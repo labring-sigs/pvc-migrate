@@ -1,5 +1,3 @@
-# syntax=docker/dockerfile:1.10
-
 ARG GO_VERSION=1.26.5
 
 FROM --platform=$BUILDPLATFORM golang:${GO_VERSION}-trixie AS build
