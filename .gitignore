@@ -1,0 +1,10 @@
+/bin/
+/dist/
+/coverage.out
+/.idea/
+/.vscode/
+*.test
+*.log
+.DS_Store
+/pvc-migrate
+/pvc-migrate.*

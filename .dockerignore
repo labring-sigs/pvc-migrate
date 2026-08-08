@@ -1,0 +1,17 @@
+.git
+.github
+.gitignore
+.DS_Store
+.idea
+.vscode
+bin
+dist
+coverage.out
+*.log
+*.test
+*.tmp
+pvc-migrate
+*.kubeconfig
+kubeconfig*
+test/fixtures
+test/cluster

@@ -1,0 +1,64 @@
+version: "2"
+
+run:
+  go: "1.26"
+  relative-path-mode: gomod
+  modules-download-mode: readonly
+
+issues:
+  max-issues-per-linter: 0
+  max-same-issues: 0
+
+linters:
+  default: none
+  enable:
+    - asciicheck
+    - bidichk
+    - bodyclose
+    - durationcheck
+    - errcheck
+    - errorlint
+    - gocritic
+    - gosec
+    - govet
+    - ineffassign
+    - misspell
+    - noctx
+    - nolintlint
+    - staticcheck
+    - unused
+  exclusions:
+    generated: lax
+    presets:
+      - comments
+      - common-false-positives
+      - legacy
+      - std-error-handling
+    paths:
+      - third_party$
+      - builtin$
+      - examples$
+  settings:
+    errcheck:
+      check-type-assertions: false
+    staticcheck:
+      dot-import-whitelist: []
+      http-status-code-whitelist: []
+    gosec:
+      excludes:
+        - G404
+
+formatters:
+  enable:
+    - gofmt
+  exclusions:
+    generated: lax
+    paths:
+      - third_party$
+      - builtin$
+      - examples$
+  settings:
+    gofmt:
+      rewrite-rules:
+        - pattern: "a[b:len(a)]"
+          replacement: "a[b:]"

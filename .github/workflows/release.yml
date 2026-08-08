@@ -1,0 +1,112 @@
+name: Release
+
+on:
+  push:
+    branches:
+      - "**"
+    tags:
+      - "v*.*.*"
+    paths-ignore:
+      - "**/*.md"
+      - "**/*.yaml"
+  pull_request:
+    branches:
+      - "**"
+    paths-ignore:
+      - "**/*.md"
+      - "**/*.yaml"
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.head_ref || github.ref_name }}
+  cancel-in-progress: true
+
+jobs:
+  release:
+    name: Release
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    strategy:
+      fail-fast: false
+      matrix:
+        targets:
+          - GOOS: linux
+            GOARCH: arm64
+          - GOOS: linux
+            GOARCH: amd64
+          - GOOS: darwin
+            GOARCH: arm64
+          - GOOS: darwin
+            GOARCH: amd64
+          - GOOS: windows
+            GOARCH: amd64
+            EXT: .exe
+          - GOOS: windows
+            GOARCH: arm64
+            EXT: .exe
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Setup Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: "go.mod"
+
+      - name: Build
+        run: |
+          set -euo pipefail
+          export GOOS=${{ matrix.targets.GOOS }}
+          export GOARCH=${{ matrix.targets.GOARCH }}
+          export CGO_ENABLED=0
+          version="${GITHUB_REF_NAME#v}"
+          go build -trimpath -ldflags "-s -w -X main.version=${version}" -o "pvc-migrate-${{ matrix.targets.GOOS }}-${{ matrix.targets.GOARCH }}${{ matrix.targets.EXT }}" ./cmd/pvc-migrate
+
+      - name: Get release meta
+        id: release_meta
+        if: ${{ startsWith(github.ref, 'refs/tags/') }}
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME#v}"
+          echo "version: ${version}"
+          prerelease="$(printf '%s' "${version}" | grep -E 'rc|beta|alpha|pre|dev|snapshot|nightly' || true)"
+          release_name="Version ${version}"
+          echo "release_name: ${release_name}"
+          if [ -n "${prerelease}" ]; then
+            prerelease=true
+            release_name="${release_name} (Prerelease)"
+          else
+            prerelease=false
+          fi
+          tag_name="v${version}"
+          echo "prerelease: ${prerelease}"
+          echo "tag_name: ${tag_name}"
+
+          {
+            echo "PRERELEASE=${prerelease}"
+            echo "RELEASE_NAME=${release_name}"
+            echo "TAG_NAME=${tag_name}"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Release
+        if: ${{ startsWith(github.ref, 'refs/tags/') }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+
+          asset_file="pvc-migrate-${{ matrix.targets.GOOS }}-${{ matrix.targets.GOARCH }}${{ matrix.targets.EXT }}"
+          test -f "${asset_file}"
+          release_args=(
+            "${{ steps.release_meta.outputs.TAG_NAME }}"
+            --title "${{ steps.release_meta.outputs.RELEASE_NAME }}"
+            --verify-tag
+            --generate-notes
+          )
+          if [[ "${{ steps.release_meta.outputs.PRERELEASE }}" == "true" ]]; then
+            release_args+=(--prerelease)
+          fi
+          release_args+=("${asset_file}")
+
+          gh release create "${release_args[@]}" \
+          || gh release upload "${{ steps.release_meta.outputs.TAG_NAME }}" "${asset_file}"

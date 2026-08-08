@@ -1,0 +1,314 @@
+package cli
+
+import (
+	"context"
+	"fmt"
+	"os"
+
+	"github.com/labring-sigs/pvc-migrate/internal/backup"
+	"github.com/labring-sigs/pvc-migrate/internal/domain"
+	"github.com/labring-sigs/pvc-migrate/internal/objectstore"
+	"github.com/spf13/cobra"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/client-go/kubernetes"
+)
+
+type bucketFlags struct {
+	id                   string
+	namespace            string
+	pvc                  string
+	backend              string
+	bucket               string
+	name                 string
+	prefix               string
+	path                 string
+	s3Provider           string
+	endpoint             string
+	region               string
+	accessKey            string
+	secretKey            string
+	sessionToken         string
+	credentialsSecret    string
+	accessKeyKey         string
+	secretKeyKey         string
+	sessionTokenKey      string
+	accessKeyExplicit    bool
+	secretKeyExplicit    bool
+	sessionTokenExplicit bool
+	allowInsecure        bool
+	serverEncryption     string
+	sseKMSKeyID          string
+	online               bool
+	allowMounted         bool
+	deleteExtraneous     bool
+}
+
+func (r *rootState) newBackupCommand(restore bool) *cobra.Command {
+	return r.newObjectTransferCommand(restore, false)
+}
+
+func (r *rootState) newLiveBackupCommand() *cobra.Command {
+	return r.newObjectTransferCommand(false, true)
+}
+
+func (r *rootState) newObjectTransferCommand(restore, forceOnline bool) *cobra.Command {
+	flags := &bucketFlags{}
+	var dryRun bool
+	use := "backup"
+	short := "Back up PVC data to object storage"
+	pvcFlag := "source-pvc"
+	if forceOnline {
+		use = "live-backup"
+		short = "Back up PVC data while source consumers remain active"
+	} else if restore {
+		use = "restore"
+		short = "Restore object-storage backup data into a PVC"
+		pvcFlag = "destination-pvc"
+	}
+	command := &cobra.Command{
+		Use:   use,
+		Short: short,
+		Args:  cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			if err := validateBucketFlags(flags, pvcFlag); err != nil {
+				return err
+			}
+			online := !restore && (forceOnline || flags.online || flags.allowMounted)
+			runtime, err := r.runtime()
+			if err != nil {
+				return err
+			}
+			ctx, cancel := r.context(cmd.Context())
+			defer cancel()
+			flags.accessKeyExplicit = cmd.Flags().Changed("access-key")
+			flags.secretKeyExplicit = cmd.Flags().Changed("secret-key")
+			flags.sessionTokenExplicit = cmd.Flags().Changed("session-token")
+			if err := loadS3Credentials(ctx, runtime.clients.Kubernetes, flags); err != nil {
+				return err
+			}
+			store, err := r.newObjectStore(ctx, flags)
+			if err != nil {
+				return err
+			}
+			request := backup.Request{
+				ID:                    flags.id,
+				Namespace:             flags.namespace,
+				PVCName:               flags.pvc,
+				Path:                  flags.path,
+				Online:                online,
+				AllowMounted:          flags.allowMounted,
+				DeleteExtraneousFiles: flags.deleteExtraneous,
+				HelmTimeout:           r.global.helmTimeout,
+				KubeconfigPath:        r.global.kubeconfig,
+				KubeContext:           r.global.kubeContext,
+				Store:                 store,
+				Writer:                r.options.ErrOut,
+				Logger:                runtime.logger,
+			}
+			plan, err := backup.Preflight(ctx, runtime.clients.Kubernetes, request, restore)
+			if err != nil {
+				return err
+			}
+			if dryRun {
+				return printerFor(r).Print(plan)
+			}
+			if err := r.confirm(cmd, flags.name); err != nil {
+				return err
+			}
+			err = backup.Run(ctx, runtime.clients.Kubernetes, request, restore)
+			if err != nil {
+				return err
+			}
+			if r.global.output != "table" {
+				mode := "offline"
+				if online {
+					mode = "online"
+				}
+				if restore {
+					mode = "restore"
+				}
+				return printerFor(r).Print(&backup.Result{
+					Operation:   use,
+					Namespace:   flags.namespace,
+					PVC:         flags.pvc,
+					Name:        flags.name,
+					Destination: store.Destination(),
+					Mode:        mode,
+					Status:      "completed",
+				})
+			}
+			_, err = fmt.Fprintf(cmd.OutOrStdout(), "%s completed: %s/%s name=%s\n", use, flags.namespace, flags.pvc, flags.name)
+			return err
+		},
+	}
+	bindBucketFlags(command, flags, restore, !forceOnline)
+	bindDryRun(command, &dryRun)
+	command.AddCommand(r.newBackupPlanCommand(restore, forceOnline))
+	return command
+}
+
+func (r *rootState) newBackupPlanCommand(restore, forceOnline bool) *cobra.Command {
+	flags := &bucketFlags{}
+	use := "plan"
+	pvcFlag := "source-pvc"
+	if restore {
+		pvcFlag = "destination-pvc"
+	}
+	command := &cobra.Command{
+		Use:   use,
+		Short: "Validate object-storage access and PVC state without mutations",
+		Args:  cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			if err := validateBucketFlags(flags, pvcFlag); err != nil {
+				return err
+			}
+			online := !restore && (forceOnline || flags.online || flags.allowMounted)
+			runtime, err := r.runtime()
+			if err != nil {
+				return err
+			}
+			ctx, cancel := r.context(cmd.Context())
+			defer cancel()
+			flags.accessKeyExplicit = cmd.Flags().Changed("access-key")
+			flags.secretKeyExplicit = cmd.Flags().Changed("secret-key")
+			flags.sessionTokenExplicit = cmd.Flags().Changed("session-token")
+			if err := loadS3Credentials(ctx, runtime.clients.Kubernetes, flags); err != nil {
+				return err
+			}
+			store, err := r.newObjectStore(ctx, flags)
+			if err != nil {
+				return err
+			}
+			request := backup.Request{
+				ID: flags.id, Namespace: flags.namespace, PVCName: flags.pvc, Path: flags.path,
+				Online: online, AllowMounted: flags.allowMounted, DeleteExtraneousFiles: flags.deleteExtraneous,
+				HelmTimeout: r.global.helmTimeout, KubeconfigPath: r.global.kubeconfig, KubeContext: r.global.kubeContext,
+				Store: store, Writer: r.options.ErrOut, Logger: runtime.logger,
+			}
+			plan, err := backup.Preflight(ctx, runtime.clients.Kubernetes, request, restore)
+			if err != nil {
+				return err
+			}
+			return printerFor(r).Print(plan)
+		},
+	}
+	bindBucketFlags(command, flags, restore, !forceOnline)
+	return command
+}
+
+func bindBucketFlags(command *cobra.Command, flags *bucketFlags, restore, includeOnline bool) {
+	pvcFlag := "source-pvc"
+	if restore {
+		pvcFlag = "destination-pvc"
+	}
+	command.Flags().StringVar(&flags.id, "id", "", "pv-migrate operation ID")
+	command.Flags().StringVarP(&flags.namespace, "namespace", "n", "default", "PVC namespace")
+	command.Flags().StringVar(&flags.pvc, pvcFlag, "", "PVC name")
+	command.Flags().StringVar(&flags.backend, "backend", "s3", "S3-compatible object backend")
+	command.Flags().StringVar(&flags.bucket, "bucket", "", "Bucket or container name")
+	command.Flags().StringVar(&flags.name, "name", "", "Backup identity inside the bucket")
+	command.Flags().StringVar(&flags.prefix, "prefix", "pv-migrate", "Global bucket prefix")
+	command.Flags().StringVar(&flags.path, "path", "", "PVC subdirectory")
+	command.Flags().StringVar(&flags.s3Provider, "s3-provider", "", "rclone S3 provider")
+	command.Flags().StringVar(&flags.endpoint, "endpoint", "", "S3 endpoint")
+	command.Flags().StringVar(&flags.region, "region", "", "S3 region")
+	command.Flags().StringVar(&flags.accessKey, "access-key", os.Getenv("AWS_ACCESS_KEY_ID"), "S3 access key; defaults to AWS_ACCESS_KEY_ID")
+	command.Flags().StringVar(&flags.secretKey, "secret-key", os.Getenv("AWS_SECRET_ACCESS_KEY"), "S3 secret key; defaults to AWS_SECRET_ACCESS_KEY")
+	command.Flags().StringVar(&flags.sessionToken, "session-token", os.Getenv("AWS_SESSION_TOKEN"), "S3 session token; defaults to AWS_SESSION_TOKEN")
+	command.Flags().StringVar(&flags.credentialsSecret, "credentials-secret", "", "Kubernetes Secret containing S3 credentials")
+	command.Flags().StringVar(&flags.accessKeyKey, "access-key-key", "accessKey", "Key in --credentials-secret containing the access key")
+	command.Flags().StringVar(&flags.secretKeyKey, "secret-key-key", "secretKey", "Key in --credentials-secret containing the secret key")
+	command.Flags().StringVar(&flags.sessionTokenKey, "session-token-key", "sessionToken", "Key in --credentials-secret containing the session token")
+	command.Flags().BoolVar(&flags.allowInsecure, "allow-insecure-endpoint", false, "Allow an HTTP S3 endpoint; use HTTPS for production")
+	command.Flags().StringVar(&flags.serverEncryption, "s3-server-side-encryption", "", "S3 server-side encryption: AES256 or aws:kms")
+	command.Flags().StringVar(&flags.sseKMSKeyID, "s3-sse-kms-key-id", "", "S3 KMS key ID when using aws:kms")
+	if includeOnline {
+		command.Flags().BoolVar(&flags.online, "online", false, "Run a best-effort online backup while Pods keep using the source PVC")
+	}
+	if restore || includeOnline {
+		command.Flags().BoolVar(&flags.allowMounted, "allow-mounted", false, mountedFlagDescription(restore))
+	}
+	if includeOnline {
+		_ = command.Flags().MarkDeprecated("allow-mounted", "use --online for an online backup")
+	}
+	if restore {
+		command.Flags().BoolVar(&flags.deleteExtraneous, "delete-extraneous", false, "Delete destination files absent from the backup (destructive)")
+	}
+}
+
+func mountedFlagDescription(restore bool) string {
+	if restore {
+		return "Allow restore while the destination PVC has Pod consumers"
+	}
+	return "Compatibility alias for --online; allow source PVC Pod consumers"
+}
+
+func validateBucketFlags(flags *bucketFlags, pvcFlag string) error {
+	if flags.pvc == "" {
+		return domain.NewError(domain.ErrorValidation, "backup/restore", "--"+pvcFlag+" is required")
+	}
+	if flags.name == "" {
+		return domain.NewError(domain.ErrorValidation, "backup/restore", "--name is required")
+	}
+	if flags.backend == "" || flags.bucket == "" {
+		return domain.NewError(domain.ErrorValidation, "backup/restore", "--backend and --bucket are required")
+	}
+	if flags.backend != "s3" {
+		return domain.NewError(domain.ErrorValidation, "backup/restore", fmt.Sprintf("unsupported backend %q", flags.backend))
+	}
+	return nil
+}
+
+func (r *rootState) newObjectStore(ctx context.Context, flags *bucketFlags) (*objectstore.Store, error) {
+	cfg := objectstore.Config{
+		Bucket:                flags.bucket,
+		Prefix:                flags.prefix,
+		Name:                  flags.name,
+		Provider:              flags.s3Provider,
+		Endpoint:              flags.endpoint,
+		Region:                flags.region,
+		AccessKey:             flags.accessKey,
+		SecretKey:             flags.secretKey,
+		SessionToken:          flags.sessionToken,
+		AllowInsecureEndpoint: flags.allowInsecure,
+		ForcePathStyle:        flags.endpoint != "",
+		ServerSideEncryption:  flags.serverEncryption,
+		SSEKMSKeyID:           flags.sseKMSKeyID,
+	}
+	if r.options.objectStoreFactory != nil {
+		return r.options.objectStoreFactory(ctx, cfg)
+	}
+	return objectstore.New(ctx, cfg)
+}
+
+func loadS3Credentials(ctx context.Context, client kubernetes.Interface, flags *bucketFlags) error {
+	if flags.credentialsSecret == "" {
+		return nil
+	}
+	secret, err := client.CoreV1().Secrets(flags.namespace).Get(ctx, flags.credentialsSecret, metav1.GetOptions{})
+	if err != nil {
+		return domain.WrapError(domain.ErrorKubernetes, "S3 credentials", "read credentials Secret", err)
+	}
+	read := func(key string) string {
+		if value := secret.Data[key]; len(value) > 0 {
+			return string(value)
+		}
+		return secret.StringData[key]
+	}
+	if !flags.accessKeyExplicit {
+		if value := read(flags.accessKeyKey); value != "" {
+			flags.accessKey = value
+		}
+	}
+	if !flags.secretKeyExplicit {
+		if value := read(flags.secretKeyKey); value != "" {
+			flags.secretKey = value
+		}
+	}
+	if !flags.sessionTokenExplicit {
+		if value := read(flags.sessionTokenKey); value != "" {
+			flags.sessionToken = value
+		}
+	}
+	return nil
+}

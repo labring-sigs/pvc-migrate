@@ -1,0 +1,72 @@
+package domain
+
+import (
+	corev1 "k8s.io/api/core/v1"
+	storagev1 "k8s.io/api/storage/v1"
+)
+
+type CheckSeverity string
+
+const (
+	SeverityInfo    CheckSeverity = "info"
+	SeverityWarning CheckSeverity = "warning"
+	SeverityError   CheckSeverity = "error"
+)
+
+type Check struct {
+	Name     string        `json:"name" yaml:"name"`
+	Severity CheckSeverity `json:"severity" yaml:"severity"`
+	Passed   bool          `json:"passed" yaml:"passed"`
+	Message  string        `json:"message" yaml:"message"`
+}
+
+type ResourceEstimate struct {
+	StorageRequests    string            `json:"storageRequests" yaml:"storageRequests"`
+	PVCs               int               `json:"persistentVolumeClaims" yaml:"persistentVolumeClaims"`
+	Pods               int               `json:"pods" yaml:"pods"`
+	Jobs               int               `json:"jobs" yaml:"jobs"`
+	Services           int               `json:"services" yaml:"services"`
+	Secrets            int               `json:"secrets" yaml:"secrets"`
+	ConfigMaps         int               `json:"configMaps" yaml:"configMaps"`
+	ServiceAccounts    int               `json:"serviceAccounts" yaml:"serviceAccounts"`
+	Leases             int               `json:"leases,omitempty" yaml:"leases,omitempty"`
+	ByStorageClass     map[string]string `json:"byStorageClass" yaml:"byStorageClass"`
+	PVCsByStorageClass map[string]int    `json:"persistentVolumeClaimsByStorageClass,omitempty" yaml:"persistentVolumeClaimsByStorageClass,omitempty"`
+}
+
+type PlannedVolume struct {
+	SourcePVC      ObjectReference                     `json:"sourcePVC" yaml:"sourcePVC"`
+	SourcePV       ObjectReference                     `json:"sourcePV" yaml:"sourcePV"`
+	DestinationPVC ObjectReference                     `json:"destinationPVC" yaml:"destinationPVC"`
+	Capacity       string                              `json:"capacity" yaml:"capacity"`
+	AccessModes    []corev1.PersistentVolumeAccessMode `json:"accessModes" yaml:"accessModes"`
+	VolumeMode     corev1.PersistentVolumeMode         `json:"volumeMode" yaml:"volumeMode"`
+	StorageClass   string                              `json:"storageClass" yaml:"storageClass"`
+	BindingMode    storagev1.VolumeBindingMode         `json:"bindingMode" yaml:"bindingMode"`
+	CSIProvisioner string                              `json:"csiProvisioner" yaml:"csiProvisioner"`
+}
+
+type MigrationPlan struct {
+	APIVersion           string           `json:"apiVersion" yaml:"apiVersion"`
+	Kind                 string           `json:"kind" yaml:"kind"`
+	SessionID            string           `json:"sessionID" yaml:"sessionID"`
+	SourceNamespace      string           `json:"sourceNamespace" yaml:"sourceNamespace"`
+	TemporaryNamespace   string           `json:"temporaryNamespace" yaml:"temporaryNamespace"`
+	DestinationNamespace string           `json:"destinationNamespace" yaml:"destinationNamespace"`
+	SessionNamespace     string           `json:"sessionNamespace" yaml:"sessionNamespace"`
+	TargetNode           string           `json:"targetNode,omitempty" yaml:"targetNode,omitempty"`
+	Workload             WorkloadSpec     `json:"workload" yaml:"workload"`
+	Volumes              []PlannedVolume  `json:"volumes" yaml:"volumes"`
+	Checks               []Check          `json:"checks" yaml:"checks"`
+	TemporaryUsage       ResourceEstimate `json:"temporaryUsage" yaml:"temporaryUsage"`
+	RollbackRetention    ResourceEstimate `json:"rollbackRetention" yaml:"rollbackRetention"`
+	Ready                bool             `json:"ready" yaml:"ready"`
+	SessionSpec          SessionSpec      `json:"-" yaml:"-"`
+}
+
+func (p *MigrationPlan) AddCheck(check Check) {
+	p.Checks = append(p.Checks, check)
+	if check.Severity == SeverityError && !check.Passed {
+		p.Ready = false
+	}
+}
