@@ -25,10 +25,39 @@ func TestNormalizeToolImageCanonicalizesAndConfiguresAllComponents(t *testing.T)
 	if err != nil {
 		t.Fatal(err)
 	}
+	if len(values) != 6 {
+		t.Fatalf("Helm image values=%v", values)
+	}
 	for _, component := range []string{"rsync", "sshd", "rclone"} {
 		if !slices.Contains(values, component+".image.repository=registry.example/team/pvc-migrate") || !slices.Contains(values, component+".image.tag=aio") {
 			t.Fatalf("component %s values=%v", component, values)
 		}
+	}
+}
+
+func TestNormalizeToolImageAcceptsSupportedReferenceForms(t *testing.T) {
+	tests := []struct {
+		name  string
+		input string
+		want  string
+	}{
+		{name: "empty uses build default", input: "", want: DefaultToolImageRepository + ":main"},
+		{name: "trims whitespace", input: "  registry.example/team/tool:v1  ", want: "registry.example/team/tool:v1"},
+		{name: "registry port", input: "registry.example:5000/team/tool:v1", want: "registry.example:5000/team/tool:v1"},
+		{name: "localhost registry", input: "localhost:5000/tool:test", want: "localhost:5000/tool:test"},
+		{name: "docker hub canonical name", input: "busybox:1.36", want: "docker.io/library/busybox:1.36"},
+		{name: "explicit latest tag", input: "registry.example/tool:latest", want: "registry.example/tool:latest"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			got, err := NormalizeToolImage(test.input)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got != test.want {
+				t.Fatalf("NormalizeToolImage(%q)=%q, want %q", test.input, got, test.want)
+			}
+		})
 	}
 }
 
@@ -55,7 +84,11 @@ func TestToolImageValuesParseAsHelmStringOverrides(t *testing.T) {
 }
 
 func TestToolSecurityContextValuesParseAsNumericHelmOverrides(t *testing.T) {
-	options := values.Options{Values: ToolSecurityContextHelmValues()}
+	securityValues := ToolSecurityContextHelmValues()
+	if len(securityValues) != 6 {
+		t.Fatalf("security values=%v", securityValues)
+	}
+	options := values.Options{Values: securityValues}
 	merged, err := options.MergeValues(getter.All(cli.New()))
 	if err != nil {
 		t.Fatal(err)
@@ -111,7 +144,15 @@ func TestToolSecurityContextValuesPreserveSSHDChartCapabilities(t *testing.T) {
 }
 
 func TestNormalizeToolImageRejectsUnpinnedAndDigestReferences(t *testing.T) {
-	for _, image := range []string{"registry.example/team/pvc-migrate", "registry.example/team/pvc-migrate@sha256:abc", "bad image:aio"} {
+	for _, image := range []string{
+		"registry.example/team/pvc-migrate",
+		"registry.example/team/pvc-migrate@sha256:abc",
+		"registry.example/team/pvc-migrate:aio@sha256:abc",
+		"registry.example/team/pvc-migrate:",
+		"bad image:aio",
+		"registry.example/tool:tag extra",
+		"http://registry.example/tool:tag",
+	} {
 		_, err := NormalizeToolImage(image)
 		if domain.CategoryOf(err) != domain.ErrorValidation {
 			t.Fatalf("image %q error=%v category=%q", image, err, domain.CategoryOf(err))

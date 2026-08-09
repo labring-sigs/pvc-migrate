@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/labring-sigs/pvc-migrate/internal/domain"
+	"github.com/labring-sigs/pvc-migrate/internal/kube"
 	"github.com/utkuozdemir/pv-migrate/pvmigrate"
 )
 
@@ -35,6 +36,88 @@ func TestAllUpstreamStrategiesMapExactly(t *testing.T) {
 		if domain.CategoryOf(err) != domain.ErrorValidation || !strings.Contains(err.Error(), input) {
 			t.Fatalf("strategyValue(%q) error=%v category=%q", input, err, domain.CategoryOf(err))
 		}
+	}
+	for _, strategy := range pvmigrate.AllStrategies {
+		got, err := strategyValue(string(strategy))
+		if err != nil || got != strategy {
+			t.Fatalf("upstream strategy %q is not supported by the adapter: value=%q error=%v", strategy, got, err)
+		}
+	}
+}
+
+func TestCopyBuildsCompleteUpstreamMigrationContract(t *testing.T) {
+	var captured pvmigrate.Migration
+	engine := &PVMigrate{run: func(_ context.Context, migration pvmigrate.Migration) error {
+		captured = migration
+		return nil
+	}}
+	writer := &bytes.Buffer{}
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	request := Request{
+		SessionID:             "session-1",
+		ToolImage:             "registry.example:5000/team/pvc-migrate:tool-image",
+		Source:                domain.ObjectReference{Namespace: "source-ns", Name: "source-pvc"},
+		Destination:           domain.ObjectReference{Namespace: "target-ns", Name: "target-pvc"},
+		Mode:                  ModeFinal,
+		Attempt:               4,
+		KubeconfigPath:        "/tmp/kubeconfig",
+		Context:               "cluster-context",
+		Strategies:            []string{"mount", "clusterip", "loadbalancer", "nodeport", "local"},
+		DeleteExtraneousFiles: true,
+		VerifyChecksum:        true,
+		NoCompress:            true,
+		HelmTimeout:           37 * time.Second,
+		HelmStringValues:      []string{"sshd.nodeName=source-node"},
+		Writer:                writer,
+		Logger:                logger,
+	}
+	var updates []Progress
+	if err := engine.Copy(context.Background(), request, func(progress Progress) { updates = append(updates, progress) }); err != nil {
+		t.Fatal(err)
+	}
+
+	if captured.ID != operationID(request) || captured.Source != (pvmigrate.PVC{KubeconfigPath: "/tmp/kubeconfig", Context: "cluster-context", Namespace: "source-ns", Name: "source-pvc"}) || captured.Dest != (pvmigrate.PVC{KubeconfigPath: "/tmp/kubeconfig", Context: "cluster-context", Namespace: "target-ns", Name: "target-pvc"}) {
+		t.Fatalf("upstream PVC request=%#v", captured)
+	}
+	if !captured.DeleteExtraneousFiles || captured.IgnoreMounted || !captured.NoCompress || !captured.StructuredLogs || captured.Writer != writer || captured.Logger != logger {
+		t.Fatalf("upstream migration policy=%#v", captured)
+	}
+	if captured.RsyncExtraArgs != "-HAXS --numeric-ids --checksum" {
+		t.Fatalf("upstream rsync args=%q", captured.RsyncExtraArgs)
+	}
+	if captured.HelmTimeout != request.HelmTimeout || len(captured.Strategies) != len(request.Strategies) || captured.Strategies[0] != pvmigrate.Mount || captured.Strategies[4] != pvmigrate.Local {
+		t.Fatalf("upstream execution fields timeout=%s strategies=%v", captured.HelmTimeout, captured.Strategies)
+	}
+	if len(captured.HelmValues) != len(kube.ToolSecurityContextHelmValues()) || len(captured.HelmStringValues) != 7 || captured.HelmStringValues[len(captured.HelmStringValues)-1] != "sshd.nodeName=source-node" {
+		t.Fatalf("upstream Helm values=%v stringValues=%v", captured.HelmValues, captured.HelmStringValues)
+	}
+	if len(updates) != 2 || updates[0].State != "running" || updates[1].State != "completed" || updates[0].Mode != ModeFinal || updates[1].Attempt != request.Attempt {
+		t.Fatalf("progress=%#v", updates)
+	}
+}
+
+func TestCopyBuildsWarmUpstreamMigrationContract(t *testing.T) {
+	var captured pvmigrate.Migration
+	engine := &PVMigrate{run: func(_ context.Context, migration pvmigrate.Migration) error {
+		captured = migration
+		return nil
+	}}
+	request := Request{
+		SessionID:      "session-warm",
+		ToolImage:      "registry.example/pvc-migrate:contract",
+		Source:         domain.ObjectReference{Namespace: "source", Name: "data"},
+		Destination:    domain.ObjectReference{Namespace: "target", Name: "data"},
+		Mode:           ModeWarm,
+		Attempt:        1,
+		Strategies:     []string{"mount"},
+		HelmTimeout:    0,
+		VerifyChecksum: false,
+	}
+	if err := engine.Copy(context.Background(), request, nil); err != nil {
+		t.Fatal(err)
+	}
+	if !captured.IgnoreMounted || captured.RsyncExtraArgs != "-HAXS --numeric-ids" || captured.HelmTimeout != 10*time.Minute {
+		t.Fatalf("warm upstream migration: ignoreMounted=%t rsyncArgs=%q helmTimeout=%s", captured.IgnoreMounted, captured.RsyncExtraArgs, captured.HelmTimeout)
 	}
 }
 

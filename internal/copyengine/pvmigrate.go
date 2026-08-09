@@ -12,9 +12,11 @@ import (
 	"github.com/utkuozdemir/pv-migrate/pvmigrate"
 )
 
-type PVMigrate struct{}
+type PVMigrate struct {
+	run func(context.Context, pvmigrate.Migration) error
+}
 
-func NewPVMigrate() *PVMigrate { return &PVMigrate{} }
+func NewPVMigrate() *PVMigrate { return &PVMigrate{run: pvmigrate.Run} }
 
 func (p *PVMigrate) Copy(ctx context.Context, request Request, progress ProgressFunc) error {
 	strategies := make([]pvmigrate.Strategy, 0, len(request.Strategies))
@@ -68,7 +70,11 @@ func (p *PVMigrate) Copy(ctx context.Context, request Request, progress Progress
 	if migration.HelmTimeout == 0 {
 		migration.HelmTimeout = 10 * time.Minute
 	}
-	if err := pvmigrate.Run(ctx, migration); err != nil {
+	run := p.run
+	if run == nil {
+		run = pvmigrate.Run
+	}
+	if err := run(ctx, migration); err != nil {
 		if progress != nil {
 			progress(Progress{Mode: request.Mode, Attempt: request.Attempt, State: "failed", Message: err.Error()})
 		}

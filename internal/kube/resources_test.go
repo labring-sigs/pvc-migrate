@@ -12,11 +12,24 @@ import (
 )
 
 func TestDefaultToolImageUsesBuildRepositoryAndTag(t *testing.T) {
-	if got := DefaultToolImage("registry.example/pvc-migrate", "v1.2.3"); got != "registry.example/pvc-migrate:1.2.3" {
-		t.Fatalf("DefaultToolImage=%q", got)
+	tests := []struct {
+		name       string
+		repository string
+		version    string
+		want       string
+	}{
+		{name: "release", repository: "registry.example/pvc-migrate", version: "v1.2.3", want: "registry.example/pvc-migrate:1.2.3"},
+		{name: "repository trailing slash", repository: "registry.example/team/pvc-migrate/", version: "1.2.3", want: "registry.example/team/pvc-migrate:1.2.3"},
+		{name: "trim inputs", repository: " registry.example/pvc-migrate/ ", version: " v1.2.3 ", want: "registry.example/pvc-migrate:1.2.3"},
+		{name: "development", repository: "", version: "dev", want: DefaultToolImageRepository + ":main"},
+		{name: "empty version", repository: "registry.example/pvc-migrate", version: "", want: "registry.example/pvc-migrate:main"},
 	}
-	if got := DefaultToolImage("", "dev"); got != DefaultToolImageRepository+":main" {
-		t.Fatalf("development tool image=%q", got)
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := DefaultToolImage(test.repository, test.version); got != test.want {
+				t.Fatalf("DefaultToolImage(%q, %q)=%q, want %q", test.repository, test.version, got, test.want)
+			}
+		})
 	}
 }
 

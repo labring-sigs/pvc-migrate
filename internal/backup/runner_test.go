@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
@@ -14,6 +15,7 @@ import (
 	"github.com/labring-sigs/pvc-migrate/internal/domain"
 	"github.com/labring-sigs/pvc-migrate/internal/kube"
 	"github.com/labring-sigs/pvc-migrate/internal/objectstore"
+	"github.com/utkuozdemir/pv-migrate/pvmigrate"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -271,6 +273,55 @@ func TestPVMigrateBackupAndRestoreHonorMountedPolicy(t *testing.T) {
 	}
 	if !restoreRequest.IgnoreMounted || !restoreRequest.DeleteExtraneousFiles {
 		t.Fatalf("restore mounted policy=%t delete=%t", restoreRequest.IgnoreMounted, restoreRequest.DeleteExtraneousFiles)
+	}
+}
+
+func TestPVMigrateBackupAndRestoreForwardFullRequestContract(t *testing.T) {
+	store, err := objectstore.NewWithClient(&preflightObjectStore{}, objectstore.Config{
+		Bucket: "bucket", Prefix: "prefix", Name: "recovery-point",
+	}, objectstore.Credentials{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	writer := &bytes.Buffer{}
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	request := Request{
+		ID:                    "operation",
+		ToolImage:             "registry.example/team/pvc-migrate:contract",
+		Namespace:             "source-ns",
+		PVCName:               "source-pvc",
+		Path:                  "subdir",
+		Online:                true,
+		AllowMounted:          true,
+		DeleteExtraneousFiles: true,
+		HelmTimeout:           41 * time.Second,
+		KubeconfigPath:        "/tmp/kubeconfig",
+		KubeContext:           "cluster-context",
+		Store:                 store,
+		Writer:                writer,
+		Logger:                logger,
+	}
+	customValues := []string{"rclone.nodeName=source-node"}
+	backupRequest, err := pvmigrateBackupRequest(request, "/tmp/rclone.conf", customValues)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if backupRequest.ID != request.ID || backupRequest.PVC != (pvmigrate.PVC{KubeconfigPath: request.KubeconfigPath, Context: request.KubeContext, Namespace: request.Namespace, Name: request.PVCName}) || backupRequest.Backend != "s3" || backupRequest.Bucket != "bucket" || backupRequest.Name != "recovery-point" || backupRequest.Prefix != "prefix" || backupRequest.Path != request.Path || backupRequest.RcloneConfigFile != "/tmp/rclone.conf" || backupRequest.Remote != store.RemotePath() {
+		t.Fatalf("backup upstream request=%#v", backupRequest)
+	}
+	if !backupRequest.IgnoreMounted || backupRequest.HelmTimeout != request.HelmTimeout || !backupRequest.StructuredLogs || backupRequest.Writer != writer || backupRequest.Logger != logger || backupRequest.HelmStringValues[len(backupRequest.HelmStringValues)-1] != customValues[0] {
+		t.Fatalf("backup execution fields=%#v helmValues=%v", backupRequest, backupRequest.HelmStringValues)
+	}
+
+	restoreRequest, err := pvmigrateRestoreRequest(request, "/tmp/rclone.conf")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if restoreRequest.ID != request.ID || restoreRequest.PVC != backupRequest.PVC || restoreRequest.Backend != "s3" || restoreRequest.Bucket != backupRequest.Bucket || restoreRequest.Name != backupRequest.Name || restoreRequest.Prefix != backupRequest.Prefix || restoreRequest.Path != request.Path || restoreRequest.RcloneConfigFile != "/tmp/rclone.conf" || restoreRequest.Remote != store.RemotePath() {
+		t.Fatalf("restore upstream request=%#v", restoreRequest)
+	}
+	if !restoreRequest.IgnoreMounted || !restoreRequest.DeleteExtraneousFiles || restoreRequest.HelmTimeout != request.HelmTimeout || !restoreRequest.StructuredLogs || restoreRequest.Writer != writer || restoreRequest.Logger != logger {
+		t.Fatalf("restore execution fields=%#v", restoreRequest)
 	}
 }
 
