@@ -115,7 +115,7 @@ func (s *Service) withSessionIDLock(ctx context.Context, namespace, id string, f
 		if err := held.lock.Err(); err != nil {
 			return err
 		}
-		return fn(held.lock.Context())
+		return fn(ctx)
 	}
 	locker, supported := s.store.(kube.SessionLocker)
 	if !supported {

@@ -56,6 +56,28 @@ func (m *memoryStore) Delete(context.Context, *domain.Session) error {
 	return nil
 }
 
+func TestSessionLockSupportsMultiLevelReentry(t *testing.T) {
+	client := fake.NewClientset()
+	service := &Service{store: kube.NewConfigMapSessionStore(client)}
+	calls := 0
+	err := service.withSessionIDLock(context.Background(), "system", "session", func(first context.Context) error {
+		calls++
+		return service.withSessionIDLock(first, "system", "session", func(second context.Context) error {
+			calls++
+			return service.withSessionIDLock(second, "system", "session", func(context.Context) error {
+				calls++
+				return nil
+			})
+		})
+	})
+	if err != nil {
+		t.Fatalf("nested session lock: %v", err)
+	}
+	if calls != 3 {
+		t.Fatalf("nested calls=%d, want 3", calls)
+	}
+}
+
 type fakeReserver struct{}
 
 func (f *fakeReserver) ReserveVolume(_ context.Context, _ *domain.Session, volume *domain.VolumeSpec, status *domain.VolumeStatus, _ bool) error {
