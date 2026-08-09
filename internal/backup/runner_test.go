@@ -371,6 +371,28 @@ func TestPVMigrateBackupAndRestoreUseZeroHelperResources(t *testing.T) {
 	}
 }
 
+func TestPVMigrateBackupAndRestorePinDefaultHelperTimeout(t *testing.T) {
+	store, err := objectstore.NewWithClient(&preflightObjectStore{}, objectstore.Config{Bucket: "backups", Name: "daily"}, objectstore.Credentials{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := Request{Namespace: "default", PVCName: "data", Store: store}
+	backupRequest, err := pvmigrateBackupRequest(request, "/tmp/rclone.conf", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if backupRequest.HelmTimeout != 10*time.Minute {
+		t.Fatalf("backup default HelmTimeout=%s, want 10m", backupRequest.HelmTimeout)
+	}
+	restoreRequest, err := pvmigrateRestoreRequest(request, "/tmp/rclone.conf")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if restoreRequest.HelmTimeout != 10*time.Minute {
+		t.Fatalf("restore default HelmTimeout=%s, want 10m", restoreRequest.HelmTimeout)
+	}
+}
+
 func TestRestoreLockHolderGeneratesUniqueDefaultIdentity(t *testing.T) {
 	first, err := operationLockHolder("")
 	if err != nil {

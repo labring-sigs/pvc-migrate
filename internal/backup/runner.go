@@ -208,7 +208,7 @@ func pvmigrateBackupRequest(req Request, configPath string, helmValues []string)
 		IgnoreMounted:    req.Online,
 		HelmValues:       kube.ToolSecurityContextHelmValues(),
 		HelmStringValues: append(append(kube.ZeroResourceHelmValues(), imageValues...), helmValues...),
-		HelmTimeout:      req.HelmTimeout,
+		HelmTimeout:      helperHelmTimeout(req.HelmTimeout),
 		Writer:           req.Writer,
 		Logger:           req.Logger,
 		StructuredLogs:   true,
@@ -234,11 +234,18 @@ func pvmigrateRestoreRequest(req Request, configPath string) (pvmigrate.Restore,
 		DeleteExtraneousFiles: req.DeleteExtraneousFiles,
 		HelmValues:            kube.ToolSecurityContextHelmValues(),
 		HelmStringValues:      append(kube.ZeroResourceHelmValues(), imageValues...),
-		HelmTimeout:           req.HelmTimeout,
+		HelmTimeout:           helperHelmTimeout(req.HelmTimeout),
 		Writer:                req.Writer,
 		Logger:                req.Logger,
 		StructuredLogs:        true,
 	}, nil
+}
+
+func helperHelmTimeout(timeout time.Duration) time.Duration {
+	if timeout == 0 {
+		return 10 * time.Minute
+	}
+	return timeout
 }
 
 func runBackup(ctx context.Context, client kubernetes.Interface, req Request, expectedPVCUID, expectedPVUID string) (retErr error) {

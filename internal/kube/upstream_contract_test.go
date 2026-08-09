@@ -5,11 +5,13 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/utkuozdemir/pv-migrate/pvmigrate"
 	"helm.sh/helm/v4/pkg/chart/common"
 	commonutil "helm.sh/helm/v4/pkg/chart/common/util"
 	chart "helm.sh/helm/v4/pkg/chart/v2"
@@ -25,6 +27,50 @@ import (
 )
 
 const upstreamModule = "github.com/utkuozdemir/pv-migrate"
+
+// Keep the adapter review-driven when upstream adds or renames an option. A
+// newly added field can otherwise compile cleanly and silently retain its
+// zero value in our request builders.
+func TestUpstreamRequestShapeRequiresAdapterReview(t *testing.T) {
+	assertUpstreamFieldNames(t, "PVC", reflect.TypeOf(pvmigrate.PVC{}), []string{
+		"KubeconfigPath", "Context", "Namespace", "Name", "Path",
+	})
+	assertUpstreamFieldNames(t, "Migration", reflect.TypeOf(pvmigrate.Migration{}), []string{
+		"ID", "ImageTag", "ChartVersion", "Source", "Dest",
+		"DeleteExtraneousFiles", "IgnoreMounted", "IgnoreSizes", "NoChown", "Detach", "Push",
+		"NoCleanup", "NoCleanupOnFailure", "ShowProgressBar", "SourceMountReadWrite", "NoCompress", "NonRoot",
+		"RsyncExtraArgs", "KeyAlgorithm", "SSHReverseTunnelPort", "Strategies", "DestHostOverride",
+		"HelmTimeout", "LoadBalancerTimeout", "HelmValuesFiles", "HelmValues", "HelmFileValues", "HelmStringValues",
+		"Writer", "Logger", "StructuredLogs", "ColorOutput",
+	})
+	assertUpstreamFieldNames(t, "Backup", reflect.TypeOf(pvmigrate.Backup{}), []string{
+		"ID", "ImageTag", "ChartVersion", "PVC", "Backend", "Bucket", "S3Provider", "Endpoint", "Region",
+		"AccessKey", "SecretKey", "StorageAccount", "StorageKey", "GCSServiceAccountJSON", "GCSBucketPolicyOnly",
+		"Name", "Prefix", "Path", "RcloneConfigFile", "Remote", "RcloneExtraArgs", "IgnoreMounted", "NonRoot",
+		"Detach", "NoCleanup", "NoCleanupOnFailure", "HelmTimeout", "HelmValuesFiles", "HelmValues", "HelmFileValues",
+		"HelmStringValues", "Writer", "Logger", "StructuredLogs", "ColorOutput",
+	})
+	assertUpstreamFieldNames(t, "Restore", reflect.TypeOf(pvmigrate.Restore{}), []string{
+		"ID", "ImageTag", "ChartVersion", "PVC", "Backend", "Bucket", "S3Provider", "Endpoint", "Region",
+		"AccessKey", "SecretKey", "StorageAccount", "StorageKey", "GCSServiceAccountJSON", "GCSBucketPolicyOnly",
+		"Name", "Prefix", "Path", "RcloneConfigFile", "Remote", "RcloneExtraArgs", "DeleteExtraneousFiles",
+		"IgnoreMounted", "NonRoot", "Detach", "NoCleanup", "NoCleanupOnFailure", "HelmTimeout", "HelmValuesFiles",
+		"HelmValues", "HelmFileValues", "HelmStringValues", "Writer", "Logger", "StructuredLogs", "ColorOutput",
+	})
+}
+
+func assertUpstreamFieldNames(t *testing.T, typeName string, typ reflect.Type, want []string) {
+	t.Helper()
+	got := make([]string, typ.NumField())
+	for index := range got {
+		got[index] = typ.Field(index).Name
+	}
+	slices.Sort(got)
+	slices.Sort(want)
+	if !slices.Equal(got, want) {
+		t.Fatalf("upstream %s fields changed: got=%v want=%v; inspect adapter mappings before upgrading", typeName, got, want)
+	}
+}
 
 // These tests render the chart and inspect Dockerfiles from the resolved module
 // itself. An upstream upgrade therefore changes the contract under test and
@@ -138,6 +184,64 @@ func TestToolDockerfileContainsUpstreamHelperRuntime(t *testing.T) {
 			t.Errorf("tool Dockerfile lacks required runtime fragment %q", fragment)
 		}
 	}
+}
+
+func TestToolDockerfileTracksUpstreamSSHDConfig(t *testing.T) {
+	upstreamConfig, err := os.ReadFile(filepath.Join(upstreamModuleDir(t), "docker", "sshd", "sshd_config"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	localConfig, err := os.ReadFile(filepath.Join(repositoryRoot(t), "docker", "sshd_config"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(localConfig) != string(upstreamConfig) {
+		t.Fatalf("tool image sshd_config diverges from upstream:\nlocal:\n%s\nupstream:\n%s", localConfig, upstreamConfig)
+	}
+}
+
+func TestToolDockerfileTracksUpstreamAlpineBase(t *testing.T) {
+	upstreamDir := upstreamModuleDir(t)
+	versions := make(map[string]struct{})
+	for _, relative := range []string{
+		"docker/rsync/Dockerfile",
+		"docker/sshd/Dockerfile",
+		"docker/rclone/Dockerfile",
+	} {
+		content, err := os.ReadFile(filepath.Join(upstreamDir, relative))
+		if err != nil {
+			t.Fatal(err)
+		}
+		version := alpineBaseVersion(string(content))
+		if version == "" {
+			t.Fatalf("%s does not declare an alpine base image", relative)
+		}
+		versions[version] = struct{}{}
+	}
+	if len(versions) != 1 {
+		t.Fatalf("upstream helper Dockerfiles use different Alpine versions: %v", versions)
+	}
+	var upstreamVersion string
+	for version := range versions {
+		upstreamVersion = version
+	}
+	local, err := os.ReadFile(filepath.Join(repositoryRoot(t), "Dockerfile"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(local), "ARG ALPINE_VERSION="+upstreamVersion) {
+		t.Fatalf("tool Dockerfile Alpine version differs from upstream: want %s", upstreamVersion)
+	}
+}
+
+func alpineBaseVersion(content string) string {
+	for _, line := range strings.Split(content, "\n") {
+		fields := strings.Fields(line)
+		if len(fields) == 2 && fields[0] == "FROM" && strings.HasPrefix(fields[1], "alpine:") {
+			return strings.TrimPrefix(fields[1], "alpine:")
+		}
+	}
+	return ""
 }
 
 func loadUpstreamChart(t *testing.T) *chart.Chart {
