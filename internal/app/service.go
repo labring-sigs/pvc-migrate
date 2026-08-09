@@ -1165,12 +1165,10 @@ func (s *Service) copyWithRetry(ctx context.Context, session *domain.Session, vo
 			Writer:                s.config.Writer,
 			Logger:                s.config.Logger,
 		}
-		last = s.copier.Copy(ctx, request, func(progress copyengine.Progress) {
+		copyErr := s.copier.Copy(ctx, request, func(progress copyengine.Progress) {
 			s.config.Logger.Info("copy progress", "session", session.ID, "pvc", volume.SourcePVC.Name, "mode", progress.Mode, "attempt", progress.Attempt, "state", progress.State, "message", progress.Message)
 		})
-		if last == nil {
-			last = s.waitForCopyHelperRelease(ctx, volume)
-		}
+		last = errors.Join(copyErr, s.waitForCopyHelperRelease(ctx, volume))
 		if last == nil {
 			return nil
 		}

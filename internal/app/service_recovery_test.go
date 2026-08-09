@@ -107,6 +107,26 @@ type scriptedCopier struct {
 	copyHook  func()
 }
 
+type cleanupAwareCopier struct {
+	client            kubernetes.Interface
+	helperNamespace   string
+	helperName        string
+	calls             int
+	secondSawHelper   bool
+	firstAttemptEnded chan struct{}
+}
+
+func (c *cleanupAwareCopier) Copy(ctx context.Context, _ copyengine.Request, _ copyengine.ProgressFunc) error {
+	c.calls++
+	if c.calls == 1 {
+		close(c.firstAttemptEnded)
+		return domain.NewError(domain.ErrorCopy, "copy", "injected helper failure")
+	}
+	_, err := c.client.CoreV1().Pods(c.helperNamespace).Get(ctx, c.helperName, metav1.GetOptions{})
+	c.secondSawHelper = err == nil
+	return nil
+}
+
 func (c *scriptedCopier) Copy(_ context.Context, request copyengine.Request, _ copyengine.ProgressFunc) error {
 	c.requests = append(c.requests, request)
 	if c.copyHook != nil {
@@ -420,6 +440,49 @@ func TestCopyRetriesPersistAttemptsAndUseExponentialBackoff(t *testing.T) {
 		if request.Attempt != index+1 || request.Mode != copyengine.ModeWarm {
 			t.Fatalf("request %d attempt=%d mode=%s", index, request.Attempt, request.Mode)
 		}
+	}
+}
+
+func TestCopyFailureWaitsForHelperReleaseBeforeRetry(t *testing.T) {
+	fixture := newRecoveryFixture(t)
+	helper := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: "app",
+			Name:      "pv-migrate-helper",
+			Labels: map[string]string{
+				"app.kubernetes.io/instance":  "pv-migrate-pm-test-clusterip",
+				"app.kubernetes.io/component": "sshd",
+			},
+		},
+		Spec: corev1.PodSpec{Volumes: []corev1.Volume{{
+			Name: "source",
+			VolumeSource: corev1.VolumeSource{PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
+				ClaimName: "data",
+			}},
+		}}},
+	}
+	if _, err := fixture.client.CoreV1().Pods(helper.Namespace).Create(context.Background(), helper, metav1.CreateOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	copier := &cleanupAwareCopier{
+		client: fixture.client, helperNamespace: helper.Namespace, helperName: helper.Name,
+		firstAttemptEnded: make(chan struct{}),
+	}
+	fixture.service.copier = copier
+	fixture.service.config.Retries = 2
+	go func() {
+		<-copier.firstAttemptEnded
+		time.Sleep(10 * time.Millisecond)
+		_ = fixture.client.CoreV1().Pods(helper.Namespace).Delete(context.Background(), helper.Name, metav1.DeleteOptions{})
+	}()
+	session := appTestSession()
+	transitionThrough(t, session, domain.PhaseReserving, domain.PhaseReserved)
+
+	if err := fixture.service.WarmCopy(context.Background(), session); err != nil {
+		t.Fatal(err)
+	}
+	if copier.calls != 2 || copier.secondSawHelper {
+		t.Fatalf("copy calls=%d secondSawHelper=%t", copier.calls, copier.secondSawHelper)
 	}
 }
 
