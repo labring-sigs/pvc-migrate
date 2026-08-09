@@ -142,6 +142,7 @@ type SessionCommon struct {
 type SessionWorkflowOptions struct {
 	SourceNode       string   `json:"sourceNode,omitempty" yaml:"sourceNode,omitempty"`
 	TargetNode       string   `json:"targetNode,omitempty" yaml:"targetNode,omitempty"`
+	ToolImage        string   `json:"toolImage,omitempty" yaml:"toolImage,omitempty"`
 	Strategies       []string `json:"strategies,omitempty" yaml:"strategies,omitempty"`
 	VerifyChecksum   bool     `json:"verifyChecksum,omitempty" yaml:"verifyChecksum,omitempty"`
 	DeleteExtraneous bool     `json:"deleteExtraneous" yaml:"deleteExtraneous"`

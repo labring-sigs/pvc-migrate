@@ -33,6 +33,7 @@ const (
 
 type Request struct {
 	ID                    string
+	ToolImage             string
 	Namespace             string
 	PVCName               string
 	Path                  string
@@ -49,6 +50,7 @@ type Request struct {
 
 type Plan struct {
 	Operation        string   `json:"operation" yaml:"operation"`
+	ToolImage        string   `json:"toolImage" yaml:"toolImage"`
 	Namespace        string   `json:"namespace" yaml:"namespace"`
 	PVC              string   `json:"pvc" yaml:"pvc"`
 	Mode             string   `json:"mode" yaml:"mode"`
@@ -94,6 +96,10 @@ func Preflight(ctx context.Context, client kubernetes.Interface, req Request, re
 	if err := objectstore.ValidatePath(req.Path); err != nil {
 		return nil, err
 	}
+	toolImage, err := kube.NormalizeToolImage(req.ToolImage)
+	if err != nil {
+		return nil, err
+	}
 	info, err := inspectPVC(ctx, client, req.Namespace, req.PVCName, req.Online, req.AllowMounted, restore)
 	if err != nil {
 		return nil, err
@@ -107,6 +113,7 @@ func Preflight(ctx context.Context, client kubernetes.Interface, req Request, re
 	}
 	plan := &Plan{
 		Operation:        "backup",
+		ToolImage:        toolImage,
 		Namespace:        req.Namespace,
 		PVC:              req.PVCName,
 		Mode:             "offline",
@@ -183,10 +190,13 @@ func Run(ctx context.Context, client kubernetes.Interface, req Request, restore 
 	return runBackup(ctx, client, req, plan.PVCUID, plan.PVUID)
 }
 
-func pvmigrateBackupRequest(req Request, configPath string, helmValues []string) pvmigrate.Backup {
+func pvmigrateBackupRequest(req Request, configPath string, helmValues []string) (pvmigrate.Backup, error) {
+	imageValues, err := kube.ToolImageHelmValues(req.ToolImage)
+	if err != nil {
+		return pvmigrate.Backup{}, err
+	}
 	return pvmigrate.Backup{
 		ID:               req.ID,
-		ImageTag:         kube.PVMigrateImageTag,
 		PVC:              pvmigrate.PVC{KubeconfigPath: req.KubeconfigPath, Context: req.KubeContext, Namespace: req.Namespace, Name: req.PVCName},
 		Backend:          "s3",
 		Bucket:           req.Store.Config().Bucket,
@@ -196,18 +206,21 @@ func pvmigrateBackupRequest(req Request, configPath string, helmValues []string)
 		RcloneConfigFile: configPath,
 		Remote:           req.Store.RemotePath(),
 		IgnoreMounted:    req.Online,
-		HelmStringValues: append(kube.ZeroResourceHelmValues(), helmValues...),
+		HelmStringValues: append(append(kube.ZeroResourceHelmValues(), imageValues...), helmValues...),
 		HelmTimeout:      req.HelmTimeout,
 		Writer:           req.Writer,
 		Logger:           req.Logger,
 		StructuredLogs:   true,
-	}
+	}, nil
 }
 
-func pvmigrateRestoreRequest(req Request, configPath string) pvmigrate.Restore {
+func pvmigrateRestoreRequest(req Request, configPath string) (pvmigrate.Restore, error) {
+	imageValues, err := kube.ToolImageHelmValues(req.ToolImage)
+	if err != nil {
+		return pvmigrate.Restore{}, err
+	}
 	return pvmigrate.Restore{
 		ID:                    req.ID,
-		ImageTag:              kube.PVMigrateImageTag,
 		PVC:                   pvmigrate.PVC{KubeconfigPath: req.KubeconfigPath, Context: req.KubeContext, Namespace: req.Namespace, Name: req.PVCName},
 		Backend:               "s3",
 		Bucket:                req.Store.Config().Bucket,
@@ -218,12 +231,12 @@ func pvmigrateRestoreRequest(req Request, configPath string) pvmigrate.Restore {
 		Remote:                req.Store.RemotePath(),
 		IgnoreMounted:         req.AllowMounted,
 		DeleteExtraneousFiles: req.DeleteExtraneousFiles,
-		HelmStringValues:      kube.ZeroResourceHelmValues(),
+		HelmStringValues:      append(kube.ZeroResourceHelmValues(), imageValues...),
 		HelmTimeout:           req.HelmTimeout,
 		Writer:                req.Writer,
 		Logger:                req.Logger,
 		StructuredLogs:        true,
-	}
+	}, nil
 }
 
 func runBackup(ctx context.Context, client kubernetes.Interface, req Request, expectedPVCUID, expectedPVUID string) (retErr error) {
@@ -292,7 +305,11 @@ func runBackup(ctx context.Context, client kubernetes.Interface, req Request, ex
 	}
 	helperRequest := req
 	helperRequest.ID = helperOperationID(holder)
-	if err := pvmigrate.RunBackup(leaseCtx, pvmigrateBackupRequest(helperRequest, configPath, helmValues)); err != nil {
+	backupRequest, err := pvmigrateBackupRequest(helperRequest, configPath, helmValues)
+	if err != nil {
+		return err
+	}
+	if err := pvmigrate.RunBackup(leaseCtx, backupRequest); err != nil {
 		select {
 		case leaseErr := <-leaseErrors:
 			return leaseErr
@@ -573,7 +590,11 @@ func runRestore(ctx context.Context, client kubernetes.Interface, req Request, e
 	}
 	helperRequest := req
 	helperRequest.ID = helperOperationID(holder)
-	if err := pvmigrate.RunRestore(leaseCtx, pvmigrateRestoreRequest(helperRequest, configPath)); err != nil {
+	restoreRequest, err := pvmigrateRestoreRequest(helperRequest, configPath)
+	if err != nil {
+		return err
+	}
+	if err := pvmigrate.RunRestore(leaseCtx, restoreRequest); err != nil {
 		select {
 		case leaseErr := <-leaseErrors:
 			return leaseErr

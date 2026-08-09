@@ -55,9 +55,9 @@ func TestSessionWorkflowOptionsArePersistedInsideConcretePayload(t *testing.T) {
 		Volumes: []VolumeSpec{{SourcePVC: ObjectReference{Namespace: "app", Name: "data"}}},
 	}
 	spec := NewSessionSpec(OperationMigrate, common, WorkloadSpec{Adapter: WorkloadNone}, false, SessionWorkflowOptions{
-		SourceNode: "source-node", TargetNode: "target-node", Strategies: []string{"mount", "clusterip"}, VerifyChecksum: true, DeleteExtraneous: true,
+		SourceNode: "source-node", TargetNode: "target-node", ToolImage: "registry.example/pvc-migrate:aio", Strategies: []string{"mount", "clusterip"}, VerifyChecksum: true, DeleteExtraneous: true,
 	})
-	if got := spec.WorkflowOptions(); got.SourceNode != "source-node" || got.TargetNode != "target-node" || !got.VerifyChecksum || !got.DeleteExtraneous || len(got.Strategies) != 2 || got.Strategies[0] != "mount" || got.Strategies[1] != "clusterip" {
+	if got := spec.WorkflowOptions(); got.SourceNode != "source-node" || got.TargetNode != "target-node" || got.ToolImage != "registry.example/pvc-migrate:aio" || !got.VerifyChecksum || !got.DeleteExtraneous || len(got.Strategies) != 2 || got.Strategies[0] != "mount" || got.Strategies[1] != "clusterip" {
 		t.Fatalf("workflow options = %#v", got)
 	}
 	raw, err := json.Marshal(spec)
@@ -75,7 +75,7 @@ func TestSessionWorkflowOptionsArePersistedInsideConcretePayload(t *testing.T) {
 	if err := json.Unmarshal(document["migrate"], &payload); err != nil {
 		t.Fatal(err)
 	}
-	for _, field := range []string{"sourceNode", "targetNode", "strategies", "verifyChecksum", "deleteExtraneous", "workload"} {
+	for _, field := range []string{"sourceNode", "targetNode", "toolImage", "strategies", "verifyChecksum", "deleteExtraneous", "workload"} {
 		if _, exists := payload[field]; !exists {
 			t.Fatalf("migration payload lacks %s: %s", field, raw)
 		}

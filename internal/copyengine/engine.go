@@ -18,6 +18,7 @@ const (
 
 type Request struct {
 	SessionID             string
+	ToolImage             string
 	Source                domain.ObjectReference
 	Destination           domain.ObjectReference
 	Mode                  Mode

@@ -1149,6 +1149,7 @@ func (s *Service) copyWithRetry(ctx context.Context, session *domain.Session, vo
 		}
 		request := copyengine.Request{
 			SessionID:             session.ID,
+			ToolImage:             options.ToolImage,
 			Source:                volume.SourcePVC,
 			Destination:           volume.DestinationPVC,
 			Mode:                  mode,

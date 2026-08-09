@@ -20,12 +20,13 @@ import (
 )
 
 type Options struct {
-	Version            string
-	In                 io.Reader
-	Out                io.Writer
-	ErrOut             io.Writer
-	runtimeFactory     func(*rootState) (*commandRuntime, error)
-	objectStoreFactory func(context.Context, objectstore.Config) (*objectstore.Store, error)
+	Version             string
+	ToolImageRepository string
+	In                  io.Reader
+	Out                 io.Writer
+	ErrOut              io.Writer
+	runtimeFactory      func(*rootState) (*commandRuntime, error)
+	objectStoreFactory  func(context.Context, objectstore.Config) (*objectstore.Store, error)
 }
 
 type globals struct {
@@ -41,6 +42,7 @@ type globals struct {
 	logLevel         string
 	noCompress       bool
 	assumeYes        bool
+	toolImage        string
 }
 
 type rootState struct {
@@ -91,6 +93,7 @@ func NewRoot(options Options) *cobra.Command {
 	flags.StringVar(&state.global.logLevel, "log-level", "info", "Log level: debug, info, warn, error")
 	flags.BoolVar(&state.global.noCompress, "no-compress", false, "Disable rsync compression")
 	flags.BoolVarP(&state.global.assumeYes, "yes", "y", false, "Approve workload pause and storage identity changes")
+	flags.StringVar(&state.global.toolImage, "tool-image", kube.DefaultToolImage(options.ToolImageRepository, options.Version), "Unified image used by PVC reservation, copy, SSHD, and backup tools")
 
 	command.AddCommand(
 		state.newReserveCommand(),

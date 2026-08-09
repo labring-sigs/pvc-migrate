@@ -5,10 +5,6 @@ import (
 	"k8s.io/apimachinery/pkg/api/resource"
 )
 
-// PVMigrateImageTag pins the helper images used by the embedded pv-migrate
-// chart. The three images are released together and share this tag.
-const PVMigrateImageTag = "v3.6.1"
-
 // ZeroResourceRequirements prevents LimitRange defaults from assigning a
 // compute or requested ephemeral-storage footprint to short-lived migration
 // helpers. A zero ephemeral-storage limit would make every helper immediately
@@ -41,11 +37,16 @@ func ZeroResourceHelmValues() []string {
 		"limits.cpu",
 		"limits.memory",
 	}
-	values := make([]string, 0, len(components)*len(resources))
+	values := make([]string, 0, len(components)*(len(resources)+2))
 	for _, component := range components {
 		for _, resourceName := range resources {
 			values = append(values, component+".resources."+resourceName+"=0")
 		}
+		// The upstream tool images run as root because rsync preserves
+		// ownership/ACLs and sshd binds to port 22. The unified image defaults
+		// to the non-root CLI user, so helper roles set their runtime identity
+		// explicitly.
+		values = append(values, component+".securityContext.runAsUser=0", component+".securityContext.runAsGroup=0")
 	}
 	return values
 }

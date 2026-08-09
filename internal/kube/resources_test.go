@@ -11,9 +11,12 @@ import (
 	"k8s.io/apimachinery/pkg/api/resource"
 )
 
-func TestPVMigrateImageTagIsPinned(t *testing.T) {
-	if PVMigrateImageTag != "v3.6.1" {
-		t.Fatalf("PVMigrateImageTag=%q, want v3.6.1", PVMigrateImageTag)
+func TestDefaultToolImageUsesBuildRepositoryAndTag(t *testing.T) {
+	if got := DefaultToolImage("registry.example/pvc-migrate", "v1.2.3"); got != "registry.example/pvc-migrate:1.2.3" {
+		t.Fatalf("DefaultToolImage=%q", got)
+	}
+	if got := DefaultToolImage("", "dev"); got != DefaultToolImageRepository+":main" {
+		t.Fatalf("development tool image=%q", got)
 	}
 }
 
@@ -52,8 +55,8 @@ func TestZeroResourceHelmValuesCoverAllHelperComponents(t *testing.T) {
 			}
 		}
 	}
-	if len(values) != 15 {
-		t.Fatalf("values=%d, want 15", len(values))
+	if len(values) != 21 {
+		t.Fatalf("values=%d, want 21", len(values))
 	}
 }
 
@@ -86,6 +89,10 @@ func TestZeroResourceHelmValuesParseAsChartOverrides(t *testing.T) {
 			if _, ok := resources["limits"].(map[string]any)["ephemeral-storage"]; ok {
 				t.Fatalf("component %s sets an evicting ephemeral-storage limit", component)
 			}
+		}
+		securityContext, ok := componentValues["securityContext"].(map[string]any)
+		if !ok || securityContext["runAsUser"] != "0" || securityContext["runAsGroup"] != "0" {
+			t.Fatalf("component %s securityContext=%#v", component, componentValues["securityContext"])
 		}
 	}
 }

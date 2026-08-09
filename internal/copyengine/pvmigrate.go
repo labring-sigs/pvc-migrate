@@ -30,12 +30,15 @@ func (p *PVMigrate) Copy(ctx context.Context, request Request, progress Progress
 		rsyncArgs += " --checksum"
 	}
 	operationID := operationID(request)
+	imageValues, err := kube.ToolImageHelmValues(request.ToolImage)
+	if err != nil {
+		return err
+	}
 	if progress != nil {
 		progress(Progress{Mode: request.Mode, Attempt: request.Attempt, State: "running", Message: operationID})
 	}
 	migration := pvmigrate.Migration{
-		ID:       operationID,
-		ImageTag: kube.PVMigrateImageTag,
+		ID: operationID,
 		Source: pvmigrate.PVC{
 			KubeconfigPath: request.KubeconfigPath,
 			Context:        request.Context,
@@ -56,7 +59,7 @@ func (p *PVMigrate) Copy(ctx context.Context, request Request, progress Progress
 		RsyncExtraArgs:        rsyncArgs,
 		Strategies:            strategies,
 		HelmTimeout:           request.HelmTimeout,
-		HelmStringValues:      append([]string(nil), request.HelmStringValues...),
+		HelmStringValues:      append(imageValues, request.HelmStringValues...),
 		Writer:                request.Writer,
 		Logger:                request.Logger,
 		StructuredLogs:        true,

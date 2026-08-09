@@ -241,17 +241,23 @@ func TestPVMigrateBackupAndRestoreHonorMountedPolicy(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	request := Request{ID: "operation", Namespace: "default", PVCName: "data", Store: store, DeleteExtraneousFiles: true, AllowMounted: true, Online: true}
-	backupRequest := pvmigrateBackupRequest(request, "/tmp/rclone.conf", nil)
-	if backupRequest.ImageTag != kube.PVMigrateImageTag {
-		t.Fatalf("backup helper image tag=%q, want %q", backupRequest.ImageTag, kube.PVMigrateImageTag)
+	request := Request{ID: "operation", ToolImage: "registry.example/pvc-migrate:aio", Namespace: "default", PVCName: "data", Store: store, DeleteExtraneousFiles: true, AllowMounted: true, Online: true}
+	backupRequest, err := pvmigrateBackupRequest(request, "/tmp/rclone.conf", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !containsString(backupRequest.HelmStringValues, "rclone.image.repository=registry.example/pvc-migrate") || !containsString(backupRequest.HelmStringValues, "rclone.image.tag=aio") {
+		t.Fatalf("backup tool image values=%v", backupRequest.HelmStringValues)
 	}
 	if !backupRequest.IgnoreMounted {
 		t.Fatal("online backup did not ignore mounted source")
 	}
-	restoreRequest := pvmigrateRestoreRequest(request, "/tmp/rclone.conf")
-	if restoreRequest.ImageTag != kube.PVMigrateImageTag {
-		t.Fatalf("restore helper image tag=%q, want %q", restoreRequest.ImageTag, kube.PVMigrateImageTag)
+	restoreRequest, err := pvmigrateRestoreRequest(request, "/tmp/rclone.conf")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !containsString(restoreRequest.HelmStringValues, "rclone.image.repository=registry.example/pvc-migrate") || !containsString(restoreRequest.HelmStringValues, "rclone.image.tag=aio") {
+		t.Fatalf("restore tool image values=%v", restoreRequest.HelmStringValues)
 	}
 	if !restoreRequest.IgnoreMounted || !restoreRequest.DeleteExtraneousFiles {
 		t.Fatalf("restore mounted policy=%t delete=%t", restoreRequest.IgnoreMounted, restoreRequest.DeleteExtraneousFiles)
@@ -265,10 +271,18 @@ func TestPVMigrateBackupAndRestoreForwardLogger(t *testing.T) {
 		t.Fatal(err)
 	}
 	request := Request{ID: "operation", Namespace: "default", PVCName: "data", Store: store, Logger: logger}
-	if got := pvmigrateBackupRequest(request, "/tmp/rclone.conf", nil).Logger; got != logger {
+	backupRequest, err := pvmigrateBackupRequest(request, "/tmp/rclone.conf", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := backupRequest.Logger; got != logger {
 		t.Fatal("backup logger was not forwarded")
 	}
-	if got := pvmigrateRestoreRequest(request, "/tmp/rclone.conf").Logger; got != logger {
+	restoreRequest, err := pvmigrateRestoreRequest(request, "/tmp/rclone.conf")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := restoreRequest.Logger; got != logger {
 		t.Fatal("restore logger was not forwarded")
 	}
 }
@@ -279,7 +293,15 @@ func TestPVMigrateBackupAndRestoreUseZeroHelperResources(t *testing.T) {
 		t.Fatal(err)
 	}
 	request := Request{Namespace: "default", PVCName: "data", Store: store}
-	for _, values := range [][]string{pvmigrateBackupRequest(request, "/tmp/rclone.conf", nil).HelmStringValues, pvmigrateRestoreRequest(request, "/tmp/rclone.conf").HelmStringValues} {
+	backupRequest, err := pvmigrateBackupRequest(request, "/tmp/rclone.conf", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	restoreRequest, err := pvmigrateRestoreRequest(request, "/tmp/rclone.conf")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, values := range [][]string{backupRequest.HelmStringValues, restoreRequest.HelmStringValues} {
 		for _, expected := range kube.ZeroResourceHelmValues() {
 			if !containsString(values, expected) {
 				t.Fatalf("missing helper resource value %q in %v", expected, values)
