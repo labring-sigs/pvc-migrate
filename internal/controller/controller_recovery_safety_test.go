@@ -105,9 +105,9 @@ func TestControllerScaleConflictsPreserveCategoryAndPauseState(t *testing.T) {
 			t.Fatalf("category=%s error=%v", domain.CategoryOf(err), err)
 		}
 		current, _ := dynamicClient.Resource(mustGVR(grafanaAPIVersion, grafanaResource)).Namespace("vm").Get(context.Background(), "grafana", metav1.GetOptions{})
-		paused, _, _ := unstructured.NestedBool(current.Object, "spec", "deployment", "spec", "paused")
-		if paused {
-			t.Fatal("Grafana pause state was not compensated")
+		suspended, _, _ := unstructured.NestedBool(current.Object, "spec", "suspend")
+		if suspended {
+			t.Fatal("Grafana suspend state was not compensated")
 		}
 	})
 }
@@ -172,7 +172,7 @@ func TestGrafanaPauseNoOpAvoidsUpdates(t *testing.T) {
 	manager := NewManager(fake.NewClientset(), dynamicClient, nil)
 	session := controllerSession(domain.WorkloadSpec{
 		Pod:     domain.ObjectReference{Namespace: "vm"},
-		Grafana: &domain.GrafanaSpec{APIVersion: grafanaAPIVersion, Name: "grafana", UID: "grafana-uid", OriginalPaused: true},
+		Grafana: &domain.GrafanaSpec{APIVersion: grafanaAPIVersion, Name: "grafana", UID: "grafana-uid", OriginalSuspend: true},
 	})
 	if err := manager.setGrafanaPaused(context.Background(), session, true); err != nil {
 		t.Fatal(err)
@@ -183,6 +183,36 @@ func TestGrafanaPauseNoOpAvoidsUpdates(t *testing.T) {
 	}
 	if countDynamicActions(dynamicClient.Actions(), "update", grafanaResource) != updates {
 		t.Fatal("idempotent Grafana pause issued an update")
+	}
+}
+
+func TestGrafanaSuspendRestoresOmittedField(t *testing.T) {
+	dynamicClient := dynamicfake.NewSimpleDynamicClient(runtime.NewScheme(), grafanaObject("grafana-uid", false))
+	object, err := dynamicClient.Resource(mustGVR(grafanaAPIVersion, grafanaResource)).Namespace("vm").Get(context.Background(), "grafana", metav1.GetOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	unstructured.RemoveNestedField(object.Object, "spec", "suspend")
+	if _, err := dynamicClient.Resource(mustGVR(grafanaAPIVersion, grafanaResource)).Namespace("vm").Update(context.Background(), object, metav1.UpdateOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	manager := NewManager(fake.NewClientset(), dynamicClient, nil)
+	session := controllerSession(domain.WorkloadSpec{
+		Pod:     domain.ObjectReference{Namespace: "vm"},
+		Grafana: &domain.GrafanaSpec{APIVersion: grafanaAPIVersion, Name: "grafana", UID: "grafana-uid", OriginalSuspend: false, OriginalSuspendConfigured: false},
+	})
+	if err := manager.setGrafanaPaused(context.Background(), session, true); err != nil {
+		t.Fatal(err)
+	}
+	if err := manager.restoreGrafanaPause(context.Background(), session); err != nil {
+		t.Fatal(err)
+	}
+	current, err := dynamicClient.Resource(mustGVR(grafanaAPIVersion, grafanaResource)).Namespace("vm").Get(context.Background(), "grafana", metav1.GetOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, found, nestedErr := unstructured.NestedFieldNoCopy(current.Object, "spec", "suspend"); nestedErr != nil || found {
+		t.Fatalf("suspend field was added after restore: found=%t err=%v", found, nestedErr)
 	}
 }
 
@@ -229,7 +259,7 @@ func TestRestoreGrafanaPauseClearsOwnerAndAllowsNextSession(t *testing.T) {
 	manager := NewManager(fake.NewClientset(), dynamicClient, nil)
 	session := controllerSession(domain.WorkloadSpec{
 		Pod:     domain.ObjectReference{Namespace: "vm"},
-		Grafana: &domain.GrafanaSpec{APIVersion: grafanaAPIVersion, Name: "grafana", UID: "grafana-uid", OriginalPaused: true},
+		Grafana: &domain.GrafanaSpec{APIVersion: grafanaAPIVersion, Name: "grafana", UID: "grafana-uid", OriginalSuspend: true},
 	})
 	if err := manager.setGrafanaPaused(context.Background(), session, true); err != nil {
 		t.Fatal(err)
@@ -247,7 +277,7 @@ func TestRestoreGrafanaPauseClearsOwnerAndAllowsNextSession(t *testing.T) {
 
 	next := controllerSession(domain.WorkloadSpec{
 		Pod:     domain.ObjectReference{Namespace: "vm"},
-		Grafana: &domain.GrafanaSpec{APIVersion: grafanaAPIVersion, Name: "grafana", UID: "grafana-uid", OriginalPaused: true},
+		Grafana: &domain.GrafanaSpec{APIVersion: grafanaAPIVersion, Name: "grafana", UID: "grafana-uid", OriginalSuspend: true},
 	})
 	next.ID = "next-session"
 	if err := manager.setGrafanaPaused(context.Background(), next, true); err != nil {
@@ -277,7 +307,7 @@ func TestControllerPauseDetectsExternalCRPauseState(t *testing.T) {
 		grafana := grafanaObject("grafana-uid", true)
 		dynamicClient := dynamicfake.NewSimpleDynamicClient(runtime.NewScheme(), grafana)
 		manager := NewManager(fake.NewClientset(), dynamicClient, nil)
-		session := controllerSession(domain.WorkloadSpec{Pod: domain.ObjectReference{Namespace: "vm"}, Grafana: &domain.GrafanaSpec{APIVersion: grafanaAPIVersion, Name: "grafana", UID: "grafana-uid", OriginalPaused: false}})
+		session := controllerSession(domain.WorkloadSpec{Pod: domain.ObjectReference{Namespace: "vm"}, Grafana: &domain.GrafanaSpec{APIVersion: grafanaAPIVersion, Name: "grafana", UID: "grafana-uid", OriginalSuspend: false}})
 		if err := manager.setGrafanaPaused(context.Background(), session, true); domain.CategoryOf(err) != domain.ErrorConflict {
 			t.Fatalf("category=%s error=%v", domain.CategoryOf(err), err)
 		}
@@ -396,7 +426,7 @@ func grafanaObject(uid types.UID, paused bool) *unstructured.Unstructured {
 		"apiVersion": grafanaAPIVersion,
 		"kind":       "Grafana",
 		"metadata":   map[string]any{"name": "grafana", "namespace": "vm", "uid": string(uid)},
-		"spec":       map[string]any{"deployment": map[string]any{"spec": map[string]any{"paused": paused}}},
+		"spec":       map[string]any{"suspend": paused},
 	}}
 }
 
