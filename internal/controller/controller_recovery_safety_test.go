@@ -2,6 +2,7 @@ package controller
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 
@@ -314,6 +315,19 @@ func TestControllerPauseDetectsExternalCRPauseState(t *testing.T) {
 	})
 }
 
+func TestGrafanaSuspendOwnershipConflictUsesSuspendTerminology(t *testing.T) {
+	grafana := grafanaObject("grafana-uid", false)
+	grafana.SetAnnotations(map[string]string{pauseSessionAnnotation: "other-session"})
+	dynamicClient := dynamicfake.NewSimpleDynamicClient(runtime.NewScheme(), grafana)
+	manager := NewManager(fake.NewClientset(), dynamicClient, nil)
+	session := controllerSession(domain.WorkloadSpec{Pod: domain.ObjectReference{Namespace: "vm"}, Grafana: &domain.GrafanaSpec{APIVersion: grafanaAPIVersion, Name: "grafana", UID: "grafana-uid", OriginalSuspend: false}})
+
+	err := manager.setGrafanaPaused(context.Background(), session, true)
+	if domain.CategoryOf(err) != domain.ErrorConflict || !strings.Contains(err.Error(), "suspend is owned") {
+		t.Fatalf("category=%s error=%v", domain.CategoryOf(err), err)
+	}
+}
+
 func TestGrafanaResumeUsesCompleteDeploymentSelector(t *testing.T) {
 	replicas := int32(0)
 	deployment := &appsv1.Deployment{
@@ -421,12 +435,12 @@ func vmClusterObject(uid types.UID, paused bool) *unstructured.Unstructured {
 	}}
 }
 
-func grafanaObject(uid types.UID, paused bool) *unstructured.Unstructured {
+func grafanaObject(uid types.UID, suspended bool) *unstructured.Unstructured {
 	return &unstructured.Unstructured{Object: map[string]any{
 		"apiVersion": grafanaAPIVersion,
 		"kind":       "Grafana",
 		"metadata":   map[string]any{"name": "grafana", "namespace": "vm", "uid": string(uid)},
-		"spec":       map[string]any{"suspend": paused},
+		"spec":       map[string]any{"suspend": suspended},
 	}}
 }
 

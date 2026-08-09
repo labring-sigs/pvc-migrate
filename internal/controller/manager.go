@@ -289,7 +289,7 @@ func (m *Manager) verifyPauseControl(ctx context.Context, session *domain.Sessio
 			return domain.NewError(domain.ErrorConflict, "verify paused", fmt.Sprintf("Grafana %s/%s UID changed", object.GetNamespace(), object.GetName()))
 		}
 		if object.GetAnnotations()[pauseSessionAnnotation] != session.ID {
-			return domain.NewError(domain.ErrorConflict, "verify paused", fmt.Sprintf("Grafana %s/%s pause ownership changed", object.GetNamespace(), object.GetName()))
+			return domain.NewError(domain.ErrorConflict, "verify paused", fmt.Sprintf("Grafana %s/%s suspend ownership changed", object.GetNamespace(), object.GetName()))
 		}
 		suspended, _, _ := unstructured.NestedBool(object.Object, "spec", "suspend")
 		if !suspended {
@@ -1524,7 +1524,7 @@ func (m *Manager) restoreGrafanaPause(ctx context.Context, session *domain.Sessi
 		annotations := object.GetAnnotations()
 		pauseOwner := annotations[pauseSessionAnnotation]
 		if pauseOwner != "" && pauseOwner != session.ID {
-			return domain.NewError(domain.ErrorConflict, "restore Grafana pause", fmt.Sprintf("Grafana %s/%s pause is owned by session %s", object.GetNamespace(), object.GetName(), pauseOwner))
+			return domain.NewError(domain.ErrorConflict, "restore Grafana suspend", fmt.Sprintf("Grafana %s/%s suspend is owned by session %s", object.GetNamespace(), object.GetName(), pauseOwner))
 		}
 		if pauseOwner == "" {
 			if current != grafana.OriginalSuspend {
@@ -1581,7 +1581,7 @@ func (m *Manager) setGrafanaPaused(ctx context.Context, session *domain.Session,
 		annotations := object.GetAnnotations()
 		pauseOwner := annotations[pauseSessionAnnotation]
 		if pauseOwner != "" && pauseOwner != session.ID {
-			return domain.NewError(domain.ErrorConflict, "Grafana suspend", fmt.Sprintf("Grafana %s/%s pause is owned by session %s", object.GetNamespace(), object.GetName(), pauseOwner))
+			return domain.NewError(domain.ErrorConflict, "Grafana suspend", fmt.Sprintf("Grafana %s/%s suspend is owned by session %s", object.GetNamespace(), object.GetName(), pauseOwner))
 		}
 		if pauseOwner == "" && current != grafana.OriginalSuspend {
 			return domain.NewError(domain.ErrorConflict, "Grafana suspend", fmt.Sprintf("Grafana suspend changed from expected %t to %t", grafana.OriginalSuspend, current))
