@@ -28,6 +28,9 @@ FROM alpine:${ALPINE_VERSION}
 ARG VERSION=dev
 ARG TOOL_IMAGE_REPOSITORY=ghcr.io/labring-sigs/pvc-migrate
 
+# Match upstream pv-migrate's helper images: Alpine must unlock root before
+# sshd accepts the chart-mounted root public key, and UID/GID 10000 is the
+# fixed identity used by its non-root helper mode.
 RUN apk add --no-cache \
       ca-certificates \
       openssh \
@@ -45,8 +48,8 @@ RUN apk add --no-cache \
 COPY docker/sshd_config /etc/ssh/sshd_config
 COPY --from=build /out/pvc-migrate /usr/local/bin/pvc-migrate
 
-LABEL org.opencontainers.image.title="pvc-migrate all-in-one tool image" \
-      org.opencontainers.image.description="Unified pvc-migrate CLI, rsync, SSHD, rclone, and PVC reservation helper" \
+LABEL org.opencontainers.image.title="pvc-migrate tool image" \
+      org.opencontainers.image.description="pvc-migrate CLI and in-cluster PVC reservation, rsync, SSHD, and rclone tools" \
       org.opencontainers.image.source="https://github.com/labring-sigs/pvc-migrate" \
       org.opencontainers.image.version="${VERSION}" \
       org.opencontainers.image.ref.name="${TOOL_IMAGE_REPOSITORY}:${VERSION}"

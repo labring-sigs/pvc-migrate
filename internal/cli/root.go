@@ -93,7 +93,7 @@ func NewRoot(options Options) *cobra.Command {
 	flags.StringVar(&state.global.logLevel, "log-level", "info", "Log level: debug, info, warn, error")
 	flags.BoolVar(&state.global.noCompress, "no-compress", false, "Disable rsync compression")
 	flags.BoolVarP(&state.global.assumeYes, "yes", "y", false, "Approve workload pause and storage identity changes")
-	flags.StringVar(&state.global.toolImage, "tool-image", kube.DefaultToolImage(options.ToolImageRepository, options.Version), "Unified image used by PVC reservation, copy, SSHD, and backup tools")
+	flags.StringVar(&state.global.toolImage, "tool-image", kube.DefaultToolImage(options.ToolImageRepository, options.Version), "Tool image used by PVC reservation, copy, SSHD, and backup helpers")
 
 	command.AddCommand(
 		state.newReserveCommand(),

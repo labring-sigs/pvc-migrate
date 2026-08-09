@@ -37,7 +37,7 @@ kubectl apply -f deploy/rbac.yaml
 
 A locally executed CLI uses the identity from its kubeconfig and requires equivalent permissions.
 
-Build the all-in-one tool image. It runs the CLI by default and also supplies PVC reservation, rsync, SSHD, and rclone roles inside the cluster:
+Build the tool image. It runs the CLI by default and also supplies PVC reservation, rsync, SSHD, and rclone roles inside the cluster:
 
 ```bash
 docker build --build-arg VERSION=0.1.0 -t pvc-migrate:0.1.0 .

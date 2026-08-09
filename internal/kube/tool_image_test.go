@@ -6,6 +6,8 @@ import (
 	"testing"
 
 	"github.com/labring-sigs/pvc-migrate/internal/domain"
+	chartutil "helm.sh/helm/v4/pkg/chart/common/util"
+	chart "helm.sh/helm/v4/pkg/chart/v2"
 	"helm.sh/helm/v4/pkg/cli"
 	"helm.sh/helm/v4/pkg/cli/values"
 	"helm.sh/helm/v4/pkg/getter"
@@ -71,6 +73,39 @@ func TestToolSecurityContextValuesParseAsNumericHelmOverrides(t *testing.T) {
 			if value, ok := securityContext[field].(int64); !ok || value != 0 {
 				t.Fatalf("component %s %s=%#v (%T), want numeric zero", component, field, securityContext[field], securityContext[field])
 			}
+		}
+	}
+}
+
+func TestToolSecurityContextValuesPreserveSSHDChartCapabilities(t *testing.T) {
+	options := values.Options{Values: ToolSecurityContextHelmValues()}
+	overrides, err := options.MergeValues(getter.All(cli.New()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	merged, err := chartutil.CoalesceValues(&chart.Chart{
+		Metadata: &chart.Metadata{Name: "pv-migrate", APIVersion: chart.APIVersionV2},
+		Values: map[string]any{
+			"sshd": map[string]any{
+				"securityContext": map[string]any{
+					"capabilities": map[string]any{"add": []any{"SYS_CHROOT"}},
+				},
+			},
+		},
+	}, overrides)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sshd := merged["sshd"].(map[string]any)
+	securityContext := sshd["securityContext"].(map[string]any)
+	capabilities := securityContext["capabilities"].(map[string]any)
+	add, ok := capabilities["add"].([]any)
+	if !ok || len(add) != 1 || add[0] != "SYS_CHROOT" {
+		t.Fatalf("sshd capabilities.add=%#v", capabilities["add"])
+	}
+	for _, field := range []string{"runAsUser", "runAsGroup"} {
+		if value, ok := securityContext[field].(int64); !ok || value != 0 {
+			t.Fatalf("sshd %s=%#v (%T), want numeric zero", field, securityContext[field], securityContext[field])
 		}
 	}
 }

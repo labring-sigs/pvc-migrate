@@ -8,8 +8,8 @@ import (
 	"github.com/labring-sigs/pvc-migrate/internal/domain"
 )
 
-// DefaultToolImageRepository is the build-time default repository for the
-// unified runtime image. Container builds replace it with their own repository.
+// DefaultToolImageRepository is the build-time default repository for the tool
+// image. Container builds replace it with their own repository.
 const DefaultToolImageRepository = "ghcr.io/labring-sigs/pvc-migrate"
 
 // DefaultToolImage returns the tool image associated with a CLI build.
