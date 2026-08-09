@@ -59,6 +59,7 @@ func (p *PVMigrate) Copy(ctx context.Context, request Request, progress Progress
 		RsyncExtraArgs:        rsyncArgs,
 		Strategies:            strategies,
 		HelmTimeout:           request.HelmTimeout,
+		HelmValues:            kube.ToolSecurityContextHelmValues(),
 		HelmStringValues:      append(imageValues, request.HelmStringValues...),
 		Writer:                request.Writer,
 		Logger:                request.Logger,

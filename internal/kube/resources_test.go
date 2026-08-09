@@ -55,8 +55,8 @@ func TestZeroResourceHelmValuesCoverAllHelperComponents(t *testing.T) {
 			}
 		}
 	}
-	if len(values) != 21 {
-		t.Fatalf("values=%d, want 21", len(values))
+	if len(values) != 15 {
+		t.Fatalf("values=%d, want 15", len(values))
 	}
 }
 
@@ -89,10 +89,6 @@ func TestZeroResourceHelmValuesParseAsChartOverrides(t *testing.T) {
 			if _, ok := resources["limits"].(map[string]any)["ephemeral-storage"]; ok {
 				t.Fatalf("component %s sets an evicting ephemeral-storage limit", component)
 			}
-		}
-		securityContext, ok := componentValues["securityContext"].(map[string]any)
-		if !ok || securityContext["runAsUser"] != "0" || securityContext["runAsGroup"] != "0" {
-			t.Fatalf("component %s securityContext=%#v", component, componentValues["securityContext"])
 		}
 	}
 }

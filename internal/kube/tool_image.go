@@ -69,3 +69,14 @@ func ToolImageHelmValues(image string) ([]string, error) {
 	}
 	return values, nil
 }
+
+// ToolSecurityContextHelmValues overrides the image's non-root USER for
+// in-cluster data mover roles. These values must be passed through Helm's
+// typed value channel so Kubernetes receives numeric UID/GID fields.
+func ToolSecurityContextHelmValues() []string {
+	values := make([]string, 0, 6)
+	for _, component := range []string{"rsync", "sshd", "rclone"} {
+		values = append(values, component+".securityContext.runAsUser=0", component+".securityContext.runAsGroup=0")
+	}
+	return values
+}

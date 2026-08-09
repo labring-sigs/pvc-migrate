@@ -52,6 +52,29 @@ func TestToolImageValuesParseAsHelmStringOverrides(t *testing.T) {
 	}
 }
 
+func TestToolSecurityContextValuesParseAsNumericHelmOverrides(t *testing.T) {
+	options := values.Options{Values: ToolSecurityContextHelmValues()}
+	merged, err := options.MergeValues(getter.All(cli.New()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, component := range []string{"rsync", "sshd", "rclone"} {
+		componentValues, ok := merged[component].(map[string]any)
+		if !ok {
+			t.Fatalf("component %s=%#v", component, merged[component])
+		}
+		securityContext, ok := componentValues["securityContext"].(map[string]any)
+		if !ok {
+			t.Fatalf("component %s securityContext=%#v", component, componentValues["securityContext"])
+		}
+		for _, field := range []string{"runAsUser", "runAsGroup"} {
+			if value, ok := securityContext[field].(int64); !ok || value != 0 {
+				t.Fatalf("component %s %s=%#v (%T), want numeric zero", component, field, securityContext[field], securityContext[field])
+			}
+		}
+	}
+}
+
 func TestNormalizeToolImageRejectsUnpinnedAndDigestReferences(t *testing.T) {
 	for _, image := range []string{"registry.example/team/pvc-migrate", "registry.example/team/pvc-migrate@sha256:abc", "bad image:aio"} {
 		_, err := NormalizeToolImage(image)

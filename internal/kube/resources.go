@@ -37,16 +37,11 @@ func ZeroResourceHelmValues() []string {
 		"limits.cpu",
 		"limits.memory",
 	}
-	values := make([]string, 0, len(components)*(len(resources)+2))
+	values := make([]string, 0, len(components)*len(resources))
 	for _, component := range components {
 		for _, resourceName := range resources {
 			values = append(values, component+".resources."+resourceName+"=0")
 		}
-		// The upstream tool images run as root because rsync preserves
-		// ownership/ACLs and sshd binds to port 22. The unified image defaults
-		// to the non-root CLI user, so helper roles set their runtime identity
-		// explicitly.
-		values = append(values, component+".securityContext.runAsUser=0", component+".securityContext.runAsGroup=0")
 	}
 	return values
 }

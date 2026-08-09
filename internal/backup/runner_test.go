@@ -249,6 +249,11 @@ func TestPVMigrateBackupAndRestoreHonorMountedPolicy(t *testing.T) {
 	if !containsString(backupRequest.HelmStringValues, "rclone.image.repository=registry.example/pvc-migrate") || !containsString(backupRequest.HelmStringValues, "rclone.image.tag=aio") {
 		t.Fatalf("backup tool image values=%v", backupRequest.HelmStringValues)
 	}
+	for _, expected := range kube.ToolSecurityContextHelmValues() {
+		if !containsString(backupRequest.HelmValues, expected) {
+			t.Fatalf("backup typed Helm values lack %q: %v", expected, backupRequest.HelmValues)
+		}
+	}
 	if !backupRequest.IgnoreMounted {
 		t.Fatal("online backup did not ignore mounted source")
 	}
@@ -258,6 +263,11 @@ func TestPVMigrateBackupAndRestoreHonorMountedPolicy(t *testing.T) {
 	}
 	if !containsString(restoreRequest.HelmStringValues, "rclone.image.repository=registry.example/pvc-migrate") || !containsString(restoreRequest.HelmStringValues, "rclone.image.tag=aio") {
 		t.Fatalf("restore tool image values=%v", restoreRequest.HelmStringValues)
+	}
+	for _, expected := range kube.ToolSecurityContextHelmValues() {
+		if !containsString(restoreRequest.HelmValues, expected) {
+			t.Fatalf("restore typed Helm values lack %q: %v", expected, restoreRequest.HelmValues)
+		}
 	}
 	if !restoreRequest.IgnoreMounted || !restoreRequest.DeleteExtraneousFiles {
 		t.Fatalf("restore mounted policy=%t delete=%t", restoreRequest.IgnoreMounted, restoreRequest.DeleteExtraneousFiles)
