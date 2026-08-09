@@ -109,7 +109,7 @@ func TestVMClusterUsesComponentPauseAndStatefulSetScale(t *testing.T) {
 	}
 }
 
-func TestGrafanaUsesCRPauseAndDeploymentScale(t *testing.T) {
+func TestGrafanaUsesCRSuspendAndDeploymentScale(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
 	replicas := int32(1)
@@ -117,7 +117,7 @@ func TestGrafanaUsesCRPauseAndDeploymentScale(t *testing.T) {
 		"apiVersion": grafanaAPIVersion,
 		"kind":       "Grafana",
 		"metadata":   map[string]any{"name": "grafana", "namespace": "vm", "uid": "grafana-uid"},
-		"spec":       map[string]any{"deployment": map[string]any{"spec": map[string]any{"replicas": int64(1), "paused": false}}},
+		"spec":       map[string]any{"suspend": false, "deployment": map[string]any{"spec": map[string]any{"replicas": int64(1)}}},
 	}}
 	deployment := &appsv1.Deployment{
 		ObjectMeta: metav1.ObjectMeta{Namespace: "vm", Name: "grafana-deployment", UID: types.UID("deployment-uid"), OwnerReferences: []metav1.OwnerReference{{APIVersion: grafanaAPIVersion, Kind: "Grafana", Name: "grafana", UID: "grafana-uid", Controller: boolPointer(true)}}},
@@ -155,6 +155,13 @@ func TestGrafanaUsesCRPauseAndDeploymentScale(t *testing.T) {
 	if err := manager.Pause(ctx, session); err != nil {
 		t.Fatal(err)
 	}
+	pausedCR, err := dynamicClient.Resource(mustGVR(grafanaAPIVersion, grafanaResource)).Namespace("vm").Get(ctx, "grafana", metav1.GetOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if suspended, found, nestedErr := unstructured.NestedBool(pausedCR.Object, "spec", "suspend"); nestedErr != nil || !found || !suspended {
+		t.Fatalf("paused Grafana suspend=%t found=%t err=%v, want true", suspended, found, nestedErr)
+	}
 	if err := manager.Resume(ctx, session); err != nil {
 		t.Fatal(err)
 	}
@@ -167,6 +174,9 @@ func TestGrafanaUsesCRPauseAndDeploymentScale(t *testing.T) {
 	}
 	if resumed.GetAnnotations()[pauseSessionAnnotation] != "" {
 		t.Fatalf("Grafana pause owner=%q", resumed.GetAnnotations()[pauseSessionAnnotation])
+	}
+	if suspended, found, nestedErr := unstructured.NestedBool(resumed.Object, "spec", "suspend"); nestedErr != nil || !found || suspended {
+		t.Fatalf("resumed Grafana suspend=%t found=%t err=%v, want false", suspended, found, nestedErr)
 	}
 }
 

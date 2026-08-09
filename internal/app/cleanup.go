@@ -30,9 +30,7 @@ func (s *Service) cleanup(ctx context.Context, session *domain.Session, options 
 	if session == nil {
 		return domain.NewError(domain.ErrorValidation, "cleanup", "session is nil")
 	}
-	switch session.Status.Phase {
-	case domain.PhaseCompleted, domain.PhaseRolledBack, domain.PhaseAborted:
-	default:
+	if !cleanupPhaseAllowed(session) {
 		return domain.NewError(domain.ErrorPrecondition, "cleanup", fmt.Sprintf("session phase %s is still active", session.Status.Phase))
 	}
 	if !session.Spec.Operation().RebindsPVC() && (options.DeleteTemporary || options.DeleteRollback || options.DeleteSession) {
@@ -76,10 +74,7 @@ func (s *Service) cleanup(ctx context.Context, session *domain.Session, options 
 			if rollback.Name == "" {
 				continue
 			}
-			expectedRole := "rollback"
-			if session.Status.Phase == domain.PhaseAborted {
-				expectedRole = "destination"
-			}
+			expectedRole := cleanupRollbackRole(session)
 			if err := s.deleteRollbackPV(ctx, session.ID, rollback, expectedRole); err != nil {
 				return err
 			}
@@ -104,6 +99,9 @@ func (s *Service) cleanup(ctx context.Context, session *domain.Session, options 
 				}
 			}
 			activePVC := session.Status.Volumes[index].Activation.ActivePVC
+			if activePVC.Name == "" && cleanupKeepsSource(session) {
+				activePVC = volume.SourcePVC
+			}
 			if activePVC.Name == "" && session.Status.Phase == domain.PhaseAborted {
 				activePVC = volume.SourcePVC
 			}
@@ -213,6 +211,9 @@ func (s *Service) discoverDestinationRefs(ctx context.Context, sessionID string,
 }
 
 func cleanupPVRefs(session *domain.Session, volume *domain.VolumeSpec) (active domain.ObjectReference, rollback domain.ObjectReference, policy corev1.PersistentVolumeReclaimPolicy) {
+	if cleanupKeepsSource(session) {
+		return volume.SourcePV, volume.DestinationPV, volume.SourceReclaimPolicy
+	}
 	if session.Spec.Operation().RebindsPVC() {
 		return volume.SourcePV, domain.ObjectReference{}, volume.SourceReclaimPolicy
 	}
@@ -220,6 +221,43 @@ func cleanupPVRefs(session *domain.Session, volume *domain.VolumeSpec) (active d
 		return volume.SourcePV, volume.DestinationPV, volume.SourceReclaimPolicy
 	}
 	return volume.DestinationPV, volume.SourcePV, volume.DestinationPolicy
+}
+
+func cleanupKeepsSource(session *domain.Session) bool {
+	if session == nil {
+		return false
+	}
+	switch session.Spec.Operation() {
+	case domain.OperationReserve, domain.OperationCopy:
+		return true
+	default:
+		return false
+	}
+}
+
+func cleanupPhaseAllowed(session *domain.Session) bool {
+	if session == nil {
+		return false
+	}
+	phase := session.Status.Phase
+	if phase == domain.PhaseAborted {
+		return true
+	}
+	switch session.Spec.Operation() {
+	case domain.OperationReserve:
+		return phase == domain.PhaseReserved
+	case domain.OperationCopy:
+		return phase == domain.PhaseWarmCopied
+	default:
+		return phase == domain.PhaseCompleted || phase == domain.PhaseRolledBack
+	}
+}
+
+func cleanupRollbackRole(session *domain.Session) string {
+	if cleanupKeepsSource(session) || session.Status.Phase == domain.PhaseAborted {
+		return "destination"
+	}
+	return "rollback"
 }
 
 func (s *Service) deleteReservationPods(ctx context.Context, session *domain.Session) error {

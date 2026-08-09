@@ -7,6 +7,7 @@ import (
 	"io"
 	"log/slog"
 	"math"
+	"slices"
 	"strings"
 	"time"
 
@@ -453,9 +454,7 @@ func (s *Service) ValidateCleanup(ctx context.Context, session *domain.Session, 
 	if err := session.Validate(); err != nil {
 		return err
 	}
-	switch session.Status.Phase {
-	case domain.PhaseCompleted, domain.PhaseRolledBack, domain.PhaseAborted:
-	default:
+	if !cleanupPhaseAllowed(session) {
 		return domain.NewError(domain.ErrorPrecondition, "cleanup dry-run", fmt.Sprintf("session phase %s is still active", session.Status.Phase))
 	}
 	if options.DeleteSession && !options.Finalize {
@@ -487,10 +486,7 @@ func (s *Service) ValidateCleanup(ctx context.Context, session *domain.Session, 
 			}
 		}
 		if options.DeleteRollback && rollback.Name != "" {
-			expectedRole := "rollback"
-			if session.Status.Phase == domain.PhaseAborted {
-				expectedRole = "destination"
-			}
+			expectedRole := cleanupRollbackRole(session)
 			pv, err := s.client.CoreV1().PersistentVolumes().Get(ctx, rollback.Name, metav1.GetOptions{})
 			switch {
 			case apierrors.IsNotFound(err):
@@ -1235,38 +1231,61 @@ func isPVMigrateHelperForClaims(pod *corev1.Pod, claims map[string]struct{}) boo
 func (s *Service) helmSchedulingValues(ctx context.Context, session *domain.Session) ([]string, error) {
 	values := kube.ZeroResourceHelmValues()
 	options := session.Spec.WorkflowOptions()
-	for _, item := range []struct {
+	type schedulingTarget struct {
 		component string
-		node      string
-	}{
-		{component: "sshd", node: options.SourceNode},
-		{component: "rsync", node: options.TargetNode},
-	} {
-		if item.node == "" {
-			continue
-		}
-		node, err := s.client.CoreV1().Nodes().Get(ctx, item.node, metav1.GetOptions{})
-		if err != nil {
-			return nil, domain.WrapError(domain.ErrorKubernetes, "copy scheduling", fmt.Sprintf("read node %s", item.node), err)
-		}
-		hostname := node.Labels[corev1.LabelHostname]
-		if hostname == "" {
-			return nil, domain.NewError(domain.ErrorPrecondition, "copy scheduling", fmt.Sprintf("node %s lacks %s", item.node, corev1.LabelHostname))
-		}
-		values = append(values, fmt.Sprintf("%s.nodeSelector.kubernetes\\.io/hostname=%s", item.component, hostname))
-		index := 0
-		for _, taint := range node.Spec.Taints {
-			if taint.Effect != corev1.TaintEffectNoSchedule && taint.Effect != corev1.TaintEffectNoExecute {
+		nodes     []string
+		pinNode   bool
+	}
+	targets := []schedulingTarget{{component: "rsync", nodes: []string{options.TargetNode}, pinNode: true}}
+	if slices.Contains(options.Strategies, "local") {
+		// The local strategy deploys an SSHD on both sides. PVC topology places
+		// each Pod on its volume's node, while the combined tolerations allow
+		// both source and destination nodes to accept their respective Pod.
+		targets = append(targets, schedulingTarget{component: "sshd", nodes: []string{options.SourceNode, options.TargetNode}})
+	} else {
+		targets = append(targets, schedulingTarget{component: "sshd", nodes: []string{options.SourceNode}, pinNode: true})
+	}
+	for _, target := range targets {
+		tolerationIndex := 0
+		seenNodes := map[string]struct{}{}
+		seenTolerations := map[string]struct{}{}
+		for _, nodeName := range target.nodes {
+			if nodeName == "" {
 				continue
 			}
-			prefix := fmt.Sprintf("%s.tolerations[%d]", item.component, index)
-			values = append(values, prefix+".key="+taint.Key, prefix+".effect="+string(taint.Effect))
-			if taint.Value == "" {
-				values = append(values, prefix+".operator=Exists")
-			} else {
-				values = append(values, prefix+".operator=Equal", prefix+".value="+taint.Value)
+			if _, seen := seenNodes[nodeName]; seen {
+				continue
 			}
-			index++
+			seenNodes[nodeName] = struct{}{}
+			node, err := s.client.CoreV1().Nodes().Get(ctx, nodeName, metav1.GetOptions{})
+			if err != nil {
+				return nil, domain.WrapError(domain.ErrorKubernetes, "copy scheduling", fmt.Sprintf("read node %s", nodeName), err)
+			}
+			if target.pinNode {
+				hostname := node.Labels[corev1.LabelHostname]
+				if hostname == "" {
+					return nil, domain.NewError(domain.ErrorPrecondition, "copy scheduling", fmt.Sprintf("node %s lacks %s", nodeName, corev1.LabelHostname))
+				}
+				values = append(values, fmt.Sprintf("%s.nodeSelector.kubernetes\\.io/hostname=%s", target.component, hostname))
+			}
+			for _, taint := range node.Spec.Taints {
+				if taint.Effect != corev1.TaintEffectNoSchedule && taint.Effect != corev1.TaintEffectNoExecute {
+					continue
+				}
+				signature := taint.Key + "\x00" + taint.Value + "\x00" + string(taint.Effect)
+				if _, seen := seenTolerations[signature]; seen {
+					continue
+				}
+				seenTolerations[signature] = struct{}{}
+				prefix := fmt.Sprintf("%s.tolerations[%d]", target.component, tolerationIndex)
+				values = append(values, prefix+".key="+taint.Key, prefix+".effect="+string(taint.Effect))
+				if taint.Value == "" {
+					values = append(values, prefix+".operator=Exists")
+				} else {
+					values = append(values, prefix+".operator=Equal", prefix+".value="+taint.Value)
+				}
+				tolerationIndex++
+			}
 		}
 	}
 	return values, nil

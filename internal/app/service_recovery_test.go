@@ -1269,6 +1269,48 @@ func TestHelmSchedulingValuesRejectMissingNodeTopology(t *testing.T) {
 	})
 }
 
+func TestHelmSchedulingValuesLocalLetsPVTopologyPlaceBothSSHDPods(t *testing.T) {
+	fixture := newRecoveryFixture(t)
+	source, err := fixture.client.CoreV1().Nodes().Get(context.Background(), "source-node", metav1.GetOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	source.Spec.Taints = []corev1.Taint{{Key: "source-storage", Value: "true", Effect: corev1.TaintEffectNoSchedule}}
+	if _, err := fixture.client.CoreV1().Nodes().Update(context.Background(), source, metav1.UpdateOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	target, err := fixture.client.CoreV1().Nodes().Get(context.Background(), "target-node", metav1.GetOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	target.Spec.Taints = []corev1.Taint{{Key: "target-storage", Effect: corev1.TaintEffectNoExecute}}
+	if _, err := fixture.client.CoreV1().Nodes().Update(context.Background(), target, metav1.UpdateOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	session := appTestSession()
+	session.Spec.WorkflowOptionsPtr().Strategies = []string{"local"}
+	values, err := fixture.service.helmSchedulingValues(context.Background(), session)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, value := range values {
+		if strings.HasPrefix(value, "sshd.nodeSelector.") {
+			t.Fatalf("local strategy pinned both SSHD Pods to one node: %v", values)
+		}
+	}
+	for _, expected := range []string{
+		"sshd.tolerations[0].key=source-storage",
+		"sshd.tolerations[0].value=true",
+		"sshd.tolerations[1].key=target-storage",
+		"sshd.tolerations[1].operator=Exists",
+		"rsync.nodeSelector.kubernetes\\.io/hostname=target-host",
+	} {
+		if !slices.Contains(values, expected) {
+			t.Fatalf("missing value %q in %v", expected, values)
+		}
+	}
+}
+
 func TestResumeWorkloadFailsWhenActiveResourcesDoNotMatchPlan(t *testing.T) {
 	t.Run("PVC points to source", func(t *testing.T) {
 		fixture := newRecoveryFixture(t)

@@ -193,11 +193,12 @@ type VMClusterSpec struct {
 }
 
 type GrafanaSpec struct {
-	APIVersion       string    `json:"apiVersion" yaml:"apiVersion"`
-	Name             string    `json:"name" yaml:"name"`
-	UID              types.UID `json:"uid,omitempty" yaml:"uid,omitempty"`
-	OriginalPaused   bool      `json:"originalPaused" yaml:"originalPaused"`
-	OriginalReplicas int32     `json:"originalReplicas" yaml:"originalReplicas"`
+	APIVersion                string    `json:"apiVersion" yaml:"apiVersion"`
+	Name                      string    `json:"name" yaml:"name"`
+	UID                       types.UID `json:"uid,omitempty" yaml:"uid,omitempty"`
+	OriginalSuspend           bool      `json:"originalSuspend" yaml:"originalSuspend"`
+	OriginalSuspendConfigured bool      `json:"originalSuspendConfigured" yaml:"originalSuspendConfigured"`
+	OriginalReplicas          int32     `json:"originalReplicas" yaml:"originalReplicas"`
 }
 
 type SessionSpec struct {

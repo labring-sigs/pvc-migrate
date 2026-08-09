@@ -289,11 +289,11 @@ func (m *Manager) verifyPauseControl(ctx context.Context, session *domain.Sessio
 			return domain.NewError(domain.ErrorConflict, "verify paused", fmt.Sprintf("Grafana %s/%s UID changed", object.GetNamespace(), object.GetName()))
 		}
 		if object.GetAnnotations()[pauseSessionAnnotation] != session.ID {
-			return domain.NewError(domain.ErrorConflict, "verify paused", fmt.Sprintf("Grafana %s/%s pause ownership changed", object.GetNamespace(), object.GetName()))
+			return domain.NewError(domain.ErrorConflict, "verify paused", fmt.Sprintf("Grafana %s/%s suspend ownership changed", object.GetNamespace(), object.GetName()))
 		}
-		paused, _, _ := unstructured.NestedBool(object.Object, "spec", "deployment", "spec", "paused")
-		if !paused {
-			return domain.NewError(domain.ErrorPrecondition, "verify paused", "Grafana deployment is not paused")
+		suspended, _, _ := unstructured.NestedBool(object.Object, "spec", "suspend")
+		if !suspended {
+			return domain.NewError(domain.ErrorPrecondition, "verify paused", "Grafana reconciliation is not suspended")
 		}
 	case domain.WorkloadKubeBlocks:
 		kb := workload.KubeBlocks
@@ -708,20 +708,17 @@ func (m *Manager) grafanaWorkload(ctx context.Context, pod *corev1.Pod, deployme
 	if err != nil {
 		return domain.WorkloadSpec{}, domain.WrapError(domain.ErrorKubernetes, "discover Grafana", "read Grafana", err)
 	}
-	paused, _, _ := unstructured.NestedBool(grafana.Object, "spec", "deployment", "spec", "paused")
+	suspended, suspendConfigured, nestedErr := unstructured.NestedBool(grafana.Object, "spec", "suspend")
+	if nestedErr != nil {
+		return domain.WorkloadSpec{}, domain.WrapError(domain.ErrorPrecondition, "discover Grafana", "read reconciliation suspend state", nestedErr)
+	}
 	return domain.WorkloadSpec{
 		Adapter:          domain.WorkloadGrafana,
 		Pod:              podReference(pod),
 		Controller:       objectReference("apps/v1", "Deployment", deployment.Namespace, deployment.Name, deployment.UID, deployment.ResourceVersion),
 		OriginalReplicas: deployment.Spec.Replicas,
 		AffectedPods:     []domain.ObjectReference{podReference(pod)},
-		Grafana: &domain.GrafanaSpec{
-			APIVersion:       grafanaAPIVersion,
-			Name:             owner.Name,
-			UID:              grafana.GetUID(),
-			OriginalPaused:   paused,
-			OriginalReplicas: *deployment.Spec.Replicas,
-		},
+		Grafana:          &domain.GrafanaSpec{APIVersion: grafanaAPIVersion, Name: owner.Name, UID: grafana.GetUID(), OriginalSuspend: suspended, OriginalSuspendConfigured: suspendConfigured, OriginalReplicas: *deployment.Spec.Replicas},
 	}, nil
 }
 
@@ -1440,7 +1437,7 @@ func (m *Manager) pauseGrafana(ctx context.Context, session *domain.Session) err
 	}
 	if err := m.patchDeploymentReplicas(ctx, session.Spec.Workload().Controller, 0, *session.Spec.Workload().OriginalReplicas); err != nil {
 		if restoreErr := m.restoreGrafanaPause(ctx, session); restoreErr != nil {
-			return domain.WrapError(domain.ErrorKubernetes, "pause Grafana", fmt.Sprintf("scale Deployment: %v; restore Grafana pause state", err), restoreErr)
+			return domain.WrapError(domain.ErrorKubernetes, "pause Grafana", fmt.Sprintf("scale Deployment: %v; restore Grafana suspend state", err), restoreErr)
 		}
 		return workloadScaleError("pause Grafana", "scale Deployment", err)
 	}
@@ -1465,6 +1462,9 @@ func (m *Manager) resumeGrafana(ctx context.Context, session *domain.Session) er
 	}
 	if err := m.patchDeploymentReplicas(ctx, session.Spec.Workload().Controller, *session.Spec.Workload().OriginalReplicas, 0); err != nil {
 		return workloadScaleError("resume Grafana", "restore Deployment replicas", err)
+	}
+	if err := m.restoreGrafanaPause(ctx, session); err != nil {
+		return err
 	}
 	var ready *corev1.Pod
 	if err := kube.WaitFor(ctx, m.poll, fmt.Sprintf("Grafana Deployment %s/%s readiness", session.Spec.Workload().Controller.Namespace, session.Spec.Workload().Controller.Name), func(waitCtx context.Context) (bool, error) {
@@ -1493,7 +1493,7 @@ func (m *Manager) resumeGrafana(ctx context.Context, session *domain.Session) er
 	if ready != nil {
 		session.Spec.WorkloadPtr().Pod = podReference(ready)
 	}
-	return m.restoreGrafanaPause(ctx, session)
+	return nil
 }
 
 func (m *Manager) restoreGrafanaPause(ctx context.Context, session *domain.Session) error {
@@ -1517,27 +1517,31 @@ func (m *Manager) restoreGrafanaPause(ctx context.Context, session *domain.Sessi
 		if grafana.UID != "" && object.GetUID() != grafana.UID {
 			return domain.NewError(domain.ErrorConflict, "restore Grafana pause", fmt.Sprintf("Grafana %s/%s UID changed", object.GetNamespace(), object.GetName()))
 		}
-		current, _, nestedErr := unstructured.NestedBool(object.Object, "spec", "deployment", "spec", "paused")
+		current, _, nestedErr := unstructured.NestedBool(object.Object, "spec", "suspend")
 		if nestedErr != nil {
-			return domain.WrapError(domain.ErrorPrecondition, "restore Grafana pause", "read deployment pause state", nestedErr)
+			return domain.WrapError(domain.ErrorPrecondition, "restore Grafana suspend", "read reconciliation suspend state", nestedErr)
 		}
 		annotations := object.GetAnnotations()
 		pauseOwner := annotations[pauseSessionAnnotation]
 		if pauseOwner != "" && pauseOwner != session.ID {
-			return domain.NewError(domain.ErrorConflict, "restore Grafana pause", fmt.Sprintf("Grafana %s/%s pause is owned by session %s", object.GetNamespace(), object.GetName(), pauseOwner))
+			return domain.NewError(domain.ErrorConflict, "restore Grafana suspend", fmt.Sprintf("Grafana %s/%s suspend is owned by session %s", object.GetNamespace(), object.GetName(), pauseOwner))
 		}
 		if pauseOwner == "" {
-			if current != grafana.OriginalPaused {
-				return domain.NewError(domain.ErrorConflict, "restore Grafana pause", fmt.Sprintf("Grafana paused changed from expected %t to %t", grafana.OriginalPaused, current))
+			if current != grafana.OriginalSuspend {
+				return domain.NewError(domain.ErrorConflict, "restore Grafana suspend", fmt.Sprintf("Grafana suspend changed from expected %t to %t", grafana.OriginalSuspend, current))
 			}
 			return nil
 		}
-		if !current && grafana.OriginalPaused {
-			return domain.NewError(domain.ErrorConflict, "restore Grafana pause", "Grafana paused state changed while session was active")
+		if !current && grafana.OriginalSuspend {
+			return domain.NewError(domain.ErrorConflict, "restore Grafana suspend", "Grafana suspend state changed while session was active")
 		}
-		if current != grafana.OriginalPaused {
-			if err := unstructured.SetNestedField(object.Object, grafana.OriginalPaused, "spec", "deployment", "spec", "paused"); err != nil {
-				return err
+		if current != grafana.OriginalSuspend {
+			if grafana.OriginalSuspendConfigured {
+				if err := unstructured.SetNestedField(object.Object, grafana.OriginalSuspend, "spec", "suspend"); err != nil {
+					return err
+				}
+			} else {
+				unstructured.RemoveNestedField(object.Object, "spec", "suspend")
 			}
 		}
 		delete(annotations, pauseSessionAnnotation)
@@ -1546,7 +1550,7 @@ func (m *Manager) restoreGrafanaPause(ctx context.Context, session *domain.Sessi
 			if apierrors.IsConflict(updateErr) {
 				return updateErr
 			}
-			return domain.WrapError(domain.ErrorKubernetes, "restore Grafana pause", "clear deployment pause owner", updateErr)
+			return domain.WrapError(domain.ErrorKubernetes, "restore Grafana suspend", "clear reconciliation suspend owner", updateErr)
 		}
 		return nil
 	})
@@ -1555,7 +1559,7 @@ func (m *Manager) restoreGrafanaPause(ctx context.Context, session *domain.Sessi
 func (m *Manager) setGrafanaPaused(ctx context.Context, session *domain.Session, paused bool) error {
 	grafana := session.Spec.Workload().Grafana
 	if m.dynamic == nil {
-		return domain.NewError(domain.ErrorPrecondition, "Grafana pause", "dynamic client is required for deployment pause control")
+		return domain.NewError(domain.ErrorPrecondition, "Grafana suspend", "dynamic client is required for reconciliation suspend control")
 	}
 	gvr, err := kube.ParseGroupVersionResource(grafana.APIVersion, grafanaResource)
 	if err != nil {
@@ -1565,30 +1569,30 @@ func (m *Manager) setGrafanaPaused(ctx context.Context, session *domain.Session,
 		resource := m.dynamic.Resource(gvr).Namespace(session.Spec.Workload().Pod.Namespace)
 		object, getErr := resource.Get(ctx, grafana.Name, metav1.GetOptions{})
 		if getErr != nil {
-			return domain.WrapError(domain.ErrorKubernetes, "Grafana pause", "read Grafana", getErr)
+			return domain.WrapError(domain.ErrorKubernetes, "Grafana suspend", "read Grafana", getErr)
 		}
 		if grafana.UID != "" && object.GetUID() != grafana.UID {
-			return domain.NewError(domain.ErrorConflict, "Grafana pause", fmt.Sprintf("Grafana %s/%s UID changed", object.GetNamespace(), object.GetName()))
+			return domain.NewError(domain.ErrorConflict, "Grafana suspend", fmt.Sprintf("Grafana %s/%s UID changed", object.GetNamespace(), object.GetName()))
 		}
-		current, _, nestedErr := unstructured.NestedBool(object.Object, "spec", "deployment", "spec", "paused")
+		current, _, nestedErr := unstructured.NestedBool(object.Object, "spec", "suspend")
 		if nestedErr != nil {
-			return domain.WrapError(domain.ErrorPrecondition, "Grafana pause", "read deployment pause state", nestedErr)
+			return domain.WrapError(domain.ErrorPrecondition, "Grafana suspend", "read reconciliation suspend state", nestedErr)
 		}
 		annotations := object.GetAnnotations()
 		pauseOwner := annotations[pauseSessionAnnotation]
 		if pauseOwner != "" && pauseOwner != session.ID {
-			return domain.NewError(domain.ErrorConflict, "Grafana pause", fmt.Sprintf("Grafana %s/%s pause is owned by session %s", object.GetNamespace(), object.GetName(), pauseOwner))
+			return domain.NewError(domain.ErrorConflict, "Grafana suspend", fmt.Sprintf("Grafana %s/%s suspend is owned by session %s", object.GetNamespace(), object.GetName(), pauseOwner))
 		}
-		if pauseOwner == "" && current != grafana.OriginalPaused {
-			return domain.NewError(domain.ErrorConflict, "Grafana pause", fmt.Sprintf("Grafana paused changed from expected %t to %t", grafana.OriginalPaused, current))
+		if pauseOwner == "" && current != grafana.OriginalSuspend {
+			return domain.NewError(domain.ErrorConflict, "Grafana suspend", fmt.Sprintf("Grafana suspend changed from expected %t to %t", grafana.OriginalSuspend, current))
 		}
 		if pauseOwner == session.ID && current == paused {
 			return nil
 		}
 		if pauseOwner == session.ID && paused && !current {
-			return domain.NewError(domain.ErrorConflict, "Grafana pause", "Grafana paused state changed while session was active")
+			return domain.NewError(domain.ErrorConflict, "Grafana suspend", "Grafana suspend state changed while session was active")
 		}
-		if err := unstructured.SetNestedField(object.Object, paused, "spec", "deployment", "spec", "paused"); err != nil {
+		if err := unstructured.SetNestedField(object.Object, paused, "spec", "suspend"); err != nil {
 			return err
 		}
 		if paused {
@@ -1604,7 +1608,7 @@ func (m *Manager) setGrafanaPaused(ctx context.Context, session *domain.Session,
 			if apierrors.IsConflict(updateErr) {
 				return updateErr
 			}
-			return domain.WrapError(domain.ErrorKubernetes, "Grafana pause", "update deployment paused state", updateErr)
+			return domain.WrapError(domain.ErrorKubernetes, "Grafana suspend", "update reconciliation suspend state", updateErr)
 		}
 		return nil
 	})
