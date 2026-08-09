@@ -27,6 +27,7 @@ type Options struct {
 	DestinationNamespace string
 	SessionNamespace     string
 	StagingNamespace     string
+	ToolImage            string
 	SourcePVCs           []string
 	DestinationPVCs      []string
 	PodName              string
@@ -60,6 +61,7 @@ func (p *Planner) Plan(ctx context.Context, options Options) (*domain.MigrationP
 		TemporaryNamespace:   options.TemporaryNamespace,
 		DestinationNamespace: options.DestinationNamespace,
 		SessionNamespace:     options.SessionNamespace,
+		ToolImage:            options.ToolImage,
 		TargetNode:           options.TargetNode,
 		Ready:                true,
 		TemporaryUsage: domain.ResourceEstimate{
@@ -70,6 +72,9 @@ func (p *Planner) Plan(ctx context.Context, options Options) (*domain.MigrationP
 			ByStorageClass:     map[string]string{},
 			PVCsByStorageClass: map[string]int{},
 		},
+	}
+	if _, err := kube.NormalizeToolImage(options.ToolImage); err != nil {
+		plan.AddCheck(failed("tool-image", err.Error()))
 	}
 	if problems := validation.IsDNS1123Label(options.SessionID); len(problems) > 0 {
 		plan.AddCheck(failed("session-id", strings.Join(problems, "; ")))
@@ -414,6 +419,7 @@ func (p *Planner) Plan(ctx context.Context, options Options) (*domain.MigrationP
 		Strategies:       append([]string(nil), options.Strategies...),
 		VerifyChecksum:   options.VerifyChecksum,
 		DeleteExtraneous: options.DeleteExtraneous,
+		ToolImage:        options.ToolImage,
 	})
 	if len(volumeSpecs) != len(pvcNames) {
 		plan.Ready = false
@@ -439,6 +445,9 @@ func applyDefaults(options Options) Options {
 	}
 	if options.StagingNamespace == "" {
 		options.StagingNamespace = options.DestinationNamespace
+	}
+	if options.ToolImage == "" {
+		options.ToolImage = kube.DefaultToolImageRepository + ":main"
 	}
 	if len(options.Strategies) == 0 {
 		options.Strategies = []string{"mount", "clusterip"}

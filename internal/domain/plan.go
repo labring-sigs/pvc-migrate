@@ -54,6 +54,7 @@ type MigrationPlan struct {
 	TemporaryNamespace   string           `json:"temporaryNamespace" yaml:"temporaryNamespace"`
 	DestinationNamespace string           `json:"destinationNamespace" yaml:"destinationNamespace"`
 	SessionNamespace     string           `json:"sessionNamespace" yaml:"sessionNamespace"`
+	ToolImage            string           `json:"toolImage" yaml:"toolImage"`
 	TargetNode           string           `json:"targetNode,omitempty" yaml:"targetNode,omitempty"`
 	Workload             WorkloadSpec     `json:"workload" yaml:"workload"`
 	Volumes              []PlannedVolume  `json:"volumes" yaml:"volumes"`

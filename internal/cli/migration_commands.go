@@ -95,6 +95,7 @@ func (f *migrationFlags) planOptions(state *rootState, operation domain.Operatio
 		PodName:              f.podName,
 		SourceNode:           f.sourceNode,
 		TargetNode:           f.targetNode,
+		ToolImage:            state.global.toolImage,
 		DestinationClass:     f.destinationClass,
 		Strategies:           append([]string(nil), f.strategies...),
 		Online:               f.online,

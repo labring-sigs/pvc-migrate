@@ -115,7 +115,7 @@ func (s *Service) withSessionIDLock(ctx context.Context, namespace, id string, f
 		if err := held.lock.Err(); err != nil {
 			return err
 		}
-		return fn(held.lock.Context())
+		return fn(ctx)
 	}
 	locker, supported := s.store.(kube.SessionLocker)
 	if !supported {
@@ -1149,6 +1149,7 @@ func (s *Service) copyWithRetry(ctx context.Context, session *domain.Session, vo
 		}
 		request := copyengine.Request{
 			SessionID:             session.ID,
+			ToolImage:             options.ToolImage,
 			Source:                volume.SourcePVC,
 			Destination:           volume.DestinationPVC,
 			Mode:                  mode,
@@ -1164,12 +1165,10 @@ func (s *Service) copyWithRetry(ctx context.Context, session *domain.Session, vo
 			Writer:                s.config.Writer,
 			Logger:                s.config.Logger,
 		}
-		last = s.copier.Copy(ctx, request, func(progress copyengine.Progress) {
+		copyErr := s.copier.Copy(ctx, request, func(progress copyengine.Progress) {
 			s.config.Logger.Info("copy progress", "session", session.ID, "pvc", volume.SourcePVC.Name, "mode", progress.Mode, "attempt", progress.Attempt, "state", progress.State, "message", progress.Message)
 		})
-		if last == nil {
-			last = s.waitForCopyHelperRelease(ctx, volume)
-		}
+		last = errors.Join(copyErr, s.waitForCopyHelperRelease(ctx, volume))
 		if last == nil {
 			return nil
 		}

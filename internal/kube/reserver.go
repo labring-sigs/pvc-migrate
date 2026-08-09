@@ -18,16 +18,13 @@ import (
 	"k8s.io/client-go/util/retry"
 )
 
-const defaultHelperImage = "busybox:1.36.1"
-
 type Reserver struct {
-	client      kubernetes.Interface
-	poll        time.Duration
-	helperImage string
+	client kubernetes.Interface
+	poll   time.Duration
 }
 
 func NewReserver(client kubernetes.Interface) *Reserver {
-	return &Reserver{client: client, poll: time.Second, helperImage: defaultHelperImage}
+	return &Reserver{client: client, poll: time.Second}
 }
 
 func (r *Reserver) ReserveVolume(ctx context.Context, session *domain.Session, volume *domain.VolumeSpec, status *domain.VolumeStatus, dryRun bool) error {
@@ -194,6 +191,10 @@ func validateDestinationPVC(pvc *corev1.PersistentVolumeClaim, sessionID string,
 
 func (r *Reserver) provisionOnTarget(ctx context.Context, session *domain.Session, volume *domain.VolumeSpec) error {
 	options := session.Spec.WorkflowOptions()
+	toolImage, err := NormalizeToolImage(options.ToolImage)
+	if err != nil {
+		return domain.WrapError(domain.ErrorValidation, "provision target PVC", "validate tool image", err)
+	}
 	if options.TargetNode == "" {
 		return domain.NewError(domain.ErrorPrecondition, "provision target PVC", "target node is required")
 	}
@@ -222,8 +223,12 @@ func (r *Reserver) provisionOnTarget(ctx context.Context, session *domain.Sessio
 			NodeSelector:                  map[string]string{corev1.LabelHostname: hostname},
 			Tolerations:                   nodeTolerations(node),
 			Containers: []corev1.Container{{
-				Name:         "verify-volume",
-				Image:        r.helperImage,
+				Name:  "verify-volume",
+				Image: toolImage,
+				SecurityContext: &corev1.SecurityContext{
+					RunAsUser:  int64Pointer(0),
+					RunAsGroup: int64Pointer(0),
+				},
 				Command:      []string{"sh", "-c", "test -d /data && sleep 3600"},
 				Resources:    ZeroResourceRequirements(),
 				VolumeMounts: []corev1.VolumeMount{{Name: "data", MountPath: "/data"}},

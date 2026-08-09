@@ -1,6 +1,7 @@
 BINARY := bin/pvc-migrate
 VERSION ?= dev
-LDFLAGS := -s -w -X main.version=$(VERSION)
+TOOL_IMAGE_REPOSITORY ?= ghcr.io/labring-sigs/pvc-migrate
+LDFLAGS := -s -w -X main.version=$(VERSION) -X main.toolImageRepository=$(TOOL_IMAGE_REPOSITORY)
 
 .PHONY: all build test test-race vet lint check e2e clean
 

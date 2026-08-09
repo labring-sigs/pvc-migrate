@@ -5,10 +5,6 @@ import (
 	"k8s.io/apimachinery/pkg/api/resource"
 )
 
-// PVMigrateImageTag pins the helper images used by the embedded pv-migrate
-// chart. The three images are released together and share this tag.
-const PVMigrateImageTag = "v3.6.1"
-
 // ZeroResourceRequirements prevents LimitRange defaults from assigning a
 // compute or requested ephemeral-storage footprint to short-lived migration
 // helpers. A zero ephemeral-storage limit would make every helper immediately

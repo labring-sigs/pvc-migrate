@@ -137,7 +137,7 @@ For a WFFC destination stuck in Pending:
 1. Inspect the reservation consumer Pod and its scheduling events.
 2. Inspect PVC events and `volume.kubernetes.io/selected-node`.
 3. Confirm the StorageClass provisioner is present on the target node.
-4. Confirm helper image pull, taints, quota, and backend capacity.
+4. Confirm tool image pull, taints, quota, and backend capacity.
 5. Correct the cluster condition and run `session resume`.
 
 ## Copy Failures

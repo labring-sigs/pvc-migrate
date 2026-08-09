@@ -11,9 +11,25 @@ import (
 	"k8s.io/apimachinery/pkg/api/resource"
 )
 
-func TestPVMigrateImageTagIsPinned(t *testing.T) {
-	if PVMigrateImageTag != "v3.6.1" {
-		t.Fatalf("PVMigrateImageTag=%q, want v3.6.1", PVMigrateImageTag)
+func TestDefaultToolImageUsesBuildRepositoryAndTag(t *testing.T) {
+	tests := []struct {
+		name       string
+		repository string
+		version    string
+		want       string
+	}{
+		{name: "release", repository: "registry.example/pvc-migrate", version: "v1.2.3", want: "registry.example/pvc-migrate:1.2.3"},
+		{name: "repository trailing slash", repository: "registry.example/team/pvc-migrate/", version: "1.2.3", want: "registry.example/team/pvc-migrate:1.2.3"},
+		{name: "trim inputs", repository: " registry.example/pvc-migrate/ ", version: " v1.2.3 ", want: "registry.example/pvc-migrate:1.2.3"},
+		{name: "development", repository: "", version: "dev", want: DefaultToolImageRepository + ":main"},
+		{name: "empty version", repository: "registry.example/pvc-migrate", version: "", want: "registry.example/pvc-migrate:main"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := DefaultToolImage(test.repository, test.version); got != test.want {
+				t.Fatalf("DefaultToolImage(%q, %q)=%q, want %q", test.repository, test.version, got, test.want)
+			}
+		})
 	}
 }
 

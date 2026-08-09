@@ -16,7 +16,7 @@
 
 - A Kubernetes cluster with filesystem PVC support
 - Kubernetes credentials with the permissions validated by the relevant `plan` command
-- Network and image access for the temporary copy helpers
+- Network access for the temporary tool image on source and target nodes
 - Go 1.26.5 or a compatible newer toolchain when building from source
 
 ## Installation
@@ -37,12 +37,14 @@ kubectl apply -f deploy/rbac.yaml
 
 A locally executed CLI uses the identity from its kubeconfig and requires equivalent permissions.
 
-Build a non-root distroless container image:
+Build the tool image. It runs the CLI by default and also supplies PVC reservation, rsync, SSHD, and rclone roles inside the cluster:
 
 ```bash
 docker build --build-arg VERSION=0.1.0 -t pvc-migrate:0.1.0 .
 docker run --rm pvc-migrate:0.1.0 version
 ```
+
+Use `--tool-image registry.example/pvc-migrate:0.1.0` when cluster nodes pull the image from an internal registry. New migration sessions persist this image reference and reuse it during resume.
 
 ## Quick Start
 

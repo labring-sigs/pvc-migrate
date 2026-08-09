@@ -92,6 +92,7 @@ func (r *rootState) newObjectTransferCommand(restore, forceOnline bool) *cobra.C
 			}
 			request := backup.Request{
 				ID:                    flags.id,
+				ToolImage:             r.global.toolImage,
 				Namespace:             flags.namespace,
 				PVCName:               flags.pvc,
 				Path:                  flags.path,
@@ -180,7 +181,7 @@ func (r *rootState) newBackupPlanCommand(restore, forceOnline bool) *cobra.Comma
 				return err
 			}
 			request := backup.Request{
-				ID: flags.id, Namespace: flags.namespace, PVCName: flags.pvc, Path: flags.path,
+				ID: flags.id, ToolImage: r.global.toolImage, Namespace: flags.namespace, PVCName: flags.pvc, Path: flags.path,
 				Online: online, AllowMounted: flags.allowMounted, DeleteExtraneousFiles: flags.deleteExtraneous,
 				HelmTimeout: r.global.helmTimeout, KubeconfigPath: r.global.kubeconfig, KubeContext: r.global.kubeContext,
 				Store: store, Writer: r.options.ErrOut, Logger: runtime.logger,

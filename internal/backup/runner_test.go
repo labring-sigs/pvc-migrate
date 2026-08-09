@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
@@ -14,6 +15,7 @@ import (
 	"github.com/labring-sigs/pvc-migrate/internal/domain"
 	"github.com/labring-sigs/pvc-migrate/internal/kube"
 	"github.com/labring-sigs/pvc-migrate/internal/objectstore"
+	"github.com/utkuozdemir/pv-migrate/pvmigrate"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -241,20 +243,85 @@ func TestPVMigrateBackupAndRestoreHonorMountedPolicy(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	request := Request{ID: "operation", Namespace: "default", PVCName: "data", Store: store, DeleteExtraneousFiles: true, AllowMounted: true, Online: true}
-	backupRequest := pvmigrateBackupRequest(request, "/tmp/rclone.conf", nil)
-	if backupRequest.ImageTag != kube.PVMigrateImageTag {
-		t.Fatalf("backup helper image tag=%q, want %q", backupRequest.ImageTag, kube.PVMigrateImageTag)
+	request := Request{ID: "operation", ToolImage: "registry.example/pvc-migrate:aio", Namespace: "default", PVCName: "data", Store: store, DeleteExtraneousFiles: true, AllowMounted: true, Online: true}
+	backupRequest, err := pvmigrateBackupRequest(request, "/tmp/rclone.conf", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !containsString(backupRequest.HelmStringValues, "rclone.image.repository=registry.example/pvc-migrate") || !containsString(backupRequest.HelmStringValues, "rclone.image.tag=aio") {
+		t.Fatalf("backup tool image values=%v", backupRequest.HelmStringValues)
+	}
+	for _, expected := range kube.ToolSecurityContextHelmValues() {
+		if !containsString(backupRequest.HelmValues, expected) {
+			t.Fatalf("backup typed Helm values lack %q: %v", expected, backupRequest.HelmValues)
+		}
 	}
 	if !backupRequest.IgnoreMounted {
 		t.Fatal("online backup did not ignore mounted source")
 	}
-	restoreRequest := pvmigrateRestoreRequest(request, "/tmp/rclone.conf")
-	if restoreRequest.ImageTag != kube.PVMigrateImageTag {
-		t.Fatalf("restore helper image tag=%q, want %q", restoreRequest.ImageTag, kube.PVMigrateImageTag)
+	restoreRequest, err := pvmigrateRestoreRequest(request, "/tmp/rclone.conf")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !containsString(restoreRequest.HelmStringValues, "rclone.image.repository=registry.example/pvc-migrate") || !containsString(restoreRequest.HelmStringValues, "rclone.image.tag=aio") {
+		t.Fatalf("restore tool image values=%v", restoreRequest.HelmStringValues)
+	}
+	for _, expected := range kube.ToolSecurityContextHelmValues() {
+		if !containsString(restoreRequest.HelmValues, expected) {
+			t.Fatalf("restore typed Helm values lack %q: %v", expected, restoreRequest.HelmValues)
+		}
 	}
 	if !restoreRequest.IgnoreMounted || !restoreRequest.DeleteExtraneousFiles {
 		t.Fatalf("restore mounted policy=%t delete=%t", restoreRequest.IgnoreMounted, restoreRequest.DeleteExtraneousFiles)
+	}
+}
+
+func TestPVMigrateBackupAndRestoreForwardFullRequestContract(t *testing.T) {
+	store, err := objectstore.NewWithClient(&preflightObjectStore{}, objectstore.Config{
+		Bucket: "bucket", Prefix: "prefix", Name: "recovery-point",
+	}, objectstore.Credentials{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	writer := &bytes.Buffer{}
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	request := Request{
+		ID:                    "operation",
+		ToolImage:             "registry.example/team/pvc-migrate:contract",
+		Namespace:             "source-ns",
+		PVCName:               "source-pvc",
+		Path:                  "subdir",
+		Online:                true,
+		AllowMounted:          true,
+		DeleteExtraneousFiles: true,
+		HelmTimeout:           41 * time.Second,
+		KubeconfigPath:        "/tmp/kubeconfig",
+		KubeContext:           "cluster-context",
+		Store:                 store,
+		Writer:                writer,
+		Logger:                logger,
+	}
+	customValues := []string{"rclone.nodeName=source-node"}
+	backupRequest, err := pvmigrateBackupRequest(request, "/tmp/rclone.conf", customValues)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if backupRequest.ID != request.ID || backupRequest.PVC != (pvmigrate.PVC{KubeconfigPath: request.KubeconfigPath, Context: request.KubeContext, Namespace: request.Namespace, Name: request.PVCName}) || backupRequest.Backend != "s3" || backupRequest.Bucket != "bucket" || backupRequest.Name != "recovery-point" || backupRequest.Prefix != "prefix" || backupRequest.Path != request.Path || backupRequest.RcloneConfigFile != "/tmp/rclone.conf" || backupRequest.Remote != store.RemotePath() {
+		t.Fatalf("backup upstream request=%#v", backupRequest)
+	}
+	if !backupRequest.IgnoreMounted || backupRequest.HelmTimeout != request.HelmTimeout || !backupRequest.StructuredLogs || backupRequest.Writer != writer || backupRequest.Logger != logger || backupRequest.HelmStringValues[len(backupRequest.HelmStringValues)-1] != customValues[0] {
+		t.Fatalf("backup execution fields=%#v helmValues=%v", backupRequest, backupRequest.HelmStringValues)
+	}
+
+	restoreRequest, err := pvmigrateRestoreRequest(request, "/tmp/rclone.conf")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if restoreRequest.ID != request.ID || restoreRequest.PVC != backupRequest.PVC || restoreRequest.Backend != "s3" || restoreRequest.Bucket != backupRequest.Bucket || restoreRequest.Name != backupRequest.Name || restoreRequest.Prefix != backupRequest.Prefix || restoreRequest.Path != request.Path || restoreRequest.RcloneConfigFile != "/tmp/rclone.conf" || restoreRequest.Remote != store.RemotePath() {
+		t.Fatalf("restore upstream request=%#v", restoreRequest)
+	}
+	if !restoreRequest.IgnoreMounted || !restoreRequest.DeleteExtraneousFiles || restoreRequest.HelmTimeout != request.HelmTimeout || !restoreRequest.StructuredLogs || restoreRequest.Writer != writer || restoreRequest.Logger != logger {
+		t.Fatalf("restore execution fields=%#v", restoreRequest)
 	}
 }
 
@@ -265,10 +332,18 @@ func TestPVMigrateBackupAndRestoreForwardLogger(t *testing.T) {
 		t.Fatal(err)
 	}
 	request := Request{ID: "operation", Namespace: "default", PVCName: "data", Store: store, Logger: logger}
-	if got := pvmigrateBackupRequest(request, "/tmp/rclone.conf", nil).Logger; got != logger {
+	backupRequest, err := pvmigrateBackupRequest(request, "/tmp/rclone.conf", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := backupRequest.Logger; got != logger {
 		t.Fatal("backup logger was not forwarded")
 	}
-	if got := pvmigrateRestoreRequest(request, "/tmp/rclone.conf").Logger; got != logger {
+	restoreRequest, err := pvmigrateRestoreRequest(request, "/tmp/rclone.conf")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := restoreRequest.Logger; got != logger {
 		t.Fatal("restore logger was not forwarded")
 	}
 }
@@ -279,12 +354,42 @@ func TestPVMigrateBackupAndRestoreUseZeroHelperResources(t *testing.T) {
 		t.Fatal(err)
 	}
 	request := Request{Namespace: "default", PVCName: "data", Store: store}
-	for _, values := range [][]string{pvmigrateBackupRequest(request, "/tmp/rclone.conf", nil).HelmStringValues, pvmigrateRestoreRequest(request, "/tmp/rclone.conf").HelmStringValues} {
+	backupRequest, err := pvmigrateBackupRequest(request, "/tmp/rclone.conf", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	restoreRequest, err := pvmigrateRestoreRequest(request, "/tmp/rclone.conf")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, values := range [][]string{backupRequest.HelmStringValues, restoreRequest.HelmStringValues} {
 		for _, expected := range kube.ZeroResourceHelmValues() {
 			if !containsString(values, expected) {
 				t.Fatalf("missing helper resource value %q in %v", expected, values)
 			}
 		}
+	}
+}
+
+func TestPVMigrateBackupAndRestorePinDefaultHelperTimeout(t *testing.T) {
+	store, err := objectstore.NewWithClient(&preflightObjectStore{}, objectstore.Config{Bucket: "backups", Name: "daily"}, objectstore.Credentials{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := Request{Namespace: "default", PVCName: "data", Store: store}
+	backupRequest, err := pvmigrateBackupRequest(request, "/tmp/rclone.conf", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if backupRequest.HelmTimeout != 10*time.Minute {
+		t.Fatalf("backup default HelmTimeout=%s, want 10m", backupRequest.HelmTimeout)
+	}
+	restoreRequest, err := pvmigrateRestoreRequest(request, "/tmp/rclone.conf")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if restoreRequest.HelmTimeout != 10*time.Minute {
+		t.Fatalf("restore default HelmTimeout=%s, want 10m", restoreRequest.HelmTimeout)
 	}
 }
 

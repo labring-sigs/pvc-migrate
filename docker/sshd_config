@@ -1,0 +1,7 @@
+Port 22
+PidFile /tmp/sshd.pid
+PasswordAuthentication no
+ChallengeResponseAuthentication no
+PermitRootLogin yes
+ClientAliveInterval 300
+ClientAliveCountMax 3

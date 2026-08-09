@@ -1,4 +1,4 @@
-name: Docker
+name: Tool image
 
 on:
   push:
@@ -56,7 +56,7 @@ jobs:
           } >> "$GITHUB_OUTPUT"
 
   docker-build:
-    name: Docker Build
+    name: Tool image build
     needs: docker-prepare
     permissions:
       contents: read
@@ -74,6 +74,7 @@ jobs:
       push: ${{ github.event_name == 'push' }}
       build-args: |
         VERSION={{meta.version}}
+        TOOL_IMAGE_REPOSITORY=ghcr.io/${{ github.repository }}
       artifact-upload: false
       sign: ${{ github.event_name == 'push' && 'auto' || 'false' }}
       cache: true
@@ -82,6 +83,12 @@ jobs:
       sbom: true
       set-meta-annotations: true
       set-meta-labels: true
+      meta-labels: |
+        org.opencontainers.image.title=pvc-migrate tool image
+        org.opencontainers.image.description=pvc-migrate CLI and in-cluster PVC reservation, rsync, SSHD, and rclone tools
+      meta-annotations: |
+        org.opencontainers.image.title=pvc-migrate tool image
+        org.opencontainers.image.description=pvc-migrate CLI and in-cluster PVC reservation, rsync, SSHD, and rclone tools
       meta-images: ${{ needs.docker-prepare.outputs.meta-images }}
       meta-tags: |
         type=ref,event=branch

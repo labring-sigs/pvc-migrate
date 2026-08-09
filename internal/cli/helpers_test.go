@@ -49,6 +49,7 @@ func TestRootCommandSurfaceAndGlobalDefaults(t *testing.T) {
 		"log-level":         "info",
 		"no-compress":       "false",
 		"yes":               "false",
+		"tool-image":        "ghcr.io/labring-sigs/pvc-migrate:test",
 	} {
 		flag := root.PersistentFlags().Lookup(name)
 		if flag == nil || flag.DefValue != want {

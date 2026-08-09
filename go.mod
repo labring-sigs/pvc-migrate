@@ -8,6 +8,7 @@ require (
 	github.com/aws/aws-sdk-go-v2/credentials v1.19.34
 	github.com/aws/aws-sdk-go-v2/service/s3 v1.107.0
 	github.com/aws/smithy-go v1.27.6
+	github.com/distribution/reference v0.6.0
 	github.com/spf13/cobra v1.10.2
 	github.com/utkuozdemir/pv-migrate v1.8.1-0.20260802124747-22a469151eca
 	helm.sh/helm/v4 v4.2.3
