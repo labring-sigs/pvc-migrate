@@ -234,6 +234,17 @@ func TestToolDockerfileTracksUpstreamAlpineBase(t *testing.T) {
 	}
 }
 
+func TestToolDockerfileDefaultsMissingVersionMetadata(t *testing.T) {
+	content, err := os.ReadFile(filepath.Join(repositoryRoot(t), "Dockerfile"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	dockerfile := string(content)
+	if strings.Count(dockerfile, "${BUILD_VERSION:-dev}") != 2 {
+		t.Fatalf("Dockerfile must normalize an empty VERSION for validation and build, content=%s", dockerfile)
+	}
+}
+
 func alpineBaseVersion(content string) string {
 	for _, line := range strings.Split(content, "\n") {
 		fields := strings.Fields(line)

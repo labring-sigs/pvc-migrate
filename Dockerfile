@@ -16,12 +16,12 @@ RUN --mount=type=cache,target=/go/pkg/mod \
     --mount=type=cache,target=/root/.cache/go-build \
     go mod download
 
-RUN ["sh", "-c", "case \"$(printenv BUILD_VERSION)\" in ''|*[!A-Za-z0-9._+-]*) echo \"VERSION must contain only letters, digits, '.', '_', '+', or '-'\" >&2; exit 1;; esac"]
+RUN ["sh", "-c", "version=\"${BUILD_VERSION:-dev}\"; case \"$version\" in ''|*[!A-Za-z0-9._+-]*) echo \"VERSION must contain only letters, digits, '.', '_', '+', or '-'\" >&2; exit 1;; esac"]
 
 COPY --link . .
 RUN --mount=type=cache,target=/go/pkg/mod \
     --mount=type=cache,target=/root/.cache/go-build \
-    ["sh", "-c", "CGO_ENABLED=0 GOOS=\"${TARGETOS:-linux}\" GOARCH=\"${TARGETARCH:-amd64}\" go build -trimpath -ldflags=\"-s -w -X main.version=$(printenv BUILD_VERSION) -X main.toolImageRepository=${TOOL_IMAGE_REPOSITORY}\" -o /out/pvc-migrate ./cmd/pvc-migrate"]
+    ["sh", "-c", "version=\"${BUILD_VERSION:-dev}\"; CGO_ENABLED=0 GOOS=\"${TARGETOS:-linux}\" GOARCH=\"${TARGETARCH:-amd64}\" go build -trimpath -ldflags=\"-s -w -X main.version=$version -X main.toolImageRepository=${TOOL_IMAGE_REPOSITORY}\" -o /out/pvc-migrate ./cmd/pvc-migrate"]
 
 FROM alpine:${ALPINE_VERSION}
 
