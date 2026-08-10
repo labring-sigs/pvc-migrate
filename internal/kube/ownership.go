@@ -11,12 +11,10 @@ import (
 	"k8s.io/client-go/util/retry"
 )
 
-const SessionAnnotation = "pvc-migrate.io/session"
-
 func markPVSession(labels map[string]string, sessionID, role string) (changed bool) {
 	for _, label := range []struct{ key, value string }{
 		{ManagedByLabel, ManagedByValue},
-		{SessionLabel, sessionID},
+		{SessionKey, sessionID},
 		{ResourceRoleLabel, role},
 	} {
 		if labels[label.key] != label.value {
@@ -36,7 +34,7 @@ func AcquirePVC(ctx context.Context, client kubernetes.Interface, ref domain.Obj
 		if ref.UID != "" && pvc.UID != ref.UID {
 			return domain.NewError(domain.ErrorConflict, "acquire PVC", fmt.Sprintf("PVC %s/%s UID changed", ref.Namespace, ref.Name))
 		}
-		owner := pvc.Annotations[SessionAnnotation]
+		owner := pvc.Annotations[SessionKey]
 		if owner != "" && owner != sessionID {
 			return domain.NewError(domain.ErrorConflict, "acquire PVC", fmt.Sprintf("PVC %s/%s belongs to session %s", ref.Namespace, ref.Name, owner))
 		}
@@ -46,7 +44,7 @@ func AcquirePVC(ctx context.Context, client kubernetes.Interface, ref domain.Obj
 		if pvc.Annotations == nil {
 			pvc.Annotations = map[string]string{}
 		}
-		pvc.Annotations[SessionAnnotation] = sessionID
+		pvc.Annotations[SessionKey] = sessionID
 		_, err = client.CoreV1().PersistentVolumeClaims(ref.Namespace).Update(ctx, pvc, metav1.UpdateOptions{})
 		return err
 	})
@@ -74,10 +72,10 @@ func ReleasePVC(ctx context.Context, client kubernetes.Interface, ref domain.Obj
 		if ref.UID != "" && pvc.UID != ref.UID {
 			return domain.NewError(domain.ErrorConflict, "release PVC", fmt.Sprintf("PVC %s/%s UID changed", ref.Namespace, ref.Name))
 		}
-		if pvc.Annotations[SessionAnnotation] != sessionID {
+		if pvc.Annotations[SessionKey] != sessionID {
 			return nil
 		}
-		delete(pvc.Annotations, SessionAnnotation)
+		delete(pvc.Annotations, SessionKey)
 		_, err = client.CoreV1().PersistentVolumeClaims(ref.Namespace).Update(ctx, pvc, metav1.UpdateOptions{})
 		return err
 	})
@@ -102,7 +100,7 @@ func FinalizePVC(ctx context.Context, client kubernetes.Interface, ref domain.Ob
 		if ref.UID != "" && pvc.UID != ref.UID {
 			return domain.NewError(domain.ErrorConflict, "finalize PVC", fmt.Sprintf("PVC %s/%s UID changed", ref.Namespace, ref.Name))
 		}
-		for _, owner := range []string{pvc.Annotations[SessionAnnotation], pvc.Labels[SessionLabel]} {
+		for _, owner := range []string{pvc.Annotations[SessionKey], pvc.Labels[SessionKey]} {
 			if owner != "" && owner != sessionID {
 				return domain.NewError(domain.ErrorConflict, "finalize PVC", fmt.Sprintf("PVC %s/%s belongs to session %s", ref.Namespace, ref.Name, owner))
 			}
@@ -114,15 +112,15 @@ func FinalizePVC(ctx context.Context, client kubernetes.Interface, ref domain.Ob
 			pvc.Annotations = map[string]string{}
 		}
 		delete(pvc.Labels, ManagedByLabel)
-		delete(pvc.Labels, SessionLabel)
+		delete(pvc.Labels, SessionKey)
 		delete(pvc.Labels, ResourceRoleLabel)
 		for key, value := range original.Labels {
 			pvc.Labels[key] = value
 		}
-		delete(pvc.Annotations, SessionAnnotation)
-		delete(pvc.Annotations, "pvc-migrate.io/rollback-pv")
-		delete(pvc.Annotations, "pvc-migrate.io/source-pv")
-		delete(pvc.Annotations, "pvc-migrate.io/source-pvc-uid")
+		delete(pvc.Annotations, SessionKey)
+		delete(pvc.Annotations, RollbackPVAnnotation)
+		delete(pvc.Annotations, SourcePVAnnotation)
+		delete(pvc.Annotations, SourcePVCUIDAnnotation)
 		for key, value := range original.Annotations {
 			pvc.Annotations[key] = value
 		}

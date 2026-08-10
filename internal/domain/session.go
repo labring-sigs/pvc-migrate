@@ -148,6 +148,15 @@ type SessionWorkflowOptions struct {
 	DeleteExtraneous bool     `json:"deleteExtraneous" yaml:"deleteExtraneous"`
 }
 
+const (
+	StrategyAuto         = AutoValue
+	StrategyMount        = "mount"
+	StrategyClusterIP    = "clusterip"
+	StrategyLoadBalancer = "loadbalancer"
+	StrategyNodePort     = "nodeport"
+	StrategyLocal        = "local"
+)
+
 type MigrateSessionSpec struct {
 	SessionWorkflowOptions `json:",inline" yaml:",inline"`
 	Workload               WorkloadSpec `json:"workload" yaml:"workload"`
@@ -172,15 +181,17 @@ type RenameSessionSpec struct{}
 type MoveSessionSpec struct{}
 
 type KubeBlocksSpec struct {
-	Cluster             string          `json:"cluster" yaml:"cluster"`
-	Component           string          `json:"component" yaml:"component"`
-	Instance            string          `json:"instance" yaml:"instance"`
-	Role                string          `json:"role,omitempty" yaml:"role,omitempty"`
-	SwitchoverCandidate string          `json:"switchoverCandidate,omitempty" yaml:"switchoverCandidate,omitempty"`
-	OpsAPIVersion       string          `json:"opsAPIVersion" yaml:"opsAPIVersion"`
-	ClusterAPIVersion   string          `json:"clusterAPIVersion,omitempty" yaml:"clusterAPIVersion,omitempty"`
-	ClusterUID          types.UID       `json:"clusterUID,omitempty" yaml:"clusterUID,omitempty"`
-	OriginalStops       map[string]bool `json:"originalStops,omitempty" yaml:"originalStops,omitempty"`
+	Cluster                  string          `json:"cluster" yaml:"cluster"`
+	Component                string          `json:"component" yaml:"component"`
+	Instance                 string          `json:"instance" yaml:"instance"`
+	Role                     string          `json:"role,omitempty" yaml:"role,omitempty"`
+	SwitchoverCandidate      string          `json:"switchoverCandidate,omitempty" yaml:"switchoverCandidate,omitempty"`
+	OpsAPIVersion            string          `json:"opsAPIVersion" yaml:"opsAPIVersion"`
+	ClusterAPIVersion        string          `json:"clusterAPIVersion,omitempty" yaml:"clusterAPIVersion,omitempty"`
+	ClusterUID               types.UID       `json:"clusterUID,omitempty" yaml:"clusterUID,omitempty"`
+	OriginalStops            map[string]bool `json:"originalStops,omitempty" yaml:"originalStops,omitempty"`
+	OriginalPaused           bool            `json:"originalPaused,omitempty" yaml:"originalPaused,omitempty"`
+	OriginalPausedConfigured bool            `json:"originalPausedConfigured,omitempty" yaml:"originalPausedConfigured,omitempty"`
 }
 
 type VMClusterSpec struct {

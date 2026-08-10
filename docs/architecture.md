@@ -94,7 +94,7 @@ For ordinal `k` and original replicas `N`, pause changes replicas to `k`. Pods `
 
 ### KubeBlocks
 
-Discovery supports served `apps.kubeblocks.io/v1alpha1` and `operations.kubeblocks.io/v1alpha1` OpsRequest resources. Leader, primary, and master roles require a candidate or explicit downtime acknowledgement. The adapter can issue a switchover request, then sets and restores every Cluster component through `componentSpecs[].stop` so instance PVCs remain available for final sync. Component-wide downtime is part of the migration plan.
+Discovery supports served `apps.kubeblocks.io/v1alpha1` and `operations.kubeblocks.io/v1alpha1` OpsRequest resources. Leader, primary, and master roles require a candidate or explicit downtime acknowledgement. InstanceSet-backed Pods use the InstanceSet's served `spec.paused` field to suspend reconciliation, delete only the selected Pod, and restore the original pause representation after activation. Legacy StatefulSet-backed Pods set and restore `componentSpecs[].stop` for the selected Cluster component. The `kubeblocks.io/reconcile` annotation is a reconcile trigger, not a pause control.
 
 ## Namespace And RBAC Model
 

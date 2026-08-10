@@ -214,7 +214,17 @@ func TestKubeBlocksUsesDiscoveredCurrentOpsAPI(t *testing.T) {
 		},
 		"spec": map[string]any{"componentSpecs": []any{map[string]any{"name": "postgresql", "stop": false}}},
 	}}
-	dynamicClient := dynamicfake.NewSimpleDynamicClient(runtime.NewScheme(), cluster)
+	instanceSet := &unstructured.Unstructured{Object: map[string]any{
+		"apiVersion": "workloads.kubeblocks.io/v1alpha1",
+		"kind":       "InstanceSet",
+		"metadata": map[string]any{
+			"name":      "cluster-postgresql",
+			"namespace": "db",
+			"uid":       "is-uid",
+		},
+		"spec": map[string]any{"paused": false},
+	}}
+	dynamicClient := dynamicfake.NewSimpleDynamicClient(runtime.NewScheme(), cluster, instanceSet)
 	var switchoverCandidate string
 	var operationTypes []string
 	dynamicClient.PrependReactor("create", "opsrequests", func(action clienttesting.Action) (bool, runtime.Object, error) {
@@ -235,15 +245,18 @@ func TestKubeBlocksUsesDiscoveredCurrentOpsAPI(t *testing.T) {
 		_ = unstructured.SetNestedField(object.Object, "Succeed", "status", "phase")
 		return false, nil, nil
 	})
+	clusterUpdates := 0
 	dynamicClient.PrependReactor("update", "clusters", func(action clienttesting.Action) (bool, runtime.Object, error) {
+		clusterUpdates++
+		return false, nil, nil
+	})
+	dynamicClient.PrependReactor("update", "instancesets", func(action clienttesting.Action) (bool, runtime.Object, error) {
 		object := action.(clienttesting.UpdateAction).GetObject().(*unstructured.Unstructured)
-		components, _, _ := unstructured.NestedSlice(object.Object, "spec", "componentSpecs")
-		stopped, _, _ := unstructured.NestedBool(components[0].(map[string]any), "stop")
-		if stopped {
-			_ = typed.CoreV1().Pods("db").Delete(ctx, selected.Name, metav1.DeleteOptions{})
-		} else {
+		paused, _, _ := unstructured.NestedBool(object.Object, "spec", "paused")
+		if !paused {
 			restored := readyPod("db", selected.Name, "node-b")
 			restored.Labels = selected.Labels
+			restored.OwnerReferences = selected.OwnerReferences
 			_, _ = typed.CoreV1().Pods("db").Create(ctx, restored, metav1.CreateOptions{})
 		}
 		return false, nil, nil
@@ -273,6 +286,12 @@ func TestKubeBlocksUsesDiscoveredCurrentOpsAPI(t *testing.T) {
 	session.Status.Phase = domain.PhasePausing
 	if err := manager.Pause(ctx, session); err != nil {
 		t.Fatal(err)
+	}
+	if _, err := typed.CoreV1().Pods("db").Get(ctx, candidate.Name, metav1.GetOptions{}); err != nil {
+		t.Fatalf("candidate Pod did not remain available: %v", err)
+	}
+	if clusterUpdates != 0 {
+		t.Fatalf("InstanceSet migration updated Cluster %d times", clusterUpdates)
 	}
 	if switchoverCandidate != candidate.Name {
 		t.Fatalf("switchover instanceName=%q want=%q", switchoverCandidate, candidate.Name)

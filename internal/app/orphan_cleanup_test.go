@@ -22,18 +22,18 @@ func orphanFixture() (*fake.Clientset, OrphanCleanupOptions) {
 	const sessionID = "orphan-session"
 	pvc := &corev1.PersistentVolumeClaim{ObjectMeta: metav1.ObjectMeta{
 		Namespace: "app", Name: "data", UID: types.UID("pvc-uid"), ResourceVersion: "1",
-		Labels:      map[string]string{kube.ManagedByLabel: kube.ManagedByValue, kube.SessionLabel: sessionID, kube.ResourceRoleLabel: "active"},
-		Annotations: map[string]string{kube.SessionAnnotation: sessionID, "pvc-migrate.io/rollback-pv": "pv-rollback", "pvc-migrate.io/source-pv": "pv-source"},
+		Labels:      map[string]string{kube.ManagedByLabel: kube.ManagedByValue, kube.SessionKey: sessionID, kube.ResourceRoleLabel: "active"},
+		Annotations: map[string]string{kube.SessionKey: sessionID, kube.RollbackPVAnnotation: "pv-rollback", kube.SourcePVAnnotation: "pv-source"},
 	}, Spec: corev1.PersistentVolumeClaimSpec{VolumeName: "pv-active"}, Status: corev1.PersistentVolumeClaimStatus{Phase: corev1.ClaimBound}}
 	active := &corev1.PersistentVolume{ObjectMeta: metav1.ObjectMeta{
 		Name: "pv-active", UID: types.UID("active-uid"), ResourceVersion: "2",
-		Labels:      map[string]string{kube.ManagedByLabel: kube.ManagedByValue, kube.SessionLabel: sessionID, kube.ResourceRoleLabel: "active"},
-		Annotations: map[string]string{kube.OriginalPolicyAnnotation: string(corev1.PersistentVolumeReclaimDelete), "pvc-migrate.io/paired-pv": "pv-rollback"},
+		Labels:      map[string]string{kube.ManagedByLabel: kube.ManagedByValue, kube.SessionKey: sessionID, kube.ResourceRoleLabel: "active"},
+		Annotations: map[string]string{kube.OriginalPolicyAnnotation: string(corev1.PersistentVolumeReclaimDelete), kube.PairedPVAnnotation: "pv-rollback"},
 	}, Spec: corev1.PersistentVolumeSpec{PersistentVolumeReclaimPolicy: corev1.PersistentVolumeReclaimRetain, ClaimRef: &corev1.ObjectReference{Namespace: "app", Name: "data", UID: types.UID("pvc-uid")}}}
 	rollback := &corev1.PersistentVolume{ObjectMeta: metav1.ObjectMeta{
 		Name: "pv-rollback", UID: types.UID("rollback-uid"), ResourceVersion: "3",
-		Labels:      map[string]string{kube.ManagedByLabel: kube.ManagedByValue, kube.SessionLabel: sessionID, kube.ResourceRoleLabel: "rollback"},
-		Annotations: map[string]string{"pvc-migrate.io/paired-pv": "pv-active"},
+		Labels:      map[string]string{kube.ManagedByLabel: kube.ManagedByValue, kube.SessionKey: sessionID, kube.ResourceRoleLabel: "rollback"},
+		Annotations: map[string]string{kube.PairedPVAnnotation: "pv-active"},
 	}, Spec: corev1.PersistentVolumeSpec{PersistentVolumeReclaimPolicy: corev1.PersistentVolumeReclaimRetain}, Status: corev1.PersistentVolumeStatus{Phase: corev1.VolumeReleased}}
 	return fake.NewClientset(pvc, active, rollback), OrphanCleanupOptions{SessionID: sessionID, SessionNamespace: "system", SourceNamespace: "app", SourcePVC: "data"}
 }
@@ -70,14 +70,14 @@ func TestCleanupOrphanDeletesOnlyReleasedRollbackAndFinalizesMetadata(t *testing
 	if err != nil {
 		t.Fatal(err)
 	}
-	if pvc.Annotations[kube.SessionAnnotation] != "" || pvc.Labels[kube.SessionLabel] != "" {
+	if pvc.Annotations[kube.SessionKey] != "" || pvc.Labels[kube.SessionKey] != "" {
 		t.Fatalf("PVC ownership remains: labels=%v annotations=%v", pvc.Labels, pvc.Annotations)
 	}
 	active, err := client.CoreV1().PersistentVolumes().Get(context.Background(), "pv-active", metav1.GetOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if active.Spec.PersistentVolumeReclaimPolicy != corev1.PersistentVolumeReclaimDelete || active.Labels[kube.SessionLabel] != "" || active.Annotations[kube.OriginalPolicyAnnotation] != "" {
+	if active.Spec.PersistentVolumeReclaimPolicy != corev1.PersistentVolumeReclaimDelete || active.Labels[kube.SessionKey] != "" || active.Annotations[kube.OriginalPolicyAnnotation] != "" {
 		t.Fatalf("active PV remains managed: %#v", active)
 	}
 }
@@ -85,7 +85,7 @@ func TestCleanupOrphanDeletesOnlyReleasedRollbackAndFinalizesMetadata(t *testing
 func TestCleanupOrphanAcceptsAnnotationOnlyPVCOwnership(t *testing.T) {
 	client, options := orphanFixture()
 	pvc, _ := client.CoreV1().PersistentVolumeClaims("app").Get(context.Background(), "data", metav1.GetOptions{})
-	delete(pvc.Labels, kube.SessionLabel)
+	delete(pvc.Labels, kube.SessionKey)
 	if _, err := client.CoreV1().PersistentVolumeClaims("app").Update(context.Background(), pvc, metav1.UpdateOptions{}); err != nil {
 		t.Fatal(err)
 	}
@@ -109,12 +109,12 @@ func TestCleanupOrphanResumesAfterRollbackAndPVCCheckpoints(t *testing.T) {
 	}
 	pvc, _ := client.CoreV1().PersistentVolumeClaims("app").Get(context.Background(), "data", metav1.GetOptions{})
 	delete(pvc.Labels, kube.ManagedByLabel)
-	delete(pvc.Labels, kube.SessionLabel)
+	delete(pvc.Labels, kube.SessionKey)
 	delete(pvc.Labels, kube.ResourceRoleLabel)
-	delete(pvc.Annotations, kube.SessionAnnotation)
-	delete(pvc.Annotations, "pvc-migrate.io/rollback-pv")
-	delete(pvc.Annotations, "pvc-migrate.io/source-pv")
-	delete(pvc.Annotations, "pvc-migrate.io/source-pvc-uid")
+	delete(pvc.Annotations, kube.SessionKey)
+	delete(pvc.Annotations, kube.RollbackPVAnnotation)
+	delete(pvc.Annotations, kube.SourcePVAnnotation)
+	delete(pvc.Annotations, kube.SourcePVCUIDAnnotation)
 	if _, err := client.CoreV1().PersistentVolumeClaims("app").Update(context.Background(), pvc, metav1.UpdateOptions{}); err != nil {
 		t.Fatal(err)
 	}

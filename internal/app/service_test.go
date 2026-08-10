@@ -139,7 +139,7 @@ func (f *fakeSwitcher) ActivateVolume(ctx context.Context, session *domain.Sessi
 	if pvc.Annotations == nil {
 		pvc.Annotations = map[string]string{}
 	}
-	pvc.Annotations[kube.SessionAnnotation] = session.ID
+	pvc.Annotations[kube.SessionKey] = session.ID
 	pvc, err = f.client.CoreV1().PersistentVolumeClaims(pvc.Namespace).Update(ctx, pvc, metav1.UpdateOptions{})
 	if err != nil {
 		return err
@@ -160,7 +160,7 @@ func (f *fakeSwitcher) RollbackVolume(ctx context.Context, session *domain.Sessi
 	}
 	pvc.Spec.VolumeName = volume.SourcePV.Name
 	pvc.Status.Phase = corev1.ClaimBound
-	pvc.Annotations[kube.SessionAnnotation] = session.ID
+	pvc.Annotations[kube.SessionKey] = session.ID
 	if _, err := f.client.CoreV1().PersistentVolumeClaims(pvc.Namespace).Update(ctx, pvc, metav1.UpdateOptions{}); err != nil {
 		return err
 	}

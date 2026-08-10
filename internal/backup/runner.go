@@ -31,6 +31,14 @@ const (
 	restoreLockExpiryAnnotation = "pvc-migrate.io/backup-restore-lock-expires-at"
 )
 
+type Mode string
+
+const (
+	ModeOffline Mode = "offline"
+	ModeOnline  Mode = "online"
+	ModeRestore Mode = "restore"
+)
+
 type Request struct {
 	ID                    string
 	ToolImage             string
@@ -53,7 +61,7 @@ type Plan struct {
 	ToolImage        string   `json:"toolImage" yaml:"toolImage"`
 	Namespace        string   `json:"namespace" yaml:"namespace"`
 	PVC              string   `json:"pvc" yaml:"pvc"`
-	Mode             string   `json:"mode" yaml:"mode"`
+	Mode             Mode     `json:"mode" yaml:"mode"`
 	Consistency      string   `json:"consistency" yaml:"consistency"`
 	Destination      string   `json:"destination" yaml:"destination"`
 	ManifestPresent  bool     `json:"manifestPresent" yaml:"manifestPresent"`
@@ -76,7 +84,7 @@ type Result struct {
 	PVC         string `json:"pvc" yaml:"pvc"`
 	Name        string `json:"name" yaml:"name"`
 	Destination string `json:"destination" yaml:"destination"`
-	Mode        string `json:"mode" yaml:"mode"`
+	Mode        Mode   `json:"mode" yaml:"mode"`
 	Status      string `json:"status" yaml:"status"`
 }
 
@@ -116,7 +124,7 @@ func Preflight(ctx context.Context, client kubernetes.Interface, req Request, re
 		ToolImage:        toolImage,
 		Namespace:        req.Namespace,
 		PVC:              req.PVCName,
-		Mode:             "offline",
+		Mode:             ModeOffline,
 		Consistency:      backupConsistency(req.Online),
 		Destination:      req.Store.Destination(),
 		ManifestPresent:  manifest != nil,
@@ -129,7 +137,7 @@ func Preflight(ctx context.Context, client kubernetes.Interface, req Request, re
 		Compression:      "none",
 	}
 	if req.Online {
-		plan.Mode = "online"
+		plan.Mode = ModeOnline
 		plan.Consistency = "best-effort crash-consistent file copy"
 		if node, nodeErr := onlineRWOConsumerNode(info); nodeErr != nil {
 			return nil, nodeErr
@@ -139,7 +147,7 @@ func Preflight(ctx context.Context, client kubernetes.Interface, req Request, re
 	}
 	if restore {
 		plan.Operation = "restore"
-		plan.Mode = "restore"
+		plan.Mode = ModeRestore
 		plan.Consistency = "destination PVC write; application must be quiesced"
 		if manifest == nil {
 			return nil, domain.NewError(domain.ErrorPrecondition, "restore preflight", "S3 completion manifest is missing; the backup is not a published recovery point")

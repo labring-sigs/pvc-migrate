@@ -54,7 +54,7 @@ func New(client kubernetes.Interface, controllers *controller.Manager) *Planner 
 }
 
 func (p *Planner) Plan(ctx context.Context, options Options) (*domain.MigrationPlan, error) {
-	autoStrategyRequested := len(options.Strategies) == 0 || (len(options.Strategies) == 1 && containsStrategy(options.Strategies, "auto"))
+	autoStrategyRequested := len(options.Strategies) == 0 || (len(options.Strategies) == 1 && containsStrategy(options.Strategies, domain.StrategyAuto))
 	autoTargetNodeRequested := isAutoNode(options.TargetNode)
 	options = applyDefaults(options)
 	if autoTargetNodeRequested {
@@ -62,7 +62,7 @@ func (p *Planner) Plan(ctx context.Context, options Options) (*domain.MigrationP
 	}
 	plan := &domain.MigrationPlan{
 		APIVersion:           domain.SessionAPIVersion,
-		Kind:                 "MigrationPlan",
+		Kind:                 domain.MigrationPlanKind,
 		SessionID:            options.SessionID,
 		SourceNamespace:      options.SourceNamespace,
 		TemporaryNamespace:   options.TemporaryNamespace,
@@ -144,7 +144,11 @@ func (p *Planner) Plan(ctx context.Context, options Options) (*domain.MigrationP
 					plan.AddCheck(warned("database-role", fmt.Sprintf("selected KubeBlocks instance role=%s; switchover target=%s", workload.KubeBlocks.Role, workload.KubeBlocks.SwitchoverCandidate)))
 				}
 				if workload.KubeBlocks != nil {
-					plan.AddCheck(warned("database-pause-scope", "KubeBlocks migration stops every Cluster component through componentSpecs[].stop; all components share the downtime window and source PVCs remain retained"))
+					message := "KubeBlocks migration stops the selected Cluster component through componentSpecs[].stop; that component shares the downtime window and source PVCs remain retained"
+					if workload.Controller.Kind == domain.KindInstanceSet {
+						message = "KubeBlocks migration pauses InstanceSet reconciliation and stops only the selected Pod; sibling instances remain running while InstanceSet self-healing is suspended"
+					}
+					plan.AddCheck(warned("database-pause-scope", message))
 				}
 			}
 		}
@@ -278,7 +282,7 @@ func (p *Planner) Plan(ctx context.Context, options Options) (*domain.MigrationP
 			plan.AddCheck(failed("destination-pvc", fmt.Sprintf("generated PVC name %q is invalid: %s", destinationName, strings.Join(problems, "; "))))
 			continue
 		}
-		destinationRef := domain.ObjectReference{APIVersion: "v1", Kind: "PersistentVolumeClaim", Namespace: options.StagingNamespace, Name: destinationName}
+		destinationRef := domain.ObjectReference{APIVersion: domain.CoreAPIVersion, Kind: domain.KindPersistentVolumeClaim, Namespace: options.StagingNamespace, Name: destinationName}
 		accessModes := append([]corev1.PersistentVolumeAccessMode(nil), pvc.Spec.AccessModes...)
 		plannedVolumes = append(plannedVolumes, domain.PlannedVolume{
 			SourcePVC:      pvcReference(pvc),
@@ -331,7 +335,7 @@ func (p *Planner) Plan(ctx context.Context, options Options) (*domain.MigrationP
 		}
 		if workload.Adapter == domain.WorkloadStandalone {
 			for _, owner := range pvc.OwnerReferences {
-				if owner.Kind == "Pod" {
+				if owner.Kind == domain.KindPod {
 					plan.AddCheck(failed("pvc-ownership", fmt.Sprintf("standalone Pod migration cannot preserve Pod-owned PVC %s/%s", pvc.Namespace, pvc.Name)))
 				}
 			}
@@ -501,14 +505,14 @@ func applyDefaults(options Options) Options {
 	if options.CapacityAwareness == "" {
 		options.CapacityAwareness = domain.CapacityAwarenessAuto
 	}
-	if len(options.Strategies) == 0 || (len(options.Strategies) == 1 && containsStrategy(options.Strategies, "auto")) {
+	if len(options.Strategies) == 0 || (len(options.Strategies) == 1 && containsStrategy(options.Strategies, domain.StrategyAuto)) {
 		options.Strategies = autoStrategies(options.SourceNamespace, options.StagingNamespace)
 	}
 	return options
 }
 
 func isAutoNode(value string) bool {
-	return value == "" || strings.EqualFold(value, "auto")
+	return value == "" || strings.EqualFold(value, domain.AutoValue)
 }
 
 func (p *Planner) checkPodTargetScheduling(plan *domain.MigrationPlan, sourcePod *corev1.Pod, workload domain.WorkloadSpec, node *corev1.Node) {
@@ -714,9 +718,9 @@ func containsStrategy(strategies []string, wanted string) bool {
 
 func autoStrategies(sourceNamespace, destinationNamespace string) []string {
 	if sourceNamespace == destinationNamespace {
-		return []string{"mount", "clusterip"}
+		return []string{domain.StrategyMount, domain.StrategyClusterIP}
 	}
-	return []string{"clusterip", "local"}
+	return []string{domain.StrategyClusterIP, domain.StrategyLocal}
 }
 
 // filterStrategies removes constraints that are deterministically known from
@@ -725,7 +729,7 @@ func autoStrategies(sourceNamespace, destinationNamespace string) []string {
 func filterStrategies(plan *domain.MigrationPlan, options Options, mountTopologyConflict string) []string {
 	filtered := make([]string, 0, len(options.Strategies))
 	for _, strategy := range options.Strategies {
-		if strategy == "mount" {
+		if strategy == domain.StrategyMount {
 			switch {
 			case options.SourceNamespace != options.StagingNamespace:
 				plan.AddCheck(warned("strategy", "mount skipped: source and destination PVCs are in different namespaces; use clusterip or local"))
@@ -742,7 +746,7 @@ func filterStrategies(plan *domain.MigrationPlan, options Options, mountTopology
 
 func supportedStrategy(strategy string) bool {
 	switch strategy {
-	case "mount", "clusterip", "loadbalancer", "nodeport", "local":
+	case domain.StrategyMount, domain.StrategyClusterIP, domain.StrategyLoadBalancer, domain.StrategyNodePort, domain.StrategyLocal:
 		return true
 	default:
 		return false
@@ -784,11 +788,11 @@ func failed(name, message string) domain.Check {
 }
 
 func pvcReference(pvc *corev1.PersistentVolumeClaim) domain.ObjectReference {
-	return domain.ObjectReference{APIVersion: "v1", Kind: "PersistentVolumeClaim", Namespace: pvc.Namespace, Name: pvc.Name, UID: pvc.UID, ResourceVersion: pvc.ResourceVersion}
+	return domain.ObjectReference{APIVersion: domain.CoreAPIVersion, Kind: domain.KindPersistentVolumeClaim, Namespace: pvc.Namespace, Name: pvc.Name, UID: pvc.UID, ResourceVersion: pvc.ResourceVersion}
 }
 
 func pvReference(pv *corev1.PersistentVolume) domain.ObjectReference {
-	return domain.ObjectReference{APIVersion: "v1", Kind: "PersistentVolume", Name: pv.Name, UID: pv.UID, ResourceVersion: pv.ResourceVersion}
+	return domain.ObjectReference{APIVersion: domain.CoreAPIVersion, Kind: domain.KindPersistentVolume, Name: pv.Name, UID: pv.UID, ResourceVersion: pv.ResourceVersion}
 }
 
 func nodeReady(node *corev1.Node) bool {
@@ -962,7 +966,7 @@ func filteredPVCAnnotations(input map[string]string) map[string]string {
 			"volume.kubernetes.io/storage-provisioner",
 			"volume.beta.kubernetes.io/storage-provisioner",
 			"kubectl.kubernetes.io/last-applied-configuration",
-			kube.SessionAnnotation:
+			kube.SessionKey:
 			continue
 		default:
 			result[key] = value

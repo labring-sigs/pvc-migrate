@@ -158,7 +158,7 @@ func (p *Planner) PlanRename(ctx context.Context, options RenameOptions) (*domai
 	if pvc.Spec.VolumeMode != nil {
 		mode = *pvc.Spec.VolumeMode
 	}
-	destinationRef := domain.ObjectReference{APIVersion: "v1", Kind: "PersistentVolumeClaim", Namespace: options.DestinationNamespace, Name: options.DestinationPVC}
+	destinationRef := domain.ObjectReference{APIVersion: domain.CoreAPIVersion, Kind: domain.KindPersistentVolumeClaim, Namespace: options.DestinationNamespace, Name: options.DestinationPVC}
 	volume := domain.VolumeSpec{
 		SourcePVC:           pvcReference(pvc),
 		SourcePV:            pvReference(pv),

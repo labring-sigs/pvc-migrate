@@ -99,7 +99,7 @@ func TestSessionLeaseRecoversExpiredHolder(t *testing.T) {
 			Name:      SessionLockName("session-expired"),
 			Labels: map[string]string{
 				ManagedByLabel: ManagedByValue,
-				SessionLabel:   "session-expired",
+				SessionKey:     "session-expired",
 			},
 		},
 		Spec: coordinationv1.LeaseSpec{

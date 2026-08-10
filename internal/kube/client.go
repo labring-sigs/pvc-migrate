@@ -70,7 +70,7 @@ func EnsureNamespace(ctx context.Context, client kubernetes.Interface, name, ses
 		},
 	}}
 	if sessionID != "" {
-		namespace.Labels[SessionLabel] = sessionID
+		namespace.Labels[SessionKey] = sessionID
 	}
 	options := metav1.CreateOptions{}
 	if dryRun {

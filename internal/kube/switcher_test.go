@@ -41,14 +41,14 @@ func switcherFixture(t *testing.T) (*Switcher, *domain.Session, *domain.VolumeSp
 			Name:            "data-migrated",
 			UID:             tempPVCUID,
 			ResourceVersion: "11",
-			Labels:          map[string]string{SessionLabel: "session"},
-			Annotations:     map[string]string{SessionAnnotation: "session"},
+			Labels:          map[string]string{SessionKey: "session"},
+			Annotations:     map[string]string{SessionKey: "session"},
 		},
 		Spec:   corev1.PersistentVolumeClaimSpec{StorageClassName: &storageClass, VolumeMode: &mode, VolumeName: "pv-destination"},
 		Status: corev1.PersistentVolumeClaimStatus{Phase: corev1.ClaimBound},
 	}
 	sourcePV := &corev1.PersistentVolume{
-		ObjectMeta: metav1.ObjectMeta{Name: "pv-source", UID: sourcePVUID, ResourceVersion: "20", Labels: map[string]string{SessionLabel: "session"}},
+		ObjectMeta: metav1.ObjectMeta{Name: "pv-source", UID: sourcePVUID, ResourceVersion: "20", Labels: map[string]string{SessionKey: "session"}},
 		Spec: corev1.PersistentVolumeSpec{
 			Capacity:                      corev1.ResourceList{corev1.ResourceStorage: resource.MustParse("1Gi")},
 			PersistentVolumeReclaimPolicy: corev1.PersistentVolumeReclaimRetain,
@@ -62,7 +62,7 @@ func switcherFixture(t *testing.T) (*Switcher, *domain.Session, *domain.VolumeSp
 			Name:            "pv-destination",
 			UID:             destinationPVUID,
 			ResourceVersion: "21",
-			Labels:          map[string]string{SessionLabel: "session"},
+			Labels:          map[string]string{SessionKey: "session"},
 			Annotations:     map[string]string{OriginalPolicyAnnotation: string(corev1.PersistentVolumeReclaimDelete)},
 		},
 		Spec: corev1.PersistentVolumeSpec{

@@ -27,10 +27,10 @@ func NewSwitcher(client kubernetes.Interface) *Switcher {
 }
 
 func (s *Switcher) VerifyVolumeOffline(ctx context.Context, volume *domain.VolumeSpec) error {
-	if err := s.verifyPVCAndPVIdentity(ctx, volume.SourcePVC, volume.SourcePV, "source"); err != nil {
+	if err := s.verifyPVCAndPVIdentity(ctx, volume.SourcePVC, volume.SourcePV, ResourceRoleSource); err != nil {
 		return err
 	}
-	if err := s.verifyPVCAndPVIdentity(ctx, volume.DestinationPVC, volume.DestinationPV, "destination"); err != nil {
+	if err := s.verifyPVCAndPVIdentity(ctx, volume.DestinationPVC, volume.DestinationPV, ResourceRoleDestination); err != nil {
 		return err
 	}
 	if err := s.ensureNoConsumers(ctx, volume.SourcePVC.Namespace, volume.SourcePVC.Name); err != nil {
@@ -69,10 +69,10 @@ func (s *Switcher) ActivateVolume(ctx context.Context, session *domain.Session, 
 	} else if active != nil {
 		return s.completeActivation(ctx, session, volume, status, active, progress)
 	}
-	if err := s.ensureRetain(ctx, volume.SourcePV, session.ID, "source"); err != nil {
+	if err := s.ensureRetain(ctx, volume.SourcePV, session.ID, ResourceRoleSource); err != nil {
 		return err
 	}
-	if err := s.ensureRetain(ctx, volume.DestinationPV, session.ID, "destination"); err != nil {
+	if err := s.ensureRetain(ctx, volume.DestinationPV, session.ID, ResourceRoleDestination); err != nil {
 		return err
 	}
 
@@ -129,7 +129,7 @@ func (s *Switcher) RollbackVolume(ctx context.Context, session *domain.Session, 
 	current, err := s.client.CoreV1().PersistentVolumeClaims(volume.SourcePVC.Namespace).Get(ctx, volume.SourcePVC.Name, metav1.GetOptions{})
 	if err == nil && current.Spec.VolumeName == volume.SourcePV.Name {
 		original := volume.SourcePVC.UID != "" && current.UID == volume.SourcePVC.UID
-		recovered := current.Annotations[SessionAnnotation] == session.ID
+		recovered := current.Annotations[SessionKey] == session.ID
 		if !original && !recovered {
 			return domain.NewError(domain.ErrorConflict, "rollback volume", fmt.Sprintf("PVC %s/%s is not the original or session-owned source PVC", current.Namespace, current.Name))
 		}
@@ -139,14 +139,14 @@ func (s *Switcher) RollbackVolume(ctx context.Context, session *domain.Session, 
 		return domain.WrapError(domain.ErrorKubernetes, "rollback volume", "read active PVC", err)
 	}
 	if err == nil {
-		if current.Spec.VolumeName != volume.DestinationPV.Name || current.Annotations[SessionAnnotation] != session.ID {
+		if current.Spec.VolumeName != volume.DestinationPV.Name || current.Annotations[SessionKey] != session.ID {
 			return domain.NewError(domain.ErrorConflict, "rollback volume", fmt.Sprintf("PVC %s/%s is not the session's active destination", current.Namespace, current.Name))
 		}
 		// The storage provisioner may restore the destination PV's original
 		// reclaim policy after activation. Retain it before deleting the active
 		// PVC so rollback keeps the destination PV available for pair marking
 		// and cleanup.
-		if err := s.ensureRetain(ctx, volume.DestinationPV, session.ID, "destination"); err != nil {
+		if err := s.ensureRetain(ctx, volume.DestinationPV, session.ID, ResourceRoleDestination); err != nil {
 			return err
 		}
 		ref := domain.ObjectReference{Namespace: current.Namespace, Name: current.Name, UID: current.UID, ResourceVersion: current.ResourceVersion}
@@ -157,10 +157,10 @@ func (s *Switcher) RollbackVolume(ctx context.Context, session *domain.Session, 
 			return err
 		}
 	}
-	if err := s.ensureRetain(ctx, volume.SourcePV, session.ID, "source"); err != nil {
+	if err := s.ensureRetain(ctx, volume.SourcePV, session.ID, ResourceRoleSource); err != nil {
 		return err
 	}
-	if err := s.ensureRetain(ctx, volume.DestinationPV, session.ID, "destination"); err != nil {
+	if err := s.ensureRetain(ctx, volume.DestinationPV, session.ID, ResourceRoleDestination); err != nil {
 		return err
 	}
 	sourceClass := ""
@@ -185,11 +185,11 @@ func (s *Switcher) RenamePVC(ctx context.Context, session *domain.Session, volum
 		return nil, err
 	}
 	if existing, err := s.client.CoreV1().PersistentVolumeClaims(volume.DestinationPVC.Namespace).Get(ctx, volume.DestinationPVC.Name, metav1.GetOptions{}); err == nil {
-		if existing.Spec.VolumeName == volume.SourcePV.Name && existing.Annotations[SessionAnnotation] == session.ID {
+		if existing.Spec.VolumeName == volume.SourcePV.Name && existing.Annotations[SessionKey] == session.ID {
 			if err := s.ensureNoConsumers(ctx, existing.Namespace, existing.Name); err != nil {
 				return nil, err
 			}
-			if err := s.ensureRetain(ctx, volume.SourcePV, session.ID, "active"); err != nil {
+			if err := s.ensureRetain(ctx, volume.SourcePV, session.ID, ResourceRoleActive); err != nil {
 				return nil, err
 			}
 			return existing, nil
@@ -198,7 +198,7 @@ func (s *Switcher) RenamePVC(ctx context.Context, session *domain.Session, volum
 	} else if !apierrors.IsNotFound(err) {
 		return nil, domain.WrapError(domain.ErrorKubernetes, "rename PVC", "read destination PVC", err)
 	}
-	if err := s.ensureRetain(ctx, volume.SourcePV, session.ID, "rename"); err != nil {
+	if err := s.ensureRetain(ctx, volume.SourcePV, session.ID, ResourceRoleRename); err != nil {
 		return nil, err
 	}
 	if err := s.deletePVC(ctx, volume.SourcePVC); err != nil {
@@ -227,7 +227,7 @@ func (s *Switcher) RenamePVC(ctx context.Context, session *domain.Session, volum
 	if err != nil {
 		return nil, err
 	}
-	if err := s.ensureRetain(ctx, volume.SourcePV, session.ID, "active"); err != nil {
+	if err := s.ensureRetain(ctx, volume.SourcePV, session.ID, ResourceRoleActive); err != nil {
 		return nil, err
 	}
 	return created, nil
@@ -244,7 +244,7 @@ func (s *Switcher) activePVC(ctx context.Context, session *domain.Session, volum
 	if pvc.UID == volume.SourcePVC.UID && pvc.Spec.VolumeName == volume.SourcePV.Name {
 		return nil, nil
 	}
-	if pvc.Spec.VolumeName == volume.DestinationPV.Name && pvc.Annotations[SessionAnnotation] == session.ID {
+	if pvc.Spec.VolumeName == volume.DestinationPV.Name && pvc.Annotations[SessionKey] == session.ID {
 		return pvc, nil
 	}
 	return nil, domain.NewError(domain.ErrorConflict, "activate volume", fmt.Sprintf("PVC %s/%s has unexpected UID or binding", pvc.Namespace, pvc.Name))
@@ -259,7 +259,7 @@ func (s *Switcher) createActivePVC(ctx context.Context, session *domain.Session,
 	if err != nil {
 		return nil, domain.WrapError(domain.ErrorKubernetes, "create active PVC", fmt.Sprintf("create %s/%s", pvc.Namespace, pvc.Name), err)
 	}
-	if created.Spec.VolumeName != pvRef.Name || created.Annotations[SessionAnnotation] != session.ID {
+	if created.Spec.VolumeName != pvRef.Name || created.Annotations[SessionKey] != session.ID {
 		return nil, domain.NewError(domain.ErrorConflict, "create active PVC", fmt.Sprintf("PVC %s/%s exists with an unexpected binding", created.Namespace, created.Name))
 	}
 	if err := WaitFor(ctx, s.poll, fmt.Sprintf("PVC %s/%s binding to PV %s", created.Namespace, created.Name, pvRef.Name), func(waitCtx context.Context) (bool, error) {
@@ -320,9 +320,9 @@ func activePVCManifest(session *domain.Session, volume *domain.VolumeSpec, pvRef
 		delete(pvc.Annotations, key)
 	}
 	pvc.Labels[ManagedByLabel] = ManagedByValue
-	pvc.Labels[SessionLabel] = session.ID
-	pvc.Annotations[SessionAnnotation] = session.ID
-	pvc.Annotations["pvc-migrate.io/rollback-pv"] = volume.SourcePV.Name
+	pvc.Labels[SessionKey] = session.ID
+	pvc.Annotations[SessionKey] = session.ID
+	pvc.Annotations[RollbackPVAnnotation] = volume.SourcePV.Name
 	return pvc
 }
 
@@ -334,7 +334,7 @@ func (s *Switcher) completeActivation(ctx context.Context, session *domain.Sessi
 		return err
 	}
 	now := metav1.NewTime(s.now().UTC())
-	status.Activation.ActivePVC = domain.ObjectReference{APIVersion: "v1", Kind: "PersistentVolumeClaim", Namespace: pvc.Namespace, Name: pvc.Name, UID: pvc.UID, ResourceVersion: pvc.ResourceVersion}
+	status.Activation.ActivePVC = domain.ObjectReference{APIVersion: domain.CoreAPIVersion, Kind: domain.KindPersistentVolumeClaim, Namespace: pvc.Namespace, Name: pvc.Name, UID: pvc.UID, ResourceVersion: pvc.ResourceVersion}
 	status.Activation.ActivatedAt = &now
 	status.Activation.TemporaryPVCDeleted = true
 	status.Activation.SourcePVCDeleted = true
@@ -350,7 +350,7 @@ func (s *Switcher) completeRollback(ctx context.Context, session *domain.Session
 		return err
 	}
 	now := metav1.NewTime(s.now().UTC())
-	status.Activation.ActivePVC = domain.ObjectReference{APIVersion: "v1", Kind: "PersistentVolumeClaim", Namespace: pvc.Namespace, Name: pvc.Name, UID: pvc.UID, ResourceVersion: pvc.ResourceVersion}
+	status.Activation.ActivePVC = domain.ObjectReference{APIVersion: domain.CoreAPIVersion, Kind: domain.KindPersistentVolumeClaim, Namespace: pvc.Namespace, Name: pvc.Name, UID: pvc.UID, ResourceVersion: pvc.ResourceVersion}
 	status.Activation.RolledBackAt = &now
 	return callProgress(progress)
 }
@@ -445,7 +445,7 @@ func (s *Switcher) reservePV(ctx context.Context, ref domain.ObjectReference, na
 		if ref.UID != "" && pv.UID != ref.UID {
 			return domain.NewError(domain.ErrorConflict, "reserve PV", fmt.Sprintf("PV %s UID changed", ref.Name))
 		}
-		if owner := pv.Labels[SessionLabel]; owner != "" && owner != sessionID {
+		if owner := pv.Labels[SessionKey]; owner != "" && owner != sessionID {
 			return domain.NewError(domain.ErrorConflict, "reserve PV", fmt.Sprintf("PV %s belongs to session %s", ref.Name, owner))
 		}
 		if pv.Spec.ClaimRef != nil && pv.Spec.ClaimRef.Namespace == namespace && pv.Spec.ClaimRef.Name == claim {
@@ -460,7 +460,7 @@ func (s *Switcher) reservePV(ctx context.Context, ref domain.ObjectReference, na
 				return getErr
 			}
 		}
-		pv.Spec.ClaimRef = &corev1.ObjectReference{APIVersion: "v1", Kind: "PersistentVolumeClaim", Namespace: namespace, Name: claim}
+		pv.Spec.ClaimRef = &corev1.ObjectReference{APIVersion: domain.CoreAPIVersion, Kind: domain.KindPersistentVolumeClaim, Namespace: namespace, Name: claim}
 		_, err = s.client.CoreV1().PersistentVolumes().Update(ctx, pv, metav1.UpdateOptions{})
 		return err
 	})
@@ -488,7 +488,7 @@ func (s *Switcher) ensureRetain(ctx context.Context, ref domain.ObjectReference,
 		if pv.Annotations == nil {
 			pv.Annotations = map[string]string{}
 		}
-		if owner := pv.Labels[SessionLabel]; owner != "" && owner != sessionID {
+		if owner := pv.Labels[SessionKey]; owner != "" && owner != sessionID {
 			return domain.NewError(domain.ErrorConflict, "retain PV", fmt.Sprintf("PV %s belongs to session %s", ref.Name, owner))
 		}
 		changed := markPVSession(pv.Labels, sessionID, role)
@@ -579,8 +579,8 @@ func (s *Switcher) markPVPair(ctx context.Context, sessionID string, volume *dom
 		role  string
 		other string
 	}{
-		{ref: active, role: "active", other: rollback.Name},
-		{ref: rollback, role: "rollback", other: active.Name},
+		{ref: active, role: ResourceRoleActive, other: rollback.Name},
+		{ref: rollback, role: ResourceRoleRollback, other: active.Name},
 	} {
 		err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
 			pv, err := s.client.CoreV1().PersistentVolumes().Get(ctx, item.ref.Name, metav1.GetOptions{})
@@ -589,7 +589,7 @@ func (s *Switcher) markPVPair(ctx context.Context, sessionID string, volume *dom
 				// Provisioners with a Delete reclaim policy can remove it while the
 				// active PVC is being deleted; keep validating and marking the active
 				// PV without turning a completed rollback into a failure.
-				if rolledBack && item.role == "rollback" && apierrors.IsNotFound(err) {
+				if rolledBack && item.role == ResourceRoleRollback && apierrors.IsNotFound(err) {
 					return nil
 				}
 				return err
@@ -597,7 +597,7 @@ func (s *Switcher) markPVPair(ctx context.Context, sessionID string, volume *dom
 			if item.ref.UID != "" && pv.UID != item.ref.UID {
 				return domain.NewError(domain.ErrorConflict, "mark PV pair", fmt.Sprintf("PV %s UID changed", item.ref.Name))
 			}
-			if owner := pv.Labels[SessionLabel]; owner != "" && owner != sessionID {
+			if owner := pv.Labels[SessionKey]; owner != "" && owner != sessionID {
 				return domain.NewError(domain.ErrorConflict, "mark PV pair", fmt.Sprintf("PV %s belongs to session %s", item.ref.Name, owner))
 			}
 			if pv.Labels == nil {
@@ -607,8 +607,8 @@ func (s *Switcher) markPVPair(ctx context.Context, sessionID string, volume *dom
 				pv.Annotations = map[string]string{}
 			}
 			changed := markPVSession(pv.Labels, sessionID, item.role)
-			if pv.Annotations["pvc-migrate.io/paired-pv"] != item.other {
-				pv.Annotations["pvc-migrate.io/paired-pv"] = item.other
+			if pv.Annotations[PairedPVAnnotation] != item.other {
+				pv.Annotations[PairedPVAnnotation] = item.other
 				changed = true
 			}
 			if pv.Spec.PersistentVolumeReclaimPolicy != corev1.PersistentVolumeReclaimRetain {

@@ -86,7 +86,7 @@ func TestReserveVolumeDryRunHasNoPersistentOwnershipChanges(t *testing.T) {
 	}
 	currentPVC, _ := client.CoreV1().PersistentVolumeClaims("app").Get(ctx, "data", metav1.GetOptions{})
 	currentPV, _ := client.CoreV1().PersistentVolumes().Get(ctx, "pv-source", metav1.GetOptions{})
-	if currentPVC.Annotations[SessionAnnotation] != "" || currentPV.Labels[SessionLabel] != "" || currentPV.Spec.PersistentVolumeReclaimPolicy != corev1.PersistentVolumeReclaimDelete {
+	if currentPVC.Annotations[SessionKey] != "" || currentPV.Labels[SessionKey] != "" || currentPV.Spec.PersistentVolumeReclaimPolicy != corev1.PersistentVolumeReclaimDelete {
 		t.Fatalf("dry-run mutated source resources: pvc=%#v pv=%#v", currentPVC, currentPV)
 	}
 	if session.Status.Volumes[0].Reserved {
@@ -101,8 +101,8 @@ func TestReserveVolumeDryRunValidatesExistingDestinationOwnership(t *testing.T) 
 	existing := &corev1.PersistentVolumeClaim{
 		ObjectMeta: metav1.ObjectMeta{
 			Namespace: "system", Name: "data-migrated",
-			Labels:      map[string]string{SessionLabel: "foreign-session"},
-			Annotations: map[string]string{"pvc-migrate.io/source-pvc-uid": "source-pvc-uid"},
+			Labels:      map[string]string{SessionKey: "foreign-session"},
+			Annotations: map[string]string{SourcePVCUIDAnnotation: "source-pvc-uid"},
 		},
 		Spec: corev1.PersistentVolumeClaimSpec{
 			StorageClassName: &class,
@@ -162,9 +162,9 @@ func TestValidateDestinationPVCConflictMatrix(t *testing.T) {
 			ObjectMeta: metav1.ObjectMeta{
 				Namespace: volume.DestinationPVC.Namespace,
 				Name:      volume.DestinationPVC.Name,
-				Labels:    map[string]string{SessionLabel: session.ID},
+				Labels:    map[string]string{SessionKey: session.ID},
 				Annotations: map[string]string{
-					"pvc-migrate.io/source-pvc-uid": string(volume.SourcePVC.UID),
+					SourcePVCUIDAnnotation: string(volume.SourcePVC.UID),
 				},
 			},
 			Spec: corev1.PersistentVolumeClaimSpec{
@@ -183,8 +183,8 @@ func TestValidateDestinationPVCConflictMatrix(t *testing.T) {
 		mutate func(*corev1.PersistentVolumeClaim)
 	}{
 		{"terminating", func(pvc *corev1.PersistentVolumeClaim) { pvc.DeletionTimestamp = &now }},
-		{"foreign session", func(pvc *corev1.PersistentVolumeClaim) { pvc.Labels[SessionLabel] = "other" }},
-		{"different source", func(pvc *corev1.PersistentVolumeClaim) { pvc.Annotations["pvc-migrate.io/source-pvc-uid"] = "other" }},
+		{"foreign session", func(pvc *corev1.PersistentVolumeClaim) { pvc.Labels[SessionKey] = "other" }},
+		{"different source", func(pvc *corev1.PersistentVolumeClaim) { pvc.Annotations[SourcePVCUIDAnnotation] = "other" }},
 		{"storage class absent", func(pvc *corev1.PersistentVolumeClaim) { pvc.Spec.StorageClassName = nil }},
 		{"storage class changed", func(pvc *corev1.PersistentVolumeClaim) { value := "slow"; pvc.Spec.StorageClassName = &value }},
 		{"volume mode changed", func(pvc *corev1.PersistentVolumeClaim) {
@@ -249,7 +249,7 @@ func TestProvisionOnTargetRejectsInvalidNodeAndHelper(t *testing.T) {
 				&corev1.Pod{ObjectMeta: metav1.ObjectMeta{
 					Namespace: volume.DestinationPVC.Namespace,
 					Name:      helperPodName(session.ID, volume.SourcePVC.Name),
-					Labels:    map[string]string{SessionLabel: test.owner},
+					Labels:    map[string]string{SessionKey: test.owner},
 				}, Status: corev1.PodStatus{Phase: test.phase}},
 			)
 			reserver := NewReserver(client)
@@ -270,7 +270,7 @@ func TestProvisionOnTargetSurfacesHelperCleanupFailure(t *testing.T) {
 			Namespace: volume.DestinationPVC.Namespace,
 			Name:      helperPodName(session.ID, volume.SourcePVC.Name),
 			UID:       types.UID("helper-uid"),
-			Labels:    map[string]string{SessionLabel: session.ID},
+			Labels:    map[string]string{SessionKey: session.ID},
 		},
 		Status: corev1.PodStatus{
 			Phase: corev1.PodRunning,
@@ -328,7 +328,7 @@ func TestRetainPVPreservesPolicyAndRejectsOwnershipConflicts(t *testing.T) {
 	if pv.Spec.PersistentVolumeReclaimPolicy != corev1.PersistentVolumeReclaimRetain || pv.Annotations[OriginalPolicyAnnotation] != string(corev1.PersistentVolumeReclaimDelete) || pv.Labels[ResourceRoleLabel] != "active" {
 		t.Fatalf("retained PV: %#v", pv)
 	}
-	pv.Labels[SessionLabel] = "other-session"
+	pv.Labels[SessionKey] = "other-session"
 	if _, err := client.CoreV1().PersistentVolumes().Update(ctx, pv, metav1.UpdateOptions{}); err != nil {
 		t.Fatal(err)
 	}
@@ -373,10 +373,10 @@ func TestReserveVolumeRejectsBoundDestinationTopologyAndClaimRefConflicts(t *tes
 					Namespace: volume.DestinationPVC.Namespace,
 					Name:      volume.DestinationPVC.Name,
 					UID:       destinationUID,
-					Labels:    map[string]string{SessionLabel: session.ID},
+					Labels:    map[string]string{SessionKey: session.ID},
 					Annotations: map[string]string{
-						SessionAnnotation:               session.ID,
-						"pvc-migrate.io/source-pvc-uid": string(volume.SourcePVC.UID),
+						SessionKey:             session.ID,
+						SourcePVCUIDAnnotation: string(volume.SourcePVC.UID),
 					},
 				},
 				Spec: corev1.PersistentVolumeClaimSpec{

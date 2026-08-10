@@ -21,7 +21,7 @@ func sessionConfigMap(t *testing.T, session *domain.Session, managed bool) *core
 	labels := map[string]string{}
 	if managed {
 		labels[ManagedByLabel] = ManagedByValue
-		labels[SessionLabel] = session.ID
+		labels[SessionKey] = session.ID
 	}
 	return &corev1.ConfigMap{
 		ObjectMeta: metav1.ObjectMeta{

@@ -16,14 +16,8 @@ import (
 )
 
 const (
-	ManagedByLabel           = "app.kubernetes.io/managed-by"
-	ManagedByValue           = "pvc-migrate"
-	SessionLabel             = "pvc-migrate.io/session"
-	ResourceRoleLabel        = "pvc-migrate.io/role"
-	SessionDataKey           = "session.json"
-	SessionNamePrefix        = "pvc-migrate-session-"
-	SessionFinalizer         = "pvc-migrate.io/session-protection"
-	OriginalPolicyAnnotation = "pvc-migrate.io/original-reclaim-policy"
+	SessionDataKey    = "session.json"
+	SessionNamePrefix = "pvc-migrate-session-"
 )
 
 type SessionStore interface {
@@ -80,7 +74,7 @@ func (s *ConfigMapSessionStore) Create(ctx context.Context, session *domain.Sess
 			Namespace: session.Spec.SessionNamespace,
 			Labels: map[string]string{
 				ManagedByLabel: ManagedByValue,
-				SessionLabel:   session.ID,
+				SessionKey:     session.ID,
 			},
 			Finalizers: []string{SessionFinalizer},
 		},
@@ -138,7 +132,7 @@ func (s *ConfigMapSessionStore) Update(ctx context.Context, session *domain.Sess
 		cm.Labels = map[string]string{}
 	}
 	cm.Labels[ManagedByLabel] = ManagedByValue
-	cm.Labels[SessionLabel] = session.ID
+	cm.Labels[SessionKey] = session.ID
 	cm.Finalizers = ensureSessionFinalizer(cm.Finalizers)
 	cm.Data = map[string]string{SessionDataKey: string(data)}
 	updated, err := s.client.CoreV1().ConfigMaps(cm.Namespace).Update(ctx, cm, metav1.UpdateOptions{})
@@ -251,7 +245,7 @@ func decodeSession(cm *corev1.ConfigMap) (*domain.Session, error) {
 	if err := session.Validate(); err != nil {
 		return nil, err
 	}
-	if cm.Name != SessionConfigMapName(session.ID) || cm.Namespace != session.Spec.SessionNamespace || cm.Labels[ManagedByLabel] != ManagedByValue || cm.Labels[SessionLabel] != session.ID {
+	if cm.Name != SessionConfigMapName(session.ID) || cm.Namespace != session.Spec.SessionNamespace || cm.Labels[ManagedByLabel] != ManagedByValue || cm.Labels[SessionKey] != session.ID {
 		return nil, domain.NewError(domain.ErrorConflict, "decode session", fmt.Sprintf("ConfigMap %s/%s ownership metadata does not match session %q", cm.Namespace, cm.Name, session.ID))
 	}
 	return &session, nil

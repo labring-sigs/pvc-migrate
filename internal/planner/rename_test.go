@@ -69,7 +69,7 @@ func TestPlanRenameSameNamespacePreservesDurableMetadataWithoutQuotaDemand(t *te
 	if metadata.Labels["application"] != "database" || metadata.Annotations["application.example/setting"] != "keep" {
 		t.Fatalf("preserved metadata=%#v", metadata)
 	}
-	for _, key := range []string{"volume.kubernetes.io/selected-node", "pv.kubernetes.io/bind-completed", "kubectl.kubernetes.io/last-applied-configuration", kube.SessionAnnotation} {
+	for _, key := range []string{"volume.kubernetes.io/selected-node", "pv.kubernetes.io/bind-completed", "kubectl.kubernetes.io/last-applied-configuration", kube.SessionKey} {
 		if _, exists := metadata.Annotations[key]; exists {
 			t.Fatalf("transient annotation %q was preserved", key)
 		}

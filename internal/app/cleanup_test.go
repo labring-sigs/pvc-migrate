@@ -26,7 +26,7 @@ func TestCleanupFinalizesActivePVAndClosesRollbackWindow(t *testing.T) {
 				Namespace:   "app",
 				Name:        "data",
 				UID:         types.UID("active-pvc-uid"),
-				Annotations: map[string]string{kube.SessionAnnotation: session.ID},
+				Annotations: map[string]string{kube.SessionKey: session.ID},
 			},
 		},
 		managedPV("pv-destination", "dest-pv-uid", session.ID, "active", corev1.VolumeBound),
@@ -47,18 +47,18 @@ func TestCleanupFinalizesActivePVAndClosesRollbackWindow(t *testing.T) {
 	if active.Spec.PersistentVolumeReclaimPolicy != corev1.PersistentVolumeReclaimDelete {
 		t.Fatalf("active reclaim policy=%s", active.Spec.PersistentVolumeReclaimPolicy)
 	}
-	if active.Labels[kube.SessionLabel] != "" || active.Labels[kube.ResourceRoleLabel] != "" || active.Labels[kube.ManagedByLabel] != "" {
+	if active.Labels[kube.SessionKey] != "" || active.Labels[kube.ResourceRoleLabel] != "" || active.Labels[kube.ManagedByLabel] != "" {
 		t.Fatalf("active PV ownership labels=%v", active.Labels)
 	}
-	if active.Annotations[kube.OriginalPolicyAnnotation] != "" || active.Annotations["pvc-migrate.io/paired-pv"] != "" {
+	if active.Annotations[kube.OriginalPolicyAnnotation] != "" || active.Annotations[kube.PairedPVAnnotation] != "" {
 		t.Fatalf("active PV migration annotations=%v", active.Annotations)
 	}
 	pvc, err := client.CoreV1().PersistentVolumeClaims("app").Get(ctx, "data", metav1.GetOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if pvc.Annotations[kube.SessionAnnotation] != "" {
-		t.Fatalf("active PVC remains owned by %q", pvc.Annotations[kube.SessionAnnotation])
+	if pvc.Annotations[kube.SessionKey] != "" {
+		t.Fatalf("active PVC remains owned by %q", pvc.Annotations[kube.SessionKey])
 	}
 	if store.deletes != 1 {
 		t.Fatalf("session deletes=%d", store.deletes)
@@ -77,7 +77,7 @@ func TestCleanupAbortedSessionReleasesSourceAndDeletesDestination(t *testing.T) 
 				Namespace:   "app",
 				Name:        "data",
 				UID:         types.UID("source-pvc-uid"),
-				Annotations: map[string]string{kube.SessionAnnotation: session.ID},
+				Annotations: map[string]string{kube.SessionKey: session.ID},
 			},
 		},
 		managedPV("pv-source", "source-pv-uid", session.ID, "source", corev1.VolumeBound),
@@ -95,15 +95,15 @@ func TestCleanupAbortedSessionReleasesSourceAndDeletesDestination(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	if source.Spec.PersistentVolumeReclaimPolicy != corev1.PersistentVolumeReclaimDelete || source.Labels[kube.SessionLabel] != "" {
+	if source.Spec.PersistentVolumeReclaimPolicy != corev1.PersistentVolumeReclaimDelete || source.Labels[kube.SessionKey] != "" {
 		t.Fatalf("finalized source PV=%#v", source)
 	}
 	pvc, err := client.CoreV1().PersistentVolumeClaims("app").Get(ctx, "data", metav1.GetOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if pvc.Annotations[kube.SessionAnnotation] != "" {
-		t.Fatalf("source PVC remains owned by %q", pvc.Annotations[kube.SessionAnnotation])
+	if pvc.Annotations[kube.SessionKey] != "" {
+		t.Fatalf("source PVC remains owned by %q", pvc.Annotations[kube.SessionKey])
 	}
 }
 
@@ -219,7 +219,7 @@ func TestCleanupAbortedCopyReleasesSourceAfterCheckpointLoss(t *testing.T) {
 	client := fake.NewClientset(
 		&corev1.PersistentVolumeClaim{ObjectMeta: metav1.ObjectMeta{
 			Namespace: "app", Name: "data", UID: types.UID("source-pvc-uid"),
-			Annotations: map[string]string{kube.SessionAnnotation: session.ID},
+			Annotations: map[string]string{kube.SessionKey: session.ID},
 		}},
 		managedPV("pv-source", "source-pv-uid", session.ID, "source", corev1.VolumeBound),
 	)
@@ -231,14 +231,14 @@ func TestCleanupAbortedCopyReleasesSourceAfterCheckpointLoss(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if pvc.Annotations[kube.SessionAnnotation] != "" {
-		t.Fatalf("source PVC remains owned by %q", pvc.Annotations[kube.SessionAnnotation])
+	if pvc.Annotations[kube.SessionKey] != "" {
+		t.Fatalf("source PVC remains owned by %q", pvc.Annotations[kube.SessionKey])
 	}
 	pv, err := client.CoreV1().PersistentVolumes().Get(ctx, "pv-source", metav1.GetOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if pv.Spec.PersistentVolumeReclaimPolicy != corev1.PersistentVolumeReclaimDelete || pv.Labels[kube.SessionLabel] != "" || pv.Labels[kube.ResourceRoleLabel] != "" {
+	if pv.Spec.PersistentVolumeReclaimPolicy != corev1.PersistentVolumeReclaimDelete || pv.Labels[kube.SessionKey] != "" || pv.Labels[kube.ResourceRoleLabel] != "" {
 		t.Fatalf("source PV was not restored: %#v", pv)
 	}
 }
@@ -251,7 +251,7 @@ func TestCleanupAbortedMigrationBeforeReservePreservesForeignOwner(t *testing.T)
 	client := fake.NewClientset(
 		&corev1.PersistentVolumeClaim{ObjectMeta: metav1.ObjectMeta{
 			Namespace: "app", Name: "data", UID: types.UID("source-pvc-uid"),
-			Annotations: map[string]string{kube.SessionAnnotation: foreign},
+			Annotations: map[string]string{kube.SessionKey: foreign},
 		}},
 		managedPV("pv-source", "source-pv-uid", foreign, "active", corev1.VolumeBound),
 	)
@@ -272,7 +272,7 @@ func TestCleanupAbortedMigrationBeforeReservePreservesForeignOwner(t *testing.T)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if pvc.Annotations[kube.SessionAnnotation] != foreign || pv.Labels[kube.SessionLabel] != foreign || store.deletes != 1 {
+	if pvc.Annotations[kube.SessionKey] != foreign || pv.Labels[kube.SessionKey] != foreign || store.deletes != 1 {
 		t.Fatalf("foreign ownership changed: pvc=%v pv=%v deletes=%d", pvc.Annotations, pv.Labels, store.deletes)
 	}
 }
@@ -285,7 +285,7 @@ func TestCleanupAbortedMigrationReleasesOwnPreCheckpointSource(t *testing.T) {
 	client := fake.NewClientset(
 		&corev1.PersistentVolumeClaim{ObjectMeta: metav1.ObjectMeta{
 			Namespace: "app", Name: "data", UID: types.UID("source-pvc-uid"),
-			Annotations: map[string]string{kube.SessionAnnotation: session.ID},
+			Annotations: map[string]string{kube.SessionKey: session.ID},
 		}},
 		managedPV("pv-source", "source-pv-uid", session.ID, "source", corev1.VolumeBound),
 	)
@@ -301,7 +301,7 @@ func TestCleanupAbortedMigrationReleasesOwnPreCheckpointSource(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if pvc.Annotations[kube.SessionAnnotation] != "" || pv.Labels[kube.SessionLabel] != "" || pv.Spec.PersistentVolumeReclaimPolicy != corev1.PersistentVolumeReclaimDelete {
+	if pvc.Annotations[kube.SessionKey] != "" || pv.Labels[kube.SessionKey] != "" || pv.Spec.PersistentVolumeReclaimPolicy != corev1.PersistentVolumeReclaimDelete {
 		t.Fatalf("session ownership remains: pvc=%v pv=%#v", pvc.Annotations, pv)
 	}
 }
@@ -337,12 +337,12 @@ func TestCleanupSingleStageSessionsRemovesDestinationAndFinalizesSource(t *testi
 
 			sourcePVC := &corev1.PersistentVolumeClaim{ObjectMeta: metav1.ObjectMeta{
 				Namespace: "app", Name: "data", UID: types.UID("source-pvc-uid"),
-				Annotations: map[string]string{kube.SessionAnnotation: session.ID},
+				Annotations: map[string]string{kube.SessionKey: session.ID},
 			}}
 			destinationPVC := &corev1.PersistentVolumeClaim{ObjectMeta: metav1.ObjectMeta{
 				Namespace: "system", Name: "data-migrated", UID: types.UID("destination-pvc-uid"),
-				Labels:      map[string]string{kube.ManagedByLabel: kube.ManagedByValue, kube.SessionLabel: session.ID, kube.ResourceRoleLabel: "destination"},
-				Annotations: map[string]string{kube.SessionAnnotation: session.ID},
+				Labels:      map[string]string{kube.ManagedByLabel: kube.ManagedByValue, kube.SessionKey: session.ID, kube.ResourceRoleLabel: "destination"},
+				Annotations: map[string]string{kube.SessionKey: session.ID},
 			}}
 			sourcePV := managedPV("pv-source", "source-pv-uid", session.ID, "source", corev1.VolumeBound)
 			destinationPV := managedPV("pv-destination", "destination-pv-uid", session.ID, "destination", corev1.VolumeReleased)
@@ -367,14 +367,14 @@ func TestCleanupSingleStageSessionsRemovesDestinationAndFinalizesSource(t *testi
 			if err != nil {
 				t.Fatal(err)
 			}
-			if finalSourcePVC.Annotations[kube.SessionAnnotation] != "" {
-				t.Fatalf("source PVC remains owned by %q", finalSourcePVC.Annotations[kube.SessionAnnotation])
+			if finalSourcePVC.Annotations[kube.SessionKey] != "" {
+				t.Fatalf("source PVC remains owned by %q", finalSourcePVC.Annotations[kube.SessionKey])
 			}
 			finalSourcePV, err := client.CoreV1().PersistentVolumes().Get(ctx, sourcePV.Name, metav1.GetOptions{})
 			if err != nil {
 				t.Fatal(err)
 			}
-			if finalSourcePV.Spec.PersistentVolumeReclaimPolicy != corev1.PersistentVolumeReclaimDelete || finalSourcePV.Labels[kube.SessionLabel] != "" {
+			if finalSourcePV.Spec.PersistentVolumeReclaimPolicy != corev1.PersistentVolumeReclaimDelete || finalSourcePV.Labels[kube.SessionKey] != "" {
 				t.Fatalf("source PV was not finalized: %#v", finalSourcePV)
 			}
 			if store.deletes != 1 {
@@ -396,15 +396,15 @@ func TestCleanupCompletedCopyCanPreserveOutputAndDeleteSession(t *testing.T) {
 
 	sourcePVC := &corev1.PersistentVolumeClaim{ObjectMeta: metav1.ObjectMeta{
 		Namespace: "app", Name: "data", UID: types.UID("source-pvc-uid"),
-		Annotations: map[string]string{kube.SessionAnnotation: session.ID},
+		Annotations: map[string]string{kube.SessionKey: session.ID},
 	}}
 	destinationPVC := &corev1.PersistentVolumeClaim{ObjectMeta: metav1.ObjectMeta{
 		Namespace: "system", Name: "data-migrated", UID: types.UID("destination-pvc-uid"),
 		Labels: map[string]string{
-			kube.ManagedByLabel: kube.ManagedByValue, kube.SessionLabel: session.ID, kube.ResourceRoleLabel: "destination",
+			kube.ManagedByLabel: kube.ManagedByValue, kube.SessionKey: session.ID, kube.ResourceRoleLabel: "destination",
 		},
 		Annotations: map[string]string{
-			kube.SessionAnnotation: session.ID, "pvc-migrate.io/source-pv": "pv-source", "pvc-migrate.io/source-pvc-uid": "source-pvc-uid",
+			kube.SessionKey: session.ID, kube.SourcePVAnnotation: "pv-source", kube.SourcePVCUIDAnnotation: "source-pvc-uid",
 		},
 	}}
 	sourcePV := managedPV("pv-source", "source-pv-uid", session.ID, "source", corev1.VolumeBound)
@@ -427,7 +427,7 @@ func TestCleanupCompletedCopyCanPreserveOutputAndDeleteSession(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if pvc.Annotations[kube.SessionAnnotation] != "" || pvc.Annotations["pvc-migrate.io/source-pv"] != "" || pvc.Annotations["pvc-migrate.io/source-pvc-uid"] != "" || pvc.Labels[kube.SessionLabel] != "" {
+		if pvc.Annotations[kube.SessionKey] != "" || pvc.Annotations[kube.SourcePVAnnotation] != "" || pvc.Annotations[kube.SourcePVCUIDAnnotation] != "" || pvc.Labels[kube.SessionKey] != "" {
 			t.Fatalf("PVC %s/%s ownership=%v annotations=%v", pvc.Namespace, pvc.Name, pvc.Labels, pvc.Annotations)
 		}
 	}
@@ -436,7 +436,7 @@ func TestCleanupCompletedCopyCanPreserveOutputAndDeleteSession(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if pv.Spec.PersistentVolumeReclaimPolicy != corev1.PersistentVolumeReclaimDelete || pv.Labels[kube.SessionLabel] != "" || pv.Labels[kube.ResourceRoleLabel] != "" {
+		if pv.Spec.PersistentVolumeReclaimPolicy != corev1.PersistentVolumeReclaimDelete || pv.Labels[kube.SessionKey] != "" || pv.Labels[kube.ResourceRoleLabel] != "" {
 			t.Fatalf("PV %s policy=%s labels=%v", name, pv.Spec.PersistentVolumeReclaimPolicy, pv.Labels)
 		}
 	}
@@ -472,12 +472,12 @@ func managedPV(name, uid, sessionID, role string, phase corev1.PersistentVolumeP
 			ResourceVersion: "1",
 			Labels: map[string]string{
 				kube.ManagedByLabel:    kube.ManagedByValue,
-				kube.SessionLabel:      sessionID,
+				kube.SessionKey:        sessionID,
 				kube.ResourceRoleLabel: role,
 			},
 			Annotations: map[string]string{
 				kube.OriginalPolicyAnnotation: string(corev1.PersistentVolumeReclaimDelete),
-				"pvc-migrate.io/paired-pv":    "paired",
+				kube.PairedPVAnnotation:       "paired",
 			},
 		},
 		Spec:   corev1.PersistentVolumeSpec{PersistentVolumeReclaimPolicy: corev1.PersistentVolumeReclaimRetain},

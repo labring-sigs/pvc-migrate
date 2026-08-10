@@ -80,7 +80,7 @@ func (s *Service) cleanup(ctx context.Context, session *domain.Session, options 
 			if volume.DestinationPVC.UID == "" {
 				continue
 			}
-			if err := s.ensurePVCUnused(ctx, volume.DestinationPVC); err != nil {
+			if err := s.ensurePVCUnused(ctx, volume.DestinationPVC, session.ID); err != nil {
 				return err
 			}
 			if err := s.deleteManagedPVC(ctx, session.ID, volume.DestinationPVC); err != nil {
@@ -171,7 +171,7 @@ func uncheckpointedSource(session *domain.Session, index int) bool {
 	return !status.Reserved && status.Activation.ActivePVC.Name == "" && volume.DestinationPVC.UID == "" && volume.DestinationPV.Name == ""
 }
 
-func (s *Service) ensurePVCUnused(ctx context.Context, ref domain.ObjectReference) error {
+func (s *Service) ensurePVCUnused(ctx context.Context, ref domain.ObjectReference, sessionID string) error {
 	pvc, err := s.client.CoreV1().PersistentVolumeClaims(ref.Namespace).Get(ctx, ref.Name, metav1.GetOptions{})
 	if apierrors.IsNotFound(err) {
 		return nil
@@ -188,6 +188,9 @@ func (s *Service) ensurePVCUnused(ctx context.Context, ref domain.ObjectReferenc
 	}
 	for _, pod := range pods.Items {
 		if pod.Status.Phase == corev1.PodSucceeded || pod.Status.Phase == corev1.PodFailed {
+			continue
+		}
+		if sessionID != "" && pod.Labels[kube.SessionKey] == sessionID && pod.Labels[kube.ResourceRoleLabel] == kube.ResourceRoleReservationConsumer {
 			continue
 		}
 		if kube.PodUsesPVC(&pod, ref.Name) {
@@ -224,7 +227,7 @@ func (s *Service) discoverDestinationRefs(ctx context.Context, sessionID string,
 	if err != nil {
 		return domain.WrapError(domain.ErrorKubernetes, "cleanup", fmt.Sprintf("read destination PVC %s/%s", volume.DestinationPVC.Namespace, volume.DestinationPVC.Name), err)
 	}
-	if pvc.Labels[kube.ManagedByLabel] != kube.ManagedByValue || pvc.Labels[kube.SessionLabel] != sessionID || pvc.Labels[kube.ResourceRoleLabel] != "destination" || pvc.Annotations[kube.SessionAnnotation] != sessionID || pvc.Annotations["pvc-migrate.io/source-pvc-uid"] != string(volume.SourcePVC.UID) {
+	if pvc.Labels[kube.ManagedByLabel] != kube.ManagedByValue || pvc.Labels[kube.SessionKey] != sessionID || pvc.Labels[kube.ResourceRoleLabel] != kube.ResourceRoleDestination || pvc.Annotations[kube.SessionKey] != sessionID || pvc.Annotations[kube.SourcePVCUIDAnnotation] != string(volume.SourcePVC.UID) {
 		return domain.NewError(domain.ErrorConflict, "cleanup", fmt.Sprintf("destination PVC %s/%s identity or session ownership changed", pvc.Namespace, pvc.Name))
 	}
 	volume.DestinationPVC.UID = pvc.UID
@@ -239,13 +242,13 @@ func (s *Service) discoverDestinationRefs(ctx context.Context, sessionID string,
 	if err != nil {
 		return domain.WrapError(domain.ErrorKubernetes, "cleanup", fmt.Sprintf("read destination PV %s", pvc.Spec.VolumeName), err)
 	}
-	if pv.Labels[kube.ManagedByLabel] != kube.ManagedByValue || pv.Labels[kube.SessionLabel] != sessionID || pv.Labels[kube.ResourceRoleLabel] != "destination" {
+	if pv.Labels[kube.ManagedByLabel] != kube.ManagedByValue || pv.Labels[kube.SessionKey] != sessionID || pv.Labels[kube.ResourceRoleLabel] != kube.ResourceRoleDestination {
 		return domain.NewError(domain.ErrorConflict, "cleanup", fmt.Sprintf("destination PV %s identity or session ownership changed", pv.Name))
 	}
 	if pv.Spec.ClaimRef == nil || pv.Spec.ClaimRef.Namespace != pvc.Namespace || pv.Spec.ClaimRef.Name != pvc.Name || pv.Spec.ClaimRef.UID != pvc.UID {
 		return domain.NewError(domain.ErrorConflict, "cleanup", fmt.Sprintf("destination PV %s claimRef does not match destination PVC", pv.Name))
 	}
-	volume.DestinationPV = domain.ObjectReference{APIVersion: "v1", Kind: "PersistentVolume", Name: pv.Name, UID: pv.UID, ResourceVersion: pv.ResourceVersion}
+	volume.DestinationPV = domain.ObjectReference{APIVersion: domain.CoreAPIVersion, Kind: domain.KindPersistentVolume, Name: pv.Name, UID: pv.UID, ResourceVersion: pv.ResourceVersion}
 	volume.DestinationPolicy = corev1.PersistentVolumeReclaimPolicy(pv.Annotations[kube.OriginalPolicyAnnotation])
 	if volume.DestinationPolicy == "" {
 		volume.DestinationPolicy = pv.Spec.PersistentVolumeReclaimPolicy
@@ -302,9 +305,9 @@ func cleanupPhaseAllowed(session *domain.Session) bool {
 
 func cleanupRollbackRole(session *domain.Session) string {
 	if cleanupKeepsSource(session) || session.Status.Phase == domain.PhaseAborted {
-		return "destination"
+		return kube.ResourceRoleDestination
 	}
-	return "rollback"
+	return kube.ResourceRoleRollback
 }
 
 func (s *Service) deleteReservationPods(ctx context.Context, session *domain.Session) error {
@@ -312,7 +315,7 @@ func (s *Service) deleteReservationPods(ctx context.Context, session *domain.Ses
 	for _, volume := range session.Spec.Volumes {
 		namespaces[volume.DestinationPVC.Namespace] = struct{}{}
 	}
-	selector := kube.SessionLabel + "=" + session.ID + "," + kube.ResourceRoleLabel + "=reservation-consumer"
+	selector := kube.SessionKey + "=" + session.ID + "," + kube.ResourceRoleLabel + "=" + kube.ResourceRoleReservationConsumer
 	for namespace := range namespaces {
 		pods, err := s.client.CoreV1().Pods(namespace).List(ctx, metav1.ListOptions{LabelSelector: selector})
 		if err != nil && !apierrors.IsNotFound(err) {
@@ -361,10 +364,10 @@ func (s *Service) releaseUncheckpointedSource(ctx context.Context, sessionID str
 	if volume.SourcePV.UID != "" && pv.UID != volume.SourcePV.UID {
 		return domain.NewError(domain.ErrorConflict, "cleanup", fmt.Sprintf("source PV %s identity changed", pv.Name))
 	}
-	if pv.Labels[kube.SessionLabel] != sessionID {
+	if pv.Labels[kube.SessionKey] != sessionID {
 		return nil
 	}
-	if role := pv.Labels[kube.ResourceRoleLabel]; role != "source" {
+	if role := pv.Labels[kube.ResourceRoleLabel]; role != kube.ResourceRoleSource {
 		return domain.NewError(domain.ErrorConflict, "cleanup", fmt.Sprintf("source PV %s has unexpected session role %q", pv.Name, role))
 	}
 	return s.finalizeActivePV(ctx, sessionID, volume.SourcePV, volume.SourceReclaimPolicy)
@@ -395,13 +398,13 @@ func (s *Service) validateUncheckpointedSource(ctx context.Context, sessionID st
 	if volume.SourcePV.UID != "" && pv.UID != volume.SourcePV.UID {
 		return domain.NewError(domain.ErrorConflict, "cleanup", fmt.Sprintf("source PV %s identity changed", pv.Name))
 	}
-	if pv.Labels[kube.SessionLabel] != sessionID {
+	if pv.Labels[kube.SessionKey] != sessionID {
 		return nil
 	}
-	if pvcErr == nil && pvc.Annotations[kube.SessionAnnotation] != "" && pvc.Annotations[kube.SessionAnnotation] != sessionID {
-		return domain.NewError(domain.ErrorConflict, "cleanup", fmt.Sprintf("source PVC %s/%s belongs to session %s", pvc.Namespace, pvc.Name, pvc.Annotations[kube.SessionAnnotation]))
+	if pvcErr == nil && pvc.Annotations[kube.SessionKey] != "" && pvc.Annotations[kube.SessionKey] != sessionID {
+		return domain.NewError(domain.ErrorConflict, "cleanup", fmt.Sprintf("source PVC %s/%s belongs to session %s", pvc.Namespace, pvc.Name, pvc.Annotations[kube.SessionKey]))
 	}
-	if role := pv.Labels[kube.ResourceRoleLabel]; role != "source" {
+	if role := pv.Labels[kube.ResourceRoleLabel]; role != kube.ResourceRoleSource {
 		return domain.NewError(domain.ErrorConflict, "cleanup", fmt.Sprintf("source PV %s has unexpected session role %q", pv.Name, role))
 	}
 	if volume.SourceReclaimPolicy == "" {
@@ -418,7 +421,7 @@ func (s *Service) deleteManagedPVC(ctx context.Context, sessionID string, ref do
 	if err != nil {
 		return domain.WrapError(domain.ErrorKubernetes, "cleanup", fmt.Sprintf("read PVC %s/%s", ref.Namespace, ref.Name), err)
 	}
-	if pvc.UID != ref.UID || pvc.Labels[kube.SessionLabel] != sessionID {
+	if pvc.UID != ref.UID || pvc.Labels[kube.SessionKey] != sessionID {
 		return domain.NewError(domain.ErrorConflict, "cleanup", fmt.Sprintf("PVC %s/%s identity or session ownership changed", ref.Namespace, ref.Name))
 	}
 	uid := pvc.UID
@@ -437,7 +440,7 @@ func (s *Service) deleteRollbackPV(ctx context.Context, sessionID string, ref do
 	if err != nil {
 		return domain.WrapError(domain.ErrorKubernetes, "cleanup rollback PV", fmt.Sprintf("read PV %s", ref.Name), err)
 	}
-	if pv.UID != ref.UID || pv.Labels[kube.SessionLabel] != sessionID || pv.Labels[kube.ResourceRoleLabel] != expectedRole {
+	if pv.UID != ref.UID || pv.Labels[kube.SessionKey] != sessionID || pv.Labels[kube.ResourceRoleLabel] != expectedRole {
 		return domain.NewError(domain.ErrorConflict, "cleanup rollback PV", fmt.Sprintf("PV %s identity, ownership, or role changed", ref.Name))
 	}
 	// PVC deletion and PV release are asynchronous Kubernetes controller updates.
@@ -464,7 +467,7 @@ func (s *Service) deleteRollbackPV(ctx context.Context, sessionID string, ref do
 			if getErr != nil {
 				return false, getErr
 			}
-			if current.UID != ref.UID || current.Labels[kube.SessionLabel] != sessionID || current.Labels[kube.ResourceRoleLabel] != expectedRole {
+			if current.UID != ref.UID || current.Labels[kube.SessionKey] != sessionID || current.Labels[kube.ResourceRoleLabel] != expectedRole {
 				return false, domain.NewError(domain.ErrorConflict, "cleanup rollback PV", fmt.Sprintf("PV %s identity, ownership, or role changed while waiting for release", ref.Name))
 			}
 			if current.Status.Phase == corev1.VolumeReleased || current.Status.Phase == corev1.VolumeAvailable {
@@ -501,7 +504,7 @@ func (s *Service) deleteRollbackPV(ctx context.Context, sessionID string, ref do
 		if err != nil {
 			return domain.WrapError(domain.ErrorKubernetes, "cleanup rollback PV", fmt.Sprintf("read PV %s after release", ref.Name), err)
 		}
-		if pv.UID != ref.UID || pv.Labels[kube.SessionLabel] != sessionID || pv.Labels[kube.ResourceRoleLabel] != expectedRole {
+		if pv.UID != ref.UID || pv.Labels[kube.SessionKey] != sessionID || pv.Labels[kube.ResourceRoleLabel] != expectedRole {
 			return domain.NewError(domain.ErrorConflict, "cleanup rollback PV", fmt.Sprintf("PV %s identity, ownership, or role changed", ref.Name))
 		}
 	}
@@ -529,20 +532,20 @@ func (s *Service) finalizeActivePV(ctx context.Context, sessionID string, ref do
 		if pv.UID != ref.UID {
 			return domain.NewError(domain.ErrorConflict, "finalize active PV", fmt.Sprintf("PV %s identity, ownership, or role changed", ref.Name))
 		}
-		if pv.Labels[kube.SessionLabel] == "" && role == "" && pv.Spec.PersistentVolumeReclaimPolicy == policy && pv.Annotations[kube.OriginalPolicyAnnotation] == "" {
+		if pv.Labels[kube.SessionKey] == "" && role == "" && pv.Spec.PersistentVolumeReclaimPolicy == policy && pv.Annotations[kube.OriginalPolicyAnnotation] == "" {
 			return nil
 		}
-		if pv.Labels[kube.SessionLabel] != sessionID || (role != "active" && role != "source" && role != "rename" && role != "destination") {
+		if pv.Labels[kube.SessionKey] != sessionID || (role != kube.ResourceRoleActive && role != kube.ResourceRoleSource && role != kube.ResourceRoleRename && role != kube.ResourceRoleDestination) {
 			return domain.NewError(domain.ErrorConflict, "finalize active PV", fmt.Sprintf("PV %s identity, ownership, or role changed", ref.Name))
 		}
 		pv.Spec.PersistentVolumeReclaimPolicy = policy
-		delete(pv.Labels, kube.SessionLabel)
+		delete(pv.Labels, kube.SessionKey)
 		delete(pv.Labels, kube.ResourceRoleLabel)
 		if pv.Labels[kube.ManagedByLabel] == kube.ManagedByValue {
 			delete(pv.Labels, kube.ManagedByLabel)
 		}
 		delete(pv.Annotations, kube.OriginalPolicyAnnotation)
-		delete(pv.Annotations, "pvc-migrate.io/paired-pv")
+		delete(pv.Annotations, kube.PairedPVAnnotation)
 		_, err = s.client.CoreV1().PersistentVolumes().Update(ctx, pv, metav1.UpdateOptions{})
 		return err
 	})
