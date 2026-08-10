@@ -110,6 +110,24 @@ func TestTablePlanRendersChecksAndVolumes(t *testing.T) {
 	}
 }
 
+func TestValueOrUnknownPreservesReportedValues(t *testing.T) {
+	for _, tt := range []struct {
+		name  string
+		value string
+		want  string
+	}{
+		{name: "empty", value: "", want: "unknown"},
+		{name: "quantity", value: "10Gi", want: "10Gi"},
+		{name: "whitespace", value: " ", want: " "},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := valueOrUnknown(tt.value); got != tt.want {
+				t.Fatalf("valueOrUnknown(%q) = %q, want %q", tt.value, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestTableSessionRendersSyncAndActivationState(t *testing.T) {
 	warm := metav1.NewTime(time.Date(2026, 8, 7, 1, 2, 3, 0, time.UTC))
 	activated := metav1.NewTime(time.Date(2026, 8, 7, 2, 0, 0, 0, time.UTC))

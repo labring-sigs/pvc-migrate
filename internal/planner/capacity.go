@@ -64,6 +64,9 @@ func capacityDemands(volumes []domain.PlannedVolume) (map[string]capacityDemand,
 		if err != nil {
 			return nil, fmt.Errorf("parse PVC %s/%s capacity %q: %w", volume.SourcePVC.Namespace, volume.SourcePVC.Name, volume.Capacity, err)
 		}
+		if capacity.Sign() <= 0 {
+			return nil, fmt.Errorf("PVC %s/%s capacity %s must be positive", volume.SourcePVC.Namespace, volume.SourcePVC.Name, capacity.String())
+		}
 		demand, ok := demands[volume.StorageClass]
 		if !ok {
 			demand = capacityDemand{
@@ -180,9 +183,7 @@ func (inventory *storageCapacityInventory) evaluate(node *corev1.Node, demand ca
 
 	maxCapacity := (*resource.Quantity)(nil)
 	maxVolume := (*resource.Quantity)(nil)
-	knownShortage := false
 	unknownCapacity := false
-	supportedObject := false
 	capacitySufficient := false
 	for _, item := range matching {
 		if item.Capacity != nil && item.Capacity.Sign() > 0 {
@@ -200,13 +201,11 @@ func (inventory *storageCapacityInventory) evaluate(node *corev1.Node, demand ca
 				continue
 			}
 		}
-		supportedObject = true
 		if item.Capacity == nil {
 			unknownCapacity = true
 			continue
 		}
 		if item.Capacity.Sign() <= 0 || item.Capacity.Cmp(demand.total) < 0 {
-			knownShortage = true
 			continue
 		}
 		capacitySufficient = true
@@ -235,15 +234,11 @@ func (inventory *storageCapacityInventory) evaluate(node *corev1.Node, demand ca
 		}
 		return capacityEvaluation{report: report, surplus: surplus}
 	}
-	if knownShortage || !supportedObject {
-		report.Status = domain.StorageCapacityInsufficient
-		report.Message = fmt.Sprintf("StorageClass %s reports insufficient capacity for %s requested on target node %s", demand.storageClass, demand.total.String(), node.Name)
-		if report.MaximumVolumeSize != "" && demand.largest.Cmp(resource.MustParse(report.MaximumVolumeSize)) > 0 {
-			report.Message = fmt.Sprintf("StorageClass %s maximumVolumeSize=%s is below the largest requested volume %s", demand.storageClass, report.MaximumVolumeSize, demand.largest.String())
-		}
-		return capacityEvaluation{report: report, surplus: surplus}
+	report.Status = domain.StorageCapacityInsufficient
+	report.Message = fmt.Sprintf("StorageClass %s reports insufficient capacity for %s requested on target node %s", demand.storageClass, demand.total.String(), node.Name)
+	if report.MaximumVolumeSize != "" && demand.largest.Cmp(resource.MustParse(report.MaximumVolumeSize)) > 0 {
+		report.Message = fmt.Sprintf("StorageClass %s maximumVolumeSize=%s is below the largest requested volume %s", demand.storageClass, report.MaximumVolumeSize, demand.largest.String())
 	}
-	report.Message = fmt.Sprintf("StorageClass %s capacity could not be verified on target node %s", demand.storageClass, node.Name)
 	return capacityEvaluation{report: report, surplus: surplus}
 }
 

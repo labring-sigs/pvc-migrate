@@ -579,42 +579,7 @@ func (p *Planner) selectTargetNode(ctx context.Context, plan *domain.MigrationPl
 		plan.AddCheck(failed("target-node", message))
 		return nil
 	}
-	slices.SortStableFunc(candidates, func(a, b targetNodeCandidate) int {
-		if a.capacityKnown != b.capacityKnown {
-			if a.capacityKnown > b.capacityKnown {
-				return -1
-			}
-			return 1
-		}
-		if a.capacityUnknown != b.capacityUnknown {
-			if a.capacityUnknown < b.capacityUnknown {
-				return -1
-			}
-			return 1
-		}
-		if comparison := a.capacitySurplus.Cmp(b.capacitySurplus); comparison != 0 {
-			return -comparison
-		}
-		if a.distinctFromSrc != b.distinctFromSrc {
-			if a.distinctFromSrc {
-				return -1
-			}
-			return 1
-		}
-		if a.taintPenalty != b.taintPenalty {
-			if a.taintPenalty < b.taintPenalty {
-				return -1
-			}
-			return 1
-		}
-		if a.sourcePVMatches != b.sourcePVMatches {
-			if a.sourcePVMatches > b.sourcePVMatches {
-				return -1
-			}
-			return 1
-		}
-		return strings.Compare(a.node.Name, b.node.Name)
-	})
+	slices.SortStableFunc(candidates, compareTargetNodeCandidates)
 	selected := candidates[0]
 	reasons := []string{"topology-compatible Ready node"}
 	if selected.capacityKnown > 0 {
@@ -630,6 +595,43 @@ func (p *Planner) selectTargetNode(ctx context.Context, plan *domain.MigrationPl
 	}
 	plan.AddCheck(passed("target-node-selection", fmt.Sprintf("auto selected target node %s (%s)", selected.node.Name, strings.Join(reasons, ", "))))
 	return selected.node
+}
+
+func compareTargetNodeCandidates(a, b targetNodeCandidate) int {
+	if a.capacityKnown != b.capacityKnown {
+		if a.capacityKnown > b.capacityKnown {
+			return -1
+		}
+		return 1
+	}
+	if a.capacityUnknown != b.capacityUnknown {
+		if a.capacityUnknown < b.capacityUnknown {
+			return -1
+		}
+		return 1
+	}
+	if comparison := a.capacitySurplus.Cmp(b.capacitySurplus); comparison != 0 {
+		return -comparison
+	}
+	if a.distinctFromSrc != b.distinctFromSrc {
+		if a.distinctFromSrc {
+			return -1
+		}
+		return 1
+	}
+	if a.taintPenalty != b.taintPenalty {
+		if a.taintPenalty < b.taintPenalty {
+			return -1
+		}
+		return 1
+	}
+	if a.sourcePVMatches != b.sourcePVMatches {
+		if a.sourcePVMatches > b.sourcePVMatches {
+			return -1
+		}
+		return 1
+	}
+	return strings.Compare(a.node.Name, b.node.Name)
 }
 
 func hardTaintCount(node *corev1.Node) int {

@@ -73,6 +73,48 @@ func TestStorageCapacityMissingObjectsFollowPolicy(t *testing.T) {
 	}
 }
 
+func TestStorageCapacityCheckRejectsMalformedDemandByPolicy(t *testing.T) {
+	node := &corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "node-b"}}
+	volume := plannedCapacityVolume("data", "fast", "broken")
+	for _, tt := range []struct {
+		name      string
+		mode      domain.CapacityAwareness
+		wantReady bool
+		severity  domain.CheckSeverity
+	}{
+		{name: "auto warning", mode: domain.CapacityAwarenessAuto, wantReady: true, severity: domain.SeverityWarning},
+		{name: "require error", mode: domain.CapacityAwarenessRequire, wantReady: false, severity: domain.SeverityError},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			plan := &domain.MigrationPlan{Ready: true}
+			New(nil, nil).checkStorageCapacity(plan, node, []domain.PlannedVolume{volume}, &storageCapacityInventory{mode: tt.mode}, tt.mode)
+			if plan.Ready != tt.wantReady || len(plan.Checks) != 1 || plan.Checks[0].Severity != tt.severity {
+				t.Fatalf("plan=%#v", plan)
+			}
+		})
+	}
+}
+
+func TestStorageCapacityCheckSortsMultipleStorageClassesAndKeepsReadyWarnings(t *testing.T) {
+	plan := &domain.MigrationPlan{Ready: true}
+	volumes := []domain.PlannedVolume{
+		plannedCapacityVolume("z-data", "z-class", "2Gi"),
+		plannedCapacityVolume("a-data", "a-class", "1Gi"),
+	}
+	inventory := &storageCapacityInventory{
+		mode:   domain.CapacityAwarenessAuto,
+		loaded: true,
+		items:  []storagev1.CSIStorageCapacity{*storageCapacityObject("z-capacity", "z-class", &metav1.LabelSelector{}, "4Gi", "4Gi")},
+	}
+	New(nil, nil).checkStorageCapacity(plan, &corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "node-b"}}, volumes, inventory, domain.CapacityAwarenessAuto)
+	if !plan.Ready || len(plan.StorageCapacity) != 2 || plan.StorageCapacity[0].StorageClass != "a-class" || plan.StorageCapacity[0].Status != domain.StorageCapacityUnknown || plan.StorageCapacity[1].Status != domain.StorageCapacitySufficient {
+		t.Fatalf("plan=%#v", plan)
+	}
+	if plan.Checks[0].Severity != domain.SeverityWarning || plan.Checks[1].Severity != domain.SeverityInfo {
+		t.Fatalf("checks=%#v", plan.Checks)
+	}
+}
+
 func TestStorageCapacityTopologyMismatchIsInsufficient(t *testing.T) {
 	node := &corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "node-b", Labels: map[string]string{"topology.kubernetes.io/zone": "zone-b"}}}
 	object := storageCapacityObject("zone-a", "fast", &metav1.LabelSelector{MatchLabels: map[string]string{"topology.kubernetes.io/zone": "zone-a"}}, "20Gi", "20Gi")
@@ -117,6 +159,17 @@ func TestStorageCapacityAggregatesPVCsWithoutSummingOverlappingReports(t *testin
 	}
 }
 
+func TestStorageCapacityDemandsRejectMalformedAndNonPositiveCapacity(t *testing.T) {
+	for _, value := range []string{"broken", "0", "-1Gi"} {
+		t.Run(value, func(t *testing.T) {
+			_, err := capacityDemands([]domain.PlannedVolume{plannedCapacityVolume("data", "fast", value)})
+			if err == nil || !strings.Contains(err.Error(), "capacity") {
+				t.Fatalf("value=%q error=%v", value, err)
+			}
+		})
+	}
+}
+
 func TestStorageCapacityTopologyNilAndInvalidRemainUnavailable(t *testing.T) {
 	tests := []struct {
 		name       string
@@ -139,6 +192,42 @@ func TestStorageCapacityTopologyNilAndInvalidRemainUnavailable(t *testing.T) {
 	}
 }
 
+func TestStorageCapacityEvaluationHandlesFallbackTopologyAndMultipleReports(t *testing.T) {
+	node := &corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "node-b"}}
+	objects := []runtime.Object{
+		storageCapacityObject("other-namespace", "other", &metav1.LabelSelector{}, "100Gi", "100Gi"),
+		storageCapacityObject("small", "fast", &metav1.LabelSelector{}, "2Gi", "10Gi"),
+		storageCapacityObject("large", "fast", &metav1.LabelSelector{}, "10Gi", "20Gi"),
+	}
+	objects[0].(*storagev1.CSIStorageCapacity).Namespace = "other"
+	objects[2].(*storagev1.CSIStorageCapacity).Namespace = "other"
+	inventory := New(plannerClient(objects...), nil).loadStorageCapacity(context.Background(), domain.CapacityAwarenessAuto)
+	evaluation := inventory.evaluate(node, capacityDemandFor("fast", "example.csi.io", "8Gi", "8Gi", 1))
+	if evaluation.report.Status != domain.StorageCapacitySufficient || evaluation.report.PublishedObjects != 2 || evaluation.report.MatchingObjects != 2 || evaluation.report.ReportedCapacity != "10Gi" || evaluation.report.MaximumVolumeSize != "20Gi" {
+		t.Fatalf("report=%#v", evaluation.report)
+	}
+
+	maxOnly := storageCapacityObject("max-only", "max-only", &metav1.LabelSelector{}, "", "8Gi")
+	maxOnlyInventory := New(plannerClient(maxOnly), nil).loadStorageCapacity(context.Background(), domain.CapacityAwarenessAuto)
+	maxOnlyEvaluation := maxOnlyInventory.evaluate(node, capacityDemandFor("max-only", "example.csi.io", "4Gi", "4Gi", 1))
+	if maxOnlyEvaluation.report.Status != domain.StorageCapacityUnknown || !strings.Contains(maxOnlyEvaluation.report.Message, "maximumVolumeSize=8Gi") {
+		t.Fatalf("max-only report=%#v", maxOnlyEvaluation.report)
+	}
+
+	maxTooSmall := storageCapacityObject("max-small", "max-small", &metav1.LabelSelector{}, "", "2Gi")
+	maxSmallInventory := New(plannerClient(maxTooSmall), nil).loadStorageCapacity(context.Background(), domain.CapacityAwarenessAuto)
+	maxSmallEvaluation := maxSmallInventory.evaluate(node, capacityDemandFor("max-small", "example.csi.io", "4Gi", "4Gi", 1))
+	if maxSmallEvaluation.report.Status != domain.StorageCapacityInsufficient || !strings.Contains(maxSmallEvaluation.report.Message, "maximumVolumeSize") {
+		t.Fatalf("max-small report=%#v", maxSmallEvaluation.report)
+	}
+
+	var nilInventory *storageCapacityInventory
+	nilEvaluation := nilInventory.evaluate(node, capacityDemandFor("fast", "example.csi.io", "1Gi", "1Gi", 1))
+	if nilEvaluation.report.Status != domain.StorageCapacityUnknown || nilEvaluation.report.Message != "CSIStorageCapacity lookup is unavailable" {
+		t.Fatalf("nil inventory report=%#v", nilEvaluation.report)
+	}
+}
+
 func TestStorageCapacityOffSkipsAPIRead(t *testing.T) {
 	client := kubernetesfake.NewClientset()
 	calls := 0
@@ -149,6 +238,119 @@ func TestStorageCapacityOffSkipsAPIRead(t *testing.T) {
 	inventory := New(client, nil).loadStorageCapacity(context.Background(), domain.CapacityAwarenessOff)
 	if calls != 0 || inventory.loaded || inventory.err != nil {
 		t.Fatalf("calls=%d inventory=%#v", calls, inventory)
+	}
+}
+
+func TestStorageCapacityScoreHandlesUnknownInsufficientAndDisabledInventories(t *testing.T) {
+	node := &corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "node-b"}}
+	volumes := []domain.PlannedVolume{plannedCapacityVolume("data", "fast", "4Gi")}
+	for _, tt := range []struct {
+		name                   string
+		inventory              *storageCapacityInventory
+		wantKnown, wantUnknown int
+		wantCompatible         bool
+	}{
+		{name: "nil inventory", inventory: nil, wantCompatible: true},
+		{name: "off", inventory: &storageCapacityInventory{mode: domain.CapacityAwarenessOff}, wantCompatible: true},
+		{name: "unloaded", inventory: &storageCapacityInventory{mode: domain.CapacityAwarenessAuto}, wantCompatible: true},
+		{name: "unknown object", inventory: &storageCapacityInventory{mode: domain.CapacityAwarenessAuto, loaded: true, items: []storagev1.CSIStorageCapacity{*storageCapacityObject("unknown", "fast", &metav1.LabelSelector{}, "", "4Gi")}}, wantUnknown: 1, wantCompatible: true},
+		{name: "insufficient object", inventory: &storageCapacityInventory{mode: domain.CapacityAwarenessAuto, loaded: true, items: []storagev1.CSIStorageCapacity{*storageCapacityObject("small", "fast", &metav1.LabelSelector{}, "1Gi", "4Gi")}}, wantCompatible: false},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			known, unknown, _, compatible := capacityScore(tt.inventory, node, volumes)
+			if known != tt.wantKnown || unknown != tt.wantUnknown || compatible != tt.wantCompatible {
+				t.Fatalf("score=(%d,%d,%t)", known, unknown, compatible)
+			}
+		})
+	}
+	badVolume := plannedCapacityVolume("bad", "fast", "broken")
+	known, unknown, _, compatible := capacityScore(&storageCapacityInventory{mode: domain.CapacityAwarenessAuto, loaded: true}, node, []domain.PlannedVolume{badVolume})
+	if known != 0 || unknown != 0 || !compatible {
+		t.Fatalf("invalid score=(%d,%d,%t)", known, unknown, compatible)
+	}
+}
+
+func TestSelectTargetNodeHandlesEmptyVolumesAndCapacityExhaustion(t *testing.T) {
+	emptyPlan := &domain.MigrationPlan{Ready: true}
+	if node := New(plannerClient(), nil).selectTargetNode(context.Background(), emptyPlan, domain.WorkloadSpec{}, nil, "", nil, nil, nil, nil); node != nil || emptyPlan.Ready || !hasFailedCheck(emptyPlan, "target-node") {
+		t.Fatalf("empty selection node=%v plan=%#v", node, emptyPlan)
+	}
+
+	nodes := []runtime.Object{
+		&corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "node-a", Labels: map[string]string{corev1.LabelHostname: "node-a"}}, Status: corev1.NodeStatus{Conditions: []corev1.NodeCondition{{Type: corev1.NodeReady, Status: corev1.ConditionTrue}}}},
+		&corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "node-b", Labels: map[string]string{corev1.LabelHostname: "node-b"}}, Status: corev1.NodeStatus{Conditions: []corev1.NodeCondition{{Type: corev1.NodeReady, Status: corev1.ConditionTrue}}}},
+		storageCapacityObject("node-a", "fast", &metav1.LabelSelector{MatchLabels: map[string]string{corev1.LabelHostname: "node-a"}}, "1Gi", "1Gi"),
+		storageCapacityObject("node-b", "fast", &metav1.LabelSelector{MatchLabels: map[string]string{corev1.LabelHostname: "node-b"}}, "1Gi", "1Gi"),
+	}
+	client := plannerClient(nodes...)
+	inventory := New(client, nil).loadStorageCapacity(context.Background(), domain.CapacityAwarenessAuto)
+	plan := &domain.MigrationPlan{Ready: true}
+	volume := plannedCapacityVolume("data", "fast", "2Gi")
+	if node := New(client, nil).selectTargetNode(context.Background(), plan, domain.WorkloadSpec{}, nil, "", []domain.PlannedVolume{volume}, nil, nil, inventory); node != nil || plan.Ready || !hasFailedCheck(plan, "target-node") || !strings.Contains(plan.Checks[len(plan.Checks)-1].Message, "sufficient CSI-reported capacity") {
+		t.Fatalf("exhausted selection node=%v plan=%#v", node, plan)
+	}
+}
+
+func TestCompareTargetNodeCandidatesUsesEveryPreference(t *testing.T) {
+	nodeA := &corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "node-a"}}
+	nodeB := &corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "node-b"}}
+	base := targetNodeCandidate{node: nodeA, capacitySurplus: resource.MustParse("1Gi")}
+	cases := []struct {
+		name string
+		a    targetNodeCandidate
+		b    targetNodeCandidate
+		want int
+	}{
+		{name: "known capacity descending", a: targetNodeCandidate{node: nodeA, capacityKnown: 2}, b: targetNodeCandidate{node: nodeB, capacityKnown: 1}, want: -1},
+		{name: "known capacity ascending", a: targetNodeCandidate{node: nodeA, capacityKnown: 1}, b: targetNodeCandidate{node: nodeB, capacityKnown: 2}, want: 1},
+		{name: "unknown count ascending", a: targetNodeCandidate{node: nodeA, capacityUnknown: 1}, b: targetNodeCandidate{node: nodeB, capacityUnknown: 2}, want: -1},
+		{name: "unknown count descending", a: targetNodeCandidate{node: nodeA, capacityUnknown: 2}, b: targetNodeCandidate{node: nodeB, capacityUnknown: 1}, want: 1},
+		{name: "surplus descending", a: targetNodeCandidate{node: nodeA, capacitySurplus: resource.MustParse("2Gi")}, b: targetNodeCandidate{node: nodeB, capacitySurplus: resource.MustParse("1Gi")}, want: -1},
+		{name: "distinct first", a: targetNodeCandidate{node: nodeA, distinctFromSrc: true}, b: targetNodeCandidate{node: nodeB}, want: -1},
+		{name: "fewer taints first", a: targetNodeCandidate{node: nodeA, taintPenalty: 0}, b: targetNodeCandidate{node: nodeB, taintPenalty: 1}, want: -1},
+		{name: "more source PV matches first", a: targetNodeCandidate{node: nodeA, sourcePVMatches: 2}, b: targetNodeCandidate{node: nodeB, sourcePVMatches: 1}, want: -1},
+		{name: "name tie break", a: targetNodeCandidate{node: nodeB}, b: targetNodeCandidate{node: nodeA}, want: 1},
+	}
+	for _, tt := range cases {
+		t.Run(tt.name, func(t *testing.T) {
+			got := compareTargetNodeCandidates(tt.a, tt.b)
+			if (got < 0 && tt.want >= 0) || (got > 0 && tt.want <= 0) || (got == 0 && tt.want != 0) {
+				t.Fatalf("compare=%d want sign %d", got, tt.want)
+			}
+		})
+	}
+	if got := compareTargetNodeCandidates(base, base); got != 0 {
+		t.Fatalf("identical candidates compare=%d", got)
+	}
+}
+
+func TestSelectTargetNodeHandlesNodeListFailureAndSourceReasons(t *testing.T) {
+	volume := plannedCapacityVolume("data", "fast", "1Gi")
+	failingClient := plannerClient()
+	failingClient.PrependReactor("list", "nodes", func(clienttesting.Action) (bool, runtime.Object, error) {
+		return true, nil, errors.New("node list unavailable")
+	})
+	failingPlan := &domain.MigrationPlan{Ready: true}
+	if node := New(failingClient, nil).selectTargetNode(context.Background(), failingPlan, domain.WorkloadSpec{}, nil, "", []domain.PlannedVolume{volume}, nil, nil, nil); node != nil || failingPlan.Ready || !strings.Contains(failingPlan.Checks[0].Message, "node list unavailable") {
+		t.Fatalf("failure node=%v plan=%#v", node, failingPlan)
+	}
+
+	objects := []runtime.Object{
+		&corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "node-a", Labels: map[string]string{corev1.LabelHostname: "node-a"}}, Status: corev1.NodeStatus{Conditions: []corev1.NodeCondition{{Type: corev1.NodeReady, Status: corev1.ConditionTrue}}}},
+		&corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "node-b", Labels: map[string]string{corev1.LabelHostname: "node-b"}}, Status: corev1.NodeStatus{Conditions: []corev1.NodeCondition{{Type: corev1.NodeReady, Status: corev1.ConditionTrue}}}},
+	}
+	client := plannerClient(objects...)
+	distinctPlan := &domain.MigrationPlan{Ready: true}
+	selected := New(client, nil).selectTargetNode(context.Background(), distinctPlan, domain.WorkloadSpec{}, nil, "node-a", []domain.PlannedVolume{volume}, nil, nil, nil)
+	if selected == nil || selected.Name != "node-b" || !strings.Contains(distinctPlan.Checks[0].Message, "distinct from source node-a") {
+		t.Fatalf("distinct selection=%v plan=%#v", selected, distinctPlan)
+	}
+
+	onlyClient := plannerClient(objects[0])
+	onlyPlan := &domain.MigrationPlan{Ready: true}
+	selected = New(onlyClient, nil).selectTargetNode(context.Background(), onlyPlan, domain.WorkloadSpec{}, nil, "node-a", []domain.PlannedVolume{volume}, nil, nil, nil)
+	if selected == nil || selected.Name != "node-a" || !strings.Contains(onlyPlan.Checks[0].Message, "only compatible node") {
+		t.Fatalf("only selection=%v plan=%#v", selected, onlyPlan)
 	}
 }
 
