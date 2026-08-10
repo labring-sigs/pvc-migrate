@@ -122,7 +122,7 @@ func (p *Planner) PlanRename(ctx context.Context, options RenameOptions) (*domai
 	} else {
 		plan.AddCheck(passed("destination-pvc", fmt.Sprintf("destination identity %s/%s is available", options.DestinationNamespace, options.DestinationPVC)))
 	}
-	p.checkPVCReferences(ctx, plan, pvc, nil, domain.OperationMigrate, false)
+	p.checkPVCReferences(ctx, plan, pvc, nil, domain.OperationRename, false)
 	if len(pvc.OwnerReferences) > 0 {
 		plan.AddCheck(failed("pvc-ownership", "PVC identity changes require a PVC without ownerReferences because its controller may recreate the source name"))
 	}

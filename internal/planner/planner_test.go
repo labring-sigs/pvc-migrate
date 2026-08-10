@@ -128,6 +128,67 @@ func TestCopySupportsOfflineAndOnlineModesAcrossNamespaces(t *testing.T) {
 	}
 }
 
+func TestMigrateWithoutPodRejectsActiveConsumers(t *testing.T) {
+	objects := append(plannerObjects("2Gi"),
+		&corev1.Pod{
+			ObjectMeta: metav1.ObjectMeta{Namespace: "app", Name: "writer"},
+			Spec: corev1.PodSpec{
+				NodeName: "node-b",
+				Volumes: []corev1.Volume{{Name: "data", VolumeSource: corev1.VolumeSource{
+					PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: "data"},
+				}}},
+			},
+			Status: corev1.PodStatus{Phase: corev1.PodRunning},
+		},
+	)
+	plan, err := New(plannerClient(objects...), nil).Plan(context.Background(), Options{
+		Operation:          domain.OperationMigrate,
+		SessionID:          "migration",
+		SourceNamespace:    "app",
+		TemporaryNamespace: "system",
+		StagingNamespace:   "system",
+		SessionNamespace:   "system",
+		SourcePVCs:         []string{"data"},
+		TargetNode:         "node-b",
+		DestinationClass:   "fast",
+		Strategies:         []string{"mount"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if plan.Ready || !hasFailedCheck(plan, "controller-adapter") {
+		t.Fatalf("active PVC-only migration should fail: %#v", plan.Checks)
+	}
+	if hasWarningCheck(plan, "pvc-consumers") {
+		t.Fatalf("PVC-only migration should not suggest warm copy after preflight failure: %#v", plan.Checks)
+	}
+	for _, check := range plan.Checks {
+		if check.Name == "controller-adapter" && !check.Passed && !strings.Contains(check.Message, "--pod") {
+			t.Fatalf("consumer failure should explain the actionable workload selection: %q", check.Message)
+		}
+	}
+
+	offline := objects[:len(objects)-1]
+	plan, err = New(plannerClient(offline...), nil).Plan(context.Background(), Options{
+		Operation:          domain.OperationMigrate,
+		SessionID:          "offline-migration",
+		SourceNamespace:    "app",
+		TemporaryNamespace: "system",
+		StagingNamespace:   "system",
+		SessionNamespace:   "system",
+		SourcePVCs:         []string{"data"},
+		TargetNode:         "node-b",
+		DestinationClass:   "fast",
+		Strategies:         []string{"clusterip"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !plan.Ready {
+		t.Fatalf("offline PVC-only migration should remain supported: %#v", plan.Checks)
+	}
+}
+
 func TestPlanFiltersImpossibleMountStrategyAcrossNamespaces(t *testing.T) {
 	objects := plannerObjects("2Gi")
 	objects = append(objects, &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "archive"}})
