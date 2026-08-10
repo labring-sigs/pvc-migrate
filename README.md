@@ -52,7 +52,7 @@ Every mutating command defaults to `--dry-run=true`. Execution requires an expli
 
 ### 1. Plan
 
-Inspect the Pod, PVCs, target node, storage topology, permissions, quotas, consumers, and workload adapter:
+Inspect the Pod, automatically selected target node, storage topology, permissions, quotas, consumers, and workload adapter:
 
 ```bash
 pvc-migrate \
@@ -64,7 +64,6 @@ pvc-migrate \
   --source-namespace application \
   --temporary-namespace pvc-migrate-system \
   --pod database-1 \
-  --target-node worker-b \
   --destination-storage-class fast-local
 ```
 
@@ -83,7 +82,6 @@ pvc-migrate \
   --source-namespace application \
   --temporary-namespace pvc-migrate-system \
   --pod database-1 \
-  --target-node worker-b \
   --destination-storage-class fast-local \
   --precopy-passes 1 \
   --verify-checksum \
@@ -195,7 +193,7 @@ Stable exit codes are validation `2`, precondition `3`, conflict `4`, Kubernetes
 
 The default `copy` mode requires zero active Pod consumers. `copy --online` allows active consumers for one finite warm-copy pass. Both modes finish after data copy and leave application PVC identities unchanged. `migrate` and `migrate-pod` provide managed final sync and cutover.
 
-The planner infers the source helper node from active consumers. `--source-node` supplies an explicit node when the storage backend requires one. RWOP consumers and consumers spread across multiple nodes require separate sessions or an application-specific workflow.
+The planner infers the source helper node from active consumers and selects a Ready, schedulable target node that satisfies Pod scheduling and StorageClass topology. `--target-node` accepts a node name or `auto`; `auto` is the default and prefers a node different from the source when the workload and storage topology allow it. `--source-node` supplies an explicit node when the storage backend requires one. RWOP consumers and consumers spread across multiple nodes require separate sessions or an application-specific workflow.
 
 ```bash
 pvc-migrate copy --dry-run=false \

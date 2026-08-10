@@ -3,7 +3,7 @@
 ## Before A Migration
 
 1. Confirm recent application-level backups and a tested restore procedure.
-2. Confirm source and destination StorageClasses, target node, available backend capacity, and image registry access.
+2. Confirm source and destination StorageClasses, available backend capacity, and image registry access. The planner selects a compatible target node automatically; pass `--target-node` to pin one.
 3. Confirm the session and temporary namespaces exist or allow the CLI to create them.
 4. Run the operation-specific plan, such as `migrate-pod plan -o yaml`, and resolve every error check. Review warnings for active writers, roles, CSINode registration, and NetworkPolicies.
 5. Run the write command with its local `--dry-run=true` default to exercise API reads and server-side validation without persistent resources. Add `--dry-run=false` to the approved execution.
@@ -144,7 +144,7 @@ For a WFFC destination stuck in Pending:
 
 The copy engine tries configured strategies in order through upstream pv-migrate. `clusterip` requires policy and network reachability between source and staging namespaces. Node-local RWO volumes generally need source and destination helpers on their respective nodes.
 
-`copy` defaults to an offline pass and requires zero active Pod consumers. Use `copy --online` for one finite warm pass with file-level consistency while consumers keep running. `--destination-storage-class`, `--target-node`, and `--source-node` control the destination class and helper placement; the source node is inferred from a unique active consumer when possible. Cross-namespace copy defaults the destination PVC name to the source name.
+`copy` defaults to an offline pass and requires zero active Pod consumers. Use `copy --online` for one finite warm pass with file-level consistency while consumers keep running. `--destination-storage-class`, `--target-node`, and `--source-node` control the destination class and helper placement; `--target-node` defaults to `auto`, which selects a compatible Ready node and prefers a node different from the source. The source node is inferred from a unique active consumer when possible. Cross-namespace copy defaults the destination PVC name to the source name.
 
 Inspect Helm-owned Jobs, Deployments, Services, and Pods carrying the operation ID from structured logs. The application service increments and persists copy attempts before each call. A later resume performs another incremental pass.
 

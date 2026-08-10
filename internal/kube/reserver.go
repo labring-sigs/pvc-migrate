@@ -128,7 +128,7 @@ func (r *Reserver) ReserveVolume(ctx context.Context, session *domain.Session, v
 		if nodeErr != nil {
 			return domain.WrapError(domain.ErrorKubernetes, "reserve volume", "read target node for PV topology", nodeErr)
 		}
-		if !pvSupportsNode(pv, node) {
+		if !PVSupportsNode(pv, node) {
 			return domain.NewError(domain.ErrorPrecondition, "reserve volume", fmt.Sprintf("destination PV %s topology excludes target node %s", pv.Name, node.Name))
 		}
 	}
@@ -352,7 +352,8 @@ func isPodReady(pod *corev1.Pod) bool {
 	return false
 }
 
-func pvSupportsNode(pv *corev1.PersistentVolume, node *corev1.Node) bool {
+// PVSupportsNode reports whether a PV's required node affinity permits a node.
+func PVSupportsNode(pv *corev1.PersistentVolume, node *corev1.Node) bool {
 	if pv.Spec.NodeAffinity == nil || pv.Spec.NodeAffinity.Required == nil || len(pv.Spec.NodeAffinity.Required.NodeSelectorTerms) == 0 {
 		return true
 	}

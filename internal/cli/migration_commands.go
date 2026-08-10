@@ -41,9 +41,9 @@ func (f *migrationFlags) bind(command *cobra.Command, includePod, includeSourceN
 	if includeSourceNode {
 		flags.StringVar(&f.sourceNode, "source-node", "", "Source helper node; inferred from active consumers when possible")
 	}
-	flags.StringVar(&f.targetNode, "target-node", "", "Target node for provisioning and copy helpers")
+	flags.StringVar(&f.targetNode, "target-node", "auto", "Target node for provisioning and copy helpers; auto selects a compatible Ready node")
 	flags.StringVar(&f.destinationClass, "destination-storage-class", "", "Destination StorageClass; defaults to each source class")
-	flags.StringSliceVar(&f.strategies, "strategy", []string{"mount", "clusterip"}, "pv-migrate strategy order")
+	flags.StringSliceVar(&f.strategies, "strategy", []string{"auto"}, "pv-migrate strategy order; auto selects a topology-compatible order")
 	flags.BoolVar(&f.verifyChecksum, "verify-checksum", true, "Use rsync checksum comparison during final sync")
 	flags.BoolVar(&f.deleteExtraneous, "delete-extraneous", true, "Delete destination files absent from the source")
 	if includePrecopy {

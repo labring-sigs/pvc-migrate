@@ -72,7 +72,7 @@ This model gives crash consistency at the final filesystem state. Database-level
 
 ## Storage Reservation And Topology
 
-The planner checks target node readiness, Pod node selectors, required affinity, taints, StorageClass topology, and CSINode registration signals. Reservation creates a real destination PVC before downtime, which consumes namespace quota and tests backend provisioning.
+The planner selects a target node automatically when `--target-node` is `auto` (the default). Selection considers Ready and schedulable state, Pod node selectors and required affinity, migration-hard scheduling constraints, taints, and every destination StorageClass topology; a pinned node receives the same checks. Reservation creates a real destination PVC before downtime, which consumes namespace quota and tests backend provisioning.
 
 For `WaitForFirstConsumer`, a short-lived consumer Pod uses the target hostname and generated tolerations for target-node `NoSchedule` and `NoExecute` taints. The reserver waits for Pod readiness and a Bound PVC, records the PV UID and selected node, changes the PV to `Retain`, and removes the consumer. Generated tolerations remain limited to helper resources.
 

@@ -76,8 +76,8 @@ func TestPVSupportsNodeChecksRequiredTopology(t *testing.T) {
 	pv := &corev1.PersistentVolume{Spec: corev1.PersistentVolumeSpec{NodeAffinity: &corev1.VolumeNodeAffinity{Required: &corev1.NodeSelector{NodeSelectorTerms: []corev1.NodeSelectorTerm{{MatchExpressions: []corev1.NodeSelectorRequirement{{Key: "topology.kubernetes.io/zone", Operator: corev1.NodeSelectorOpIn, Values: []string{"zone-b"}}}}}}}}}
 	matching := &corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "node-b", Labels: map[string]string{"topology.kubernetes.io/zone": "zone-b"}}}
 	other := &corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "node-a", Labels: map[string]string{"topology.kubernetes.io/zone": "zone-a"}}}
-	if !pvSupportsNode(pv, matching) || pvSupportsNode(pv, other) {
-		t.Fatalf("topology matching=%t other=%t", pvSupportsNode(pv, matching), pvSupportsNode(pv, other))
+	if !PVSupportsNode(pv, matching) || PVSupportsNode(pv, other) {
+		t.Fatalf("topology matching=%t other=%t", PVSupportsNode(pv, matching), PVSupportsNode(pv, other))
 	}
 }
 

@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"maps"
+	"slices"
 	"sort"
 	"strings"
 
@@ -52,7 +53,12 @@ func New(client kubernetes.Interface, controllers *controller.Manager) *Planner 
 }
 
 func (p *Planner) Plan(ctx context.Context, options Options) (*domain.MigrationPlan, error) {
+	autoStrategyRequested := len(options.Strategies) == 0 || (len(options.Strategies) == 1 && containsStrategy(options.Strategies, "auto"))
+	autoTargetNodeRequested := isAutoNode(options.TargetNode)
 	options = applyDefaults(options)
+	if autoTargetNodeRequested {
+		options.TargetNode = ""
+	}
 	plan := &domain.MigrationPlan{
 		APIVersion:           domain.SessionAPIVersion,
 		Kind:                 "MigrationPlan",
@@ -163,9 +169,6 @@ func (p *Planner) Plan(ctx context.Context, options Options) (*domain.MigrationP
 	}
 	plan.Workload = workload
 
-	if options.TargetNode == "" {
-		plan.AddCheck(failed("target-node", "target node is required for deterministic provisioning and topology checks"))
-	}
 	var targetNode *corev1.Node
 	if options.TargetNode != "" {
 		node, err := p.client.CoreV1().Nodes().Get(ctx, options.TargetNode, metav1.GetOptions{})
@@ -178,14 +181,7 @@ func (p *Planner) Plan(ctx context.Context, options Options) (*domain.MigrationP
 			} else {
 				plan.AddCheck(passed("target-node", fmt.Sprintf("node %s is Ready and schedulable", node.Name)))
 			}
-			if sourcePod != nil {
-				issues := schedulingIssues(sourcePod.Spec, node)
-				if len(issues) > 0 {
-					plan.AddCheck(failed("pod-scheduling", strings.Join(issues, "; ")))
-				} else {
-					plan.AddCheck(passed("pod-scheduling", "target node satisfies nodeSelector, required nodeAffinity, and taints"))
-				}
-			}
+			p.checkPodTargetScheduling(plan, sourcePod, workload, node)
 		}
 	}
 	if len(options.DestinationPVCs) > 0 && len(options.DestinationPVCs) != len(pvcNames) {
@@ -200,6 +196,8 @@ func (p *Planner) Plan(ctx context.Context, options Options) (*domain.MigrationP
 	podsLoaded := false
 	storageClasses := make(map[string]*storagev1.StorageClass)
 	storageClassErrors := make(map[string]error)
+	sourcePVs := make(map[string]*corev1.PersistentVolume)
+	mountTopologyConflict := ""
 	totalStorage := resource.MustParse("0")
 	storageByClass := map[string]resource.Quantity{}
 	pvcsByClass := map[string]int{}
@@ -228,6 +226,7 @@ func (p *Planner) Plan(ctx context.Context, options Options) (*domain.MigrationP
 			plan.AddCheck(failed("source-pv", fmt.Sprintf("read PV %s: %v", pvc.Spec.VolumeName, err)))
 			continue
 		}
+		sourcePVs[pv.Name] = pv
 		capacity, ok := pv.Spec.Capacity[corev1.ResourceStorage]
 		if !ok || capacity.Sign() <= 0 {
 			plan.AddCheck(failed("capacity", fmt.Sprintf("PV %s has no positive storage capacity", pv.Name)))
@@ -262,14 +261,6 @@ func (p *Planner) Plan(ctx context.Context, options Options) (*domain.MigrationP
 		bindingMode := storagev1.VolumeBindingImmediate
 		if sc.VolumeBindingMode != nil {
 			bindingMode = *sc.VolumeBindingMode
-		}
-		if targetNode != nil && !matchesAllowedTopologies(sc, targetNode) {
-			plan.AddCheck(failed("storage-topology", fmt.Sprintf("node %s does not satisfy StorageClass %s allowedTopologies", targetNode.Name, sc.Name)))
-		} else {
-			plan.AddCheck(passed("storage-topology", fmt.Sprintf("StorageClass %s bindingMode=%s topology is compatible", sc.Name, bindingMode)))
-		}
-		if targetNode != nil {
-			p.checkCSINode(ctx, plan, sc, targetNode)
 		}
 		classQuantity := storageByClass[destinationClass]
 		classQuantity.Add(capacity)
@@ -336,6 +327,32 @@ func (p *Planner) Plan(ctx context.Context, options Options) (*domain.MigrationP
 	}
 	if options.Operation == domain.OperationCopy && options.Online && sourcePod == nil {
 		options.SourceNode = inferOnlineCopySourceNode(plan, options.SourceNode, copyConsumerNodes)
+	}
+	if autoTargetNodeRequested {
+		targetNode = p.selectTargetNode(ctx, plan, workload, sourcePod, options.SourceNode, plannedVolumes, sourcePVs, storageClasses)
+		if targetNode != nil {
+			options.TargetNode = targetNode.Name
+			plan.TargetNode = targetNode.Name
+			p.checkPodTargetScheduling(plan, sourcePod, workload, targetNode)
+		}
+	}
+	if targetNode != nil {
+		for _, volume := range plannedVolumes {
+			pv := sourcePVs[volume.SourcePV.Name]
+			if pv != nil && !kube.PVSupportsNode(pv, targetNode) && mountTopologyConflict == "" {
+				mountTopologyConflict = fmt.Sprintf("source PV %s node affinity excludes target node %s", pv.Name, targetNode.Name)
+			}
+			sc := storageClasses[volume.StorageClass]
+			if sc == nil {
+				continue
+			}
+			if !matchesAllowedTopologies(sc, targetNode) {
+				plan.AddCheck(failed("storage-topology", fmt.Sprintf("node %s does not satisfy StorageClass %s allowedTopologies", targetNode.Name, sc.Name)))
+			} else {
+				plan.AddCheck(passed("storage-topology", fmt.Sprintf("StorageClass %s bindingMode=%s topology is compatible", sc.Name, volume.BindingMode)))
+			}
+			p.checkCSINode(ctx, plan, sc, targetNode)
+		}
 	}
 	if options.SourceNode != "" {
 		node, err := p.client.CoreV1().Nodes().Get(ctx, options.SourceNode, metav1.GetOptions{})
@@ -407,6 +424,14 @@ func (p *Planner) Plan(ctx context.Context, options Options) (*domain.MigrationP
 			}
 		}
 	}
+	options.Strategies = filterStrategies(plan, options, mountTopologyConflict)
+	if len(options.Strategies) == 0 {
+		plan.AddCheck(failed("strategy", "no selected pv-migrate strategy can handle the requested source and destination"))
+	} else if autoStrategyRequested {
+		plan.AddCheck(passed("strategy-selection", fmt.Sprintf("auto selected strategy order: %s", strings.Join(options.Strategies, ","))))
+	}
+	plan.SourceNode = options.SourceNode
+	plan.Strategies = slices.Clone(options.Strategies)
 	plan.SessionSpec = domain.NewSessionSpec(options.Operation, domain.SessionCommon{
 		SourceNamespace:      options.SourceNamespace,
 		TemporaryNamespace:   options.TemporaryNamespace,
@@ -449,10 +474,176 @@ func applyDefaults(options Options) Options {
 	if options.ToolImage == "" {
 		options.ToolImage = kube.DefaultToolImageRepository + ":main"
 	}
-	if len(options.Strategies) == 0 {
-		options.Strategies = []string{"mount", "clusterip"}
+	if len(options.Strategies) == 0 || (len(options.Strategies) == 1 && containsStrategy(options.Strategies, "auto")) {
+		options.Strategies = autoStrategies(options.SourceNamespace, options.StagingNamespace)
 	}
 	return options
+}
+
+func isAutoNode(value string) bool {
+	return value == "" || strings.EqualFold(value, "auto")
+}
+
+func (p *Planner) checkPodTargetScheduling(plan *domain.MigrationPlan, sourcePod *corev1.Pod, workload domain.WorkloadSpec, node *corev1.Node) {
+	if sourcePod == nil {
+		return
+	}
+	schedulingSpec := sourcePod.Spec
+	if workload.Adapter == domain.WorkloadStandalone {
+		schedulingSpec = *sourcePod.Spec.DeepCopy()
+		if hostname := schedulingSpec.NodeSelector[corev1.LabelHostname]; hostname != "" && hostname != node.Labels[corev1.LabelHostname] {
+			delete(schedulingSpec.NodeSelector, corev1.LabelHostname)
+			plan.AddCheck(warned("pod-scheduling", fmt.Sprintf("standalone Pod hostname selector %s will be replaced with target hostname %s", hostname, node.Labels[corev1.LabelHostname])))
+		}
+	}
+	issues := schedulingIssues(schedulingSpec, node)
+	if len(issues) > 0 {
+		plan.AddCheck(failed("pod-scheduling", strings.Join(issues, "; ")))
+	} else {
+		plan.AddCheck(passed("pod-scheduling", "target node satisfies nodeSelector, required nodeAffinity, and taints"))
+	}
+}
+
+type targetNodeCandidate struct {
+	node            *corev1.Node
+	distinctFromSrc bool
+	taintPenalty    int
+	sourcePVMatches int
+}
+
+func (p *Planner) selectTargetNode(ctx context.Context, plan *domain.MigrationPlan, workload domain.WorkloadSpec, sourcePod *corev1.Pod, sourceNode string, volumes []domain.PlannedVolume, sourcePVs map[string]*corev1.PersistentVolume, storageClasses map[string]*storagev1.StorageClass) *corev1.Node {
+	if len(volumes) == 0 {
+		plan.AddCheck(failed("target-node", "target node auto-selection requires at least one valid source PVC"))
+		return nil
+	}
+	nodes, err := p.client.CoreV1().Nodes().List(ctx, metav1.ListOptions{})
+	if err != nil {
+		plan.AddCheck(failed("target-node", fmt.Sprintf("list nodes for auto-selection: %v", err)))
+		return nil
+	}
+	candidates := make([]targetNodeCandidate, 0, len(nodes.Items))
+	for i := range nodes.Items {
+		node := &nodes.Items[i]
+		if !nodeReady(node) || node.Spec.Unschedulable {
+			continue
+		}
+		if sourcePod != nil && len(schedulingIssuesForTarget(sourcePod, workload, node)) > 0 {
+			continue
+		}
+		if sourcePod != nil && len(podMigrationIssues(sourcePod.Spec, sourceNode, node.Name)) > 0 {
+			continue
+		}
+		compatible := true
+		sourcePVMatches := 0
+		for _, volume := range volumes {
+			if sc := storageClasses[volume.StorageClass]; sc != nil && !matchesAllowedTopologies(sc, node) {
+				compatible = false
+				break
+			}
+			if pv := sourcePVs[volume.SourcePV.Name]; pv != nil && kube.PVSupportsNode(pv, node) {
+				sourcePVMatches++
+			}
+		}
+		if !compatible {
+			continue
+		}
+		candidates = append(candidates, targetNodeCandidate{node: node, distinctFromSrc: sourceNode == "" || node.Name != sourceNode, taintPenalty: hardTaintCount(node), sourcePVMatches: sourcePVMatches})
+	}
+	if len(candidates) == 0 {
+		plan.AddCheck(failed("target-node", "no Ready and schedulable node satisfies Pod scheduling and destination StorageClass topology"))
+		return nil
+	}
+	slices.SortStableFunc(candidates, func(a, b targetNodeCandidate) int {
+		if a.distinctFromSrc != b.distinctFromSrc {
+			if a.distinctFromSrc {
+				return -1
+			}
+			return 1
+		}
+		if a.taintPenalty != b.taintPenalty {
+			if a.taintPenalty < b.taintPenalty {
+				return -1
+			}
+			return 1
+		}
+		if a.sourcePVMatches != b.sourcePVMatches {
+			if a.sourcePVMatches > b.sourcePVMatches {
+				return -1
+			}
+			return 1
+		}
+		return strings.Compare(a.node.Name, b.node.Name)
+	})
+	selected := candidates[0]
+	reason := "topology-compatible Ready node"
+	if sourceNode != "" {
+		switch {
+		case selected.node.Name != sourceNode:
+			reason = fmt.Sprintf("topology-compatible Ready node distinct from source %s", sourceNode)
+		case len(candidates) == 1:
+			reason = fmt.Sprintf("only compatible Ready node; source node %s is retained", sourceNode)
+		}
+	}
+	plan.AddCheck(passed("target-node-selection", fmt.Sprintf("auto selected target node %s (%s)", selected.node.Name, reason)))
+	return selected.node
+}
+
+func hardTaintCount(node *corev1.Node) int {
+	count := 0
+	for _, taint := range node.Spec.Taints {
+		if taint.Effect == corev1.TaintEffectNoSchedule || taint.Effect == corev1.TaintEffectNoExecute {
+			count++
+		}
+	}
+	return count
+}
+
+func schedulingIssuesForTarget(sourcePod *corev1.Pod, workload domain.WorkloadSpec, node *corev1.Node) []string {
+	spec := sourcePod.Spec
+	if workload.Adapter == domain.WorkloadStandalone {
+		spec = *sourcePod.Spec.DeepCopy()
+		if hostname := spec.NodeSelector[corev1.LabelHostname]; hostname != "" && hostname != node.Labels[corev1.LabelHostname] {
+			delete(spec.NodeSelector, corev1.LabelHostname)
+		}
+	}
+	return schedulingIssues(spec, node)
+}
+
+func containsStrategy(strategies []string, wanted string) bool {
+	for _, strategy := range strategies {
+		if strategy == wanted {
+			return true
+		}
+	}
+	return false
+}
+
+func autoStrategies(sourceNamespace, destinationNamespace string) []string {
+	if sourceNamespace == destinationNamespace {
+		return []string{"mount", "clusterip"}
+	}
+	return []string{"clusterip", "local"}
+}
+
+// filterStrategies removes constraints that are deterministically known from
+// the Kubernetes inventory before a helper resource is created. A fallback
+// strategy remains valid when one earlier strategy cannot handle the topology.
+func filterStrategies(plan *domain.MigrationPlan, options Options, mountTopologyConflict string) []string {
+	filtered := make([]string, 0, len(options.Strategies))
+	for _, strategy := range options.Strategies {
+		if strategy == "mount" {
+			switch {
+			case options.SourceNamespace != options.StagingNamespace:
+				plan.AddCheck(warned("strategy", "mount skipped: source and destination PVCs are in different namespaces; use clusterip or local"))
+				continue
+			case mountTopologyConflict != "":
+				plan.AddCheck(warned("strategy", "mount skipped: "+mountTopologyConflict+"; use clusterip, nodeport, loadbalancer, or local"))
+				continue
+			}
+		}
+		filtered = append(filtered, strategy)
+	}
+	return filtered
 }
 
 func supportedStrategy(strategy string) bool {

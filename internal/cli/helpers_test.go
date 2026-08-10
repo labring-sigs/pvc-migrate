@@ -140,7 +140,8 @@ func TestMigrationFlagDefaultsAndPlanOptions(t *testing.T) {
 	for name, want := range map[string]string{
 		"source-namespace":    "default",
 		"temporary-namespace": "pvc-migrate-system",
-		"strategy":            "[mount,clusterip]",
+		"target-node":         "auto",
+		"strategy":            "[auto]",
 		"verify-checksum":     "true",
 		"delete-extraneous":   "true",
 		"precopy-passes":      "1",

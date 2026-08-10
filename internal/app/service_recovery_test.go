@@ -1511,6 +1511,64 @@ func TestDryRunRecoveryValidationUsesReadOnlyChecks(t *testing.T) {
 	}
 }
 
+func TestDryRunResumeFromActivatedAcceptsPausedStandalonePod(t *testing.T) {
+	fixture := newRecoveryFixture(t)
+	session := appTestSession()
+	setSessionOperation(session, domain.OperationMigrate)
+	session.Status.Phase = domain.PhaseActivated
+	_ = session.Spec.SetWorkload(domain.WorkloadSpec{
+		Adapter: domain.WorkloadStandalone,
+		Pod:     domain.ObjectReference{Namespace: "app", Name: "application"},
+	})
+	session.Spec.WorkflowOptionsPtr().TargetNode = "target-node"
+	session.Spec.Volumes[0].DestinationPV = domain.ObjectReference{Name: "pv-destination", UID: types.UID("destination-pv-uid")}
+	session.Status.Volumes[0].Activation.ActivePVC = domain.ObjectReference{Namespace: "app", Name: "data", UID: types.UID("active-pvc-uid")}
+	_, err := fixture.client.CoreV1().PersistentVolumeClaims("app").Create(context.Background(), &corev1.PersistentVolumeClaim{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "app", Name: "data", UID: types.UID("active-pvc-uid"), Annotations: map[string]string{kube.SessionAnnotation: session.ID}},
+		Spec:       corev1.PersistentVolumeClaimSpec{VolumeName: "pv-destination"},
+		Status:     corev1.PersistentVolumeClaimStatus{Phase: corev1.ClaimBound},
+	}, metav1.CreateOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = fixture.client.CoreV1().PersistentVolumes().Create(context.Background(), &corev1.PersistentVolume{
+		ObjectMeta: metav1.ObjectMeta{Name: "pv-destination", UID: types.UID("destination-pv-uid")},
+		Spec: corev1.PersistentVolumeSpec{ClaimRef: &corev1.ObjectReference{
+			Namespace: "app", Name: "data", UID: types.UID("active-pvc-uid"),
+		}},
+	}, metav1.CreateOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	node, err := fixture.client.CoreV1().Nodes().Get(context.Background(), "target-node", metav1.GetOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	node.Status.Conditions = []corev1.NodeCondition{{Type: corev1.NodeReady, Status: corev1.ConditionTrue}}
+	if _, err := fixture.client.CoreV1().Nodes().UpdateStatus(context.Background(), node, metav1.UpdateOptions{}); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := fixture.service.ValidateResume(context.Background(), session); err != nil {
+		t.Fatal(err)
+	}
+	if fixture.controller.verifies != 1 || fixture.controller.resumes != 0 || fixture.store.updates != 0 {
+		t.Fatalf("dry-run side effects: verifies=%d resumes=%d updates=%d", fixture.controller.verifies, fixture.controller.resumes, fixture.store.updates)
+	}
+
+	node, err = fixture.client.CoreV1().Nodes().Get(context.Background(), "target-node", metav1.GetOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	node.Spec.Unschedulable = true
+	if _, err := fixture.client.CoreV1().Nodes().Update(context.Background(), node, metav1.UpdateOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	if err := fixture.service.ValidateResume(context.Background(), session); domain.CategoryOf(err) != domain.ErrorPrecondition {
+		t.Fatalf("unschedulable target category=%s error=%v", domain.CategoryOf(err), err)
+	}
+}
+
 func TestDryRunRollbackRejectsUnactivatedSession(t *testing.T) {
 	fixture := newRecoveryFixture(t)
 	session := appTestSession()

@@ -134,6 +134,72 @@ func TestCleanupAbortedSessionSkipsReplacedSourceResources(t *testing.T) {
 	}
 }
 
+func TestCleanupAbortedCopyBeforeReservePreservesUnownedSourcePV(t *testing.T) {
+	ctx := context.Background()
+	session := appTestSession()
+	setSessionOperation(session, domain.OperationCopy)
+	session.Status.Phase = domain.PhaseAborted
+	client := fake.NewClientset(
+		&corev1.PersistentVolumeClaim{ObjectMeta: metav1.ObjectMeta{
+			Namespace: "app", Name: "data", UID: types.UID("source-pvc-uid"),
+		}},
+		&corev1.PersistentVolume{ObjectMeta: metav1.ObjectMeta{
+			Name: "pv-source", UID: types.UID("source-pv-uid"),
+		}, Spec: corev1.PersistentVolumeSpec{
+			PersistentVolumeReclaimPolicy: corev1.PersistentVolumeReclaimDelete,
+			ClaimRef:                      &corev1.ObjectReference{Namespace: "app", Name: "data", UID: types.UID("source-pvc-uid")},
+		}},
+	)
+	store := &memoryStore{}
+	service := &Service{client: client, store: store}
+	if err := service.Cleanup(ctx, session, CleanupOptions{Finalize: true, DeleteSession: true}); err != nil {
+		t.Fatal(err)
+	}
+	pv, err := client.CoreV1().PersistentVolumes().Get(ctx, "pv-source", metav1.GetOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pv.Spec.PersistentVolumeReclaimPolicy != corev1.PersistentVolumeReclaimDelete {
+		t.Fatalf("source reclaim policy=%s", pv.Spec.PersistentVolumeReclaimPolicy)
+	}
+	if store.deletes != 1 {
+		t.Fatalf("session deletes=%d", store.deletes)
+	}
+}
+
+func TestCleanupAbortedCopyReleasesSourceAfterCheckpointLoss(t *testing.T) {
+	ctx := context.Background()
+	session := appTestSession()
+	setSessionOperation(session, domain.OperationCopy)
+	session.Status.Phase = domain.PhaseAborted
+	session.Spec.Volumes[0].SourceReclaimPolicy = corev1.PersistentVolumeReclaimDelete
+	client := fake.NewClientset(
+		&corev1.PersistentVolumeClaim{ObjectMeta: metav1.ObjectMeta{
+			Namespace: "app", Name: "data", UID: types.UID("source-pvc-uid"),
+			Annotations: map[string]string{kube.SessionAnnotation: session.ID},
+		}},
+		managedPV("pv-source", "source-pv-uid", session.ID, "source", corev1.VolumeBound),
+	)
+	service := &Service{client: client, store: &memoryStore{}}
+	if err := service.Cleanup(ctx, session, CleanupOptions{Finalize: true, DeleteSession: true}); err != nil {
+		t.Fatal(err)
+	}
+	pvc, err := client.CoreV1().PersistentVolumeClaims("app").Get(ctx, "data", metav1.GetOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pvc.Annotations[kube.SessionAnnotation] != "" {
+		t.Fatalf("source PVC remains owned by %q", pvc.Annotations[kube.SessionAnnotation])
+	}
+	pv, err := client.CoreV1().PersistentVolumes().Get(ctx, "pv-source", metav1.GetOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pv.Spec.PersistentVolumeReclaimPolicy != corev1.PersistentVolumeReclaimDelete || pv.Labels[kube.SessionLabel] != "" || pv.Labels[kube.ResourceRoleLabel] != "" {
+		t.Fatalf("source PV was not restored: %#v", pv)
+	}
+}
+
 func TestCleanupRequiresRollbackClosureBeforeSessionDeletion(t *testing.T) {
 	session := appTestSession()
 	session.Status.Phase = domain.PhaseCompleted
@@ -209,6 +275,73 @@ func TestCleanupSingleStageSessionsRemovesDestinationAndFinalizesSource(t *testi
 				t.Fatalf("session deletes=%d", store.deletes)
 			}
 		})
+	}
+}
+
+func TestCleanupCompletedCopyCanPreserveOutputAndDeleteSession(t *testing.T) {
+	ctx := context.Background()
+	session := appTestSession()
+	setSessionOperation(session, domain.OperationCopy)
+	session.Status.Phase = domain.PhaseWarmCopied
+	session.Spec.Volumes[0].SourceReclaimPolicy = corev1.PersistentVolumeReclaimDelete
+	session.Spec.Volumes[0].DestinationPV = domain.ObjectReference{Name: "pv-destination", UID: types.UID("destination-pv-uid")}
+	session.Spec.Volumes[0].DestinationPVC.UID = types.UID("destination-pvc-uid")
+	session.Spec.Volumes[0].DestinationPolicy = corev1.PersistentVolumeReclaimDelete
+
+	sourcePVC := &corev1.PersistentVolumeClaim{ObjectMeta: metav1.ObjectMeta{
+		Namespace: "app", Name: "data", UID: types.UID("source-pvc-uid"),
+		Annotations: map[string]string{kube.SessionAnnotation: session.ID},
+	}}
+	destinationPVC := &corev1.PersistentVolumeClaim{ObjectMeta: metav1.ObjectMeta{
+		Namespace: "system", Name: "data-migrated", UID: types.UID("destination-pvc-uid"),
+		Labels: map[string]string{
+			kube.ManagedByLabel: kube.ManagedByValue, kube.SessionLabel: session.ID, kube.ResourceRoleLabel: "destination",
+		},
+		Annotations: map[string]string{
+			kube.SessionAnnotation: session.ID, "pvc-migrate.io/source-pv": "pv-source", "pvc-migrate.io/source-pvc-uid": "source-pvc-uid",
+		},
+	}}
+	sourcePV := managedPV("pv-source", "source-pv-uid", session.ID, "source", corev1.VolumeBound)
+	sourcePV.Spec.ClaimRef = &corev1.ObjectReference{Namespace: "app", Name: "data", UID: sourcePVC.UID}
+	destinationPV := managedPV("pv-destination", "destination-pv-uid", session.ID, "destination", corev1.VolumeBound)
+	destinationPV.Spec.ClaimRef = &corev1.ObjectReference{Namespace: "system", Name: "data-migrated", UID: destinationPVC.UID}
+	client := fake.NewClientset(sourcePVC, destinationPVC, sourcePV, destinationPV)
+	store := &memoryStore{}
+	service := &Service{client: client, store: store}
+	options := CleanupOptions{Finalize: true, DeleteSession: true}
+
+	if err := service.ValidateCleanup(ctx, session, options); err != nil {
+		t.Fatal(err)
+	}
+	if err := service.Cleanup(ctx, session, options); err != nil {
+		t.Fatal(err)
+	}
+	for _, ref := range []domain.ObjectReference{session.Spec.Volumes[0].SourcePVC, session.Spec.Volumes[0].DestinationPVC} {
+		pvc, err := client.CoreV1().PersistentVolumeClaims(ref.Namespace).Get(ctx, ref.Name, metav1.GetOptions{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if pvc.Annotations[kube.SessionAnnotation] != "" || pvc.Annotations["pvc-migrate.io/source-pv"] != "" || pvc.Annotations["pvc-migrate.io/source-pvc-uid"] != "" || pvc.Labels[kube.SessionLabel] != "" {
+			t.Fatalf("PVC %s/%s ownership=%v annotations=%v", pvc.Namespace, pvc.Name, pvc.Labels, pvc.Annotations)
+		}
+	}
+	for _, name := range []string{"pv-source", "pv-destination"} {
+		pv, err := client.CoreV1().PersistentVolumes().Get(ctx, name, metav1.GetOptions{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if pv.Spec.PersistentVolumeReclaimPolicy != corev1.PersistentVolumeReclaimDelete || pv.Labels[kube.SessionLabel] != "" || pv.Labels[kube.ResourceRoleLabel] != "" {
+			t.Fatalf("PV %s policy=%s labels=%v", name, pv.Spec.PersistentVolumeReclaimPolicy, pv.Labels)
+		}
+	}
+	if store.deletes != 1 {
+		t.Fatalf("session deletes=%d", store.deletes)
+	}
+	if err := service.ValidateCleanup(ctx, session, options); err != nil {
+		t.Fatalf("idempotent validation: %v", err)
+	}
+	if err := service.Cleanup(ctx, session, options); err != nil {
+		t.Fatalf("idempotent cleanup: %v", err)
 	}
 }
 

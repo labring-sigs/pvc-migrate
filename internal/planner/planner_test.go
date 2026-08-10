@@ -5,6 +5,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/labring-sigs/pvc-migrate/internal/controller"
 	"github.com/labring-sigs/pvc-migrate/internal/domain"
 	authorizationv1 "k8s.io/api/authorization/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -127,6 +128,182 @@ func TestCopySupportsOfflineAndOnlineModesAcrossNamespaces(t *testing.T) {
 	}
 }
 
+func TestPlanFiltersImpossibleMountStrategyAcrossNamespaces(t *testing.T) {
+	objects := plannerObjects("2Gi")
+	objects = append(objects, &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "archive"}})
+	plan, err := New(plannerClient(objects...), nil).Plan(context.Background(), Options{
+		Operation:            domain.OperationCopy,
+		SessionID:            "cross-namespace-copy",
+		SourceNamespace:      "app",
+		TemporaryNamespace:   "archive",
+		DestinationNamespace: "archive",
+		StagingNamespace:     "archive",
+		SessionNamespace:     "system",
+		SourcePVCs:           []string{"data"},
+		TargetNode:           "node-b",
+		Strategies:           []string{"mount", "clusterip"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !plan.Ready {
+		t.Fatalf("fallback strategy should keep plan ready: %#v", plan.Checks)
+	}
+	if !hasWarningCheck(plan, "strategy") || strings.Contains(strings.Join(plan.SessionSpec.WorkflowOptions().Strategies, ","), "mount") {
+		t.Fatalf("plan should warn and remove mount: checks=%#v strategies=%v", plan.Checks, plan.SessionSpec.WorkflowOptions().Strategies)
+	}
+
+	plan, err = New(plannerClient(objects...), nil).Plan(context.Background(), Options{
+		Operation:            domain.OperationCopy,
+		SessionID:            "cross-namespace-mount-only",
+		SourceNamespace:      "app",
+		TemporaryNamespace:   "archive",
+		DestinationNamespace: "archive",
+		StagingNamespace:     "archive",
+		SessionNamespace:     "system",
+		SourcePVCs:           []string{"data"},
+		TargetNode:           "node-b",
+		Strategies:           []string{"mount"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if plan.Ready || !hasWarningCheck(plan, "strategy") {
+		t.Fatalf("mount-only cross-namespace plan should fail: %#v", plan.Checks)
+	}
+}
+
+func TestPlanFiltersMountWhenSourcePVExcludesTargetNode(t *testing.T) {
+	objects := plannerObjects("2Gi")
+	for _, object := range objects {
+		if pv, ok := object.(*corev1.PersistentVolume); ok {
+			pv.Spec.NodeAffinity = &corev1.VolumeNodeAffinity{Required: &corev1.NodeSelector{
+				NodeSelectorTerms: []corev1.NodeSelectorTerm{{MatchExpressions: []corev1.NodeSelectorRequirement{{
+					Key: corev1.LabelHostname, Operator: corev1.NodeSelectorOpIn, Values: []string{"node-a"},
+				}}}},
+			}}
+		}
+	}
+	plan, err := New(plannerClient(objects...), nil).Plan(context.Background(), Options{
+		Operation:          domain.OperationCopy,
+		SessionID:          "topology-copy",
+		SourceNamespace:    "app",
+		StagingNamespace:   "app",
+		SessionNamespace:   "system",
+		TemporaryNamespace: "system",
+		SourcePVCs:         []string{"data"},
+		TargetNode:         "node-b",
+		DestinationClass:   "fast",
+		Strategies:         []string{"auto"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !plan.Ready || !hasWarningCheck(plan, "strategy") {
+		t.Fatalf("fallback strategy should keep plan ready: %#v", plan.Checks)
+	}
+	if got := strings.Join(plan.SessionSpec.WorkflowOptions().Strategies, ","); got != "clusterip" {
+		t.Fatalf("strategies=%q", got)
+	}
+	if got := strings.Join(plan.Strategies, ","); got != "clusterip" || !hasPassedCheck(plan, "strategy-selection") {
+		t.Fatalf("visible strategies=%q checks=%#v", got, plan.Checks)
+	}
+
+	plan, err = New(plannerClient(objects...), nil).Plan(context.Background(), Options{
+		Operation:          domain.OperationCopy,
+		SessionID:          "topology-mount-only",
+		SourceNamespace:    "app",
+		StagingNamespace:   "app",
+		SessionNamespace:   "system",
+		TemporaryNamespace: "system",
+		SourcePVCs:         []string{"data"},
+		TargetNode:         "node-b",
+		DestinationClass:   "fast",
+		Strategies:         []string{"mount"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if plan.Ready || !hasFailedCheck(plan, "strategy") {
+		t.Fatalf("mount-only topology conflict should fail: %#v", plan.Checks)
+	}
+}
+
+func TestPlanAllowsStandalonePodHostnameSelectorToMove(t *testing.T) {
+	objects := append(plannerObjects("2Gi"),
+		&corev1.Node{
+			ObjectMeta: metav1.ObjectMeta{Name: "node-a", Labels: map[string]string{corev1.LabelHostname: "node-a"}},
+			Status:     corev1.NodeStatus{Conditions: []corev1.NodeCondition{{Type: corev1.NodeReady, Status: corev1.ConditionTrue}}},
+		},
+		&corev1.ServiceAccount{ObjectMeta: metav1.ObjectMeta{Namespace: "app", Name: "default"}},
+		&corev1.Pod{
+			ObjectMeta: metav1.ObjectMeta{Namespace: "app", Name: "application"},
+			Spec: corev1.PodSpec{
+				NodeName:     "node-a",
+				NodeSelector: map[string]string{corev1.LabelHostname: "node-a", "disk": "fast"},
+				Containers:   []corev1.Container{{Name: "app", Image: "busybox"}},
+				Volumes: []corev1.Volume{{Name: "data", VolumeSource: corev1.VolumeSource{
+					PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: "data"},
+				}}},
+			},
+			Status: corev1.PodStatus{Phase: corev1.PodRunning, Conditions: []corev1.PodCondition{{Type: corev1.PodReady, Status: corev1.ConditionTrue}}},
+		},
+	)
+	for _, object := range objects {
+		if node, ok := object.(*corev1.Node); ok && node.Name == "node-b" {
+			node.Labels["disk"] = "fast"
+		}
+	}
+	client := plannerClient(objects...)
+	plan, err := New(client, controller.NewManager(client, nil, nil)).Plan(context.Background(), Options{
+		Operation:          domain.OperationMigratePod,
+		SessionID:          "repeat-migration",
+		SourceNamespace:    "app",
+		StagingNamespace:   "system",
+		SessionNamespace:   "system",
+		TemporaryNamespace: "system",
+		PodName:            "application",
+		TargetNode:         "node-b",
+		DestinationClass:   "fast",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !plan.Ready || !hasWarningCheck(plan, "pod-scheduling") {
+		t.Fatalf("repeat standalone migration checks=%#v", plan.Checks)
+	}
+}
+
+func TestAutoStrategiesChooseNamespaceCompatibleOrder(t *testing.T) {
+	if got := autoStrategies("app", "app"); strings.Join(got, ",") != "mount,clusterip" {
+		t.Fatalf("same-namespace auto strategies=%v", got)
+	}
+	if got := autoStrategies("app", "archive"); strings.Join(got, ",") != "clusterip,local" {
+		t.Fatalf("cross-namespace auto strategies=%v", got)
+	}
+}
+
+func TestPlanRejectsMixedAutoStrategyList(t *testing.T) {
+	plan, err := New(plannerClient(plannerObjects("2Gi")...), nil).Plan(context.Background(), Options{
+		Operation:          domain.OperationCopy,
+		SessionID:          "mixed-auto",
+		SourceNamespace:    "app",
+		StagingNamespace:   "system",
+		SessionNamespace:   "system",
+		TemporaryNamespace: "system",
+		SourcePVCs:         []string{"data"},
+		TargetNode:         "node-b",
+		DestinationClass:   "fast",
+		Strategies:         []string{"auto", "nodeport"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if plan.Ready || !hasFailedCheck(plan, "strategy") {
+		t.Fatalf("mixed auto list should fail: %#v", plan.Checks)
+	}
+}
+
 func plannerObjects(capacity string) []runtime.Object {
 	wffc := storagev1.VolumeBindingWaitForFirstConsumer
 	storageClass := "fast"
@@ -202,6 +379,66 @@ func TestPlanModelsTopologyQuotaAndSessionIdentity(t *testing.T) {
 	}
 	if plan.SessionSpec.Volumes[0].SourcePVC.UID != types.UID("pvc-uid") || plan.SessionSpec.Volumes[0].SourcePV.UID != types.UID("pv-uid") {
 		t.Fatalf("session resource identities: %#v", plan.SessionSpec.Volumes[0])
+	}
+}
+
+func TestPlanAutoSelectsTopologyCompatibleTargetNode(t *testing.T) {
+	objects := plannerObjects("2Gi")
+	objects = append(objects,
+		&corev1.Node{
+			ObjectMeta: metav1.ObjectMeta{Name: "node-a", Labels: map[string]string{corev1.LabelHostname: "node-a", corev1.LabelTopologyZone: "zone-a"}},
+			Status:     corev1.NodeStatus{Conditions: []corev1.NodeCondition{{Type: corev1.NodeReady, Status: corev1.ConditionTrue}}},
+		},
+		&corev1.Node{
+			ObjectMeta: metav1.ObjectMeta{Name: "control-plane", Labels: map[string]string{corev1.LabelHostname: "control-plane", corev1.LabelTopologyZone: "zone-b"}},
+			Spec:       corev1.NodeSpec{Taints: []corev1.Taint{{Key: "node-role.kubernetes.io/control-plane", Effect: corev1.TaintEffectNoSchedule}}},
+			Status:     corev1.NodeStatus{Conditions: []corev1.NodeCondition{{Type: corev1.NodeReady, Status: corev1.ConditionTrue}}},
+		},
+	)
+	plan, err := New(plannerClient(objects...), nil).Plan(context.Background(), Options{
+		SessionID:          "auto-target",
+		SourceNamespace:    "app",
+		TemporaryNamespace: "system",
+		StagingNamespace:   "system",
+		SessionNamespace:   "system",
+		SourcePVCs:         []string{"data"},
+		DestinationClass:   "fast",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !plan.Ready || plan.TargetNode != "node-b" {
+		t.Fatalf("auto target plan ready=%t target=%q checks=%#v", plan.Ready, plan.TargetNode, plan.Checks)
+	}
+	if plan.SessionSpec.WorkflowOptions().TargetNode != "node-b" {
+		t.Fatalf("session target=%q", plan.SessionSpec.WorkflowOptions().TargetNode)
+	}
+	if !hasPassedCheckContaining(plan, "target-node-selection", "auto selected target node node-b") {
+		t.Fatalf("selection check missing: %#v", plan.Checks)
+	}
+}
+
+func TestPlanAutoTargetRejectsWhenNoTopologyCompatibleNodeExists(t *testing.T) {
+	objects := plannerObjects("2Gi")
+	for _, object := range objects {
+		if node, ok := object.(*corev1.Node); ok {
+			node.Labels[corev1.LabelTopologyZone] = "zone-a"
+		}
+	}
+	plan, err := New(plannerClient(objects...), nil).Plan(context.Background(), Options{
+		SessionID:          "auto-target-fail",
+		SourceNamespace:    "app",
+		TemporaryNamespace: "system",
+		StagingNamespace:   "system",
+		SessionNamespace:   "system",
+		SourcePVCs:         []string{"data"},
+		DestinationClass:   "fast",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if plan.Ready || !hasFailedCheck(plan, "target-node") {
+		t.Fatalf("expected target selection failure: ready=%t checks=%#v", plan.Ready, plan.Checks)
 	}
 }
 
@@ -357,4 +594,31 @@ func TestSchedulingIssuesCoverSelectorAffinityAndTaints(t *testing.T) {
 	if len(issues) != 3 {
 		t.Fatalf("issues=%v", issues)
 	}
+}
+
+func hasWarningCheck(plan *domain.MigrationPlan, name string) bool {
+	for _, check := range plan.Checks {
+		if check.Name == name && check.Severity == domain.SeverityWarning && check.Passed {
+			return true
+		}
+	}
+	return false
+}
+
+func hasPassedCheck(plan *domain.MigrationPlan, name string) bool {
+	for _, check := range plan.Checks {
+		if check.Name == name && check.Passed {
+			return true
+		}
+	}
+	return false
+}
+
+func hasPassedCheckContaining(plan *domain.MigrationPlan, name, message string) bool {
+	for _, check := range plan.Checks {
+		if check.Name == name && check.Passed && strings.Contains(check.Message, message) {
+			return true
+		}
+	}
+	return false
 }
