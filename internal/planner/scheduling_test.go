@@ -3,8 +3,10 @@ package planner
 import (
 	"testing"
 
+	"github.com/labring-sigs/pvc-migrate/internal/domain"
 	corev1 "k8s.io/api/core/v1"
 	storagev1 "k8s.io/api/storage/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
@@ -65,6 +67,62 @@ func TestSchedulingAcceptsAlternativeAffinityTermAndTolerations(t *testing.T) {
 	}
 	if issues := schedulingIssues(spec, node); len(issues) != 0 {
 		t.Fatalf("scheduling issues: %v", issues)
+	}
+}
+
+func TestSchedulingIgnoresObservedNodeNameForManagedWorkload(t *testing.T) {
+	spec := &corev1.Pod{Spec: corev1.PodSpec{NodeName: "node-a"}}
+	issues := schedulingIssuesForTarget(spec, domain.WorkloadSpec{Adapter: domain.WorkloadStatefulSet}, &corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "node-b"}})
+	if len(issues) != 0 {
+		t.Fatalf("issues=%v", issues)
+	}
+}
+
+func TestResourceFitUsesInitContainerAndOverheadRequests(t *testing.T) {
+	spec := corev1.PodSpec{
+		Containers: []corev1.Container{
+			{Resources: corev1.ResourceRequirements{Requests: corev1.ResourceList{
+				corev1.ResourceCPU:    resource.MustParse("500m"),
+				corev1.ResourceMemory: resource.MustParse("256Mi"),
+			}}},
+			{Resources: corev1.ResourceRequirements{Requests: corev1.ResourceList{
+				corev1.ResourceCPU: resource.MustParse("250m"),
+			}}},
+		},
+		InitContainers: []corev1.Container{{Resources: corev1.ResourceRequirements{Requests: corev1.ResourceList{
+			corev1.ResourceCPU:    resource.MustParse("2"),
+			corev1.ResourceMemory: resource.MustParse("1Gi"),
+		}}}},
+		Overhead: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("100m")},
+	}
+	requests := podResourceRequests(spec)
+	cpu := requests[corev1.ResourceCPU]
+	if cpu.Cmp(resource.MustParse("2.1")) != 0 {
+		t.Fatalf("cpu requests=%s", cpu.String())
+	}
+	memory := requests[corev1.ResourceMemory]
+	if memory.Cmp(resource.MustParse("1Gi")) != 0 {
+		t.Fatalf("memory requests=%s", memory.String())
+	}
+	node := &corev1.Node{Status: corev1.NodeStatus{Allocatable: corev1.ResourceList{
+		corev1.ResourceCPU:    resource.MustParse("2"),
+		corev1.ResourceMemory: resource.MustParse("2Gi"),
+	}}}
+	issues, known := resourceFitIssues(spec, node)
+	if !known || len(issues) != 1 || issues[0] != "Pod resource request cpu=2100m exceeds node allocatable cpu=2" {
+		t.Fatalf("known=%t issues=%v", known, issues)
+	}
+}
+
+func TestResourceFitReportsUnknownAllocatableResource(t *testing.T) {
+	spec := corev1.PodSpec{Containers: []corev1.Container{{Resources: corev1.ResourceRequirements{Requests: corev1.ResourceList{
+		corev1.ResourceName("example.com/gpu"): resource.MustParse("1"),
+	}}}}}
+	issues, known := resourceFitIssues(spec, &corev1.Node{Status: corev1.NodeStatus{Allocatable: corev1.ResourceList{
+		corev1.ResourceCPU: resource.MustParse("2"),
+	}}})
+	if known || len(issues) != 0 {
+		t.Fatalf("known=%t issues=%v", known, issues)
 	}
 }
 

@@ -167,6 +167,49 @@ func TestCleanupAbortedCopyBeforeReservePreservesUnownedSourcePV(t *testing.T) {
 	}
 }
 
+func TestValidateCleanupAbortedCopyChecksUncheckpointedSourceIdentity(t *testing.T) {
+	session := appTestSession()
+	setSessionOperation(session, domain.OperationCopy)
+	session.Status.Phase = domain.PhaseAborted
+	session.Spec.Volumes[0].SourceReclaimPolicy = corev1.PersistentVolumeReclaimDelete
+	client := fake.NewClientset(
+		&corev1.PersistentVolumeClaim{ObjectMeta: metav1.ObjectMeta{
+			Namespace: "app", Name: "data", UID: types.UID("recreated-pvc-uid"),
+		}},
+		&corev1.PersistentVolume{ObjectMeta: metav1.ObjectMeta{
+			Name: "pv-source", UID: types.UID("source-pv-uid"),
+		}, Spec: corev1.PersistentVolumeSpec{
+			PersistentVolumeReclaimPolicy: corev1.PersistentVolumeReclaimDelete,
+		}},
+	)
+	service := &Service{client: client, store: &memoryStore{}}
+	err := service.ValidateCleanup(context.Background(), session, CleanupOptions{Finalize: true, DeleteSession: true})
+	if domain.CategoryOf(err) != domain.ErrorConflict {
+		t.Fatalf("category=%s error=%v", domain.CategoryOf(err), err)
+	}
+}
+
+func TestValidateCleanupAbortedCopyPreservesUnownedSourcePolicyChanges(t *testing.T) {
+	session := appTestSession()
+	setSessionOperation(session, domain.OperationCopy)
+	session.Status.Phase = domain.PhaseAborted
+	session.Spec.Volumes[0].SourceReclaimPolicy = corev1.PersistentVolumeReclaimDelete
+	client := fake.NewClientset(
+		&corev1.PersistentVolumeClaim{ObjectMeta: metav1.ObjectMeta{
+			Namespace: "app", Name: "data", UID: types.UID("source-pvc-uid"),
+		}},
+		&corev1.PersistentVolume{ObjectMeta: metav1.ObjectMeta{
+			Name: "pv-source", UID: types.UID("source-pv-uid"),
+		}, Spec: corev1.PersistentVolumeSpec{
+			PersistentVolumeReclaimPolicy: corev1.PersistentVolumeReclaimRetain,
+		}},
+	)
+	service := &Service{client: client, store: &memoryStore{}}
+	if err := service.ValidateCleanup(context.Background(), session, CleanupOptions{Finalize: true, DeleteSession: true}); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestCleanupAbortedCopyReleasesSourceAfterCheckpointLoss(t *testing.T) {
 	ctx := context.Background()
 	session := appTestSession()

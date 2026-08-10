@@ -513,6 +513,12 @@ func (s *Service) ValidateCleanup(ctx context.Context, session *domain.Session, 
 				}
 			}
 		}
+		if session.Status.Phase == domain.PhaseAborted && cleanupKeepsSource(session) && !volumeWasReserved(session, index) {
+			if err := s.validateUncheckpointedSource(ctx, session.ID, volume); err != nil {
+				return err
+			}
+			continue
+		}
 		if options.Finalize {
 			if active.Name == "" {
 				continue
@@ -1353,7 +1359,11 @@ func (s *Service) validateWorkloadResume(ctx context.Context, session *domain.Se
 		return err
 	}
 	options := session.Spec.WorkflowOptions()
-	if session.Spec.Workload().Adapter == domain.WorkloadNone || options.TargetNode == "" {
+	// TargetNode is the exact placement contract only for the standalone
+	// adapter. Controller-managed workloads keep their own scheduling policy;
+	// the helper node can become unavailable while the workload still has a
+	// valid placement elsewhere.
+	if session.Spec.Workload().Adapter != domain.WorkloadStandalone || options.TargetNode == "" {
 		return nil
 	}
 	node, err := s.client.CoreV1().Nodes().Get(ctx, options.TargetNode, metav1.GetOptions{})
@@ -1371,7 +1381,11 @@ func (s *Service) verifyActiveVolumes(ctx context.Context, session *domain.Sessi
 		return err
 	}
 	options := session.Spec.WorkflowOptions()
-	if session.Spec.Workload().Adapter != domain.WorkloadNone && options.TargetNode != "" {
+	// TargetNode pins reservation and copy helpers for every workload. The
+	// standalone adapter also pins the recreated Pod; controller-managed
+	// workloads retain their own scheduler policy and may validly land on a
+	// different node when the destination volume is topology-independent.
+	if session.Spec.Workload().Adapter == domain.WorkloadStandalone && options.TargetNode != "" {
 		pod, err := s.client.CoreV1().Pods(session.Spec.Workload().Pod.Namespace).Get(ctx, session.Spec.Workload().Pod.Name, metav1.GetOptions{})
 		if err != nil {
 			return domain.WrapError(domain.ErrorKubernetes, "verify migration", "read resumed Pod", err)

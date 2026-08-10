@@ -1363,6 +1363,80 @@ func TestResumeWorkloadFailsWhenActiveResourcesDoNotMatchPlan(t *testing.T) {
 			t.Fatalf("phase=%s resumeFrom=%s", session.Status.Phase, session.Status.ResumeFrom)
 		}
 	})
+
+	t.Run("managed workload may land on another node", func(t *testing.T) {
+		fixture := newRecoveryFixture(t)
+		session := appTestSession()
+		session.Status.Phase = domain.PhaseActivated
+		_ = session.Spec.SetWorkload(domain.WorkloadSpec{
+			Adapter: domain.WorkloadStatefulSet,
+			Pod:     domain.ObjectReference{Namespace: "app", Name: "application"},
+		})
+		session.Spec.Volumes[0].DestinationPV = domain.ObjectReference{Name: "pv-destination", UID: types.UID("destination-pv-uid")}
+		session.Status.Volumes[0].Activation.ActivePVC = domain.ObjectReference{Namespace: "app", Name: "data", UID: types.UID("active-pvc-uid")}
+		_, err := fixture.client.CoreV1().PersistentVolumeClaims("app").Create(context.Background(), &corev1.PersistentVolumeClaim{
+			ObjectMeta: metav1.ObjectMeta{Namespace: "app", Name: "data", UID: types.UID("active-pvc-uid"), Annotations: map[string]string{kube.SessionAnnotation: session.ID}},
+			Spec:       corev1.PersistentVolumeClaimSpec{VolumeName: "pv-destination"},
+			Status:     corev1.PersistentVolumeClaimStatus{Phase: corev1.ClaimBound},
+		}, metav1.CreateOptions{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, err = fixture.client.CoreV1().PersistentVolumes().Create(context.Background(), &corev1.PersistentVolume{
+			ObjectMeta: metav1.ObjectMeta{Name: "pv-destination", UID: types.UID("destination-pv-uid")},
+			Spec: corev1.PersistentVolumeSpec{ClaimRef: &corev1.ObjectReference{
+				Namespace: "app", Name: "data", UID: types.UID("active-pvc-uid"),
+			}},
+		}, metav1.CreateOptions{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, err = fixture.client.CoreV1().Pods("app").Create(context.Background(), &corev1.Pod{
+			ObjectMeta: metav1.ObjectMeta{Namespace: "app", Name: "application"},
+			Spec:       corev1.PodSpec{NodeName: "source-node"},
+		}, metav1.CreateOptions{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := fixture.service.ResumeWorkload(context.Background(), session); err != nil {
+			t.Fatal(err)
+		}
+		if session.Status.Phase != domain.PhaseCompleted {
+			t.Fatalf("phase=%s", session.Status.Phase)
+		}
+	})
+
+	t.Run("managed workload does not require the helper target to be ready", func(t *testing.T) {
+		fixture := newRecoveryFixture(t)
+		session := appTestSession()
+		session.Status.Phase = domain.PhaseResuming
+		_ = session.Spec.SetWorkload(domain.WorkloadSpec{
+			Adapter: domain.WorkloadStatefulSet,
+			Pod:     domain.ObjectReference{Namespace: "app", Name: "application"},
+		})
+		session.Spec.Volumes[0].DestinationPV = domain.ObjectReference{Name: "pv-destination", UID: types.UID("destination-pv-uid")}
+		session.Status.Volumes[0].Activation.ActivePVC = domain.ObjectReference{Namespace: "app", Name: "data", UID: types.UID("active-pvc-uid")}
+		_, err := fixture.client.CoreV1().PersistentVolumeClaims("app").Create(context.Background(), &corev1.PersistentVolumeClaim{
+			ObjectMeta: metav1.ObjectMeta{Namespace: "app", Name: "data", UID: types.UID("active-pvc-uid"), Annotations: map[string]string{kube.SessionAnnotation: session.ID}},
+			Spec:       corev1.PersistentVolumeClaimSpec{VolumeName: "pv-destination"},
+			Status:     corev1.PersistentVolumeClaimStatus{Phase: corev1.ClaimBound},
+		}, metav1.CreateOptions{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, err = fixture.client.CoreV1().PersistentVolumes().Create(context.Background(), &corev1.PersistentVolume{
+			ObjectMeta: metav1.ObjectMeta{Name: "pv-destination", UID: types.UID("destination-pv-uid")},
+			Spec: corev1.PersistentVolumeSpec{ClaimRef: &corev1.ObjectReference{
+				Namespace: "app", Name: "data", UID: types.UID("active-pvc-uid"),
+			}},
+		}, metav1.CreateOptions{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := fixture.service.ValidateResume(context.Background(), session); err != nil {
+			t.Fatal(err)
+		}
+	})
 }
 
 func TestMigrateStopsAtEachFailedStageAndRecordsResumePoint(t *testing.T) {

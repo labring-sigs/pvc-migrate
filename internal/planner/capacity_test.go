@@ -291,6 +291,35 @@ func TestSelectTargetNodeHandlesEmptyVolumesAndCapacityExhaustion(t *testing.T) 
 	}
 }
 
+func TestSelectTargetNodeRejectsStandalonePodResourceOverflow(t *testing.T) {
+	objects := []runtime.Object{
+		&corev1.Node{
+			ObjectMeta: metav1.ObjectMeta{Name: "node-a", Labels: map[string]string{corev1.LabelHostname: "node-a"}},
+			Status: corev1.NodeStatus{
+				Conditions:  []corev1.NodeCondition{{Type: corev1.NodeReady, Status: corev1.ConditionTrue}},
+				Allocatable: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("1")},
+			},
+		},
+		&corev1.Node{
+			ObjectMeta: metav1.ObjectMeta{Name: "node-b", Labels: map[string]string{corev1.LabelHostname: "node-b"}},
+			Status: corev1.NodeStatus{
+				Conditions:  []corev1.NodeCondition{{Type: corev1.NodeReady, Status: corev1.ConditionTrue}},
+				Allocatable: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("1")},
+			},
+		},
+	}
+	client := plannerClient(objects...)
+	plan := &domain.MigrationPlan{Ready: true}
+	volume := plannedCapacityVolume("data", "fast", "1Gi")
+	sourcePod := &corev1.Pod{Spec: corev1.PodSpec{NodeName: "node-a", Containers: []corev1.Container{{
+		Resources: corev1.ResourceRequirements{Requests: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("2")}},
+	}}}}
+	selected := New(client, nil).selectTargetNode(context.Background(), plan, domain.WorkloadSpec{Adapter: domain.WorkloadStandalone}, sourcePod, "node-a", []domain.PlannedVolume{volume}, nil, nil, nil)
+	if selected != nil || plan.Ready || !hasFailedCheck(plan, "target-node") {
+		t.Fatalf("selected=%v ready=%t checks=%#v", selected, plan.Ready, plan.Checks)
+	}
+}
+
 func TestCompareTargetNodeCandidatesUsesEveryPreference(t *testing.T) {
 	nodeA := &corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "node-a"}}
 	nodeB := &corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "node-b"}}
@@ -305,6 +334,7 @@ func TestCompareTargetNodeCandidatesUsesEveryPreference(t *testing.T) {
 		{name: "known capacity ascending", a: targetNodeCandidate{node: nodeA, capacityKnown: 1}, b: targetNodeCandidate{node: nodeB, capacityKnown: 2}, want: 1},
 		{name: "unknown count ascending", a: targetNodeCandidate{node: nodeA, capacityUnknown: 1}, b: targetNodeCandidate{node: nodeB, capacityUnknown: 2}, want: -1},
 		{name: "unknown count descending", a: targetNodeCandidate{node: nodeA, capacityUnknown: 2}, b: targetNodeCandidate{node: nodeB, capacityUnknown: 1}, want: 1},
+		{name: "resource fit verification first", a: targetNodeCandidate{node: nodeA, resourceUnknown: 0}, b: targetNodeCandidate{node: nodeB, resourceUnknown: 1}, want: -1},
 		{name: "surplus descending", a: targetNodeCandidate{node: nodeA, capacitySurplus: resource.MustParse("2Gi")}, b: targetNodeCandidate{node: nodeB, capacitySurplus: resource.MustParse("1Gi")}, want: -1},
 		{name: "distinct first", a: targetNodeCandidate{node: nodeA, distinctFromSrc: true}, b: targetNodeCandidate{node: nodeB}, want: -1},
 		{name: "fewer taints first", a: targetNodeCandidate{node: nodeA, taintPenalty: 0}, b: targetNodeCandidate{node: nodeB, taintPenalty: 1}, want: -1},

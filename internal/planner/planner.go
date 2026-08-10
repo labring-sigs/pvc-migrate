@@ -506,6 +506,9 @@ func (p *Planner) checkPodTargetScheduling(plan *domain.MigrationPlan, sourcePod
 	schedulingSpec := sourcePod.Spec
 	if workload.Adapter == domain.WorkloadStandalone {
 		schedulingSpec = *sourcePod.Spec.DeepCopy()
+		// The standalone adapter clears both direct and hostname placement from
+		// the recreated Pod before applying the selected target node.
+		schedulingSpec.NodeName = ""
 		if hostname := schedulingSpec.NodeSelector[corev1.LabelHostname]; hostname != "" && hostname != node.Labels[corev1.LabelHostname] {
 			delete(schedulingSpec.NodeSelector, corev1.LabelHostname)
 			plan.AddCheck(warned("pod-scheduling", fmt.Sprintf("standalone Pod hostname selector %s will be replaced with target hostname %s", hostname, node.Labels[corev1.LabelHostname])))
@@ -517,6 +520,14 @@ func (p *Planner) checkPodTargetScheduling(plan *domain.MigrationPlan, sourcePod
 	} else {
 		plan.AddCheck(passed("pod-scheduling", "target node satisfies nodeSelector, required nodeAffinity, and taints"))
 	}
+	if workload.Adapter == domain.WorkloadStandalone {
+		resourceIssues, known := resourceFitIssues(schedulingSpec, node)
+		if len(resourceIssues) > 0 {
+			plan.AddCheck(failed("pod-resources", strings.Join(resourceIssues, "; ")))
+		} else if !known {
+			plan.AddCheck(warned("pod-resources", fmt.Sprintf("target node %s does not publish all allocatable resources needed to verify standalone Pod placement", node.Name)))
+		}
+	}
 }
 
 type targetNodeCandidate struct {
@@ -527,6 +538,7 @@ type targetNodeCandidate struct {
 	capacityKnown   int
 	capacityUnknown int
 	capacitySurplus resource.Quantity
+	resourceUnknown int
 }
 
 func (p *Planner) selectTargetNode(ctx context.Context, plan *domain.MigrationPlan, workload domain.WorkloadSpec, sourcePod *corev1.Pod, sourceNode string, volumes []domain.PlannedVolume, sourcePVs map[string]*corev1.PersistentVolume, storageClasses map[string]*storagev1.StorageClass, capacityInventory *storageCapacityInventory) *corev1.Node {
@@ -547,6 +559,18 @@ func (p *Planner) selectTargetNode(ctx context.Context, plan *domain.MigrationPl
 		}
 		if sourcePod != nil && len(schedulingIssuesForTarget(sourcePod, workload, node)) > 0 {
 			continue
+		}
+		resourceUnknown := 0
+		if sourcePod != nil && workload.Adapter == domain.WorkloadStandalone {
+			spec := *sourcePod.Spec.DeepCopy()
+			spec.NodeName = ""
+			resourceIssues, known := resourceFitIssues(spec, node)
+			if len(resourceIssues) > 0 {
+				continue
+			}
+			if !known {
+				resourceUnknown = 1
+			}
 		}
 		if sourcePod != nil && len(podMigrationIssues(sourcePod.Spec, sourceNode, node.Name)) > 0 {
 			continue
@@ -569,7 +593,7 @@ func (p *Planner) selectTargetNode(ctx context.Context, plan *domain.MigrationPl
 		if !capacityCompatible {
 			continue
 		}
-		candidates = append(candidates, targetNodeCandidate{node: node, distinctFromSrc: sourceNode == "" || node.Name != sourceNode, taintPenalty: hardTaintCount(node), sourcePVMatches: sourcePVMatches, capacityKnown: capacityKnown, capacityUnknown: capacityUnknown, capacitySurplus: capacitySurplus})
+		candidates = append(candidates, targetNodeCandidate{node: node, distinctFromSrc: sourceNode == "" || node.Name != sourceNode, taintPenalty: hardTaintCount(node), sourcePVMatches: sourcePVMatches, capacityKnown: capacityKnown, capacityUnknown: capacityUnknown, capacitySurplus: capacitySurplus, resourceUnknown: resourceUnknown})
 	}
 	if len(candidates) == 0 {
 		message := "no Ready and schedulable node satisfies Pod scheduling and destination StorageClass topology"
@@ -606,6 +630,12 @@ func compareTargetNodeCandidates(a, b targetNodeCandidate) int {
 	}
 	if a.capacityUnknown != b.capacityUnknown {
 		if a.capacityUnknown < b.capacityUnknown {
+			return -1
+		}
+		return 1
+	}
+	if a.resourceUnknown != b.resourceUnknown {
+		if a.resourceUnknown < b.resourceUnknown {
 			return -1
 		}
 		return 1
@@ -648,11 +678,17 @@ func schedulingIssuesForTarget(sourcePod *corev1.Pod, workload domain.WorkloadSp
 	spec := sourcePod.Spec
 	if workload.Adapter == domain.WorkloadStandalone {
 		spec = *sourcePod.Spec.DeepCopy()
+		spec.NodeName = ""
 		if hostname := spec.NodeSelector[corev1.LabelHostname]; hostname != "" && hostname != node.Labels[corev1.LabelHostname] {
 			delete(spec.NodeSelector, corev1.LabelHostname)
 		}
 	}
-	return schedulingIssues(spec, node)
+	issues := schedulingIssues(spec, node)
+	if workload.Adapter == domain.WorkloadStandalone {
+		resourceIssues, _ := resourceFitIssues(spec, node)
+		issues = append(issues, resourceIssues...)
+	}
+	return issues
 }
 
 func containsStrategy(strategies []string, wanted string) bool {
