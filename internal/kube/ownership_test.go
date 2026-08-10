@@ -145,7 +145,7 @@ func TestFinalizePVCRestoresOriginalMetadataAndPreservesBindingAnnotations(t *te
 			ManagedByLabel: "pvc-migrate", SessionLabel: "session", "external.example/keep": "value",
 		},
 		Annotations: map[string]string{
-			SessionAnnotation: "session", "pvc-migrate.io/rollback-pv": "old-pv", "pv.kubernetes.io/bind-completed": "yes",
+			SessionAnnotation: "session", "pvc-migrate.io/rollback-pv": "old-pv", "pvc-migrate.io/source-pv": "source-pv", "pvc-migrate.io/source-pvc-uid": "source-pvc", "pv.kubernetes.io/bind-completed": "yes",
 		},
 	}})
 	original := domain.PVCMetadata{
@@ -163,7 +163,7 @@ func TestFinalizePVCRestoresOriginalMetadataAndPreservesBindingAnnotations(t *te
 	if pvc.Labels[ManagedByLabel] != "database-operator" || pvc.Labels[SessionLabel] != "" || pvc.Labels["external.example/keep"] != "value" || pvc.Labels["original.example/label"] != "value" {
 		t.Fatalf("labels=%v", pvc.Labels)
 	}
-	if pvc.Annotations[SessionAnnotation] != "" || pvc.Annotations["pvc-migrate.io/rollback-pv"] != "" || pvc.Annotations["pv.kubernetes.io/bind-completed"] != "yes" || pvc.Annotations["original.example/annotation"] != "value" {
+	if pvc.Annotations[SessionAnnotation] != "" || pvc.Annotations["pvc-migrate.io/rollback-pv"] != "" || pvc.Annotations["pvc-migrate.io/source-pv"] != "" || pvc.Annotations["pvc-migrate.io/source-pvc-uid"] != "" || pvc.Annotations["pv.kubernetes.io/bind-completed"] != "yes" || pvc.Annotations["original.example/annotation"] != "value" {
 		t.Fatalf("annotations=%v", pvc.Annotations)
 	}
 	if len(pvc.OwnerReferences) != 1 || pvc.OwnerReferences[0].UID != originalOwner.UID {

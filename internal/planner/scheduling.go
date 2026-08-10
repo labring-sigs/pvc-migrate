@@ -76,6 +76,61 @@ func schedulingIssues(spec corev1.PodSpec, node *corev1.Node) []string {
 	return issues
 }
 
+// resourceFitIssues checks constraints that can be proven from the Pod and
+// Node objects alone. Current cluster usage remains dynamic, so an unknown
+// allocatable entry is reported to the caller as an unverifiable fit.
+func resourceFitIssues(spec corev1.PodSpec, node *corev1.Node) (issues []string, known bool) {
+	requests := podResourceRequests(spec)
+	if len(requests) == 0 {
+		return nil, true
+	}
+	if len(node.Status.Allocatable) == 0 {
+		return nil, false
+	}
+	known = true
+	for name, request := range requests {
+		allocatable, ok := node.Status.Allocatable[name]
+		if !ok {
+			known = false
+			continue
+		}
+		if request.Cmp(allocatable) > 0 {
+			issues = append(issues, fmt.Sprintf("Pod resource request %s=%s exceeds node allocatable %s=%s", name, request.String(), name, allocatable.String()))
+		}
+	}
+	sort.SliceStable(issues, func(i, j int) bool { return issues[i] < issues[j] })
+	return issues, known
+}
+
+func podResourceRequests(spec corev1.PodSpec) corev1.ResourceList {
+	requests := corev1.ResourceList{}
+	for _, container := range spec.Containers {
+		addResourceList(requests, container.Resources.Requests)
+	}
+	for _, container := range spec.InitContainers {
+		for name, request := range container.Resources.Requests {
+			current, ok := requests[name]
+			if !ok || request.Cmp(current) > 0 {
+				requests[name] = request.DeepCopy()
+			}
+		}
+	}
+	addResourceList(requests, spec.Overhead)
+	return requests
+}
+
+func addResourceList(target, source corev1.ResourceList) {
+	for name, value := range source {
+		current, ok := target[name]
+		if !ok {
+			target[name] = value.DeepCopy()
+			continue
+		}
+		current.Add(value)
+		target[name] = current
+	}
+}
+
 func nodeSelectorTermMatches(term corev1.NodeSelectorTerm, node *corev1.Node) bool {
 	for _, requirement := range term.MatchExpressions {
 		if !selectorRequirementMatches(requirement, node.Labels[requirement.Key], node.Labels) {

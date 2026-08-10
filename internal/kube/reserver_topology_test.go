@@ -15,19 +15,19 @@ func TestPVSupportsNodeHonorsMatchFields(t *testing.T) {
 			MatchFields: []corev1.NodeSelectorRequirement{{Key: "metadata.name", Operator: corev1.NodeSelectorOpIn, Values: []string{"node-a"}}},
 		}}},
 	}}}
-	if !pvSupportsNode(pv, node) {
+	if !PVSupportsNode(pv, node) {
 		t.Fatal("PV with matching metadata.name field was rejected")
 	}
 	pv.Spec.NodeAffinity.Required.NodeSelectorTerms[0].MatchFields[0].Values = []string{"node-b"}
-	if pvSupportsNode(pv, node) {
+	if PVSupportsNode(pv, node) {
 		t.Fatal("PV with non-matching metadata.name field was accepted")
 	}
 	pv.Spec.NodeAffinity.Required.NodeSelectorTerms[0].MatchFields = []corev1.NodeSelectorRequirement{{Key: "metadata.uid", Operator: corev1.NodeSelectorOpIn, Values: []string{"node-uid"}}}
-	if !pvSupportsNode(pv, node) {
+	if !PVSupportsNode(pv, node) {
 		t.Fatal("PV with matching metadata.uid field was rejected")
 	}
 	pv.Spec.NodeAffinity.Required.NodeSelectorTerms[0].MatchFields[0].Values = []string{"other-uid"}
-	if pvSupportsNode(pv, node) {
+	if PVSupportsNode(pv, node) {
 		t.Fatal("PV with non-matching metadata.uid field was accepted")
 	}
 }

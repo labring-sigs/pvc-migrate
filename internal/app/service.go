@@ -243,8 +243,13 @@ func (s *Service) ValidateResume(ctx context.Context, session *domain.Session) e
 		return s.ValidateFinalSync(ctx, session)
 	case domain.PhaseFinalSynced, domain.PhaseActivating:
 		return s.ValidateActivation(ctx, session)
-	case domain.PhaseActivated, domain.PhaseResuming:
-		return s.verifyActiveVolumes(ctx, session)
+	case domain.PhaseActivated:
+		if err := s.controllers.VerifyPaused(ctx, session); err != nil {
+			return err
+		}
+		return s.validateWorkloadResume(ctx, session)
+	case domain.PhaseResuming:
+		return s.validateWorkloadResume(ctx, session)
 	case domain.PhaseRenaming, domain.PhaseMoving:
 		return s.validateOfflineVolumes(ctx, session)
 	case domain.PhaseRollingBack:
@@ -469,7 +474,7 @@ func (s *Service) ValidateCleanup(ctx context.Context, session *domain.Session, 
 			}
 		}
 		active, rollback, policy := cleanupPVRefs(session, volume)
-		if options.DeleteSession && rollback.Name != "" && !options.DeleteRollback {
+		if options.DeleteSession && rollback.Name != "" && !options.DeleteRollback && !preservesCopyOutput(session, options) {
 			return domain.NewError(domain.ErrorPrecondition, "cleanup dry-run", "deleting the session requires --delete-rollback-pv while a rollback PV is recorded")
 		}
 		if options.DeleteTemporary && volume.DestinationPVC.UID != "" {
@@ -508,6 +513,12 @@ func (s *Service) ValidateCleanup(ctx context.Context, session *domain.Session, 
 				}
 			}
 		}
+		if session.Status.Phase == domain.PhaseAborted && cleanupKeepsSource(session) && !volumeWasReserved(session, index) {
+			if err := s.validateUncheckpointedSource(ctx, session.ID, volume); err != nil {
+				return err
+			}
+			continue
+		}
 		if options.Finalize {
 			if active.Name == "" {
 				continue
@@ -526,11 +537,36 @@ func (s *Service) ValidateCleanup(ctx context.Context, session *domain.Session, 
 			if err != nil {
 				return domain.WrapError(domain.ErrorKubernetes, "cleanup dry-run", fmt.Sprintf("read active PV %s", active.Name), err)
 			}
-			role := pv.Labels[kube.ResourceRoleLabel]
-			if pv.UID != active.UID || pv.Labels[kube.SessionLabel] != session.ID || (role != "active" && role != "source" && role != "rename") {
-				return domain.NewError(domain.ErrorConflict, "cleanup dry-run", fmt.Sprintf("PV %s identity, ownership, or role changed", active.Name))
+			if err := validateFinalizablePV(pv, active, session.ID, policy); err != nil {
+				return err
+			}
+			if preservesCopyOutput(session, options) && volume.DestinationPV.Name != "" {
+				destinationPV, err := s.client.CoreV1().PersistentVolumes().Get(ctx, volume.DestinationPV.Name, metav1.GetOptions{})
+				if err != nil {
+					return domain.WrapError(domain.ErrorKubernetes, "cleanup dry-run", fmt.Sprintf("read copy destination PV %s", volume.DestinationPV.Name), err)
+				}
+				if err := validateFinalizablePV(destinationPV, volume.DestinationPV, session.ID, volume.DestinationPolicy); err != nil {
+					return err
+				}
 			}
 		}
+	}
+	return nil
+}
+
+func validateFinalizablePV(pv *corev1.PersistentVolume, ref domain.ObjectReference, sessionID string, policy corev1.PersistentVolumeReclaimPolicy) error {
+	if policy == "" {
+		return domain.NewError(domain.ErrorPrecondition, "cleanup dry-run", fmt.Sprintf("PV %s has no recorded reclaim policy", ref.Name))
+	}
+	if pv.UID != ref.UID {
+		return domain.NewError(domain.ErrorConflict, "cleanup dry-run", fmt.Sprintf("PV %s identity, ownership, or role changed", ref.Name))
+	}
+	role := pv.Labels[kube.ResourceRoleLabel]
+	if pv.Labels[kube.SessionLabel] == "" && role == "" && pv.Spec.PersistentVolumeReclaimPolicy == policy && pv.Annotations[kube.OriginalPolicyAnnotation] == "" {
+		return nil
+	}
+	if pv.Labels[kube.SessionLabel] != sessionID || (role != "active" && role != "source" && role != "rename" && role != "destination") {
+		return domain.NewError(domain.ErrorConflict, "cleanup dry-run", fmt.Sprintf("PV %s identity, ownership, or role changed", ref.Name))
 	}
 	return nil
 }
@@ -1291,8 +1327,7 @@ func (s *Service) helmSchedulingValues(ctx context.Context, session *domain.Sess
 	return values, nil
 }
 
-func (s *Service) verifyActiveVolumes(ctx context.Context, session *domain.Session) error {
-	options := session.Spec.WorkflowOptions()
+func (s *Service) verifyActiveStorage(ctx context.Context, session *domain.Session) error {
 	for index := range session.Spec.Volumes {
 		volume := &session.Spec.Volumes[index]
 		pvc, err := s.client.CoreV1().PersistentVolumeClaims(volume.SourcePVC.Namespace).Get(ctx, volume.SourcePVC.Name, metav1.GetOptions{})
@@ -1316,7 +1351,41 @@ func (s *Service) verifyActiveVolumes(ctx context.Context, session *domain.Sessi
 			}
 		}
 	}
-	if session.Spec.Workload().Adapter != domain.WorkloadNone && options.TargetNode != "" {
+	return nil
+}
+
+func (s *Service) validateWorkloadResume(ctx context.Context, session *domain.Session) error {
+	if err := s.verifyActiveStorage(ctx, session); err != nil {
+		return err
+	}
+	options := session.Spec.WorkflowOptions()
+	// TargetNode is the exact placement contract only for the standalone
+	// adapter. Controller-managed workloads keep their own scheduling policy;
+	// the helper node can become unavailable while the workload still has a
+	// valid placement elsewhere.
+	if session.Spec.Workload().Adapter != domain.WorkloadStandalone || options.TargetNode == "" {
+		return nil
+	}
+	node, err := s.client.CoreV1().Nodes().Get(ctx, options.TargetNode, metav1.GetOptions{})
+	if err != nil {
+		return domain.WrapError(domain.ErrorKubernetes, "resume dry-run", "read target node", err)
+	}
+	if !nodeReadyAndSchedulable(node) {
+		return domain.NewError(domain.ErrorPrecondition, "resume dry-run", fmt.Sprintf("target node %s must be Ready and schedulable", node.Name))
+	}
+	return nil
+}
+
+func (s *Service) verifyActiveVolumes(ctx context.Context, session *domain.Session) error {
+	if err := s.verifyActiveStorage(ctx, session); err != nil {
+		return err
+	}
+	options := session.Spec.WorkflowOptions()
+	// TargetNode pins reservation and copy helpers for every workload. The
+	// standalone adapter also pins the recreated Pod; controller-managed
+	// workloads retain their own scheduler policy and may validly land on a
+	// different node when the destination volume is topology-independent.
+	if session.Spec.Workload().Adapter == domain.WorkloadStandalone && options.TargetNode != "" {
 		pod, err := s.client.CoreV1().Pods(session.Spec.Workload().Pod.Namespace).Get(ctx, session.Spec.Workload().Pod.Name, metav1.GetOptions{})
 		if err != nil {
 			return domain.WrapError(domain.ErrorKubernetes, "verify migration", "read resumed Pod", err)
@@ -1326,6 +1395,18 @@ func (s *Service) verifyActiveVolumes(ctx context.Context, session *domain.Sessi
 		}
 	}
 	return nil
+}
+
+func nodeReadyAndSchedulable(node *corev1.Node) bool {
+	if node == nil || node.Spec.Unschedulable {
+		return false
+	}
+	for _, condition := range node.Status.Conditions {
+		if condition.Type == corev1.NodeReady {
+			return condition.Status == corev1.ConditionTrue
+		}
+	}
+	return false
 }
 
 func (s *Service) begin(ctx context.Context, session *domain.Session, phase domain.Phase, message string) error {

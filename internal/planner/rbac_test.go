@@ -75,6 +75,9 @@ func TestDeploymentClusterRoleCoversPlannerAccessReviews(t *testing.T) {
 	if !clusterRoleAllows(role.Rules, authorizationv1.ResourceAttributes{Verb: "delete", Group: "coordination.k8s.io", Resource: "leases"}) {
 		t.Fatal("deployment ClusterRole cannot delete session Leases")
 	}
+	if !clusterRoleAllows(role.Rules, authorizationv1.ResourceAttributes{Verb: "list", Group: "storage.k8s.io", Resource: "csistoragecapacities"}) {
+		t.Fatal("deployment ClusterRole cannot list CSIStorageCapacity objects")
+	}
 
 	workloads := []domain.WorkloadSpec{
 		{},

@@ -13,6 +13,22 @@ const (
 	SeverityError   CheckSeverity = "error"
 )
 
+type CapacityAwareness string
+
+const (
+	CapacityAwarenessAuto    CapacityAwareness = "auto"
+	CapacityAwarenessRequire CapacityAwareness = "require"
+	CapacityAwarenessOff     CapacityAwareness = "off"
+)
+
+type StorageCapacityStatus string
+
+const (
+	StorageCapacitySufficient   StorageCapacityStatus = "sufficient"
+	StorageCapacityInsufficient StorageCapacityStatus = "insufficient"
+	StorageCapacityUnknown      StorageCapacityStatus = "unknown"
+)
+
 type Check struct {
 	Name     string        `json:"name" yaml:"name"`
 	Severity CheckSeverity `json:"severity" yaml:"severity"`
@@ -46,23 +62,41 @@ type PlannedVolume struct {
 	CSIProvisioner string                              `json:"csiProvisioner" yaml:"csiProvisioner"`
 }
 
+type StorageCapacityReport struct {
+	StorageClass      string                `json:"storageClass" yaml:"storageClass"`
+	CSIProvisioner    string                `json:"csiProvisioner" yaml:"csiProvisioner"`
+	TargetNode        string                `json:"targetNode" yaml:"targetNode"`
+	RequestedCapacity string                `json:"requestedCapacity" yaml:"requestedCapacity"`
+	LargestVolume     string                `json:"largestVolume" yaml:"largestVolume"`
+	ReportedCapacity  string                `json:"reportedCapacity,omitempty" yaml:"reportedCapacity,omitempty"`
+	MaximumVolumeSize string                `json:"maximumVolumeSize,omitempty" yaml:"maximumVolumeSize,omitempty"`
+	PublishedObjects  int                   `json:"publishedObjects" yaml:"publishedObjects"`
+	MatchingObjects   int                   `json:"matchingObjects" yaml:"matchingObjects"`
+	Status            StorageCapacityStatus `json:"status" yaml:"status"`
+	Message           string                `json:"message" yaml:"message"`
+}
+
 type MigrationPlan struct {
-	APIVersion           string           `json:"apiVersion" yaml:"apiVersion"`
-	Kind                 string           `json:"kind" yaml:"kind"`
-	SessionID            string           `json:"sessionID" yaml:"sessionID"`
-	SourceNamespace      string           `json:"sourceNamespace" yaml:"sourceNamespace"`
-	TemporaryNamespace   string           `json:"temporaryNamespace" yaml:"temporaryNamespace"`
-	DestinationNamespace string           `json:"destinationNamespace" yaml:"destinationNamespace"`
-	SessionNamespace     string           `json:"sessionNamespace" yaml:"sessionNamespace"`
-	ToolImage            string           `json:"toolImage" yaml:"toolImage"`
-	TargetNode           string           `json:"targetNode,omitempty" yaml:"targetNode,omitempty"`
-	Workload             WorkloadSpec     `json:"workload" yaml:"workload"`
-	Volumes              []PlannedVolume  `json:"volumes" yaml:"volumes"`
-	Checks               []Check          `json:"checks" yaml:"checks"`
-	TemporaryUsage       ResourceEstimate `json:"temporaryUsage" yaml:"temporaryUsage"`
-	RollbackRetention    ResourceEstimate `json:"rollbackRetention" yaml:"rollbackRetention"`
-	Ready                bool             `json:"ready" yaml:"ready"`
-	SessionSpec          SessionSpec      `json:"-" yaml:"-"`
+	APIVersion           string                  `json:"apiVersion" yaml:"apiVersion"`
+	Kind                 string                  `json:"kind" yaml:"kind"`
+	SessionID            string                  `json:"sessionID" yaml:"sessionID"`
+	SourceNamespace      string                  `json:"sourceNamespace" yaml:"sourceNamespace"`
+	TemporaryNamespace   string                  `json:"temporaryNamespace" yaml:"temporaryNamespace"`
+	DestinationNamespace string                  `json:"destinationNamespace" yaml:"destinationNamespace"`
+	SessionNamespace     string                  `json:"sessionNamespace" yaml:"sessionNamespace"`
+	ToolImage            string                  `json:"toolImage" yaml:"toolImage"`
+	CapacityAwareness    CapacityAwareness       `json:"capacityAwareness" yaml:"capacityAwareness"`
+	SourceNode           string                  `json:"sourceNode,omitempty" yaml:"sourceNode,omitempty"`
+	TargetNode           string                  `json:"targetNode,omitempty" yaml:"targetNode,omitempty"`
+	Strategies           []string                `json:"strategies,omitempty" yaml:"strategies,omitempty"`
+	Workload             WorkloadSpec            `json:"workload" yaml:"workload"`
+	Volumes              []PlannedVolume         `json:"volumes" yaml:"volumes"`
+	Checks               []Check                 `json:"checks" yaml:"checks"`
+	StorageCapacity      []StorageCapacityReport `json:"storageCapacity,omitempty" yaml:"storageCapacity,omitempty"`
+	TemporaryUsage       ResourceEstimate        `json:"temporaryUsage" yaml:"temporaryUsage"`
+	RollbackRetention    ResourceEstimate        `json:"rollbackRetention" yaml:"rollbackRetention"`
+	Ready                bool                    `json:"ready" yaml:"ready"`
+	SessionSpec          SessionSpec             `json:"-" yaml:"-"`
 }
 
 func (p *MigrationPlan) AddCheck(check Check) {

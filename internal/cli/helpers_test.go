@@ -96,7 +96,7 @@ func TestRootCommandSurfaceAndGlobalDefaults(t *testing.T) {
 	if online := copyCommand.Flags().Lookup("online"); online == nil || online.DefValue != "false" {
 		t.Fatalf("copy --online default=%v, want false", online)
 	}
-	for _, name := range []string{"destination-storage-class", "source-node", "target-node", "pod"} {
+	for _, name := range []string{"capacity-awareness", "destination-storage-class", "source-node", "target-node", "pod"} {
 		if copyCommand.Flags().Lookup(name) == nil {
 			t.Fatalf("copy is missing --%s", name)
 		}
@@ -138,9 +138,11 @@ func TestMigrationFlagDefaultsAndPlanOptions(t *testing.T) {
 	flags.bind(command, true, true, true, true)
 
 	for name, want := range map[string]string{
+		"capacity-awareness":  "auto",
 		"source-namespace":    "default",
 		"temporary-namespace": "pvc-migrate-system",
-		"strategy":            "[mount,clusterip]",
+		"target-node":         "auto",
+		"strategy":            "[auto]",
 		"verify-checksum":     "true",
 		"delete-extraneous":   "true",
 		"precopy-passes":      "1",
@@ -160,6 +162,7 @@ func TestMigrationFlagDefaultsAndPlanOptions(t *testing.T) {
 	flags.sourceNode = "node-a"
 	flags.targetNode = "node-b"
 	flags.destinationClass = "fast"
+	flags.capacityAwareness = "require"
 	flags.strategies = []string{"local"}
 	flags.verifyChecksum = true
 	flags.deleteExtraneous = true
@@ -172,7 +175,7 @@ func TestMigrationFlagDefaultsAndPlanOptions(t *testing.T) {
 	if options.SessionID != "mig-fixed" || options.SourceNamespace != "source" || options.DestinationNamespace != "source" || options.TemporaryNamespace != "staging" || options.StagingNamespace != "staging" || options.SessionNamespace != "sessions" {
 		t.Fatalf("namespaces and identity = %#v", options)
 	}
-	if options.Operation != domain.OperationMigratePod || options.PodName != "db-2" || options.SourceNode != "node-a" || options.TargetNode != "node-b" || options.DestinationClass != "fast" || options.SwitchoverCandidate != "db-1" || !options.AllowLeaderDowntime || !options.VerifyChecksum || !options.DeleteExtraneous {
+	if options.Operation != domain.OperationMigratePod || options.PodName != "db-2" || options.SourceNode != "node-a" || options.TargetNode != "node-b" || options.DestinationClass != "fast" || options.CapacityAwareness != domain.CapacityAwarenessRequire || options.SwitchoverCandidate != "db-1" || !options.AllowLeaderDowntime || !options.VerifyChecksum || !options.DeleteExtraneous {
 		t.Fatalf("options = %#v", options)
 	}
 	flags.sourcePVCs[0] = "mutated"

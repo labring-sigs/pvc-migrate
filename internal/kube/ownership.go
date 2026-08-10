@@ -121,6 +121,8 @@ func FinalizePVC(ctx context.Context, client kubernetes.Interface, ref domain.Ob
 		}
 		delete(pvc.Annotations, SessionAnnotation)
 		delete(pvc.Annotations, "pvc-migrate.io/rollback-pv")
+		delete(pvc.Annotations, "pvc-migrate.io/source-pv")
+		delete(pvc.Annotations, "pvc-migrate.io/source-pvc-uid")
 		for key, value := range original.Annotations {
 			pvc.Annotations[key] = value
 		}
