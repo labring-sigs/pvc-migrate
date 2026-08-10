@@ -87,6 +87,22 @@ func TestSessionGuidanceIncludesCustomNamespaceAndApproval(t *testing.T) {
 	}
 }
 
+func TestSessionGuidanceAbortIncludesValidationAndApproval(t *testing.T) {
+	var output bytes.Buffer
+	if err := writeSessionGuidance(&output, guidanceSession(domain.PhasePaused)); err != nil {
+		t.Fatal(err)
+	}
+	text := output.String()
+	for _, want := range []string{
+		"session abort mig-test --dry-run",
+		"--yes session abort mig-test --dry-run=false",
+	} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("guidance=%q missing %q", text, want)
+		}
+	}
+}
+
 func TestSessionGuidanceUsesOperationSpecificCompletionPaths(t *testing.T) {
 	reserve := guidanceSession(domain.PhaseReserved)
 	reserve.Spec = domain.NewSessionSpec(domain.OperationReserve, reserve.Spec.SessionCommon, domain.WorkloadSpec{}, false)
@@ -179,6 +195,17 @@ func TestTransferErrorGuidanceIncludesPVCInspection(t *testing.T) {
 	}
 	if !strings.Contains(command.stderr.String(), "kubectl --namespace app get pvc data") {
 		t.Fatalf("guidance=%q", command.stderr.String())
+	}
+}
+
+func TestRuntimeErrorGuidanceAvoidsPVCInspection(t *testing.T) {
+	command := &guidanceErrorCommand{}
+	if err := reportRuntimeError(command, domain.NewError(domain.ErrorValidation, "flags", "unsupported output format")); err == nil {
+		t.Fatal("expected original runtime error")
+	}
+	text := command.stderr.String()
+	if strings.Contains(text, "get pvc") || !strings.Contains(text, "--kubeconfig") || !strings.Contains(text, "--output") {
+		t.Fatalf("guidance=%q", text)
 	}
 }
 

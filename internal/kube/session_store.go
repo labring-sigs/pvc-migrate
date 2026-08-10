@@ -193,6 +193,9 @@ func (s *ConfigMapSessionStore) Delete(ctx context.Context, session *domain.Sess
 		updated := cm.DeepCopy()
 		updated.Finalizers = removeString(updated.Finalizers, SessionFinalizer)
 		latest, err := s.client.CoreV1().ConfigMaps(cm.Namespace).Update(ctx, updated, metav1.UpdateOptions{})
+		if apierrors.IsConflict(err) {
+			return domain.WrapError(domain.ErrorConflict, "delete session", "session ConfigMap changed while removing protection finalizer", err)
+		}
 		if err != nil && !apierrors.IsNotFound(err) {
 			return domain.WrapError(domain.ErrorKubernetes, "delete session", "remove session protection finalizer", err)
 		}

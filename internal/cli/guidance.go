@@ -30,6 +30,8 @@ func writeSessionGuidance(w io.Writer, session *domain.Session) error {
 	copy := fmt.Sprintf("%s copy --session %s --dry-run=false", prefix, session.ID)
 	rollbackPlan := fmt.Sprintf("%s session rollback %s --dry-run", prefix, session.ID)
 	rollback := fmt.Sprintf("%s --yes session rollback %s --dry-run=false", prefix, session.ID)
+	abortPlan := fmt.Sprintf("%s session abort %s --dry-run", prefix, session.ID)
+	abort := fmt.Sprintf("%s --yes session abort %s --dry-run=false", prefix, session.ID)
 
 	if _, err := fmt.Fprintf(w, "\nNext steps for session %s (phase %s):\n", session.ID, session.Status.Phase); err != nil {
 		return err
@@ -86,7 +88,10 @@ func writeSessionGuidance(w io.Writer, session *domain.Session) error {
 			}
 		}
 		if session.Status.Phase == domain.PhasePaused || session.Status.Phase == domain.PhaseFinalSyncing || session.Status.Phase == domain.PhaseFinalSynced {
-			if _, err := fmt.Fprintln(w, "  Abort before activation (type the session ID or use --yes):", fmt.Sprintf("%s session abort %s --dry-run=false", prefix, session.ID)); err != nil {
+			if _, err := fmt.Fprintln(w, "  Abort before activation (validate first):", abortPlan); err != nil {
+				return err
+			}
+			if _, err := fmt.Fprintln(w, "  Abort before activation:", abort); err != nil {
 				return err
 			}
 		}
@@ -233,6 +238,11 @@ func reportPlanningError(cmd interface{ ErrOrStderr() io.Writer }, err error) er
 
 func reportPreSessionError(cmd interface{ ErrOrStderr() io.Writer }, err error) error {
 	_, _ = fmt.Fprintln(cmd.ErrOrStderr(), "\nThe command stopped before session creation. Correct the reported condition and rerun; dry-run remains the default.")
+	return err
+}
+
+func reportRuntimeError(cmd interface{ ErrOrStderr() io.Writer }, err error) error {
+	_, _ = fmt.Fprintln(cmd.ErrOrStderr(), "\nCommand initialization stopped before any cluster operation. Check --kubeconfig, --context, --output, --log-format, and --log-level, then rerun the command.")
 	return err
 }
 

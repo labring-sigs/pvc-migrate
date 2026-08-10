@@ -105,6 +105,7 @@ func TestConfigMapSessionStoreDeleteUsesUIDPrecondition(t *testing.T) {
 		t.Fatal(err)
 	}
 	cm.UID = "session-configmap-uid"
+	cm.ResourceVersion = "session-configmap-rv"
 	if _, err := client.CoreV1().ConfigMaps("system").Update(ctx, cm, metav1.UpdateOptions{}); err != nil {
 		t.Fatal(err)
 	}
@@ -116,7 +117,7 @@ func TestConfigMapSessionStoreDeleteUsesUIDPrecondition(t *testing.T) {
 	if err := store.Delete(ctx, session); err != nil {
 		t.Fatal(err)
 	}
-	if preconditions == nil || preconditions.UID == nil || *preconditions.UID != "session-configmap-uid" {
+	if preconditions == nil || preconditions.UID == nil || *preconditions.UID != "session-configmap-uid" || preconditions.ResourceVersion == nil || *preconditions.ResourceVersion == "" {
 		t.Fatalf("delete preconditions: %#v", preconditions)
 	}
 	updated, err := client.CoreV1().ConfigMaps("system").Get(ctx, SessionConfigMapName(session.ID), metav1.GetOptions{})
@@ -129,6 +130,29 @@ func TestConfigMapSessionStoreDeleteUsesUIDPrecondition(t *testing.T) {
 	}
 	if err := store.Delete(ctx, session); err != nil {
 		t.Fatalf("idempotent delete: %v", err)
+	}
+}
+
+func TestConfigMapSessionStoreDeleteMapsFinalizerConflict(t *testing.T) {
+	ctx := context.Background()
+	client := fake.NewClientset()
+	store := NewConfigMapSessionStore(client)
+	session := storeTestSession()
+	if err := store.Create(ctx, session); err != nil {
+		t.Fatal(err)
+	}
+	client.PrependReactor("update", "configmaps", func(action clienttesting.Action) (bool, runtime.Object, error) {
+		updated := action.(clienttesting.UpdateAction).GetObject().(*corev1.ConfigMap)
+		if !containsString(updated.Finalizers, SessionFinalizer) {
+			return true, nil, apierrors.NewConflict(schema.GroupResource{Resource: "configmaps"}, updated.Name, fmt.Errorf("session changed"))
+		}
+		return false, nil, nil
+	})
+	if err := store.Delete(ctx, session); domain.CategoryOf(err) != domain.ErrorConflict {
+		t.Fatalf("category=%s error=%v", domain.CategoryOf(err), err)
+	}
+	if _, err := client.CoreV1().ConfigMaps("system").Get(ctx, SessionConfigMapName(session.ID), metav1.GetOptions{}); err != nil {
+		t.Fatalf("session ConfigMap disappeared after conflict: %v", err)
 	}
 }
 

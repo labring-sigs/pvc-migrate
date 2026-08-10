@@ -76,7 +76,7 @@ func (r *rootState) newObjectTransferCommand(restore, forceOnline bool) *cobra.C
 			online := !restore && (forceOnline || flags.online || flags.allowMounted)
 			runtime, err := r.runtime()
 			if err != nil {
-				return reportTransferError(cmd, use, flags.namespace, flags.pvc, err)
+				return reportRuntimeError(cmd, err)
 			}
 			ctx, cancel := r.context(cmd.Context())
 			defer cancel()
@@ -177,7 +177,7 @@ func (r *rootState) newBackupPlanCommand(restore, forceOnline bool) *cobra.Comma
 			online := !restore && (forceOnline || flags.online || flags.allowMounted)
 			runtime, err := r.runtime()
 			if err != nil {
-				return reportTransferError(cmd, "backup plan", flags.namespace, flags.pvc, err)
+				return reportRuntimeError(cmd, err)
 			}
 			ctx, cancel := r.context(cmd.Context())
 			defer cancel()
