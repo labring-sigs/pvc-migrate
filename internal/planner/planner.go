@@ -196,6 +196,7 @@ func (p *Planner) Plan(ctx context.Context, options Options) (*domain.MigrationP
 	volumeSpecs := make([]domain.VolumeSpec, 0, len(pvcNames))
 	plannedVolumes := make([]domain.PlannedVolume, 0, len(pvcNames))
 	copyConsumerNodes := map[string]struct{}{}
+	unmanagedConsumerNames := map[string]struct{}{}
 	var namespacePods []corev1.Pod
 	var namespacePodsErr error
 	podsLoaded := false
@@ -315,6 +316,11 @@ func (p *Planner) Plan(ctx context.Context, options Options) (*domain.MigrationP
 			podsLoaded = true
 		}
 		consumers := p.checkPVCReferencesFromPods(plan, pvc, sourcePod, options.Operation, options.Online, namespacePods, namespacePodsErr)
+		if options.Operation == domain.OperationMigrate && sourcePod == nil {
+			for _, consumer := range consumers {
+				unmanagedConsumerNames[consumer.Name] = struct{}{}
+			}
+		}
 		if options.Operation == domain.OperationCopy && options.Online && sourcePod == nil {
 			for _, consumer := range consumers {
 				if consumer.Spec.NodeName != "" {
@@ -329,6 +335,11 @@ func (p *Planner) Plan(ctx context.Context, options Options) (*domain.MigrationP
 				}
 			}
 		}
+	}
+	if len(unmanagedConsumerNames) > 0 {
+		names := slices.Collect(maps.Keys(unmanagedConsumerNames))
+		sort.Strings(names)
+		plan.AddCheck(failed("controller-adapter", fmt.Sprintf("PVC-only migration has active Pod consumer(s) %s; use --pod to select a workload that pvc-migrate can pause before final sync", strings.Join(names, ","))))
 	}
 	if options.Operation == domain.OperationCopy && options.Online && sourcePod == nil {
 		options.SourceNode = inferOnlineCopySourceNode(plan, options.SourceNode, copyConsumerNodes)
