@@ -29,6 +29,7 @@ type Options struct {
 	SessionNamespace     string
 	StagingNamespace     string
 	ToolImage            string
+	CapacityAwareness    domain.CapacityAwareness
 	SourcePVCs           []string
 	DestinationPVCs      []string
 	PodName              string
@@ -68,6 +69,7 @@ func (p *Planner) Plan(ctx context.Context, options Options) (*domain.MigrationP
 		DestinationNamespace: options.DestinationNamespace,
 		SessionNamespace:     options.SessionNamespace,
 		ToolImage:            options.ToolImage,
+		CapacityAwareness:    options.CapacityAwareness,
 		TargetNode:           options.TargetNode,
 		Ready:                true,
 		TemporaryUsage: domain.ResourceEstimate{
@@ -89,6 +91,9 @@ func (p *Planner) Plan(ctx context.Context, options Options) (*domain.MigrationP
 		if !supportedStrategy(strategy) {
 			plan.AddCheck(failed("strategy", fmt.Sprintf("unsupported pv-migrate strategy %q", strategy)))
 		}
+	}
+	if !validCapacityAwareness(options.CapacityAwareness) {
+		plan.AddCheck(failed("capacity-awareness", fmt.Sprintf("unsupported capacity awareness mode %q; use auto, require, or off", options.CapacityAwareness)))
 	}
 	for _, field := range []struct {
 		name  string
@@ -328,8 +333,12 @@ func (p *Planner) Plan(ctx context.Context, options Options) (*domain.MigrationP
 	if options.Operation == domain.OperationCopy && options.Online && sourcePod == nil {
 		options.SourceNode = inferOnlineCopySourceNode(plan, options.SourceNode, copyConsumerNodes)
 	}
+	capacityInventory := &storageCapacityInventory{mode: options.CapacityAwareness}
+	if len(plannedVolumes) > 0 {
+		capacityInventory = p.loadStorageCapacity(ctx, options.CapacityAwareness)
+	}
 	if autoTargetNodeRequested {
-		targetNode = p.selectTargetNode(ctx, plan, workload, sourcePod, options.SourceNode, plannedVolumes, sourcePVs, storageClasses)
+		targetNode = p.selectTargetNode(ctx, plan, workload, sourcePod, options.SourceNode, plannedVolumes, sourcePVs, storageClasses, capacityInventory)
 		if targetNode != nil {
 			options.TargetNode = targetNode.Name
 			plan.TargetNode = targetNode.Name
@@ -353,6 +362,9 @@ func (p *Planner) Plan(ctx context.Context, options Options) (*domain.MigrationP
 			}
 			p.checkCSINode(ctx, plan, sc, targetNode)
 		}
+	}
+	if targetNode != nil && len(plannedVolumes) > 0 && validCapacityAwareness(options.CapacityAwareness) && options.CapacityAwareness != domain.CapacityAwarenessOff {
+		p.checkStorageCapacity(plan, targetNode, plannedVolumes, capacityInventory, options.CapacityAwareness)
 	}
 	if options.SourceNode != "" {
 		node, err := p.client.CoreV1().Nodes().Get(ctx, options.SourceNode, metav1.GetOptions{})
@@ -474,6 +486,9 @@ func applyDefaults(options Options) Options {
 	if options.ToolImage == "" {
 		options.ToolImage = kube.DefaultToolImageRepository + ":main"
 	}
+	if options.CapacityAwareness == "" {
+		options.CapacityAwareness = domain.CapacityAwarenessAuto
+	}
 	if len(options.Strategies) == 0 || (len(options.Strategies) == 1 && containsStrategy(options.Strategies, "auto")) {
 		options.Strategies = autoStrategies(options.SourceNamespace, options.StagingNamespace)
 	}
@@ -509,9 +524,12 @@ type targetNodeCandidate struct {
 	distinctFromSrc bool
 	taintPenalty    int
 	sourcePVMatches int
+	capacityKnown   int
+	capacityUnknown int
+	capacitySurplus resource.Quantity
 }
 
-func (p *Planner) selectTargetNode(ctx context.Context, plan *domain.MigrationPlan, workload domain.WorkloadSpec, sourcePod *corev1.Pod, sourceNode string, volumes []domain.PlannedVolume, sourcePVs map[string]*corev1.PersistentVolume, storageClasses map[string]*storagev1.StorageClass) *corev1.Node {
+func (p *Planner) selectTargetNode(ctx context.Context, plan *domain.MigrationPlan, workload domain.WorkloadSpec, sourcePod *corev1.Pod, sourceNode string, volumes []domain.PlannedVolume, sourcePVs map[string]*corev1.PersistentVolume, storageClasses map[string]*storagev1.StorageClass, capacityInventory *storageCapacityInventory) *corev1.Node {
 	if len(volumes) == 0 {
 		plan.AddCheck(failed("target-node", "target node auto-selection requires at least one valid source PVC"))
 		return nil
@@ -547,13 +565,36 @@ func (p *Planner) selectTargetNode(ctx context.Context, plan *domain.MigrationPl
 		if !compatible {
 			continue
 		}
-		candidates = append(candidates, targetNodeCandidate{node: node, distinctFromSrc: sourceNode == "" || node.Name != sourceNode, taintPenalty: hardTaintCount(node), sourcePVMatches: sourcePVMatches})
+		capacityKnown, capacityUnknown, capacitySurplus, capacityCompatible := capacityScore(capacityInventory, node, volumes)
+		if !capacityCompatible {
+			continue
+		}
+		candidates = append(candidates, targetNodeCandidate{node: node, distinctFromSrc: sourceNode == "" || node.Name != sourceNode, taintPenalty: hardTaintCount(node), sourcePVMatches: sourcePVMatches, capacityKnown: capacityKnown, capacityUnknown: capacityUnknown, capacitySurplus: capacitySurplus})
 	}
 	if len(candidates) == 0 {
-		plan.AddCheck(failed("target-node", "no Ready and schedulable node satisfies Pod scheduling and destination StorageClass topology"))
+		message := "no Ready and schedulable node satisfies Pod scheduling and destination StorageClass topology"
+		if capacityInventory != nil && capacityInventory.loaded && len(capacityInventory.items) > 0 {
+			message += " with sufficient CSI-reported capacity"
+		}
+		plan.AddCheck(failed("target-node", message))
 		return nil
 	}
 	slices.SortStableFunc(candidates, func(a, b targetNodeCandidate) int {
+		if a.capacityKnown != b.capacityKnown {
+			if a.capacityKnown > b.capacityKnown {
+				return -1
+			}
+			return 1
+		}
+		if a.capacityUnknown != b.capacityUnknown {
+			if a.capacityUnknown < b.capacityUnknown {
+				return -1
+			}
+			return 1
+		}
+		if comparison := a.capacitySurplus.Cmp(b.capacitySurplus); comparison != 0 {
+			return -comparison
+		}
 		if a.distinctFromSrc != b.distinctFromSrc {
 			if a.distinctFromSrc {
 				return -1
@@ -575,16 +616,19 @@ func (p *Planner) selectTargetNode(ctx context.Context, plan *domain.MigrationPl
 		return strings.Compare(a.node.Name, b.node.Name)
 	})
 	selected := candidates[0]
-	reason := "topology-compatible Ready node"
+	reasons := []string{"topology-compatible Ready node"}
+	if selected.capacityKnown > 0 {
+		reasons = append(reasons, fmt.Sprintf("CSI capacity verified for %d StorageClass(es)", selected.capacityKnown))
+	}
 	if sourceNode != "" {
 		switch {
 		case selected.node.Name != sourceNode:
-			reason = fmt.Sprintf("topology-compatible Ready node distinct from source %s", sourceNode)
+			reasons = append(reasons, fmt.Sprintf("distinct from source %s", sourceNode))
 		case len(candidates) == 1:
-			reason = fmt.Sprintf("only compatible Ready node; source node %s is retained", sourceNode)
+			reasons = append(reasons, fmt.Sprintf("only compatible node; source node %s is retained", sourceNode))
 		}
 	}
-	plan.AddCheck(passed("target-node-selection", fmt.Sprintf("auto selected target node %s (%s)", selected.node.Name, reason)))
+	plan.AddCheck(passed("target-node-selection", fmt.Sprintf("auto selected target node %s (%s)", selected.node.Name, strings.Join(reasons, ", "))))
 	return selected.node
 }
 

@@ -21,6 +21,7 @@ type migrationFlags struct {
 	sourceNode           string
 	targetNode           string
 	destinationClass     string
+	capacityAwareness    string
 	strategies           []string
 	verifyChecksum       bool
 	deleteExtraneous     bool
@@ -43,6 +44,7 @@ func (f *migrationFlags) bind(command *cobra.Command, includePod, includeSourceN
 	}
 	flags.StringVar(&f.targetNode, "target-node", "auto", "Target node for provisioning and copy helpers; auto selects a compatible Ready node")
 	flags.StringVar(&f.destinationClass, "destination-storage-class", "", "Destination StorageClass; defaults to each source class")
+	flags.StringVar(&f.capacityAwareness, "capacity-awareness", string(domain.CapacityAwarenessAuto), "CSIStorageCapacity policy: auto, require, or off")
 	flags.StringSliceVar(&f.strategies, "strategy", []string{"auto"}, "pv-migrate strategy order; auto selects a topology-compatible order")
 	flags.BoolVar(&f.verifyChecksum, "verify-checksum", true, "Use rsync checksum comparison during final sync")
 	flags.BoolVar(&f.deleteExtraneous, "delete-extraneous", true, "Delete destination files absent from the source")
@@ -97,6 +99,7 @@ func (f *migrationFlags) planOptions(state *rootState, operation domain.Operatio
 		TargetNode:           f.targetNode,
 		ToolImage:            state.global.toolImage,
 		DestinationClass:     f.destinationClass,
+		CapacityAwareness:    domain.CapacityAwareness(f.capacityAwareness),
 		Strategies:           append([]string(nil), f.strategies...),
 		Online:               f.online,
 		VerifyChecksum:       f.verifyChecksum,

@@ -52,7 +52,7 @@ Every mutating command defaults to `--dry-run=true`. Execution requires an expli
 
 ### 1. Plan
 
-Inspect the Pod, automatically selected target node, storage topology, permissions, quotas, consumers, and workload adapter:
+Inspect the Pod, automatically selected target node, CSI-reported storage capacity, topology, permissions, quotas, consumers, and workload adapter:
 
 ```bash
 pvc-migrate \
@@ -193,7 +193,9 @@ Stable exit codes are validation `2`, precondition `3`, conflict `4`, Kubernetes
 
 The default `copy` mode requires zero active Pod consumers. `copy --online` allows active consumers for one finite warm-copy pass. Both modes finish after data copy and leave application PVC identities unchanged. `migrate` and `migrate-pod` provide managed final sync and cutover.
 
-The planner infers the source helper node from active consumers and selects a Ready, schedulable target node that satisfies Pod scheduling and StorageClass topology. `--target-node` accepts a node name or `auto`; `auto` is the default and prefers a node different from the source when the workload and storage topology allow it. `--source-node` supplies an explicit node when the storage backend requires one. RWOP consumers and consumers spread across multiple nodes require separate sessions or an application-specific workflow.
+The planner infers the source helper node from active consumers and selects a Ready, schedulable target node that satisfies Pod scheduling, StorageClass topology, and available CSI capacity signals. `--target-node` accepts a node name or `auto`; `auto` is the default and prefers nodes with sufficient reported capacity and then a node different from the source. `--source-node` supplies an explicit node when the storage backend requires one. RWOP consumers and consumers spread across multiple nodes require separate sessions or an application-specific workflow.
+
+`--capacity-awareness=auto` is the default. Matching `CSIStorageCapacity` objects enforce reported capacity and `maximumVolumeSize`; missing capacity information produces a warning and reservation performs the final provisioning check. `require` makes missing capacity information a failed plan, and `off` disables the API lookup.
 
 ```bash
 pvc-migrate copy --dry-run=false \

@@ -5,7 +5,7 @@
 1. Confirm recent application-level backups and a tested restore procedure.
 2. Confirm source and destination StorageClasses, available backend capacity, and image registry access. The planner selects a compatible target node automatically; pass `--target-node` to pin one.
 3. Confirm the session and temporary namespaces exist or allow the CLI to create them.
-4. Run the operation-specific plan, such as `migrate-pod plan -o yaml`, and resolve every error check. Review warnings for active writers, roles, CSINode registration, and NetworkPolicies.
+4. Run the operation-specific plan, such as `migrate-pod plan -o yaml`, and resolve every error check. Review warnings for unknown CSI capacity, active writers, roles, CSINode registration, and NetworkPolicies. Use `--capacity-awareness=require` where every destination driver publishes `CSIStorageCapacity`.
 5. Run the write command with its local `--dry-run=true` default to exercise API reads and server-side validation without persistent resources. Add `--dry-run=false` to the approved execution.
 6. Record the session ID in the change ticket and use it for every follow-up command.
 

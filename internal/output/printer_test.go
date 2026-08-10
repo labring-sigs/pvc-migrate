@@ -95,12 +95,15 @@ func TestTablePlanRendersChecksAndVolumes(t *testing.T) {
 			{Name: "quota", Passed: true, Severity: domain.SeverityInfo, Message: "enough"},
 			{Name: "topology", Passed: false, Severity: domain.SeverityError, Message: "unavailable"},
 		},
+		StorageCapacity: []domain.StorageCapacityReport{{
+			StorageClass: "fast", TargetNode: "node-b", RequestedCapacity: "10Gi", ReportedCapacity: "20Gi", MaximumVolumeSize: "15Gi", Status: domain.StorageCapacitySufficient,
+		}},
 	}
 	var output bytes.Buffer
 	if err := (Printer{Writer: &output}).Print(plan); err != nil {
 		t.Fatal(err)
 	}
-	for _, want := range []string{"SESSION", "mig-1", "app/data", "pv-a", "staging/data-mig", "PASS", "FAIL", "unavailable"} {
+	for _, want := range []string{"SESSION", "mig-1", "app/data", "pv-a", "staging/data-mig", "STORAGE CLASS", "20Gi", "15Gi", "sufficient", "PASS", "FAIL", "unavailable"} {
 		if !strings.Contains(output.String(), want) {
 			t.Fatalf("table missing %q:\n%s", want, output.String())
 		}

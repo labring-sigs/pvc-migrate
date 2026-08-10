@@ -72,6 +72,16 @@ func (p Printer) printPlan(plan *domain.MigrationPlan) error {
 			return err
 		}
 	}
+	if len(plan.StorageCapacity) > 0 {
+		if _, err := fmt.Fprintln(w, "\nSTORAGE CLASS\tTARGET NODE\tREQUESTED\tREPORTED\tMAX VOLUME\tSTATUS"); err != nil {
+			return err
+		}
+		for _, capacity := range plan.StorageCapacity {
+			if _, err := fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\n", capacity.StorageClass, capacity.TargetNode, capacity.RequestedCapacity, valueOrUnknown(capacity.ReportedCapacity), valueOrUnknown(capacity.MaximumVolumeSize), capacity.Status); err != nil {
+				return err
+			}
+		}
+	}
 	if _, err := fmt.Fprintln(w, "\nCHECK\tRESULT\tSEVERITY\tMESSAGE"); err != nil {
 		return err
 	}
@@ -85,6 +95,13 @@ func (p Printer) printPlan(plan *domain.MigrationPlan) error {
 		}
 	}
 	return w.Flush()
+}
+
+func valueOrUnknown(value string) string {
+	if value == "" {
+		return "unknown"
+	}
+	return value
 }
 
 func (p Printer) printSession(session *domain.Session) error {

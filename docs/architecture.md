@@ -72,11 +72,11 @@ This model gives crash consistency at the final filesystem state. Database-level
 
 ## Storage Reservation And Topology
 
-The planner selects a target node automatically when `--target-node` is `auto` (the default). Selection considers Ready and schedulable state, Pod node selectors and required affinity, migration-hard scheduling constraints, taints, and every destination StorageClass topology; a pinned node receives the same checks. Reservation creates a real destination PVC before downtime, which consumes namespace quota and tests backend provisioning.
+The planner selects a target node automatically when `--target-node` is `auto` (the default). Selection considers Ready and schedulable state, Pod node selectors and required affinity, migration-hard scheduling constraints, taints, every destination StorageClass topology, and matching `CSIStorageCapacity` reports. Known capacity limits remove unsuitable nodes, and greater reported headroom ranks earlier; a pinned node receives the same checks. Reservation creates a real destination PVC before downtime, which consumes namespace quota and tests backend provisioning.
 
 For `WaitForFirstConsumer`, a short-lived consumer Pod uses the target hostname and generated tolerations for target-node `NoSchedule` and `NoExecute` taints. The reserver waits for Pod readiness and a Bound PVC, records the PV UID and selected node, changes the PV to `Retain`, and removes the consumer. Generated tolerations remain limited to helper resources.
 
-Quota evaluation uses Kubernetes `resource.Quantity` and evaluates every ResourceQuota and PVC LimitRange in the staging namespace. The plan estimates temporary storage, retained rollback storage, PVCs, Pods, Jobs, Services, Secrets, and ConfigMaps. Actual destination binding remains the authoritative storage-capacity test.
+Quota evaluation uses Kubernetes `resource.Quantity` and evaluates every ResourceQuota and PVC LimitRange in the staging namespace. Capacity awareness aggregates the requested PVC capacity by StorageClass, matches namespaced `CSIStorageCapacity` objects against target-node labels, and checks both available capacity and the largest requested volume. The plan estimates temporary storage, retained rollback storage, PVCs, Pods, Jobs, Services, Secrets, and ConfigMaps. Actual destination binding remains the authoritative storage-capacity test.
 
 Helper containers set CPU and memory requests/limits to `0` and ephemeral-storage requests to `0`. The ephemeral-storage limit remains unset so kubelet can account for helper logs and writable-layer usage without immediately evicting a container whose limit is `0`. Object-count quota for Pods, Jobs, Secrets, Services, and ConfigMaps still applies and remains part of the plan estimate.
 
