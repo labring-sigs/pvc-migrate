@@ -43,7 +43,7 @@ func TestCheckPVCReferencesModelsOfflineWarmCopyRWOPAndSharedUnit(t *testing.T) 
 		t.Run(tt.name, func(t *testing.T) {
 			pvc := &corev1.PersistentVolumeClaim{ObjectMeta: metav1.ObjectMeta{Namespace: "app", Name: "data"}, Spec: corev1.PersistentVolumeClaimSpec{AccessModes: []corev1.PersistentVolumeAccessMode{tt.mode}}}
 			plan := &domain.MigrationPlan{Ready: true}
-			New(kubernetesfake.NewClientset(tt.pods...), nil).checkPVCReferences(context.Background(), plan, pvc, tt.sourcePod, domain.OperationMigrate, false)
+			New(kubernetesfake.NewClientset(tt.pods...), nil).checkPVCReferences(context.Background(), plan, pvc, tt.sourcePod, domain.OperationCopy, true)
 			if plan.Ready != tt.ready || len(plan.Checks) != 1 || plan.Checks[0].Severity != tt.severity || !strings.Contains(plan.Checks[0].Message, tt.message) {
 				t.Fatalf("plan ready=%t checks=%#v", plan.Ready, plan.Checks)
 			}

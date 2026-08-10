@@ -159,6 +159,9 @@ func TestMigrateWithoutPodRejectsActiveConsumers(t *testing.T) {
 	if plan.Ready || !hasFailedCheck(plan, "controller-adapter") {
 		t.Fatalf("active PVC-only migration should fail: %#v", plan.Checks)
 	}
+	if hasWarningCheck(plan, "pvc-consumers") {
+		t.Fatalf("PVC-only migration should not suggest warm copy after preflight failure: %#v", plan.Checks)
+	}
 	for _, check := range plan.Checks {
 		if check.Name == "controller-adapter" && !check.Passed && !strings.Contains(check.Message, "--pod") {
 			t.Fatalf("consumer failure should explain the actionable workload selection: %q", check.Message)

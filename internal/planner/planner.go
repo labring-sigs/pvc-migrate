@@ -891,6 +891,9 @@ func (p *Planner) checkPVCReferencesFromPods(plan *domain.MigrationPlan, pvc *co
 		plan.AddCheck(passed("pvc-consumers", fmt.Sprintf("PVC %s/%s is offline", pvc.Namespace, pvc.Name)))
 		return consumers
 	}
+	if operation == domain.OperationMigrate {
+		return consumers
+	}
 	if kube.HasAccessMode(pvc.Spec.AccessModes, corev1.ReadWriteOncePod) {
 		plan.AddCheck(failed("pvc-consumers", fmt.Sprintf("active RWOP PVC %s/%s cannot be warm-copied", pvc.Namespace, pvc.Name)))
 		return consumers
