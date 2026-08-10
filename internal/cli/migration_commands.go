@@ -3,6 +3,7 @@ package cli
 import (
 	"context"
 	"fmt"
+	"io"
 	"time"
 
 	"github.com/labring-sigs/pvc-migrate/internal/domain"
@@ -134,17 +135,17 @@ func (r *rootState) newMigrationPlanCommand(operation domain.Operation, useTempo
 			if targetsExistingSession(flags) && (operation == domain.OperationReserve || operation == domain.OperationCopy) {
 				session, err := runtime.store.Get(ctx, r.global.sessionNamespace, flags.sessionID)
 				if err != nil {
-					return err
+					return reportSessionLookupError(cmd, r.global.sessionNamespace, flags.sessionID, err)
 				}
 				if operation == domain.OperationCopy {
 					if err := prepareCopySession(session, flags); err != nil {
-						return err
+						return reportSessionError(cmd, session, err)
 					}
 				}
 				if err := runtime.service.ValidateReservation(ctx, session); err != nil {
-					return err
+					return reportSessionError(cmd, session, err)
 				}
-				return runtime.printer.Print(session)
+				return printSessionResult(cmd, runtime, session)
 			}
 			options, err := flags.planOptions(r, operation, useTemporary)
 			if err != nil {
@@ -152,9 +153,9 @@ func (r *rootState) newMigrationPlanCommand(operation domain.Operation, useTempo
 			}
 			plan, err := runtime.planner.Plan(ctx, options)
 			if err != nil {
-				return err
+				return reportPlanningError(cmd, err)
 			}
-			if err := runtime.printer.Print(plan); err != nil {
+			if err := printPlanResult(cmd, runtime, plan); err != nil {
 				return err
 			}
 			return requireReady(plan)
@@ -184,18 +185,18 @@ func (r *rootState) newReserveCommand() *cobra.Command {
 			if targetsExistingSession(flags) {
 				session, err := runtime.store.Get(ctx, r.global.sessionNamespace, flags.sessionID)
 				if err != nil {
-					return err
+					return reportSessionLookupError(cmd, r.global.sessionNamespace, flags.sessionID, err)
 				}
 				if dryRun {
 					if err := runtime.service.ValidateReservation(ctx, session); err != nil {
-						return err
+						return reportSessionError(cmd, session, err)
 					}
-					return runtime.printer.Print(session)
+					return printSessionResult(cmd, runtime, session)
 				}
 				if err := runtime.service.Reserve(ctx, session); err != nil {
-					return err
+					return reportSessionError(cmd, session, err)
 				}
-				return runtime.printer.Print(session)
+				return printSessionResult(cmd, runtime, session)
 			}
 			options, err := flags.planOptions(r, domain.OperationReserve, true)
 			if err != nil {
@@ -203,22 +204,22 @@ func (r *rootState) newReserveCommand() *cobra.Command {
 			}
 			plan, err := runtime.planner.Plan(ctx, options)
 			if err != nil {
-				return err
+				return reportPlanningError(cmd, err)
 			}
-			if err := requireReadyWithOutput(runtime, plan); err != nil {
+			if err := requireReadyWithOutput(runtime, plan, cmd.ErrOrStderr()); err != nil {
 				return err
 			}
 			session, err := runtime.service.CreateSession(ctx, plan, dryRun)
 			if err != nil {
-				return err
+				return reportSessionCreationError(cmd, plan.SessionNamespace, plan.SessionID, err)
 			}
 			if dryRun {
-				return runtime.printer.Print(plan)
+				return printPlanResult(cmd, runtime, plan)
 			}
 			if err := runtime.service.Reserve(ctx, session); err != nil {
-				return err
+				return reportSessionError(cmd, session, err)
 			}
-			return runtime.printer.Print(session)
+			return printSessionResult(cmd, runtime, session)
 		},
 	}
 	flags.bind(command, true, false, false, false)
@@ -242,43 +243,54 @@ func (r *rootState) newCopyCommand() *cobra.Command {
 			ctx, cancel := r.context(cmd.Context())
 			defer cancel()
 			var session *domain.Session
+			var plan *domain.MigrationPlan
 			if targetsExistingSession(flags) {
 				session, err = runtime.store.Get(ctx, r.global.sessionNamespace, flags.sessionID)
-				if err == nil {
-					err = prepareCopySession(session, flags)
+				if err != nil {
+					return reportSessionLookupError(cmd, r.global.sessionNamespace, flags.sessionID, err)
 				}
+				err = prepareCopySession(session, flags)
 			} else {
 				var options planner.Options
 				options, err = flags.planOptions(r, domain.OperationCopy, false)
 				if err == nil {
-					var plan *domain.MigrationPlan
 					plan, err = runtime.planner.Plan(ctx, options)
+					if err != nil {
+						return reportPlanningError(cmd, err)
+					}
 					if err == nil {
-						err = requireReadyWithOutput(runtime, plan)
+						err = requireReadyWithOutput(runtime, plan, cmd.ErrOrStderr())
 					}
 					if err == nil {
 						session, err = runtime.service.CreateSession(ctx, plan, dryRun)
+						if err != nil {
+							return reportSessionCreationError(cmd, plan.SessionNamespace, plan.SessionID, err)
+						}
 					}
 				}
 			}
 			if err != nil {
+				if session != nil {
+					return reportSessionError(cmd, session, err)
+				}
 				return err
 			}
 			if dryRun {
 				if targetsExistingSession(flags) {
 					if err := runtime.service.ValidateReservation(ctx, session); err != nil {
-						return err
+						return reportSessionError(cmd, session, err)
 					}
+					return printSessionResult(cmd, runtime, session)
 				}
-				return runtime.printer.Print(session)
+				return printPlanResult(cmd, runtime, plan)
 			}
 			if err := runtime.service.Reserve(ctx, session); err != nil {
-				return err
+				return reportSessionError(cmd, session, err)
 			}
 			if err := runtime.service.WarmCopy(ctx, session); err != nil {
-				return err
+				return reportSessionError(cmd, session, err)
 			}
-			return runtime.printer.Print(session)
+			return printSessionResult(cmd, runtime, session)
 		},
 	}
 	flags.bind(command, true, true, false, false)
@@ -331,30 +343,30 @@ func (r *rootState) newFinalSyncCommand() *cobra.Command {
 			defer cancel()
 			session, err := runtime.store.Get(ctx, r.global.sessionNamespace, sessionID)
 			if err != nil {
-				return err
+				return reportSessionLookupError(cmd, r.global.sessionNamespace, sessionID, err)
 			}
 			if !session.Spec.Orchestrated() {
-				return domain.NewError(domain.ErrorPrecondition, "final-sync", "final sync requires an orchestrated migration session")
+				return reportSessionError(cmd, session, domain.NewError(domain.ErrorPrecondition, "final-sync", "final sync requires an orchestrated migration session"))
 			}
 			if dryRun {
 				if err := runtime.service.ValidateFinalSync(ctx, session); err != nil {
-					return err
+					return reportSessionError(cmd, session, err)
 				}
-				return runtime.printer.Print(session)
+				return printSessionResult(cmd, runtime, session)
 			}
 			if err := r.confirm(cmd, sessionID); err != nil {
-				return err
+				return reportSessionError(cmd, session, err)
 			}
 			alreadyPaused := session.Status.Phase == domain.PhasePaused || session.Status.Phase == domain.PhaseFinalSyncing || session.Status.Phase == domain.PhaseFinalSynced || (session.Status.Phase == domain.PhaseFailed && session.Status.ResumeFrom == domain.PhaseFinalSyncing)
 			if !alreadyPaused {
 				if err := runtime.service.Pause(ctx, session); err != nil {
-					return err
+					return reportSessionError(cmd, session, err)
 				}
 			}
 			if err := runtime.service.FinalSync(ctx, session); err != nil {
-				return err
+				return reportSessionError(cmd, session, err)
 			}
-			return runtime.printer.Print(session)
+			return printSessionResult(cmd, runtime, session)
 		},
 	}
 	command.Flags().StringVar(&sessionID, "session", "", "Migration session ID")
@@ -387,21 +399,21 @@ func (r *rootState) newActivateCommand() *cobra.Command {
 			defer cancel()
 			session, err := runtime.store.Get(ctx, r.global.sessionNamespace, sessionID)
 			if err != nil {
-				return err
+				return reportSessionLookupError(cmd, r.global.sessionNamespace, sessionID, err)
 			}
 			if dryRun {
 				if err := runtime.service.ValidateActivation(ctx, session); err != nil {
-					return err
+					return reportSessionError(cmd, session, err)
 				}
-				return runtime.printer.Print(session)
+				return printSessionResult(cmd, runtime, session)
 			}
 			if err := r.confirm(cmd, sessionID); err != nil {
-				return err
+				return reportSessionError(cmd, session, err)
 			}
 			if err := runtime.service.Activate(ctx, session); err != nil {
-				return err
+				return reportSessionError(cmd, session, err)
 			}
-			return runtime.printer.Print(session)
+			return printSessionResult(cmd, runtime, session)
 		},
 	}
 	command.Flags().StringVar(&sessionID, "session", "", "Migration session ID")
@@ -430,12 +442,12 @@ func (r *rootState) newSessionFlagPlanCommand(action string, validate func(conte
 			defer cancel()
 			session, err := runtime.store.Get(ctx, r.global.sessionNamespace, sessionID)
 			if err != nil {
-				return err
+				return reportSessionLookupError(cmd, r.global.sessionNamespace, sessionID, err)
 			}
 			if err := validate(ctx, runtime, session); err != nil {
-				return err
+				return reportSessionError(cmd, session, err)
 			}
-			return runtime.printer.Print(session)
+			return printSessionResult(cmd, runtime, session)
 		},
 	}
 	command.Flags().StringVar(&sessionID, "session", "", "Migration session ID")
@@ -482,25 +494,25 @@ func (r *rootState) newMigrateCommand(podMode bool) *cobra.Command {
 			}
 			plan, err := runtime.planner.Plan(ctx, options)
 			if err != nil {
-				return err
+				return reportPlanningError(cmd, err)
 			}
-			if err := requireReadyWithOutput(runtime, plan); err != nil {
+			if err := requireReadyWithOutput(runtime, plan, cmd.ErrOrStderr()); err != nil {
 				return err
 			}
 			if dryRun {
-				return runtime.printer.Print(plan)
+				return printPlanResult(cmd, runtime, plan)
 			}
 			if err := r.confirm(cmd, approvalIdentity(flags)); err != nil {
-				return err
+				return reportPreSessionError(cmd, err)
 			}
 			session, err := runtime.service.CreateSession(ctx, plan, false)
 			if err != nil {
-				return err
+				return reportSessionCreationError(cmd, plan.SessionNamespace, plan.SessionID, err)
 			}
 			if err := runtime.service.Migrate(ctx, session, flags.precopyPasses); err != nil {
-				return err
+				return reportSessionError(cmd, session, err)
 			}
-			return runtime.printer.Print(session)
+			return printSessionResult(cmd, runtime, session)
 		},
 	}
 	flags.bind(command, true, true, true, true)
@@ -546,12 +558,20 @@ func requireReady(plan *domain.MigrationPlan) error {
 	return domain.NewError(domain.ErrorPrecondition, "plan", "migration plan contains failed checks")
 }
 
-func requireReadyWithOutput(runtime *commandRuntime, plan *domain.MigrationPlan) error {
+func requireReadyWithOutput(runtime *commandRuntime, plan *domain.MigrationPlan, guidance ...io.Writer) error {
 	if plan.Ready {
 		return nil
 	}
 	if err := runtime.printer.Print(plan); err != nil {
 		return err
+	}
+	for _, writer := range guidance {
+		if writer == nil {
+			continue
+		}
+		if _, err := fmt.Fprintln(writer, "\nNo session or migration resources were created. Resolve the failed plan checks, then rerun the command."); err != nil {
+			return err
+		}
 	}
 	return requireReady(plan)
 }

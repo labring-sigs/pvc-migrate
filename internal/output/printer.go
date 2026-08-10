@@ -48,6 +48,8 @@ func (p Printer) printTable(value any) error {
 	switch typed := value.(type) {
 	case *domain.MigrationPlan:
 		return p.printPlan(typed)
+	case *domain.OrphanCleanupPlan:
+		return p.printOrphanCleanupPlan(typed)
 	case *domain.Session:
 		return p.printSession(typed)
 	case []*domain.Session:
@@ -57,6 +59,26 @@ func (p Printer) printTable(value any) error {
 		encoder.SetIndent("", "  ")
 		return encoder.Encode(value)
 	}
+}
+
+func (p Printer) printOrphanCleanupPlan(plan *domain.OrphanCleanupPlan) error {
+	w := tabwriter.NewWriter(p.Writer, 0, 4, 2, ' ', 0)
+	if _, err := fmt.Fprintf(w, "SESSION\tREADY\tSOURCE PVC\tACTIVE PV\tROLLBACK PV\n%s\t%t\t%s/%s\t%s\t%s\n\n", plan.SessionID, plan.Ready, plan.SourcePVC.Namespace, plan.SourcePVC.Name, plan.ActivePV.Name, plan.RollbackPV.Name); err != nil {
+		return err
+	}
+	if _, err := fmt.Fprintln(w, "CHECK\tRESULT\tSEVERITY\tMESSAGE"); err != nil {
+		return err
+	}
+	for _, check := range plan.Checks {
+		result := "PASS"
+		if !check.Passed {
+			result = "FAIL"
+		}
+		if _, err := fmt.Fprintf(w, "%s\t%s\t%s\t%s\n", check.Name, result, check.Severity, check.Message); err != nil {
+			return err
+		}
+	}
+	return w.Flush()
 }
 
 func (p Printer) printPlan(plan *domain.MigrationPlan) error {

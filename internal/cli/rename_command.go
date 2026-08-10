@@ -81,25 +81,25 @@ func (r *rootState) newPVCIdentityCommand(move bool) *cobra.Command {
 				SessionNamespace:     r.global.sessionNamespace,
 			})
 			if err != nil {
-				return err
+				return reportPlanningError(cmd, err)
 			}
-			if err := requireReadyWithOutput(runtime, plan); err != nil {
+			if err := requireReadyWithOutput(runtime, plan, cmd.ErrOrStderr()); err != nil {
 				return err
 			}
 			if dryRun {
-				return runtime.printer.Print(plan)
+				return printPlanResult(cmd, runtime, plan)
 			}
 			if err := r.confirm(cmd, sourcePVC); err != nil {
-				return err
+				return reportPreSessionError(cmd, err)
 			}
 			session, err := runtime.service.CreateSession(ctx, plan, false)
 			if err != nil {
-				return err
+				return reportSessionCreationError(cmd, plan.SessionNamespace, plan.SessionID, err)
 			}
 			if err := runtime.service.Rename(ctx, session); err != nil {
-				return err
+				return reportSessionError(cmd, session, err)
 			}
-			return runtime.printer.Print(session)
+			return printSessionResult(cmd, runtime, session)
 		},
 	}
 	flags := command.Flags()
@@ -173,9 +173,9 @@ func (r *rootState) newPVCIdentityPlanCommand(move bool) *cobra.Command {
 				SessionNamespace:     r.global.sessionNamespace,
 			})
 			if err != nil {
-				return err
+				return reportPlanningError(cmd, err)
 			}
-			if err := runtime.printer.Print(plan); err != nil {
+			if err := printPlanResult(cmd, runtime, plan); err != nil {
 				return err
 			}
 			return requireReady(plan)

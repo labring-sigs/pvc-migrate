@@ -232,6 +232,7 @@ func (p *Planner) Plan(ctx context.Context, options Options) (*domain.MigrationP
 			plan.AddCheck(failed("source-pv", fmt.Sprintf("read PV %s: %v", pvc.Spec.VolumeName, err)))
 			continue
 		}
+		p.checkSessionOwnership(ctx, plan, options.SessionNamespace, pvc, pv)
 		sourcePVs[pv.Name] = pv
 		capacity, ok := pv.Spec.Capacity[corev1.ResourceStorage]
 		if !ok || capacity.Sign() <= 0 {

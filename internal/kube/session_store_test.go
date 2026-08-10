@@ -43,6 +43,11 @@ func TestConfigMapSessionStoreRoundTripAndConflict(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if len(cm.Finalizers) != 1 || cm.Finalizers[0] != SessionFinalizer {
+		t.Fatalf("session finalizers=%v", cm.Finalizers)
+	}
+	cm.Finalizers = append(cm.Finalizers, "example.com/external-protection")
+	cm.Annotations = map[string]string{"example.com/audit": "keep"}
 	cm.ResourceVersion = "1"
 	if _, err := client.CoreV1().ConfigMaps("system").Update(ctx, cm, metav1.UpdateOptions{}); err != nil {
 		t.Fatal(err)
@@ -57,6 +62,13 @@ func TestConfigMapSessionStoreRoundTripAndConflict(t *testing.T) {
 	}
 	if err := store.Update(ctx, loaded); err != nil {
 		t.Fatal(err)
+	}
+	updatedMetadata, err := client.CoreV1().ConfigMaps("system").Get(ctx, SessionConfigMapName("alpha"), metav1.GetOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !containsString(updatedMetadata.Finalizers, SessionFinalizer) || !containsString(updatedMetadata.Finalizers, "example.com/external-protection") || updatedMetadata.Annotations["example.com/audit"] != "keep" {
+		t.Fatalf("session metadata was not preserved: finalizers=%v annotations=%v", updatedMetadata.Finalizers, updatedMetadata.Annotations)
 	}
 	client.PrependReactor("update", "configmaps", func(action clienttesting.Action) (bool, runtime.Object, error) {
 		return true, nil, apierrors.NewConflict(
@@ -106,6 +118,10 @@ func TestConfigMapSessionStoreDeleteUsesUIDPrecondition(t *testing.T) {
 	}
 	if preconditions == nil || preconditions.UID == nil || *preconditions.UID != "session-configmap-uid" {
 		t.Fatalf("delete preconditions: %#v", preconditions)
+	}
+	updated, err := client.CoreV1().ConfigMaps("system").Get(ctx, SessionConfigMapName(session.ID), metav1.GetOptions{})
+	if err == nil && containsString(updated.Finalizers, SessionFinalizer) {
+		t.Fatalf("session finalizer remains before delete: %v", updated.Finalizers)
 	}
 	_, err = client.CoreV1().ConfigMaps("system").Get(ctx, SessionConfigMapName("alpha"), metav1.GetOptions{})
 	if !apierrors.IsNotFound(err) {

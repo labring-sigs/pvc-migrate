@@ -46,6 +46,8 @@ Session specifications use a discriminator with exactly one concrete payload. `r
 
 ConfigMap updates carry the current Kubernetes `resourceVersion`. A competing process receives a conflict and reloads the session before continuing. Mutating session commands also claim `pvc-migrate-lock-<sha256(session-id)>` in the session namespace. The holder renews the Lease while the operation runs; a renewal, ownership, or resource-version failure cancels the operation context, and the service refuses further mutations under the fenced holder. The Lease is released only by its current holder, with expiration recovering abandoned sessions.
 
+Session ConfigMaps carry `pvc-migrate.io/session-protection`. Session cleanup verifies the persisted resource relationship, removes this finalizer, and deletes the ConfigMap with a UID precondition. `session cleanup-orphan` reconstructs the relationship from PVC and PV metadata when the ConfigMap has already disappeared.
+
 ## Migration Transaction
 
 Kubernetes has no transaction across PVCs, PVs, Pods, StatefulSets, and custom resources. The application service implements a durable saga:
