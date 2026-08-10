@@ -43,6 +43,11 @@ func TestConfigMapSessionStoreRoundTripAndConflict(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if len(cm.Finalizers) != 1 || cm.Finalizers[0] != SessionFinalizer {
+		t.Fatalf("session finalizers=%v", cm.Finalizers)
+	}
+	cm.Finalizers = append(cm.Finalizers, "example.com/external-protection")
+	cm.Annotations = map[string]string{"example.com/audit": "keep"}
 	cm.ResourceVersion = "1"
 	if _, err := client.CoreV1().ConfigMaps("system").Update(ctx, cm, metav1.UpdateOptions{}); err != nil {
 		t.Fatal(err)
@@ -57,6 +62,13 @@ func TestConfigMapSessionStoreRoundTripAndConflict(t *testing.T) {
 	}
 	if err := store.Update(ctx, loaded); err != nil {
 		t.Fatal(err)
+	}
+	updatedMetadata, err := client.CoreV1().ConfigMaps("system").Get(ctx, SessionConfigMapName("alpha"), metav1.GetOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !containsString(updatedMetadata.Finalizers, SessionFinalizer) || !containsString(updatedMetadata.Finalizers, "example.com/external-protection") || updatedMetadata.Annotations["example.com/audit"] != "keep" {
+		t.Fatalf("session metadata was not preserved: finalizers=%v annotations=%v", updatedMetadata.Finalizers, updatedMetadata.Annotations)
 	}
 	client.PrependReactor("update", "configmaps", func(action clienttesting.Action) (bool, runtime.Object, error) {
 		return true, nil, apierrors.NewConflict(
@@ -93,6 +105,7 @@ func TestConfigMapSessionStoreDeleteUsesUIDPrecondition(t *testing.T) {
 		t.Fatal(err)
 	}
 	cm.UID = "session-configmap-uid"
+	cm.ResourceVersion = "session-configmap-rv"
 	if _, err := client.CoreV1().ConfigMaps("system").Update(ctx, cm, metav1.UpdateOptions{}); err != nil {
 		t.Fatal(err)
 	}
@@ -104,8 +117,12 @@ func TestConfigMapSessionStoreDeleteUsesUIDPrecondition(t *testing.T) {
 	if err := store.Delete(ctx, session); err != nil {
 		t.Fatal(err)
 	}
-	if preconditions == nil || preconditions.UID == nil || *preconditions.UID != "session-configmap-uid" {
+	if preconditions == nil || preconditions.UID == nil || *preconditions.UID != "session-configmap-uid" || preconditions.ResourceVersion == nil || *preconditions.ResourceVersion == "" {
 		t.Fatalf("delete preconditions: %#v", preconditions)
+	}
+	updated, err := client.CoreV1().ConfigMaps("system").Get(ctx, SessionConfigMapName(session.ID), metav1.GetOptions{})
+	if err == nil && containsString(updated.Finalizers, SessionFinalizer) {
+		t.Fatalf("session finalizer remains before delete: %v", updated.Finalizers)
 	}
 	_, err = client.CoreV1().ConfigMaps("system").Get(ctx, SessionConfigMapName("alpha"), metav1.GetOptions{})
 	if !apierrors.IsNotFound(err) {
@@ -113,6 +130,29 @@ func TestConfigMapSessionStoreDeleteUsesUIDPrecondition(t *testing.T) {
 	}
 	if err := store.Delete(ctx, session); err != nil {
 		t.Fatalf("idempotent delete: %v", err)
+	}
+}
+
+func TestConfigMapSessionStoreDeleteMapsFinalizerConflict(t *testing.T) {
+	ctx := context.Background()
+	client := fake.NewClientset()
+	store := NewConfigMapSessionStore(client)
+	session := storeTestSession()
+	if err := store.Create(ctx, session); err != nil {
+		t.Fatal(err)
+	}
+	client.PrependReactor("update", "configmaps", func(action clienttesting.Action) (bool, runtime.Object, error) {
+		updated := action.(clienttesting.UpdateAction).GetObject().(*corev1.ConfigMap)
+		if !containsString(updated.Finalizers, SessionFinalizer) {
+			return true, nil, apierrors.NewConflict(schema.GroupResource{Resource: "configmaps"}, updated.Name, fmt.Errorf("session changed"))
+		}
+		return false, nil, nil
+	})
+	if err := store.Delete(ctx, session); domain.CategoryOf(err) != domain.ErrorConflict {
+		t.Fatalf("category=%s error=%v", domain.CategoryOf(err), err)
+	}
+	if _, err := client.CoreV1().ConfigMaps("system").Get(ctx, SessionConfigMapName(session.ID), metav1.GetOptions{}); err != nil {
+		t.Fatalf("session ConfigMap disappeared after conflict: %v", err)
 	}
 }
 

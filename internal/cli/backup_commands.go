@@ -71,12 +71,12 @@ func (r *rootState) newObjectTransferCommand(restore, forceOnline bool) *cobra.C
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			if err := validateBucketFlags(flags, pvcFlag); err != nil {
-				return err
+				return reportPreSessionError(cmd, err)
 			}
 			online := !restore && (forceOnline || flags.online || flags.allowMounted)
 			runtime, err := r.runtime()
 			if err != nil {
-				return err
+				return reportRuntimeError(cmd, err)
 			}
 			ctx, cancel := r.context(cmd.Context())
 			defer cancel()
@@ -84,11 +84,11 @@ func (r *rootState) newObjectTransferCommand(restore, forceOnline bool) *cobra.C
 			flags.secretKeyExplicit = cmd.Flags().Changed("secret-key")
 			flags.sessionTokenExplicit = cmd.Flags().Changed("session-token")
 			if err := loadS3Credentials(ctx, runtime.clients.Kubernetes, flags); err != nil {
-				return err
+				return reportTransferError(cmd, use, flags.namespace, flags.pvc, err)
 			}
 			store, err := r.newObjectStore(ctx, flags)
 			if err != nil {
-				return err
+				return reportTransferError(cmd, use, flags.namespace, flags.pvc, err)
 			}
 			request := backup.Request{
 				ID:                    flags.id,
@@ -108,17 +108,20 @@ func (r *rootState) newObjectTransferCommand(restore, forceOnline bool) *cobra.C
 			}
 			plan, err := backup.Preflight(ctx, runtime.clients.Kubernetes, request, restore)
 			if err != nil {
-				return err
+				return reportTransferError(cmd, use, flags.namespace, flags.pvc, err)
 			}
 			if dryRun {
-				return printerFor(r).Print(plan)
+				if err := printerFor(r).Print(plan); err != nil {
+					return reportTransferError(cmd, use, flags.namespace, flags.pvc, err)
+				}
+				return writeTransferDryRunGuidance(cmd.ErrOrStderr(), use, flags.namespace, flags.pvc)
 			}
 			if err := r.confirm(cmd, flags.name); err != nil {
-				return err
+				return reportTransferError(cmd, use, flags.namespace, flags.pvc, err)
 			}
 			err = backup.Run(ctx, runtime.clients.Kubernetes, request, restore)
 			if err != nil {
-				return err
+				return reportTransferError(cmd, use, flags.namespace, flags.pvc, err)
 			}
 			if r.global.output != "table" {
 				mode := "offline"
@@ -128,7 +131,7 @@ func (r *rootState) newObjectTransferCommand(restore, forceOnline bool) *cobra.C
 				if restore {
 					mode = "restore"
 				}
-				return printerFor(r).Print(&backup.Result{
+				if err := printerFor(r).Print(&backup.Result{
 					Operation:   use,
 					Namespace:   flags.namespace,
 					PVC:         flags.pvc,
@@ -136,9 +139,17 @@ func (r *rootState) newObjectTransferCommand(restore, forceOnline bool) *cobra.C
 					Destination: store.Destination(),
 					Mode:        mode,
 					Status:      "completed",
-				})
+				}); err != nil {
+					return err
+				}
+				_, err := fmt.Fprintf(cmd.ErrOrStderr(), "%s completed. Verify the backup or restore result before the next workload change.\n", use)
+				return err
 			}
 			_, err = fmt.Fprintf(cmd.OutOrStdout(), "%s completed: %s/%s name=%s\n", use, flags.namespace, flags.pvc, flags.name)
+			if err != nil {
+				return err
+			}
+			_, err = fmt.Fprintf(cmd.ErrOrStderr(), "%s completed. Verify the backup or restore result before the next workload change.\n", use)
 			return err
 		},
 	}
@@ -161,12 +172,12 @@ func (r *rootState) newBackupPlanCommand(restore, forceOnline bool) *cobra.Comma
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			if err := validateBucketFlags(flags, pvcFlag); err != nil {
-				return err
+				return reportPreSessionError(cmd, err)
 			}
 			online := !restore && (forceOnline || flags.online || flags.allowMounted)
 			runtime, err := r.runtime()
 			if err != nil {
-				return err
+				return reportRuntimeError(cmd, err)
 			}
 			ctx, cancel := r.context(cmd.Context())
 			defer cancel()
@@ -174,11 +185,11 @@ func (r *rootState) newBackupPlanCommand(restore, forceOnline bool) *cobra.Comma
 			flags.secretKeyExplicit = cmd.Flags().Changed("secret-key")
 			flags.sessionTokenExplicit = cmd.Flags().Changed("session-token")
 			if err := loadS3Credentials(ctx, runtime.clients.Kubernetes, flags); err != nil {
-				return err
+				return reportTransferError(cmd, "backup plan", flags.namespace, flags.pvc, err)
 			}
 			store, err := r.newObjectStore(ctx, flags)
 			if err != nil {
-				return err
+				return reportTransferError(cmd, "backup plan", flags.namespace, flags.pvc, err)
 			}
 			request := backup.Request{
 				ID: flags.id, ToolImage: r.global.toolImage, Namespace: flags.namespace, PVCName: flags.pvc, Path: flags.path,
@@ -188,9 +199,12 @@ func (r *rootState) newBackupPlanCommand(restore, forceOnline bool) *cobra.Comma
 			}
 			plan, err := backup.Preflight(ctx, runtime.clients.Kubernetes, request, restore)
 			if err != nil {
-				return err
+				return reportTransferError(cmd, "backup plan", flags.namespace, flags.pvc, err)
 			}
-			return printerFor(r).Print(plan)
+			if err := printerFor(r).Print(plan); err != nil {
+				return reportTransferError(cmd, "backup plan", flags.namespace, flags.pvc, err)
+			}
+			return writeTransferDryRunGuidance(cmd.ErrOrStderr(), "backup plan", flags.namespace, flags.pvc)
 		},
 	}
 	bindBucketFlags(command, flags, restore, !forceOnline)

@@ -51,7 +51,6 @@ func TestPlanRenameSameNamespacePreservesDurableMetadataWithoutQuotaDemand(t *te
 			"volume.kubernetes.io/selected-node":               "drop",
 			"pv.kubernetes.io/bind-completed":                  "drop",
 			"kubectl.kubernetes.io/last-applied-configuration": "drop",
-			kube.SessionAnnotation:                             "drop",
 		}
 	}
 	plan, err := New(plannerClient(objects...), nil).PlanRename(context.Background(), RenameOptions{

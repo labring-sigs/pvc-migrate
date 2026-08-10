@@ -107,7 +107,32 @@ pvc-migrate --kubeconfig /path/to/config \
   --delete-rollback-pv --finalize --delete-session
 ```
 
-For a `Retain` rollback PV, deleting the Kubernetes PV object preserves backend data. Use the CSI driver's documented backend deletion procedure when storage reclamation is intended. A backend deletion policy can be applied to the rollback PV before cleanup after the application validation window.
+For a `Retain` rollback PV, deleting the Kubernetes PV object preserves backend data. Keep the rollback PV at `Retain` during cleanup. Use the CSI driver's documented backend deletion procedure when storage reclamation is intended.
+
+## Recover A Missing Session Record
+
+Session ConfigMaps use `pvc-migrate.io/session-protection`. A direct ConfigMap deletion remains pending until validated session cleanup removes this finalizer.
+
+For ownership left by an already missing ConfigMap, identify the active PVC reported by migration preflight and validate the reconstructed PVC/PV pair:
+
+```bash
+pvc-migrate --kubeconfig /path/to/config \
+  --session-namespace pvc-migrate-system \
+  session cleanup-orphan SESSION \
+  --source-namespace application --source-pvc data-database-1
+```
+
+Execute the same validated plan:
+
+```bash
+pvc-migrate --kubeconfig /path/to/config \
+  --session-namespace pvc-migrate-system \
+  --yes session cleanup-orphan SESSION \
+  --source-namespace application --source-pvc data-database-1 \
+  --dry-run=false
+```
+
+The command requires matching session ownership, active PVC/PV claimRef UIDs, reciprocal `paired-pv` metadata, a recorded active reclaim policy, and a Released or Available rollback PV with `Retain` reclaim policy. It deletes the rollback PV object, restores the active reclaim policy, clears session metadata, and removes the orphan Lease.
 
 ## Inspect A Stuck Cutover
 

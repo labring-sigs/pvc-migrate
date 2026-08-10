@@ -513,7 +513,7 @@ func (s *Service) ValidateCleanup(ctx context.Context, session *domain.Session, 
 				}
 			}
 		}
-		if session.Status.Phase == domain.PhaseAborted && cleanupKeepsSource(session) && !volumeWasReserved(session, index) {
+		if uncheckpointedSource(session, index) {
 			if err := s.validateUncheckpointedSource(ctx, session.ID, volume); err != nil {
 				return err
 			}

@@ -63,6 +63,7 @@ func TestRootCommandSurfaceAndGlobalDefaults(t *testing.T) {
 		{"activate"}, {"backup"}, {"copy"}, {"final-sync"}, {"live-backup"}, {"migrate"}, {"migrate-pod"},
 		{"move"}, {"rename"}, {"reserve"}, {"restore"}, {"session", "abort"},
 		{"session", "cleanup"}, {"session", "resume"}, {"session", "rollback"},
+		{"session", "cleanup-orphan"},
 	}
 	for _, path := range mutationPaths {
 		command, _, err := root.Find(path)
@@ -115,7 +116,7 @@ func TestRootCommandSurfaceAndGlobalDefaults(t *testing.T) {
 	if err != nil || status.Flags().Lookup("dry-run") != nil {
 		t.Fatalf("session status dry-run flag=%v error=%v", status.Flags().Lookup("dry-run"), err)
 	}
-	for _, name := range []string{"abort", "cleanup", "resume", "rollback", "status"} {
+	for _, name := range []string{"abort", "cleanup", "cleanup-orphan", "resume", "rollback", "status"} {
 		command, _, err := session.Find([]string{name})
 		if err != nil || command == session || command.Name() != name {
 			t.Fatalf("session Find(%q) command=%v error=%v", name, command, err)
@@ -329,6 +330,12 @@ func TestResumeApprovalCoversPVCRebindStages(t *testing.T) {
 	}
 	if requiresResumeApproval(domain.PhasePlanned) {
 		t.Fatal("planned phase unexpectedly requires resume approval")
+	}
+	if !requiresOperationResumeApproval(domain.OperationRename, domain.PhasePlanned) || !requiresOperationResumeApproval(domain.OperationMove, domain.PhasePlanned) {
+		t.Fatal("planned PVC identity phases require approval")
+	}
+	if requiresOperationResumeApproval(domain.OperationMigrate, domain.PhasePlanned) {
+		t.Fatal("planned orchestrated phases do not require identity approval")
 	}
 }
 

@@ -22,6 +22,7 @@ const (
 	ResourceRoleLabel        = "pvc-migrate.io/role"
 	SessionDataKey           = "session.json"
 	SessionNamePrefix        = "pvc-migrate-session-"
+	SessionFinalizer         = "pvc-migrate.io/session-protection"
 	OriginalPolicyAnnotation = "pvc-migrate.io/original-reclaim-policy"
 )
 
@@ -81,6 +82,7 @@ func (s *ConfigMapSessionStore) Create(ctx context.Context, session *domain.Sess
 				ManagedByLabel: ManagedByValue,
 				SessionLabel:   session.ID,
 			},
+			Finalizers: []string{SessionFinalizer},
 		},
 		Data: map[string]string{SessionDataKey: string(data)},
 	}
@@ -117,18 +119,28 @@ func (s *ConfigMapSessionStore) Update(ctx context.Context, session *domain.Sess
 	if err != nil {
 		return domain.WrapError(domain.ErrorInternal, "update session", "encode session", err)
 	}
-	cm := &corev1.ConfigMap{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:            SessionConfigMapName(session.ID),
-			Namespace:       session.Spec.SessionNamespace,
-			ResourceVersion: session.ResourceVersion,
-			Labels: map[string]string{
-				ManagedByLabel: ManagedByValue,
-				SessionLabel:   session.ID,
-			},
-		},
-		Data: map[string]string{SessionDataKey: string(data)},
+	existing, err := s.client.CoreV1().ConfigMaps(session.Spec.SessionNamespace).Get(ctx, SessionConfigMapName(session.ID), metav1.GetOptions{})
+	if apierrors.IsNotFound(err) {
+		return domain.WrapError(domain.ErrorConflict, "update session", "session ConfigMap disappeared", err)
 	}
+	if err != nil {
+		return domain.WrapError(domain.ErrorKubernetes, "update session", "read ConfigMap metadata", err)
+	}
+	if _, err := decodeSession(existing); err != nil {
+		return domain.WrapError(domain.ErrorConflict, "update session", "ConfigMap ownership does not match the session", err)
+	}
+	if existing.DeletionTimestamp != nil {
+		return domain.NewError(domain.ErrorConflict, "update session", "session ConfigMap is pending deletion")
+	}
+	cm := existing.DeepCopy()
+	cm.ResourceVersion = session.ResourceVersion
+	if cm.Labels == nil {
+		cm.Labels = map[string]string{}
+	}
+	cm.Labels[ManagedByLabel] = ManagedByValue
+	cm.Labels[SessionLabel] = session.ID
+	cm.Finalizers = ensureSessionFinalizer(cm.Finalizers)
+	cm.Data = map[string]string{SessionDataKey: string(data)}
 	updated, err := s.client.CoreV1().ConfigMaps(cm.Namespace).Update(ctx, cm, metav1.UpdateOptions{})
 	if apierrors.IsConflict(err) {
 		return domain.WrapError(domain.ErrorConflict, "update session", "session changed by another process", err)
@@ -177,11 +189,53 @@ func (s *ConfigMapSessionStore) Delete(ctx context.Context, session *domain.Sess
 	if _, err := decodeSession(cm); err != nil {
 		return domain.WrapError(domain.ErrorConflict, "delete session", "ConfigMap ownership does not match the session", err)
 	}
-	options := metav1.DeleteOptions{Preconditions: &metav1.Preconditions{UID: &cm.UID}}
+	if containsString(cm.Finalizers, SessionFinalizer) {
+		updated := cm.DeepCopy()
+		updated.Finalizers = removeString(updated.Finalizers, SessionFinalizer)
+		latest, err := s.client.CoreV1().ConfigMaps(cm.Namespace).Update(ctx, updated, metav1.UpdateOptions{})
+		if apierrors.IsConflict(err) {
+			return domain.WrapError(domain.ErrorConflict, "delete session", "session ConfigMap changed while removing protection finalizer", err)
+		}
+		if err != nil && !apierrors.IsNotFound(err) {
+			return domain.WrapError(domain.ErrorKubernetes, "delete session", "remove session protection finalizer", err)
+		}
+		if err == nil {
+			cm = latest
+		}
+	}
+	uid, resourceVersion := cm.UID, cm.ResourceVersion
+	options := metav1.DeleteOptions{Preconditions: &metav1.Preconditions{UID: &uid, ResourceVersion: &resourceVersion}}
 	if err := s.client.CoreV1().ConfigMaps(cm.Namespace).Delete(ctx, cm.Name, options); err != nil && !apierrors.IsNotFound(err) {
 		return domain.WrapError(domain.ErrorKubernetes, "delete session", fmt.Sprintf("delete ConfigMap UID %s", cm.UID), err)
 	}
 	return nil
+}
+
+func ensureSessionFinalizer(finalizers []string) []string {
+	finalizers = append([]string(nil), finalizers...)
+	if !containsString(finalizers, SessionFinalizer) {
+		finalizers = append(finalizers, SessionFinalizer)
+	}
+	return finalizers
+}
+
+func containsString(values []string, value string) bool {
+	for _, item := range values {
+		if item == value {
+			return true
+		}
+	}
+	return false
+}
+
+func removeString(values []string, value string) []string {
+	result := values[:0]
+	for _, item := range values {
+		if item != value {
+			result = append(result, item)
+		}
+	}
+	return result
 }
 
 func decodeSession(cm *corev1.ConfigMap) (*domain.Session, error) {

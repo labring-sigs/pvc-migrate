@@ -51,9 +51,9 @@ func (s *Service) cleanup(ctx context.Context, session *domain.Session, options 
 			}
 		}
 	}
-	if session.Status.Phase == domain.PhaseAborted && cleanupKeepsSource(session) {
+	if session.Status.Phase == domain.PhaseAborted {
 		for index := range session.Spec.Volumes {
-			if volumeWasReserved(session, index) {
+			if !uncheckpointedSource(session, index) {
 				continue
 			}
 			if err := s.validateUncheckpointedSource(ctx, session.ID, &session.Spec.Volumes[index]); err != nil {
@@ -64,9 +64,9 @@ func (s *Service) cleanup(ctx context.Context, session *domain.Session, options 
 	if err := s.deleteReservationPods(ctx, session); err != nil {
 		return err
 	}
-	if session.Status.Phase == domain.PhaseAborted && cleanupKeepsSource(session) {
+	if session.Status.Phase == domain.PhaseAborted {
 		for index := range session.Spec.Volumes {
-			if volumeWasReserved(session, index) {
+			if !uncheckpointedSource(session, index) {
 				continue
 			}
 			if err := s.releaseUncheckpointedSource(ctx, session.ID, &session.Spec.Volumes[index]); err != nil {
@@ -107,11 +107,10 @@ func (s *Service) cleanup(ctx context.Context, session *domain.Session, options 
 			if active.Name == "" {
 				continue
 			}
-			// A failed reserve/copy session can be aborted before it acquires
-			// the source PVC or PV. Its recorded source reference is inventory
-			// only, so finalizing it would reject the cleanup when the PV has no
-			// ownership labels. Preserve that PV and close session-owned staging.
-			if session.Status.Phase == domain.PhaseAborted && cleanupKeepsSource(session) && !volumeWasReserved(session, index) {
+			// A workflow can be aborted before its reservation checkpoint. Its
+			// source reference is still inventory, so release only ownership
+			// acquired by this session and skip active-PV finalization.
+			if uncheckpointedSource(session, index) {
 				continue
 			}
 			// An aborted migration before activation has no active ownership to
@@ -163,11 +162,13 @@ func (s *Service) cleanup(ctx context.Context, session *domain.Session, options 
 	return nil
 }
 
-func volumeWasReserved(session *domain.Session, index int) bool {
-	if session == nil || index < 0 || index >= len(session.Status.Volumes) {
+func uncheckpointedSource(session *domain.Session, index int) bool {
+	if session == nil || session.Status.Phase != domain.PhaseAborted || index < 0 || index >= len(session.Status.Volumes) || index >= len(session.Spec.Volumes) {
 		return false
 	}
-	return session.Status.Volumes[index].Reserved
+	status := session.Status.Volumes[index]
+	volume := session.Spec.Volumes[index]
+	return !status.Reserved && status.Activation.ActivePVC.Name == "" && volume.DestinationPVC.UID == "" && volume.DestinationPV.Name == ""
 }
 
 func (s *Service) ensurePVCUnused(ctx context.Context, ref domain.ObjectReference) error {

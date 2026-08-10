@@ -106,7 +106,7 @@ func TestMigratePodRejectsSourcePVCOverride(t *testing.T) {
 }
 
 func TestBackupDryRunPrintsStructuredPlanWithoutSecrets(t *testing.T) {
-	stdout, _, err := executeBackupCLI(t, "", "backup", "--dry-run", "--output", "json", "--source-pvc", "data", "--backend", "s3", "--bucket", "backups", "--name", "daily", "--access-key", "visible-key", "--secret-key", "sensitive-secret")
+	stdout, stderr, err := executeBackupCLI(t, "", "backup", "--dry-run", "--output", "json", "--source-pvc", "data", "--backend", "s3", "--bucket", "backups", "--name", "daily", "--access-key", "visible-key", "--secret-key", "sensitive-secret")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -122,6 +122,9 @@ func TestBackupDryRunPrintsStructuredPlanWithoutSecrets(t *testing.T) {
 	}
 	if strings.Contains(stdout, "visible-key") || strings.Contains(stdout, "sensitive-secret") {
 		t.Fatalf("credentials leaked in output: %s", stdout)
+	}
+	if !strings.Contains(stderr, "dry-run completed") || !strings.Contains(stderr, "--dry-run=false") {
+		t.Fatalf("missing follow-up guidance: %s", stderr)
 	}
 }
 

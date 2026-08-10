@@ -138,6 +138,7 @@ func (p *Planner) PlanRename(ctx context.Context, options RenameOptions) (*domai
 		plan.AddCheck(failed("source-pv", fmt.Sprintf("read source PV: %v", err)))
 		return plan, nil
 	}
+	p.checkSessionOwnership(ctx, plan, options.SessionNamespace, pvc, pv)
 	capacity := pv.Spec.Capacity[corev1.ResourceStorage]
 	storageClass := ""
 	if pvc.Spec.StorageClassName != nil {

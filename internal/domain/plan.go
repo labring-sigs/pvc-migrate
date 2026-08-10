@@ -99,6 +99,28 @@ type MigrationPlan struct {
 	SessionSpec          SessionSpec             `json:"-" yaml:"-"`
 }
 
+// OrphanCleanupPlan describes a session ownership record whose ConfigMap is
+// gone. It is deliberately resource-scoped so an administrator can review
+// every UID and relationship before removing retained migration metadata.
+type OrphanCleanupPlan struct {
+	APIVersion       string          `json:"apiVersion" yaml:"apiVersion"`
+	Kind             string          `json:"kind" yaml:"kind"`
+	SessionID        string          `json:"sessionID" yaml:"sessionID"`
+	SessionNamespace string          `json:"sessionNamespace" yaml:"sessionNamespace"`
+	SourcePVC        ObjectReference `json:"sourcePVC" yaml:"sourcePVC"`
+	ActivePV         ObjectReference `json:"activePV" yaml:"activePV"`
+	RollbackPV       ObjectReference `json:"rollbackPV" yaml:"rollbackPV"`
+	Checks           []Check         `json:"checks" yaml:"checks"`
+	Ready            bool            `json:"ready" yaml:"ready"`
+}
+
+func (p *OrphanCleanupPlan) AddCheck(check Check) {
+	p.Checks = append(p.Checks, check)
+	if check.Severity == SeverityError && !check.Passed {
+		p.Ready = false
+	}
+}
+
 func (p *MigrationPlan) AddCheck(check Check) {
 	p.Checks = append(p.Checks, check)
 	if check.Severity == SeverityError && !check.Passed {

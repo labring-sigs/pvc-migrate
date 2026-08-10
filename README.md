@@ -121,6 +121,21 @@ pvc-migrate --kubeconfig /path/to/kubeconfig \
 
 `--delete-rollback-pv` deletes the retained PV object. Its `Retain` policy preserves the backend volume for storage-provider cleanup.
 
+If a PVC or PV still has session ownership after its session ConfigMap was lost, validate the reconstructed resource relationship and then clear it:
+
+```bash
+pvc-migrate --kubeconfig /path/to/kubeconfig \
+  --session-namespace pvc-migrate-system \
+  session cleanup-orphan database-20260809 \
+  --source-namespace application --source-pvc data-database-1
+
+pvc-migrate --kubeconfig /path/to/kubeconfig \
+  --session-namespace pvc-migrate-system \
+  --yes session cleanup-orphan database-20260809 \
+  --source-namespace application --source-pvc data-database-1 \
+  --dry-run=false
+```
+
 ## Migration Workflow
 
 ```text
@@ -150,7 +165,9 @@ Controller ownership outside the supported adapters causes the plan to fail. PVC
 
 ## Safety and Recovery
 
+- Session commands print phase-aware next steps, verification commands, and validated dry-run/execute pairs on stderr. JSON and YAML results remain a single structured document on stdout.
 - Session state is stored in `pvc-migrate-session-<id>` ConfigMaps.
+- Session ConfigMaps carry a protection finalizer and are deleted through validated session cleanup.
 - Every mutating session command uses a renewable Kubernetes Lease for exclusive ownership.
 - PVC and PV mutations verify recorded UIDs, bindings, and session ownership.
 - Source and destination PVs use `Retain` throughout cutover and rollback.
@@ -182,6 +199,7 @@ See [Architecture](docs/architecture.md) for consistency boundaries and [Runbook
 | `session abort` | Restore a paused workload before activation |
 | `session rollback` | Restore retained source PVs and resume the workload |
 | `session cleanup` | Delete staged resources or close the rollback window |
+| `session cleanup-orphan` | Validate and clear ownership after a session ConfigMap was lost |
 | `completion` | Generate shell completion |
 | `version` | Print version information |
 
