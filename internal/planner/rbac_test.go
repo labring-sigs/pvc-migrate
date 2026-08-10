@@ -117,6 +117,7 @@ func TestCheckRBACIncludesControllerSpecificPermissions(t *testing.T) {
 		name     string
 		workload domain.WorkloadSpec
 		want     []authorizationv1.ResourceAttributes
+		exclude  []authorizationv1.ResourceAttributes
 	}{
 		{
 			name: "StatefulSet",
@@ -137,6 +138,26 @@ func TestCheckRBACIncludesControllerSpecificPermissions(t *testing.T) {
 			want: []authorizationv1.ResourceAttributes{
 				{Namespace: "app", Verb: "create", Group: "operations.kubeblocks.io", Resource: "opsrequests"},
 				{Namespace: "app", Verb: "get", Group: "apps.kubeblocks.io", Resource: "clusters"},
+				{Namespace: "app", Verb: "update", Group: "apps.kubeblocks.io", Resource: "clusters"},
+				{Namespace: "app", Verb: "patch", Group: "apps.kubeblocks.io", Resource: "clusters"},
+			},
+		},
+		{
+			name: "KubeBlocks InstanceSet",
+			workload: domain.WorkloadSpec{
+				Adapter:    domain.WorkloadKubeBlocks,
+				Controller: domain.ObjectReference{APIVersion: "workloads.kubeblocks.io/v1alpha1", Kind: "InstanceSet", Namespace: "app", Name: "cluster-db"},
+				KubeBlocks: &domain.KubeBlocksSpec{
+					OpsAPIVersion:     "operations.kubeblocks.io/v1alpha1",
+					ClusterAPIVersion: "apps.kubeblocks.io/v1alpha1",
+				},
+			},
+			want: []authorizationv1.ResourceAttributes{
+				{Namespace: "app", Verb: "get", Group: "workloads.kubeblocks.io", Resource: "instancesets"},
+				{Namespace: "app", Verb: "update", Group: "workloads.kubeblocks.io", Resource: "instancesets"},
+				{Namespace: "app", Verb: "patch", Group: "workloads.kubeblocks.io", Resource: "instancesets"},
+			},
+			exclude: []authorizationv1.ResourceAttributes{
 				{Namespace: "app", Verb: "update", Group: "apps.kubeblocks.io", Resource: "clusters"},
 				{Namespace: "app", Verb: "patch", Group: "apps.kubeblocks.io", Resource: "clusters"},
 			},
@@ -188,6 +209,11 @@ func TestCheckRBACIncludesControllerSpecificPermissions(t *testing.T) {
 			for _, want := range tt.want {
 				if !hasAccessReview(seen, want) {
 					t.Fatalf("missing access review %#v", want)
+				}
+			}
+			for _, excluded := range tt.exclude {
+				if hasAccessReview(seen, excluded) {
+					t.Fatalf("unexpected access review %#v", excluded)
 				}
 			}
 		})

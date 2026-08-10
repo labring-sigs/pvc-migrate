@@ -38,7 +38,7 @@ func (r *Reserver) ReserveVolume(ctx context.Context, session *domain.Session, v
 		if err := AcquirePVC(ctx, r.client, volume.SourcePVC, session.ID); err != nil {
 			return err
 		}
-		if err := r.retainPV(ctx, volume.SourcePV.Name, volume.SourcePV.UID, session.ID, "source"); err != nil {
+		if err := r.retainPV(ctx, volume.SourcePV.Name, volume.SourcePV.UID, session.ID, ResourceRoleSource); err != nil {
 			return err
 		}
 	}
@@ -55,13 +55,13 @@ func (r *Reserver) ReserveVolume(ctx context.Context, session *domain.Session, v
 			Namespace: volume.DestinationPVC.Namespace,
 			Labels: map[string]string{
 				ManagedByLabel:    ManagedByValue,
-				SessionLabel:      session.ID,
-				ResourceRoleLabel: "destination",
+				SessionKey:        session.ID,
+				ResourceRoleLabel: ResourceRoleDestination,
 			},
 			Annotations: map[string]string{
-				SessionAnnotation:               session.ID,
-				"pvc-migrate.io/source-pvc-uid": string(volume.SourcePVC.UID),
-				"pvc-migrate.io/source-pv":      volume.SourcePV.Name,
+				SessionKey:             session.ID,
+				SourcePVCUIDAnnotation: string(volume.SourcePVC.UID),
+				SourcePVAnnotation:     volume.SourcePV.Name,
 			},
 		},
 		Spec: corev1.PersistentVolumeClaimSpec{
@@ -132,14 +132,14 @@ func (r *Reserver) ReserveVolume(ctx context.Context, session *domain.Session, v
 			return domain.NewError(domain.ErrorPrecondition, "reserve volume", fmt.Sprintf("destination PV %s topology excludes target node %s", pv.Name, node.Name))
 		}
 	}
-	if err := r.retainPV(ctx, pv.Name, pv.UID, session.ID, "destination"); err != nil {
+	if err := r.retainPV(ctx, pv.Name, pv.UID, session.ID, ResourceRoleDestination); err != nil {
 		return err
 	}
 	current, err := r.client.CoreV1().PersistentVolumes().Get(ctx, pv.Name, metav1.GetOptions{})
 	if err != nil {
 		return domain.WrapError(domain.ErrorKubernetes, "reserve volume", "read retained destination PV", err)
 	}
-	volume.DestinationPV = domain.ObjectReference{APIVersion: "v1", Kind: "PersistentVolume", Name: current.Name, UID: current.UID, ResourceVersion: current.ResourceVersion}
+	volume.DestinationPV = domain.ObjectReference{APIVersion: domain.CoreAPIVersion, Kind: domain.KindPersistentVolume, Name: current.Name, UID: current.UID, ResourceVersion: current.ResourceVersion}
 	volume.DestinationPolicy = corev1.PersistentVolumeReclaimPolicy(current.Annotations[OriginalPolicyAnnotation])
 	if volume.DestinationPolicy == "" {
 		volume.DestinationPolicy = pv.Spec.PersistentVolumeReclaimPolicy
@@ -170,7 +170,7 @@ func validateDestinationPVC(pvc *corev1.PersistentVolumeClaim, sessionID string,
 	if pvc.DeletionTimestamp != nil {
 		return domain.NewError(domain.ErrorConflict, "reserve volume", fmt.Sprintf("destination PVC %s/%s is terminating", pvc.Namespace, pvc.Name))
 	}
-	if pvc.Labels[SessionLabel] != sessionID || pvc.Annotations["pvc-migrate.io/source-pvc-uid"] != string(volume.SourcePVC.UID) {
+	if pvc.Labels[SessionKey] != sessionID || pvc.Annotations[SourcePVCUIDAnnotation] != string(volume.SourcePVC.UID) {
 		return domain.NewError(domain.ErrorConflict, "reserve volume", fmt.Sprintf("destination PVC %s/%s belongs to another operation", pvc.Namespace, pvc.Name))
 	}
 	if pvc.Spec.StorageClassName == nil || *pvc.Spec.StorageClassName != volume.StorageClass {
@@ -213,8 +213,8 @@ func (r *Reserver) provisionOnTarget(ctx context.Context, session *domain.Sessio
 			Namespace: volume.DestinationPVC.Namespace,
 			Labels: map[string]string{
 				ManagedByLabel:    ManagedByValue,
-				SessionLabel:      session.ID,
-				ResourceRoleLabel: "reservation-consumer",
+				SessionKey:        session.ID,
+				ResourceRoleLabel: ResourceRoleReservationConsumer,
 			},
 		},
 		Spec: corev1.PodSpec{
@@ -248,7 +248,7 @@ func (r *Reserver) provisionOnTarget(ctx context.Context, session *domain.Sessio
 	if err != nil {
 		return domain.WrapError(domain.ErrorKubernetes, "provision target PVC", fmt.Sprintf("create helper Pod %s/%s", pod.Namespace, pod.Name), err)
 	}
-	if existing.Labels[SessionLabel] != session.ID {
+	if existing.Labels[SessionKey] != session.ID {
 		return domain.NewError(domain.ErrorConflict, "provision target PVC", fmt.Sprintf("helper Pod %s/%s belongs to another session", pod.Namespace, pod.Name))
 	}
 	if err := WaitFor(ctx, r.poll, fmt.Sprintf("reservation Pod %s/%s readiness", pod.Namespace, pod.Name), func(waitCtx context.Context) (bool, error) {
@@ -288,7 +288,7 @@ func (r *Reserver) retainPV(ctx context.Context, name string, uid types.UID, ses
 		if pv.UID != uid {
 			return domain.NewError(domain.ErrorConflict, "retain PV", fmt.Sprintf("PV %s UID changed", name))
 		}
-		if owner := pv.Labels[SessionLabel]; owner != "" && owner != sessionID {
+		if owner := pv.Labels[SessionKey]; owner != "" && owner != sessionID {
 			return domain.NewError(domain.ErrorConflict, "retain PV", fmt.Sprintf("PV %s belongs to session %s", name, owner))
 		}
 		if pv.Labels == nil {

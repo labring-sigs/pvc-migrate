@@ -457,6 +457,7 @@ func kubeBlocksClusterObject(stopped bool) *unstructured.Unstructured {
 
 func kubeBlocksRecoverySession(originalStopped bool) *domain.Session {
 	session := kubeBlocksSession()
+	session.Spec.Workload().KubeBlocks.Component = "postgresql"
 	session.Spec.Workload().KubeBlocks.ClusterAPIVersion = kubeBlocksClusterAPIVersion
 	session.Spec.Workload().KubeBlocks.ClusterUID = "cluster-uid"
 	session.Spec.Workload().KubeBlocks.OriginalStops = map[string]bool{"postgresql": originalStopped}

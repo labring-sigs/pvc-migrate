@@ -124,12 +124,12 @@ func (r *rootState) newObjectTransferCommand(restore, forceOnline bool) *cobra.C
 				return reportTransferError(cmd, use, flags.namespace, flags.pvc, err)
 			}
 			if r.global.output != "table" {
-				mode := "offline"
+				mode := backup.ModeOffline
 				if online {
-					mode = "online"
+					mode = backup.ModeOnline
 				}
 				if restore {
-					mode = "restore"
+					mode = backup.ModeRestore
 				}
 				if err := printerFor(r).Print(&backup.Result{
 					Operation:   use,

@@ -478,12 +478,12 @@ func (s *Service) ValidateCleanup(ctx context.Context, session *domain.Session, 
 			return domain.NewError(domain.ErrorPrecondition, "cleanup dry-run", "deleting the session requires --delete-rollback-pv while a rollback PV is recorded")
 		}
 		if options.DeleteTemporary && volume.DestinationPVC.UID != "" {
-			if err := s.ensurePVCUnused(ctx, volume.DestinationPVC); err != nil {
+			if err := s.ensurePVCUnused(ctx, volume.DestinationPVC, session.ID); err != nil {
 				return err
 			}
 			pvc, err := s.client.CoreV1().PersistentVolumeClaims(volume.DestinationPVC.Namespace).Get(ctx, volume.DestinationPVC.Name, metav1.GetOptions{})
 			if err == nil {
-				if pvc.UID != volume.DestinationPVC.UID || pvc.Labels[kube.SessionLabel] != session.ID {
+				if pvc.UID != volume.DestinationPVC.UID || pvc.Labels[kube.SessionKey] != session.ID {
 					return domain.NewError(domain.ErrorConflict, "cleanup dry-run", fmt.Sprintf("PVC %s/%s identity or session ownership changed", pvc.Namespace, pvc.Name))
 				}
 			} else if !apierrors.IsNotFound(err) {
@@ -500,7 +500,7 @@ func (s *Service) ValidateCleanup(ctx context.Context, session *domain.Session, 
 			case err != nil:
 				return domain.WrapError(domain.ErrorKubernetes, "cleanup dry-run", fmt.Sprintf("read rollback PV %s", rollback.Name), err)
 			default:
-				if pv.UID != rollback.UID || pv.Labels[kube.SessionLabel] != session.ID || pv.Labels[kube.ResourceRoleLabel] != expectedRole {
+				if pv.UID != rollback.UID || pv.Labels[kube.SessionKey] != session.ID || pv.Labels[kube.ResourceRoleLabel] != expectedRole {
 					return domain.NewError(domain.ErrorConflict, "cleanup dry-run", fmt.Sprintf("PV %s identity, ownership, or role changed", pv.Name))
 				}
 				if pv.Status.Phase != corev1.VolumeReleased && pv.Status.Phase != corev1.VolumeAvailable {
@@ -562,10 +562,10 @@ func validateFinalizablePV(pv *corev1.PersistentVolume, ref domain.ObjectReferen
 		return domain.NewError(domain.ErrorConflict, "cleanup dry-run", fmt.Sprintf("PV %s identity, ownership, or role changed", ref.Name))
 	}
 	role := pv.Labels[kube.ResourceRoleLabel]
-	if pv.Labels[kube.SessionLabel] == "" && role == "" && pv.Spec.PersistentVolumeReclaimPolicy == policy && pv.Annotations[kube.OriginalPolicyAnnotation] == "" {
+	if pv.Labels[kube.SessionKey] == "" && role == "" && pv.Spec.PersistentVolumeReclaimPolicy == policy && pv.Annotations[kube.OriginalPolicyAnnotation] == "" {
 		return nil
 	}
-	if pv.Labels[kube.SessionLabel] != sessionID || (role != "active" && role != "source" && role != "rename" && role != "destination") {
+	if pv.Labels[kube.SessionKey] != sessionID || (role != kube.ResourceRoleActive && role != kube.ResourceRoleSource && role != kube.ResourceRoleRename && role != kube.ResourceRoleDestination) {
 		return domain.NewError(domain.ErrorConflict, "cleanup dry-run", fmt.Sprintf("PV %s identity, ownership, or role changed", ref.Name))
 	}
 	return nil
@@ -1046,7 +1046,7 @@ func (s *Service) rollback(ctx context.Context, session *domain.Session) error {
 			return s.failContext(ctx, session, err)
 		}
 		now := metav1.NewTime(s.now().UTC())
-		status.Activation.ActivePVC = domain.ObjectReference{APIVersion: "v1", Kind: "PersistentVolumeClaim", Namespace: pvc.Namespace, Name: pvc.Name, UID: pvc.UID, ResourceVersion: pvc.ResourceVersion}
+		status.Activation.ActivePVC = domain.ObjectReference{APIVersion: domain.CoreAPIVersion, Kind: domain.KindPersistentVolumeClaim, Namespace: pvc.Namespace, Name: pvc.Name, UID: pvc.UID, ResourceVersion: pvc.ResourceVersion}
 		status.Activation.RolledBackAt = &now
 		return s.finish(ctx, session, domain.PhaseRolledBack, "PVC name restored")
 	}
@@ -1104,7 +1104,7 @@ func (s *Service) rename(ctx context.Context, session *domain.Session) error {
 		return s.failContext(ctx, session, err)
 	}
 	now := metav1.NewTime(s.now().UTC())
-	status.Activation.ActivePVC = domain.ObjectReference{APIVersion: "v1", Kind: "PersistentVolumeClaim", Namespace: pvc.Namespace, Name: pvc.Name, UID: pvc.UID, ResourceVersion: pvc.ResourceVersion}
+	status.Activation.ActivePVC = domain.ObjectReference{APIVersion: domain.CoreAPIVersion, Kind: domain.KindPersistentVolumeClaim, Namespace: pvc.Namespace, Name: pvc.Name, UID: pvc.UID, ResourceVersion: pvc.ResourceVersion}
 	status.Activation.ActivatedAt = &now
 	if session.Spec.Operation() == domain.OperationMove {
 		return s.finish(ctx, session, domain.PhaseCompleted, "PVC move completed")
@@ -1248,8 +1248,8 @@ func (s *Service) waitForCopyHelperRelease(ctx context.Context, volume *domain.V
 }
 
 func isPVMigrateHelperForClaims(pod *corev1.Pod, claims map[string]struct{}) bool {
-	instance := pod.Labels["app.kubernetes.io/instance"]
-	component := pod.Labels["app.kubernetes.io/component"]
+	instance := pod.Labels[kube.AppInstanceLabel]
+	component := pod.Labels[kube.AppComponentLabel]
 	if !strings.HasPrefix(instance, "pv-migrate-") || (component != "sshd" && component != "rsync" && component != "rclone") {
 		return false
 	}
@@ -1273,7 +1273,7 @@ func (s *Service) helmSchedulingValues(ctx context.Context, session *domain.Sess
 		pinNode   bool
 	}
 	targets := []schedulingTarget{{component: "rsync", nodes: []string{options.TargetNode}, pinNode: true}}
-	if slices.Contains(options.Strategies, "local") {
+	if slices.Contains(options.Strategies, domain.StrategyLocal) {
 		// The local strategy deploys an SSHD on both sides. PVC topology places
 		// each Pod on its volume's node, while the combined tolerations allow
 		// both source and destination nodes to accept their respective Pod.
@@ -1334,7 +1334,7 @@ func (s *Service) verifyActiveStorage(ctx context.Context, session *domain.Sessi
 		if err != nil {
 			return domain.WrapError(domain.ErrorKubernetes, "verify migration", fmt.Sprintf("read PVC %s/%s", volume.SourcePVC.Namespace, volume.SourcePVC.Name), err)
 		}
-		if pvc.Status.Phase != corev1.ClaimBound || pvc.Spec.VolumeName != volume.DestinationPV.Name || pvc.Annotations[kube.SessionAnnotation] != session.ID {
+		if pvc.Status.Phase != corev1.ClaimBound || pvc.Spec.VolumeName != volume.DestinationPV.Name || pvc.Annotations[kube.SessionKey] != session.ID {
 			return domain.NewError(domain.ErrorConflict, "verify migration", fmt.Sprintf("PVC %s/%s is not active on destination PV %s", pvc.Namespace, pvc.Name, volume.DestinationPV.Name))
 		}
 		active := session.Status.Volumes[index].Activation.ActivePVC

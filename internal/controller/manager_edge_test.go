@@ -371,7 +371,7 @@ func TestStandalonePauseIsIdempotentAndProtectsUID(t *testing.T) {
 
 func TestStandaloneResumeHandlesExistingPodsAndNodeValidation(t *testing.T) {
 	owned := readyPod("app", "worker", "node-a")
-	owned.Annotations = map[string]string{kube.SessionAnnotation: "session"}
+	owned.Annotations = map[string]string{kube.SessionKey: "session"}
 	client := kubernetesfake.NewClientset(owned)
 	manager := NewManager(client, dynamicfake.NewSimpleDynamicClient(runtime.NewScheme()), client.Discovery())
 	session := controllerSession(domain.WorkloadSpec{Adapter: domain.WorkloadStandalone, Pod: domain.ObjectReference{Namespace: "app", Name: "worker"}, OriginalObject: []byte("invalid")})
@@ -383,7 +383,7 @@ func TestStandaloneResumeHandlesExistingPodsAndNodeValidation(t *testing.T) {
 	}
 
 	foreign := owned.DeepCopy()
-	foreign.Annotations[kube.SessionAnnotation] = "another-session"
+	foreign.Annotations[kube.SessionKey] = "another-session"
 	foreignClient := kubernetesfake.NewClientset(foreign)
 	manager = NewManager(foreignClient, dynamicfake.NewSimpleDynamicClient(runtime.NewScheme()), foreignClient.Discovery())
 	err := manager.Resume(context.Background(), controllerSession(domain.WorkloadSpec{Adapter: domain.WorkloadStandalone, Pod: domain.ObjectReference{Namespace: "app", Name: "worker"}}))
@@ -456,7 +456,7 @@ func TestStandaloneResumeRejectsConcurrentForeignPod(t *testing.T) {
 	client.PrependReactor("create", "pods", func(action clienttesting.Action) (bool, runtime.Object, error) {
 		created := action.(clienttesting.CreateAction).GetObject().(*corev1.Pod)
 		foreign := readyPod(created.Namespace, created.Name, "node-b")
-		foreign.Annotations = map[string]string{kube.SessionAnnotation: "foreign-session"}
+		foreign.Annotations = map[string]string{kube.SessionKey: "foreign-session"}
 		if err := client.Tracker().Create(corev1.SchemeGroupVersion.WithResource("pods"), foreign, created.Namespace); err != nil {
 			t.Fatalf("create concurrent Pod: %v", err)
 		}
@@ -571,6 +571,183 @@ func kubeBlocksSession() *domain.Session {
 	return session
 }
 
+func kubeBlocksInstanceSetObject(apiVersion string, paused *bool) *unstructured.Unstructured {
+	spec := map[string]any{}
+	if paused != nil {
+		spec["paused"] = *paused
+	}
+	return &unstructured.Unstructured{Object: map[string]any{
+		"apiVersion": apiVersion,
+		"kind":       "InstanceSet",
+		"metadata": map[string]any{
+			"name":      "cluster-db",
+			"namespace": "db",
+			"uid":       "instanceset-uid",
+		},
+		"spec": spec,
+	}}
+}
+
+func kubeBlocksInstanceSetSession(apiVersion string, originalPaused, configured bool) *domain.Session {
+	session := kubeBlocksSession()
+	session.Spec.WorkloadPtr().Controller = domain.ObjectReference{
+		APIVersion: apiVersion,
+		Kind:       "InstanceSet",
+		Namespace:  "db",
+		Name:       "cluster-db",
+		UID:        "instanceset-uid",
+	}
+	session.Spec.Workload().KubeBlocks.OriginalPaused = originalPaused
+	session.Spec.Workload().KubeBlocks.OriginalPausedConfigured = configured
+	return session
+}
+
+func TestDiscoverKubeBlocksInstanceSetProbesOmittedPausedField(t *testing.T) {
+	for _, apiVersion := range []string{"workloads.kubeblocks.io/v1alpha1", "workloads.kubeblocks.io/v1"} {
+		t.Run(apiVersion, func(t *testing.T) {
+			object := kubeBlocksInstanceSetObject(apiVersion, nil)
+			dynamicClient := dynamicfake.NewSimpleDynamicClient(runtime.NewScheme(), object)
+			manager := NewManager(kubernetesfake.NewClientset(), dynamicClient, nil)
+			owner := &metav1.OwnerReference{APIVersion: apiVersion, Kind: "InstanceSet", Name: object.GetName(), UID: object.GetUID()}
+			paused, configured, uid, err := manager.discoverKubeBlocksInstanceSet(context.Background(), "db", owner)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if paused || configured || uid != object.GetUID() {
+				t.Fatalf("paused=%t configured=%t uid=%s", paused, configured, uid)
+			}
+			foundDryRun := false
+			for _, action := range dynamicClient.Actions() {
+				if action.GetVerb() != "update" || action.GetResource().Resource != instanceSetResource {
+					continue
+				}
+				options := action.(interface{ GetUpdateOptions() metav1.UpdateOptions }).GetUpdateOptions()
+				foundDryRun = len(options.DryRun) > 0
+			}
+			if !foundDryRun {
+				t.Fatal("InstanceSet paused support was not probed with dry-run")
+			}
+		})
+	}
+}
+
+func TestDiscoverKubeBlocksInstanceSetRejectsPrunedPausedField(t *testing.T) {
+	apiVersion := "workloads.kubeblocks.io/v1alpha1"
+	object := kubeBlocksInstanceSetObject(apiVersion, nil)
+	dynamicClient := dynamicfake.NewSimpleDynamicClient(runtime.NewScheme(), object)
+	dynamicClient.PrependReactor("update", instanceSetResource, func(action clienttesting.Action) (bool, runtime.Object, error) {
+		updated := action.(clienttesting.UpdateAction).GetObject().(*unstructured.Unstructured).DeepCopy()
+		unstructured.RemoveNestedField(updated.Object, "spec", "paused")
+		return true, updated, nil
+	})
+	manager := NewManager(kubernetesfake.NewClientset(), dynamicClient, nil)
+	owner := &metav1.OwnerReference{APIVersion: apiVersion, Kind: "InstanceSet", Name: object.GetName(), UID: object.GetUID()}
+	_, _, _, err := manager.discoverKubeBlocksInstanceSet(context.Background(), "db", owner)
+	if domain.CategoryOf(err) != domain.ErrorPrecondition || !strings.Contains(err.Error(), "does not support spec.paused") {
+		t.Fatalf("category=%s error=%v", domain.CategoryOf(err), err)
+	}
+}
+
+func TestDiscoverKubeBlocksInstanceSetRejectsInitiallyPausedState(t *testing.T) {
+	const apiVersion = "workloads.kubeblocks.io/v1alpha1"
+	selected := readyPod("db", "cluster-db-0", "node-a")
+	selected.OwnerReferences = []metav1.OwnerReference{{APIVersion: apiVersion, Kind: domain.KindInstanceSet, Name: "cluster-db", UID: "instanceset-uid", Controller: boolPointer(true)}}
+	selected.Labels = map[string]string{
+		kube.AppInstanceLabel:    "cluster",
+		kubeBlocksComponentLabel: "db",
+		kubeBlocksRoleLabel:      "secondary",
+	}
+	typed := kubernetesfake.NewClientset(selected)
+	discovery := typed.Discovery().(*fake.FakeDiscovery)
+	discovery.Resources = []*metav1.APIResourceList{{GroupVersion: kubeBlocksClusterAPIVersion, APIResources: []metav1.APIResource{{Name: "opsrequests"}}}}
+	cluster := &unstructured.Unstructured{Object: map[string]any{
+		"apiVersion": kubeBlocksClusterAPIVersion,
+		"kind":       domain.KindCluster,
+		"metadata":   map[string]any{"name": "cluster", "namespace": "db", "uid": "cluster-uid"},
+		"spec":       map[string]any{"componentSpecs": []any{map[string]any{"name": "db", "stop": false}}},
+	}}
+	originalPaused := true
+	instanceSet := kubeBlocksInstanceSetObject(apiVersion, &originalPaused)
+	manager := NewManager(typed, dynamicfake.NewSimpleDynamicClient(runtime.NewScheme(), cluster, instanceSet), discovery)
+
+	_, err := manager.Discover(context.Background(), DiscoverOptions{Namespace: "db", PodName: selected.Name})
+	if domain.CategoryOf(err) != domain.ErrorPrecondition || !strings.Contains(err.Error(), "already paused") || !strings.Contains(err.Error(), "spec.paused=false") {
+		t.Fatalf("category=%s error=%v", domain.CategoryOf(err), err)
+	}
+}
+
+func TestKubeBlocksInstanceSetPauseRestoresOmittedState(t *testing.T) {
+	ctx := context.Background()
+	apiVersion := "workloads.kubeblocks.io/v1"
+	object := kubeBlocksInstanceSetObject(apiVersion, nil)
+	dynamicClient := dynamicfake.NewSimpleDynamicClient(runtime.NewScheme(), object)
+	manager := NewManager(kubernetesfake.NewClientset(), dynamicClient, nil)
+	session := kubeBlocksInstanceSetSession(apiVersion, false, false)
+	if err := manager.setKubeBlocksPaused(ctx, session, true); err != nil {
+		t.Fatal(err)
+	}
+	resource := dynamicClient.Resource(mustGVR(apiVersion, instanceSetResource)).Namespace("db")
+	paused, err := resource.Get(ctx, object.GetName(), metav1.GetOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if current, found, nestedErr := unstructured.NestedBool(paused.Object, "spec", "paused"); nestedErr != nil || !found || !current {
+		t.Fatalf("paused=%t found=%t err=%v", current, found, nestedErr)
+	}
+	if err := manager.setKubeBlocksPaused(ctx, session, false); err != nil {
+		t.Fatal(err)
+	}
+	resumed, err := resource.Get(ctx, object.GetName(), metav1.GetOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, found, nestedErr := unstructured.NestedBool(resumed.Object, "spec", "paused"); nestedErr != nil || found {
+		t.Fatalf("restored paused field found=%t err=%v", found, nestedErr)
+	}
+	if resumed.GetAnnotations()[pauseSessionAnnotation] != "" {
+		t.Fatalf("pause owner=%q", resumed.GetAnnotations()[pauseSessionAnnotation])
+	}
+}
+
+func TestKubeBlocksInstanceSetResumeRejectsInitiallyPausedState(t *testing.T) {
+	ctx := context.Background()
+	apiVersion := "workloads.kubeblocks.io/v1alpha1"
+	originalPaused := true
+	object := kubeBlocksInstanceSetObject(apiVersion, &originalPaused)
+	dynamicClient := dynamicfake.NewSimpleDynamicClient(runtime.NewScheme(), object)
+	manager := NewManager(kubernetesfake.NewClientset(), dynamicClient, nil)
+	session := kubeBlocksInstanceSetSession(apiVersion, true, true)
+	if err := manager.setKubeBlocksPaused(ctx, session, true); err != nil {
+		t.Fatal(err)
+	}
+	if err := manager.resumeKubeBlocks(ctx, session); domain.CategoryOf(err) != domain.ErrorPrecondition {
+		t.Fatalf("category=%s error=%v", domain.CategoryOf(err), err)
+	}
+	resumed, err := dynamicClient.Resource(mustGVR(apiVersion, instanceSetResource)).Namespace("db").Get(ctx, object.GetName(), metav1.GetOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if current, found, nestedErr := unstructured.NestedBool(resumed.Object, "spec", "paused"); nestedErr != nil || !found || !current {
+		t.Fatalf("paused=%t found=%t err=%v", current, found, nestedErr)
+	}
+	if resumed.GetAnnotations()[pauseSessionAnnotation] != session.ID {
+		t.Fatalf("pause owner=%q", resumed.GetAnnotations()[pauseSessionAnnotation])
+	}
+}
+
+func TestKubeBlocksInstanceSetPauseRejectsForeignOwnership(t *testing.T) {
+	apiVersion := "workloads.kubeblocks.io/v1alpha1"
+	originalPaused := false
+	object := kubeBlocksInstanceSetObject(apiVersion, &originalPaused)
+	object.SetAnnotations(map[string]string{pauseSessionAnnotation: "other-session"})
+	dynamicClient := dynamicfake.NewSimpleDynamicClient(runtime.NewScheme(), object)
+	manager := NewManager(kubernetesfake.NewClientset(), dynamicClient, nil)
+	err := manager.setKubeBlocksPaused(context.Background(), kubeBlocksInstanceSetSession(apiVersion, false, true), true)
+	if domain.CategoryOf(err) != domain.ErrorConflict || !strings.Contains(err.Error(), "other-session") {
+		t.Fatalf("category=%s error=%v", domain.CategoryOf(err), err)
+	}
+}
+
 func countDynamicActions(actions []clienttesting.Action, verb, resource string) int {
 	count := 0
 	for _, action := range actions {
@@ -597,7 +774,7 @@ func TestPauseKubeBlocksReturnsPodReadErrorsBeforeOffline(t *testing.T) {
 	}
 }
 
-func TestKubeBlocksPausePreservesOriginalStopsAcrossComponents(t *testing.T) {
+func TestKubeBlocksPauseOnlyStopsSelectedComponent(t *testing.T) {
 	ctx := context.Background()
 	cluster := &unstructured.Unstructured{Object: map[string]any{
 		"apiVersion": "apps.kubeblocks.io/v1alpha1",
@@ -609,12 +786,13 @@ func TestKubeBlocksPausePreservesOriginalStopsAcrossComponents(t *testing.T) {
 		},
 		"spec": map[string]any{"componentSpecs": []any{
 			map[string]any{"name": "postgresql", "stop": false},
-			map[string]any{"name": "etcd", "stop": true},
+			map[string]any{"name": "etcd", "stop": false},
 		}},
 	}}
 	dynamicClient := dynamicfake.NewSimpleDynamicClient(runtime.NewScheme(), cluster)
 	manager := NewManager(kubernetesfake.NewClientset(), dynamicClient, nil)
 	session := kubeBlocksSession()
+	session.Spec.Workload().KubeBlocks.Component = "postgresql"
 	session.Spec.Workload().KubeBlocks.ClusterAPIVersion = "apps.kubeblocks.io/v1alpha1"
 	if err := manager.setKubeBlocksPaused(ctx, session, true); err != nil {
 		t.Fatal(err)
@@ -624,7 +802,7 @@ func TestKubeBlocksPausePreservesOriginalStopsAcrossComponents(t *testing.T) {
 		t.Fatal(err)
 	}
 	components, _, _ := unstructured.NestedSlice(paused.Object, "spec", "componentSpecs")
-	for index, expected := range []bool{true, true} {
+	for index, expected := range []bool{true, false} {
 		stopped, _, _ := unstructured.NestedBool(components[index].(map[string]any), "stop")
 		if stopped != expected {
 			t.Fatalf("pause component[%d] stop=%v want=%v", index, stopped, expected)
@@ -638,7 +816,7 @@ func TestKubeBlocksPausePreservesOriginalStopsAcrossComponents(t *testing.T) {
 		t.Fatal(err)
 	}
 	components, _, _ = unstructured.NestedSlice(resumed.Object, "spec", "componentSpecs")
-	for index, expected := range []bool{false, true} {
+	for index, expected := range []bool{false, false} {
 		stopped, _, _ := unstructured.NestedBool(components[index].(map[string]any), "stop")
 		if stopped != expected {
 			t.Fatalf("resume component[%d] stop=%v want=%v", index, stopped, expected)

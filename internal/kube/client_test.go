@@ -26,7 +26,7 @@ func TestEnsureNamespaceCreateExistingAndDryRun(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if namespace.Labels[ManagedByLabel] != ManagedByValue || namespace.Labels[SessionLabel] != "session" {
+	if namespace.Labels[ManagedByLabel] != ManagedByValue || namespace.Labels[SessionKey] != "session" {
 		t.Fatalf("namespace labels: %#v", namespace.Labels)
 	}
 	if err := EnsureNamespace(ctx, client, "system", "other-session", false); err != nil {

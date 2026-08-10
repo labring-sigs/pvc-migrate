@@ -47,7 +47,7 @@ func (s *ConfigMapSessionStore) AcquireSessionLock(ctx context.Context, namespac
 	now := metav1.NewMicroTime(time.Now().UTC())
 	labelsForLease := map[string]string{
 		ManagedByLabel: ManagedByValue,
-		SessionLabel:   id,
+		SessionKey:     id,
 	}
 
 	for attempt := 0; attempt < 2; attempt++ {
@@ -78,7 +78,7 @@ func (s *ConfigMapSessionStore) AcquireSessionLock(ctx context.Context, namespac
 		if err != nil {
 			return nil, domain.WrapError(domain.ErrorKubernetes, "acquire session lock", fmt.Sprintf("read Lease %s/%s", namespace, name), err)
 		}
-		if lease.Labels[ManagedByLabel] != ManagedByValue || lease.Labels[SessionLabel] != id {
+		if lease.Labels[ManagedByLabel] != ManagedByValue || lease.Labels[SessionKey] != id {
 			return nil, domain.NewError(domain.ErrorConflict, "acquire session lock", fmt.Sprintf("Lease %s/%s is owned by another resource", namespace, name))
 		}
 		if lease.Spec.HolderIdentity != nil && *lease.Spec.HolderIdentity != "" && !sessionLeaseExpired(lease, time.Now().UTC()) {
@@ -183,7 +183,7 @@ func (l *sessionLease) renew() error {
 	if err != nil {
 		return domain.WrapError(domain.ErrorKubernetes, "renew session lock", "read session Lease", err)
 	}
-	if lease.Labels[ManagedByLabel] != ManagedByValue || lease.Labels[SessionLabel] != l.sessionID || lease.Spec.HolderIdentity == nil || *lease.Spec.HolderIdentity != l.holder {
+	if lease.Labels[ManagedByLabel] != ManagedByValue || lease.Labels[SessionKey] != l.sessionID || lease.Spec.HolderIdentity == nil || *lease.Spec.HolderIdentity != l.holder {
 		return domain.NewError(domain.ErrorConflict, "renew session lock", "session lock ownership was fenced")
 	}
 	now := metav1.NewMicroTime(time.Now().UTC())

@@ -19,13 +19,13 @@ import (
 // Kubernetes controllers converge.
 func (p *Planner) checkSessionOwnership(ctx context.Context, plan *domain.MigrationPlan, sessionNamespace string, pvc *corev1.PersistentVolumeClaim, pv *corev1.PersistentVolume) {
 	owners := map[string][]string{}
-	if owner := pvc.Annotations[kube.SessionAnnotation]; owner != "" {
+	if owner := pvc.Annotations[kube.SessionKey]; owner != "" {
 		owners[owner] = append(owners[owner], "PVC annotation")
 	}
-	if owner := pvc.Labels[kube.SessionLabel]; owner != "" {
+	if owner := pvc.Labels[kube.SessionKey]; owner != "" {
 		owners[owner] = append(owners[owner], "PVC label")
 	}
-	if owner := pv.Labels[kube.SessionLabel]; owner != "" {
+	if owner := pv.Labels[kube.SessionKey]; owner != "" {
 		owners[owner] = append(owners[owner], "PV label")
 	}
 	if len(owners) == 0 {

@@ -42,8 +42,8 @@ func TestAcquirePVCHandlesOwnershipAndRetriesConflicts(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if pvc.Annotations[SessionAnnotation] != "session" || updates != 2 {
-		t.Fatalf("PVC ownership=%q updates=%d", pvc.Annotations[SessionAnnotation], updates)
+	if pvc.Annotations[SessionKey] != "session" || updates != 2 {
+		t.Fatalf("PVC ownership=%q updates=%d", pvc.Annotations[SessionKey], updates)
 	}
 	if err := AcquirePVC(ctx, client, ref, "session"); err != nil {
 		t.Fatalf("idempotent acquire: %v", err)
@@ -69,7 +69,7 @@ func TestAcquirePVCRejectsUIDAndOwnerConflicts(t *testing.T) {
 			ref:  domain.ObjectReference{Namespace: "app", Name: "data", UID: types.UID("expected")},
 			pvc: &corev1.PersistentVolumeClaim{ObjectMeta: metav1.ObjectMeta{
 				Namespace: "app", Name: "data", UID: types.UID("expected"),
-				Annotations: map[string]string{SessionAnnotation: "other-session"},
+				Annotations: map[string]string{SessionKey: "other-session"},
 			}},
 		},
 	}
@@ -90,7 +90,7 @@ func TestReleasePVCIsOwnershipSafeAndIdempotent(t *testing.T) {
 	ref := domain.ObjectReference{Namespace: "app", Name: "data", UID: uid}
 	client := fake.NewClientset(&corev1.PersistentVolumeClaim{ObjectMeta: metav1.ObjectMeta{
 		Namespace: "app", Name: "data", UID: uid,
-		Annotations: map[string]string{SessionAnnotation: "session", "example.com/keep": "value"},
+		Annotations: map[string]string{SessionKey: "session", "example.com/keep": "value"},
 	}})
 	if err := ReleasePVC(ctx, client, ref, "session"); err != nil {
 		t.Fatal(err)
@@ -99,14 +99,14 @@ func TestReleasePVCIsOwnershipSafeAndIdempotent(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, exists := pvc.Annotations[SessionAnnotation]; exists || pvc.Annotations["example.com/keep"] != "value" {
+	if _, exists := pvc.Annotations[SessionKey]; exists || pvc.Annotations["example.com/keep"] != "value" {
 		t.Fatalf("annotations after release: %#v", pvc.Annotations)
 	}
 	if err := ReleasePVC(ctx, client, ref, "session"); err != nil {
 		t.Fatalf("idempotent release: %v", err)
 	}
 
-	pvc.Annotations[SessionAnnotation] = "other-session"
+	pvc.Annotations[SessionKey] = "other-session"
 	if _, err := client.CoreV1().PersistentVolumeClaims("app").Update(ctx, pvc, metav1.UpdateOptions{}); err != nil {
 		t.Fatal(err)
 	}
@@ -114,7 +114,7 @@ func TestReleasePVCIsOwnershipSafeAndIdempotent(t *testing.T) {
 		t.Fatalf("release of foreign ownership: %v", err)
 	}
 	pvc, _ = client.CoreV1().PersistentVolumeClaims("app").Get(ctx, "data", metav1.GetOptions{})
-	if pvc.Annotations[SessionAnnotation] != "other-session" {
+	if pvc.Annotations[SessionKey] != "other-session" {
 		t.Fatalf("foreign ownership changed: %#v", pvc.Annotations)
 	}
 	if err := ReleasePVC(ctx, client, domain.ObjectReference{Namespace: "app", Name: "missing"}, "session"); err != nil {
@@ -125,7 +125,7 @@ func TestReleasePVCIsOwnershipSafeAndIdempotent(t *testing.T) {
 func TestReleasePVCRejectsReusedName(t *testing.T) {
 	client := fake.NewClientset(&corev1.PersistentVolumeClaim{ObjectMeta: metav1.ObjectMeta{
 		Namespace: "app", Name: "data", UID: types.UID("replacement"),
-		Annotations: map[string]string{SessionAnnotation: "session"},
+		Annotations: map[string]string{SessionKey: "session"},
 	}})
 	err := ReleasePVC(context.Background(), client, domain.ObjectReference{
 		Namespace: "app", Name: "data", UID: types.UID("original"),
@@ -142,10 +142,10 @@ func TestFinalizePVCRestoresOriginalMetadataAndPreservesBindingAnnotations(t *te
 	client := fake.NewClientset(&corev1.PersistentVolumeClaim{ObjectMeta: metav1.ObjectMeta{
 		Namespace: ref.Namespace, Name: ref.Name, UID: ref.UID,
 		Labels: map[string]string{
-			ManagedByLabel: "pvc-migrate", SessionLabel: "session", "external.example/keep": "value",
+			ManagedByLabel: "pvc-migrate", SessionKey: "session", "external.example/keep": "value",
 		},
 		Annotations: map[string]string{
-			SessionAnnotation: "session", "pvc-migrate.io/rollback-pv": "old-pv", "pvc-migrate.io/source-pv": "source-pv", "pvc-migrate.io/source-pvc-uid": "source-pvc", "pv.kubernetes.io/bind-completed": "yes",
+			SessionKey: "session", RollbackPVAnnotation: "old-pv", SourcePVAnnotation: "source-pv", SourcePVCUIDAnnotation: "source-pvc", "pv.kubernetes.io/bind-completed": "yes",
 		},
 	}})
 	original := domain.PVCMetadata{
@@ -160,10 +160,10 @@ func TestFinalizePVCRestoresOriginalMetadataAndPreservesBindingAnnotations(t *te
 	if err != nil {
 		t.Fatal(err)
 	}
-	if pvc.Labels[ManagedByLabel] != "database-operator" || pvc.Labels[SessionLabel] != "" || pvc.Labels["external.example/keep"] != "value" || pvc.Labels["original.example/label"] != "value" {
+	if pvc.Labels[ManagedByLabel] != "database-operator" || pvc.Labels[SessionKey] != "" || pvc.Labels["external.example/keep"] != "value" || pvc.Labels["original.example/label"] != "value" {
 		t.Fatalf("labels=%v", pvc.Labels)
 	}
-	if pvc.Annotations[SessionAnnotation] != "" || pvc.Annotations["pvc-migrate.io/rollback-pv"] != "" || pvc.Annotations["pvc-migrate.io/source-pv"] != "" || pvc.Annotations["pvc-migrate.io/source-pvc-uid"] != "" || pvc.Annotations["pv.kubernetes.io/bind-completed"] != "yes" || pvc.Annotations["original.example/annotation"] != "value" {
+	if pvc.Annotations[SessionKey] != "" || pvc.Annotations[RollbackPVAnnotation] != "" || pvc.Annotations[SourcePVAnnotation] != "" || pvc.Annotations[SourcePVCUIDAnnotation] != "" || pvc.Annotations["pv.kubernetes.io/bind-completed"] != "yes" || pvc.Annotations["original.example/annotation"] != "value" {
 		t.Fatalf("annotations=%v", pvc.Annotations)
 	}
 	if len(pvc.OwnerReferences) != 1 || pvc.OwnerReferences[0].UID != originalOwner.UID {
@@ -178,7 +178,7 @@ func TestFinalizePVCRejectsForeignOwnership(t *testing.T) {
 	ref := domain.ObjectReference{Namespace: "app", Name: "data", UID: types.UID("pvc-uid")}
 	client := fake.NewClientset(&corev1.PersistentVolumeClaim{ObjectMeta: metav1.ObjectMeta{
 		Namespace: ref.Namespace, Name: ref.Name, UID: ref.UID,
-		Labels: map[string]string{SessionLabel: "foreign-session"},
+		Labels: map[string]string{SessionKey: "foreign-session"},
 	}})
 	err := FinalizePVC(context.Background(), client, ref, "session", domain.PVCMetadata{})
 	if domain.CategoryOf(err) != domain.ErrorConflict {

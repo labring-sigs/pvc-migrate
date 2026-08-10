@@ -114,7 +114,7 @@ func TestReserveVolumeProvisionsOnTargetAndRetainsBothPVs(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if pv.Spec.PersistentVolumeReclaimPolicy != corev1.PersistentVolumeReclaimRetain || pv.Labels[SessionLabel] != "session" {
+		if pv.Spec.PersistentVolumeReclaimPolicy != corev1.PersistentVolumeReclaimRetain || pv.Labels[SessionKey] != "session" {
 			t.Fatalf("retained PV %s: %#v", name, pv)
 		}
 	}
@@ -132,7 +132,7 @@ func TestReserveVolumeRejectsDestinationOwnedByAnotherSession(t *testing.T) {
 	client := fake.NewClientset(
 		&corev1.PersistentVolumeClaim{ObjectMeta: metav1.ObjectMeta{Namespace: "app", Name: "data", UID: sourcePVCUID}, Spec: corev1.PersistentVolumeClaimSpec{VolumeName: "pv-source", AccessModes: []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce}, StorageClassName: &storageClass, VolumeMode: &mode}, Status: corev1.PersistentVolumeClaimStatus{Phase: corev1.ClaimBound}},
 		&corev1.PersistentVolume{ObjectMeta: metav1.ObjectMeta{Name: "pv-source", UID: sourcePVUID}, Spec: corev1.PersistentVolumeSpec{ClaimRef: &corev1.ObjectReference{UID: sourcePVCUID}, PersistentVolumeReclaimPolicy: corev1.PersistentVolumeReclaimRetain}},
-		&corev1.PersistentVolumeClaim{ObjectMeta: metav1.ObjectMeta{Namespace: "system", Name: "data-migrated", Labels: map[string]string{SessionLabel: "other"}, Annotations: map[string]string{"pvc-migrate.io/source-pvc-uid": string(sourcePVCUID)}}, Spec: corev1.PersistentVolumeClaimSpec{StorageClassName: &storageClass, VolumeMode: &mode, Resources: corev1.VolumeResourceRequirements{Requests: corev1.ResourceList{corev1.ResourceStorage: resource.MustParse("1Gi")}}}},
+		&corev1.PersistentVolumeClaim{ObjectMeta: metav1.ObjectMeta{Namespace: "system", Name: "data-migrated", Labels: map[string]string{SessionKey: "other"}, Annotations: map[string]string{SourcePVCUIDAnnotation: string(sourcePVCUID)}}, Spec: corev1.PersistentVolumeClaimSpec{StorageClassName: &storageClass, VolumeMode: &mode, Resources: corev1.VolumeResourceRequirements{Requests: corev1.ResourceList{corev1.ResourceStorage: resource.MustParse("1Gi")}}}},
 	)
 	session := domain.NewSession("session", domain.NewSessionSpec(domain.OperationReserve, domain.SessionCommon{
 		SourceNamespace: "app", TemporaryNamespace: "system", SessionNamespace: "system",

@@ -29,7 +29,7 @@ func TestCleanupDeletesReservationPodsAcrossDestinationNamespaces(t *testing.T) 
 			Name:      name,
 			UID:       types.UID(name + "-uid"),
 			Labels: map[string]string{
-				kube.SessionLabel:      session.ID,
+				kube.SessionKey:        session.ID,
 				kube.ResourceRoleLabel: "reservation-consumer",
 			},
 		}}
@@ -39,7 +39,7 @@ func TestCleanupDeletesReservationPodsAcrossDestinationNamespaces(t *testing.T) 
 		reservationPod("backup", "reserve-logs"),
 		&corev1.Pod{ObjectMeta: metav1.ObjectMeta{
 			Namespace: "system", Name: "other-session", UID: types.UID("other-uid"),
-			Labels: map[string]string{kube.SessionLabel: "another-session", kube.ResourceRoleLabel: "reservation-consumer"},
+			Labels: map[string]string{kube.SessionKey: "another-session", kube.ResourceRoleLabel: "reservation-consumer"},
 		}},
 		&corev1.Pod{ObjectMeta: metav1.ObjectMeta{
 			Namespace: "system", Name: "application", UID: types.UID("application-uid"),
@@ -101,7 +101,7 @@ func TestCleanupTemporaryPVCRequiresRecordedIdentityAndOwnership(t *testing.T) {
 			session.Spec.Volumes[0].DestinationPVC.UID = types.UID("reserved-pvc-uid")
 			client := fake.NewClientset(&corev1.PersistentVolumeClaim{ObjectMeta: metav1.ObjectMeta{
 				Namespace: "system", Name: "data-migrated", UID: test.uid,
-				Labels: map[string]string{kube.SessionLabel: test.sessionID},
+				Labels: map[string]string{kube.SessionKey: test.sessionID},
 			}})
 			service := &Service{client: client, store: &memoryStore{}}
 
@@ -128,11 +128,11 @@ func TestCleanupDeletesOnlyOwnedTemporaryPVCs(t *testing.T) {
 	client := fake.NewClientset(
 		&corev1.PersistentVolumeClaim{ObjectMeta: metav1.ObjectMeta{
 			Namespace: "system", Name: "data-migrated", UID: types.UID("temporary-uid-data"), ResourceVersion: "1",
-			Labels: map[string]string{kube.SessionLabel: session.ID},
+			Labels: map[string]string{kube.SessionKey: session.ID},
 		}},
 		&corev1.PersistentVolumeClaim{ObjectMeta: metav1.ObjectMeta{
 			Namespace: "system", Name: "logs-migrated", UID: types.UID("temporary-uid-logs"), ResourceVersion: "1",
-			Labels: map[string]string{kube.SessionLabel: session.ID},
+			Labels: map[string]string{kube.SessionKey: session.ID},
 		}},
 	)
 	service := &Service{client: client, store: &memoryStore{}}
@@ -144,6 +144,46 @@ func TestCleanupDeletesOnlyOwnedTemporaryPVCs(t *testing.T) {
 		if _, err := client.CoreV1().PersistentVolumeClaims("system").Get(ctx, name, metav1.GetOptions{}); !apierrors.IsNotFound(err) {
 			t.Fatalf("temporary PVC %s still exists: %v", name, err)
 		}
+	}
+}
+
+func TestCleanupValidationAccountsForOwnedReservationPod(t *testing.T) {
+	ctx := context.Background()
+	session := appTestSession()
+	session.Status.Phase = domain.PhaseAborted
+	session.Spec.Volumes[0].DestinationPVC.UID = types.UID("temporary-pvc-uid")
+	pvc := &corev1.PersistentVolumeClaim{ObjectMeta: metav1.ObjectMeta{
+		Namespace: session.Spec.Volumes[0].DestinationPVC.Namespace,
+		Name:      session.Spec.Volumes[0].DestinationPVC.Name,
+		UID:       session.Spec.Volumes[0].DestinationPVC.UID,
+		Labels:    map[string]string{kube.SessionKey: session.ID},
+	}}
+	pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{
+		Namespace: pvc.Namespace,
+		Name:      "reservation-consumer",
+		UID:       types.UID("reservation-pod-uid"),
+		Labels: map[string]string{
+			kube.SessionKey:        session.ID,
+			kube.ResourceRoleLabel: "reservation-consumer",
+		},
+	}, Spec: corev1.PodSpec{Volumes: []corev1.Volume{{
+		Name:         "data",
+		VolumeSource: corev1.VolumeSource{PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: pvc.Name}},
+	}}}}
+	client := fake.NewClientset(pvc, pod)
+	service := &Service{client: client, store: &memoryStore{}}
+
+	if err := service.ValidateCleanup(ctx, session, CleanupOptions{DeleteTemporary: true}); err != nil {
+		t.Fatalf("cleanup dry-run blocked by owned reservation Pod: %v", err)
+	}
+	if err := service.Cleanup(ctx, session, CleanupOptions{DeleteTemporary: true}); err != nil {
+		t.Fatalf("cleanup: %v", err)
+	}
+	if _, err := client.CoreV1().Pods(pod.Namespace).Get(ctx, pod.Name, metav1.GetOptions{}); !apierrors.IsNotFound(err) {
+		t.Fatalf("reservation Pod still exists: %v", err)
+	}
+	if _, err := client.CoreV1().PersistentVolumeClaims(pvc.Namespace).Get(ctx, pvc.Name, metav1.GetOptions{}); !apierrors.IsNotFound(err) {
+		t.Fatalf("temporary PVC still exists: %v", err)
 	}
 }
 
@@ -159,12 +199,12 @@ func TestCleanupRecoversDestinationRefsAfterCheckpointLoss(t *testing.T) {
 		UID:       pvcUID,
 		Labels: map[string]string{
 			kube.ManagedByLabel:    kube.ManagedByValue,
-			kube.SessionLabel:      session.ID,
+			kube.SessionKey:        session.ID,
 			kube.ResourceRoleLabel: "destination",
 		},
 		Annotations: map[string]string{
-			kube.SessionAnnotation:          session.ID,
-			"pvc-migrate.io/source-pvc-uid": string(session.Spec.Volumes[0].SourcePVC.UID),
+			kube.SessionKey:             session.ID,
+			kube.SourcePVCUIDAnnotation: string(session.Spec.Volumes[0].SourcePVC.UID),
 		},
 	}, Spec: corev1.PersistentVolumeClaimSpec{VolumeName: "pv-destination"}}
 	pv := managedPV("pv-destination", string(pvUID), session.ID, "destination", corev1.VolumeReleased)
@@ -194,12 +234,12 @@ func TestCleanupSessionDeletionRequiresDiscoveredRollbackPV(t *testing.T) {
 		UID:       pvcUID,
 		Labels: map[string]string{
 			kube.ManagedByLabel:    kube.ManagedByValue,
-			kube.SessionLabel:      session.ID,
+			kube.SessionKey:        session.ID,
 			kube.ResourceRoleLabel: "destination",
 		},
 		Annotations: map[string]string{
-			kube.SessionAnnotation:          session.ID,
-			"pvc-migrate.io/source-pvc-uid": string(session.Spec.Volumes[0].SourcePVC.UID),
+			kube.SessionKey:             session.ID,
+			kube.SourcePVCUIDAnnotation: string(session.Spec.Volumes[0].SourcePVC.UID),
 		},
 	}, Spec: corev1.PersistentVolumeClaimSpec{VolumeName: "pv-destination"}}
 	pv := managedPV("pv-destination", "delete-check-destination-pv-uid", session.ID, "destination", corev1.VolumeReleased)
@@ -225,7 +265,7 @@ func TestCleanupOrphanRecoveryProtectsForeignDestinationPVC(t *testing.T) {
 		UID:       types.UID("foreign-destination-pvc-uid"),
 		Labels: map[string]string{
 			kube.ManagedByLabel:    kube.ManagedByValue,
-			kube.SessionLabel:      "another-session",
+			kube.SessionKey:        "another-session",
 			kube.ResourceRoleLabel: "destination",
 		},
 	}}
@@ -252,7 +292,7 @@ func TestCleanupIgnoresTerminalPVCConsumers(t *testing.T) {
 				Namespace: session.Spec.Volumes[0].DestinationPVC.Namespace,
 				Name:      session.Spec.Volumes[0].DestinationPVC.Name,
 				UID:       session.Spec.Volumes[0].DestinationPVC.UID,
-				Labels:    map[string]string{kube.SessionLabel: session.ID},
+				Labels:    map[string]string{kube.SessionKey: session.ID},
 			}}
 			pod := &corev1.Pod{
 				ObjectMeta: metav1.ObjectMeta{Namespace: pvc.Namespace, Name: "terminal-consumer"},
@@ -282,7 +322,7 @@ func TestCleanupBlocksRunningPVCConsumer(t *testing.T) {
 		Namespace: session.Spec.Volumes[0].DestinationPVC.Namespace,
 		Name:      session.Spec.Volumes[0].DestinationPVC.Name,
 		UID:       session.Spec.Volumes[0].DestinationPVC.UID,
-		Labels:    map[string]string{kube.SessionLabel: session.ID},
+		Labels:    map[string]string{kube.SessionKey: session.ID},
 	}}
 	pod := &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{Namespace: pvc.Namespace, Name: "running-consumer"},
@@ -311,7 +351,7 @@ func TestCleanupBlocksAttachedDestinationPV(t *testing.T) {
 		Namespace: session.Spec.Volumes[0].DestinationPVC.Namespace,
 		Name:      session.Spec.Volumes[0].DestinationPVC.Name,
 		UID:       session.Spec.Volumes[0].DestinationPVC.UID,
-		Labels:    map[string]string{kube.SessionLabel: session.ID},
+		Labels:    map[string]string{kube.SessionKey: session.ID},
 	}, Spec: corev1.PersistentVolumeClaimSpec{VolumeName: "pv-destination"}}
 	pvName := "pv-destination"
 	attachment := &storagev1.VolumeAttachment{
@@ -341,12 +381,12 @@ func TestValidateCleanupDiscoversDestinationRefsWithoutMutation(t *testing.T) {
 		UID:       pvcUID,
 		Labels: map[string]string{
 			kube.ManagedByLabel:    kube.ManagedByValue,
-			kube.SessionLabel:      session.ID,
+			kube.SessionKey:        session.ID,
 			kube.ResourceRoleLabel: "destination",
 		},
 		Annotations: map[string]string{
-			kube.SessionAnnotation:          session.ID,
-			"pvc-migrate.io/source-pvc-uid": string(session.Spec.Volumes[0].SourcePVC.UID),
+			kube.SessionKey:             session.ID,
+			kube.SourcePVCUIDAnnotation: string(session.Spec.Volumes[0].SourcePVC.UID),
 		},
 	}, Spec: corev1.PersistentVolumeClaimSpec{VolumeName: "pv-destination"}}
 	pv := managedPV("pv-destination", "validate-destination-pv-uid", session.ID, "destination", corev1.VolumeReleased)
@@ -382,7 +422,7 @@ func TestValidateCleanupAccountsForTemporaryPVCDeletionBeforePVDeletion(t *testi
 			Namespace: session.Spec.Volumes[0].DestinationPVC.Namespace,
 			Name:      session.Spec.Volumes[0].DestinationPVC.Name,
 			UID:       session.Spec.Volumes[0].DestinationPVC.UID,
-			Labels:    map[string]string{kube.SessionLabel: session.ID},
+			Labels:    map[string]string{kube.SessionKey: session.ID},
 		},
 		Spec: corev1.PersistentVolumeClaimSpec{VolumeName: pv.Name},
 	}
@@ -523,7 +563,7 @@ func TestCleanupRenameFinalizesSourcePVWithoutRollbackDeletion(t *testing.T) {
 		managedPV("pv-source", "source-pv-uid", session.ID, "rename", corev1.VolumeBound),
 		&corev1.PersistentVolumeClaim{ObjectMeta: metav1.ObjectMeta{
 			Namespace: "app", Name: "renamed-data", UID: types.UID("renamed-pvc-uid"),
-			Annotations: map[string]string{kube.SessionAnnotation: session.ID},
+			Annotations: map[string]string{kube.SessionKey: session.ID},
 		}},
 	)
 	store := &memoryStore{}
@@ -536,14 +576,14 @@ func TestCleanupRenameFinalizesSourcePVWithoutRollbackDeletion(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if pv.Spec.PersistentVolumeReclaimPolicy != corev1.PersistentVolumeReclaimDelete || pv.Labels[kube.SessionLabel] != "" {
+	if pv.Spec.PersistentVolumeReclaimPolicy != corev1.PersistentVolumeReclaimDelete || pv.Labels[kube.SessionKey] != "" {
 		t.Fatalf("finalized rename PV=%+v", pv)
 	}
 	pvc, err := client.CoreV1().PersistentVolumeClaims("app").Get(ctx, "renamed-data", metav1.GetOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if pvc.Annotations[kube.SessionAnnotation] != "" || store.deletes != 1 {
+	if pvc.Annotations[kube.SessionKey] != "" || store.deletes != 1 {
 		t.Fatalf("PVC annotations=%v session deletes=%d", pvc.Annotations, store.deletes)
 	}
 }
@@ -561,7 +601,7 @@ func TestCleanupFinalizeReleasesPVOnlyAfterPVCCheckpoint(t *testing.T) {
 		managedPV("pv-destination", "dest-pv-uid", session.ID, "active", corev1.VolumeBound),
 		&corev1.PersistentVolumeClaim{ObjectMeta: metav1.ObjectMeta{
 			Namespace: "app", Name: "data", UID: types.UID("active-pvc-uid"),
-			Annotations: map[string]string{kube.SessionAnnotation: session.ID},
+			Annotations: map[string]string{kube.SessionKey: session.ID},
 		}},
 	)
 	failed := false
@@ -581,7 +621,7 @@ func TestCleanupFinalizeReleasesPVOnlyAfterPVCCheckpoint(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if pv.Labels[kube.SessionLabel] != session.ID {
+	if pv.Labels[kube.SessionKey] != session.ID {
 		t.Fatalf("PV ownership cleared before PVC checkpoint: labels=%v", pv.Labels)
 	}
 	if err := service.Cleanup(ctx, session, CleanupOptions{Finalize: true}); err != nil {
@@ -591,7 +631,7 @@ func TestCleanupFinalizeReleasesPVOnlyAfterPVCCheckpoint(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if pv.Labels[kube.SessionLabel] != "" {
+	if pv.Labels[kube.SessionKey] != "" {
 		t.Fatalf("PV ownership remains after retry: labels=%v", pv.Labels)
 	}
 }

@@ -62,9 +62,15 @@ func (p *Planner) checkRBAC(ctx context.Context, plan *domain.MigrationPlan, sou
 		add(sourceNamespace, group, "opsrequests", "get", "create", "delete")
 		clusterGroup := strings.SplitN(workload.KubeBlocks.ClusterAPIVersion, "/", 2)[0]
 		if clusterGroup == "" {
-			clusterGroup = "apps.kubeblocks.io"
+			clusterGroup = domain.KubeBlocksAppsGroup
 		}
-		add(sourceNamespace, clusterGroup, "clusters", "get", "update", "patch")
+		add(sourceNamespace, clusterGroup, "clusters", "get")
+		if workload.Controller.Kind == domain.KindInstanceSet {
+			instanceSetGroup := strings.SplitN(workload.Controller.APIVersion, "/", 2)[0]
+			add(sourceNamespace, instanceSetGroup, "instancesets", "get", "update", "patch")
+		} else {
+			add(sourceNamespace, clusterGroup, "clusters", "update", "patch")
+		}
 	}
 	if workload.VMCluster != nil {
 		group := strings.SplitN(workload.VMCluster.APIVersion, "/", 2)[0]

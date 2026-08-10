@@ -22,13 +22,13 @@ func TestPlanRejectsPersistedSessionOwnershipBeforeMutation(t *testing.T) {
 		t.Fatal(err)
 	}
 	pvc, _ := client.CoreV1().PersistentVolumeClaims("app").Get(context.Background(), "data", metav1.GetOptions{})
-	pvc.Annotations = map[string]string{kube.SessionAnnotation: old.ID}
-	pvc.Labels = map[string]string{kube.SessionLabel: old.ID}
+	pvc.Annotations = map[string]string{kube.SessionKey: old.ID}
+	pvc.Labels = map[string]string{kube.SessionKey: old.ID}
 	if _, err := client.CoreV1().PersistentVolumeClaims("app").Update(context.Background(), pvc, metav1.UpdateOptions{}); err != nil {
 		t.Fatal(err)
 	}
 	pv, _ := client.CoreV1().PersistentVolumes().Get(context.Background(), "pv-source", metav1.GetOptions{})
-	pv.Labels = map[string]string{kube.SessionLabel: old.ID}
+	pv.Labels = map[string]string{kube.SessionKey: old.ID}
 	if _, err := client.CoreV1().PersistentVolumes().Update(context.Background(), pv, metav1.UpdateOptions{}); err != nil {
 		t.Fatal(err)
 	}
@@ -53,7 +53,7 @@ func TestPlanRejectsPersistedSessionOwnershipBeforeMutation(t *testing.T) {
 func TestPlanDiagnosesOrphanSessionOwnership(t *testing.T) {
 	client := plannerClient(plannerObjects("2Gi")...)
 	pvc, _ := client.CoreV1().PersistentVolumeClaims("app").Get(context.Background(), "data", metav1.GetOptions{})
-	pvc.Annotations = map[string]string{kube.SessionAnnotation: "missing-session"}
+	pvc.Annotations = map[string]string{kube.SessionKey: "missing-session"}
 	if _, err := client.CoreV1().PersistentVolumeClaims("app").Update(context.Background(), pvc, metav1.UpdateOptions{}); err != nil {
 		t.Fatal(err)
 	}
@@ -76,12 +76,12 @@ func TestPlanDiagnosesOrphanSessionOwnership(t *testing.T) {
 func TestPlanRejectsConflictingSessionOwnership(t *testing.T) {
 	client := plannerClient(plannerObjects("2Gi")...)
 	pvc, _ := client.CoreV1().PersistentVolumeClaims("app").Get(context.Background(), "data", metav1.GetOptions{})
-	pvc.Annotations = map[string]string{kube.SessionAnnotation: "session-a"}
+	pvc.Annotations = map[string]string{kube.SessionKey: "session-a"}
 	if _, err := client.CoreV1().PersistentVolumeClaims("app").Update(context.Background(), pvc, metav1.UpdateOptions{}); err != nil {
 		t.Fatal(err)
 	}
 	pv, _ := client.CoreV1().PersistentVolumes().Get(context.Background(), "pv-source", metav1.GetOptions{})
-	pv.Labels = map[string]string{kube.SessionLabel: "session-b"}
+	pv.Labels = map[string]string{kube.SessionKey: "session-b"}
 	if _, err := client.CoreV1().PersistentVolumes().Update(context.Background(), pv, metav1.UpdateOptions{}); err != nil {
 		t.Fatal(err)
 	}

@@ -5,6 +5,11 @@ import (
 	storagev1 "k8s.io/api/storage/v1"
 )
 
+const (
+	MigrationPlanKind     = "MigrationPlan"
+	OrphanCleanupPlanKind = "OrphanCleanupPlan"
+)
+
 type CheckSeverity string
 
 const (
@@ -16,7 +21,7 @@ const (
 type CapacityAwareness string
 
 const (
-	CapacityAwarenessAuto    CapacityAwareness = "auto"
+	CapacityAwarenessAuto    CapacityAwareness = AutoValue
 	CapacityAwarenessRequire CapacityAwareness = "require"
 	CapacityAwarenessOff     CapacityAwareness = "off"
 )

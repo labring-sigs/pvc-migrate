@@ -206,7 +206,7 @@ func TestMarkPVPairRejectsForeignSessionOwnership(t *testing.T) {
 		DestinationPV: domain.ObjectReference{Name: "destination", UID: types.UID("destination-uid")},
 	}
 	client := fake.NewClientset(
-		&corev1.PersistentVolume{ObjectMeta: metav1.ObjectMeta{Name: "source", UID: volume.SourcePV.UID, Labels: map[string]string{SessionLabel: "foreign"}}},
+		&corev1.PersistentVolume{ObjectMeta: metav1.ObjectMeta{Name: "source", UID: volume.SourcePV.UID, Labels: map[string]string{SessionKey: "foreign"}}},
 		&corev1.PersistentVolume{ObjectMeta: metav1.ObjectMeta{Name: "destination", UID: volume.DestinationPV.UID}},
 	)
 	err := NewSwitcher(client).markPVPair(context.Background(), "session", volume, false)
@@ -217,7 +217,7 @@ func TestMarkPVPairRejectsForeignSessionOwnership(t *testing.T) {
 	if getErr != nil {
 		t.Fatal(getErr)
 	}
-	if source.Labels[SessionLabel] != "foreign" {
+	if source.Labels[SessionKey] != "foreign" {
 		t.Fatalf("foreign ownership changed: labels=%v", source.Labels)
 	}
 }
@@ -238,7 +238,7 @@ func TestMarkPVPairAllowsMissingRollbackPV(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if source.Labels[SessionLabel] != "session" || source.Labels[ResourceRoleLabel] != "active" || source.Spec.PersistentVolumeReclaimPolicy != corev1.PersistentVolumeReclaimRetain {
+	if source.Labels[SessionKey] != "session" || source.Labels[ResourceRoleLabel] != "active" || source.Spec.PersistentVolumeReclaimPolicy != corev1.PersistentVolumeReclaimRetain {
 		t.Fatalf("active PV was not marked: %#v", source)
 	}
 }
@@ -266,10 +266,10 @@ func TestRenamePVCIdempotentDestinationKeepsActiveRole(t *testing.T) {
 	client := fake.NewClientset(
 		&corev1.PersistentVolume{ObjectMeta: metav1.ObjectMeta{
 			Name: "pv", UID: volume.SourcePV.UID,
-			Labels: map[string]string{SessionLabel: session.ID, ResourceRoleLabel: "active"},
+			Labels: map[string]string{SessionKey: session.ID, ResourceRoleLabel: "active"},
 		}, Spec: corev1.PersistentVolumeSpec{PersistentVolumeReclaimPolicy: corev1.PersistentVolumeReclaimRetain}},
 		&corev1.PersistentVolumeClaim{ObjectMeta: metav1.ObjectMeta{
-			Namespace: "app", Name: "new", Annotations: map[string]string{SessionAnnotation: session.ID},
+			Namespace: "app", Name: "new", Annotations: map[string]string{SessionKey: session.ID},
 		}, Spec: corev1.PersistentVolumeClaimSpec{VolumeName: "pv"}},
 	)
 	if _, err := NewSwitcher(client).RenamePVC(context.Background(), session, volume, nil); err != nil {
@@ -294,10 +294,10 @@ func TestRenamePVCIdempotentDestinationRejectsConsumers(t *testing.T) {
 	client := fake.NewClientset(
 		&corev1.PersistentVolume{ObjectMeta: metav1.ObjectMeta{
 			Name: "pv", UID: volume.SourcePV.UID,
-			Labels: map[string]string{SessionLabel: session.ID, ResourceRoleLabel: "active"},
+			Labels: map[string]string{SessionKey: session.ID, ResourceRoleLabel: "active"},
 		}, Spec: corev1.PersistentVolumeSpec{PersistentVolumeReclaimPolicy: corev1.PersistentVolumeReclaimRetain}},
 		&corev1.PersistentVolumeClaim{ObjectMeta: metav1.ObjectMeta{
-			Namespace: "app", Name: "new", Annotations: map[string]string{SessionAnnotation: session.ID},
+			Namespace: "app", Name: "new", Annotations: map[string]string{SessionKey: session.ID},
 		}, Spec: corev1.PersistentVolumeClaimSpec{VolumeName: "pv"}},
 		&corev1.Pod{ObjectMeta: metav1.ObjectMeta{Namespace: "app", Name: "consumer"}, Spec: corev1.PodSpec{Volumes: []corev1.Volume{{VolumeSource: corev1.VolumeSource{PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: "new"}}}}}},
 	)
@@ -399,7 +399,7 @@ func TestRollbackVolumeRejectsForeignActivePVC(t *testing.T) {
 		t.Fatal(err)
 	}
 	active, _ := switcher.client.CoreV1().PersistentVolumeClaims("app").Get(ctx, "data", metav1.GetOptions{})
-	active.Annotations[SessionAnnotation] = "other-session"
+	active.Annotations[SessionKey] = "other-session"
 	if _, err := switcher.client.CoreV1().PersistentVolumeClaims("app").Update(ctx, active, metav1.UpdateOptions{}); err != nil {
 		t.Fatal(err)
 	}
@@ -430,7 +430,7 @@ func TestRollbackVolumeFastPathRequiresSourcePVCIdentityOrSessionOwnership(t *te
 			}
 			pvc.UID = test.uid
 			if test.annotate {
-				pvc.Annotations = map[string]string{SessionAnnotation: session.ID}
+				pvc.Annotations = map[string]string{SessionKey: session.ID}
 			} else {
 				pvc.Annotations = nil
 			}
@@ -470,7 +470,7 @@ func TestRollbackVolumeRejectsSourcePVCBoundToUnexpectedPV(t *testing.T) {
 		t.Fatal(err)
 	}
 	pvc.Spec.VolumeName = "unexpected-pv"
-	pvc.Annotations = map[string]string{SessionAnnotation: session.ID}
+	pvc.Annotations = map[string]string{SessionKey: session.ID}
 	if _, err := switcher.client.CoreV1().PersistentVolumeClaims(pvc.Namespace).Update(ctx, pvc, metav1.UpdateOptions{}); err != nil {
 		t.Fatal(err)
 	}
@@ -536,7 +536,7 @@ func TestReservePVIdempotencyAndConflictChecks(t *testing.T) {
 		pvcUID := types.UID("pvc-uid")
 		client := fake.NewClientset(
 			&corev1.PersistentVolumeClaim{ObjectMeta: metav1.ObjectMeta{Namespace: "app", Name: "data", UID: pvcUID}, Spec: corev1.PersistentVolumeClaimSpec{VolumeName: "pv"}},
-			&corev1.PersistentVolume{ObjectMeta: metav1.ObjectMeta{Name: "pv", UID: ref.UID, Labels: map[string]string{SessionLabel: "session"}}, Spec: corev1.PersistentVolumeSpec{ClaimRef: &corev1.ObjectReference{Namespace: "app", Name: "data", UID: pvcUID}}, Status: corev1.PersistentVolumeStatus{Phase: corev1.VolumeBound}},
+			&corev1.PersistentVolume{ObjectMeta: metav1.ObjectMeta{Name: "pv", UID: ref.UID, Labels: map[string]string{SessionKey: "session"}}, Spec: corev1.PersistentVolumeSpec{ClaimRef: &corev1.ObjectReference{Namespace: "app", Name: "data", UID: pvcUID}}, Status: corev1.PersistentVolumeStatus{Phase: corev1.VolumeBound}},
 		)
 		switcher := NewSwitcher(client)
 		switcher.poll = time.Millisecond
@@ -555,7 +555,7 @@ func TestReservePVIdempotencyAndConflictChecks(t *testing.T) {
 	})
 	t.Run("stale claim UID is cleared", func(t *testing.T) {
 		client := fake.NewClientset(&corev1.PersistentVolume{
-			ObjectMeta: metav1.ObjectMeta{Name: "pv", UID: ref.UID, Labels: map[string]string{SessionLabel: "session"}},
+			ObjectMeta: metav1.ObjectMeta{Name: "pv", UID: ref.UID, Labels: map[string]string{SessionKey: "session"}},
 			Spec:       corev1.PersistentVolumeSpec{ClaimRef: &corev1.ObjectReference{Namespace: "app", Name: "data", UID: types.UID("deleted-pvc")}},
 			Status:     corev1.PersistentVolumeStatus{Phase: corev1.VolumeBound},
 		})
@@ -577,7 +577,7 @@ func TestReservePVIdempotencyAndConflictChecks(t *testing.T) {
 		{
 			name: "foreign owner",
 			ref:  ref,
-			pv: &corev1.PersistentVolume{ObjectMeta: metav1.ObjectMeta{Name: "pv", UID: ref.UID, Labels: map[string]string{SessionLabel: "other"}},
+			pv: &corev1.PersistentVolume{ObjectMeta: metav1.ObjectMeta{Name: "pv", UID: ref.UID, Labels: map[string]string{SessionKey: "other"}},
 				Status: corev1.PersistentVolumeStatus{Phase: corev1.VolumeReleased}},
 		},
 		{
@@ -635,7 +635,7 @@ func TestEnsureRetainPreservesPolicyAndRejectsIdentityConflicts(t *testing.T) {
 
 	foreign := pv.DeepCopy()
 	foreign.Name = "foreign"
-	foreign.Labels[SessionLabel] = "other-session"
+	foreign.Labels[SessionKey] = "other-session"
 	if _, err := client.CoreV1().PersistentVolumes().Create(ctx, foreign, metav1.CreateOptions{}); err != nil {
 		t.Fatal(err)
 	}
@@ -715,7 +715,7 @@ func TestCreateAndValidateActivePVCRejectUnexpectedObjects(t *testing.T) {
 			Name:      volume.SourcePVC.Name,
 			UID:       types.UID("foreign"),
 			Annotations: map[string]string{
-				SessionAnnotation: "other-session",
+				SessionKey: "other-session",
 			},
 		},
 		Spec:   corev1.PersistentVolumeClaimSpec{VolumeName: "other-pv"},
@@ -776,7 +776,7 @@ func TestRenamePVCSuccessIdempotencyAndRecovery(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if renamed.Namespace != "app" || renamed.Name != "data-renamed" || renamed.Spec.VolumeName != volume.SourcePV.Name || renamed.Annotations[SessionAnnotation] != session.ID {
+			if renamed.Namespace != "app" || renamed.Name != "data-renamed" || renamed.Spec.VolumeName != volume.SourcePV.Name || renamed.Annotations[SessionKey] != session.ID {
 				t.Fatalf("renamed PVC: %#v", renamed)
 			}
 			pv, _ := switcher.client.CoreV1().PersistentVolumes().Get(ctx, volume.SourcePV.Name, metav1.GetOptions{})

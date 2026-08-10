@@ -26,13 +26,21 @@ import (
 )
 
 const (
-	kubeBlocksClusterAPIVersion = "apps.kubeblocks.io/v1alpha1"
+	kubeBlocksClusterAPIVersion = domain.KubeBlocksAppsGroup + "/v1alpha1"
+	kubeBlocksOpsAPIVersion     = "operations.kubeblocks.io/v1alpha1"
+	kubeBlocksGroupSuffix       = "kubeblocks.io"
 	vmClusterAPIVersion         = "operator.victoriametrics.com/v1beta1"
 	grafanaAPIVersion           = "grafana.integreatly.org/v1beta1"
+	grafanaAPIGroup             = "grafana.integreatly.org"
 	clusterResource             = "clusters"
+	instanceSetResource         = "instancesets"
 	vmClusterResource           = "vmclusters"
 	grafanaResource             = "grafanas"
-	pauseSessionAnnotation      = "pvc-migrate.io/pause-session"
+	pauseSessionAnnotation      = kube.PauseSessionAnnotation
+	kubeBlocksComponentLabel    = "apps.kubeblocks.io/component-name"
+	kubeBlocksRoleLabel         = "kubeblocks.io/role"
+	kubeBlocksAppsRoleLabel     = "apps.kubeblocks.io/role"
+	genericRoleLabel            = "role"
 )
 
 type DiscoverOptions struct {
@@ -73,7 +81,7 @@ func (m *Manager) Discover(ctx context.Context, options DiscoverOptions) (domain
 		return domain.WorkloadSpec{}, domain.WrapError(domain.ErrorPrecondition, "discover workload", "parse controller apiVersion", parseErr)
 	}
 	var sts *appsv1.StatefulSet
-	if owner.Kind == "StatefulSet" && groupVersion.Group == appsv1.GroupName {
+	if owner.Kind == domain.KindStatefulSet && groupVersion.Group == appsv1.GroupName {
 		sts, err = m.typed.AppsV1().StatefulSets(options.Namespace).Get(ctx, owner.Name, metav1.GetOptions{})
 		if err != nil {
 			return domain.WorkloadSpec{}, domain.WrapError(domain.ErrorKubernetes, "discover workload", "read StatefulSet", err)
@@ -85,19 +93,19 @@ func (m *Manager) Discover(ctx context.Context, options DiscoverOptions) (domain
 			return m.victoriaLogsWorkload(ctx, pod, sts)
 		}
 	}
-	if owner.Kind == "Job" && groupVersion.Group == batchv1.GroupName {
+	if owner.Kind == domain.KindJob && groupVersion.Group == batchv1.GroupName {
 		job, getErr := m.typed.BatchV1().Jobs(options.Namespace).Get(ctx, owner.Name, metav1.GetOptions{})
 		if getErr != nil {
 			return domain.WorkloadSpec{}, domain.WrapError(domain.ErrorKubernetes, "discover workload", "read Job", getErr)
 		}
-		if parent := controllerOwner(job.OwnerReferences); parent != nil && parent.Kind == "Backup" {
+		if parent := controllerOwner(job.OwnerReferences); parent != nil && parent.Kind == domain.KindBackup {
 			return domain.WorkloadSpec{}, domain.NewError(domain.ErrorPrecondition, "discover workload", fmt.Sprintf("Backup-owned archive-WAL Job %s/%s is a backup helper and cannot be migrated", options.Namespace, job.Name))
 		}
 	}
 	if err := requireReadyPod(pod, options.Namespace, options.PodName); err != nil {
 		return domain.WorkloadSpec{}, err
 	}
-	if owner.Kind == "StatefulSet" && groupVersion.Group == appsv1.GroupName {
+	if owner.Kind == domain.KindStatefulSet && groupVersion.Group == appsv1.GroupName {
 		parent := controllerOwner(sts.OwnerReferences)
 		if parent != nil {
 			parentGV, parentErr := schema.ParseGroupVersion(parent.APIVersion)
@@ -105,11 +113,11 @@ func (m *Manager) Discover(ctx context.Context, options DiscoverOptions) (domain
 				return domain.WorkloadSpec{}, domain.WrapError(domain.ErrorPrecondition, "discover workload", "parse parent controller apiVersion", parentErr)
 			}
 			switch parent.Kind {
-			case "VMCluster":
+			case domain.KindVMCluster:
 				if parentGV.Group == "operator.victoriametrics.com" {
 					return m.vmClusterWorkload(ctx, pod, owner, parent, sts, options)
 				}
-			case "Component":
+			case domain.KindComponent:
 				if strings.Contains(parentGV.Group, "kubeblocks.io") {
 					return m.kubeBlocksWorkload(ctx, pod, owner, options)
 				}
@@ -121,13 +129,13 @@ func (m *Manager) Discover(ctx context.Context, options DiscoverOptions) (domain
 		}
 		return m.statefulSetWorkload(ctx, pod, sts, options)
 	}
-	if owner.Kind == "ReplicaSet" && groupVersion.Group == appsv1.GroupName {
+	if owner.Kind == domain.KindReplicaSet && groupVersion.Group == appsv1.GroupName {
 		rs, getErr := m.typed.AppsV1().ReplicaSets(options.Namespace).Get(ctx, owner.Name, metav1.GetOptions{})
 		if getErr != nil {
 			return domain.WorkloadSpec{}, domain.WrapError(domain.ErrorKubernetes, "discover workload", "read ReplicaSet", getErr)
 		}
 		deployment := controllerOwner(rs.OwnerReferences)
-		if deployment == nil || deployment.Kind != "Deployment" {
+		if deployment == nil || deployment.Kind != domain.KindDeployment {
 			return domain.WorkloadSpec{}, domain.NewError(domain.ErrorPrecondition, "discover workload", "ReplicaSet has no Deployment controller")
 		}
 		deploymentObject, getErr := m.typed.AppsV1().Deployments(options.Namespace).Get(ctx, deployment.Name, metav1.GetOptions{})
@@ -137,13 +145,13 @@ func (m *Manager) Discover(ctx context.Context, options DiscoverOptions) (domain
 		grafanaOwner := controllerOwner(deploymentObject.OwnerReferences)
 		if grafanaOwner != nil {
 			grafanaGV, _ := schema.ParseGroupVersion(grafanaOwner.APIVersion)
-			if grafanaOwner.Kind == "Grafana" && grafanaGV.Group == "grafana.integreatly.org" {
+			if grafanaOwner.Kind == domain.KindGrafana && grafanaGV.Group == grafanaAPIGroup {
 				return m.grafanaWorkload(ctx, pod, deploymentObject, grafanaOwner)
 			}
 		}
 		return domain.WorkloadSpec{}, domain.NewError(domain.ErrorPrecondition, "discover workload", fmt.Sprintf("Deployment %s/%s has no safe pause adapter", options.Namespace, deployment.Name))
 	}
-	if owner.Kind == "InstanceSet" && strings.Contains(groupVersion.Group, "kubeblocks.io") {
+	if owner.Kind == domain.KindInstanceSet && strings.Contains(groupVersion.Group, kubeBlocksGroupSuffix) {
 		return m.kubeBlocksWorkload(ctx, pod, owner, options)
 	}
 	return domain.WorkloadSpec{}, domain.NewError(domain.ErrorPrecondition, "discover workload", fmt.Sprintf("controller %s/%s has no safe pause adapter", owner.APIVersion, owner.Kind))
@@ -229,7 +237,7 @@ func (m *Manager) verifyPauseControl(ctx context.Context, session *domain.Sessio
 	}
 	switch workload.Adapter {
 	case domain.WorkloadVictoriaLogs:
-		if workload.Controller.Kind != "StatefulSet" {
+		if workload.Controller.Kind != domain.KindStatefulSet {
 			return domain.NewError(domain.ErrorInternal, "verify paused", "Victoria Logs session lacks StatefulSet controller state")
 		}
 		sts, err := m.typed.AppsV1().StatefulSets(workload.Controller.Namespace).Get(ctx, workload.Controller.Name, metav1.GetOptions{})
@@ -300,6 +308,9 @@ func (m *Manager) verifyPauseControl(ctx context.Context, session *domain.Sessio
 		if kb == nil {
 			return domain.NewError(domain.ErrorInternal, "verify paused", "session lacks KubeBlocks state")
 		}
+		if workload.Controller.Kind == domain.KindInstanceSet {
+			return m.verifyKubeBlocksInstanceSetPaused(ctx, session)
+		}
 		apiVersion := kb.ClusterAPIVersion
 		if apiVersion == "" {
 			apiVersion = kubeBlocksClusterAPIVersion
@@ -322,16 +333,25 @@ func (m *Manager) verifyPauseControl(ctx context.Context, session *domain.Sessio
 		if nestedErr != nil || !ok {
 			return domain.NewError(domain.ErrorPrecondition, "verify paused", "KubeBlocks Cluster has no componentSpecs")
 		}
+		componentFound := false
 		for index := range components {
 			component, ok := components[index].(map[string]any)
 			if !ok {
 				return domain.NewError(domain.ErrorPrecondition, "verify paused", fmt.Sprintf("KubeBlocks componentSpecs[%d] is malformed", index))
 			}
+			name, _, _ := unstructured.NestedString(component, "name")
+			if name != kb.Component {
+				continue
+			}
+			componentFound = true
 			stopped, _, _ := unstructured.NestedBool(component, "stop")
 			if !stopped {
-				name, _, _ := unstructured.NestedString(component, "name")
 				return domain.NewError(domain.ErrorPrecondition, "verify paused", fmt.Sprintf("KubeBlocks component %s is not stopped", name))
 			}
+			break
+		}
+		if !componentFound {
+			return domain.NewError(domain.ErrorPrecondition, "verify paused", fmt.Sprintf("KubeBlocks Cluster has no component %s", kb.Component))
 		}
 	}
 	return nil
@@ -382,7 +402,7 @@ func (m *Manager) statefulSetWorkload(ctx context.Context, pod *corev1.Pod, sts 
 	return domain.WorkloadSpec{
 		Adapter:          domain.WorkloadStatefulSet,
 		Pod:              podReference(pod),
-		Controller:       objectReference("apps/v1", "StatefulSet", sts.Namespace, sts.Name, sts.UID, sts.ResourceVersion),
+		Controller:       objectReference(domain.AppsAPIVersion, domain.KindStatefulSet, sts.Namespace, sts.Name, sts.UID, sts.ResourceVersion),
 		OriginalReplicas: &replicas,
 		Ordinal:          &ordinal,
 		AffectedPods:     affected,
@@ -410,7 +430,7 @@ func (m *Manager) victoriaLogsWorkload(ctx context.Context, pod *corev1.Pod, sts
 	return domain.WorkloadSpec{
 		Adapter:          domain.WorkloadVictoriaLogs,
 		Pod:              podReference(pod),
-		Controller:       objectReference("apps/v1", "StatefulSet", sts.Namespace, sts.Name, sts.UID, sts.ResourceVersion),
+		Controller:       objectReference(domain.AppsAPIVersion, domain.KindStatefulSet, sts.Namespace, sts.Name, sts.UID, sts.ResourceVersion),
 		OriginalReplicas: &replicas,
 		Ordinal:          &zero,
 		AffectedPods:     affected,
@@ -418,7 +438,7 @@ func (m *Manager) victoriaLogsWorkload(ctx context.Context, pod *corev1.Pod, sts
 }
 
 func (m *Manager) kubeBlocksWorkload(ctx context.Context, pod *corev1.Pod, owner *metav1.OwnerReference, options DiscoverOptions) (domain.WorkloadSpec, error) {
-	cluster := pod.Labels["app.kubernetes.io/instance"]
+	cluster := pod.Labels[kube.AppInstanceLabel]
 	component := kubeBlocksComponent(pod)
 	if cluster == "" || component == "" {
 		return domain.WorkloadSpec{}, domain.NewError(domain.ErrorPrecondition, "discover KubeBlocks", "Pod lacks cluster or component identity labels")
@@ -427,7 +447,7 @@ func (m *Manager) kubeBlocksWorkload(ctx context.Context, pod *corev1.Pod, owner
 		return domain.WorkloadSpec{}, domain.NewError(domain.ErrorPrecondition, "discover KubeBlocks", reason)
 	}
 	opsAPIVersion := ""
-	for _, candidate := range []string{"apps.kubeblocks.io/v1alpha1", "operations.kubeblocks.io/v1alpha1"} {
+	for _, candidate := range []string{kubeBlocksClusterAPIVersion, kubeBlocksOpsAPIVersion} {
 		if kube.HasAPIResource(m.discovery, candidate, "opsrequests") {
 			opsAPIVersion = candidate
 			break
@@ -443,7 +463,7 @@ func (m *Manager) kubeBlocksWorkload(ctx context.Context, pod *corev1.Pod, owner
 		if err != nil {
 			return domain.WorkloadSpec{}, domain.WrapError(domain.ErrorPrecondition, "discover KubeBlocks", "read switchover candidate", err)
 		}
-		if candidate.Labels["app.kubernetes.io/instance"] != cluster || kubeBlocksComponent(candidate) != component || !podReady(candidate) {
+		if candidate.Labels[kube.AppInstanceLabel] != cluster || kubeBlocksComponent(candidate) != component || !podReady(candidate) {
 			return domain.WorkloadSpec{}, domain.NewError(domain.ErrorPrecondition, "discover KubeBlocks", "switchover candidate must be a Ready Pod in the same component")
 		}
 		switchoverCandidate = candidate
@@ -474,7 +494,7 @@ func (m *Manager) kubeBlocksWorkload(ctx context.Context, pod *corev1.Pod, owner
 	if reason := unsupportedKubeBlocksReason(pod, components, component); reason != "" {
 		return domain.WorkloadSpec{}, domain.NewError(domain.ErrorPrecondition, "discover KubeBlocks", reason)
 	}
-	originalStops := make(map[string]bool, len(components))
+	originalStops := make(map[string]bool, 1)
 	componentFound := false
 	for index := range components {
 		componentSpec, componentOK := components[index].(map[string]any)
@@ -493,34 +513,92 @@ func (m *Manager) kubeBlocksWorkload(ctx context.Context, pod *corev1.Pod, owner
 		if stopErr != nil {
 			return domain.WorkloadSpec{}, domain.WrapError(domain.ErrorPrecondition, "discover KubeBlocks", fmt.Sprintf("read component %s stop state", name), stopErr)
 		}
-		originalStops[name] = stopped
-		componentFound = componentFound || name == component
+		if name == component {
+			originalStops[name] = stopped
+			componentFound = true
+		}
 	}
 	if !componentFound {
 		return domain.WorkloadSpec{}, domain.NewError(domain.ErrorPrecondition, "discover KubeBlocks", fmt.Sprintf("Cluster componentSpecs has no component %s", component))
 	}
+	originalPaused, pausedConfigured, instanceSetUID, err := m.discoverKubeBlocksInstanceSet(ctx, pod.Namespace, owner)
+	if err != nil {
+		return domain.WorkloadSpec{}, err
+	}
+	if owner.Kind == domain.KindInstanceSet && originalPaused {
+		return domain.WorkloadSpec{}, domain.NewError(
+			domain.ErrorPrecondition,
+			"discover KubeBlocks",
+			fmt.Sprintf("InstanceSet %s/%s is already paused; set spec.paused=false and wait for Pod %s/%s to become Ready before retrying", pod.Namespace, owner.Name, pod.Namespace, pod.Name),
+		)
+	}
+	controllerUID := owner.UID
+	if instanceSetUID != "" {
+		controllerUID = instanceSetUID
+	}
 	return domain.WorkloadSpec{
 		Adapter:    domain.WorkloadKubeBlocks,
 		Pod:        podReference(pod),
-		Controller: objectReference(owner.APIVersion, owner.Kind, pod.Namespace, owner.Name, owner.UID, ""),
+		Controller: objectReference(owner.APIVersion, owner.Kind, pod.Namespace, owner.Name, controllerUID, ""),
 		KubeBlocks: &domain.KubeBlocksSpec{
-			Cluster:             cluster,
-			Component:           component,
-			Instance:            pod.Name,
-			Role:                role,
-			SwitchoverCandidate: options.SwitchoverCandidate,
-			OpsAPIVersion:       opsAPIVersion,
-			ClusterAPIVersion:   kubeBlocksClusterAPIVersion,
-			ClusterUID:          clusterObject.GetUID(),
-			OriginalStops:       originalStops,
+			Cluster:                  cluster,
+			Component:                component,
+			Instance:                 pod.Name,
+			Role:                     role,
+			SwitchoverCandidate:      options.SwitchoverCandidate,
+			OpsAPIVersion:            opsAPIVersion,
+			ClusterAPIVersion:        kubeBlocksClusterAPIVersion,
+			ClusterUID:               clusterObject.GetUID(),
+			OriginalStops:            originalStops,
+			OriginalPaused:           originalPaused,
+			OriginalPausedConfigured: pausedConfigured,
 		},
 	}, nil
 }
 
+func (m *Manager) discoverKubeBlocksInstanceSet(ctx context.Context, namespace string, owner *metav1.OwnerReference) (bool, bool, types.UID, error) {
+	if owner.Kind != domain.KindInstanceSet {
+		return false, false, "", nil
+	}
+	if m.dynamic == nil {
+		return false, false, "", domain.NewError(domain.ErrorPrecondition, "discover KubeBlocks", "dynamic client is required for InstanceSet reconciliation control")
+	}
+	gvr, err := kube.ParseGroupVersionResource(owner.APIVersion, instanceSetResource)
+	if err != nil {
+		return false, false, "", err
+	}
+	resource := m.dynamic.Resource(gvr).Namespace(namespace)
+	object, err := resource.Get(ctx, owner.Name, metav1.GetOptions{})
+	if err != nil {
+		return false, false, "", domain.WrapError(domain.ErrorKubernetes, "discover KubeBlocks", "read InstanceSet", err)
+	}
+	if owner.UID != "" && object.GetUID() != "" && object.GetUID() != owner.UID {
+		return false, false, "", domain.NewError(domain.ErrorConflict, "discover KubeBlocks", fmt.Sprintf("InstanceSet %s/%s UID changed", namespace, owner.Name))
+	}
+	paused, found, err := unstructured.NestedBool(object.Object, "spec", "paused")
+	if err != nil {
+		return false, false, "", domain.WrapError(domain.ErrorPrecondition, "discover KubeBlocks", "read InstanceSet paused state", err)
+	}
+	if !found {
+		probe := object.DeepCopy()
+		if err := unstructured.SetNestedField(probe.Object, true, "spec", "paused"); err != nil {
+			return false, false, "", err
+		}
+		result, updateErr := resource.Update(ctx, probe, metav1.UpdateOptions{DryRun: []string{metav1.DryRunAll}})
+		if updateErr != nil {
+			return false, false, "", domain.WrapError(domain.ErrorPrecondition, "discover KubeBlocks", "probe InstanceSet spec.paused support", updateErr)
+		}
+		if _, supported, nestedErr := unstructured.NestedBool(result.Object, "spec", "paused"); nestedErr != nil || !supported {
+			return false, false, "", domain.NewError(domain.ErrorPrecondition, "discover KubeBlocks", fmt.Sprintf("InstanceSet %s/%s does not support spec.paused", namespace, owner.Name))
+		}
+	}
+	return paused, found, object.GetUID(), nil
+}
+
 func kubeBlocksComponent(pod *corev1.Pod) string {
-	component := pod.Labels["apps.kubeblocks.io/component-name"]
+	component := pod.Labels[kubeBlocksComponentLabel]
 	if component == "" {
-		component = pod.Labels["app.kubernetes.io/component"]
+		component = pod.Labels[kube.AppComponentLabel]
 	}
 	return component
 }
@@ -549,7 +627,7 @@ func (m *Manager) readyKubeBlocksCandidate(ctx context.Context, selected *corev1
 	candidates := make([]string, 0, len(pods.Items))
 	for index := range pods.Items {
 		candidate := &pods.Items[index]
-		if candidate.Name == selected.Name || candidate.Labels["app.kubernetes.io/instance"] != cluster || kubeBlocksComponent(candidate) != component || !podReady(candidate) || isLeaderRole(podRole(candidate)) {
+		if candidate.Name == selected.Name || candidate.Labels[kube.AppInstanceLabel] != cluster || kubeBlocksComponent(candidate) != component || !podReady(candidate) || isLeaderRole(podRole(candidate)) {
 			continue
 		}
 		candidates = append(candidates, candidate.Name)
@@ -607,9 +685,9 @@ func kubeBlocksSwitchoverSpec(opsAPIVersion, cluster, component, selected, candi
 func unsupportedKubeBlocksReason(pod *corev1.Pod, components []any, selectedComponent string) string {
 	values := []string{
 		selectedComponent,
-		pod.Labels["app.kubernetes.io/name"],
-		pod.Labels["app.kubernetes.io/component"],
-		pod.Labels["apps.kubeblocks.io/component-name"],
+		pod.Labels[kube.AppNameLabel],
+		pod.Labels[kube.AppComponentLabel],
+		pod.Labels[kubeBlocksComponentLabel],
 	}
 	for _, container := range append(append([]corev1.Container(nil), pod.Spec.InitContainers...), pod.Spec.Containers...) {
 		values = append(values, container.Name, container.Image)
@@ -656,7 +734,7 @@ func (m *Manager) vmClusterWorkload(ctx context.Context, pod *corev1.Pod, owner,
 		}
 	}
 	if component == "" {
-		component = sts.Labels["app.kubernetes.io/component"]
+		component = sts.Labels[kube.AppComponentLabel]
 	}
 	if component != "vmstorage" && component != "vmselect" && component != "vminsert" {
 		return domain.WorkloadSpec{}, domain.NewError(domain.ErrorPrecondition, "discover VMCluster", fmt.Sprintf("StatefulSet %s/%s has no supported VMCluster component", pod.Namespace, sts.Name))
@@ -715,7 +793,7 @@ func (m *Manager) grafanaWorkload(ctx context.Context, pod *corev1.Pod, deployme
 	return domain.WorkloadSpec{
 		Adapter:          domain.WorkloadGrafana,
 		Pod:              podReference(pod),
-		Controller:       objectReference("apps/v1", "Deployment", deployment.Namespace, deployment.Name, deployment.UID, deployment.ResourceVersion),
+		Controller:       objectReference(domain.AppsAPIVersion, domain.KindDeployment, deployment.Namespace, deployment.Name, deployment.UID, deployment.ResourceVersion),
 		OriginalReplicas: deployment.Spec.Replicas,
 		AffectedPods:     []domain.ObjectReference{podReference(pod)},
 		Grafana:          &domain.GrafanaSpec{APIVersion: grafanaAPIVersion, Name: owner.Name, UID: grafana.GetUID(), OriginalSuspend: suspended, OriginalSuspendConfigured: suspendConfigured, OriginalReplicas: *deployment.Spec.Replicas},
@@ -737,7 +815,7 @@ func statefulSetReplicas(sts *appsv1.StatefulSet) int32 {
 }
 
 func isCockroachStatefulSet(sts *appsv1.StatefulSet) bool {
-	return strings.EqualFold(sts.Labels["app.kubernetes.io/name"], "cockroachdb") ||
+	return strings.EqualFold(sts.Labels[kube.AppNameLabel], "cockroachdb") ||
 		strings.Contains(strings.ToLower(sts.Name), "cockroach")
 }
 
@@ -745,8 +823,8 @@ func isMinIOStatefulSet(sts *appsv1.StatefulSet) bool {
 	for _, value := range []string{
 		sts.Name,
 		sts.Labels["app"],
-		sts.Labels["app.kubernetes.io/name"],
-		sts.Labels["app.kubernetes.io/component"],
+		sts.Labels[kube.AppNameLabel],
+		sts.Labels[kube.AppComponentLabel],
 	} {
 		if strings.Contains(strings.ToLower(value), "minio") {
 			return true
@@ -756,10 +834,10 @@ func isMinIOStatefulSet(sts *appsv1.StatefulSet) bool {
 }
 
 func isVictoriaLogsStatefulSet(sts *appsv1.StatefulSet) bool {
-	if !strings.EqualFold(sts.Labels["app.kubernetes.io/name"], "victoria-logs-cluster") {
+	if !strings.EqualFold(sts.Labels[kube.AppNameLabel], "victoria-logs-cluster") {
 		return false
 	}
-	return strings.EqualFold(sts.Labels["app.kubernetes.io/component"], "vlstorage") ||
+	return strings.EqualFold(sts.Labels[kube.AppComponentLabel], "vlstorage") ||
 		strings.EqualFold(sts.Labels["app"], "vlstorage") ||
 		strings.Contains(strings.ToLower(sts.Name), "-vlstorage")
 }
@@ -786,17 +864,17 @@ func unsupportedStatefulSetReason(sts *appsv1.StatefulSet) string {
 		parentGV, err := schema.ParseGroupVersion(parent.APIVersion)
 		if err == nil {
 			switch parent.Kind {
-			case "Backup":
+			case domain.KindBackup:
 				return fmt.Sprintf("Backup-owned archive-WAL StatefulSet %s/%s is a backup helper and cannot be migrated", sts.Namespace, sts.Name)
 			case "Tenant":
 				if parentGV.Group == "minio.min.io" {
 					return fmt.Sprintf("MinIO Tenant StatefulSet %s/%s requires MinIO drive or pool maintenance", sts.Namespace, sts.Name)
 				}
-			case "VMCluster":
+			case domain.KindVMCluster:
 				if parentGV.Group == "operator.victoriametrics.com" {
 					return ""
 				}
-			case "Component", "InstanceSet":
+			case domain.KindComponent, domain.KindInstanceSet:
 				if strings.Contains(parentGV.Group, "kubeblocks.io") {
 					return ""
 				}
@@ -819,7 +897,7 @@ func controllerOwner(owners []metav1.OwnerReference) *metav1.OwnerReference {
 }
 
 func podReference(pod *corev1.Pod) domain.ObjectReference {
-	return objectReference("v1", "Pod", pod.Namespace, pod.Name, pod.UID, pod.ResourceVersion)
+	return objectReference(domain.CoreAPIVersion, domain.KindPod, pod.Namespace, pod.Name, pod.UID, pod.ResourceVersion)
 }
 
 func objectReference(apiVersion, kind, namespace, name string, uid types.UID, resourceVersion string) domain.ObjectReference {
@@ -836,7 +914,7 @@ func podReady(pod *corev1.Pod) bool {
 }
 
 func podRole(pod *corev1.Pod) string {
-	for _, key := range []string{"kubeblocks.io/role", "apps.kubeblocks.io/role", "role"} {
+	for _, key := range []string{kubeBlocksRoleLabel, kubeBlocksAppsRoleLabel, genericRoleLabel} {
 		if value := strings.ToLower(pod.Labels[key]); value != "" {
 			return value
 		}
@@ -907,7 +985,7 @@ func (m *Manager) createAndWaitOps(ctx context.Context, session *domain.Session,
 				"namespace": session.Spec.Workload().Pod.Namespace,
 				"labels": map[string]any{
 					kube.ManagedByLabel: kube.ManagedByValue,
-					kube.SessionLabel:   session.ID,
+					kube.SessionKey:     session.ID,
 				},
 			},
 			"spec": spec,
@@ -999,7 +1077,7 @@ func (m *Manager) pauseStatefulSet(ctx context.Context, session *domain.Session)
 
 func (m *Manager) pauseVictoriaLogs(ctx context.Context, session *domain.Session) error {
 	workload := session.Spec.Workload()
-	if workload.Controller.Kind != "StatefulSet" || workload.OriginalReplicas == nil {
+	if workload.Controller.Kind != domain.KindStatefulSet || workload.OriginalReplicas == nil {
 		return domain.NewError(domain.ErrorInternal, "pause Victoria Logs", "session lacks StatefulSet replica state")
 	}
 	if err := m.patchVictoriaLogsReplicas(ctx, session, 0, false); err != nil {
@@ -1049,7 +1127,7 @@ func (m *Manager) resumeStatefulSet(ctx context.Context, session *domain.Session
 
 func (m *Manager) resumeVictoriaLogs(ctx context.Context, session *domain.Session) error {
 	workload := session.Spec.Workload()
-	if workload.Controller.Kind != "StatefulSet" || workload.OriginalReplicas == nil {
+	if workload.Controller.Kind != domain.KindStatefulSet || workload.OriginalReplicas == nil {
 		return domain.NewError(domain.ErrorInternal, "resume Victoria Logs", "session lacks StatefulSet replica state")
 	}
 	if err := m.patchVictoriaLogsReplicas(ctx, session, *workload.OriginalReplicas, true); err != nil {
@@ -1679,7 +1757,7 @@ func (m *Manager) resumeStandalone(ctx context.Context, session *domain.Session)
 	workload := session.Spec.Workload()
 	existing, err := m.typed.CoreV1().Pods(workload.Pod.Namespace).Get(ctx, workload.Pod.Name, metav1.GetOptions{})
 	if err == nil {
-		if existing.Annotations[kube.SessionAnnotation] != session.ID {
+		if existing.Annotations[kube.SessionKey] != session.ID {
 			return domain.NewError(domain.ErrorConflict, "resume standalone Pod", fmt.Sprintf("Pod %s/%s was recreated outside this session", existing.Namespace, existing.Name))
 		}
 		if podReady(existing) {
@@ -1708,7 +1786,7 @@ func (m *Manager) resumeStandalone(ctx context.Context, session *domain.Session)
 	if pod.Annotations == nil {
 		pod.Annotations = map[string]string{}
 	}
-	pod.Annotations[kube.SessionAnnotation] = session.ID
+	pod.Annotations[kube.SessionKey] = session.ID
 	options := session.Spec.WorkflowOptions()
 	resumeNode := options.TargetNode
 	if session.Status.Phase == domain.PhaseRollingBack || session.Status.Phase == domain.PhaseAborting {
@@ -1738,7 +1816,7 @@ func (m *Manager) resumeStandalone(ctx context.Context, session *domain.Session)
 		if getErr != nil {
 			return domain.WrapError(domain.ErrorKubernetes, "resume standalone Pod", "read concurrently created Pod", getErr)
 		}
-		if existing.Annotations[kube.SessionAnnotation] != session.ID {
+		if existing.Annotations[kube.SessionKey] != session.ID {
 			return domain.NewError(domain.ErrorConflict, "resume standalone Pod", fmt.Sprintf("Pod %s/%s was created outside this session", existing.Namespace, existing.Name))
 		}
 	}
@@ -1782,11 +1860,14 @@ func (m *Manager) pauseKubeBlocks(ctx context.Context, session *domain.Session) 
 			return domain.NewError(domain.ErrorPrecondition, "pause KubeBlocks", fmt.Sprintf("instance %s retained role %s after switchover", kb.Instance, podRole(current)))
 		}
 	}
-	// KubeBlocks HorizontalScaling can delete an instance PVC. Pause the whole
-	// Cluster through componentSpecs[].stop so every component is quiesced while
-	// the source PVC identities remain available for final sync and rollback.
 	if err := m.setKubeBlocksPaused(ctx, session, true); err != nil {
 		return err
+	}
+	if session.Spec.Workload().Controller.Kind == domain.KindInstanceSet {
+		if err := m.deleteKubeBlocksInstancePod(ctx, session); err != nil {
+			return err
+		}
+		return m.VerifyPaused(ctx, session)
 	}
 	if err := kube.WaitFor(ctx, m.poll, fmt.Sprintf("KubeBlocks Pod %s/%s deletion", session.Spec.Workload().Pod.Namespace, session.Spec.Workload().Pod.Name), func(waitCtx context.Context) (bool, error) {
 		_, getErr := m.typed.CoreV1().Pods(session.Spec.Workload().Pod.Namespace).Get(waitCtx, session.Spec.Workload().Pod.Name, metav1.GetOptions{})
@@ -1805,6 +1886,9 @@ func (m *Manager) resumeKubeBlocks(ctx context.Context, session *domain.Session)
 	if kb == nil {
 		return domain.NewError(domain.ErrorInternal, "resume KubeBlocks", "session lacks KubeBlocks state")
 	}
+	if session.Spec.Workload().Controller.Kind == domain.KindInstanceSet && kb.OriginalPaused {
+		return domain.NewError(domain.ErrorPrecondition, "resume KubeBlocks", "an initially paused InstanceSet cannot safely recreate the migrated Pod; set spec.paused=false and verify the Pod is Ready before recovery")
+	}
 	if err := m.setKubeBlocksPaused(ctx, session, false); err != nil {
 		return err
 	}
@@ -1821,6 +1905,9 @@ func (m *Manager) resumeKubeBlocks(ctx context.Context, session *domain.Session)
 }
 
 func (m *Manager) setKubeBlocksPaused(ctx context.Context, session *domain.Session, paused bool) error {
+	if session.Spec.Workload().Controller.Kind == domain.KindInstanceSet {
+		return m.setKubeBlocksInstanceSetPaused(ctx, session, paused)
+	}
 	kb := session.Spec.Workload().KubeBlocks
 	if kb == nil {
 		return domain.NewError(domain.ErrorInternal, "KubeBlocks pause", "session lacks KubeBlocks state")
@@ -1870,7 +1957,7 @@ func (m *Manager) setKubeBlocksPaused(ctx context.Context, session *domain.Sessi
 			kb.OriginalStops = map[string]bool{}
 		}
 		changed := false
-		seenComponents := make(map[string]struct{}, len(components))
+		componentFound := false
 		for index := range components {
 			component, componentOK := components[index].(map[string]any)
 			if !componentOK {
@@ -1880,6 +1967,10 @@ func (m *Manager) setKubeBlocksPaused(ctx context.Context, session *domain.Sessi
 			if nameErr != nil || !nameOK || name == "" {
 				return domain.NewError(domain.ErrorPrecondition, "KubeBlocks pause", fmt.Sprintf("componentSpecs[%d] has no name", index))
 			}
+			if name != kb.Component {
+				continue
+			}
+			componentFound = true
 			current, _, stopErr := unstructured.NestedBool(component, "stop")
 			if stopErr != nil {
 				return domain.WrapError(domain.ErrorPrecondition, "KubeBlocks pause", fmt.Sprintf("read component %s stop state", name), stopErr)
@@ -1891,9 +1982,8 @@ func (m *Manager) setKubeBlocksPaused(ctx context.Context, session *domain.Sessi
 				known = true
 			}
 			if !known {
-				return domain.NewError(domain.ErrorConflict, "KubeBlocks pause", fmt.Sprintf("Cluster component %s was added after discovery", name))
+				return domain.NewError(domain.ErrorConflict, "KubeBlocks pause", fmt.Sprintf("Cluster component %s lacks original stop state", name))
 			}
-			seenComponents[name] = struct{}{}
 			expectedCurrent := original
 			want := true
 			if pauseOwner == session.ID {
@@ -1912,11 +2002,10 @@ func (m *Manager) setKubeBlocksPaused(ctx context.Context, session *domain.Sessi
 				changed = true
 			}
 			components[index] = component
+			break
 		}
-		for name := range kb.OriginalStops {
-			if _, found := seenComponents[name]; !found {
-				return domain.NewError(domain.ErrorConflict, "KubeBlocks pause", fmt.Sprintf("Cluster component %s was removed after discovery", name))
-			}
+		if !componentFound {
+			return domain.NewError(domain.ErrorConflict, "KubeBlocks pause", fmt.Sprintf("Cluster component %s was removed after discovery", kb.Component))
 		}
 		if paused && pauseOwner == "" {
 			if annotations == nil {
@@ -1945,6 +2034,158 @@ func (m *Manager) setKubeBlocksPaused(ctx context.Context, session *domain.Sessi
 			return domain.WrapError(domain.ErrorKubernetes, "KubeBlocks pause", "update Cluster component stop state", updateErr)
 		}
 		return nil
+	})
+}
+
+func (m *Manager) setKubeBlocksInstanceSetPaused(ctx context.Context, session *domain.Session, paused bool) error {
+	workload := session.Spec.Workload()
+	kb := workload.KubeBlocks
+	if kb == nil {
+		return domain.NewError(domain.ErrorInternal, "InstanceSet pause", "session lacks KubeBlocks state")
+	}
+	if m.dynamic == nil {
+		return domain.NewError(domain.ErrorPrecondition, "InstanceSet pause", "dynamic client is required for InstanceSet reconciliation control")
+	}
+	if session.ID == "" {
+		return domain.NewError(domain.ErrorInternal, "InstanceSet pause", "session ID is required for InstanceSet pause ownership")
+	}
+	ref := workload.Controller
+	gvr, err := kube.ParseGroupVersionResource(ref.APIVersion, instanceSetResource)
+	if err != nil {
+		return err
+	}
+	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		resource := m.dynamic.Resource(gvr).Namespace(ref.Namespace)
+		object, getErr := resource.Get(ctx, ref.Name, metav1.GetOptions{})
+		if getErr != nil {
+			return domain.WrapError(domain.ErrorKubernetes, "InstanceSet pause", "read InstanceSet", getErr)
+		}
+		if ref.UID != "" && object.GetUID() != "" && object.GetUID() != ref.UID {
+			return domain.NewError(domain.ErrorConflict, "InstanceSet pause", fmt.Sprintf("InstanceSet %s/%s UID changed", ref.Namespace, ref.Name))
+		}
+		current, found, nestedErr := unstructured.NestedBool(object.Object, "spec", "paused")
+		if nestedErr != nil {
+			return domain.WrapError(domain.ErrorPrecondition, "InstanceSet pause", "read InstanceSet paused state", nestedErr)
+		}
+		if !found {
+			current = false
+		}
+		annotations := object.GetAnnotations()
+		pauseOwner := annotations[pauseSessionAnnotation]
+		if pauseOwner != "" && pauseOwner != session.ID {
+			return domain.NewError(domain.ErrorConflict, "InstanceSet pause", fmt.Sprintf("InstanceSet %s/%s pause is owned by session %s", ref.Namespace, ref.Name, pauseOwner))
+		}
+		switch {
+		case pauseOwner == "":
+			if current != kb.OriginalPaused {
+				return domain.NewError(domain.ErrorConflict, "InstanceSet pause", fmt.Sprintf("InstanceSet %s/%s paused changed from expected %t to %t", ref.Namespace, ref.Name, kb.OriginalPaused, current))
+			}
+			if !paused {
+				return nil
+			}
+		case paused && current:
+			return nil
+		case !paused && !current:
+			return domain.NewError(domain.ErrorConflict, "InstanceSet resume", fmt.Sprintf("InstanceSet %s/%s paused state changed while session was active", ref.Namespace, ref.Name))
+		case paused && !current:
+			return domain.NewError(domain.ErrorConflict, "InstanceSet pause", fmt.Sprintf("InstanceSet %s/%s paused state changed while session was active", ref.Namespace, ref.Name))
+		}
+		want := paused
+		if !paused {
+			want = kb.OriginalPaused
+		}
+		changed := current != want || (!paused && found != kb.OriginalPausedConfigured)
+		if changed {
+			if !paused && !kb.OriginalPausedConfigured {
+				unstructured.RemoveNestedField(object.Object, "spec", "paused")
+			} else {
+				if err := unstructured.SetNestedField(object.Object, want, "spec", "paused"); err != nil {
+					return err
+				}
+			}
+		}
+		if paused {
+			if annotations == nil {
+				annotations = map[string]string{}
+			}
+			if annotations[pauseSessionAnnotation] != session.ID {
+				annotations[pauseSessionAnnotation] = session.ID
+				changed = true
+			}
+		} else if annotations[pauseSessionAnnotation] == session.ID {
+			delete(annotations, pauseSessionAnnotation)
+			changed = true
+		}
+		if !changed {
+			return nil
+		}
+		object.SetAnnotations(annotations)
+		updated, updateErr := resource.Update(ctx, object, metav1.UpdateOptions{})
+		if updateErr != nil {
+			if apierrors.IsConflict(updateErr) {
+				return updateErr
+			}
+			return domain.WrapError(domain.ErrorKubernetes, "InstanceSet pause", "update InstanceSet paused state", updateErr)
+		}
+		actual, configured, nestedErr := unstructured.NestedBool(updated.Object, "spec", "paused")
+		if nestedErr != nil {
+			return domain.WrapError(domain.ErrorPrecondition, "InstanceSet pause", "verify updated InstanceSet paused state", nestedErr)
+		}
+		if paused && (!configured || !actual) {
+			return domain.NewError(domain.ErrorPrecondition, "InstanceSet pause", fmt.Sprintf("InstanceSet %s/%s API did not preserve spec.paused", ref.Namespace, ref.Name))
+		}
+		return nil
+	})
+}
+
+func (m *Manager) verifyKubeBlocksInstanceSetPaused(ctx context.Context, session *domain.Session) error {
+	ref := session.Spec.Workload().Controller
+	gvr, err := kube.ParseGroupVersionResource(ref.APIVersion, instanceSetResource)
+	if err != nil {
+		return err
+	}
+	object, err := m.dynamic.Resource(gvr).Namespace(ref.Namespace).Get(ctx, ref.Name, metav1.GetOptions{})
+	if err != nil {
+		return domain.WrapError(domain.ErrorKubernetes, "verify paused", "read InstanceSet", err)
+	}
+	if ref.UID != "" && object.GetUID() != "" && object.GetUID() != ref.UID {
+		return domain.NewError(domain.ErrorConflict, "verify paused", fmt.Sprintf("InstanceSet %s/%s UID changed", ref.Namespace, ref.Name))
+	}
+	if object.GetAnnotations()[pauseSessionAnnotation] != session.ID {
+		return domain.NewError(domain.ErrorConflict, "verify paused", fmt.Sprintf("InstanceSet %s/%s pause ownership changed", ref.Namespace, ref.Name))
+	}
+	paused, found, nestedErr := unstructured.NestedBool(object.Object, "spec", "paused")
+	if nestedErr != nil {
+		return domain.WrapError(domain.ErrorPrecondition, "verify paused", "read InstanceSet paused state", nestedErr)
+	}
+	if !found || !paused {
+		return domain.NewError(domain.ErrorPrecondition, "verify paused", fmt.Sprintf("InstanceSet %s/%s reconciliation is not paused", ref.Namespace, ref.Name))
+	}
+	return nil
+}
+
+func (m *Manager) deleteKubeBlocksInstancePod(ctx context.Context, session *domain.Session) error {
+	ref := session.Spec.Workload().Pod
+	pod, err := m.typed.CoreV1().Pods(ref.Namespace).Get(ctx, ref.Name, metav1.GetOptions{})
+	if apierrors.IsNotFound(err) {
+		return nil
+	}
+	if err != nil {
+		return domain.WrapError(domain.ErrorKubernetes, "pause KubeBlocks", "read instance Pod", err)
+	}
+	if ref.UID != "" && pod.UID != ref.UID {
+		return domain.NewError(domain.ErrorConflict, "pause KubeBlocks", fmt.Sprintf("Pod %s/%s UID changed", ref.Namespace, ref.Name))
+	}
+	options := metav1.DeleteOptions{Preconditions: &metav1.Preconditions{UID: &pod.UID}}
+	if err := m.typed.CoreV1().Pods(ref.Namespace).Delete(ctx, ref.Name, options); err != nil && !apierrors.IsNotFound(err) {
+		return domain.WrapError(domain.ErrorKubernetes, "pause KubeBlocks", "delete instance Pod", err)
+	}
+	return kube.WaitFor(ctx, m.poll, fmt.Sprintf("KubeBlocks Pod %s/%s deletion", ref.Namespace, ref.Name), func(waitCtx context.Context) (bool, error) {
+		_, getErr := m.typed.CoreV1().Pods(ref.Namespace).Get(waitCtx, ref.Name, metav1.GetOptions{})
+		if apierrors.IsNotFound(getErr) {
+			return true, nil
+		}
+		return false, getErr
 	})
 }
 
