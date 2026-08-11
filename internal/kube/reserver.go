@@ -229,7 +229,7 @@ func (r *Reserver) provisionOnTarget(ctx context.Context, session *domain.Sessio
 					RunAsUser:  int64Pointer(0),
 					RunAsGroup: int64Pointer(0),
 				},
-				Command:      []string{"sh", "-c", "test -d /data && sleep 3600"},
+				Command:      []string{"sh", "-c", "test -d /data && exec sleep 3600"},
 				Resources:    ZeroResourceRequirements(),
 				VolumeMounts: []corev1.VolumeMount{{Name: "data", MountPath: "/data"}},
 			}},

@@ -186,6 +186,33 @@ func TestToolDockerfileContainsUpstreamHelperRuntime(t *testing.T) {
 	}
 }
 
+func TestToolImageShellWrapperUsesTiniProcessGroup(t *testing.T) {
+	root := repositoryRoot(t)
+	content, err := os.ReadFile(filepath.Join(root, "docker", "sh"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	shell := string(content)
+	for _, fragment := range []string{
+		"#!/bin/sh",
+		"exec /sbin/tini -g -- /bin/busybox sh \"$@\"",
+	} {
+		if !strings.Contains(shell, fragment) {
+			t.Errorf("docker/sh lacks signal-forwarding fragment %q: %s", fragment, shell)
+		}
+	}
+	dockerfile, err := os.ReadFile(filepath.Join(root, "Dockerfile"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(dockerfile), "COPY --link --chmod=0755 docker/sh /usr/local/bin/sh") {
+		t.Fatalf("Dockerfile does not install the signal-forwarding sh wrapper")
+	}
+	if !strings.Contains(string(dockerfile), "ENV PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin") {
+		t.Fatalf("Dockerfile does not keep /usr/local/bin ahead of /bin in PATH")
+	}
+}
+
 func TestToolDockerfileTracksUpstreamSSHDConfig(t *testing.T) {
 	upstreamConfig, err := os.ReadFile(filepath.Join(upstreamModuleDir(t), "docker", "sshd", "sshd_config"))
 	if err != nil {

@@ -46,6 +46,7 @@ RUN apk add --no-cache \
     && chmod 700 /home/pvmigrate/.ssh
 
 COPY docker/sshd_config /etc/ssh/sshd_config
+COPY --link --chmod=0755 docker/sh /usr/local/bin/sh
 COPY --from=build /out/pvc-migrate /usr/local/bin/pvc-migrate
 
 LABEL org.opencontainers.image.title="pvc-migrate tool image" \
@@ -54,7 +55,8 @@ LABEL org.opencontainers.image.title="pvc-migrate tool image" \
       org.opencontainers.image.version="${VERSION}" \
       org.opencontainers.image.ref.name="${TOOL_IMAGE_REPOSITORY}:${VERSION}"
 
-ENV HOME=/home/pvmigrate
+ENV PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
+    HOME=/home/pvmigrate
 USER 10000:10000
 EXPOSE 22 2222
 ENTRYPOINT ["tini", "--", "/usr/local/bin/pvc-migrate"]
