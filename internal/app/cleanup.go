@@ -7,7 +7,9 @@ import (
 
 	"github.com/labring-sigs/pvc-migrate/internal/domain"
 	"github.com/labring-sigs/pvc-migrate/internal/kube"
+	"github.com/labring-sigs/pvc-migrate/internal/parallel"
 	corev1 "k8s.io/api/core/v1"
+	storagev1 "k8s.io/api/storage/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/util/retry"
@@ -172,19 +174,46 @@ func uncheckpointedSource(session *domain.Session, index int) bool {
 }
 
 func (s *Service) ensurePVCUnused(ctx context.Context, ref domain.ObjectReference, sessionID string) error {
+	_, err := s.inspectPVCUnused(ctx, ref, sessionID)
+	return err
+}
+
+func (s *Service) inspectPVCUnused(ctx context.Context, ref domain.ObjectReference, sessionID string) (*corev1.PersistentVolumeClaim, error) {
 	pvc, err := s.client.CoreV1().PersistentVolumeClaims(ref.Namespace).Get(ctx, ref.Name, metav1.GetOptions{})
 	if apierrors.IsNotFound(err) {
-		return nil
+		return nil, nil
 	}
 	if err != nil {
-		return domain.WrapError(domain.ErrorKubernetes, "cleanup", fmt.Sprintf("read PVC %s/%s consumers", ref.Namespace, ref.Name), err)
+		return nil, domain.WrapError(domain.ErrorKubernetes, "cleanup", fmt.Sprintf("read PVC %s/%s consumers", ref.Namespace, ref.Name), err)
 	}
 	if ref.UID != "" && pvc.UID != ref.UID {
-		return domain.NewError(domain.ErrorConflict, "cleanup", fmt.Sprintf("PVC %s/%s identity changed", ref.Namespace, ref.Name))
+		return nil, domain.NewError(domain.ErrorConflict, "cleanup", fmt.Sprintf("PVC %s/%s identity changed", ref.Namespace, ref.Name))
 	}
-	pods, err := s.client.CoreV1().Pods(ref.Namespace).List(ctx, metav1.ListOptions{})
-	if err != nil {
-		return domain.WrapError(domain.ErrorKubernetes, "cleanup", fmt.Sprintf("list PVC consumers in %s", ref.Namespace), err)
+	var pods *corev1.PodList
+	var attachments *storagev1.VolumeAttachmentList
+	var podErr, attachmentErr error
+	count := 1
+	if pvc.Spec.VolumeName != "" {
+		count = 2
+	}
+	parallel.ForLimit(count, 2, func(index int) {
+		if index == 0 {
+			pods, podErr = s.client.CoreV1().Pods(ref.Namespace).List(ctx, metav1.ListOptions{})
+			if podErr == nil && pods == nil {
+				podErr = fmt.Errorf("list PVC consumers in %s returned an empty object", ref.Namespace)
+			}
+			return
+		}
+		attachments, attachmentErr = s.client.StorageV1().VolumeAttachments().List(ctx, metav1.ListOptions{})
+		if attachmentErr == nil && attachments == nil {
+			attachmentErr = fmt.Errorf("list VolumeAttachments for PV %s returned an empty object", pvc.Spec.VolumeName)
+		}
+	})
+	if podErr != nil {
+		return nil, domain.WrapError(domain.ErrorKubernetes, "cleanup", fmt.Sprintf("list PVC consumers in %s", ref.Namespace), podErr)
+	}
+	if pods == nil {
+		pods = &corev1.PodList{}
 	}
 	for _, pod := range pods.Items {
 		if pod.Status.Phase == corev1.PodSucceeded || pod.Status.Phase == corev1.PodFailed {
@@ -194,22 +223,24 @@ func (s *Service) ensurePVCUnused(ctx context.Context, ref domain.ObjectReferenc
 			continue
 		}
 		if kube.PodUsesPVC(&pod, ref.Name) {
-			return domain.NewError(domain.ErrorPrecondition, "cleanup", fmt.Sprintf("PVC %s/%s is still referenced by Pod %s", ref.Namespace, ref.Name, pod.Name))
+			return nil, domain.NewError(domain.ErrorPrecondition, "cleanup", fmt.Sprintf("PVC %s/%s is still referenced by Pod %s", ref.Namespace, ref.Name, pod.Name))
 		}
 	}
 	if pvc.Spec.VolumeName == "" {
-		return nil
+		return pvc, nil
 	}
-	attachments, err := s.client.StorageV1().VolumeAttachments().List(ctx, metav1.ListOptions{})
-	if err != nil {
-		return domain.WrapError(domain.ErrorKubernetes, "cleanup", fmt.Sprintf("list attachments for PV %s", pvc.Spec.VolumeName), err)
+	if attachmentErr != nil {
+		return nil, domain.WrapError(domain.ErrorKubernetes, "cleanup", fmt.Sprintf("list attachments for PV %s", pvc.Spec.VolumeName), attachmentErr)
+	}
+	if attachments == nil {
+		attachments = &storagev1.VolumeAttachmentList{}
 	}
 	for _, attachment := range attachments.Items {
 		if attachment.Spec.Source.PersistentVolumeName != nil && *attachment.Spec.Source.PersistentVolumeName == pvc.Spec.VolumeName && attachment.Status.Attached {
-			return domain.NewError(domain.ErrorPrecondition, "cleanup", fmt.Sprintf("PVC %s/%s still has an attached PV on node %s", ref.Namespace, ref.Name, attachment.Spec.NodeName))
+			return nil, domain.NewError(domain.ErrorPrecondition, "cleanup", fmt.Sprintf("PVC %s/%s still has an attached PV on node %s", ref.Namespace, ref.Name, attachment.Spec.NodeName))
 		}
 	}
-	return nil
+	return pvc, nil
 }
 
 // discoverDestinationRefs recovers references lost after a destination PVC

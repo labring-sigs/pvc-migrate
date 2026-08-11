@@ -4,9 +4,12 @@ import (
 	"context"
 	"fmt"
 	"maps"
+	"strings"
+	"sync"
 	"time"
 
 	"github.com/labring-sigs/pvc-migrate/internal/domain"
+	"github.com/labring-sigs/pvc-migrate/internal/parallel"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -27,22 +30,195 @@ func NewSwitcher(client kubernetes.Interface) *Switcher {
 }
 
 func (s *Switcher) VerifyVolumeOffline(ctx context.Context, volume *domain.VolumeSpec) error {
-	if err := s.verifyPVCAndPVIdentity(ctx, volume.SourcePVC, volume.SourcePV, ResourceRoleSource); err != nil {
-		return err
+	if volume == nil {
+		return domain.NewError(domain.ErrorValidation, "verify PVC offline", "volume is nil")
 	}
-	if err := s.verifyPVCAndPVIdentity(ctx, volume.DestinationPVC, volume.DestinationPV, ResourceRoleDestination); err != nil {
-		return err
+	return s.VerifyVolumesOffline(ctx, []*domain.VolumeSpec{volume})
+}
+
+type offlineIdentityKey struct {
+	pvc domain.ObjectReference
+	pv  domain.ObjectReference
+}
+
+type offlineIdentityRead struct {
+	pvc  domain.ObjectReference
+	pv   domain.ObjectReference
+	role string
+	err  error
+}
+
+type podListResult struct {
+	pods []corev1.Pod
+	err  error
+}
+
+// VerifyVolumesOffline shares namespace and cluster-wide inventory reads
+// across volumes while preserving source-first, input-order validation.
+func (s *Switcher) VerifyVolumesOffline(ctx context.Context, volumes []*domain.VolumeSpec) error {
+	identities := make([]offlineIdentityRead, 0, 2*len(volumes))
+	identityIndexes := make([]int, 0, 2*len(volumes))
+	identityByKey := make(map[offlineIdentityKey]int, 2*len(volumes))
+	addIdentity := func(pvc, pv domain.ObjectReference, role string) {
+		key := offlineIdentityKey{pvc: pvc, pv: pv}
+		index, exists := identityByKey[key]
+		if !exists {
+			index = len(identities)
+			identityByKey[key] = index
+			identities = append(identities, offlineIdentityRead{pvc: pvc, pv: pv, role: role})
+		}
+		identityIndexes = append(identityIndexes, index)
 	}
-	if err := s.ensureNoConsumers(ctx, volume.SourcePVC.Namespace, volume.SourcePVC.Name); err != nil {
-		return err
+	for _, volume := range volumes {
+		if volume == nil {
+			return domain.NewError(domain.ErrorValidation, "verify PVC offline", "volume is nil")
+		}
+		addIdentity(volume.SourcePVC, volume.SourcePV, ResourceRoleSource)
+		addIdentity(volume.DestinationPVC, volume.DestinationPV, ResourceRoleDestination)
 	}
-	if err := s.ensureNoConsumers(ctx, volume.DestinationPVC.Namespace, volume.DestinationPVC.Name); err != nil {
-		return err
+	parallel.For(len(identities), func(index int) {
+		identity := &identities[index]
+		identity.err = s.verifyPVCAndPVIdentity(ctx, identity.pvc, identity.pv, identity.role)
+	})
+	for _, index := range identityIndexes {
+		if err := identities[index].err; err != nil {
+			return err
+		}
 	}
-	if err := s.ensureDetached(ctx, volume.SourcePV.Name); err != nil {
-		return err
+
+	namespaces := make([]string, 0)
+	namespaceIndexes := make(map[string]int)
+	pvNames := make([]string, 0, 2*len(volumes))
+	seenPVs := make(map[string]struct{}, 2*len(volumes))
+	for _, volume := range volumes {
+		for _, ref := range []domain.ObjectReference{volume.SourcePVC, volume.DestinationPVC} {
+			if _, exists := namespaceIndexes[ref.Namespace]; !exists {
+				namespaceIndexes[ref.Namespace] = len(namespaces)
+				namespaces = append(namespaces, ref.Namespace)
+			}
+		}
+		for _, ref := range []domain.ObjectReference{volume.SourcePV, volume.DestinationPV} {
+			if ref.Name == "" {
+				continue
+			}
+			if _, exists := seenPVs[ref.Name]; exists {
+				continue
+			}
+			seenPVs[ref.Name] = struct{}{}
+			pvNames = append(pvNames, ref.Name)
+		}
 	}
-	return s.ensureDetached(ctx, volume.DestinationPV.Name)
+	checkCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	podLists := make([]podListResult, len(namespaces))
+	podCheckDone := make(chan error, 1)
+	detachDone := make(chan error, 1)
+	checkPods := func() error {
+		for _, volume := range volumes {
+			for _, ref := range []domain.ObjectReference{volume.SourcePVC, volume.DestinationPVC} {
+				result := podLists[namespaceIndexes[ref.Namespace]]
+				if result.err != nil {
+					return domain.WrapError(domain.ErrorKubernetes, "verify PVC offline", fmt.Sprintf("list Pods in %s", ref.Namespace), result.err)
+				}
+				if err := ensureNoConsumerInPods(result.pods, ref.Namespace, ref.Name); err != nil {
+					return err
+				}
+			}
+		}
+		return nil
+	}
+	var offlineWG sync.WaitGroup
+	offlineWG.Go(func() {
+		parallel.For(len(namespaces), func(index int) {
+			pods, err := s.client.CoreV1().Pods(namespaces[index]).List(checkCtx, metav1.ListOptions{})
+			if err == nil && pods == nil {
+				err = fmt.Errorf("list Pods in %s returned an empty object", namespaces[index])
+			}
+			if pods != nil {
+				podLists[index].pods = pods.Items
+			}
+			podLists[index].err = err
+		})
+		podCheckDone <- checkPods()
+	})
+	offlineWG.Go(func() {
+		detachDone <- s.ensureVolumesDetached(checkCtx, pvNames)
+	})
+
+	select {
+	case podErr := <-podCheckDone:
+		if podErr != nil {
+			cancel()
+			<-detachDone
+			offlineWG.Wait()
+			return podErr
+		}
+		detachErr := <-detachDone
+		offlineWG.Wait()
+		return detachErr
+	case detachErr := <-detachDone:
+		if podErr := <-podCheckDone; podErr != nil {
+			offlineWG.Wait()
+			return podErr
+		}
+		offlineWG.Wait()
+		return detachErr
+	}
+}
+
+func ensureNoConsumerInPods(pods []corev1.Pod, namespace, claim string) error {
+	for i := range pods {
+		for _, volume := range pods[i].Spec.Volumes {
+			if volume.PersistentVolumeClaim != nil && volume.PersistentVolumeClaim.ClaimName == claim {
+				return domain.NewError(domain.ErrorPrecondition, "verify PVC offline", fmt.Sprintf("PVC %s/%s is referenced by Pod %s", namespace, claim, pods[i].Name))
+			}
+		}
+	}
+	return nil
+}
+
+func (s *Switcher) ensureVolumesDetached(ctx context.Context, pvNames []string) error {
+	if len(pvNames) == 0 {
+		return nil
+	}
+	wanted := make(map[string]struct{}, len(pvNames))
+	for _, name := range pvNames {
+		wanted[name] = struct{}{}
+	}
+	pvDescription := strings.Join(pvNames, ",")
+	return WaitFor(ctx, s.poll, fmt.Sprintf("VolumeAttachment detach for PV(s) %s", pvDescription), func(waitCtx context.Context) (bool, error) {
+		attachments, err := s.client.StorageV1().VolumeAttachments().List(waitCtx, metav1.ListOptions{})
+		if err != nil {
+			return false, domain.WrapError(domain.ErrorKubernetes, "verify PV offline", fmt.Sprintf("list VolumeAttachments for PV(s) %s", pvDescription), err)
+		}
+		if attachments == nil {
+			return false, domain.NewError(domain.ErrorKubernetes, "verify PV offline", fmt.Sprintf("list VolumeAttachments for PV(s) %s returned an empty object", pvDescription))
+		}
+		for _, attachment := range attachments.Items {
+			if attachment.Spec.Source.PersistentVolumeName == nil || !attachment.Status.Attached {
+				continue
+			}
+			if _, exists := wanted[*attachment.Spec.Source.PersistentVolumeName]; exists {
+				return false, nil
+			}
+		}
+		return true, nil
+	})
+}
+
+func (s *Switcher) ensureNoConsumers(ctx context.Context, namespace, claim string) error {
+	pods, err := s.client.CoreV1().Pods(namespace).List(ctx, metav1.ListOptions{})
+	if err != nil {
+		return domain.WrapError(domain.ErrorKubernetes, "verify PVC offline", fmt.Sprintf("list Pods in %s", namespace), err)
+	}
+	return ensureNoConsumerInPods(pods.Items, namespace, claim)
+}
+
+func (s *Switcher) ensureDetached(ctx context.Context, pvName string) error {
+	if pvName == "" {
+		return nil
+	}
+	return s.ensureVolumesDetached(ctx, []string{pvName})
 }
 
 func (s *Switcher) ActivateVolume(ctx context.Context, session *domain.Session, volume *domain.VolumeSpec, status *domain.VolumeStatus, progress ProgressFunc) error {
@@ -353,39 +529,6 @@ func (s *Switcher) completeRollback(ctx context.Context, session *domain.Session
 	status.Activation.ActivePVC = domain.ObjectReference{APIVersion: domain.CoreAPIVersion, Kind: domain.KindPersistentVolumeClaim, Namespace: pvc.Namespace, Name: pvc.Name, UID: pvc.UID, ResourceVersion: pvc.ResourceVersion}
 	status.Activation.RolledBackAt = &now
 	return callProgress(progress)
-}
-
-func (s *Switcher) ensureNoConsumers(ctx context.Context, namespace, claim string) error {
-	pods, err := s.client.CoreV1().Pods(namespace).List(ctx, metav1.ListOptions{})
-	if err != nil {
-		return domain.WrapError(domain.ErrorKubernetes, "verify PVC offline", fmt.Sprintf("list Pods in %s", namespace), err)
-	}
-	for i := range pods.Items {
-		for _, volume := range pods.Items[i].Spec.Volumes {
-			if volume.PersistentVolumeClaim != nil && volume.PersistentVolumeClaim.ClaimName == claim {
-				return domain.NewError(domain.ErrorPrecondition, "verify PVC offline", fmt.Sprintf("PVC %s/%s is referenced by Pod %s", namespace, claim, pods.Items[i].Name))
-			}
-		}
-	}
-	return nil
-}
-
-func (s *Switcher) ensureDetached(ctx context.Context, pvName string) error {
-	if pvName == "" {
-		return nil
-	}
-	return WaitFor(ctx, s.poll, fmt.Sprintf("VolumeAttachment detach for PV %s", pvName), func(waitCtx context.Context) (bool, error) {
-		attachments, err := s.client.StorageV1().VolumeAttachments().List(waitCtx, metav1.ListOptions{})
-		if err != nil {
-			return false, domain.WrapError(domain.ErrorKubernetes, "verify PV offline", fmt.Sprintf("list VolumeAttachments for PV %s", pvName), err)
-		}
-		for _, attachment := range attachments.Items {
-			if attachment.Spec.Source.PersistentVolumeName != nil && *attachment.Spec.Source.PersistentVolumeName == pvName && attachment.Status.Attached {
-				return false, nil
-			}
-		}
-		return true, nil
-	})
 }
 
 func (s *Switcher) deletePVC(ctx context.Context, ref domain.ObjectReference) error {

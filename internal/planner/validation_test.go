@@ -111,6 +111,20 @@ func TestCheckCSINodeTreatsMissingAndUnregisteredDriversAsWarnings(t *testing.T)
 	}
 }
 
+func TestCheckCSINodeFailsOnEmptyObject(t *testing.T) {
+	client := kubernetesfake.NewClientset()
+	client.PrependReactor("get", "csinodes", func(clienttesting.Action) (bool, runtime.Object, error) {
+		return true, nil, nil
+	})
+	plan := &domain.MigrationPlan{Ready: true}
+	New(client, nil).checkCSINode(context.Background(), plan,
+		&storagev1.StorageClass{ObjectMeta: metav1.ObjectMeta{Name: "fast"}, Provisioner: "example.csi.io"},
+		&corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "node-b"}})
+	if plan.Ready || len(plan.Checks) != 1 || plan.Checks[0].Severity != domain.SeverityError || !strings.Contains(plan.Checks[0].Message, "returned an empty object") {
+		t.Fatalf("plan ready=%t checks=%#v", plan.Ready, plan.Checks)
+	}
+}
+
 func TestPodPVCNamesAreUniqueAndSorted(t *testing.T) {
 	pod := &corev1.Pod{Spec: corev1.PodSpec{Volumes: []corev1.Volume{
 		{Name: "z", VolumeSource: corev1.VolumeSource{PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: "z-data"}}},

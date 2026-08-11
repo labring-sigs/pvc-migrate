@@ -11,6 +11,7 @@ import (
 	"github.com/labring-sigs/pvc-migrate/internal/controller"
 	"github.com/labring-sigs/pvc-migrate/internal/domain"
 	"github.com/labring-sigs/pvc-migrate/internal/kube"
+	"github.com/labring-sigs/pvc-migrate/internal/parallel"
 	corev1 "k8s.io/api/core/v1"
 	storagev1 "k8s.io/api/storage/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -122,14 +123,22 @@ func (p *Planner) Plan(ctx context.Context, options Options) (*domain.MigrationP
 		if len(options.SourcePVCs) > 0 {
 			plan.AddCheck(failed("source-pvc", "--source-pvc cannot be combined with --pod; the Pod PVC set is migrated as one unit"))
 		}
-		if options.Operation == domain.OperationCopy {
+		if options.Operation != domain.OperationCopy && p.controllers == nil {
+			return nil, domain.NewError(domain.ErrorInternal, "plan", "controller manager is unavailable")
+		}
+		pod, podErr := p.client.CoreV1().Pods(options.SourceNamespace).Get(ctx, options.PodName, metav1.GetOptions{})
+		if podErr == nil && (pod == nil || pod.Name == "") {
+			podErr = fmt.Errorf("read Pod %s/%s returned an empty object", options.SourceNamespace, options.PodName)
+		}
+		switch {
+		case options.Operation == domain.OperationCopy:
 			workload = domain.WorkloadSpec{Adapter: domain.WorkloadNone}
 			plan.AddCheck(passed("controller-adapter", "copy does not mutate or pause the selected workload"))
-		} else {
-			if p.controllers == nil {
-				return nil, domain.NewError(domain.ErrorInternal, "plan", "controller manager is unavailable")
-			}
-			discovered, err := p.controllers.Discover(ctx, controller.DiscoverOptions{
+		case podErr != nil:
+			err := domain.WrapError(domain.ErrorKubernetes, "discover workload", fmt.Sprintf("read Pod %s/%s", options.SourceNamespace, options.PodName), podErr)
+			plan.AddCheck(failed("controller-adapter", err.Error()))
+		default:
+			discovered, err := p.controllers.DiscoverPod(ctx, pod, controller.DiscoverOptions{
 				Namespace:           options.SourceNamespace,
 				PodName:             options.PodName,
 				SwitchoverCandidate: options.SwitchoverCandidate,
@@ -152,9 +161,8 @@ func (p *Planner) Plan(ctx context.Context, options Options) (*domain.MigrationP
 				}
 			}
 		}
-		pod, err := p.client.CoreV1().Pods(options.SourceNamespace).Get(ctx, options.PodName, metav1.GetOptions{})
-		if err != nil {
-			plan.AddCheck(failed("source-pod", err.Error()))
+		if podErr != nil {
+			plan.AddCheck(failed("source-pod", podErr.Error()))
 		} else {
 			sourcePod = pod
 			if options.SourceNode == "" {
@@ -177,13 +185,17 @@ func (p *Planner) Plan(ctx context.Context, options Options) (*domain.MigrationP
 		}
 	}
 	plan.Workload = workload
+	inventory := p.loadPlanInventory(ctx, options, pvcNames, autoTargetNodeRequested)
 
 	var targetNode *corev1.Node
 	if options.TargetNode != "" {
-		node, err := p.client.CoreV1().Nodes().Get(ctx, options.TargetNode, metav1.GetOptions{})
-		if err != nil {
+		node, err := inventory.targetNode, inventory.targetNodeErr
+		switch {
+		case err != nil:
 			plan.AddCheck(failed("target-node", fmt.Sprintf("read target node: %v", err)))
-		} else {
+		case node == nil || node.Name == "":
+			plan.AddCheck(failed("target-node", "read target node returned an empty object"))
+		default:
 			targetNode = node
 			if !nodeReady(node) || node.Spec.Unschedulable {
 				plan.AddCheck(failed("target-node", fmt.Sprintf("node %s must be Ready and schedulable", node.Name)))
@@ -201,19 +213,19 @@ func (p *Planner) Plan(ctx context.Context, options Options) (*domain.MigrationP
 	plannedVolumes := make([]domain.PlannedVolume, 0, len(pvcNames))
 	copyConsumerNodes := map[string]struct{}{}
 	unmanagedConsumerNames := map[string]struct{}{}
-	var namespacePods []corev1.Pod
-	var namespacePodsErr error
-	podsLoaded := false
-	storageClasses := make(map[string]*storagev1.StorageClass)
-	storageClassErrors := make(map[string]error)
+	storageClasses := inventory.storageClasses
+	storageClassErrors := inventory.storageClassError
 	sourcePVs := make(map[string]*corev1.PersistentVolume)
 	mountTopologyConflict := ""
 	totalStorage := resource.MustParse("0")
 	storageByClass := map[string]resource.Quantity{}
 	pvcsByClass := map[string]int{}
 	for index, pvcName := range pvcNames {
-		pvc, err := p.client.CoreV1().PersistentVolumeClaims(options.SourceNamespace).Get(ctx, pvcName, metav1.GetOptions{})
-		if err != nil {
+		pvc, err := inventory.pvcs[index].pvc, inventory.pvcs[index].err
+		if err != nil || pvc == nil || pvc.Name == "" {
+			if err == nil {
+				err = fmt.Errorf("read PVC %s/%s returned an empty object", options.SourceNamespace, pvcName)
+			}
 			plan.AddCheck(failed("source-pvc", fmt.Sprintf("read PVC %s/%s: %v", options.SourceNamespace, pvcName, err)))
 			continue
 		}
@@ -231,8 +243,11 @@ func (p *Planner) Plan(ctx context.Context, options Options) (*domain.MigrationP
 		if !kube.HasWritableAccessMode(pvc.Spec.AccessModes) {
 			plan.AddCheck(failed("access-mode", fmt.Sprintf("PVC %s/%s has no writable access mode for the destination copy", pvc.Namespace, pvc.Name)))
 		}
-		pv, err := p.client.CoreV1().PersistentVolumes().Get(ctx, pvc.Spec.VolumeName, metav1.GetOptions{})
-		if err != nil {
+		pv, err := inventory.pvs[index].pv, inventory.pvs[index].err
+		if err != nil || pv == nil || pv.Name == "" {
+			if err == nil {
+				err = fmt.Errorf("read PV %s returned an empty object", pvc.Spec.VolumeName)
+			}
 			plan.AddCheck(failed("source-pv", fmt.Sprintf("read PV %s: %v", pvc.Spec.VolumeName, err)))
 			continue
 		}
@@ -257,13 +272,12 @@ func (p *Planner) Plan(ctx context.Context, options Options) (*domain.MigrationP
 			continue
 		}
 		sc, cached := storageClasses[destinationClass]
-		var storageClassErr error
-		if cached {
-			storageClassErr = storageClassErrors[destinationClass]
-		} else {
-			sc, storageClassErr = p.client.StorageV1().StorageClasses().Get(ctx, destinationClass, metav1.GetOptions{})
-			storageClasses[destinationClass] = sc
-			storageClassErrors[destinationClass] = storageClassErr
+		storageClassErr := storageClassErrors[destinationClass]
+		if !cached {
+			storageClassErr = fmt.Errorf("storage class %s was not loaded", destinationClass)
+		}
+		if storageClassErr == nil && (sc == nil || sc.Name == "") {
+			storageClassErr = fmt.Errorf("read StorageClass %s returned an empty object", destinationClass)
 		}
 		if storageClassErr != nil {
 			plan.AddCheck(failed("storage-class", fmt.Sprintf("read StorageClass %s: %v", destinationClass, storageClassErr)))
@@ -311,16 +325,7 @@ func (p *Planner) Plan(ctx context.Context, options Options) (*domain.MigrationP
 			AccessModes:    accessModes,
 			VolumeMode:     mode,
 		})
-		if !podsLoaded {
-			pods, listErr := p.client.CoreV1().Pods(options.SourceNamespace).List(ctx, metav1.ListOptions{})
-			if listErr != nil {
-				namespacePodsErr = listErr
-			} else {
-				namespacePods = pods.Items
-			}
-			podsLoaded = true
-		}
-		consumers := p.checkPVCReferencesFromPods(plan, pvc, sourcePod, options.Operation, options.Online, namespacePods, namespacePodsErr)
+		consumers := p.checkPVCReferencesFromPods(plan, pvc, sourcePod, options.Operation, options.Online, inventory.namespacePods, inventory.namespacePodsErr)
 		if options.Operation == domain.OperationMigrate && sourcePod == nil {
 			for _, consumer := range consumers {
 				unmanagedConsumerNames[consumer.Name] = struct{}{}
@@ -348,17 +353,29 @@ func (p *Planner) Plan(ctx context.Context, options Options) (*domain.MigrationP
 	}
 	if options.Operation == domain.OperationCopy && options.Online && sourcePod == nil {
 		options.SourceNode = inferOnlineCopySourceNode(plan, options.SourceNode, copyConsumerNodes)
+		if options.SourceNode != "" && inventory.sourceNode == nil && inventory.sourceNodeErr == nil {
+			inventory.sourceNode, inventory.sourceNodeErr = p.client.CoreV1().Nodes().Get(ctx, options.SourceNode, metav1.GetOptions{})
+		}
 	}
-	capacityInventory := &storageCapacityInventory{mode: options.CapacityAwareness}
-	if len(plannedVolumes) > 0 {
-		capacityInventory = p.loadStorageCapacity(ctx, options.CapacityAwareness)
+	capacityInventory := inventory.capacity
+	if capacityInventory == nil {
+		capacityInventory = &storageCapacityInventory{mode: options.CapacityAwareness}
 	}
 	if autoTargetNodeRequested {
-		targetNode = p.selectTargetNode(ctx, plan, workload, sourcePod, options.SourceNode, plannedVolumes, sourcePVs, storageClasses, capacityInventory)
+		targetNode = p.selectTargetNodeFromNodes(plan, workload, sourcePod, options.SourceNode, plannedVolumes, sourcePVs, storageClasses, capacityInventory, inventory.nodes, inventory.nodesErr)
 		if targetNode != nil {
 			options.TargetNode = targetNode.Name
 			plan.TargetNode = targetNode.Name
 			p.checkPodTargetScheduling(plan, sourcePod, workload, targetNode)
+		}
+	}
+	var csiNode *storagev1.CSINode
+	var csiNodeErr error
+	if targetNode != nil && len(plannedVolumes) > 0 {
+		if autoTargetNodeRequested {
+			csiNode, csiNodeErr = p.client.StorageV1().CSINodes().Get(ctx, targetNode.Name, metav1.GetOptions{})
+		} else {
+			csiNode, csiNodeErr = inventory.csiNode, inventory.csiNodeErr
 		}
 	}
 	if targetNode != nil {
@@ -376,17 +393,19 @@ func (p *Planner) Plan(ctx context.Context, options Options) (*domain.MigrationP
 			} else {
 				plan.AddCheck(passed("storage-topology", fmt.Sprintf("StorageClass %s bindingMode=%s topology is compatible", sc.Name, volume.BindingMode)))
 			}
-			p.checkCSINode(ctx, plan, sc, targetNode)
+			p.checkCSINodeFromObject(plan, sc, targetNode, csiNode, csiNodeErr)
 		}
 	}
 	if targetNode != nil && len(plannedVolumes) > 0 && validCapacityAwareness(options.CapacityAwareness) && options.CapacityAwareness != domain.CapacityAwarenessOff {
 		p.checkStorageCapacity(plan, targetNode, plannedVolumes, capacityInventory, options.CapacityAwareness)
 	}
 	if options.SourceNode != "" {
-		node, err := p.client.CoreV1().Nodes().Get(ctx, options.SourceNode, metav1.GetOptions{})
+		node, err := inventory.sourceNode, inventory.sourceNodeErr
 		switch {
 		case err != nil:
 			plan.AddCheck(failed("source-node", fmt.Sprintf("read source node: %v", err)))
+		case node == nil || node.Name == "":
+			plan.AddCheck(failed("source-node", "read source node returned an empty object"))
 		case !nodeReady(node) || node.Spec.Unschedulable:
 			plan.AddCheck(failed("source-node", fmt.Sprintf("node %s must be Ready and schedulable for the source helper", node.Name)))
 		default:
@@ -413,8 +432,14 @@ func (p *Planner) Plan(ctx context.Context, options Options) (*domain.MigrationP
 		plan.RollbackRetention.PVCsByStorageClass[class] = pvcsByClass[class]
 	}
 	if len(plannedVolumes) > 0 {
-		p.checkLimitRanges(ctx, plan, options.StagingNamespace, plannedVolumes)
-		p.checkQuotas(ctx, plan, options.StagingNamespace, plan.TemporaryUsage)
+		tasks := []planCheckTask{
+			func(result *domain.MigrationPlan) {
+				p.checkLimitRanges(ctx, result, options.StagingNamespace, plannedVolumes)
+			},
+			func(result *domain.MigrationPlan) {
+				p.checkQuotas(ctx, result, options.StagingNamespace, plan.TemporaryUsage)
+			},
+		}
 		if options.SourceNamespace != options.StagingNamespace {
 			// clusterip puts the sshd Deployment, Service, Secret, and
 			// ServiceAccount in the source namespace. Check those object
@@ -428,8 +453,10 @@ func (p *Planner) Plan(ctx context.Context, options Options) (*domain.MigrationP
 				ByStorageClass:     map[string]string{},
 				PVCsByStorageClass: map[string]int{},
 			}
-			p.checkLimitRanges(ctx, plan, options.SourceNamespace, nil)
-			p.checkQuotas(ctx, plan, options.SourceNamespace, sourceHelpers)
+			tasks = append(tasks,
+				func(result *domain.MigrationPlan) { p.checkLimitRanges(ctx, result, options.SourceNamespace, nil) },
+				func(result *domain.MigrationPlan) { p.checkQuotas(ctx, result, options.SourceNamespace, sourceHelpers) },
+			)
 		}
 		if options.SessionNamespace != options.StagingNamespace && options.SessionNamespace != options.SourceNamespace {
 			// Session persistence creates one ConfigMap and the mutating
@@ -441,12 +468,23 @@ func (p *Planner) Plan(ctx context.Context, options Options) (*domain.MigrationP
 				ByStorageClass:     map[string]string{},
 				PVCsByStorageClass: map[string]int{},
 			}
-			p.checkQuotas(ctx, plan, options.SessionNamespace, sessionResources)
+			tasks = append(tasks, func(result *domain.MigrationPlan) {
+				p.checkQuotas(ctx, result, options.SessionNamespace, sessionResources)
+			})
 		}
-		p.checkNetworkPolicies(ctx, plan, options.SourceNamespace, options.StagingNamespace)
-		p.checkRBAC(ctx, plan, options.SourceNamespace, options.StagingNamespace, options.SessionNamespace, workload)
+		tasks = append(tasks,
+			func(result *domain.MigrationPlan) {
+				p.checkNetworkPolicies(ctx, result, options.SourceNamespace, options.StagingNamespace)
+			},
+			func(result *domain.MigrationPlan) {
+				p.checkRBAC(ctx, result, options.SourceNamespace, options.StagingNamespace, options.SessionNamespace, workload)
+			},
+		)
 		if sourcePod != nil {
-			p.checkPodDependencies(ctx, plan, sourcePod)
+			tasks = append(tasks, func(result *domain.MigrationPlan) { p.checkPodDependencies(ctx, result, sourcePod) })
+		}
+		runPlanCheckTasks(plan, tasks)
+		if sourcePod != nil {
 			for _, issue := range podMigrationIssues(sourcePod.Spec, options.SourceNode, options.TargetNode) {
 				plan.AddCheck(failed("pod-scheduling", issue))
 			}
@@ -557,19 +595,42 @@ type targetNodeCandidate struct {
 	resourceUnknown int
 }
 
+type planCheckTask func(*domain.MigrationPlan)
+
+func runPlanCheckTasks(plan *domain.MigrationPlan, tasks []planCheckTask) {
+	checks := make([][]domain.Check, len(tasks))
+	parallel.For(len(tasks), func(index int) {
+		result := &domain.MigrationPlan{Ready: true}
+		tasks[index](result)
+		checks[index] = result.Checks
+	})
+	for _, taskChecks := range checks {
+		for _, check := range taskChecks {
+			plan.AddCheck(check)
+		}
+	}
+}
+
 func (p *Planner) selectTargetNode(ctx context.Context, plan *domain.MigrationPlan, workload domain.WorkloadSpec, sourcePod *corev1.Pod, sourceNode string, volumes []domain.PlannedVolume, sourcePVs map[string]*corev1.PersistentVolume, storageClasses map[string]*storagev1.StorageClass, capacityInventory *storageCapacityInventory) *corev1.Node {
+	nodes, err := p.client.CoreV1().Nodes().List(ctx, metav1.ListOptions{})
+	if nodes == nil {
+		return p.selectTargetNodeFromNodes(plan, workload, sourcePod, sourceNode, volumes, sourcePVs, storageClasses, capacityInventory, nil, err)
+	}
+	return p.selectTargetNodeFromNodes(plan, workload, sourcePod, sourceNode, volumes, sourcePVs, storageClasses, capacityInventory, nodes.Items, err)
+}
+
+func (p *Planner) selectTargetNodeFromNodes(plan *domain.MigrationPlan, workload domain.WorkloadSpec, sourcePod *corev1.Pod, sourceNode string, volumes []domain.PlannedVolume, sourcePVs map[string]*corev1.PersistentVolume, storageClasses map[string]*storagev1.StorageClass, capacityInventory *storageCapacityInventory, nodes []corev1.Node, err error) *corev1.Node {
 	if len(volumes) == 0 {
 		plan.AddCheck(failed("target-node", "target node auto-selection requires at least one valid source PVC"))
 		return nil
 	}
-	nodes, err := p.client.CoreV1().Nodes().List(ctx, metav1.ListOptions{})
 	if err != nil {
 		plan.AddCheck(failed("target-node", fmt.Sprintf("list nodes for auto-selection: %v", err)))
 		return nil
 	}
-	candidates := make([]targetNodeCandidate, 0, len(nodes.Items))
-	for i := range nodes.Items {
-		node := &nodes.Items[i]
+	candidates := make([]targetNodeCandidate, 0, len(nodes))
+	for i := range nodes {
+		node := &nodes[i]
 		if !nodeReady(node) || node.Spec.Unschedulable {
 			continue
 		}
@@ -796,6 +857,9 @@ func pvReference(pv *corev1.PersistentVolume) domain.ObjectReference {
 }
 
 func nodeReady(node *corev1.Node) bool {
+	if node == nil {
+		return false
+	}
 	for _, condition := range node.Status.Conditions {
 		if condition.Type == corev1.NodeReady {
 			return condition.Status == corev1.ConditionTrue
@@ -826,12 +890,24 @@ func matchesAllowedTopologies(sc *storagev1.StorageClass, node *corev1.Node) boo
 
 func (p *Planner) checkCSINode(ctx context.Context, plan *domain.MigrationPlan, sc *storagev1.StorageClass, node *corev1.Node) {
 	csiNode, err := p.client.StorageV1().CSINodes().Get(ctx, node.Name, metav1.GetOptions{})
+	p.checkCSINodeFromObject(plan, sc, node, csiNode, err)
+}
+
+func (p *Planner) checkCSINodeFromObject(plan *domain.MigrationPlan, sc *storagev1.StorageClass, node *corev1.Node, csiNode *storagev1.CSINode, err error) {
+	if node == nil || sc == nil {
+		plan.AddCheck(failed("csi-node", "node or StorageClass inventory returned an empty object"))
+		return
+	}
 	if apierrors.IsNotFound(err) {
 		plan.AddCheck(warned("csi-node", fmt.Sprintf("node %s has no CSINode object; provisioner %s must validate node support during reservation", node.Name, sc.Provisioner)))
 		return
 	}
 	if err != nil {
 		plan.AddCheck(failed("csi-node", fmt.Sprintf("read CSINode %s: %v", node.Name, err)))
+		return
+	}
+	if csiNode == nil || csiNode.Name == "" {
+		plan.AddCheck(failed("csi-node", fmt.Sprintf("read CSINode %s returned an empty object", node.Name)))
 		return
 	}
 	for _, driver := range csiNode.Spec.Drivers {

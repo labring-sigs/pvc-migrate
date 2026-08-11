@@ -8,12 +8,14 @@ import (
 	"log/slog"
 	"math"
 	"slices"
+	"sort"
 	"strings"
 	"time"
 
 	"github.com/labring-sigs/pvc-migrate/internal/copyengine"
 	"github.com/labring-sigs/pvc-migrate/internal/domain"
 	"github.com/labring-sigs/pvc-migrate/internal/kube"
+	"github.com/labring-sigs/pvc-migrate/internal/parallel"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -58,6 +60,10 @@ type volumeSwitcher interface {
 	ActivateVolume(context.Context, *domain.Session, *domain.VolumeSpec, *domain.VolumeStatus, kube.ProgressFunc) error
 	RollbackVolume(context.Context, *domain.Session, *domain.VolumeSpec, *domain.VolumeStatus, kube.ProgressFunc) error
 	RenamePVC(context.Context, *domain.Session, *domain.VolumeSpec, kube.ProgressFunc) (*corev1.PersistentVolumeClaim, error)
+}
+
+type batchVolumeSwitcher interface {
+	VerifyVolumesOffline(context.Context, []*domain.VolumeSpec) error
 }
 
 func NewService(
@@ -290,12 +296,7 @@ func (s *Service) validateSingleOperationResume(ctx context.Context, session *do
 		case domain.PhasePlanned, domain.PhaseReserving:
 			return s.ValidateReservation(ctx, session)
 		case domain.PhaseReserved, domain.PhaseWarmCopying:
-			for index := range session.Spec.Volumes {
-				if err := s.validateCopyConsumers(ctx, session, &session.Spec.Volumes[index]); err != nil {
-					return err
-				}
-			}
-			return nil
+			return s.validateCopyConsumersBatch(ctx, session)
 		case domain.PhaseWarmCopied:
 			return nil
 		default:
@@ -429,8 +430,19 @@ func (s *Service) validateRebindRollbackVolumes(ctx context.Context, session *do
 }
 
 func (s *Service) validateOfflineVolumes(ctx context.Context, session *domain.Session) error {
+	volumes := make([]*domain.VolumeSpec, len(session.Spec.Volumes))
 	for index := range session.Spec.Volumes {
-		if err := s.switcher.VerifyVolumeOffline(ctx, &session.Spec.Volumes[index]); err != nil {
+		volumes[index] = &session.Spec.Volumes[index]
+	}
+	return s.verifyVolumesOffline(ctx, volumes)
+}
+
+func (s *Service) verifyVolumesOffline(ctx context.Context, volumes []*domain.VolumeSpec) error {
+	if switcher, ok := s.switcher.(batchVolumeSwitcher); ok {
+		return switcher.VerifyVolumesOffline(ctx, volumes)
+	}
+	for _, volume := range volumes {
+		if err := s.switcher.VerifyVolumeOffline(ctx, volume); err != nil {
 			return err
 		}
 	}
@@ -478,16 +490,14 @@ func (s *Service) ValidateCleanup(ctx context.Context, session *domain.Session, 
 			return domain.NewError(domain.ErrorPrecondition, "cleanup dry-run", "deleting the session requires --delete-rollback-pv while a rollback PV is recorded")
 		}
 		if options.DeleteTemporary && volume.DestinationPVC.UID != "" {
-			if err := s.ensurePVCUnused(ctx, volume.DestinationPVC, session.ID); err != nil {
+			pvc, err := s.inspectPVCUnused(ctx, volume.DestinationPVC, session.ID)
+			if err != nil {
 				return err
 			}
-			pvc, err := s.client.CoreV1().PersistentVolumeClaims(volume.DestinationPVC.Namespace).Get(ctx, volume.DestinationPVC.Name, metav1.GetOptions{})
-			if err == nil {
+			if pvc != nil {
 				if pvc.UID != volume.DestinationPVC.UID || pvc.Labels[kube.SessionKey] != session.ID {
 					return domain.NewError(domain.ErrorConflict, "cleanup dry-run", fmt.Sprintf("PVC %s/%s identity or session ownership changed", pvc.Namespace, pvc.Name))
 				}
-			} else if !apierrors.IsNotFound(err) {
-				return domain.WrapError(domain.ErrorKubernetes, "cleanup dry-run", fmt.Sprintf("read PVC %s/%s", volume.DestinationPVC.Namespace, volume.DestinationPVC.Name), err)
 			}
 		}
 		if options.DeleteRollback && rollback.Name != "" {
@@ -526,14 +536,10 @@ func (s *Service) ValidateCleanup(ctx context.Context, session *domain.Session, 
 			if policy == "" {
 				return domain.NewError(domain.ErrorPrecondition, "cleanup dry-run", fmt.Sprintf("PV %s has no recorded reclaim policy", active.Name))
 			}
-			if session.Status.Phase == domain.PhaseAborted && session.Status.Volumes[index].Activation.ActivePVC.Name == "" {
-				if _, err := s.client.CoreV1().PersistentVolumes().Get(ctx, active.Name, metav1.GetOptions{}); apierrors.IsNotFound(err) {
-					continue
-				} else if err != nil {
-					return domain.WrapError(domain.ErrorKubernetes, "cleanup dry-run", fmt.Sprintf("read PV %s", active.Name), err)
-				}
-			}
 			pv, err := s.client.CoreV1().PersistentVolumes().Get(ctx, active.Name, metav1.GetOptions{})
+			if session.Status.Phase == domain.PhaseAborted && session.Status.Volumes[index].Activation.ActivePVC.Name == "" && apierrors.IsNotFound(err) {
+				continue
+			}
 			if err != nil {
 				return domain.WrapError(domain.ErrorKubernetes, "cleanup dry-run", fmt.Sprintf("read active PV %s", active.Name), err)
 			}
@@ -587,12 +593,7 @@ func (s *Service) ValidateFinalSync(ctx context.Context, session *domain.Session
 	if err := s.controllers.VerifyPaused(ctx, session); err != nil {
 		return err
 	}
-	for index := range session.Spec.Volumes {
-		if err := s.switcher.VerifyVolumeOffline(ctx, &session.Spec.Volumes[index]); err != nil {
-			return err
-		}
-	}
-	return nil
+	return s.validateOfflineVolumes(ctx, session)
 }
 
 // ValidateActivation performs activation preconditions through read-only API
@@ -617,11 +618,8 @@ func (s *Service) ValidateActivation(ctx context.Context, session *domain.Sessio
 		if status.Sync.FinalCompletedAt == nil {
 			return domain.NewError(domain.ErrorPrecondition, "activation dry-run", fmt.Sprintf("PVC %s has no completed final sync", volume.SourcePVC.Name))
 		}
-		if err := s.switcher.VerifyVolumeOffline(ctx, volume); err != nil {
-			return err
-		}
 	}
-	return nil
+	return s.validateOfflineVolumes(ctx, session)
 }
 
 func (s *Service) Reserve(ctx context.Context, session *domain.Session) error {
@@ -1117,13 +1115,65 @@ func (s *Service) validateCopyConsumers(ctx context.Context, session *domain.Ses
 		return nil
 	}
 	pods, err := s.client.CoreV1().Pods(volume.SourcePVC.Namespace).List(ctx, metav1.ListOptions{})
-	if err != nil {
-		return domain.WrapError(domain.ErrorKubernetes, "copy preflight", fmt.Sprintf("list PVC consumers in %s", volume.SourcePVC.Namespace), err)
+	if err == nil && pods == nil {
+		err = fmt.Errorf("list PVC consumers in %s returned an empty object", volume.SourcePVC.Namespace)
+	}
+	var items []corev1.Pod
+	if pods != nil {
+		items = pods.Items
+	}
+	return s.validateCopyConsumersFromPods(ctx, session, volume, items, err)
+}
+
+func (s *Service) validateCopyConsumersBatch(ctx context.Context, session *domain.Session) error {
+	if session.Spec.Operation() != domain.OperationCopy {
+		return nil
+	}
+	namespaces := make([]string, 0)
+	seen := map[string]struct{}{}
+	for index := range session.Spec.Volumes {
+		namespace := session.Spec.Volumes[index].SourcePVC.Namespace
+		if _, exists := seen[namespace]; exists {
+			continue
+		}
+		seen[namespace] = struct{}{}
+		namespaces = append(namespaces, namespace)
+	}
+	sort.Strings(namespaces)
+	type result struct {
+		pods []corev1.Pod
+		err  error
+	}
+	results := make([]result, len(namespaces))
+	parallel.For(len(namespaces), func(index int) {
+		pods, err := s.client.CoreV1().Pods(namespaces[index]).List(ctx, metav1.ListOptions{})
+		if err == nil && pods == nil {
+			err = fmt.Errorf("list PVC consumers in %s returned an empty object", namespaces[index])
+		}
+		if pods != nil {
+			results[index].pods = pods.Items
+		}
+		results[index].err = err
+	})
+	for index := range session.Spec.Volumes {
+		volume := &session.Spec.Volumes[index]
+		namespaceIndex := sort.SearchStrings(namespaces, volume.SourcePVC.Namespace)
+		result := results[namespaceIndex]
+		if err := s.validateCopyConsumersFromPods(ctx, session, volume, result.pods, result.err); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (s *Service) validateCopyConsumersFromPods(ctx context.Context, session *domain.Session, volume *domain.VolumeSpec, pods []corev1.Pod, listErr error) error {
+	if listErr != nil {
+		return domain.WrapError(domain.ErrorKubernetes, "copy preflight", fmt.Sprintf("list PVC consumers in %s", volume.SourcePVC.Namespace), listErr)
 	}
 	active := make([]*corev1.Pod, 0)
 	nodes := map[string]struct{}{}
-	for index := range pods.Items {
-		pod := &pods.Items[index]
+	for index := range pods {
+		pod := &pods[index]
 		if pod.Status.Phase == corev1.PodSucceeded || pod.Status.Phase == corev1.PodFailed || !kube.PodUsesPVC(pod, volume.SourcePVC.Name) {
 			continue
 		}
@@ -1281,6 +1331,28 @@ func (s *Service) helmSchedulingValues(ctx context.Context, session *domain.Sess
 	} else {
 		targets = append(targets, schedulingTarget{component: "sshd", nodes: []string{options.SourceNode}, pinNode: true})
 	}
+	nodeNames := make([]string, 0, 2)
+	nodeIndexes := map[string]int{}
+	for _, target := range targets {
+		for _, nodeName := range target.nodes {
+			if nodeName == "" {
+				continue
+			}
+			if _, exists := nodeIndexes[nodeName]; exists {
+				continue
+			}
+			nodeIndexes[nodeName] = len(nodeNames)
+			nodeNames = append(nodeNames, nodeName)
+		}
+	}
+	type nodeResult struct {
+		node *corev1.Node
+		err  error
+	}
+	nodes := make([]nodeResult, len(nodeNames))
+	parallel.For(len(nodeNames), func(index int) {
+		nodes[index].node, nodes[index].err = s.client.CoreV1().Nodes().Get(ctx, nodeNames[index], metav1.GetOptions{})
+	})
 	for _, target := range targets {
 		tolerationIndex := 0
 		seenNodes := map[string]struct{}{}
@@ -1293,10 +1365,11 @@ func (s *Service) helmSchedulingValues(ctx context.Context, session *domain.Sess
 				continue
 			}
 			seenNodes[nodeName] = struct{}{}
-			node, err := s.client.CoreV1().Nodes().Get(ctx, nodeName, metav1.GetOptions{})
-			if err != nil {
-				return nil, domain.WrapError(domain.ErrorKubernetes, "copy scheduling", fmt.Sprintf("read node %s", nodeName), err)
+			result := nodes[nodeIndexes[nodeName]]
+			if result.err != nil {
+				return nil, domain.WrapError(domain.ErrorKubernetes, "copy scheduling", fmt.Sprintf("read node %s", nodeName), result.err)
 			}
+			node := result.node
 			if target.pinNode {
 				hostname := node.Labels[corev1.LabelHostname]
 				if hostname == "" {
@@ -1328,27 +1401,44 @@ func (s *Service) helmSchedulingValues(ctx context.Context, session *domain.Sess
 }
 
 func (s *Service) verifyActiveStorage(ctx context.Context, session *domain.Session) error {
-	for index := range session.Spec.Volumes {
-		volume := &session.Spec.Volumes[index]
-		pvc, err := s.client.CoreV1().PersistentVolumeClaims(volume.SourcePVC.Namespace).Get(ctx, volume.SourcePVC.Name, metav1.GetOptions{})
+	results := make([]error, len(session.Spec.Volumes))
+	parallel.For(len(session.Spec.Volumes), func(index int) {
+		results[index] = s.verifyActiveStorageVolume(ctx, session, index)
+	})
+	for _, err := range results {
 		if err != nil {
-			return domain.WrapError(domain.ErrorKubernetes, "verify migration", fmt.Sprintf("read PVC %s/%s", volume.SourcePVC.Namespace, volume.SourcePVC.Name), err)
+			return err
 		}
-		if pvc.Status.Phase != corev1.ClaimBound || pvc.Spec.VolumeName != volume.DestinationPV.Name || pvc.Annotations[kube.SessionKey] != session.ID {
-			return domain.NewError(domain.ErrorConflict, "verify migration", fmt.Sprintf("PVC %s/%s is not active on destination PV %s", pvc.Namespace, pvc.Name, volume.DestinationPV.Name))
+	}
+	return nil
+}
+
+func (s *Service) verifyActiveStorageVolume(ctx context.Context, session *domain.Session, index int) error {
+	volume := &session.Spec.Volumes[index]
+	pvc, err := s.client.CoreV1().PersistentVolumeClaims(volume.SourcePVC.Namespace).Get(ctx, volume.SourcePVC.Name, metav1.GetOptions{})
+	if err != nil {
+		return domain.WrapError(domain.ErrorKubernetes, "verify migration", fmt.Sprintf("read PVC %s/%s", volume.SourcePVC.Namespace, volume.SourcePVC.Name), err)
+	}
+	if pvc == nil || pvc.Name == "" {
+		return domain.NewError(domain.ErrorKubernetes, "verify migration", fmt.Sprintf("read PVC %s/%s returned an empty object", volume.SourcePVC.Namespace, volume.SourcePVC.Name))
+	}
+	if pvc.Status.Phase != corev1.ClaimBound || pvc.Spec.VolumeName != volume.DestinationPV.Name || pvc.Annotations[kube.SessionKey] != session.ID {
+		return domain.NewError(domain.ErrorConflict, "verify migration", fmt.Sprintf("PVC %s/%s is not active on destination PV %s", pvc.Namespace, pvc.Name, volume.DestinationPV.Name))
+	}
+	active := session.Status.Volumes[index].Activation.ActivePVC
+	if active.UID != "" && pvc.UID != active.UID {
+		return domain.NewError(domain.ErrorConflict, "verify migration", fmt.Sprintf("active PVC %s/%s UID changed", pvc.Namespace, pvc.Name))
+	}
+	if active.UID != "" && volume.DestinationPV.UID != "" {
+		pv, err := s.client.CoreV1().PersistentVolumes().Get(ctx, volume.DestinationPV.Name, metav1.GetOptions{})
+		if err != nil {
+			return domain.WrapError(domain.ErrorKubernetes, "verify migration", fmt.Sprintf("read active PV %s", volume.DestinationPV.Name), err)
 		}
-		active := session.Status.Volumes[index].Activation.ActivePVC
-		if active.UID != "" && pvc.UID != active.UID {
-			return domain.NewError(domain.ErrorConflict, "verify migration", fmt.Sprintf("active PVC %s/%s UID changed", pvc.Namespace, pvc.Name))
+		if pv == nil || pv.Name == "" {
+			return domain.NewError(domain.ErrorKubernetes, "verify migration", fmt.Sprintf("read active PV %s returned an empty object", volume.DestinationPV.Name))
 		}
-		if active.UID != "" && volume.DestinationPV.UID != "" {
-			pv, err := s.client.CoreV1().PersistentVolumes().Get(ctx, volume.DestinationPV.Name, metav1.GetOptions{})
-			if err != nil {
-				return domain.WrapError(domain.ErrorKubernetes, "verify migration", fmt.Sprintf("read active PV %s", volume.DestinationPV.Name), err)
-			}
-			if pv.UID != volume.DestinationPV.UID || pv.Spec.ClaimRef == nil || pv.Spec.ClaimRef.Namespace != pvc.Namespace || pv.Spec.ClaimRef.Name != pvc.Name || pv.Spec.ClaimRef.UID != pvc.UID {
-				return domain.NewError(domain.ErrorConflict, "verify migration", fmt.Sprintf("active PV %s identity or claimRef changed", pv.Name))
-			}
+		if pv.UID != volume.DestinationPV.UID || pv.Spec.ClaimRef == nil || pv.Spec.ClaimRef.Namespace != pvc.Namespace || pv.Spec.ClaimRef.Name != pvc.Name || pv.Spec.ClaimRef.UID != pvc.UID {
+			return domain.NewError(domain.ErrorConflict, "verify migration", fmt.Sprintf("active PV %s identity or claimRef changed", pv.Name))
 		}
 	}
 	return nil

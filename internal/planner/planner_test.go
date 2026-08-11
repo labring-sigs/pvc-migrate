@@ -3,6 +3,7 @@ package planner
 import (
 	"context"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/labring-sigs/pvc-migrate/internal/controller"
@@ -125,6 +126,91 @@ func TestCopySupportsOfflineAndOnlineModesAcrossNamespaces(t *testing.T) {
 	}
 	if !selectedPod.Ready || selectedPod.Workload.Adapter != domain.WorkloadNone || selectedPod.SessionSpec.WorkflowOptions().SourceNode != "node-a" {
 		t.Fatalf("pod copy plan=%#v", selectedPod)
+	}
+}
+
+func TestPlanPodReadsTheSourcePodOnce(t *testing.T) {
+	objects := plannerObjects("2Gi")
+	objects = append(objects,
+		&corev1.ServiceAccount{ObjectMeta: metav1.ObjectMeta{Namespace: "app", Name: "default"}},
+		&corev1.Pod{
+			ObjectMeta: metav1.ObjectMeta{Namespace: "app", Name: "writer"},
+			Spec: corev1.PodSpec{
+				NodeName: "node-b",
+				Volumes: []corev1.Volume{{Name: "data", VolumeSource: corev1.VolumeSource{
+					PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: "data"},
+				}}},
+			},
+		},
+	)
+	client := plannerClient(objects...)
+	var podGets atomic.Int32
+	client.PrependReactor("get", "pods", func(action clienttesting.Action) (bool, runtime.Object, error) {
+		if getAction, ok := action.(clienttesting.GetAction); ok && getAction.GetName() == "writer" {
+			podGets.Add(1)
+		}
+		return false, nil, nil
+	})
+	_, err := New(client, nil).Plan(context.Background(), Options{
+		Operation:            domain.OperationCopy,
+		SessionID:            "copy-pod",
+		SourceNamespace:      "app",
+		TemporaryNamespace:   "system",
+		DestinationNamespace: "system",
+		StagingNamespace:     "system",
+		SessionNamespace:     "system",
+		PodName:              "writer",
+		TargetNode:           "node-b",
+		DestinationClass:     "fast",
+		Online:               true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if podGets.Load() != 1 {
+		t.Fatalf("source Pod GETs = %d, want 1", podGets.Load())
+	}
+}
+
+func TestPlanHandlesEmptyInventoryObjects(t *testing.T) {
+	tests := []struct {
+		name     string
+		resource string
+		object   string
+		check    string
+	}{
+		{name: "PVC", resource: "persistentvolumeclaims", object: "data", check: "source-pvc"},
+		{name: "PV", resource: "persistentvolumes", object: "pv-source", check: "source-pv"},
+		{name: "target node", resource: "nodes", object: "node-b", check: "target-node"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			client := plannerClient(plannerObjects("2Gi")...)
+			client.PrependReactor("get", test.resource, func(action clienttesting.Action) (bool, runtime.Object, error) {
+				getAction, ok := action.(clienttesting.GetAction)
+				if ok && getAction.GetName() == test.object {
+					return true, nil, nil
+				}
+				return false, nil, nil
+			})
+			plan, err := New(client, nil).Plan(context.Background(), Options{
+				SessionID:            "empty-object",
+				SourceNamespace:      "app",
+				TemporaryNamespace:   "system",
+				DestinationNamespace: "system",
+				StagingNamespace:     "system",
+				SessionNamespace:     "system",
+				SourcePVCs:           []string{"data"},
+				TargetNode:           "node-b",
+				DestinationClass:     "fast",
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if plan.Ready || !hasFailedCheck(plan, test.check) {
+				t.Fatalf("plan checks=%#v", plan.Checks)
+			}
+		})
 	}
 }
 

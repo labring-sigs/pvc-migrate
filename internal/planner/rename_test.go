@@ -12,6 +12,8 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/kubernetes"
+	coretyped "k8s.io/client-go/kubernetes/typed/core/v1"
 	clienttesting "k8s.io/client-go/testing"
 )
 
@@ -92,6 +94,52 @@ func TestPlanRenameRequiresOfflinePVC(t *testing.T) {
 	if plan.Ready || !hasFailedCheck(plan, "rename-offline") {
 		t.Fatalf("checks=%#v", plan.Checks)
 	}
+}
+
+func TestPlanRenameFailsOnEmptyPodList(t *testing.T) {
+	base := plannerClient(plannerObjects("2Gi")...)
+	for _, operation := range []domain.Operation{domain.OperationRename, domain.OperationMove} {
+		t.Run(string(operation), func(t *testing.T) {
+			options := RenameOptions{
+				Operation: operation, SessionID: "empty-pods-" + strings.ToLower(string(operation)), SourceNamespace: "app", SourcePVC: "data",
+				DestinationNamespace: "app", DestinationPVC: "renamed", SessionNamespace: "system",
+			}
+			if operation == domain.OperationMove {
+				options.DestinationNamespace = "system"
+			}
+			plan, err := New(&nilPodListClient{Interface: base}, nil).PlanRename(context.Background(), options)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if plan.Ready || !hasFailedCheck(plan, "pvc-consumers") {
+				t.Fatalf("empty PodList must fail closed: checks=%#v", plan.Checks)
+			}
+		})
+	}
+}
+
+type nilPodListClient struct {
+	kubernetes.Interface
+}
+
+func (c *nilPodListClient) CoreV1() coretyped.CoreV1Interface {
+	return &nilPodListCore{CoreV1Interface: c.Interface.CoreV1()}
+}
+
+type nilPodListCore struct {
+	coretyped.CoreV1Interface
+}
+
+func (c *nilPodListCore) Pods(namespace string) coretyped.PodInterface {
+	return &nilPodListPods{PodInterface: c.CoreV1Interface.Pods(namespace)}
+}
+
+type nilPodListPods struct {
+	coretyped.PodInterface
+}
+
+func (c *nilPodListPods) List(context.Context, metav1.ListOptions) (*corev1.PodList, error) {
+	return nil, nil
 }
 
 func TestPlanMoveCrossNamespaceRejectsOwnersAndAccountsForStorage(t *testing.T) {
