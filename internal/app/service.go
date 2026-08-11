@@ -483,9 +483,13 @@ func (s *Service) ValidateCleanup(ctx context.Context, session *domain.Session, 
 		volumeValue := session.Spec.Volumes[index]
 		volume := &volumeValue
 		if !session.Spec.Operation().RebindsPVC() && (options.DeleteTemporary || options.DeleteRollback || options.DeleteSession) {
-			if err := s.discoverDestinationRefs(ctx, session.ID, volume); err != nil {
+			recoverySession := *session
+			recoverySession.Spec.Volumes = slices.Clone(session.Spec.Volumes)
+			recoverySession.Spec.Volumes[index] = volumeValue
+			if _, err := s.discoverDestinationRefs(ctx, &recoverySession, index); err != nil {
 				return err
 			}
+			volume = &recoverySession.Spec.Volumes[index]
 		}
 		active, rollback, policy := cleanupPVRefs(session, volume)
 		if options.DeleteSession && rollback.Name != "" && !options.DeleteRollback && !preservesCopyOutput(session, options) {
@@ -512,7 +516,11 @@ func (s *Service) ValidateCleanup(ctx context.Context, session *domain.Session, 
 			case err != nil:
 				return domain.WrapError(domain.ErrorKubernetes, "cleanup dry-run", fmt.Sprintf("read rollback PV %s", rollback.Name), err)
 			default:
-				if pv.UID != rollback.UID || pv.Labels[kube.SessionKey] != session.ID || pv.Labels[kube.ResourceRoleLabel] != expectedRole {
+				var uncheckpointedClaim *domain.ObjectReference
+				if uncheckpointedDestination(session, index) {
+					uncheckpointedClaim = &volume.DestinationPVC
+				}
+				if !cleanupPVIdentityMatches(pv, rollback, session.ID, expectedRole, uncheckpointedClaim) {
 					return domain.NewError(domain.ErrorConflict, "cleanup dry-run", fmt.Sprintf("PV %s identity, ownership, or role changed", pv.Name))
 				}
 				if pv.Status.Phase != corev1.VolumeReleased && pv.Status.Phase != corev1.VolumeAvailable {
@@ -839,6 +847,19 @@ func (s *Service) Migrate(ctx context.Context, session *domain.Session, warmPass
 	})
 }
 
+func (s *Service) migrateAfterWarmCopy(ctx context.Context, session *domain.Session) error {
+	if err := s.Pause(ctx, session); err != nil {
+		return err
+	}
+	if err := s.FinalSync(ctx, session); err != nil {
+		return err
+	}
+	if err := s.Activate(ctx, session); err != nil {
+		return err
+	}
+	return s.ResumeWorkload(ctx, session)
+}
+
 func (s *Service) migrate(ctx context.Context, session *domain.Session, warmPasses int) error {
 	if warmPasses < 0 {
 		return domain.NewError(domain.ErrorValidation, "migrate", "warm passes must be non-negative")
@@ -851,16 +872,7 @@ func (s *Service) migrate(ctx context.Context, session *domain.Session, warmPass
 			return err
 		}
 	}
-	if err := s.Pause(ctx, session); err != nil {
-		return err
-	}
-	if err := s.FinalSync(ctx, session); err != nil {
-		return err
-	}
-	if err := s.Activate(ctx, session); err != nil {
-		return err
-	}
-	return s.ResumeWorkload(ctx, session)
+	return s.migrateAfterWarmCopy(ctx, session)
 }
 
 func (s *Service) ResumeSession(ctx context.Context, session *domain.Session) error {
@@ -942,9 +954,9 @@ func (s *Service) resumeSession(ctx context.Context, session *domain.Session) er
 		if err := s.WarmCopy(ctx, session); err != nil {
 			return err
 		}
-		return s.Migrate(ctx, session, 0)
+		return s.migrateAfterWarmCopy(ctx, session)
 	case domain.PhaseWarmCopied, domain.PhasePausing:
-		return s.Migrate(ctx, session, 0)
+		return s.migrateAfterWarmCopy(ctx, session)
 	case domain.PhasePaused, domain.PhaseFinalSyncing:
 		if err := s.FinalSync(ctx, session); err != nil {
 			return err

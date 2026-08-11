@@ -970,6 +970,26 @@ func TestResumeSessionCompletesEveryCompositeMigrationStage(t *testing.T) {
 	}
 }
 
+func TestResumeFailedCompositePausingContinuesFromPause(t *testing.T) {
+	service, session, controller, _ := appTestService(t, &fakeCopier{})
+	if err := service.Reserve(context.Background(), session); err != nil {
+		t.Fatal(err)
+	}
+	transitionThrough(t, session, domain.PhaseWarmCopying, domain.PhaseWarmCopied)
+	session.Status.Phase = domain.PhaseFailed
+	session.Status.ResumeFrom = domain.PhasePausing
+
+	if err := service.ResumeSession(context.Background(), session); err != nil {
+		t.Fatal(err)
+	}
+	if session.Status.Phase != domain.PhaseCompleted {
+		t.Fatalf("phase=%s", session.Status.Phase)
+	}
+	if controller.paused != 1 || controller.resumed != 1 {
+		t.Fatalf("pause calls=%d resume calls=%d", controller.paused, controller.resumed)
+	}
+}
+
 func TestResumeSessionDispatchesSingleOperationStages(t *testing.T) {
 	tests := []struct {
 		name      string

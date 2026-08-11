@@ -240,6 +240,252 @@ func TestCleanupRecoversDestinationRefsAfterCheckpointLoss(t *testing.T) {
 	}
 }
 
+func TestCleanupRecoversUncheckpointedProvisionedDestinationPV(t *testing.T) {
+	ctx := context.Background()
+	session := appTestSession()
+	session.Status.Phase = domain.PhaseAborted
+	session.Spec.Volumes[0].SourceReclaimPolicy = corev1.PersistentVolumeReclaimDelete
+	pvcUID := types.UID("uncheckpointed-destination-pvc-uid")
+	pvUID := types.UID("uncheckpointed-destination-pv-uid")
+	pvc := &corev1.PersistentVolumeClaim{ObjectMeta: metav1.ObjectMeta{
+		Namespace:       session.Spec.Volumes[0].DestinationPVC.Namespace,
+		Name:            session.Spec.Volumes[0].DestinationPVC.Name,
+		UID:             pvcUID,
+		ResourceVersion: "1",
+		Labels: map[string]string{
+			kube.ManagedByLabel:    kube.ManagedByValue,
+			kube.SessionKey:        session.ID,
+			kube.ResourceRoleLabel: kube.ResourceRoleDestination,
+		},
+		Annotations: map[string]string{
+			kube.SessionKey:             session.ID,
+			kube.SourcePVCUIDAnnotation: string(session.Spec.Volumes[0].SourcePVC.UID),
+		},
+	}, Spec: corev1.PersistentVolumeClaimSpec{VolumeName: "pv-uncheckpointed"}}
+	pv := &corev1.PersistentVolume{
+		ObjectMeta: metav1.ObjectMeta{Name: "pv-uncheckpointed", UID: pvUID, ResourceVersion: "1"},
+		Spec: corev1.PersistentVolumeSpec{
+			ClaimRef:                      &corev1.ObjectReference{Namespace: pvc.Namespace, Name: pvc.Name, UID: pvcUID},
+			PersistentVolumeReclaimPolicy: corev1.PersistentVolumeReclaimDelete,
+		},
+		Status: corev1.PersistentVolumeStatus{Phase: corev1.VolumeReleased},
+	}
+	sourcePVC := &corev1.PersistentVolumeClaim{ObjectMeta: metav1.ObjectMeta{
+		Namespace: session.Spec.Volumes[0].SourcePVC.Namespace,
+		Name:      session.Spec.Volumes[0].SourcePVC.Name,
+		UID:       session.Spec.Volumes[0].SourcePVC.UID,
+		Annotations: map[string]string{
+			kube.SessionKey: session.ID,
+		},
+	}}
+	sourcePV := managedPV(session.Spec.Volumes[0].SourcePV.Name, string(session.Spec.Volumes[0].SourcePV.UID), session.ID, kube.ResourceRoleSource, corev1.VolumeBound)
+	sourcePV.Spec.PersistentVolumeReclaimPolicy = corev1.PersistentVolumeReclaimRetain
+	client := fake.NewClientset(pvc, pv, sourcePVC, sourcePV)
+	store := &memoryStore{}
+	service := &Service{client: client, store: store}
+	options := CleanupOptions{DeleteTemporary: true, DeleteRollback: true, Finalize: true, DeleteSession: true}
+
+	if err := service.ValidateCleanup(ctx, session, options); err != nil {
+		t.Fatalf("validate cleanup: %v", err)
+	}
+	if err := service.Cleanup(ctx, session, options); err != nil {
+		t.Fatalf("cleanup: %v", err)
+	}
+	if _, err := client.CoreV1().PersistentVolumeClaims(pvc.Namespace).Get(ctx, pvc.Name, metav1.GetOptions{}); !apierrors.IsNotFound(err) {
+		t.Fatalf("temporary PVC still exists: %v", err)
+	}
+	if _, err := client.CoreV1().PersistentVolumes().Get(ctx, pv.Name, metav1.GetOptions{}); !apierrors.IsNotFound(err) {
+		t.Fatalf("uncheckpointed destination PV still exists: %v", err)
+	}
+	if store.deletes != 1 {
+		t.Fatalf("session deletes=%d", store.deletes)
+	}
+}
+
+type cleanupCheckpointStore struct {
+	memoryStore
+	snapshot *domain.Session
+}
+
+func (s *cleanupCheckpointStore) Update(ctx context.Context, session *domain.Session) error {
+	snapshot := *session
+	snapshot.Spec = session.Spec
+	snapshot.Spec.Volumes = append([]domain.VolumeSpec(nil), session.Spec.Volumes...)
+	s.snapshot = &snapshot
+	return s.memoryStore.Update(ctx, session)
+}
+
+func TestCleanupPersistsRecoveredRefsBeforeRetryableDeletion(t *testing.T) {
+	ctx := context.Background()
+	session := appTestSession()
+	session.Status.Phase = domain.PhaseAborted
+	pvcUID := types.UID("retry-destination-pvc-uid")
+	pvc := &corev1.PersistentVolumeClaim{ObjectMeta: metav1.ObjectMeta{
+		Namespace: session.Spec.Volumes[0].DestinationPVC.Namespace,
+		Name:      session.Spec.Volumes[0].DestinationPVC.Name,
+		UID:       pvcUID,
+		Labels: map[string]string{
+			kube.ManagedByLabel:    kube.ManagedByValue,
+			kube.SessionKey:        session.ID,
+			kube.ResourceRoleLabel: kube.ResourceRoleDestination,
+		},
+		Annotations: map[string]string{
+			kube.SessionKey:             session.ID,
+			kube.SourcePVCUIDAnnotation: string(session.Spec.Volumes[0].SourcePVC.UID),
+		},
+	}, Spec: corev1.PersistentVolumeClaimSpec{VolumeName: "pv-retry"}}
+	pv := &corev1.PersistentVolume{
+		ObjectMeta: metav1.ObjectMeta{Name: "pv-retry", UID: types.UID("retry-destination-pv-uid")},
+		Spec: corev1.PersistentVolumeSpec{
+			ClaimRef:                      &corev1.ObjectReference{Namespace: pvc.Namespace, Name: pvc.Name, UID: pvcUID},
+			PersistentVolumeReclaimPolicy: corev1.PersistentVolumeReclaimDelete,
+		},
+		Status: corev1.PersistentVolumeStatus{Phase: corev1.VolumeReleased},
+	}
+	client := fake.NewClientset(pvc, pv)
+	deleteFailed := false
+	client.PrependReactor("delete", "persistentvolumes", func(action clienttesting.Action) (bool, runtime.Object, error) {
+		deleteAction := action.(clienttesting.DeleteAction)
+		if !deleteFailed && deleteAction.GetName() == pv.Name {
+			deleteFailed = true
+			return true, nil, errors.New("injected PV delete failure")
+		}
+		return false, nil, nil
+	})
+	store := &cleanupCheckpointStore{}
+	service := &Service{client: client, store: store}
+
+	if err := service.Cleanup(ctx, session, CleanupOptions{DeleteTemporary: true, DeleteRollback: true}); domain.CategoryOf(err) != domain.ErrorKubernetes {
+		t.Fatalf("first cleanup category=%s error=%v", domain.CategoryOf(err), err)
+	}
+	if _, err := client.CoreV1().PersistentVolumeClaims(pvc.Namespace).Get(ctx, pvc.Name, metav1.GetOptions{}); !apierrors.IsNotFound(err) {
+		t.Fatalf("destination PVC still exists after first cleanup: %v", err)
+	}
+	if store.snapshot == nil || store.snapshot.Spec.Volumes[0].DestinationPVC.UID != pvcUID || store.snapshot.Spec.Volumes[0].DestinationPV.Name != pv.Name {
+		t.Fatalf("recovered references were not checkpointed: %#v", store.snapshot)
+	}
+
+	reloaded := *store.snapshot
+	service = &Service{client: client, store: store}
+	if err := service.Cleanup(ctx, &reloaded, CleanupOptions{DeleteTemporary: true, DeleteRollback: true}); err != nil {
+		t.Fatalf("retry cleanup: %v", err)
+	}
+	if _, err := client.CoreV1().PersistentVolumes().Get(ctx, pv.Name, metav1.GetOptions{}); !apierrors.IsNotFound(err) {
+		t.Fatalf("destination PV still exists after retry: %v", err)
+	}
+}
+
+type checkpointFailureStore struct {
+	memoryStore
+	err error
+}
+
+func (s *checkpointFailureStore) Update(context.Context, *domain.Session) error {
+	s.updates++
+	return s.err
+}
+
+func TestCleanupStopsWhenRecoveredRefsCheckpointFails(t *testing.T) {
+	ctx := context.Background()
+	session := appTestSession()
+	session.Status.Phase = domain.PhaseAborted
+	pvcUID := types.UID("checkpoint-failure-pvc-uid")
+	pvc := &corev1.PersistentVolumeClaim{ObjectMeta: metav1.ObjectMeta{
+		Namespace: session.Spec.Volumes[0].DestinationPVC.Namespace,
+		Name:      session.Spec.Volumes[0].DestinationPVC.Name,
+		UID:       pvcUID,
+		Labels: map[string]string{
+			kube.ManagedByLabel:    kube.ManagedByValue,
+			kube.SessionKey:        session.ID,
+			kube.ResourceRoleLabel: kube.ResourceRoleDestination,
+		},
+		Annotations: map[string]string{
+			kube.SessionKey:             session.ID,
+			kube.SourcePVCUIDAnnotation: string(session.Spec.Volumes[0].SourcePVC.UID),
+		},
+	}, Spec: corev1.PersistentVolumeClaimSpec{VolumeName: "pv-checkpoint-failure"}}
+	pv := managedPV("pv-checkpoint-failure", "checkpoint-failure-pv-uid", session.ID, kube.ResourceRoleDestination, corev1.VolumeReleased)
+	pv.Spec.ClaimRef = &corev1.ObjectReference{Namespace: pvc.Namespace, Name: pvc.Name, UID: pvcUID}
+	store := &checkpointFailureStore{err: domain.NewError(domain.ErrorKubernetes, "cleanup", "checkpoint recovered references")}
+	service := &Service{client: fake.NewClientset(pvc, pv), store: store}
+
+	if err := service.Cleanup(ctx, session, CleanupOptions{DeleteTemporary: true, DeleteRollback: true}); domain.CategoryOf(err) != domain.ErrorKubernetes {
+		t.Fatalf("category=%s error=%v", domain.CategoryOf(err), err)
+	}
+	if store.updates != 1 {
+		t.Fatalf("checkpoint updates=%d", store.updates)
+	}
+	if session.Spec.Volumes[0].DestinationPVC.UID != "" || session.Spec.Volumes[0].DestinationPV.Name != "" {
+		t.Fatalf("session references changed after checkpoint failure: %#v", session.Spec.Volumes[0])
+	}
+	if _, err := service.client.CoreV1().PersistentVolumeClaims(pvc.Namespace).Get(ctx, pvc.Name, metav1.GetOptions{}); err != nil {
+		t.Fatalf("destination PVC changed after checkpoint failure: %v", err)
+	}
+	if _, err := service.client.CoreV1().PersistentVolumes().Get(ctx, pv.Name, metav1.GetOptions{}); err != nil {
+		t.Fatalf("destination PV changed after checkpoint failure: %v", err)
+	}
+	if err := service.Cleanup(ctx, session, CleanupOptions{DeleteTemporary: true, DeleteRollback: true}); domain.CategoryOf(err) != domain.ErrorKubernetes {
+		t.Fatalf("retry category=%s error=%v", domain.CategoryOf(err), err)
+	}
+	if store.updates != 2 {
+		t.Fatalf("retry checkpoint updates=%d", store.updates)
+	}
+	if _, err := service.client.CoreV1().PersistentVolumeClaims(pvc.Namespace).Get(ctx, pvc.Name, metav1.GetOptions{}); err != nil {
+		t.Fatalf("destination PVC changed after retry checkpoint failure: %v", err)
+	}
+	if _, err := service.client.CoreV1().PersistentVolumes().Get(ctx, pv.Name, metav1.GetOptions{}); err != nil {
+		t.Fatalf("destination PV changed after retry checkpoint failure: %v", err)
+	}
+}
+
+func TestCleanupRejectsUncheckpointedDestinationPVWithUnsafeIdentity(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		mutate func(*corev1.PersistentVolume)
+	}{
+		{name: "retain policy", mutate: func(pv *corev1.PersistentVolume) {
+			pv.Spec.PersistentVolumeReclaimPolicy = corev1.PersistentVolumeReclaimRetain
+		}},
+		{name: "foreign session", mutate: func(pv *corev1.PersistentVolume) { pv.Labels = map[string]string{kube.SessionKey: "other"} }},
+		{name: "foreign manager", mutate: func(pv *corev1.PersistentVolume) {
+			pv.Labels = map[string]string{kube.ManagedByLabel: "external-controller"}
+		}},
+		{name: "claim UID changed", mutate: func(pv *corev1.PersistentVolume) { pv.Spec.ClaimRef.UID = types.UID("replacement") }},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			session := appTestSession()
+			session.Status.Phase = domain.PhaseAborted
+			pvcUID := types.UID("destination-pvc-uid")
+			pvc := &corev1.PersistentVolumeClaim{ObjectMeta: metav1.ObjectMeta{
+				Namespace: session.Spec.Volumes[0].DestinationPVC.Namespace,
+				Name:      session.Spec.Volumes[0].DestinationPVC.Name,
+				UID:       pvcUID,
+				Labels: map[string]string{
+					kube.ManagedByLabel: kube.ManagedByValue, kube.SessionKey: session.ID, kube.ResourceRoleLabel: kube.ResourceRoleDestination,
+				},
+				Annotations: map[string]string{kube.SessionKey: session.ID, kube.SourcePVCUIDAnnotation: string(session.Spec.Volumes[0].SourcePVC.UID)},
+			}, Spec: corev1.PersistentVolumeClaimSpec{VolumeName: "pv-uncheckpointed"}}
+			pv := &corev1.PersistentVolume{
+				ObjectMeta: metav1.ObjectMeta{Name: "pv-uncheckpointed", UID: types.UID("destination-pv-uid")},
+				Spec: corev1.PersistentVolumeSpec{
+					ClaimRef:                      &corev1.ObjectReference{Namespace: pvc.Namespace, Name: pvc.Name, UID: pvcUID},
+					PersistentVolumeReclaimPolicy: corev1.PersistentVolumeReclaimDelete,
+				},
+			}
+			test.mutate(pv)
+			service := &Service{client: fake.NewClientset(pvc, pv), store: &memoryStore{}}
+
+			err := service.Cleanup(context.Background(), session, CleanupOptions{DeleteTemporary: true, DeleteRollback: true})
+			if domain.CategoryOf(err) != domain.ErrorConflict {
+				t.Fatalf("category=%s error=%v", domain.CategoryOf(err), err)
+			}
+			if _, err := service.client.CoreV1().PersistentVolumeClaims(pvc.Namespace).Get(context.Background(), pvc.Name, metav1.GetOptions{}); err != nil {
+				t.Fatalf("protected PVC: %v", err)
+			}
+		})
+	}
+}
+
 func TestCleanupSessionDeletionRequiresDiscoveredRollbackPV(t *testing.T) {
 	ctx := context.Background()
 	session := appTestSession()
@@ -527,7 +773,7 @@ func TestCleanupWaitsForBoundPVAfterClaimDeletion(t *testing.T) {
 	})
 	service := &Service{client: client, store: &memoryStore{}}
 
-	err := service.deleteRollbackPV(context.Background(), "session-123", domain.ObjectReference{Name: pv.Name, UID: pv.UID}, "destination")
+	err := service.deleteRollbackPV(context.Background(), "session-123", domain.ObjectReference{Name: pv.Name, UID: pv.UID}, "destination", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
