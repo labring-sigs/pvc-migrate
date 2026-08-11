@@ -108,16 +108,32 @@ func Preflight(ctx context.Context, client kubernetes.Interface, req Request, re
 	if err != nil {
 		return nil, err
 	}
-	info, err := inspectPVC(ctx, client, req.Namespace, req.PVCName, req.Online, req.AllowMounted, restore)
-	if err != nil {
-		return nil, err
+	var (
+		info        *PVCInfo
+		infoErr     error
+		quotaErr    error
+		manifest    *objectstore.Manifest
+		manifestErr error
+	)
+	var wg sync.WaitGroup
+	wg.Go(func() {
+		info, infoErr = inspectPVC(ctx, client, req.Namespace, req.PVCName, req.Online, req.AllowMounted, restore)
+	})
+	wg.Go(func() {
+		quotaErr = checkHelperQuota(ctx, client, req.Namespace)
+	})
+	wg.Go(func() {
+		manifest, manifestErr = req.Store.Manifest(ctx)
+	})
+	wg.Wait()
+	if infoErr != nil {
+		return nil, infoErr
 	}
-	if err := checkHelperQuota(ctx, client, req.Namespace); err != nil {
-		return nil, err
+	if quotaErr != nil {
+		return nil, quotaErr
 	}
-	manifest, err := req.Store.Manifest(ctx)
-	if err != nil {
-		return nil, err
+	if manifestErr != nil {
+		return nil, manifestErr
 	}
 	plan := &Plan{
 		Operation:        "backup",
@@ -640,9 +656,25 @@ func classifySyncError(ctx context.Context, operation string, err error) error {
 }
 
 func inspectPVC(ctx context.Context, client kubernetes.Interface, namespace, name string, online, allowMounted, restore bool) (*PVCInfo, error) {
-	pvc, err := client.CoreV1().PersistentVolumeClaims(namespace).Get(ctx, name, metav1.GetOptions{})
-	if err != nil {
-		return nil, domain.WrapError(domain.ErrorKubernetes, "backup preflight", "read PVC", err)
+	var (
+		pvc                          *corev1.PersistentVolumeClaim
+		pvcErr                       error
+		consumerNames, consumerNodes []string
+		consumerErr                  error
+	)
+	var wg sync.WaitGroup
+	wg.Go(func() {
+		pvc, pvcErr = client.CoreV1().PersistentVolumeClaims(namespace).Get(ctx, name, metav1.GetOptions{})
+	})
+	wg.Go(func() {
+		consumerNames, consumerNodes, consumerErr = pvcConsumerDetails(ctx, client, namespace, name)
+	})
+	wg.Wait()
+	if pvcErr != nil {
+		return nil, domain.WrapError(domain.ErrorKubernetes, "backup preflight", "read PVC", pvcErr)
+	}
+	if pvc == nil || pvc.Name == "" {
+		return nil, domain.NewError(domain.ErrorKubernetes, "backup preflight", fmt.Sprintf("read PVC %s/%s returned an empty object", namespace, name))
 	}
 	if pvc.Status.Phase != corev1.ClaimBound || pvc.Spec.VolumeName == "" {
 		return nil, domain.NewError(domain.ErrorPrecondition, "backup preflight", fmt.Sprintf("PVC %s/%s must be Bound", namespace, name))
@@ -658,13 +690,15 @@ func inspectPVC(ctx context.Context, client kubernetes.Interface, namespace, nam
 	if err != nil {
 		return nil, domain.WrapError(domain.ErrorKubernetes, "backup preflight", "read PV", err)
 	}
+	if pv == nil || pv.Name == "" {
+		return nil, domain.NewError(domain.ErrorKubernetes, "backup preflight", fmt.Sprintf("read PV %s returned an empty object", pvc.Spec.VolumeName))
+	}
 	capacity, ok := pv.Spec.Capacity[corev1.ResourceStorage]
 	if !ok || capacity.Sign() <= 0 {
 		return nil, domain.NewError(domain.ErrorPrecondition, "backup preflight", "PV has no positive storage capacity")
 	}
-	consumerNames, consumerNodes, err := pvcConsumerDetails(ctx, client, namespace, name)
-	if err != nil {
-		return nil, err
+	if consumerErr != nil {
+		return nil, consumerErr
 	}
 	switch {
 	case restore:
@@ -686,9 +720,22 @@ func inspectPVC(ctx context.Context, client kubernetes.Interface, namespace, nam
 }
 
 func checkHelperQuota(ctx context.Context, client kubernetes.Interface, namespace string) error {
-	quotas, err := client.CoreV1().ResourceQuotas(namespace).List(ctx, metav1.ListOptions{})
-	if err != nil {
-		return domain.WrapError(domain.ErrorKubernetes, "backup preflight", "list helper ResourceQuotas", err)
+	var quotas *corev1.ResourceQuotaList
+	var limitRanges *corev1.LimitRangeList
+	var quotaErr, limitRangeErr error
+	var wg sync.WaitGroup
+	wg.Go(func() {
+		quotas, quotaErr = client.CoreV1().ResourceQuotas(namespace).List(ctx, metav1.ListOptions{})
+	})
+	wg.Go(func() {
+		limitRanges, limitRangeErr = client.CoreV1().LimitRanges(namespace).List(ctx, metav1.ListOptions{})
+	})
+	wg.Wait()
+	if quotaErr != nil {
+		return domain.WrapError(domain.ErrorKubernetes, "backup preflight", "list helper ResourceQuotas", quotaErr)
+	}
+	if quotas == nil {
+		return domain.NewError(domain.ErrorKubernetes, "backup preflight", "list helper ResourceQuotas returned an empty object")
 	}
 	demand := helperQuotaDemand()
 	violations := make([]string, 0)
@@ -717,9 +764,11 @@ func checkHelperQuota(ctx context.Context, client kubernetes.Interface, namespac
 		sort.Strings(violations)
 		return domain.NewError(domain.ErrorPrecondition, "backup preflight", "helper resources exceed namespace quota: "+strings.Join(violations, "; "))
 	}
-	limitRanges, err := client.CoreV1().LimitRanges(namespace).List(ctx, metav1.ListOptions{})
-	if err != nil {
-		return domain.WrapError(domain.ErrorKubernetes, "backup preflight", "list helper LimitRanges", err)
+	if limitRangeErr != nil {
+		return domain.WrapError(domain.ErrorKubernetes, "backup preflight", "list helper LimitRanges", limitRangeErr)
+	}
+	if limitRanges == nil {
+		return domain.NewError(domain.ErrorKubernetes, "backup preflight", "list helper LimitRanges returned an empty object")
 	}
 	for _, limitRange := range limitRanges.Items {
 		for _, item := range limitRange.Spec.Limits {
@@ -775,6 +824,9 @@ func pvcConsumerDetails(ctx context.Context, client kubernetes.Interface, namesp
 	pods, err := client.CoreV1().Pods(namespace).List(ctx, metav1.ListOptions{})
 	if err != nil {
 		return nil, nil, domain.WrapError(domain.ErrorKubernetes, "backup preflight", "list PVC consumers", err)
+	}
+	if pods == nil {
+		return nil, nil, domain.NewError(domain.ErrorKubernetes, "backup preflight", "list PVC consumers returned an empty object")
 	}
 	consumers := make([]string, 0)
 	nodes := make([]string, 0)

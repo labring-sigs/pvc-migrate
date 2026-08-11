@@ -11,6 +11,7 @@ import (
 
 	"github.com/labring-sigs/pvc-migrate/internal/domain"
 	"github.com/labring-sigs/pvc-migrate/internal/kube"
+	"github.com/labring-sigs/pvc-migrate/internal/parallel"
 	appsv1 "k8s.io/api/apps/v1"
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -66,6 +67,23 @@ func (m *Manager) Discover(ctx context.Context, options DiscoverOptions) (domain
 	if err != nil {
 		return domain.WorkloadSpec{}, domain.WrapError(domain.ErrorKubernetes, "discover workload", fmt.Sprintf("read Pod %s/%s", options.Namespace, options.PodName), err)
 	}
+	return m.DiscoverPod(ctx, pod, options)
+}
+
+// DiscoverPod resolves a workload from a caller-owned Pod snapshot.
+func (m *Manager) DiscoverPod(ctx context.Context, pod *corev1.Pod, options DiscoverOptions) (domain.WorkloadSpec, error) {
+	if pod == nil {
+		return domain.WorkloadSpec{}, domain.NewError(domain.ErrorValidation, "discover workload", "Pod is nil")
+	}
+	if options.Namespace == "" {
+		options.Namespace = pod.Namespace
+	}
+	if options.PodName == "" {
+		options.PodName = pod.Name
+	}
+	if pod.Namespace != options.Namespace || pod.Name != options.PodName {
+		return domain.WorkloadSpec{}, domain.NewError(domain.ErrorConflict, "discover workload", fmt.Sprintf("Pod snapshot %s/%s does not match requested %s/%s", pod.Namespace, pod.Name, options.Namespace, options.PodName))
+	}
 	if pod.Annotations[corev1.MirrorPodAnnotationKey] != "" {
 		return domain.WorkloadSpec{}, domain.NewError(domain.ErrorPrecondition, "discover workload", "static mirror Pods are unsupported")
 	}
@@ -81,6 +99,7 @@ func (m *Manager) Discover(ctx context.Context, options DiscoverOptions) (domain
 		return domain.WorkloadSpec{}, domain.WrapError(domain.ErrorPrecondition, "discover workload", "parse controller apiVersion", parseErr)
 	}
 	var sts *appsv1.StatefulSet
+	var err error
 	if owner.Kind == domain.KindStatefulSet && groupVersion.Group == appsv1.GroupName {
 		sts, err = m.typed.AppsV1().StatefulSets(options.Namespace).Get(ctx, owner.Name, metav1.GetOptions{})
 		if err != nil {
@@ -212,13 +231,18 @@ func (m *Manager) VerifyPaused(ctx context.Context, session *domain.Session) err
 		references = []domain.ObjectReference{workload.Pod}
 	}
 	seen := make(map[string]struct{}, len(references))
+	uniqueReferences := make([]domain.ObjectReference, 0, len(references))
 	for _, reference := range references {
 		key := reference.Namespace + "/" + reference.Name
 		if _, ok := seen[key]; ok || reference.Name == "" {
 			continue
 		}
 		seen[key] = struct{}{}
-		_, err := m.typed.CoreV1().Pods(reference.Namespace).Get(ctx, reference.Name, metav1.GetOptions{})
+		uniqueReferences = append(uniqueReferences, reference)
+	}
+	_, errors := m.readPodReferences(ctx, uniqueReferences)
+	for index, reference := range uniqueReferences {
+		err := errors[index]
 		if apierrors.IsNotFound(err) {
 			continue
 		}
@@ -228,6 +252,27 @@ func (m *Manager) VerifyPaused(ctx context.Context, session *domain.Session) err
 		return domain.NewError(domain.ErrorPrecondition, "verify paused", fmt.Sprintf("Pod %s/%s is still present", reference.Namespace, reference.Name))
 	}
 	return nil
+}
+
+func (m *Manager) readPodReferences(ctx context.Context, references []domain.ObjectReference) ([]*corev1.Pod, []error) {
+	pods := make([]*corev1.Pod, len(references))
+	errors := make([]error, len(references))
+	parallel.For(len(references), func(index int) {
+		reference := references[index]
+		pods[index], errors[index] = m.typed.CoreV1().Pods(reference.Namespace).Get(ctx, reference.Name, metav1.GetOptions{})
+		if errors[index] == nil && (pods[index] == nil || pods[index].Name == "") {
+			errors[index] = domain.NewError(domain.ErrorKubernetes, "read Pod", fmt.Sprintf("Pod %s/%s returned an empty object", reference.Namespace, reference.Name))
+		}
+	})
+	return pods, errors
+}
+
+func (m *Manager) readPods(ctx context.Context, namespace string, names []string) ([]*corev1.Pod, []error) {
+	references := make([]domain.ObjectReference, len(names))
+	for index, name := range names {
+		references[index] = domain.ObjectReference{Namespace: namespace, Name: name}
+	}
+	return m.readPodReferences(ctx, references)
 }
 
 func (m *Manager) verifyPauseControl(ctx context.Context, session *domain.Session) error {
@@ -385,9 +430,13 @@ func (m *Manager) statefulSetWorkload(ctx context.Context, pod *corev1.Pod, sts 
 		return domain.WorkloadSpec{}, domain.NewError(domain.ErrorPrecondition, "discover StatefulSet", fmt.Sprintf("PVC retention whenScaled is %s", policy.WhenScaled))
 	}
 	affected := make([]domain.ObjectReference, 0, replicas-ordinal)
+	names := make([]string, 0, replicas-ordinal)
 	for current := ordinal; current < replicas; current++ {
-		name := fmt.Sprintf("%s-%d", sts.Name, current)
-		candidate, getErr := m.typed.CoreV1().Pods(pod.Namespace).Get(ctx, name, metav1.GetOptions{})
+		names = append(names, fmt.Sprintf("%s-%d", sts.Name, current))
+	}
+	candidates, getErrors := m.readPods(ctx, pod.Namespace, names)
+	for index, name := range names {
+		candidate, getErr := candidates[index], getErrors[index]
 		if getErr != nil {
 			return domain.WorkloadSpec{}, domain.WrapError(domain.ErrorPrecondition, "discover StatefulSet", fmt.Sprintf("affected Pod %s/%s is unavailable", pod.Namespace, name), getErr)
 		}
@@ -415,9 +464,13 @@ func (m *Manager) victoriaLogsWorkload(ctx context.Context, pod *corev1.Pod, sts
 		return domain.WorkloadSpec{}, domain.NewError(domain.ErrorPrecondition, "discover Victoria Logs", fmt.Sprintf("PVC retention whenScaled is %s", policy.WhenScaled))
 	}
 	affected := make([]domain.ObjectReference, 0, replicas)
+	names := make([]string, 0, replicas)
 	for ordinal := int32(0); ordinal < replicas; ordinal++ {
-		name := fmt.Sprintf("%s-%d", sts.Name, ordinal)
-		candidate, err := m.typed.CoreV1().Pods(pod.Namespace).Get(ctx, name, metav1.GetOptions{})
+		names = append(names, fmt.Sprintf("%s-%d", sts.Name, ordinal))
+	}
+	candidates, getErrors := m.readPods(ctx, pod.Namespace, names)
+	for index, name := range names {
+		candidate, err := candidates[index], getErrors[index]
 		if err != nil {
 			return domain.WorkloadSpec{}, domain.WrapError(domain.ErrorPrecondition, "discover Victoria Logs", fmt.Sprintf("affected Pod %s/%s is unavailable", pod.Namespace, name), err)
 		}
@@ -621,7 +674,7 @@ func (m *Manager) kubeBlocksLeaderGuidance(ctx context.Context, selected *corev1
 
 func (m *Manager) readyKubeBlocksCandidate(ctx context.Context, selected *corev1.Pod, cluster, component string) string {
 	pods, err := m.typed.CoreV1().Pods(selected.Namespace).List(ctx, metav1.ListOptions{})
-	if err != nil {
+	if err != nil || pods == nil {
 		return ""
 	}
 	candidates := make([]string, 0, len(pods.Items))

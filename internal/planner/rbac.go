@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/labring-sigs/pvc-migrate/internal/domain"
+	"github.com/labring-sigs/pvc-migrate/internal/parallel"
 	authorizationv1 "k8s.io/api/authorization/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
@@ -104,8 +105,13 @@ func (p *Planner) checkRenameRBAC(ctx context.Context, plan *domain.MigrationPla
 }
 
 func (p *Planner) checkAccessReviews(ctx context.Context, plan *domain.MigrationPlan, checks []rbacAccess) {
-	denied := make([]string, 0)
-	for _, check := range checks {
+	type result struct {
+		review *authorizationv1.SelfSubjectAccessReview
+		err    error
+	}
+	results := make([]result, len(checks))
+	run := func(index int) {
+		check := checks[index]
 		review, err := p.client.AuthorizationV1().SelfSubjectAccessReviews().Create(ctx, &authorizationv1.SelfSubjectAccessReview{
 			Spec: authorizationv1.SelfSubjectAccessReviewSpec{ResourceAttributes: &authorizationv1.ResourceAttributes{
 				Namespace: check.namespace,
@@ -114,8 +120,31 @@ func (p *Planner) checkAccessReviews(ctx context.Context, plan *domain.Migration
 				Resource:  check.resource,
 			}},
 		}, metav1.CreateOptions{})
-		if err != nil {
+		results[index] = result{review: review, err: err}
+	}
+	if len(checks) == 0 {
+		plan.AddCheck(passed("rbac", "no Kubernetes permissions are required"))
+		return
+	}
+	// Keep the existing fast-fail behavior for an unavailable authorization
+	// endpoint, then fan out the remaining independent reviews.
+	run(0)
+	if results[0].err != nil {
+		plan.AddCheck(failed("rbac", fmt.Sprintf("SelfSubjectAccessReview failed: %v", results[0].err)))
+		return
+	}
+	parallel.For(len(checks)-1, func(index int) {
+		run(index + 1)
+	})
+	denied := make([]string, 0)
+	for index, check := range checks {
+		review := results[index].review
+		if err := results[index].err; err != nil {
 			plan.AddCheck(failed("rbac", fmt.Sprintf("SelfSubjectAccessReview failed: %v", err)))
+			return
+		}
+		if review == nil {
+			plan.AddCheck(failed("rbac", "SelfSubjectAccessReview returned an empty object"))
 			return
 		}
 		if !review.Status.Allowed {

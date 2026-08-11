@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/labring-sigs/pvc-migrate/internal/domain"
@@ -59,6 +60,22 @@ func TestCleanupDeletesReservationPodsAcrossDestinationNamespaces(t *testing.T) 
 		if _, err := client.CoreV1().Pods("system").Get(ctx, name, metav1.GetOptions{}); err != nil {
 			t.Fatalf("unrelated Pod %s: %v", name, err)
 		}
+	}
+}
+
+func TestInspectPVCUnusedFailsOnEmptyPVCObject(t *testing.T) {
+	client := fake.NewClientset()
+	client.PrependReactor("get", "persistentvolumeclaims", func(clienttesting.Action) (bool, runtime.Object, error) {
+		return true, nil, nil
+	})
+	service := &Service{client: client}
+
+	_, err := service.inspectPVCUnused(context.Background(), domain.ObjectReference{Namespace: "app", Name: "data"}, "session-123")
+	if domain.CategoryOf(err) != domain.ErrorKubernetes {
+		t.Fatalf("category=%s error=%v", domain.CategoryOf(err), err)
+	}
+	if !strings.Contains(err.Error(), "PVC app/data returned an empty object") {
+		t.Fatalf("error=%v", err)
 	}
 }
 

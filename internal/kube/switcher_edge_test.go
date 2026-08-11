@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -15,7 +17,10 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/kubernetes/fake"
+	coretyped "k8s.io/client-go/kubernetes/typed/core/v1"
+	storagetyped "k8s.io/client-go/kubernetes/typed/storage/v1"
 	clienttesting "k8s.io/client-go/testing"
 )
 
@@ -55,6 +60,38 @@ func TestVerifyVolumeOfflineChecksSourceAndDestinationConsumers(t *testing.T) {
 	switcher, _, volume, _ := switcherFixture(t)
 	if err := switcher.VerifyVolumeOffline(context.Background(), volume); err != nil {
 		t.Fatalf("offline volume: %v", err)
+	}
+}
+
+func TestVerifyVolumeOfflineReturnsConsumerBeforeAttachmentTimeout(t *testing.T) {
+	switcher, _, volume, _ := switcherFixture(t)
+	client := switcher.client.(*fake.Clientset)
+	if _, err := client.CoreV1().Pods(volume.SourcePVC.Namespace).Create(context.Background(), &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Namespace: volume.SourcePVC.Namespace, Name: "consumer"},
+		Spec: corev1.PodSpec{Volumes: []corev1.Volume{{
+			Name:         "data",
+			VolumeSource: corev1.VolumeSource{PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: volume.SourcePVC.Name}},
+		}}},
+	}, metav1.CreateOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := client.StorageV1().VolumeAttachments().Create(context.Background(), &storagev1.VolumeAttachment{
+		ObjectMeta: metav1.ObjectMeta{Name: "attached-source"},
+		Spec:       storagev1.VolumeAttachmentSpec{Source: storagev1.VolumeAttachmentSource{PersistentVolumeName: &volume.SourcePV.Name}},
+		Status:     storagev1.VolumeAttachmentStatus{Attached: true},
+	}, metav1.CreateOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	switcher.poll = 100 * time.Millisecond
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	started := time.Now()
+	err := switcher.VerifyVolumeOffline(ctx, volume)
+	if domain.CategoryOf(err) != domain.ErrorPrecondition {
+		t.Fatalf("category=%s error=%v", domain.CategoryOf(err), err)
+	}
+	if elapsed := time.Since(started); elapsed >= 500*time.Millisecond {
+		t.Fatalf("consumer check waited for attachment timeout: %s", elapsed)
 	}
 }
 
@@ -171,6 +208,74 @@ func TestVerifyVolumeOfflineRechecksPVCAndPVIdentity(t *testing.T) {
 	}
 }
 
+func TestVerifyVolumesOfflineSharesInventoryAcrossVolumes(t *testing.T) {
+	switcher, _, volume, _ := switcherFixture(t)
+	client := switcher.client.(*fake.Clientset)
+	var pvcGets, pvGets, podLists, attachmentLists atomic.Int32
+	client.PrependReactor("get", "persistentvolumeclaims", func(clienttesting.Action) (bool, runtime.Object, error) {
+		pvcGets.Add(1)
+		return false, nil, nil
+	})
+	client.PrependReactor("get", "persistentvolumes", func(clienttesting.Action) (bool, runtime.Object, error) {
+		pvGets.Add(1)
+		return false, nil, nil
+	})
+	client.PrependReactor("list", "pods", func(clienttesting.Action) (bool, runtime.Object, error) {
+		podLists.Add(1)
+		return false, nil, nil
+	})
+	client.PrependReactor("list", "volumeattachments", func(clienttesting.Action) (bool, runtime.Object, error) {
+		attachmentLists.Add(1)
+		return false, nil, nil
+	})
+	if err := switcher.VerifyVolumesOffline(context.Background(), []*domain.VolumeSpec{volume, volume}); err != nil {
+		t.Fatal(err)
+	}
+	if got := pvcGets.Load(); got != 2 {
+		t.Fatalf("PVC GETs = %d, want 2", got)
+	}
+	if got := pvGets.Load(); got != 2 {
+		t.Fatalf("PV GETs = %d, want 2", got)
+	}
+	if got := podLists.Load(); got != 2 {
+		t.Fatalf("Pod Lists = %d, want 2 unique namespaces", got)
+	}
+	if got := attachmentLists.Load(); got != 1 {
+		t.Fatalf("VolumeAttachment Lists = %d, want 1", got)
+	}
+}
+
+func TestVerifyVolumeOfflineDeduplicatesRebindReferences(t *testing.T) {
+	switcher, _, volume, _ := switcherFixture(t)
+	client := switcher.client.(*fake.Clientset)
+	rebind := *volume
+	rebind.DestinationPVC = volume.SourcePVC
+	rebind.DestinationPV = volume.SourcePV
+	var pvcGets, pvGets, podLists, attachmentLists atomic.Int32
+	client.PrependReactor("get", "persistentvolumeclaims", func(clienttesting.Action) (bool, runtime.Object, error) {
+		pvcGets.Add(1)
+		return false, nil, nil
+	})
+	client.PrependReactor("get", "persistentvolumes", func(clienttesting.Action) (bool, runtime.Object, error) {
+		pvGets.Add(1)
+		return false, nil, nil
+	})
+	client.PrependReactor("list", "pods", func(clienttesting.Action) (bool, runtime.Object, error) {
+		podLists.Add(1)
+		return false, nil, nil
+	})
+	client.PrependReactor("list", "volumeattachments", func(clienttesting.Action) (bool, runtime.Object, error) {
+		attachmentLists.Add(1)
+		return false, nil, nil
+	})
+	if err := switcher.VerifyVolumeOffline(context.Background(), &rebind); err != nil {
+		t.Fatal(err)
+	}
+	if pvcGets.Load() != 1 || pvGets.Load() != 1 || podLists.Load() != 1 || attachmentLists.Load() != 1 {
+		t.Fatalf("deduplicated reads: PVC=%d PV=%d Pods=%d Attachments=%d", pvcGets.Load(), pvGets.Load(), podLists.Load(), attachmentLists.Load())
+	}
+}
+
 func TestEnsureDetachedWaitsForCSIAttachmentState(t *testing.T) {
 	attachment := &storagev1.VolumeAttachment{
 		ObjectMeta: metav1.ObjectMeta{Name: "attachment"},
@@ -182,6 +287,79 @@ func TestEnsureDetachedWaitsForCSIAttachmentState(t *testing.T) {
 	if err := switcher.ensureDetached(context.Background(), "pv-data"); err != nil {
 		t.Fatal(err)
 	}
+}
+
+func TestEnsureDetachedFailsOnEmptyVolumeAttachmentList(t *testing.T) {
+	base := fake.NewClientset()
+	switcher := NewSwitcher(&nilVolumeAttachmentClient{Interface: base})
+	switcher.poll = time.Millisecond
+	err := switcher.ensureVolumesDetached(context.Background(), []string{"pv-data", "pv-logs"})
+	if domain.CategoryOf(err) != domain.ErrorKubernetes {
+		t.Fatalf("category=%s error=%v", domain.CategoryOf(err), err)
+	}
+	if !strings.Contains(err.Error(), "pv-data,pv-logs") || !strings.Contains(err.Error(), "empty object") {
+		t.Fatalf("error=%v", err)
+	}
+}
+
+func TestEnsureNoConsumersFailsOnEmptyPodList(t *testing.T) {
+	client := &nilPodListClient{Interface: fake.NewClientset()}
+
+	err := NewSwitcher(client).ensureNoConsumers(context.Background(), "app", "data")
+	if domain.CategoryOf(err) != domain.ErrorKubernetes {
+		t.Fatalf("category=%s error=%v", domain.CategoryOf(err), err)
+	}
+	if !strings.Contains(err.Error(), "list Pods in app returned an empty object") {
+		t.Fatalf("error=%v", err)
+	}
+}
+
+type nilPodListClient struct {
+	kubernetes.Interface
+}
+
+func (c *nilPodListClient) CoreV1() coretyped.CoreV1Interface {
+	return &nilPodListCore{CoreV1Interface: c.Interface.CoreV1()}
+}
+
+type nilPodListCore struct {
+	coretyped.CoreV1Interface
+}
+
+func (c *nilPodListCore) Pods(namespace string) coretyped.PodInterface {
+	return &nilPodInterface{PodInterface: c.CoreV1Interface.Pods(namespace)}
+}
+
+type nilPodInterface struct {
+	coretyped.PodInterface
+}
+
+func (c *nilPodInterface) List(context.Context, metav1.ListOptions) (*corev1.PodList, error) {
+	return nil, nil
+}
+
+type nilVolumeAttachmentClient struct {
+	kubernetes.Interface
+}
+
+func (c *nilVolumeAttachmentClient) StorageV1() storagetyped.StorageV1Interface {
+	return &nilVolumeAttachmentStorage{StorageV1Interface: c.Interface.StorageV1()}
+}
+
+type nilVolumeAttachmentStorage struct {
+	storagetyped.StorageV1Interface
+}
+
+func (c *nilVolumeAttachmentStorage) VolumeAttachments() storagetyped.VolumeAttachmentInterface {
+	return &nilVolumeAttachmentInterface{VolumeAttachmentInterface: c.StorageV1Interface.VolumeAttachments()}
+}
+
+type nilVolumeAttachmentInterface struct {
+	storagetyped.VolumeAttachmentInterface
+}
+
+func (c *nilVolumeAttachmentInterface) List(context.Context, metav1.ListOptions) (*storagev1.VolumeAttachmentList, error) {
+	return nil, nil
 }
 
 func stringPointer(value string) *string { return &value }

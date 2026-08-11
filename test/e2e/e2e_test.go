@@ -181,6 +181,9 @@ func TestStandaloneWFFCMigrationAndRollback(t *testing.T) {
 		"--timeout", "12m",
 		"--output", "json",
 	}
+	if toolImage := os.Getenv("PVC_MIGRATE_E2E_TOOL_IMAGE"); toolImage != "" {
+		common = append(common, "--tool-image", toolImage)
+	}
 	migration := []string{
 		"migrate-pod",
 		"--session", sessionID,
@@ -332,6 +335,9 @@ func TestOnlineCopyMultiVolumeIdempotencyAndCleanup(t *testing.T) {
 	}
 	binary := e2eBinary(t, ctx)
 	common := []string{"--kubeconfig", kubeconfig, "--session-namespace", namespace, "--timeout", "12m", "--output", "json"}
+	if toolImage := os.Getenv("PVC_MIGRATE_E2E_TOOL_IMAGE"); toolImage != "" {
+		common = append(common, "--tool-image", toolImage)
+	}
 	copyArgs := []string{"copy", "--session", sessionID, "--source-namespace", namespace, "--temporary-namespace", namespace, "--target-node", targetNode, "--destination-storage-class", destinationClass, "--strategy", "clusterip", "--online", "--source-pvc", claims[0], "--source-pvc", claims[1]}
 	repeatCopyArgs := []string{"copy", "--session", sessionID, "--online"}
 	offlineCopyArgs := []string{"copy", "--session", sessionID, "--source-namespace", namespace, "--temporary-namespace", namespace, "--target-node", targetNode, "--destination-storage-class", destinationClass, "--strategy", "clusterip", "--source-pvc", claims[0], "--source-pvc", claims[1]}
@@ -419,8 +425,8 @@ func TestOnlineCopyMultiVolumeIdempotencyAndCleanup(t *testing.T) {
 	if output := runCLIExpectFailure(t, ctx, binary, append(append([]string{}, common...), "--yes", "session", "rollback", sessionID, "--dry-run=false")...); !strings.Contains(string(output), "phase WarmCopied cannot roll back") {
 		t.Fatalf("unexpected rollback error: %s", output)
 	}
-	if output := runCLIExpectFailure(t, ctx, binary, append(append([]string{}, common...), "--yes", "session", "cleanup", sessionID, "--delete-temporary", "--dry-run=false")...); !strings.Contains(string(output), "phase WarmCopied is still active") {
-		t.Fatalf("unexpected active cleanup error: %s", output)
+	if output := runCLIExpectFailure(t, ctx, binary, append(append([]string{}, common...), "--yes", "session", "cleanup", sessionID, "--delete-temporary", "--dry-run=false")...); !strings.Contains(string(output), "is still referenced by Pod") {
+		t.Fatalf("unexpected mounted cleanup error: %s", output)
 	}
 	if output := runCLIExpectFailure(t, ctx, binary, append(append([]string{}, common...), "--yes", "final-sync", "--session", sessionID, "--dry-run=false")...); !strings.Contains(string(output), "final sync requires an orchestrated") {
 		t.Fatalf("unexpected final-sync error: %s", output)
@@ -496,11 +502,15 @@ func e2eBinary(t *testing.T, ctx context.Context) string {
 func runCLI(t *testing.T, ctx context.Context, binary string, args ...string) []byte {
 	t.Helper()
 	command := exec.CommandContext(ctx, binary, args...)
-	output, err := command.CombinedOutput()
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	command.Stdout = &stdout
+	command.Stderr = &stderr
+	err := command.Run()
 	if err != nil {
-		t.Fatalf("pvc-migrate %s: %v\n%s", strings.Join(args, " "), err, output)
+		t.Fatalf("pvc-migrate %s: %v\nstdout:\n%s\nstderr:\n%s", strings.Join(args, " "), err, stdout.String(), stderr.String())
 	}
-	return output
+	return stdout.Bytes()
 }
 
 func runCLIExpectFailure(t *testing.T, ctx context.Context, binary string, args ...string) []byte {
@@ -925,6 +935,24 @@ func cleanupTestResources(t *testing.T, client kubernetes.Interface, namespace, 
 				return updateErr
 			})
 		}
+	}
+	sessionConfigMapName := "pvc-migrate-session-" + sessionID
+	if err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		configMap, getErr := client.CoreV1().ConfigMaps(namespace).Get(ctx, sessionConfigMapName, metav1.GetOptions{})
+		if apierrors.IsNotFound(getErr) {
+			return nil
+		}
+		if getErr != nil {
+			return getErr
+		}
+		if configMap == nil || configMap.Labels[sessionLabel] != sessionID {
+			return nil
+		}
+		configMap.Finalizers = nil
+		_, updateErr := client.CoreV1().ConfigMaps(namespace).Update(ctx, configMap, metav1.UpdateOptions{})
+		return updateErr
+	}); err != nil {
+		t.Errorf("remove E2E session protection from %s/%s: %v", namespace, sessionConfigMapName, err)
 	}
 	propagation := metav1.DeletePropagationForeground
 	if err := client.CoreV1().Namespaces().Delete(ctx, namespace, metav1.DeleteOptions{PropagationPolicy: &propagation}); err != nil && !apierrors.IsNotFound(err) {

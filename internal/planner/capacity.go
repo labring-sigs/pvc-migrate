@@ -52,6 +52,10 @@ func (p *Planner) loadStorageCapacity(ctx context.Context, mode domain.CapacityA
 		inventory.err = err
 		return inventory
 	}
+	if items == nil {
+		inventory.err = fmt.Errorf("CSIStorageCapacity list returned an empty object")
+		return inventory
+	}
 	inventory.loaded = true
 	inventory.items = append([]storagev1.CSIStorageCapacity(nil), items.Items...)
 	return inventory
