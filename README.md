@@ -8,6 +8,7 @@
 - Reduce downtime with configurable warm-copy passes followed by a final offline sync.
 - Validate topology, scheduling, quota, RBAC, dependencies, consumers, and controller ownership before execution.
 - Resume interrupted sessions from their persisted phase.
+- Follow generated reservation, rsync, SSHD, and rclone Pod logs in the active CLI.
 - Preserve the source PV for an explicit rollback window.
 - Move or rename offline PVC identities while retaining their PV.
 - Back up and restore PVC files through S3-compatible object storage.
@@ -158,7 +159,7 @@ The destination PVCs are provisioned before downtime. Warm-copy passes run while
 | RWX or multiple consumers | Run a file-level pass after consumer validation | Application quiescence defines transactional consistency |
 | MinIO Tenant | Use MinIO drive or pool maintenance | Rejected during planning |
 | CockroachDB | Use drain, decommission, and CockroachDB recovery procedures | Rejected during planning |
-| Backup archive-WAL helper | Use the owning backup controller workflow | Rejected during planning |
+| Backup archive-WAL workload | Use the owning backup controller workflow | Rejected during planning |
 
 For a KubeBlocks primary, `--kubeblocks-candidate` requests an automated switchover. The plan also prints `kbcli cluster promote` guidance and a matching OpsRequest YAML when the installed KubeBlocks API accepts that operation. `--allow-leader-downtime` acknowledges a direct primary restart when the application can tolerate it.
 
@@ -169,6 +170,7 @@ Controller ownership outside the supported adapters causes the plan to fail. PVC
 ## Safety and Recovery
 
 - Session commands print phase-aware next steps, verification commands, and validated dry-run/execute pairs on stderr. JSON and YAML results remain a single structured document on stdout.
+- Tool Pod logs stream to stderr by default and remain available in the command output after short-lived Pods are removed. Use `--stream-tool-logs=false` for quiet automation.
 - Session state is stored in `pvc-migrate-session-<id>` ConfigMaps.
 - Session ConfigMaps carry a protection finalizer and are deleted through validated session cleanup.
 - Every mutating session command uses a renewable Kubernetes Lease for exclusive ownership.
@@ -215,7 +217,7 @@ Stable exit codes are validation `2`, precondition `3`, conflict `4`, Kubernetes
 
 The default `copy` mode requires zero active Pod consumers. `copy --online` allows active consumers for one finite warm-copy pass. Both modes finish after data copy and leave application PVC identities unchanged. `migrate` and `migrate-pod` provide managed final sync and cutover.
 
-The planner infers the source helper node from active consumers and selects a Ready, schedulable target node that satisfies Pod scheduling, StorageClass topology, and available CSI capacity signals. `--target-node` accepts a node name or `auto`; `auto` is the default and prefers nodes with sufficient reported capacity and then a node different from the source. `--source-node` supplies an explicit node when the storage backend requires one. RWOP consumers and consumers spread across multiple nodes require separate sessions or an application-specific workflow.
+The planner infers the source tool node from active consumers and selects a Ready, schedulable target node that satisfies Pod scheduling, StorageClass topology, and available CSI capacity signals. `--target-node` accepts a node name or `auto`; `auto` is the default and prefers nodes with sufficient reported capacity and then a node different from the source. `--source-node` supplies an explicit node when the storage backend requires one. RWOP consumers and consumers spread across multiple nodes require separate sessions or an application-specific workflow.
 
 `--capacity-awareness=auto` is the default. Matching `CSIStorageCapacity` objects enforce reported capacity and `maximumVolumeSize`; missing capacity information produces a warning and reservation performs the final provisioning check. `require` makes missing capacity information a failed plan, and `off` disables the API lookup.
 

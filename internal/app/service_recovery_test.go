@@ -111,10 +111,10 @@ type scriptedCopier struct {
 
 type cleanupAwareCopier struct {
 	client            kubernetes.Interface
-	helperNamespace   string
-	helperName        string
+	toolNamespace     string
+	toolName          string
 	calls             int
-	secondSawHelper   bool
+	secondSawTool     bool
 	firstAttemptEnded chan struct{}
 }
 
@@ -122,10 +122,10 @@ func (c *cleanupAwareCopier) Copy(ctx context.Context, _ copyengine.Request, _ c
 	c.calls++
 	if c.calls == 1 {
 		close(c.firstAttemptEnded)
-		return domain.NewError(domain.ErrorCopy, "copy", "injected helper failure")
+		return domain.NewError(domain.ErrorCopy, "copy", "injected tool failure")
 	}
-	_, err := c.client.CoreV1().Pods(c.helperNamespace).Get(ctx, c.helperName, metav1.GetOptions{})
-	c.secondSawHelper = err == nil
+	_, err := c.client.CoreV1().Pods(c.toolNamespace).Get(ctx, c.toolName, metav1.GetOptions{})
+	c.secondSawTool = err == nil
 	return nil
 }
 
@@ -445,12 +445,12 @@ func TestCopyRetriesPersistAttemptsAndUseExponentialBackoff(t *testing.T) {
 	}
 }
 
-func TestCopyFailureWaitsForHelperReleaseBeforeRetry(t *testing.T) {
+func TestCopyFailureWaitsForToolReleaseBeforeRetry(t *testing.T) {
 	fixture := newRecoveryFixture(t)
-	helper := &corev1.Pod{
+	tool := &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
 			Namespace: "app",
-			Name:      "pv-migrate-helper",
+			Name:      "pv-migrate-tool",
 			Labels: map[string]string{
 				"app.kubernetes.io/instance":  "pv-migrate-pm-test-clusterip",
 				"app.kubernetes.io/component": "sshd",
@@ -463,11 +463,11 @@ func TestCopyFailureWaitsForHelperReleaseBeforeRetry(t *testing.T) {
 			}},
 		}}},
 	}
-	if _, err := fixture.client.CoreV1().Pods(helper.Namespace).Create(context.Background(), helper, metav1.CreateOptions{}); err != nil {
+	if _, err := fixture.client.CoreV1().Pods(tool.Namespace).Create(context.Background(), tool, metav1.CreateOptions{}); err != nil {
 		t.Fatal(err)
 	}
 	copier := &cleanupAwareCopier{
-		client: fixture.client, helperNamespace: helper.Namespace, helperName: helper.Name,
+		client: fixture.client, toolNamespace: tool.Namespace, toolName: tool.Name,
 		firstAttemptEnded: make(chan struct{}),
 	}
 	fixture.service.copier = copier
@@ -475,7 +475,7 @@ func TestCopyFailureWaitsForHelperReleaseBeforeRetry(t *testing.T) {
 	go func() {
 		<-copier.firstAttemptEnded
 		time.Sleep(10 * time.Millisecond)
-		_ = fixture.client.CoreV1().Pods(helper.Namespace).Delete(context.Background(), helper.Name, metav1.DeleteOptions{})
+		_ = fixture.client.CoreV1().Pods(tool.Namespace).Delete(context.Background(), tool.Name, metav1.DeleteOptions{})
 	}()
 	session := appTestSession()
 	transitionThrough(t, session, domain.PhaseReserving, domain.PhaseReserved)
@@ -483,8 +483,8 @@ func TestCopyFailureWaitsForHelperReleaseBeforeRetry(t *testing.T) {
 	if err := fixture.service.WarmCopy(context.Background(), session); err != nil {
 		t.Fatal(err)
 	}
-	if copier.calls != 2 || copier.secondSawHelper {
-		t.Fatalf("copy calls=%d secondSawHelper=%t", copier.calls, copier.secondSawHelper)
+	if copier.calls != 2 || copier.secondSawTool {
+		t.Fatalf("copy calls=%d secondSawTool=%t", copier.calls, copier.secondSawTool)
 	}
 }
 
@@ -510,7 +510,7 @@ func TestCopyRetryCancellationLeavesRecoverableFailure(t *testing.T) {
 
 func TestCopyFailureAfterContextCancellationPreservesRootCause(t *testing.T) {
 	fixture := newRecoveryFixture(t)
-	cause := domain.NewError(domain.ErrorCopy, "copy", "helper deadline exceeded")
+	cause := domain.NewError(domain.ErrorCopy, "copy", "tool deadline exceeded")
 	ctx, cancel := context.WithCancel(context.Background())
 	fixture.copier.copyError = cause
 	fixture.copier.copyHook = cancel
@@ -1433,7 +1433,7 @@ func TestResumeWorkloadFailsWhenActiveResourcesDoNotMatchPlan(t *testing.T) {
 		}
 	})
 
-	t.Run("managed workload does not require the helper target to be ready", func(t *testing.T) {
+	t.Run("managed workload does not require the tool target to be ready", func(t *testing.T) {
 		fixture := newRecoveryFixture(t)
 		session := appTestSession()
 		session.Status.Phase = domain.PhaseResuming

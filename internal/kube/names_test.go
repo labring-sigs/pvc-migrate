@@ -26,8 +26,8 @@ func TestBoundedNameKeepsLongOperationsDistinct(t *testing.T) {
 }
 
 func TestBoundedNameKeepsLongPVCNamesDistinct(t *testing.T) {
-	first := helperPodName("session", strings.Repeat("a", 80))
-	second := helperPodName("session", strings.Repeat("b", 80))
+	first := toolPodName("session", strings.Repeat("a", 80))
+	second := toolPodName("session", strings.Repeat("b", 80))
 	if first == second || len(first) > maxDNSLabelLength || len(second) > maxDNSLabelLength {
 		t.Fatalf("reservation names=%q,%q", first, second)
 	}

@@ -76,7 +76,7 @@ func TestCopyBuildsCompleteUpstreamMigrationContract(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if captured.ID != operationID(request) || captured.Source != (pvmigrate.PVC{KubeconfigPath: "/tmp/kubeconfig", Context: "cluster-context", Namespace: "source-ns", Name: "source-pvc"}) || captured.Dest != (pvmigrate.PVC{KubeconfigPath: "/tmp/kubeconfig", Context: "cluster-context", Namespace: "target-ns", Name: "target-pvc"}) {
+	if captured.ID != OperationID(request) || captured.Source != (pvmigrate.PVC{KubeconfigPath: "/tmp/kubeconfig", Context: "cluster-context", Namespace: "source-ns", Name: "source-pvc"}) || captured.Dest != (pvmigrate.PVC{KubeconfigPath: "/tmp/kubeconfig", Context: "cluster-context", Namespace: "target-ns", Name: "target-pvc"}) {
 		t.Fatalf("upstream PVC request=%#v", captured)
 	}
 	if !captured.DeleteExtraneousFiles || captured.IgnoreMounted || !captured.NoCompress || !captured.StructuredLogs || captured.Writer != writer || captured.Logger != logger {
@@ -128,7 +128,7 @@ func TestOperationIDIncludesEveryCollisionBoundary(t *testing.T) {
 		Mode:      ModeWarm,
 		Attempt:   1,
 	}
-	baseID := operationID(base)
+	baseID := OperationID(base)
 	cases := []Request{
 		func() Request { value := base; value.SessionID = "migration-124"; return value }(),
 		func() Request { value := base; value.Source.Namespace = "other"; return value }(),
@@ -138,7 +138,7 @@ func TestOperationIDIncludesEveryCollisionBoundary(t *testing.T) {
 	}
 	seen := map[string]struct{}{baseID: {}}
 	for _, request := range cases {
-		id := operationID(request)
+		id := OperationID(request)
 		if id == baseID {
 			t.Fatalf("request %#v collided with base ID %q", request, id)
 		}
@@ -201,7 +201,7 @@ func TestCopyReportsUpstreamFailureWithStableOperationIdentity(t *testing.T) {
 			if domain.CategoryOf(err) != domain.ErrorCopy {
 				t.Fatalf("Copy() error=%v category=%q logs=%s", err, domain.CategoryOf(err), logs.String())
 			}
-			operation := operationID(request)
+			operation := OperationID(request)
 			if !strings.Contains(err.Error(), operation) {
 				t.Fatalf("error %q omits operation ID %q", err, operation)
 			}

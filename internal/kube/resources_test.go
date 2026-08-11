@@ -51,14 +51,14 @@ func TestZeroResourceRequirementsIncludesComputeAndEphemeralStorage(t *testing.T
 		}
 	}
 	if _, ok := requirements.Limits[corev1.ResourceEphemeralStorage]; ok {
-		t.Fatal("zero ephemeral-storage limit would evict every helper")
+		t.Fatal("zero ephemeral-storage limit would evict every tool")
 	}
 	if len(requirements.Requests) != len(wantRequests) || len(requirements.Limits) != len(wantLimits) {
 		t.Fatalf("resource keys requests=%v limits=%v", requirements.Requests, requirements.Limits)
 	}
 }
 
-func TestZeroResourceHelmValuesCoverAllHelperComponents(t *testing.T) {
+func TestZeroResourceHelmValuesCoverAllToolComponents(t *testing.T) {
 	values := ZeroResourceHelmValues()
 	for _, component := range []string{"rsync", "sshd", "rclone"} {
 		for _, resourceName := range []string{"requests.cpu", "requests.memory", "requests.ephemeral-storage", "limits.cpu", "limits.memory"} {

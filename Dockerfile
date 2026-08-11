@@ -28,9 +28,9 @@ FROM alpine:${ALPINE_VERSION}
 ARG VERSION=dev
 ARG TOOL_IMAGE_REPOSITORY=ghcr.io/labring-sigs/pvc-migrate
 
-# Match upstream pv-migrate's helper images: Alpine must unlock root before
+# Match upstream pv-migrate's tool images: Alpine must unlock root before
 # sshd accepts the chart-mounted root public key, and UID/GID 10000 is the
-# fixed identity used by its non-root helper mode.
+# fixed identity used by its non-root tool mode.
 RUN apk add --no-cache \
       ca-certificates \
       openssh \

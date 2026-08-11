@@ -408,7 +408,7 @@ func (p *Planner) Plan(ctx context.Context, options Options) (*domain.MigrationP
 		case node == nil || node.Name == "":
 			plan.AddCheck(failed("source-node", "read source node returned an empty object"))
 		case !nodeReady(node) || node.Spec.Unschedulable:
-			plan.AddCheck(failed("source-node", fmt.Sprintf("node %s must be Ready and schedulable for the source helper", node.Name)))
+			plan.AddCheck(failed("source-node", fmt.Sprintf("node %s must be Ready and schedulable for the source tool", node.Name)))
 		default:
 			plan.AddCheck(passed("source-node", fmt.Sprintf("node %s is Ready and schedulable", node.Name)))
 		}
@@ -445,7 +445,7 @@ func (p *Planner) Plan(ctx context.Context, options Options) (*domain.MigrationP
 			// clusterip puts the sshd Deployment, Service, Secret, and
 			// ServiceAccount in the source namespace. Check those object
 			// quotas independently from the destination PVC reservation.
-			sourceHelpers := domain.ResourceEstimate{
+			sourceTools := domain.ResourceEstimate{
 				StorageRequests:    "0",
 				Pods:               len(plannedVolumes),
 				Services:           len(plannedVolumes),
@@ -456,7 +456,7 @@ func (p *Planner) Plan(ctx context.Context, options Options) (*domain.MigrationP
 			}
 			tasks = append(tasks,
 				func(result *domain.MigrationPlan) { p.checkLimitRanges(ctx, result, options.SourceNamespace, nil) },
-				func(result *domain.MigrationPlan) { p.checkQuotas(ctx, result, options.SourceNamespace, sourceHelpers) },
+				func(result *domain.MigrationPlan) { p.checkQuotas(ctx, result, options.SourceNamespace, sourceTools) },
 			)
 		}
 		if options.SessionNamespace != options.StagingNamespace && options.SessionNamespace != options.SourceNamespace {
@@ -786,7 +786,7 @@ func autoStrategies(sourceNamespace, destinationNamespace string) []string {
 }
 
 // filterStrategies removes constraints that are deterministically known from
-// the Kubernetes inventory before a helper resource is created. A fallback
+// the Kubernetes inventory before a tool resource is created. A fallback
 // strategy remains valid when one earlier strategy cannot handle the topology.
 func filterStrategies(plan *domain.MigrationPlan, options Options, mountTopologyConflict string) []string {
 	filtered := make([]string, 0, len(options.Strategies))
@@ -1002,7 +1002,7 @@ func inferOnlineCopySourceNode(plan *domain.MigrationPlan, requested string, con
 		return requested
 	}
 	if requested == "" {
-		plan.AddCheck(passed("source-node-inference", fmt.Sprintf("inferred source helper node %s from active PVC consumers", nodes[0])))
+		plan.AddCheck(passed("source-node-inference", fmt.Sprintf("inferred source tool node %s from active PVC consumers", nodes[0])))
 		return nodes[0]
 	}
 	return requested

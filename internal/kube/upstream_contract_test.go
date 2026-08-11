@@ -74,8 +74,8 @@ func assertUpstreamFieldNames(t *testing.T, typeName string, typ reflect.Type, w
 
 // These tests render the chart and inspect Dockerfiles from the resolved module
 // itself. An upstream upgrade therefore changes the contract under test and
-// fails here before a helper reaches a cluster with a different shape.
-func TestUpstreamChartHelperContract(t *testing.T) {
+// fails here before a tool reaches a cluster with a different shape.
+func TestUpstreamChartToolContract(t *testing.T) {
 	chart := loadUpstreamChart(t)
 	assertUpstreamChartComponents(t, chart.Values)
 
@@ -105,7 +105,7 @@ func TestUpstreamChartHelperContract(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	containers := upstreamHelperContainers(t, files)
+	containers := upstreamToolContainers(t, files)
 	for _, component := range []string{"rsync", "sshd", "rclone"} {
 		container, ok := containers[component]
 		if !ok {
@@ -114,7 +114,7 @@ func TestUpstreamChartHelperContract(t *testing.T) {
 				rendered = append(rendered, name)
 			}
 			slices.Sort(rendered)
-			t.Fatalf("upstream chart did not render %s helper; rendered=%v", component, rendered)
+			t.Fatalf("upstream chart did not render %s tool; rendered=%v", component, rendered)
 		}
 		if container.Image != image || container.ImagePullPolicy != corev1.PullIfNotPresent {
 			t.Fatalf("%s image=%q pullPolicy=%q", component, container.Image, container.ImagePullPolicy)
@@ -122,8 +122,8 @@ func TestUpstreamChartHelperContract(t *testing.T) {
 		if len(container.Command) != 3 || container.Command[0] != "sh" || container.Command[1] != "-c" || strings.TrimSpace(container.Command[2]) == "" {
 			t.Fatalf("%s command=%q", component, container.Command)
 		}
-		assertRootHelperSecurityContext(t, component, container.SecurityContext)
-		assertZeroHelperResources(t, component, container.Resources)
+		assertRootToolSecurityContext(t, component, container.SecurityContext)
+		assertZeroToolResources(t, component, container.Resources)
 	}
 
 	sshd := containers["sshd"]
@@ -147,7 +147,7 @@ func TestUpstreamChartHelperContract(t *testing.T) {
 	}
 }
 
-func TestToolDockerfileContainsUpstreamHelperRuntime(t *testing.T) {
+func TestToolDockerfileContainsUpstreamToolRuntime(t *testing.T) {
 	upstreamDir := upstreamModuleDir(t)
 	required := make(map[string]struct{})
 	for _, relative := range []string{
@@ -170,7 +170,7 @@ func TestToolDockerfileContainsUpstreamHelperRuntime(t *testing.T) {
 	}
 	for packageName := range required {
 		if _, ok := available[packageName]; !ok {
-			t.Errorf("tool Dockerfile dropped upstream helper package %q; Dockerfile=%s", packageName, toolDockerfile)
+			t.Errorf("tool Dockerfile dropped upstream tool package %q; Dockerfile=%s", packageName, toolDockerfile)
 		}
 	}
 	for _, fragment := range []string{
@@ -246,7 +246,7 @@ func TestToolDockerfileTracksUpstreamAlpineBase(t *testing.T) {
 		versions[version] = struct{}{}
 	}
 	if len(versions) != 1 {
-		t.Fatalf("upstream helper Dockerfiles use different Alpine versions: %v", versions)
+		t.Fatalf("upstream tool Dockerfiles use different Alpine versions: %v", versions)
 	}
 	var upstreamVersion string
 	for version := range versions {
@@ -395,7 +395,7 @@ func configureUpstreamContractWorkloads(t *testing.T, overrides map[string]any) 
 	rclone["configMount"] = false
 }
 
-func upstreamHelperContainers(t *testing.T, files map[string]string) map[string]corev1.Container {
+func upstreamToolContainers(t *testing.T, files map[string]string) map[string]corev1.Container {
 	t.Helper()
 	containers := make(map[string]corev1.Container)
 	for filename, content := range files {
@@ -415,8 +415,14 @@ func upstreamHelperContainers(t *testing.T, files map[string]string) map[string]
 		if component == "" || len(workload.Spec.Template.Spec.Containers) == 0 {
 			continue
 		}
+		if instance := workload.Spec.Template.Labels[AppInstanceLabel]; instance == "" || instance != workload.Metadata.Labels[AppInstanceLabel] {
+			t.Fatalf("upstream %s tool Pod instance label=%q workload label=%q; tool log discovery requires the release identity on Pods", component, instance, workload.Metadata.Labels[AppInstanceLabel])
+		}
+		if workload.Spec.Template.Labels[AppComponentLabel] != component {
+			t.Fatalf("upstream %s tool Pod component label=%q", component, workload.Spec.Template.Labels[AppComponentLabel])
+		}
 		if len(workload.Spec.Template.Spec.Containers) != 1 {
-			t.Fatalf("upstream %s helper containers=%d", component, len(workload.Spec.Template.Spec.Containers))
+			t.Fatalf("upstream %s tool containers=%d", component, len(workload.Spec.Template.Spec.Containers))
 		}
 		containers[component] = workload.Spec.Template.Spec.Containers[0]
 	}
@@ -450,14 +456,14 @@ func upstreamSSHDService(t *testing.T, files map[string]string) *corev1.Service 
 	return nil
 }
 
-func assertRootHelperSecurityContext(t *testing.T, component string, context *corev1.SecurityContext) {
+func assertRootToolSecurityContext(t *testing.T, component string, context *corev1.SecurityContext) {
 	t.Helper()
 	if context == nil || context.RunAsUser == nil || *context.RunAsUser != 0 || context.RunAsGroup == nil || *context.RunAsGroup != 0 {
 		t.Fatalf("%s securityContext=%#v", component, context)
 	}
 }
 
-func assertZeroHelperResources(t *testing.T, component string, resources corev1.ResourceRequirements) {
+func assertZeroToolResources(t *testing.T, component string, resources corev1.ResourceRequirements) {
 	t.Helper()
 	zero := resource.MustParse("0")
 	for _, name := range []corev1.ResourceName{corev1.ResourceCPU, corev1.ResourceMemory, corev1.ResourceEphemeralStorage} {

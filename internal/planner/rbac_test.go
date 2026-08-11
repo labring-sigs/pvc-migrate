@@ -17,7 +17,7 @@ import (
 	"sigs.k8s.io/yaml"
 )
 
-func TestCheckRBACIncludesHelperAndVolumePermissions(t *testing.T) {
+func TestCheckRBACIncludesToolAndVolumePermissions(t *testing.T) {
 	seen := collectAllowedAccessReviews(t, domain.WorkloadSpec{})
 	want := []authorizationv1.ResourceAttributes{
 		{Namespace: "app", Verb: "create", Resource: "pods/portforward"},

@@ -55,6 +55,69 @@ func TestConfigMapSessionStoreDeletesSessionLease(t *testing.T) {
 	}
 }
 
+func TestConfigMapSessionStoreDeletesSessionLeaseWithPreconditions(t *testing.T) {
+	ctx := context.Background()
+	client := fake.NewClientset()
+	store := NewConfigMapSessionStore(client)
+	lock, err := store.AcquireSessionLock(ctx, "system", "session-preconditions")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := lock.Release(ctx); err != nil {
+		t.Fatal(err)
+	}
+	var deleteOptions metav1.DeleteOptions
+	client.PrependReactor("delete", "leases", func(action clienttesting.Action) (bool, runtime.Object, error) {
+		deleteOptions = action.(clienttesting.DeleteAction).GetDeleteOptions()
+		return true, nil, nil
+	})
+	if err := store.DeleteSessionLease(ctx, "system", "session-preconditions"); err != nil {
+		t.Fatal(err)
+	}
+	if deleteOptions.Preconditions == nil || deleteOptions.Preconditions.ResourceVersion == nil || *deleteOptions.Preconditions.ResourceVersion == "" {
+		t.Fatalf("missing resourceVersion precondition: %#v", deleteOptions.Preconditions)
+	}
+	if deleteOptions.Preconditions.UID == nil || *deleteOptions.Preconditions.UID == "" {
+		t.Fatalf("missing UID precondition: %#v", deleteOptions.Preconditions)
+	}
+}
+
+func TestConfigMapSessionStorePreservesReplacedLeaseOnDeleteRace(t *testing.T) {
+	ctx := context.Background()
+	client := fake.NewClientset()
+	store := NewConfigMapSessionStore(client)
+	lock, err := store.AcquireSessionLock(ctx, "system", "session-delete-race")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := lock.Release(ctx); err != nil {
+		t.Fatal(err)
+	}
+	client.PrependReactor("delete", "leases", func(action clienttesting.Action) (bool, runtime.Object, error) {
+		name := action.(clienttesting.DeleteAction).GetName()
+		lease, getErr := client.CoordinationV1().Leases("system").Get(ctx, name, metav1.GetOptions{})
+		if getErr != nil {
+			return true, nil, getErr
+		}
+		lease = lease.DeepCopy()
+		lease.Spec.HolderIdentity = ptr("new-holder")
+		if _, updateErr := client.CoordinationV1().Leases("system").Update(ctx, lease, metav1.UpdateOptions{}); updateErr != nil {
+			return true, nil, updateErr
+		}
+		return false, nil, nil
+	})
+	if err := store.DeleteSessionLease(ctx, "system", "session-delete-race"); domain.CategoryOf(err) != domain.ErrorConflict {
+		t.Fatalf("delete race category=%s error=%v", domain.CategoryOf(err), err)
+	}
+	lease, err := client.CoordinationV1().Leases("system").Get(ctx, SessionLockName("session-delete-race"), metav1.GetOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if lease.Spec.HolderIdentity == nil || *lease.Spec.HolderIdentity != "new-holder" {
+		t.Fatalf("replacement Lease was changed: %#v", lease.Spec.HolderIdentity)
+	}
+}
+
 func TestSessionLeaseRenewFailureFencesContext(t *testing.T) {
 	oldRenewEvery := sessionLeaseRenewEvery
 	oldDuration := sessionLeaseDuration

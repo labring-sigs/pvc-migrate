@@ -51,6 +51,8 @@ type Request struct {
 	HelmTimeout           time.Duration
 	KubeconfigPath        string
 	KubeContext           string
+	StreamToolLogs        bool
+	StructuredLogs        bool
 	Store                 *objectstore.Store
 	Writer                io.Writer
 	Logger                *slog.Logger
@@ -120,7 +122,7 @@ func Preflight(ctx context.Context, client kubernetes.Interface, req Request, re
 		info, infoErr = inspectPVC(ctx, client, req.Namespace, req.PVCName, req.Online, req.AllowMounted, restore)
 	})
 	wg.Go(func() {
-		quotaErr = checkHelperQuota(ctx, client, req.Namespace)
+		quotaErr = checkToolQuota(ctx, client, req.Namespace)
 	})
 	wg.Go(func() {
 		manifest, manifestErr = req.Store.Manifest(ctx)
@@ -158,7 +160,7 @@ func Preflight(ctx context.Context, client kubernetes.Interface, req Request, re
 		if node, nodeErr := onlineRWOConsumerNode(info); nodeErr != nil {
 			return nil, nodeErr
 		} else if node != "" {
-			plan.Warnings = append(plan.Warnings, fmt.Sprintf("RWO online helper will be pinned to consumer node %s", node))
+			plan.Warnings = append(plan.Warnings, fmt.Sprintf("RWO online tool will be pinned to consumer node %s", node))
 		}
 	}
 	if restore {
@@ -232,7 +234,7 @@ func pvmigrateBackupRequest(req Request, configPath string, helmValues []string)
 		IgnoreMounted:    req.Online,
 		HelmValues:       kube.ToolSecurityContextHelmValues(),
 		HelmStringValues: append(append(kube.ZeroResourceHelmValues(), imageValues...), helmValues...),
-		HelmTimeout:      helperHelmTimeout(req.HelmTimeout),
+		HelmTimeout:      toolHelmTimeout(req.HelmTimeout),
 		Writer:           req.Writer,
 		Logger:           req.Logger,
 		StructuredLogs:   true,
@@ -258,14 +260,14 @@ func pvmigrateRestoreRequest(req Request, configPath string) (pvmigrate.Restore,
 		DeleteExtraneousFiles: req.DeleteExtraneousFiles,
 		HelmValues:            kube.ToolSecurityContextHelmValues(),
 		HelmStringValues:      append(kube.ZeroResourceHelmValues(), imageValues...),
-		HelmTimeout:           helperHelmTimeout(req.HelmTimeout),
+		HelmTimeout:           toolHelmTimeout(req.HelmTimeout),
 		Writer:                req.Writer,
 		Logger:                req.Logger,
 		StructuredLogs:        true,
 	}, nil
 }
 
-func helperHelmTimeout(timeout time.Duration) time.Duration {
+func toolHelmTimeout(timeout time.Duration) time.Duration {
 	if timeout == 0 {
 		return 10 * time.Minute
 	}
@@ -333,22 +335,25 @@ func runBackup(ctx context.Context, client kubernetes.Interface, req Request, ex
 	if err := configFile.Close(); err != nil {
 		return domain.WrapError(domain.ErrorInternal, "backup", "close temporary S3 config", err)
 	}
-	if err := validateBackupHelperStart(ctx, client, req); err != nil {
+	if err := validateBackupToolStart(ctx, client, req); err != nil {
 		return err
 	}
-	helperRequest := req
-	helperRequest.ID = helperOperationID(holder)
-	backupRequest, err := pvmigrateBackupRequest(helperRequest, configPath, helmValues)
+	toolRequest := req
+	toolRequest.ID = toolOperationID(holder)
+	backupRequest, err := pvmigrateBackupRequest(toolRequest, configPath, helmValues)
 	if err != nil {
 		return err
 	}
-	if err := pvmigrate.RunBackup(leaseCtx, backupRequest); err != nil {
+	toolLogs := startToolLogs(leaseCtx, client, toolRequest)
+	toolErr := pvmigrate.RunBackup(leaseCtx, backupRequest)
+	toolLogs.Stop()
+	if toolErr != nil {
 		select {
 		case leaseErr := <-leaseErrors:
 			return leaseErr
 		default:
 		}
-		return classifySyncError(leaseCtx, "backup", err)
+		return classifySyncError(leaseCtx, "backup", toolErr)
 	}
 	if err := checkObjectStoreLease(leaseCtx, leaseErrors, "backup"); err != nil {
 		return err
@@ -391,12 +396,12 @@ func runBackup(ctx context.Context, client kubernetes.Interface, req Request, ex
 	})
 }
 
-func validateBackupHelperStart(ctx context.Context, client kubernetes.Interface, req Request) error {
+func validateBackupToolStart(ctx context.Context, client kubernetes.Interface, req Request) error {
 	if req.Online {
 		return nil
 	}
 	// A consumer can appear after Preflight while the operation waits for the
-	// object-store lock and helper setup. Recheck immediately before the helper
+	// object-store lock and tool setup. Recheck immediately before the tool
 	// mounts the offline source PVC.
 	_, err := inspectPVC(ctx, client, req.Namespace, req.PVCName, false, false, false)
 	return err
@@ -472,7 +477,7 @@ func operationLockHolder(operationID string) (string, error) {
 	return objectstore.LockHolder(attempt), nil
 }
 
-func helperOperationID(holder string) string {
+func toolOperationID(holder string) string {
 	digest := sha256.Sum256([]byte(holder))
 	// pv-migrate embeds this value in Helm and Kubernetes names. Keep it
 	// lowercase, DNS-safe, and below its 24-character identifier limit.
@@ -595,7 +600,7 @@ func runRestore(ctx context.Context, client kubernetes.Interface, req Request, e
 		return err
 	}
 	// A controller can recreate a consumer after the initial preflight. Recheck
-	// immediately before the helper mounts the destination so restore never
+	// immediately before the tool mounts the destination so restore never
 	// silently writes into a newly active workload unless explicitly allowed.
 	if _, err := inspectPVC(ctx, client, req.Namespace, req.PVCName, false, req.AllowMounted, true); err != nil {
 		return err
@@ -621,19 +626,22 @@ func runRestore(ctx context.Context, client kubernetes.Interface, req Request, e
 	if err := configFile.Close(); err != nil {
 		return domain.WrapError(domain.ErrorInternal, "restore", "close temporary S3 config", err)
 	}
-	helperRequest := req
-	helperRequest.ID = helperOperationID(holder)
-	restoreRequest, err := pvmigrateRestoreRequest(helperRequest, configPath)
+	toolRequest := req
+	toolRequest.ID = toolOperationID(holder)
+	restoreRequest, err := pvmigrateRestoreRequest(toolRequest, configPath)
 	if err != nil {
 		return err
 	}
-	if err := pvmigrate.RunRestore(leaseCtx, restoreRequest); err != nil {
+	toolLogs := startToolLogs(leaseCtx, client, toolRequest)
+	toolErr := pvmigrate.RunRestore(leaseCtx, restoreRequest)
+	toolLogs.Stop()
+	if toolErr != nil {
 		select {
 		case leaseErr := <-leaseErrors:
 			return leaseErr
 		default:
 		}
-		return classifySyncError(leaseCtx, "restore", err)
+		return classifySyncError(leaseCtx, "restore", toolErr)
 	}
 	if _, _, err := verifyPVCIdentity(ctx, client, req.Namespace, req.PVCName, expectedPVCUID, expectedPVUID); err != nil {
 		return err
@@ -653,6 +661,19 @@ func classifySyncError(ctx context.Context, operation string, err error) error {
 		return domain.WrapError(domain.ErrorTimeout, operation, "S3 data synchronization canceled", err)
 	}
 	return domain.WrapError(domain.ErrorCopy, operation, "S3 data synchronization failed", err)
+}
+
+func startToolLogs(ctx context.Context, client kubernetes.Interface, req Request) *kube.ToolLogStream {
+	if !req.StreamToolLogs {
+		return nil
+	}
+	return kube.StartPVMigrateToolLogs(ctx, client, kube.ToolLogOptions{
+		Namespaces:  []string{req.Namespace},
+		OperationID: req.ID,
+		Writer:      req.Writer,
+		Logger:      req.Logger,
+		Structured:  req.StructuredLogs,
+	})
 }
 
 func inspectPVC(ctx context.Context, client kubernetes.Interface, namespace, name string, online, allowMounted, restore bool) (*PVCInfo, error) {
@@ -719,7 +740,7 @@ func inspectPVC(ctx context.Context, client kubernetes.Interface, namespace, nam
 	return &PVCInfo{PVC: pvc, PV: pv, Capacity: capacity, Mode: mode, Consumers: consumerNames, Nodes: consumerNodes}, nil
 }
 
-func checkHelperQuota(ctx context.Context, client kubernetes.Interface, namespace string) error {
+func checkToolQuota(ctx context.Context, client kubernetes.Interface, namespace string) error {
 	var quotas *corev1.ResourceQuotaList
 	var limitRanges *corev1.LimitRangeList
 	var quotaErr, limitRangeErr error
@@ -732,20 +753,20 @@ func checkHelperQuota(ctx context.Context, client kubernetes.Interface, namespac
 	})
 	wg.Wait()
 	if quotaErr != nil {
-		return domain.WrapError(domain.ErrorKubernetes, "backup preflight", "list helper ResourceQuotas", quotaErr)
+		return domain.WrapError(domain.ErrorKubernetes, "backup preflight", "list tool ResourceQuotas", quotaErr)
 	}
 	if quotas == nil {
-		return domain.NewError(domain.ErrorKubernetes, "backup preflight", "list helper ResourceQuotas returned an empty object")
+		return domain.NewError(domain.ErrorKubernetes, "backup preflight", "list tool ResourceQuotas returned an empty object")
 	}
-	demand := helperQuotaDemand()
+	demand := toolQuotaDemand()
 	violations := make([]string, 0)
 	for _, quota := range quotas.Items {
 		// The zero-resource policy deliberately omits an ephemeral-storage
 		// limit. Kubernetes requires an explicit limit when a namespace quota
-		// tracks limits.ephemeral-storage, so this helper Pod would be rejected
+		// tracks limits.ephemeral-storage, so this tool Pod would be rejected
 		// by admission even though its requested quantity is zero.
 		if _, bounded := quota.Spec.Hard[corev1.ResourceLimitsEphemeralStorage]; bounded {
-			violations = append(violations, fmt.Sprintf("%s/%s %s: helper omits an ephemeral-storage limit required by this quota", namespace, quota.Name, corev1.ResourceLimitsEphemeralStorage))
+			violations = append(violations, fmt.Sprintf("%s/%s %s: tool omits an ephemeral-storage limit required by this quota", namespace, quota.Name, corev1.ResourceLimitsEphemeralStorage))
 		}
 		for name, requested := range demand {
 			hard, bounded := quota.Spec.Hard[name]
@@ -756,19 +777,19 @@ func checkHelperQuota(ctx context.Context, client kubernetes.Interface, namespac
 			total := used.DeepCopy()
 			total.Add(requested)
 			if total.Cmp(hard) > 0 {
-				violations = append(violations, fmt.Sprintf("%s/%s %s: used %s + helper demand %s exceeds hard %s", namespace, quota.Name, name, used.String(), requested.String(), hard.String()))
+				violations = append(violations, fmt.Sprintf("%s/%s %s: used %s + tool demand %s exceeds hard %s", namespace, quota.Name, name, used.String(), requested.String(), hard.String()))
 			}
 		}
 	}
 	if len(violations) > 0 {
 		sort.Strings(violations)
-		return domain.NewError(domain.ErrorPrecondition, "backup preflight", "helper resources exceed namespace quota: "+strings.Join(violations, "; "))
+		return domain.NewError(domain.ErrorPrecondition, "backup preflight", "tool resources exceed namespace quota: "+strings.Join(violations, "; "))
 	}
 	if limitRangeErr != nil {
-		return domain.WrapError(domain.ErrorKubernetes, "backup preflight", "list helper LimitRanges", limitRangeErr)
+		return domain.WrapError(domain.ErrorKubernetes, "backup preflight", "list tool LimitRanges", limitRangeErr)
 	}
 	if limitRanges == nil {
-		return domain.NewError(domain.ErrorKubernetes, "backup preflight", "list helper LimitRanges returned an empty object")
+		return domain.NewError(domain.ErrorKubernetes, "backup preflight", "list tool LimitRanges returned an empty object")
 	}
 	for _, limitRange := range limitRanges.Items {
 		for _, item := range limitRange.Spec.Limits {
@@ -777,7 +798,7 @@ func checkHelperQuota(ctx context.Context, client kubernetes.Interface, namespac
 			}
 			for _, name := range []corev1.ResourceName{corev1.ResourceCPU, corev1.ResourceMemory, corev1.ResourceEphemeralStorage} {
 				if minimum, ok := item.Min[name]; ok && minimum.Sign() > 0 {
-					return domain.NewError(domain.ErrorPrecondition, "backup preflight", fmt.Sprintf("helper resource %s=0 is below LimitRange %s minimum %s", name, limitRange.Name, minimum.String()))
+					return domain.NewError(domain.ErrorPrecondition, "backup preflight", fmt.Sprintf("tool resource %s=0 is below LimitRange %s minimum %s", name, limitRange.Name, minimum.String()))
 				}
 			}
 		}
@@ -785,12 +806,12 @@ func checkHelperQuota(ctx context.Context, client kubernetes.Interface, namespac
 	return nil
 }
 
-// helperQuotaDemand describes the objects created by the embedded pv-migrate
+// toolQuotaDemand describes the objects created by the embedded pv-migrate
 // bucket-storage chart. Every run creates one ServiceAccount, Job, and Job Pod
 // plus one chart Secret. Helm's default Secret storage driver creates a second
 // Secret for the release record; configmap storage creates a release ConfigMap.
 // Memory and SQL drivers keep release state outside the namespace.
-func helperQuotaDemand() map[corev1.ResourceName]resource.Quantity {
+func toolQuotaDemand() map[corev1.ResourceName]resource.Quantity {
 	demand := map[corev1.ResourceName]resource.Quantity{}
 	add := func(name corev1.ResourceName, count int64) {
 		demand[name] = *resource.NewQuantity(count, resource.DecimalSI)
@@ -813,7 +834,7 @@ func helperQuotaDemand() map[corev1.ResourceName]resource.Quantity {
 	default:
 		// Helm defaults to the Secret driver when HELM_DRIVER is empty. Treat
 		// unknown values conservatively; Helm will either use a Secret driver
-		// alias or fail before creating helper resources.
+		// alias or fail before creating tool resources.
 		add(corev1.ResourceSecrets, 2)
 		add(corev1.ResourceName("count/secrets"), 2)
 	}

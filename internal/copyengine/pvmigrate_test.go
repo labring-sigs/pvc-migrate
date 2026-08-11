@@ -14,8 +14,8 @@ func TestOperationIDIsStableAndValid(t *testing.T) {
 		Mode:      ModeFinal,
 		Attempt:   2,
 	}
-	first := operationID(request)
-	second := operationID(request)
+	first := OperationID(request)
+	second := OperationID(request)
 	if first != second {
 		t.Fatalf("operation IDs differ: %q != %q", first, second)
 	}

@@ -215,7 +215,7 @@ func TestValidateDestinationPVCConflictMatrix(t *testing.T) {
 	}
 }
 
-func TestProvisionOnTargetRejectsInvalidNodeAndHelper(t *testing.T) {
+func TestProvisionOnTargetRejectsInvalidNodeAndTool(t *testing.T) {
 	t.Run("target node required", func(t *testing.T) {
 		session := reserveTestSession()
 		session.Spec.WorkflowOptionsPtr().TargetNode = ""
@@ -238,8 +238,8 @@ func TestProvisionOnTargetRejectsInvalidNodeAndHelper(t *testing.T) {
 		phase    corev1.PodPhase
 		category domain.ErrorCategory
 	}{
-		{name: "foreign helper", owner: "other", phase: corev1.PodRunning, category: domain.ErrorConflict},
-		{name: "failed helper", owner: "session", phase: corev1.PodFailed, category: domain.ErrorPrecondition},
+		{name: "foreign tool", owner: "other", phase: corev1.PodRunning, category: domain.ErrorConflict},
+		{name: "failed tool", owner: "session", phase: corev1.PodFailed, category: domain.ErrorPrecondition},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			session := reserveTestSession()
@@ -248,7 +248,7 @@ func TestProvisionOnTargetRejectsInvalidNodeAndHelper(t *testing.T) {
 				&corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "node-b", Labels: map[string]string{corev1.LabelHostname: "node-b"}}},
 				&corev1.Pod{ObjectMeta: metav1.ObjectMeta{
 					Namespace: volume.DestinationPVC.Namespace,
-					Name:      helperPodName(session.ID, volume.SourcePVC.Name),
+					Name:      toolPodName(session.ID, volume.SourcePVC.Name),
 					Labels:    map[string]string{SessionKey: test.owner},
 				}, Status: corev1.PodStatus{Phase: test.phase}},
 			)
@@ -262,14 +262,14 @@ func TestProvisionOnTargetRejectsInvalidNodeAndHelper(t *testing.T) {
 	}
 }
 
-func TestProvisionOnTargetSurfacesHelperCleanupFailure(t *testing.T) {
+func TestProvisionOnTargetSurfacesToolCleanupFailure(t *testing.T) {
 	session := reserveTestSession()
 	volume := &session.Spec.Volumes[0]
-	helper := &corev1.Pod{
+	tool := &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
 			Namespace: volume.DestinationPVC.Namespace,
-			Name:      helperPodName(session.ID, volume.SourcePVC.Name),
-			UID:       types.UID("helper-uid"),
+			Name:      toolPodName(session.ID, volume.SourcePVC.Name),
+			UID:       types.UID("tool-uid"),
 			Labels:    map[string]string{SessionKey: session.ID},
 		},
 		Status: corev1.PodStatus{
@@ -281,10 +281,10 @@ func TestProvisionOnTargetSurfacesHelperCleanupFailure(t *testing.T) {
 	}
 	client := fake.NewClientset(
 		&corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "node-b", Labels: map[string]string{corev1.LabelHostname: "node-b"}}},
-		helper,
+		tool,
 	)
 	client.PrependReactor("delete", "pods", func(clienttesting.Action) (bool, runtime.Object, error) {
-		return true, nil, errors.New("injected helper cleanup failure")
+		return true, nil, errors.New("injected tool cleanup failure")
 	})
 	reserver := NewReserver(client)
 	reserver.poll = time.Millisecond

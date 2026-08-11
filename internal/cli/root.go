@@ -17,6 +17,7 @@ import (
 	"github.com/labring-sigs/pvc-migrate/internal/output"
 	"github.com/labring-sigs/pvc-migrate/internal/planner"
 	"github.com/spf13/cobra"
+	"k8s.io/klog/v2"
 )
 
 type Options struct {
@@ -40,6 +41,7 @@ type globals struct {
 	output           string
 	logFormat        string
 	logLevel         string
+	streamToolLogs   bool
 	noCompress       bool
 	assumeYes        bool
 	toolImage        string
@@ -87,13 +89,14 @@ func NewRoot(options Options) *cobra.Command {
 	flags.DurationVar(&state.global.timeout, "timeout", 30*time.Minute, "Operation timeout")
 	flags.IntVar(&state.global.retries, "retries", 3, "Copy retry attempts")
 	flags.DurationVar(&state.global.retryBackoff, "retry-backoff", 2*time.Second, "Initial copy retry backoff")
-	flags.DurationVar(&state.global.helmTimeout, "helm-timeout", 10*time.Minute, "pv-migrate helper deployment timeout")
+	flags.DurationVar(&state.global.helmTimeout, "helm-timeout", 10*time.Minute, "pv-migrate tool deployment timeout")
 	flags.StringVarP(&state.global.output, "output", "o", "table", "Output format: table, json, yaml")
 	flags.StringVar(&state.global.logFormat, "log-format", "text", "Log format: text, json")
 	flags.StringVar(&state.global.logLevel, "log-level", "info", "Log level: debug, info, warn, error")
+	flags.BoolVar(&state.global.streamToolLogs, "stream-tool-logs", true, "Stream generated tool Pod logs to stderr")
 	flags.BoolVar(&state.global.noCompress, "no-compress", false, "Disable rsync compression")
 	flags.BoolVarP(&state.global.assumeYes, "yes", "y", false, "Approve workload pause and storage identity changes")
-	flags.StringVar(&state.global.toolImage, "tool-image", kube.DefaultToolImage(options.ToolImageRepository, options.Version), "Tool image used by PVC reservation, copy, SSHD, and backup helpers")
+	flags.StringVar(&state.global.toolImage, "tool-image", kube.DefaultToolImage(options.ToolImageRepository, options.Version), "Tool image used by PVC reservation, copy, SSHD, and backup tools")
 
 	command.AddCommand(
 		state.newReserveCommand(),
@@ -130,16 +133,25 @@ func (r *rootState) runtime() (*commandRuntime, error) {
 	if err != nil {
 		return nil, err
 	}
+	configureKubernetesLogger(logger)
 	clients, err := kube.NewClients(r.global.kubeconfig, r.global.kubeContext)
 	if err != nil {
 		return nil, err
 	}
 	controllers := controller.NewManager(clients.Kubernetes, clients.Dynamic, clients.Discovery)
 	store := kube.NewConfigMapSessionStore(clients.Kubernetes)
+	reserver := kube.NewReserver(clients.Kubernetes)
+	if r.global.streamToolLogs {
+		reserver = reserver.WithToolLogs(kube.ToolLogOptions{
+			Writer:     r.options.ErrOut,
+			Logger:     logger,
+			Structured: r.global.logFormat == "json",
+		})
+	}
 	service := app.NewService(
 		clients.Kubernetes,
 		store,
-		kube.NewReserver(clients.Kubernetes),
+		reserver,
 		copyengine.NewPVMigrate(),
 		controllers,
 		kube.NewSwitcher(clients.Kubernetes),
@@ -150,6 +162,8 @@ func (r *rootState) runtime() (*commandRuntime, error) {
 			RetryBackoff:   r.global.retryBackoff,
 			HelmTimeout:    r.global.helmTimeout,
 			NoCompress:     r.global.noCompress,
+			StreamToolLogs: r.global.streamToolLogs,
+			StructuredLogs: r.global.logFormat == "json",
 			Writer:         r.options.ErrOut,
 			Logger:         logger,
 		},
@@ -163,6 +177,10 @@ func (r *rootState) runtime() (*commandRuntime, error) {
 		logger:      logger,
 		controllers: controllers,
 	}, nil
+}
+
+func configureKubernetesLogger(logger *slog.Logger) {
+	klog.SetSlogLogger(logger.With("component", "kubernetes"))
 }
 
 func loggerFor(r *rootState) (*slog.Logger, error) {

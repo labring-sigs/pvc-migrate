@@ -37,12 +37,12 @@ The final validation used an isolated Kubernetes `v1.28.15` environment.
 
 | Scenario | Evidence | Result |
 | --- | --- | --- |
-| Standalone WFFC migration and rollback | `TestStandaloneWFFCMigrationAndRollback` passed in 306.69s. The generated namespace, session resources, helper Pods, and labeled PVs were removed after the test. | Passed |
+| Standalone WFFC migration and rollback | `TestStandaloneWFFCMigrationAndRollback` passed in 306.69s. The generated namespace, session resources, tool Pods, and labeled PVs were removed after the test. | Passed |
 | Offline S3 backup | Used an isolated S3-compatible Tenant endpoint and recovery-point prefix; manifest v2 contained 4 objects and 262450 bytes. | Passed |
 | S3 restore integrity | Marker SHA-256 `0669edbd2edb79ba63f2054f309b3a15d25afd11cfbbb1a0363db68c09db15c3`, nested SHA-256 `6128253afd1f93ca3d606f541d3fe2a9d589fc7fe2c8dec75b50df72ea58de7c`, payload SHA-256 `f25bb2b76f220bdeced8e61c8eebf156a9971263aadeac2aaf64c0c2de2b4601`; restored hashes matched the source. | Passed |
 | Online S3 backup | The source writer remained `Running` and `Ready` on the source worker, while `live.log` advanced from 56 to 58 lines during post-backup verification. The published manifest used the best-effort crash-consistent boundary and contained 5 objects. | Passed |
-| Pinned-helper S3 exercise | With helper tag `v3.6.1`, online backup, restore, and offline backup all completed against the official Tenant. The source writer stayed `Running/true`; restored marker, payload, and live-log hashes were `3e8a08b6613d0453dc2660b69816094a303afa30fefeab49bbfdafa7f2c975fd`, `5647f05ec18958947d32874eeb788fa396a05d0bab7c1b71f112ceb7e9b31eee`, and `1dd89774be579906903640754e016739e795de458002b14bcff73acd6363f731`. The offline manifest was v2 with 4 objects and 2097798 bytes. | Passed |
-| S3 helper cleanup | Helm Job, Pod, Secret, and ServiceAccount were removed after each backup/restore. The test namespace, its Delete-reclaim PVs, both completion prefixes, the temporary validation bucket, and the port-forward were removed and verified absent. | Passed |
+| Pinned-tool S3 exercise | With tool tag `v3.6.1`, online backup, restore, and offline backup all completed against the official Tenant. The source writer stayed `Running/true`; restored marker, payload, and live-log hashes were `3e8a08b6613d0453dc2660b69816094a303afa30fefeab49bbfdafa7f2c975fd`, `5647f05ec18958947d32874eeb788fa396a05d0bab7c1b71f112ceb7e9b31eee`, and `1dd89774be579906903640754e016739e795de458002b14bcff73acd6363f731`. The offline manifest was v2 with 4 objects and 2097798 bytes. | Passed |
+| S3 tool cleanup | Helm Job, Pod, Secret, and ServiceAccount were removed after each backup/restore. The test namespace, its Delete-reclaim PVs, both completion prefixes, the temporary validation bucket, and the port-forward were removed and verified absent. | Passed |
 
 ## Defects Found And Fixed
 

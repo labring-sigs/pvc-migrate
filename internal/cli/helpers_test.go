@@ -13,6 +13,7 @@ import (
 	"github.com/labring-sigs/pvc-migrate/internal/domain"
 	"github.com/labring-sigs/pvc-migrate/internal/output"
 	"github.com/spf13/cobra"
+	"k8s.io/klog/v2"
 )
 
 type cliFailingWriter struct {
@@ -47,6 +48,7 @@ func TestRootCommandSurfaceAndGlobalDefaults(t *testing.T) {
 		"output":            "table",
 		"log-format":        "text",
 		"log-level":         "info",
+		"stream-tool-logs":  "true",
 		"no-compress":       "false",
 		"yes":               "false",
 		"tool-image":        "ghcr.io/labring-sigs/pvc-migrate:test",
@@ -58,6 +60,9 @@ func TestRootCommandSurfaceAndGlobalDefaults(t *testing.T) {
 	}
 	if root.PersistentFlags().Lookup("dry-run") != nil {
 		t.Fatal("root exposes mutation-only --dry-run")
+	}
+	if root.PersistentFlags().Lookup("stream-helper-logs") != nil {
+		t.Fatal("root exposes the removed --stream-helper-logs flag")
 	}
 	mutationPaths := [][]string{
 		{"activate"}, {"backup"}, {"copy"}, {"final-sync"}, {"live-backup"}, {"migrate"}, {"migrate-pod"},
@@ -244,6 +249,23 @@ func TestLoggerForFormatsAndValidation(t *testing.T) {
 	state.global.logLevel = "trace"
 	if _, err := loggerFor(state); domain.CategoryOf(err) != domain.ErrorValidation {
 		t.Fatalf("invalid level error=%v category=%q", err, domain.CategoryOf(err))
+	}
+}
+
+func TestKubernetesLogsFollowCLIFormat(t *testing.T) {
+	state := klog.CaptureState()
+	defer state.Restore()
+
+	var output bytes.Buffer
+	logger := slog.New(slog.NewJSONHandler(&output, nil))
+	configureKubernetesLogger(logger)
+	klog.ErrorS(errors.New("watch ended"), "reflector failed", "resource", "pods")
+
+	text := output.String()
+	for _, want := range []string{`"msg":"reflector failed"`, `"component":"kubernetes"`, `"resource":"pods"`, `"err":"watch ended"`} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("Kubernetes JSON log lacks %q: %s", want, text)
+		}
 	}
 }
 

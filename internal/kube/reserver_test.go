@@ -42,12 +42,12 @@ func TestReserveVolumeProvisionsOnTargetAndRetainsBothPVs(t *testing.T) {
 			Spec:       corev1.NodeSpec{Taints: []corev1.Taint{{Key: "storage", Value: "local", Effect: corev1.TaintEffectNoSchedule}}},
 		},
 	)
-	var helperTolerations []corev1.Toleration
-	var helperDeletePreconditions *metav1.Preconditions
+	var toolTolerations []corev1.Toleration
+	var toolDeletePreconditions *metav1.Preconditions
 	client.PrependReactor("create", "pods", func(action clienttesting.Action) (bool, runtime.Object, error) {
 		pod := action.(clienttesting.CreateAction).GetObject().(*corev1.Pod)
-		helperTolerations = append([]corev1.Toleration(nil), pod.Spec.Tolerations...)
-		pod.UID = types.UID("helper-uid")
+		toolTolerations = append([]corev1.Toleration(nil), pod.Spec.Tolerations...)
+		pod.UID = types.UID("tool-uid")
 		pod.Status = corev1.PodStatus{Phase: corev1.PodRunning, Conditions: []corev1.PodCondition{{Type: corev1.PodReady, Status: corev1.ConditionTrue}}}
 		pvcObject, err := client.Tracker().Get(corev1.SchemeGroupVersion.WithResource("persistentvolumeclaims"), "system", "data-migrated")
 		if err != nil {
@@ -75,7 +75,7 @@ func TestReserveVolumeProvisionsOnTargetAndRetainsBothPVs(t *testing.T) {
 		return false, nil, nil
 	})
 	client.PrependReactor("delete", "pods", func(action clienttesting.Action) (bool, runtime.Object, error) {
-		helperDeletePreconditions = action.(clienttesting.DeleteAction).GetDeleteOptions().Preconditions
+		toolDeletePreconditions = action.(clienttesting.DeleteAction).GetDeleteOptions().Preconditions
 		return false, nil, nil
 	})
 	session := domain.NewSession("session", domain.NewSessionSpec(domain.OperationReserve, domain.SessionCommon{
@@ -103,11 +103,11 @@ func TestReserveVolumeProvisionsOnTargetAndRetainsBothPVs(t *testing.T) {
 	if !status.Reserved || volume.DestinationPV.Name != "pv-destination" || volume.DestinationPV.UID != types.UID("destination-pv-uid") {
 		t.Fatalf("reservation state: volume=%#v status=%#v", volume, status)
 	}
-	if len(helperTolerations) != 1 || helperTolerations[0].Key != "storage" || helperTolerations[0].Value != "local" {
-		t.Fatalf("helper tolerations: %#v", helperTolerations)
+	if len(toolTolerations) != 1 || toolTolerations[0].Key != "storage" || toolTolerations[0].Value != "local" {
+		t.Fatalf("tool tolerations: %#v", toolTolerations)
 	}
-	if helperDeletePreconditions == nil || helperDeletePreconditions.UID == nil || *helperDeletePreconditions.UID != types.UID("helper-uid") {
-		t.Fatalf("helper delete preconditions: %#v", helperDeletePreconditions)
+	if toolDeletePreconditions == nil || toolDeletePreconditions.UID == nil || *toolDeletePreconditions.UID != types.UID("tool-uid") {
+		t.Fatalf("tool delete preconditions: %#v", toolDeletePreconditions)
 	}
 	for _, name := range []string{"pv-source", "pv-destination"} {
 		pv, err := client.CoreV1().PersistentVolumes().Get(ctx, name, metav1.GetOptions{})

@@ -169,6 +169,10 @@ func TestPlanOrphanCleanupRejectsUnsafeStates(t *testing.T) {
 		{name: "active claim UID missing", mutate: func(_ *corev1.PersistentVolumeClaim, active *corev1.PersistentVolume, _ *corev1.PersistentVolume) {
 			active.Spec.ClaimRef.UID = ""
 		}, want: "claimRef does not match"},
+		{name: "PVC and active claim UIDs missing", mutate: func(pvc *corev1.PersistentVolumeClaim, active *corev1.PersistentVolume, _ *corev1.PersistentVolume) {
+			pvc.UID = ""
+			active.Spec.ClaimRef.UID = ""
+		}, want: "claimRef does not match"},
 		{name: "missing original policy", mutate: func(_ *corev1.PersistentVolumeClaim, active *corev1.PersistentVolume, _ *corev1.PersistentVolume) {
 			active.Annotations = nil
 		}, want: "original-reclaim-policy"},

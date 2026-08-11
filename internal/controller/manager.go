@@ -118,7 +118,7 @@ func (m *Manager) DiscoverPod(ctx context.Context, pod *corev1.Pod, options Disc
 			return domain.WorkloadSpec{}, domain.WrapError(domain.ErrorKubernetes, "discover workload", "read Job", getErr)
 		}
 		if parent := controllerOwner(job.OwnerReferences); parent != nil && parent.Kind == domain.KindBackup {
-			return domain.WorkloadSpec{}, domain.NewError(domain.ErrorPrecondition, "discover workload", fmt.Sprintf("Backup-owned archive-WAL Job %s/%s is a backup helper and cannot be migrated", options.Namespace, job.Name))
+			return domain.WorkloadSpec{}, domain.NewError(domain.ErrorPrecondition, "discover workload", fmt.Sprintf("Backup-owned archive-WAL Job %s/%s is a backup workload and cannot be migrated", options.Namespace, job.Name))
 		}
 	}
 	if err := requireReadyPod(pod, options.Namespace, options.PodName); err != nil {
@@ -764,8 +764,8 @@ func unsupportedKubeBlocksReason(pod *corev1.Pod, components []any, selectedComp
 			return fmt.Sprintf("KubeBlocks MinIO component %s requires MinIO's native drive or pool maintenance", selectedComponent)
 		case strings.Contains(lower, "cockroach"), strings.Contains(lower, "crdb"):
 			return fmt.Sprintf("KubeBlocks CockroachDB component %s requires CockroachDB drain and decommission", selectedComponent)
-		case strings.Contains(lower, "archive-wal"), lower == "wal", strings.Contains(lower, "wal-helper"):
-			return fmt.Sprintf("KubeBlocks archive-WAL component %s is a backup helper and cannot be migrated", selectedComponent)
+		case strings.Contains(lower, "archive-wal"), lower == "wal", strings.Contains(lower, "wal-tool"):
+			return fmt.Sprintf("KubeBlocks archive-WAL component %s is a backup workload and cannot be migrated", selectedComponent)
 		}
 	}
 	return ""
@@ -918,7 +918,7 @@ func unsupportedStatefulSetReason(sts *appsv1.StatefulSet) string {
 		if err == nil {
 			switch parent.Kind {
 			case domain.KindBackup:
-				return fmt.Sprintf("Backup-owned archive-WAL StatefulSet %s/%s is a backup helper and cannot be migrated", sts.Namespace, sts.Name)
+				return fmt.Sprintf("Backup-owned archive-WAL StatefulSet %s/%s is a backup workload and cannot be migrated", sts.Namespace, sts.Name)
 			case "Tenant":
 				if parentGV.Group == "minio.min.io" {
 					return fmt.Sprintf("MinIO Tenant StatefulSet %s/%s requires MinIO drive or pool maintenance", sts.Namespace, sts.Name)

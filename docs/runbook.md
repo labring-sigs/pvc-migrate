@@ -28,7 +28,7 @@ Read these fields first:
 - `status.volumes[].activation`: cutover checkpoints and active PVC UID;
 - `status.history`: ordered phase changes.
 
-Structured logs go to stderr. JSON or YAML command results go to stdout.
+Generated reservation, rsync, SSHD, and rclone Pod logs follow the active command on stderr by default, so short-lived tool cleanup does not remove the operator's copy of their output. Prefixes identify the Pod and container when several PVCs run concurrently. Redirect stderr to retain a file, for example `2>migration.log`, or use `--stream-tool-logs=false` for quiet automation. `--log-format=json` emits each tool line as a structured record. JSON or YAML command results stay on stdout.
 
 ## Failure Response
 
@@ -167,11 +167,11 @@ For a WFFC destination stuck in Pending:
 
 ## Copy Failures
 
-The copy engine tries configured strategies in order through upstream pv-migrate. `clusterip` requires policy and network reachability between source and staging namespaces. Node-local RWO volumes generally need source and destination helpers on their respective nodes.
+The copy engine tries configured strategies in order through upstream pv-migrate. `clusterip` requires policy and network reachability between source and staging namespaces. Node-local RWO volumes generally need source and destination tools on their respective nodes.
 
-`copy` defaults to an offline pass and requires zero active Pod consumers. Use `copy --online` for one finite warm pass with file-level consistency while consumers keep running. `--destination-storage-class`, `--target-node`, and `--source-node` control the destination class and helper placement; `--target-node` defaults to `auto`, which selects a compatible Ready node and prefers a node different from the source. The source node is inferred from a unique active consumer when possible. Cross-namespace copy defaults the destination PVC name to the source name.
+`copy` defaults to an offline pass and requires zero active Pod consumers. Use `copy --online` for one finite warm pass with file-level consistency while consumers keep running. `--destination-storage-class`, `--target-node`, and `--source-node` control the destination class and tool placement; `--target-node` defaults to `auto`, which selects a compatible Ready node and prefers a node different from the source. The source node is inferred from a unique active consumer when possible. Cross-namespace copy defaults the destination PVC name to the source name.
 
-Inspect Helm-owned Jobs, Deployments, Services, and Pods carrying the operation ID from structured logs. The application service increments and persists copy attempts before each call. A later resume performs another incremental pass.
+The CLI follows matching Helm-owned tool Pod logs through each attempt and prints the operation ID in progress records. Inspect Jobs, Deployments, Services, and Pods carrying that ID when cluster events require more context. The application service increments and persists copy attempts before each call. A later resume performs another incremental pass.
 
 ## KubeBlocks
 
@@ -183,7 +183,7 @@ Database consistency depends on a successful KubeBlocks offline operation and Re
 
 ## Object-Storage Backup
 
-The default `backup` command uses an offline source-PVC check. It creates a short-lived read-only helper Job after the source has no Pod consumers and syncs individual files to the object prefix.
+The default `backup` command uses an offline source-PVC check. It creates a short-lived read-only tool Job after the source has no Pod consumers and syncs individual files to the object prefix.
 
 For an online warm pass, use `live-backup` or `backup --online` with an explicit mutation flag:
 
@@ -198,9 +198,9 @@ pvc-migrate --kubeconfig /path/to/config \
   --name database-20260807
 ```
 
-The helper mounts the source read-only while application Pods continue to run. An incomplete synchronization can be retried with the same name while its completion manifest is absent. A published recovery point is immutable and requires a new name for a later backup. The result has a best-effort crash-consistent file boundary; database transactions need application quiesce, a filesystem snapshot, or a database-native backup.
+The tool mounts the source read-only while application Pods continue to run. An incomplete synchronization can be retried with the same name while its completion manifest is absent. A published recovery point is immutable and requires a new name for a later backup. The result has a best-effort crash-consistent file boundary; database transactions need application quiesce, a filesystem snapshot, or a database-native backup.
 
-The offline consumer check is a point-in-time guard. A controller can recreate a Pod after the check because Kubernetes has no PVC lock understood by workload controllers. Keep the workload owner quiesced for the whole offline backup or restore helper lifetime when file consistency matters.
+The offline consumer check is a point-in-time guard. A controller can recreate a Pod after the check because Kubernetes has no PVC lock understood by workload controllers. Keep the workload owner quiesced for the whole offline backup or restore tool lifetime when file consistency matters.
 
 Restore an S3 prefix into a PVC with the destination kept quiesced until validation completes:
 
@@ -215,13 +215,13 @@ pvc-migrate --kubeconfig /path/to/config \
   --name database-20260807
 ```
 
-S3 object-storage mode copies files individually and uses no archive compression. The resulting recovery point preserves file contents and paths; owner/group/mode, ACL, xattr, hardlink, device-file, and empty-directory metadata require an application-specific export or a future archive format. Restore keeps extra destination files by default; pass `--delete-extraneous` after reviewing the destructive deletion set. The immutable manifest binds the source PVC identity, capacity, VolumeMode, and `--path`, plus an object inventory containing count, total bytes, and a SHA-256 fingerprint over sorted object keys, sizes, and ETags. Restore checks the manifest and inventory before creating the helper and verifies the inventory after synchronization. The dry-run result displays the destination prefix, mode, consistency boundary, and compression policy without exposing credentials.
+S3 object-storage mode copies files individually and uses no archive compression. The resulting recovery point preserves file contents and paths; owner/group/mode, ACL, xattr, hardlink, device-file, and empty-directory metadata require an application-specific export or a future archive format. Restore keeps extra destination files by default; pass `--delete-extraneous` after reviewing the destructive deletion set. The immutable manifest binds the source PVC identity, capacity, VolumeMode, and `--path`, plus an object inventory containing count, total bytes, and a SHA-256 fingerprint over sorted object keys, sizes, and ETags. Restore checks the manifest and inventory before creating the tool and verifies the inventory after synchronization. The dry-run result displays the destination prefix, mode, consistency boundary, and compression policy without exposing credentials.
 
 The manifest schema is version 2. Recovery points created by earlier builds need a fresh backup before restore.
 
 ## Real-Cluster E2E
 
-Run the isolated test with credentials that can create namespaces, PV/PVC resources, Pods, Helm helper resources, and SelfSubjectAccessReviews:
+Run the isolated test with credentials that can create namespaces, PV/PVC resources, Pods, Helm tool resources, and SelfSubjectAccessReviews:
 
 ```bash
 PVC_MIGRATE_E2E=1 \

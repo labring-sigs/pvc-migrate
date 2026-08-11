@@ -35,18 +35,18 @@ func (p *Planner) checkLimitRanges(ctx context.Context, plan *domain.MigrationPl
 			if item.Type == corev1.LimitTypeContainer || item.Type == corev1.LimitTypePod {
 				for _, resourceName := range []corev1.ResourceName{corev1.ResourceCPU, corev1.ResourceMemory, corev1.ResourceEphemeralStorage} {
 					if minimum, ok := item.Min[resourceName]; ok && minimum.Cmp(zero) > 0 {
-						scope := "helper Pod"
+						scope := "tool Pod"
 						if item.Type == corev1.LimitTypeContainer {
-							scope = "helper container"
+							scope = "tool container"
 						}
 						violations = append(violations, fmt.Sprintf("%s resource %s=0 is below %s minimum %s", scope, resourceName, limitRange.Name, minimum.String()))
 					}
 					if ratio, ok := item.MaxLimitRequestRatio[resourceName]; ok && ratio.Cmp(zero) > 0 {
-						scope := "helper Pod"
+						scope := "tool Pod"
 						if item.Type == corev1.LimitTypeContainer {
-							scope = "helper container"
+							scope = "tool container"
 						}
-						// Helpers explicitly set both request and limit to zero. Kubernetes
+						// Tool containers explicitly set both request and limit to zero. Kubernetes
 						// rejects that pair when a LimitRange requires a non-zero ratio.
 						violations = append(violations, fmt.Sprintf("%s resource %s=0/0 violates %s maxLimitRequestRatio %s", scope, resourceName, limitRange.Name, ratio.String()))
 					}
