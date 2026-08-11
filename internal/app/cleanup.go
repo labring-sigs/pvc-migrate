@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 	"fmt"
+	"slices"
 	"time"
 
 	"github.com/labring-sigs/pvc-migrate/internal/domain"
@@ -36,21 +37,8 @@ func (s *Service) cleanup(ctx context.Context, session *domain.Session, options 
 		return domain.NewError(domain.ErrorPrecondition, "cleanup", fmt.Sprintf("session phase %s is still active", session.Status.Phase))
 	}
 	if !session.Spec.Operation().RebindsPVC() && (options.DeleteTemporary || options.DeleteRollback || options.DeleteSession) {
-		recovered := false
-		for index := range session.Spec.Volumes {
-			changed, err := s.discoverDestinationRefs(ctx, session, index)
-			if err != nil {
-				return err
-			}
-			recovered = recovered || changed
-		}
-		if recovered {
-			if s.store == nil {
-				return domain.NewError(domain.ErrorInternal, "cleanup", "session store is required to checkpoint recovered destination references")
-			}
-			if err := s.store.Update(ctx, session); err != nil {
-				return err
-			}
+		if err := s.recoverDestinationRefs(ctx, session); err != nil {
+			return err
 		}
 	}
 	if options.DeleteSession {
@@ -179,6 +167,34 @@ func (s *Service) cleanup(ctx context.Context, session *domain.Session, options 
 	return nil
 }
 
+func (s *Service) recoverDestinationRefs(ctx context.Context, session *domain.Session) error {
+	if session == nil {
+		return domain.NewError(domain.ErrorValidation, "cleanup", "session is nil")
+	}
+	recoveredSession := *session
+	recoveredSession.Spec.Volumes = slices.Clone(session.Spec.Volumes)
+	recovered := false
+	for index := range recoveredSession.Spec.Volumes {
+		changed, err := s.discoverDestinationRefs(ctx, &recoveredSession, index)
+		if err != nil {
+			return err
+		}
+		recovered = recovered || changed
+	}
+	if !recovered {
+		return nil
+	}
+	if s.store == nil {
+		return domain.NewError(domain.ErrorInternal, "cleanup", "session store is required to checkpoint recovered destination references")
+	}
+	if err := s.store.Update(ctx, &recoveredSession); err != nil {
+		return err
+	}
+	session.Spec.Volumes = recoveredSession.Spec.Volumes
+	session.ResourceVersion = recoveredSession.ResourceVersion
+	return nil
+}
+
 func uncheckpointedSource(session *domain.Session, index int) bool {
 	if session == nil || session.Status.Phase != domain.PhaseAborted || index < 0 || index >= len(session.Status.Volumes) || index >= len(session.Spec.Volumes) {
 		return false
@@ -189,7 +205,7 @@ func uncheckpointedSource(session *domain.Session, index int) bool {
 }
 
 func uncheckpointedDestination(session *domain.Session, index int) bool {
-	if session == nil || session.Status.Phase != domain.PhaseAborted || index < 0 || index >= len(session.Status.Volumes) {
+	if session == nil || session.Status.Phase != domain.PhaseAborted || index < 0 || index >= len(session.Status.Volumes) || index >= len(session.Spec.Volumes) {
 		return false
 	}
 	status := session.Status.Volumes[index]

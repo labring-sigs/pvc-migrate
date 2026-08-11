@@ -415,11 +415,26 @@ func TestCleanupStopsWhenRecoveredRefsCheckpointFails(t *testing.T) {
 	if store.updates != 1 {
 		t.Fatalf("checkpoint updates=%d", store.updates)
 	}
+	if session.Spec.Volumes[0].DestinationPVC.UID != "" || session.Spec.Volumes[0].DestinationPV.Name != "" {
+		t.Fatalf("session references changed after checkpoint failure: %#v", session.Spec.Volumes[0])
+	}
 	if _, err := service.client.CoreV1().PersistentVolumeClaims(pvc.Namespace).Get(ctx, pvc.Name, metav1.GetOptions{}); err != nil {
 		t.Fatalf("destination PVC changed after checkpoint failure: %v", err)
 	}
 	if _, err := service.client.CoreV1().PersistentVolumes().Get(ctx, pv.Name, metav1.GetOptions{}); err != nil {
 		t.Fatalf("destination PV changed after checkpoint failure: %v", err)
+	}
+	if err := service.Cleanup(ctx, session, CleanupOptions{DeleteTemporary: true, DeleteRollback: true}); domain.CategoryOf(err) != domain.ErrorKubernetes {
+		t.Fatalf("retry category=%s error=%v", domain.CategoryOf(err), err)
+	}
+	if store.updates != 2 {
+		t.Fatalf("retry checkpoint updates=%d", store.updates)
+	}
+	if _, err := service.client.CoreV1().PersistentVolumeClaims(pvc.Namespace).Get(ctx, pvc.Name, metav1.GetOptions{}); err != nil {
+		t.Fatalf("destination PVC changed after retry checkpoint failure: %v", err)
+	}
+	if _, err := service.client.CoreV1().PersistentVolumes().Get(ctx, pv.Name, metav1.GetOptions{}); err != nil {
+		t.Fatalf("destination PV changed after retry checkpoint failure: %v", err)
 	}
 }
 
