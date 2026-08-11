@@ -1,0 +1,5 @@
+#!/bin/sh
+
+# The upstream helper chart overrides the image entrypoint with "sh -c".
+# Keep that shell under tini so SIGTERM reaches the shell and its children.
+exec /sbin/tini -g -- /bin/busybox sh "$@"
