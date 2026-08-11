@@ -14,9 +14,11 @@ import (
 	"github.com/labring-sigs/pvc-migrate/internal/kube"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/kubernetes/fake"
+	clienttesting "k8s.io/client-go/testing"
 )
 
 type snapshotStore struct {
@@ -1267,6 +1269,31 @@ func TestHelmSchedulingValuesRejectMissingNodeTopology(t *testing.T) {
 			t.Fatalf("category=%s error=%v", domain.CategoryOf(err), err)
 		}
 	})
+}
+
+func TestHelmSchedulingValuesRejectsEmptyNodeObjects(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		object runtime.Object
+	}{
+		{name: "nil", object: nil},
+		{name: "empty", object: &corev1.Node{}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			fixture := newRecoveryFixture(t)
+			fixture.client.(*fake.Clientset).PrependReactor("get", "nodes", func(clienttesting.Action) (bool, runtime.Object, error) {
+				return true, test.object, nil
+			})
+
+			_, err := fixture.service.helmSchedulingValues(context.Background(), appTestSession())
+			if domain.CategoryOf(err) != domain.ErrorKubernetes {
+				t.Fatalf("category=%s error=%v", domain.CategoryOf(err), err)
+			}
+			if !strings.Contains(err.Error(), "returned an empty object") {
+				t.Fatalf("error=%v", err)
+			}
+		})
+	}
 }
 
 func TestHelmSchedulingValuesLocalLetsPVTopologyPlaceBothSSHDPods(t *testing.T) {

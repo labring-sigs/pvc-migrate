@@ -1370,6 +1370,9 @@ func (s *Service) helmSchedulingValues(ctx context.Context, session *domain.Sess
 				return nil, domain.WrapError(domain.ErrorKubernetes, "copy scheduling", fmt.Sprintf("read node %s", nodeName), result.err)
 			}
 			node := result.node
+			if node == nil || node.Name == "" {
+				return nil, domain.NewError(domain.ErrorKubernetes, "copy scheduling", fmt.Sprintf("read node %s returned an empty object", nodeName))
+			}
 			if target.pinNode {
 				hostname := node.Labels[corev1.LabelHostname]
 				if hostname == "" {

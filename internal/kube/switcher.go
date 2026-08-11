@@ -211,6 +211,9 @@ func (s *Switcher) ensureNoConsumers(ctx context.Context, namespace, claim strin
 	if err != nil {
 		return domain.WrapError(domain.ErrorKubernetes, "verify PVC offline", fmt.Sprintf("list Pods in %s", namespace), err)
 	}
+	if pods == nil {
+		return domain.NewError(domain.ErrorKubernetes, "verify PVC offline", fmt.Sprintf("list Pods in %s returned an empty object", namespace))
+	}
 	return ensureNoConsumerInPods(pods.Items, namespace, claim)
 }
 

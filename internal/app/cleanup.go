@@ -186,6 +186,9 @@ func (s *Service) inspectPVCUnused(ctx context.Context, ref domain.ObjectReferen
 	if err != nil {
 		return nil, domain.WrapError(domain.ErrorKubernetes, "cleanup", fmt.Sprintf("read PVC %s/%s consumers", ref.Namespace, ref.Name), err)
 	}
+	if pvc == nil || pvc.Name == "" {
+		return nil, domain.NewError(domain.ErrorKubernetes, "cleanup", fmt.Sprintf("read PVC %s/%s returned an empty object", ref.Namespace, ref.Name))
+	}
 	if ref.UID != "" && pvc.UID != ref.UID {
 		return nil, domain.NewError(domain.ErrorConflict, "cleanup", fmt.Sprintf("PVC %s/%s identity changed", ref.Namespace, ref.Name))
 	}

@@ -19,6 +19,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/kubernetes/fake"
+	coretyped "k8s.io/client-go/kubernetes/typed/core/v1"
 	storagetyped "k8s.io/client-go/kubernetes/typed/storage/v1"
 	clienttesting "k8s.io/client-go/testing"
 )
@@ -299,6 +300,42 @@ func TestEnsureDetachedFailsOnEmptyVolumeAttachmentList(t *testing.T) {
 	if !strings.Contains(err.Error(), "pv-data,pv-logs") || !strings.Contains(err.Error(), "empty object") {
 		t.Fatalf("error=%v", err)
 	}
+}
+
+func TestEnsureNoConsumersFailsOnEmptyPodList(t *testing.T) {
+	client := &nilPodListClient{Interface: fake.NewClientset()}
+
+	err := NewSwitcher(client).ensureNoConsumers(context.Background(), "app", "data")
+	if domain.CategoryOf(err) != domain.ErrorKubernetes {
+		t.Fatalf("category=%s error=%v", domain.CategoryOf(err), err)
+	}
+	if !strings.Contains(err.Error(), "list Pods in app returned an empty object") {
+		t.Fatalf("error=%v", err)
+	}
+}
+
+type nilPodListClient struct {
+	kubernetes.Interface
+}
+
+func (c *nilPodListClient) CoreV1() coretyped.CoreV1Interface {
+	return &nilPodListCore{CoreV1Interface: c.Interface.CoreV1()}
+}
+
+type nilPodListCore struct {
+	coretyped.CoreV1Interface
+}
+
+func (c *nilPodListCore) Pods(namespace string) coretyped.PodInterface {
+	return &nilPodInterface{PodInterface: c.CoreV1Interface.Pods(namespace)}
+}
+
+type nilPodInterface struct {
+	coretyped.PodInterface
+}
+
+func (c *nilPodInterface) List(context.Context, metav1.ListOptions) (*corev1.PodList, error) {
+	return nil, nil
 }
 
 type nilVolumeAttachmentClient struct {
