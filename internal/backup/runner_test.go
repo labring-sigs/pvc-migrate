@@ -96,10 +96,10 @@ func TestPreflightRejectsOfflineMountedAndOnlineRWOP(t *testing.T) {
 	}
 }
 
-func TestPreflightRejectsHelperObjectQuotaExhaustion(t *testing.T) {
+func TestPreflightRejectsToolObjectQuotaExhaustion(t *testing.T) {
 	baseClient, request := preflightFixture(t, &preflightObjectStore{})
 	quota := &corev1.ResourceQuota{
-		ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "helper-limit"},
+		ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "tool-limit"},
 		Spec: corev1.ResourceQuotaSpec{Hard: corev1.ResourceList{
 			corev1.ResourceName("count/jobs.batch"): resource.MustParse("0"),
 		}},
@@ -146,7 +146,7 @@ func TestPreflightRejectsEphemeralStorageLimitQuota(t *testing.T) {
 	}
 }
 
-func TestHelperQuotaDemandFollowsHelmReleaseDriver(t *testing.T) {
+func TestToolQuotaDemandFollowsHelmReleaseDriver(t *testing.T) {
 	tests := []struct {
 		name       string
 		driver     string
@@ -160,7 +160,7 @@ func TestHelperQuotaDemandFollowsHelmReleaseDriver(t *testing.T) {
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			t.Setenv("HELM_DRIVER", test.driver)
-			demand := helperQuotaDemand()
+			demand := toolQuotaDemand()
 			quantityString := func(name corev1.ResourceName) string {
 				quantity, ok := demand[name]
 				if !ok {
@@ -178,10 +178,10 @@ func TestHelperQuotaDemandFollowsHelmReleaseDriver(t *testing.T) {
 	}
 }
 
-func TestPreflightRejectsHelperLimitRangeMinimum(t *testing.T) {
+func TestPreflightRejectsToolLimitRangeMinimum(t *testing.T) {
 	client, request := preflightFixture(t, &preflightObjectStore{})
 	limitRange := &corev1.LimitRange{
-		ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "helper-minimum"},
+		ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "tool-minimum"},
 		Spec: corev1.LimitRangeSpec{Limits: []corev1.LimitRangeItem{{
 			Type: corev1.LimitTypeContainer,
 			Min:  corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("1m")},
@@ -348,7 +348,7 @@ func TestPVMigrateBackupAndRestoreForwardLogger(t *testing.T) {
 	}
 }
 
-func TestPVMigrateBackupAndRestoreUseZeroHelperResources(t *testing.T) {
+func TestPVMigrateBackupAndRestoreUseZeroToolResources(t *testing.T) {
 	store, err := objectstore.NewWithClient(&preflightObjectStore{}, objectstore.Config{Bucket: "backups", Name: "daily"}, objectstore.Credentials{})
 	if err != nil {
 		t.Fatal(err)
@@ -365,13 +365,13 @@ func TestPVMigrateBackupAndRestoreUseZeroHelperResources(t *testing.T) {
 	for _, values := range [][]string{backupRequest.HelmStringValues, restoreRequest.HelmStringValues} {
 		for _, expected := range kube.ZeroResourceHelmValues() {
 			if !containsString(values, expected) {
-				t.Fatalf("missing helper resource value %q in %v", expected, values)
+				t.Fatalf("missing tool resource value %q in %v", expected, values)
 			}
 		}
 	}
 }
 
-func TestPVMigrateBackupAndRestorePinDefaultHelperTimeout(t *testing.T) {
+func TestPVMigrateBackupAndRestorePinDefaultToolTimeout(t *testing.T) {
 	store, err := objectstore.NewWithClient(&preflightObjectStore{}, objectstore.Config{Bucket: "backups", Name: "daily"}, objectstore.Credentials{})
 	if err != nil {
 		t.Fatal(err)
@@ -419,19 +419,19 @@ func TestRestoreLockHolderGeneratesUniqueAttemptForExplicitID(t *testing.T) {
 	if first == second {
 		t.Fatalf("explicit operation lock holders collided: %q", first)
 	}
-	if helperOperationID(first) == helperOperationID(second) {
-		t.Fatalf("explicit operation helper IDs collided: %q", helperOperationID(first))
+	if toolOperationID(first) == toolOperationID(second) {
+		t.Fatalf("explicit operation tool IDs collided: %q", toolOperationID(first))
 	}
 }
 
-func TestHelperOperationIDIsUniqueSafeAndBounded(t *testing.T) {
-	first := helperOperationID("pvc-migrate-first")
-	second := helperOperationID("pvc-migrate-second")
+func TestToolOperationIDIsUniqueSafeAndBounded(t *testing.T) {
+	first := toolOperationID("pvc-migrate-first")
+	second := toolOperationID("pvc-migrate-second")
 	if first == second || len(first) > 24 || len(second) > 24 {
-		t.Fatalf("helper IDs first=%q second=%q", first, second)
+		t.Fatalf("tool IDs first=%q second=%q", first, second)
 	}
 	if !strings.HasPrefix(first, "pm-") || strings.ContainsAny(first[3:], "ABCDEFGHIJKLMNOPQRSTUVWXYZ_/") {
-		t.Fatalf("helper ID %q is not DNS-safe", first)
+		t.Fatalf("tool ID %q is not DNS-safe", first)
 	}
 }
 
@@ -491,9 +491,9 @@ func TestOfflinePreflightIgnoresTerminalPVCConsumers(t *testing.T) {
 	}
 }
 
-func TestOfflineBackupHelperStartRechecksConsumers(t *testing.T) {
+func TestOfflineBackupToolStartRechecksConsumers(t *testing.T) {
 	client, request := preflightFixture(t, &preflightObjectStore{})
-	if err := validateBackupHelperStart(context.Background(), client, request); err != nil {
+	if err := validateBackupToolStart(context.Background(), client, request); err != nil {
 		t.Fatal(err)
 	}
 	pod := &corev1.Pod{
@@ -505,7 +505,7 @@ func TestOfflineBackupHelperStartRechecksConsumers(t *testing.T) {
 	if _, err := client.CoreV1().Pods("default").Create(context.Background(), pod, metav1.CreateOptions{}); err != nil {
 		t.Fatal(err)
 	}
-	if err := validateBackupHelperStart(context.Background(), client, request); domain.CategoryOf(err) != domain.ErrorPrecondition {
+	if err := validateBackupToolStart(context.Background(), client, request); domain.CategoryOf(err) != domain.ErrorPrecondition {
 		t.Fatalf("category=%s error=%v", domain.CategoryOf(err), err)
 	}
 }
@@ -519,7 +519,7 @@ func containsString(values []string, want string) bool {
 	return false
 }
 
-func TestOnlineBackupPinsRWOHelperToConsumerNode(t *testing.T) {
+func TestOnlineBackupPinsRWOToolToConsumerNode(t *testing.T) {
 	client, request := preflightFixture(t, &preflightObjectStore{})
 	request.Online = true
 	pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "consumer"}, Spec: corev1.PodSpec{NodeName: "node-a", Volumes: []corev1.Volume{{VolumeSource: corev1.VolumeSource{PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: "data"}}}}}}

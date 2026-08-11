@@ -102,6 +102,8 @@ func (r *rootState) newObjectTransferCommand(restore, forceOnline bool) *cobra.C
 				HelmTimeout:           r.global.helmTimeout,
 				KubeconfigPath:        r.global.kubeconfig,
 				KubeContext:           r.global.kubeContext,
+				StreamToolLogs:        r.global.streamToolLogs,
+				StructuredLogs:        r.global.logFormat == "json",
 				Store:                 store,
 				Writer:                r.options.ErrOut,
 				Logger:                runtime.logger,
@@ -195,6 +197,7 @@ func (r *rootState) newBackupPlanCommand(restore, forceOnline bool) *cobra.Comma
 				ID: flags.id, ToolImage: r.global.toolImage, Namespace: flags.namespace, PVCName: flags.pvc, Path: flags.path,
 				Online: online, AllowMounted: flags.allowMounted, DeleteExtraneousFiles: flags.deleteExtraneous,
 				HelmTimeout: r.global.helmTimeout, KubeconfigPath: r.global.kubeconfig, KubeContext: r.global.kubeContext,
+				StreamToolLogs: r.global.streamToolLogs, StructuredLogs: r.global.logFormat == "json",
 				Store: store, Writer: r.options.ErrOut, Logger: runtime.logger,
 			}
 			plan, err := backup.Preflight(ctx, runtime.clients.Kubernetes, request, restore)

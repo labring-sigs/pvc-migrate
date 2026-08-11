@@ -28,7 +28,7 @@ func DefaultToolImage(repository, version string) string {
 }
 
 // NormalizeToolImage validates the single image reference accepted by all
-// helper roles and returns a canonical repository:tag reference. Helm's chart
+// tool roles and returns a canonical repository:tag reference. Helm's chart
 // renders repository and tag as separate values, so digest-only references are
 // deliberately rejected until the embedded chart exposes digest fields.
 func NormalizeToolImage(value string) (string, error) {

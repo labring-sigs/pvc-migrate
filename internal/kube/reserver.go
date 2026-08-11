@@ -19,12 +19,19 @@ import (
 )
 
 type Reserver struct {
-	client kubernetes.Interface
-	poll   time.Duration
+	client   kubernetes.Interface
+	poll     time.Duration
+	toolLogs *ToolLogOptions
 }
 
 func NewReserver(client kubernetes.Interface) *Reserver {
 	return &Reserver{client: client, poll: time.Second}
+}
+
+// WithToolLogs enables log streaming for reservation consumer Pods.
+func (r *Reserver) WithToolLogs(options ToolLogOptions) *Reserver {
+	r.toolLogs = &options
+	return r
 }
 
 func (r *Reserver) ReserveVolume(ctx context.Context, session *domain.Session, volume *domain.VolumeSpec, status *domain.VolumeStatus, dryRun bool) error {
@@ -206,7 +213,7 @@ func (r *Reserver) provisionOnTarget(ctx context.Context, session *domain.Sessio
 	if hostname == "" {
 		return domain.NewError(domain.ErrorPrecondition, "provision target PVC", fmt.Sprintf("node %s lacks %s", node.Name, corev1.LabelHostname))
 	}
-	podName := helperPodName(session.ID, volume.SourcePVC.Name)
+	podName := toolPodName(session.ID, volume.SourcePVC.Name)
 	pod := &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      podName,
@@ -246,18 +253,23 @@ func (r *Reserver) provisionOnTarget(ctx context.Context, session *domain.Sessio
 		existing, err = r.client.CoreV1().Pods(pod.Namespace).Create(ctx, pod, metav1.CreateOptions{})
 	}
 	if err != nil {
-		return domain.WrapError(domain.ErrorKubernetes, "provision target PVC", fmt.Sprintf("create helper Pod %s/%s", pod.Namespace, pod.Name), err)
+		return domain.WrapError(domain.ErrorKubernetes, "provision target PVC", fmt.Sprintf("create tool Pod %s/%s", pod.Namespace, pod.Name), err)
 	}
 	if existing.Labels[SessionKey] != session.ID {
-		return domain.NewError(domain.ErrorConflict, "provision target PVC", fmt.Sprintf("helper Pod %s/%s belongs to another session", pod.Namespace, pod.Name))
+		return domain.NewError(domain.ErrorConflict, "provision target PVC", fmt.Sprintf("tool Pod %s/%s belongs to another session", pod.Namespace, pod.Name))
 	}
+	var toolLogs *ToolLogStream
+	if r.toolLogs != nil {
+		toolLogs = StartPodLogs(ctx, r.client, existing, *r.toolLogs)
+	}
+	defer toolLogs.Stop()
 	if err := WaitFor(ctx, r.poll, fmt.Sprintf("reservation Pod %s/%s readiness", pod.Namespace, pod.Name), func(waitCtx context.Context) (bool, error) {
 		current, getErr := r.client.CoreV1().Pods(pod.Namespace).Get(waitCtx, pod.Name, metav1.GetOptions{})
 		if getErr != nil {
 			return false, getErr
 		}
 		if current.Status.Phase == corev1.PodFailed {
-			return false, domain.NewError(domain.ErrorPrecondition, "provision target PVC", fmt.Sprintf("helper Pod %s/%s failed", pod.Namespace, pod.Name))
+			return false, domain.NewError(domain.ErrorPrecondition, "provision target PVC", fmt.Sprintf("tool Pod %s/%s failed", pod.Namespace, pod.Name))
 		}
 		return isPodReady(current), nil
 	}); err != nil {
@@ -321,7 +333,7 @@ func (r *Reserver) retainPV(ctx context.Context, name string, uid types.UID, ses
 	return nil
 }
 
-func helperPodName(sessionID, pvcName string) string {
+func toolPodName(sessionID, pvcName string) string {
 	return BoundedName("pvc-migrate-bind", sessionID, pvcName)
 }
 

@@ -159,7 +159,7 @@ func TestCheckLimitRangesValidatesMinimumMaximumAndMalformedCapacity(t *testing.
 	}
 }
 
-func TestCheckLimitRangesRejectsPositiveHelperPodMinimums(t *testing.T) {
+func TestCheckLimitRangesRejectsPositiveToolPodMinimums(t *testing.T) {
 	limitRange := &corev1.LimitRange{
 		ObjectMeta: metav1.ObjectMeta{Namespace: "stage", Name: "pod-bounds"},
 		Spec: corev1.LimitRangeSpec{Limits: []corev1.LimitRangeItem{{
@@ -170,12 +170,12 @@ func TestCheckLimitRangesRejectsPositiveHelperPodMinimums(t *testing.T) {
 	planner := New(kubernetesfake.NewClientset(limitRange), nil)
 	plan := &domain.MigrationPlan{Ready: true}
 	planner.checkLimitRanges(context.Background(), plan, "stage", []domain.PlannedVolume{{Capacity: "1Gi"}})
-	if plan.Ready || len(plan.Checks) != 1 || !strings.Contains(plan.Checks[0].Message, "helper Pod resource cpu=0") {
+	if plan.Ready || len(plan.Checks) != 1 || !strings.Contains(plan.Checks[0].Message, "tool Pod resource cpu=0") {
 		t.Fatalf("pod minimum check: %#v", plan.Checks)
 	}
 }
 
-func TestCheckLimitRangesRejectsPositiveHelperContainerMinimums(t *testing.T) {
+func TestCheckLimitRangesRejectsPositiveToolContainerMinimums(t *testing.T) {
 	limitRange := &corev1.LimitRange{
 		ObjectMeta: metav1.ObjectMeta{Namespace: "stage", Name: "container-bounds"},
 		Spec: corev1.LimitRangeSpec{Limits: []corev1.LimitRangeItem{{
@@ -186,12 +186,12 @@ func TestCheckLimitRangesRejectsPositiveHelperContainerMinimums(t *testing.T) {
 	planner := New(kubernetesfake.NewClientset(limitRange), nil)
 	plan := &domain.MigrationPlan{Ready: true}
 	planner.checkLimitRanges(context.Background(), plan, "stage", []domain.PlannedVolume{{Capacity: "1Gi"}})
-	if plan.Ready || len(plan.Checks) != 1 || !strings.Contains(plan.Checks[0].Message, "helper container") {
+	if plan.Ready || len(plan.Checks) != 1 || !strings.Contains(plan.Checks[0].Message, "tool container") {
 		t.Fatalf("container minimum check: %#v", plan.Checks)
 	}
 }
 
-func TestCheckLimitRangesModelsHelperDefaultsAndMaxRequestRatio(t *testing.T) {
+func TestCheckLimitRangesModelsToolDefaultsAndMaxRequestRatio(t *testing.T) {
 	newLimitRange := func(ratio corev1.ResourceList) *corev1.LimitRange {
 		return &corev1.LimitRange{
 			ObjectMeta: metav1.ObjectMeta{Namespace: "stage", Name: "container-policy"},

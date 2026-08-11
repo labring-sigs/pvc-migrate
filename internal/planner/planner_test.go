@@ -589,11 +589,11 @@ func TestPlanAutoTargetRejectsWhenNoTopologyCompatibleNodeExists(t *testing.T) {
 	}
 }
 
-func TestPlanChecksSourceAndSessionNamespaceHelperQuotas(t *testing.T) {
+func TestPlanChecksSourceAndSessionNamespaceToolQuotas(t *testing.T) {
 	objects := plannerObjects("2Gi")
 	objects = append(objects,
 		&corev1.ResourceQuota{
-			ObjectMeta: metav1.ObjectMeta{Namespace: "app", Name: "source-helper-limit"},
+			ObjectMeta: metav1.ObjectMeta{Namespace: "app", Name: "source-tool-limit"},
 			Spec: corev1.ResourceQuotaSpec{Hard: corev1.ResourceList{
 				corev1.ResourceName("count/secrets"): resource.MustParse("0"),
 			}},
@@ -620,14 +620,14 @@ func TestPlanChecksSourceAndSessionNamespaceHelperQuotas(t *testing.T) {
 		t.Fatal(err)
 	}
 	if plan.Ready {
-		t.Fatal("plan unexpectedly passed source/session helper quota checks")
+		t.Fatal("plan unexpectedly passed source/session tool quota checks")
 	}
 	var sourceFound, sessionFound bool
 	for _, check := range plan.Checks {
 		if check.Name != "resource-quota" || check.Passed {
 			continue
 		}
-		if strings.Contains(check.Message, "app/source-helper-limit") {
+		if strings.Contains(check.Message, "app/source-tool-limit") {
 			sourceFound = true
 		}
 		if strings.Contains(check.Message, "audit/session-limit") {

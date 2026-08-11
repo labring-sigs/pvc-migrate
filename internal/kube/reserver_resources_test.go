@@ -13,7 +13,7 @@ import (
 	clienttesting "k8s.io/client-go/testing"
 )
 
-func TestReservationHelperPodUsesZeroResourceQuotaFootprint(t *testing.T) {
+func TestReservationToolPodUsesZeroResourceQuotaFootprint(t *testing.T) {
 	session := reserveTestSession()
 	volume := &session.Spec.Volumes[0]
 	client := fake.NewClientset(&corev1.Node{
@@ -44,13 +44,13 @@ func TestReservationHelperPodUsesZeroResourceQuotaFootprint(t *testing.T) {
 		t.Fatal(err)
 	}
 	if created == nil {
-		t.Fatal("reservation helper Pod was not created")
+		t.Fatal("reservation tool Pod was not created")
 	}
 	if len(created.Spec.Containers) != 1 {
-		t.Fatalf("helper containers = %d, want 1", len(created.Spec.Containers))
+		t.Fatalf("tool containers = %d, want 1", len(created.Spec.Containers))
 	}
 	if got := created.Spec.Containers[0].Command; len(got) != 3 || got[0] != "sh" || got[1] != "-c" || got[2] != "test -d /data && exec sleep 3600" {
-		t.Fatalf("helper command=%q", got)
+		t.Fatalf("tool command=%q", got)
 	}
 	resources := created.Spec.Containers[0].Resources
 	zero := resource.MustParse("0")
@@ -71,7 +71,7 @@ func TestReservationHelperPodUsesZeroResourceQuotaFootprint(t *testing.T) {
 		t.Fatalf("unexpected resource keys: requests=%#v limits=%#v", resources.Requests, resources.Limits)
 	}
 	if _, ok := resources.Limits[corev1.ResourceEphemeralStorage]; ok {
-		t.Fatal("zero ephemeral-storage limit would evict every helper")
+		t.Fatal("zero ephemeral-storage limit would evict every tool")
 	}
 }
 
@@ -84,7 +84,7 @@ func TestPVSupportsNodeChecksRequiredTopology(t *testing.T) {
 	}
 }
 
-func TestReservationKeepsPVCStorageRequestSeparateFromHelperResources(t *testing.T) {
+func TestReservationKeepsPVCStorageRequestSeparateFromToolResources(t *testing.T) {
 	session := reserveTestSession()
 	volume := &session.Spec.Volumes[0]
 	sourcePVC, sourcePV := reserveSourceObjects()

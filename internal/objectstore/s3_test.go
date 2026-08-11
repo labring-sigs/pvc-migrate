@@ -110,6 +110,24 @@ func (missingS3ObjectError) ErrorCode() string             { return "NoSuchKey" 
 func (missingS3ObjectError) ErrorMessage() string          { return "missing object" }
 func (missingS3ObjectError) ErrorFault() smithy.ErrorFault { return smithy.FaultClient }
 
+type missingS3Bucket struct{}
+
+func (missingS3Bucket) HeadObject(context.Context, *s3.HeadObjectInput, ...func(*s3.Options)) (*s3.HeadObjectOutput, error) {
+	return nil, &smithy.GenericAPIError{Code: "NoSuchBucket", Message: "missing bucket"}
+}
+func (missingS3Bucket) GetObject(context.Context, *s3.GetObjectInput, ...func(*s3.Options)) (*s3.GetObjectOutput, error) {
+	return nil, &smithy.GenericAPIError{Code: "NoSuchBucket", Message: "missing bucket"}
+}
+func (missingS3Bucket) PutObject(context.Context, *s3.PutObjectInput, ...func(*s3.Options)) (*s3.PutObjectOutput, error) {
+	return nil, &smithy.GenericAPIError{Code: "NoSuchBucket", Message: "missing bucket"}
+}
+func (missingS3Bucket) DeleteObject(context.Context, *s3.DeleteObjectInput, ...func(*s3.Options)) (*s3.DeleteObjectOutput, error) {
+	return nil, &smithy.GenericAPIError{Code: "NoSuchBucket", Message: "missing bucket"}
+}
+func (missingS3Bucket) ListObjectsV2(context.Context, *s3.ListObjectsV2Input, ...func(*s3.Options)) (*s3.ListObjectsV2Output, error) {
+	return nil, &smithy.GenericAPIError{Code: "NoSuchBucket", Message: "missing bucket"}
+}
+
 type timeoutS3 struct{ API }
 
 func (timeoutS3) GetObject(context.Context, *s3.GetObjectInput, ...func(*s3.Options)) (*s3.GetObjectOutput, error) {
@@ -153,6 +171,36 @@ func TestManifestMissingAndImmutable(t *testing.T) {
 	}
 	if err := store.PutManifest(context.Background(), want); err == nil {
 		t.Fatal("second manifest publication succeeded")
+	}
+}
+
+func TestIsMissingDistinguishesBucketAndObjectErrors(t *testing.T) {
+	tests := []struct {
+		name string
+		code string
+		want bool
+	}{
+		{name: "missing object", code: "NoSuchKey", want: true},
+		{name: "generic not found object", code: "NotFound", want: true},
+		{name: "missing bucket", code: "NoSuchBucket", want: false},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			err := &smithy.GenericAPIError{Code: test.code, Message: test.name}
+			if got := isMissing(err); got != test.want {
+				t.Fatalf("isMissing(%q)=%t, want %t", test.code, got, test.want)
+			}
+		})
+	}
+}
+
+func TestMissingBucketErrorsRemainActionable(t *testing.T) {
+	store := newTestStore(t, missingS3Bucket{})
+	if _, err := store.Manifest(context.Background()); err == nil || !strings.Contains(err.Error(), `bucket "backups" does not exist`) {
+		t.Fatalf("manifest missing bucket error=%v", err)
+	}
+	if _, err := store.AcquireLock(context.Background(), "holder", time.Minute); err == nil || !strings.Contains(err.Error(), `bucket "backups" does not exist`) {
+		t.Fatalf("lock missing bucket error=%v", err)
 	}
 }
 

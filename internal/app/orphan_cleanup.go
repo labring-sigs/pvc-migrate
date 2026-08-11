@@ -91,7 +91,7 @@ func (s *Service) PlanOrphanCleanup(ctx context.Context, options OrphanCleanupOp
 	if active.Labels[kube.SessionKey] != options.SessionID || active.Labels[kube.ResourceRoleLabel] != kube.ResourceRoleActive {
 		plan.AddCheck(orphanFailed("active-ownership", fmt.Sprintf("active PV %s must carry session=%s and role=active", active.Name, options.SessionID)))
 	}
-	if active.Spec.ClaimRef == nil || active.Spec.ClaimRef.Namespace != pvc.Namespace || active.Spec.ClaimRef.Name != pvc.Name || active.Spec.ClaimRef.UID != pvc.UID {
+	if pvc.UID == "" || active.Spec.ClaimRef == nil || active.Spec.ClaimRef.Namespace != pvc.Namespace || active.Spec.ClaimRef.Name != pvc.Name || active.Spec.ClaimRef.UID == "" || active.Spec.ClaimRef.UID != pvc.UID {
 		plan.AddCheck(orphanFailed("active-claim", fmt.Sprintf("active PV %s claimRef does not match PVC %s/%s UID %s", active.Name, pvc.Namespace, pvc.Name, pvc.UID)))
 	}
 	originalPolicy := corev1.PersistentVolumeReclaimPolicy(active.Annotations[kube.OriginalPolicyAnnotation])

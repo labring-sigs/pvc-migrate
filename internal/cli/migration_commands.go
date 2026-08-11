@@ -41,9 +41,9 @@ func (f *migrationFlags) bind(command *cobra.Command, includePod, includeSourceN
 	flags.StringSliceVar(&f.sourcePVCs, "source-pvc", nil, "Source PVC name; repeat for multiple claims")
 	flags.StringSliceVar(&f.destinationPVCs, "destination-pvc", nil, "Destination PVC name; repeat in source PVC order")
 	if includeSourceNode {
-		flags.StringVar(&f.sourceNode, "source-node", "", "Source helper node; inferred from active consumers when possible")
+		flags.StringVar(&f.sourceNode, "source-node", "", "Source tool node; inferred from active consumers when possible")
 	}
-	flags.StringVar(&f.targetNode, "target-node", domain.AutoValue, "Target node for provisioning and copy helpers; auto selects a compatible Ready node")
+	flags.StringVar(&f.targetNode, "target-node", domain.AutoValue, "Target node for provisioning and copy tools; auto selects a compatible Ready node")
 	flags.StringVar(&f.destinationClass, "destination-storage-class", "", "Destination StorageClass; defaults to each source class")
 	flags.StringVar(&f.capacityAwareness, "capacity-awareness", string(domain.CapacityAwarenessAuto), "CSIStorageCapacity policy: auto, require, or off")
 	flags.StringSliceVar(&f.strategies, "strategy", []string{domain.StrategyAuto}, "pv-migrate strategy order; auto selects a topology-compatible order")

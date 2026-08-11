@@ -351,8 +351,8 @@ func TestRollbackRestoresSourceBindingAndResumes(t *testing.T) {
 	}
 }
 
-func TestPVMigrateHelperIdentificationIsScopedToClaims(t *testing.T) {
-	helper := &corev1.Pod{
+func TestPVMigrateToolIdentificationIsScopedToClaims(t *testing.T) {
+	tool := &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{Labels: map[string]string{
 			"app.kubernetes.io/instance":  "pv-migrate-pm-123-clusterip",
 			"app.kubernetes.io/component": "sshd",
@@ -364,14 +364,14 @@ func TestPVMigrateHelperIdentificationIsScopedToClaims(t *testing.T) {
 			}},
 		}}},
 	}
-	if !isPVMigrateHelperForClaims(helper, map[string]struct{}{"data": {}}) {
-		t.Fatal("expected helper Pod to match its PVC")
+	if !isPVMigrateToolForClaims(tool, map[string]struct{}{"data": {}}) {
+		t.Fatal("expected tool Pod to match its PVC")
 	}
-	if isPVMigrateHelperForClaims(helper, map[string]struct{}{"other": {}}) {
-		t.Fatal("helper Pod matched another PVC")
+	if isPVMigrateToolForClaims(tool, map[string]struct{}{"other": {}}) {
+		t.Fatal("tool Pod matched another PVC")
 	}
-	helper.Labels["app.kubernetes.io/instance"] = "application"
-	if isPVMigrateHelperForClaims(helper, map[string]struct{}{"data": {}}) {
-		t.Fatal("application Pod matched a pv-migrate helper")
+	tool.Labels["app.kubernetes.io/instance"] = "application"
+	if isPVMigrateToolForClaims(tool, map[string]struct{}{"data": {}}) {
+		t.Fatal("application Pod matched a pv-migrate tool")
 	}
 }

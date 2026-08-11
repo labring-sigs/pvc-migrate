@@ -218,7 +218,7 @@ func TestRollbackVolumeRestoresOriginalPV(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if active.Spec.VolumeName != "pv-source" || status.Activation.RolledBackAt == nil {
+	if active.Spec.VolumeName != "pv-source" || active.Annotations[RollbackPVAnnotation] != "pv-destination" || status.Activation.RolledBackAt == nil {
 		t.Fatalf("rollback PVC/status: pvc=%#v status=%#v", active, status.Activation)
 	}
 	source, _ := switcher.client.CoreV1().PersistentVolumes().Get(ctx, "pv-source", metav1.GetOptions{})

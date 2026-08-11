@@ -31,7 +31,7 @@ func (p *PVMigrate) Copy(ctx context.Context, request Request, progress Progress
 	if request.VerifyChecksum {
 		rsyncArgs += " --checksum"
 	}
-	operationID := operationID(request)
+	operationID := OperationID(request)
 	imageValues, err := kube.ToolImageHelmValues(request.ToolImage)
 	if err != nil {
 		return err
@@ -115,7 +115,9 @@ func strategyValue(value string) (pvmigrate.Strategy, error) {
 	}
 }
 
-func operationID(request Request) string {
+// OperationID returns the stable upstream operation identity used in Helm
+// release names and tool Pod labels.
+func OperationID(request Request) string {
 	value := fmt.Sprintf("%s/%s/%s/%s/%d", request.SessionID, request.Source.Namespace, request.Source.Name, request.Mode, request.Attempt)
 	digest := sha256.Sum256([]byte(value))
 	return fmt.Sprintf("pm-%x", digest[:8])

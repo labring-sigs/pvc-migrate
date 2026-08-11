@@ -108,17 +108,37 @@ func (s *ConfigMapSessionStore) AcquireSessionLock(ctx context.Context, namespac
 
 // DeleteSessionLease removes a lock owned by the session. Cleanup holds the
 // same lock while deleting the session, so a concurrent mutator cannot race
-// this operation.
+// this operation. The resourceVersion precondition also protects the small
+// window where an expired holder is replaced before its cleanup call runs.
 func (s *ConfigMapSessionStore) DeleteSessionLease(ctx context.Context, namespace, id string) error {
 	if namespace == "" || id == "" {
 		return domain.NewError(domain.ErrorValidation, "delete session lock", "session namespace and ID are required")
 	}
-	err := s.client.CoordinationV1().Leases(namespace).Delete(ctx, SessionLockName(id), metav1.DeleteOptions{})
+	leases := s.client.CoordinationV1().Leases(namespace)
+	name := SessionLockName(id)
+	lease, err := leases.Get(ctx, name, metav1.GetOptions{})
 	if apierrors.IsNotFound(err) {
 		return nil
 	}
 	if err != nil {
-		return domain.WrapError(domain.ErrorKubernetes, "delete session lock", fmt.Sprintf("delete Lease %s/%s", namespace, SessionLockName(id)), err)
+		return domain.WrapError(domain.ErrorKubernetes, "delete session lock", fmt.Sprintf("read Lease %s/%s", namespace, name), err)
+	}
+	if lease.Labels[ManagedByLabel] != ManagedByValue || lease.Labels[SessionKey] != id {
+		return domain.NewError(domain.ErrorConflict, "delete session lock", fmt.Sprintf("Lease %s/%s is owned by another resource", namespace, name))
+	}
+	preconditions := &metav1.Preconditions{ResourceVersion: &lease.ResourceVersion}
+	if lease.UID != "" {
+		preconditions.UID = &lease.UID
+	}
+	err = leases.Delete(ctx, name, metav1.DeleteOptions{Preconditions: preconditions})
+	if apierrors.IsNotFound(err) {
+		return nil
+	}
+	if apierrors.IsConflict(err) {
+		return domain.WrapError(domain.ErrorConflict, "delete session lock", fmt.Sprintf("Lease %s/%s changed while deleting", namespace, name), err)
+	}
+	if err != nil {
+		return domain.WrapError(domain.ErrorKubernetes, "delete session lock", fmt.Sprintf("delete Lease %s/%s", namespace, name), err)
 	}
 	return nil
 }

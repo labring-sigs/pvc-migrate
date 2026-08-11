@@ -29,6 +29,8 @@ type Config struct {
 	RetryBackoff   time.Duration
 	HelmTimeout    time.Duration
 	NoCompress     bool
+	StreamToolLogs bool
+	StructuredLogs bool
 	Writer         io.Writer
 	Logger         *slog.Logger
 }
@@ -1247,10 +1249,21 @@ func (s *Service) copyWithRetry(ctx context.Context, session *domain.Session, vo
 			Writer:                s.config.Writer,
 			Logger:                s.config.Logger,
 		}
+		var toolLogs *kube.ToolLogStream
+		if s.config.StreamToolLogs {
+			toolLogs = kube.StartPVMigrateToolLogs(ctx, s.client, kube.ToolLogOptions{
+				Namespaces:  []string{volume.SourcePVC.Namespace, volume.DestinationPVC.Namespace},
+				OperationID: copyengine.OperationID(request),
+				Writer:      s.config.Writer,
+				Logger:      s.config.Logger,
+				Structured:  s.config.StructuredLogs,
+			})
+		}
 		copyErr := s.copier.Copy(ctx, request, func(progress copyengine.Progress) {
 			s.config.Logger.Info("copy progress", "session", session.ID, "pvc", volume.SourcePVC.Name, "mode", progress.Mode, "attempt", progress.Attempt, "state", progress.State, "message", progress.Message)
 		})
-		last = errors.Join(copyErr, s.waitForCopyHelperRelease(ctx, volume))
+		toolLogs.Stop()
+		last = errors.Join(copyErr, s.waitForCopyToolRelease(ctx, volume))
 		if last == nil {
 			return nil
 		}
@@ -1273,7 +1286,7 @@ func (s *Service) copyWithRetry(ctx context.Context, session *domain.Session, vo
 	return last
 }
 
-func (s *Service) waitForCopyHelperRelease(ctx context.Context, volume *domain.VolumeSpec) error {
+func (s *Service) waitForCopyToolRelease(ctx context.Context, volume *domain.VolumeSpec) error {
 	claims := map[string]map[string]struct{}{}
 	for _, ref := range []domain.ObjectReference{volume.SourcePVC, volume.DestinationPVC} {
 		if claims[ref.Namespace] == nil {
@@ -1281,14 +1294,14 @@ func (s *Service) waitForCopyHelperRelease(ctx context.Context, volume *domain.V
 		}
 		claims[ref.Namespace][ref.Name] = struct{}{}
 	}
-	return kube.WaitFor(ctx, time.Second, fmt.Sprintf("pv-migrate helpers to release PVC %s/%s", volume.SourcePVC.Namespace, volume.SourcePVC.Name), func(waitCtx context.Context) (bool, error) {
+	return kube.WaitFor(ctx, time.Second, fmt.Sprintf("pv-migrate tools to release PVC %s/%s", volume.SourcePVC.Namespace, volume.SourcePVC.Name), func(waitCtx context.Context) (bool, error) {
 		for namespace, namespaceClaims := range claims {
 			pods, err := s.client.CoreV1().Pods(namespace).List(waitCtx, metav1.ListOptions{})
 			if err != nil {
 				return false, domain.WrapError(domain.ErrorKubernetes, "copy cleanup", fmt.Sprintf("list Pods in %s", namespace), err)
 			}
 			for i := range pods.Items {
-				if isPVMigrateHelperForClaims(&pods.Items[i], namespaceClaims) {
+				if isPVMigrateToolForClaims(&pods.Items[i], namespaceClaims) {
 					return false, nil
 				}
 			}
@@ -1297,7 +1310,7 @@ func (s *Service) waitForCopyHelperRelease(ctx context.Context, volume *domain.V
 	})
 }
 
-func isPVMigrateHelperForClaims(pod *corev1.Pod, claims map[string]struct{}) bool {
+func isPVMigrateToolForClaims(pod *corev1.Pod, claims map[string]struct{}) bool {
 	instance := pod.Labels[kube.AppInstanceLabel]
 	component := pod.Labels[kube.AppComponentLabel]
 	if !strings.HasPrefix(instance, "pv-migrate-") || (component != "sshd" && component != "rsync" && component != "rclone") {
@@ -1454,7 +1467,7 @@ func (s *Service) validateWorkloadResume(ctx context.Context, session *domain.Se
 	options := session.Spec.WorkflowOptions()
 	// TargetNode is the exact placement contract only for the standalone
 	// adapter. Controller-managed workloads keep their own scheduling policy;
-	// the helper node can become unavailable while the workload still has a
+	// the tool node can become unavailable while the workload still has a
 	// valid placement elsewhere.
 	if session.Spec.Workload().Adapter != domain.WorkloadStandalone || options.TargetNode == "" {
 		return nil
@@ -1474,7 +1487,7 @@ func (s *Service) verifyActiveVolumes(ctx context.Context, session *domain.Sessi
 		return err
 	}
 	options := session.Spec.WorkflowOptions()
-	// TargetNode pins reservation and copy helpers for every workload. The
+	// TargetNode pins reservation and copy tools for every workload. The
 	// standalone adapter also pins the recreated Pod; controller-managed
 	// workloads retain their own scheduler policy and may validly land on a
 	// different node when the destination volume is topology-independent.

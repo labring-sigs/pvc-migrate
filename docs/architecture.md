@@ -42,7 +42,7 @@ The ConfigMap contains:
 - per-volume activation checkpoints and the active PVC UID;
 - phase history and `resumeFrom`.
 
-Session specifications use a discriminator with exactly one concrete payload. `reserve`, `migrate`, `migratePod`, `copy`, `rename`, and `move` each have their own typed payload; workflow options such as helper nodes, copy strategies, checksum verification, and extraneous-file policy live inside the applicable payload. `SessionCommon` contains only identities shared by every workflow: namespaces, creator, and volume records. `Session.Validate` rejects missing, mixed, or discriminator-mismatched payloads, so a persisted session cannot silently combine fields from different workflows.
+Session specifications use a discriminator with exactly one concrete payload. `reserve`, `migrate`, `migratePod`, `copy`, `rename`, and `move` each have their own typed payload; workflow options such as tool nodes, copy strategies, checksum verification, and extraneous-file policy live inside the applicable payload. `SessionCommon` contains only identities shared by every workflow: namespaces, creator, and volume records. `Session.Validate` rejects missing, mixed, or discriminator-mismatched payloads, so a persisted session cannot silently combine fields from different workflows.
 
 ConfigMap updates carry the current Kubernetes `resourceVersion`. A competing process receives a conflict and reloads the session before continuing. Mutating session commands also claim `pvc-migrate-lock-<sha256(session-id)>` in the session namespace. The holder renews the Lease while the operation runs; a renewal, ownership, or resource-version failure cancels the operation context, and the service refuses further mutations under the fenced holder. The Lease is released only by its current holder, with expiration recovering abandoned sessions.
 
@@ -78,11 +78,11 @@ This model gives crash consistency at the final filesystem state. Database-level
 
 The planner selects a target node automatically when `--target-node` is `auto` (the default). Selection considers Ready and schedulable state, Pod node selectors and required affinity, migration-hard scheduling constraints, taints, every destination StorageClass topology, and matching `CSIStorageCapacity` reports. Known capacity limits remove unsuitable nodes, and greater reported headroom ranks earlier; a pinned node receives the same checks. Reservation creates a real destination PVC before downtime, which consumes namespace quota and tests backend provisioning.
 
-For `WaitForFirstConsumer`, a short-lived consumer Pod uses the target hostname and generated tolerations for target-node `NoSchedule` and `NoExecute` taints. The reserver waits for Pod readiness and a Bound PVC, records the PV UID and selected node, changes the PV to `Retain`, and removes the consumer. Generated tolerations remain limited to helper resources.
+For `WaitForFirstConsumer`, a short-lived consumer Pod uses the target hostname and generated tolerations for target-node `NoSchedule` and `NoExecute` taints. The reserver waits for Pod readiness and a Bound PVC, records the PV UID and selected node, changes the PV to `Retain`, and removes the consumer. Generated tolerations remain limited to tool resources.
 
 Quota evaluation uses Kubernetes `resource.Quantity` and evaluates every ResourceQuota and PVC LimitRange in the staging namespace. Capacity awareness aggregates the requested PVC capacity by StorageClass, matches namespaced `CSIStorageCapacity` objects against target-node labels, and checks both available capacity and the largest requested volume. The plan estimates temporary storage, retained rollback storage, PVCs, Pods, Jobs, Services, Secrets, and ConfigMaps. Actual destination binding remains the authoritative storage-capacity test.
 
-Helper containers set CPU and memory requests/limits to `0` and ephemeral-storage requests to `0`. The ephemeral-storage limit remains unset so kubelet can account for helper logs and writable-layer usage without immediately evicting a container whose limit is `0`. Object-count quota for Pods, Jobs, Secrets, Services, and ConfigMaps still applies and remains part of the plan estimate.
+Tool containers set CPU and memory requests/limits to `0` and ephemeral-storage requests to `0`. The ephemeral-storage limit remains unset so kubelet can account for tool logs and writable-layer usage without immediately evicting a container whose limit is `0`. Object-count quota for Pods, Jobs, Secrets, Services, and ConfigMaps still applies and remains part of the plan estimate.
 
 ## Workload Adapters
 
@@ -100,9 +100,9 @@ Discovery supports served `apps.kubeblocks.io/v1alpha1` and `operations.kubebloc
 
 ## Namespace And RBAC Model
 
-The source namespace owns the application PVC identity. The temporary namespace holds staged PVCs and copy helpers. The destination namespace defaults to the source namespace for activation. The session namespace holds ConfigMaps and defaults to `pvc-migrate-system`. `rename` rebinds a name within one namespace; `move` rebinds the same retained PV across namespaces.
+The source namespace owns the application PVC identity. The temporary namespace holds staged PVCs and copy tools. The destination namespace defaults to the source namespace for activation. The session namespace holds ConfigMaps and defaults to `pvc-migrate-system`. `rename` rebinds a name within one namespace; `move` rebinds the same retained PV across namespaces.
 
-`plan` issues SelfSubjectAccessReviews for source, staging, session, cluster-scoped PV/node/storage resources, Helm helper objects, controller operations, and KubeBlocks OpsRequests. It also verifies Pod-referenced Secrets, ConfigMaps, and ServiceAccounts. Existing NetworkPolicies generate a warning because the real copy Job provides the definitive connectivity result.
+`plan` issues SelfSubjectAccessReviews for source, staging, session, cluster-scoped PV/node/storage resources, Helm tool objects, controller operations, and KubeBlocks OpsRequests. It also verifies Pod-referenced Secrets, ConfigMaps, and ServiceAccounts. Existing NetworkPolicies generate a warning because the real copy Job provides the definitive connectivity result.
 
 ## Finalize And Rollback
 
@@ -114,6 +114,6 @@ Abort applies before activation. The source remains active, the staged destinati
 
 ## Upstream Boundary
 
-`internal/copyengine.PVMigrate` imports `github.com/utkuozdemir/pv-migrate/pvmigrate` directly. The adapter converts strategies, builds stable operation IDs, supplies scheduling Helm values, disables interactive progress, and converts upstream failures into the `copy` error category.
+`internal/copyengine.PVMigrate` imports `github.com/utkuozdemir/pv-migrate/pvmigrate` directly. The adapter converts strategies, builds stable operation IDs, supplies scheduling Helm values, disables interactive progress, and converts upstream failures into the `copy` error category. A separate Kubernetes watcher follows tool Pods whose Helm instance label contains the exact operation ID, preserving raw rsync, SSHD, and rclone output on CLI stderr while stdout remains reserved for command results.
 
 The module is pinned to upstream commit `22a469151ecaf3e4c529437193380eba23949165` as `v1.8.1-0.20260802124747-22a469151eca`. The pseudo-version resolves the upstream tag and module-path history while retaining a reproducible commit.

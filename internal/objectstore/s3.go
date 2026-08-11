@@ -266,6 +266,9 @@ func (s *Store) RcloneConfig() string {
 func (s *Store) Manifest(ctx context.Context) (*Manifest, error) {
 	output, err := s.client.GetObject(ctx, &s3.GetObjectInput{Bucket: aws.String(s.config.Bucket), Key: aws.String(s.manifestKey())})
 	if err != nil {
+		if isNoSuchBucket(err) {
+			return nil, domain.NewError(domain.ErrorPrecondition, "S3 manifest", fmt.Sprintf("bucket %q does not exist", s.config.Bucket))
+		}
 		if isMissing(err) {
 			return nil, nil
 		}
@@ -402,6 +405,9 @@ func (s *Store) AcquireLock(ctx context.Context, holder string, ttl time.Duratio
 	}
 	current, etag, getErr := s.readLock(ctx)
 	if getErr != nil {
+		if isNoSuchBucket(getErr) {
+			return "", domain.NewError(domain.ErrorPrecondition, "S3 lock", fmt.Sprintf("bucket %q does not exist", s.config.Bucket))
+		}
 		return "", wrapS3Error(ctx, domain.ErrorConflict, "S3 lock", "acquire backup lock", getErr)
 	}
 	if current == nil || time.Now().UTC().Before(current.ExpiresAt) {
@@ -553,18 +559,27 @@ func wrapS3Error(ctx context.Context, category domain.ErrorCategory, operation, 
 }
 
 func isMissing(err error) bool {
-	var responseErr *smithyhttp.ResponseError
-	if errors.As(err, &responseErr) && responseErr.HTTPStatusCode() == http.StatusNotFound {
-		return true
-	}
 	var apiErr smithy.APIError
 	if errors.As(err, &apiErr) {
 		switch apiErr.ErrorCode() {
 		case "NoSuchKey", "NotFound", "NoSuchObject":
 			return true
+		case "NoSuchBucket":
+			// A missing bucket is a configuration or provisioning error that callers
+			// need to distinguish from an absent object.
+			return false
 		}
 	}
+	var responseErr *smithyhttp.ResponseError
+	if errors.As(err, &responseErr) && responseErr.HTTPStatusCode() == http.StatusNotFound {
+		return true
+	}
 	return false
+}
+
+func isNoSuchBucket(err error) bool {
+	var apiErr smithy.APIError
+	return errors.As(err, &apiErr) && apiErr.ErrorCode() == "NoSuchBucket"
 }
 
 func LockHolder(operationID string) string {

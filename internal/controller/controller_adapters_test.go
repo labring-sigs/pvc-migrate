@@ -188,7 +188,7 @@ func TestDiscoverRejectsControllerSpecificUnsafeWorkloads(t *testing.T) {
 		want   string
 	}{
 		{name: "cockroach", labels: map[string]string{"app.kubernetes.io/name": "cockroachdb"}, want: "CockroachDB"},
-		{name: "backup helper", parent: &metav1.OwnerReference{APIVersion: "dataprotection.kubeblocks.io/v1alpha1", Kind: "Backup", Name: "archive"}, want: "backup helper"},
+		{name: "backup workload", parent: &metav1.OwnerReference{APIVersion: "dataprotection.kubeblocks.io/v1alpha1", Kind: "Backup", Name: "archive"}, want: "backup workload"},
 		{name: "minio tenant", parent: &metav1.OwnerReference{APIVersion: "minio.min.io/v2", Kind: "Tenant", Name: "object-storage"}, want: "MinIO"},
 		{name: "minio helm", labels: map[string]string{"app.kubernetes.io/name": "minio"}, want: "MinIO"},
 	}
@@ -213,7 +213,7 @@ func TestDiscoverRejectsControllerSpecificUnsafeWorkloads(t *testing.T) {
 	}
 }
 
-func TestDiscoverRejectsBackupHelperBeforeReadiness(t *testing.T) {
+func TestDiscoverRejectsBackupWorkloadBeforeReadiness(t *testing.T) {
 	replicas := int32(1)
 	sts := &appsv1.StatefulSet{
 		ObjectMeta: metav1.ObjectMeta{
@@ -244,7 +244,7 @@ func TestDiscoverRejectsBackupHelperBeforeReadiness(t *testing.T) {
 	}
 	manager := NewManager(fake.NewClientset(sts, pod), dynamicfake.NewSimpleDynamicClient(runtime.NewScheme()), nil)
 	_, err := manager.Discover(context.Background(), DiscoverOptions{Namespace: "app", PodName: pod.Name})
-	if domain.CategoryOf(err) != domain.ErrorPrecondition || !strings.Contains(err.Error(), "backup helper") {
+	if domain.CategoryOf(err) != domain.ErrorPrecondition || !strings.Contains(err.Error(), "backup workload") {
 		t.Fatalf("category=%s error=%v", domain.CategoryOf(err), err)
 	}
 }

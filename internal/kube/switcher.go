@@ -501,7 +501,11 @@ func activePVCManifest(session *domain.Session, volume *domain.VolumeSpec, pvRef
 	pvc.Labels[ManagedByLabel] = ManagedByValue
 	pvc.Labels[SessionKey] = session.ID
 	pvc.Annotations[SessionKey] = session.ID
-	pvc.Annotations[RollbackPVAnnotation] = volume.SourcePV.Name
+	rollbackPV := volume.SourcePV.Name
+	if pvRef.Name == volume.SourcePV.Name {
+		rollbackPV = volume.DestinationPV.Name
+	}
+	pvc.Annotations[RollbackPVAnnotation] = rollbackPV
 	return pvc
 }
 

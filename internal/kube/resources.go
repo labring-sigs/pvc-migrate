@@ -7,7 +7,7 @@ import (
 
 // ZeroResourceRequirements prevents LimitRange defaults from assigning a
 // compute or requested ephemeral-storage footprint to short-lived migration
-// helpers. A zero ephemeral-storage limit would make every helper immediately
+// tools. A zero ephemeral-storage limit would make every tool immediately
 // evictable because its writable layer and logs consume local storage, so that
 // limit is deliberately omitted.
 // PVC storage remains represented by the PVC requests.storage field.
