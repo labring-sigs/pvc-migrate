@@ -158,6 +158,16 @@ func TestMoveSessionUsesDedicatedRebindPhase(t *testing.T) {
 	if !OperationMove.RebindsPVC() || OperationMigrate.RebindsPVC() {
 		t.Fatal("PVC rebind operation classification is incorrect")
 	}
+	for _, operation := range []Operation{OperationMigrate, OperationMigratePod, OperationRename, OperationMove} {
+		if !operation.RecreatesPVC() {
+			t.Fatalf("operation %s must recreate PVC identity", operation)
+		}
+	}
+	for _, operation := range []Operation{OperationReserve, OperationCopy, OperationBackup, OperationRestore} {
+		if operation.RecreatesPVC() {
+			t.Fatalf("operation %s must preserve PVC identity", operation)
+		}
+	}
 }
 
 func TestFailedSessionRecordsResumePhase(t *testing.T) {

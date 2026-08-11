@@ -140,6 +140,7 @@ func (p *Planner) PlanRename(ctx context.Context, options RenameOptions) (*domai
 		plan.AddCheck(failed("source-pvc", "source PVC must be Bound"))
 		return plan, nil
 	}
+	p.checkPVCFinalizers(plan, pvc, options.Operation)
 	switch {
 	case destinationPVCErr == nil && existing == nil:
 		plan.AddCheck(failed("destination-pvc", "read destination PVC returned an empty object"))

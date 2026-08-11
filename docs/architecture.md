@@ -62,6 +62,8 @@ Kubernetes has no transaction across PVCs, PVs, Pods, StatefulSets, and custom r
 
 Each activation mutation has UID and resource-version preconditions where the API supports them. The recreated PVC manifest receives a server-side dry-run after the old PVC disappears and before the PV claim reservation changes. A process failure at any checkpoint leaves `Retain` volumes and enough session state for `session resume` or `session rollback`.
 
+The session preserves business labels, annotations, and owner references for the final PVC. Stale binding and CSI resizer annotations are omitted; Kubernetes and CSI controllers derive current binding metadata, and the external resizer writes its annotation when a later expansion begins. Operations that recreate a PVC reject custom finalizers during planning so an unknown controller cannot leave the replacement identity with an unrecoverable deletion block.
+
 Multi-PVC Pod migration reserves and warm-copies every volume, pauses once, final-syncs every volume, activates every volume, and resumes once. A partial activation keeps the workload paused while resume completes the remaining volumes.
 
 ## Consistency Boundary

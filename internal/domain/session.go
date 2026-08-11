@@ -35,6 +35,12 @@ func (o Operation) RebindsPVC() bool {
 	return o == OperationRename || o == OperationMove
 }
 
+// RecreatesPVC reports workflows that delete the source PVC and create a new
+// PVC identity for activation.
+func (o Operation) RecreatesPVC() bool {
+	return o == OperationMigrate || o == OperationMigratePod || o.RebindsPVC()
+}
+
 type Phase string
 
 const (

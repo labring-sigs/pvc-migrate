@@ -494,7 +494,7 @@ func activePVCManifest(session *domain.Session, volume *domain.VolumeSpec, pvRef
 		"volume.beta.kubernetes.io/storage-provisioner",
 		"volume.kubernetes.io/selected-node",
 		"volume.kubernetes.io/storage-provisioner",
-		"volume.kubernetes.io/storage-resizer",
+		PVCStorageResizerAnnotation,
 	} {
 		delete(pvc.Annotations, key)
 	}

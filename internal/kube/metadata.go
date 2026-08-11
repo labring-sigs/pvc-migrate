@@ -9,15 +9,17 @@ const (
 )
 
 const (
-	SessionKey               = "pvc-migrate.io/session"
-	ResourceRoleLabel        = "pvc-migrate.io/role"
-	SessionFinalizer         = "pvc-migrate.io/session-protection"
-	OriginalPolicyAnnotation = "pvc-migrate.io/original-reclaim-policy"
-	SourcePVCUIDAnnotation   = "pvc-migrate.io/source-pvc-uid"
-	SourcePVAnnotation       = "pvc-migrate.io/source-pv"
-	RollbackPVAnnotation     = "pvc-migrate.io/rollback-pv"
-	PairedPVAnnotation       = "pvc-migrate.io/paired-pv"
-	PauseSessionAnnotation   = "pvc-migrate.io/pause-session"
+	SessionKey                  = "pvc-migrate.io/session"
+	PVCProtectionFinalizer      = "kubernetes.io/pvc-protection"
+	PVCStorageResizerAnnotation = "volume.kubernetes.io/storage-resizer"
+	ResourceRoleLabel           = "pvc-migrate.io/role"
+	SessionFinalizer            = "pvc-migrate.io/session-protection"
+	OriginalPolicyAnnotation    = "pvc-migrate.io/original-reclaim-policy"
+	SourcePVCUIDAnnotation      = "pvc-migrate.io/source-pvc-uid"
+	SourcePVAnnotation          = "pvc-migrate.io/source-pv"
+	RollbackPVAnnotation        = "pvc-migrate.io/rollback-pv"
+	PairedPVAnnotation          = "pvc-migrate.io/paired-pv"
+	PauseSessionAnnotation      = "pvc-migrate.io/pause-session"
 )
 
 const (
