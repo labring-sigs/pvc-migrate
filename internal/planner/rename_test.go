@@ -52,6 +52,7 @@ func TestPlanRenameSameNamespacePreservesDurableMetadataWithoutQuotaDemand(t *te
 			"application.example/setting":                      "keep",
 			"volume.kubernetes.io/selected-node":               "drop",
 			"pv.kubernetes.io/bind-completed":                  "drop",
+			"volume.kubernetes.io/storage-resizer":             "drop",
 			"kubectl.kubernetes.io/last-applied-configuration": "drop",
 		}
 	}
@@ -71,10 +72,28 @@ func TestPlanRenameSameNamespacePreservesDurableMetadataWithoutQuotaDemand(t *te
 	if metadata.Labels["application"] != "database" || metadata.Annotations["application.example/setting"] != "keep" {
 		t.Fatalf("preserved metadata=%#v", metadata)
 	}
-	for _, key := range []string{"volume.kubernetes.io/selected-node", "pv.kubernetes.io/bind-completed", "kubectl.kubernetes.io/last-applied-configuration", kube.SessionKey} {
+	for _, key := range []string{"volume.kubernetes.io/selected-node", "pv.kubernetes.io/bind-completed", "volume.kubernetes.io/storage-resizer", "kubectl.kubernetes.io/last-applied-configuration", kube.SessionKey} {
 		if _, exists := metadata.Annotations[key]; exists {
 			t.Fatalf("transient annotation %q was preserved", key)
 		}
+	}
+}
+
+func TestPlanRenameRejectsCustomPVCFinalizer(t *testing.T) {
+	objects := plannerObjects("2Gi")
+	for _, object := range objects {
+		if pvc, ok := object.(*corev1.PersistentVolumeClaim); ok {
+			pvc.Finalizers = []string{kube.PVCProtectionFinalizer, "storage.example/protect"}
+		}
+	}
+	plan, err := New(plannerClient(objects...), nil).PlanRename(context.Background(), RenameOptions{
+		SessionID: "rename-finalizer", SourceNamespace: "app", SourcePVC: "data", DestinationPVC: "renamed", SessionNamespace: "system",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if plan.Ready || !hasFailedCheck(plan, "pvc-finalizers") {
+		t.Fatalf("plan=%#v", plan)
 	}
 }
 

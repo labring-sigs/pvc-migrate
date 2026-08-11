@@ -175,6 +175,7 @@ Controller ownership outside the supported adapters causes the plan to fail. PVC
 - PVC and PV mutations verify recorded UIDs, bindings, and session ownership.
 - Source and destination PVs use `Retain` throughout cutover and rollback.
 - Replacement PVCs receive API-server dry-run validation before activation.
+- Recreated PVC workflows reject unknown custom finalizers during planning; Kubernetes PVC protection remains controller-managed, stale CSI binding metadata is omitted, and the external resizer writes its annotation when a later expansion begins.
 - A failure after workload pause preserves the paused workload and its resumable session.
 - `session abort` restores a paused workload before activation and retains staged storage for cleanup.
 - `session rollback` restores application PVC identities to the retained source PVs.

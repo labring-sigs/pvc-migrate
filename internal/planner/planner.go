@@ -233,6 +233,7 @@ func (p *Planner) Plan(ctx context.Context, options Options) (*domain.MigrationP
 			plan.AddCheck(failed("source-pvc", fmt.Sprintf("PVC %s/%s must be Bound", pvc.Namespace, pvc.Name)))
 			continue
 		}
+		p.checkPVCFinalizers(plan, pvc, options.Operation)
 		mode := corev1.PersistentVolumeFilesystem
 		if pvc.Spec.VolumeMode != nil {
 			mode = *pvc.Spec.VolumeMode
@@ -1041,6 +1042,7 @@ func filteredPVCAnnotations(input map[string]string) map[string]string {
 			"volume.kubernetes.io/selected-node",
 			"volume.kubernetes.io/storage-provisioner",
 			"volume.beta.kubernetes.io/storage-provisioner",
+			kube.PVCStorageResizerAnnotation,
 			"kubectl.kubernetes.io/last-applied-configuration",
 			kube.SessionKey:
 			continue
@@ -1067,4 +1069,21 @@ func isRiskRole(role string) bool {
 	default:
 		return false
 	}
+}
+
+func (p *Planner) checkPVCFinalizers(plan *domain.MigrationPlan, pvc *corev1.PersistentVolumeClaim, operation domain.Operation) {
+	if pvc == nil || !operation.RecreatesPVC() {
+		return
+	}
+	custom := make([]string, 0, len(pvc.Finalizers))
+	for _, finalizer := range pvc.Finalizers {
+		if finalizer != "" && finalizer != kube.PVCProtectionFinalizer {
+			custom = append(custom, finalizer)
+		}
+	}
+	if len(custom) == 0 {
+		return
+	}
+	slices.Sort(custom)
+	plan.AddCheck(failed("pvc-finalizers", fmt.Sprintf("PVC %s/%s has custom finalizer(s) %s; remove them or complete their controller cleanup before an operation that recreates the PVC", pvc.Namespace, pvc.Name, strings.Join(custom, ", "))))
 }
