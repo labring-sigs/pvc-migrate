@@ -11,6 +11,72 @@ import (
 	"k8s.io/apimachinery/pkg/api/resource"
 )
 
+func TestPodBlocksPVCDeletion(t *testing.T) {
+	for _, test := range []struct {
+		name            string
+		phase           corev1.PodPhase
+		nodeName        string
+		wantProtection  bool
+		wantSafeRemoval bool
+	}{
+		{name: "scheduled running", phase: corev1.PodRunning, nodeName: "node-a", wantProtection: true, wantSafeRemoval: true},
+		{name: "unscheduled pending", phase: corev1.PodPending, wantSafeRemoval: true},
+		{name: "scheduled succeeded", phase: corev1.PodSucceeded, nodeName: "node-a", wantProtection: true, wantSafeRemoval: true},
+		{name: "scheduled failed", phase: corev1.PodFailed, nodeName: "node-a", wantProtection: true, wantSafeRemoval: true},
+		{name: "unscheduled succeeded", phase: corev1.PodSucceeded},
+		{name: "unscheduled failed", phase: corev1.PodFailed},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			pod := &corev1.Pod{
+				Spec: corev1.PodSpec{NodeName: test.nodeName, Volumes: []corev1.Volume{{
+					VolumeSource: corev1.VolumeSource{PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: "data"}},
+				}}},
+				Status: corev1.PodStatus{Phase: test.phase},
+			}
+			if got := PodBlocksPVCDeletion(pod, "data"); got != test.wantProtection {
+				t.Fatalf("PodBlocksPVCDeletion()=%t, want %t", got, test.wantProtection)
+			}
+			if got := PodPreventsSafePVCDeletion(pod, "data"); got != test.wantSafeRemoval {
+				t.Fatalf("PodPreventsSafePVCDeletion()=%t, want %t", got, test.wantSafeRemoval)
+			}
+			if PodBlocksPVCDeletion(pod, "other") {
+				t.Fatal("unreferenced PVC blocks deletion")
+			}
+			if PodPreventsSafePVCDeletion(pod, "other") {
+				t.Fatal("unreferenced PVC prevents safe deletion")
+			}
+		})
+	}
+}
+
+func TestActivePodUsesPVC(t *testing.T) {
+	for _, test := range []struct {
+		name  string
+		phase corev1.PodPhase
+		want  bool
+	}{
+		{name: "pending", phase: corev1.PodPending, want: true},
+		{name: "running", phase: corev1.PodRunning, want: true},
+		{name: "succeeded", phase: corev1.PodSucceeded},
+		{name: "failed", phase: corev1.PodFailed},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			pod := &corev1.Pod{
+				Spec: corev1.PodSpec{Volumes: []corev1.Volume{{
+					VolumeSource: corev1.VolumeSource{PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: "data"}},
+				}}},
+				Status: corev1.PodStatus{Phase: test.phase},
+			}
+			if got := ActivePodUsesPVC(pod, "data"); got != test.want {
+				t.Fatalf("ActivePodUsesPVC()=%t, want %t", got, test.want)
+			}
+			if ActivePodUsesPVC(pod, "other") {
+				t.Fatal("unreferenced PVC has an active consumer")
+			}
+		})
+	}
+}
+
 func TestDefaultToolImageUsesBuildRepositoryAndTag(t *testing.T) {
 	tests := []struct {
 		name       string

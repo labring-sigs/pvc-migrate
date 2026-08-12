@@ -168,10 +168,8 @@ func (s *Switcher) VerifyVolumesOffline(ctx context.Context, volumes []*domain.V
 
 func ensureNoConsumerInPods(pods []corev1.Pod, namespace, claim string) error {
 	for i := range pods {
-		for _, volume := range pods[i].Spec.Volumes {
-			if volume.PersistentVolumeClaim != nil && volume.PersistentVolumeClaim.ClaimName == claim {
-				return domain.NewError(domain.ErrorPrecondition, "verify PVC offline", fmt.Sprintf("PVC %s/%s is referenced by Pod %s", namespace, claim, pods[i].Name))
-			}
+		if PodPreventsSafePVCDeletion(&pods[i], claim) {
+			return domain.NewError(domain.ErrorPrecondition, "verify PVC offline", fmt.Sprintf("PVC %s/%s is referenced by Pod %s", namespace, claim, pods[i].Name))
 		}
 	}
 	return nil

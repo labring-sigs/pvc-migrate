@@ -947,7 +947,13 @@ func (p *Planner) checkPVCReferencesFromPods(plan *domain.MigrationPlan, pvc *co
 	consumers := make([]*corev1.Pod, 0)
 	for i := range pods {
 		pod := &pods[i]
-		if pod.Status.Phase != corev1.PodSucceeded && pod.Status.Phase != corev1.PodFailed && kube.PodUsesPVC(pod, pvc.Name) {
+		if operation.RecreatesPVC() {
+			if kube.PodPreventsSafePVCDeletion(pod, pvc.Name) {
+				consumers = append(consumers, pod)
+			}
+			continue
+		}
+		if kube.ActivePodUsesPVC(pod, pvc.Name) {
 			consumers = append(consumers, pod)
 		}
 	}

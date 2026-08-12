@@ -316,7 +316,7 @@ func (s *Service) resolveSourceToolProbeTargets(ctx context.Context, session *do
 		nodes := map[string]struct{}{}
 		for podIndex := range result.pods {
 			pod := &result.pods[podIndex]
-			if pod.Status.Phase == corev1.PodSucceeded || pod.Status.Phase == corev1.PodFailed || !kube.PodUsesPVC(pod, volume.SourcePVC.Name) {
+			if !kube.ActivePodUsesPVC(pod, volume.SourcePVC.Name) {
 				continue
 			}
 			activeCount++
@@ -721,7 +721,7 @@ func (s *Service) validateRollbackConsumers(ctx context.Context, session *domain
 		}
 		for podIndex := range result.items {
 			pod := &result.items[podIndex]
-			if !kube.PodUsesPVC(pod, volume.SourcePVC.Name) {
+			if !kube.PodPreventsSafePVCDeletion(pod, volume.SourcePVC.Name) {
 				continue
 			}
 			if _, controlled := allowed[pod.Namespace+"/"+pod.Name]; controlled {
@@ -1597,7 +1597,7 @@ func (s *Service) validateCopyConsumersFromPods(ctx context.Context, session *do
 	scheduledCount := 0
 	for index := range pods {
 		pod := &pods[index]
-		if pod.Status.Phase == corev1.PodSucceeded || pod.Status.Phase == corev1.PodFailed || !kube.PodUsesPVC(pod, volume.SourcePVC.Name) {
+		if !kube.ActivePodUsesPVC(pod, volume.SourcePVC.Name) {
 			continue
 		}
 		active = append(active, pod)

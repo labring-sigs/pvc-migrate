@@ -261,11 +261,8 @@ func (s *Service) inspectPVCUnused(ctx context.Context, ref domain.ObjectReferen
 		if sessionID != "" && pod.Labels[kube.SessionKey] == sessionID && pod.Labels[kube.ResourceRoleLabel] == kube.ResourceRoleReservationConsumer {
 			continue
 		}
-		if kube.PodUsesPVC(&pod, ref.Name) {
+		if kube.PodPreventsSafePVCDeletion(&pod, ref.Name) {
 			if pod.Status.Phase == corev1.PodSucceeded || pod.Status.Phase == corev1.PodFailed {
-				if pod.Spec.NodeName == "" {
-					continue
-				}
 				return nil, domain.NewError(domain.ErrorPrecondition, "cleanup", fmt.Sprintf("PVC %s/%s is still protected by terminal Pod %s (phase %s); delete the Pod object before cleanup", ref.Namespace, ref.Name, pod.Name, pod.Status.Phase))
 			}
 			return nil, domain.NewError(domain.ErrorPrecondition, "cleanup", fmt.Sprintf("PVC %s/%s is still referenced by Pod %s", ref.Namespace, ref.Name, pod.Name))
