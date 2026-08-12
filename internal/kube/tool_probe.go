@@ -159,6 +159,10 @@ func (p *KubernetesToolImageProber) probeTarget(ctx context.Context, image, oper
 	}
 	defer func() {
 		if cleanupErr := p.cleanupProbePod(target.Namespace, created.Name, created.UID, poll); cleanupErr != nil {
+			if retErr != nil && errors.Is(retErr, context.Canceled) {
+				logProbeCleanupWarning(options, target.Namespace, created.Name, cleanupErr)
+				return
+			}
 			retErr = errors.Join(retErr, cleanupErr)
 		}
 	}()
@@ -188,7 +192,7 @@ func (p *KubernetesToolImageProber) probeTarget(ctx context.Context, image, oper
 			return false, nil
 		}
 	}); err != nil {
-		if domain.CategoryOf(err) == domain.ErrorTimeout {
+		if domain.CategoryOf(err) == domain.ErrorTimeout && !errors.Is(err, context.Canceled) {
 			if details := p.probeDiagnostics(target.Namespace, created.Name, created.UID); details != "" {
 				return result, domain.WrapError(domain.ErrorTimeout, "tool image probe", fmt.Sprintf("probe Pod %s/%s did not complete: %s", target.Namespace, created.Name, details), err)
 			}
@@ -217,7 +221,7 @@ func (p *KubernetesToolImageProber) cleanupProbePod(namespace, name string, uid 
 	if deleteErr != nil {
 		return domain.WrapError(domain.ErrorKubernetes, "tool image probe", fmt.Sprintf("delete probe Pod %s/%s", namespace, name), deleteErr)
 	}
-	return WaitFor(cleanupCtx, poll, fmt.Sprintf("probe Pod %s/%s deletion", namespace, name), func(waitCtx context.Context) (bool, error) {
+	if err := WaitFor(cleanupCtx, poll, fmt.Sprintf("probe Pod %s/%s deletion", namespace, name), func(waitCtx context.Context) (bool, error) {
 		current, err := p.client.CoreV1().Pods(namespace).Get(waitCtx, name, metav1.GetOptions{})
 		if apierrors.IsNotFound(err) {
 			return true, nil
@@ -229,7 +233,22 @@ func (p *KubernetesToolImageProber) cleanupProbePod(namespace, name string, uid 
 			return false, domain.NewError(domain.ErrorConflict, "tool image probe", fmt.Sprintf("Pod %s/%s was replaced while waiting for probe cleanup", namespace, name))
 		}
 		return false, nil
-	})
+	}); err != nil {
+		inspectCtx, inspectCancel := context.WithTimeout(context.Background(), time.Second)
+		defer inspectCancel()
+		current, inspectErr := p.client.CoreV1().Pods(namespace).Get(inspectCtx, name, metav1.GetOptions{})
+		if apierrors.IsNotFound(inspectErr) {
+			return nil
+		}
+		if inspectErr != nil {
+			return domain.WrapError(domain.ErrorKubernetes, "tool image probe cleanup", fmt.Sprintf("inspect probe Pod %s/%s after cleanup timeout", namespace, name), inspectErr)
+		}
+		if current != nil && current.UID != uid {
+			return domain.NewError(domain.ErrorConflict, "tool image probe cleanup", fmt.Sprintf("probe Pod %s/%s was replaced while waiting for probe cleanup", namespace, name))
+		}
+		return domain.WrapError(domain.ErrorTimeout, "tool image probe cleanup", fmt.Sprintf("probe Pod %s/%s deletion was not confirmed; inspect with kubectl --namespace %s get pod %s", namespace, name, namespace, name), err)
+	}
+	return nil
 }
 
 func (p *KubernetesToolImageProber) probeDiagnostics(namespace, name string, uid types.UID) string {
@@ -540,6 +559,15 @@ func logProbeSuccess(options ToolImageProbeOptions, image string, target ToolPro
 	}
 	if options.Writer != nil {
 		_, _ = fmt.Fprintf(options.Writer, "tool image probe succeeded: namespace=%s node=%s image=%s components=%s\n", target.Namespace, nodeName, image, strings.Join(target.Components, ","))
+	}
+}
+
+func logProbeCleanupWarning(options ToolImageProbeOptions, namespace, podName string, err error) {
+	if options.Logger != nil {
+		options.Logger.Warn("tool image probe cleanup was not confirmed", "namespace", namespace, "pod", podName, "error", err)
+	}
+	if options.Writer != nil {
+		_, _ = fmt.Fprintf(options.Writer, "warning: tool image probe cleanup was not confirmed for %s/%s: %v\n", namespace, podName, err)
 	}
 }
 

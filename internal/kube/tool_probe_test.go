@@ -536,11 +536,90 @@ func TestToolImageProbeCleansPodAfterCancellation(t *testing.T) {
 		Image: "registry.example/tool:test", Targets: []ToolProbeTarget{{Namespace: "system", NodeName: "node-a"}},
 		Timeout: time.Second, Poll: time.Millisecond,
 	})
-	if domain.CategoryOf(err) != domain.ErrorTimeout {
+	if domain.CategoryOf(err) != domain.ErrorTimeout || !errors.Is(err, context.Canceled) || !strings.Contains(err.Error(), "canceled while waiting for tool image probe Pod") {
 		t.Fatalf("probe category=%s error=%v", domain.CategoryOf(err), err)
 	}
 	if _, getErr := client.CoreV1().Pods("system").Get(context.Background(), createdName, metav1.GetOptions{}); !apierrors.IsNotFound(getErr) {
 		t.Fatalf("canceled probe Pod still exists: %v", getErr)
+	}
+}
+
+func TestToolImageProbeCancellationDoesNotAddTimeoutDiagnostics(t *testing.T) {
+	client := fake.NewClientset(readyProbeNode("node-a"))
+	ctx, cancel := context.WithCancel(context.Background())
+	var createdName string
+	client.PrependReactor("create", "pods", func(action clienttesting.Action) (bool, runtime.Object, error) {
+		pod := action.(clienttesting.CreateAction).GetObject().(*corev1.Pod)
+		pod.UID = types.UID("canceled-diagnostics-probe")
+		createdName = pod.Name
+		return false, nil, nil
+	})
+	client.PrependReactor("get", "pods", func(action clienttesting.Action) (bool, runtime.Object, error) {
+		cancel()
+		return false, nil, context.Canceled
+	})
+
+	_, err := NewToolImageProber(client).Probe(ctx, ToolImageProbeOptions{
+		Image: "registry.example/tool:test", Targets: []ToolProbeTarget{{Namespace: "system", NodeName: "node-a"}}, Timeout: time.Second, Poll: time.Millisecond,
+	})
+	if domain.CategoryOf(err) != domain.ErrorTimeout || !errors.Is(err, context.Canceled) || !strings.Contains(err.Error(), "canceled while waiting for tool image probe Pod") || strings.Contains(err.Error(), "did not complete") {
+		t.Fatalf("probe cancellation error=%v", err)
+	}
+	if _, getErr := client.CoreV1().Pods("system").Get(context.Background(), createdName, metav1.GetOptions{}); !apierrors.IsNotFound(getErr) {
+		t.Fatalf("canceled probe Pod still exists: %v", getErr)
+	}
+}
+
+func TestToolImageProbeCleanupTimeoutExplainsUnconfirmedDeletion(t *testing.T) {
+	client := fake.NewClientset(readyProbeNode("node-a"))
+	client.PrependReactor("create", "pods", func(action clienttesting.Action) (bool, runtime.Object, error) {
+		pod := action.(clienttesting.CreateAction).GetObject().(*corev1.Pod)
+		pod.UID = types.UID("stuck-cleanup-probe")
+		return false, nil, nil
+	})
+	client.PrependReactor("get", "pods", successfulProbeGetReactor(client))
+	client.PrependReactor("delete", "pods", func(clienttesting.Action) (bool, runtime.Object, error) {
+		return true, nil, nil
+	})
+
+	_, err := NewToolImageProber(client).Probe(context.Background(), ToolImageProbeOptions{
+		Image: "registry.example/tool:test", Targets: []ToolProbeTarget{{Namespace: "system", NodeName: "node-a"}}, Timeout: time.Second, Poll: 10 * time.Millisecond,
+	})
+	if domain.CategoryOf(err) != domain.ErrorTimeout || !strings.Contains(err.Error(), "deletion was not confirmed") || !strings.Contains(err.Error(), "inspect with kubectl") {
+		t.Fatalf("cleanup timeout error=%v", err)
+	}
+}
+
+func TestToolImageProbeCancellationKeepsCleanupWarningSeparate(t *testing.T) {
+	client := fake.NewClientset(readyProbeNode("node-a"))
+	ctx, cancel := context.WithCancel(context.Background())
+	var createdName string
+	var output strings.Builder
+	client.PrependReactor("create", "pods", func(action clienttesting.Action) (bool, runtime.Object, error) {
+		pod := action.(clienttesting.CreateAction).GetObject().(*corev1.Pod)
+		pod.UID = types.UID("canceled-stuck-cleanup-probe")
+		createdName = pod.Name
+		return false, nil, nil
+	})
+	client.PrependReactor("get", "pods", func(action clienttesting.Action) (bool, runtime.Object, error) {
+		get := action.(clienttesting.GetAction)
+		if get.GetName() == createdName {
+			cancel()
+		}
+		return false, nil, nil
+	})
+	client.PrependReactor("delete", "pods", func(clienttesting.Action) (bool, runtime.Object, error) {
+		return true, nil, nil
+	})
+
+	_, err := NewToolImageProber(client).Probe(ctx, ToolImageProbeOptions{
+		Image: "registry.example/tool:test", Targets: []ToolProbeTarget{{Namespace: "system", NodeName: "node-a"}}, Timeout: time.Second, Poll: 10 * time.Millisecond, Writer: &output,
+	})
+	if domain.CategoryOf(err) != domain.ErrorTimeout || !errors.Is(err, context.Canceled) || !strings.Contains(err.Error(), "canceled while waiting for tool image probe Pod") {
+		t.Fatalf("probe cancellation error=%v", err)
+	}
+	if strings.Contains(err.Error(), "cleanup was not confirmed") || !strings.Contains(output.String(), "warning: tool image probe cleanup was not confirmed") || !strings.Contains(output.String(), createdName) {
+		t.Fatalf("cleanup warning output=%q error=%v", output.String(), err)
 	}
 }
 

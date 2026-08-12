@@ -2,6 +2,7 @@ package kube
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
@@ -102,8 +103,14 @@ func WaitFor(ctx context.Context, interval time.Duration, description string, co
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 	for {
+		if err := ctx.Err(); err != nil {
+			return waitContextError(err, description)
+		}
 		ready, err := condition(ctx)
 		if err != nil {
+			if contextErr := ctx.Err(); contextErr != nil {
+				return waitContextError(contextErr, description)
+			}
 			return err
 		}
 		if ready {
@@ -111,10 +118,18 @@ func WaitFor(ctx context.Context, interval time.Duration, description string, co
 		}
 		select {
 		case <-ctx.Done():
-			return domain.WrapError(domain.ErrorTimeout, "wait", fmt.Sprintf("timed out waiting for %s", description), ctx.Err())
+			return waitContextError(ctx.Err(), description)
 		case <-ticker.C:
 		}
 	}
+}
+
+func waitContextError(err error, description string) error {
+	message := fmt.Sprintf("timed out waiting for %s", description)
+	if errors.Is(err, context.Canceled) {
+		message = fmt.Sprintf("canceled while waiting for %s", description)
+	}
+	return domain.WrapError(domain.ErrorTimeout, "wait", message, err)
 }
 
 func ParseGroupVersionResource(apiVersion, resource string) (schema.GroupVersionResource, error) {

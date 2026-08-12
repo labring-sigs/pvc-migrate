@@ -30,6 +30,7 @@ const (
 	restoreLockAnnotation       = "pvc-migrate.io/backup-restore-lock"
 	restoreLockExpiryAnnotation = "pvc-migrate.io/backup-restore-lock-expires-at"
 	rclonePreserveLinksArgs     = "--links"
+	lockReleaseTimeout          = 10 * time.Second
 )
 
 type Mode string
@@ -407,15 +408,15 @@ func runBackup(ctx context.Context, client kubernetes.Interface, req Request, ex
 	defer func() {
 		cancelLease()
 		<-leaseDone
-		if retErr == nil {
-			select {
-			case leaseErr := <-leaseErrors:
-				retErr = leaseErr
-			default:
-			}
+		select {
+		case leaseErr := <-leaseErrors:
+			retErr = errors.Join(retErr, leaseErr)
+		default:
 		}
-		if releaseErr := req.Store.ReleaseLock(context.Background(), lease.current()); retErr == nil && releaseErr != nil {
-			retErr = releaseErr
+		if releaseErr := runWithCleanupTimeout(lockReleaseTimeout, func(releaseCtx context.Context) error {
+			return req.Store.ReleaseLock(releaseCtx, lease.current())
+		}); releaseErr != nil {
+			retErr = errors.Join(retErr, releaseErr)
 		}
 	}()
 	// A concurrent backup may pass the initial preflight while this operation
@@ -482,12 +483,7 @@ func runBackup(ctx context.Context, client kubernetes.Interface, req Request, ex
 	toolErr := pvmigrate.RunBackup(leaseCtx, backupRequest)
 	toolLogs.Stop()
 	if toolErr != nil {
-		select {
-		case leaseErr := <-leaseErrors:
-			return leaseErr
-		default:
-		}
-		return classifySyncError(leaseCtx, "backup", toolErr)
+		return classifyToolAndLeaseError(leaseCtx, "backup", toolErr, leaseErrors)
 	}
 	if err := checkObjectStoreLease(leaseCtx, leaseErrors, "backup"); err != nil {
 		return err
@@ -717,15 +713,13 @@ func runRestore(ctx context.Context, client kubernetes.Interface, req Request, e
 	defer func() {
 		cancelLease()
 		<-leaseDone
-		if retErr == nil {
-			select {
-			case leaseErr := <-leaseErrors:
-				retErr = leaseErr
-			default:
-			}
+		select {
+		case leaseErr := <-leaseErrors:
+			retErr = errors.Join(retErr, leaseErr)
+		default:
 		}
-		if releaseErr := unlock(context.Background()); retErr == nil && releaseErr != nil {
-			retErr = releaseErr
+		if releaseErr := runWithCleanupTimeout(lockReleaseTimeout, unlock); releaseErr != nil {
+			retErr = errors.Join(retErr, releaseErr)
 		}
 	}()
 	_, currentPV, err := verifyPVCIdentity(leaseCtx, client, req.Namespace, req.PVCName, expectedPVCUID, expectedPVUID)
@@ -791,12 +785,7 @@ func runRestore(ctx context.Context, client kubernetes.Interface, req Request, e
 	toolErr := pvmigrate.RunRestore(leaseCtx, restoreRequest)
 	toolLogs.Stop()
 	if toolErr != nil {
-		select {
-		case leaseErr := <-leaseErrors:
-			return leaseErr
-		default:
-		}
-		return classifySyncError(leaseCtx, "restore", toolErr)
+		return classifyToolAndLeaseError(leaseCtx, "restore", toolErr, leaseErrors)
 	}
 	if _, _, err := verifyPVCIdentity(ctx, client, req.Namespace, req.PVCName, expectedPVCUID, expectedPVUID); err != nil {
 		return err
@@ -805,6 +794,19 @@ func runRestore(ctx context.Context, client kubernetes.Interface, req Request, e
 		return wrapBackupError(domain.ErrorConflict, "restore", "S3 backup inventory changed during synchronization", err)
 	}
 	return nil
+}
+
+func runWithCleanupTimeout(timeout time.Duration, cleanup func(context.Context) error) error {
+	if cleanup == nil {
+		return nil
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	err := cleanup(ctx)
+	if errors.Is(err, context.DeadlineExceeded) || (err != nil && errors.Is(ctx.Err(), context.DeadlineExceeded)) {
+		return domain.WrapError(domain.ErrorTimeout, "release operation lock", "lock cleanup deadline exceeded", err)
+	}
+	return err
 }
 
 func classifySyncError(ctx context.Context, operation string, err error) error {
@@ -816,6 +818,16 @@ func classifySyncError(ctx context.Context, operation string, err error) error {
 		return domain.WrapError(domain.ErrorTimeout, operation, "S3 data synchronization canceled", err)
 	}
 	return domain.WrapError(domain.ErrorCopy, operation, "S3 data synchronization failed", err)
+}
+
+func classifyToolAndLeaseError(ctx context.Context, operation string, toolErr error, leaseErrors <-chan error) error {
+	syncErr := classifySyncError(ctx, operation, toolErr)
+	select {
+	case leaseErr := <-leaseErrors:
+		return errors.Join(leaseErr, syncErr)
+	default:
+		return syncErr
+	}
 }
 
 func startToolLogs(ctx context.Context, client kubernetes.Interface, req Request) *kube.ToolLogStream {

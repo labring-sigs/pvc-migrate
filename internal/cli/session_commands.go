@@ -85,8 +85,8 @@ func (r *rootState) newSessionResumeCommand() *cobra.Command {
 				phase = session.Status.ResumeFrom
 			}
 			if requiresResumeApproval(phase) || requiresOperationResumeApproval(session.Spec.Operation(), phase) {
-				if err := r.confirm(cmd, args[0]); err != nil {
-					return reportSessionError(cmd, session, err)
+				if err := r.confirm(ctx, cmd, args[0]); err != nil {
+					return reportApprovalError(cmd, err)
 				}
 			}
 			if err := runtime.service.ResumeSession(ctx, session); err != nil {
@@ -140,8 +140,8 @@ func (r *rootState) newSessionAbortCommand() *cobra.Command {
 				}
 				return printSessionResult(cmd, runtime, session)
 			}
-			if err := r.confirm(cmd, args[0]); err != nil {
-				return reportSessionError(cmd, session, err)
+			if err := r.confirm(ctx, cmd, args[0]); err != nil {
+				return reportApprovalError(cmd, err)
 			}
 			if err := runtime.service.Abort(ctx, session); err != nil {
 				return reportSessionError(cmd, session, err)
@@ -179,8 +179,8 @@ func (r *rootState) newSessionRollbackCommand() *cobra.Command {
 				}
 				return printSessionResult(cmd, runtime, session)
 			}
-			if err := r.confirm(cmd, args[0]); err != nil {
-				return reportSessionError(cmd, session, err)
+			if err := r.confirm(ctx, cmd, args[0]); err != nil {
+				return reportApprovalError(cmd, err)
 			}
 			if err := runtime.service.Rollback(ctx, session); err != nil {
 				return reportSessionError(cmd, session, err)
@@ -220,8 +220,8 @@ func (r *rootState) newSessionCleanupCommand() *cobra.Command {
 				return printSessionResult(cmd, runtime, session)
 			}
 			if options.DeleteTemporary || options.DeleteRollback || options.Finalize || options.DeleteSession {
-				if err := r.confirm(cmd, args[0]); err != nil {
-					return reportSessionError(cmd, session, err)
+				if err := r.confirm(ctx, cmd, args[0]); err != nil {
+					return reportApprovalError(cmd, err)
 				}
 			}
 			if err := runtime.service.Cleanup(ctx, session, options); err != nil {
@@ -283,9 +283,8 @@ func (r *rootState) newSessionOrphanCleanupCommand() *cobra.Command {
 				_, err := fmt.Fprintln(cmd.ErrOrStderr(), "\nOrphan cleanup validation passed. Execute:", executeCommand)
 				return err
 			}
-			if err := r.confirm(cmd, args[0]); err != nil {
-				_, _ = fmt.Fprintln(cmd.ErrOrStderr(), "\nApproval stopped cleanup. Revalidate:", validateCommand)
-				return err
+			if err := r.confirm(ctx, cmd, args[0]); err != nil {
+				return reportApprovalError(cmd, err)
 			}
 			plan, err = runtime.service.CleanupOrphan(ctx, options)
 			if err != nil {

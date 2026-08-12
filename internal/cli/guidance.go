@@ -1,8 +1,10 @@
 package cli
 
 import (
+	"errors"
 	"fmt"
 	"io"
+	"slices"
 	"sort"
 	"strings"
 
@@ -258,6 +260,11 @@ func reportPreSessionError(cmd interface{ ErrOrStderr() io.Writer }, err error) 
 	return err
 }
 
+func reportApprovalError(cmd interface{ ErrOrStderr() io.Writer }, err error) error {
+	_, _ = fmt.Fprintln(cmd.ErrOrStderr(), "\nApproval stopped before the protected action began. Revalidate with --dry-run, then rerun and type the requested value exactly or use --yes.")
+	return err
+}
+
 func reportRuntimeError(cmd interface{ ErrOrStderr() io.Writer }, err error) error {
 	_, _ = fmt.Fprintln(cmd.ErrOrStderr(), "\nCommand initialization stopped before any cluster operation. Check --kubeconfig, --context, --output, --log-format, and --log-level, then rerun the command.")
 	return err
@@ -282,13 +289,59 @@ func reportSessionCreationError(cmd interface{ ErrOrStderr() io.Writer }, namesp
 }
 
 func reportCleanupError(cmd interface{ ErrOrStderr() io.Writer }, session *domain.Session, options app.CleanupOptions, err error) error {
-	if session != nil && options.DeleteSession {
+	deleteRecordFailed := errorHasOperation(err, "delete session", "delete session lock")
+	if session != nil && options.DeleteSession && deleteRecordFailed {
 		_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "\nCleanup stopped during session record removal. Inspect the ConfigMap: kubectl --namespace %s get configmap %s\n", session.Spec.SessionNamespace, kube.SessionConfigMapName(session.ID))
 		_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "Inspect the Lease: kubectl --namespace %s get lease %s\n", session.Spec.SessionNamespace, kube.SessionLockName(session.ID))
 		_, _ = fmt.Fprintln(cmd.ErrOrStderr(), "Use session status when the ConfigMap remains; use session cleanup-orphan when ownership remains after the ConfigMap is gone.")
 		return err
 	}
+	if session != nil {
+		prefix := sessionCommandPrefix(session.Spec.SessionNamespace)
+		_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "\nCleanup stopped before confirmed completion. Inspect current state: %s session status %s\n", prefix, session.ID)
+		_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "Revalidate cleanup before retrying: %s %s --dry-run\n", prefix, cleanupCommandArgsForOptions(session.ID, options))
+		return err
+	}
 	return reportSessionError(cmd, session, err)
+}
+
+func errorHasOperation(err error, operations ...string) bool {
+	if err == nil {
+		return false
+	}
+	var typed *domain.Error
+	if errors.As(err, &typed) && slices.Contains(operations, typed.Op) {
+		return true
+	}
+	if joined, ok := err.(interface{ Unwrap() []error }); ok {
+		for _, nested := range joined.Unwrap() {
+			if errorHasOperation(nested, operations...) {
+				return true
+			}
+		}
+		return false
+	}
+	if wrapped, ok := err.(interface{ Unwrap() error }); ok {
+		return errorHasOperation(wrapped.Unwrap(), operations...)
+	}
+	return false
+}
+
+func cleanupCommandArgsForOptions(id string, options app.CleanupOptions) string {
+	args := []string{"session", "cleanup", id}
+	if options.DeleteTemporary {
+		args = append(args, "--delete-temporary")
+	}
+	if options.DeleteRollback {
+		args = append(args, "--delete-rollback-pv")
+	}
+	if options.Finalize {
+		args = append(args, "--finalize")
+	}
+	if options.DeleteSession {
+		args = append(args, "--delete-session")
+	}
+	return strings.Join(args, " ")
 }
 
 func printPlanResult(cmd interface{ ErrOrStderr() io.Writer }, runtime *commandRuntime, plan *domain.MigrationPlan) error {

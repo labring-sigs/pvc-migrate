@@ -354,8 +354,8 @@ func (r *rootState) newFinalSyncCommand() *cobra.Command {
 				}
 				return printSessionResult(cmd, runtime, session)
 			}
-			if err := r.confirm(cmd, sessionID); err != nil {
-				return reportSessionError(cmd, session, err)
+			if err := r.confirm(ctx, cmd, sessionID); err != nil {
+				return reportApprovalError(cmd, err)
 			}
 			if err := runtime.service.PauseAndFinalSync(ctx, session); err != nil {
 				return reportSessionError(cmd, session, err)
@@ -401,8 +401,8 @@ func (r *rootState) newActivateCommand() *cobra.Command {
 				}
 				return printSessionResult(cmd, runtime, session)
 			}
-			if err := r.confirm(cmd, sessionID); err != nil {
-				return reportSessionError(cmd, session, err)
+			if err := r.confirm(ctx, cmd, sessionID); err != nil {
+				return reportApprovalError(cmd, err)
 			}
 			if err := runtime.service.Activate(ctx, session); err != nil {
 				return reportSessionError(cmd, session, err)
@@ -496,8 +496,8 @@ func (r *rootState) newMigrateCommand(podMode bool) *cobra.Command {
 			if dryRun {
 				return printPlanResult(cmd, runtime, plan)
 			}
-			if err := r.confirm(cmd, approvalIdentity(flags)); err != nil {
-				return reportPreSessionError(cmd, err)
+			if err := r.confirm(ctx, cmd, approvalIdentity(flags)); err != nil {
+				return reportApprovalError(cmd, err)
 			}
 			session, err := runtime.service.CreateSession(ctx, plan, false)
 			if err != nil {
@@ -515,7 +515,10 @@ func (r *rootState) newMigrateCommand(podMode bool) *cobra.Command {
 	return command
 }
 
-func (r *rootState) confirm(command *cobra.Command, expected string) error {
+func (r *rootState) confirm(ctx context.Context, command *cobra.Command, expected string) error {
+	if err := ctx.Err(); err != nil {
+		return domain.WrapError(domain.ErrorTimeout, "approval", "approval canceled", err)
+	}
 	if r.global.assumeYes {
 		return nil
 	}
@@ -525,11 +528,30 @@ func (r *rootState) confirm(command *cobra.Command, expected string) error {
 	if _, err := fmt.Fprintf(command.ErrOrStderr(), "Type %s to approve: ", expected); err != nil {
 		return err
 	}
-	var actual string
-	if _, err := fmt.Fscan(command.InOrStdin(), &actual); err != nil {
-		return domain.WrapError(domain.ErrorPrecondition, "approval", "typed approval or --yes is required", err)
+	type scanResult struct {
+		actual string
+		err    error
 	}
-	if actual != expected {
+	result := make(chan scanResult, 1)
+	go func() {
+		var actual string
+		_, err := fmt.Fscan(command.InOrStdin(), &actual)
+		result <- scanResult{actual: actual, err: err}
+	}()
+
+	var scanned scanResult
+	select {
+	case <-ctx.Done():
+		return domain.WrapError(domain.ErrorTimeout, "approval", "typed approval canceled", ctx.Err())
+	case scanned = <-result:
+		if err := ctx.Err(); err != nil {
+			return domain.WrapError(domain.ErrorTimeout, "approval", "typed approval canceled", err)
+		}
+	}
+	if scanned.err != nil {
+		return domain.WrapError(domain.ErrorPrecondition, "approval", "typed approval or --yes is required", scanned.err)
+	}
+	if scanned.actual != expected {
 		return domain.NewError(domain.ErrorPrecondition, "approval", "typed approval did not match")
 	}
 	return nil
