@@ -37,13 +37,15 @@ const (
 )
 
 // ToolProbeTarget describes one node and namespace where a real tool Pod will
-// run. An empty NodeName lets the scheduler choose a node. PVCName optionally
-// applies the real volume's scheduling and mount constraints to that choice.
+// run. An empty NodeName lets the scheduler choose a node. PVCName identifies
+// the real volume for result correlation and, unless SkipPVCMount is set,
+// applies its scheduling and mount constraints to that choice.
 type ToolProbeTarget struct {
-	Namespace  string
-	NodeName   string
-	PVCName    string
-	Components []string
+	Namespace    string
+	NodeName     string
+	PVCName      string
+	SkipPVCMount bool
+	Components   []string
 }
 
 // ToolImageProbeOptions controls a preflight Pod that verifies the image can
@@ -262,6 +264,7 @@ func normalizeToolProbeTargets(targets []ToolProbeTarget) ([]ToolProbeTarget, er
 		current.Namespace = target.Namespace
 		current.NodeName = target.NodeName
 		current.PVCName = target.PVCName
+		current.SkipPVCMount = target.SkipPVCMount
 		for _, component := range append([]string{ToolComponentShell}, target.Components...) {
 			if !validToolProbeComponent(component) {
 				return nil, domain.NewError(domain.ErrorValidation, "tool image probe", fmt.Sprintf("unsupported tool component %q", component))
@@ -387,7 +390,7 @@ func toolProbePod(image, operationID string, target ToolProbeTarget, node *corev
 		spec.NodeSelector = map[string]string{corev1.LabelHostname: node.Labels[corev1.LabelHostname]}
 		spec.Tolerations = nodeTolerations(node)
 	}
-	if target.PVCName != "" {
+	if target.PVCName != "" && !target.SkipPVCMount {
 		spec.Volumes = []corev1.Volume{{
 			Name: "source-pvc",
 			VolumeSource: corev1.VolumeSource{PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{

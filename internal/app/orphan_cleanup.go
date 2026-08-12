@@ -503,16 +503,17 @@ func (s *Service) finalizeOrphanPVC(ctx context.Context, sessionID string, ref d
 }
 
 func (s *Service) finalizeOrphanPV(ctx context.Context, sessionID string, ref domain.ObjectReference, expectedRole string) error {
+	role := orphanPVRoleName(expectedRole)
 	pv, err := s.client.CoreV1().PersistentVolumes().Get(ctx, ref.Name, metav1.GetOptions{})
 	if err != nil {
-		return domain.WrapError(domain.ErrorKubernetes, "cleanup orphan", fmt.Sprintf("read active PV %s", ref.Name), err)
+		return domain.WrapError(domain.ErrorKubernetes, "cleanup orphan", fmt.Sprintf("read %s PV %s", role, ref.Name), err)
 	}
 	if pv.UID != ref.UID || pv.ResourceVersion != ref.ResourceVersion || pv.Labels[kube.SessionKey] != sessionID || pv.Labels[kube.ResourceRoleLabel] != expectedRole {
-		return domain.NewError(domain.ErrorConflict, "cleanup orphan", fmt.Sprintf("active PV %s identity or ownership changed", ref.Name))
+		return domain.NewError(domain.ErrorConflict, "cleanup orphan", fmt.Sprintf("%s PV %s identity or ownership changed", role, ref.Name))
 	}
 	policy := corev1.PersistentVolumeReclaimPolicy(pv.Annotations[kube.OriginalPolicyAnnotation])
 	if !validReclaimPolicy(policy) {
-		return domain.NewError(domain.ErrorPrecondition, "cleanup orphan", fmt.Sprintf("active PV %s has no valid original reclaim policy", ref.Name))
+		return domain.NewError(domain.ErrorPrecondition, "cleanup orphan", fmt.Sprintf("%s PV %s has no valid original reclaim policy", role, ref.Name))
 	}
 	pv.Spec.PersistentVolumeReclaimPolicy = policy
 	delete(pv.Labels, kube.ManagedByLabel)
@@ -522,7 +523,20 @@ func (s *Service) finalizeOrphanPV(ctx context.Context, sessionID string, ref do
 	delete(pv.Annotations, kube.PairedPVAnnotation)
 	_, err = s.client.CoreV1().PersistentVolumes().Update(ctx, pv, metav1.UpdateOptions{})
 	if err != nil {
-		return domain.WrapError(domain.ErrorKubernetes, "cleanup orphan", fmt.Sprintf("finalize active PV %s", ref.Name), err)
+		return domain.WrapError(domain.ErrorKubernetes, "cleanup orphan", fmt.Sprintf("finalize %s PV %s", role, ref.Name), err)
 	}
 	return nil
+}
+
+func orphanPVRoleName(role string) string {
+	switch role {
+	case kube.ResourceRoleSource:
+		return "source"
+	case kube.ResourceRoleDestination:
+		return "destination"
+	case kube.ResourceRoleActive:
+		return "active"
+	default:
+		return "orphan"
+	}
 }

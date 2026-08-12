@@ -501,3 +501,16 @@ func containsPassedOrphanCheck(plan *domain.OrphanCleanupPlan, text string) bool
 	}
 	return false
 }
+
+func TestOrphanPVRoleName(t *testing.T) {
+	for role, want := range map[string]string{
+		kube.ResourceRoleSource:      "source",
+		kube.ResourceRoleDestination: "destination",
+		kube.ResourceRoleActive:      "active",
+		"unknown":                    "orphan",
+	} {
+		if got := orphanPVRoleName(role); got != want {
+			t.Fatalf("role %q rendered as %q, want %q", role, got, want)
+		}
+	}
+}

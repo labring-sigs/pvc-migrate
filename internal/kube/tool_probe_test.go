@@ -93,6 +93,17 @@ func TestToolImageProbeRunsOncePerNodeAndChecksEveryComponent(t *testing.T) {
 	}
 }
 
+func TestToolImageProbeCorrelatesPVCWithoutMountWhenNodeIsExplicit(t *testing.T) {
+	target := ToolProbeTarget{Namespace: "system", NodeName: "node-a", PVCName: "data", SkipPVCMount: true, Components: []string{ToolComponentSSHD}}
+	pod := toolProbePod("registry.example/tool:test", "operation", target, readyProbeNode("node-a"), time.Minute)
+	if len(pod.Spec.Volumes) != 0 || len(pod.Spec.Containers[0].VolumeMounts) != 0 {
+		t.Fatalf("probe unexpectedly mounts PVC: volumes=%#v mounts=%#v", pod.Spec.Volumes, pod.Spec.Containers[0].VolumeMounts)
+	}
+	if pod.Annotations["pvc-migrate.io/probe-pvc"] != "data" {
+		t.Fatalf("probe PVC annotation=%q", pod.Annotations["pvc-migrate.io/probe-pvc"])
+	}
+}
+
 func TestSSHDToolProbeChecksRemoteRsyncAndBothHostKeyAlgorithms(t *testing.T) {
 	command := toolProbeCommand([]string{ToolComponentSSHD})
 	for _, required := range []string{

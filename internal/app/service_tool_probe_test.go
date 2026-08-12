@@ -249,6 +249,38 @@ func TestResolveSessionToolProbeTargetsUsesPVCConstrainedScheduling(t *testing.T
 	}
 }
 
+func TestResolveSessionToolProbeTargetsCorrelatesExplicitSourceNodeWithoutMount(t *testing.T) {
+	session := copyToolProbeSession(true)
+	session.Spec.WorkflowOptionsPtr().SourceNode = "node-a"
+	client := fake.NewClientset(&corev1.Node{ObjectMeta: metav1.ObjectMeta{
+		Name: "node-a", Labels: map[string]string{corev1.LabelHostname: "node-a"},
+	}})
+	service := &Service{client: client}
+	targets, err := service.resolveCopyToolProbeTargets(context.Background(), session)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var source *kube.ToolProbeTarget
+	for index := range targets {
+		if targets[index].Namespace == session.Spec.Volumes[0].SourcePVC.Namespace {
+			source = &targets[index]
+			break
+		}
+	}
+	if source == nil || source.NodeName != "node-a" || source.PVCName != session.Spec.Volumes[0].SourcePVC.Name || !source.SkipPVCMount {
+		t.Fatalf("source target=%#v all=%#v", source, targets)
+	}
+	prober := &recordingToolImageProber{results: []kube.ToolImageProbeResult{{Target: *source, NodeName: "node-a"}}}
+	service.config.ToolImageProber = prober
+	results, err := service.probeToolImage(context.Background(), session, targets)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := probedSourceNode(session, &session.Spec.Volumes[0], results); got != "node-a" {
+		t.Fatalf("probed source node=%q", got)
+	}
+}
+
 func TestResolveSessionToolProbeTargetsRejectsCopyConsumerConflicts(t *testing.T) {
 	for _, test := range []struct {
 		name       string

@@ -234,7 +234,7 @@ func copyToolProbeTargets(session *domain.Session) []kube.ToolProbeTarget {
 		if !needsSSHD || options.SourceNode == "" {
 			return targets
 		}
-		targets = append(targets, toolProbeTargetsForNamespaces(sourceVolumeNamespaces(session), options.SourceNode, []string{kube.ToolComponentSSHD})...)
+		targets = append(targets, sourceToolProbeTargets(session, options.SourceNode)...)
 		return targets
 	}
 	return nil
@@ -394,9 +394,12 @@ func (s *Service) resolveSourceToolProbeTargets(ctx context.Context, session *do
 	targets := make([]kube.ToolProbeTarget, 0, len(session.Spec.Volumes))
 	for index := range session.Spec.Volumes {
 		volume := &session.Spec.Volumes[index]
-		target := kube.ToolProbeTarget{Namespace: volume.SourcePVC.Namespace, NodeName: resolvedNodes[index], Components: []string{kube.ToolComponentSSHD}}
-		if target.NodeName == "" {
-			target.PVCName = volume.SourcePVC.Name
+		target := kube.ToolProbeTarget{
+			Namespace:    volume.SourcePVC.Namespace,
+			NodeName:     resolvedNodes[index],
+			PVCName:      volume.SourcePVC.Name,
+			SkipPVCMount: resolvedNodes[index] != "",
+			Components:   []string{kube.ToolComponentSSHD},
 		}
 		targets = append(targets, target)
 	}
@@ -429,6 +432,23 @@ func toolProbeTargetsForNamespaces(namespaces []string, nodeName string, compone
 	targets := make([]kube.ToolProbeTarget, 0, len(namespaces))
 	for _, namespace := range namespaces {
 		targets = append(targets, kube.ToolProbeTarget{Namespace: namespace, NodeName: nodeName, Components: slices.Clone(components)})
+	}
+	return targets
+}
+
+func sourceToolProbeTargets(session *domain.Session, nodeName string) []kube.ToolProbeTarget {
+	if session == nil {
+		return nil
+	}
+	targets := make([]kube.ToolProbeTarget, 0, len(session.Spec.Volumes))
+	for _, volume := range session.Spec.Volumes {
+		targets = append(targets, kube.ToolProbeTarget{
+			Namespace:    volume.SourcePVC.Namespace,
+			NodeName:     nodeName,
+			PVCName:      volume.SourcePVC.Name,
+			SkipPVCMount: true,
+			Components:   []string{kube.ToolComponentSSHD},
+		})
 	}
 	return targets
 }
