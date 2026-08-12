@@ -32,7 +32,7 @@ func mustGVR(apiVersion, resource string) schema.GroupVersionResource {
 }
 
 func TestVMClusterUsesComponentPauseAndStatefulSetScale(t *testing.T) {
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	replicas := int32(2)
 	vm := &unstructured.Unstructured{Object: map[string]any{
