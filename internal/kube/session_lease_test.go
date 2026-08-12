@@ -47,6 +47,9 @@ func TestConfigMapSessionStoreDeletesSessionLease(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if err := lock.Delete(ctx); err != nil {
+		t.Fatal(err)
+	}
 	if err := lock.Release(ctx); err != nil {
 		t.Fatal(err)
 	}
@@ -56,6 +59,37 @@ func TestConfigMapSessionStoreDeletesSessionLease(t *testing.T) {
 	if err := store.DeleteSessionLease(ctx, "system", "session-delete"); err != nil {
 		t.Fatalf("idempotent lease deletion: %v", err)
 	}
+}
+
+func TestSessionLeaseDeleteFencesReplacement(t *testing.T) {
+	ctx := context.Background()
+	client := fake.NewClientset()
+	store := NewConfigMapSessionStore(client)
+	lock, err := store.AcquireSessionLock(ctx, "system", "session-delete-fence")
+	if err != nil {
+		t.Fatal(err)
+	}
+	lease, err := client.CoordinationV1().Leases("system").Get(ctx, SessionLockName("session-delete-fence"), metav1.GetOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	replacement := lease.DeepCopy()
+	replacement.Spec.HolderIdentity = ptr("new-holder")
+	if _, err := client.CoordinationV1().Leases("system").Update(ctx, replacement, metav1.UpdateOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	deleteErr := lock.Delete(ctx)
+	if domain.CategoryOf(deleteErr) != domain.ErrorConflict {
+		t.Fatalf("delete error=%v", deleteErr)
+	}
+	current, err := client.CoordinationV1().Leases("system").Get(ctx, lease.Name, metav1.GetOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if current.Spec.HolderIdentity == nil || *current.Spec.HolderIdentity != "new-holder" {
+		t.Fatalf("replacement holder=%v", current.Spec.HolderIdentity)
+	}
+	_ = lock.Release(ctx)
 }
 
 func TestConfigMapSessionStoreDeletesSessionLeaseWithPreconditions(t *testing.T) {

@@ -38,6 +38,237 @@ func orphanFixture() (*fake.Clientset, OrphanCleanupOptions) {
 	return fake.NewClientset(pvc, active, rollback), OrphanCleanupOptions{SessionID: sessionID, SessionNamespace: "system", SourceNamespace: "app", SourcePVC: "data"}
 }
 
+func preActivationOrphanFixture() (*fake.Clientset, OrphanCleanupOptions) {
+	const sessionID = "pre-orphan-session"
+	sourcePVC := &corev1.PersistentVolumeClaim{ObjectMeta: metav1.ObjectMeta{
+		Namespace: "app", Name: "source", UID: types.UID("source-pvc-uid"), ResourceVersion: "10",
+		Annotations: map[string]string{kube.SessionKey: sessionID},
+	}, Spec: corev1.PersistentVolumeClaimSpec{VolumeName: "pv-source"}, Status: corev1.PersistentVolumeClaimStatus{Phase: corev1.ClaimBound}}
+	sourcePV := &corev1.PersistentVolume{ObjectMeta: metav1.ObjectMeta{
+		Name: "pv-source", UID: types.UID("source-pv-uid"), ResourceVersion: "11",
+		Labels:      map[string]string{kube.ManagedByLabel: kube.ManagedByValue, kube.SessionKey: sessionID, kube.ResourceRoleLabel: kube.ResourceRoleSource},
+		Annotations: map[string]string{kube.OriginalPolicyAnnotation: string(corev1.PersistentVolumeReclaimDelete)},
+	}, Spec: corev1.PersistentVolumeSpec{
+		PersistentVolumeReclaimPolicy: corev1.PersistentVolumeReclaimRetain,
+		ClaimRef:                      &corev1.ObjectReference{Namespace: sourcePVC.Namespace, Name: sourcePVC.Name, UID: sourcePVC.UID},
+	}, Status: corev1.PersistentVolumeStatus{Phase: corev1.VolumeBound}}
+	destinationPVC := &corev1.PersistentVolumeClaim{ObjectMeta: metav1.ObjectMeta{
+		Namespace: "system", Name: "destination", UID: types.UID("destination-pvc-uid"), ResourceVersion: "20",
+		Labels: map[string]string{kube.ManagedByLabel: kube.ManagedByValue, kube.SessionKey: sessionID, kube.ResourceRoleLabel: kube.ResourceRoleDestination},
+		Annotations: map[string]string{
+			kube.SessionKey:             sessionID,
+			kube.SourcePVCUIDAnnotation: string(sourcePVC.UID),
+		},
+	}, Spec: corev1.PersistentVolumeClaimSpec{VolumeName: "pv-destination"}, Status: corev1.PersistentVolumeClaimStatus{Phase: corev1.ClaimBound}}
+	destinationPV := &corev1.PersistentVolume{ObjectMeta: metav1.ObjectMeta{
+		Name: "pv-destination", UID: types.UID("destination-pv-uid"), ResourceVersion: "21",
+		Labels:      map[string]string{kube.ManagedByLabel: kube.ManagedByValue, kube.SessionKey: sessionID, kube.ResourceRoleLabel: kube.ResourceRoleDestination},
+		Annotations: map[string]string{kube.OriginalPolicyAnnotation: string(corev1.PersistentVolumeReclaimDelete)},
+	}, Spec: corev1.PersistentVolumeSpec{
+		PersistentVolumeReclaimPolicy: corev1.PersistentVolumeReclaimRetain,
+		ClaimRef:                      &corev1.ObjectReference{Namespace: destinationPVC.Namespace, Name: destinationPVC.Name, UID: destinationPVC.UID},
+	}, Status: corev1.PersistentVolumeStatus{Phase: corev1.VolumeBound}}
+	reservationPod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{
+		Namespace: destinationPVC.Namespace, Name: "reservation", UID: "reservation-uid",
+		Labels: map[string]string{kube.SessionKey: sessionID, kube.ResourceRoleLabel: kube.ResourceRoleReservationConsumer},
+	}, Spec: corev1.PodSpec{Volumes: []corev1.Volume{{
+		Name: "data", VolumeSource: corev1.VolumeSource{PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: destinationPVC.Name}},
+	}}}}
+	return fake.NewClientset(sourcePVC, sourcePV, destinationPVC, destinationPV, reservationPod), OrphanCleanupOptions{SessionID: sessionID, SessionNamespace: "system", SourceNamespace: "app", SourcePVC: "source"}
+}
+
+func releaseDestinationPVOnPVCDelete(t *testing.T, client *fake.Clientset) {
+	t.Helper()
+	client.PrependReactor("delete", "persistentvolumeclaims", func(action k8stesting.Action) (bool, runtime.Object, error) {
+		deleted := action.(k8stesting.DeleteAction)
+		if deleted.GetNamespace() != "system" || deleted.GetName() != "destination" {
+			return false, nil, nil
+		}
+		object, err := client.Tracker().Get(corev1.SchemeGroupVersion.WithResource("persistentvolumes"), "", "pv-destination")
+		if err != nil {
+			return true, nil, err
+		}
+		pv := object.(*corev1.PersistentVolume)
+		pv.Status.Phase = corev1.VolumeReleased
+		if err := client.Tracker().Update(corev1.SchemeGroupVersion.WithResource("persistentvolumes"), pv, ""); err != nil {
+			return true, nil, err
+		}
+		return false, nil, nil
+	})
+}
+
+func TestPlanOrphanCleanupRecognizesPreActivationResources(t *testing.T) {
+	client, options := preActivationOrphanFixture()
+	plan, err := (&Service{client: client, store: &memoryStore{}}).PlanOrphanCleanup(context.Background(), options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !plan.Ready || plan.Mode != domain.OrphanCleanupPreActivation || plan.PreActivation == nil {
+		t.Fatalf("plan=%#v", plan)
+	}
+	resources := plan.PreActivation
+	if resources.SourcePV.Name != "pv-source" || resources.DestinationPVC.Name != "destination" || resources.DestinationPV.Name != "pv-destination" {
+		t.Fatalf("resources=%#v", resources)
+	}
+}
+
+func TestCleanupOrphanRemovesPreActivationDestinationAndFinalizesSource(t *testing.T) {
+	client, options := preActivationOrphanFixture()
+	releaseDestinationPVOnPVCDelete(t, client)
+	service := &Service{client: client, store: kube.NewConfigMapSessionStore(client)}
+	plan, err := service.CleanupOrphan(context.Background(), options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if plan == nil || !plan.Ready || plan.Mode != domain.OrphanCleanupPreActivation {
+		t.Fatalf("plan=%#v", plan)
+	}
+	if _, err := client.CoreV1().PersistentVolumeClaims("system").Get(context.Background(), "destination", metav1.GetOptions{}); !apierrors.IsNotFound(err) {
+		t.Fatalf("destination PVC still exists: %v", err)
+	}
+	if _, err := client.CoreV1().PersistentVolumes().Get(context.Background(), "pv-destination", metav1.GetOptions{}); !apierrors.IsNotFound(err) {
+		t.Fatalf("destination PV still exists: %v", err)
+	}
+	if _, err := client.CoreV1().Pods("system").Get(context.Background(), "reservation", metav1.GetOptions{}); !apierrors.IsNotFound(err) {
+		t.Fatalf("reservation Pod still exists: %v", err)
+	}
+	sourcePVC, err := client.CoreV1().PersistentVolumeClaims("app").Get(context.Background(), "source", metav1.GetOptions{})
+	if err != nil || sourcePVC.Annotations[kube.SessionKey] != "" {
+		t.Fatalf("source PVC was not finalized: pvc=%#v err=%v", sourcePVC, err)
+	}
+	sourcePV, err := client.CoreV1().PersistentVolumes().Get(context.Background(), "pv-source", metav1.GetOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sourcePV.Spec.PersistentVolumeReclaimPolicy != corev1.PersistentVolumeReclaimDelete || sourcePV.Labels[kube.SessionKey] != "" || sourcePV.Annotations[kube.OriginalPolicyAnnotation] != "" {
+		t.Fatalf("source PV was not finalized: %#v", sourcePV)
+	}
+	if _, err := client.CoordinationV1().Leases(options.SessionNamespace).Get(context.Background(), kube.SessionLockName(options.SessionID), metav1.GetOptions{}); !apierrors.IsNotFound(err) {
+		t.Fatalf("session Lease still exists: %v", err)
+	}
+}
+
+func TestPlanPreActivationOrphanRejectsUnsafeDestinationStates(t *testing.T) {
+	tests := []struct {
+		name   string
+		mutate func(*corev1.PersistentVolumeClaim, *corev1.PersistentVolume)
+		want   string
+	}{
+		{name: "delete reclaim policy", mutate: func(_ *corev1.PersistentVolumeClaim, pv *corev1.PersistentVolume) {
+			pv.Spec.PersistentVolumeReclaimPolicy = corev1.PersistentVolumeReclaimDelete
+		}, want: "reclaim policy must be Retain"},
+		{name: "claim UID mismatch", mutate: func(_ *corev1.PersistentVolumeClaim, pv *corev1.PersistentVolume) {
+			pv.Spec.ClaimRef.UID = "replacement"
+		}, want: "claimRef does not match"},
+		{name: "foreign PV ownership", mutate: func(_ *corev1.PersistentVolumeClaim, pv *corev1.PersistentVolume) {
+			pv.Labels[kube.SessionKey] = "other"
+		}, want: "ownership changed"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			client, options := preActivationOrphanFixture()
+			pvc, _ := client.CoreV1().PersistentVolumeClaims("system").Get(context.Background(), "destination", metav1.GetOptions{})
+			pv, _ := client.CoreV1().PersistentVolumes().Get(context.Background(), "pv-destination", metav1.GetOptions{})
+			test.mutate(pvc, pv)
+			if _, err := client.CoreV1().PersistentVolumeClaims("system").Update(context.Background(), pvc, metav1.UpdateOptions{}); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := client.CoreV1().PersistentVolumes().Update(context.Background(), pv, metav1.UpdateOptions{}); err != nil {
+				t.Fatal(err)
+			}
+			plan, err := (&Service{client: client, store: &memoryStore{}}).PlanOrphanCleanup(context.Background(), options)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if plan.Ready || !containsOrphanCheck(plan, test.want) {
+				t.Fatalf("plan=%#v", plan)
+			}
+		})
+	}
+}
+
+func TestPlanPreActivationOrphanRejectsExternalDestinationConsumer(t *testing.T) {
+	client, options := preActivationOrphanFixture()
+	external := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Namespace: "system", Name: "external"}, Spec: corev1.PodSpec{Volumes: []corev1.Volume{{
+		Name: "data", VolumeSource: corev1.VolumeSource{PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: "destination"}},
+	}}}}
+	if _, err := client.CoreV1().Pods("system").Create(context.Background(), external, metav1.CreateOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	plan, err := (&Service{client: client, store: &memoryStore{}}).PlanOrphanCleanup(context.Background(), options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if plan.Ready || !containsOrphanCheck(plan, "referenced by Pod external") {
+		t.Fatalf("plan=%#v", plan)
+	}
+}
+
+func TestCleanupPreActivationOrphanKeepsLeaseForOtherVolumes(t *testing.T) {
+	client, options := preActivationOrphanFixture()
+	sourcePVC, _ := client.CoreV1().PersistentVolumeClaims("app").Get(context.Background(), "source", metav1.GetOptions{})
+	sourcePV, _ := client.CoreV1().PersistentVolumes().Get(context.Background(), "pv-source", metav1.GetOptions{})
+	destinationPVC, _ := client.CoreV1().PersistentVolumeClaims("system").Get(context.Background(), "destination", metav1.GetOptions{})
+	destinationPV, _ := client.CoreV1().PersistentVolumes().Get(context.Background(), "pv-destination", metav1.GetOptions{})
+	sourcePVC = sourcePVC.DeepCopy()
+	sourcePVC.Name, sourcePVC.UID, sourcePVC.ResourceVersion = "source-2", "source-pvc-uid-2", "30"
+	sourcePVC.Spec.VolumeName = "pv-source-2"
+	sourcePV = sourcePV.DeepCopy()
+	sourcePV.Name, sourcePV.UID, sourcePV.ResourceVersion = "pv-source-2", "source-pv-uid-2", "31"
+	sourcePV.Spec.ClaimRef = &corev1.ObjectReference{Namespace: sourcePVC.Namespace, Name: sourcePVC.Name, UID: sourcePVC.UID}
+	destinationPVC = destinationPVC.DeepCopy()
+	destinationPVC.Name, destinationPVC.UID, destinationPVC.ResourceVersion = "destination-2", "destination-pvc-uid-2", "40"
+	destinationPVC.Spec.VolumeName = "pv-destination-2"
+	destinationPVC.Annotations[kube.SourcePVCUIDAnnotation] = string(sourcePVC.UID)
+	destinationPV = destinationPV.DeepCopy()
+	destinationPV.Name, destinationPV.UID, destinationPV.ResourceVersion = "pv-destination-2", "destination-pv-uid-2", "41"
+	destinationPV.Spec.ClaimRef = &corev1.ObjectReference{Namespace: destinationPVC.Namespace, Name: destinationPVC.Name, UID: destinationPVC.UID}
+	if _, err := client.CoreV1().PersistentVolumeClaims("app").Create(context.Background(), sourcePVC, metav1.CreateOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := client.CoreV1().PersistentVolumes().Create(context.Background(), sourcePV, metav1.CreateOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := client.CoreV1().PersistentVolumeClaims("system").Create(context.Background(), destinationPVC, metav1.CreateOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := client.CoreV1().PersistentVolumes().Create(context.Background(), destinationPV, metav1.CreateOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	releaseDestinationPVOnPVCDelete(t, client)
+	service := &Service{client: client, store: kube.NewConfigMapSessionStore(client)}
+	plan, err := service.CleanupOrphan(context.Background(), options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !plan.Ready || !containsPassedOrphanCheck(plan, "additional destination PVCs") {
+		t.Fatalf("plan=%#v", plan)
+	}
+	if _, err := client.CoordinationV1().Leases(options.SessionNamespace).Get(context.Background(), kube.SessionLockName(options.SessionID), metav1.GetOptions{}); err != nil {
+		t.Fatalf("session Lease should remain for other volumes: %v", err)
+	}
+}
+
+func TestCleanupPreActivationOrphanResumesAfterDestinationPVCDeletion(t *testing.T) {
+	client, options := preActivationOrphanFixture()
+	if err := client.Tracker().Delete(corev1.SchemeGroupVersion.WithResource("persistentvolumeclaims"), "system", "destination"); err != nil {
+		t.Fatal(err)
+	}
+	pv, _ := client.CoreV1().PersistentVolumes().Get(context.Background(), "pv-destination", metav1.GetOptions{})
+	pv.Status.Phase = corev1.VolumeReleased
+	if _, err := client.CoreV1().PersistentVolumes().Update(context.Background(), pv, metav1.UpdateOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	service := &Service{client: client, store: &memoryStore{}}
+	plan, err := service.PlanOrphanCleanup(context.Background(), options)
+	if err != nil || !plan.Ready || plan.PreActivation == nil || plan.PreActivation.DestinationPV.Name != "pv-destination" {
+		t.Fatalf("plan=%#v err=%v", plan, err)
+	}
+	if _, err := service.CleanupOrphan(context.Background(), options); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestPlanOrphanCleanupRequiresExactResourceRelationship(t *testing.T) {
 	client, options := orphanFixture()
 	service := &Service{client: client, store: &memoryStore{}}
@@ -48,7 +279,7 @@ func TestPlanOrphanCleanupRequiresExactResourceRelationship(t *testing.T) {
 	if !plan.Ready || len(plan.Checks) < 2 {
 		t.Fatalf("plan=%#v", plan)
 	}
-	if plan.ActivePV.Name != "pv-active" || plan.RollbackPV.Name != "pv-rollback" {
+	if plan.Mode != domain.OrphanCleanupPostActivation || plan.PostActivation == nil || plan.PostActivation.ActivePV.Name != "pv-active" || plan.PostActivation.RollbackPV.Name != "pv-rollback" {
 		t.Fatalf("refs=%#v", plan)
 	}
 }
@@ -145,7 +376,7 @@ func TestPlanOrphanCleanupHandlesRollbackPVAlreadyGone(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !plan.Ready || plan.RollbackPV.Name != "pv-rollback" {
+	if !plan.Ready || plan.PostActivation == nil || plan.PostActivation.RollbackPV.Name != "pv-rollback" {
 		t.Fatalf("plan=%#v", plan)
 	}
 	if _, err := service.CleanupOrphan(context.Background(), options); err != nil {
@@ -256,6 +487,15 @@ func TestCleanupOrphanDeletesLeaseWhileLockIsHeld(t *testing.T) {
 func containsOrphanCheck(plan *domain.OrphanCleanupPlan, text string) bool {
 	for _, check := range plan.Checks {
 		if !check.Passed && strings.Contains(check.Message, text) {
+			return true
+		}
+	}
+	return false
+}
+
+func containsPassedOrphanCheck(plan *domain.OrphanCleanupPlan, text string) bool {
+	for _, check := range plan.Checks {
+		if check.Passed && strings.Contains(check.Message, text) {
 			return true
 		}
 	}

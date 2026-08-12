@@ -171,6 +171,7 @@ Controller ownership outside the supported adapters causes the plan to fail. PVC
 
 - Session commands print phase-aware next steps, verification commands, and validated dry-run/execute pairs on stderr. JSON and YAML results remain a single structured document on stdout.
 - Tool Pod logs stream to stderr by default and remain available in the command output after short-lived Pods are removed. Use `--stream-tool-logs=false` for quiet automation.
+- Each tool-backed stage runs a short-lived probe Pod on every selected source and target node before starting the stage. Image pull, scheduling, security-context, shell, rsync, SSHD, and rclone failures retain the session record and surface before data transfer or workload mutation; backup and restore probes run while their operation lock is held.
 - Session state is stored in `pvc-migrate-session-<id>` ConfigMaps.
 - Session ConfigMaps carry a protection finalizer and are deleted through validated session cleanup.
 - Every mutating session command uses a renewable Kubernetes Lease for exclusive ownership.

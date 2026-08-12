@@ -7,6 +7,7 @@ import (
 
 	"github.com/labring-sigs/pvc-migrate/internal/backup"
 	"github.com/labring-sigs/pvc-migrate/internal/domain"
+	"github.com/labring-sigs/pvc-migrate/internal/kube"
 	"github.com/labring-sigs/pvc-migrate/internal/objectstore"
 	"github.com/spf13/cobra"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -107,6 +108,7 @@ func (r *rootState) newObjectTransferCommand(restore, forceOnline bool) *cobra.C
 				Store:                 store,
 				Writer:                r.options.ErrOut,
 				Logger:                runtime.logger,
+				ToolImageProber:       kube.NewToolImageProber(runtime.clients.Kubernetes),
 			}
 			plan, err := backup.Preflight(ctx, runtime.clients.Kubernetes, request, restore)
 			if err != nil {
@@ -155,7 +157,7 @@ func (r *rootState) newObjectTransferCommand(restore, forceOnline bool) *cobra.C
 			return err
 		},
 	}
-	bindBucketFlags(command, flags, restore, !forceOnline)
+	bindBucketFlags(command, flags, restore, !restore && !forceOnline)
 	bindDryRun(command, &dryRun)
 	command.AddCommand(r.newBackupPlanCommand(restore, forceOnline))
 	return command
@@ -165,8 +167,12 @@ func (r *rootState) newBackupPlanCommand(restore, forceOnline bool) *cobra.Comma
 	flags := &bucketFlags{}
 	use := "plan"
 	pvcFlag := "source-pvc"
-	if restore {
+	operation := "backup plan"
+	if forceOnline {
+		operation = "live-backup plan"
+	} else if restore {
 		pvcFlag = "destination-pvc"
+		operation = "restore plan"
 	}
 	command := &cobra.Command{
 		Use:   use,
@@ -187,11 +193,11 @@ func (r *rootState) newBackupPlanCommand(restore, forceOnline bool) *cobra.Comma
 			flags.secretKeyExplicit = cmd.Flags().Changed("secret-key")
 			flags.sessionTokenExplicit = cmd.Flags().Changed("session-token")
 			if err := loadS3Credentials(ctx, runtime.clients.Kubernetes, flags); err != nil {
-				return reportTransferError(cmd, "backup plan", flags.namespace, flags.pvc, err)
+				return reportTransferError(cmd, operation, flags.namespace, flags.pvc, err)
 			}
 			store, err := r.newObjectStore(ctx, flags)
 			if err != nil {
-				return reportTransferError(cmd, "backup plan", flags.namespace, flags.pvc, err)
+				return reportTransferError(cmd, operation, flags.namespace, flags.pvc, err)
 			}
 			request := backup.Request{
 				ID: flags.id, ToolImage: r.global.toolImage, Namespace: flags.namespace, PVCName: flags.pvc, Path: flags.path,
@@ -202,15 +208,15 @@ func (r *rootState) newBackupPlanCommand(restore, forceOnline bool) *cobra.Comma
 			}
 			plan, err := backup.Preflight(ctx, runtime.clients.Kubernetes, request, restore)
 			if err != nil {
-				return reportTransferError(cmd, "backup plan", flags.namespace, flags.pvc, err)
+				return reportTransferError(cmd, operation, flags.namespace, flags.pvc, err)
 			}
 			if err := printerFor(r).Print(plan); err != nil {
-				return reportTransferError(cmd, "backup plan", flags.namespace, flags.pvc, err)
+				return reportTransferError(cmd, operation, flags.namespace, flags.pvc, err)
 			}
-			return writeTransferDryRunGuidance(cmd.ErrOrStderr(), "backup plan", flags.namespace, flags.pvc)
+			return writeTransferDryRunGuidance(cmd.ErrOrStderr(), operation, flags.namespace, flags.pvc)
 		},
 	}
-	bindBucketFlags(command, flags, restore, !forceOnline)
+	bindBucketFlags(command, flags, restore, !restore && !forceOnline)
 	return command
 }
 

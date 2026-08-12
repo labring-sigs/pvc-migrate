@@ -108,6 +108,8 @@ func (r *Reserver) ReserveVolume(ctx context.Context, session *domain.Session, v
 		if err := r.provisionOnTarget(ctx, session, volume); err != nil {
 			return err
 		}
+	} else if err := r.cleanupReservationPod(ctx, session, volume); err != nil {
+		return err
 	}
 	bound, err := r.client.CoreV1().PersistentVolumeClaims(pvc.Namespace).Get(ctx, pvc.Name, metav1.GetOptions{})
 	if err != nil {
@@ -230,8 +232,9 @@ func (r *Reserver) provisionOnTarget(ctx context.Context, session *domain.Sessio
 			NodeSelector:                  map[string]string{corev1.LabelHostname: hostname},
 			Tolerations:                   nodeTolerations(node),
 			Containers: []corev1.Container{{
-				Name:  "verify-volume",
-				Image: toolImage,
+				Name:            "verify-volume",
+				Image:           toolImage,
+				ImagePullPolicy: corev1.PullIfNotPresent,
 				SecurityContext: &corev1.SecurityContext{
 					RunAsUser:  int64Pointer(0),
 					RunAsGroup: int64Pointer(0),
@@ -251,12 +254,15 @@ func (r *Reserver) provisionOnTarget(ctx context.Context, session *domain.Sessio
 	existing, err := r.client.CoreV1().Pods(pod.Namespace).Get(ctx, pod.Name, metav1.GetOptions{})
 	if apierrors.IsNotFound(err) {
 		existing, err = r.client.CoreV1().Pods(pod.Namespace).Create(ctx, pod, metav1.CreateOptions{})
+		if apierrors.IsAlreadyExists(err) {
+			existing, err = r.client.CoreV1().Pods(pod.Namespace).Get(ctx, pod.Name, metav1.GetOptions{})
+		}
 	}
 	if err != nil {
 		return domain.WrapError(domain.ErrorKubernetes, "provision target PVC", fmt.Sprintf("create tool Pod %s/%s", pod.Namespace, pod.Name), err)
 	}
-	if existing.Labels[SessionKey] != session.ID {
-		return domain.NewError(domain.ErrorConflict, "provision target PVC", fmt.Sprintf("tool Pod %s/%s belongs to another session", pod.Namespace, pod.Name))
+	if err := validateReservationPod(existing, session.ID, volume.DestinationPVC.Name); err != nil {
+		return err
 	}
 	var toolLogs *ToolLogStream
 	if r.toolLogs != nil {
@@ -275,20 +281,49 @@ func (r *Reserver) provisionOnTarget(ctx context.Context, session *domain.Sessio
 	}); err != nil {
 		return err
 	}
-	current, err := r.client.CoreV1().Pods(pod.Namespace).Get(ctx, pod.Name, metav1.GetOptions{})
-	if err == nil {
-		options := metav1.DeleteOptions{Preconditions: &metav1.Preconditions{UID: &current.UID}}
-		if deleteErr := r.client.CoreV1().Pods(pod.Namespace).Delete(ctx, pod.Name, options); deleteErr != nil && !apierrors.IsNotFound(deleteErr) {
-			return domain.WrapError(domain.ErrorKubernetes, "provision target PVC", "delete reservation Pod", deleteErr)
-		}
+	return r.cleanupReservationPod(ctx, session, volume)
+}
+
+func (r *Reserver) cleanupReservationPod(ctx context.Context, session *domain.Session, volume *domain.VolumeSpec) error {
+	namespace := volume.DestinationPVC.Namespace
+	name := toolPodName(session.ID, volume.SourcePVC.Name)
+	pod, err := r.client.CoreV1().Pods(namespace).Get(ctx, name, metav1.GetOptions{})
+	if apierrors.IsNotFound(err) {
+		return nil
 	}
-	return WaitFor(ctx, r.poll, fmt.Sprintf("reservation Pod %s/%s deletion", pod.Namespace, pod.Name), func(waitCtx context.Context) (bool, error) {
-		_, getErr := r.client.CoreV1().Pods(pod.Namespace).Get(waitCtx, pod.Name, metav1.GetOptions{})
+	if err != nil {
+		return domain.WrapError(domain.ErrorKubernetes, "clean up reservation Pod", fmt.Sprintf("read tool Pod %s/%s", namespace, name), err)
+	}
+	if err := validateReservationPod(pod, session.ID, volume.DestinationPVC.Name); err != nil {
+		return err
+	}
+	options := metav1.DeleteOptions{Preconditions: &metav1.Preconditions{UID: &pod.UID}}
+	if err := r.client.CoreV1().Pods(namespace).Delete(ctx, name, options); err != nil && !apierrors.IsNotFound(err) {
+		if apierrors.IsConflict(err) {
+			return domain.WrapError(domain.ErrorConflict, "clean up reservation Pod", fmt.Sprintf("tool Pod %s/%s changed while deleting", namespace, name), err)
+		}
+		return domain.WrapError(domain.ErrorKubernetes, "clean up reservation Pod", fmt.Sprintf("delete tool Pod %s/%s", namespace, name), err)
+	}
+	return WaitFor(ctx, r.poll, fmt.Sprintf("reservation Pod %s/%s deletion", namespace, name), func(waitCtx context.Context) (bool, error) {
+		current, getErr := r.client.CoreV1().Pods(namespace).Get(waitCtx, name, metav1.GetOptions{})
 		if apierrors.IsNotFound(getErr) {
 			return true, nil
 		}
+		if getErr == nil && current.UID != pod.UID {
+			return false, domain.NewError(domain.ErrorConflict, "clean up reservation Pod", fmt.Sprintf("tool Pod %s/%s name was reused", namespace, name))
+		}
 		return false, getErr
 	})
+}
+
+func validateReservationPod(pod *corev1.Pod, sessionID, destinationPVC string) error {
+	if pod.Labels[SessionKey] != sessionID || pod.Labels[ResourceRoleLabel] != ResourceRoleReservationConsumer {
+		return domain.NewError(domain.ErrorConflict, "validate reservation Pod", fmt.Sprintf("tool Pod %s/%s is not owned by session %s as a reservation consumer", pod.Namespace, pod.Name, sessionID))
+	}
+	if !PodUsesPVC(pod, destinationPVC) {
+		return domain.NewError(domain.ErrorConflict, "validate reservation Pod", fmt.Sprintf("tool Pod %s/%s does not mount destination PVC %s", pod.Namespace, pod.Name, destinationPVC))
+	}
+	return nil
 }
 
 func (r *Reserver) retainPV(ctx context.Context, name string, uid types.UID, sessionID, role string) error {
@@ -393,6 +428,27 @@ func PVSupportsNode(pv *corev1.PersistentVolume, node *corev1.Node) bool {
 		}
 	}
 	return false
+}
+
+// PVUniqueNodeName returns the object name of the sole current node allowed by
+// the PV's required node affinity. An empty result leaves placement to the
+// scheduler. Resolving against Node objects also handles hostname labels whose
+// values differ from metadata.name.
+func PVUniqueNodeName(pv *corev1.PersistentVolume, nodes []corev1.Node) string {
+	if pv == nil || pv.Spec.NodeAffinity == nil || pv.Spec.NodeAffinity.Required == nil || len(pv.Spec.NodeAffinity.Required.NodeSelectorTerms) == 0 {
+		return ""
+	}
+	var candidate string
+	for index := range nodes {
+		if !PVSupportsNode(pv, &nodes[index]) {
+			continue
+		}
+		if candidate != "" {
+			return ""
+		}
+		candidate = nodes[index].Name
+	}
+	return candidate
 }
 
 func nodeFieldValue(node *corev1.Node, key string) (string, bool) {

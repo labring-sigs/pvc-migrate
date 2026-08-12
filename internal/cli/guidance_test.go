@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"strings"
 	"testing"
@@ -88,17 +89,43 @@ func TestSessionGuidanceIncludesCustomNamespaceAndApproval(t *testing.T) {
 }
 
 func TestSessionGuidanceAbortIncludesValidationAndApproval(t *testing.T) {
+	for _, phase := range []domain.Phase{domain.PhasePlanned, domain.PhaseReserving, domain.PhaseReserved, domain.PhaseWarmCopying, domain.PhasePaused, domain.PhaseFinalSyncing, domain.PhaseFinalSynced} {
+		t.Run(string(phase), func(t *testing.T) {
+			var output bytes.Buffer
+			if err := writeSessionGuidance(&output, guidanceSession(phase)); err != nil {
+				t.Fatal(err)
+			}
+			text := output.String()
+			for _, want := range []string{
+				"session abort mig-test --dry-run",
+				"--yes session abort mig-test --dry-run=false",
+			} {
+				if !strings.Contains(text, want) {
+					t.Fatalf("guidance=%q missing %q", text, want)
+				}
+			}
+		})
+	}
+
+	copySession := guidanceSession(domain.PhaseWarmCopied)
+	copySession.Spec = domain.NewSessionSpec(domain.OperationCopy, copySession.Spec.SessionCommon, domain.WorkloadSpec{}, false)
 	var output bytes.Buffer
-	if err := writeSessionGuidance(&output, guidanceSession(domain.PhasePaused)); err != nil {
+	if err := writeSessionGuidance(&output, copySession); err != nil {
 		t.Fatal(err)
 	}
-	text := output.String()
-	for _, want := range []string{
-		"session abort mig-test --dry-run",
-		"--yes session abort mig-test --dry-run=false",
-	} {
-		if !strings.Contains(text, want) {
-			t.Fatalf("guidance=%q missing %q", text, want)
+	if strings.Contains(output.String(), "session abort") {
+		t.Fatalf("completed copy guidance contains redundant abort action: %q", output.String())
+	}
+}
+
+func TestTransferDryRunGuidanceUsesOperationName(t *testing.T) {
+	for _, operation := range []string{"backup plan", "live-backup plan", "restore plan"} {
+		var output bytes.Buffer
+		if err := writeTransferDryRunGuidance(&output, operation, "app", "data"); err != nil {
+			t.Fatal(err)
+		}
+		if !strings.Contains(output.String(), operation+" dry-run completed") {
+			t.Fatalf("operation=%q guidance=%q", operation, output.String())
 		}
 	}
 }
@@ -182,6 +209,20 @@ func TestErrorGuidanceIncludesRecoveryInspection(t *testing.T) {
 		"session status",
 		"configmap pvc-migrate-session-mig-test",
 	} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("guidance=%q missing %q", text, want)
+		}
+	}
+}
+
+func TestSessionCreationErrorGuidanceInspectsPotentialRecord(t *testing.T) {
+	command := &guidanceErrorCommand{}
+	creationErr := domain.NewError(domain.ErrorKubernetes, "create session", "connection reset after create")
+	if err := reportSessionCreationError(command, "migration-control", "mig-test", creationErr); !errors.Is(err, creationErr) {
+		t.Fatalf("returned error=%v", err)
+	}
+	text := command.stderr.String()
+	for _, want := range []string{"session status mig-test", "get configmap pvc-migrate-session-mig-test"} {
 		if !strings.Contains(text, want) {
 			t.Fatalf("guidance=%q missing %q", text, want)
 		}

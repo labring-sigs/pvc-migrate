@@ -23,16 +23,17 @@ import (
 )
 
 type Config struct {
-	KubeconfigPath string
-	Context        string
-	Retries        int
-	RetryBackoff   time.Duration
-	HelmTimeout    time.Duration
-	NoCompress     bool
-	StreamToolLogs bool
-	StructuredLogs bool
-	Writer         io.Writer
-	Logger         *slog.Logger
+	KubeconfigPath  string
+	Context         string
+	Retries         int
+	RetryBackoff    time.Duration
+	HelmTimeout     time.Duration
+	NoCompress      bool
+	StreamToolLogs  bool
+	StructuredLogs  bool
+	Writer          io.Writer
+	Logger          *slog.Logger
+	ToolImageProber kube.ToolImageProber
 }
 
 type Service struct {
@@ -184,6 +185,252 @@ func (s *Service) CreateSession(ctx context.Context, plan *domain.MigrationPlan,
 		return nil, createErr
 	}
 	return session, nil
+}
+
+func (s *Service) probeToolImage(ctx context.Context, session *domain.Session, targets []kube.ToolProbeTarget) ([]kube.ToolImageProbeResult, error) {
+	if session == nil || s.config.ToolImageProber == nil {
+		return nil, nil
+	}
+	if len(targets) == 0 {
+		return nil, nil
+	}
+	return s.config.ToolImageProber.Probe(ctx, kube.ToolImageProbeOptions{
+		OperationID: session.ID,
+		Image:       session.Spec.WorkflowOptions().ToolImage,
+		Targets:     targets,
+		Timeout:     s.config.HelmTimeout,
+		Writer:      s.config.Writer,
+		Logger:      s.config.Logger,
+	})
+}
+
+func reservationToolProbeTargets(session *domain.Session) []kube.ToolProbeTarget {
+	if session == nil {
+		return nil
+	}
+	options := session.Spec.WorkflowOptions()
+	if options.TargetNode == "" {
+		return nil
+	}
+	return toolProbeTargetsForNamespaces(destinationVolumeNamespaces(session), options.TargetNode, nil)
+}
+
+func copyToolProbeTargets(session *domain.Session) []kube.ToolProbeTarget {
+	if session == nil {
+		return nil
+	}
+	options := session.Spec.WorkflowOptions()
+	switch session.Spec.Operation() {
+	case domain.OperationCopy, domain.OperationMigrate, domain.OperationMigratePod:
+		if options.TargetNode == "" {
+			return nil
+		}
+		targetNamespaces := destinationVolumeNamespaces(session)
+		targets := toolProbeTargetsForNamespaces(targetNamespaces, options.TargetNode, []string{kube.ToolComponentRsync})
+		needsSSHD := sessionNeedsSourceSSHD(session)
+		if slices.Contains(options.Strategies, domain.StrategyLocal) {
+			targets = append(targets, toolProbeTargetsForNamespaces(targetNamespaces, options.TargetNode, []string{kube.ToolComponentSSHD})...)
+		}
+		if !needsSSHD || options.SourceNode == "" {
+			return targets
+		}
+		targets = append(targets, toolProbeTargetsForNamespaces(sourceVolumeNamespaces(session), options.SourceNode, []string{kube.ToolComponentSSHD})...)
+		return targets
+	}
+	return nil
+}
+
+func sessionNeedsSourceSSHD(session *domain.Session) bool {
+	if session == nil {
+		return false
+	}
+	operation := session.Spec.Operation()
+	if operation != domain.OperationCopy && operation != domain.OperationMigrate && operation != domain.OperationMigratePod {
+		return false
+	}
+	strategies := session.Spec.WorkflowOptions().Strategies
+	if len(strategies) == 0 {
+		return true
+	}
+	for _, strategy := range strategies {
+		if strategy != domain.StrategyMount {
+			return true
+		}
+	}
+	return false
+}
+
+func (s *Service) resolveCopyToolProbeTargets(ctx context.Context, session *domain.Session) ([]kube.ToolProbeTarget, error) {
+	targets := copyToolProbeTargets(session)
+	if !sessionNeedsSourceSSHD(session) {
+		return targets, nil
+	}
+	options := session.Spec.WorkflowOptions()
+	sourceTargets, err := s.resolveSourceToolProbeTargets(ctx, session)
+	if err != nil {
+		return nil, err
+	}
+	if options.SourceNode == "" {
+		targets = append(targets, sourceTargets...)
+	}
+	return targets, nil
+}
+
+func (s *Service) resolveSourceToolProbeTargets(ctx context.Context, session *domain.Session) ([]kube.ToolProbeTarget, error) {
+	if session == nil {
+		return nil, domain.NewError(domain.ErrorValidation, "tool image probe", "session is nil")
+	}
+	options := session.Spec.WorkflowOptions()
+	namespaces := sourceVolumeNamespaces(session)
+	type podListResult struct {
+		pods []corev1.Pod
+		err  error
+	}
+	podLists := make([]podListResult, len(namespaces))
+	parallel.For(len(namespaces), func(index int) {
+		pods, err := s.client.CoreV1().Pods(namespaces[index]).List(ctx, metav1.ListOptions{})
+		if err == nil && pods == nil {
+			err = fmt.Errorf("list PVC consumers in %s returned an empty object", namespaces[index])
+		}
+		if pods != nil {
+			podLists[index].pods = pods.Items
+		}
+		podLists[index].err = err
+	})
+
+	resolvedNodes := make([]string, len(session.Spec.Volumes))
+	needsTopology := make([]bool, len(session.Spec.Volumes))
+	activeCopyNodes := map[string]struct{}{}
+	for index := range session.Spec.Volumes {
+		volume := &session.Spec.Volumes[index]
+		namespaceIndex := slices.Index(namespaces, volume.SourcePVC.Namespace)
+		if namespaceIndex < 0 {
+			return nil, domain.NewError(domain.ErrorInternal, "tool image probe", fmt.Sprintf("source namespace %s was not inventoried", volume.SourcePVC.Namespace))
+		}
+		result := podLists[namespaceIndex]
+		if result.err != nil {
+			return nil, domain.WrapError(domain.ErrorKubernetes, "tool image probe", fmt.Sprintf("list PVC consumers in %s", volume.SourcePVC.Namespace), result.err)
+		}
+		activeCount := 0
+		scheduledCount := 0
+		nodes := map[string]struct{}{}
+		for podIndex := range result.pods {
+			pod := &result.pods[podIndex]
+			if pod.Status.Phase == corev1.PodSucceeded || pod.Status.Phase == corev1.PodFailed || !kube.PodUsesPVC(pod, volume.SourcePVC.Name) {
+				continue
+			}
+			activeCount++
+			if pod.Spec.NodeName != "" {
+				scheduledCount++
+				nodes[pod.Spec.NodeName] = struct{}{}
+			}
+		}
+		if session.Spec.Operation() == domain.OperationCopy && activeCount > 0 {
+			if !session.Spec.Online() {
+				return nil, domain.NewError(domain.ErrorPrecondition, "tool image probe", fmt.Sprintf("offline copy requires PVC %s/%s to have zero active Pod consumers", volume.SourcePVC.Namespace, volume.SourcePVC.Name))
+			}
+			if kube.HasAccessMode(volume.AccessModes, corev1.ReadWriteOncePod) {
+				return nil, domain.NewError(domain.ErrorPrecondition, "tool image probe", fmt.Sprintf("active RWOP PVC %s/%s cannot be warm-copied", volume.SourcePVC.Namespace, volume.SourcePVC.Name))
+			}
+			if kube.HasAccessMode(volume.AccessModes, corev1.ReadWriteOnce) && scheduledCount != activeCount {
+				return nil, domain.NewError(domain.ErrorPrecondition, "tool image probe", fmt.Sprintf("every active consumer of RWO PVC %s/%s must be scheduled before online copy", volume.SourcePVC.Namespace, volume.SourcePVC.Name))
+			}
+		}
+		if len(nodes) > 1 {
+			return nil, domain.NewError(domain.ErrorPrecondition, "tool image probe", fmt.Sprintf("PVC %s/%s active consumers span multiple nodes", volume.SourcePVC.Namespace, volume.SourcePVC.Name))
+		}
+		for nodeName := range nodes {
+			resolvedNodes[index] = nodeName
+			if session.Spec.Operation() == domain.OperationCopy {
+				activeCopyNodes[nodeName] = struct{}{}
+			}
+		}
+		if resolvedNodes[index] == "" {
+			needsTopology[index] = true
+		}
+		if options.SourceNode != "" && resolvedNodes[index] != "" && resolvedNodes[index] != options.SourceNode {
+			return nil, domain.NewError(domain.ErrorConflict, "tool image probe", fmt.Sprintf("PVC %s/%s consumer runs on %s, session source node is %s", volume.SourcePVC.Namespace, volume.SourcePVC.Name, resolvedNodes[index], options.SourceNode))
+		}
+	}
+	if len(activeCopyNodes) > 1 {
+		return nil, domain.NewError(domain.ErrorPrecondition, "tool image probe", "online copy consumers span multiple source nodes")
+	}
+	if options.SourceNode != "" {
+		return nil, nil
+	}
+
+	needsAnyTopology := slices.Contains(needsTopology, true)
+	var nodes []corev1.Node
+	if needsAnyTopology {
+		nodeList, err := s.client.CoreV1().Nodes().List(ctx, metav1.ListOptions{})
+		if err != nil {
+			return nil, domain.WrapError(domain.ErrorKubernetes, "tool image probe", "list nodes for source PV topology", err)
+		}
+		if nodeList == nil {
+			return nil, domain.NewError(domain.ErrorKubernetes, "tool image probe", "list nodes for source PV topology returned an empty object")
+		}
+		nodes = nodeList.Items
+		type pvResult struct {
+			pv  *corev1.PersistentVolume
+			err error
+		}
+		pvs := make([]pvResult, len(session.Spec.Volumes))
+		parallel.For(len(session.Spec.Volumes), func(index int) {
+			if !needsTopology[index] || session.Spec.Volumes[index].SourcePV.Name == "" {
+				return
+			}
+			pvs[index].pv, pvs[index].err = s.client.CoreV1().PersistentVolumes().Get(ctx, session.Spec.Volumes[index].SourcePV.Name, metav1.GetOptions{})
+		})
+		for index := range pvs {
+			if pvs[index].err != nil {
+				return nil, domain.WrapError(domain.ErrorKubernetes, "tool image probe", fmt.Sprintf("read source PV %s", session.Spec.Volumes[index].SourcePV.Name), pvs[index].err)
+			}
+			if pvs[index].pv != nil {
+				resolvedNodes[index] = kube.PVUniqueNodeName(pvs[index].pv, nodes)
+			}
+		}
+	}
+
+	targets := make([]kube.ToolProbeTarget, 0, len(session.Spec.Volumes))
+	for index := range session.Spec.Volumes {
+		volume := &session.Spec.Volumes[index]
+		target := kube.ToolProbeTarget{Namespace: volume.SourcePVC.Namespace, NodeName: resolvedNodes[index], Components: []string{kube.ToolComponentSSHD}}
+		if target.NodeName == "" {
+			target.PVCName = volume.SourcePVC.Name
+		}
+		targets = append(targets, target)
+	}
+	return targets, nil
+}
+
+func destinationVolumeNamespaces(session *domain.Session) []string {
+	return volumeNamespaces(session, func(volume domain.VolumeSpec) string { return volume.DestinationPVC.Namespace }, session.Spec.TemporaryNamespace)
+}
+
+func sourceVolumeNamespaces(session *domain.Session) []string {
+	return volumeNamespaces(session, func(volume domain.VolumeSpec) string { return volume.SourcePVC.Namespace }, session.Spec.SourceNamespace)
+}
+
+func volumeNamespaces(session *domain.Session, namespaceFor func(domain.VolumeSpec) string, fallback string) []string {
+	namespaces := make([]string, 0, len(session.Spec.Volumes))
+	for _, volume := range session.Spec.Volumes {
+		namespace := namespaceFor(volume)
+		if namespace != "" && !slices.Contains(namespaces, namespace) {
+			namespaces = append(namespaces, namespace)
+		}
+	}
+	if len(namespaces) == 0 && fallback != "" {
+		namespaces = append(namespaces, fallback)
+	}
+	return namespaces
+}
+
+func toolProbeTargetsForNamespaces(namespaces []string, nodeName string, components []string) []kube.ToolProbeTarget {
+	targets := make([]kube.ToolProbeTarget, 0, len(namespaces))
+	for _, namespace := range namespaces {
+		targets = append(targets, kube.ToolProbeTarget{Namespace: namespace, NodeName: nodeName, Components: slices.Clone(components)})
+	}
+	return targets
 }
 
 func (s *Service) ensureSessionNamespaces(ctx context.Context, plan *domain.MigrationPlan, dryRun bool) error {
@@ -394,12 +641,76 @@ func (s *Service) ValidateRollback(ctx context.Context, session *domain.Session)
 		return s.validateRebindRollbackVolumes(ctx, session)
 	}
 	if wasRunning {
-		return s.verifyActiveVolumes(ctx, session)
+		if err := s.verifyActiveVolumes(ctx, session); err != nil {
+			return err
+		}
+		return s.validateRollbackConsumers(ctx, session)
 	}
 	if err := s.controllers.VerifyPaused(ctx, session); err != nil {
 		return err
 	}
 	return s.validateOfflineVolumes(ctx, session)
+}
+
+// validateRollbackConsumers mirrors the Pod reference guard in RollbackVolume
+// while allowing consumers that the recorded workload adapter will pause.
+func (s *Service) validateRollbackConsumers(ctx context.Context, session *domain.Session) error {
+	allowed := make(map[string]struct{})
+	workload := session.Spec.Workload()
+	if workload.Adapter != domain.WorkloadNone {
+		for _, ref := range append([]domain.ObjectReference{workload.Pod}, workload.AffectedPods...) {
+			if ref.Namespace != "" && ref.Name != "" {
+				allowed[ref.Namespace+"/"+ref.Name] = struct{}{}
+			}
+		}
+	}
+
+	namespaces := make([]string, 0)
+	seenNamespaces := make(map[string]struct{})
+	for index := range session.Spec.Volumes {
+		namespace := session.Spec.Volumes[index].SourcePVC.Namespace
+		if _, exists := seenNamespaces[namespace]; exists {
+			continue
+		}
+		seenNamespaces[namespace] = struct{}{}
+		namespaces = append(namespaces, namespace)
+	}
+	sort.Strings(namespaces)
+
+	type podList struct {
+		items []corev1.Pod
+		err   error
+	}
+	results := make([]podList, len(namespaces))
+	parallel.For(len(namespaces), func(index int) {
+		pods, err := s.client.CoreV1().Pods(namespaces[index]).List(ctx, metav1.ListOptions{})
+		if err == nil && pods == nil {
+			err = fmt.Errorf("list Pods in %s returned an empty object", namespaces[index])
+		}
+		if pods != nil {
+			results[index].items = pods.Items
+		}
+		results[index].err = err
+	})
+
+	for volumeIndex := range session.Spec.Volumes {
+		volume := &session.Spec.Volumes[volumeIndex]
+		result := results[sort.SearchStrings(namespaces, volume.SourcePVC.Namespace)]
+		if result.err != nil {
+			return domain.WrapError(domain.ErrorKubernetes, "rollback dry-run", fmt.Sprintf("list Pods in %s", volume.SourcePVC.Namespace), result.err)
+		}
+		for podIndex := range result.items {
+			pod := &result.items[podIndex]
+			if !kube.PodUsesPVC(pod, volume.SourcePVC.Name) {
+				continue
+			}
+			if _, controlled := allowed[pod.Namespace+"/"+pod.Name]; controlled {
+				continue
+			}
+			return domain.NewError(domain.ErrorPrecondition, "rollback dry-run", fmt.Sprintf("PVC %s/%s is referenced by Pod %s, which is outside the recorded workload pause scope", volume.SourcePVC.Namespace, volume.SourcePVC.Name, pod.Name))
+		}
+	}
+	return nil
 }
 
 // validateRebindRollbackVolumes checks the PVC identity currently serving the
@@ -596,8 +907,15 @@ func (s *Service) ValidateFinalSync(ctx context.Context, session *domain.Session
 	if !session.Spec.Orchestrated() {
 		return domain.NewError(domain.ErrorPrecondition, "final sync dry-run", "final sync requires an orchestrated migration session")
 	}
-	valid := session.Status.Phase == domain.PhasePaused || session.Status.Phase == domain.PhaseFinalSyncing || session.Status.Phase == domain.PhaseFinalSynced || (session.Status.Phase == domain.PhaseFailed && session.Status.ResumeFrom == domain.PhaseFinalSyncing)
-	if !valid {
+	phase := session.Status.Phase
+	if phase == domain.PhaseFailed {
+		phase = session.Status.ResumeFrom
+	}
+	switch phase {
+	case domain.PhaseReserved, domain.PhaseWarmCopied, domain.PhasePausing:
+		return s.ValidateReservation(ctx, session)
+	case domain.PhasePaused, domain.PhaseFinalSyncing, domain.PhaseFinalSynced:
+	default:
 		return domain.NewError(domain.ErrorPrecondition, "final sync dry-run", fmt.Sprintf("session phase %s cannot final-sync", session.Status.Phase))
 	}
 	if err := s.controllers.VerifyPaused(ctx, session); err != nil {
@@ -640,6 +958,9 @@ func (s *Service) reserve(ctx context.Context, session *domain.Session) error {
 	if session.Status.Phase == domain.PhaseReserved || phaseAfter(session.Status.Phase, domain.PhaseReserved) {
 		return nil
 	}
+	if _, err := s.probeToolImage(ctx, session, reservationToolProbeTargets(session)); err != nil {
+		return err
+	}
 	if err := s.begin(ctx, session, domain.PhaseReserving, "reserving destination storage"); err != nil {
 		return err
 	}
@@ -667,18 +988,32 @@ func (s *Service) WarmCopy(ctx context.Context, session *domain.Session) error {
 }
 
 func (s *Service) warmCopy(ctx context.Context, session *domain.Session) error {
-	if session.Status.Phase == domain.PhaseWarmCopied {
-		for i := range session.Status.Volumes {
-			session.Status.Volumes[i].Sync.WarmCompletedAt = nil
-			session.Status.Volumes[i].Sync.LastError = ""
-		}
-	}
 	valid := session.Status.Phase == domain.PhaseReserved ||
 		session.Status.Phase == domain.PhaseWarmCopied ||
 		session.Status.Phase == domain.PhaseWarmCopying ||
 		(session.Status.Phase == domain.PhaseFailed && session.Status.ResumeFrom == domain.PhaseWarmCopying)
 	if !valid {
 		return domain.NewError(domain.ErrorPrecondition, "warm copy", fmt.Sprintf("session phase %s cannot warm-copy", session.Status.Phase))
+	}
+	// Infer and checkpoint an online copy's source node while the session Lease
+	// is held. Rechecks before each volume then reject a consumer that moves
+	// after the node-specific image probe.
+	if err := s.validateCopyConsumersBatch(ctx, session); err != nil {
+		return err
+	}
+	targets, err := s.resolveCopyToolProbeTargets(ctx, session)
+	if err != nil {
+		return err
+	}
+	probeResults, err := s.probeToolImage(ctx, session, targets)
+	if err != nil {
+		return err
+	}
+	if session.Status.Phase == domain.PhaseWarmCopied {
+		for i := range session.Status.Volumes {
+			session.Status.Volumes[i].Sync.WarmCompletedAt = nil
+			session.Status.Volumes[i].Sync.LastError = ""
+		}
 	}
 	if err := s.begin(ctx, session, domain.PhaseWarmCopying, "running warm copy"); err != nil {
 		return err
@@ -692,7 +1027,7 @@ func (s *Service) warmCopy(ctx context.Context, session *domain.Session) error {
 		if err := s.validateCopyConsumers(ctx, session, volume); err != nil {
 			return s.failContext(ctx, session, err)
 		}
-		if err := s.copyWithRetry(ctx, session, volume, status, copyengine.ModeWarm); err != nil {
+		if err := s.copyWithRetry(ctx, session, volume, status, copyengine.ModeWarm, probeResults); err != nil {
 			return s.failContext(ctx, session, err)
 		}
 		now := metav1.NewTime(s.now().UTC())
@@ -752,6 +1087,62 @@ func (s *Service) finalSync(ctx context.Context, session *domain.Session) error 
 	if err := s.controllers.VerifyPaused(ctx, session); err != nil {
 		return err
 	}
+	targets, err := s.resolveCopyToolProbeTargets(ctx, session)
+	if err != nil {
+		return err
+	}
+	probeResults, err := s.probeToolImage(ctx, session, targets)
+	if err != nil {
+		return err
+	}
+	return s.finalSyncWithProbeResults(ctx, session, probeResults)
+}
+
+// PauseAndFinalSync verifies the tool image while holding the same Session
+// Lease used to pause the workload and launch the offline copy.
+func (s *Service) PauseAndFinalSync(ctx context.Context, session *domain.Session) error {
+	return s.withSessionLock(ctx, session, func(lockedCtx context.Context) error {
+		return s.pauseAndFinalSync(lockedCtx, session)
+	})
+}
+
+func (s *Service) pauseAndFinalSync(ctx context.Context, session *domain.Session) error {
+	if session == nil || !session.Spec.Orchestrated() {
+		return domain.NewError(domain.ErrorPrecondition, "final sync", "final sync requires an orchestrated migration session")
+	}
+	phase := session.Status.Phase
+	if phase == domain.PhaseFailed {
+		phase = session.Status.ResumeFrom
+	}
+	switch phase {
+	case domain.PhaseReserved, domain.PhaseWarmCopied, domain.PhasePausing,
+		domain.PhasePaused, domain.PhaseFinalSyncing, domain.PhaseFinalSynced:
+	default:
+		return domain.NewError(domain.ErrorPrecondition, "final sync", fmt.Sprintf("session phase %s cannot final-sync", session.Status.Phase))
+	}
+	alreadyPaused := phase == domain.PhasePaused || phase == domain.PhaseFinalSyncing || phase == domain.PhaseFinalSynced
+	if alreadyPaused {
+		if err := s.controllers.VerifyPaused(ctx, session); err != nil {
+			return err
+		}
+	}
+	targets, err := s.resolveCopyToolProbeTargets(ctx, session)
+	if err != nil {
+		return err
+	}
+	probeResults, err := s.probeToolImage(ctx, session, targets)
+	if err != nil {
+		return err
+	}
+	if !alreadyPaused {
+		if err := s.pause(ctx, session); err != nil {
+			return err
+		}
+	}
+	return s.finalSyncWithProbeResults(ctx, session, probeResults)
+}
+
+func (s *Service) finalSyncWithProbeResults(ctx context.Context, session *domain.Session, probeResults []kube.ToolImageProbeResult) error {
 	if session.Status.Phase == domain.PhaseFinalSynced {
 		for i := range session.Status.Volumes {
 			session.Status.Volumes[i].Sync.FinalCompletedAt = nil
@@ -770,7 +1161,7 @@ func (s *Service) finalSync(ctx context.Context, session *domain.Session) error 
 		if err := s.switcher.VerifyVolumeOffline(ctx, volume); err != nil {
 			return s.failContext(ctx, session, err)
 		}
-		if err := s.copyWithRetry(ctx, session, volume, status, copyengine.ModeFinal); err != nil {
+		if err := s.copyWithRetry(ctx, session, volume, status, copyengine.ModeFinal, probeResults); err != nil {
 			return s.failContext(ctx, session, err)
 		}
 		now := metav1.NewTime(s.now().UTC())
@@ -848,10 +1239,7 @@ func (s *Service) Migrate(ctx context.Context, session *domain.Session, warmPass
 }
 
 func (s *Service) migrateAfterWarmCopy(ctx context.Context, session *domain.Session) error {
-	if err := s.Pause(ctx, session); err != nil {
-		return err
-	}
-	if err := s.FinalSync(ctx, session); err != nil {
+	if err := s.PauseAndFinalSync(ctx, session); err != nil {
 		return err
 	}
 	if err := s.Activate(ctx, session); err != nil {
@@ -1186,6 +1574,7 @@ func (s *Service) validateCopyConsumersFromPods(ctx context.Context, session *do
 	}
 	active := make([]*corev1.Pod, 0)
 	nodes := map[string]struct{}{}
+	scheduledCount := 0
 	for index := range pods {
 		pod := &pods[index]
 		if pod.Status.Phase == corev1.PodSucceeded || pod.Status.Phase == corev1.PodFailed || !kube.PodUsesPVC(pod, volume.SourcePVC.Name) {
@@ -1193,6 +1582,7 @@ func (s *Service) validateCopyConsumersFromPods(ctx context.Context, session *do
 		}
 		active = append(active, pod)
 		if pod.Spec.NodeName != "" {
+			scheduledCount++
 			nodes[pod.Spec.NodeName] = struct{}{}
 		}
 	}
@@ -1208,6 +1598,9 @@ func (s *Service) validateCopyConsumersFromPods(ctx context.Context, session *do
 	}
 	if kube.HasAccessMode(volume.AccessModes, corev1.ReadWriteOncePod) {
 		return domain.NewError(domain.ErrorPrecondition, "copy preflight", fmt.Sprintf("active RWOP PVC %s/%s cannot be warm-copied", volume.SourcePVC.Namespace, volume.SourcePVC.Name))
+	}
+	if kube.HasAccessMode(volume.AccessModes, corev1.ReadWriteOnce) && scheduledCount != len(active) {
+		return domain.NewError(domain.ErrorPrecondition, "copy preflight", fmt.Sprintf("every active consumer of RWO PVC %s/%s must be scheduled before online copy", volume.SourcePVC.Namespace, volume.SourcePVC.Name))
 	}
 	if len(nodes) > 1 {
 		return domain.NewError(domain.ErrorPrecondition, "copy preflight", fmt.Sprintf("online copy consumers for PVC %s/%s moved across multiple nodes", volume.SourcePVC.Namespace, volume.SourcePVC.Name))
@@ -1230,11 +1623,16 @@ func (s *Service) validateCopyConsumersFromPods(ctx context.Context, session *do
 	return nil
 }
 
-func (s *Service) copyWithRetry(ctx context.Context, session *domain.Session, volume *domain.VolumeSpec, status *domain.VolumeStatus, mode copyengine.Mode) error {
-	values, err := s.helmSchedulingValues(ctx, session)
+func (s *Service) copyWithRetry(ctx context.Context, session *domain.Session, volume *domain.VolumeSpec, status *domain.VolumeStatus, mode copyengine.Mode, probeResults []kube.ToolImageProbeResult) error {
+	values, err := s.helmSchedulingValues(ctx, session, probedSourceNode(session, volume, probeResults))
 	if err != nil {
 		return err
 	}
+	pullSecretValues, err := kube.ToolImagePullSecretHelmValues(probeResults)
+	if err != nil {
+		return err
+	}
+	values = append(values, pullSecretValues...)
 	var last error
 	options := session.Spec.WorkflowOptions()
 	for retryIndex := 0; retryIndex < s.config.Retries; retryIndex++ {
@@ -1339,9 +1737,12 @@ func isPVMigrateToolForClaims(pod *corev1.Pod, claims map[string]struct{}) bool 
 	return false
 }
 
-func (s *Service) helmSchedulingValues(ctx context.Context, session *domain.Session) ([]string, error) {
+func (s *Service) helmSchedulingValues(ctx context.Context, session *domain.Session, sourceNode string) ([]string, error) {
 	values := kube.ZeroResourceHelmValues()
 	options := session.Spec.WorkflowOptions()
+	if sourceNode == "" {
+		sourceNode = options.SourceNode
+	}
 	type schedulingTarget struct {
 		component string
 		nodes     []string
@@ -1352,9 +1753,9 @@ func (s *Service) helmSchedulingValues(ctx context.Context, session *domain.Sess
 		// The local strategy deploys an SSHD on both sides. PVC topology places
 		// each Pod on its volume's node, while the combined tolerations allow
 		// both source and destination nodes to accept their respective Pod.
-		targets = append(targets, schedulingTarget{component: "sshd", nodes: []string{options.SourceNode, options.TargetNode}})
+		targets = append(targets, schedulingTarget{component: "sshd", nodes: []string{sourceNode, options.TargetNode}})
 	} else {
-		targets = append(targets, schedulingTarget{component: "sshd", nodes: []string{options.SourceNode}, pinNode: true})
+		targets = append(targets, schedulingTarget{component: "sshd", nodes: []string{sourceNode}, pinNode: true})
 	}
 	nodeNames := make([]string, 0, 2)
 	nodeIndexes := map[string]int{}
@@ -1379,9 +1780,8 @@ func (s *Service) helmSchedulingValues(ctx context.Context, session *domain.Sess
 		nodes[index].node, nodes[index].err = s.client.CoreV1().Nodes().Get(ctx, nodeNames[index], metav1.GetOptions{})
 	})
 	for _, target := range targets {
-		tolerationIndex := 0
 		seenNodes := map[string]struct{}{}
-		seenTolerations := map[string]struct{}{}
+		componentNodes := make([]*corev1.Node, 0, len(target.nodes))
 		for _, nodeName := range target.nodes {
 			if nodeName == "" {
 				continue
@@ -1398,6 +1798,7 @@ func (s *Service) helmSchedulingValues(ctx context.Context, session *domain.Sess
 			if node == nil || node.Name == "" {
 				return nil, domain.NewError(domain.ErrorKubernetes, "copy scheduling", fmt.Sprintf("read node %s returned an empty object", nodeName))
 			}
+			componentNodes = append(componentNodes, node)
 			if target.pinNode {
 				hostname := node.Labels[corev1.LabelHostname]
 				if hostname == "" {
@@ -1405,27 +1806,26 @@ func (s *Service) helmSchedulingValues(ctx context.Context, session *domain.Sess
 				}
 				values = append(values, fmt.Sprintf("%s.nodeSelector.kubernetes\\.io/hostname=%s", target.component, hostname))
 			}
-			for _, taint := range node.Spec.Taints {
-				if taint.Effect != corev1.TaintEffectNoSchedule && taint.Effect != corev1.TaintEffectNoExecute {
-					continue
-				}
-				signature := taint.Key + "\x00" + taint.Value + "\x00" + string(taint.Effect)
-				if _, seen := seenTolerations[signature]; seen {
-					continue
-				}
-				seenTolerations[signature] = struct{}{}
-				prefix := fmt.Sprintf("%s.tolerations[%d]", target.component, tolerationIndex)
-				values = append(values, prefix+".key="+taint.Key, prefix+".effect="+string(taint.Effect))
-				if taint.Value == "" {
-					values = append(values, prefix+".operator=Exists")
-				} else {
-					values = append(values, prefix+".operator=Equal", prefix+".value="+taint.Value)
-				}
-				tolerationIndex++
-			}
 		}
+		values = append(values, kube.ToolComponentTolerationHelmValues(target.component, componentNodes...)...)
 	}
 	return values, nil
+}
+
+func probedSourceNode(session *domain.Session, volume *domain.VolumeSpec, results []kube.ToolImageProbeResult) string {
+	if session == nil || volume == nil {
+		return ""
+	}
+	if sourceNode := session.Spec.WorkflowOptions().SourceNode; sourceNode != "" {
+		return sourceNode
+	}
+	for _, result := range results {
+		if result.Target.Namespace == volume.SourcePVC.Namespace && result.Target.PVCName == volume.SourcePVC.Name &&
+			slices.Contains(result.Target.Components, kube.ToolComponentSSHD) {
+			return result.NodeName
+		}
+	}
+	return ""
 }
 
 func (s *Service) verifyActiveStorage(ctx context.Context, session *domain.Session) error {

@@ -90,7 +90,11 @@ func (p *Planner) Plan(ctx context.Context, options Options) (*domain.MigrationP
 	}
 	for _, strategy := range options.Strategies {
 		if !supportedStrategy(strategy) {
-			plan.AddCheck(failed("strategy", fmt.Sprintf("unsupported pv-migrate strategy %q", strategy)))
+			message := fmt.Sprintf("unsupported pv-migrate strategy %q", strategy)
+			if strategy == domain.StrategyAuto {
+				message = "strategy auto selects the full fallback order and cannot be combined with explicit strategies"
+			}
+			plan.AddCheck(failed("strategy", message))
 		}
 	}
 	if !validCapacityAwareness(options.CapacityAwareness) {
@@ -117,7 +121,7 @@ func (p *Planner) Plan(ctx context.Context, options Options) (*domain.MigrationP
 	}
 
 	var workload domain.WorkloadSpec
-	pvcNames := uniqueSorted(options.SourcePVCs)
+	pvcNames := uniqueInOrder(options.SourcePVCs)
 	var sourcePod *corev1.Pod
 	if options.PodName != "" {
 		if len(options.SourcePVCs) > 0 {
@@ -150,7 +154,7 @@ func (p *Planner) Plan(ctx context.Context, options Options) (*domain.MigrationP
 				workload = discovered
 				plan.AddCheck(passed("controller-adapter", fmt.Sprintf("%s provides pause and resume semantics", workload.Adapter)))
 				if workload.KubeBlocks != nil && isRiskRole(workload.KubeBlocks.Role) {
-					plan.AddCheck(warned("database-role", fmt.Sprintf("selected KubeBlocks instance role=%s; switchover target=%s", workload.KubeBlocks.Role, workload.KubeBlocks.SwitchoverCandidate)))
+					plan.AddCheck(warned("database-role", kubeBlocksRoleWarning(workload.KubeBlocks)))
 				}
 				if workload.KubeBlocks != nil {
 					message := "KubeBlocks migration stops the selected Cluster component through componentSpecs[].stop; that component shares the downtime window and source PVCs remain retained"
@@ -211,6 +215,7 @@ func (p *Planner) Plan(ctx context.Context, options Options) (*domain.MigrationP
 
 	volumeSpecs := make([]domain.VolumeSpec, 0, len(pvcNames))
 	plannedVolumes := make([]domain.PlannedVolume, 0, len(pvcNames))
+	destinationSources := make(map[string]string, len(pvcNames))
 	copyConsumerNodes := map[string]struct{}{}
 	unmanagedConsumerNames := map[string]struct{}{}
 	storageClasses := inventory.storageClasses
@@ -296,6 +301,12 @@ func (p *Planner) Plan(ctx context.Context, options Options) (*domain.MigrationP
 		if problems := validation.IsDNS1123Subdomain(destinationName); len(problems) > 0 {
 			plan.AddCheck(failed("destination-pvc", fmt.Sprintf("generated PVC name %q is invalid: %s", destinationName, strings.Join(problems, "; "))))
 			continue
+		}
+		destinationKey := options.StagingNamespace + "/" + destinationName
+		if previousSource, exists := destinationSources[destinationKey]; exists {
+			plan.AddCheck(failed("destination-pvc", fmt.Sprintf("source PVCs %s/%s and %s/%s map to the same destination PVC %s", options.SourceNamespace, previousSource, pvc.Namespace, pvc.Name, destinationKey)))
+		} else {
+			destinationSources[destinationKey] = pvc.Name
 		}
 		destinationRef := domain.ObjectReference{APIVersion: domain.CoreAPIVersion, Kind: domain.KindPersistentVolumeClaim, Namespace: options.StagingNamespace, Name: destinationName}
 		accessModes := append([]corev1.PersistentVolumeAccessMode(nil), pvc.Spec.AccessModes...)
@@ -949,6 +960,19 @@ func (p *Planner) checkPVCReferencesFromPods(plan *domain.MigrationPlan, pvc *co
 		plan.AddCheck(failed("pvc-consumers", fmt.Sprintf("offline copy requires PVC %s/%s to have zero active Pod consumers; found %s; use --online for a finite warm copy", pvc.Namespace, pvc.Name, strings.Join(consumerNames, ","))))
 		return consumers
 	}
+	if operation == domain.OperationCopy && online && kube.HasAccessMode(pvc.Spec.AccessModes, corev1.ReadWriteOnce) {
+		unscheduled := make([]string, 0)
+		for _, consumer := range consumers {
+			if consumer.Spec.NodeName == "" {
+				unscheduled = append(unscheduled, consumer.Name)
+			}
+		}
+		if len(unscheduled) > 0 {
+			sort.Strings(unscheduled)
+			plan.AddCheck(failed("source-node", fmt.Sprintf("RWO PVC %s/%s has unscheduled active consumer(s) %s; wait for every consumer to receive a node before online copy", pvc.Namespace, pvc.Name, strings.Join(unscheduled, ","))))
+			return consumers
+		}
+	}
 	if sourcePod != nil {
 		others := make([]string, 0)
 		for _, consumer := range consumers {
@@ -974,6 +998,10 @@ func (p *Planner) checkPVCReferencesFromPods(plan *domain.MigrationPlan, pvc *co
 		return consumers
 	}
 	if operation == domain.OperationMigrate {
+		return consumers
+	}
+	if operation == domain.OperationReserve {
+		plan.AddCheck(warned("pvc-consumers", fmt.Sprintf("PVC %s/%s is active on Pod(s) %s; reservation keeps the source PVC mounted and provisions destination storage", pvc.Namespace, pvc.Name, strings.Join(consumerNames, ","))))
 		return consumers
 	}
 	if kube.HasAccessMode(pvc.Spec.AccessModes, corev1.ReadWriteOncePod) {
@@ -1016,6 +1044,22 @@ func podPVCNames(pod *corev1.Pod) []string {
 		}
 	}
 	return uniqueSorted(values)
+}
+
+func uniqueInOrder(values []string) []string {
+	seen := make(map[string]struct{}, len(values))
+	result := make([]string, 0, len(values))
+	for _, value := range values {
+		if value == "" {
+			continue
+		}
+		if _, exists := seen[value]; exists {
+			continue
+		}
+		seen[value] = struct{}{}
+		result = append(result, value)
+	}
+	return result
 }
 
 func uniqueSorted(values []string) []string {
@@ -1064,11 +1108,21 @@ func contains(values []string, expected string) bool {
 
 func isRiskRole(role string) bool {
 	switch strings.ToLower(role) {
-	case "leader", "primary", "master":
+	case "leader", "primary", "master", "unknown":
 		return true
 	default:
 		return false
 	}
+}
+
+func kubeBlocksRoleWarning(spec *domain.KubeBlocksSpec) string {
+	if spec.Role == "unknown" && spec.SwitchoverCandidate == "" {
+		return "selected KubeBlocks instance role is unknown; possible leader downtime was explicitly acknowledged"
+	}
+	if spec.SwitchoverCandidate == "" {
+		return fmt.Sprintf("selected KubeBlocks instance role=%s; leader downtime was explicitly acknowledged", spec.Role)
+	}
+	return fmt.Sprintf("selected KubeBlocks instance role=%s; switchover target=%s", spec.Role, spec.SwitchoverCandidate)
 }
 
 func (p *Planner) checkPVCFinalizers(plan *domain.MigrationPlan, pvc *corev1.PersistentVolumeClaim, operation domain.Operation) {

@@ -1232,7 +1232,7 @@ func TestHelmSchedulingValuesIncludeNodeTolerations(t *testing.T) {
 	if _, err := fixture.client.CoreV1().Nodes().Update(context.Background(), source, metav1.UpdateOptions{}); err != nil {
 		t.Fatal(err)
 	}
-	values, err := fixture.service.helmSchedulingValues(context.Background(), appTestSession())
+	values, err := fixture.service.helmSchedulingValues(context.Background(), appTestSession(), "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1268,7 +1268,7 @@ func TestHelmSchedulingValuesRejectMissingNodeTopology(t *testing.T) {
 		fixture := newRecoveryFixture(t)
 		session := appTestSession()
 		session.Spec.WorkflowOptionsPtr().SourceNode = "missing-node"
-		_, err := fixture.service.helmSchedulingValues(context.Background(), session)
+		_, err := fixture.service.helmSchedulingValues(context.Background(), session, "")
 		if domain.CategoryOf(err) != domain.ErrorKubernetes {
 			t.Fatalf("category=%s error=%v", domain.CategoryOf(err), err)
 		}
@@ -1284,7 +1284,7 @@ func TestHelmSchedulingValuesRejectMissingNodeTopology(t *testing.T) {
 		if _, err := fixture.client.CoreV1().Nodes().Update(context.Background(), node, metav1.UpdateOptions{}); err != nil {
 			t.Fatal(err)
 		}
-		_, err = fixture.service.helmSchedulingValues(context.Background(), appTestSession())
+		_, err = fixture.service.helmSchedulingValues(context.Background(), appTestSession(), "")
 		if domain.CategoryOf(err) != domain.ErrorPrecondition {
 			t.Fatalf("category=%s error=%v", domain.CategoryOf(err), err)
 		}
@@ -1305,7 +1305,7 @@ func TestHelmSchedulingValuesRejectsEmptyNodeObjects(t *testing.T) {
 				return true, test.object, nil
 			})
 
-			_, err := fixture.service.helmSchedulingValues(context.Background(), appTestSession())
+			_, err := fixture.service.helmSchedulingValues(context.Background(), appTestSession(), "")
 			if domain.CategoryOf(err) != domain.ErrorKubernetes {
 				t.Fatalf("category=%s error=%v", domain.CategoryOf(err), err)
 			}
@@ -1336,7 +1336,7 @@ func TestHelmSchedulingValuesLocalLetsPVTopologyPlaceBothSSHDPods(t *testing.T) 
 	}
 	session := appTestSession()
 	session.Spec.WorkflowOptionsPtr().Strategies = []string{"local"}
-	values, err := fixture.service.helmSchedulingValues(context.Background(), session)
+	values, err := fixture.service.helmSchedulingValues(context.Background(), session, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1698,6 +1698,96 @@ func TestDryRunRollbackRejectsUnactivatedSession(t *testing.T) {
 	}
 	if fixture.store.updates != 0 || fixture.controller.pauses != 0 || fixture.controller.resumes != 0 {
 		t.Fatalf("rollback dry-run mutated state: store=%d pauses=%d resumes=%d", fixture.store.updates, fixture.controller.pauses, fixture.controller.resumes)
+	}
+}
+
+func TestDryRunRollbackChecksConsumersOutsideTheWorkloadPauseScope(t *testing.T) {
+	tests := []struct {
+		name     string
+		workload domain.WorkloadSpec
+		consumer string
+		phase    corev1.PodPhase
+		want     domain.ErrorCategory
+	}{
+		{
+			name:     "plain migrate rejects an active consumer",
+			workload: domain.WorkloadSpec{Adapter: domain.WorkloadNone},
+			consumer: "writer",
+			phase:    corev1.PodRunning,
+			want:     domain.ErrorPrecondition,
+		},
+		{
+			name: "migrate-pod allows its controlled consumer",
+			workload: domain.WorkloadSpec{
+				Adapter: domain.WorkloadStandalone,
+				Pod:     domain.ObjectReference{Namespace: "app", Name: "application"},
+			},
+			consumer: "application",
+			phase:    corev1.PodRunning,
+		},
+		{
+			name: "migrate-pod rejects a terminal external consumer like execution",
+			workload: domain.WorkloadSpec{
+				Adapter:      domain.WorkloadStatefulSet,
+				Pod:          domain.ObjectReference{Namespace: "app", Name: "db-0"},
+				AffectedPods: []domain.ObjectReference{{Namespace: "app", Name: "db-0"}},
+			},
+			consumer: "stale-reader",
+			phase:    corev1.PodSucceeded,
+			want:     domain.ErrorPrecondition,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			fixture := newRecoveryFixture(t)
+			session := appTestSession()
+			session.Status.Phase = domain.PhaseCompleted
+			operation := domain.OperationMigratePod
+			if test.workload.Adapter == domain.WorkloadNone {
+				operation = domain.OperationMigrate
+			}
+			setSessionOperation(session, operation)
+			if err := session.Spec.SetWorkload(test.workload); err != nil {
+				t.Fatal(err)
+			}
+			session.Spec.Volumes[0].DestinationPV = domain.ObjectReference{Name: "pv-destination", UID: types.UID("destination-pv-uid")}
+			session.Status.Volumes[0].Activation.ActivePVC = domain.ObjectReference{Namespace: "app", Name: "data", UID: types.UID("active-pvc-uid")}
+			if _, err := fixture.client.CoreV1().PersistentVolumeClaims("app").Create(context.Background(), &corev1.PersistentVolumeClaim{
+				ObjectMeta: metav1.ObjectMeta{Namespace: "app", Name: "data", UID: types.UID("active-pvc-uid"), Annotations: map[string]string{kube.SessionKey: session.ID}},
+				Spec:       corev1.PersistentVolumeClaimSpec{VolumeName: "pv-destination"},
+				Status:     corev1.PersistentVolumeClaimStatus{Phase: corev1.ClaimBound},
+			}, metav1.CreateOptions{}); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := fixture.client.CoreV1().PersistentVolumes().Create(context.Background(), &corev1.PersistentVolume{
+				ObjectMeta: metav1.ObjectMeta{Name: "pv-destination", UID: types.UID("destination-pv-uid")},
+				Spec: corev1.PersistentVolumeSpec{ClaimRef: &corev1.ObjectReference{
+					Namespace: "app", Name: "data", UID: types.UID("active-pvc-uid"),
+				}},
+			}, metav1.CreateOptions{}); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := fixture.client.CoreV1().Pods("app").Create(context.Background(), &corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{Namespace: "app", Name: test.consumer},
+				Spec: corev1.PodSpec{Volumes: []corev1.Volume{{
+					Name: "data", VolumeSource: corev1.VolumeSource{PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: "data"}},
+				}}, NodeName: "target-node"},
+				Status: corev1.PodStatus{Phase: test.phase},
+			}, metav1.CreateOptions{}); err != nil {
+				t.Fatal(err)
+			}
+
+			err := fixture.service.ValidateRollback(context.Background(), session)
+			if test.want == "" {
+				if err != nil {
+					t.Fatal(err)
+				}
+				return
+			}
+			if domain.CategoryOf(err) != test.want {
+				t.Fatalf("category=%s error=%v want=%s", domain.CategoryOf(err), err, test.want)
+			}
+		})
 	}
 }
 

@@ -357,13 +357,7 @@ func (r *rootState) newFinalSyncCommand() *cobra.Command {
 			if err := r.confirm(cmd, sessionID); err != nil {
 				return reportSessionError(cmd, session, err)
 			}
-			alreadyPaused := session.Status.Phase == domain.PhasePaused || session.Status.Phase == domain.PhaseFinalSyncing || session.Status.Phase == domain.PhaseFinalSynced || (session.Status.Phase == domain.PhaseFailed && session.Status.ResumeFrom == domain.PhaseFinalSyncing)
-			if !alreadyPaused {
-				if err := runtime.service.Pause(ctx, session); err != nil {
-					return reportSessionError(cmd, session, err)
-				}
-			}
-			if err := runtime.service.FinalSync(ctx, session); err != nil {
+			if err := runtime.service.PauseAndFinalSync(ctx, session); err != nil {
 				return reportSessionError(cmd, session, err)
 			}
 			return printSessionResult(cmd, runtime, session)

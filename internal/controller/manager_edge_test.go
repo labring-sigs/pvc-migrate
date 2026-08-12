@@ -213,7 +213,16 @@ func TestDiscoverRejectsKubeBlocksSwitchoverRejectedByAdmission(t *testing.T) {
 		"metadata":   map[string]any{"name": "cluster", "namespace": "db", "uid": "cluster-uid"},
 		"spec":       map[string]any{"componentSpecs": []any{map[string]any{"name": "db", "stop": false}}},
 	}}
-	dynamicClient := dynamicfake.NewSimpleDynamicClient(runtime.NewScheme(), cluster)
+	instanceSet := kubeBlocksInstanceSetObject("workloads.kubeblocks.io/v1alpha1", boolPointer(false))
+	_ = unstructured.SetNestedSlice(instanceSet.Object, []any{
+		map[string]any{"name": "primary", "isLeader": true},
+		map[string]any{"name": "secondary", "isLeader": false},
+	}, "spec", "roles")
+	_ = unstructured.SetNestedSlice(instanceSet.Object, []any{
+		map[string]any{"podName": selected.Name, "role": map[string]any{"name": "primary"}},
+		map[string]any{"podName": candidate.Name, "role": map[string]any{"name": "secondary"}},
+	}, "status", "membersStatus")
+	dynamicClient := dynamicfake.NewSimpleDynamicClient(runtime.NewScheme(), cluster, instanceSet)
 	dynamicClient.PrependReactor("create", "opsrequests", func(action clienttesting.Action) (bool, runtime.Object, error) {
 		return true, nil, apierrors.NewForbidden(schema.GroupResource{Group: "apps.kubeblocks.io", Resource: "opsrequests"}, "preflight", errors.New("component does not support switchover"))
 	})
@@ -609,12 +618,12 @@ func TestDiscoverKubeBlocksInstanceSetProbesOmittedPausedField(t *testing.T) {
 			dynamicClient := dynamicfake.NewSimpleDynamicClient(runtime.NewScheme(), object)
 			manager := NewManager(kubernetesfake.NewClientset(), dynamicClient, nil)
 			owner := &metav1.OwnerReference{APIVersion: apiVersion, Kind: "InstanceSet", Name: object.GetName(), UID: object.GetUID()}
-			paused, configured, uid, err := manager.discoverKubeBlocksInstanceSet(context.Background(), "db", owner)
+			state, err := manager.discoverKubeBlocksInstanceSet(context.Background(), "db", owner, "cluster-db-0")
 			if err != nil {
 				t.Fatal(err)
 			}
-			if paused || configured || uid != object.GetUID() {
-				t.Fatalf("paused=%t configured=%t uid=%s", paused, configured, uid)
+			if state.Paused || state.PausedConfigured || state.UID != object.GetUID() {
+				t.Fatalf("state=%+v", state)
 			}
 			foundDryRun := false
 			for _, action := range dynamicClient.Actions() {
@@ -642,9 +651,74 @@ func TestDiscoverKubeBlocksInstanceSetRejectsPrunedPausedField(t *testing.T) {
 	})
 	manager := NewManager(kubernetesfake.NewClientset(), dynamicClient, nil)
 	owner := &metav1.OwnerReference{APIVersion: apiVersion, Kind: "InstanceSet", Name: object.GetName(), UID: object.GetUID()}
-	_, _, _, err := manager.discoverKubeBlocksInstanceSet(context.Background(), "db", owner)
+	_, err := manager.discoverKubeBlocksInstanceSet(context.Background(), "db", owner, "cluster-db-0")
 	if domain.CategoryOf(err) != domain.ErrorPrecondition || !strings.Contains(err.Error(), "does not support spec.paused") {
 		t.Fatalf("category=%s error=%v", domain.CategoryOf(err), err)
+	}
+}
+
+func TestDiscoverKubeBlocksUsesInstanceSetRoleStatus(t *testing.T) {
+	for _, test := range []struct {
+		name       string
+		labelRole  string
+		memberRole string
+		allow      bool
+		wantRole   string
+		wantError  string
+	}{
+		{name: "missing role is blocked", wantError: "role is unavailable"},
+		{name: "missing role accepts downtime", allow: true, wantRole: "unknown"},
+		{name: "member status resolves role", memberRole: "secondary", wantRole: "secondary"},
+		{name: "label and status conflict", labelRole: "primary", memberRole: "secondary", allow: true, wantError: "role changed"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			const apiVersion = "workloads.kubeblocks.io/v1alpha1"
+			selected := readyPod("db", "cluster-db-0", "node-a")
+			selected.OwnerReferences = []metav1.OwnerReference{{APIVersion: apiVersion, Kind: domain.KindInstanceSet, Name: "cluster-db", UID: "instanceset-uid", Controller: boolPointer(true)}}
+			selected.Labels = map[string]string{
+				kube.AppInstanceLabel:    "cluster",
+				kubeBlocksComponentLabel: "db",
+			}
+			if test.labelRole != "" {
+				selected.Labels[kubeBlocksRoleLabel] = test.labelRole
+			}
+			typed := kubernetesfake.NewClientset(selected)
+			discovery := typed.Discovery().(*fake.FakeDiscovery)
+			discovery.Resources = []*metav1.APIResourceList{{GroupVersion: kubeBlocksClusterAPIVersion, APIResources: []metav1.APIResource{{Name: "opsrequests"}}}}
+			cluster := &unstructured.Unstructured{Object: map[string]any{
+				"apiVersion": kubeBlocksClusterAPIVersion,
+				"kind":       domain.KindCluster,
+				"metadata":   map[string]any{"name": "cluster", "namespace": "db", "uid": "cluster-uid"},
+				"spec":       map[string]any{"componentSpecs": []any{map[string]any{"name": "db", "stop": false}}},
+			}}
+			instanceSet := kubeBlocksInstanceSetObject(apiVersion, boolPointer(false))
+			_ = unstructured.SetNestedSlice(instanceSet.Object, []any{
+				map[string]any{"name": "primary", "isLeader": true},
+				map[string]any{"name": "secondary", "isLeader": false},
+			}, "spec", "roles")
+			if test.memberRole != "" {
+				_ = unstructured.SetNestedSlice(instanceSet.Object, []any{
+					map[string]any{"podName": selected.Name, "role": map[string]any{"name": test.memberRole}},
+				}, "status", "membersStatus")
+			}
+			manager := NewManager(typed, dynamicfake.NewSimpleDynamicClient(runtime.NewScheme(), cluster, instanceSet), discovery)
+			workload, err := manager.Discover(context.Background(), DiscoverOptions{Namespace: "db", PodName: selected.Name, AllowLeaderDowntime: test.allow})
+			if test.wantError != "" {
+				if domain.CategoryOf(err) != domain.ErrorPrecondition && domain.CategoryOf(err) != domain.ErrorConflict {
+					t.Fatalf("category=%s error=%v", domain.CategoryOf(err), err)
+				}
+				if !strings.Contains(err.Error(), test.wantError) {
+					t.Fatalf("error=%v want=%q", err, test.wantError)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if workload.KubeBlocks == nil || workload.KubeBlocks.Role != test.wantRole {
+				t.Fatalf("workload=%#v", workload.KubeBlocks)
+			}
+		})
 	}
 }
 

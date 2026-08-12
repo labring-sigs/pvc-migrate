@@ -293,6 +293,18 @@ func TestCopyConsumerPreflightSupportsOfflineAndOnlineBoundaries(t *testing.T) {
 	if session.Spec.WorkflowOptions().SourceNode != "source-node" {
 		t.Fatalf("inferred source node=%q", session.Spec.WorkflowOptions().SourceNode)
 	}
+	pod, err := service.client.CoreV1().Pods("app").Get(context.Background(), "writer", metav1.GetOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	pod.Spec.NodeName = ""
+	if _, err := service.client.CoreV1().Pods("app").Update(context.Background(), pod, metav1.UpdateOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	session.Spec.WorkflowOptionsPtr().SourceNode = ""
+	if err := service.validateCopyConsumers(context.Background(), session, &session.Spec.Volumes[0]); domain.CategoryOf(err) != domain.ErrorPrecondition {
+		t.Fatalf("unscheduled RWO category=%s error=%v", domain.CategoryOf(err), err)
+	}
 	session.Spec.Volumes[0].AccessModes = []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOncePod}
 	if err := service.validateCopyConsumers(context.Background(), session, &session.Spec.Volumes[0]); domain.CategoryOf(err) != domain.ErrorPrecondition {
 		t.Fatalf("online RWOP category=%s error=%v", domain.CategoryOf(err), err)

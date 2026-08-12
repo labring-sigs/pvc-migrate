@@ -68,6 +68,27 @@ func reserveTestSession() *domain.Session {
 	}, domain.WorkloadSpec{Adapter: domain.WorkloadNone}, false, domain.SessionWorkflowOptions{TargetNode: "node-b"}), time.Unix(100, 0))
 }
 
+func reservationToolPod(session *domain.Session, uid types.UID) *corev1.Pod {
+	volume := &session.Spec.Volumes[0]
+	return &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: volume.DestinationPVC.Namespace,
+			Name:      toolPodName(session.ID, volume.SourcePVC.Name),
+			UID:       uid,
+			Labels: map[string]string{
+				SessionKey:        session.ID,
+				ResourceRoleLabel: ResourceRoleReservationConsumer,
+			},
+		},
+		Spec: corev1.PodSpec{Volumes: []corev1.Volume{{
+			Name: "data",
+			VolumeSource: corev1.VolumeSource{PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
+				ClaimName: volume.DestinationPVC.Name,
+			}},
+		}}},
+	}
+}
+
 func TestReserveVolumeDryRunHasNoPersistentOwnershipChanges(t *testing.T) {
 	ctx := context.Background()
 	sourcePVC, sourcePV := reserveSourceObjects()
@@ -244,13 +265,12 @@ func TestProvisionOnTargetRejectsInvalidNodeAndTool(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			session := reserveTestSession()
 			volume := &session.Spec.Volumes[0]
+			tool := reservationToolPod(session, "tool-uid")
+			tool.Labels[SessionKey] = test.owner
+			tool.Status.Phase = test.phase
 			client := fake.NewClientset(
 				&corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "node-b", Labels: map[string]string{corev1.LabelHostname: "node-b"}}},
-				&corev1.Pod{ObjectMeta: metav1.ObjectMeta{
-					Namespace: volume.DestinationPVC.Namespace,
-					Name:      toolPodName(session.ID, volume.SourcePVC.Name),
-					Labels:    map[string]string{SessionKey: test.owner},
-				}, Status: corev1.PodStatus{Phase: test.phase}},
+				tool,
 			)
 			reserver := NewReserver(client)
 			reserver.poll = time.Millisecond
@@ -265,19 +285,12 @@ func TestProvisionOnTargetRejectsInvalidNodeAndTool(t *testing.T) {
 func TestProvisionOnTargetSurfacesToolCleanupFailure(t *testing.T) {
 	session := reserveTestSession()
 	volume := &session.Spec.Volumes[0]
-	tool := &corev1.Pod{
-		ObjectMeta: metav1.ObjectMeta{
-			Namespace: volume.DestinationPVC.Namespace,
-			Name:      toolPodName(session.ID, volume.SourcePVC.Name),
-			UID:       types.UID("tool-uid"),
-			Labels:    map[string]string{SessionKey: session.ID},
-		},
-		Status: corev1.PodStatus{
-			Phase: corev1.PodRunning,
-			Conditions: []corev1.PodCondition{{
-				Type: corev1.PodReady, Status: corev1.ConditionTrue,
-			}},
-		},
+	tool := reservationToolPod(session, "tool-uid")
+	tool.Status = corev1.PodStatus{
+		Phase: corev1.PodRunning,
+		Conditions: []corev1.PodCondition{{
+			Type: corev1.PodReady, Status: corev1.ConditionTrue,
+		}},
 	}
 	client := fake.NewClientset(
 		&corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "node-b", Labels: map[string]string{corev1.LabelHostname: "node-b"}}},
@@ -292,6 +305,168 @@ func TestProvisionOnTargetSurfacesToolCleanupFailure(t *testing.T) {
 	if domain.CategoryOf(err) != domain.ErrorKubernetes {
 		t.Fatalf("category=%s error=%v", domain.CategoryOf(err), err)
 	}
+}
+
+func TestProvisionOnTargetRevalidatesCreateAlreadyExistsRace(t *testing.T) {
+	session := reserveTestSession()
+	volume := &session.Spec.Volumes[0]
+	foreign := reservationToolPod(session, "foreign-tool-uid")
+	foreign.Labels[SessionKey] = "other-session"
+	client := fake.NewClientset(&corev1.Node{
+		ObjectMeta: metav1.ObjectMeta{Name: "node-b", Labels: map[string]string{corev1.LabelHostname: "node-b"}},
+	})
+	gets := 0
+	client.PrependReactor("get", "pods", func(clienttesting.Action) (bool, runtime.Object, error) {
+		gets++
+		if gets == 1 {
+			return true, nil, apierrors.NewNotFound(corev1.Resource("pods"), foreign.Name)
+		}
+		return true, foreign, nil
+	})
+	client.PrependReactor("create", "pods", func(clienttesting.Action) (bool, runtime.Object, error) {
+		return true, nil, apierrors.NewAlreadyExists(corev1.Resource("pods"), foreign.Name)
+	})
+	err := NewReserver(client).provisionOnTarget(context.Background(), session, volume)
+	if domain.CategoryOf(err) != domain.ErrorConflict {
+		t.Fatalf("category=%s error=%v", domain.CategoryOf(err), err)
+	}
+	if gets != 2 {
+		t.Fatalf("Pod gets=%d, want initial lookup plus race revalidation", gets)
+	}
+}
+
+func TestReserveVolumeCleansStaleReservationPodForBoundDestination(t *testing.T) {
+	ctx := context.Background()
+	session := reserveTestSession()
+	volume := &session.Spec.Volumes[0]
+	sourcePVC, sourcePV := reserveSourceObjects()
+	storageClass := volume.StorageClass
+	destinationPVC := &corev1.PersistentVolumeClaim{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: volume.DestinationPVC.Namespace,
+			Name:      volume.DestinationPVC.Name,
+			UID:       "destination-pvc-uid",
+			Labels:    map[string]string{SessionKey: session.ID},
+			Annotations: map[string]string{
+				SourcePVCUIDAnnotation:               string(volume.SourcePVC.UID),
+				"volume.kubernetes.io/selected-node": session.Spec.WorkflowOptions().TargetNode,
+			},
+		},
+		Spec: corev1.PersistentVolumeClaimSpec{
+			AccessModes:      append([]corev1.PersistentVolumeAccessMode(nil), volume.AccessModes...),
+			StorageClassName: &storageClass,
+			VolumeMode:       &volume.VolumeMode,
+			VolumeName:       "pv-destination",
+			Resources: corev1.VolumeResourceRequirements{Requests: corev1.ResourceList{
+				corev1.ResourceStorage: resource.MustParse(volume.Capacity),
+			}},
+		},
+		Status: corev1.PersistentVolumeClaimStatus{Phase: corev1.ClaimBound},
+	}
+	destinationPV := &corev1.PersistentVolume{
+		ObjectMeta: metav1.ObjectMeta{Name: "pv-destination", UID: "destination-pv-uid"},
+		Spec: corev1.PersistentVolumeSpec{
+			PersistentVolumeReclaimPolicy: corev1.PersistentVolumeReclaimDelete,
+			ClaimRef: &corev1.ObjectReference{
+				Namespace: destinationPVC.Namespace,
+				Name:      destinationPVC.Name,
+				UID:       destinationPVC.UID,
+			},
+		},
+	}
+	tool := reservationToolPod(session, "stale-tool-uid")
+	client := fake.NewClientset(
+		sourcePVC,
+		sourcePV,
+		destinationPVC,
+		destinationPV,
+		tool,
+		&corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "node-b", Labels: map[string]string{corev1.LabelHostname: "node-b"}}},
+	)
+	var preconditions *metav1.Preconditions
+	client.PrependReactor("delete", "pods", func(action clienttesting.Action) (bool, runtime.Object, error) {
+		preconditions = action.(clienttesting.DeleteAction).GetDeleteOptions().Preconditions
+		return false, nil, nil
+	})
+	reserver := NewReserver(client)
+	reserver.poll = time.Millisecond
+	if err := reserver.ReserveVolume(ctx, session, volume, &session.Status.Volumes[0], false); err != nil {
+		t.Fatal(err)
+	}
+	if preconditions == nil || preconditions.UID == nil || *preconditions.UID != tool.UID {
+		t.Fatalf("delete preconditions=%#v", preconditions)
+	}
+	if _, err := client.CoreV1().Pods(tool.Namespace).Get(ctx, tool.Name, metav1.GetOptions{}); !apierrors.IsNotFound(err) {
+		t.Fatalf("stale reservation Pod still exists: %v", err)
+	}
+	if !session.Status.Volumes[0].Reserved {
+		t.Fatal("bound destination was not marked reserved")
+	}
+}
+
+func TestCleanupReservationPodOwnershipAndDeletionRaces(t *testing.T) {
+	t.Run("already deleted", func(t *testing.T) {
+		session := reserveTestSession()
+		if err := NewReserver(fake.NewClientset()).cleanupReservationPod(context.Background(), session, &session.Spec.Volumes[0]); err != nil {
+			t.Fatal(err)
+		}
+	})
+	for _, test := range []struct {
+		name   string
+		mutate func(*corev1.Pod)
+	}{
+		{name: "foreign session", mutate: func(pod *corev1.Pod) { pod.Labels[SessionKey] = "other" }},
+		{name: "wrong role", mutate: func(pod *corev1.Pod) { pod.Labels[ResourceRoleLabel] = ResourceRoleDestination }},
+		{name: "wrong PVC", mutate: func(pod *corev1.Pod) { pod.Spec.Volumes[0].PersistentVolumeClaim.ClaimName = "other" }},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			session := reserveTestSession()
+			tool := reservationToolPod(session, "tool-uid")
+			test.mutate(tool)
+			client := fake.NewClientset(tool)
+			err := NewReserver(client).cleanupReservationPod(context.Background(), session, &session.Spec.Volumes[0])
+			if domain.CategoryOf(err) != domain.ErrorConflict {
+				t.Fatalf("category=%s error=%v", domain.CategoryOf(err), err)
+			}
+			if _, getErr := client.CoreV1().Pods(tool.Namespace).Get(context.Background(), tool.Name, metav1.GetOptions{}); getErr != nil {
+				t.Fatalf("foreign Pod was deleted: %v", getErr)
+			}
+		})
+	}
+	t.Run("delete precondition conflict", func(t *testing.T) {
+		session := reserveTestSession()
+		tool := reservationToolPod(session, "tool-uid")
+		client := fake.NewClientset(tool)
+		client.PrependReactor("delete", "pods", func(clienttesting.Action) (bool, runtime.Object, error) {
+			return true, nil, apierrors.NewConflict(corev1.Resource("pods"), tool.Name, errors.New("UID changed"))
+		})
+		err := NewReserver(client).cleanupReservationPod(context.Background(), session, &session.Spec.Volumes[0])
+		if domain.CategoryOf(err) != domain.ErrorConflict {
+			t.Fatalf("category=%s error=%v", domain.CategoryOf(err), err)
+		}
+	})
+	t.Run("name reused while waiting", func(t *testing.T) {
+		session := reserveTestSession()
+		tool := reservationToolPod(session, "tool-uid")
+		client := fake.NewClientset(tool)
+		client.PrependReactor("delete", "pods", func(clienttesting.Action) (bool, runtime.Object, error) {
+			resource := corev1.SchemeGroupVersion.WithResource("pods")
+			if err := client.Tracker().Delete(resource, tool.Namespace, tool.Name); err != nil {
+				return true, nil, err
+			}
+			replacement := reservationToolPod(session, "replacement-uid")
+			if err := client.Tracker().Create(resource, replacement, replacement.Namespace); err != nil {
+				return true, nil, err
+			}
+			return true, nil, nil
+		})
+		reserver := NewReserver(client)
+		reserver.poll = time.Millisecond
+		err := reserver.cleanupReservationPod(context.Background(), session, &session.Spec.Volumes[0])
+		if domain.CategoryOf(err) != domain.ErrorConflict {
+			t.Fatalf("category=%s error=%v", domain.CategoryOf(err), err)
+		}
+	})
 }
 
 func TestRetainPVPreservesPolicyAndRejectsOwnershipConflicts(t *testing.T) {

@@ -201,12 +201,15 @@ type KubeBlocksSpec struct {
 }
 
 type VMClusterSpec struct {
-	APIVersion       string    `json:"apiVersion" yaml:"apiVersion"`
-	Name             string    `json:"name" yaml:"name"`
-	UID              types.UID `json:"uid,omitempty" yaml:"uid,omitempty"`
-	Component        string    `json:"component" yaml:"component"`
-	OriginalPaused   bool      `json:"originalPaused" yaml:"originalPaused"`
-	OriginalReplicas int32     `json:"originalReplicas" yaml:"originalReplicas"`
+	APIVersion                      string    `json:"apiVersion" yaml:"apiVersion"`
+	Name                            string    `json:"name" yaml:"name"`
+	UID                             types.UID `json:"uid,omitempty" yaml:"uid,omitempty"`
+	Component                       string    `json:"component" yaml:"component"`
+	OriginalPaused                  bool      `json:"originalPaused" yaml:"originalPaused"`
+	OriginalPausedConfigured        bool      `json:"originalPausedConfigured" yaml:"originalPausedConfigured"`
+	OriginalClusterPaused           bool      `json:"originalClusterPaused" yaml:"originalClusterPaused"`
+	OriginalClusterPausedConfigured bool      `json:"originalClusterPausedConfigured" yaml:"originalClusterPausedConfigured"`
+	OriginalReplicas                int32     `json:"originalReplicas" yaml:"originalReplicas"`
 }
 
 type GrafanaSpec struct {

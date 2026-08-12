@@ -38,8 +38,9 @@ func TestVMClusterUsesComponentPauseAndStatefulSetScale(t *testing.T) {
 	vm := &unstructured.Unstructured{Object: map[string]any{
 		"apiVersion": vmClusterAPIVersion,
 		"kind":       "VMCluster",
-		"metadata":   map[string]any{"name": "metrics", "namespace": "vm", "uid": "vm-uid"},
-		"spec":       map[string]any{"vmstorage": map[string]any{"replicaCount": int64(2), "paused": false}},
+		"metadata":   map[string]any{"name": "metrics", "namespace": "vm", "uid": "vm-uid", "generation": int64(1)},
+		"spec":       map[string]any{"paused": true, "vmstorage": map[string]any{"replicaCount": int64(2), "paused": false}},
+		"status":     map[string]any{"observedGeneration": int64(1), "clusterStatus": "operational", "updateStatus": "operational"},
 	}}
 	sts := &appsv1.StatefulSet{
 		ObjectMeta: metav1.ObjectMeta{Namespace: "vm", Name: "vmstorage-metrics", UID: types.UID("sts-uid"), OwnerReferences: []metav1.OwnerReference{{APIVersion: vmClusterAPIVersion, Kind: "VMCluster", Name: "metrics", UID: "vm-uid", Controller: boolPointer(true)}}},
@@ -67,6 +68,9 @@ func TestVMClusterUsesComponentPauseAndStatefulSetScale(t *testing.T) {
 	}
 	if workload.Adapter != domain.WorkloadVMCluster || workload.VMCluster == nil || workload.VMCluster.Component != "vmstorage" {
 		t.Fatalf("workload=%#v", workload)
+	}
+	if !workload.VMCluster.OriginalClusterPaused || !workload.VMCluster.OriginalClusterPausedConfigured {
+		t.Fatalf("top-level VMCluster pause state=%#v", workload.VMCluster)
 	}
 	session := controllerSession(workload)
 	session.Spec.WorkflowOptionsPtr().TargetNode = "node-b"
@@ -106,6 +110,72 @@ func TestVMClusterUsesComponentPauseAndStatefulSetScale(t *testing.T) {
 	}
 	if resumed.GetAnnotations()[pauseSessionAnnotation] != "" {
 		t.Fatalf("vmstorage pause owner=%q", resumed.GetAnnotations()[pauseSessionAnnotation])
+	}
+}
+
+func TestVMClusterResumeWaitsForOperatorConvergence(t *testing.T) {
+	vm := &unstructured.Unstructured{Object: map[string]any{
+		"apiVersion": vmClusterAPIVersion,
+		"kind":       "VMCluster",
+		"metadata":   map[string]any{"name": "metrics", "namespace": "vm", "uid": "vm-uid", "generation": int64(2)},
+		"status":     map[string]any{"observedGeneration": int64(1), "clusterStatus": "operational", "updateStatus": "expanding"},
+	}}
+	dynamicClient := dynamicfake.NewSimpleDynamicClient(runtime.NewScheme(), vm)
+	reads := 0
+	dynamicClient.PrependReactor("get", vmClusterResource, func(action clienttesting.Action) (bool, runtime.Object, error) {
+		reads++
+		current := vm.DeepCopy()
+		if reads >= 3 {
+			_ = unstructured.SetNestedField(current.Object, int64(2), "status", "observedGeneration")
+			_ = unstructured.SetNestedField(current.Object, "operational", "status", "updateStatus")
+		}
+		return true, current, nil
+	})
+	manager := NewManager(fake.NewClientset(), dynamicClient, nil)
+	manager.poll = time.Millisecond
+	session := controllerSession(domain.WorkloadSpec{
+		Adapter: domain.WorkloadVMCluster,
+		Pod:     domain.ObjectReference{Namespace: "vm", Name: "vmstorage-metrics-0"},
+		VMCluster: &domain.VMClusterSpec{
+			APIVersion: vmClusterAPIVersion,
+			Name:       "metrics",
+			UID:        "vm-uid",
+			Component:  "vmstorage",
+		},
+	})
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if err := manager.waitForVMClusterOperational(ctx, session); err != nil {
+		t.Fatal(err)
+	}
+	if reads < 3 {
+		t.Fatalf("VMCluster convergence reads=%d, want at least 3", reads)
+	}
+}
+
+func TestVMClusterResumeAcceptsOriginallyPausedCluster(t *testing.T) {
+	vm := &unstructured.Unstructured{Object: map[string]any{
+		"apiVersion": vmClusterAPIVersion,
+		"kind":       "VMCluster",
+		"metadata":   map[string]any{"name": "metrics", "namespace": "vm", "uid": "vm-uid", "generation": int64(2)},
+		"spec":       map[string]any{"paused": true},
+		"status":     map[string]any{"observedGeneration": int64(2), "clusterStatus": "paused", "updateStatus": "paused"},
+	}}
+	dynamicClient := dynamicfake.NewSimpleDynamicClient(runtime.NewScheme(), vm)
+	manager := NewManager(fake.NewClientset(), dynamicClient, nil)
+	manager.poll = time.Millisecond
+	session := controllerSession(domain.WorkloadSpec{
+		Adapter: domain.WorkloadVMCluster,
+		Pod:     domain.ObjectReference{Namespace: "vm", Name: "vmstorage-metrics-0"},
+		VMCluster: &domain.VMClusterSpec{
+			APIVersion: vmClusterAPIVersion, Name: "metrics", UID: "vm-uid", Component: "vmstorage",
+			OriginalClusterPaused: true, OriginalClusterPausedConfigured: true,
+		},
+	})
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if err := manager.waitForVMClusterOperational(ctx, session); err != nil {
+		t.Fatal(err)
 	}
 }
 

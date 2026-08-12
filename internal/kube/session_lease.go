@@ -156,6 +156,7 @@ type sessionLease struct {
 	mu         sync.RWMutex
 	err        error
 	releaseErr error
+	deleted    bool
 }
 
 func newSessionLease(parent context.Context, leases coordinationclient.LeaseInterface, namespace, name, sessionID, holder string) *sessionLease {
@@ -242,6 +243,12 @@ func (l *sessionLease) Release(ctx context.Context) error {
 	l.once.Do(func() {
 		l.cancel()
 		<-l.done
+		l.mu.RLock()
+		deleted := l.deleted
+		l.mu.RUnlock()
+		if deleted {
+			return
+		}
 		if l.Err() != nil {
 			l.setReleaseErr(l.Err())
 			return
@@ -271,6 +278,45 @@ func (l *sessionLease) Release(ctx context.Context) error {
 	l.mu.RLock()
 	defer l.mu.RUnlock()
 	return l.releaseErr
+}
+
+// Delete stops renewal and deletes the Lease only when it is still held by
+// this lock. It is used when the protected session resources are removed and
+// the lock must disappear as one operation.
+func (l *sessionLease) Delete(ctx context.Context) error {
+	l.cancel()
+	<-l.done
+	lease, err := l.leases.Get(ctx, l.name, metav1.GetOptions{})
+	if apierrors.IsNotFound(err) {
+		l.mu.Lock()
+		l.deleted = true
+		l.mu.Unlock()
+		return nil
+	}
+	if err != nil {
+		return domain.WrapError(domain.ErrorKubernetes, "delete session lock", "read session Lease", err)
+	}
+	if lease.Labels[ManagedByLabel] != ManagedByValue || lease.Labels[SessionKey] != l.sessionID || lease.Spec.HolderIdentity == nil || *lease.Spec.HolderIdentity != l.holder {
+		return domain.NewError(domain.ErrorConflict, "delete session lock", "session lock ownership was fenced")
+	}
+	preconditions := &metav1.Preconditions{ResourceVersion: &lease.ResourceVersion}
+	if lease.UID != "" {
+		preconditions.UID = &lease.UID
+	}
+	err = l.leases.Delete(ctx, l.name, metav1.DeleteOptions{Preconditions: preconditions})
+	if apierrors.IsNotFound(err) {
+		err = nil
+	}
+	if apierrors.IsConflict(err) {
+		return domain.WrapError(domain.ErrorConflict, "delete session lock", "session lock changed while deleting", err)
+	}
+	if err != nil {
+		return domain.WrapError(domain.ErrorKubernetes, "delete session lock", "delete session Lease", err)
+	}
+	l.mu.Lock()
+	l.deleted = true
+	l.mu.Unlock()
+	return nil
 }
 
 func (l *sessionLease) setReleaseErr(err error) {

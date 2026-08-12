@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -82,8 +83,11 @@ current-context: local
 	if clients.RESTConfig.Host != "https://127.0.0.1:6443" || clients.RESTConfig.UserAgent != "pvc-migrate/dev" || clients.RESTConfig.QPS != 30 || clients.RESTConfig.Burst != 60 {
 		t.Fatalf("REST config: %#v", clients.RESTConfig)
 	}
-	if _, err := NewClients(filepath.Join(t.TempDir(), "missing"), ""); domain.CategoryOf(err) != domain.ErrorValidation {
+	if _, err := NewClients(filepath.Join(t.TempDir(), "missing"), ""); domain.CategoryOf(err) != domain.ErrorValidation || !strings.Contains(err.Error(), "no such file") {
 		t.Fatalf("missing kubeconfig category=%s error=%v", domain.CategoryOf(err), err)
+	}
+	if _, err := NewClients(path, "missing"); domain.CategoryOf(err) != domain.ErrorValidation || !strings.Contains(err.Error(), `context "missing" does not exist`) {
+		t.Fatalf("missing context category=%s error=%v", domain.CategoryOf(err), err)
 	}
 }
 

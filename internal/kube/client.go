@@ -32,7 +32,7 @@ func NewClients(kubeconfigPath, kubeContext string) (*Clients, error) {
 	overrides := &clientcmd.ConfigOverrides{CurrentContext: kubeContext}
 	config, err := clientcmd.NewNonInteractiveDeferredLoadingClientConfig(rules, overrides).ClientConfig()
 	if err != nil {
-		return nil, domain.WrapError(domain.ErrorValidation, "kubernetes config", "load kubeconfig", err)
+		return nil, domain.WrapError(domain.ErrorValidation, "kubernetes config", fmt.Sprintf("load kubeconfig: %v", err), err)
 	}
 	config.UserAgent = "pvc-migrate/dev"
 	config.QPS = 30
