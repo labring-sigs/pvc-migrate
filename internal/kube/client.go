@@ -108,6 +108,9 @@ func WaitFor(ctx context.Context, interval time.Duration, description string, co
 		}
 		ready, err := condition(ctx)
 		if err != nil {
+			if contextErr := ctx.Err(); contextErr != nil {
+				return waitContextError(contextErr, description)
+			}
 			return err
 		}
 		if ready {
