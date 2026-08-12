@@ -131,19 +131,53 @@ func TestWaitForReadyErrorAndTimeout(t *testing.T) {
 		t.Fatalf("condition error=%v", err)
 	}
 
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
-	calls = 0
-	err := WaitFor(ctx, time.Millisecond, "timeout", func(context.Context) (bool, error) {
-		calls++
-		return false, nil
+	t.Run("pre-canceled", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		calls = 0
+		err := WaitFor(ctx, time.Millisecond, "resource readiness", func(context.Context) (bool, error) {
+			calls++
+			return false, nil
+		})
+		if domain.CategoryOf(err) != domain.ErrorTimeout || !errors.Is(err, context.Canceled) || !strings.Contains(err.Error(), "canceled while waiting for resource readiness") {
+			t.Fatalf("cancellation category=%s error=%v", domain.CategoryOf(err), err)
+		}
+		if calls != 0 {
+			t.Fatalf("pre-canceled condition calls=%d", calls)
+		}
 	})
-	if domain.CategoryOf(err) != domain.ErrorTimeout {
-		t.Fatalf("timeout category=%s error=%v", domain.CategoryOf(err), err)
-	}
-	if calls != 0 {
-		t.Fatalf("pre-canceled condition calls=%d", calls)
-	}
+
+	t.Run("canceled after condition", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		calls = 0
+		err := WaitFor(ctx, time.Hour, "resource deletion", func(context.Context) (bool, error) {
+			calls++
+			cancel()
+			return false, nil
+		})
+		if domain.CategoryOf(err) != domain.ErrorTimeout || !errors.Is(err, context.Canceled) || !strings.Contains(err.Error(), "canceled while waiting for resource deletion") {
+			t.Fatalf("cancellation category=%s error=%v", domain.CategoryOf(err), err)
+		}
+		if calls != 1 {
+			t.Fatalf("condition calls=%d", calls)
+		}
+	})
+
+	t.Run("deadline exceeded", func(t *testing.T) {
+		ctx, cancel := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
+		defer cancel()
+		calls = 0
+		err := WaitFor(ctx, time.Millisecond, "resource readiness", func(context.Context) (bool, error) {
+			calls++
+			return false, nil
+		})
+		if domain.CategoryOf(err) != domain.ErrorTimeout || !errors.Is(err, context.DeadlineExceeded) || !strings.Contains(err.Error(), "timed out waiting for resource readiness") {
+			t.Fatalf("deadline category=%s error=%v", domain.CategoryOf(err), err)
+		}
+		if calls != 0 {
+			t.Fatalf("expired-deadline condition calls=%d", calls)
+		}
+	})
 }
 
 func TestParseGroupVersionResource(t *testing.T) {

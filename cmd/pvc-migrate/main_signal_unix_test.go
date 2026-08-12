@@ -63,6 +63,34 @@ func TestSecondInterruptForcesTermination(t *testing.T) {
 	}
 }
 
+func TestQueuedSecondSignalForcesTermination(t *testing.T) {
+	signals := make(chan os.Signal, 2)
+	forced := make(chan os.Signal, 1)
+	ctx, exitCode, stop := commandSignalContextFromChannel(context.Background(), signals, func() {}, func(received os.Signal) {
+		forced <- received
+	})
+	t.Cleanup(stop)
+
+	signals <- os.Interrupt
+	signals <- syscall.SIGTERM
+	select {
+	case <-ctx.Done():
+	case <-time.After(5 * time.Second):
+		t.Fatal("first signal did not cancel the command context")
+	}
+	if exitCode() != 130 {
+		t.Fatalf("exit code=%d, want 130", exitCode())
+	}
+	select {
+	case received := <-forced:
+		if received != syscall.SIGTERM {
+			t.Fatalf("forced signal=%v, want %v", received, syscall.SIGTERM)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("queued second signal did not force termination")
+	}
+}
+
 func TestSignalHelperProcess(t *testing.T) {
 	mode := os.Getenv(signalHelperMode)
 	if mode == "" {

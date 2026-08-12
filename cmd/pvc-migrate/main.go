@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"sync"
 	"sync/atomic"
 	"syscall"
 
@@ -50,26 +51,59 @@ func commandExitCode(ctx context.Context, signalExitCode func() int, err error) 
 // cancellation, then restores the process defaults so a second signal can
 // force termination when an external driver does not stop promptly.
 func commandSignalContext(parent context.Context) (context.Context, func() int, context.CancelFunc) {
-	ctx, cancel := context.WithCancel(parent)
-	signals := make(chan os.Signal, 1)
+	signals := make(chan os.Signal, 2)
 	signal.Notify(signals, os.Interrupt, syscall.SIGTERM)
+	return commandSignalContextFromChannel(parent, signals, func() {
+		signal.Stop(signals)
+	}, forceCommandTermination)
+}
+
+func commandSignalContextFromChannel(
+	parent context.Context,
+	signals <-chan os.Signal,
+	stopNotifications func(),
+	forceTermination func(os.Signal),
+) (context.Context, func() int, context.CancelFunc) {
+	ctx, cancel := context.WithCancel(parent)
 	var exitCode atomic.Int32
 	exitCode.Store(130)
+	var stopOnce sync.Once
+	stopSignalNotifications := func() {
+		stopOnce.Do(stopNotifications)
+	}
+	stop := func() {
+		stopSignalNotifications()
+		cancel()
+	}
 	go func() {
 		select {
 		case received := <-signals:
 			if received == syscall.SIGTERM {
 				exitCode.Store(143)
 			}
-			signal.Stop(signals)
 			cancel()
+			stopSignalNotifications()
+			select {
+			case received = <-signals:
+				forceTermination(received)
+			default:
+			}
 		case <-ctx.Done():
-			signal.Stop(signals)
+			stopSignalNotifications()
 		}
 	}()
-	stop := func() {
-		signal.Stop(signals)
-		cancel()
-	}
 	return ctx, func() int { return int(exitCode.Load()) }, stop
+}
+
+func forceCommandTermination(received os.Signal) {
+	process, err := os.FindProcess(os.Getpid())
+	if err == nil {
+		if err := process.Signal(received); err == nil {
+			return
+		}
+	}
+	if received == syscall.SIGTERM {
+		os.Exit(143)
+	}
+	os.Exit(130)
 }
