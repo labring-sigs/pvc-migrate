@@ -410,12 +410,11 @@ func (s *Store) AcquireLock(ctx context.Context, holder string, ttl time.Duratio
 		}
 		return "", wrapS3Error(ctx, domain.ErrorConflict, "S3 lock", "acquire backup lock", getErr)
 	}
-	if current == nil || time.Now().UTC().Before(current.ExpiresAt) {
-		owner := "unknown"
-		if current != nil {
-			owner = current.Holder
-		}
-		return "", domain.NewError(domain.ErrorConflict, "S3 lock", fmt.Sprintf("backup recovery point is locked by %s", owner))
+	if current == nil {
+		return "", wrapS3Error(ctx, domain.ErrorPrecondition, "S3 lock", "backend rejected atomic lock creation; verify PutObject If-None-Match support, encryption settings, and write permission", err)
+	}
+	if time.Now().UTC().Before(current.ExpiresAt) {
+		return "", domain.NewError(domain.ErrorConflict, "S3 lock", fmt.Sprintf("backup recovery point is locked by %s", current.Holder))
 	}
 	input.Body = bytes.NewReader(data)
 	input.IfNoneMatch = nil
@@ -554,6 +553,10 @@ func (s *Store) applyEncryption(input *s3.PutObjectInput) {
 func wrapS3Error(ctx context.Context, category domain.ErrorCategory, operation, message string, err error) error {
 	if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) || errors.Is(ctx.Err(), context.DeadlineExceeded) || errors.Is(ctx.Err(), context.Canceled) {
 		return domain.WrapError(domain.ErrorTimeout, operation, message+": operation timed out", err)
+	}
+	var apiErr smithy.APIError
+	if errors.As(err, &apiErr) && apiErr.ErrorCode() != "" {
+		message += fmt.Sprintf(" (S3 code %s)", apiErr.ErrorCode())
 	}
 	return domain.WrapError(category, operation, message, err)
 }

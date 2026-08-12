@@ -20,6 +20,7 @@ func TestCheckPVCReferencesModelsOfflineWarmCopyRWOPAndSharedUnit(t *testing.T) 
 	rwop := corev1.ReadWriteOncePod
 	tests := []struct {
 		name      string
+		operation domain.Operation
 		mode      corev1.PersistentVolumeAccessMode
 		pods      []runtime.Object
 		sourcePod *corev1.Pod
@@ -27,11 +28,13 @@ func TestCheckPVCReferencesModelsOfflineWarmCopyRWOPAndSharedUnit(t *testing.T) 
 		severity  domain.CheckSeverity
 		message   string
 	}{
-		{name: "offline", mode: rwo, ready: true, severity: domain.SeverityInfo, message: "is offline"},
-		{name: "active RWO warns", mode: rwo, pods: []runtime.Object{podWithPVC("app", "consumer", "data")}, ready: true, severity: domain.SeverityWarning, message: "warm copy has file-level consistency"},
-		{name: "active RWOP fails", mode: rwop, pods: []runtime.Object{podWithPVC("app", "consumer", "data")}, severity: domain.SeverityError, message: "cannot be warm-copied"},
+		{name: "offline", operation: domain.OperationCopy, mode: rwo, ready: true, severity: domain.SeverityInfo, message: "is offline"},
+		{name: "active RWO warns", operation: domain.OperationCopy, mode: rwo, pods: []runtime.Object{podWithPVC("app", "consumer", "data")}, ready: true, severity: domain.SeverityWarning, message: "warm copy has file-level consistency"},
+		{name: "active RWOP fails", operation: domain.OperationCopy, mode: rwop, pods: []runtime.Object{podWithPVC("app", "consumer", "data")}, severity: domain.SeverityError, message: "cannot be warm-copied"},
+		{name: "active RWOP reserve warns accurately", operation: domain.OperationReserve, mode: rwop, pods: []runtime.Object{podWithPVC("app", "consumer", "data")}, ready: true, severity: domain.SeverityWarning, message: "reservation keeps the source PVC mounted"},
 		{
 			name:      "selected unit has another consumer",
+			operation: domain.OperationCopy,
 			mode:      rwo,
 			pods:      []runtime.Object{podWithPVC("app", "selected", "data"), podWithPVC("app", "other", "data")},
 			sourcePod: podWithPVC("app", "selected", "data"),
@@ -43,7 +46,7 @@ func TestCheckPVCReferencesModelsOfflineWarmCopyRWOPAndSharedUnit(t *testing.T) 
 		t.Run(tt.name, func(t *testing.T) {
 			pvc := &corev1.PersistentVolumeClaim{ObjectMeta: metav1.ObjectMeta{Namespace: "app", Name: "data"}, Spec: corev1.PersistentVolumeClaimSpec{AccessModes: []corev1.PersistentVolumeAccessMode{tt.mode}}}
 			plan := &domain.MigrationPlan{Ready: true}
-			New(kubernetesfake.NewClientset(tt.pods...), nil).checkPVCReferences(context.Background(), plan, pvc, tt.sourcePod, domain.OperationCopy, true)
+			New(kubernetesfake.NewClientset(tt.pods...), nil).checkPVCReferences(context.Background(), plan, pvc, tt.sourcePod, tt.operation, true)
 			if plan.Ready != tt.ready || len(plan.Checks) != 1 || plan.Checks[0].Severity != tt.severity || !strings.Contains(plan.Checks[0].Message, tt.message) {
 				t.Fatalf("plan ready=%t checks=%#v", plan.Ready, plan.Checks)
 			}
@@ -141,7 +144,7 @@ func TestPodPVCNamesAreUniqueAndSorted(t *testing.T) {
 func podWithPVC(namespace, name, claim string) *corev1.Pod {
 	return &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{Namespace: namespace, Name: name},
-		Spec: corev1.PodSpec{Volumes: []corev1.Volume{{Name: "data", VolumeSource: corev1.VolumeSource{
+		Spec: corev1.PodSpec{NodeName: "node-a", Volumes: []corev1.Volume{{Name: "data", VolumeSource: corev1.VolumeSource{
 			PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: claim},
 		}}}},
 	}

@@ -87,7 +87,7 @@ func writeSessionGuidance(w io.Writer, session *domain.Session) error {
 				return err
 			}
 		}
-		if session.Status.Phase == domain.PhasePaused || session.Status.Phase == domain.PhaseFinalSyncing || session.Status.Phase == domain.PhaseFinalSynced {
+		if phaseCanAbortBeforeActivation(session) {
 			if _, err := fmt.Fprintln(w, "  Abort before activation (validate first):", abortPlan); err != nil {
 				return err
 			}
@@ -149,6 +149,23 @@ func writeSessionGuidance(w io.Writer, session *domain.Session) error {
 		}
 	}
 	return nil
+}
+
+func phaseCanAbortBeforeActivation(session *domain.Session) bool {
+	if session == nil {
+		return false
+	}
+	if session.Spec.Operation() == domain.OperationCopy && session.Status.Phase == domain.PhaseWarmCopied {
+		return false
+	}
+	switch session.Status.Phase {
+	case domain.PhasePlanned, domain.PhaseReserving, domain.PhaseReserved, domain.PhaseWarmCopying,
+		domain.PhaseWarmCopied, domain.PhasePausing, domain.PhasePaused, domain.PhaseFinalSyncing,
+		domain.PhaseFinalSynced:
+		return true
+	default:
+		return false
+	}
 }
 
 func cleanupCommandArgs(session *domain.Session) string {

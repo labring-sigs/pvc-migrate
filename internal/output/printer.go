@@ -63,8 +63,27 @@ func (p Printer) printTable(value any) error {
 
 func (p Printer) printOrphanCleanupPlan(plan *domain.OrphanCleanupPlan) error {
 	w := tabwriter.NewWriter(p.Writer, 0, 4, 2, ' ', 0)
-	if _, err := fmt.Fprintf(w, "SESSION\tREADY\tSOURCE PVC\tACTIVE PV\tROLLBACK PV\n%s\t%t\t%s/%s\t%s\t%s\n\n", plan.SessionID, plan.Ready, plan.SourcePVC.Namespace, plan.SourcePVC.Name, plan.ActivePV.Name, plan.RollbackPV.Name); err != nil {
-		return err
+	switch plan.Mode {
+	case domain.OrphanCleanupPreActivation:
+		resources := plan.PreActivation
+		if resources == nil {
+			return domain.NewError(domain.ErrorInternal, "output", "pre-activation orphan resources are missing")
+		}
+		if _, err := fmt.Fprintf(w, "SESSION\tREADY\tMODE\tSOURCE PVC\tSOURCE PV\tDESTINATION PVC\tDESTINATION PV\n%s\t%t\t%s\t%s/%s\t%s\t%s/%s\t%s\n\n", plan.SessionID, plan.Ready, plan.Mode, resources.SourcePVC.Namespace, resources.SourcePVC.Name, resources.SourcePV.Name, resources.DestinationPVC.Namespace, resources.DestinationPVC.Name, resources.DestinationPV.Name); err != nil {
+			return err
+		}
+	case domain.OrphanCleanupPostActivation:
+		resources := plan.PostActivation
+		if resources == nil {
+			return domain.NewError(domain.ErrorInternal, "output", "post-activation orphan resources are missing")
+		}
+		if _, err := fmt.Fprintf(w, "SESSION\tREADY\tMODE\tSOURCE PVC\tACTIVE PV\tROLLBACK PV\n%s\t%t\t%s\t%s/%s\t%s\t%s\n\n", plan.SessionID, plan.Ready, plan.Mode, resources.SourcePVC.Namespace, resources.SourcePVC.Name, resources.ActivePV.Name, resources.RollbackPV.Name); err != nil {
+			return err
+		}
+	default:
+		if _, err := fmt.Fprintf(w, "SESSION\tREADY\tMODE\n%s\t%t\t%s\n\n", plan.SessionID, plan.Ready, plan.Mode); err != nil {
+			return err
+		}
 	}
 	if _, err := fmt.Fprintln(w, "CHECK\tRESULT\tSEVERITY\tMESSAGE"); err != nil {
 		return err

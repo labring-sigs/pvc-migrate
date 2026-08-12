@@ -66,6 +66,53 @@ func TestPlanRejectsUnsupportedStrategiesAndDestinationCount(t *testing.T) {
 	}
 }
 
+func TestPlanPreservesExplicitPVCMappingAndRejectsDuplicateDestinations(t *testing.T) {
+	objects := plannerObjects("2Gi")
+	dataPVC := objects[5].(*corev1.PersistentVolumeClaim)
+	dataPV := objects[6].(*corev1.PersistentVolume)
+	logsPVC := dataPVC.DeepCopy()
+	logsPVC.Name = "logs"
+	logsPVC.UID = types.UID("logs-pvc-uid")
+	logsPVC.Spec.VolumeName = "pv-logs"
+	logsPV := dataPV.DeepCopy()
+	logsPV.Name = "pv-logs"
+	logsPV.UID = types.UID("logs-pv-uid")
+	logsPV.Spec.ClaimRef = &corev1.ObjectReference{Namespace: "app", Name: "logs", UID: logsPVC.UID}
+	objects = append(objects, logsPVC, logsPV)
+
+	base := Options{
+		SessionID:          "migration",
+		SourceNamespace:    "app",
+		TemporaryNamespace: "system",
+		StagingNamespace:   "system",
+		SessionNamespace:   "system",
+		SourcePVCs:         []string{"logs", "data"},
+		DestinationPVCs:    []string{"logs-new", "data-new"},
+		TargetNode:         "node-b",
+		DestinationClass:   "fast",
+	}
+	plan, err := New(plannerClient(objects...), nil).Plan(context.Background(), base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !plan.Ready || len(plan.Volumes) != 2 {
+		t.Fatalf("plan checks=%#v volumes=%#v", plan.Checks, plan.Volumes)
+	}
+	if plan.Volumes[0].SourcePVC.Name != "logs" || plan.Volumes[0].DestinationPVC.Name != "logs-new" ||
+		plan.Volumes[1].SourcePVC.Name != "data" || plan.Volumes[1].DestinationPVC.Name != "data-new" {
+		t.Fatalf("explicit mapping was reordered: %#v", plan.Volumes)
+	}
+
+	base.DestinationPVCs = []string{"shared", "shared"}
+	duplicate, err := New(plannerClient(objects...), nil).Plan(context.Background(), base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if duplicate.Ready || !hasFailedCheck(duplicate, "destination-pvc") {
+		t.Fatalf("duplicate destination plan checks=%#v", duplicate.Checks)
+	}
+}
+
 func TestCopySupportsOfflineAndOnlineModesAcrossNamespaces(t *testing.T) {
 	objects := plannerObjects("2Gi")
 	objects = append(objects,
@@ -126,6 +173,35 @@ func TestCopySupportsOfflineAndOnlineModesAcrossNamespaces(t *testing.T) {
 	}
 	if !selectedPod.Ready || selectedPod.Workload.Adapter != domain.WorkloadNone || selectedPod.SessionSpec.WorkflowOptions().SourceNode != "node-a" {
 		t.Fatalf("pod copy plan=%#v", selectedPod)
+	}
+}
+
+func TestOnlineCopyRejectsUnscheduledRWOConsumer(t *testing.T) {
+	objects := append(plannerObjects("2Gi"), &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "app", Name: "pending-writer"},
+		Spec: corev1.PodSpec{Volumes: []corev1.Volume{{
+			Name: "data", VolumeSource: corev1.VolumeSource{PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: "data"}},
+		}}},
+		Status: corev1.PodStatus{Phase: corev1.PodPending},
+	})
+	plan, err := New(plannerClient(objects...), nil).Plan(context.Background(), Options{
+		Operation:            domain.OperationCopy,
+		SessionID:            "copy-pending",
+		SourceNamespace:      "app",
+		TemporaryNamespace:   "system",
+		DestinationNamespace: "system",
+		StagingNamespace:     "system",
+		SessionNamespace:     "system",
+		SourcePVCs:           []string{"data"},
+		TargetNode:           "node-b",
+		DestinationClass:     "fast",
+		Online:               true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if plan.Ready || !hasFailedCheck(plan, "source-node") {
+		t.Fatalf("plan checks=%#v", plan.Checks)
 	}
 }
 
@@ -446,7 +522,7 @@ func TestPlanRejectsMixedAutoStrategyList(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if plan.Ready || !hasFailedCheck(plan, "strategy") {
+	if plan.Ready || !hasFailedCheck(plan, "strategy") || !hasFailedCheckContaining(plan, "strategy", "cannot be combined") {
 		t.Fatalf("mixed auto list should fail: %#v", plan.Checks)
 	}
 }
@@ -764,6 +840,15 @@ func hasPassedCheck(plan *domain.MigrationPlan, name string) bool {
 func hasPassedCheckContaining(plan *domain.MigrationPlan, name, message string) bool {
 	for _, check := range plan.Checks {
 		if check.Name == name && check.Passed && strings.Contains(check.Message, message) {
+			return true
+		}
+	}
+	return false
+}
+
+func hasFailedCheckContaining(plan *domain.MigrationPlan, name, message string) bool {
+	for _, check := range plan.Checks {
+		if check.Name == name && !check.Passed && strings.Contains(check.Message, message) {
 			return true
 		}
 	}

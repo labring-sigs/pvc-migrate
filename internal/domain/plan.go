@@ -10,6 +10,13 @@ const (
 	OrphanCleanupPlanKind = "OrphanCleanupPlan"
 )
 
+type OrphanCleanupMode string
+
+const (
+	OrphanCleanupPreActivation  OrphanCleanupMode = "PreActivation"
+	OrphanCleanupPostActivation OrphanCleanupMode = "PostActivation"
+)
+
 type CheckSeverity string
 
 const (
@@ -108,15 +115,28 @@ type MigrationPlan struct {
 // gone. It is deliberately resource-scoped so an administrator can review
 // every UID and relationship before removing retained migration metadata.
 type OrphanCleanupPlan struct {
-	APIVersion       string          `json:"apiVersion" yaml:"apiVersion"`
-	Kind             string          `json:"kind" yaml:"kind"`
-	SessionID        string          `json:"sessionID" yaml:"sessionID"`
-	SessionNamespace string          `json:"sessionNamespace" yaml:"sessionNamespace"`
-	SourcePVC        ObjectReference `json:"sourcePVC" yaml:"sourcePVC"`
-	ActivePV         ObjectReference `json:"activePV" yaml:"activePV"`
-	RollbackPV       ObjectReference `json:"rollbackPV" yaml:"rollbackPV"`
-	Checks           []Check         `json:"checks" yaml:"checks"`
-	Ready            bool            `json:"ready" yaml:"ready"`
+	APIVersion       string                       `json:"apiVersion" yaml:"apiVersion"`
+	Kind             string                       `json:"kind" yaml:"kind"`
+	SessionID        string                       `json:"sessionID" yaml:"sessionID"`
+	SessionNamespace string                       `json:"sessionNamespace" yaml:"sessionNamespace"`
+	Mode             OrphanCleanupMode            `json:"mode" yaml:"mode"`
+	PreActivation    *OrphanPreActivationCleanup  `json:"preActivation,omitempty" yaml:"preActivation,omitempty"`
+	PostActivation   *OrphanPostActivationCleanup `json:"postActivation,omitempty" yaml:"postActivation,omitempty"`
+	Checks           []Check                      `json:"checks" yaml:"checks"`
+	Ready            bool                         `json:"ready" yaml:"ready"`
+}
+
+type OrphanPreActivationCleanup struct {
+	SourcePVC      ObjectReference `json:"sourcePVC" yaml:"sourcePVC"`
+	SourcePV       ObjectReference `json:"sourcePV" yaml:"sourcePV"`
+	DestinationPVC ObjectReference `json:"destinationPVC,omitempty" yaml:"destinationPVC,omitempty"`
+	DestinationPV  ObjectReference `json:"destinationPV,omitempty" yaml:"destinationPV,omitempty"`
+}
+
+type OrphanPostActivationCleanup struct {
+	SourcePVC  ObjectReference `json:"sourcePVC" yaml:"sourcePVC"`
+	ActivePV   ObjectReference `json:"activePV" yaml:"activePV"`
+	RollbackPV ObjectReference `json:"rollbackPV" yaml:"rollbackPV"`
 }
 
 func (p *OrphanCleanupPlan) AddCheck(check Check) {

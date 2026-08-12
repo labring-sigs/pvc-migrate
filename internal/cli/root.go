@@ -17,6 +17,7 @@ import (
 	"github.com/labring-sigs/pvc-migrate/internal/output"
 	"github.com/labring-sigs/pvc-migrate/internal/planner"
 	"github.com/spf13/cobra"
+	"k8s.io/apimachinery/pkg/util/validation"
 	"k8s.io/klog/v2"
 )
 
@@ -125,6 +126,9 @@ func (r *rootState) runtime() (*commandRuntime, error) {
 	if r.options.runtimeFactory != nil {
 		return r.options.runtimeFactory(r)
 	}
+	if err := r.validateGlobalFlags(); err != nil {
+		return nil, err
+	}
 	format := output.Format(r.global.output)
 	if format != output.Table && format != output.JSON && format != output.YAML {
 		return nil, domain.NewError(domain.ErrorValidation, "flags", fmt.Sprintf("unsupported output format %q", r.global.output))
@@ -156,16 +160,17 @@ func (r *rootState) runtime() (*commandRuntime, error) {
 		controllers,
 		kube.NewSwitcher(clients.Kubernetes),
 		app.Config{
-			KubeconfigPath: r.global.kubeconfig,
-			Context:        r.global.kubeContext,
-			Retries:        r.global.retries,
-			RetryBackoff:   r.global.retryBackoff,
-			HelmTimeout:    r.global.helmTimeout,
-			NoCompress:     r.global.noCompress,
-			StreamToolLogs: r.global.streamToolLogs,
-			StructuredLogs: r.global.logFormat == "json",
-			Writer:         r.options.ErrOut,
-			Logger:         logger,
+			KubeconfigPath:  r.global.kubeconfig,
+			Context:         r.global.kubeContext,
+			Retries:         r.global.retries,
+			RetryBackoff:    r.global.retryBackoff,
+			HelmTimeout:     r.global.helmTimeout,
+			NoCompress:      r.global.noCompress,
+			StreamToolLogs:  r.global.streamToolLogs,
+			StructuredLogs:  r.global.logFormat == "json",
+			Writer:          r.options.ErrOut,
+			Logger:          logger,
+			ToolImageProber: kube.NewToolImageProber(clients.Kubernetes),
 		},
 	)
 	return &commandRuntime{
@@ -177,6 +182,21 @@ func (r *rootState) runtime() (*commandRuntime, error) {
 		logger:      logger,
 		controllers: controllers,
 	}, nil
+}
+
+func (r *rootState) validateGlobalFlags() error {
+	switch {
+	case r.global.retries < 1:
+		return domain.NewError(domain.ErrorValidation, "flags", "--retries must be at least 1")
+	case r.global.retryBackoff <= 0:
+		return domain.NewError(domain.ErrorValidation, "flags", "--retry-backoff must be greater than 0")
+	case r.global.helmTimeout <= 0:
+		return domain.NewError(domain.ErrorValidation, "flags", "--helm-timeout must be greater than 0")
+	}
+	if problems := validation.IsDNS1123Label(r.global.sessionNamespace); len(problems) > 0 {
+		return domain.NewError(domain.ErrorValidation, "flags", fmt.Sprintf("--session-namespace %q is invalid: %s", r.global.sessionNamespace, strings.Join(problems, "; ")))
+	}
+	return nil
 }
 
 func configureKubernetesLogger(logger *slog.Logger) {

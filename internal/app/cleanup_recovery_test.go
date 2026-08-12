@@ -544,7 +544,7 @@ func TestCleanupOrphanRecoveryProtectsForeignDestinationPVC(t *testing.T) {
 	}
 }
 
-func TestCleanupIgnoresTerminalPVCConsumers(t *testing.T) {
+func TestCleanupBlocksTerminalPVCConsumers(t *testing.T) {
 	for _, phase := range []corev1.PodPhase{corev1.PodSucceeded, corev1.PodFailed} {
 		t.Run(string(phase), func(t *testing.T) {
 			ctx := context.Background()
@@ -559,20 +559,49 @@ func TestCleanupIgnoresTerminalPVCConsumers(t *testing.T) {
 			}}
 			pod := &corev1.Pod{
 				ObjectMeta: metav1.ObjectMeta{Namespace: pvc.Namespace, Name: "terminal-consumer"},
-				Spec: corev1.PodSpec{Volumes: []corev1.Volume{{VolumeSource: corev1.VolumeSource{
+				Spec: corev1.PodSpec{NodeName: "node-a", Volumes: []corev1.Volume{{VolumeSource: corev1.VolumeSource{
 					PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: pvc.Name},
 				}}}},
 				Status: corev1.PodStatus{Phase: phase},
 			}
 			client := fake.NewClientset(pvc, pod)
 			service := &Service{client: client, store: &memoryStore{}}
-			if err := service.Cleanup(ctx, session, CleanupOptions{DeleteTemporary: true}); err != nil {
-				t.Fatal(err)
+			options := CleanupOptions{DeleteTemporary: true}
+			if err := service.ValidateCleanup(ctx, session, options); domain.CategoryOf(err) != domain.ErrorPrecondition || !strings.Contains(err.Error(), "delete the Pod object") {
+				t.Fatalf("validate category=%s error=%v", domain.CategoryOf(err), err)
 			}
-			if _, err := client.CoreV1().PersistentVolumeClaims(pvc.Namespace).Get(ctx, pvc.Name, metav1.GetOptions{}); !apierrors.IsNotFound(err) {
-				t.Fatalf("temporary PVC still exists: %v", err)
+			if err := service.Cleanup(ctx, session, options); domain.CategoryOf(err) != domain.ErrorPrecondition || !strings.Contains(err.Error(), string(phase)) {
+				t.Fatalf("cleanup category=%s error=%v", domain.CategoryOf(err), err)
+			}
+			if _, err := client.CoreV1().PersistentVolumeClaims(pvc.Namespace).Get(ctx, pvc.Name, metav1.GetOptions{}); err != nil {
+				t.Fatalf("temporary PVC was changed: %v", err)
 			}
 		})
+	}
+}
+
+func TestCleanupIgnoresUnscheduledTerminalPVCConsumers(t *testing.T) {
+	ctx := context.Background()
+	session := appTestSession()
+	session.Status.Phase = domain.PhaseAborted
+	session.Spec.Volumes[0].DestinationPVC.UID = types.UID("temporary-pvc-uid")
+	pvc := &corev1.PersistentVolumeClaim{ObjectMeta: metav1.ObjectMeta{
+		Namespace: session.Spec.Volumes[0].DestinationPVC.Namespace,
+		Name:      session.Spec.Volumes[0].DestinationPVC.Name,
+		UID:       session.Spec.Volumes[0].DestinationPVC.UID,
+		Labels:    map[string]string{kube.SessionKey: session.ID},
+	}}
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Namespace: pvc.Namespace, Name: "unscheduled-terminal"},
+		Spec: corev1.PodSpec{Volumes: []corev1.Volume{{VolumeSource: corev1.VolumeSource{
+			PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: pvc.Name},
+		}}}},
+		Status: corev1.PodStatus{Phase: corev1.PodSucceeded},
+	}
+	client := fake.NewClientset(pvc, pod)
+	service := &Service{client: client, store: &memoryStore{}}
+	if err := service.ValidateCleanup(ctx, session, CleanupOptions{DeleteTemporary: true}); err != nil {
+		t.Fatalf("validate cleanup error=%v", err)
 	}
 }
 

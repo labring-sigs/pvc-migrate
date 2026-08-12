@@ -84,9 +84,36 @@ func TestUpstreamChartToolContract(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	pullSecretResults := make([]ToolImageProbeResult, 0, 3)
+	for _, component := range []string{ToolComponentRsync, ToolComponentSSHD, ToolComponentRclone} {
+		pullSecretResults = append(pullSecretResults, ToolImageProbeResult{
+			Target:           ToolProbeTarget{Components: []string{component}},
+			ImagePullSecrets: []corev1.LocalObjectReference{{Name: component + "-registry"}},
+		})
+	}
+	toolNode := &corev1.Node{
+		ObjectMeta: metav1.ObjectMeta{Name: "tool-node"},
+		Spec: corev1.NodeSpec{Taints: []corev1.Taint{{
+			Key: "storage", Value: "true", Effect: corev1.TaintEffectNoSchedule,
+		}}},
+	}
+	schedulingValues, err := ToolComponentNodeHelmValues(ToolComponentRclone, toolNode)
+	if err != nil {
+		t.Fatal(err)
+	}
+	schedulingValues = append(schedulingValues,
+		"rsync.nodeSelector.kubernetes\\.io/hostname=target-host",
+		"sshd.nodeSelector.kubernetes\\.io/hostname=source-host",
+	)
+	schedulingValues = append(schedulingValues, ToolComponentTolerationHelmValues(ToolComponentRsync, toolNode)...)
+	schedulingValues = append(schedulingValues, ToolComponentTolerationHelmValues(ToolComponentSSHD, toolNode)...)
+	pullSecretValues, err := ToolImagePullSecretHelmValues(pullSecretResults)
+	if err != nil {
+		t.Fatal(err)
+	}
 	options := values.Options{
 		Values:       ToolSecurityContextHelmValues(),
-		StringValues: append(imageValues, ZeroResourceHelmValues()...),
+		StringValues: append(append(append(imageValues, ZeroResourceHelmValues()...), pullSecretValues...), schedulingValues...),
 	}
 	overrides, err := options.MergeValues(getter.All(cli.New()))
 	if err != nil {
@@ -106,6 +133,7 @@ func TestUpstreamChartToolContract(t *testing.T) {
 		t.Fatal(err)
 	}
 	containers := upstreamToolContainers(t, files)
+	podSpecs := upstreamToolPodSpecs(t, files)
 	for _, component := range []string{"rsync", "sshd", "rclone"} {
 		container, ok := containers[component]
 		if !ok {
@@ -124,6 +152,23 @@ func TestUpstreamChartToolContract(t *testing.T) {
 		}
 		assertRootToolSecurityContext(t, component, container.SecurityContext)
 		assertZeroToolResources(t, component, container.Resources)
+		if secrets := podSpecs[component].ImagePullSecrets; !slices.Equal(secrets, []corev1.LocalObjectReference{{Name: component + "-registry"}}) {
+			t.Fatalf("%s imagePullSecrets=%v", component, secrets)
+		}
+		if tolerations := podSpecs[component].Tolerations; !slices.Equal(tolerations, []corev1.Toleration{{
+			Key: "storage", Operator: corev1.TolerationOpEqual, Value: "true", Effect: corev1.TaintEffectNoSchedule,
+		}}) {
+			t.Fatalf("%s tolerations=%v", component, tolerations)
+		}
+	}
+	if podSpecs[ToolComponentRclone].NodeName != "tool-node" {
+		t.Fatalf("rclone nodeName=%q", podSpecs[ToolComponentRclone].NodeName)
+	}
+	if nodeSelector := podSpecs[ToolComponentRsync].NodeSelector; nodeSelector[corev1.LabelHostname] != "target-host" {
+		t.Fatalf("rsync nodeSelector=%v", nodeSelector)
+	}
+	if nodeSelector := podSpecs[ToolComponentSSHD].NodeSelector; nodeSelector[corev1.LabelHostname] != "source-host" {
+		t.Fatalf("sshd nodeSelector=%v", nodeSelector)
 	}
 
 	sshd := containers["sshd"]
@@ -427,6 +472,30 @@ func upstreamToolContainers(t *testing.T, files map[string]string) map[string]co
 		containers[component] = workload.Spec.Template.Spec.Containers[0]
 	}
 	return containers
+}
+
+func upstreamToolPodSpecs(t *testing.T, files map[string]string) map[string]corev1.PodSpec {
+	t.Helper()
+	podSpecs := make(map[string]corev1.PodSpec)
+	for filename, content := range files {
+		if strings.TrimSpace(content) == "" {
+			continue
+		}
+		var workload struct {
+			Metadata metav1.ObjectMeta `json:"metadata"`
+			Spec     struct {
+				Template corev1.PodTemplateSpec `json:"template"`
+			} `json:"spec"`
+		}
+		if err := yaml.Unmarshal([]byte(content), &workload); err != nil {
+			t.Fatalf("parse upstream manifest %s: %v", filename, err)
+		}
+		component := workload.Metadata.Labels[AppComponentLabel]
+		if component != "" && len(workload.Spec.Template.Spec.Containers) > 0 {
+			podSpecs[component] = workload.Spec.Template.Spec
+		}
+	}
+	return podSpecs
 }
 
 func upstreamSSHDService(t *testing.T, files map[string]string) *corev1.Service {

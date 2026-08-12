@@ -86,7 +86,7 @@ func TestCheckPodDependenciesStopsOnKubernetesError(t *testing.T) {
 }
 
 func TestRiskRolesAreCaseInsensitive(t *testing.T) {
-	for _, role := range []string{"leader", "PRIMARY", "Master"} {
+	for _, role := range []string{"leader", "PRIMARY", "Master", "unknown"} {
 		if !isRiskRole(role) {
 			t.Fatalf("role %q should be risky", role)
 		}
@@ -95,5 +95,26 @@ func TestRiskRolesAreCaseInsensitive(t *testing.T) {
 		if isRiskRole(role) {
 			t.Fatalf("role %q should be low risk", role)
 		}
+	}
+}
+
+func TestKubeBlocksRoleWarningDescribesTheSelectedSafetyPath(t *testing.T) {
+	tests := []struct {
+		name      string
+		spec      domain.KubeBlocksSpec
+		want      string
+		forbidden string
+	}{
+		{name: "unknown role with accepted downtime", spec: domain.KubeBlocksSpec{Role: "unknown"}, want: "possible leader downtime was explicitly acknowledged", forbidden: "target="},
+		{name: "known leader with accepted downtime", spec: domain.KubeBlocksSpec{Role: "primary"}, want: "leader downtime was explicitly acknowledged", forbidden: "target="},
+		{name: "automatic switchover", spec: domain.KubeBlocksSpec{Role: "primary", SwitchoverCandidate: "db-1"}, want: "switchover target=db-1"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			message := kubeBlocksRoleWarning(&test.spec)
+			if !strings.Contains(message, test.want) || (test.forbidden != "" && strings.Contains(message, test.forbidden)) {
+				t.Fatalf("message=%q want=%q forbidden=%q", message, test.want, test.forbidden)
+			}
+		})
 	}
 }

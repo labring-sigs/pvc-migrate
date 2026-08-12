@@ -146,6 +146,15 @@ func (timeoutS3) DeleteObject(context.Context, *s3.DeleteObjectInput, ...func(*s
 	return nil, context.DeadlineExceeded
 }
 
+type conditionalWriteUnsupportedS3 struct{ API }
+
+func (c conditionalWriteUnsupportedS3) PutObject(ctx context.Context, input *s3.PutObjectInput, options ...func(*s3.Options)) (*s3.PutObjectOutput, error) {
+	if input.IfNoneMatch != nil || input.IfMatch != nil {
+		return nil, &smithy.GenericAPIError{Code: "NotImplemented", Message: "conditional writes are unsupported"}
+	}
+	return c.API.PutObject(ctx, input, options...)
+}
+
 func newTestStore(t *testing.T, client API) *Store {
 	t.Helper()
 	store, err := NewWithClient(client, Config{Bucket: "backups", Prefix: "pv-migrate", Name: "daily"}, Credentials{AccessKey: "key", SecretKey: "secret"})
@@ -266,6 +275,14 @@ func TestLockExclusionAndExpiredReplacement(t *testing.T) {
 	}
 	if _, err := store.Manifest(ctx); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestLockReportsMissingConditionalWriteCapability(t *testing.T) {
+	store := newTestStore(t, conditionalWriteUnsupportedS3{API: newFakeS3()})
+	_, err := store.AcquireLock(context.Background(), "holder", time.Minute)
+	if domain.CategoryOf(err) != domain.ErrorPrecondition || !strings.Contains(err.Error(), "verify PutObject If-None-Match support, encryption settings, and write permission") || !strings.Contains(err.Error(), "S3 code NotImplemented") {
+		t.Fatalf("category=%s error=%v", domain.CategoryOf(err), err)
 	}
 }
 

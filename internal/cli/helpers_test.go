@@ -102,6 +102,16 @@ func TestRootCommandSurfaceAndGlobalDefaults(t *testing.T) {
 	if online := copyCommand.Flags().Lookup("online"); online == nil || online.DefValue != "false" {
 		t.Fatalf("copy --online default=%v, want false", online)
 	}
+	restoreCommand, _, err := root.Find([]string{"restore"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if restoreCommand.Flags().Lookup("online") != nil {
+		t.Fatal("restore exposes backup-only --online flag")
+	}
+	if restoreCommand.Flags().Lookup("allow-mounted") == nil {
+		t.Fatal("restore is missing --allow-mounted")
+	}
 	for _, name := range []string{"capacity-awareness", "destination-storage-class", "source-node", "target-node", "pod"} {
 		if copyCommand.Flags().Lookup(name) == nil {
 			t.Fatalf("copy is missing --%s", name)
@@ -448,6 +458,10 @@ func TestCommandsRejectInvalidInputBeforeClusterAccess(t *testing.T) {
 		{name: "rename destination", args: []string{"rename", "--source-pvc", "data"}, category: domain.ErrorValidation, text: "--destination-pvc"},
 		{name: "orchestrated namespace", args: []string{"migrate", "--source-namespace", "app", "--destination-namespace", "other"}, category: domain.ErrorPrecondition, text: "source namespace"},
 		{name: "negative precopy passes", args: []string{"migrate", "--precopy-passes", "-1"}, category: domain.ErrorValidation, text: "cannot be negative"},
+		{name: "zero retries", args: []string{"migrate", "plan", "--retries", "0"}, category: domain.ErrorValidation, text: "--retries"},
+		{name: "negative retry backoff", args: []string{"migrate", "plan", "--retry-backoff", "-1s"}, category: domain.ErrorValidation, text: "--retry-backoff"},
+		{name: "zero Helm timeout", args: []string{"migrate", "plan", "--helm-timeout", "0"}, category: domain.ErrorValidation, text: "--helm-timeout"},
+		{name: "empty session namespace", args: []string{"migrate", "plan", "--session-namespace", ""}, category: domain.ErrorValidation, text: "--session-namespace"},
 		{name: "backup PVC", args: []string{"backup", "--dry-run", "--name", "daily", "--backend", "s3", "--bucket", "b"}, category: domain.ErrorValidation, text: "--source-pvc"},
 		{name: "restore PVC", args: []string{"restore", "--dry-run", "--name", "daily", "--backend", "s3", "--bucket", "b"}, category: domain.ErrorValidation, text: "--destination-pvc"},
 		{name: "Azure backend", args: []string{"backup", "--dry-run", "--source-pvc", "data", "--name", "daily", "--backend", "azure", "--bucket", "b"}, category: domain.ErrorValidation, text: "unsupported backend"},

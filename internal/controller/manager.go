@@ -51,6 +51,15 @@ type DiscoverOptions struct {
 	AllowLeaderDowntime bool
 }
 
+type kubeBlocksInstanceSetState struct {
+	Paused           bool
+	PausedConfigured bool
+	UID              types.UID
+	Role             string
+	LeaderRoles      map[string]bool
+	HasLeaderRole    bool
+}
+
 type Manager struct {
 	typed     kubernetes.Interface
 	dynamic   dynamic.Interface
@@ -539,11 +548,6 @@ func (m *Manager) kubeBlocksWorkload(ctx context.Context, pod *corev1.Pod, owner
 	if err != nil || !ok || len(components) == 0 {
 		return domain.WorkloadSpec{}, domain.NewError(domain.ErrorPrecondition, "discover KubeBlocks", "Cluster has no componentSpecs")
 	}
-	if isLeaderRole(role) && switchoverCandidate != nil {
-		if err := m.validateKubeBlocksSwitchover(ctx, pod.Namespace, cluster, component, pod.Name, switchoverCandidate.Name, opsAPIVersion); err != nil {
-			return domain.WorkloadSpec{}, domain.NewError(domain.ErrorPrecondition, "discover KubeBlocks", fmt.Sprintf("automatic switchover for selected instance %s was rejected by the served OpsRequest API: %v; use the component's native switchover procedure or --allow-leader-downtime", pod.Name, err))
-		}
-	}
 	if reason := unsupportedKubeBlocksReason(pod, components, component); reason != "" {
 		return domain.WorkloadSpec{}, domain.NewError(domain.ErrorPrecondition, "discover KubeBlocks", reason)
 	}
@@ -574,11 +578,46 @@ func (m *Manager) kubeBlocksWorkload(ctx context.Context, pod *corev1.Pod, owner
 	if !componentFound {
 		return domain.WorkloadSpec{}, domain.NewError(domain.ErrorPrecondition, "discover KubeBlocks", fmt.Sprintf("Cluster componentSpecs has no component %s", component))
 	}
-	originalPaused, pausedConfigured, instanceSetUID, err := m.discoverKubeBlocksInstanceSet(ctx, pod.Namespace, owner)
+	instanceSet, err := m.discoverKubeBlocksInstanceSet(ctx, pod.Namespace, owner, pod.Name)
 	if err != nil {
 		return domain.WorkloadSpec{}, err
 	}
-	if owner.Kind == domain.KindInstanceSet && originalPaused {
+	if role != "" && instanceSet.Role != "" && !strings.EqualFold(role, instanceSet.Role) {
+		return domain.WorkloadSpec{}, domain.NewError(domain.ErrorConflict, "discover KubeBlocks", fmt.Sprintf("selected instance role changed from %s to %s during discovery; rerun the plan", role, instanceSet.Role))
+	}
+	if role == "" {
+		role = instanceSet.Role
+	}
+	roleIsLeader := isLeaderRole(role)
+	if instanceSet.HasLeaderRole {
+		if role == "" {
+			if !options.AllowLeaderDowntime {
+				return domain.WorkloadSpec{}, domain.NewError(domain.ErrorPrecondition, "discover KubeBlocks", fmt.Sprintf("selected instance %s role is unavailable while InstanceSet %s declares leader roles; wait for the KubeBlocks role probe to recover, or use --allow-leader-downtime to acknowledge a possible leader outage", pod.Name, owner.Name))
+			}
+			role = "unknown"
+			roleIsLeader = false
+		} else if knownLeader, knownRole := instanceSet.LeaderRoles[strings.ToLower(role)]; knownRole {
+			roleIsLeader = knownLeader
+		} else if !options.AllowLeaderDowntime {
+			return domain.WorkloadSpec{}, domain.NewError(domain.ErrorPrecondition, "discover KubeBlocks", fmt.Sprintf("selected instance %s reports role %s, which is absent from InstanceSet %s role definitions; wait for role status to converge, or use --allow-leader-downtime", pod.Name, role, owner.Name))
+		}
+	}
+	if roleIsLeader && !options.AllowLeaderDowntime && switchoverCandidate == nil {
+		return domain.WorkloadSpec{}, domain.NewError(domain.ErrorPrecondition, "discover KubeBlocks", m.kubeBlocksLeaderGuidance(ctx, pod, cluster, component, role, opsAPIVersion))
+	}
+	if roleIsLeader && switchoverCandidate != nil {
+		candidateRole := podRole(switchoverCandidate)
+		if instanceSet.HasLeaderRole {
+			candidateIsLeader, knownRole := instanceSet.LeaderRoles[strings.ToLower(candidateRole)]
+			if !knownRole || candidateIsLeader {
+				return domain.WorkloadSpec{}, domain.NewError(domain.ErrorPrecondition, "discover KubeBlocks", fmt.Sprintf("switchover candidate %s must have a known non-leader role in InstanceSet %s", switchoverCandidate.Name, owner.Name))
+			}
+		}
+		if err := m.validateKubeBlocksSwitchover(ctx, pod.Namespace, cluster, component, pod.Name, switchoverCandidate.Name, opsAPIVersion); err != nil {
+			return domain.WorkloadSpec{}, domain.NewError(domain.ErrorPrecondition, "discover KubeBlocks", fmt.Sprintf("automatic switchover for selected instance %s was rejected by the served OpsRequest API: %v; use the component's native switchover procedure or --allow-leader-downtime", pod.Name, err))
+		}
+	}
+	if owner.Kind == domain.KindInstanceSet && instanceSet.Paused {
 		return domain.WorkloadSpec{}, domain.NewError(
 			domain.ErrorPrecondition,
 			"discover KubeBlocks",
@@ -586,8 +625,8 @@ func (m *Manager) kubeBlocksWorkload(ctx context.Context, pod *corev1.Pod, owner
 		)
 	}
 	controllerUID := owner.UID
-	if instanceSetUID != "" {
-		controllerUID = instanceSetUID
+	if instanceSet.UID != "" {
+		controllerUID = instanceSet.UID
 	}
 	return domain.WorkloadSpec{
 		Adapter:    domain.WorkloadKubeBlocks,
@@ -603,49 +642,116 @@ func (m *Manager) kubeBlocksWorkload(ctx context.Context, pod *corev1.Pod, owner
 			ClusterAPIVersion:        kubeBlocksClusterAPIVersion,
 			ClusterUID:               clusterObject.GetUID(),
 			OriginalStops:            originalStops,
-			OriginalPaused:           originalPaused,
-			OriginalPausedConfigured: pausedConfigured,
+			OriginalPaused:           instanceSet.Paused,
+			OriginalPausedConfigured: instanceSet.PausedConfigured,
 		},
 	}, nil
 }
 
-func (m *Manager) discoverKubeBlocksInstanceSet(ctx context.Context, namespace string, owner *metav1.OwnerReference) (bool, bool, types.UID, error) {
+func (m *Manager) discoverKubeBlocksInstanceSet(ctx context.Context, namespace string, owner *metav1.OwnerReference, podName string) (kubeBlocksInstanceSetState, error) {
+	state := kubeBlocksInstanceSetState{}
 	if owner.Kind != domain.KindInstanceSet {
-		return false, false, "", nil
+		return state, nil
 	}
 	if m.dynamic == nil {
-		return false, false, "", domain.NewError(domain.ErrorPrecondition, "discover KubeBlocks", "dynamic client is required for InstanceSet reconciliation control")
+		return state, domain.NewError(domain.ErrorPrecondition, "discover KubeBlocks", "dynamic client is required for InstanceSet reconciliation control")
 	}
 	gvr, err := kube.ParseGroupVersionResource(owner.APIVersion, instanceSetResource)
 	if err != nil {
-		return false, false, "", err
+		return state, err
 	}
 	resource := m.dynamic.Resource(gvr).Namespace(namespace)
 	object, err := resource.Get(ctx, owner.Name, metav1.GetOptions{})
 	if err != nil {
-		return false, false, "", domain.WrapError(domain.ErrorKubernetes, "discover KubeBlocks", "read InstanceSet", err)
+		return state, domain.WrapError(domain.ErrorKubernetes, "discover KubeBlocks", "read InstanceSet", err)
 	}
 	if owner.UID != "" && object.GetUID() != "" && object.GetUID() != owner.UID {
-		return false, false, "", domain.NewError(domain.ErrorConflict, "discover KubeBlocks", fmt.Sprintf("InstanceSet %s/%s UID changed", namespace, owner.Name))
+		return state, domain.NewError(domain.ErrorConflict, "discover KubeBlocks", fmt.Sprintf("InstanceSet %s/%s UID changed", namespace, owner.Name))
+	}
+	state.UID = object.GetUID()
+	state.LeaderRoles, state.HasLeaderRole, err = kubeBlocksLeaderRoles(object)
+	if err != nil {
+		return state, err
+	}
+	state.Role, err = kubeBlocksMemberRole(object, podName)
+	if err != nil {
+		return state, err
 	}
 	paused, found, err := unstructured.NestedBool(object.Object, "spec", "paused")
 	if err != nil {
-		return false, false, "", domain.WrapError(domain.ErrorPrecondition, "discover KubeBlocks", "read InstanceSet paused state", err)
+		return state, domain.WrapError(domain.ErrorPrecondition, "discover KubeBlocks", "read InstanceSet paused state", err)
 	}
+	state.Paused = paused
+	state.PausedConfigured = found
 	if !found {
 		probe := object.DeepCopy()
 		if err := unstructured.SetNestedField(probe.Object, true, "spec", "paused"); err != nil {
-			return false, false, "", err
+			return state, err
 		}
 		result, updateErr := resource.Update(ctx, probe, metav1.UpdateOptions{DryRun: []string{metav1.DryRunAll}})
 		if updateErr != nil {
-			return false, false, "", domain.WrapError(domain.ErrorPrecondition, "discover KubeBlocks", "probe InstanceSet spec.paused support", updateErr)
+			return state, domain.WrapError(domain.ErrorPrecondition, "discover KubeBlocks", "probe InstanceSet spec.paused support", updateErr)
 		}
 		if _, supported, nestedErr := unstructured.NestedBool(result.Object, "spec", "paused"); nestedErr != nil || !supported {
-			return false, false, "", domain.NewError(domain.ErrorPrecondition, "discover KubeBlocks", fmt.Sprintf("InstanceSet %s/%s does not support spec.paused", namespace, owner.Name))
+			return state, domain.NewError(domain.ErrorPrecondition, "discover KubeBlocks", fmt.Sprintf("InstanceSet %s/%s does not support spec.paused", namespace, owner.Name))
 		}
 	}
-	return paused, found, object.GetUID(), nil
+	return state, nil
+}
+
+func kubeBlocksLeaderRoles(instanceSet *unstructured.Unstructured) (map[string]bool, bool, error) {
+	roles, found, err := unstructured.NestedSlice(instanceSet.Object, "spec", "roles")
+	if err != nil {
+		return nil, false, domain.WrapError(domain.ErrorPrecondition, "discover KubeBlocks", "read InstanceSet role definitions", err)
+	}
+	if !found || len(roles) == 0 {
+		return nil, false, nil
+	}
+	result := make(map[string]bool, len(roles))
+	hasLeader := false
+	for index, value := range roles {
+		role, ok := value.(map[string]any)
+		if !ok {
+			return nil, false, domain.NewError(domain.ErrorPrecondition, "discover KubeBlocks", fmt.Sprintf("InstanceSet spec.roles[%d] is malformed", index))
+		}
+		name, _, nameErr := unstructured.NestedString(role, "name")
+		leader, _, leaderErr := unstructured.NestedBool(role, "isLeader")
+		if nameErr != nil || leaderErr != nil || name == "" {
+			return nil, false, domain.NewError(domain.ErrorPrecondition, "discover KubeBlocks", fmt.Sprintf("InstanceSet spec.roles[%d] has invalid role identity", index))
+		}
+		result[strings.ToLower(name)] = leader
+		hasLeader = hasLeader || leader
+	}
+	return result, hasLeader, nil
+}
+
+func kubeBlocksMemberRole(instanceSet *unstructured.Unstructured, podName string) (string, error) {
+	members, found, err := unstructured.NestedSlice(instanceSet.Object, "status", "membersStatus")
+	if err != nil {
+		return "", domain.WrapError(domain.ErrorPrecondition, "discover KubeBlocks", "read InstanceSet member roles", err)
+	}
+	if !found {
+		return "", nil
+	}
+	for index, value := range members {
+		member, ok := value.(map[string]any)
+		if !ok {
+			return "", domain.NewError(domain.ErrorPrecondition, "discover KubeBlocks", fmt.Sprintf("InstanceSet status.membersStatus[%d] is malformed", index))
+		}
+		name, _, nameErr := unstructured.NestedString(member, "podName")
+		if nameErr != nil {
+			return "", domain.WrapError(domain.ErrorPrecondition, "discover KubeBlocks", fmt.Sprintf("read InstanceSet member %d Pod name", index), nameErr)
+		}
+		if name != podName {
+			continue
+		}
+		role, _, roleErr := unstructured.NestedString(member, "role", "name")
+		if roleErr != nil {
+			return "", domain.WrapError(domain.ErrorPrecondition, "discover KubeBlocks", fmt.Sprintf("read InstanceSet member %s role", podName), roleErr)
+		}
+		return strings.ToLower(role), nil
+	}
+	return "", nil
 }
 
 func kubeBlocksComponent(pod *corev1.Pod) string {
@@ -793,6 +899,9 @@ func (m *Manager) vmClusterWorkload(ctx context.Context, pod *corev1.Pod, owner,
 		return domain.WorkloadSpec{}, domain.NewError(domain.ErrorPrecondition, "discover VMCluster", fmt.Sprintf("StatefulSet %s/%s has no supported VMCluster component", pod.Namespace, sts.Name))
 	}
 	originalPaused := false
+	originalPausedConfigured := false
+	originalClusterPaused := false
+	originalClusterPausedConfigured := false
 	var vmUID types.UID
 	if m.dynamic != nil {
 		gvr, parseErr := kube.ParseGroupVersionResource(vmClusterAPIVersion, vmClusterResource)
@@ -805,6 +914,9 @@ func (m *Manager) vmClusterWorkload(ctx context.Context, pod *corev1.Pod, owner,
 		}
 		vmUID = vm.GetUID()
 		originalPaused, _, _ = unstructured.NestedBool(vm.Object, "spec", component, "paused")
+		_, originalPausedConfigured, _ = unstructured.NestedBool(vm.Object, "spec", component, "paused")
+		originalClusterPaused, _, _ = unstructured.NestedBool(vm.Object, "spec", "paused")
+		_, originalClusterPausedConfigured, _ = unstructured.NestedBool(vm.Object, "spec", "paused")
 	}
 	return domain.WorkloadSpec{
 		Adapter:          domain.WorkloadVMCluster,
@@ -814,12 +926,15 @@ func (m *Manager) vmClusterWorkload(ctx context.Context, pod *corev1.Pod, owner,
 		Ordinal:          base.Ordinal,
 		AffectedPods:     base.AffectedPods,
 		VMCluster: &domain.VMClusterSpec{
-			APIVersion:       vmClusterAPIVersion,
-			Name:             parent.Name,
-			UID:              vmUID,
-			Component:        component,
-			OriginalPaused:   originalPaused,
-			OriginalReplicas: valueOrDefault(base.OriginalReplicas, 1),
+			APIVersion:                      vmClusterAPIVersion,
+			Name:                            parent.Name,
+			UID:                             vmUID,
+			Component:                       component,
+			OriginalPaused:                  originalPaused,
+			OriginalPausedConfigured:        originalPausedConfigured,
+			OriginalClusterPaused:           originalClusterPaused,
+			OriginalClusterPausedConfigured: originalClusterPausedConfigured,
+			OriginalReplicas:                valueOrDefault(base.OriginalReplicas, 1),
 		},
 	}, nil
 }
@@ -1346,7 +1461,67 @@ func (m *Manager) resumeVMCluster(ctx context.Context, session *domain.Session) 
 			return err
 		}
 	}
-	return m.restoreVMClusterPause(ctx, session)
+	if err := m.restoreVMClusterPause(ctx, session); err != nil {
+		return err
+	}
+	return m.waitForVMClusterOperational(ctx, session)
+}
+
+func (m *Manager) waitForVMClusterOperational(ctx context.Context, session *domain.Session) error {
+	vm := session.Spec.Workload().VMCluster
+	if vm == nil {
+		return domain.NewError(domain.ErrorInternal, "wait for VMCluster", "session lacks VMCluster state")
+	}
+	if m.dynamic == nil {
+		return domain.NewError(domain.ErrorPrecondition, "wait for VMCluster", "dynamic client is required for convergence checks")
+	}
+	gvr, err := kube.ParseGroupVersionResource(vm.APIVersion, vmClusterResource)
+	if err != nil {
+		return err
+	}
+	resource := m.dynamic.Resource(gvr).Namespace(session.Spec.Workload().Pod.Namespace)
+	return kube.WaitFor(ctx, m.poll, fmt.Sprintf("VMCluster %s/%s convergence", session.Spec.Workload().Pod.Namespace, vm.Name), func(waitCtx context.Context) (bool, error) {
+		object, getErr := resource.Get(waitCtx, vm.Name, metav1.GetOptions{})
+		if getErr != nil {
+			return false, domain.WrapError(domain.ErrorKubernetes, "wait for VMCluster", "read VMCluster", getErr)
+		}
+		if vm.UID != "" && object.GetUID() != vm.UID {
+			return false, domain.NewError(domain.ErrorConflict, "wait for VMCluster", fmt.Sprintf("VMCluster %s/%s UID changed", object.GetNamespace(), object.GetName()))
+		}
+		observedGeneration, found, nestedErr := unstructured.NestedInt64(object.Object, "status", "observedGeneration")
+		if nestedErr != nil {
+			return false, domain.WrapError(domain.ErrorPrecondition, "wait for VMCluster", "read observed generation", nestedErr)
+		}
+		if !found || observedGeneration < object.GetGeneration() {
+			return false, nil
+		}
+		currentClusterPaused, clusterPausedFound, nestedErr := unstructured.NestedBool(object.Object, "spec", "paused")
+		if nestedErr != nil {
+			return false, domain.WrapError(domain.ErrorPrecondition, "wait for VMCluster", "read top-level pause state", nestedErr)
+		}
+		if vm.OriginalClusterPausedConfigured {
+			if !clusterPausedFound || currentClusterPaused != vm.OriginalClusterPaused {
+				return false, domain.NewError(domain.ErrorConflict, "wait for VMCluster", fmt.Sprintf("VMCluster %s/%s top-level paused changed from expected %t to %t", object.GetNamespace(), object.GetName(), vm.OriginalClusterPaused, currentClusterPaused))
+			}
+		} else if clusterPausedFound && currentClusterPaused {
+			return false, domain.NewError(domain.ErrorConflict, "wait for VMCluster", fmt.Sprintf("VMCluster %s/%s was paused externally during migration", object.GetNamespace(), object.GetName()))
+		}
+		clusterStatus, _, nestedErr := unstructured.NestedString(object.Object, "status", "clusterStatus")
+		if nestedErr != nil {
+			return false, domain.WrapError(domain.ErrorPrecondition, "wait for VMCluster", "read cluster status", nestedErr)
+		}
+		updateStatus, _, nestedErr := unstructured.NestedString(object.Object, "status", "updateStatus")
+		if nestedErr != nil {
+			return false, domain.WrapError(domain.ErrorPrecondition, "wait for VMCluster", "read update status", nestedErr)
+		}
+		if vm.OriginalClusterPausedConfigured && vm.OriginalClusterPaused {
+			// A top-level paused VMCluster intentionally remains outside the
+			// operator's operational state machine. The observed generation still
+			// fences us against an object replacement or a stale read.
+			return true, nil
+		}
+		return strings.EqualFold(clusterStatus, "operational") && strings.EqualFold(updateStatus, "operational"), nil
+	})
 }
 
 func (m *Manager) restoreVMClusterPause(ctx context.Context, session *domain.Session) error {

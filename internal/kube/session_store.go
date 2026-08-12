@@ -46,6 +46,7 @@ type SessionLock interface {
 	Context() context.Context
 	Err() error
 	Release(context.Context) error
+	Delete(context.Context) error
 }
 
 type ConfigMapSessionStore struct {
