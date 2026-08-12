@@ -102,6 +102,9 @@ func WaitFor(ctx context.Context, interval time.Duration, description string, co
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 	for {
+		if err := ctx.Err(); err != nil {
+			return domain.WrapError(domain.ErrorTimeout, "wait", fmt.Sprintf("timed out waiting for %s", description), err)
+		}
 		ready, err := condition(ctx)
 		if err != nil {
 			return err

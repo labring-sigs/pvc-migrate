@@ -253,7 +253,7 @@ func TestRuntimeErrorGuidanceAvoidsPVCInspection(t *testing.T) {
 func TestCleanupErrorGuidanceUsesActualLeaseName(t *testing.T) {
 	command := &guidanceErrorCommand{}
 	session := guidanceSession(domain.PhaseCompleted)
-	if err := reportCleanupError(command, session, app.CleanupOptions{DeleteSession: true}, domain.NewError(domain.ErrorKubernetes, "cleanup", "delete failed")); err == nil {
+	if err := reportCleanupError(command, session, app.CleanupOptions{DeleteSession: true}, domain.NewError(domain.ErrorKubernetes, "delete session", "delete failed")); err == nil {
 		t.Fatal("expected original cleanup error")
 	}
 	text := command.stderr.String()
@@ -265,5 +265,56 @@ func TestCleanupErrorGuidanceUsesActualLeaseName(t *testing.T) {
 	}
 	if strings.Contains(text, "get configmap,lease "+kube.SessionConfigMapName(session.ID)) {
 		t.Fatalf("guidance still uses ConfigMap name for Lease: %q", text)
+	}
+}
+
+func TestCleanupErrorGuidanceFindsJoinedLeaseDeletion(t *testing.T) {
+	command := &guidanceErrorCommand{}
+	session := guidanceSession(domain.PhaseCompleted)
+	cleanupErr := errors.Join(
+		domain.NewError(domain.ErrorKubernetes, "cleanup", "resource cleanup failed"),
+		domain.NewError(domain.ErrorKubernetes, "delete session lock", "Lease deletion failed"),
+	)
+	if err := reportCleanupError(command, session, app.CleanupOptions{DeleteSession: true}, cleanupErr); !errors.Is(err, cleanupErr) {
+		t.Fatalf("returned error=%v", err)
+	}
+	text := command.stderr.String()
+	if !strings.Contains(text, "session record removal") || !strings.Contains(text, "get lease "+kube.SessionLockName(session.ID)) {
+		t.Fatalf("guidance=%q", text)
+	}
+}
+
+func TestCleanupLockErrorGuidanceDescribesRetryableCleanup(t *testing.T) {
+	command := &guidanceErrorCommand{}
+	session := guidanceSession(domain.PhaseCompleted)
+	options := app.CleanupOptions{DeleteTemporary: true, DeleteRollback: true, Finalize: true, DeleteSession: true}
+	cleanupErr := domain.NewError(domain.ErrorKubernetes, "acquire session lock", "read Lease failed")
+	if err := reportCleanupError(command, session, options, cleanupErr); !errors.Is(err, cleanupErr) {
+		t.Fatalf("returned error=%v", err)
+	}
+	text := command.stderr.String()
+	for _, want := range []string{
+		"Cleanup stopped before confirmed completion",
+		"session status " + session.ID,
+		"session cleanup " + session.ID + " --delete-temporary --delete-rollback-pv --finalize --delete-session --dry-run",
+	} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("guidance=%q missing %q", text, want)
+		}
+	}
+	if strings.Contains(text, "session record removal") || strings.Contains(text, "cleanup-orphan") {
+		t.Fatalf("lock acquisition was misreported as record removal: %q", text)
+	}
+}
+
+func TestApprovalErrorGuidanceStatesProtectedActionDidNotStart(t *testing.T) {
+	command := &guidanceErrorCommand{}
+	approvalErr := domain.WrapError(domain.ErrorTimeout, "approval", "typed approval canceled", context.Canceled)
+	if err := reportApprovalError(command, approvalErr); !errors.Is(err, approvalErr) {
+		t.Fatalf("returned error=%v", err)
+	}
+	text := command.stderr.String()
+	if !strings.Contains(text, "before the protected action began") || !strings.Contains(text, "--dry-run") || !strings.Contains(text, "--yes") {
+		t.Fatalf("guidance=%q", text)
 	}
 }

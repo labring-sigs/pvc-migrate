@@ -133,9 +133,16 @@ func TestWaitForReadyErrorAndTimeout(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	err := WaitFor(ctx, time.Millisecond, "timeout", func(context.Context) (bool, error) { return false, nil })
+	calls = 0
+	err := WaitFor(ctx, time.Millisecond, "timeout", func(context.Context) (bool, error) {
+		calls++
+		return false, nil
+	})
 	if domain.CategoryOf(err) != domain.ErrorTimeout {
 		t.Fatalf("timeout category=%s error=%v", domain.CategoryOf(err), err)
+	}
+	if calls != 0 {
+		t.Fatalf("pre-canceled condition calls=%d", calls)
 	}
 }
 

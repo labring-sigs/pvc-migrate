@@ -14,8 +14,31 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes/fake"
+	coordinationclient "k8s.io/client-go/kubernetes/typed/coordination/v1"
 	clienttesting "k8s.io/client-go/testing"
 )
+
+type cancelAwareLeaseClient struct {
+	coordinationclient.LeaseInterface
+	started chan struct{}
+	lease   *coordinationv1.Lease
+	calls   int
+}
+
+func (c *cancelAwareLeaseClient) Get(ctx context.Context, _ string, _ metav1.GetOptions) (*coordinationv1.Lease, error) {
+	c.calls++
+	if c.calls == 1 {
+		close(c.started)
+		<-ctx.Done()
+		return nil, ctx.Err()
+	}
+	return c.lease.DeepCopy(), nil
+}
+
+func (c *cancelAwareLeaseClient) Update(_ context.Context, lease *coordinationv1.Lease, _ metav1.UpdateOptions) (*coordinationv1.Lease, error) {
+	c.lease = lease.DeepCopy()
+	return lease.DeepCopy(), nil
+}
 
 func TestConfigMapSessionStoreSessionLeaseContendsAndReleases(t *testing.T) {
 	ctx := context.Background()
@@ -190,6 +213,48 @@ func TestSessionLeaseRenewFailureFencesContext(t *testing.T) {
 	}
 	if err := lock.Release(context.Background()); domain.CategoryOf(err) != domain.ErrorKubernetes {
 		t.Fatalf("release after fencing error = %v", err)
+	}
+}
+
+func TestSessionLeaseCancellationStopsInFlightRenewal(t *testing.T) {
+	oldRenewEvery := sessionLeaseRenewEvery
+	oldDuration := sessionLeaseDuration
+	sessionLeaseRenewEvery = 5 * time.Millisecond
+	sessionLeaseDuration = 30 * time.Second
+	defer func() {
+		sessionLeaseRenewEvery = oldRenewEvery
+		sessionLeaseDuration = oldDuration
+	}()
+
+	const (
+		sessionID = "session-cancel-renew"
+		holder    = "holder"
+	)
+	leaseClient := &cancelAwareLeaseClient{
+		started: make(chan struct{}),
+		lease: &coordinationv1.Lease{
+			ObjectMeta: metav1.ObjectMeta{
+				Namespace: "system",
+				Name:      SessionLockName(sessionID),
+				Labels: map[string]string{
+					ManagedByLabel: ManagedByValue,
+					SessionKey:     sessionID,
+				},
+			},
+			Spec: coordinationv1.LeaseSpec{HolderIdentity: ptr(holder)},
+		},
+	}
+	lock := newSessionLease(context.Background(), leaseClient, "system", leaseClient.lease.Name, sessionID, holder)
+	select {
+	case <-leaseClient.started:
+	case <-time.After(time.Second):
+		t.Fatal("lease renewal did not start")
+	}
+	if err := lock.Release(context.Background()); err != nil {
+		t.Fatalf("release after cancellation: %v", err)
+	}
+	if err := lock.Err(); err != nil {
+		t.Fatalf("normal cancellation recorded as lease loss: %v", err)
 	}
 }
 

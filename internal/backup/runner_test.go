@@ -29,9 +29,11 @@ import (
 )
 
 type preflightObjectStore struct {
-	manifest []byte
-	puts     int
-	onPut    func()
+	manifest  []byte
+	puts      int
+	onPut     func()
+	getErr    error
+	deleteErr error
 }
 
 func (f *preflightObjectStore) HeadObject(context.Context, *s3.HeadObjectInput, ...func(*s3.Options)) (*s3.HeadObjectOutput, error) {
@@ -39,6 +41,9 @@ func (f *preflightObjectStore) HeadObject(context.Context, *s3.HeadObjectInput, 
 }
 
 func (f *preflightObjectStore) GetObject(_ context.Context, _ *s3.GetObjectInput, _ ...func(*s3.Options)) (*s3.GetObjectOutput, error) {
+	if f.getErr != nil {
+		return nil, f.getErr
+	}
 	if len(f.manifest) == 0 {
 		return nil, preflightMissingObject{}
 	}
@@ -53,7 +58,10 @@ func (f *preflightObjectStore) PutObject(context.Context, *s3.PutObjectInput, ..
 	return &s3.PutObjectOutput{ETag: aws.String("etag")}, nil
 }
 
-func (*preflightObjectStore) DeleteObject(context.Context, *s3.DeleteObjectInput, ...func(*s3.Options)) (*s3.DeleteObjectOutput, error) {
+func (f *preflightObjectStore) DeleteObject(context.Context, *s3.DeleteObjectInput, ...func(*s3.Options)) (*s3.DeleteObjectOutput, error) {
+	if f.deleteErr != nil {
+		return nil, f.deleteErr
+	}
 	return &s3.DeleteObjectOutput{}, nil
 }
 
@@ -89,6 +97,44 @@ func preflightFixture(t *testing.T, client objectstore.API) (kubernetes.Interfac
 		t.Fatal(err)
 	}
 	return fake.NewClientset(pvc, pv), Request{ID: "test", Namespace: "default", PVCName: "data", Store: store}
+}
+
+func TestRunWithCleanupTimeout(t *testing.T) {
+	t.Run("deadline bounds cleanup", func(t *testing.T) {
+		started := time.Now()
+		err := runWithCleanupTimeout(10*time.Millisecond, func(ctx context.Context) error {
+			<-ctx.Done()
+			return ctx.Err()
+		})
+		if domain.CategoryOf(err) != domain.ErrorTimeout || !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("error=%v category=%q", err, domain.CategoryOf(err))
+		}
+		if elapsed := time.Since(started); elapsed > time.Second {
+			t.Fatalf("cleanup elapsed=%v", elapsed)
+		}
+	})
+	t.Run("preserves cleanup error", func(t *testing.T) {
+		wantErr := domain.NewError(domain.ErrorConflict, "release lock", "ownership changed")
+		if err := runWithCleanupTimeout(time.Second, func(context.Context) error { return wantErr }); !errors.Is(err, wantErr) {
+			t.Fatalf("error=%v", err)
+		}
+	})
+	t.Run("nil cleanup", func(t *testing.T) {
+		if err := runWithCleanupTimeout(time.Second, nil); err != nil {
+			t.Fatal(err)
+		}
+	})
+}
+
+func TestRunBackupPreservesOperationAndLockCleanupErrors(t *testing.T) {
+	operationErr := errors.New("manifest read failed")
+	cleanupErr := errors.New("lock delete failed")
+	storeAPI := &preflightObjectStore{getErr: operationErr, deleteErr: cleanupErr}
+	client, request := preflightFixture(t, storeAPI)
+	err := runBackup(context.Background(), client, request, "pvc", "pv")
+	if !errors.Is(err, operationErr) || !errors.Is(err, cleanupErr) {
+		t.Fatalf("error=%v", err)
+	}
 }
 
 func TestPreflightRejectsOfflineMountedAndOnlineRWOP(t *testing.T) {
@@ -1032,5 +1078,31 @@ func TestClassifySyncErrorPreservesTimeoutCategory(t *testing.T) {
 				t.Fatalf("category=%s error=%v", domain.CategoryOf(err), err)
 			}
 		})
+	}
+}
+
+func TestClassifyToolAndLeaseErrorPreservesBothFailures(t *testing.T) {
+	toolErr := io.ErrUnexpectedEOF
+	for _, test := range []struct {
+		name     string
+		leaseErr error
+		category domain.ErrorCategory
+	}{
+		{name: "lease conflict", leaseErr: domain.NewError(domain.ErrorConflict, "renew", "ownership changed"), category: domain.ErrorConflict},
+		{name: "lease timeout", leaseErr: domain.NewError(domain.ErrorTimeout, "renew", "deadline"), category: domain.ErrorTimeout},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			leaseErrors := make(chan error, 1)
+			leaseErrors <- test.leaseErr
+			err := classifyToolAndLeaseError(context.Background(), "backup", toolErr, leaseErrors)
+			if domain.CategoryOf(err) != test.category || !errors.Is(err, test.leaseErr) || !errors.Is(err, toolErr) {
+				t.Fatalf("category=%s error=%v", domain.CategoryOf(err), err)
+			}
+		})
+	}
+
+	err := classifyToolAndLeaseError(context.Background(), "backup", toolErr, make(chan error))
+	if domain.CategoryOf(err) != domain.ErrorCopy || !errors.Is(err, toolErr) {
+		t.Fatalf("copy-only category=%s error=%v", domain.CategoryOf(err), err)
 	}
 }

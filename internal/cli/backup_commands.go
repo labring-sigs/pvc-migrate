@@ -120,8 +120,8 @@ func (r *rootState) newObjectTransferCommand(restore, forceOnline bool) *cobra.C
 				}
 				return writeTransferDryRunGuidance(cmd.ErrOrStderr(), use, flags.namespace, flags.pvc)
 			}
-			if err := r.confirm(cmd, flags.name); err != nil {
-				return reportTransferError(cmd, use, flags.namespace, flags.pvc, err)
+			if err := r.confirm(ctx, cmd, flags.name); err != nil {
+				return reportApprovalError(cmd, err)
 			}
 			err = backup.Run(ctx, runtime.clients.Kubernetes, request, restore)
 			if err != nil {

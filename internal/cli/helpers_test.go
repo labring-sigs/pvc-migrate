@@ -22,6 +22,17 @@ type cliFailingWriter struct {
 
 func (w cliFailingWriter) Write([]byte) (int, error) { return 0, w.err }
 
+type cliBlockingReader struct {
+	started chan struct{}
+	release chan struct{}
+}
+
+func (r cliBlockingReader) Read([]byte) (int, error) {
+	close(r.started)
+	<-r.release
+	return 0, io.EOF
+}
+
 func TestRootCommandSurfaceAndGlobalDefaults(t *testing.T) {
 	root := NewRoot(Options{Version: "test"})
 	wantCommands := []string{"activate", "backup", "completion", "copy", "final-sync", "live-backup", "migrate", "migrate-pod", "move", "rename", "reserve", "restore", "session", "version"}
@@ -305,13 +316,22 @@ func TestRootContextTimeoutModes(t *testing.T) {
 func TestConfirmationPaths(t *testing.T) {
 	t.Run("assume yes", func(t *testing.T) {
 		state := &rootState{global: globals{assumeYes: true}}
-		if err := state.confirm(&cobra.Command{}, "data"); err != nil {
+		if err := state.confirm(context.Background(), &cobra.Command{}, "data"); err != nil {
 			t.Fatal(err)
+		}
+	})
+	t.Run("canceled assume yes", func(t *testing.T) {
+		state := &rootState{global: globals{assumeYes: true}}
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		err := state.confirm(ctx, &cobra.Command{}, "data")
+		if domain.CategoryOf(err) != domain.ErrorTimeout || !errors.Is(err, context.Canceled) {
+			t.Fatalf("error=%v category=%q", err, domain.CategoryOf(err))
 		}
 	})
 	t.Run("empty identity", func(t *testing.T) {
 		state := &rootState{}
-		if err := state.confirm(&cobra.Command{}, ""); domain.CategoryOf(err) != domain.ErrorValidation {
+		if err := state.confirm(context.Background(), &cobra.Command{}, ""); domain.CategoryOf(err) != domain.ErrorValidation {
 			t.Fatalf("error=%v category=%q", err, domain.CategoryOf(err))
 		}
 	})
@@ -320,7 +340,7 @@ func TestConfirmationPaths(t *testing.T) {
 		command := &cobra.Command{}
 		command.SetIn(strings.NewReader("data\n"))
 		command.SetErr(&prompt)
-		if err := (&rootState{}).confirm(command, "data"); err != nil {
+		if err := (&rootState{}).confirm(context.Background(), command, "data"); err != nil {
 			t.Fatal(err)
 		}
 		if prompt.String() != "Type data to approve: " {
@@ -331,7 +351,7 @@ func TestConfirmationPaths(t *testing.T) {
 		command := &cobra.Command{}
 		command.SetIn(strings.NewReader("other\n"))
 		command.SetErr(io.Discard)
-		if err := (&rootState{}).confirm(command, "data"); domain.CategoryOf(err) != domain.ErrorPrecondition {
+		if err := (&rootState{}).confirm(context.Background(), command, "data"); domain.CategoryOf(err) != domain.ErrorPrecondition {
 			t.Fatalf("error=%v category=%q", err, domain.CategoryOf(err))
 		}
 	})
@@ -339,7 +359,7 @@ func TestConfirmationPaths(t *testing.T) {
 		command := &cobra.Command{}
 		command.SetIn(strings.NewReader(""))
 		command.SetErr(io.Discard)
-		err := (&rootState{}).confirm(command, "data")
+		err := (&rootState{}).confirm(context.Background(), command, "data")
 		if domain.CategoryOf(err) != domain.ErrorPrecondition || !errors.Is(err, io.EOF) {
 			t.Fatalf("error=%v category=%q", err, domain.CategoryOf(err))
 		}
@@ -348,8 +368,44 @@ func TestConfirmationPaths(t *testing.T) {
 		wantErr := errors.New("closed")
 		command := &cobra.Command{}
 		command.SetErr(cliFailingWriter{err: wantErr})
-		if err := (&rootState{}).confirm(command, "data"); !errors.Is(err, wantErr) {
+		if err := (&rootState{}).confirm(context.Background(), command, "data"); !errors.Is(err, wantErr) {
 			t.Fatalf("error=%v want=%v", err, wantErr)
+		}
+	})
+	t.Run("canceled while waiting for input", func(t *testing.T) {
+		reader := cliBlockingReader{started: make(chan struct{}), release: make(chan struct{})}
+		defer close(reader.release)
+		command := &cobra.Command{}
+		command.SetIn(reader)
+		command.SetErr(io.Discard)
+		ctx, cancel := context.WithCancel(context.Background())
+		result := make(chan error, 1)
+		go func() { result <- (&rootState{}).confirm(ctx, command, "data") }()
+		select {
+		case <-reader.started:
+		case <-time.After(time.Second):
+			t.Fatal("approval did not start reading input")
+		}
+		cancel()
+		var err error
+		select {
+		case err = <-result:
+		case <-time.After(time.Second):
+			t.Fatal("approval did not stop after cancellation")
+		}
+		if domain.CategoryOf(err) != domain.ErrorTimeout || !errors.Is(err, context.Canceled) {
+			t.Fatalf("error=%v category=%q", err, domain.CategoryOf(err))
+		}
+	})
+	t.Run("canceled input never approves", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		command := &cobra.Command{}
+		command.SetIn(strings.NewReader("data\n"))
+		command.SetErr(io.Discard)
+		err := (&rootState{}).confirm(ctx, command, "data")
+		if domain.CategoryOf(err) != domain.ErrorTimeout || !errors.Is(err, context.Canceled) {
+			t.Fatalf("error=%v category=%q", err, domain.CategoryOf(err))
 		}
 	})
 }

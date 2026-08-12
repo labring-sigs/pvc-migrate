@@ -187,6 +187,9 @@ func (l *sessionLease) renewLoop() {
 			return
 		case <-ticker.C:
 			if err := l.renew(); err != nil {
+				if l.ctx.Err() != nil {
+					return
+				}
 				l.markLost(err)
 				return
 			}
@@ -195,7 +198,7 @@ func (l *sessionLease) renewLoop() {
 }
 
 func (l *sessionLease) renew() error {
-	renewCtx, cancel := context.WithTimeout(context.Background(), sessionLeaseRenewTimeout())
+	renewCtx, cancel := context.WithTimeout(l.ctx, sessionLeaseRenewTimeout())
 	defer cancel()
 	lease, err := l.leases.Get(renewCtx, l.name, metav1.GetOptions{})
 	if apierrors.IsNotFound(err) {

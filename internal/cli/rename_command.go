@@ -89,8 +89,8 @@ func (r *rootState) newPVCIdentityCommand(move bool) *cobra.Command {
 			if dryRun {
 				return printPlanResult(cmd, runtime, plan)
 			}
-			if err := r.confirm(cmd, sourcePVC); err != nil {
-				return reportPreSessionError(cmd, err)
+			if err := r.confirm(ctx, cmd, sourcePVC); err != nil {
+				return reportApprovalError(cmd, err)
 			}
 			session, err := runtime.service.CreateSession(ctx, plan, false)
 			if err != nil {
