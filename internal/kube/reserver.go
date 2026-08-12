@@ -508,6 +508,25 @@ func PodUsesPVC(pod *corev1.Pod, claim string) bool {
 	return false
 }
 
+func ActivePodUsesPVC(pod *corev1.Pod, claim string) bool {
+	return pod.Status.Phase != corev1.PodSucceeded &&
+		pod.Status.Phase != corev1.PodFailed &&
+		PodUsesPVC(pod, claim)
+}
+
+// PodBlocksPVCDeletion follows the PVC protection controller's boundary for
+// ordinary PVC volumes: only a scheduled Pod can have reached kubelet and
+// mounted the claim.
+func PodBlocksPVCDeletion(pod *corev1.Pod, claim string) bool {
+	return pod.Spec.NodeName != "" && PodUsesPVC(pod, claim)
+}
+
+// PodPreventsSafePVCDeletion includes active Pods that may still be scheduled
+// and terminal Pods that remain inside the PVC protection boundary.
+func PodPreventsSafePVCDeletion(pod *corev1.Pod, claim string) bool {
+	return ActivePodUsesPVC(pod, claim) || PodBlocksPVCDeletion(pod, claim)
+}
+
 func nodeRequirementMatches(requirement corev1.NodeSelectorRequirement, actual string, exists bool) bool {
 	switch requirement.Operator {
 	case corev1.NodeSelectorOpIn:

@@ -557,16 +557,22 @@ func TestRestoreLockRenewalPreservesTimeoutCategory(t *testing.T) {
 
 func TestOfflinePreflightIgnoresTerminalPVCConsumers(t *testing.T) {
 	client, request := preflightFixture(t, &preflightObjectStore{})
-	for name, phase := range map[string]corev1.PodPhase{
-		"completed": corev1.PodSucceeded,
-		"failed":    corev1.PodFailed,
+	for _, podState := range []struct {
+		name     string
+		phase    corev1.PodPhase
+		nodeName string
+	}{
+		{name: "completed-unscheduled", phase: corev1.PodSucceeded},
+		{name: "failed-unscheduled", phase: corev1.PodFailed},
+		{name: "completed-scheduled", phase: corev1.PodSucceeded, nodeName: "node-a"},
+		{name: "failed-scheduled", phase: corev1.PodFailed, nodeName: "node-a"},
 	} {
 		pod := &corev1.Pod{
-			ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: name},
-			Spec: corev1.PodSpec{Volumes: []corev1.Volume{{VolumeSource: corev1.VolumeSource{
+			ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: podState.name},
+			Spec: corev1.PodSpec{NodeName: podState.nodeName, Volumes: []corev1.Volume{{VolumeSource: corev1.VolumeSource{
 				PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: "data"},
 			}}}},
-			Status: corev1.PodStatus{Phase: phase},
+			Status: corev1.PodStatus{Phase: podState.phase},
 		}
 		if _, err := client.CoreV1().Pods("default").Create(context.Background(), pod, metav1.CreateOptions{}); err != nil {
 			t.Fatal(err)

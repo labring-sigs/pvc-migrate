@@ -176,6 +176,46 @@ func TestCopySupportsOfflineAndOnlineModesAcrossNamespaces(t *testing.T) {
 	}
 }
 
+func TestPlanUsesPVCProtectionBoundaryForTerminalConsumers(t *testing.T) {
+	for _, test := range []struct {
+		name      string
+		operation domain.Operation
+		nodeName  string
+		wantReady bool
+	}{
+		{name: "migration blocks scheduled terminal Pod", operation: domain.OperationMigrate, nodeName: "node-a", wantReady: false},
+		{name: "migration ignores unscheduled terminal Pod", operation: domain.OperationMigrate, wantReady: true},
+		{name: "offline copy ignores scheduled terminal Pod", operation: domain.OperationCopy, nodeName: "node-a", wantReady: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			objects := append(plannerObjects("2Gi"), &corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{Namespace: "app", Name: "terminal"},
+				Spec: corev1.PodSpec{NodeName: test.nodeName, Volumes: []corev1.Volume{{
+					VolumeSource: corev1.VolumeSource{PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: "data"}},
+				}}},
+				Status: corev1.PodStatus{Phase: corev1.PodSucceeded},
+			})
+			plan, err := New(plannerClient(objects...), nil).Plan(context.Background(), Options{
+				Operation:          test.operation,
+				SessionID:          "terminal-consumer",
+				SourceNamespace:    "app",
+				TemporaryNamespace: "system",
+				StagingNamespace:   "system",
+				SessionNamespace:   "system",
+				SourcePVCs:         []string{"data"},
+				TargetNode:         "node-b",
+				DestinationClass:   "fast",
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if plan.Ready != test.wantReady {
+				t.Fatalf("ready=%t checks=%#v", plan.Ready, plan.Checks)
+			}
+		})
+	}
+}
+
 func TestOnlineCopyRejectsUnscheduledRWOConsumer(t *testing.T) {
 	objects := append(plannerObjects("2Gi"), &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{Namespace: "app", Name: "pending-writer"},

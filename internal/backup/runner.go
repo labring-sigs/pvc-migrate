@@ -1020,21 +1020,12 @@ func pvcConsumerDetails(ctx context.Context, client kubernetes.Interface, namesp
 	nodes := make([]string, 0)
 	for i := range pods.Items {
 		pod := &pods.Items[i]
-		// Succeeded and Failed Pods have no running containers that can write to
-		// their volumes. Keeping them out of the consumer set prevents stale
-		// terminal objects from blocking an offline operation while active and
-		// pending Pods remain protected.
-		if (pod.Status.Phase == corev1.PodSucceeded || pod.Status.Phase == corev1.PodFailed) && pod.Spec.NodeName == "" {
+		if !kube.ActivePodUsesPVC(pod, claim) {
 			continue
 		}
-		for _, volume := range pod.Spec.Volumes {
-			if volume.PersistentVolumeClaim != nil && volume.PersistentVolumeClaim.ClaimName == claim {
-				consumers = append(consumers, pod.Name)
-				if pod.Spec.NodeName != "" {
-					nodes = append(nodes, pod.Spec.NodeName)
-				}
-				break
-			}
+		consumers = append(consumers, pod.Name)
+		if pod.Spec.NodeName != "" {
+			nodes = append(nodes, pod.Spec.NodeName)
 		}
 	}
 	return consumers, nodes, nil

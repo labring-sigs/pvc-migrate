@@ -314,6 +314,31 @@ func TestEnsureNoConsumersFailsOnEmptyPodList(t *testing.T) {
 	}
 }
 
+func TestEnsureNoConsumersUsesPVCProtectionBoundaryForTerminalPods(t *testing.T) {
+	for _, test := range []struct {
+		name     string
+		nodeName string
+		wantErr  bool
+	}{
+		{name: "scheduled", nodeName: "node-a", wantErr: true},
+		{name: "unscheduled", wantErr: false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			pod := &corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{Namespace: "app", Name: "terminal"},
+				Spec: corev1.PodSpec{NodeName: test.nodeName, Volumes: []corev1.Volume{{
+					VolumeSource: corev1.VolumeSource{PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: "data"}},
+				}}},
+				Status: corev1.PodStatus{Phase: corev1.PodSucceeded},
+			}
+			err := NewSwitcher(fake.NewClientset(pod)).ensureNoConsumers(context.Background(), "app", "data")
+			if (err != nil) != test.wantErr {
+				t.Fatalf("error=%v, wantErr=%t", err, test.wantErr)
+			}
+		})
+	}
+}
+
 type nilPodListClient struct {
 	kubernetes.Interface
 }
