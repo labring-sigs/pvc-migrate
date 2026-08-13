@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"log/slog"
 	"sync"
@@ -25,6 +26,28 @@ func newLogOutputWriter(target io.Writer, structured func() bool) io.Writer {
 		target = io.Discard
 	}
 	return &logOutputWriter{target: target, structured: structured}
+}
+
+// WriteCommandError keeps top-level command failures in the active stderr
+// format after Cobra has applied persistent flags.
+func WriteCommandError(w io.Writer, err error) {
+	if writer, ok := w.(*logOutputWriter); ok {
+		writer.writeCommandError(err)
+		return
+	}
+	_, _ = fmt.Fprintf(w, "error: %v\n", err)
+}
+
+func (w *logOutputWriter) writeCommandError(err error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.structured != nil && w.structured() {
+		record := slog.NewRecord(time.Now(), slog.LevelError, "command failed", 0)
+		record.AddAttrs(slog.String("error", err.Error()))
+		_ = slog.NewJSONHandler(w.target, nil).Handle(context.Background(), record)
+		return
+	}
+	_, _ = fmt.Fprintf(w.target, "error: %v\n", err)
 }
 
 func (w *logOutputWriter) Write(data []byte) (int, error) {

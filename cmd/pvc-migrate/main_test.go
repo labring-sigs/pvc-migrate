@@ -5,9 +5,10 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"strings"
+	"io"
 	"testing"
 
+	"github.com/labring-sigs/pvc-migrate/internal/cli"
 	"github.com/labring-sigs/pvc-migrate/internal/domain"
 )
 
@@ -26,19 +27,44 @@ func TestCommandExitCode(t *testing.T) {
 	}
 }
 
-func TestWriteCommandErrorUsesRequestedLogFormat(t *testing.T) {
-	var jsonOutput bytes.Buffer
-	writeCommandError(&jsonOutput, []string{"--log-format=json"}, errors.New("planned failure"))
-	var entry map[string]string
-	if err := json.Unmarshal(jsonOutput.Bytes(), &entry); err != nil {
-		t.Fatalf("JSON error=%v output=%s", err, jsonOutput.String())
+func TestWriteCommandErrorUsesFinalLogFormat(t *testing.T) {
+	tests := []struct {
+		name       string
+		args       []string
+		structured bool
+	}{
+		{
+			name: "text final value",
+			args: []string{"--log-format", "json", "--log-format", "text", "version"},
+		},
+		{
+			name:       "json final value",
+			args:       []string{"--log-format", "text", "--log-format", "json", "version"},
+			structured: true,
+		},
 	}
-	if entry["level"] != "ERROR" || entry["error"] != "planned failure" {
-		t.Fatalf("entry=%v", entry)
-	}
-	var textOutput bytes.Buffer
-	writeCommandError(&textOutput, nil, errors.New("planned failure"))
-	if !strings.Contains(textOutput.String(), "error: planned failure") {
-		t.Fatalf("text output=%q", textOutput.String())
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			var stderr bytes.Buffer
+			command := cli.NewRoot(cli.Options{Version: "test", ErrOut: &stderr, Out: io.Discard})
+			command.SetArgs(test.args)
+			if err := command.Execute(); err != nil {
+				t.Fatal(err)
+			}
+			cli.WriteCommandError(command.ErrOrStderr(), errors.New("planned failure"))
+			if !test.structured {
+				if output := stderr.String(); output != "error: planned failure\n" {
+					t.Fatalf("text output=%q", output)
+				}
+				return
+			}
+			var entry map[string]any
+			if err := json.Unmarshal(stderr.Bytes(), &entry); err != nil {
+				t.Fatalf("JSON error=%v output=%s", err, stderr.String())
+			}
+			if entry["level"] != "ERROR" || entry["msg"] != "command failed" || entry["error"] != "planned failure" {
+				t.Fatalf("entry=%v", entry)
+			}
+		})
 	}
 }

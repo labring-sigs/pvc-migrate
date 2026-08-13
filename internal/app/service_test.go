@@ -36,6 +36,34 @@ func (f *failingUpdateStore) Update(context.Context, *domain.Session) error {
 	return errors.New("injected session update failure")
 }
 
+type fakeSessionLocker struct {
+	memoryStore
+	lock kube.SessionLock
+}
+
+func (f *fakeSessionLocker) AcquireSessionLock(context.Context, string, string) (kube.SessionLock, error) {
+	return f.lock, nil
+}
+
+type fakeSessionLock struct {
+	ctx        context.Context
+	err        error
+	releaseErr error
+}
+
+func (f *fakeSessionLock) Context() context.Context {
+	if f.ctx != nil {
+		return f.ctx
+	}
+	return context.Background()
+}
+
+func (f *fakeSessionLock) Err() error { return f.err }
+
+func (f *fakeSessionLock) Release(context.Context) error { return f.releaseErr }
+
+func (f *fakeSessionLock) Delete(context.Context) error { return nil }
+
 func (m *contextAwareStore) Update(ctx context.Context, session *domain.Session) error {
 	m.updateContextErr = ctx.Err()
 	if m.updateContextErr != nil {
@@ -84,6 +112,26 @@ func TestSessionLockSupportsMultiLevelReentry(t *testing.T) {
 	}
 	if calls != 3 {
 		t.Fatalf("nested calls=%d, want 3", calls)
+	}
+}
+
+func TestSessionLockReleaseFailureIsLoggedAsWarning(t *testing.T) {
+	var logs bytes.Buffer
+	releaseErr := errors.New("lease update denied")
+	service := &Service{
+		store:  &fakeSessionLocker{lock: &fakeSessionLock{releaseErr: releaseErr}},
+		config: Config{Logger: slog.New(slog.NewTextHandler(&logs, nil))},
+	}
+	err := service.withSessionIDLock(context.Background(), "system", "session", func(context.Context) error { return nil })
+	if !errors.Is(err, releaseErr) {
+		t.Fatalf("error=%v, want release error", err)
+	}
+	output := logs.String()
+	if !strings.Contains(output, "session lock release failed") || !strings.Contains(output, releaseErr.Error()) {
+		t.Fatalf("warning log missing release failure: %q", output)
+	}
+	if strings.Contains(output, "session lock released") {
+		t.Fatalf("success log emitted after release failure: %q", output)
 	}
 }
 

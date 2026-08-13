@@ -144,7 +144,11 @@ func (s *Service) withSessionIDLock(ctx context.Context, namespace, id string, f
 	releaseCtx, cancelRelease := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancelRelease()
 	releaseErr := lock.Release(releaseCtx)
-	s.logInfo("session lock released", "session", id, "namespace", namespace)
+	if releaseErr != nil {
+		s.logWarn("session lock release failed", "session", id, "namespace", namespace, "error", releaseErr)
+	} else {
+		s.logInfo("session lock released", "session", id, "namespace", namespace)
+	}
 	return errors.Join(operationErr, releaseErr)
 }
 
@@ -2034,6 +2038,12 @@ func (s *Service) persist(ctx context.Context, session *domain.Session) error {
 func (s *Service) logInfo(message string, args ...any) {
 	if s != nil && s.config.Logger != nil {
 		s.config.Logger.Info(message, args...)
+	}
+}
+
+func (s *Service) logWarn(message string, args ...any) {
+	if s != nil && s.config.Logger != nil {
+		s.config.Logger.Warn(message, args...)
 	}
 }
 

@@ -2,9 +2,6 @@ package main
 
 import (
 	"context"
-	"encoding/json"
-	"fmt"
-	"io"
 	"os"
 	"os/signal"
 	"sync"
@@ -34,29 +31,9 @@ func run() int {
 	})
 	err := command.ExecuteContext(ctx)
 	if err != nil {
-		writeCommandError(os.Stderr, os.Args[1:], err)
+		cli.WriteCommandError(command.ErrOrStderr(), err)
 	}
 	return commandExitCode(ctx, signalExitCode, err)
-}
-
-func writeCommandError(w io.Writer, args []string, err error) {
-	if logFormatJSON(args) {
-		_ = json.NewEncoder(w).Encode(map[string]string{"level": "ERROR", "msg": "command failed", "error": err.Error()})
-		return
-	}
-	_, _ = fmt.Fprintf(w, "error: %v\n", err)
-}
-
-func logFormatJSON(args []string) bool {
-	for index := 0; index < len(args); index++ {
-		if args[index] == "--log-format" && index+1 < len(args) {
-			return args[index+1] == "json"
-		}
-		if args[index] == "--log-format=json" {
-			return true
-		}
-	}
-	return false
 }
 
 func commandExitCode(ctx context.Context, signalExitCode func() int, err error) int {
