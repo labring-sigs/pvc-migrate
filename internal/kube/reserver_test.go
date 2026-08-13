@@ -1,7 +1,10 @@
 package kube
 
 import (
+	"bytes"
 	"context"
+	"log/slog"
+	"strings"
 	"testing"
 	"time"
 
@@ -14,6 +17,18 @@ import (
 	"k8s.io/client-go/kubernetes/fake"
 	clienttesting "k8s.io/client-go/testing"
 )
+
+func TestReserverWaitLogsBeforePolling(t *testing.T) {
+	var logs bytes.Buffer
+	reserver := NewReserver(fake.NewClientset()).WithLogger(slog.New(slog.NewTextHandler(&logs, nil)))
+	reserver.poll = time.Millisecond
+	if err := reserver.waitFor(context.Background(), "reservation Pod readiness", func(context.Context) (bool, error) { return true, nil }); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(logs.String(), "waiting for Kubernetes resource") || !strings.Contains(logs.String(), "reservation Pod readiness") {
+		t.Fatalf("logs=%q", logs.String())
+	}
+}
 
 func TestReserveVolumeProvisionsOnTargetAndRetainsBothPVs(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)

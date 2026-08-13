@@ -1,7 +1,9 @@
 package planner
 
 import (
+	"bytes"
 	"context"
+	"log/slog"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -41,6 +43,33 @@ func TestDestinationPVCNameTrimsTruncatedDNSBoundaries(t *testing.T) {
 	long := destinationPVCName(Options{SessionID: "migration-20260807"}, strings.Repeat("a", 250), 0)
 	if problems := validation.IsDNS1123Subdomain(long); len(problems) != 0 || strings.HasSuffix(long, "-") {
 		t.Fatalf("long name=%q problems=%v", long, problems)
+	}
+}
+
+func TestPlanLogsLongRunningChecksBeforeTheyRun(t *testing.T) {
+	var logs bytes.Buffer
+	planner := New(plannerClient(plannerObjects("2Gi")...), nil).WithLogger(slog.New(slog.NewTextHandler(&logs, nil)))
+	plan, err := planner.Plan(context.Background(), Options{
+		SessionID: "migration", SourceNamespace: "app", TemporaryNamespace: "system", StagingNamespace: "system", SessionNamespace: "system",
+		SourcePVCs: []string{"data"}, TargetNode: "node-b", DestinationClass: "fast",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !plan.Ready {
+		t.Fatalf("checks=%#v", plan.Checks)
+	}
+	output := logs.String()
+	for _, event := range []string{
+		"migration planning started",
+		"loading migration cluster inventory",
+		"loading CSI storage capacity",
+		"validating migration cluster policies",
+		"checking migration RBAC permissions",
+	} {
+		if !strings.Contains(output, event) {
+			t.Fatalf("logs missing %q: %s", event, output)
+		}
 	}
 }
 

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"sort"
 	"strconv"
 	"strings"
@@ -65,10 +66,24 @@ type Manager struct {
 	dynamic   dynamic.Interface
 	discovery discovery.DiscoveryInterface
 	poll      time.Duration
+	logger    *slog.Logger
 }
 
 func NewManager(typed kubernetes.Interface, dynamicClient dynamic.Interface, discoveryClient discovery.DiscoveryInterface) *Manager {
 	return &Manager{typed: typed, dynamic: dynamicClient, discovery: discoveryClient, poll: time.Second}
+}
+
+// WithLogger enables progress logs for controller reconciliation waits.
+func (m *Manager) WithLogger(logger *slog.Logger) *Manager {
+	m.logger = logger
+	return m
+}
+
+func (m *Manager) waitFor(ctx context.Context, description string, condition func(context.Context) (bool, error)) error {
+	if m.logger != nil {
+		m.logger.Info("waiting for workload controller", "description", description)
+	}
+	return kube.WaitFor(ctx, m.poll, description, condition)
 }
 
 func (m *Manager) Discover(ctx context.Context, options DiscoverOptions) (domain.WorkloadSpec, error) {
@@ -1130,7 +1145,7 @@ func (m *Manager) createAndWaitOps(ctx context.Context, session *domain.Session,
 			if err := resource.Delete(ctx, name, metav1.DeleteOptions{Preconditions: &metav1.Preconditions{UID: &uid}}); err != nil && !apierrors.IsNotFound(err) {
 				return domain.WrapError(domain.ErrorKubernetes, "KubeBlocks operation", fmt.Sprintf("delete failed OpsRequest %s", name), err)
 			}
-			if err := kube.WaitFor(ctx, m.poll, fmt.Sprintf("failed OpsRequest %s deletion", name), func(waitCtx context.Context) (bool, error) {
+			if err := m.waitFor(ctx, fmt.Sprintf("failed OpsRequest %s deletion", name), func(waitCtx context.Context) (bool, error) {
 				_, err := resource.Get(waitCtx, name, metav1.GetOptions{})
 				if apierrors.IsNotFound(err) {
 					return true, nil
@@ -1163,7 +1178,7 @@ func (m *Manager) createAndWaitOps(ctx context.Context, session *domain.Session,
 	} else if getErr != nil {
 		return domain.WrapError(domain.ErrorKubernetes, "KubeBlocks operation", fmt.Sprintf("read OpsRequest %s", name), getErr)
 	}
-	return kube.WaitFor(ctx, m.poll, fmt.Sprintf("KubeBlocks OpsRequest %s", name), func(waitCtx context.Context) (bool, error) {
+	return m.waitFor(ctx, fmt.Sprintf("KubeBlocks OpsRequest %s", name), func(waitCtx context.Context) (bool, error) {
 		current, readErr := resource.Get(waitCtx, name, metav1.GetOptions{})
 		if readErr != nil {
 			return false, domain.WrapError(domain.ErrorKubernetes, "KubeBlocks operation", "read OpsRequest status", readErr)
@@ -1228,7 +1243,7 @@ func (m *Manager) pauseStatefulSet(ctx context.Context, session *domain.Session)
 		return domain.WrapError(domain.ErrorKubernetes, "pause StatefulSet", "scale down", err)
 	}
 	for _, pod := range workload.AffectedPods {
-		if err := kube.WaitFor(ctx, m.poll, fmt.Sprintf("Pod %s/%s deletion", pod.Namespace, pod.Name), func(waitCtx context.Context) (bool, error) {
+		if err := m.waitFor(ctx, fmt.Sprintf("Pod %s/%s deletion", pod.Namespace, pod.Name), func(waitCtx context.Context) (bool, error) {
 			_, getErr := m.typed.CoreV1().Pods(pod.Namespace).Get(waitCtx, pod.Name, metav1.GetOptions{})
 			if apierrors.IsNotFound(getErr) {
 				return true, nil
@@ -1250,7 +1265,7 @@ func (m *Manager) pauseVictoriaLogs(ctx context.Context, session *domain.Session
 		return err
 	}
 	for _, pod := range workload.AffectedPods {
-		if err := kube.WaitFor(ctx, m.poll, fmt.Sprintf("Pod %s/%s deletion", pod.Namespace, pod.Name), func(waitCtx context.Context) (bool, error) {
+		if err := m.waitFor(ctx, fmt.Sprintf("Pod %s/%s deletion", pod.Namespace, pod.Name), func(waitCtx context.Context) (bool, error) {
 			_, getErr := m.typed.CoreV1().Pods(pod.Namespace).Get(waitCtx, pod.Name, metav1.GetOptions{})
 			if apierrors.IsNotFound(getErr) {
 				return true, nil
@@ -1275,7 +1290,7 @@ func (m *Manager) resumeStatefulSet(ctx context.Context, session *domain.Session
 		return domain.WrapError(domain.ErrorKubernetes, "resume StatefulSet", "restore replicas", err)
 	}
 	for _, ref := range workload.AffectedPods {
-		if err := kube.WaitFor(ctx, m.poll, fmt.Sprintf("Pod %s/%s readiness", ref.Namespace, ref.Name), func(waitCtx context.Context) (bool, error) {
+		if err := m.waitFor(ctx, fmt.Sprintf("Pod %s/%s readiness", ref.Namespace, ref.Name), func(waitCtx context.Context) (bool, error) {
 			pod, err := m.typed.CoreV1().Pods(ref.Namespace).Get(waitCtx, ref.Name, metav1.GetOptions{})
 			if apierrors.IsNotFound(err) {
 				return false, nil
@@ -1300,7 +1315,7 @@ func (m *Manager) resumeVictoriaLogs(ctx context.Context, session *domain.Sessio
 		return err
 	}
 	for _, ref := range workload.AffectedPods {
-		if err := kube.WaitFor(ctx, m.poll, fmt.Sprintf("Pod %s/%s readiness", ref.Namespace, ref.Name), func(waitCtx context.Context) (bool, error) {
+		if err := m.waitFor(ctx, fmt.Sprintf("Pod %s/%s readiness", ref.Namespace, ref.Name), func(waitCtx context.Context) (bool, error) {
 			pod, err := m.typed.CoreV1().Pods(ref.Namespace).Get(waitCtx, ref.Name, metav1.GetOptions{})
 			if apierrors.IsNotFound(err) {
 				return false, nil
@@ -1417,7 +1432,7 @@ func (m *Manager) pauseVMCluster(ctx context.Context, session *domain.Session) e
 		return workloadScaleError("pause VMCluster", "scale component StatefulSet", err)
 	}
 	for _, pod := range workload.AffectedPods {
-		if err := kube.WaitFor(ctx, m.poll, fmt.Sprintf("Pod %s/%s deletion", pod.Namespace, pod.Name), func(waitCtx context.Context) (bool, error) {
+		if err := m.waitFor(ctx, fmt.Sprintf("Pod %s/%s deletion", pod.Namespace, pod.Name), func(waitCtx context.Context) (bool, error) {
 			_, getErr := m.typed.CoreV1().Pods(pod.Namespace).Get(waitCtx, pod.Name, metav1.GetOptions{})
 			if apierrors.IsNotFound(getErr) {
 				return true, nil
@@ -1446,7 +1461,7 @@ func (m *Manager) resumeVMCluster(ctx context.Context, session *domain.Session) 
 		return workloadScaleError("resume VMCluster", "restore component StatefulSet", err)
 	}
 	for _, ref := range workload.AffectedPods {
-		if err := kube.WaitFor(ctx, m.poll, fmt.Sprintf("Pod %s/%s readiness", ref.Namespace, ref.Name), func(waitCtx context.Context) (bool, error) {
+		if err := m.waitFor(ctx, fmt.Sprintf("Pod %s/%s readiness", ref.Namespace, ref.Name), func(waitCtx context.Context) (bool, error) {
 			pod, err := m.typed.CoreV1().Pods(ref.Namespace).Get(waitCtx, ref.Name, metav1.GetOptions{})
 			if apierrors.IsNotFound(err) {
 				return false, nil
@@ -1478,7 +1493,7 @@ func (m *Manager) waitForVMClusterOperational(ctx context.Context, session *doma
 		return err
 	}
 	resource := m.dynamic.Resource(gvr).Namespace(session.Spec.Workload().Pod.Namespace)
-	return kube.WaitFor(ctx, m.poll, fmt.Sprintf("VMCluster %s/%s convergence", session.Spec.Workload().Pod.Namespace, vm.Name), func(waitCtx context.Context) (bool, error) {
+	return m.waitFor(ctx, fmt.Sprintf("VMCluster %s/%s convergence", session.Spec.Workload().Pod.Namespace, vm.Name), func(waitCtx context.Context) (bool, error) {
 		object, getErr := resource.Get(waitCtx, vm.Name, metav1.GetOptions{})
 		if getErr != nil {
 			return false, domain.WrapError(domain.ErrorKubernetes, "wait for VMCluster", "read VMCluster", getErr)
@@ -1746,7 +1761,7 @@ func (m *Manager) pauseGrafana(ctx context.Context, session *domain.Session) err
 		return workloadScaleError("pause Grafana", "scale Deployment", err)
 	}
 	for _, ref := range session.Spec.Workload().AffectedPods {
-		if err := kube.WaitFor(ctx, m.poll, fmt.Sprintf("Pod %s/%s deletion", ref.Namespace, ref.Name), func(waitCtx context.Context) (bool, error) {
+		if err := m.waitFor(ctx, fmt.Sprintf("Pod %s/%s deletion", ref.Namespace, ref.Name), func(waitCtx context.Context) (bool, error) {
 			_, getErr := m.typed.CoreV1().Pods(ref.Namespace).Get(waitCtx, ref.Name, metav1.GetOptions{})
 			if apierrors.IsNotFound(getErr) {
 				return true, nil
@@ -1771,7 +1786,7 @@ func (m *Manager) resumeGrafana(ctx context.Context, session *domain.Session) er
 		return err
 	}
 	var ready *corev1.Pod
-	if err := kube.WaitFor(ctx, m.poll, fmt.Sprintf("Grafana Deployment %s/%s readiness", session.Spec.Workload().Controller.Namespace, session.Spec.Workload().Controller.Name), func(waitCtx context.Context) (bool, error) {
+	if err := m.waitFor(ctx, fmt.Sprintf("Grafana Deployment %s/%s readiness", session.Spec.Workload().Controller.Namespace, session.Spec.Workload().Controller.Name), func(waitCtx context.Context) (bool, error) {
 		deployment, err := m.typed.AppsV1().Deployments(session.Spec.Workload().Controller.Namespace).Get(waitCtx, session.Spec.Workload().Controller.Name, metav1.GetOptions{})
 		if err != nil {
 			return false, err
@@ -1973,7 +1988,7 @@ func (m *Manager) pauseStandalone(ctx context.Context, session *domain.Session) 
 	if err := m.typed.CoreV1().Pods(ref.Namespace).Delete(ctx, ref.Name, options); err != nil && !apierrors.IsNotFound(err) {
 		return domain.WrapError(domain.ErrorKubernetes, "pause standalone Pod", "delete Pod", err)
 	}
-	return kube.WaitFor(ctx, m.poll, fmt.Sprintf("Pod %s/%s deletion", ref.Namespace, ref.Name), func(waitCtx context.Context) (bool, error) {
+	return m.waitFor(ctx, fmt.Sprintf("Pod %s/%s deletion", ref.Namespace, ref.Name), func(waitCtx context.Context) (bool, error) {
 		_, getErr := m.typed.CoreV1().Pods(ref.Namespace).Get(waitCtx, ref.Name, metav1.GetOptions{})
 		return apierrors.IsNotFound(getErr), ignoreNotFound(getErr)
 	})
@@ -2047,7 +2062,7 @@ func (m *Manager) resumeStandalone(ctx context.Context, session *domain.Session)
 		}
 	}
 	var ready *corev1.Pod
-	if err := kube.WaitFor(ctx, m.poll, fmt.Sprintf("Pod %s/%s readiness", pod.Namespace, pod.Name), func(waitCtx context.Context) (bool, error) {
+	if err := m.waitFor(ctx, fmt.Sprintf("Pod %s/%s readiness", pod.Namespace, pod.Name), func(waitCtx context.Context) (bool, error) {
 		current, getErr := m.typed.CoreV1().Pods(pod.Namespace).Get(waitCtx, pod.Name, metav1.GetOptions{})
 		if getErr != nil {
 			return false, getErr
@@ -2095,7 +2110,7 @@ func (m *Manager) pauseKubeBlocks(ctx context.Context, session *domain.Session) 
 		}
 		return m.VerifyPaused(ctx, session)
 	}
-	if err := kube.WaitFor(ctx, m.poll, fmt.Sprintf("KubeBlocks Pod %s/%s deletion", session.Spec.Workload().Pod.Namespace, session.Spec.Workload().Pod.Name), func(waitCtx context.Context) (bool, error) {
+	if err := m.waitFor(ctx, fmt.Sprintf("KubeBlocks Pod %s/%s deletion", session.Spec.Workload().Pod.Namespace, session.Spec.Workload().Pod.Name), func(waitCtx context.Context) (bool, error) {
 		_, getErr := m.typed.CoreV1().Pods(session.Spec.Workload().Pod.Namespace).Get(waitCtx, session.Spec.Workload().Pod.Name, metav1.GetOptions{})
 		if apierrors.IsNotFound(getErr) {
 			return true, nil
@@ -2118,7 +2133,7 @@ func (m *Manager) resumeKubeBlocks(ctx context.Context, session *domain.Session)
 	if err := m.setKubeBlocksPaused(ctx, session, false); err != nil {
 		return err
 	}
-	return kube.WaitFor(ctx, m.poll, fmt.Sprintf("KubeBlocks Pod %s readiness", kb.Instance), func(waitCtx context.Context) (bool, error) {
+	return m.waitFor(ctx, fmt.Sprintf("KubeBlocks Pod %s readiness", kb.Instance), func(waitCtx context.Context) (bool, error) {
 		pod, err := m.typed.CoreV1().Pods(session.Spec.Workload().Pod.Namespace).Get(waitCtx, kb.Instance, metav1.GetOptions{})
 		if apierrors.IsNotFound(err) {
 			return false, nil
@@ -2406,7 +2421,7 @@ func (m *Manager) deleteKubeBlocksInstancePod(ctx context.Context, session *doma
 	if err := m.typed.CoreV1().Pods(ref.Namespace).Delete(ctx, ref.Name, options); err != nil && !apierrors.IsNotFound(err) {
 		return domain.WrapError(domain.ErrorKubernetes, "pause KubeBlocks", "delete instance Pod", err)
 	}
-	return kube.WaitFor(ctx, m.poll, fmt.Sprintf("KubeBlocks Pod %s/%s deletion", ref.Namespace, ref.Name), func(waitCtx context.Context) (bool, error) {
+	return m.waitFor(ctx, fmt.Sprintf("KubeBlocks Pod %s/%s deletion", ref.Namespace, ref.Name), func(waitCtx context.Context) (bool, error) {
 		_, getErr := m.typed.CoreV1().Pods(ref.Namespace).Get(waitCtx, ref.Name, metav1.GetOptions{})
 		if apierrors.IsNotFound(getErr) {
 			return true, nil

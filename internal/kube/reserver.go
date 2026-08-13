@@ -3,6 +3,7 @@ package kube
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"slices"
 	"sort"
 	"strconv"
@@ -22,6 +23,7 @@ type Reserver struct {
 	client   kubernetes.Interface
 	poll     time.Duration
 	toolLogs *ToolLogOptions
+	logger   *slog.Logger
 }
 
 func NewReserver(client kubernetes.Interface) *Reserver {
@@ -32,6 +34,19 @@ func NewReserver(client kubernetes.Interface) *Reserver {
 func (r *Reserver) WithToolLogs(options ToolLogOptions) *Reserver {
 	r.toolLogs = &options
 	return r
+}
+
+// WithLogger enables progress logs for reservation and cleanup waits.
+func (r *Reserver) WithLogger(logger *slog.Logger) *Reserver {
+	r.logger = logger
+	return r
+}
+
+func (r *Reserver) waitFor(ctx context.Context, description string, condition func(context.Context) (bool, error)) error {
+	if r.logger != nil {
+		r.logger.Info("waiting for Kubernetes resource", "operation", "reservation", "description", description)
+	}
+	return WaitFor(ctx, r.poll, description, condition)
 }
 
 func (r *Reserver) ReserveVolume(ctx context.Context, session *domain.Session, volume *domain.VolumeSpec, status *domain.VolumeStatus, dryRun bool) error {
@@ -269,7 +284,7 @@ func (r *Reserver) provisionOnTarget(ctx context.Context, session *domain.Sessio
 		toolLogs = StartPodLogs(ctx, r.client, existing, *r.toolLogs)
 	}
 	defer toolLogs.Stop()
-	if err := WaitFor(ctx, r.poll, fmt.Sprintf("reservation Pod %s/%s readiness", pod.Namespace, pod.Name), func(waitCtx context.Context) (bool, error) {
+	if err := r.waitFor(ctx, fmt.Sprintf("reservation Pod %s/%s readiness", pod.Namespace, pod.Name), func(waitCtx context.Context) (bool, error) {
 		current, getErr := r.client.CoreV1().Pods(pod.Namespace).Get(waitCtx, pod.Name, metav1.GetOptions{})
 		if getErr != nil {
 			return false, getErr
@@ -304,7 +319,7 @@ func (r *Reserver) cleanupReservationPod(ctx context.Context, session *domain.Se
 		}
 		return domain.WrapError(domain.ErrorKubernetes, "clean up reservation Pod", fmt.Sprintf("delete tool Pod %s/%s", namespace, name), err)
 	}
-	return WaitFor(ctx, r.poll, fmt.Sprintf("reservation Pod %s/%s deletion", namespace, name), func(waitCtx context.Context) (bool, error) {
+	return r.waitFor(ctx, fmt.Sprintf("reservation Pod %s/%s deletion", namespace, name), func(waitCtx context.Context) (bool, error) {
 		current, getErr := r.client.CoreV1().Pods(namespace).Get(waitCtx, name, metav1.GetOptions{})
 		if apierrors.IsNotFound(getErr) {
 			return true, nil

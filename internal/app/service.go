@@ -131,6 +131,7 @@ func (s *Service) withSessionIDLock(ctx context.Context, namespace, id string, f
 	if !supported {
 		return fn(ctx)
 	}
+	s.logInfo("acquiring session lock", "session", id, "namespace", namespace)
 	lock, err := locker.AcquireSessionLock(ctx, namespace, id)
 	if err != nil {
 		return err
@@ -143,6 +144,7 @@ func (s *Service) withSessionIDLock(ctx context.Context, namespace, id string, f
 	releaseCtx, cancelRelease := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancelRelease()
 	releaseErr := lock.Release(releaseCtx)
+	s.logInfo("session lock released", "session", id, "namespace", namespace)
 	return errors.Join(operationErr, releaseErr)
 }
 
@@ -170,6 +172,7 @@ func (s *Service) CreateSession(ctx context.Context, plan *domain.MigrationPlan,
 		}
 		return session, nil
 	}
+	s.logInfo("creating migration session", "session", plan.SessionID, "sessionNamespace", plan.SessionSpec.SessionNamespace, "temporaryNamespace", plan.SessionSpec.TemporaryNamespace)
 	// The Lease used to serialize creation lives in the session namespace.
 	// Ensure that namespace exists before attempting to acquire the Lease.
 	if err := kube.EnsureNamespace(ctx, s.client, plan.SessionSpec.SessionNamespace, plan.SessionID, false); err != nil {
@@ -194,6 +197,7 @@ func (s *Service) probeToolImage(ctx context.Context, session *domain.Session, t
 	if len(targets) == 0 {
 		return nil, nil
 	}
+	s.logInfo("tool image validation started", "session", session.ID, "image", session.Spec.WorkflowOptions().ToolImage, "targets", len(targets))
 	return s.config.ToolImageProber.Probe(ctx, kube.ToolImageProbeOptions{
 		OperationID: session.ID,
 		Image:       session.Spec.WorkflowOptions().ToolImage,
@@ -454,6 +458,7 @@ func sourceToolProbeTargets(session *domain.Session, nodeName string) []kube.Too
 }
 
 func (s *Service) ensureSessionNamespaces(ctx context.Context, plan *domain.MigrationPlan, dryRun bool) error {
+	s.logInfo("ensuring migration namespaces", "session", plan.SessionID, "dryRun", dryRun)
 	if err := kube.EnsureNamespace(ctx, s.client, plan.SessionSpec.SessionNamespace, plan.SessionID, dryRun); err != nil {
 		return err
 	}
@@ -482,6 +487,7 @@ func (s *Service) ValidateReservation(ctx context.Context, session *domain.Sessi
 	if err := session.Validate(); err != nil {
 		return err
 	}
+	s.logInfo("reservation preflight started", "session", session.ID, "volumes", len(session.Spec.Volumes))
 	for index := range session.Spec.Volumes {
 		volume := session.Spec.Volumes[index]
 		status := session.Status.Volumes[index]
@@ -807,6 +813,7 @@ func (s *Service) ValidateCleanup(ctx context.Context, session *domain.Session, 
 	if !cleanupPhaseAllowed(session) {
 		return domain.NewError(domain.ErrorPrecondition, "cleanup dry-run", fmt.Sprintf("session phase %s is still active", session.Status.Phase))
 	}
+	s.logInfo("cleanup preflight started", "session", session.ID, "volumes", len(session.Spec.Volumes), "deleteTemporary", options.DeleteTemporary, "deleteRollback", options.DeleteRollback, "finalize", options.Finalize, "deleteSession", options.DeleteSession)
 	if options.DeleteSession && !options.Finalize {
 		return domain.NewError(domain.ErrorPrecondition, "cleanup dry-run", "deleting the session requires --finalize")
 	}
@@ -993,6 +1000,7 @@ func (s *Service) reserve(ctx context.Context, session *domain.Session) error {
 		if status.Reserved && volume.DestinationPV.UID != "" {
 			continue
 		}
+		s.logInfo("destination storage reservation started", "session", session.ID, "pvc", volume.SourcePVC.Name, "destination", volume.DestinationPVC.Namespace+"/"+volume.DestinationPVC.Name, "node", session.Spec.WorkflowOptions().TargetNode)
 		if err := s.reserver.ReserveVolume(ctx, session, volume, status, false); err != nil {
 			return s.failContext(ctx, session, err)
 		}
@@ -1015,6 +1023,7 @@ func (s *Service) warmCopy(ctx context.Context, session *domain.Session) error {
 	if !valid {
 		return domain.NewError(domain.ErrorPrecondition, "warm copy", fmt.Sprintf("session phase %s cannot warm-copy", session.Status.Phase))
 	}
+	s.logInfo("warm copy preflight started", "session", session.ID, "volumes", len(session.Spec.Volumes))
 	// Infer and checkpoint an online copy's source node while the session Lease
 	// is held. Rechecks before each volume then reject a consumer that moves
 	// after the node-specific image probe.
@@ -1104,6 +1113,7 @@ func (s *Service) finalSync(ctx context.Context, session *domain.Session) error 
 	if !valid {
 		return domain.NewError(domain.ErrorPrecondition, "final sync", fmt.Sprintf("session phase %s cannot final-sync", session.Status.Phase))
 	}
+	s.logInfo("final sync preflight started", "session", session.ID, "volumes", len(session.Spec.Volumes))
 	if err := s.controllers.VerifyPaused(ctx, session); err != nil {
 		return err
 	}
@@ -1140,6 +1150,7 @@ func (s *Service) pauseAndFinalSync(ctx context.Context, session *domain.Session
 	default:
 		return domain.NewError(domain.ErrorPrecondition, "final sync", fmt.Sprintf("session phase %s cannot final-sync", session.Status.Phase))
 	}
+	s.logInfo("pause and final sync preflight started", "session", session.ID, "volumes", len(session.Spec.Volumes), "alreadyPaused", phase == domain.PhasePaused || phase == domain.PhaseFinalSyncing || phase == domain.PhaseFinalSynced)
 	alreadyPaused := phase == domain.PhasePaused || phase == domain.PhaseFinalSyncing || phase == domain.PhaseFinalSynced
 	if alreadyPaused {
 		if err := s.controllers.VerifyPaused(ctx, session); err != nil {
@@ -1222,6 +1233,7 @@ func (s *Service) activate(ctx context.Context, session *domain.Session) error {
 		if status.Activation.ActivatedAt != nil {
 			continue
 		}
+		s.logInfo("volume activation started", "session", session.ID, "index", index, "source", volume.SourcePVC.Namespace+"/"+volume.SourcePVC.Name, "destination", volume.DestinationPVC.Namespace+"/"+volume.DestinationPVC.Name, "pv", volume.DestinationPV.Name)
 		if err := s.switcher.ActivateVolume(ctx, session, volume, status, func() error {
 			return s.store.Update(ctx, session)
 		}); err != nil {
@@ -1481,6 +1493,7 @@ func (s *Service) rollback(ctx context.Context, session *domain.Session) error {
 	for index := len(session.Spec.Volumes) - 1; index >= 0; index-- {
 		volume := &session.Spec.Volumes[index]
 		status := &session.Status.Volumes[index]
+		s.logInfo("volume rollback started", "session", session.ID, "index", index, "source", volume.SourcePVC.Namespace+"/"+volume.SourcePVC.Name, "destination", volume.DestinationPVC.Namespace+"/"+volume.DestinationPVC.Name, "pv", volume.DestinationPV.Name)
 		if err := s.switcher.RollbackVolume(ctx, session, volume, status, func() error {
 			return s.store.Update(ctx, session)
 		}); err != nil {
@@ -1517,6 +1530,7 @@ func (s *Service) rename(ctx context.Context, session *domain.Session) error {
 	if err := s.begin(ctx, session, phase, message); err != nil {
 		return err
 	}
+	s.logInfo("PVC identity change started", "session", session.ID, "operation", session.Spec.Operation(), "source", session.Spec.Volumes[0].SourcePVC.Namespace+"/"+session.Spec.Volumes[0].SourcePVC.Name, "destination", session.Spec.Volumes[0].DestinationPVC.Namespace+"/"+session.Spec.Volumes[0].DestinationPVC.Name)
 	volume := &session.Spec.Volumes[0]
 	status := &session.Status.Volumes[0]
 	pvc, err := s.switcher.RenamePVC(ctx, session, volume, func() error { return s.store.Update(ctx, session) })
@@ -1679,6 +1693,7 @@ func (s *Service) copyWithRetry(ctx context.Context, session *domain.Session, vo
 			Writer:                s.config.Writer,
 			Logger:                s.config.Logger,
 		}
+		s.logInfo("copy started", "session", session.ID, "pvc", volume.SourcePVC.Name, "mode", mode, "attempt", status.Sync.Attempts, "source", volume.SourcePVC.Namespace+"/"+volume.SourcePVC.Name, "destination", volume.DestinationPVC.Namespace+"/"+volume.DestinationPVC.Name)
 		var toolLogs *kube.ToolLogStream
 		if s.config.StreamToolLogs {
 			toolLogs = kube.StartPVMigrateToolLogs(ctx, s.client, kube.ToolLogOptions{
@@ -1690,9 +1705,10 @@ func (s *Service) copyWithRetry(ctx context.Context, session *domain.Session, vo
 			})
 		}
 		copyErr := s.copier.Copy(ctx, request, func(progress copyengine.Progress) {
-			s.config.Logger.Info("copy progress", "session", session.ID, "pvc", volume.SourcePVC.Name, "mode", progress.Mode, "attempt", progress.Attempt, "state", progress.State, "message", progress.Message)
+			s.logInfo("copy progress", "session", session.ID, "pvc", volume.SourcePVC.Name, "mode", progress.Mode, "attempt", progress.Attempt, "state", progress.State, "message", progress.Message)
 		})
 		toolLogs.Stop()
+		s.logInfo("waiting for copy tool Pods to release PVCs", "session", session.ID, "pvc", volume.SourcePVC.Name)
 		last = errors.Join(copyErr, s.waitForCopyToolRelease(ctx, volume))
 		if last == nil {
 			return nil
@@ -1708,6 +1724,7 @@ func (s *Service) copyWithRetry(ctx context.Context, session *domain.Session, vo
 		}
 		if retryIndex+1 < s.config.Retries {
 			delay := time.Duration(math.Pow(2, float64(retryIndex))) * s.config.RetryBackoff
+			s.logInfo("copy retry scheduled", "session", session.ID, "pvc", volume.SourcePVC.Name, "mode", mode, "attempt", status.Sync.Attempts, "nextAttempt", status.Sync.Attempts+1, "backoff", delay, "error", last)
 			if err := s.sleep(ctx, delay); err != nil {
 				return domain.WrapError(domain.ErrorTimeout, "copy retry", "context ended during retry backoff", err)
 			}
@@ -1949,6 +1966,7 @@ func nodeReadyAndSchedulable(node *corev1.Node) bool {
 
 func (s *Service) begin(ctx context.Context, session *domain.Session, phase domain.Phase, message string) error {
 	if session.Status.Phase == phase {
+		s.logInfo("migration stage resumed", "session", session.ID, "phase", phase, "message", message)
 		return nil
 	}
 	if session.Status.Phase == domain.PhaseFailed {
@@ -1959,6 +1977,7 @@ func (s *Service) begin(ctx context.Context, session *domain.Session, phase doma
 	if err := session.Transition(phase, message, s.now()); err != nil {
 		return err
 	}
+	s.logInfo("migration stage started", "session", session.ID, "phase", phase, "message", message)
 	return s.persist(ctx, session)
 }
 
@@ -1966,7 +1985,12 @@ func (s *Service) finish(ctx context.Context, session *domain.Session, phase dom
 	if err := session.Transition(phase, message, s.now()); err != nil {
 		return err
 	}
-	return s.persist(ctx, session)
+	if err := s.persist(ctx, session); err != nil {
+		s.logInfo("migration stage persistence failed", "session", session.ID, "phase", phase, "message", message, "error", err)
+		return err
+	}
+	s.logInfo("migration stage completed", "session", session.ID, "phase", phase, "message", message)
+	return nil
 }
 
 func (s *Service) fail(ctx context.Context, session *domain.Session, cause error) error {
@@ -2005,6 +2029,12 @@ func (s *Service) persist(ctx context.Context, session *domain.Session) error {
 	persistCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 	return s.store.Update(persistCtx, session)
+}
+
+func (s *Service) logInfo(message string, args ...any) {
+	if s != nil && s.config.Logger != nil {
+		s.config.Logger.Info(message, args...)
+	}
 }
 
 func phaseAfter(current, reference domain.Phase) bool {

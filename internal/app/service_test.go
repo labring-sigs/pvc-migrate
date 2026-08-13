@@ -1,9 +1,12 @@
 package app
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
+	"strings"
 	"testing"
 	"time"
 
@@ -25,6 +28,12 @@ type memoryStore struct {
 type contextAwareStore struct {
 	memoryStore
 	updateContextErr error
+}
+
+type failingUpdateStore struct{ memoryStore }
+
+func (f *failingUpdateStore) Update(context.Context, *domain.Session) error {
+	return errors.New("injected session update failure")
 }
 
 func (m *contextAwareStore) Update(ctx context.Context, session *domain.Session) error {
@@ -245,6 +254,41 @@ func TestMigrateRunsAllStagesAndPersistsProgress(t *testing.T) {
 	}
 	if store.updates < 10 {
 		t.Fatalf("session updates=%d, expected progress persistence", store.updates)
+	}
+}
+
+func TestMigrateLogsLongRunningStageBoundaries(t *testing.T) {
+	var logs bytes.Buffer
+	copier := &fakeCopier{}
+	service, session, _, _ := appTestService(t, copier)
+	service.config.Logger = slog.New(slog.NewTextHandler(&logs, nil))
+	if err := service.Migrate(context.Background(), session, 1); err != nil {
+		t.Fatal(err)
+	}
+	for _, event := range []string{
+		"migration stage started",
+		"destination storage reservation started",
+		"copy started",
+		"waiting for copy tool Pods to release PVCs",
+		"migration stage completed",
+	} {
+		if !strings.Contains(logs.String(), event) {
+			t.Fatalf("logs missing %q: %s", event, logs.String())
+		}
+	}
+}
+
+func TestFinishLogsCompletionAfterPersistence(t *testing.T) {
+	var logs bytes.Buffer
+	service, session, _, _ := appTestService(t, &fakeCopier{})
+	service.store = &failingUpdateStore{}
+	service.config.Logger = slog.New(slog.NewTextHandler(&logs, nil))
+	if err := service.finish(context.Background(), session, domain.PhaseReserving, "reserving destination storage"); err == nil {
+		t.Fatal("expected persistence failure")
+	}
+	output := logs.String()
+	if !strings.Contains(output, "migration stage persistence failed") || strings.Contains(output, "migration stage completed") {
+		t.Fatalf("logs=%q", output)
 	}
 }
 

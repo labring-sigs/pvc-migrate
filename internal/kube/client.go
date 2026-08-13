@@ -100,6 +100,12 @@ func HasAPIResource(discoveryClient discovery.DiscoveryInterface, groupVersion, 
 }
 
 func WaitFor(ctx context.Context, interval time.Duration, description string, condition func(context.Context) (bool, error)) error {
+	if interval <= 0 {
+		return domain.NewError(domain.ErrorValidation, "wait", "poll interval must be positive")
+	}
+	if condition == nil {
+		return domain.NewError(domain.ErrorValidation, "wait", "condition is required")
+	}
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 	for {

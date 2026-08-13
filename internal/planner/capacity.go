@@ -43,6 +43,7 @@ func validCapacityAwareness(value domain.CapacityAwareness) bool {
 }
 
 func (p *Planner) loadStorageCapacity(ctx context.Context, mode domain.CapacityAwareness) *storageCapacityInventory {
+	p.logInfo("loading CSI storage capacity", "mode", mode)
 	inventory := &storageCapacityInventory{mode: mode}
 	if mode == domain.CapacityAwarenessOff || !validCapacityAwareness(mode) {
 		return inventory

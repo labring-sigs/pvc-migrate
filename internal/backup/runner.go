@@ -104,6 +104,15 @@ type PVCInfo struct {
 }
 
 func Preflight(ctx context.Context, client kubernetes.Interface, req Request, restore bool) (*Plan, error) {
+	return preflight(ctx, client, req, restore, "preflight")
+}
+
+func preflight(ctx context.Context, client kubernetes.Interface, req Request, restore bool, stage string) (*Plan, error) {
+	operation := "backup"
+	if restore {
+		operation = "restore"
+	}
+	logOperation(req, operation+" "+stage+" started", "namespace", req.Namespace, "pvc", req.PVCName, "path", req.Path)
 	if client == nil || req.Store == nil {
 		return nil, domain.NewError(domain.ErrorInternal, "backup preflight", "Kubernetes client and S3 store are required")
 	}
@@ -123,12 +132,15 @@ func Preflight(ctx context.Context, client kubernetes.Interface, req Request, re
 	)
 	var wg sync.WaitGroup
 	wg.Go(func() {
+		logOperation(req, operation+" "+stage+" inspecting PVC", "namespace", req.Namespace, "pvc", req.PVCName)
 		info, infoErr = inspectPVC(ctx, client, req.Namespace, req.PVCName, req.Online, req.AllowMounted, restore)
 	})
 	wg.Go(func() {
+		logOperation(req, operation+" "+stage+" checking tool quota", "namespace", req.Namespace, "pvc", req.PVCName)
 		quotaErr = checkToolQuota(ctx, client, req.Namespace)
 	})
 	wg.Go(func() {
+		logOperation(req, operation+" "+stage+" checking object-store manifest", "namespace", req.Namespace, "pvc", req.PVCName)
 		manifest, manifestErr = req.Store.Manifest(ctx)
 	})
 	wg.Wait()
@@ -183,6 +195,7 @@ func Preflight(ctx context.Context, client kubernetes.Interface, req Request, re
 		plan.ObjectCount = manifest.ObjectCount
 		plan.TotalBytes = manifest.TotalBytes
 		plan.InventorySHA256 = manifest.InventorySHA256
+		logOperation(req, "restore "+stage+" verifying backup inventory", "namespace", req.Namespace, "pvc", req.PVCName)
 		if err := req.Store.VerifyInventory(ctx, *manifest); err != nil {
 			return nil, wrapBackupError(domain.ErrorPrecondition, "restore preflight", "verify S3 backup inventory", err)
 		}
@@ -233,10 +246,15 @@ func uniquePVToolNode(ctx context.Context, client kubernetes.Interface, pv *core
 }
 
 func Run(ctx context.Context, client kubernetes.Interface, req Request, restore bool) error {
-	plan, err := Preflight(ctx, client, req, restore)
+	operation := "backup"
+	if restore {
+		operation = "restore"
+	}
+	plan, err := preflight(ctx, client, req, restore, "execution revalidation")
 	if err != nil {
 		return err
 	}
+	logOperation(req, operation+" execution started", "namespace", req.Namespace, "pvc", req.PVCName, "toolNode", plan.ToolNode)
 	if restore {
 		return runRestore(ctx, client, req, plan.PVCUID, plan.PVUID, plan.ObjectCount, plan.TotalBytes, plan.InventorySHA256)
 	}
@@ -396,10 +414,12 @@ func runBackup(ctx context.Context, client kubernetes.Interface, req Request, ex
 	if err != nil {
 		return err
 	}
+	logOperation(req, "acquiring backup operation lock", "namespace", req.Namespace, "pvc", req.PVCName)
 	lockETag, err := req.Store.AcquireLock(ctx, holder, operationLockTTL(ctx, req.HelmTimeout))
 	if err != nil {
 		return err
 	}
+	logOperation(req, "backup operation lock acquired", "namespace", req.Namespace, "pvc", req.PVCName)
 	lease := &lockLease{etag: lockETag}
 	leaseCtx, cancelLease := context.WithCancel(ctx)
 	leaseErrors := make(chan error, 1)
@@ -479,6 +499,7 @@ func runBackup(ctx context.Context, client kubernetes.Interface, req Request, ex
 	if err := validateTransferToolLaunch(leaseCtx, client, req, expectedPVCUID, expectedPVUID, probeResult, false); err != nil {
 		return err
 	}
+	logOperation(req, "starting backup data synchronization", "namespace", req.Namespace, "pvc", req.PVCName, "toolNode", probeResult.NodeName)
 	toolLogs := startToolLogs(leaseCtx, client, toolRequest)
 	toolErr := pvmigrate.RunBackup(leaseCtx, backupRequest)
 	toolLogs.Stop()
@@ -500,6 +521,7 @@ func runBackup(ctx context.Context, client kubernetes.Interface, req Request, ex
 	if pvc.Spec.VolumeMode != nil {
 		mode = *pvc.Spec.VolumeMode
 	}
+	logOperation(req, "building backup inventory", "namespace", req.Namespace, "pvc", req.PVCName)
 	inventory, err := req.Store.Inventory(leaseCtx)
 	if err != nil {
 		return err
@@ -510,6 +532,7 @@ func runBackup(ctx context.Context, client kubernetes.Interface, req Request, ex
 	if err := lease.renewNow(leaseCtx, req.Store, holder, operationLockTTL(ctx, req.HelmTimeout)); err != nil {
 		return classifyLeaseError(leaseCtx, "backup", err)
 	}
+	logOperation(req, "publishing backup completion manifest", "namespace", req.Namespace, "pvc", req.PVCName)
 	return req.Store.PutManifest(leaseCtx, objectstore.Manifest{
 		CreatedAt:       time.Now().UTC(),
 		SourceNamespace: req.Namespace,
@@ -702,10 +725,12 @@ func runRestore(ctx context.Context, client kubernetes.Interface, req Request, e
 		return err
 	}
 	ttl := operationLockTTL(ctx, req.HelmTimeout)
+	logOperation(req, "acquiring restore operation lock", "namespace", req.Namespace, "pvc", req.PVCName)
 	unlock, err := acquireRestoreLock(ctx, client, req.Namespace, req.PVCName, holder, ttl, expectedPVCUID)
 	if err != nil {
 		return err
 	}
+	logOperation(req, "restore operation lock acquired", "namespace", req.Namespace, "pvc", req.PVCName)
 	leaseCtx, cancelLease := context.WithCancel(ctx)
 	leaseErrors := make(chan error, 1)
 	leaseDone := make(chan struct{})
@@ -734,6 +759,7 @@ func runRestore(ctx context.Context, client kubernetes.Interface, req Request, e
 		return err
 	}
 	expectedInventory := objectstore.Manifest{ObjectCount: expectedObjectCount, TotalBytes: expectedTotalBytes, InventorySHA256: expectedInventorySHA256}
+	logOperation(req, "verifying backup inventory before restore synchronization", "namespace", req.Namespace, "pvc", req.PVCName)
 	if err := req.Store.VerifyInventory(leaseCtx, expectedInventory); err != nil {
 		return wrapBackupError(domain.ErrorPrecondition, "restore", "verify S3 backup inventory before synchronization", err)
 	}
@@ -781,6 +807,7 @@ func runRestore(ctx context.Context, client kubernetes.Interface, req Request, e
 	if err := validateTransferToolLaunch(leaseCtx, client, req, expectedPVCUID, expectedPVUID, probeResult, true); err != nil {
 		return err
 	}
+	logOperation(req, "starting restore data synchronization", "namespace", req.Namespace, "pvc", req.PVCName, "toolNode", probeResult.NodeName)
 	toolLogs := startToolLogs(leaseCtx, client, toolRequest)
 	toolErr := pvmigrate.RunRestore(leaseCtx, restoreRequest)
 	toolLogs.Stop()
@@ -790,10 +817,17 @@ func runRestore(ctx context.Context, client kubernetes.Interface, req Request, e
 	if _, _, err := verifyPVCIdentity(ctx, client, req.Namespace, req.PVCName, expectedPVCUID, expectedPVUID); err != nil {
 		return err
 	}
+	logOperation(req, "verifying backup inventory after restore synchronization", "namespace", req.Namespace, "pvc", req.PVCName)
 	if err := req.Store.VerifyInventory(ctx, expectedInventory); err != nil {
 		return wrapBackupError(domain.ErrorConflict, "restore", "S3 backup inventory changed during synchronization", err)
 	}
 	return nil
+}
+
+func logOperation(req Request, message string, args ...any) {
+	if req.Logger != nil {
+		req.Logger.Info(message, args...)
+	}
 }
 
 func runWithCleanupTimeout(timeout time.Duration, cleanup func(context.Context) error) error {

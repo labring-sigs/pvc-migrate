@@ -50,6 +50,7 @@ type planInventory struct {
 // leaves dependent PV and StorageClass reads in explicit stages. Results keep
 // their input indexes so callers can preserve deterministic checks and plans.
 func (p *Planner) loadPlanInventory(ctx context.Context, options Options, pvcNames []string, autoTargetNode bool) planInventory {
+	p.logInfo("loading PVC and Pod inventory", "namespace", options.SourceNamespace, "pvcs", len(pvcNames))
 	inventory := planInventory{
 		pvcs:              make([]pvcReadResult, len(pvcNames)),
 		pvs:               make([]pvReadResult, len(pvcNames)),
@@ -149,6 +150,7 @@ func (p *Planner) loadPlanInventory(ctx context.Context, options Options, pvcNam
 			results[index].sc, results[index].err = p.client.StorageV1().StorageClasses().Get(ctx, name, metav1.GetOptions{})
 		})
 	})
+	p.logInfo("loading dependent PV and StorageClass inventory", "namespace", options.SourceNamespace, "pvcs", len(pvIndexes), "storageClasses", len(classes))
 	dependentWG.Wait()
 	for _, result := range results {
 		inventory.storageClasses[result.name] = result.sc

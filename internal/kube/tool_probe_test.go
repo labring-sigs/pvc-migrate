@@ -153,7 +153,7 @@ func TestToolImageProbeSerializesMultiNodeOutput(t *testing.T) {
 		t.Fatal(err)
 	}
 	lines := strings.Split(strings.TrimSpace(output.String()), "\n")
-	if len(lines) != 2 || !strings.Contains(output.String(), "node=node-a") || !strings.Contains(output.String(), "node=node-b") {
+	if len(lines) != 8 || !strings.Contains(output.String(), "node=node-a") || !strings.Contains(output.String(), "node=node-b") || strings.Count(output.String(), "tool image probe succeeded") != 2 || strings.Count(output.String(), "tool image probe cleanup started") != 2 {
 		t.Fatalf("probe output=%q", output.String())
 	}
 }
@@ -168,6 +168,20 @@ func TestToolImageProbeIncludesPodCreationCause(t *testing.T) {
 	})
 	if domain.CategoryOf(err) != domain.ErrorPrecondition || !strings.Contains(err.Error(), "restricted policy requires non-root") {
 		t.Fatalf("probe category=%s error=%v", domain.CategoryOf(err), err)
+	}
+}
+
+func TestToolImageProbeLogsStartBeforeCreateFailure(t *testing.T) {
+	client := fake.NewClientset(readyProbeNode("node-a"))
+	client.PrependReactor("create", "pods", func(clienttesting.Action) (bool, runtime.Object, error) {
+		return true, nil, apierrors.NewForbidden(corev1.Resource("pods"), "probe", errors.New("quota exceeded"))
+	})
+	var output bytes.Buffer
+	_, err := NewToolImageProber(client).Probe(context.Background(), ToolImageProbeOptions{
+		Image: "registry.example/tool:test", Targets: []ToolProbeTarget{{Namespace: "system", NodeName: "node-a"}}, Writer: &output,
+	})
+	if err == nil || !strings.Contains(output.String(), "tool image probe started") {
+		t.Fatalf("error=%v output=%q", err, output.String())
 	}
 }
 

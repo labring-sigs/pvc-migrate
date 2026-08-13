@@ -3,6 +3,7 @@ package kube
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"maps"
 	"strings"
 	"sync"
@@ -21,12 +22,26 @@ type Switcher struct {
 	client kubernetes.Interface
 	poll   time.Duration
 	now    func() time.Time
+	logger *slog.Logger
 }
 
 type ProgressFunc func() error
 
 func NewSwitcher(client kubernetes.Interface) *Switcher {
 	return &Switcher{client: client, poll: time.Second, now: time.Now}
+}
+
+// WithLogger enables progress logs for volume switch waits.
+func (s *Switcher) WithLogger(logger *slog.Logger) *Switcher {
+	s.logger = logger
+	return s
+}
+
+func (s *Switcher) waitFor(ctx context.Context, description string, condition func(context.Context) (bool, error)) error {
+	if s.logger != nil {
+		s.logger.Info("waiting for Kubernetes resource", "operation", "volume switch", "description", description)
+	}
+	return WaitFor(ctx, s.poll, description, condition)
 }
 
 func (s *Switcher) VerifyVolumeOffline(ctx context.Context, volume *domain.VolumeSpec) error {
@@ -184,7 +199,7 @@ func (s *Switcher) ensureVolumesDetached(ctx context.Context, pvNames []string) 
 		wanted[name] = struct{}{}
 	}
 	pvDescription := strings.Join(pvNames, ",")
-	return WaitFor(ctx, s.poll, fmt.Sprintf("VolumeAttachment detach for PV(s) %s", pvDescription), func(waitCtx context.Context) (bool, error) {
+	return s.waitFor(ctx, fmt.Sprintf("VolumeAttachment detach for PV(s) %s", pvDescription), func(waitCtx context.Context) (bool, error) {
 		attachments, err := s.client.StorageV1().VolumeAttachments().List(waitCtx, metav1.ListOptions{})
 		if err != nil {
 			return false, domain.WrapError(domain.ErrorKubernetes, "verify PV offline", fmt.Sprintf("list VolumeAttachments for PV(s) %s", pvDescription), err)
@@ -439,7 +454,7 @@ func (s *Switcher) createActivePVC(ctx context.Context, session *domain.Session,
 	if created.Spec.VolumeName != pvRef.Name || created.Annotations[SessionKey] != session.ID {
 		return nil, domain.NewError(domain.ErrorConflict, "create active PVC", fmt.Sprintf("PVC %s/%s exists with an unexpected binding", created.Namespace, created.Name))
 	}
-	if err := WaitFor(ctx, s.poll, fmt.Sprintf("PVC %s/%s binding to PV %s", created.Namespace, created.Name, pvRef.Name), func(waitCtx context.Context) (bool, error) {
+	if err := s.waitFor(ctx, fmt.Sprintf("PVC %s/%s binding to PV %s", created.Namespace, created.Name, pvRef.Name), func(waitCtx context.Context) (bool, error) {
 		current, getErr := s.client.CoreV1().PersistentVolumeClaims(created.Namespace).Get(waitCtx, created.Name, metav1.GetOptions{})
 		if getErr != nil {
 			return false, getErr
@@ -554,7 +569,7 @@ func (s *Switcher) deletePVC(ctx context.Context, ref domain.ObjectReference) er
 		}
 		return domain.WrapError(domain.ErrorKubernetes, "delete PVC", fmt.Sprintf("delete %s/%s", ref.Namespace, ref.Name), err)
 	}
-	return WaitFor(ctx, s.poll, fmt.Sprintf("PVC %s/%s deletion", ref.Namespace, ref.Name), func(waitCtx context.Context) (bool, error) {
+	return s.waitFor(ctx, fmt.Sprintf("PVC %s/%s deletion", ref.Namespace, ref.Name), func(waitCtx context.Context) (bool, error) {
 		current, getErr := s.client.CoreV1().PersistentVolumeClaims(ref.Namespace).Get(waitCtx, ref.Name, metav1.GetOptions{})
 		if apierrors.IsNotFound(getErr) {
 			return true, nil
@@ -570,7 +585,7 @@ func (s *Switcher) deletePVC(ctx context.Context, ref domain.ObjectReference) er
 }
 
 func (s *Switcher) reservePV(ctx context.Context, ref domain.ObjectReference, namespace, claim, sessionID string) error {
-	if err := WaitFor(ctx, s.poll, fmt.Sprintf("PV %s release before reservation", ref.Name), func(waitCtx context.Context) (bool, error) {
+	if err := s.waitFor(ctx, fmt.Sprintf("PV %s release before reservation", ref.Name), func(waitCtx context.Context) (bool, error) {
 		pv, err := s.client.CoreV1().PersistentVolumes().Get(waitCtx, ref.Name, metav1.GetOptions{})
 		if err != nil {
 			return false, err

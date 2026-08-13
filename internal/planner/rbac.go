@@ -19,6 +19,7 @@ type rbacAccess struct {
 }
 
 func (p *Planner) checkRBAC(ctx context.Context, plan *domain.MigrationPlan, sourceNamespace, stagingNamespace, sessionNamespace string, workload domain.WorkloadSpec) {
+	p.logInfo("checking migration RBAC permissions", "sourceNamespace", sourceNamespace, "stagingNamespace", stagingNamespace, "sessionNamespace", sessionNamespace)
 	checks := make([]rbacAccess, 0)
 	add := func(namespace, group, resource string, verbs ...string) {
 		for _, verb := range verbs {

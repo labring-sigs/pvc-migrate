@@ -137,6 +137,28 @@ func TestRunBackupPreservesOperationAndLockCleanupErrors(t *testing.T) {
 	}
 }
 
+func TestPreflightLogsStartBeforeValidationFailure(t *testing.T) {
+	var logs bytes.Buffer
+	request := Request{Logger: slog.New(slog.NewTextHandler(&logs, nil))}
+	if _, err := Preflight(context.Background(), nil, request, false); err == nil {
+		t.Fatal("expected preflight validation failure")
+	}
+	if !strings.Contains(logs.String(), "backup preflight started") {
+		t.Fatalf("logs=%q", logs.String())
+	}
+}
+
+func TestExecutionRevalidationLogsItsDistinctPhase(t *testing.T) {
+	var logs bytes.Buffer
+	request := Request{Logger: slog.New(slog.NewTextHandler(&logs, nil))}
+	if _, err := preflight(context.Background(), nil, request, false, "execution revalidation"); err == nil {
+		t.Fatal("expected execution revalidation failure")
+	}
+	if !strings.Contains(logs.String(), "backup execution revalidation started") {
+		t.Fatalf("logs=%q", logs.String())
+	}
+}
+
 func TestPreflightRejectsOfflineMountedAndOnlineRWOP(t *testing.T) {
 	mode := corev1.PersistentVolumeFilesystem
 	pvc := &corev1.PersistentVolumeClaim{ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "data", UID: "pvc"}, Spec: corev1.PersistentVolumeClaimSpec{VolumeName: "pv-data", VolumeMode: &mode, AccessModes: []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOncePod}}, Status: corev1.PersistentVolumeClaimStatus{Phase: corev1.ClaimBound}}

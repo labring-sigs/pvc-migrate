@@ -180,6 +180,15 @@ func TestWaitForReadyErrorAndTimeout(t *testing.T) {
 	})
 }
 
+func TestWaitForRejectsInvalidArguments(t *testing.T) {
+	if err := WaitFor(context.Background(), 0, "ready", func(context.Context) (bool, error) { return true, nil }); domain.CategoryOf(err) != domain.ErrorValidation {
+		t.Fatalf("zero interval category=%s error=%v", domain.CategoryOf(err), err)
+	}
+	if err := WaitFor(context.Background(), time.Millisecond, "ready", nil); domain.CategoryOf(err) != domain.ErrorValidation {
+		t.Fatalf("nil condition category=%s error=%v", domain.CategoryOf(err), err)
+	}
+}
+
 func TestParseGroupVersionResource(t *testing.T) {
 	gvr, err := ParseGroupVersionResource("apps/v1", "statefulsets")
 	if err != nil {
