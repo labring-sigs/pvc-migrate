@@ -28,7 +28,7 @@ Read these fields first:
 - `status.volumes[].activation`: cutover checkpoints and active PVC UID;
 - `status.history`: ordered phase changes.
 
-Generated reservation, rsync, SSHD, and rclone Pod logs follow the active command on stderr by default, so short-lived tool cleanup does not remove the operator's copy of their output. Prefixes identify the Pod and container when several PVCs run concurrently. Redirect stderr to retain a file, for example `2>migration.log`, or use `--stream-tool-logs=false` for quiet automation. `--log-format=json` emits each tool line as a structured record. JSON or YAML command results stay on stdout.
+Generated reservation, rsync, SSHD, and rclone Pod logs follow the active command on stderr by default, so short-lived tool cleanup does not remove the operator's copy of their output. Prefixes identify the Pod and container when several PVCs run concurrently. Redirect stderr to retain a file, for example `2>migration.log`, or use `--stream-tool-logs=false` for quiet automation. `--log-format=json` emits JSON Lines for tool output, progress events, guidance, and failures. JSON or YAML command results stay on stdout.
 
 ## Failure Response
 

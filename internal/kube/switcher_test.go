@@ -1,8 +1,11 @@
 package kube
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"log/slog"
+	"strings"
 	"testing"
 	"time"
 
@@ -15,6 +18,18 @@ import (
 	"k8s.io/client-go/kubernetes/fake"
 	clienttesting "k8s.io/client-go/testing"
 )
+
+func TestSwitcherWaitLogsBeforePolling(t *testing.T) {
+	var logs bytes.Buffer
+	switcher := NewSwitcher(fake.NewClientset()).WithLogger(slog.New(slog.NewTextHandler(&logs, nil)))
+	switcher.poll = time.Millisecond
+	if err := switcher.waitFor(context.Background(), "PVC binding", func(context.Context) (bool, error) { return true, nil }); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(logs.String(), "waiting for Kubernetes resource") || !strings.Contains(logs.String(), "PVC binding") {
+		t.Fatalf("logs=%q", logs.String())
+	}
+}
 
 func switcherFixture(t *testing.T) (*Switcher, *domain.Session, *domain.VolumeSpec, *domain.VolumeStatus) {
 	t.Helper()

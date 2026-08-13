@@ -36,6 +36,7 @@ func (s *Service) cleanup(ctx context.Context, session *domain.Session, options 
 	if !cleanupPhaseAllowed(session) {
 		return domain.NewError(domain.ErrorPrecondition, "cleanup", fmt.Sprintf("session phase %s is still active", session.Status.Phase))
 	}
+	s.logInfo("cleanup started", "session", session.ID, "phase", session.Status.Phase, "deleteTemporary", options.DeleteTemporary, "deleteRollback", options.DeleteRollback, "finalize", options.Finalize, "deleteSession", options.DeleteSession)
 	if !session.Spec.Operation().RebindsPVC() && (options.DeleteTemporary || options.DeleteRollback || options.DeleteSession) {
 		if err := s.recoverDestinationRefs(ctx, session); err != nil {
 			return err
@@ -164,6 +165,7 @@ func (s *Service) cleanup(ctx context.Context, session *domain.Session, options 
 			}
 		}
 	}
+	s.logInfo("cleanup completed", "session", session.ID)
 	return nil
 }
 
@@ -409,6 +411,7 @@ func (s *Service) deleteReservationPods(ctx context.Context, session *domain.Ses
 				return domain.WrapError(domain.ErrorKubernetes, "cleanup", fmt.Sprintf("delete Pod %s/%s", namespace, pods.Items[i].Name), err)
 			}
 			podName := pods.Items[i].Name
+			s.logInfo("waiting for reservation Pod deletion", "session", session.ID, "namespace", namespace, "pod", podName)
 			if err := kube.WaitFor(ctx, time.Second, fmt.Sprintf("reservation Pod %s/%s deletion", namespace, podName), func(waitCtx context.Context) (bool, error) {
 				_, getErr := s.client.CoreV1().Pods(namespace).Get(waitCtx, podName, metav1.GetOptions{})
 				if apierrors.IsNotFound(getErr) {
@@ -538,6 +541,7 @@ func (s *Service) deleteRollbackPV(ctx context.Context, sessionID string, ref do
 		} else if !apierrors.IsNotFound(claimErr) {
 			return domain.WrapError(domain.ErrorKubernetes, "cleanup rollback PV", fmt.Sprintf("read PVC %s/%s", pv.Spec.ClaimRef.Namespace, pv.Spec.ClaimRef.Name), claimErr)
 		}
+		s.logInfo("waiting for PV release", "session", sessionID, "pv", pv.Name)
 		if err := kube.WaitFor(ctx, time.Second, fmt.Sprintf("PV %s release", pv.Name), func(waitCtx context.Context) (bool, error) {
 			current, getErr := s.client.CoreV1().PersistentVolumes().Get(waitCtx, ref.Name, metav1.GetOptions{})
 			if apierrors.IsNotFound(getErr) {

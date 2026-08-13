@@ -20,6 +20,9 @@ const (
 )
 
 func (p *Planner) checkPodDependencies(ctx context.Context, plan *domain.MigrationPlan, pod *corev1.Pod) {
+	if pod != nil {
+		p.logInfo("checking Pod dependencies", "namespace", pod.Namespace, "pod", pod.Name)
+	}
 	secrets := map[string]struct{}{}
 	configMaps := map[string]struct{}{}
 	for _, reference := range pod.Spec.ImagePullSecrets {

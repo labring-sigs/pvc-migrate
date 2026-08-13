@@ -3,6 +3,7 @@ package planner
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"maps"
 	"slices"
 	"sort"
@@ -48,16 +49,30 @@ type Options struct {
 type Planner struct {
 	client      kubernetes.Interface
 	controllers *controller.Manager
+	logger      *slog.Logger
 }
 
 func New(client kubernetes.Interface, controllers *controller.Manager) *Planner {
 	return &Planner{client: client, controllers: controllers}
 }
 
+// WithLogger enables progress logs for cluster inventory and policy checks.
+func (p *Planner) WithLogger(logger *slog.Logger) *Planner {
+	p.logger = logger
+	return p
+}
+
+func (p *Planner) logInfo(message string, args ...any) {
+	if p != nil && p.logger != nil {
+		p.logger.Info(message, args...)
+	}
+}
+
 func (p *Planner) Plan(ctx context.Context, options Options) (*domain.MigrationPlan, error) {
 	autoStrategyRequested := len(options.Strategies) == 0 || (len(options.Strategies) == 1 && containsStrategy(options.Strategies, domain.StrategyAuto))
 	autoTargetNodeRequested := isAutoNode(options.TargetNode)
 	options = applyDefaults(options)
+	p.logInfo("migration planning started", "operation", options.Operation, "session", options.SessionID, "namespace", options.SourceNamespace, "pod", options.PodName, "pvcs", len(options.SourcePVCs))
 	if autoTargetNodeRequested {
 		options.TargetNode = ""
 	}
@@ -189,6 +204,7 @@ func (p *Planner) Plan(ctx context.Context, options Options) (*domain.MigrationP
 		}
 	}
 	plan.Workload = workload
+	p.logInfo("loading migration cluster inventory", "session", options.SessionID, "namespace", options.SourceNamespace, "pvcs", len(pvcNames), "autoTargetNode", autoTargetNodeRequested)
 	inventory := p.loadPlanInventory(ctx, options, pvcNames, autoTargetNodeRequested)
 
 	var targetNode *corev1.Node
@@ -444,6 +460,7 @@ func (p *Planner) Plan(ctx context.Context, options Options) (*domain.MigrationP
 		plan.RollbackRetention.PVCsByStorageClass[class] = pvcsByClass[class]
 	}
 	if len(plannedVolumes) > 0 {
+		p.logInfo("validating migration cluster policies", "session", options.SessionID, "sourceNamespace", options.SourceNamespace, "stagingNamespace", options.StagingNamespace, "sessionNamespace", options.SessionNamespace, "volumes", len(plannedVolumes))
 		tasks := []planCheckTask{
 			func(result *domain.MigrationPlan) {
 				p.checkLimitRanges(ctx, result, options.StagingNamespace, plannedVolumes)

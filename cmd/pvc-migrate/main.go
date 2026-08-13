@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"fmt"
 	"os"
 	"os/signal"
 	"sync"
@@ -32,7 +31,7 @@ func run() int {
 	})
 	err := command.ExecuteContext(ctx)
 	if err != nil {
-		_, _ = fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		cli.WriteCommandError(command.ErrOrStderr(), err)
 	}
 	return commandExitCode(ctx, signalExitCode, err)
 }

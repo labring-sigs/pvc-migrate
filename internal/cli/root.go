@@ -51,6 +51,7 @@ type globals struct {
 type rootState struct {
 	options Options
 	global  globals
+	errOut  io.Writer
 }
 
 type commandRuntime struct {
@@ -74,6 +75,7 @@ func NewRoot(options Options) *cobra.Command {
 		options.ErrOut = io.Discard
 	}
 	state := &rootState{options: options}
+	state.errOut = newLogOutputWriter(options.ErrOut, func() bool { return state.global.logFormat == "json" })
 	command := &cobra.Command{
 		Use:           "pvc-migrate",
 		Short:         "Resumable Kubernetes PVC migration",
@@ -82,7 +84,7 @@ func NewRoot(options Options) *cobra.Command {
 	}
 	command.SetIn(options.In)
 	command.SetOut(options.Out)
-	command.SetErr(options.ErrOut)
+	command.SetErr(state.errWriter())
 	flags := command.PersistentFlags()
 	flags.StringVar(&state.global.kubeconfig, "kubeconfig", "", "Kubeconfig path")
 	flags.StringVar(&state.global.kubeContext, "context", "", "Kubernetes context")
@@ -142,12 +144,12 @@ func (r *rootState) runtime() (*commandRuntime, error) {
 	if err != nil {
 		return nil, err
 	}
-	controllers := controller.NewManager(clients.Kubernetes, clients.Dynamic, clients.Discovery)
+	controllers := controller.NewManager(clients.Kubernetes, clients.Dynamic, clients.Discovery).WithLogger(logger)
 	store := kube.NewConfigMapSessionStore(clients.Kubernetes)
-	reserver := kube.NewReserver(clients.Kubernetes)
+	reserver := kube.NewReserver(clients.Kubernetes).WithLogger(logger)
 	if r.global.streamToolLogs {
 		reserver = reserver.WithToolLogs(kube.ToolLogOptions{
-			Writer:     r.options.ErrOut,
+			Writer:     r.errWriter(),
 			Logger:     logger,
 			Structured: r.global.logFormat == "json",
 		})
@@ -158,7 +160,7 @@ func (r *rootState) runtime() (*commandRuntime, error) {
 		reserver,
 		copyengine.NewPVMigrate(),
 		controllers,
-		kube.NewSwitcher(clients.Kubernetes),
+		kube.NewSwitcher(clients.Kubernetes).WithLogger(logger),
 		app.Config{
 			KubeconfigPath:  r.global.kubeconfig,
 			Context:         r.global.kubeContext,
@@ -168,7 +170,7 @@ func (r *rootState) runtime() (*commandRuntime, error) {
 			NoCompress:      r.global.noCompress,
 			StreamToolLogs:  r.global.streamToolLogs,
 			StructuredLogs:  r.global.logFormat == "json",
-			Writer:          r.options.ErrOut,
+			Writer:          r.errWriter(),
 			Logger:          logger,
 			ToolImageProber: kube.NewToolImageProber(clients.Kubernetes),
 		},
@@ -176,7 +178,7 @@ func (r *rootState) runtime() (*commandRuntime, error) {
 	return &commandRuntime{
 		clients:     clients,
 		store:       store,
-		planner:     planner.New(clients.Kubernetes, controllers),
+		planner:     planner.New(clients.Kubernetes, controllers).WithLogger(logger),
 		service:     service,
 		printer:     output.Printer{Writer: r.options.Out, Format: format},
 		logger:      logger,
@@ -211,12 +213,19 @@ func loggerFor(r *rootState) (*slog.Logger, error) {
 	handlerOptions := &slog.HandlerOptions{Level: level}
 	switch r.global.logFormat {
 	case "text":
-		return slog.New(slog.NewTextHandler(r.options.ErrOut, handlerOptions)), nil
+		return slog.New(slog.NewTextHandler(r.errWriter(), handlerOptions)), nil
 	case "json":
-		return slog.New(slog.NewJSONHandler(r.options.ErrOut, handlerOptions)), nil
+		return slog.New(slog.NewJSONHandler(r.errWriter(), handlerOptions)), nil
 	default:
 		return nil, domain.NewError(domain.ErrorValidation, "flags", fmt.Sprintf("unsupported log format %q", r.global.logFormat))
 	}
+}
+
+func (r *rootState) errWriter() io.Writer {
+	if r.errOut != nil {
+		return r.errOut
+	}
+	return r.options.ErrOut
 }
 
 func printerFor(r *rootState) output.Printer {

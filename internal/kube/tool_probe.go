@@ -135,6 +135,9 @@ func (p *KubernetesToolImageProber) Probe(ctx context.Context, options ToolImage
 }
 
 func (p *KubernetesToolImageProber) probeTarget(ctx context.Context, image, operationID string, target ToolProbeTarget, timeout, poll time.Duration, options ToolImageProbeOptions) (result ToolImageProbeResult, retErr error) {
+	p.outputMu.Lock()
+	logProbeStart(options, image, target, "")
+	p.outputMu.Unlock()
 	var node *corev1.Node
 	if target.NodeName != "" {
 		var err error
@@ -158,6 +161,9 @@ func (p *KubernetesToolImageProber) probeTarget(ctx context.Context, image, oper
 		return result, domain.WrapError(domain.ErrorPrecondition, "tool image probe", fmt.Sprintf("create probe Pod %s/%s: %v", target.Namespace, pod.Name, err), err)
 	}
 	defer func() {
+		p.outputMu.Lock()
+		logProbeCleanupStart(options, target.Namespace, created.Name)
+		p.outputMu.Unlock()
 		if cleanupErr := p.cleanupProbePod(target.Namespace, created.Name, created.UID, poll); cleanupErr != nil {
 			if retErr != nil && errors.Is(retErr, context.Canceled) {
 				logProbeCleanupWarning(options, target.Namespace, created.Name, cleanupErr)
@@ -168,6 +174,9 @@ func (p *KubernetesToolImageProber) probeTarget(ctx context.Context, image, oper
 	}()
 	observedTarget := target
 	imagePullSecrets := slices.Clone(created.Spec.ImagePullSecrets)
+	p.outputMu.Lock()
+	logProbeWaiting(options, image, target, created.Name)
+	p.outputMu.Unlock()
 	if err := WaitFor(ctx, poll, fmt.Sprintf("tool image probe Pod %s/%s", target.Namespace, created.Name), func(waitCtx context.Context) (bool, error) {
 		current, getErr := p.client.CoreV1().Pods(target.Namespace).Get(waitCtx, created.Name, metav1.GetOptions{})
 		if apierrors.IsNotFound(getErr) {
@@ -549,6 +558,32 @@ func joinProbeFailure(parts ...string) string {
 	return strings.Join(filtered, "; ")
 }
 
+func logProbeStart(options ToolImageProbeOptions, image string, target ToolProbeTarget, podName string) {
+	nodeName := target.NodeName
+	if nodeName == "" {
+		nodeName = "scheduler-selected"
+	}
+	if options.Logger != nil {
+		options.Logger.Info("tool image probe started", "image", image, "namespace", target.Namespace, "node", nodeName, "pvc", target.PVCName, "components", target.Components, "pod", podName)
+	}
+	if options.Logger == nil && options.Writer != nil {
+		_, _ = fmt.Fprintf(options.Writer, "tool image probe started: namespace=%s node=%s image=%s pvc=%s components=%s pod=%s\n", target.Namespace, nodeName, image, target.PVCName, strings.Join(target.Components, ","), podName)
+	}
+}
+
+func logProbeWaiting(options ToolImageProbeOptions, image string, target ToolProbeTarget, podName string) {
+	nodeName := target.NodeName
+	if nodeName == "" {
+		nodeName = "scheduler-selected"
+	}
+	if options.Logger != nil {
+		options.Logger.Info("tool image probe waiting", "image", image, "namespace", target.Namespace, "node", nodeName, "pvc", target.PVCName, "components", target.Components, "pod", podName)
+	}
+	if options.Logger == nil && options.Writer != nil {
+		_, _ = fmt.Fprintf(options.Writer, "tool image probe waiting: namespace=%s node=%s image=%s pvc=%s components=%s pod=%s\n", target.Namespace, nodeName, image, target.PVCName, strings.Join(target.Components, ","), podName)
+	}
+}
+
 func logProbeSuccess(options ToolImageProbeOptions, image string, target ToolProbeTarget, podName string) {
 	nodeName := target.NodeName
 	if nodeName == "" {
@@ -557,7 +592,7 @@ func logProbeSuccess(options ToolImageProbeOptions, image string, target ToolPro
 	if options.Logger != nil {
 		options.Logger.Info("tool image probe succeeded", "image", image, "namespace", target.Namespace, "node", nodeName, "components", target.Components, "pod", podName)
 	}
-	if options.Writer != nil {
+	if options.Logger == nil && options.Writer != nil {
 		_, _ = fmt.Fprintf(options.Writer, "tool image probe succeeded: namespace=%s node=%s image=%s components=%s\n", target.Namespace, nodeName, image, strings.Join(target.Components, ","))
 	}
 }
@@ -566,8 +601,17 @@ func logProbeCleanupWarning(options ToolImageProbeOptions, namespace, podName st
 	if options.Logger != nil {
 		options.Logger.Warn("tool image probe cleanup was not confirmed", "namespace", namespace, "pod", podName, "error", err)
 	}
-	if options.Writer != nil {
+	if options.Logger == nil && options.Writer != nil {
 		_, _ = fmt.Fprintf(options.Writer, "warning: tool image probe cleanup was not confirmed for %s/%s: %v\n", namespace, podName, err)
+	}
+}
+
+func logProbeCleanupStart(options ToolImageProbeOptions, namespace, podName string) {
+	if options.Logger != nil {
+		options.Logger.Info("tool image probe cleanup started", "namespace", namespace, "pod", podName)
+	}
+	if options.Logger == nil && options.Writer != nil {
+		_, _ = fmt.Fprintf(options.Writer, "tool image probe cleanup started: namespace=%s pod=%s\n", namespace, podName)
 	}
 }
 

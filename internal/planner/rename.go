@@ -41,6 +41,7 @@ func (p *Planner) PlanRename(ctx context.Context, options RenameOptions) (*domai
 	if options.Operation == domain.OperationMove && options.DestinationPVC == "" {
 		options.DestinationPVC = options.SourcePVC
 	}
+	p.logInfo("PVC identity planning started", "operation", options.Operation, "session", options.SessionID, "source", options.SourceNamespace+"/"+options.SourcePVC, "destination", options.DestinationNamespace+"/"+options.DestinationPVC)
 	kind := "RenamePlan"
 	if options.Operation == domain.OperationMove {
 		kind = "MovePlan"
@@ -100,6 +101,7 @@ func (p *Planner) PlanRename(ctx context.Context, options RenameOptions) (*domai
 		plan.AddCheck(failed("rename", "source and destination PVC identities must differ"))
 		return plan, nil
 	}
+	p.logInfo("loading PVC identity cluster inventory", "session", options.SessionID, "source", options.SourceNamespace+"/"+options.SourcePVC, "destination", options.DestinationNamespace+"/"+options.DestinationPVC)
 	var destinationNamespaceErr error
 	var pvc *corev1.PersistentVolumeClaim
 	var pvcErr error
@@ -255,6 +257,7 @@ func (p *Planner) PlanRename(ctx context.Context, options RenameOptions) (*domai
 		SessionNamespace:     options.SessionNamespace,
 		Volumes:              []domain.VolumeSpec{volume},
 	}, domain.WorkloadSpec{Adapter: domain.WorkloadNone}, false)
+	p.logInfo("validating PVC identity cluster policies", "session", options.SessionID, "sourceNamespace", options.SourceNamespace, "destinationNamespace", options.DestinationNamespace)
 	runPlanCheckTasks(plan, []planCheckTask{
 		func(result *domain.MigrationPlan) {
 			p.checkLimitRanges(ctx, result, options.DestinationNamespace, plan.Volumes)

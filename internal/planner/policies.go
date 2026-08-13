@@ -15,6 +15,7 @@ import (
 )
 
 func (p *Planner) checkLimitRanges(ctx context.Context, plan *domain.MigrationPlan, namespace string, volumes []domain.PlannedVolume) {
+	p.logInfo("checking LimitRanges", "namespace", namespace, "volumes", len(volumes))
 	items, err := p.client.CoreV1().LimitRanges(namespace).List(ctx, metav1.ListOptions{})
 	if apierrors.IsNotFound(err) {
 		plan.AddCheck(warned("limit-range", fmt.Sprintf("namespace %s does not exist yet; reservation will create it", namespace)))
@@ -79,6 +80,7 @@ func (p *Planner) checkLimitRanges(ctx context.Context, plan *domain.MigrationPl
 }
 
 func (p *Planner) checkQuotas(ctx context.Context, plan *domain.MigrationPlan, namespace string, estimate domain.ResourceEstimate) {
+	p.logInfo("checking ResourceQuotas", "namespace", namespace)
 	items, err := p.client.CoreV1().ResourceQuotas(namespace).List(ctx, metav1.ListOptions{})
 	if apierrors.IsNotFound(err) {
 		plan.AddCheck(warned("resource-quota", fmt.Sprintf("namespace %s does not exist yet; no quota is currently applied", namespace)))
@@ -162,6 +164,7 @@ func quotaDemand(estimate domain.ResourceEstimate) (corev1.ResourceList, error) 
 }
 
 func (p *Planner) checkNetworkPolicies(ctx context.Context, plan *domain.MigrationPlan, namespaces ...string) {
+	p.logInfo("checking NetworkPolicies", "namespaces", namespaces)
 	unique := make([]string, 0, len(namespaces))
 	seen := map[string]struct{}{}
 	for _, namespace := range namespaces {

@@ -26,6 +26,7 @@ type OrphanCleanupOptions struct {
 // relationship or a post-activation active/rollback relationship after the
 // durable session ConfigMap was lost.
 func (s *Service) PlanOrphanCleanup(ctx context.Context, options OrphanCleanupOptions) (*domain.OrphanCleanupPlan, error) {
+	s.logInfo("orphan cleanup planning started", "session", options.SessionID, "namespace", options.SessionNamespace, "source", options.SourceNamespace+"/"+options.SourcePVC)
 	plan := &domain.OrphanCleanupPlan{
 		APIVersion:       domain.SessionAPIVersion,
 		Kind:             domain.OrphanCleanupPlanKind,
@@ -285,6 +286,7 @@ func (s *Service) planPreActivationOrphan(ctx context.Context, plan *domain.Orph
 // CleanupOrphan performs the validated metadata cleanup and removes the
 // session lease. It never deletes the active PVC or active PV.
 func (s *Service) CleanupOrphan(ctx context.Context, options OrphanCleanupOptions) (*domain.OrphanCleanupPlan, error) {
+	s.logInfo("orphan cleanup started", "session", options.SessionID, "namespace", options.SessionNamespace)
 	var result *domain.OrphanCleanupPlan
 	err := s.withSessionIDLock(ctx, options.SessionNamespace, options.SessionID, func(lockedCtx context.Context) error {
 		plan, err := s.PlanOrphanCleanup(lockedCtx, options)

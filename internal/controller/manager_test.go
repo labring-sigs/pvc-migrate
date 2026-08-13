@@ -1,7 +1,9 @@
 package controller
 
 import (
+	"bytes"
 	"context"
+	"log/slog"
 	"strings"
 	"testing"
 	"time"
@@ -19,6 +21,18 @@ import (
 	kubernetesfake "k8s.io/client-go/kubernetes/fake"
 	clienttesting "k8s.io/client-go/testing"
 )
+
+func TestManagerWaitLogsBeforePolling(t *testing.T) {
+	var logs bytes.Buffer
+	manager := NewManager(kubernetesfake.NewClientset(), nil, nil).WithLogger(slog.New(slog.NewTextHandler(&logs, nil)))
+	manager.poll = time.Millisecond
+	if err := manager.waitFor(context.Background(), "StatefulSet readiness", func(context.Context) (bool, error) { return true, nil }); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(logs.String(), "waiting for workload controller") || !strings.Contains(logs.String(), "StatefulSet readiness") {
+		t.Fatalf("logs=%q", logs.String())
+	}
+}
 
 func readyPod(namespace, name, node string) *corev1.Pod {
 	return &corev1.Pod{
