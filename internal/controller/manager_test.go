@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/labring-sigs/pvc-migrate/internal/domain"
+	"github.com/labring-sigs/pvc-migrate/internal/kube"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -62,6 +63,76 @@ func TestDiscoverStatefulSetArbitraryOrdinal(t *testing.T) {
 	}
 	if len(workload.AffectedPods) != 2 || workload.AffectedPods[0].Name != "db-1" || workload.AffectedPods[1].Name != "db-2" {
 		t.Fatalf("affected Pods: %#v", workload.AffectedPods)
+	}
+}
+
+func TestDiscoverHelmManagedStatefulSetUsesNativeAdapter(t *testing.T) {
+	ctx := context.Background()
+	replicas := int32(1)
+	sts := &appsv1.StatefulSet{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: "app",
+			Name:      "redis",
+			UID:       types.UID("sts-uid"),
+			Annotations: map[string]string{
+				"meta.helm.sh/release-name":      "redis",
+				"meta.helm.sh/release-namespace": "app",
+			},
+			Labels: map[string]string{"app.kubernetes.io/managed-by": "Helm"},
+		},
+		Spec: appsv1.StatefulSetSpec{
+			Replicas: &replicas,
+			PersistentVolumeClaimRetentionPolicy: &appsv1.StatefulSetPersistentVolumeClaimRetentionPolicy{
+				WhenScaled: appsv1.RetainPersistentVolumeClaimRetentionPolicyType,
+			},
+		},
+	}
+	pod := readyPod("app", "redis-0", "node-a")
+	pod.OwnerReferences = []metav1.OwnerReference{{
+		APIVersion: "apps/v1",
+		Kind:       "StatefulSet",
+		Name:       sts.Name,
+		UID:        sts.UID,
+		Controller: boolPointer(true),
+	}}
+	client := kubernetesfake.NewClientset(sts, pod)
+	manager := NewManager(client, dynamicfake.NewSimpleDynamicClient(runtime.NewScheme()), client.Discovery())
+	workload, err := manager.Discover(ctx, DiscoverOptions{Namespace: "app", PodName: pod.Name, AllowLeaderDowntime: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if workload.Adapter != domain.WorkloadStatefulSet || workload.Ordinal == nil || *workload.Ordinal != 0 {
+		t.Fatalf("unexpected workload: %#v", workload)
+	}
+}
+
+func TestStatefulSetApplicationDetectionIgnoresNameSubstrings(t *testing.T) {
+	for _, name := range []string{"cockroach-cache", "minio-cache"} {
+		t.Run(name, func(t *testing.T) {
+			sts := &appsv1.StatefulSet{ObjectMeta: metav1.ObjectMeta{Name: name, Labels: map[string]string{kube.AppNameLabel: "redis"}}}
+			if reason := unsupportedStatefulSetReason(sts); reason != "" {
+				t.Fatalf("unsupported reason=%q", reason)
+			}
+		})
+	}
+}
+
+func TestStatefulSetApplicationDetectionUsesApplicationLabels(t *testing.T) {
+	tests := []struct {
+		name   string
+		labels map[string]string
+		want   string
+	}{
+		{name: "CockroachDB", labels: map[string]string{kube.AppNameLabel: "cockroachdb"}, want: "CockroachDB"},
+		{name: "MinIO component", labels: map[string]string{kube.AppComponentLabel: "minio"}, want: "MinIO"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			sts := &appsv1.StatefulSet{ObjectMeta: metav1.ObjectMeta{Name: "data", Labels: test.labels}}
+			if reason := unsupportedStatefulSetReason(sts); !strings.Contains(reason, test.want) {
+				t.Fatalf("unsupported reason=%q, want %q", reason, test.want)
+			}
+		})
 	}
 }
 

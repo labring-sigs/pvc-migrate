@@ -15,6 +15,7 @@ import (
 	"testing"
 	"time"
 
+	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
@@ -248,6 +249,138 @@ func TestStandaloneWFFCMigrationAndRollback(t *testing.T) {
 	}
 	if finalPVC.Annotations[sessionLabel] != "" {
 		t.Fatalf("finalized PVC remains session-owned: %v", finalPVC.Annotations)
+	}
+}
+
+func TestHelmManagedStatefulSetMigrationAndRollback(t *testing.T) {
+	if os.Getenv("PVC_MIGRATE_E2E") != "1" {
+		t.Skip("set PVC_MIGRATE_E2E=1 to run cluster E2E tests")
+	}
+	kubeconfig := os.Getenv("PVC_MIGRATE_E2E_KUBECONFIG")
+	if kubeconfig == "" {
+		kubeconfig = os.Getenv("KUBECONFIG")
+	}
+	if kubeconfig == "" {
+		t.Fatal("PVC_MIGRATE_E2E_KUBECONFIG or KUBECONFIG is required")
+	}
+	config, err := clientcmd.BuildConfigFromFlags("", kubeconfig)
+	if err != nil {
+		t.Fatal(err)
+	}
+	config.UserAgent = "pvc-migrate-e2e-helm-statefulset"
+	client, err := kubernetes.NewForConfig(config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 25*time.Minute)
+	defer cancel()
+	suffix := strconv.FormatInt(time.Now().UTC().UnixNano(), 36)
+	if len(suffix) > 10 {
+		suffix = suffix[len(suffix)-10:]
+	}
+	namespace := "pvc-migrate-sts-" + suffix
+	sessionID := "sts-" + suffix
+	defer cleanupTestResources(t, client, namespace, sessionID)
+
+	if _, err := client.CoreV1().Namespaces().Create(ctx, &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{
+		Name:   namespace,
+		Labels: map[string]string{"app.kubernetes.io/managed-by": "pvc-migrate-e2e", sessionLabel: sessionID},
+	}}, metav1.CreateOptions{}); err != nil {
+		t.Fatal(err)
+	}
+
+	sourceClass := envOrDefault("PVC_MIGRATE_E2E_SOURCE_CLASS", "openebs-hostpath")
+	destinationClass := envOrDefault("PVC_MIGRATE_E2E_DESTINATION_CLASS", "openebs-backup")
+	labels := map[string]string{"app": "redis", "component": "e2e", "app.kubernetes.io/managed-by": "Helm"}
+	marker := "helm-statefulset-" + suffix
+	if _, err := client.CoreV1().Services(namespace).Create(ctx, &corev1.Service{
+		ObjectMeta: metav1.ObjectMeta{Name: "redis", Namespace: namespace},
+		Spec:       corev1.ServiceSpec{ClusterIP: corev1.ClusterIPNone, Selector: labels, Ports: []corev1.ServicePort{{Name: "redis", Port: 6379}}},
+	}, metav1.CreateOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	replicas := int32(1)
+	if _, err := client.AppsV1().StatefulSets(namespace).Create(ctx, &appsv1.StatefulSet{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "redis",
+			Namespace: namespace,
+			Labels:    labels,
+			Annotations: map[string]string{
+				"meta.helm.sh/release-name":      "redis",
+				"meta.helm.sh/release-namespace": namespace,
+			},
+		},
+		Spec: appsv1.StatefulSetSpec{
+			ServiceName: "redis",
+			Replicas:    &replicas,
+			Selector:    &metav1.LabelSelector{MatchLabels: labels},
+			PersistentVolumeClaimRetentionPolicy: &appsv1.StatefulSetPersistentVolumeClaimRetentionPolicy{
+				WhenScaled:  appsv1.RetainPersistentVolumeClaimRetentionPolicyType,
+				WhenDeleted: appsv1.RetainPersistentVolumeClaimRetentionPolicyType,
+			},
+			Template: corev1.PodTemplateSpec{
+				ObjectMeta: metav1.ObjectMeta{Labels: labels},
+				Spec: corev1.PodSpec{Containers: []corev1.Container{{
+					Name:           "writer",
+					Image:          envOrDefault("PVC_MIGRATE_E2E_HELPER_IMAGE", "busybox:1.36.1"),
+					Command:        []string{"sh", "-c", "set -eu; if [ ! -s /data/payload ]; then printf '%s\\n' \"$1\" > /data/payload; sync; fi; exec sleep 86400", "writer", marker},
+					ReadinessProbe: &corev1.Probe{ProbeHandler: corev1.ProbeHandler{Exec: &corev1.ExecAction{Command: []string{"test", "-s", "/data/payload"}}}, PeriodSeconds: 1},
+					VolumeMounts:   []corev1.VolumeMount{{Name: "data", MountPath: "/data"}},
+				}}, RestartPolicy: corev1.RestartPolicyAlways},
+			},
+			VolumeClaimTemplates: []corev1.PersistentVolumeClaim{{
+				ObjectMeta: metav1.ObjectMeta{Name: "data"},
+				Spec: corev1.PersistentVolumeClaimSpec{
+					AccessModes:      []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce},
+					StorageClassName: &sourceClass,
+					Resources:        corev1.VolumeResourceRequirements{Requests: corev1.ResourceList{corev1.ResourceStorage: resource.MustParse("64Mi")}},
+				},
+			}},
+		},
+	}, metav1.CreateOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	pod := waitForReadyPod(t, ctx, client, namespace, "redis-0", "")
+	sourceNode := pod.Spec.NodeName
+	sourceDigest := podDigest(t, ctx, config, client, namespace, pod.Name)
+	targetNode := os.Getenv("PVC_MIGRATE_E2E_TARGET_NODE")
+	if targetNode == "" || targetNode == sourceNode {
+		targetNode = chooseTargetNode(t, ctx, client, sourceNode)
+	}
+	binary := e2eBinary(t, ctx)
+	common := []string{"--kubeconfig", kubeconfig, "--session-namespace", namespace, "--timeout", "12m", "--output", "json"}
+	if toolImage := os.Getenv("PVC_MIGRATE_E2E_TOOL_IMAGE"); toolImage != "" {
+		common = append(common, "--tool-image", toolImage)
+	}
+	migration := []string{"migrate-pod", "--session", sessionID, "--source-namespace", namespace, "--temporary-namespace", namespace, "--pod", "redis-0", "--target-node", targetNode, "--destination-storage-class", destinationClass, "--strategy", "clusterip", "--precopy-passes", "1"}
+	runCLI(t, ctx, binary, append(append([]string{}, common...), append(append([]string{}, migration...), "--dry-run")...)...)
+	if _, err := client.CoreV1().ConfigMaps(namespace).Get(ctx, "pvc-migrate-session-"+sessionID, metav1.GetOptions{}); !apierrors.IsNotFound(err) {
+		t.Fatalf("dry-run created a session ConfigMap: %v", err)
+	}
+	runCLI(t, ctx, binary, append(append([]string{}, common...), append(append([]string{"--yes"}, migration...), "--dry-run=false")...)...)
+	migrated := waitForReadyPod(t, ctx, client, namespace, "redis-0", targetNode)
+	if digest := podDigest(t, ctx, config, client, namespace, migrated.Name); digest != sourceDigest {
+		t.Fatalf("migrated digest=%s want=%s", digest, sourceDigest)
+	}
+	assertSessionPhase(t, ctx, client, namespace, sessionID, "Completed")
+
+	runCLI(t, ctx, binary, append(append([]string{}, common...), "--yes", "session", "rollback", sessionID, "--dry-run=false")...)
+	rolledBack := waitForReadyPod(t, ctx, client, namespace, "redis-0", sourceNode)
+	if digest := podDigest(t, ctx, config, client, namespace, rolledBack.Name); digest != sourceDigest {
+		t.Fatalf("rolled-back digest=%s want=%s", digest, sourceDigest)
+	}
+	assertSessionPhase(t, ctx, client, namespace, sessionID, "RolledBack")
+	statefulSet, err := client.AppsV1().StatefulSets(namespace).Get(ctx, "redis", metav1.GetOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if statefulSet.Spec.Replicas == nil || *statefulSet.Spec.Replicas != replicas {
+		t.Fatalf("StatefulSet replicas=%v want=%d", statefulSet.Spec.Replicas, replicas)
+	}
+	setRollbackPVsToDelete(t, ctx, client, sessionID)
+	runCLI(t, ctx, binary, append(append([]string{}, common...), "--yes", "session", "cleanup", sessionID, "--delete-rollback-pv", "--finalize", "--delete-session", "--dry-run=false")...)
+	if _, err := client.CoreV1().ConfigMaps(namespace).Get(ctx, "pvc-migrate-session-"+sessionID, metav1.GetOptions{}); !apierrors.IsNotFound(err) {
+		t.Fatalf("session ConfigMap still exists: %v", err)
 	}
 }
 

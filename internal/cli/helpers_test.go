@@ -455,10 +455,14 @@ func TestReadinessHelpers(t *testing.T) {
 
 	var printed bytes.Buffer
 	runtime := &commandRuntime{printer: output.Printer{Writer: &printed, Format: output.JSON}}
-	plan := &domain.MigrationPlan{SessionID: "mig", Ready: false}
-	err = requireReadyWithOutput(runtime, plan)
-	if domain.CategoryOf(err) != domain.ErrorPrecondition || !strings.Contains(printed.String(), "mig") {
-		t.Fatalf("error=%v output=%q", err, printed.String())
+	plan := &domain.MigrationPlan{SessionID: "mig", Ready: false, Checks: []domain.Check{{
+		Name: "controller-adapter", Severity: domain.SeverityError, Message: "discover workload: controller has no safe pause adapter",
+	}}}
+	var guidance bytes.Buffer
+	err = requireReadyWithOutput(runtime, plan, &guidance)
+	if domain.CategoryOf(err) != domain.ErrorPrecondition || !strings.Contains(printed.String(), "mig") ||
+		!strings.Contains(guidance.String(), "use the controller's native maintenance or pause procedure") {
+		t.Fatalf("error=%v output=%q guidance=%q", err, printed.String(), guidance.String())
 	}
 	runtime.printer.Writer = cliFailingWriter{err: io.ErrClosedPipe}
 	if err := requireReadyWithOutput(runtime, plan); !errors.Is(err, io.ErrClosedPipe) {
@@ -468,6 +472,43 @@ func TestReadinessHelpers(t *testing.T) {
 	runtime.printer.Writer = &printed
 	if err := requireReadyWithOutput(runtime, &domain.MigrationPlan{Ready: true}); err != nil || printed.Len() != 0 {
 		t.Fatalf("ready error=%v output=%q", err, printed.String())
+	}
+}
+
+func TestPlanFailureGuidanceSuggestsActionForControllerAndStorageChecks(t *testing.T) {
+	var output bytes.Buffer
+	plan := &domain.MigrationPlan{
+		Checks: []domain.Check{
+			{Name: "controller-adapter", Severity: domain.SeverityError, Message: "discover workload: controller has no safe pause adapter"},
+			{Name: "storage-capacity", Severity: domain.SeverityError, Message: "capacity is insufficient"},
+		},
+	}
+	if err := writePlanFailureGuidance(&output, plan); err != nil {
+		t.Fatal(err)
+	}
+	text := output.String()
+	for _, want := range []string{
+		"use the controller's native maintenance or pause procedure",
+		"choose a compatible StorageClass or target node",
+	} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("guidance=%q missing %q", text, want)
+		}
+	}
+}
+
+func TestPlanFailureGuidancePrioritizesStatefulSetAction(t *testing.T) {
+	var output bytes.Buffer
+	plan := &domain.MigrationPlan{Checks: []domain.Check{{
+		Name:     "controller-adapter",
+		Severity: domain.SeverityError,
+		Message:  "discover workload: StatefulSet app/db PVC retention whenScaled is Delete; Retain is required",
+	}}}
+	if err := writePlanFailureGuidance(&output, plan); err != nil {
+		t.Fatal(err)
+	}
+	if text := output.String(); !strings.Contains(text, "persistentVolumeClaimRetentionPolicy.whenScaled=Retain") {
+		t.Fatalf("guidance=%q", text)
 	}
 }
 

@@ -984,17 +984,16 @@ func statefulSetReplicas(sts *appsv1.StatefulSet) int32 {
 
 func isCockroachStatefulSet(sts *appsv1.StatefulSet) bool {
 	return strings.EqualFold(sts.Labels[kube.AppNameLabel], "cockroachdb") ||
-		strings.Contains(strings.ToLower(sts.Name), "cockroach")
+		strings.EqualFold(sts.Labels["app"], "cockroachdb")
 }
 
 func isMinIOStatefulSet(sts *appsv1.StatefulSet) bool {
 	for _, value := range []string{
-		sts.Name,
 		sts.Labels["app"],
 		sts.Labels[kube.AppNameLabel],
 		sts.Labels[kube.AppComponentLabel],
 	} {
-		if strings.Contains(strings.ToLower(value), "minio") {
+		if strings.EqualFold(value, "minio") {
 			return true
 		}
 	}
@@ -1017,9 +1016,11 @@ func requireReadyPod(pod *corev1.Pod, namespace, name string) error {
 	return nil
 }
 
-// unsupportedStatefulSetReason rejects controllers whose reconciliation or
-// storage lifecycle can invalidate the source PVC during migration. Workloads
-// with a dedicated adapter are allowed through for specialized discovery.
+// unsupportedStatefulSetReason rejects workloads whose reconciliation or
+// storage lifecycle requires an application-specific migration procedure.
+// Ordinary StatefulSets, including Helm-rendered ones, use the native
+// StatefulSet adapter below. Helm metadata alone does not imply a controller
+// that will reconcile replica changes during the migration window.
 func unsupportedStatefulSetReason(sts *appsv1.StatefulSet) string {
 	if isCockroachStatefulSet(sts) {
 		return fmt.Sprintf("CockroachDB StatefulSet %s/%s requires CockroachDB drain and decommission", sts.Namespace, sts.Name)
@@ -1048,9 +1049,6 @@ func unsupportedStatefulSetReason(sts *appsv1.StatefulSet) string {
 				}
 			}
 		}
-	}
-	if release := sts.Annotations["meta.helm.sh/release-name"]; release != "" && !isVictoriaLogsStatefulSet(sts) {
-		return fmt.Sprintf("Helm-managed StatefulSet %s/%s has no safe pause adapter", sts.Namespace, sts.Name)
 	}
 	return ""
 }

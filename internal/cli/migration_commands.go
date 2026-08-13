@@ -588,6 +588,9 @@ func requireReadyWithOutput(runtime *commandRuntime, plan *domain.MigrationPlan,
 		if _, err := fmt.Fprintln(writer, "\nNo session or migration resources were created. Resolve the failed plan checks, then rerun the command."); err != nil {
 			return err
 		}
+		if err := writePlanFailureGuidance(writer, plan); err != nil {
+			return err
+		}
 	}
 	return requireReady(plan)
 }
