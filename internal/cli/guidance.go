@@ -352,8 +352,51 @@ func printPlanResult(cmd interface{ ErrOrStderr() io.Writer }, runtime *commandR
 	if plan.Ready {
 		message = "\nDry-run completed without cluster mutations. Run the write command with the same inputs and --dry-run=false; provide --yes or typed approval when requested."
 	}
-	_, err := fmt.Fprintln(cmd.ErrOrStderr(), message)
-	return err
+	if _, err := fmt.Fprintln(cmd.ErrOrStderr(), message); err != nil {
+		return err
+	}
+	if plan.Ready {
+		return nil
+	}
+	return writePlanFailureGuidance(cmd.ErrOrStderr(), plan)
+}
+
+func writePlanFailureGuidance(w io.Writer, plan *domain.MigrationPlan) error {
+	if plan == nil {
+		return nil
+	}
+	seen := make(map[string]struct{})
+	for _, check := range plan.Checks {
+		if check.Passed || check.Severity != domain.SeverityError {
+			continue
+		}
+		var advice string
+		switch {
+		case strings.Contains(check.Message, "PVC retention whenScaled is"):
+			advice = "StatefulSet action: set persistentVolumeClaimRetentionPolicy.whenScaled=Retain and verify the StatefulSet before rerunning the plan."
+		case strings.Contains(check.Message, "scale-down affects"):
+			advice = "StatefulSet action: complete an application switchover, or explicitly acknowledge the restart with --allow-leader-downtime when the workload can tolerate it."
+		case check.Name == "pvc-consumers":
+			advice = "PVC action: stop or select every consumer with --pod, then verify that the PVC has no unmanaged Pod references before rerunning the plan."
+		case check.Name == "controller-adapter":
+			advice = "Workload action: use the controller's native maintenance or pause procedure, then rerun the plan; migrate-pod mutates only workloads with a verified adapter."
+		case check.Name == "target-node":
+			advice = "Node action: choose a Ready, schedulable target with --target-node, or correct the target node condition before rerunning the plan."
+		case check.Name == "storage-topology" || check.Name == "storage-capacity":
+			advice = "Storage action: choose a compatible StorageClass or target node, then verify topology and capacity before rerunning the plan."
+		}
+		if advice == "" {
+			continue
+		}
+		if _, exists := seen[advice]; exists {
+			continue
+		}
+		seen[advice] = struct{}{}
+		if _, err := fmt.Fprintln(w, "  "+advice); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func sessionCommandPrefix(namespace string) string {
