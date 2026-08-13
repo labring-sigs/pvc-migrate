@@ -66,13 +66,15 @@ func TestSecondInterruptForcesTermination(t *testing.T) {
 func TestQueuedSecondSignalForcesTermination(t *testing.T) {
 	signals := make(chan os.Signal, 2)
 	forced := make(chan os.Signal, 1)
+	// Fill the buffered channel before starting the consumer so the second
+	// signal is unambiguously queued when the first signal is handled.
+	signals <- os.Interrupt
+	signals <- syscall.SIGTERM
 	ctx, exitCode, stop := commandSignalContextFromChannel(context.Background(), signals, func() {}, func(received os.Signal) {
 		forced <- received
 	})
 	t.Cleanup(stop)
 
-	signals <- os.Interrupt
-	signals <- syscall.SIGTERM
 	select {
 	case <-ctx.Done():
 	case <-time.After(5 * time.Second):
