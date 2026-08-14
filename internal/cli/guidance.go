@@ -7,20 +7,31 @@ import (
 	"slices"
 	"sort"
 	"strings"
+	"unicode"
 
 	"github.com/labring-sigs/pvc-migrate/internal/app"
 	"github.com/labring-sigs/pvc-migrate/internal/domain"
 	"github.com/labring-sigs/pvc-migrate/internal/kube"
+	"github.com/spf13/cobra"
 )
+
+type guidancePrefixes struct {
+	pvcMigrate string
+	kubectl    string
+}
 
 // writeSessionGuidance keeps operational instructions on stderr so JSON and
 // YAML stdout remain one parseable document. Every destructive command is
 // shown with its dry-run form first and explicit approval on execution.
-func writeSessionGuidance(w io.Writer, session *domain.Session) error {
+func writeSessionGuidance(w io.Writer, session *domain.Session, supplied ...guidancePrefixes) error {
 	if session == nil {
 		return nil
 	}
-	prefix := sessionCommandPrefix(session.Spec.SessionNamespace)
+	prefixes := guidancePrefixes{pvcMigrate: sessionCommandPrefix(session.Spec.SessionNamespace), kubectl: "kubectl"}
+	if len(supplied) > 0 {
+		prefixes = supplied[0]
+	}
+	prefix := prefixes.pvcMigrate
 	status := fmt.Sprintf("%s session status %s", prefix, session.ID)
 	resumePlan := fmt.Sprintf("%s session resume %s --dry-run", prefix, session.ID)
 	resume := fmt.Sprintf("%s --yes session resume %s --dry-run=false", prefix, session.ID)
@@ -44,7 +55,7 @@ func writeSessionGuidance(w io.Writer, session *domain.Session) error {
 	if _, err := fmt.Fprintln(w, "  Inspect:", status); err != nil {
 		return err
 	}
-	if err := writeSessionInspection(w, session); err != nil {
+	if err := writeSessionInspection(w, session, prefixes.kubectl); err != nil {
 		return err
 	}
 	switch session.Status.Phase {
@@ -179,10 +190,10 @@ func cleanupCommandArgs(session *domain.Session) string {
 	return strings.Join(args, " ")
 }
 
-func writeSessionInspection(w io.Writer, session *domain.Session) error {
+func writeSessionInspection(w io.Writer, session *domain.Session, kubectlPrefix string) error {
 	workload := session.Spec.Workload()
 	if workload.Pod.Name != "" && workload.Pod.Namespace != "" {
-		if _, err := fmt.Fprintf(w, "  Verify workload readiness: kubectl --namespace %s get pod %s -o wide\n", workload.Pod.Namespace, workload.Pod.Name); err != nil {
+		if _, err := fmt.Fprintf(w, "  Verify workload readiness: %s --namespace %s get pod %s -o wide\n", kubectlPrefix, workload.Pod.Namespace, workload.Pod.Name); err != nil {
 			return err
 		}
 	}
@@ -205,7 +216,7 @@ func writeSessionInspection(w io.Writer, session *domain.Session) error {
 	for _, namespace := range namespaces {
 		names := refs[namespace]
 		sort.Strings(names)
-		if _, err := fmt.Fprintf(w, "  Verify active PVCs: kubectl --namespace %s get pvc %s\n", namespace, strings.Join(names, " ")); err != nil {
+		if _, err := fmt.Fprintf(w, "  Verify active PVCs: %s --namespace %s get pvc %s\n", kubectlPrefix, namespace, strings.Join(names, " ")); err != nil {
 			return err
 		}
 	}
@@ -231,21 +242,22 @@ func printSessionResult(cmd interface {
 	if err := runtime.printer.Print(session); err != nil {
 		return reportSessionError(cmd, session, err)
 	}
-	return writeSessionGuidance(cmd.ErrOrStderr(), session)
+	return writeSessionGuidance(cmd.ErrOrStderr(), session, guidancePrefixesForCommand(cmd, session.Spec.SessionNamespace))
 }
 
 func reportSessionError(cmd interface{ ErrOrStderr() io.Writer }, session *domain.Session, err error) error {
 	if session != nil {
-		_ = writeSessionGuidance(cmd.ErrOrStderr(), session)
+		_ = writeSessionGuidance(cmd.ErrOrStderr(), session, guidancePrefixesForCommand(cmd, session.Spec.SessionNamespace))
 	}
 	return err
 }
 
 func reportSessionLookupError(cmd interface{ ErrOrStderr() io.Writer }, namespace, id string, err error) error {
-	prefix := sessionCommandPrefix(namespace)
+	prefixes := guidancePrefixesForCommand(cmd, namespace)
+	prefix := prefixes.pvcMigrate
 	_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "\nSession lookup failed. List persisted sessions: %s session status\n", prefix)
 	if id != "" {
-		_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "Inspect the expected record: kubectl --namespace %s get configmap %s\n", namespace, kube.SessionConfigMapName(id))
+		_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "Inspect the expected record: %s --namespace %s get configmap %s\n", prefixes.kubectl, namespace, kube.SessionConfigMapName(id))
 	}
 	return err
 }
@@ -271,33 +283,39 @@ func reportRuntimeError(cmd interface{ ErrOrStderr() io.Writer }, err error) err
 }
 
 func reportTransferError(cmd interface{ ErrOrStderr() io.Writer }, operation, namespace, pvc string, err error) error {
-	_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "\n%s stopped before confirmed completion. Inspect the PVC state: kubectl --namespace %s get pvc %s\n", operation, namespace, pvc)
+	_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "\n%s stopped before confirmed completion. Inspect the PVC state: %s --namespace %s get pvc %s\n", operation, kubectlCommandPrefixForCommand(cmd), namespace, pvc)
 	_, _ = fmt.Fprintln(cmd.ErrOrStderr(), "Fix the reported condition, rerun its plan, then execute with --dry-run=false.")
 	return err
 }
 
-func writeTransferDryRunGuidance(w io.Writer, operation, namespace, pvc string) error {
-	_, err := fmt.Fprintf(w, "\n%s dry-run completed without cluster mutations. Inspect the PVC with kubectl --namespace %s get pvc %s, then run the write command with --dry-run=false.\n", operation, namespace, pvc)
+func writeTransferDryRunGuidance(w io.Writer, operation, namespace, pvc string, supplied ...string) error {
+	kubectlPrefix := "kubectl"
+	if len(supplied) > 0 {
+		kubectlPrefix = supplied[0]
+	}
+	_, err := fmt.Fprintf(w, "\n%s dry-run completed without cluster mutations. Inspect the PVC with %s --namespace %s get pvc %s, then run the write command with --dry-run=false.\n", operation, kubectlPrefix, namespace, pvc)
 	return err
 }
 
 func reportSessionCreationError(cmd interface{ ErrOrStderr() io.Writer }, namespace, id string, err error) error {
-	prefix := sessionCommandPrefix(namespace)
+	prefixes := guidancePrefixesForCommand(cmd, namespace)
+	prefix := prefixes.pvcMigrate
 	_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "\nSession creation did not return a confirmed result. Inspect before retrying: %s session status %s\n", prefix, id)
-	_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "Inspect the expected record directly: kubectl --namespace %s get configmap %s\n", namespace, kube.SessionConfigMapName(id))
+	_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "Inspect the expected record directly: %s --namespace %s get configmap %s\n", prefixes.kubectl, namespace, kube.SessionConfigMapName(id))
 	return err
 }
 
 func reportCleanupError(cmd interface{ ErrOrStderr() io.Writer }, session *domain.Session, options app.CleanupOptions, err error) error {
 	deleteRecordFailed := errorHasOperation(err, "delete session", "delete session lock")
 	if session != nil && options.DeleteSession && deleteRecordFailed {
-		_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "\nCleanup stopped during session record removal. Inspect the ConfigMap: kubectl --namespace %s get configmap %s\n", session.Spec.SessionNamespace, kube.SessionConfigMapName(session.ID))
-		_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "Inspect the Lease: kubectl --namespace %s get lease %s\n", session.Spec.SessionNamespace, kube.SessionLockName(session.ID))
+		prefixes := guidancePrefixesForCommand(cmd, session.Spec.SessionNamespace)
+		_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "\nCleanup stopped during session record removal. Inspect the ConfigMap: %s --namespace %s get configmap %s\n", prefixes.kubectl, session.Spec.SessionNamespace, kube.SessionConfigMapName(session.ID))
+		_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "Inspect the Lease: %s --namespace %s get lease %s\n", prefixes.kubectl, session.Spec.SessionNamespace, kube.SessionLockName(session.ID))
 		_, _ = fmt.Fprintln(cmd.ErrOrStderr(), "Use session status when the ConfigMap remains; use session cleanup-orphan when ownership remains after the ConfigMap is gone.")
 		return err
 	}
 	if session != nil {
-		prefix := sessionCommandPrefix(session.Spec.SessionNamespace)
+		prefix := guidancePrefixesForCommand(cmd, session.Spec.SessionNamespace).pvcMigrate
 		_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "\nCleanup stopped before confirmed completion. Inspect current state: %s session status %s\n", prefix, session.ID)
 		_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "Revalidate cleanup before retrying: %s %s --dry-run\n", prefix, cleanupCommandArgsForOptions(session.ID, options))
 		return err
@@ -384,6 +402,8 @@ func writePlanFailureGuidance(w io.Writer, plan *domain.MigrationPlan) error {
 			advice = "Node action: choose a Ready, schedulable target with --target-node, or correct the target node condition before rerunning the plan."
 		case check.Name == "storage-topology" || check.Name == "storage-capacity":
 			advice = "Storage action: choose a compatible StorageClass or target node, then verify topology and capacity before rerunning the plan."
+		case check.Name == "migration-needed":
+			advice = "Migration action: the requested node and StorageClass already match; use --force-reprovision only for an intentional backing-PV replacement."
 		}
 		if advice == "" {
 			continue
@@ -400,15 +420,75 @@ func writePlanFailureGuidance(w io.Writer, plan *domain.MigrationPlan) error {
 }
 
 func sessionCommandPrefix(namespace string) string {
-	prefix := "pvc-migrate"
-	if namespace != "" && namespace != "pvc-migrate-system" {
-		prefix += " --session-namespace " + namespace
-	}
-	return prefix
+	return sessionCommandPrefixForCommand(nil, namespace)
 }
 
-func writeSessionListGuidance(w io.Writer, namespace string, sessions []*domain.Session) error {
+func sessionCommandPrefixForCommand(value any, namespace string) string {
+	args := []string{"pvc-migrate"}
+	command, ok := value.(*cobra.Command)
+	if ok {
+		rootFlags := command.Root().PersistentFlags()
+		for _, name := range []string{"kubeconfig", "context"} {
+			if flag := rootFlags.Lookup(name); flag != nil && flag.Value.String() != "" {
+				args = append(args, "--"+name, shellQuote(flag.Value.String()))
+			}
+		}
+		for _, name := range []string{"timeout", "retries", "retry-backoff", "helm-timeout", "stream-tool-logs", "no-compress"} {
+			if flag := rootFlags.Lookup(name); flag != nil && flag.Changed {
+				args = append(args, "--"+name+"="+shellQuote(flag.Value.String()))
+			}
+		}
+	}
+	if namespace != "" && namespace != "pvc-migrate-system" {
+		args = append(args, "--session-namespace", shellQuote(namespace))
+	}
+	return strings.Join(args, " ")
+}
+
+func kubectlCommandPrefixForCommand(value any) string {
+	args := []string{"kubectl"}
+	command, ok := value.(*cobra.Command)
+	if !ok {
+		return args[0]
+	}
+	rootFlags := command.Root().PersistentFlags()
+	for _, name := range []string{"kubeconfig", "context"} {
+		if flag := rootFlags.Lookup(name); flag != nil && flag.Value.String() != "" {
+			args = append(args, "--"+name, shellQuote(flag.Value.String()))
+		}
+	}
+	return strings.Join(args, " ")
+}
+
+func guidancePrefixesForCommand(value any, namespace string) guidancePrefixes {
+	return guidancePrefixes{
+		pvcMigrate: sessionCommandPrefixForCommand(value, namespace),
+		kubectl:    kubectlCommandPrefixForCommand(value),
+	}
+}
+
+func shellQuote(value string) string {
+	if value != "" {
+		safe := true
+		for _, char := range value {
+			if unicode.IsLetter(char) || unicode.IsDigit(char) || strings.ContainsRune("-._/:@%+=,", char) {
+				continue
+			}
+			safe = false
+			break
+		}
+		if safe {
+			return value
+		}
+	}
+	return "'" + strings.ReplaceAll(value, "'", `'"'"'`) + "'"
+}
+
+func writeSessionListGuidance(w io.Writer, namespace string, sessions []*domain.Session, supplied ...string) error {
 	prefix := sessionCommandPrefix(namespace)
+	if len(supplied) > 0 {
+		prefix = supplied[0]
+	}
 	if len(sessions) == 0 {
 		_, err := fmt.Fprintf(w, "\nNo migration sessions found in %s.\n", namespace)
 		return err

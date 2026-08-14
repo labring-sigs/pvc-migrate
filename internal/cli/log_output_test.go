@@ -85,6 +85,36 @@ func TestColorizeTextLogsByLevelComponentAndTool(t *testing.T) {
 	}
 }
 
+func TestColorizeSessionGuidanceByAction(t *testing.T) {
+	input := "Next steps for session mig-test (phase Completed):\n" +
+		"  Record: ConfigMap pvc-migrate-system/pvc-migrate-session-mig-test\n" +
+		"  Inspect: pvc-migrate session status mig-test\n" +
+		"  Verify workload readiness: kubectl --namespace app get pod database-0 -o wide\n" +
+		"  Verify workload and active PVCs before closing the rollback window.\n" +
+		"  Validate rollback: pvc-migrate session rollback mig-test --dry-run\n" +
+		"  Roll back: pvc-migrate --yes session rollback mig-test --dry-run=false\n" +
+		"  Finalize and delete retained resources/session: pvc-migrate --yes session cleanup mig-test --dry-run=false\n"
+	output := string(colorizeLogText([]byte(input)))
+	for _, want := range []string{
+		"\x1b[1;36mNext steps for session mig-test (phase \x1b[0m",
+		"\x1b[1;32mCompleted\x1b[0m",
+		"\x1b[36mRecord:\x1b[0m ConfigMap",
+		"\x1b[36mInspect:\x1b[0m pvc-migrate",
+		"\x1b[36mVerify workload readiness:\x1b[0m kubectl",
+		"\x1b[1;33mValidate rollback:\x1b[0m pvc-migrate",
+		"\x1b[1;31mRoll back:\x1b[0m pvc-migrate",
+		"\x1b[1;31mFinalize and delete retained resources/session:\x1b[0m pvc-migrate",
+	} {
+		if !strings.Contains(output, want) {
+			t.Fatalf("colored guidance lacks %q: %q", want, output)
+		}
+	}
+	plain := regexp.MustCompile(`\x1b\[[0-9;]*m`).ReplaceAllString(output, "")
+	if plain != input {
+		t.Fatalf("colorization changed guidance: got %q want %q", plain, input)
+	}
+}
+
 func TestColorOutputWriterModes(t *testing.T) {
 	for _, test := range []struct {
 		mode    string

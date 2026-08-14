@@ -49,10 +49,10 @@ func (r *rootState) newSessionStatusCommand() *cobra.Command {
 				return reportSessionLookupError(cmd, r.global.sessionNamespace, "", err)
 			}
 			if err := runtime.printer.Print(sessions); err != nil {
-				_ = writeSessionListGuidance(cmd.ErrOrStderr(), r.global.sessionNamespace, sessions)
+				_ = writeSessionListGuidance(cmd.ErrOrStderr(), r.global.sessionNamespace, sessions, sessionCommandPrefixForCommand(cmd, r.global.sessionNamespace))
 				return err
 			}
-			return writeSessionListGuidance(cmd.ErrOrStderr(), r.global.sessionNamespace, sessions)
+			return writeSessionListGuidance(cmd.ErrOrStderr(), r.global.sessionNamespace, sessions, sessionCommandPrefixForCommand(cmd, r.global.sessionNamespace))
 		},
 	}
 }
@@ -261,7 +261,7 @@ func (r *rootState) newSessionOrphanCleanupCommand() *cobra.Command {
 			ctx, cancel := r.context(cmd.Context())
 			defer cancel()
 			options := app.OrphanCleanupOptions{SessionID: args[0], SessionNamespace: r.global.sessionNamespace, SourceNamespace: sourceNamespace, SourcePVC: sourcePVC}
-			prefix := sessionCommandPrefix(r.global.sessionNamespace)
+			prefix := sessionCommandPrefixForCommand(cmd, r.global.sessionNamespace)
 			validateCommand := fmt.Sprintf("%s session cleanup-orphan %s --source-namespace %s --source-pvc %s", prefix, args[0], sourceNamespace, sourcePVC)
 			executeCommand := fmt.Sprintf("%s --yes session cleanup-orphan %s --source-namespace %s --source-pvc %s --dry-run=false", prefix, args[0], sourceNamespace, sourcePVC)
 			plan, err := runtime.service.PlanOrphanCleanup(ctx, options)

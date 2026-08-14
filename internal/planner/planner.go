@@ -44,6 +44,7 @@ type Options struct {
 	DeleteExtraneous     bool
 	SwitchoverCandidate  string
 	AllowLeaderDowntime  bool
+	ForceReprovision     bool
 }
 
 type Planner struct {
@@ -241,6 +242,7 @@ func (p *Planner) Plan(ctx context.Context, options Options) (*domain.MigrationP
 	totalStorage := resource.MustParse("0")
 	storageByClass := map[string]resource.Quantity{}
 	pvcsByClass := map[string]int{}
+	storageClassChanged := false
 	for index, pvcName := range pvcNames {
 		pvc, err := inventory.pvcs[index].pvc, inventory.pvcs[index].err
 		if err != nil || pvc == nil || pvc.Name == "" {
@@ -288,6 +290,9 @@ func (p *Planner) Plan(ctx context.Context, options Options) (*domain.MigrationP
 		destinationClass := options.DestinationClass
 		if destinationClass == "" {
 			destinationClass = sourceClass
+		}
+		if destinationClass != sourceClass {
+			storageClassChanged = true
 		}
 		if destinationClass == "" {
 			plan.AddCheck(failed("storage-class", fmt.Sprintf("PVC %s/%s has no storageClassName and no destination class was supplied", pvc.Namespace, pvc.Name)))
@@ -395,6 +400,15 @@ func (p *Planner) Plan(ctx context.Context, options Options) (*domain.MigrationP
 			options.TargetNode = targetNode.Name
 			plan.TargetNode = targetNode.Name
 			p.checkPodTargetScheduling(plan, sourcePod, workload, targetNode)
+		}
+	}
+	if options.Operation == domain.OperationMigratePod && sourcePod != nil && options.SourceNode != "" && options.SourceNode == options.TargetNode &&
+		!storageClassChanged && len(plannedVolumes) > 0 && len(plannedVolumes) == len(pvcNames) {
+		message := fmt.Sprintf("Pod %s/%s already uses target node %s and every PVC already uses the requested StorageClass", options.SourceNamespace, options.PodName, options.TargetNode)
+		if options.ForceReprovision {
+			plan.AddCheck(warned("force-reprovision", message+"; --force-reprovision will replace the backing PVs"))
+		} else {
+			plan.AddCheck(failed("migration-needed", message+"; use --force-reprovision to intentionally replace the backing PVs"))
 		}
 	}
 	var csiNode *storagev1.CSINode

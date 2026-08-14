@@ -566,6 +566,78 @@ func TestPlanAllowsStandalonePodHostnameSelectorToMove(t *testing.T) {
 	}
 }
 
+func TestMigratePodRequiresForceForSameNodeAndStorageClass(t *testing.T) {
+	wffc := storagev1.VolumeBindingWaitForFirstConsumer
+	objects := append(plannerObjects("2Gi"),
+		&corev1.ServiceAccount{ObjectMeta: metav1.ObjectMeta{Namespace: "app", Name: "default"}},
+		&storagev1.StorageClass{
+			ObjectMeta:        metav1.ObjectMeta{Name: "slow"},
+			Provisioner:       "example.csi.io",
+			VolumeBindingMode: &wffc,
+			AllowedTopologies: []corev1.TopologySelectorTerm{{MatchLabelExpressions: []corev1.TopologySelectorLabelRequirement{{Key: corev1.LabelTopologyZone, Values: []string{"zone-b"}}}}},
+		},
+		&corev1.Pod{
+			ObjectMeta: metav1.ObjectMeta{Namespace: "app", Name: "application"},
+			Spec: corev1.PodSpec{
+				NodeName:   "node-b",
+				Containers: []corev1.Container{{Name: "app", Image: "busybox"}},
+				Volumes: []corev1.Volume{{Name: "data", VolumeSource: corev1.VolumeSource{
+					PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: "data"},
+				}}},
+			},
+			Status: corev1.PodStatus{Phase: corev1.PodRunning, Conditions: []corev1.PodCondition{{Type: corev1.PodReady, Status: corev1.ConditionTrue}}},
+		},
+	)
+	client := plannerClient(objects...)
+	base := Options{
+		Operation:          domain.OperationMigratePod,
+		SessionID:          "same-destination",
+		SourceNamespace:    "app",
+		StagingNamespace:   "system",
+		SessionNamespace:   "system",
+		TemporaryNamespace: "system",
+		PodName:            "application",
+		TargetNode:         "node-b",
+	}
+
+	plan, err := New(client, controller.NewManager(client, nil, nil)).Plan(context.Background(), base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if plan.Ready || !hasFailedCheckContaining(plan, "migration-needed", "--force-reprovision") {
+		t.Fatalf("same destination plan checks=%#v", plan.Checks)
+	}
+
+	base.ForceReprovision = true
+	forced, err := New(client, controller.NewManager(client, nil, nil)).Plan(context.Background(), base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !forced.Ready || !hasWarningCheck(forced, "force-reprovision") {
+		t.Fatalf("forced reprovision plan ready=%t checks=%#v", forced.Ready, forced.Checks)
+	}
+
+	base.ForceReprovision = false
+	base.DestinationClass = "slow"
+	changedClass, err := New(client, controller.NewManager(client, nil, nil)).Plan(context.Background(), base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !changedClass.Ready {
+		t.Fatalf("changed StorageClass plan ready=%t checks=%#v", changedClass.Ready, changedClass.Checks)
+	}
+
+	base.DestinationClass = ""
+	base.TargetNode = domain.AutoValue
+	automatic, err := New(client, controller.NewManager(client, nil, nil)).Plan(context.Background(), base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if automatic.Ready || automatic.TargetNode != "node-b" || !hasFailedCheckContaining(automatic, "migration-needed", "--force-reprovision") {
+		t.Fatalf("automatic same destination plan ready=%t target=%q checks=%#v", automatic.Ready, automatic.TargetNode, automatic.Checks)
+	}
+}
+
 func TestAutoStrategiesChooseNamespaceCompatibleOrder(t *testing.T) {
 	if got := autoStrategies("app", "app"); strings.Join(got, ",") != "mount,clusterip" {
 		t.Fatalf("same-namespace auto strategies=%v", got)
