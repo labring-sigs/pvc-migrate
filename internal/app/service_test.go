@@ -326,17 +326,39 @@ func TestMigrateLogsLongRunningStageBoundaries(t *testing.T) {
 	}
 }
 
-func TestFinishLogsCompletionAfterPersistence(t *testing.T) {
-	var logs bytes.Buffer
-	service, session, _, _ := appTestService(t, &fakeCopier{})
-	service.store = &failingUpdateStore{}
-	service.config.Logger = slog.New(slog.NewTextHandler(&logs, nil))
-	if err := service.finish(context.Background(), session, domain.PhaseReserving, "reserving destination storage"); err == nil {
-		t.Fatal("expected persistence failure")
+func TestStageTransitionRestoresStatusAfterPersistenceFailure(t *testing.T) {
+	tests := []struct {
+		name  string
+		apply func(*Service, *domain.Session) error
+	}{
+		{name: "begin", apply: func(service *Service, session *domain.Session) error {
+			return service.begin(context.Background(), session, domain.PhaseReserving, "reserving destination storage")
+		}},
+		{name: "finish", apply: func(service *Service, session *domain.Session) error {
+			return service.finish(context.Background(), session, domain.PhaseReserving, "reserving destination storage")
+		}},
 	}
-	output := logs.String()
-	if !strings.Contains(output, "migration stage persistence failed") || strings.Contains(output, "migration stage completed") {
-		t.Fatalf("logs=%q", output)
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			var logs bytes.Buffer
+			service, session, _, _ := appTestService(t, &fakeCopier{})
+			service.store = &failingUpdateStore{}
+			service.config.Logger = slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelWarn}))
+			initialPhase := session.Status.Phase
+			initialMessage := session.Status.Message
+			initialHistoryLen := len(session.Status.History)
+
+			if err := test.apply(service, session); err == nil {
+				t.Fatal("expected persistence failure")
+			}
+			if session.Status.Phase != initialPhase || session.Status.Message != initialMessage || len(session.Status.History) != initialHistoryLen {
+				t.Fatalf("session status advanced after failed persistence: %#v", session.Status)
+			}
+			output := logs.String()
+			if !strings.Contains(output, "level=ERROR") || !strings.Contains(output, "migration stage persistence failed") || strings.Contains(output, "migration stage started") || strings.Contains(output, "migration stage completed") {
+				t.Fatalf("logs=%q", output)
+			}
+		})
 	}
 }
 

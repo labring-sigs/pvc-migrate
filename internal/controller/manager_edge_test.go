@@ -1,9 +1,11 @@
 package controller
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
+	"log/slog"
 	"strings"
 	"testing"
 	"time"
@@ -233,6 +235,214 @@ func TestDiscoverRejectsKubeBlocksSwitchoverRejectedByAdmission(t *testing.T) {
 	}
 }
 
+func TestDiscoverKubeBlocksMongoDBFallsBackToNativeSwitchover(t *testing.T) {
+	var logs bytes.Buffer
+	selected := readyPod("db", "cluster-mongodb-0", "node-a")
+	selected.Spec.Containers = []corev1.Container{{Name: "mongodb"}}
+	selected.OwnerReferences = []metav1.OwnerReference{{APIVersion: "workloads.kubeblocks.io/v1alpha1", Kind: "InstanceSet", Name: "cluster-mongodb", UID: "instanceset-uid", Controller: boolPointer(true)}}
+	selected.Labels = map[string]string{
+		kube.AppInstanceLabel:    "cluster",
+		kube.AppNameLabel:        "mongodb",
+		kubeBlocksComponentLabel: "mongodb",
+		kubeBlocksRoleLabel:      "primary",
+	}
+	candidate := readyPod("db", "cluster-mongodb-1", "node-b")
+	candidate.Labels = map[string]string{
+		kube.AppInstanceLabel:    "cluster",
+		kube.AppNameLabel:        "mongodb",
+		kubeBlocksComponentLabel: "mongodb",
+		kubeBlocksRoleLabel:      "secondary",
+	}
+	typed := kubernetesfake.NewClientset(selected, candidate)
+	discovery := typed.Discovery().(*fake.FakeDiscovery)
+	discovery.Resources = []*metav1.APIResourceList{{GroupVersion: kubeBlocksClusterAPIVersion, APIResources: []metav1.APIResource{{Name: "opsrequests"}}}}
+	cluster := &unstructured.Unstructured{Object: map[string]any{
+		"apiVersion": kubeBlocksClusterAPIVersion,
+		"kind":       domain.KindCluster,
+		"metadata":   map[string]any{"name": "cluster", "namespace": "db", "uid": "cluster-uid"},
+		"spec":       map[string]any{"componentSpecs": []any{map[string]any{"name": "mongodb", "stop": false}}},
+	}}
+	instanceSet := kubeBlocksInstanceSetObject("workloads.kubeblocks.io/v1alpha1", boolPointer(false))
+	instanceSet.SetName("cluster-mongodb")
+	_ = unstructured.SetNestedSlice(instanceSet.Object, []any{
+		map[string]any{"name": "primary", "isLeader": true},
+		map[string]any{"name": "secondary", "isLeader": false},
+	}, "spec", "roles")
+	_ = unstructured.SetNestedSlice(instanceSet.Object, []any{
+		map[string]any{"podName": selected.Name, "role": map[string]any{"name": "primary"}},
+		map[string]any{"podName": candidate.Name, "role": map[string]any{"name": "secondary"}},
+	}, "status", "membersStatus")
+	dynamicClient := dynamicfake.NewSimpleDynamicClient(runtime.NewScheme(), cluster, instanceSet)
+	dynamicClient.PrependReactor("create", "opsrequests", func(clienttesting.Action) (bool, runtime.Object, error) {
+		return true, nil, apierrors.NewForbidden(schema.GroupResource{Group: domain.KubeBlocksAppsGroup, Resource: "opsrequests"}, "preflight", errors.New("this cluster component mongodb does not support switchover"))
+	})
+	var command podCommandRequest
+	manager := NewManager(typed, dynamicClient, discovery).WithLogger(slog.New(slog.NewTextHandler(&logs, nil)))
+	manager.commandExecutor = podCommandExecutorFunc(func(_ context.Context, request podCommandRequest) (podCommandResult, error) {
+		command = request
+		return podCommandResult{}, nil
+	})
+	workload, err := manager.Discover(context.Background(), DiscoverOptions{Namespace: "db", PodName: selected.Name, SwitchoverCandidate: candidate.Name})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if workload.KubeBlocks == nil || workload.KubeBlocks.SwitchoverStrategy != domain.KubeBlocksSwitchoverMongoDBNative || workload.KubeBlocks.SwitchoverContainer != "mongodb" {
+		t.Fatalf("KubeBlocks state=%#v", workload.KubeBlocks)
+	}
+	if command.Namespace != "db" || command.Pod != selected.Name || command.Container != "mongodb" || strings.Join(command.Command, " ") != "sh -c test -x /scripts/switchover-with-candidate.sh" {
+		t.Fatalf("native script preflight=%#v", command)
+	}
+	output := logs.String()
+	if !strings.Contains(output, "checking KubeBlocks automatic switchover") || !strings.Contains(output, "checking MongoDB native switchover script") {
+		t.Fatalf("logs=%q", output)
+	}
+}
+
+func TestKubeBlocksLeaderGuidanceProvidesMongoDBNativeCommand(t *testing.T) {
+	selected := readyPod("db", "cluster-mongodb-0", "node-a")
+	selected.Labels = map[string]string{
+		kube.AppInstanceLabel:    "cluster",
+		kube.AppNameLabel:        "mongodb",
+		kubeBlocksComponentLabel: "mongodb",
+		kubeBlocksRoleLabel:      "primary",
+	}
+	candidate := readyPod("db", "cluster-mongodb-1", "node-b")
+	candidate.Labels = map[string]string{
+		kube.AppInstanceLabel:    "cluster",
+		kube.AppNameLabel:        "mongodb",
+		kubeBlocksComponentLabel: "mongodb",
+		kubeBlocksRoleLabel:      "secondary",
+	}
+	dynamicClient := dynamicfake.NewSimpleDynamicClient(runtime.NewScheme())
+	dynamicClient.PrependReactor("create", "opsrequests", func(clienttesting.Action) (bool, runtime.Object, error) {
+		return true, nil, apierrors.NewForbidden(schema.GroupResource{Group: domain.KubeBlocksAppsGroup, Resource: "opsrequests"}, "preflight", errors.New("component mongodb does not support switchover"))
+	})
+	manager := NewManager(kubernetesfake.NewClientset(selected, candidate), dynamicClient, nil)
+	guidance := manager.kubeBlocksLeaderGuidance(context.Background(), selected, "cluster", "mongodb", "primary", kubeBlocksClusterAPIVersion)
+	if !strings.Contains(guidance, kubeBlocksMongoDBNativeSwitchoverCommand("db", "cluster", "mongodb", selected.Name, candidate.Name)) {
+		t.Fatalf("guidance=%q", guidance)
+	}
+}
+
+func TestKubeBlocksMongoDBPreflightFailureProvidesRecoveryGuidance(t *testing.T) {
+	selected := readyPod("db", "cluster-mongodb-0", "node-a")
+	selected.Spec.Containers = []corev1.Container{{Name: "mongodb"}}
+	selected.Labels = map[string]string{kube.AppNameLabel: "mongodb"}
+	candidate := "cluster-mongodb-1"
+	dynamicClient := dynamicfake.NewSimpleDynamicClient(runtime.NewScheme())
+	dynamicClient.PrependReactor("create", "opsrequests", func(clienttesting.Action) (bool, runtime.Object, error) {
+		return true, nil, apierrors.NewForbidden(schema.GroupResource{Group: domain.KubeBlocksAppsGroup, Resource: "opsrequests"}, "preflight", errors.New("component mongodb does not support switchover"))
+	})
+	manager := NewManager(kubernetesfake.NewClientset(selected), dynamicClient, nil)
+	manager.commandExecutor = podCommandExecutorFunc(func(context.Context, podCommandRequest) (podCommandResult, error) {
+		return podCommandResult{}, errors.New("script unavailable")
+	})
+	_, _, err := manager.kubeBlocksSwitchoverStrategy(context.Background(), selected, "cluster", "mongodb", candidate, kubeBlocksClusterAPIVersion)
+	if err == nil || !strings.Contains(err.Error(), "verify /scripts/switchover-with-candidate.sh is executable in the mongodb container") || strings.Contains(err.Error(), "kubectl --namespace") {
+		t.Fatalf("error=%v", err)
+	}
+}
+
+func TestRunMongoDBNativeSwitchoverExecutesScriptAndWaitsForRoleLabels(t *testing.T) {
+	var logs bytes.Buffer
+	selected := readyPod("db", "cluster-mongodb-0", "node-a")
+	selected.Labels = map[string]string{kubeBlocksRoleLabel: "primary"}
+	candidate := readyPod("db", "cluster-mongodb-1", "node-b")
+	candidate.Labels = map[string]string{kubeBlocksRoleLabel: "secondary"}
+	typed := kubernetesfake.NewClientset(selected, candidate)
+	manager := NewManager(typed, dynamicfake.NewSimpleDynamicClient(runtime.NewScheme()), nil).WithLogger(slog.New(slog.NewTextHandler(&logs, nil)))
+	manager.poll = time.Millisecond
+	var command podCommandRequest
+	manager.commandExecutor = podCommandExecutorFunc(func(ctx context.Context, request podCommandRequest) (podCommandResult, error) {
+		command = request
+		current, err := typed.CoreV1().Pods("db").Get(ctx, selected.Name, metav1.GetOptions{})
+		if err != nil {
+			return podCommandResult{}, err
+		}
+		current.Labels[kubeBlocksRoleLabel] = "secondary"
+		if _, err := typed.CoreV1().Pods("db").Update(ctx, current, metav1.UpdateOptions{}); err != nil {
+			return podCommandResult{}, err
+		}
+		current, err = typed.CoreV1().Pods("db").Get(ctx, candidate.Name, metav1.GetOptions{})
+		if err != nil {
+			return podCommandResult{}, err
+		}
+		current.Labels[kubeBlocksRoleLabel] = "primary"
+		_, err = typed.CoreV1().Pods("db").Update(ctx, current, metav1.UpdateOptions{})
+		return podCommandResult{Stdout: "Switchover complete"}, err
+	})
+	session := kubeBlocksSession()
+	kb := session.Spec.Workload().KubeBlocks
+	kb.Component = "mongodb"
+	kb.Instance = selected.Name
+	kb.SwitchoverCandidate = candidate.Name
+	kb.SwitchoverStrategy = domain.KubeBlocksSwitchoverMongoDBNative
+	kb.SwitchoverContainer = "mongodb"
+	if err := manager.runMongoDBNativeSwitchover(context.Background(), session); err != nil {
+		t.Fatal(err)
+	}
+	want := []string{
+		"env",
+		"KB_CONSENSUS_LEADER_POD_FQDN=cluster-mongodb-0.cluster-mongodb-headless",
+		"KB_SWITCHOVER_CANDIDATE_FQDN=cluster-mongodb-1.cluster-mongodb-headless",
+		"/scripts/switchover-with-candidate.sh",
+	}
+	if command.Namespace != "db" || command.Pod != selected.Name || command.Container != "mongodb" || strings.Join(command.Command, "|") != strings.Join(want, "|") {
+		t.Fatalf("native switchover command=%#v", command)
+	}
+	output := logs.String()
+	if !strings.Contains(output, "starting KubeBlocks MongoDB native switchover") || !strings.Contains(output, "waiting for workload controller") || !strings.Contains(output, "KubeBlocks MongoDB switchover from "+selected.Name+" to "+candidate.Name) {
+		t.Fatalf("logs=%q", output)
+	}
+}
+
+func TestRunMongoDBNativeSwitchoverRequiresRoleConvergence(t *testing.T) {
+	selected := readyPod("db", "cluster-mongodb-0", "node-a")
+	selected.Labels = map[string]string{kubeBlocksRoleLabel: "primary"}
+	candidate := readyPod("db", "cluster-mongodb-1", "node-b")
+	candidate.Labels = map[string]string{kubeBlocksRoleLabel: "secondary"}
+	manager := NewManager(kubernetesfake.NewClientset(selected, candidate), dynamicfake.NewSimpleDynamicClient(runtime.NewScheme()), nil)
+	manager.poll = time.Millisecond
+	manager.commandExecutor = podCommandExecutorFunc(func(context.Context, podCommandRequest) (podCommandResult, error) {
+		return podCommandResult{Stdout: "Switchover complete"}, nil
+	})
+	session := kubeBlocksSession()
+	kb := session.Spec.Workload().KubeBlocks
+	kb.Component = "mongodb"
+	kb.Instance = selected.Name
+	kb.SwitchoverCandidate = candidate.Name
+	kb.SwitchoverStrategy = domain.KubeBlocksSwitchoverMongoDBNative
+	kb.SwitchoverContainer = "mongodb"
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
+	defer cancel()
+	err := manager.runMongoDBNativeSwitchover(ctx, session)
+	if domain.CategoryOf(err) != domain.ErrorTimeout || !strings.Contains(err.Error(), "MongoDB switchover") {
+		t.Fatalf("category=%s error=%v", domain.CategoryOf(err), err)
+	}
+}
+
+func TestRunMongoDBNativeSwitchoverProvidesManualCommandAfterScriptFailure(t *testing.T) {
+	selected := readyPod("db", "cluster-mongodb-0", "node-a")
+	selected.Labels = map[string]string{kubeBlocksRoleLabel: "primary"}
+	candidate := readyPod("db", "cluster-mongodb-1", "node-b")
+	candidate.Labels = map[string]string{kubeBlocksRoleLabel: "secondary"}
+	manager := NewManager(kubernetesfake.NewClientset(selected, candidate), dynamicfake.NewSimpleDynamicClient(runtime.NewScheme()), nil)
+	manager.commandExecutor = podCommandExecutorFunc(func(context.Context, podCommandRequest) (podCommandResult, error) {
+		return podCommandResult{Stderr: "candidate is not caught up"}, errors.New("script exited with status 1")
+	})
+	session := kubeBlocksSession()
+	kb := session.Spec.Workload().KubeBlocks
+	kb.Component = "mongodb"
+	kb.Instance = selected.Name
+	kb.SwitchoverCandidate = candidate.Name
+	kb.SwitchoverStrategy = domain.KubeBlocksSwitchoverMongoDBNative
+	kb.SwitchoverContainer = "mongodb"
+	err := manager.runMongoDBNativeSwitchover(context.Background(), session)
+	if domain.CategoryOf(err) != domain.ErrorPrecondition || !strings.Contains(err.Error(), kubeBlocksMongoDBNativeSwitchoverCommand("db", "cluster", "mongodb", selected.Name, candidate.Name)) {
+		t.Fatalf("category=%s error=%v", domain.CategoryOf(err), err)
+	}
+}
+
 func kubeBlocksCandidate(component string) *corev1.Pod {
 	pod := readyPod("db", "cluster-other-1", "node-b")
 	pod.Labels = map[string]string{"app.kubernetes.io/instance": "cluster", "apps.kubeblocks.io/component-name": component}
@@ -247,6 +457,20 @@ func TestKubeBlocksSwitchoverCommandMatchesServedAPI(t *testing.T) {
 	operationsCommand := kubeBlocksSwitchoverCommand("db", "cluster", "postgresql", "cluster-postgresql-0", "cluster-postgresql-1", "operations.kubeblocks.io/v1alpha1")
 	if !strings.Contains(operationsCommand, "instanceName: cluster-postgresql-0") || !strings.Contains(operationsCommand, "candidateName: cluster-postgresql-1") {
 		t.Fatalf("operations OpsRequest command=%q", operationsCommand)
+	}
+}
+
+func TestKubeBlocksMongoDBNativeSwitchoverCommand(t *testing.T) {
+	command := kubeBlocksMongoDBNativeSwitchoverCommand("db", "cluster", "mongodb", "cluster-mongodb-0", "cluster-mongodb-1")
+	for _, fragment := range []string{
+		"kubectl --namespace db exec cluster-mongodb-0 -c mongodb -- env",
+		"KB_CONSENSUS_LEADER_POD_FQDN=cluster-mongodb-0.cluster-mongodb-headless",
+		"KB_SWITCHOVER_CANDIDATE_FQDN=cluster-mongodb-1.cluster-mongodb-headless",
+		"/scripts/switchover-with-candidate.sh",
+	} {
+		if !strings.Contains(command, fragment) {
+			t.Fatalf("command=%q does not contain %q", command, fragment)
+		}
 	}
 }
 

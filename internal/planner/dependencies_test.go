@@ -108,6 +108,7 @@ func TestKubeBlocksRoleWarningDescribesTheSelectedSafetyPath(t *testing.T) {
 		{name: "unknown role with accepted downtime", spec: domain.KubeBlocksSpec{Role: "unknown"}, want: "possible leader downtime was explicitly acknowledged", forbidden: "target="},
 		{name: "known leader with accepted downtime", spec: domain.KubeBlocksSpec{Role: "primary"}, want: "leader downtime was explicitly acknowledged", forbidden: "target="},
 		{name: "automatic switchover", spec: domain.KubeBlocksSpec{Role: "primary", SwitchoverCandidate: "db-1"}, want: "switchover target=db-1"},
+		{name: "MongoDB native switchover", spec: domain.KubeBlocksSpec{Role: "primary", SwitchoverCandidate: "db-1", SwitchoverStrategy: domain.KubeBlocksSwitchoverMongoDBNative}, want: "native candidate switchover targets=db-1"},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {

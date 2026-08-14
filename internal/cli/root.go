@@ -144,7 +144,7 @@ func (r *rootState) runtime() (*commandRuntime, error) {
 	if err != nil {
 		return nil, err
 	}
-	controllers := controller.NewManager(clients.Kubernetes, clients.Dynamic, clients.Discovery).WithLogger(logger)
+	controllers := controller.NewManager(clients.Kubernetes, clients.Dynamic, clients.Discovery).WithRESTConfig(clients.RESTConfig).WithLogger(logger)
 	store := kube.NewConfigMapSessionStore(clients.Kubernetes)
 	reserver := kube.NewReserver(clients.Kubernetes).WithLogger(logger)
 	if r.global.streamToolLogs {

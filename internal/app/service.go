@@ -1978,19 +1978,27 @@ func (s *Service) begin(ctx context.Context, session *domain.Session, phase doma
 			return domain.NewError(domain.ErrorPrecondition, "resume phase", fmt.Sprintf("failed session resumes from %s, requested %s", session.Status.ResumeFrom, phase))
 		}
 	}
-	if err := session.Transition(phase, message, s.now()); err != nil {
-		return err
-	}
-	s.logInfo("migration stage started", "session", session.ID, "phase", phase, "message", message)
-	return s.persist(ctx, session)
-}
-
-func (s *Service) finish(ctx context.Context, session *domain.Session, phase domain.Phase, message string) error {
+	previousStatus := session.Status
 	if err := session.Transition(phase, message, s.now()); err != nil {
 		return err
 	}
 	if err := s.persist(ctx, session); err != nil {
-		s.logInfo("migration stage persistence failed", "session", session.ID, "phase", phase, "message", message, "error", err)
+		session.Status = previousStatus
+		s.logError("migration stage persistence failed", "session", session.ID, "phase", phase, "message", message, "error", err)
+		return err
+	}
+	s.logInfo("migration stage started", "session", session.ID, "phase", phase, "message", message)
+	return nil
+}
+
+func (s *Service) finish(ctx context.Context, session *domain.Session, phase domain.Phase, message string) error {
+	previousStatus := session.Status
+	if err := session.Transition(phase, message, s.now()); err != nil {
+		return err
+	}
+	if err := s.persist(ctx, session); err != nil {
+		session.Status = previousStatus
+		s.logError("migration stage persistence failed", "session", session.ID, "phase", phase, "message", message, "error", err)
 		return err
 	}
 	s.logInfo("migration stage completed", "session", session.ID, "phase", phase, "message", message)
@@ -2044,6 +2052,12 @@ func (s *Service) logInfo(message string, args ...any) {
 func (s *Service) logWarn(message string, args ...any) {
 	if s != nil && s.config.Logger != nil {
 		s.config.Logger.Warn(message, args...)
+	}
+}
+
+func (s *Service) logError(message string, args ...any) {
+	if s != nil && s.config.Logger != nil {
+		s.config.Logger.Error(message, args...)
 	}
 }
 

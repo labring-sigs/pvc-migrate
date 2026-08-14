@@ -187,18 +187,28 @@ type RenameSessionSpec struct{}
 type MoveSessionSpec struct{}
 
 type KubeBlocksSpec struct {
-	Cluster                  string          `json:"cluster" yaml:"cluster"`
-	Component                string          `json:"component" yaml:"component"`
-	Instance                 string          `json:"instance" yaml:"instance"`
-	Role                     string          `json:"role,omitempty" yaml:"role,omitempty"`
-	SwitchoverCandidate      string          `json:"switchoverCandidate,omitempty" yaml:"switchoverCandidate,omitempty"`
-	OpsAPIVersion            string          `json:"opsAPIVersion" yaml:"opsAPIVersion"`
-	ClusterAPIVersion        string          `json:"clusterAPIVersion,omitempty" yaml:"clusterAPIVersion,omitempty"`
-	ClusterUID               types.UID       `json:"clusterUID,omitempty" yaml:"clusterUID,omitempty"`
-	OriginalStops            map[string]bool `json:"originalStops,omitempty" yaml:"originalStops,omitempty"`
-	OriginalPaused           bool            `json:"originalPaused,omitempty" yaml:"originalPaused,omitempty"`
-	OriginalPausedConfigured bool            `json:"originalPausedConfigured,omitempty" yaml:"originalPausedConfigured,omitempty"`
+	Cluster                  string                       `json:"cluster" yaml:"cluster"`
+	Component                string                       `json:"component" yaml:"component"`
+	Instance                 string                       `json:"instance" yaml:"instance"`
+	Role                     string                       `json:"role,omitempty" yaml:"role,omitempty"`
+	SwitchoverCandidate      string                       `json:"switchoverCandidate,omitempty" yaml:"switchoverCandidate,omitempty"`
+	SwitchoverStrategy       KubeBlocksSwitchoverStrategy `json:"switchoverStrategy,omitempty" yaml:"switchoverStrategy,omitempty"`
+	SwitchoverContainer      string                       `json:"switchoverContainer,omitempty" yaml:"switchoverContainer,omitempty"`
+	OpsAPIVersion            string                       `json:"opsAPIVersion" yaml:"opsAPIVersion"`
+	ClusterAPIVersion        string                       `json:"clusterAPIVersion,omitempty" yaml:"clusterAPIVersion,omitempty"`
+	ClusterUID               types.UID                    `json:"clusterUID,omitempty" yaml:"clusterUID,omitempty"`
+	OriginalStops            map[string]bool              `json:"originalStops,omitempty" yaml:"originalStops,omitempty"`
+	OriginalPaused           bool                         `json:"originalPaused,omitempty" yaml:"originalPaused,omitempty"`
+	OriginalPausedConfigured bool                         `json:"originalPausedConfigured,omitempty" yaml:"originalPausedConfigured,omitempty"`
 }
+
+// KubeBlocksSwitchoverStrategy is the durable leader-handoff mechanism chosen during planning.
+type KubeBlocksSwitchoverStrategy string
+
+const (
+	KubeBlocksSwitchoverOpsRequest    KubeBlocksSwitchoverStrategy = "opsrequest"
+	KubeBlocksSwitchoverMongoDBNative KubeBlocksSwitchoverStrategy = "mongodb-native"
+)
 
 type VMClusterSpec struct {
 	APIVersion                      string    `json:"apiVersion" yaml:"apiVersion"`
