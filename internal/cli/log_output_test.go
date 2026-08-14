@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"regexp"
 	"strings"
 	"testing"
 )
@@ -43,7 +44,7 @@ func TestLogOutputWriterKeepsJSONLogsAndGuidanceParseable(t *testing.T) {
 func TestRootUsesStructuredStderrForJSONLogFormat(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	command := NewRoot(Options{Version: "test", Out: &stdout, ErrOut: &stderr})
-	command.SetArgs([]string{"--log-format", "json", "version"})
+	command.SetArgs([]string{"--log-format", "json", "--color", "always", "version"})
 	if err := command.Execute(); err != nil {
 		t.Fatal(err)
 	}
@@ -56,5 +57,53 @@ func TestRootUsesStructuredStderrForJSONLogFormat(t *testing.T) {
 	}
 	if entry["msg"] != "dry-run completed" {
 		t.Fatalf("entry=%v", entry)
+	}
+}
+
+func TestColorizeTextLogsByLevelComponentAndTool(t *testing.T) {
+	input := []byte("time=2026-08-14T00:00:00Z level=ERROR msg=failed component=migration\n[tool app/pv-migrate-copy rsync] checksum mismatch\n")
+	output := string(colorizeLogText(input))
+	for _, want := range []string{
+		"\x1b[1;31mERROR\x1b[0m",
+		"component=\x1b[",
+		"\x1b[",
+		"checksum mismatch",
+	} {
+		if !strings.Contains(output, want) {
+			t.Fatalf("colored output lacks %q: %q", want, output)
+		}
+	}
+	if !strings.HasSuffix(output, "\n") {
+		t.Fatalf("colored output lost newline: %q", output)
+	}
+	plain := regexp.MustCompile(`\x1b\[[0-9;]*m`).ReplaceAllString(output, "")
+	if plain != string(input) {
+		t.Fatalf("colorization changed log content: got %q want %q", plain, input)
+	}
+	if componentColor("controller") == componentColor("planner") {
+		t.Fatal("known components share a color")
+	}
+}
+
+func TestColorOutputWriterModes(t *testing.T) {
+	for _, test := range []struct {
+		mode    string
+		colored bool
+	}{
+		{mode: colorAlways, colored: true},
+		{mode: colorAuto, colored: false},
+		{mode: colorNever, colored: false},
+	} {
+		t.Run(test.mode, func(t *testing.T) {
+			var output bytes.Buffer
+			writer := newColorOutputWriter(&output, func() bool { return colorEnabled(test.mode, &output) })
+			if _, err := writer.Write([]byte("level=INFO msg=ready\n")); err != nil {
+				t.Fatal(err)
+			}
+			got := output.String()
+			if strings.Contains(got, "\x1b[") != test.colored {
+				t.Fatalf("mode=%s output=%q", test.mode, got)
+			}
+		})
 	}
 }

@@ -42,6 +42,7 @@ type globals struct {
 	output           string
 	logFormat        string
 	logLevel         string
+	color            string
 	streamToolLogs   bool
 	noCompress       bool
 	assumeYes        bool
@@ -75,12 +76,19 @@ func NewRoot(options Options) *cobra.Command {
 		options.ErrOut = io.Discard
 	}
 	state := &rootState{options: options}
-	state.errOut = newLogOutputWriter(options.ErrOut, func() bool { return state.global.logFormat == "json" })
+	coloredErrOut := newColorOutputWriter(options.ErrOut, func() bool {
+		return state.global.logFormat != "json" && colorEnabled(state.global.color, options.ErrOut)
+	})
+	state.errOut = newLogOutputWriter(coloredErrOut, func() bool { return state.global.logFormat == "json" })
 	command := &cobra.Command{
 		Use:           "pvc-migrate",
 		Short:         "Resumable Kubernetes PVC migration",
 		SilenceUsage:  true,
 		SilenceErrors: true,
+		PersistentPreRunE: func(*cobra.Command, []string) error {
+			_, err := parseColorMode(state.global.color)
+			return err
+		},
 	}
 	command.SetIn(options.In)
 	command.SetOut(options.Out)
@@ -96,6 +104,7 @@ func NewRoot(options Options) *cobra.Command {
 	flags.StringVarP(&state.global.output, "output", "o", "table", "Output format: table, json, yaml")
 	flags.StringVar(&state.global.logFormat, "log-format", "text", "Log format: text, json")
 	flags.StringVar(&state.global.logLevel, "log-level", "info", "Log level: debug, info, warn, error")
+	flags.StringVar(&state.global.color, "color", colorAuto, "Colorize text logs: auto, always, never")
 	flags.BoolVar(&state.global.streamToolLogs, "stream-tool-logs", true, "Stream generated tool Pod logs to stderr")
 	flags.BoolVar(&state.global.noCompress, "no-compress", false, "Disable rsync compression")
 	flags.BoolVarP(&state.global.assumeYes, "yes", "y", false, "Approve workload pause and storage identity changes")
@@ -144,13 +153,13 @@ func (r *rootState) runtime() (*commandRuntime, error) {
 	if err != nil {
 		return nil, err
 	}
-	controllers := controller.NewManager(clients.Kubernetes, clients.Dynamic, clients.Discovery).WithRESTConfig(clients.RESTConfig).WithLogger(logger)
+	controllers := controller.NewManager(clients.Kubernetes, clients.Dynamic, clients.Discovery).WithRESTConfig(clients.RESTConfig).WithLogger(logger.With("component", "controller"))
 	store := kube.NewConfigMapSessionStore(clients.Kubernetes)
-	reserver := kube.NewReserver(clients.Kubernetes).WithLogger(logger)
+	reserver := kube.NewReserver(clients.Kubernetes).WithLogger(logger.With("component", "reserver"))
 	if r.global.streamToolLogs {
 		reserver = reserver.WithToolLogs(kube.ToolLogOptions{
 			Writer:     r.errWriter(),
-			Logger:     logger,
+			Logger:     logger.With("component", "tool"),
 			Structured: r.global.logFormat == "json",
 		})
 	}
@@ -160,7 +169,7 @@ func (r *rootState) runtime() (*commandRuntime, error) {
 		reserver,
 		copyengine.NewPVMigrate(),
 		controllers,
-		kube.NewSwitcher(clients.Kubernetes).WithLogger(logger),
+		kube.NewSwitcher(clients.Kubernetes).WithLogger(logger.With("component", "switcher")),
 		app.Config{
 			KubeconfigPath:  r.global.kubeconfig,
 			Context:         r.global.kubeContext,
@@ -171,17 +180,17 @@ func (r *rootState) runtime() (*commandRuntime, error) {
 			StreamToolLogs:  r.global.streamToolLogs,
 			StructuredLogs:  r.global.logFormat == "json",
 			Writer:          r.errWriter(),
-			Logger:          logger,
+			Logger:          logger.With("component", "migration"),
 			ToolImageProber: kube.NewToolImageProber(clients.Kubernetes),
 		},
 	)
 	return &commandRuntime{
 		clients:     clients,
 		store:       store,
-		planner:     planner.New(clients.Kubernetes, controllers).WithLogger(logger),
+		planner:     planner.New(clients.Kubernetes, controllers).WithLogger(logger.With("component", "planner")),
 		service:     service,
 		printer:     output.Printer{Writer: r.options.Out, Format: format},
-		logger:      logger,
+		logger:      logger.With("component", "backup"),
 		controllers: controllers,
 	}, nil
 }
@@ -206,6 +215,9 @@ func configureKubernetesLogger(logger *slog.Logger) {
 }
 
 func loggerFor(r *rootState) (*slog.Logger, error) {
+	if _, err := parseColorMode(r.global.color); err != nil {
+		return nil, err
+	}
 	level, err := parseLogLevel(r.global.logLevel)
 	if err != nil {
 		return nil, err

@@ -266,7 +266,7 @@ func reportApprovalError(cmd interface{ ErrOrStderr() io.Writer }, err error) er
 }
 
 func reportRuntimeError(cmd interface{ ErrOrStderr() io.Writer }, err error) error {
-	_, _ = fmt.Fprintln(cmd.ErrOrStderr(), "\nCommand initialization stopped before any cluster operation. Check --kubeconfig, --context, --output, --log-format, and --log-level, then rerun the command.")
+	_, _ = fmt.Fprintln(cmd.ErrOrStderr(), "\nCommand initialization stopped before any cluster operation. Check --kubeconfig, --context, --output, --log-format, --log-level, and --color, then rerun the command.")
 	return err
 }
 

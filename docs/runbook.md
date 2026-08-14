@@ -30,6 +30,8 @@ Read these fields first:
 
 Generated reservation, rsync, SSHD, and rclone Pod logs follow the active command on stderr by default, so short-lived tool cleanup does not remove the operator's copy of their output. Prefixes identify the Pod and container when several PVCs run concurrently. Redirect stderr to retain a file, for example `2>migration.log`, or use `--stream-tool-logs=false` for quiet automation. `--log-format=json` emits JSON Lines for tool output, progress events, guidance, and failures. JSON or YAML command results stay on stdout.
 
+Interactive text output uses `--color=auto` by default. Use `--color=always` when stderr is rendered by a terminal multiplexer, and use `--color=never` for plain-text collection. Severity, component, and tool prefixes receive separate colors; JSON output stays parseable.
+
 ## Failure Response
 
 | Session state | Workload state | Operator action |
