@@ -324,7 +324,7 @@ func TestKubeBlocksLeaderGuidanceProvidesMongoDBNativeCommand(t *testing.T) {
 	}
 }
 
-func TestKubeBlocksMongoDBPreflightFailureProvidesManualCommand(t *testing.T) {
+func TestKubeBlocksMongoDBPreflightFailureProvidesRecoveryGuidance(t *testing.T) {
 	selected := readyPod("db", "cluster-mongodb-0", "node-a")
 	selected.Spec.Containers = []corev1.Container{{Name: "mongodb"}}
 	selected.Labels = map[string]string{kube.AppNameLabel: "mongodb"}
@@ -338,7 +338,7 @@ func TestKubeBlocksMongoDBPreflightFailureProvidesManualCommand(t *testing.T) {
 		return podCommandResult{}, errors.New("script unavailable")
 	})
 	_, _, err := manager.kubeBlocksSwitchoverStrategy(context.Background(), selected, "cluster", "mongodb", candidate, kubeBlocksClusterAPIVersion)
-	if err == nil || !strings.Contains(err.Error(), kubeBlocksMongoDBNativeSwitchoverCommand("db", "cluster", "mongodb", selected.Name, candidate)) {
+	if err == nil || !strings.Contains(err.Error(), "verify /scripts/switchover-with-candidate.sh is executable in the mongodb container") || strings.Contains(err.Error(), "kubectl --namespace") {
 		t.Fatalf("error=%v", err)
 	}
 }

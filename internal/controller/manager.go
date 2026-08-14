@@ -882,7 +882,7 @@ func (m *Manager) kubeBlocksSwitchoverStrategy(ctx context.Context, selected *co
 	}
 	container, nativeErr := m.preflightMongoDBNativeSwitchover(ctx, selected)
 	if nativeErr != nil {
-		return "", "", fmt.Errorf("the served OpsRequest API has no MongoDB switchover handler: %w; native switchover preflight failed: %w; manual MongoDB switchover: %s", err, nativeErr, kubeBlocksMongoDBNativeSwitchoverCommand(selected.Namespace, cluster, component, selected.Name, candidate))
+		return "", "", fmt.Errorf("the served OpsRequest API has no MongoDB switchover handler: %w; native switchover preflight failed: %w; verify /scripts/switchover-with-candidate.sh is executable in the mongodb container, then rerun the plan", err, nativeErr)
 	}
 	return domain.KubeBlocksSwitchoverMongoDBNative, container, nil
 }
