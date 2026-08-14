@@ -161,7 +161,16 @@ The destination PVCs are provisioned before downtime. Warm-copy passes run while
 | CockroachDB | Use drain, decommission, and CockroachDB recovery procedures | Rejected during planning |
 | Backup archive-WAL workload | Use the owning backup controller workflow | Rejected during planning |
 
-For a KubeBlocks primary, `--kubeblocks-candidate` requests an automated switchover. The plan also prints `kbcli cluster promote` guidance and a matching OpsRequest YAML when the installed KubeBlocks API accepts that operation. `--allow-leader-downtime` acknowledges a direct primary restart when the application can tolerate it.
+For a KubeBlocks primary, `--kubeblocks-candidate` requests an automated switchover. The plan also prints `kbcli cluster promote` guidance and a matching OpsRequest YAML when the installed KubeBlocks API accepts that operation. For MongoDB components whose OpsRequest admission reports that switchover is unsupported, pvc-migrate validates and runs the KubeBlocks MongoDB native candidate script; choose a Ready, caught-up secondary as the candidate. Failure guidance includes the fully resolved equivalent command. The native command has this form:
+
+```sh
+kubectl --namespace <namespace> exec <current-primary-pod> -c mongodb -- env \
+  KB_CONSENSUS_LEADER_POD_FQDN=<current-primary-pod>.<cluster>-<component>-headless \
+  KB_SWITCHOVER_CANDIDATE_FQDN=<ready-secondary-pod>.<cluster>-<component>-headless \
+  /scripts/switchover-with-candidate.sh
+```
+
+`--allow-leader-downtime` acknowledges a direct primary restart when the application can tolerate it.
 
 InstanceSet-backed components use the served `spec.paused` field to suspend InstanceSet reconciliation while the selected Pod is migrated. The adapter deletes that Pod with a UID precondition and verifies the InstanceSet pause owner before final sync. Legacy StatefulSet-backed components use the selected Cluster component's `spec.componentSpecs[].stop` field. The `kubeblocks.io/reconcile` annotation triggers reconciliation and has no pause semantics.
 

@@ -60,6 +60,9 @@ func (p *Planner) checkRBAC(ctx context.Context, plan *domain.MigrationPlan, sou
 		add(workload.Controller.Namespace, "apps", "deployments", "get", "update")
 	}
 	if workload.KubeBlocks != nil {
+		if workload.KubeBlocks.SwitchoverStrategy == domain.KubeBlocksSwitchoverMongoDBNative {
+			add(sourceNamespace, "", "pods/exec", "create")
+		}
 		group := strings.SplitN(workload.KubeBlocks.OpsAPIVersion, "/", 2)[0]
 		add(sourceNamespace, group, "opsrequests", "get", "create", "delete")
 		clusterGroup := strings.SplitN(workload.KubeBlocks.ClusterAPIVersion, "/", 2)[0]

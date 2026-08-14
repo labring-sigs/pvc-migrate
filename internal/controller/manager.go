@@ -24,6 +24,7 @@ import (
 	"k8s.io/client-go/discovery"
 	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/rest"
 	"k8s.io/client-go/util/retry"
 )
 
@@ -62,11 +63,12 @@ type kubeBlocksInstanceSetState struct {
 }
 
 type Manager struct {
-	typed     kubernetes.Interface
-	dynamic   dynamic.Interface
-	discovery discovery.DiscoveryInterface
-	poll      time.Duration
-	logger    *slog.Logger
+	typed           kubernetes.Interface
+	dynamic         dynamic.Interface
+	discovery       discovery.DiscoveryInterface
+	commandExecutor podCommandExecutor
+	poll            time.Duration
+	logger          *slog.Logger
 }
 
 func NewManager(typed kubernetes.Interface, dynamicClient dynamic.Interface, discoveryClient discovery.DiscoveryInterface) *Manager {
@@ -76,6 +78,16 @@ func NewManager(typed kubernetes.Interface, dynamicClient dynamic.Interface, dis
 // WithLogger enables progress logs for controller reconciliation waits.
 func (m *Manager) WithLogger(logger *slog.Logger) *Manager {
 	m.logger = logger
+	return m
+}
+
+// WithRESTConfig enables Pod exec for controller adapters that require a native workload command.
+func (m *Manager) WithRESTConfig(config *rest.Config) *Manager {
+	if config == nil {
+		m.commandExecutor = nil
+		return m
+	}
+	m.commandExecutor = kubernetesPodCommandExecutor{client: m.typed, config: rest.CopyConfig(config)}
 	return m
 }
 
@@ -534,6 +546,8 @@ func (m *Manager) kubeBlocksWorkload(ctx context.Context, pod *corev1.Pod, owner
 		return domain.WorkloadSpec{}, domain.NewError(domain.ErrorPrecondition, "discover KubeBlocks", "no served OpsRequest API was found")
 	}
 	role := podRole(pod)
+	switchoverStrategy := domain.KubeBlocksSwitchoverOpsRequest
+	switchoverContainer := ""
 	var switchoverCandidate *corev1.Pod
 	if options.SwitchoverCandidate != "" {
 		candidate, err := m.typed.CoreV1().Pods(pod.Namespace).Get(ctx, options.SwitchoverCandidate, metav1.GetOptions{})
@@ -628,9 +642,11 @@ func (m *Manager) kubeBlocksWorkload(ctx context.Context, pod *corev1.Pod, owner
 				return domain.WorkloadSpec{}, domain.NewError(domain.ErrorPrecondition, "discover KubeBlocks", fmt.Sprintf("switchover candidate %s must have a known non-leader role in InstanceSet %s", switchoverCandidate.Name, owner.Name))
 			}
 		}
-		if err := m.validateKubeBlocksSwitchover(ctx, pod.Namespace, cluster, component, pod.Name, switchoverCandidate.Name, opsAPIVersion); err != nil {
-			return domain.WorkloadSpec{}, domain.NewError(domain.ErrorPrecondition, "discover KubeBlocks", fmt.Sprintf("automatic switchover for selected instance %s was rejected by the served OpsRequest API: %v; use the component's native switchover procedure or --allow-leader-downtime", pod.Name, err))
+		strategy, container, err := m.kubeBlocksSwitchoverStrategy(ctx, pod, cluster, component, switchoverCandidate.Name, opsAPIVersion)
+		if err != nil {
+			return domain.WorkloadSpec{}, domain.NewError(domain.ErrorPrecondition, "discover KubeBlocks", fmt.Sprintf("automatic switchover for selected instance %s is unavailable: %v; use --allow-leader-downtime to acknowledge the leader outage", pod.Name, err))
 		}
+		switchoverStrategy, switchoverContainer = strategy, container
 	}
 	if owner.Kind == domain.KindInstanceSet && instanceSet.Paused {
 		return domain.WorkloadSpec{}, domain.NewError(
@@ -653,6 +669,8 @@ func (m *Manager) kubeBlocksWorkload(ctx context.Context, pod *corev1.Pod, owner
 			Instance:                 pod.Name,
 			Role:                     role,
 			SwitchoverCandidate:      options.SwitchoverCandidate,
+			SwitchoverStrategy:       switchoverStrategy,
+			SwitchoverContainer:      switchoverContainer,
 			OpsAPIVersion:            opsAPIVersion,
 			ClusterAPIVersion:        kubeBlocksClusterAPIVersion,
 			ClusterUID:               clusterObject.GetUID(),
@@ -784,6 +802,9 @@ func (m *Manager) kubeBlocksLeaderGuidance(ctx context.Context, selected *corev1
 	}
 	if candidate != "REPLACE_WITH_READY_SECONDARY_POD" {
 		if err := m.validateKubeBlocksSwitchover(ctx, selected.Namespace, cluster, component, selected.Name, candidate, opsAPIVersion); err != nil {
+			if isKubeBlocksMongoDB(selected) && kubeBlocksSwitchoverUnsupported(err) {
+				return fmt.Sprintf("selected instance %s has role %s; the served OpsRequest API has no MongoDB switchover handler. Use --kubeblocks-candidate %s and pvc-migrate will validate and run the MongoDB native candidate switchover script. Manual MongoDB switchover: %s. The candidate must remain Ready and caught up; --allow-leader-downtime acknowledges a leader outage", selected.Name, role, candidate, kubeBlocksMongoDBNativeSwitchoverCommand(selected.Namespace, cluster, component, selected.Name, candidate))
+			}
 			return fmt.Sprintf("selected instance %s has role %s; the served OpsRequest API rejected automatic switchover to %s: %v. Use the component's native switchover procedure, or use --allow-leader-downtime to acknowledge the leader outage", selected.Name, role, candidate, err)
 		}
 	}
@@ -825,7 +846,15 @@ func kubeBlocksSwitchoverCommand(namespace, cluster, component, selected, candid
 	return builder.String()
 }
 
+func kubeBlocksMongoDBNativeSwitchoverCommand(namespace, cluster, component, selected, candidate string) string {
+	headlessService := fmt.Sprintf("%s-%s-headless", cluster, component)
+	return fmt.Sprintf("kubectl --namespace %s exec %s -c mongodb -- env KB_CONSENSUS_LEADER_POD_FQDN=%s.%s KB_SWITCHOVER_CANDIDATE_FQDN=%s.%s /scripts/switchover-with-candidate.sh", namespace, selected, selected, headlessService, candidate, headlessService)
+}
+
 func (m *Manager) validateKubeBlocksSwitchover(ctx context.Context, namespace, cluster, component, selected, candidate, opsAPIVersion string) error {
+	if m.logger != nil {
+		m.logger.Info("checking KubeBlocks automatic switchover", "namespace", namespace, "cluster", cluster, "component", component, "instance", selected, "candidate", candidate)
+	}
 	gvr, err := opsGVR(opsAPIVersion)
 	if err != nil {
 		return err
@@ -841,6 +870,91 @@ func (m *Manager) validateKubeBlocksSwitchover(ctx context.Context, namespace, c
 	}}
 	_, err = m.dynamic.Resource(gvr).Namespace(namespace).Create(ctx, object, metav1.CreateOptions{DryRun: []string{metav1.DryRunAll}})
 	return err
+}
+
+func (m *Manager) kubeBlocksSwitchoverStrategy(ctx context.Context, selected *corev1.Pod, cluster, component, candidate, opsAPIVersion string) (domain.KubeBlocksSwitchoverStrategy, string, error) {
+	err := m.validateKubeBlocksSwitchover(ctx, selected.Namespace, cluster, component, selected.Name, candidate, opsAPIVersion)
+	if err == nil {
+		return domain.KubeBlocksSwitchoverOpsRequest, "", nil
+	}
+	if !isKubeBlocksMongoDB(selected) || !kubeBlocksSwitchoverUnsupported(err) {
+		return "", "", fmt.Errorf("the served OpsRequest API rejected the request: %w; use the component's native switchover procedure", err)
+	}
+	container, nativeErr := m.preflightMongoDBNativeSwitchover(ctx, selected)
+	if nativeErr != nil {
+		return "", "", fmt.Errorf("the served OpsRequest API has no MongoDB switchover handler: %w; native switchover preflight failed: %w; manual MongoDB switchover: %s", err, nativeErr, kubeBlocksMongoDBNativeSwitchoverCommand(selected.Namespace, cluster, component, selected.Name, candidate))
+	}
+	return domain.KubeBlocksSwitchoverMongoDBNative, container, nil
+}
+
+func isKubeBlocksMongoDB(pod *corev1.Pod) bool {
+	if pod == nil {
+		return false
+	}
+	for _, value := range []string{pod.Labels[kube.AppNameLabel], pod.Labels[kube.AppComponentLabel], pod.Labels[kubeBlocksComponentLabel]} {
+		if strings.EqualFold(value, "mongodb") {
+			return true
+		}
+	}
+	return false
+}
+
+func kubeBlocksSwitchoverUnsupported(err error) bool {
+	if err == nil {
+		return false
+	}
+	message := strings.ToLower(err.Error())
+	return strings.Contains(message, "does not support switchover") || strings.Contains(message, "doesn't support switchover") || strings.Contains(message, "not support switchover")
+}
+
+func mongoDBContainer(pod *corev1.Pod) string {
+	if pod == nil {
+		return ""
+	}
+	for _, container := range pod.Spec.Containers {
+		if container.Name == "mongodb" {
+			return container.Name
+		}
+	}
+	return ""
+}
+
+func (m *Manager) preflightMongoDBNativeSwitchover(ctx context.Context, pod *corev1.Pod) (string, error) {
+	container := mongoDBContainer(pod)
+	if container == "" {
+		return "", fmt.Errorf("MongoDB Pod %s has no mongodb container", pod.Name)
+	}
+	if m.commandExecutor == nil {
+		return "", fmt.Errorf("pod exec is unavailable; configure Kubernetes REST access for the MongoDB native switchover")
+	}
+	if m.logger != nil {
+		m.logger.Info("checking MongoDB native switchover script", "namespace", pod.Namespace, "pod", pod.Name, "container", container)
+	}
+	result, err := m.commandExecutor.Execute(ctx, podCommandRequest{
+		Namespace: pod.Namespace,
+		Pod:       pod.Name,
+		Container: container,
+		Command:   []string{"sh", "-c", "test -x /scripts/switchover-with-candidate.sh"},
+	})
+	if err != nil {
+		return "", podCommandError("check MongoDB native switchover script", result, err)
+	}
+	return container, nil
+}
+
+func podCommandError(action string, result podCommandResult, err error) error {
+	output := strings.TrimSpace(result.Stderr)
+	if output == "" {
+		output = strings.TrimSpace(result.Stdout)
+	}
+	if output == "" {
+		return fmt.Errorf("%s: %w", action, err)
+	}
+	output = strings.Join(strings.Fields(output), " ")
+	if len(output) > 512 {
+		output = output[:512] + "..."
+	}
+	return fmt.Errorf("%s: %w (output: %s)", action, err, output)
 }
 
 func kubeBlocksSwitchoverSpec(opsAPIVersion, cluster, component, selected, candidate string) map[string]any {
@@ -2089,16 +2203,27 @@ func (m *Manager) pauseKubeBlocks(ctx context.Context, session *domain.Session) 
 		return domain.WrapError(domain.ErrorKubernetes, "pause KubeBlocks", "read instance Pod", err)
 	}
 	if session.Status.Phase == domain.PhasePausing && err == nil && isLeaderRole(podRole(pod)) && kb.SwitchoverCandidate != "" {
-		spec := kubeBlocksSwitchoverSpec(kb.OpsAPIVersion, kb.Cluster, kb.Component, kb.Instance, kb.SwitchoverCandidate)
-		if err := m.createAndWaitOps(ctx, session, "switchover", spec); err != nil {
-			return err
+		switch kb.SwitchoverStrategy {
+		case "", domain.KubeBlocksSwitchoverOpsRequest:
+			spec := kubeBlocksSwitchoverSpec(kb.OpsAPIVersion, kb.Cluster, kb.Component, kb.Instance, kb.SwitchoverCandidate)
+			if err := m.createAndWaitOps(ctx, session, "switchover", spec); err != nil {
+				return err
+			}
+		case domain.KubeBlocksSwitchoverMongoDBNative:
+			if err := m.runMongoDBNativeSwitchover(ctx, session); err != nil {
+				return err
+			}
+		default:
+			return domain.NewError(domain.ErrorPrecondition, "pause KubeBlocks", fmt.Sprintf("unsupported persisted switchover strategy %q", kb.SwitchoverStrategy))
 		}
-		current, getErr := m.typed.CoreV1().Pods(session.Spec.Workload().Pod.Namespace).Get(ctx, kb.Instance, metav1.GetOptions{})
-		if getErr != nil {
-			return domain.WrapError(domain.ErrorKubernetes, "pause KubeBlocks", "verify switchover role", getErr)
-		}
-		if isLeaderRole(podRole(current)) {
-			return domain.NewError(domain.ErrorPrecondition, "pause KubeBlocks", fmt.Sprintf("instance %s retained role %s after switchover", kb.Instance, podRole(current)))
+		if kb.SwitchoverStrategy != domain.KubeBlocksSwitchoverMongoDBNative {
+			current, getErr := m.typed.CoreV1().Pods(session.Spec.Workload().Pod.Namespace).Get(ctx, kb.Instance, metav1.GetOptions{})
+			if getErr != nil {
+				return domain.WrapError(domain.ErrorKubernetes, "pause KubeBlocks", "verify switchover role", getErr)
+			}
+			if isLeaderRole(podRole(current)) {
+				return domain.NewError(domain.ErrorPrecondition, "pause KubeBlocks", fmt.Sprintf("instance %s retained role %s after switchover", kb.Instance, podRole(current)))
+			}
 		}
 	}
 	if err := m.setKubeBlocksPaused(ctx, session, true); err != nil {
@@ -2120,6 +2245,52 @@ func (m *Manager) pauseKubeBlocks(ctx context.Context, session *domain.Session) 
 		return err
 	}
 	return m.VerifyPaused(ctx, session)
+}
+
+func (m *Manager) runMongoDBNativeSwitchover(ctx context.Context, session *domain.Session) error {
+	kb := session.Spec.Workload().KubeBlocks
+	if kb == nil {
+		return domain.NewError(domain.ErrorInternal, "pause KubeBlocks", "session lacks KubeBlocks state")
+	}
+	if kb.SwitchoverContainer == "" {
+		return domain.NewError(domain.ErrorPrecondition, "pause KubeBlocks", "MongoDB native switchover session lacks the validated container")
+	}
+	if m.commandExecutor == nil {
+		return domain.NewError(domain.ErrorPrecondition, "pause KubeBlocks", fmt.Sprintf("Pod exec is unavailable for the MongoDB native switchover; manual MongoDB switchover: %s", kubeBlocksMongoDBNativeSwitchoverCommand(session.Spec.Workload().Pod.Namespace, kb.Cluster, kb.Component, kb.Instance, kb.SwitchoverCandidate)))
+	}
+	namespace := session.Spec.Workload().Pod.Namespace
+	headlessService := fmt.Sprintf("%s-%s-headless", kb.Cluster, kb.Component)
+	leaderFQDN := fmt.Sprintf("%s.%s", kb.Instance, headlessService)
+	candidateFQDN := fmt.Sprintf("%s.%s", kb.SwitchoverCandidate, headlessService)
+	if m.logger != nil {
+		m.logger.Info("starting KubeBlocks MongoDB native switchover", "namespace", namespace, "cluster", kb.Cluster, "component", kb.Component, "instance", kb.Instance, "candidate", kb.SwitchoverCandidate)
+	}
+	result, err := m.commandExecutor.Execute(ctx, podCommandRequest{
+		Namespace: namespace,
+		Pod:       kb.Instance,
+		Container: kb.SwitchoverContainer,
+		Command: []string{
+			"env",
+			"KB_CONSENSUS_LEADER_POD_FQDN=" + leaderFQDN,
+			"KB_SWITCHOVER_CANDIDATE_FQDN=" + candidateFQDN,
+			"/scripts/switchover-with-candidate.sh",
+		},
+	})
+	if err != nil {
+		executionErr := podCommandError("run MongoDB native candidate switchover", result, err)
+		return domain.WrapError(domain.ErrorPrecondition, "pause KubeBlocks", fmt.Sprintf("%v; manual MongoDB switchover: %s", executionErr, kubeBlocksMongoDBNativeSwitchoverCommand(namespace, kb.Cluster, kb.Component, kb.Instance, kb.SwitchoverCandidate)), executionErr)
+	}
+	return m.waitFor(ctx, fmt.Sprintf("KubeBlocks MongoDB switchover from %s to %s", kb.Instance, kb.SwitchoverCandidate), func(waitCtx context.Context) (bool, error) {
+		leader, leaderErr := m.typed.CoreV1().Pods(namespace).Get(waitCtx, kb.Instance, metav1.GetOptions{})
+		if leaderErr != nil {
+			return false, leaderErr
+		}
+		candidate, candidateErr := m.typed.CoreV1().Pods(namespace).Get(waitCtx, kb.SwitchoverCandidate, metav1.GetOptions{})
+		if candidateErr != nil {
+			return false, candidateErr
+		}
+		return !isLeaderRole(podRole(leader)) && isLeaderRole(podRole(candidate)), nil
+	})
 }
 
 func (m *Manager) resumeKubeBlocks(ctx context.Context, session *domain.Session) error {

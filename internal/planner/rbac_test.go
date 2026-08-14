@@ -88,8 +88,9 @@ func TestDeploymentClusterRoleCoversPlannerAccessReviews(t *testing.T) {
 		{
 			Adapter: domain.WorkloadKubeBlocks,
 			KubeBlocks: &domain.KubeBlocksSpec{
-				OpsAPIVersion:     "operations.kubeblocks.io/v1alpha1",
-				ClusterAPIVersion: "apps.kubeblocks.io/v1alpha1",
+				OpsAPIVersion:      "operations.kubeblocks.io/v1alpha1",
+				ClusterAPIVersion:  "apps.kubeblocks.io/v1alpha1",
+				SwitchoverStrategy: domain.KubeBlocksSwitchoverMongoDBNative,
 			},
 		},
 		{
@@ -161,6 +162,17 @@ func TestCheckRBACIncludesControllerSpecificPermissions(t *testing.T) {
 				{Namespace: "app", Verb: "update", Group: "apps.kubeblocks.io", Resource: "clusters"},
 				{Namespace: "app", Verb: "patch", Group: "apps.kubeblocks.io", Resource: "clusters"},
 			},
+		},
+		{
+			name: "KubeBlocks MongoDB native switchover",
+			workload: domain.WorkloadSpec{
+				Adapter: domain.WorkloadKubeBlocks,
+				KubeBlocks: &domain.KubeBlocksSpec{
+					OpsAPIVersion:      "apps.kubeblocks.io/v1alpha1",
+					SwitchoverStrategy: domain.KubeBlocksSwitchoverMongoDBNative,
+				},
+			},
+			want: []authorizationv1.ResourceAttributes{{Namespace: "app", Verb: "create", Resource: "pods/exec"}},
 		},
 		{
 			name: "VMCluster",

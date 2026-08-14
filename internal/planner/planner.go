@@ -1145,6 +1145,9 @@ func kubeBlocksRoleWarning(spec *domain.KubeBlocksSpec) string {
 	if spec.SwitchoverCandidate == "" {
 		return fmt.Sprintf("selected KubeBlocks instance role=%s; leader downtime was explicitly acknowledged", spec.Role)
 	}
+	if spec.SwitchoverStrategy == domain.KubeBlocksSwitchoverMongoDBNative {
+		return fmt.Sprintf("selected KubeBlocks MongoDB instance role=%s; native candidate switchover targets=%s", spec.Role, spec.SwitchoverCandidate)
+	}
 	return fmt.Sprintf("selected KubeBlocks instance role=%s; switchover target=%s", spec.Role, spec.SwitchoverCandidate)
 }
 
