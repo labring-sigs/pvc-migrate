@@ -59,6 +59,7 @@ func TestRootCommandSurfaceAndGlobalDefaults(t *testing.T) {
 		"output":            "table",
 		"log-format":        "text",
 		"log-level":         "info",
+		"color":             "auto",
 		"stream-tool-logs":  "true",
 		"no-compress":       "false",
 		"yes":               "false",
@@ -244,6 +245,33 @@ func TestParseLogLevel(t *testing.T) {
 	}
 	if _, err := parseLogLevel("trace"); domain.CategoryOf(err) != domain.ErrorValidation {
 		t.Fatalf("invalid log level error=%v category=%q", err, domain.CategoryOf(err))
+	}
+}
+
+func TestParseColorMode(t *testing.T) {
+	for _, input := range []string{"", "auto", "always", "never"} {
+		mode, err := parseColorMode(input)
+		if err != nil {
+			t.Fatalf("parseColorMode(%q): %v", input, err)
+		}
+		if input == "" && mode != colorAuto || input != "" && mode != input {
+			t.Fatalf("parseColorMode(%q)=%q", input, mode)
+		}
+	}
+	if _, err := parseColorMode("rainbow"); domain.CategoryOf(err) != domain.ErrorValidation {
+		t.Fatalf("invalid color mode error=%v category=%q", err, domain.CategoryOf(err))
+	}
+}
+
+func TestRuntimeFreeCommandsRejectInvalidColorMode(t *testing.T) {
+	for _, args := range [][]string{{"--color", "rainbow", "version"}, {"--color", "rainbow", "completion", "bash"}} {
+		stdout, _, err := executeCLI(t, "", args...)
+		if domain.CategoryOf(err) != domain.ErrorValidation || !strings.Contains(err.Error(), "color mode") {
+			t.Fatalf("args=%v error=%v category=%q", args, err, domain.CategoryOf(err))
+		}
+		if stdout != "" {
+			t.Fatalf("args=%v produced output: %q", args, stdout)
+		}
 	}
 }
 
@@ -565,6 +593,7 @@ func TestCommandsRejectInvalidInputBeforeClusterAccess(t *testing.T) {
 		{name: "output", args: []string{"migrate", "plan", "--output", "toml"}, category: domain.ErrorValidation, text: "output format"},
 		{name: "log format", args: []string{"migrate", "plan", "--log-format", "console"}, category: domain.ErrorValidation, text: "log format"},
 		{name: "log level", args: []string{"migrate", "plan", "--log-level", "trace"}, category: domain.ErrorValidation, text: "log level"},
+		{name: "color mode", args: []string{"migrate", "plan", "--color", "rainbow"}, category: domain.ErrorValidation, text: "color mode"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

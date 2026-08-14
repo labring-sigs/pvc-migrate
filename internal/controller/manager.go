@@ -853,7 +853,7 @@ func kubeBlocksMongoDBNativeSwitchoverCommand(namespace, cluster, component, sel
 
 func (m *Manager) validateKubeBlocksSwitchover(ctx context.Context, namespace, cluster, component, selected, candidate, opsAPIVersion string) error {
 	if m.logger != nil {
-		m.logger.Info("checking KubeBlocks automatic switchover", "namespace", namespace, "cluster", cluster, "component", component, "instance", selected, "candidate", candidate)
+		m.logger.Info("checking KubeBlocks automatic switchover", "namespace", namespace, "cluster", cluster, "workload_component", component, "instance", selected, "candidate", candidate)
 	}
 	gvr, err := opsGVR(opsAPIVersion)
 	if err != nil {
@@ -2263,7 +2263,7 @@ func (m *Manager) runMongoDBNativeSwitchover(ctx context.Context, session *domai
 	leaderFQDN := fmt.Sprintf("%s.%s", kb.Instance, headlessService)
 	candidateFQDN := fmt.Sprintf("%s.%s", kb.SwitchoverCandidate, headlessService)
 	if m.logger != nil {
-		m.logger.Info("starting KubeBlocks MongoDB native switchover", "namespace", namespace, "cluster", kb.Cluster, "component", kb.Component, "instance", kb.Instance, "candidate", kb.SwitchoverCandidate)
+		m.logger.Info("starting KubeBlocks MongoDB native switchover", "namespace", namespace, "cluster", kb.Cluster, "workload_component", kb.Component, "instance", kb.Instance, "candidate", kb.SwitchoverCandidate)
 	}
 	result, err := m.commandExecutor.Execute(ctx, podCommandRequest{
 		Namespace: namespace,
