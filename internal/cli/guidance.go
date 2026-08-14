@@ -4,6 +4,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
+	"runtime"
 	"slices"
 	"sort"
 	"strings"
@@ -19,6 +21,13 @@ type guidancePrefixes struct {
 	pvcMigrate string
 	kubectl    string
 }
+
+type guidanceShell uint8
+
+const (
+	guidanceShellPOSIX guidanceShell = iota
+	guidanceShellPowerShell
+)
 
 // writeSessionGuidance keeps operational instructions on stderr so JSON and
 // YAML stdout remain one parseable document. Every destructive command is
@@ -468,10 +477,27 @@ func guidancePrefixesForCommand(value any, namespace string) guidancePrefixes {
 }
 
 func shellQuote(value string) string {
+	return shellQuoteFor(value, detectGuidanceShell(runtime.GOOS, os.Getenv))
+}
+
+func detectGuidanceShell(goos string, getenv func(string) string) guidanceShell {
+	if goos == "windows" {
+		if getenv("MSYSTEM") != "" {
+			return guidanceShellPOSIX
+		}
+		return guidanceShellPowerShell
+	}
+	if getenv("PSModulePath") != "" {
+		return guidanceShellPowerShell
+	}
+	return guidanceShellPOSIX
+}
+
+func shellQuoteFor(value string, shell guidanceShell) string {
 	if value != "" {
 		safe := true
 		for _, char := range value {
-			if unicode.IsLetter(char) || unicode.IsDigit(char) || strings.ContainsRune("-._/:@%+=,", char) {
+			if unicode.IsLetter(char) || unicode.IsDigit(char) || strings.ContainsRune("-._/:%+=,", char) {
 				continue
 			}
 			safe = false
@@ -480,6 +506,9 @@ func shellQuote(value string) string {
 		if safe {
 			return value
 		}
+	}
+	if shell == guidanceShellPowerShell {
+		return "'" + strings.ReplaceAll(value, "'", "''") + "'"
 	}
 	return "'" + strings.ReplaceAll(value, "'", `'"'"'`) + "'"
 }

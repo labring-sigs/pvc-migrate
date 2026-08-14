@@ -96,9 +96,70 @@ func TestSessionGuidancePreservesCommandConnectionSettings(t *testing.T) {
 	}
 }
 
-func TestShellQuoteEscapesSingleQuotes(t *testing.T) {
-	if got, want := shellQuote("config 'local'"), `'config '"'"'local'"'"''`; got != want {
-		t.Fatalf("shellQuote()=%q want %q", got, want)
+func TestShellQuoteUsesSelectedShellSyntax(t *testing.T) {
+	for _, test := range []struct {
+		name  string
+		shell guidanceShell
+		value string
+		want  string
+	}{
+		{name: "posix apostrophe", shell: guidanceShellPOSIX, value: "config 'local'", want: `'config '"'"'local'"'"''`},
+		{name: "powershell apostrophe", shell: guidanceShellPowerShell, value: "config 'local'", want: `'config ''local'''`},
+		{name: "powershell splatting prefix", shell: guidanceShellPowerShell, value: "@prod", want: `'@prod'`},
+		{name: "posix at sign", shell: guidanceShellPOSIX, value: "@prod", want: `'@prod'`},
+		{name: "safe value", shell: guidanceShellPowerShell, value: "cluster-a", want: "cluster-a"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if got := shellQuoteFor(test.value, test.shell); got != test.want {
+				t.Fatalf("shellQuoteFor(%q)=%q want %q", test.value, got, test.want)
+			}
+		})
+	}
+}
+
+func TestDetectGuidanceShell(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		goos string
+		env  map[string]string
+		want guidanceShell
+	}{
+		{name: "native windows", goos: "windows", want: guidanceShellPowerShell},
+		{name: "windows msys", goos: "windows", env: map[string]string{"MSYSTEM": "MINGW64"}, want: guidanceShellPOSIX},
+		{name: "unix powershell", goos: "linux", env: map[string]string{"PSModulePath": "/opt/powershell/modules"}, want: guidanceShellPowerShell},
+		{name: "unix posix", goos: "darwin", want: guidanceShellPOSIX},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			getenv := func(name string) string { return test.env[name] }
+			if got := detectGuidanceShell(test.goos, getenv); got != test.want {
+				t.Fatalf("detectGuidanceShell()=%v want %v", got, test.want)
+			}
+		})
+	}
+}
+
+func TestGuidancePrefixesUsePowerShellQuoting(t *testing.T) {
+	t.Setenv("PSModulePath", "/opt/powershell/modules")
+	t.Setenv("MSYSTEM", "")
+	root := NewRoot(Options{Version: "test"})
+	for name, value := range map[string]string{
+		"kubeconfig": "config 'local'",
+		"context":    "@prod",
+	} {
+		if err := root.PersistentFlags().Set(name, value); err != nil {
+			t.Fatal(err)
+		}
+	}
+	command, _, err := root.Find([]string{"session", "status"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	prefixes := guidancePrefixesForCommand(command, "pvc-migrate-system")
+	if want := "pvc-migrate --kubeconfig 'config ''local''' --context '@prod'"; prefixes.pvcMigrate != want {
+		t.Fatalf("pvc-migrate prefix=%q want %q", prefixes.pvcMigrate, want)
+	}
+	if want := "kubectl --kubeconfig 'config ''local''' --context '@prod'"; prefixes.kubectl != want {
+		t.Fatalf("kubectl prefix=%q want %q", prefixes.kubectl, want)
 	}
 }
 
