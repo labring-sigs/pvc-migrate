@@ -36,6 +36,17 @@ kubectl apply -f deploy/session-namespace.yaml
 kubectl apply -f deploy/rbac.yaml
 ```
 
+The default ClusterRole excludes Pod exec. KubeBlocks MongoDB native switchover needs it for the source namespace only:
+
+```bash
+SOURCE_NAMESPACE=app
+kubectl apply -f deploy/kubeblocks-mongodb-rbac.yaml
+kubectl create rolebinding pvc-migrate-kubeblocks-mongodb \
+  --namespace "$SOURCE_NAMESPACE" \
+  --clusterrole pvc-migrate-kubeblocks-mongodb \
+  --serviceaccount pvc-migrate-system:pvc-migrate
+```
+
 A locally executed CLI uses the identity from its kubeconfig and requires equivalent permissions.
 
 Build the tool image. It runs the CLI by default and also supplies PVC reservation, rsync, SSHD, and rclone roles inside the cluster:

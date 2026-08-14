@@ -54,18 +54,8 @@ func TestCheckRBACRejectsMissingSessionLeasePermission(t *testing.T) {
 }
 
 func TestDeploymentClusterRoleCoversPlannerAccessReviews(t *testing.T) {
-	data, err := os.ReadFile("../../deploy/rbac.yaml")
-	if err != nil {
-		t.Fatal(err)
-	}
-	var role rbacv1.ClusterRole
-	firstDocument := bytes.SplitN(data, []byte("\n---\n"), 2)[0]
-	if err := yaml.Unmarshal(firstDocument, &role); err != nil {
-		t.Fatal(err)
-	}
-	if role.Kind != "ClusterRole" || role.Name != "pvc-migrate" {
-		t.Fatalf("unexpected deployment role %s/%s", role.Kind, role.Name)
-	}
+	role := deploymentClusterRole(t, "../../deploy/rbac.yaml", "pvc-migrate")
+	mongoDBRole := deploymentClusterRole(t, "../../deploy/kubeblocks-mongodb-rbac.yaml", "pvc-migrate-kubeblocks-mongodb")
 	selfReview := authorizationv1.ResourceAttributes{
 		Verb: "create", Group: "authorization.k8s.io", Resource: "selfsubjectaccessreviews",
 	}
@@ -77,6 +67,15 @@ func TestDeploymentClusterRoleCoversPlannerAccessReviews(t *testing.T) {
 	}
 	if !clusterRoleAllows(role.Rules, authorizationv1.ResourceAttributes{Verb: "list", Group: "storage.k8s.io", Resource: "csistoragecapacities"}) {
 		t.Fatal("deployment ClusterRole cannot list CSIStorageCapacity objects")
+	}
+	if clusterRoleAllows(role.Rules, authorizationv1.ResourceAttributes{Verb: "create", Resource: "pods/exec"}) {
+		t.Fatal("default deployment ClusterRole grants Pod exec")
+	}
+	if !clusterRoleAllows(mongoDBRole.Rules, authorizationv1.ResourceAttributes{Verb: "create", Resource: "pods/exec"}) {
+		t.Fatal("KubeBlocks MongoDB role cannot create Pod exec")
+	}
+	if len(mongoDBRole.Rules) != 1 || clusterRoleAllows(mongoDBRole.Rules, authorizationv1.ResourceAttributes{Verb: "get", Resource: "pods"}) {
+		t.Fatalf("KubeBlocks MongoDB role grants unexpected permissions: %#v", mongoDBRole.Rules)
 	}
 
 	workloads := []domain.WorkloadSpec{
@@ -106,11 +105,28 @@ func TestDeploymentClusterRoleCoversPlannerAccessReviews(t *testing.T) {
 	}
 	for _, workload := range workloads {
 		for _, attributes := range collectAllowedAccessReviews(t, workload) {
-			if !clusterRoleAllows(role.Rules, attributes) {
+			if !clusterRoleAllows(role.Rules, attributes) && !clusterRoleAllows(mongoDBRole.Rules, attributes) {
 				t.Errorf("deployment ClusterRole does not allow %s %s/%s", attributes.Verb, attributes.Group, attributes.Resource)
 			}
 		}
 	}
+}
+
+func deploymentClusterRole(t *testing.T, path, name string) rbacv1.ClusterRole {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var role rbacv1.ClusterRole
+	firstDocument := bytes.SplitN(data, []byte("\n---\n"), 2)[0]
+	if err := yaml.Unmarshal(firstDocument, &role); err != nil {
+		t.Fatal(err)
+	}
+	if role.Kind != "ClusterRole" || role.Name != name {
+		t.Fatalf("unexpected deployment role %s/%s", role.Kind, role.Name)
+	}
+	return role
 }
 
 func TestCheckRBACIncludesControllerSpecificPermissions(t *testing.T) {
