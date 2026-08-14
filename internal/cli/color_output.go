@@ -236,8 +236,9 @@ func componentColor(value string) string {
 		hash ^= uint32(value[index])
 		hash *= 16777619
 	}
-	palette := []string{"36", "35", "34", "32", "33", "31", "96", "95", "94", "92", "93", "91"}
-	return palette[hash%uint32(len(palette))]
+	const paletteSize = 12
+	palette := [paletteSize]string{"36", "35", "34", "32", "33", "31", "96", "95", "94", "92", "93", "91"}
+	return palette[hash%paletteSize]
 }
 
 func ansi(code, value string) string {

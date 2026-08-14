@@ -636,6 +636,16 @@ func TestMigratePodRequiresForceForSameNodeAndStorageClass(t *testing.T) {
 	if automatic.Ready || automatic.TargetNode != "node-b" || !hasFailedCheckContaining(automatic, "migration-needed", "--force-reprovision") {
 		t.Fatalf("automatic same destination plan ready=%t target=%q checks=%#v", automatic.Ready, automatic.TargetNode, automatic.Checks)
 	}
+
+	base.SourceNode = "node-missing"
+	base.TargetNode = "node-missing"
+	incorrectSource, err := New(client, controller.NewManager(client, nil, nil)).Plan(context.Background(), base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !hasFailedCheck(incorrectSource, "source-node") || hasFailedCheck(incorrectSource, "migration-needed") {
+		t.Fatalf("incorrect source node plan checks=%#v", incorrectSource.Checks)
+	}
 }
 
 func TestAutoStrategiesChooseNamespaceCompatibleOrder(t *testing.T) {

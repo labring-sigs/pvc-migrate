@@ -402,7 +402,7 @@ func (p *Planner) Plan(ctx context.Context, options Options) (*domain.MigrationP
 			p.checkPodTargetScheduling(plan, sourcePod, workload, targetNode)
 		}
 	}
-	if options.Operation == domain.OperationMigratePod && sourcePod != nil && options.SourceNode != "" && options.SourceNode == options.TargetNode &&
+	if options.Operation == domain.OperationMigratePod && sourcePod != nil && sourcePod.Spec.NodeName != "" && sourcePod.Spec.NodeName == options.TargetNode &&
 		!storageClassChanged && len(plannedVolumes) > 0 && len(plannedVolumes) == len(pvcNames) {
 		message := fmt.Sprintf("Pod %s/%s already uses target node %s and every PVC already uses the requested StorageClass", options.SourceNamespace, options.PodName, options.TargetNode)
 		if options.ForceReprovision {
