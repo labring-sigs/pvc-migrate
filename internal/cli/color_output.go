@@ -20,10 +20,12 @@ const (
 )
 
 var (
-	logLevelToken   = regexp.MustCompile(`(^|[ \t])level=(DEBUG|INFO|WARN|ERROR)`)
-	componentToken  = regexp.MustCompile(`(^|[ \t])component=("[^"]*"|[^\s]+)`)
-	toolPrefix      = regexp.MustCompile(`\[tool [^\]\r\n]+\]`)
-	componentColors = map[string]string{
+	logLevelToken          = regexp.MustCompile(`(^|[ \t])level=(DEBUG|INFO|WARN|ERROR)`)
+	componentToken         = regexp.MustCompile(`(^|[ \t])component=("[^"]*"|[^\s]+)`)
+	toolPrefix             = regexp.MustCompile(`\[tool [^\]\r\n]+\]`)
+	guidanceTitle          = regexp.MustCompile(`^(\s*Next steps for session .+ \(phase )([^)]+)(\):\s*)$`)
+	guidanceCompletedToken = regexp.MustCompile(`(?i)\bcompleted\b`)
+	componentColors        = map[string]string{
 		"controller": "36",
 		"planner":    "34",
 		"reserver":   "33",
@@ -131,6 +133,7 @@ func colorizeLogLine(line string) string {
 	if strings.HasPrefix(lower, "warning:") {
 		return ansi("1;33", line)
 	}
+	line = colorizeGuidanceLine(line)
 
 	line = logLevelToken.ReplaceAllStringFunc(line, func(token string) string {
 		prefix, token := splitFieldPrefix(token)
@@ -150,6 +153,55 @@ func colorizeLogLine(line string) string {
 		}
 		return ansi(componentColor(component), token)
 	})
+}
+
+func colorizeGuidanceLine(line string) string {
+	if match := guidanceTitle.FindStringSubmatchIndex(line); match != nil {
+		return ansi("1;36", line[match[2]:match[3]]) +
+			ansi(guidancePhaseColor(line[match[4]:match[5]]), line[match[4]:match[5]]) +
+			ansi("1;36", line[match[6]:match[7]])
+	}
+
+	leadingLength := len(line) - len(strings.TrimLeft(line, " \t"))
+	leading, content := line[:leadingLength], line[leadingLength:]
+	if label, rest, found := strings.Cut(content, ":"); found {
+		if color := guidanceLabelColor(label); color != "" {
+			return leading + ansi(color, label+":") + rest
+		}
+	}
+	if strings.HasPrefix(strings.ToLower(content), "verify ") {
+		return leading + ansi("36", content)
+	}
+	return guidanceCompletedToken.ReplaceAllStringFunc(line, func(token string) string {
+		return ansi("1;32", token)
+	})
+}
+
+func guidancePhaseColor(phase string) string {
+	switch domain.Phase(phase) {
+	case domain.PhaseCompleted:
+		return "1;32"
+	case domain.PhaseFailed:
+		return "1;31"
+	default:
+		return "1;33"
+	}
+}
+
+func guidanceLabelColor(label string) string {
+	normalized := strings.ToLower(strings.TrimSpace(label))
+	switch {
+	case strings.HasPrefix(normalized, "record"), strings.HasPrefix(normalized, "inspect"), strings.HasPrefix(normalized, "verify"):
+		return "36"
+	case strings.HasPrefix(normalized, "validate"):
+		return "1;33"
+	case strings.HasPrefix(normalized, "continue"), strings.HasPrefix(normalized, "resume"), strings.HasPrefix(normalized, "keep"):
+		return "1;32"
+	case strings.HasPrefix(normalized, "abort"), strings.HasPrefix(normalized, "roll back"), strings.HasPrefix(normalized, "finalize"), strings.HasPrefix(normalized, "discard"), strings.HasPrefix(normalized, "close retained"):
+		return "1;31"
+	default:
+		return ""
+	}
 }
 
 func splitFieldPrefix(token string) (string, string) {
@@ -184,8 +236,9 @@ func componentColor(value string) string {
 		hash ^= uint32(value[index])
 		hash *= 16777619
 	}
-	palette := []string{"36", "35", "34", "32", "33", "31", "96", "95", "94", "92", "93", "91"}
-	return palette[hash%uint32(len(palette))]
+	const paletteSize = 12
+	palette := [paletteSize]string{"36", "35", "34", "32", "33", "31", "96", "95", "94", "92", "93", "91"}
+	return palette[hash%paletteSize]
 }
 
 func ansi(code, value string) string {

@@ -49,6 +49,120 @@ func TestSessionStatusKeepsStructuredOutputSeparateFromGuidance(t *testing.T) {
 	}
 }
 
+func TestSessionGuidancePreservesCommandConnectionSettings(t *testing.T) {
+	client := fake.NewClientset()
+	store := kube.NewConfigMapSessionStore(client)
+	session := guidanceSession(domain.PhaseCompleted)
+	session.Spec.SessionNamespace = "migration-control"
+	if err := store.Create(context.Background(), session); err != nil {
+		t.Fatal(err)
+	}
+	var stdout, stderr bytes.Buffer
+	command := NewRoot(Options{Version: "test", Out: &stdout, ErrOut: &stderr, runtimeFactory: func(state *rootState) (*commandRuntime, error) {
+		return &commandRuntime{store: store, printer: printerFor(state)}, nil
+	}})
+	command.SetArgs([]string{
+		"--kubeconfig", "/tmp/config local",
+		"--context", "cluster-a",
+		"--session-namespace", "migration-control",
+		"--timeout", "45m",
+		"--retries", "5",
+		"--retry-backoff", "3s",
+		"--helm-timeout", "12m",
+		"--stream-tool-logs=false",
+		"--no-compress",
+		"--tool-image", "registry.example/tool:dev",
+		"--log-level", "debug",
+		"--color", "never",
+		"session", "status", session.ID,
+	})
+	if err := command.Execute(); err != nil {
+		t.Fatal(err)
+	}
+	text := stderr.String()
+	pvcMigratePrefix := "pvc-migrate --kubeconfig '/tmp/config local' --context cluster-a --timeout=45m0s --retries=5 --retry-backoff=3s --helm-timeout=12m0s --stream-tool-logs=false --no-compress=true --session-namespace migration-control"
+	for _, want := range []string{
+		pvcMigratePrefix + " session status " + session.ID,
+		"kubectl --kubeconfig '/tmp/config local' --context cluster-a --namespace app get pvc data",
+	} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("guidance=%q missing %q", text, want)
+		}
+	}
+	for _, excluded := range []string{"registry.example/tool:dev", "--log-level", "--color"} {
+		if strings.Contains(text, excluded) {
+			t.Fatalf("guidance=%q includes presentation or stored-session setting %q", text, excluded)
+		}
+	}
+}
+
+func TestShellQuoteUsesSelectedShellSyntax(t *testing.T) {
+	for _, test := range []struct {
+		name  string
+		shell guidanceShell
+		value string
+		want  string
+	}{
+		{name: "posix apostrophe", shell: guidanceShellPOSIX, value: "config 'local'", want: `'config '"'"'local'"'"''`},
+		{name: "powershell apostrophe", shell: guidanceShellPowerShell, value: "config 'local'", want: `'config ''local'''`},
+		{name: "powershell splatting prefix", shell: guidanceShellPowerShell, value: "@prod", want: `'@prod'`},
+		{name: "posix at sign", shell: guidanceShellPOSIX, value: "@prod", want: `'@prod'`},
+		{name: "safe value", shell: guidanceShellPowerShell, value: "cluster-a", want: "cluster-a"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if got := shellQuoteFor(test.value, test.shell); got != test.want {
+				t.Fatalf("shellQuoteFor(%q)=%q want %q", test.value, got, test.want)
+			}
+		})
+	}
+}
+
+func TestDetectGuidanceShell(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		goos string
+		env  map[string]string
+		want guidanceShell
+	}{
+		{name: "native windows", goos: "windows", want: guidanceShellPowerShell},
+		{name: "windows msys", goos: "windows", env: map[string]string{"MSYSTEM": "MINGW64"}, want: guidanceShellPOSIX},
+		{name: "unix powershell", goos: "linux", env: map[string]string{"PSModulePath": "/opt/powershell/modules"}, want: guidanceShellPowerShell},
+		{name: "unix posix", goos: "darwin", want: guidanceShellPOSIX},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			getenv := func(name string) string { return test.env[name] }
+			if got := detectGuidanceShell(test.goos, getenv); got != test.want {
+				t.Fatalf("detectGuidanceShell()=%v want %v", got, test.want)
+			}
+		})
+	}
+}
+
+func TestGuidancePrefixesUsePowerShellQuoting(t *testing.T) {
+	t.Setenv("PSModulePath", "/opt/powershell/modules")
+	t.Setenv("MSYSTEM", "")
+	root := NewRoot(Options{Version: "test"})
+	for name, value := range map[string]string{
+		"kubeconfig": "config 'local'",
+		"context":    "@prod",
+	} {
+		if err := root.PersistentFlags().Set(name, value); err != nil {
+			t.Fatal(err)
+		}
+	}
+	command, _, err := root.Find([]string{"session", "status"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	prefixes := guidancePrefixesForCommand(command, "pvc-migrate-system")
+	if want := "pvc-migrate --kubeconfig 'config ''local''' --context '@prod'"; prefixes.pvcMigrate != want {
+		t.Fatalf("pvc-migrate prefix=%q want %q", prefixes.pvcMigrate, want)
+	}
+	if want := "kubectl --kubeconfig 'config ''local''' --context '@prod'"; prefixes.kubectl != want {
+		t.Fatalf("kubectl prefix=%q want %q", prefixes.kubectl, want)
+	}
+}
+
 func TestSessionGuidanceCoversTerminalActions(t *testing.T) {
 	for _, test := range []struct {
 		phase domain.Phase
@@ -127,6 +241,16 @@ func TestTransferDryRunGuidanceUsesOperationName(t *testing.T) {
 		if !strings.Contains(output.String(), operation+" dry-run completed") {
 			t.Fatalf("operation=%q guidance=%q", operation, output.String())
 		}
+	}
+}
+
+func TestTransferDryRunGuidanceUsesKubectlConnectionSettings(t *testing.T) {
+	var output bytes.Buffer
+	if err := writeTransferDryRunGuidance(&output, "backup plan", "app", "data", "kubectl --kubeconfig '/tmp/config local' --context cluster-a"); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(output.String(), "kubectl --kubeconfig '/tmp/config local' --context cluster-a --namespace app get pvc data") {
+		t.Fatalf("guidance=%q", output.String())
 	}
 }
 

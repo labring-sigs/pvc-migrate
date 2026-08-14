@@ -28,6 +28,7 @@ type migrationFlags struct {
 	deleteExtraneous     bool
 	switchoverCandidate  string
 	allowLeaderDowntime  bool
+	forceReprovision     bool
 	precopyPasses        int
 	online               bool
 }
@@ -63,6 +64,10 @@ func (f *migrationFlags) bind(command *cobra.Command, includePod, includeSourceN
 		flags.StringVar(&f.switchoverCandidate, "kubeblocks-candidate", "", "KubeBlocks switchover target when the selected instance is primary")
 		flags.BoolVar(&f.allowLeaderDowntime, "allow-leader-downtime", false, "Acknowledge downtime for a leader, primary, or master instance")
 	}
+}
+
+func (f *migrationFlags) bindForceReprovision(command *cobra.Command) {
+	command.Flags().BoolVar(&f.forceReprovision, "force-reprovision", false, "Replace backing PVs when the Pod already uses the target node and StorageClass")
 }
 
 func (f *migrationFlags) planOptions(state *rootState, operation domain.Operation, useTemporary bool) (planner.Options, error) {
@@ -107,6 +112,7 @@ func (f *migrationFlags) planOptions(state *rootState, operation domain.Operatio
 		DeleteExtraneous:     f.deleteExtraneous,
 		SwitchoverCandidate:  f.switchoverCandidate,
 		AllowLeaderDowntime:  f.allowLeaderDowntime,
+		ForceReprovision:     f.forceReprovision,
 	}, nil
 }
 
@@ -162,6 +168,9 @@ func (r *rootState) newMigrationPlanCommand(operation domain.Operation, useTempo
 		},
 	}
 	flags.bind(command, includePod, includeSourceNode, includeController, includePrecopy)
+	if operation == domain.OperationMigratePod {
+		flags.bindForceReprovision(command)
+	}
 	if includeOnline {
 		command.Flags().BoolVar(&flags.online, "online", false, "Allow active PVC consumers for one finite warm-copy pass")
 	}
@@ -510,6 +519,9 @@ func (r *rootState) newMigrateCommand(podMode bool) *cobra.Command {
 		},
 	}
 	flags.bind(command, true, true, true, true)
+	if podMode {
+		flags.bindForceReprovision(command)
+	}
 	bindDryRun(command, &dryRun)
 	command.AddCommand(r.newMigrationPlanCommand(operation, true, true, true, true, false, false))
 	return command

@@ -118,7 +118,7 @@ func (r *rootState) newObjectTransferCommand(restore, forceOnline bool) *cobra.C
 				if err := printerFor(r).Print(plan); err != nil {
 					return reportTransferError(cmd, use, flags.namespace, flags.pvc, err)
 				}
-				return writeTransferDryRunGuidance(cmd.ErrOrStderr(), use, flags.namespace, flags.pvc)
+				return writeTransferDryRunGuidance(cmd.ErrOrStderr(), use, flags.namespace, flags.pvc, kubectlCommandPrefixForCommand(cmd))
 			}
 			if err := r.confirm(ctx, cmd, flags.name); err != nil {
 				return reportApprovalError(cmd, err)
@@ -213,7 +213,7 @@ func (r *rootState) newBackupPlanCommand(restore, forceOnline bool) *cobra.Comma
 			if err := printerFor(r).Print(plan); err != nil {
 				return reportTransferError(cmd, operation, flags.namespace, flags.pvc, err)
 			}
-			return writeTransferDryRunGuidance(cmd.ErrOrStderr(), operation, flags.namespace, flags.pvc)
+			return writeTransferDryRunGuidance(cmd.ErrOrStderr(), operation, flags.namespace, flags.pvc, kubectlCommandPrefixForCommand(cmd))
 		},
 	}
 	bindBucketFlags(command, flags, restore, !restore && !forceOnline)
