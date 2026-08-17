@@ -27,12 +27,28 @@ type recordingToolImageProber struct {
 }
 
 type recordingOpenEBSLVMSharedVolumeManager struct {
-	shared     bool
-	sharedPVs  []string
-	ensureErr  error
-	ensurePVs  []string
-	restoreErr error
-	restorePVs []string
+	shared             bool
+	sharedPVs          []string
+	ensureErr          error
+	ensurePVs          []string
+	onEnsure           func()
+	restoreErr         error
+	restorePVs         []string
+	restoreContextErrs []error
+}
+
+type toolProbeContextStore struct {
+	memoryStore
+	updateContextErrs []error
+}
+
+func (s *toolProbeContextStore) Update(ctx context.Context, session *domain.Session) error {
+	err := ctx.Err()
+	s.updateContextErrs = append(s.updateContextErrs, err)
+	if err != nil {
+		return err
+	}
+	return s.memoryStore.Update(ctx, session)
 }
 
 func (m *recordingOpenEBSLVMSharedVolumeManager) Shared(_ context.Context, sourcePV string) (bool, error) {
@@ -46,11 +62,18 @@ func (m *recordingOpenEBSLVMSharedVolumeManager) EnsureShared(_ context.Context,
 		return kube.OpenEBSLVMSharedResult{}, m.ensureErr
 	}
 	m.shared = true
+	if m.onEnsure != nil {
+		m.onEnsure()
+	}
 	return kube.OpenEBSLVMSharedResult{Reference: "LVMVolume openebs/" + sourcePV, PreviousShared: "no", PreviousSharedSet: true, Changed: true}, nil
 }
 
-func (m *recordingOpenEBSLVMSharedVolumeManager) RestoreShared(_ context.Context, sourcePV, _ string, _ bool) error {
+func (m *recordingOpenEBSLVMSharedVolumeManager) RestoreShared(ctx context.Context, sourcePV, _ string, _ bool) error {
 	m.restorePVs = append(m.restorePVs, sourcePV)
+	m.restoreContextErrs = append(m.restoreContextErrs, ctx.Err())
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	if m.restoreErr != nil {
 		return m.restoreErr
 	}
@@ -803,6 +826,85 @@ func TestWarmCopyRestoresOpenEBSLVMSharedAfterProbeFailure(t *testing.T) {
 	}
 	if !slices.Equal(manager.restorePVs, []string{"pv-source"}) || manager.shared {
 		t.Fatalf("shared mount restore=%v shared=%t", manager.restorePVs, manager.shared)
+	}
+	if len(session.Status.OpenEBSLVMSharedMounts) != 0 {
+		t.Fatalf("pending shared mounts=%#v", session.Status.OpenEBSLVMSharedMounts)
+	}
+}
+
+func TestWarmCopyRestoresOpenEBSLVMSharedAfterProbeCancellation(t *testing.T) {
+	fixture := newRecoveryFixture(t)
+	session := appTestSession()
+	session.Status.Phase = domain.PhaseReserved
+	session.Spec.WorkflowOptionsPtr().OpenEBSLVMEnableShared = true
+	storageClass := *session.Spec.Volumes[0].SourcePVCSpec.StorageClassName
+	if _, err := fixture.client.StorageV1().StorageClasses().Create(context.Background(), &storagev1.StorageClass{
+		ObjectMeta: metav1.ObjectMeta{Name: storageClass}, Provisioner: "local.csi.openebs.io",
+	}, metav1.CreateOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fixture.client.CoreV1().Pods("app").Create(context.Background(), probeConsumerPod("database-0", "data", "source-node"), metav1.CreateOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	fixture.service.config.ToolImageProber = &recordingToolImageProber{
+		err: context.Canceled,
+		onProbe: func(context.Context) {
+			cancel()
+		},
+	}
+	manager := &recordingOpenEBSLVMSharedVolumeManager{}
+	fixture.service.config.OpenEBSLVMSharedVolumeManager = manager
+
+	err := fixture.service.WarmCopy(ctx, session)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("WarmCopy() error=%v", err)
+	}
+	if !slices.Equal(manager.restorePVs, []string{"pv-source"}) || manager.shared {
+		t.Fatalf("shared mount restore=%v shared=%t", manager.restorePVs, manager.shared)
+	}
+	if !slices.Equal(manager.restoreContextErrs, []error{nil}) {
+		t.Fatalf("restore context errors=%v", manager.restoreContextErrs)
+	}
+	if len(session.Status.OpenEBSLVMSharedMounts) != 0 {
+		t.Fatalf("pending shared mounts=%#v", session.Status.OpenEBSLVMSharedMounts)
+	}
+}
+
+func TestWarmCopyRestoresOpenEBSLVMSharedWhenCheckpointIsCanceled(t *testing.T) {
+	fixture := newRecoveryFixture(t)
+	session := appTestSession()
+	session.Status.Phase = domain.PhaseReserved
+	session.Spec.WorkflowOptionsPtr().OpenEBSLVMEnableShared = true
+	storageClass := *session.Spec.Volumes[0].SourcePVCSpec.StorageClassName
+	if _, err := fixture.client.StorageV1().StorageClasses().Create(context.Background(), &storagev1.StorageClass{
+		ObjectMeta: metav1.ObjectMeta{Name: storageClass}, Provisioner: "local.csi.openebs.io",
+	}, metav1.CreateOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fixture.client.CoreV1().Pods("app").Create(context.Background(), probeConsumerPod("database-0", "data", "source-node"), metav1.CreateOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	manager := &recordingOpenEBSLVMSharedVolumeManager{onEnsure: cancel}
+	fixture.service.config.OpenEBSLVMSharedVolumeManager = manager
+	store := &toolProbeContextStore{}
+	fixture.service.store = store
+
+	err := fixture.service.WarmCopy(ctx, session)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("WarmCopy() error=%v", err)
+	}
+	if !slices.Equal(manager.restorePVs, []string{"pv-source"}) || manager.shared {
+		t.Fatalf("shared mount restore=%v shared=%t", manager.restorePVs, manager.shared)
+	}
+	if !slices.Equal(manager.restoreContextErrs, []error{nil}) {
+		t.Fatalf("restore context errors=%v", manager.restoreContextErrs)
+	}
+	if len(store.updateContextErrs) != 2 || !errors.Is(store.updateContextErrs[0], context.Canceled) || store.updateContextErrs[1] != nil {
+		t.Fatalf("checkpoint context errors=%v", store.updateContextErrs)
 	}
 	if len(session.Status.OpenEBSLVMSharedMounts) != 0 {
 		t.Fatalf("pending shared mounts=%#v", session.Status.OpenEBSLVMSharedMounts)

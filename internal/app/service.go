@@ -23,6 +23,8 @@ import (
 	"k8s.io/client-go/kubernetes"
 )
 
+const openEBSLVMSharedMountCleanupTimeout = 10 * time.Second
+
 type Config struct {
 	KubeconfigPath                string
 	Context                       string
@@ -366,7 +368,7 @@ func (s *Service) enableOpenEBSLVMSharedMounts(ctx context.Context, session *dom
 		if resultErr == nil {
 			return
 		}
-		if err := s.restoreOpenEBSLVMSharedMounts(ctx, session); err != nil {
+		if err := s.restoreOpenEBSLVMSharedMountsAfterFailure(ctx, session); err != nil {
 			resultErr = errors.Join(resultErr, err)
 		}
 	}()
@@ -400,15 +402,20 @@ func (s *Service) enableOpenEBSLVMSharedMounts(ctx context.Context, session *dom
 		}
 		session.Status.OpenEBSLVMSharedMounts = append(session.Status.OpenEBSLVMSharedMounts, state)
 		if err := s.persist(ctx, session); err != nil {
-			restoreErr := manager.RestoreShared(ctx, state.SourcePV, state.PreviousShared, state.PreviousSharedSet)
-			if restoreErr == nil {
-				session.Status.OpenEBSLVMSharedMounts = session.Status.OpenEBSLVMSharedMounts[:len(session.Status.OpenEBSLVMSharedMounts)-1]
-			}
-			return errors.Join(err, restoreErr)
+			return err
 		}
 		s.logInfo("OpenEBS LVM shared mount configured", "sourcePV", volume.SourcePV.Name, "resource", result.Reference, "previousShared", result.PreviousShared, "changed", result.Changed)
 	}
 	return nil
+}
+
+// A temporary shared-volume patch must be reverted even after the operation
+// deadline or cancellation fires. Preserve context values such as the session
+// lock while giving cleanup its own bounded lifetime.
+func (s *Service) restoreOpenEBSLVMSharedMountsAfterFailure(ctx context.Context, session *domain.Session) error {
+	restoreCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), openEBSLVMSharedMountCleanupTimeout)
+	defer cancel()
+	return s.restoreOpenEBSLVMSharedMounts(restoreCtx, session)
 }
 
 func (s *Service) restoreOpenEBSLVMSharedMounts(ctx context.Context, session *domain.Session) error {
@@ -1226,7 +1233,7 @@ func (s *Service) warmCopy(ctx context.Context, session *domain.Session) (result
 		if !restoreSharedMounts {
 			return
 		}
-		if err := s.restoreOpenEBSLVMSharedMounts(ctx, session); err != nil {
+		if err := s.restoreOpenEBSLVMSharedMountsAfterFailure(ctx, session); err != nil {
 			resultErr = errors.Join(resultErr, s.failContext(ctx, session, err))
 		}
 	}()
