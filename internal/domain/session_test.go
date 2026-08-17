@@ -55,9 +55,9 @@ func TestSessionWorkflowOptionsArePersistedInsideConcretePayload(t *testing.T) {
 		Volumes: []VolumeSpec{{SourcePVC: ObjectReference{Namespace: "app", Name: "data"}}},
 	}
 	spec := NewSessionSpec(OperationMigrate, common, WorkloadSpec{Adapter: WorkloadNone}, false, SessionWorkflowOptions{
-		SourceNode: "source-node", TargetNode: "target-node", ToolImage: "registry.example/pvc-migrate:aio", Strategies: []string{"mount", "clusterip"}, VerifyChecksum: true, DeleteExtraneous: true,
+		SourceNode: "source-node", TargetNode: "target-node", ToolImage: "registry.example/pvc-migrate:aio", Strategies: []string{"mount", "clusterip"}, VerifyChecksum: true, DeleteExtraneous: true, PrecopyPasses: 2, OpenEBSLVMEnableShared: true,
 	})
-	if got := spec.WorkflowOptions(); got.SourceNode != "source-node" || got.TargetNode != "target-node" || got.ToolImage != "registry.example/pvc-migrate:aio" || !got.VerifyChecksum || !got.DeleteExtraneous || len(got.Strategies) != 2 || got.Strategies[0] != "mount" || got.Strategies[1] != "clusterip" {
+	if got := spec.WorkflowOptions(); got.SourceNode != "source-node" || got.TargetNode != "target-node" || got.ToolImage != "registry.example/pvc-migrate:aio" || !got.VerifyChecksum || !got.DeleteExtraneous || got.PrecopyPasses != 2 || !got.OpenEBSLVMEnableShared || len(got.Strategies) != 2 || got.Strategies[0] != "mount" || got.Strategies[1] != "clusterip" {
 		t.Fatalf("workflow options = %#v", got)
 	}
 	raw, err := json.Marshal(spec)
@@ -75,7 +75,7 @@ func TestSessionWorkflowOptionsArePersistedInsideConcretePayload(t *testing.T) {
 	if err := json.Unmarshal(document["migrate"], &payload); err != nil {
 		t.Fatal(err)
 	}
-	for _, field := range []string{"sourceNode", "targetNode", "toolImage", "strategies", "verifyChecksum", "deleteExtraneous", "workload"} {
+	for _, field := range []string{"sourceNode", "targetNode", "toolImage", "strategies", "verifyChecksum", "deleteExtraneous", "precopyPasses", "openebsLvmEnableShared", "workload"} {
 		if _, exists := payload[field]; !exists {
 			t.Fatalf("migration payload lacks %s: %s", field, raw)
 		}
@@ -94,6 +94,33 @@ func TestSessionWorkflowOptionsCloneStrategies(t *testing.T) {
 	options.Strategies[1] = "mutated"
 	if got := spec.WorkflowOptions().Strategies[1]; got != "clusterip" {
 		t.Fatalf("value accessor exposed payload slice: %q", got)
+	}
+}
+
+func TestLegacyMigrationSessionDefaultsToOnePrecopyPass(t *testing.T) {
+	legacy := SessionSpec{Type: SessionTypeMigrate, Migrate: &MigrateSessionSpec{}}
+	if got := legacy.PrecopyPasses(); got != 1 {
+		t.Fatalf("legacy precopy passes=%d want=1", got)
+	}
+	configured := NewSessionSpec(OperationMigrate, SessionCommon{}, WorkloadSpec{}, false, SessionWorkflowOptions{PrecopyPasses: 0})
+	if got := configured.PrecopyPasses(); got != 0 {
+		t.Fatalf("configured precopy passes=%d want=0", got)
+	}
+}
+
+func TestSessionTracksCompletedWarmPassesAndReadsLegacyHistory(t *testing.T) {
+	session := testSession(t)
+	if got := session.WarmPassesCompleted(); got != 0 {
+		t.Fatalf("initial completed warm passes=%d", got)
+	}
+	session.CompleteWarmPass()
+	if got := session.WarmPassesCompleted(); got != 1 {
+		t.Fatalf("completed warm passes=%d", got)
+	}
+	legacy := testSession(t)
+	legacy.Status.History = append(legacy.Status.History, HistoryEntry{Phase: PhaseWarmCopied})
+	if got := legacy.WarmPassesCompleted(); got != 1 {
+		t.Fatalf("legacy completed warm passes=%d", got)
 	}
 }
 

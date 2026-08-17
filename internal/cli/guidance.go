@@ -509,6 +509,9 @@ func writePlanFailureGuidance(w io.Writer, plan *domain.MigrationPlan) error {
 			advice = "Copy action: stop all active PVC consumers and rerun without --online, or use storage that explicitly supports a second same-node Pod mount."
 		case check.Name == "warm-copy-mount":
 			advice = "Warm-copy action: rerun with --precopy-passes 0 for offline final sync, or use storage that explicitly supports a second same-node Pod mount."
+			if strings.Contains(check.Message, "local.csi.openebs.io") {
+				advice = "OpenEBS LVM action: rerun with --precopy-passes 0 for offline final sync, or explicitly pass --openebs-lvm-enable-shared to patch the matching existing LVMVolume before the mount probe."
+			}
 		}
 		if advice == "" {
 			continue

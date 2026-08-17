@@ -26,6 +26,27 @@ type recordingToolImageProber struct {
 	onProbe func(context.Context)
 }
 
+type recordingOpenEBSLVMSharedVolumeManager struct {
+	shared    bool
+	sharedPVs []string
+	ensureErr error
+	ensurePVs []string
+}
+
+func (m *recordingOpenEBSLVMSharedVolumeManager) Shared(_ context.Context, sourcePV string) (bool, error) {
+	m.sharedPVs = append(m.sharedPVs, sourcePV)
+	return m.shared, nil
+}
+
+func (m *recordingOpenEBSLVMSharedVolumeManager) EnsureShared(_ context.Context, sourcePV string) (kube.OpenEBSLVMSharedResult, error) {
+	m.ensurePVs = append(m.ensurePVs, sourcePV)
+	if m.ensureErr != nil {
+		return kube.OpenEBSLVMSharedResult{}, m.ensureErr
+	}
+	m.shared = true
+	return kube.OpenEBSLVMSharedResult{Reference: "LVMVolume openebs/" + sourcePV, PreviousShared: "no", Changed: true}, nil
+}
+
 func (p *recordingToolImageProber) Probe(ctx context.Context, options kube.ToolImageProbeOptions) ([]kube.ToolImageProbeResult, error) {
 	p.calls = append(p.calls, options)
 	if p.onProbe != nil {
@@ -326,6 +347,34 @@ func TestResolveSessionToolProbeTargetsUsesWritableMountForSharedOpenEBSLVM(t *t
 		}
 	}
 	t.Fatal("shared LVM source target was not created")
+}
+
+func TestMarkSharedOpenEBSLVMProbeMountsReadsEachSourcePVCOnce(t *testing.T) {
+	session := appTestSession()
+	additional := session.Spec.Volumes[0]
+	additional.SourcePVC.Name = "data-2"
+	additional.SourcePV.Name = "pv-source-2"
+	session.Spec.Volumes = append(session.Spec.Volumes, additional)
+	storageClass := *session.Spec.Volumes[0].SourcePVCSpec.StorageClassName
+	client := fake.NewClientset(&storagev1.StorageClass{ObjectMeta: metav1.ObjectMeta{Name: storageClass}, Provisioner: "local.csi.openebs.io"})
+	manager := &recordingOpenEBSLVMSharedVolumeManager{shared: true}
+	service := &Service{client: client, config: Config{OpenEBSLVMSharedVolumeManager: manager}}
+	targets := []kube.ToolProbeTarget{
+		{Namespace: "app", PVCName: "data"},
+		{Namespace: "app", PVCName: "data-2"},
+		{Namespace: "app", PVCName: "data"},
+	}
+	if err := service.markSharedOpenEBSLVMProbeMounts(context.Background(), session, targets); err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(manager.sharedPVs, []string{"pv-source", "pv-source-2"}) {
+		t.Fatalf("shared PV reads=%v", manager.sharedPVs)
+	}
+	for _, target := range targets {
+		if !target.WritablePVCMount {
+			t.Fatalf("target=%#v", target)
+		}
+	}
 }
 
 func TestResolveSessionToolProbeTargetsMountsSourcePVCForMountStrategy(t *testing.T) {
@@ -679,6 +728,33 @@ func TestWarmCopyUsesWritableSourceMountForSharedOpenEBSLVM(t *testing.T) {
 	session.Status.Phase = domain.PhaseReserved
 	if err := fixture.service.WarmCopy(context.Background(), session); err != nil {
 		t.Fatal(err)
+	}
+	if len(fixture.copier.requests) != 1 || !fixture.copier.requests[0].SourceMountReadWrite {
+		t.Fatalf("copy requests=%#v", fixture.copier.requests)
+	}
+}
+
+func TestWarmCopyEnablesOpenEBSLVMSharedBeforeProbe(t *testing.T) {
+	fixture := newRecoveryFixture(t)
+	session := appTestSession()
+	session.Status.Phase = domain.PhaseReserved
+	session.Spec.WorkflowOptionsPtr().OpenEBSLVMEnableShared = true
+	storageClass := *session.Spec.Volumes[0].SourcePVCSpec.StorageClassName
+	if _, err := fixture.client.StorageV1().StorageClasses().Create(context.Background(), &storagev1.StorageClass{
+		ObjectMeta: metav1.ObjectMeta{Name: storageClass}, Provisioner: "local.csi.openebs.io",
+	}, metav1.CreateOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fixture.client.CoreV1().Pods("app").Create(context.Background(), probeConsumerPod("database-0", "data", "source-node"), metav1.CreateOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	manager := &recordingOpenEBSLVMSharedVolumeManager{}
+	fixture.service.config.OpenEBSLVMSharedVolumeManager = manager
+	if err := fixture.service.WarmCopy(context.Background(), session); err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(manager.ensurePVs, []string{"pv-source"}) {
+		t.Fatalf("shared volumes=%v", manager.ensurePVs)
 	}
 	if len(fixture.copier.requests) != 1 || !fixture.copier.requests[0].SourceMountReadWrite {
 		t.Fatalf("copy requests=%#v", fixture.copier.requests)

@@ -129,7 +129,7 @@ func TestRootCommandSurfaceAndGlobalDefaults(t *testing.T) {
 			t.Fatalf("copy is missing --%s", name)
 		}
 	}
-	for _, name := range []string{"kubeblocks-candidate", "allow-leader-downtime", "force-reprovision", "precopy-passes"} {
+	for _, name := range []string{"kubeblocks-candidate", "allow-leader-downtime", "force-reprovision", "precopy-passes", "openebs-lvm-enable-shared"} {
 		if copyCommand.Flags().Lookup(name) != nil {
 			t.Fatalf("copy exposes cutover-only --%s", name)
 		}
@@ -146,6 +146,9 @@ func TestRootCommandSurfaceAndGlobalDefaults(t *testing.T) {
 		flag := command.Flags().Lookup("precopy-passes")
 		if err != nil || flag == nil || flag.DefValue != "1" {
 			t.Fatalf("%v precopy-passes flag=%v error=%v", path, flag, err)
+		}
+		if flag := command.Flags().Lookup("openebs-lvm-enable-shared"); flag == nil || flag.DefValue != "false" {
+			t.Fatalf("%v openebs-lvm-enable-shared flag=%v", path, flag)
 		}
 	}
 	for _, path := range [][]string{{"migrate-pod"}, {"migrate-pod", "plan"}} {
@@ -187,15 +190,16 @@ func TestMigrationFlagDefaultsAndPlanOptions(t *testing.T) {
 	flags.bindForceReprovision(command)
 
 	for name, want := range map[string]string{
-		"capacity-awareness":  "auto",
-		"source-namespace":    "default",
-		"temporary-namespace": "pvc-migrate-system",
-		"target-node":         "auto",
-		"strategy":            "[auto]",
-		"verify-checksum":     "true",
-		"delete-extraneous":   "true",
-		"precopy-passes":      "1",
-		"force-reprovision":   "false",
+		"capacity-awareness":        "auto",
+		"source-namespace":          "default",
+		"temporary-namespace":       "pvc-migrate-system",
+		"target-node":               "auto",
+		"strategy":                  "[auto]",
+		"verify-checksum":           "true",
+		"delete-extraneous":         "true",
+		"precopy-passes":            "1",
+		"openebs-lvm-enable-shared": "false",
+		"force-reprovision":         "false",
 	} {
 		flag := command.Flags().Lookup(name)
 		if flag == nil || flag.DefValue != want {
@@ -219,6 +223,7 @@ func TestMigrationFlagDefaultsAndPlanOptions(t *testing.T) {
 	flags.switchoverCandidate = "db-1"
 	flags.allowLeaderDowntime = true
 	flags.forceReprovision = true
+	flags.openEBSLVMEnableShared = true
 	options, err := flags.planOptions(state, domain.OperationMigratePod, true)
 	if err != nil {
 		t.Fatal(err)
@@ -226,7 +231,7 @@ func TestMigrationFlagDefaultsAndPlanOptions(t *testing.T) {
 	if options.SessionID != "mig-fixed" || options.SourceNamespace != "source" || options.DestinationNamespace != "source" || options.TemporaryNamespace != "staging" || options.StagingNamespace != "staging" || options.SessionNamespace != "sessions" {
 		t.Fatalf("namespaces and identity = %#v", options)
 	}
-	if options.Operation != domain.OperationMigratePod || options.PodName != "db-2" || options.SourceNode != "node-a" || options.TargetNode != "node-b" || options.DestinationClass != "fast" || options.CapacityAwareness != domain.CapacityAwarenessRequire || options.SwitchoverCandidate != "db-1" || !options.AllowLeaderDowntime || !options.ForceReprovision || !options.VerifyChecksum || !options.DeleteExtraneous || options.PrecopyPasses != 1 {
+	if options.Operation != domain.OperationMigratePod || options.PodName != "db-2" || options.SourceNode != "node-a" || options.TargetNode != "node-b" || options.DestinationClass != "fast" || options.CapacityAwareness != domain.CapacityAwarenessRequire || options.SwitchoverCandidate != "db-1" || !options.AllowLeaderDowntime || !options.ForceReprovision || !options.VerifyChecksum || !options.DeleteExtraneous || !options.OpenEBSLVMEnableShared || options.PrecopyPasses != 1 {
 		t.Fatalf("options = %#v", options)
 	}
 	flags.sourcePVCs[0] = "mutated"

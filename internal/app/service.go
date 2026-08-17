@@ -24,17 +24,18 @@ import (
 )
 
 type Config struct {
-	KubeconfigPath  string
-	Context         string
-	Retries         int
-	RetryBackoff    time.Duration
-	HelmTimeout     time.Duration
-	NoCompress      bool
-	StreamToolLogs  bool
-	StructuredLogs  bool
-	Writer          io.Writer
-	Logger          *slog.Logger
-	ToolImageProber kube.ToolImageProber
+	KubeconfigPath                string
+	Context                       string
+	Retries                       int
+	RetryBackoff                  time.Duration
+	HelmTimeout                   time.Duration
+	NoCompress                    bool
+	StreamToolLogs                bool
+	StructuredLogs                bool
+	Writer                        io.Writer
+	Logger                        *slog.Logger
+	ToolImageProber               kube.ToolImageProber
+	OpenEBSLVMSharedVolumeManager kube.OpenEBSLVMSharedVolumeManager
 }
 
 type Service struct {
@@ -283,40 +284,123 @@ func (s *Service) resolveCopyToolProbeTargets(ctx context.Context, session *doma
 		targets = append(targets, sourceTargets...)
 	}
 	if mountSourcePVC {
-		s.markSharedOpenEBSLVMProbeMounts(ctx, session, targets)
+		if err := s.markSharedOpenEBSLVMProbeMounts(ctx, session, targets); err != nil {
+			return nil, err
+		}
 	}
 	return targets, nil
 }
 
-func (s *Service) markSharedOpenEBSLVMProbeMounts(ctx context.Context, session *domain.Session, targets []kube.ToolProbeTarget) {
+func (s *Service) markSharedOpenEBSLVMProbeMounts(ctx context.Context, session *domain.Session, targets []kube.ToolProbeTarget) error {
 	if session == nil {
-		return
+		return nil
 	}
+	probedPVCs := make(map[string]struct{}, len(targets))
 	for index := range targets {
 		target := &targets[index]
 		if target.PVCName == "" || target.SkipPVCMount {
 			continue
 		}
-		for volumeIndex := range session.Spec.Volumes {
-			volume := &session.Spec.Volumes[volumeIndex]
-			if target.Namespace == volume.SourcePVC.Namespace && target.PVCName == volume.SourcePVC.Name && s.sharedOpenEBSLVMSource(ctx, volume) {
-				target.WritablePVCMount = true
-				break
-			}
+		probedPVCs[target.Namespace+"/"+target.PVCName] = struct{}{}
+	}
+	sharedPVCs := make(map[string]bool, len(probedPVCs))
+	for volumeIndex := range session.Spec.Volumes {
+		volume := &session.Spec.Volumes[volumeIndex]
+		key := volume.SourcePVC.Namespace + "/" + volume.SourcePVC.Name
+		if _, probed := probedPVCs[key]; !probed {
+			continue
+		}
+		shared, err := s.sharedOpenEBSLVMSource(ctx, volume)
+		if err != nil {
+			return err
+		}
+		sharedPVCs[key] = shared
+	}
+	for index := range targets {
+		target := &targets[index]
+		if target.PVCName != "" && !target.SkipPVCMount && sharedPVCs[target.Namespace+"/"+target.PVCName] {
+			target.WritablePVCMount = true
 		}
 	}
+	return nil
 }
 
-func (s *Service) sharedOpenEBSLVMSource(ctx context.Context, volume *domain.VolumeSpec) bool {
+func (s *Service) sharedOpenEBSLVMSource(ctx context.Context, volume *domain.VolumeSpec) (bool, error) {
+	isLVM, storageClass, err := s.openEBSLVMSource(ctx, volume)
+	if err != nil || !isLVM {
+		return false, err
+	}
+	if s.config.OpenEBSLVMSharedVolumeManager != nil {
+		return s.config.OpenEBSLVMSharedVolumeManager.Shared(ctx, volume.SourcePV.Name)
+	}
+	return isSharedOpenEBSLVMStorageClass(storageClass), nil
+}
+
+func (s *Service) openEBSLVMSource(ctx context.Context, volume *domain.VolumeSpec) (bool, *storagev1.StorageClass, error) {
 	if s == nil || s.client == nil || volume == nil || volume.SourcePVCSpec.StorageClassName == nil {
-		return false
+		return false, nil, nil
 	}
 	name := strings.TrimSpace(*volume.SourcePVCSpec.StorageClassName)
 	if name == "" {
-		return false
+		return false, nil, nil
 	}
 	storageClass, err := s.client.StorageV1().StorageClasses().Get(ctx, name, metav1.GetOptions{})
-	return err == nil && storageClass != nil && isSharedOpenEBSLVMStorageClass(storageClass)
+	if err != nil {
+		if apierrors.IsNotFound(err) {
+			return false, nil, nil
+		}
+		return false, nil, domain.WrapError(domain.ErrorKubernetes, "OpenEBS LVM shared mount", fmt.Sprintf("read StorageClass %s", name), err)
+	}
+	return storageClass != nil && storageClass.Provisioner == "local.csi.openebs.io", storageClass, nil
+}
+
+func (s *Service) enableOpenEBSLVMSharedMounts(ctx context.Context, session *domain.Session) error {
+	if session == nil || !session.Spec.WorkflowOptions().OpenEBSLVMEnableShared {
+		return nil
+	}
+	manager := s.config.OpenEBSLVMSharedVolumeManager
+	if manager == nil {
+		return domain.NewError(domain.ErrorInternal, "OpenEBS LVM shared mount", "OpenEBS LVMVolume manager is required when --openebs-lvm-enable-shared is set")
+	}
+	for index := range session.Spec.Volumes {
+		volume := &session.Spec.Volumes[index]
+		isLVM, _, err := s.openEBSLVMSource(ctx, volume)
+		if err != nil {
+			return err
+		}
+		if !isLVM {
+			continue
+		}
+		active, err := s.sourcePVCIsActive(ctx, volume)
+		if err != nil {
+			return err
+		}
+		if !active {
+			continue
+		}
+		result, err := manager.EnsureShared(ctx, volume.SourcePV.Name)
+		if err != nil {
+			return err
+		}
+		s.logInfo("OpenEBS LVM shared mount configured", "sourcePV", volume.SourcePV.Name, "resource", result.Reference, "previousShared", result.PreviousShared, "changed", result.Changed)
+	}
+	return nil
+}
+
+func (s *Service) sourcePVCIsActive(ctx context.Context, volume *domain.VolumeSpec) (bool, error) {
+	if s == nil || s.client == nil || volume == nil {
+		return false, nil
+	}
+	pods, err := s.client.CoreV1().Pods(volume.SourcePVC.Namespace).List(ctx, metav1.ListOptions{})
+	if err != nil {
+		return false, domain.WrapError(domain.ErrorKubernetes, "OpenEBS LVM shared mount", fmt.Sprintf("list Pods in namespace %s", volume.SourcePVC.Namespace), err)
+	}
+	for index := range pods.Items {
+		if kube.ActivePodUsesPVC(&pods.Items[index], volume.SourcePVC.Name) {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 func isSharedOpenEBSLVMStorageClass(storageClass *storagev1.StorageClass) bool {
@@ -1083,6 +1167,9 @@ func (s *Service) warmCopy(ctx context.Context, session *domain.Session) error {
 	if err := s.validateCopyConsumersBatch(ctx, session); err != nil {
 		return err
 	}
+	if err := s.enableOpenEBSLVMSharedMounts(ctx, session); err != nil {
+		return err
+	}
 	targets, err := s.resolveCopyToolProbeTargets(ctx, session, true)
 	if err != nil {
 		return err
@@ -1118,6 +1205,9 @@ func (s *Service) warmCopy(ctx context.Context, session *domain.Session) error {
 		if err := s.store.Update(ctx, session); err != nil {
 			return err
 		}
+	}
+	if session.Spec.Operation() == domain.OperationMigrate || session.Spec.Operation() == domain.OperationMigratePod {
+		session.CompleteWarmPass()
 	}
 	return s.finish(ctx, session, domain.PhaseWarmCopied, "warm copy completed for all volumes")
 }
@@ -1370,15 +1460,31 @@ func (s *Service) migrate(ctx context.Context, session *domain.Session, warmPass
 	if warmPasses < 0 {
 		return domain.NewError(domain.ErrorValidation, "migrate", "warm passes must be non-negative")
 	}
+	if session.Spec.WorkflowOptionsPtr() == nil {
+		return domain.NewError(domain.ErrorValidation, "migrate", "session workflow options are missing")
+	}
+	if session.Spec.PrecopyPasses() != warmPasses {
+		session.Spec.SetPrecopyPasses(warmPasses)
+		if err := s.store.Update(ctx, session); err != nil {
+			return err
+		}
+	}
 	if err := s.Reserve(ctx, session); err != nil {
 		return err
 	}
-	for pass := 0; pass < warmPasses; pass++ {
+	if err := s.runRemainingWarmCopies(ctx, session, warmPasses); err != nil {
+		return err
+	}
+	return s.migrateAfterWarmCopy(ctx, session)
+}
+
+func (s *Service) runRemainingWarmCopies(ctx context.Context, session *domain.Session, warmPasses int) error {
+	for session.WarmPassesCompleted() < warmPasses {
 		if err := s.WarmCopy(ctx, session); err != nil {
 			return err
 		}
 	}
-	return s.migrateAfterWarmCopy(ctx, session)
+	return nil
 }
 
 func (s *Service) ResumeSession(ctx context.Context, session *domain.Session) error {
@@ -1453,15 +1559,23 @@ func (s *Service) resumeSession(ctx context.Context, session *domain.Session) er
 		if err := s.Reserve(ctx, session); err != nil {
 			return err
 		}
-		return s.Migrate(ctx, session, 1)
+		return s.Migrate(ctx, session, session.Spec.PrecopyPasses())
 	case domain.PhaseReserved:
-		return s.Migrate(ctx, session, 1)
+		return s.Migrate(ctx, session, session.Spec.PrecopyPasses())
 	case domain.PhaseWarmCopying:
 		if err := s.WarmCopy(ctx, session); err != nil {
 			return err
 		}
+		if err := s.runRemainingWarmCopies(ctx, session, session.Spec.PrecopyPasses()); err != nil {
+			return err
+		}
 		return s.migrateAfterWarmCopy(ctx, session)
-	case domain.PhaseWarmCopied, domain.PhasePausing:
+	case domain.PhaseWarmCopied:
+		if err := s.runRemainingWarmCopies(ctx, session, session.Spec.PrecopyPasses()); err != nil {
+			return err
+		}
+		return s.migrateAfterWarmCopy(ctx, session)
+	case domain.PhasePausing:
 		return s.migrateAfterWarmCopy(ctx, session)
 	case domain.PhasePaused, domain.PhaseFinalSyncing:
 		if err := s.FinalSync(ctx, session); err != nil {
@@ -1755,7 +1869,13 @@ func (s *Service) copyWithRetry(ctx context.Context, session *domain.Session, vo
 	values = append(values, pullSecretValues...)
 	var last error
 	options := session.Spec.WorkflowOptions()
-	sourceMountReadWrite := mode == copyengine.ModeWarm && s.sharedOpenEBSLVMSource(ctx, volume)
+	sourceMountReadWrite := false
+	if mode == copyengine.ModeWarm {
+		sourceMountReadWrite, err = s.sharedOpenEBSLVMSource(ctx, volume)
+		if err != nil {
+			return err
+		}
+	}
 	for retryIndex := 0; retryIndex < s.config.Retries; retryIndex++ {
 		status.Sync.Attempts++
 		status.Sync.LastError = ""

@@ -58,19 +58,26 @@ func TestCheckWarmCopyMountCompatibility(t *testing.T) {
 	pvc := &corev1.PersistentVolumeClaim{ObjectMeta: metav1.ObjectMeta{Namespace: "app", Name: "data"}}
 	consumer := podWithPVC("app", "database-0", "data")
 	for _, test := range []struct {
-		name       string
-		operation  domain.Operation
-		class      *storagev1.StorageClass
-		consumers  []*corev1.Pod
-		wantReady  bool
-		wantLevel  domain.CheckSeverity
-		wantText   string
-		wantChecks int
+		name         string
+		operation    domain.Operation
+		enableShared bool
+		class        *storagev1.StorageClass
+		consumers    []*corev1.Pod
+		wantReady    bool
+		wantLevel    domain.CheckSeverity
+		wantText     string
+		wantChecks   int
 	}{
 		{
 			name:      "OpenEBS LVM without shared blocks warm copy",
 			class:     &storagev1.StorageClass{ObjectMeta: metav1.ObjectMeta{Name: "openebs-lvmpv"}, Provisioner: "local.csi.openebs.io", Parameters: map[string]string{"volgroup": "lvmvg"}},
 			consumers: []*corev1.Pod{consumer}, wantText: "--precopy-passes 0", wantLevel: domain.SeverityError, wantChecks: 1,
+		},
+		{
+			name:         "OpenEBS LVM explicit enable permits warm-copy probe",
+			enableShared: true,
+			class:        &storagev1.StorageClass{ObjectMeta: metav1.ObjectMeta{Name: "openebs-lvmpv"}, Provisioner: "local.csi.openebs.io"},
+			consumers:    []*corev1.Pod{consumer}, wantReady: true, wantText: "LVMVolume spec.shared", wantLevel: domain.SeverityWarning, wantChecks: 1,
 		},
 		{
 			name:      "online copy uses copy-specific fallback",
@@ -118,7 +125,7 @@ func TestCheckWarmCopyMountCompatibility(t *testing.T) {
 			if operation == "" {
 				operation = domain.OperationMigrate
 			}
-			New(nil, nil).checkWarmCopyMountCompatibility(plan, operation, pvc, test.class.Name, test.class, nil, test.consumers)
+			New(nil, nil).checkWarmCopyMountCompatibility(plan, operation, test.enableShared, pvc, test.class.Name, test.class, nil, test.consumers)
 			if plan.Ready != test.wantReady || len(plan.Checks) != test.wantChecks {
 				t.Fatalf("ready=%t checks=%#v", plan.Ready, plan.Checks)
 			}
@@ -176,6 +183,9 @@ func TestPlanReportsOpenEBSWarmCopyMountCheck(t *testing.T) {
 	}
 	if !hasFailedCheckContaining(plan, "warm-copy-mount", "--precopy-passes 0") {
 		t.Fatalf("warm-copy mount check missing: %#v", plan.Checks)
+	}
+	if !hasFailedCheckContaining(plan, "warm-copy-mount", "--openebs-lvm-enable-shared") {
+		t.Fatalf("OpenEBS LVM shared recovery missing: %#v", plan.Checks)
 	}
 
 	options.PrecopyPasses = 0

@@ -18,7 +18,7 @@ import (
 )
 
 func TestCheckRBACIncludesToolAndVolumePermissions(t *testing.T) {
-	seen := collectAllowedAccessReviews(t, domain.WorkloadSpec{})
+	seen := collectAllowedAccessReviews(t, domain.WorkloadSpec{}, false, false)
 	want := []authorizationv1.ResourceAttributes{
 		{Namespace: "app", Verb: "create", Resource: "pods/portforward"},
 		{Namespace: "app", Verb: "update", Resource: "serviceaccounts"},
@@ -37,6 +37,19 @@ func TestCheckRBACIncludesToolAndVolumePermissions(t *testing.T) {
 	}
 }
 
+func TestCheckRBACIncludesOpenEBSLVMVolumePermissionsWhenNeeded(t *testing.T) {
+	list := authorizationv1.ResourceAttributes{Verb: "list", Group: "local.openebs.io", Resource: "lvmvolumes"}
+	patch := authorizationv1.ResourceAttributes{Verb: "patch", Group: "local.openebs.io", Resource: "lvmvolumes"}
+	inspectOnly := collectAllowedAccessReviews(t, domain.WorkloadSpec{}, true, false)
+	if !hasAccessReview(inspectOnly, list) || hasAccessReview(inspectOnly, patch) {
+		t.Fatalf("inspect-only access reviews=%#v", inspectOnly)
+	}
+	withAutoEnable := collectAllowedAccessReviews(t, domain.WorkloadSpec{}, true, true)
+	if !hasAccessReview(withAutoEnable, list) || !hasAccessReview(withAutoEnable, patch) {
+		t.Fatalf("auto-enable access reviews=%#v", withAutoEnable)
+	}
+}
+
 func TestCheckRBACRejectsMissingSessionLeasePermission(t *testing.T) {
 	client := kubernetesfake.NewClientset()
 	client.PrependReactor("create", "selfsubjectaccessreviews", func(action clienttesting.Action) (bool, runtime.Object, error) {
@@ -47,7 +60,7 @@ func TestCheckRBACRejectsMissingSessionLeasePermission(t *testing.T) {
 		return true, review, nil
 	})
 	plan := &domain.MigrationPlan{Ready: true}
-	New(client, nil).checkRBAC(context.Background(), plan, "app", "stage", "system", domain.WorkloadSpec{})
+	New(client, nil).checkRBAC(context.Background(), plan, "app", "stage", "system", domain.WorkloadSpec{}, false, false)
 	if plan.Ready || len(plan.Checks) != 1 || !strings.Contains(plan.Checks[0].Message, "create system/leases") {
 		t.Fatalf("RBAC result=%#v", plan.Checks)
 	}
@@ -67,6 +80,14 @@ func TestDeploymentClusterRoleCoversPlannerAccessReviews(t *testing.T) {
 	}
 	if !clusterRoleAllows(role.Rules, authorizationv1.ResourceAttributes{Verb: "list", Group: "storage.k8s.io", Resource: "csistoragecapacities"}) {
 		t.Fatal("deployment ClusterRole cannot list CSIStorageCapacity objects")
+	}
+	for _, attributes := range []authorizationv1.ResourceAttributes{
+		{Verb: "list", Group: "local.openebs.io", Resource: "lvmvolumes"},
+		{Verb: "patch", Group: "local.openebs.io", Resource: "lvmvolumes"},
+	} {
+		if !clusterRoleAllows(role.Rules, attributes) {
+			t.Fatalf("deployment ClusterRole cannot %s OpenEBS LVMVolumes", attributes.Verb)
+		}
 	}
 	if clusterRoleAllows(role.Rules, authorizationv1.ResourceAttributes{Verb: "create", Resource: "pods/exec"}) {
 		t.Fatal("default deployment ClusterRole grants Pod exec")
@@ -104,7 +125,7 @@ func TestDeploymentClusterRoleCoversPlannerAccessReviews(t *testing.T) {
 		},
 	}
 	for _, workload := range workloads {
-		for _, attributes := range collectAllowedAccessReviews(t, workload) {
+		for _, attributes := range collectAllowedAccessReviews(t, workload, false, false) {
 			if !clusterRoleAllows(role.Rules, attributes) && !clusterRoleAllows(mongoDBRole.Rules, attributes) {
 				t.Errorf("deployment ClusterRole does not allow %s %s/%s", attributes.Verb, attributes.Group, attributes.Resource)
 			}
@@ -230,7 +251,7 @@ func TestCheckRBACIncludesControllerSpecificPermissions(t *testing.T) {
 				return true, review, nil
 			})
 			plan := &domain.MigrationPlan{Ready: true}
-			New(client, nil).checkRBAC(context.Background(), plan, "app", "stage", "system", tt.workload)
+			New(client, nil).checkRBAC(context.Background(), plan, "app", "stage", "system", tt.workload, false, false)
 			if !plan.Ready || len(plan.Checks) != 1 || !plan.Checks[0].Passed {
 				t.Fatalf("RBAC result: %#v", plan.Checks)
 			}
@@ -261,7 +282,7 @@ func TestCheckRBACDeduplicatesEqualSourceAndStagingNamespace(t *testing.T) {
 		return true, review, nil
 	})
 	plan := &domain.MigrationPlan{Ready: true}
-	New(client, nil).checkRBAC(context.Background(), plan, "app", "app", "system", domain.WorkloadSpec{})
+	New(client, nil).checkRBAC(context.Background(), plan, "app", "app", "system", domain.WorkloadSpec{}, false, false)
 	if podGets != 1 {
 		t.Fatalf("Pod get reviews=%d want=1", podGets)
 	}
@@ -284,7 +305,7 @@ func TestCheckRBACAggregatesDeniedPermissionsAndReasons(t *testing.T) {
 		return true, review, nil
 	})
 	plan := &domain.MigrationPlan{Ready: true}
-	New(client, nil).checkRBAC(context.Background(), plan, "app", "stage", "system", domain.WorkloadSpec{})
+	New(client, nil).checkRBAC(context.Background(), plan, "app", "stage", "system", domain.WorkloadSpec{}, false, false)
 	if plan.Ready || len(plan.Checks) != 1 {
 		t.Fatalf("RBAC result: %#v", plan.Checks)
 	}
@@ -303,7 +324,7 @@ func TestCheckRBACStopsOnReviewError(t *testing.T) {
 		return true, nil, errors.New("authorization API unavailable")
 	})
 	plan := &domain.MigrationPlan{Ready: true}
-	New(client, nil).checkRBAC(context.Background(), plan, "app", "stage", "system", domain.WorkloadSpec{})
+	New(client, nil).checkRBAC(context.Background(), plan, "app", "stage", "system", domain.WorkloadSpec{}, false, false)
 	if calls != 1 || plan.Ready || len(plan.Checks) != 1 || !strings.Contains(plan.Checks[0].Message, "authorization API unavailable") {
 		t.Fatalf("calls=%d checks=%#v", calls, plan.Checks)
 	}
@@ -318,7 +339,7 @@ func hasAccessReview(seen []authorizationv1.ResourceAttributes, want authorizati
 	return false
 }
 
-func collectAllowedAccessReviews(t *testing.T, workload domain.WorkloadSpec) []authorizationv1.ResourceAttributes {
+func collectAllowedAccessReviews(t *testing.T, workload domain.WorkloadSpec, inspectOpenEBSLVMShared, enableOpenEBSLVMShared bool) []authorizationv1.ResourceAttributes {
 	t.Helper()
 	client := kubernetesfake.NewClientset()
 	seen := make([]authorizationv1.ResourceAttributes, 0)
@@ -329,7 +350,7 @@ func collectAllowedAccessReviews(t *testing.T, workload domain.WorkloadSpec) []a
 		return true, review, nil
 	})
 	plan := &domain.MigrationPlan{Ready: true}
-	New(client, nil).checkRBAC(context.Background(), plan, "app", "stage", "system", workload)
+	New(client, nil).checkRBAC(context.Background(), plan, "app", "stage", "system", workload, inspectOpenEBSLVMShared, enableOpenEBSLVMShared)
 	if !plan.Ready || len(plan.Checks) != 1 || !plan.Checks[0].Passed {
 		t.Fatalf("RBAC result: %#v", plan.Checks)
 	}

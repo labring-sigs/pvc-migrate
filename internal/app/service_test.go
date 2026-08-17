@@ -252,7 +252,7 @@ func appTestSession() *domain.Session {
 			VolumeMode:     mode,
 		}},
 	}, domain.WorkloadSpec{Adapter: domain.WorkloadNone}, false, domain.SessionWorkflowOptions{
-		SourceNode: "source-node", TargetNode: "target-node", Strategies: []string{"mount"}, DeleteExtraneous: true,
+		SourceNode: "source-node", TargetNode: "target-node", Strategies: []string{"mount"}, DeleteExtraneous: true, PrecopyPasses: 1,
 	}), time.Unix(100, 0))
 	session.ResourceVersion = "1"
 	return session
@@ -302,6 +302,61 @@ func TestMigrateRunsAllStagesAndPersistsProgress(t *testing.T) {
 	}
 	if store.updates < 10 {
 		t.Fatalf("session updates=%d, expected progress persistence", store.updates)
+	}
+}
+
+func TestResumeSessionUsesPersistedPrecopyPasses(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		passes int
+		modes  string
+	}{
+		{name: "offline", passes: 0, modes: "[final]"},
+		{name: "multiple warm passes", passes: 2, modes: "[warm warm final]"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			copier := &fakeCopier{}
+			service, session, _, _ := appTestService(t, copier)
+			session.Status.Phase = domain.PhaseReserved
+			session.Spec.SetPrecopyPasses(test.passes)
+			if err := service.ResumeSession(context.Background(), session); err != nil {
+				t.Fatal(err)
+			}
+			if got := fmt.Sprint(copier.modes); got != test.modes {
+				t.Fatalf("copy modes=%s want=%s", got, test.modes)
+			}
+		})
+	}
+}
+
+func TestResumeSessionCompletesRemainingPrecopyPasses(t *testing.T) {
+	for _, test := range []struct {
+		name      string
+		phase     domain.Phase
+		passes    int
+		completed int
+		modes     string
+	}{
+		{name: "after completed warm pass", phase: domain.PhaseWarmCopied, passes: 2, completed: 1, modes: "[warm final]"},
+		{name: "during next warm pass", phase: domain.PhaseWarmCopying, passes: 3, completed: 1, modes: "[warm warm final]"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			copier := &fakeCopier{}
+			service, session, _, _ := appTestService(t, copier)
+			session.Status.Phase = test.phase
+			session.Spec.SetPrecopyPasses(test.passes)
+			completed := test.completed
+			session.Status.WarmPassesCompleted = &completed
+			if err := service.ResumeSession(context.Background(), session); err != nil {
+				t.Fatal(err)
+			}
+			if got := fmt.Sprint(copier.modes); got != test.modes {
+				t.Fatalf("copy modes=%s want=%s", got, test.modes)
+			}
+			if got := session.WarmPassesCompleted(); got != test.passes {
+				t.Fatalf("completed warm passes=%d want=%d", got, test.passes)
+			}
+		})
 	}
 }
 

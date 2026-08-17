@@ -12,25 +12,26 @@ import (
 )
 
 type migrationFlags struct {
-	sessionID            string
-	sourceNamespace      string
-	temporaryNamespace   string
-	destinationNamespace string
-	sourcePVCs           []string
-	destinationPVCs      []string
-	podName              string
-	sourceNode           string
-	targetNode           string
-	destinationClass     string
-	capacityAwareness    string
-	strategies           []string
-	verifyChecksum       bool
-	deleteExtraneous     bool
-	switchoverCandidate  string
-	allowLeaderDowntime  bool
-	forceReprovision     bool
-	precopyPasses        int
-	online               bool
+	sessionID              string
+	sourceNamespace        string
+	temporaryNamespace     string
+	destinationNamespace   string
+	sourcePVCs             []string
+	destinationPVCs        []string
+	podName                string
+	sourceNode             string
+	targetNode             string
+	destinationClass       string
+	capacityAwareness      string
+	strategies             []string
+	verifyChecksum         bool
+	deleteExtraneous       bool
+	switchoverCandidate    string
+	allowLeaderDowntime    bool
+	forceReprovision       bool
+	precopyPasses          int
+	openEBSLVMEnableShared bool
+	online                 bool
 }
 
 func (f *migrationFlags) bind(command *cobra.Command, includePod, includeSourceNode, includeController, includePrecopy bool) {
@@ -52,6 +53,7 @@ func (f *migrationFlags) bind(command *cobra.Command, includePod, includeSourceN
 	flags.BoolVar(&f.deleteExtraneous, "delete-extraneous", true, "Delete destination files absent from the source")
 	if includePrecopy {
 		flags.IntVar(&f.precopyPasses, "precopy-passes", 1, "Warm-copy passes before workload pause")
+		flags.BoolVar(&f.openEBSLVMEnableShared, "openebs-lvm-enable-shared", false, "Patch existing OpenEBS LVMVolume spec.shared=yes before warm copy when needed")
 	}
 	if includePod {
 		podDescription := "Pod whose PVCs define the operation set"
@@ -91,29 +93,30 @@ func (f *migrationFlags) planOptions(state *rootState, operation domain.Operatio
 		temporaryNamespace = f.temporaryNamespace
 	}
 	return planner.Options{
-		SessionID:            id,
-		Operation:            operation,
-		SourceNamespace:      f.sourceNamespace,
-		TemporaryNamespace:   temporaryNamespace,
-		DestinationNamespace: destinationNamespace,
-		SessionNamespace:     state.global.sessionNamespace,
-		StagingNamespace:     stagingNamespace,
-		SourcePVCs:           append([]string(nil), f.sourcePVCs...),
-		DestinationPVCs:      append([]string(nil), f.destinationPVCs...),
-		PodName:              f.podName,
-		SourceNode:           f.sourceNode,
-		TargetNode:           f.targetNode,
-		ToolImage:            state.global.toolImage,
-		DestinationClass:     f.destinationClass,
-		CapacityAwareness:    domain.CapacityAwareness(f.capacityAwareness),
-		Strategies:           append([]string(nil), f.strategies...),
-		Online:               f.online,
-		VerifyChecksum:       f.verifyChecksum,
-		DeleteExtraneous:     f.deleteExtraneous,
-		SwitchoverCandidate:  f.switchoverCandidate,
-		AllowLeaderDowntime:  f.allowLeaderDowntime,
-		ForceReprovision:     f.forceReprovision,
-		PrecopyPasses:        f.precopyPasses,
+		SessionID:              id,
+		Operation:              operation,
+		SourceNamespace:        f.sourceNamespace,
+		TemporaryNamespace:     temporaryNamespace,
+		DestinationNamespace:   destinationNamespace,
+		SessionNamespace:       state.global.sessionNamespace,
+		StagingNamespace:       stagingNamespace,
+		SourcePVCs:             append([]string(nil), f.sourcePVCs...),
+		DestinationPVCs:        append([]string(nil), f.destinationPVCs...),
+		PodName:                f.podName,
+		SourceNode:             f.sourceNode,
+		TargetNode:             f.targetNode,
+		ToolImage:              state.global.toolImage,
+		DestinationClass:       f.destinationClass,
+		CapacityAwareness:      domain.CapacityAwareness(f.capacityAwareness),
+		Strategies:             append([]string(nil), f.strategies...),
+		Online:                 f.online,
+		VerifyChecksum:         f.verifyChecksum,
+		DeleteExtraneous:       f.deleteExtraneous,
+		SwitchoverCandidate:    f.switchoverCandidate,
+		AllowLeaderDowntime:    f.allowLeaderDowntime,
+		ForceReprovision:       f.forceReprovision,
+		PrecopyPasses:          f.precopyPasses,
+		OpenEBSLVMEnableShared: f.openEBSLVMEnableShared,
 	}, nil
 }
 

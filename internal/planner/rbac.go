@@ -18,7 +18,7 @@ type rbacAccess struct {
 	resource  string
 }
 
-func (p *Planner) checkRBAC(ctx context.Context, plan *domain.MigrationPlan, sourceNamespace, stagingNamespace, sessionNamespace string, workload domain.WorkloadSpec) {
+func (p *Planner) checkRBAC(ctx context.Context, plan *domain.MigrationPlan, sourceNamespace, stagingNamespace, sessionNamespace string, workload domain.WorkloadSpec, inspectOpenEBSLVMShared, enableOpenEBSLVMShared bool) {
 	p.logInfo("checking migration RBAC permissions", "sourceNamespace", sourceNamespace, "stagingNamespace", stagingNamespace, "sessionNamespace", sessionNamespace)
 	checks := make([]rbacAccess, 0)
 	add := func(namespace, group, resource string, verbs ...string) {
@@ -53,6 +53,12 @@ func (p *Planner) checkRBAC(ctx context.Context, plan *domain.MigrationPlan, sou
 	add("", "storage.k8s.io", "storageclasses", "get", "list")
 	add("", "storage.k8s.io", "csinodes", "get")
 	add("", "storage.k8s.io", "volumeattachments", "get", "list", "watch")
+	if inspectOpenEBSLVMShared {
+		add("", "local.openebs.io", "lvmvolumes", "list")
+	}
+	if enableOpenEBSLVMShared {
+		add("", "local.openebs.io", "lvmvolumes", "patch")
+	}
 	if workload.Adapter == domain.WorkloadStatefulSet || workload.Adapter == domain.WorkloadVMCluster {
 		add(workload.Controller.Namespace, "apps", "statefulsets", "get", "update")
 	}

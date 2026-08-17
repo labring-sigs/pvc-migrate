@@ -536,6 +536,23 @@ func TestCopyPlanFailureGuidanceDoesNotSuggestPrecopyPasses(t *testing.T) {
 	}
 }
 
+func TestOpenEBSLVMPlanFailureGuidanceOffersBothRecoveryPaths(t *testing.T) {
+	var output bytes.Buffer
+	plan := &domain.MigrationPlan{
+		SessionSpec: domain.NewSessionSpec(domain.OperationMigrate, domain.SessionCommon{}, domain.WorkloadSpec{}, false),
+		Checks:      []domain.Check{{Name: "warm-copy-mount", Severity: domain.SeverityError, Message: "StorageClass local.csi.openebs.io does not support a second mount"}},
+	}
+	if err := writePlanFailureGuidance(&output, plan); err != nil {
+		t.Fatal(err)
+	}
+	text := output.String()
+	for _, want := range []string{"--precopy-passes 0", "--openebs-lvm-enable-shared"} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("OpenEBS plan guidance=%q missing %q", text, want)
+		}
+	}
+}
+
 func TestApprovalErrorGuidanceStatesProtectedActionDidNotStart(t *testing.T) {
 	command := &guidanceErrorCommand{}
 	approvalErr := domain.WrapError(domain.ErrorTimeout, "approval", "typed approval canceled", context.Canceled)
