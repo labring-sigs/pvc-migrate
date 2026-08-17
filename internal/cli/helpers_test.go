@@ -114,6 +114,13 @@ func TestRootCommandSurfaceAndGlobalDefaults(t *testing.T) {
 	if online := copyCommand.Flags().Lookup("online"); online == nil || online.DefValue != "false" {
 		t.Fatalf("copy --online default=%v, want false", online)
 	}
+	backupCommand, _, err := root.Find([]string{"backup"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if backupCommand.Flags().Lookup("allow-mounted") != nil {
+		t.Fatal("backup exposes removed --allow-mounted alias")
+	}
 	restoreCommand, _, err := root.Find([]string{"restore"})
 	if err != nil {
 		t.Fatal(err)
@@ -521,12 +528,12 @@ func TestReadinessHelpers(t *testing.T) {
 		t.Fatalf("error=%v output=%q guidance=%q", err, printed.String(), guidance.String())
 	}
 	runtime.printer.Writer = cliFailingWriter{err: io.ErrClosedPipe}
-	if err := requireReadyWithOutput(runtime, plan); !errors.Is(err, io.ErrClosedPipe) {
+	if err := requireReadyWithOutput(runtime, plan, io.Discard); !errors.Is(err, io.ErrClosedPipe) {
 		t.Fatalf("print failure=%v", err)
 	}
 	printed.Reset()
 	runtime.printer.Writer = &printed
-	if err := requireReadyWithOutput(runtime, &domain.MigrationPlan{Ready: true}); err != nil || printed.Len() != 0 {
+	if err := requireReadyWithOutput(runtime, &domain.MigrationPlan{Ready: true}, io.Discard); err != nil || printed.Len() != 0 {
 		t.Fatalf("ready error=%v output=%q", err, printed.String())
 	}
 }

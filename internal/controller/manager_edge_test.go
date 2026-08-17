@@ -729,7 +729,7 @@ func controllerSession(workload domain.WorkloadSpec) *domain.Session {
 	return domain.NewSession("session", domain.NewSessionSpec(domain.OperationMigrate, domain.SessionCommon{
 		SourceNamespace: "app", TemporaryNamespace: "system", SessionNamespace: "system",
 		Volumes: []domain.VolumeSpec{{SourcePVC: domain.ObjectReference{Name: "data"}}},
-	}, workload, false), time.Now())
+	}, workload, false, domain.SessionWorkflowOptions{}), time.Now())
 }
 
 func TestCreateAndWaitOpsReusesSucceededAndRetriesFailedRequests(t *testing.T) {

@@ -170,7 +170,7 @@ func TestPauseStatefulSetRejectsExternalReplicaChange(t *testing.T) {
 		Controller:       domain.ObjectReference{Namespace: "app", Name: "db", UID: types.UID("sts-uid")},
 		OriginalReplicas: &original,
 		Ordinal:          &ordinal,
-	}, false), time.Now())
+	}, false, domain.SessionWorkflowOptions{}), time.Now())
 	err := manager.Pause(ctx, session)
 	if domain.CategoryOf(err) != domain.ErrorConflict {
 		t.Fatalf("category=%s error=%v", domain.CategoryOf(err), err)
@@ -367,7 +367,7 @@ func TestKubeBlocksUsesDiscoveredCurrentOpsAPI(t *testing.T) {
 		TemporaryNamespace: "system",
 		SessionNamespace:   "system",
 		Volumes:            []domain.VolumeSpec{{SourcePVC: domain.ObjectReference{Name: "data"}}},
-	}, workload, false), time.Now())
+	}, workload, false, domain.SessionWorkflowOptions{}), time.Now())
 	session.Status.Phase = domain.PhasePausing
 	if err := manager.Pause(ctx, session); err != nil {
 		t.Fatal(err)

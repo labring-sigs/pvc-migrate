@@ -1025,7 +1025,7 @@ func TestCleanupFinalizeRequiresRecordedPolicyAndOwnedActivePV(t *testing.T) {
 func TestCleanupRenameFinalizesSourcePVWithoutRollbackDeletion(t *testing.T) {
 	ctx := context.Background()
 	session := appTestSession()
-	session.Spec = domain.NewSessionSpec(domain.OperationRename, session.Spec.SessionCommon, session.Spec.Workload(), false)
+	session.Spec = domain.NewSessionSpec(domain.OperationRename, session.Spec.SessionCommon, session.Spec.Workload(), false, domain.SessionWorkflowOptions{})
 	session.Status.Phase = domain.PhaseCompleted
 	session.Spec.Volumes[0].SourceReclaimPolicy = corev1.PersistentVolumeReclaimDelete
 	session.Status.Volumes[0].Activation.ActivePVC = domain.ObjectReference{

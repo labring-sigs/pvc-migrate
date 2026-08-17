@@ -67,33 +67,34 @@ func TestCheckWarmCopyMountCompatibility(t *testing.T) {
 		wantLevel    domain.CheckSeverity
 		wantText     string
 		wantChecks   int
+		wantInspect  bool
 	}{
 		{
 			name:      "OpenEBS LVM without shared blocks warm copy",
 			class:     &storagev1.StorageClass{ObjectMeta: metav1.ObjectMeta{Name: "openebs-lvmpv"}, Provisioner: "local.csi.openebs.io", Parameters: map[string]string{"volgroup": "lvmvg"}},
-			consumers: []*corev1.Pod{consumer}, wantText: "--precopy-passes 0", wantLevel: domain.SeverityError, wantChecks: 1,
+			consumers: []*corev1.Pod{consumer}, wantText: "--precopy-passes 0", wantLevel: domain.SeverityError, wantChecks: 1, wantInspect: true,
 		},
 		{
 			name:         "OpenEBS LVM explicit enable permits warm-copy probe",
 			enableShared: true,
 			class:        &storagev1.StorageClass{ObjectMeta: metav1.ObjectMeta{Name: "openebs-lvmpv"}, Provisioner: "local.csi.openebs.io"},
-			consumers:    []*corev1.Pod{consumer}, wantReady: true, wantText: "LVMVolume spec.shared", wantLevel: domain.SeverityWarning, wantChecks: 1,
+			consumers:    []*corev1.Pod{consumer}, wantReady: true, wantText: "LVMVolume spec.shared", wantLevel: domain.SeverityWarning, wantChecks: 1, wantInspect: true,
 		},
 		{
 			name:      "online copy uses copy-specific fallback",
 			operation: domain.OperationCopy,
 			class:     &storagev1.StorageClass{ObjectMeta: metav1.ObjectMeta{Name: "openebs-lvmpv"}, Provisioner: "local.csi.openebs.io"},
-			consumers: []*corev1.Pod{consumer}, wantText: "without --online", wantLevel: domain.SeverityError, wantChecks: 1,
+			consumers: []*corev1.Pod{consumer}, wantText: "without --online", wantLevel: domain.SeverityError, wantChecks: 1, wantInspect: true,
 		},
 		{
 			name:      "OpenEBS LVM shared supports runtime verification",
 			class:     &storagev1.StorageClass{ObjectMeta: metav1.ObjectMeta{Name: "openebs-lvmpv-shared"}, Provisioner: "local.csi.openebs.io", Parameters: map[string]string{"shared": "yes"}},
-			consumers: []*corev1.Pod{consumer}, wantReady: true, wantText: "declares shared=yes", wantLevel: domain.SeverityInfo, wantChecks: 1,
+			consumers: []*corev1.Pod{consumer}, wantReady: true, wantText: "declares shared=yes", wantLevel: domain.SeverityInfo, wantChecks: 1, wantInspect: true,
 		},
 		{
 			name:      "OpenEBS LVM undocumented true value is rejected",
 			class:     &storagev1.StorageClass{ObjectMeta: metav1.ObjectMeta{Name: "openebs-lvmpv"}, Provisioner: "local.csi.openebs.io", Parameters: map[string]string{"shared": "true"}},
-			consumers: []*corev1.Pod{consumer}, wantText: "shared: \"yes\"", wantLevel: domain.SeverityError, wantChecks: 1,
+			consumers: []*corev1.Pod{consumer}, wantText: "shared: \"yes\"", wantLevel: domain.SeverityError, wantChecks: 1, wantInspect: true,
 		},
 		{
 			name:      "unknown CSI is probed at runtime",
@@ -114,9 +115,9 @@ func TestCheckWarmCopyMountCompatibility(t *testing.T) {
 			consumers: []*corev1.Pod{consumer}, wantReady: true, wantText: "StorageType=device", wantLevel: domain.SeverityWarning, wantChecks: 1,
 		},
 		{
-			name:      "offline source needs no concurrent mount check",
+			name:      "offline OpenEBS source still requires runtime inspection",
 			class:     &storagev1.StorageClass{ObjectMeta: metav1.ObjectMeta{Name: "openebs-lvmpv"}, Provisioner: "local.csi.openebs.io"},
-			wantReady: true,
+			wantReady: true, wantInspect: true,
 		},
 	} {
 		t.Run(test.name, func(t *testing.T) {
@@ -125,7 +126,10 @@ func TestCheckWarmCopyMountCompatibility(t *testing.T) {
 			if operation == "" {
 				operation = domain.OperationMigrate
 			}
-			New(nil, nil).checkWarmCopyMountCompatibility(plan, operation, test.enableShared, pvc, test.class.Name, test.class, nil, test.consumers)
+			inspect := New(nil, nil).checkWarmCopyMountCompatibility(plan, operation, test.enableShared, pvc, test.class.Name, test.class, nil, test.consumers)
+			if inspect != test.wantInspect {
+				t.Fatalf("inspect OpenEBS LVM=%t want=%t", inspect, test.wantInspect)
+			}
 			if plan.Ready != test.wantReady || len(plan.Checks) != test.wantChecks {
 				t.Fatalf("ready=%t checks=%#v", plan.Ready, plan.Checks)
 			}

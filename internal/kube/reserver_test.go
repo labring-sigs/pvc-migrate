@@ -152,7 +152,7 @@ func TestReserveVolumeRejectsDestinationOwnedByAnotherSession(t *testing.T) {
 	session := domain.NewSession("session", domain.NewSessionSpec(domain.OperationReserve, domain.SessionCommon{
 		SourceNamespace: "app", TemporaryNamespace: "system", SessionNamespace: "system",
 		Volumes: []domain.VolumeSpec{{SourcePVC: domain.ObjectReference{Namespace: "app", Name: "data", UID: sourcePVCUID}, SourcePV: domain.ObjectReference{Name: "pv-source", UID: sourcePVUID}, DestinationPVC: domain.ObjectReference{Namespace: "system", Name: "data-migrated"}, Capacity: "1Gi", StorageClass: storageClass, AccessModes: []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce}, VolumeMode: mode}},
-	}, domain.WorkloadSpec{Adapter: domain.WorkloadNone}, false), time.Now())
+	}, domain.WorkloadSpec{Adapter: domain.WorkloadNone}, false, domain.SessionWorkflowOptions{}), time.Now())
 	err := NewReserver(client).ReserveVolume(ctx, session, &session.Spec.Volumes[0], &session.Status.Volumes[0], false)
 	if domain.CategoryOf(err) != domain.ErrorConflict {
 		t.Fatalf("category=%s error=%v", domain.CategoryOf(err), err)

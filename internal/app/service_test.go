@@ -288,7 +288,7 @@ func appTestService(t *testing.T, copier *fakeCopier) (*Service, *domain.Session
 func TestMigrateRunsAllStagesAndPersistsProgress(t *testing.T) {
 	copier := &fakeCopier{}
 	service, session, controllers, store := appTestService(t, copier)
-	if err := service.Migrate(context.Background(), session, 1); err != nil {
+	if err := service.Migrate(context.Background(), session); err != nil {
 		t.Fatal(err)
 	}
 	if session.Status.Phase != domain.PhaseCompleted {
@@ -318,7 +318,7 @@ func TestResumeSessionUsesPersistedPrecopyPasses(t *testing.T) {
 			copier := &fakeCopier{}
 			service, session, _, _ := appTestService(t, copier)
 			session.Status.Phase = domain.PhaseReserved
-			session.Spec.SetPrecopyPasses(test.passes)
+			session.Spec.Migrate.PrecopyPasses = test.passes
 			if err := service.ResumeSession(context.Background(), session); err != nil {
 				t.Fatal(err)
 			}
@@ -344,16 +344,15 @@ func TestResumeSessionCompletesRemainingPrecopyPasses(t *testing.T) {
 			copier := &fakeCopier{}
 			service, session, _, _ := appTestService(t, copier)
 			session.Status.Phase = test.phase
-			session.Spec.SetPrecopyPasses(test.passes)
-			completed := test.completed
-			session.Status.WarmPassesCompleted = &completed
+			session.Spec.Migrate.PrecopyPasses = test.passes
+			session.Status.WarmPassesCompleted = test.completed
 			if err := service.ResumeSession(context.Background(), session); err != nil {
 				t.Fatal(err)
 			}
 			if got := fmt.Sprint(copier.modes); got != test.modes {
 				t.Fatalf("copy modes=%s want=%s", got, test.modes)
 			}
-			if got := session.WarmPassesCompleted(); got != test.passes {
+			if got := session.Status.WarmPassesCompleted; got != test.passes {
 				t.Fatalf("completed warm passes=%d want=%d", got, test.passes)
 			}
 		})
@@ -365,7 +364,7 @@ func TestMigrateLogsLongRunningStageBoundaries(t *testing.T) {
 	copier := &fakeCopier{}
 	service, session, _, _ := appTestService(t, copier)
 	service.config.Logger = slog.New(slog.NewTextHandler(&logs, nil))
-	if err := service.Migrate(context.Background(), session, 1); err != nil {
+	if err := service.Migrate(context.Background(), session); err != nil {
 		t.Fatal(err)
 	}
 	for _, event := range []string{
@@ -439,7 +438,7 @@ func TestFailContextPersistsAfterParentCancellation(t *testing.T) {
 
 func TestCopyConsumerPreflightSupportsOfflineAndOnlineBoundaries(t *testing.T) {
 	service, session, _, _ := appTestService(t, &fakeCopier{})
-	session.Spec = domain.NewSessionSpec(domain.OperationCopy, session.Spec.SessionCommon, domain.WorkloadSpec{Adapter: domain.WorkloadNone}, false)
+	session.Spec = domain.NewSessionSpec(domain.OperationCopy, session.Spec.SessionCommon, domain.WorkloadSpec{Adapter: domain.WorkloadNone}, false, domain.SessionWorkflowOptions{})
 	_, err := service.client.CoreV1().Pods("app").Create(context.Background(), &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{Namespace: "app", Name: "writer"},
 		Spec: corev1.PodSpec{
@@ -483,7 +482,8 @@ func TestCopyConsumerPreflightSupportsOfflineAndOnlineBoundaries(t *testing.T) {
 func TestFinalSyncFailureKeepsWorkloadPausedAndResumes(t *testing.T) {
 	copier := &fakeCopier{failFinal: 1}
 	service, session, controllers, _ := appTestService(t, copier)
-	if err := service.Migrate(context.Background(), session, 0); domain.CategoryOf(err) != domain.ErrorCopy {
+	session.Spec.Migrate.PrecopyPasses = 0
+	if err := service.Migrate(context.Background(), session); domain.CategoryOf(err) != domain.ErrorCopy {
 		t.Fatalf("migration error=%v category=%s", err, domain.CategoryOf(err))
 	}
 	if session.Status.Phase != domain.PhaseFailed || session.Status.ResumeFrom != domain.PhaseFinalSyncing {
@@ -518,7 +518,8 @@ func TestPausePersistsControllerRecoveryState(t *testing.T) {
 func TestRollbackRestoresSourceBindingAndResumes(t *testing.T) {
 	copier := &fakeCopier{}
 	service, session, controllers, _ := appTestService(t, copier)
-	if err := service.Migrate(context.Background(), session, 0); err != nil {
+	session.Spec.Migrate.PrecopyPasses = 0
+	if err := service.Migrate(context.Background(), session); err != nil {
 		t.Fatal(err)
 	}
 	if err := service.Rollback(context.Background(), session); err != nil {

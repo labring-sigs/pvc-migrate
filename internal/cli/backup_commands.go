@@ -74,7 +74,7 @@ func (r *rootState) newObjectTransferCommand(restore, forceOnline bool) *cobra.C
 			if err := validateBucketFlags(flags, pvcFlag); err != nil {
 				return reportPreSessionError(cmd, err)
 			}
-			online := !restore && (forceOnline || flags.online || flags.allowMounted)
+			online := !restore && (forceOnline || flags.online)
 			runtime, err := r.runtime()
 			if err != nil {
 				return reportRuntimeError(cmd, err)
@@ -182,7 +182,7 @@ func (r *rootState) newBackupPlanCommand(restore, forceOnline bool) *cobra.Comma
 			if err := validateBucketFlags(flags, pvcFlag); err != nil {
 				return reportPreSessionError(cmd, err)
 			}
-			online := !restore && (forceOnline || flags.online || flags.allowMounted)
+			online := !restore && (forceOnline || flags.online)
 			runtime, err := r.runtime()
 			if err != nil {
 				return reportRuntimeError(cmd, err)
@@ -249,22 +249,10 @@ func bindBucketFlags(command *cobra.Command, flags *bucketFlags, restore, includ
 	if includeOnline {
 		command.Flags().BoolVar(&flags.online, "online", false, "Run a best-effort online backup while Pods keep using the source PVC")
 	}
-	if restore || includeOnline {
-		command.Flags().BoolVar(&flags.allowMounted, "allow-mounted", false, mountedFlagDescription(restore))
-	}
-	if includeOnline {
-		_ = command.Flags().MarkDeprecated("allow-mounted", "use --online for an online backup")
-	}
 	if restore {
+		command.Flags().BoolVar(&flags.allowMounted, "allow-mounted", false, "Allow restore while the destination PVC has Pod consumers")
 		command.Flags().BoolVar(&flags.deleteExtraneous, "delete-extraneous", false, "Delete destination files absent from the backup (destructive)")
 	}
-}
-
-func mountedFlagDescription(restore bool) string {
-	if restore {
-		return "Allow restore while the destination PVC has Pod consumers"
-	}
-	return "Compatibility alias for --online; allow source PVC Pod consumers"
 }
 
 func validateBucketFlags(flags *bucketFlags, pvcFlag string) error {

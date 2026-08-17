@@ -71,6 +71,9 @@ func (s *Service) cleanup(ctx context.Context, session *domain.Session, options 
 	if !cleanupPhaseAllowed(session) {
 		return domain.NewError(domain.ErrorPrecondition, "cleanup", fmt.Sprintf("session phase %s is still active", session.Status.Phase))
 	}
+	if err := s.restoreOpenEBSLVMSharedMounts(ctx, session); err != nil {
+		return err
+	}
 	s.logInfo("cleanup started", "session", session.ID, "phase", session.Status.Phase, "deleteTemporary", options.DeleteTemporary, "deleteRollback", options.DeleteRollback, "finalize", options.Finalize, "deleteSession", options.DeleteSession)
 	if !session.Spec.Operation().RebindsPVC() && (options.DeleteTemporary || options.DeleteRollback || options.DeleteSession) {
 		if err := s.recoverDestinationRefs(ctx, session); err != nil {

@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"strings"
 	"time"
 
 	"github.com/labring-sigs/pvc-migrate/internal/domain"
@@ -53,7 +54,7 @@ func (f *migrationFlags) bind(command *cobra.Command, includePod, includeSourceN
 	flags.BoolVar(&f.deleteExtraneous, "delete-extraneous", true, "Delete destination files absent from the source")
 	if includePrecopy {
 		flags.IntVar(&f.precopyPasses, "precopy-passes", 1, "Warm-copy passes before workload pause")
-		flags.BoolVar(&f.openEBSLVMEnableShared, "openebs-lvm-enable-shared", false, "Patch existing OpenEBS LVMVolume spec.shared=yes before warm copy when needed")
+		flags.BoolVar(&f.openEBSLVMEnableShared, "openebs-lvm-enable-shared", false, "Temporarily set existing OpenEBS LVMVolume spec.shared=yes for warm copy, then restore it")
 	}
 	if includePod {
 		podDescription := "Pod whose PVCs define the operation set"
@@ -296,7 +297,7 @@ func (r *rootState) newCopyCommand() *cobra.Command {
 					if err := runtime.service.ValidateReservation(ctx, session); err != nil {
 						return reportSessionError(cmd, session, err)
 					}
-					return printSessionResult(cmd, runtime, session)
+					return printCopyDryRunResult(cmd, runtime, session, flags)
 				}
 				return printPlanResult(cmd, runtime, plan)
 			}
@@ -338,6 +339,25 @@ func prepareCopySession(session *domain.Session, flags *migrationFlags) error {
 		options.SourceNode = flags.sourceNode
 	}
 	return nil
+}
+
+func printCopyDryRunResult(cmd *cobra.Command, runtime *commandRuntime, session *domain.Session, flags *migrationFlags) error {
+	if err := runtime.printer.Print(session); err != nil {
+		return err
+	}
+	args := []string{
+		sessionCommandPrefixForCommand(cmd, session.Spec.SessionNamespace),
+		"copy", "--session", shellQuote(session.ID),
+	}
+	if flags.online {
+		args = append(args, "--online")
+	}
+	if flags.sourceNode != "" {
+		args = append(args, "--source-node", shellQuote(flags.sourceNode))
+	}
+	args = append(args, "--dry-run=false")
+	_, err := fmt.Fprintf(cmd.ErrOrStderr(), "\nCopy validation passed without persistent changes. The displayed Copy spec is a preview. Execute:\n  %s\n", strings.Join(args, " "))
+	return err
 }
 
 func (r *rootState) newFinalSyncCommand() *cobra.Command {
@@ -519,7 +539,7 @@ func (r *rootState) newMigrateCommand(podMode bool) *cobra.Command {
 			if err != nil {
 				return reportSessionCreationError(cmd, plan.SessionNamespace, plan.SessionID, err)
 			}
-			if err := runtime.service.Migrate(ctx, session, flags.precopyPasses); err != nil {
+			if err := runtime.service.Migrate(ctx, session); err != nil {
 				return reportSessionError(cmd, session, err)
 			}
 			return printSessionResult(cmd, runtime, session)
@@ -593,23 +613,18 @@ func requireReady(plan *domain.MigrationPlan) error {
 	return domain.NewError(domain.ErrorPrecondition, "plan", "migration plan contains failed checks")
 }
 
-func requireReadyWithOutput(runtime *commandRuntime, plan *domain.MigrationPlan, guidance ...io.Writer) error {
+func requireReadyWithOutput(runtime *commandRuntime, plan *domain.MigrationPlan, guidance io.Writer) error {
 	if plan.Ready {
 		return nil
 	}
 	if err := runtime.printer.Print(plan); err != nil {
 		return err
 	}
-	for _, writer := range guidance {
-		if writer == nil {
-			continue
-		}
-		if _, err := fmt.Fprintln(writer, "\nNo session or migration resources were created. Resolve the failed plan checks, then rerun the command."); err != nil {
-			return err
-		}
-		if err := writePlanFailureGuidance(writer, plan); err != nil {
-			return err
-		}
+	if _, err := fmt.Fprintln(guidance, "\nNo session or migration resources were created. Resolve the failed plan checks, then rerun the command."); err != nil {
+		return err
+	}
+	if err := writePlanFailureGuidance(guidance, plan); err != nil {
+		return err
 	}
 	return requireReady(plan)
 }

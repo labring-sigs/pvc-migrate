@@ -354,7 +354,7 @@ func (s *Service) openEBSLVMSource(ctx context.Context, volume *domain.VolumeSpe
 	return storageClass != nil && storageClass.Provisioner == "local.csi.openebs.io", storageClass, nil
 }
 
-func (s *Service) enableOpenEBSLVMSharedMounts(ctx context.Context, session *domain.Session) error {
+func (s *Service) enableOpenEBSLVMSharedMounts(ctx context.Context, session *domain.Session) (resultErr error) {
 	if session == nil || !session.Spec.WorkflowOptions().OpenEBSLVMEnableShared {
 		return nil
 	}
@@ -362,6 +362,14 @@ func (s *Service) enableOpenEBSLVMSharedMounts(ctx context.Context, session *dom
 	if manager == nil {
 		return domain.NewError(domain.ErrorInternal, "OpenEBS LVM shared mount", "OpenEBS LVMVolume manager is required when --openebs-lvm-enable-shared is set")
 	}
+	defer func() {
+		if resultErr == nil {
+			return
+		}
+		if err := s.restoreOpenEBSLVMSharedMounts(ctx, session); err != nil {
+			resultErr = errors.Join(resultErr, err)
+		}
+	}()
 	for index := range session.Spec.Volumes {
 		volume := &session.Spec.Volumes[index]
 		isLVM, _, err := s.openEBSLVMSource(ctx, volume)
@@ -382,9 +390,49 @@ func (s *Service) enableOpenEBSLVMSharedMounts(ctx context.Context, session *dom
 		if err != nil {
 			return err
 		}
+		if !result.Changed {
+			continue
+		}
+		state := domain.OpenEBSLVMSharedMount{
+			SourcePV:          volume.SourcePV.Name,
+			PreviousShared:    result.PreviousShared,
+			PreviousSharedSet: result.PreviousSharedSet,
+		}
+		session.Status.OpenEBSLVMSharedMounts = append(session.Status.OpenEBSLVMSharedMounts, state)
+		if err := s.persist(ctx, session); err != nil {
+			restoreErr := manager.RestoreShared(ctx, state.SourcePV, state.PreviousShared, state.PreviousSharedSet)
+			if restoreErr == nil {
+				session.Status.OpenEBSLVMSharedMounts = session.Status.OpenEBSLVMSharedMounts[:len(session.Status.OpenEBSLVMSharedMounts)-1]
+			}
+			return errors.Join(err, restoreErr)
+		}
 		s.logInfo("OpenEBS LVM shared mount configured", "sourcePV", volume.SourcePV.Name, "resource", result.Reference, "previousShared", result.PreviousShared, "changed", result.Changed)
 	}
 	return nil
+}
+
+func (s *Service) restoreOpenEBSLVMSharedMounts(ctx context.Context, session *domain.Session) error {
+	if session == nil || len(session.Status.OpenEBSLVMSharedMounts) == 0 {
+		return nil
+	}
+	manager := s.config.OpenEBSLVMSharedVolumeManager
+	if manager == nil {
+		return domain.NewError(domain.ErrorInternal, "restore OpenEBS LVM shared mount", "OpenEBS LVMVolume manager is required to restore session-managed shared mounts")
+	}
+	remaining := make([]domain.OpenEBSLVMSharedMount, 0, len(session.Status.OpenEBSLVMSharedMounts))
+	for index, state := range session.Status.OpenEBSLVMSharedMounts {
+		if err := manager.RestoreShared(ctx, state.SourcePV, state.PreviousShared, state.PreviousSharedSet); err != nil {
+			remaining = append(remaining, session.Status.OpenEBSLVMSharedMounts[index:]...)
+			session.Status.OpenEBSLVMSharedMounts = remaining
+			if persistErr := s.persist(ctx, session); persistErr != nil {
+				return errors.Join(err, persistErr)
+			}
+			return err
+		}
+		s.logInfo("OpenEBS LVM shared mount restored", "session", session.ID, "sourcePV", state.SourcePV, "previousShared", state.PreviousShared, "previousSharedSet", state.PreviousSharedSet)
+	}
+	session.Status.OpenEBSLVMSharedMounts = nil
+	return s.persist(ctx, session)
 }
 
 func (s *Service) sourcePVCIsActive(ctx context.Context, volume *domain.VolumeSpec) (bool, error) {
@@ -1152,13 +1200,16 @@ func (s *Service) WarmCopy(ctx context.Context, session *domain.Session) error {
 	return s.withSessionLock(ctx, session, func(lockedCtx context.Context) error { return s.warmCopy(lockedCtx, session) })
 }
 
-func (s *Service) warmCopy(ctx context.Context, session *domain.Session) error {
+func (s *Service) warmCopy(ctx context.Context, session *domain.Session) (resultErr error) {
 	valid := session.Status.Phase == domain.PhaseReserved ||
 		session.Status.Phase == domain.PhaseWarmCopied ||
 		session.Status.Phase == domain.PhaseWarmCopying ||
 		(session.Status.Phase == domain.PhaseFailed && session.Status.ResumeFrom == domain.PhaseWarmCopying)
 	if !valid {
 		return domain.NewError(domain.ErrorPrecondition, "warm copy", fmt.Sprintf("session phase %s cannot warm-copy", session.Status.Phase))
+	}
+	if err := s.restoreOpenEBSLVMSharedMounts(ctx, session); err != nil {
+		return s.failContext(ctx, session, err)
 	}
 	s.logInfo("warm copy preflight started", "session", session.ID, "volumes", len(session.Spec.Volumes))
 	// Infer and checkpoint an online copy's source node while the session Lease
@@ -1170,6 +1221,15 @@ func (s *Service) warmCopy(ctx context.Context, session *domain.Session) error {
 	if err := s.enableOpenEBSLVMSharedMounts(ctx, session); err != nil {
 		return err
 	}
+	restoreSharedMounts := true
+	defer func() {
+		if !restoreSharedMounts {
+			return
+		}
+		if err := s.restoreOpenEBSLVMSharedMounts(ctx, session); err != nil {
+			resultErr = errors.Join(resultErr, s.failContext(ctx, session, err))
+		}
+	}()
 	targets, err := s.resolveCopyToolProbeTargets(ctx, session, true)
 	if err != nil {
 		return err
@@ -1206,6 +1266,10 @@ func (s *Service) warmCopy(ctx context.Context, session *domain.Session) error {
 			return err
 		}
 	}
+	if err := s.restoreOpenEBSLVMSharedMounts(ctx, session); err != nil {
+		return s.failContext(ctx, session, err)
+	}
+	restoreSharedMounts = false
 	if session.Spec.Operation() == domain.OperationMigrate || session.Spec.Operation() == domain.OperationMigratePod {
 		session.CompleteWarmPass()
 	}
@@ -1440,9 +1504,9 @@ func (s *Service) resumeWorkload(ctx context.Context, session *domain.Session) e
 	return s.finish(ctx, session, domain.PhaseCompleted, "migration completed and workload is ready")
 }
 
-func (s *Service) Migrate(ctx context.Context, session *domain.Session, warmPasses int) error {
+func (s *Service) Migrate(ctx context.Context, session *domain.Session) error {
 	return s.withSessionLock(ctx, session, func(lockedCtx context.Context) error {
-		return s.migrate(lockedCtx, session, warmPasses)
+		return s.migrate(lockedCtx, session)
 	})
 }
 
@@ -1456,18 +1520,13 @@ func (s *Service) migrateAfterWarmCopy(ctx context.Context, session *domain.Sess
 	return s.ResumeWorkload(ctx, session)
 }
 
-func (s *Service) migrate(ctx context.Context, session *domain.Session, warmPasses int) error {
+func (s *Service) migrate(ctx context.Context, session *domain.Session) error {
+	warmPasses := session.Spec.PrecopyPasses()
 	if warmPasses < 0 {
 		return domain.NewError(domain.ErrorValidation, "migrate", "warm passes must be non-negative")
 	}
 	if session.Spec.WorkflowOptionsPtr() == nil {
 		return domain.NewError(domain.ErrorValidation, "migrate", "session workflow options are missing")
-	}
-	if session.Spec.PrecopyPasses() != warmPasses {
-		session.Spec.SetPrecopyPasses(warmPasses)
-		if err := s.store.Update(ctx, session); err != nil {
-			return err
-		}
 	}
 	if err := s.Reserve(ctx, session); err != nil {
 		return err
@@ -1479,7 +1538,7 @@ func (s *Service) migrate(ctx context.Context, session *domain.Session, warmPass
 }
 
 func (s *Service) runRemainingWarmCopies(ctx context.Context, session *domain.Session, warmPasses int) error {
-	for session.WarmPassesCompleted() < warmPasses {
+	for session.Status.WarmPassesCompleted < warmPasses {
 		if err := s.WarmCopy(ctx, session); err != nil {
 			return err
 		}
@@ -1559,9 +1618,9 @@ func (s *Service) resumeSession(ctx context.Context, session *domain.Session) er
 		if err := s.Reserve(ctx, session); err != nil {
 			return err
 		}
-		return s.Migrate(ctx, session, session.Spec.PrecopyPasses())
+		return s.Migrate(ctx, session)
 	case domain.PhaseReserved:
-		return s.Migrate(ctx, session, session.Spec.PrecopyPasses())
+		return s.Migrate(ctx, session)
 	case domain.PhaseWarmCopying:
 		if err := s.WarmCopy(ctx, session); err != nil {
 			return err
@@ -1609,13 +1668,16 @@ func (s *Service) Abort(ctx context.Context, session *domain.Session) error {
 
 func (s *Service) abort(ctx context.Context, session *domain.Session) error {
 	if session.Status.Phase == domain.PhaseAborted {
-		return nil
+		return s.restoreOpenEBSLVMSharedMounts(ctx, session)
 	}
 	if session.Status.Phase == domain.PhaseRollingBack || (session.Status.Phase == domain.PhaseFailed && session.Status.ResumeFrom == domain.PhaseRollingBack) {
 		return domain.NewError(domain.ErrorPrecondition, "abort session", "rollback recovery must continue through session resume or rollback")
 	}
 	if session.Status.Phase == domain.PhaseActivated || session.Status.Phase == domain.PhaseCompleted || session.Status.ResumeFrom == domain.PhaseActivating || session.Status.ResumeFrom == domain.PhaseResuming {
 		return domain.NewError(domain.ErrorPrecondition, "abort session", "activated sessions require rollback")
+	}
+	if err := s.restoreOpenEBSLVMSharedMounts(ctx, session); err != nil {
+		return s.failContext(ctx, session, err)
 	}
 	previous := session.Status.Phase
 	if session.Status.Phase == domain.PhaseFailed || session.Status.Phase == domain.PhaseAborting {
@@ -1645,7 +1707,7 @@ func (s *Service) Rollback(ctx context.Context, session *domain.Session) error {
 
 func (s *Service) rollback(ctx context.Context, session *domain.Session) error {
 	if session.Status.Phase == domain.PhaseRolledBack {
-		return nil
+		return s.restoreOpenEBSLVMSharedMounts(ctx, session)
 	}
 	rollbackOrigin := session.Status.ResumeFrom
 	if rollbackOrigin == domain.PhaseRollingBack {
@@ -1656,6 +1718,9 @@ func (s *Service) rollback(ctx context.Context, session *domain.Session) error {
 	valid := wasRunning || session.Status.Phase == domain.PhaseActivated || session.Status.Phase == domain.PhaseActivating || session.Status.Phase == domain.PhaseFinalSynced || session.Status.Phase == domain.PhaseRollingBack || failedDuringCutover
 	if !valid {
 		return domain.NewError(domain.ErrorPrecondition, "rollback", fmt.Sprintf("session phase %s cannot roll back", session.Status.Phase))
+	}
+	if err := s.restoreOpenEBSLVMSharedMounts(ctx, session); err != nil {
+		return s.failContext(ctx, session, err)
 	}
 	if err := s.begin(ctx, session, domain.PhaseRollingBack, "rolling back to source volumes"); err != nil {
 		return err

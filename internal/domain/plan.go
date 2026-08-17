@@ -59,7 +59,7 @@ type ResourceEstimate struct {
 	ServiceAccounts    int               `json:"serviceAccounts" yaml:"serviceAccounts"`
 	Leases             int               `json:"leases,omitempty" yaml:"leases,omitempty"`
 	ByStorageClass     map[string]string `json:"byStorageClass" yaml:"byStorageClass"`
-	PVCsByStorageClass map[string]int    `json:"persistentVolumeClaimsByStorageClass,omitempty" yaml:"persistentVolumeClaimsByStorageClass,omitempty"`
+	PVCsByStorageClass map[string]int    `json:"persistentVolumeClaimsByStorageClass" yaml:"persistentVolumeClaimsByStorageClass"`
 }
 
 type PlannedVolume struct {

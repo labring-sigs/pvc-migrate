@@ -27,10 +27,12 @@ type recordingToolImageProber struct {
 }
 
 type recordingOpenEBSLVMSharedVolumeManager struct {
-	shared    bool
-	sharedPVs []string
-	ensureErr error
-	ensurePVs []string
+	shared     bool
+	sharedPVs  []string
+	ensureErr  error
+	ensurePVs  []string
+	restoreErr error
+	restorePVs []string
 }
 
 func (m *recordingOpenEBSLVMSharedVolumeManager) Shared(_ context.Context, sourcePV string) (bool, error) {
@@ -44,7 +46,16 @@ func (m *recordingOpenEBSLVMSharedVolumeManager) EnsureShared(_ context.Context,
 		return kube.OpenEBSLVMSharedResult{}, m.ensureErr
 	}
 	m.shared = true
-	return kube.OpenEBSLVMSharedResult{Reference: "LVMVolume openebs/" + sourcePV, PreviousShared: "no", Changed: true}, nil
+	return kube.OpenEBSLVMSharedResult{Reference: "LVMVolume openebs/" + sourcePV, PreviousShared: "no", PreviousSharedSet: true, Changed: true}, nil
+}
+
+func (m *recordingOpenEBSLVMSharedVolumeManager) RestoreShared(_ context.Context, sourcePV, _ string, _ bool) error {
+	m.restorePVs = append(m.restorePVs, sourcePV)
+	if m.restoreErr != nil {
+		return m.restoreErr
+	}
+	m.shared = false
+	return nil
 }
 
 func (p *recordingToolImageProber) Probe(ctx context.Context, options kube.ToolImageProbeOptions) ([]kube.ToolImageProbeResult, error) {
@@ -756,8 +767,66 @@ func TestWarmCopyEnablesOpenEBSLVMSharedBeforeProbe(t *testing.T) {
 	if !slices.Equal(manager.ensurePVs, []string{"pv-source"}) {
 		t.Fatalf("shared volumes=%v", manager.ensurePVs)
 	}
+	if !slices.Equal(manager.restorePVs, []string{"pv-source"}) || manager.shared {
+		t.Fatalf("shared mount restore=%v shared=%t", manager.restorePVs, manager.shared)
+	}
+	if len(session.Status.OpenEBSLVMSharedMounts) != 0 {
+		t.Fatalf("pending shared mounts=%#v", session.Status.OpenEBSLVMSharedMounts)
+	}
 	if len(fixture.copier.requests) != 1 || !fixture.copier.requests[0].SourceMountReadWrite {
 		t.Fatalf("copy requests=%#v", fixture.copier.requests)
+	}
+}
+
+func TestWarmCopyRestoresOpenEBSLVMSharedAfterProbeFailure(t *testing.T) {
+	fixture := newRecoveryFixture(t)
+	session := appTestSession()
+	session.Status.Phase = domain.PhaseReserved
+	session.Spec.WorkflowOptionsPtr().OpenEBSLVMEnableShared = true
+	storageClass := *session.Spec.Volumes[0].SourcePVCSpec.StorageClassName
+	if _, err := fixture.client.StorageV1().StorageClasses().Create(context.Background(), &storagev1.StorageClass{
+		ObjectMeta: metav1.ObjectMeta{Name: storageClass}, Provisioner: "local.csi.openebs.io",
+	}, metav1.CreateOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fixture.client.CoreV1().Pods("app").Create(context.Background(), probeConsumerPod("database-0", "data", "source-node"), metav1.CreateOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	probeErr := errors.New("tool image probe failed")
+	fixture.service.config.ToolImageProber = &recordingToolImageProber{err: probeErr}
+	manager := &recordingOpenEBSLVMSharedVolumeManager{}
+	fixture.service.config.OpenEBSLVMSharedVolumeManager = manager
+
+	err := fixture.service.WarmCopy(context.Background(), session)
+	if !errors.Is(err, probeErr) {
+		t.Fatalf("WarmCopy() error=%v", err)
+	}
+	if !slices.Equal(manager.restorePVs, []string{"pv-source"}) || manager.shared {
+		t.Fatalf("shared mount restore=%v shared=%t", manager.restorePVs, manager.shared)
+	}
+	if len(session.Status.OpenEBSLVMSharedMounts) != 0 {
+		t.Fatalf("pending shared mounts=%#v", session.Status.OpenEBSLVMSharedMounts)
+	}
+}
+
+func TestAbortRestoresPendingOpenEBSLVMSharedMount(t *testing.T) {
+	fixture := newRecoveryFixture(t)
+	session := appTestSession()
+	session.Status.Phase = domain.PhaseReserved
+	session.Status.OpenEBSLVMSharedMounts = []domain.OpenEBSLVMSharedMount{{
+		SourcePV: "pv-source", PreviousShared: "no", PreviousSharedSet: true,
+	}}
+	manager := &recordingOpenEBSLVMSharedVolumeManager{shared: true}
+	fixture.service.config.OpenEBSLVMSharedVolumeManager = manager
+
+	if err := fixture.service.Abort(context.Background(), session); err != nil {
+		t.Fatal(err)
+	}
+	if session.Status.Phase != domain.PhaseAborted || !slices.Equal(manager.restorePVs, []string{"pv-source"}) || manager.shared {
+		t.Fatalf("phase=%s restore=%v shared=%t", session.Status.Phase, manager.restorePVs, manager.shared)
+	}
+	if len(session.Status.OpenEBSLVMSharedMounts) != 0 {
+		t.Fatalf("pending shared mounts=%#v", session.Status.OpenEBSLVMSharedMounts)
 	}
 }
 

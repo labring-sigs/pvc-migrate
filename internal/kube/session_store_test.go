@@ -28,7 +28,7 @@ func storeTestSession() *domain.Session {
 			SourcePVCSpec:  corev1.PersistentVolumeClaimSpec{},
 			DestinationPVC: domain.ObjectReference{Name: "dest", Namespace: "system"},
 		}},
-	}, domain.WorkloadSpec{Adapter: domain.WorkloadNone}, false), time.Unix(100, 0))
+	}, domain.WorkloadSpec{Adapter: domain.WorkloadNone}, false, domain.SessionWorkflowOptions{}), time.Unix(100, 0))
 }
 
 func TestConfigMapSessionStoreRoundTripAndConflict(t *testing.T) {

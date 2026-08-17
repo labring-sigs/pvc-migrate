@@ -109,6 +109,42 @@ func TestPlanRejectsNegativePrecopyPasses(t *testing.T) {
 	}
 }
 
+func TestPlanChecksOpenEBSLVMRBACForOfflineWarmCopy(t *testing.T) {
+	for _, test := range []struct {
+		name         string
+		enableShared bool
+		deniedVerb   string
+	}{
+		{name: "inspect", deniedVerb: "list"},
+		{name: "enable shared", enableShared: true, deniedVerb: "patch"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			objects := plannerObjects("2Gi")
+			storageClass := objects[3].(*storagev1.StorageClass)
+			storageClass.Provisioner = "local.csi.openebs.io"
+			client := kubernetesfake.NewClientset(objects...)
+			client.PrependReactor("create", "selfsubjectaccessreviews", func(action clienttesting.Action) (bool, runtime.Object, error) {
+				review := action.(clienttesting.CreateAction).GetObject().(*authorizationv1.SelfSubjectAccessReview).DeepCopy()
+				attributes := review.Spec.ResourceAttributes
+				review.Status.Allowed = attributes.Group != "local.openebs.io" || attributes.Resource != "lvmvolumes" || attributes.Verb != test.deniedVerb
+				return true, review, nil
+			})
+			plan, err := New(client, nil).Plan(context.Background(), Options{
+				SessionID: "migration", Operation: domain.OperationMigrate,
+				SourceNamespace: "app", TemporaryNamespace: "system", StagingNamespace: "system", SessionNamespace: "system",
+				SourcePVCs: []string{"data"}, TargetNode: "node-b", DestinationClass: "fast", PrecopyPasses: 1,
+				OpenEBSLVMEnableShared: test.enableShared,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if plan.Ready || !hasFailedCheckContaining(plan, "rbac", test.deniedVerb) || !hasFailedCheckContaining(plan, "rbac", "lvmvolumes") {
+				t.Fatalf("RBAC checks=%#v", plan.Checks)
+			}
+		})
+	}
+}
+
 func TestPlanPreservesExplicitPVCMappingAndRejectsDuplicateDestinations(t *testing.T) {
 	objects := plannerObjects("2Gi")
 	dataPVC := objects[5].(*corev1.PersistentVolumeClaim)

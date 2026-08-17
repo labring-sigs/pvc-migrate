@@ -32,13 +32,9 @@ const (
 // writeSessionGuidance keeps operational instructions on stderr so JSON and
 // YAML stdout remain one parseable document. Every destructive command is
 // shown with its dry-run form first and explicit approval on execution.
-func writeSessionGuidance(w io.Writer, session *domain.Session, supplied ...guidancePrefixes) error {
+func writeSessionGuidance(w io.Writer, session *domain.Session, prefixes guidancePrefixes) error {
 	if session == nil {
 		return nil
-	}
-	prefixes := guidancePrefixes{pvcMigrate: sessionCommandPrefix(session.Spec.SessionNamespace), kubectl: "kubectl"}
-	if len(supplied) > 0 {
-		prefixes = supplied[0]
 	}
 	prefix := prefixes.pvcMigrate
 	status := fmt.Sprintf("%s session status %s", prefix, session.ID)
@@ -305,11 +301,7 @@ func reportTransferError(cmd interface{ ErrOrStderr() io.Writer }, operation, na
 	return err
 }
 
-func writeTransferDryRunGuidance(w io.Writer, operation, namespace, pvc string, supplied ...string) error {
-	kubectlPrefix := "kubectl"
-	if len(supplied) > 0 {
-		kubectlPrefix = supplied[0]
-	}
+func writeTransferDryRunGuidance(w io.Writer, operation, namespace, pvc, kubectlPrefix string) error {
 	_, err := fmt.Fprintf(w, "\n%s dry-run completed without cluster mutations. Inspect the PVC with %s --namespace %s get pvc %s, then run the write command with --dry-run=false.\n", operation, kubectlPrefix, namespace, pvc)
 	return err
 }
@@ -510,7 +502,7 @@ func writePlanFailureGuidance(w io.Writer, plan *domain.MigrationPlan) error {
 		case check.Name == "warm-copy-mount":
 			advice = "Warm-copy action: rerun with --precopy-passes 0 for offline final sync, or use storage that explicitly supports a second same-node Pod mount."
 			if strings.Contains(check.Message, "local.csi.openebs.io") {
-				advice = "OpenEBS LVM action: rerun with --precopy-passes 0 for offline final sync, or explicitly pass --openebs-lvm-enable-shared to patch the matching existing LVMVolume before the mount probe."
+				advice = "OpenEBS LVM action: rerun with --precopy-passes 0 for offline final sync, or explicitly pass --openebs-lvm-enable-shared to temporarily patch the matching LVMVolume before the mount probe."
 			}
 		}
 		if advice == "" {
@@ -612,11 +604,7 @@ func shellQuoteFor(value string, shell guidanceShell) string {
 	return "'" + strings.ReplaceAll(value, "'", `'"'"'`) + "'"
 }
 
-func writeSessionListGuidance(w io.Writer, namespace string, sessions []*domain.Session, supplied ...string) error {
-	prefix := sessionCommandPrefix(namespace)
-	if len(supplied) > 0 {
-		prefix = supplied[0]
-	}
+func writeSessionListGuidance(w io.Writer, namespace string, sessions []*domain.Session, prefix string) error {
 	if len(sessions) == 0 {
 		_, err := fmt.Fprintf(w, "\nNo migration sessions found in %s.\n", namespace)
 		return err

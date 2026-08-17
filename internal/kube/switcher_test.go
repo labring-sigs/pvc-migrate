@@ -171,7 +171,7 @@ func switcherFixture(t *testing.T) (*Switcher, *domain.Session, *domain.VolumeSp
 		DestinationNamespace: "app",
 		SessionNamespace:     "system",
 		Volumes:              []domain.VolumeSpec{volume},
-	}, domain.WorkloadSpec{Adapter: domain.WorkloadNone}, false), time.Now())
+	}, domain.WorkloadSpec{Adapter: domain.WorkloadNone}, false, domain.SessionWorkflowOptions{}), time.Now())
 	completed := metav1.Now()
 	session.Status.Volumes[0].Reserved = true
 	session.Status.Volumes[0].Sync.FinalCompletedAt = &completed

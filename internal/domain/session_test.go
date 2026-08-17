@@ -22,7 +22,7 @@ func testSession(t *testing.T) *Session {
 			SourcePVCSpec:  corev1.PersistentVolumeClaimSpec{},
 			DestinationPVC: ObjectReference{Name: "target", Namespace: "pvc-migrate-system"},
 		}},
-	}, WorkloadSpec{Adapter: WorkloadNone}, false), time.Unix(100, 0))
+	}, WorkloadSpec{Adapter: WorkloadNone}, false, SessionWorkflowOptions{PrecopyPasses: 1}), time.Unix(100, 0))
 }
 
 func TestSessionSpecUsesConcretePayload(t *testing.T) {
@@ -30,7 +30,7 @@ func TestSessionSpecUsesConcretePayload(t *testing.T) {
 		SourceNamespace: "app", TemporaryNamespace: "system", DestinationNamespace: "app", SessionNamespace: "system",
 		Volumes: []VolumeSpec{{SourcePVC: ObjectReference{Namespace: "app", Name: "data"}}},
 	}
-	spec := NewSessionSpec(OperationCopy, common, WorkloadSpec{Adapter: WorkloadNone}, true)
+	spec := NewSessionSpec(OperationCopy, common, WorkloadSpec{Adapter: WorkloadNone}, true, SessionWorkflowOptions{})
 	if spec.Type != SessionTypeCopy || spec.Copy == nil || !spec.Copy.Online || spec.Migrate != nil || spec.Rename != nil || spec.Move != nil {
 		t.Fatalf("copy payload = %#v", spec)
 	}
@@ -97,30 +97,14 @@ func TestSessionWorkflowOptionsCloneStrategies(t *testing.T) {
 	}
 }
 
-func TestLegacyMigrationSessionDefaultsToOnePrecopyPass(t *testing.T) {
-	legacy := SessionSpec{Type: SessionTypeMigrate, Migrate: &MigrateSessionSpec{}}
-	if got := legacy.PrecopyPasses(); got != 1 {
-		t.Fatalf("legacy precopy passes=%d want=1", got)
-	}
-	configured := NewSessionSpec(OperationMigrate, SessionCommon{}, WorkloadSpec{}, false, SessionWorkflowOptions{PrecopyPasses: 0})
-	if got := configured.PrecopyPasses(); got != 0 {
-		t.Fatalf("configured precopy passes=%d want=0", got)
-	}
-}
-
-func TestSessionTracksCompletedWarmPassesAndReadsLegacyHistory(t *testing.T) {
+func TestSessionTracksCompletedWarmPasses(t *testing.T) {
 	session := testSession(t)
-	if got := session.WarmPassesCompleted(); got != 0 {
+	if got := session.Status.WarmPassesCompleted; got != 0 {
 		t.Fatalf("initial completed warm passes=%d", got)
 	}
 	session.CompleteWarmPass()
-	if got := session.WarmPassesCompleted(); got != 1 {
+	if got := session.Status.WarmPassesCompleted; got != 1 {
 		t.Fatalf("completed warm passes=%d", got)
-	}
-	legacy := testSession(t)
-	legacy.Status.History = append(legacy.Status.History, HistoryEntry{Phase: PhaseWarmCopied})
-	if got := legacy.WarmPassesCompleted(); got != 1 {
-		t.Fatalf("legacy completed warm passes=%d", got)
 	}
 }
 
@@ -173,7 +157,7 @@ func TestSessionRejectsUnsafeTransition(t *testing.T) {
 
 func TestMoveSessionUsesDedicatedRebindPhase(t *testing.T) {
 	session := testSession(t)
-	session.Spec = NewSessionSpec(OperationMove, session.Spec.SessionCommon, WorkloadSpec{Adapter: WorkloadNone}, false)
+	session.Spec = NewSessionSpec(OperationMove, session.Spec.SessionCommon, WorkloadSpec{Adapter: WorkloadNone}, false, SessionWorkflowOptions{})
 	session.Spec.SourceNamespace = "app"
 	session.Spec.DestinationNamespace = "archive"
 	if err := session.Transition(PhaseMoving, "move", time.Now()); err != nil {

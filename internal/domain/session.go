@@ -168,7 +168,7 @@ const (
 type MigrateSessionSpec struct {
 	SessionWorkflowOptions `json:",inline" yaml:",inline"`
 	Workload               WorkloadSpec `json:"workload" yaml:"workload"`
-	PrecopyPasses          *int         `json:"precopyPasses,omitempty" yaml:"precopyPasses,omitempty"`
+	PrecopyPasses          int          `json:"precopyPasses" yaml:"precopyPasses"`
 }
 
 type ReserveSessionSpec struct {
@@ -178,7 +178,7 @@ type ReserveSessionSpec struct {
 type MigratePodSessionSpec struct {
 	SessionWorkflowOptions `json:",inline" yaml:",inline"`
 	Workload               WorkloadSpec `json:"workload" yaml:"workload"`
-	PrecopyPasses          *int         `json:"precopyPasses,omitempty" yaml:"precopyPasses,omitempty"`
+	PrecopyPasses          int          `json:"precopyPasses" yaml:"precopyPasses"`
 }
 
 type CopySessionSpec struct {
@@ -306,18 +306,28 @@ type HistoryEntry struct {
 	Message string      `json:"message,omitempty" yaml:"message,omitempty"`
 }
 
+// OpenEBSLVMSharedMount records a temporary LVMVolume.spec.shared change made
+// by this session. PreviousSharedSet distinguishes an absent field from an
+// explicitly empty value so cleanup can restore the original CR exactly.
+type OpenEBSLVMSharedMount struct {
+	SourcePV          string `json:"sourcePV" yaml:"sourcePV"`
+	PreviousShared    string `json:"previousShared,omitempty" yaml:"previousShared,omitempty"`
+	PreviousSharedSet bool   `json:"previousSharedSet,omitempty" yaml:"previousSharedSet,omitempty"`
+}
+
 type SessionStatus struct {
-	Phase               Phase          `json:"phase" yaml:"phase"`
-	ResumeFrom          Phase          `json:"resumeFrom,omitempty" yaml:"resumeFrom,omitempty"`
-	WarmPassesCompleted *int           `json:"warmPassesCompleted,omitempty" yaml:"warmPassesCompleted,omitempty"`
-	ObservedGeneration  int64          `json:"observedGeneration,omitempty" yaml:"observedGeneration,omitempty"`
-	StartedAt           metav1.Time    `json:"startedAt" yaml:"startedAt"`
-	UpdatedAt           metav1.Time    `json:"updatedAt" yaml:"updatedAt"`
-	CompletedAt         *metav1.Time   `json:"completedAt,omitempty" yaml:"completedAt,omitempty"`
-	Message             string         `json:"message,omitempty" yaml:"message,omitempty"`
-	Conditions          []Condition    `json:"conditions,omitempty" yaml:"conditions,omitempty"`
-	Volumes             []VolumeStatus `json:"volumes" yaml:"volumes"`
-	History             []HistoryEntry `json:"history,omitempty" yaml:"history,omitempty"`
+	Phase                  Phase                   `json:"phase" yaml:"phase"`
+	ResumeFrom             Phase                   `json:"resumeFrom,omitempty" yaml:"resumeFrom,omitempty"`
+	WarmPassesCompleted    int                     `json:"warmPassesCompleted" yaml:"warmPassesCompleted"`
+	ObservedGeneration     int64                   `json:"observedGeneration,omitempty" yaml:"observedGeneration,omitempty"`
+	StartedAt              metav1.Time             `json:"startedAt" yaml:"startedAt"`
+	UpdatedAt              metav1.Time             `json:"updatedAt" yaml:"updatedAt"`
+	CompletedAt            *metav1.Time            `json:"completedAt,omitempty" yaml:"completedAt,omitempty"`
+	Message                string                  `json:"message,omitempty" yaml:"message,omitempty"`
+	Conditions             []Condition             `json:"conditions,omitempty" yaml:"conditions,omitempty"`
+	Volumes                []VolumeStatus          `json:"volumes" yaml:"volumes"`
+	History                []HistoryEntry          `json:"history,omitempty" yaml:"history,omitempty"`
+	OpenEBSLVMSharedMounts []OpenEBSLVMSharedMount `json:"openebsLvmSharedMounts,omitempty" yaml:"openebsLvmSharedMounts,omitempty"`
 }
 
 type Session struct {
@@ -347,22 +357,16 @@ func SessionTypeForOperation(operation Operation) SessionType {
 	}
 }
 
-func NewSessionSpec(operation Operation, common SessionCommon, workload WorkloadSpec, online bool, optionValues ...SessionWorkflowOptions) SessionSpec {
-	var options SessionWorkflowOptions
-	if len(optionValues) > 0 {
-		options = optionValues[0]
-		options.Strategies = slices.Clone(options.Strategies)
-	}
+func NewSessionSpec(operation Operation, common SessionCommon, workload WorkloadSpec, online bool, options SessionWorkflowOptions) SessionSpec {
+	options.Strategies = slices.Clone(options.Strategies)
 	spec := SessionSpec{SessionCommon: common, Type: SessionTypeForOperation(operation)}
 	switch spec.Type {
 	case SessionTypeReserve:
 		spec.Reserve = &ReserveSessionSpec{SessionWorkflowOptions: options}
 	case SessionTypeMigrate:
-		passes := options.PrecopyPasses
-		spec.Migrate = &MigrateSessionSpec{SessionWorkflowOptions: options, Workload: workload, PrecopyPasses: &passes}
+		spec.Migrate = &MigrateSessionSpec{SessionWorkflowOptions: options, Workload: workload, PrecopyPasses: options.PrecopyPasses}
 	case SessionTypeMigratePod:
-		passes := options.PrecopyPasses
-		spec.MigratePod = &MigratePodSessionSpec{SessionWorkflowOptions: options, Workload: workload, PrecopyPasses: &passes}
+		spec.MigratePod = &MigratePodSessionSpec{SessionWorkflowOptions: options, Workload: workload, PrecopyPasses: options.PrecopyPasses}
 	case SessionTypeCopy:
 		spec.Copy = &CopySessionSpec{SessionWorkflowOptions: options, Online: online}
 	case SessionTypeRename:
@@ -386,59 +390,22 @@ func (s SessionSpec) WorkflowOptions() SessionWorkflowOptions {
 func (s SessionSpec) PrecopyPasses() int {
 	switch s.Type {
 	case SessionTypeMigrate:
-		if s.Migrate != nil && s.Migrate.PrecopyPasses != nil {
-			return *s.Migrate.PrecopyPasses
-		}
-		return 1
-	case SessionTypeMigratePod:
-		if s.MigratePod != nil && s.MigratePod.PrecopyPasses != nil {
-			return *s.MigratePod.PrecopyPasses
-		}
-		return 1
-	}
-	return 0
-}
-
-func (s *SessionSpec) SetPrecopyPasses(passes int) {
-	if s == nil {
-		return
-	}
-	switch s.Type {
-	case SessionTypeMigrate:
 		if s.Migrate != nil {
-			s.Migrate.PrecopyPasses = &passes
+			return s.Migrate.PrecopyPasses
 		}
 	case SessionTypeMigratePod:
 		if s.MigratePod != nil {
-			s.MigratePod.PrecopyPasses = &passes
+			return s.MigratePod.PrecopyPasses
 		}
 	}
-}
-
-// WarmPassesCompleted returns the durable number of whole warm-copy rounds.
-// Sessions written before this checkpoint use their transition history.
-func (s *Session) WarmPassesCompleted() int {
-	if s == nil {
-		return 0
-	}
-	if s.Status.WarmPassesCompleted != nil {
-		return *s.Status.WarmPassesCompleted
-	}
-	completed := 0
-	for _, entry := range s.Status.History {
-		if entry.Phase == PhaseWarmCopied {
-			completed++
-		}
-	}
-	return completed
+	return 0
 }
 
 func (s *Session) CompleteWarmPass() {
 	if s == nil {
 		return
 	}
-	completed := s.WarmPassesCompleted() + 1
-	s.Status.WarmPassesCompleted = &completed
+	s.Status.WarmPassesCompleted++
 }
 
 func (s *SessionSpec) WorkflowOptionsPtr() *SessionWorkflowOptions {

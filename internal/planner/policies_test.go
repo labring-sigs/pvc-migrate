@@ -75,25 +75,11 @@ func TestQuotaDemandCountsPVCsPerStorageClass(t *testing.T) {
 	}
 }
 
-func TestQuotaDemandFallsBackToTotalPVCsForLegacyEstimates(t *testing.T) {
-	demand, err := quotaDemand(domain.ResourceEstimate{
-		StorageRequests: "2Gi",
-		PVCs:            2,
-		ByStorageClass:  map[string]string{"fast": "2Gi"},
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	name := corev1.ResourceName("fast.storageclass.storage.k8s.io/persistentvolumeclaims")
-	if quantity := demand[name]; quantity.Cmp(resource.MustParse("2")) != 0 {
-		t.Fatalf("demand[%s]=%s want=2", name, quantity.String())
-	}
-}
-
 func TestQuotaDemandRejectsInvalidQuantities(t *testing.T) {
 	tests := []domain.ResourceEstimate{
 		{StorageRequests: "bad", ByStorageClass: map[string]string{}},
 		{StorageRequests: "1Gi", ByStorageClass: map[string]string{"fast": "bad"}},
+		{StorageRequests: "1Gi", ByStorageClass: map[string]string{"fast": "1Gi"}, PVCsByStorageClass: map[string]int{}},
 	}
 	for _, estimate := range tests {
 		if _, err := quotaDemand(estimate); domain.CategoryOf(err) != domain.ErrorInternal {

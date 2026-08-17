@@ -156,7 +156,7 @@ func quotaDemand(estimate domain.ResourceEstimate) (corev1.ResourceList, error) 
 		result[corev1.ResourceName(class+".storageclass.storage.k8s.io/requests.storage")] = quantity
 		classPVCs, known := estimate.PVCsByStorageClass[class]
 		if !known {
-			classPVCs = estimate.PVCs
+			return nil, domain.NewError(domain.ErrorInternal, "quota estimate", fmt.Sprintf("StorageClass %s PVC demand is missing", class))
 		}
 		result[corev1.ResourceName(class+".storageclass.storage.k8s.io/persistentvolumeclaims")] = *resource.NewQuantity(int64(classPVCs), resource.DecimalSI)
 	}

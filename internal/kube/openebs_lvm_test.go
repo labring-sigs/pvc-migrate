@@ -16,10 +16,14 @@ import (
 func TestOpenEBSLVMSharedVolumeManager(t *testing.T) {
 	newManager := func(shared string) (OpenEBSLVMSharedVolumeManager, *dynamicfake.FakeDynamicClient) {
 		t.Helper()
+		spec := map[string]any{}
+		if shared != "" {
+			spec["shared"] = shared
+		}
 		volume := &unstructured.Unstructured{Object: map[string]any{
 			"apiVersion": "local.openebs.io/v1alpha1", "kind": "LVMVolume",
 			"metadata": map[string]any{"name": "pvc-123", "namespace": "openebs"},
-			"spec":     map[string]any{"shared": shared},
+			"spec":     spec,
 		}}
 		dynamicClient := dynamicfake.NewSimpleDynamicClientWithCustomListKinds(runtime.NewScheme(), map[schema.GroupVersionResource]string{openEBSLVMVolumeGVR: "LVMVolumeList"}, volume)
 		typed := kubernetesfake.NewClientset(&corev1.PersistentVolume{
@@ -49,6 +53,39 @@ func TestOpenEBSLVMSharedVolumeManager(t *testing.T) {
 		isShared, err := manager.Shared(context.Background(), "pv-source")
 		if err != nil || !isShared {
 			t.Fatalf("shared=%t error=%v", isShared, err)
+		}
+		if err := manager.RestoreShared(context.Background(), "pv-source", result.PreviousShared, result.PreviousSharedSet); err != nil {
+			t.Fatal(err)
+		}
+		volume, err = dynamicClient.Resource(openEBSLVMVolumeGVR).Namespace("openebs").Get(context.Background(), "pvc-123", metav1.GetOptions{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		shared, _, err = unstructured.NestedString(volume.Object, "spec", "shared")
+		if err != nil || shared != "no" {
+			t.Fatalf("restored spec.shared=%q error=%v", shared, err)
+		}
+	})
+
+	t.Run("restores an absent shared field", func(t *testing.T) {
+		manager, dynamicClient := newManager("")
+		result, err := manager.EnsureShared(context.Background(), "pv-source")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if result.PreviousSharedSet {
+			t.Fatalf("result=%#v", result)
+		}
+		if err := manager.RestoreShared(context.Background(), "pv-source", result.PreviousShared, result.PreviousSharedSet); err != nil {
+			t.Fatal(err)
+		}
+		volume, err := dynamicClient.Resource(openEBSLVMVolumeGVR).Namespace("openebs").Get(context.Background(), "pvc-123", metav1.GetOptions{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, found, err := unstructured.NestedString(volume.Object, "spec", "shared")
+		if err != nil || found {
+			t.Fatalf("restored spec.shared present=%t error=%v", found, err)
 		}
 	})
 

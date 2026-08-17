@@ -853,7 +853,8 @@ func TestStagePreconditionsPreserveSessionState(t *testing.T) {
 		run  func(*Service, *domain.Session) error
 	}{
 		{name: "negative warm passes", run: func(service *Service, session *domain.Session) error {
-			return service.Migrate(context.Background(), session, -1)
+			session.Spec.Migrate.PrecopyPasses = -1
+			return service.Migrate(context.Background(), session)
 		}},
 		{name: "warm copy from planned", run: func(service *Service, session *domain.Session) error {
 			return service.WarmCopy(context.Background(), session)
@@ -1557,7 +1558,8 @@ func TestMigrateStopsAtEachFailedStageAndRecordsResumePoint(t *testing.T) {
 			fixture := newRecoveryFixture(t)
 			test.configure(fixture)
 			session := appTestSession()
-			err := fixture.service.Migrate(context.Background(), session, test.warmPasses)
+			session.Spec.Migrate.PrecopyPasses = test.warmPasses
+			err := fixture.service.Migrate(context.Background(), session)
 			if domain.CategoryOf(err) != test.category {
 				t.Fatalf("category=%s want=%s error=%v", domain.CategoryOf(err), test.category, err)
 			}
