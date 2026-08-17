@@ -431,6 +431,111 @@ func TestCleanupLockErrorGuidanceDescribesRetryableCleanup(t *testing.T) {
 	}
 }
 
+func TestCleanupPodBlockerGuidanceNamesOwnerAndPreservesConnection(t *testing.T) {
+	for _, test := range []struct {
+		kind     string
+		resource string
+	}{
+		{kind: "Job", resource: "job"},
+		{kind: "Deployment", resource: "deployment"},
+	} {
+		t.Run(test.kind, func(t *testing.T) {
+			var stderr bytes.Buffer
+			root := NewRoot(Options{Version: "test", ErrOut: &stderr})
+			for name, value := range map[string]string{"kubeconfig": "/tmp/config local", "context": "cluster-a"} {
+				if err := root.PersistentFlags().Set(name, value); err != nil {
+					t.Fatal(err)
+				}
+			}
+			command, _, err := root.Find([]string{"session", "cleanup"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			blocker := &app.CleanupPodBlockerError{
+				PVCNamespace: "system", PVCName: "data-migrated", PodNamespace: "system", PodName: "copy-tool",
+				PodPhase: "Failed", OwnerKind: test.kind, OwnerName: "copy-owner", OwnerVerified: true, SessionOwned: true, Terminal: true,
+			}
+			if err := writeCleanupPodBlockerGuidance(&stderr, command, blocker); err != nil {
+				t.Fatal(err)
+			}
+			prefix := "kubectl --kubeconfig '/tmp/config local' --context cluster-a --namespace system"
+			for _, want := range []string{
+				prefix + " get " + test.resource + " copy-owner -o wide",
+				prefix + " delete " + test.resource + " copy-owner --ignore-not-found=true --wait=true",
+				prefix + " delete pod copy-tool --ignore-not-found=true --wait=true",
+			} {
+				if !strings.Contains(stderr.String(), want) {
+					t.Fatalf("guidance=%q missing %q", stderr.String(), want)
+				}
+			}
+		})
+	}
+}
+
+func TestCleanupPodBlockerGuidanceDoesNotDeleteUnverifiedOwner(t *testing.T) {
+	var output bytes.Buffer
+	blocker := &app.CleanupPodBlockerError{
+		PVCNamespace: "system", PVCName: "data-migrated", PodNamespace: "system", PodName: "copy-tool",
+		OwnerKind: "Job", OwnerName: "copy-owner", SessionOwned: true, Terminal: true,
+	}
+	if err := writeCleanupPodBlockerGuidance(&output, &guidanceErrorCommand{}, blocker); err != nil {
+		t.Fatal(err)
+	}
+	text := output.String()
+	if !strings.Contains(text, "UID could not be verified") || strings.Contains(text, "delete job copy-owner") {
+		t.Fatalf("unsafe unverified owner guidance=%q", text)
+	}
+}
+
+func TestWarmCopyMountGuidanceIncludesAbortCleanupAndOfflineRetry(t *testing.T) {
+	for _, test := range []struct {
+		operation domain.Operation
+		want      string
+		absent    string
+	}{
+		{operation: domain.OperationMigratePod, want: "--precopy-passes 0", absent: "without --online"},
+		{operation: domain.OperationCopy, want: "without --online", absent: "--precopy-passes"},
+	} {
+		t.Run(string(test.operation), func(t *testing.T) {
+			var output bytes.Buffer
+			session := guidanceSession(domain.PhaseFailed)
+			if test.operation == domain.OperationCopy {
+				session.Spec = domain.NewSessionSpec(domain.OperationCopy, session.Spec.SessionCommon, domain.WorkloadSpec{}, true, session.Spec.WorkflowOptions())
+			}
+			if err := writeWarmCopyMountGuidance(&output, &guidanceErrorCommand{}, session); err != nil {
+				t.Fatal(err)
+			}
+			text := output.String()
+			for _, want := range []string{
+				"session abort mig-test --dry-run",
+				"session cleanup mig-test --delete-temporary --delete-rollback-pv --finalize --delete-session --dry-run",
+				test.want,
+			} {
+				if !strings.Contains(text, want) {
+					t.Fatalf("guidance=%q missing %q", text, want)
+				}
+			}
+			if strings.Contains(text, test.absent) {
+				t.Fatalf("guidance=%q contains operation-invalid advice %q", text, test.absent)
+			}
+		})
+	}
+}
+
+func TestCopyPlanFailureGuidanceDoesNotSuggestPrecopyPasses(t *testing.T) {
+	var output bytes.Buffer
+	plan := &domain.MigrationPlan{
+		SessionSpec: domain.NewSessionSpec(domain.OperationCopy, domain.SessionCommon{}, domain.WorkloadSpec{}, true),
+		Checks:      []domain.Check{{Name: "warm-copy-mount", Severity: domain.SeverityError}},
+	}
+	if err := writePlanFailureGuidance(&output, plan); err != nil {
+		t.Fatal(err)
+	}
+	if text := output.String(); !strings.Contains(text, "without --online") || strings.Contains(text, "--precopy-passes") {
+		t.Fatalf("copy plan guidance=%q", text)
+	}
+}
+
 func TestApprovalErrorGuidanceStatesProtectedActionDidNotStart(t *testing.T) {
 	command := &guidanceErrorCommand{}
 	approvalErr := domain.WrapError(domain.ErrorTimeout, "approval", "typed approval canceled", context.Canceled)

@@ -54,6 +54,140 @@ func TestCheckPVCReferencesModelsOfflineWarmCopyRWOPAndSharedUnit(t *testing.T) 
 	}
 }
 
+func TestCheckWarmCopyMountCompatibility(t *testing.T) {
+	pvc := &corev1.PersistentVolumeClaim{ObjectMeta: metav1.ObjectMeta{Namespace: "app", Name: "data"}}
+	consumer := podWithPVC("app", "database-0", "data")
+	for _, test := range []struct {
+		name       string
+		operation  domain.Operation
+		class      *storagev1.StorageClass
+		consumers  []*corev1.Pod
+		wantReady  bool
+		wantLevel  domain.CheckSeverity
+		wantText   string
+		wantChecks int
+	}{
+		{
+			name:      "OpenEBS LVM without shared blocks warm copy",
+			class:     &storagev1.StorageClass{ObjectMeta: metav1.ObjectMeta{Name: "openebs-lvmpv"}, Provisioner: "local.csi.openebs.io", Parameters: map[string]string{"volgroup": "lvmvg"}},
+			consumers: []*corev1.Pod{consumer}, wantText: "--precopy-passes 0", wantLevel: domain.SeverityError, wantChecks: 1,
+		},
+		{
+			name:      "online copy uses copy-specific fallback",
+			operation: domain.OperationCopy,
+			class:     &storagev1.StorageClass{ObjectMeta: metav1.ObjectMeta{Name: "openebs-lvmpv"}, Provisioner: "local.csi.openebs.io"},
+			consumers: []*corev1.Pod{consumer}, wantText: "without --online", wantLevel: domain.SeverityError, wantChecks: 1,
+		},
+		{
+			name:      "OpenEBS LVM shared supports runtime verification",
+			class:     &storagev1.StorageClass{ObjectMeta: metav1.ObjectMeta{Name: "openebs-lvmpv-shared"}, Provisioner: "local.csi.openebs.io", Parameters: map[string]string{"shared": "yes"}},
+			consumers: []*corev1.Pod{consumer}, wantReady: true, wantText: "declares shared=yes", wantLevel: domain.SeverityInfo, wantChecks: 1,
+		},
+		{
+			name:      "OpenEBS LVM undocumented true value is rejected",
+			class:     &storagev1.StorageClass{ObjectMeta: metav1.ObjectMeta{Name: "openebs-lvmpv"}, Provisioner: "local.csi.openebs.io", Parameters: map[string]string{"shared": "true"}},
+			consumers: []*corev1.Pod{consumer}, wantText: "shared: \"yes\"", wantLevel: domain.SeverityError, wantChecks: 1,
+		},
+		{
+			name:      "unknown CSI is probed at runtime",
+			class:     &storagev1.StorageClass{ObjectMeta: metav1.ObjectMeta{Name: "other"}, Provisioner: "storage.example.com"},
+			consumers: []*corev1.Pod{consumer}, wantReady: true, wantText: "driver-specific", wantLevel: domain.SeverityWarning, wantChecks: 1,
+		},
+		{
+			name: "OpenEBS Hostpath supports same-node Pod mounts",
+			class: &storagev1.StorageClass{
+				ObjectMeta:  metav1.ObjectMeta{Name: "openebs-hostpath", Annotations: map[string]string{"cas.openebs.io/config": "- name: StorageType\n  value: hostpath\n- name: BasePath\n  value: /var/openebs/local\n"}},
+				Provisioner: "openebs.io/local",
+			},
+			consumers: []*corev1.Pod{consumer}, wantReady: true, wantText: "Local PV Hostpath", wantLevel: domain.SeverityInfo, wantChecks: 1,
+		},
+		{
+			name:      "OpenEBS local device remains runtime-probed",
+			class:     &storagev1.StorageClass{ObjectMeta: metav1.ObjectMeta{Name: "openebs-device"}, Provisioner: "openebs.io/local", Parameters: map[string]string{"storageType": "device"}},
+			consumers: []*corev1.Pod{consumer}, wantReady: true, wantText: "StorageType=device", wantLevel: domain.SeverityWarning, wantChecks: 1,
+		},
+		{
+			name:      "offline source needs no concurrent mount check",
+			class:     &storagev1.StorageClass{ObjectMeta: metav1.ObjectMeta{Name: "openebs-lvmpv"}, Provisioner: "local.csi.openebs.io"},
+			wantReady: true,
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			plan := &domain.MigrationPlan{Ready: true}
+			operation := test.operation
+			if operation == "" {
+				operation = domain.OperationMigrate
+			}
+			New(nil, nil).checkWarmCopyMountCompatibility(plan, operation, pvc, test.class.Name, test.class, nil, test.consumers)
+			if plan.Ready != test.wantReady || len(plan.Checks) != test.wantChecks {
+				t.Fatalf("ready=%t checks=%#v", plan.Ready, plan.Checks)
+			}
+			if test.wantChecks > 0 && (plan.Checks[0].Severity != test.wantLevel || !strings.Contains(plan.Checks[0].Message, test.wantText)) {
+				t.Fatalf("check=%#v", plan.Checks[0])
+			}
+		})
+	}
+}
+
+func TestWarmCopyRequestedUsesPrecopyPasses(t *testing.T) {
+	if warmCopyRequested(Options{Operation: domain.OperationMigratePod, PrecopyPasses: 0}) {
+		t.Fatal("offline migration requested warm copy")
+	}
+	if !warmCopyRequested(Options{Operation: domain.OperationMigratePod, PrecopyPasses: 1}) {
+		t.Fatal("precopy migration did not request warm copy")
+	}
+}
+
+func TestOpenEBSLocalStorageTypeParsesParametersAndConfig(t *testing.T) {
+	for _, test := range []struct {
+		name  string
+		class *storagev1.StorageClass
+		want  string
+	}{
+		{name: "parameter", class: &storagev1.StorageClass{Provisioner: "openebs.io/local", Parameters: map[string]string{"StorageType": "hostpath"}}, want: "hostpath"},
+		{name: "annotation", class: &storagev1.StorageClass{ObjectMeta: metav1.ObjectMeta{Annotations: map[string]string{"cas.openebs.io/config": "- name: StorageType\n  value: hostpath\n"}}, Provisioner: "openebs.io/local"}, want: "hostpath"},
+		{name: "malformed annotation", class: &storagev1.StorageClass{ObjectMeta: metav1.ObjectMeta{Annotations: map[string]string{"cas.openebs.io/config": "["}}, Provisioner: "openebs.io/local"}},
+		{name: "different provisioner", class: &storagev1.StorageClass{Provisioner: "example.io", Parameters: map[string]string{"storageType": "hostpath"}}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if got := openEBSLocalStorageType(test.class); got != test.want {
+				t.Fatalf("storage type=%q want=%q", got, test.want)
+			}
+		})
+	}
+}
+
+func TestPlanReportsOpenEBSWarmCopyMountCheck(t *testing.T) {
+	objects := plannerObjects("2Gi")
+	storageClass := objects[3].(*storagev1.StorageClass)
+	storageClass.Provisioner = "local.csi.openebs.io"
+	consumer := podWithPVC("app", "database-0", "data")
+	consumer.Status.Phase = corev1.PodRunning
+	objects = append(objects, consumer)
+	options := Options{
+		SessionID: "migration", Operation: domain.OperationMigrate,
+		SourceNamespace: "app", TemporaryNamespace: "system", StagingNamespace: "system", SessionNamespace: "system",
+		SourcePVCs: []string{"data"}, TargetNode: "node-b", DestinationClass: "fast", PrecopyPasses: 1,
+	}
+
+	plan, err := New(plannerClient(objects...), nil).Plan(context.Background(), options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !hasFailedCheckContaining(plan, "warm-copy-mount", "--precopy-passes 0") {
+		t.Fatalf("warm-copy mount check missing: %#v", plan.Checks)
+	}
+
+	options.PrecopyPasses = 0
+	offlinePlan, err := New(plannerClient(objects...), nil).Plan(context.Background(), options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if hasFailedCheck(offlinePlan, "warm-copy-mount") {
+		t.Fatalf("offline plan includes warm-copy mount check: %#v", offlinePlan.Checks)
+	}
+}
+
 func TestCheckPVCReferencesReportsListErrors(t *testing.T) {
 	client := kubernetesfake.NewClientset()
 	client.PrependReactor("list", "pods", func(clienttesting.Action) (bool, runtime.Object, error) {

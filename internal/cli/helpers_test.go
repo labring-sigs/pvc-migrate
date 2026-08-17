@@ -141,6 +141,13 @@ func TestRootCommandSurfaceAndGlobalDefaults(t *testing.T) {
 	if migrateCommand.Flags().Lookup("force-reprovision") != nil {
 		t.Fatal("migrate exposes migrate-pod-only --force-reprovision")
 	}
+	for _, path := range [][]string{{"migrate"}, {"migrate", "plan"}, {"migrate-pod"}, {"migrate-pod", "plan"}} {
+		command, _, err := root.Find(path)
+		flag := command.Flags().Lookup("precopy-passes")
+		if err != nil || flag == nil || flag.DefValue != "1" {
+			t.Fatalf("%v precopy-passes flag=%v error=%v", path, flag, err)
+		}
+	}
 	for _, path := range [][]string{{"migrate-pod"}, {"migrate-pod", "plan"}} {
 		command, _, err := root.Find(path)
 		if err != nil || command.Flags().Lookup("force-reprovision") == nil {
@@ -219,7 +226,7 @@ func TestMigrationFlagDefaultsAndPlanOptions(t *testing.T) {
 	if options.SessionID != "mig-fixed" || options.SourceNamespace != "source" || options.DestinationNamespace != "source" || options.TemporaryNamespace != "staging" || options.StagingNamespace != "staging" || options.SessionNamespace != "sessions" {
 		t.Fatalf("namespaces and identity = %#v", options)
 	}
-	if options.Operation != domain.OperationMigratePod || options.PodName != "db-2" || options.SourceNode != "node-a" || options.TargetNode != "node-b" || options.DestinationClass != "fast" || options.CapacityAwareness != domain.CapacityAwarenessRequire || options.SwitchoverCandidate != "db-1" || !options.AllowLeaderDowntime || !options.ForceReprovision || !options.VerifyChecksum || !options.DeleteExtraneous {
+	if options.Operation != domain.OperationMigratePod || options.PodName != "db-2" || options.SourceNode != "node-a" || options.TargetNode != "node-b" || options.DestinationClass != "fast" || options.CapacityAwareness != domain.CapacityAwarenessRequire || options.SwitchoverCandidate != "db-1" || !options.AllowLeaderDowntime || !options.ForceReprovision || !options.VerifyChecksum || !options.DeleteExtraneous || options.PrecopyPasses != 1 {
 		t.Fatalf("options = %#v", options)
 	}
 	flags.sourcePVCs[0] = "mutated"
@@ -599,6 +606,7 @@ func TestCommandsRejectInvalidInputBeforeClusterAccess(t *testing.T) {
 		{name: "rename destination", args: []string{"rename", "--source-pvc", "data"}, category: domain.ErrorValidation, text: "--destination-pvc"},
 		{name: "orchestrated namespace", args: []string{"migrate", "--source-namespace", "app", "--destination-namespace", "other"}, category: domain.ErrorPrecondition, text: "source namespace"},
 		{name: "negative precopy passes", args: []string{"migrate", "--precopy-passes", "-1"}, category: domain.ErrorValidation, text: "cannot be negative"},
+		{name: "negative plan precopy passes", args: []string{"migrate", "plan", "--precopy-passes", "-1"}, category: domain.ErrorValidation, text: "cannot be negative"},
 		{name: "zero retries", args: []string{"migrate", "plan", "--retries", "0"}, category: domain.ErrorValidation, text: "--retries"},
 		{name: "negative retry backoff", args: []string{"migrate", "plan", "--retry-backoff", "-1s"}, category: domain.ErrorValidation, text: "--retry-backoff"},
 		{name: "zero Helm timeout", args: []string{"migrate", "plan", "--helm-timeout", "0"}, category: domain.ErrorValidation, text: "--helm-timeout"},

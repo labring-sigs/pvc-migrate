@@ -95,6 +95,20 @@ func TestPlanRejectsUnsupportedStrategiesAndDestinationCount(t *testing.T) {
 	}
 }
 
+func TestPlanRejectsNegativePrecopyPasses(t *testing.T) {
+	plan, err := New(plannerClient(plannerObjects("2Gi")...), nil).Plan(context.Background(), Options{
+		SessionID: "migration", Operation: domain.OperationMigrate,
+		SourceNamespace: "app", TemporaryNamespace: "system", StagingNamespace: "system", SessionNamespace: "system",
+		SourcePVCs: []string{"data"}, TargetNode: "node-b", DestinationClass: "fast", PrecopyPasses: -1,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if plan.Ready || !hasFailedCheck(plan, "precopy-passes") {
+		t.Fatalf("negative precopy passes were accepted: %#v", plan.Checks)
+	}
+}
+
 func TestPlanPreservesExplicitPVCMappingAndRejectsDuplicateDestinations(t *testing.T) {
 	objects := plannerObjects("2Gi")
 	dataPVC := objects[5].(*corev1.PersistentVolumeClaim)
@@ -314,6 +328,20 @@ func TestPlanPodReadsTheSourcePodOnce(t *testing.T) {
 	}
 	if podGets.Load() != 1 {
 		t.Fatalf("source Pod GETs = %d, want 1", podGets.Load())
+	}
+}
+
+func TestPlanReportsMissingSelectedPodWithFlagGuidance(t *testing.T) {
+	plan, err := New(plannerClient(plannerObjects("2Gi")...), nil).Plan(context.Background(), Options{
+		Operation: domain.OperationCopy, SessionID: "copy-pod", SourceNamespace: "app", TemporaryNamespace: "system",
+		DestinationNamespace: "system", StagingNamespace: "system", SessionNamespace: "system",
+		PodName: "missing", TargetNode: "node-b", DestinationClass: "fast", Online: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !hasFailedCheckContaining(plan, "source-pod", "source Pod app/missing does not exist; verify --namespace and --pod") {
+		t.Fatalf("source Pod guidance missing: %#v", plan.Checks)
 	}
 }
 

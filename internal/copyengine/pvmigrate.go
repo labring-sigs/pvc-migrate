@@ -55,6 +55,7 @@ func (p *PVMigrate) Copy(ctx context.Context, request Request, progress Progress
 		},
 		DeleteExtraneousFiles: request.DeleteExtraneousFiles,
 		IgnoreMounted:         request.Mode == ModeWarm,
+		SourceMountReadWrite:  request.SourceMountReadWrite,
 		NoCompress:            request.NoCompress,
 		NoCleanupOnFailure:    false,
 		ShowProgressBar:       false,

@@ -104,6 +104,33 @@ func TestToolImageProbeCorrelatesPVCWithoutMountWhenNodeIsExplicit(t *testing.T)
 	}
 }
 
+func TestToolProbePodUsesWritablePVCMountWhenRequested(t *testing.T) {
+	target := ToolProbeTarget{Namespace: "system", NodeName: "node-a", PVCName: "data", WritablePVCMount: true}
+	pod := toolProbePod("registry.example/tool:test", "operation", target, readyProbeNode("node-a"), time.Minute)
+	if len(pod.Spec.Volumes) != 1 || pod.Spec.Volumes[0].PersistentVolumeClaim == nil || pod.Spec.Volumes[0].PersistentVolumeClaim.ReadOnly {
+		t.Fatalf("probe PVC volume=%#v", pod.Spec.Volumes)
+	}
+	if len(pod.Spec.Containers[0].VolumeMounts) != 1 || pod.Spec.Containers[0].VolumeMounts[0].ReadOnly {
+		t.Fatalf("probe PVC mount=%#v", pod.Spec.Containers[0].VolumeMounts)
+	}
+	if strings.Contains(pod.Spec.Containers[0].Command[2], "/probe-volume") {
+		t.Fatalf("probe command writes or otherwise references the mounted PVC: %q", pod.Spec.Containers[0].Command[2])
+	}
+}
+
+func TestNormalizeToolProbeTargetsPreservesStrictMountRequirements(t *testing.T) {
+	targets, err := normalizeToolProbeTargets([]ToolProbeTarget{
+		{Namespace: "system", NodeName: "node-a", PVCName: "data", SkipPVCMount: true, Components: []string{ToolComponentRsync}},
+		{Namespace: "system", NodeName: "node-a", PVCName: "data", WritablePVCMount: true, Components: []string{ToolComponentSSHD}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(targets) != 1 || targets[0].SkipPVCMount || !targets[0].WritablePVCMount || !slices.Equal(targets[0].Components, []string{ToolComponentRsync, ToolComponentShell, ToolComponentSSHD}) {
+		t.Fatalf("normalized targets=%#v", targets)
+	}
+}
+
 func TestSSHDToolProbeChecksRemoteRsyncAndBothHostKeyAlgorithms(t *testing.T) {
 	command := toolProbeCommand([]string{ToolComponentSSHD})
 	for _, required := range []string{
@@ -663,6 +690,7 @@ func TestToolImageProbeFailsImmediatelyWhenPodDisappears(t *testing.T) {
 
 func TestToolImageProbeTimeoutIncludesPodEvents(t *testing.T) {
 	client := fake.NewClientset(readyProbeNode("node-a"))
+	listCalls := 0
 	client.PrependReactor("create", "pods", func(action clienttesting.Action) (bool, runtime.Object, error) {
 		pod := action.(clienttesting.CreateAction).GetObject().(*corev1.Pod)
 		pod.UID = types.UID("pending-probe")
@@ -680,6 +708,7 @@ func TestToolImageProbeTimeoutIncludesPodEvents(t *testing.T) {
 	})
 	// Match the generated Pod name while retaining the UID ownership check.
 	client.PrependReactor("list", "events", func(action clienttesting.Action) (bool, runtime.Object, error) {
+		listCalls++
 		selector := action.(clienttesting.ListAction).GetListRestrictions().Fields.String()
 		name := strings.TrimPrefix(selector, "involvedObject.name=")
 		return true, &corev1.EventList{Items: []corev1.Event{{
@@ -693,6 +722,91 @@ func TestToolImageProbeTimeoutIncludesPodEvents(t *testing.T) {
 		Timeout: 20 * time.Millisecond, Poll: time.Millisecond,
 	})
 	if domain.CategoryOf(err) != domain.ErrorTimeout || !strings.Contains(err.Error(), "FailedMount: unable to attach or mount volumes") {
+		t.Fatalf("category=%s error=%v", domain.CategoryOf(err), err)
+	}
+	if listCalls < 1 || listCalls > 2 {
+		t.Fatalf("event list calls=%d, want at most one poll check plus timeout diagnostics", listCalls)
+	}
+}
+
+func TestToolImageProbeFailsEarlyOnConcurrentMountEvent(t *testing.T) {
+	client := fake.NewClientset(readyProbeNode("node-a"))
+	client.PrependReactor("create", "pods", func(action clienttesting.Action) (bool, runtime.Object, error) {
+		pod := action.(clienttesting.CreateAction).GetObject().(*corev1.Pod)
+		pod.UID = types.UID("concurrent-mount-probe")
+		return false, nil, nil
+	})
+	client.PrependReactor("get", "pods", func(action clienttesting.Action) (bool, runtime.Object, error) {
+		get := action.(clienttesting.GetAction)
+		object, err := client.Tracker().Get(corev1.SchemeGroupVersion.WithResource("pods"), get.GetNamespace(), get.GetName())
+		if err != nil {
+			return false, nil, nil
+		}
+		pod := object.(*corev1.Pod).DeepCopy()
+		pod.Status.Phase = corev1.PodPending
+		return true, pod, nil
+	})
+	listCalls := 0
+	client.PrependReactor("list", "events", func(action clienttesting.Action) (bool, runtime.Object, error) {
+		listCalls++
+		selector := action.(clienttesting.ListAction).GetListRestrictions().Fields.String()
+		name := strings.TrimPrefix(selector, "involvedObject.name=")
+		return true, &corev1.EventList{Items: []corev1.Event{{
+			InvolvedObject: corev1.ObjectReference{Name: name, UID: types.UID("concurrent-mount-probe")},
+			Reason:         "FailedMount",
+			Message:        "mount failed: device already mounted on another Pod path",
+		}}}, nil
+	})
+
+	started := time.Now()
+	_, err := NewToolImageProber(client).Probe(context.Background(), ToolImageProbeOptions{
+		Image: "registry.example/tool:test", Targets: []ToolProbeTarget{{Namespace: "system", NodeName: "node-a", PVCName: "data"}},
+		Timeout: 2 * time.Second, Poll: time.Millisecond,
+	})
+	if domain.CategoryOf(err) != domain.ErrorPrecondition || !strings.Contains(err.Error(), "FailedMount") || !strings.Contains(err.Error(), "already mounted") {
+		t.Fatalf("category=%s error=%v", domain.CategoryOf(err), err)
+	}
+	if elapsed := time.Since(started); elapsed > 500*time.Millisecond {
+		t.Fatalf("concurrent mount detection took %s", elapsed)
+	}
+	if listCalls != 1 {
+		t.Fatalf("event list calls=%d, want 1", listCalls)
+	}
+}
+
+func TestToolImageProbeIgnoresMountEventsWhenPVCMountIsSkipped(t *testing.T) {
+	client := fake.NewClientset(readyProbeNode("node-a"))
+	client.PrependReactor("create", "pods", func(action clienttesting.Action) (bool, runtime.Object, error) {
+		pod := action.(clienttesting.CreateAction).GetObject().(*corev1.Pod)
+		pod.UID = types.UID("skipped-mount-probe")
+		return false, nil, nil
+	})
+	client.PrependReactor("get", "pods", func(action clienttesting.Action) (bool, runtime.Object, error) {
+		get := action.(clienttesting.GetAction)
+		object, err := client.Tracker().Get(corev1.SchemeGroupVersion.WithResource("pods"), get.GetNamespace(), get.GetName())
+		if err != nil {
+			return false, nil, nil
+		}
+		pod := object.(*corev1.Pod).DeepCopy()
+		pod.Status.Phase = corev1.PodPending
+		return true, pod, nil
+	})
+	client.PrependReactor("list", "events", func(action clienttesting.Action) (bool, runtime.Object, error) {
+		selector := action.(clienttesting.ListAction).GetListRestrictions().Fields.String()
+		name := strings.TrimPrefix(selector, "involvedObject.name=")
+		return true, &corev1.EventList{Items: []corev1.Event{{
+			InvolvedObject: corev1.ObjectReference{Name: name, UID: types.UID("skipped-mount-probe")},
+			Reason:         "FailedMount",
+			Message:        "device already mounted on another Pod path",
+		}}}, nil
+	})
+
+	_, err := NewToolImageProber(client).Probe(context.Background(), ToolImageProbeOptions{
+		Image:   "registry.example/tool:test",
+		Targets: []ToolProbeTarget{{Namespace: "system", NodeName: "node-a", PVCName: "data", SkipPVCMount: true}},
+		Timeout: 20 * time.Millisecond, Poll: time.Millisecond,
+	})
+	if domain.CategoryOf(err) != domain.ErrorTimeout {
 		t.Fatalf("category=%s error=%v", domain.CategoryOf(err), err)
 	}
 }

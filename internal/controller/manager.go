@@ -550,12 +550,28 @@ func (m *Manager) kubeBlocksWorkload(ctx context.Context, pod *corev1.Pod, owner
 	switchoverContainer := ""
 	var switchoverCandidate *corev1.Pod
 	if options.SwitchoverCandidate != "" {
+		if options.SwitchoverCandidate == pod.Name {
+			return domain.WorkloadSpec{}, domain.NewError(
+				domain.ErrorPrecondition,
+				"discover KubeBlocks",
+				fmt.Sprintf("--kubeblocks-candidate %s refers to the selected source Pod; choose a different Ready non-leader Pod in cluster %s component %s%s", pod.Name, cluster, component, m.kubeBlocksCandidateSuggestion(ctx, pod, cluster, component)),
+			)
+		}
 		candidate, err := m.typed.CoreV1().Pods(pod.Namespace).Get(ctx, options.SwitchoverCandidate, metav1.GetOptions{})
 		if err != nil {
-			return domain.WorkloadSpec{}, domain.WrapError(domain.ErrorPrecondition, "discover KubeBlocks", "read switchover candidate", err)
+			message := fmt.Sprintf("read switchover candidate Pod %s/%s: %v", pod.Namespace, options.SwitchoverCandidate, err)
+			if apierrors.IsNotFound(err) {
+				message = fmt.Sprintf("switchover candidate Pod %s/%s does not exist; verify --kubeblocks-candidate%s", pod.Namespace, options.SwitchoverCandidate, m.kubeBlocksCandidateSuggestion(ctx, pod, cluster, component))
+			}
+			return domain.WorkloadSpec{}, domain.WrapError(domain.ErrorPrecondition, "discover KubeBlocks", message, err)
 		}
-		if candidate.Labels[kube.AppInstanceLabel] != cluster || kubeBlocksComponent(candidate) != component || !podReady(candidate) {
-			return domain.WorkloadSpec{}, domain.NewError(domain.ErrorPrecondition, "discover KubeBlocks", "switchover candidate must be a Ready Pod in the same component")
+		candidateCluster := candidate.Labels[kube.AppInstanceLabel]
+		candidateComponent := kubeBlocksComponent(candidate)
+		if candidateCluster != cluster || candidateComponent != component {
+			return domain.WorkloadSpec{}, domain.NewError(domain.ErrorPrecondition, "discover KubeBlocks", fmt.Sprintf("switchover candidate Pod %s/%s belongs to cluster %s component %s; expected cluster %s component %s%s", pod.Namespace, candidate.Name, candidateCluster, candidateComponent, cluster, component, m.kubeBlocksCandidateSuggestion(ctx, pod, cluster, component)))
+		}
+		if !podReady(candidate) {
+			return domain.WorkloadSpec{}, domain.NewError(domain.ErrorPrecondition, "discover KubeBlocks", fmt.Sprintf("switchover candidate Pod %s/%s must be Running and Ready%s", pod.Namespace, candidate.Name, m.kubeBlocksCandidateSuggestion(ctx, pod, cluster, component)))
 		}
 		switchoverCandidate = candidate
 	}
@@ -832,6 +848,14 @@ func (m *Manager) readyKubeBlocksCandidate(ctx context.Context, selected *corev1
 		return ""
 	}
 	return candidates[0]
+}
+
+func (m *Manager) kubeBlocksCandidateSuggestion(ctx context.Context, selected *corev1.Pod, cluster, component string) string {
+	candidate := m.readyKubeBlocksCandidate(ctx, selected, cluster, component)
+	if candidate == "" {
+		return ""
+	}
+	return fmt.Sprintf("; available Ready non-leader candidate: --kubeblocks-candidate %s", candidate)
 }
 
 func kubeBlocksSwitchoverCommand(namespace, cluster, component, selected, candidate, opsAPIVersion string) string {

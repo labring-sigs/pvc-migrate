@@ -28,6 +28,7 @@ type Request struct {
 	Strategies            []string
 	DeleteExtraneousFiles bool
 	VerifyChecksum        bool
+	SourceMountReadWrite  bool
 	NoCompress            bool
 	HelmTimeout           time.Duration
 	HelmStringValues      []string

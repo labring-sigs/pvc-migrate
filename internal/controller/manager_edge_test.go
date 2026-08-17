@@ -138,7 +138,9 @@ func TestDiscoverKubeBlocksValidatesIdentityAPIAndCandidate(t *testing.T) {
 		{name: "missing identity", labels: map[string]string{}, serveAPI: true, want: "lacks cluster or component"},
 		{name: "missing OpsRequest API", labels: map[string]string{"app.kubernetes.io/instance": "cluster", "apps.kubeblocks.io/component-name": "db"}, want: "no served OpsRequest API"},
 		{name: "leader needs candidate", labels: map[string]string{"app.kubernetes.io/instance": "cluster", "apps.kubeblocks.io/component-name": "db", "kubeblocks.io/role": "primary"}, serveAPI: true, want: "use --kubeblocks-candidate"},
-		{name: "candidate from another component", labels: map[string]string{"app.kubernetes.io/instance": "cluster", "apps.kubeblocks.io/component-name": "db", "kubeblocks.io/role": "primary"}, serveAPI: true, candidate: kubeBlocksCandidate("other"), candidateName: "cluster-other-1", want: "same component"},
+		{name: "candidate does not exist", labels: map[string]string{"app.kubernetes.io/instance": "cluster", "apps.kubeblocks.io/component-name": "db", "kubeblocks.io/role": "primary"}, serveAPI: true, candidateName: "cluster-db-missing", want: "candidate Pod db/cluster-db-missing does not exist"},
+		{name: "candidate is selected Pod", labels: map[string]string{"app.kubernetes.io/instance": "cluster", "apps.kubeblocks.io/component-name": "db", "kubeblocks.io/role": "primary"}, serveAPI: true, candidateName: "cluster-db-0", want: "refers to the selected source Pod"},
+		{name: "candidate from another component", labels: map[string]string{"app.kubernetes.io/instance": "cluster", "apps.kubeblocks.io/component-name": "db", "kubeblocks.io/role": "primary"}, serveAPI: true, candidate: kubeBlocksCandidate("other"), candidateName: "cluster-other-1", want: "expected cluster cluster component db"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -160,6 +162,23 @@ func TestDiscoverKubeBlocksValidatesIdentityAPIAndCandidate(t *testing.T) {
 				t.Fatalf("category=%s error=%v", domain.CategoryOf(err), err)
 			}
 		})
+	}
+}
+
+func TestDiscoverKubeBlocksMissingCandidateSuggestsReadySibling(t *testing.T) {
+	selected := readyPod("db", "cluster-db-0", "node-a")
+	selected.OwnerReferences = []metav1.OwnerReference{{APIVersion: "workloads.kubeblocks.io/v1alpha1", Kind: "InstanceSet", Name: "cluster-db", Controller: boolPointer(true)}}
+	selected.Labels = map[string]string{kube.AppInstanceLabel: "cluster", kubeBlocksComponentLabel: "db", kubeBlocksRoleLabel: "primary"}
+	candidate := readyPod("db", "cluster-db-1", "node-b")
+	candidate.Labels = map[string]string{kube.AppInstanceLabel: "cluster", kubeBlocksComponentLabel: "db", kubeBlocksRoleLabel: "secondary"}
+	client := kubernetesfake.NewClientset(selected, candidate)
+	discovery := client.Discovery().(*fake.FakeDiscovery)
+	discovery.Resources = []*metav1.APIResourceList{{GroupVersion: kubeBlocksClusterAPIVersion, APIResources: []metav1.APIResource{{Name: "opsrequests"}}}}
+	manager := NewManager(client, dynamicfake.NewSimpleDynamicClient(runtime.NewScheme()), discovery)
+
+	_, err := manager.Discover(context.Background(), DiscoverOptions{Namespace: "db", PodName: selected.Name, SwitchoverCandidate: "cluster-db-missing"})
+	if domain.CategoryOf(err) != domain.ErrorPrecondition || !apierrors.IsNotFound(err) || !strings.Contains(err.Error(), "does not exist") || !strings.Contains(err.Error(), "--kubeblocks-candidate "+candidate.Name) {
+		t.Fatalf("category=%s error=%v", domain.CategoryOf(err), err)
 	}
 }
 

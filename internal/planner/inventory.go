@@ -117,10 +117,14 @@ func (p *Planner) loadPlanInventory(ctx context.Context, options Options, pvcNam
 		if result.err != nil || result.pvc == nil || result.pvc.Status.Phase != corev1.ClaimBound || result.pvc.Spec.VolumeName == "" {
 			continue
 		}
-		className := ""
+		sourceClassName := ""
 		if result.pvc.Spec.StorageClassName != nil {
-			className = *result.pvc.Spec.StorageClassName
+			sourceClassName = *result.pvc.Spec.StorageClassName
 		}
+		if sourceClassName != "" {
+			classNames[sourceClassName] = struct{}{}
+		}
+		className := sourceClassName
 		if options.DestinationClass != "" {
 			className = options.DestinationClass
 		}

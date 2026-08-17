@@ -12,6 +12,7 @@ import (
 	"github.com/labring-sigs/pvc-migrate/internal/domain"
 	"github.com/labring-sigs/pvc-migrate/internal/kube"
 	corev1 "k8s.io/api/core/v1"
+	storagev1 "k8s.io/api/storage/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
@@ -113,7 +114,7 @@ func TestSessionToolProbeTargetsFollowSelectedStrategies(t *testing.T) {
 			if test.operation == domain.OperationReserve {
 				targets = reservationToolProbeTargets(session)
 			} else {
-				targets = copyToolProbeTargets(session)
+				targets = copyToolProbeTargets(session, false)
 			}
 			got := canonicalToolProbeTargets(targets)
 			if len(got) != len(test.want) {
@@ -137,7 +138,7 @@ func TestSessionToolProbeTargetsUseActualVolumeNamespaces(t *testing.T) {
 	session.Spec.Volumes[1].DestinationPVC.Namespace = "destination-b"
 	session.Spec.WorkflowOptionsPtr().Strategies = []string{domain.StrategyClusterIP}
 
-	got := canonicalToolProbeTargets(copyToolProbeTargets(session))
+	got := canonicalToolProbeTargets(copyToolProbeTargets(session, false))
 	for _, key := range []string{"source-a/source-node", "source-b/source-node"} {
 		if !slices.Equal(got[key], []string{kube.ToolComponentSSHD}) {
 			t.Fatalf("target %s components=%v", key, got[key])
@@ -161,7 +162,7 @@ func TestResolveSessionToolProbeTargetsUsesActiveConsumerNode(t *testing.T) {
 	})
 	service := &Service{client: client}
 
-	targets, err := service.resolveCopyToolProbeTargets(context.Background(), session)
+	targets, err := service.resolveCopyToolProbeTargets(context.Background(), session, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -180,7 +181,7 @@ func TestResolveSessionToolProbeTargetsChecksLocalDestinationSSHDWithoutSourceNo
 	client := fake.NewClientset(probeConsumerPod("consumer", "data", "node-a"))
 	service := &Service{client: client}
 
-	targets, err := service.resolveCopyToolProbeTargets(context.Background(), session)
+	targets, err := service.resolveCopyToolProbeTargets(context.Background(), session, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -215,7 +216,7 @@ func TestResolveSessionToolProbeTargetsUsesUniquePVTopology(t *testing.T) {
 	)
 	service := &Service{client: client}
 
-	targets, err := service.resolveCopyToolProbeTargets(context.Background(), session)
+	targets, err := service.resolveCopyToolProbeTargets(context.Background(), session, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -234,7 +235,7 @@ func TestResolveSessionToolProbeTargetsUsesPVCConstrainedScheduling(t *testing.T
 	)
 	service := &Service{client: client}
 
-	targets, err := service.resolveCopyToolProbeTargets(context.Background(), session)
+	targets, err := service.resolveCopyToolProbeTargets(context.Background(), session, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -256,7 +257,7 @@ func TestResolveSessionToolProbeTargetsCorrelatesExplicitSourceNodeWithoutMount(
 		Name: "node-a", Labels: map[string]string{corev1.LabelHostname: "node-a"},
 	}})
 	service := &Service{client: client}
-	targets, err := service.resolveCopyToolProbeTargets(context.Background(), session)
+	targets, err := service.resolveCopyToolProbeTargets(context.Background(), session, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -278,6 +279,111 @@ func TestResolveSessionToolProbeTargetsCorrelatesExplicitSourceNodeWithoutMount(
 	}
 	if got := probedSourceNode(session, &session.Spec.Volumes[0], results); got != "node-a" {
 		t.Fatalf("probed source node=%q", got)
+	}
+}
+
+func TestResolveSessionToolProbeTargetsMountsSourcePVCForWarmCopy(t *testing.T) {
+	session := copyToolProbeSession(true)
+	session.Spec.WorkflowOptionsPtr().SourceNode = "node-a"
+	service := &Service{client: fake.NewClientset()}
+
+	targets, err := service.resolveCopyToolProbeTargets(context.Background(), session, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, target := range targets {
+		if target.Namespace != session.Spec.Volumes[0].SourcePVC.Namespace {
+			continue
+		}
+		if target.PVCName != session.Spec.Volumes[0].SourcePVC.Name || target.SkipPVCMount {
+			t.Fatalf("warm-copy source target=%#v", target)
+		}
+		return
+	}
+	t.Fatal("warm-copy source target was not created")
+}
+
+func TestResolveSessionToolProbeTargetsUsesWritableMountForSharedOpenEBSLVM(t *testing.T) {
+	session := copyToolProbeSession(true)
+	session.Spec.WorkflowOptionsPtr().SourceNode = "node-a"
+	storageClass := *session.Spec.Volumes[0].SourcePVCSpec.StorageClassName
+	client := fake.NewClientset(
+		&storagev1.StorageClass{ObjectMeta: metav1.ObjectMeta{Name: storageClass}, Provisioner: "local.csi.openebs.io", Parameters: map[string]string{"shared": "yes"}},
+		probeConsumerPod("consumer", session.Spec.Volumes[0].SourcePVC.Name, "node-a"),
+	)
+	service := &Service{client: client}
+
+	targets, err := service.resolveCopyToolProbeTargets(context.Background(), session, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, target := range targets {
+		if target.Namespace == session.Spec.Volumes[0].SourcePVC.Namespace && target.PVCName == session.Spec.Volumes[0].SourcePVC.Name {
+			if target.SkipPVCMount || !target.WritablePVCMount {
+				t.Fatalf("shared LVM source target=%#v", target)
+			}
+			return
+		}
+	}
+	t.Fatal("shared LVM source target was not created")
+}
+
+func TestResolveSessionToolProbeTargetsMountsSourcePVCForMountStrategy(t *testing.T) {
+	session := copyToolProbeSession(true)
+	options := session.Spec.WorkflowOptionsPtr()
+	options.SourceNode = "node-a"
+	options.Strategies = []string{domain.StrategyMount}
+	service := &Service{client: fake.NewClientset()}
+
+	targets, err := service.resolveCopyToolProbeTargets(context.Background(), session, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, target := range targets {
+		if target.PVCName == session.Spec.Volumes[0].SourcePVC.Name {
+			if target.SkipPVCMount || len(target.Components) != 0 {
+				t.Fatalf("mount-strategy source target=%#v", target)
+			}
+			return
+		}
+	}
+	t.Fatal("mount strategy did not create a source PVC probe target")
+}
+
+func TestWarmCopyProbeErrorClassifiesConcurrentMountFailure(t *testing.T) {
+	targets := []kube.ToolProbeTarget{{Namespace: "app", PVCName: "data"}}
+	cause := domain.NewError(domain.ErrorTimeout, "tool image probe", "MountVolume.SetUp failed: device already mounted")
+	for _, test := range []struct {
+		operation domain.Operation
+		want      string
+		absent    string
+	}{
+		{operation: domain.OperationMigratePod, want: "--precopy-passes 0", absent: "without --online"},
+		{operation: domain.OperationCopy, want: "without --online", absent: "--precopy-passes"},
+	} {
+		err := warmCopyProbeError(test.operation, targets, cause)
+		if domain.CategoryOf(err) != domain.ErrorPrecondition || !strings.Contains(err.Error(), "warm-copy mount probe") || !strings.Contains(err.Error(), test.want) || strings.Contains(err.Error(), test.absent) {
+			t.Fatalf("operation=%s error=%v", test.operation, err)
+		}
+		if !errors.Is(err, cause) {
+			t.Fatalf("wrapped error does not preserve cause: %v", err)
+		}
+	}
+}
+
+func TestWarmCopyProbeErrorPreservesNonMountFailure(t *testing.T) {
+	targets := []kube.ToolProbeTarget{{Namespace: "app", PVCName: "data"}}
+	cause := domain.NewError(domain.ErrorPrecondition, "tool image probe", "ImagePullBackOff")
+	if err := warmCopyProbeError(domain.OperationMigrate, targets, cause); !errors.Is(err, cause) || strings.Contains(err.Error(), "warm-copy mount probe") {
+		t.Fatalf("error=%v want original=%v", err, cause)
+	}
+}
+
+func TestWarmCopyProbeErrorDoesNotMisclassifyGenericMountFailure(t *testing.T) {
+	targets := []kube.ToolProbeTarget{{Namespace: "app", PVCName: "data"}}
+	cause := domain.NewError(domain.ErrorPrecondition, "tool image probe", "FailedMount: filesystem needs repair")
+	if err := warmCopyProbeError(domain.OperationMigrate, targets, cause); !errors.Is(err, cause) || strings.Contains(err.Error(), "warm-copy mount probe") {
+		t.Fatalf("error=%v want original=%v", err, cause)
 	}
 }
 
@@ -314,7 +420,7 @@ func TestResolveSessionToolProbeTargetsRejectsCopyConsumerConflicts(t *testing.T
 			}
 			service := &Service{client: fake.NewClientset(objects...)}
 
-			_, err := service.resolveCopyToolProbeTargets(context.Background(), session)
+			_, err := service.resolveCopyToolProbeTargets(context.Background(), session, false)
 			if domain.CategoryOf(err) != test.want {
 				t.Fatalf("category=%s want=%s error=%v", domain.CategoryOf(err), test.want, err)
 			}
@@ -331,7 +437,7 @@ func TestResolveSessionToolProbeTargetsRejectsOnlineVolumesOnDifferentNodes(t *t
 	}
 	service := &Service{client: fake.NewClientset(pods...)}
 
-	_, err := service.resolveCopyToolProbeTargets(context.Background(), session)
+	_, err := service.resolveCopyToolProbeTargets(context.Background(), session, false)
 	if domain.CategoryOf(err) != domain.ErrorPrecondition || !strings.Contains(err.Error(), "multiple source nodes") {
 		t.Fatalf("category=%s error=%v", domain.CategoryOf(err), err)
 	}
@@ -344,7 +450,7 @@ func TestResolveSessionToolProbeTargetsRejectsOrchestratedConsumerMove(t *testin
 	session.Spec.WorkflowOptionsPtr().Strategies = []string{domain.StrategyClusterIP}
 	service := &Service{client: fake.NewClientset(probeConsumerPod("consumer", "data", "moved-node"))}
 
-	_, err := service.resolveCopyToolProbeTargets(context.Background(), session)
+	_, err := service.resolveCopyToolProbeTargets(context.Background(), session, false)
 	if domain.CategoryOf(err) != domain.ErrorConflict || !strings.Contains(err.Error(), "consumer runs on moved-node") {
 		t.Fatalf("category=%s error=%v", domain.CategoryOf(err), err)
 	}
@@ -557,6 +663,25 @@ func TestWarmCopyReusesSchedulerSelectedProbeNodeAndPullSecrets(t *testing.T) {
 		if !slices.Contains(values, expected) {
 			t.Fatalf("missing %q in %v", expected, values)
 		}
+	}
+}
+
+func TestWarmCopyUsesWritableSourceMountForSharedOpenEBSLVM(t *testing.T) {
+	fixture := newRecoveryFixture(t)
+	storageClass := *appTestSession().Spec.Volumes[0].SourcePVCSpec.StorageClassName
+	if _, err := fixture.client.StorageV1().StorageClasses().Create(context.Background(), &storagev1.StorageClass{
+		ObjectMeta: metav1.ObjectMeta{Name: storageClass}, Provisioner: "local.csi.openebs.io", Parameters: map[string]string{"shared": "yes"},
+	}, metav1.CreateOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	session := appTestSession()
+	setSessionOperation(session, domain.OperationCopy)
+	session.Status.Phase = domain.PhaseReserved
+	if err := fixture.service.WarmCopy(context.Background(), session); err != nil {
+		t.Fatal(err)
+	}
+	if len(fixture.copier.requests) != 1 || !fixture.copier.requests[0].SourceMountReadWrite {
+		t.Fatalf("copy requests=%#v", fixture.copier.requests)
 	}
 }
 

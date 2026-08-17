@@ -113,6 +113,7 @@ func (f *migrationFlags) planOptions(state *rootState, operation domain.Operatio
 		SwitchoverCandidate:  f.switchoverCandidate,
 		AllowLeaderDowntime:  f.allowLeaderDowntime,
 		ForceReprovision:     f.forceReprovision,
+		PrecopyPasses:        f.precopyPasses,
 	}, nil
 }
 
@@ -125,6 +126,9 @@ func (r *rootState) newMigrationPlanCommand(operation domain.Operation, useTempo
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			if operation == domain.OperationMigratePod && flags.podName == "" {
 				return domain.NewError(domain.ErrorValidation, "migrate-pod plan", "--pod is required")
+			}
+			if flags.precopyPasses < 0 {
+				return domain.NewError(domain.ErrorValidation, "plan", "--precopy-passes cannot be negative")
 			}
 			if flags.podName != "" && len(flags.sourcePVCs) > 0 {
 				return domain.NewError(domain.ErrorValidation, "plan", "--source-pvc cannot be combined with --pod; the Pod PVC set is migrated as one unit")
@@ -523,7 +527,7 @@ func (r *rootState) newMigrateCommand(podMode bool) *cobra.Command {
 		flags.bindForceReprovision(command)
 	}
 	bindDryRun(command, &dryRun)
-	command.AddCommand(r.newMigrationPlanCommand(operation, true, true, true, true, false, false))
+	command.AddCommand(r.newMigrationPlanCommand(operation, true, true, true, true, true, false))
 	return command
 }
 

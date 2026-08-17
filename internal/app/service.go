@@ -17,6 +17,7 @@ import (
 	"github.com/labring-sigs/pvc-migrate/internal/kube"
 	"github.com/labring-sigs/pvc-migrate/internal/parallel"
 	corev1 "k8s.io/api/core/v1"
+	storagev1 "k8s.io/api/storage/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
@@ -223,7 +224,7 @@ func reservationToolProbeTargets(session *domain.Session) []kube.ToolProbeTarget
 	return toolProbeTargetsForNamespaces(destinationVolumeNamespaces(session), options.TargetNode, nil)
 }
 
-func copyToolProbeTargets(session *domain.Session) []kube.ToolProbeTarget {
+func copyToolProbeTargets(session *domain.Session, mountSourcePVC bool) []kube.ToolProbeTarget {
 	if session == nil {
 		return nil
 	}
@@ -239,10 +240,10 @@ func copyToolProbeTargets(session *domain.Session) []kube.ToolProbeTarget {
 		if slices.Contains(options.Strategies, domain.StrategyLocal) {
 			targets = append(targets, toolProbeTargetsForNamespaces(targetNamespaces, options.TargetNode, []string{kube.ToolComponentSSHD})...)
 		}
-		if !needsSSHD || options.SourceNode == "" {
+		if (!needsSSHD && !mountSourcePVC) || options.SourceNode == "" {
 			return targets
 		}
-		targets = append(targets, sourceToolProbeTargets(session, options.SourceNode)...)
+		targets = append(targets, sourceToolProbeTargets(session, options.SourceNode, mountSourcePVC)...)
 		return targets
 	}
 	return nil
@@ -268,23 +269,63 @@ func sessionNeedsSourceSSHD(session *domain.Session) bool {
 	return false
 }
 
-func (s *Service) resolveCopyToolProbeTargets(ctx context.Context, session *domain.Session) ([]kube.ToolProbeTarget, error) {
-	targets := copyToolProbeTargets(session)
-	if !sessionNeedsSourceSSHD(session) {
+func (s *Service) resolveCopyToolProbeTargets(ctx context.Context, session *domain.Session, mountSourcePVC bool) ([]kube.ToolProbeTarget, error) {
+	targets := copyToolProbeTargets(session, mountSourcePVC)
+	if !sessionNeedsSourceSSHD(session) && !mountSourcePVC {
 		return targets, nil
 	}
 	options := session.Spec.WorkflowOptions()
-	sourceTargets, err := s.resolveSourceToolProbeTargets(ctx, session)
+	sourceTargets, err := s.resolveSourceToolProbeTargets(ctx, session, mountSourcePVC)
 	if err != nil {
 		return nil, err
 	}
 	if options.SourceNode == "" {
 		targets = append(targets, sourceTargets...)
 	}
+	if mountSourcePVC {
+		s.markSharedOpenEBSLVMProbeMounts(ctx, session, targets)
+	}
 	return targets, nil
 }
 
-func (s *Service) resolveSourceToolProbeTargets(ctx context.Context, session *domain.Session) ([]kube.ToolProbeTarget, error) {
+func (s *Service) markSharedOpenEBSLVMProbeMounts(ctx context.Context, session *domain.Session, targets []kube.ToolProbeTarget) {
+	if session == nil {
+		return
+	}
+	for index := range targets {
+		target := &targets[index]
+		if target.PVCName == "" || target.SkipPVCMount {
+			continue
+		}
+		for volumeIndex := range session.Spec.Volumes {
+			volume := &session.Spec.Volumes[volumeIndex]
+			if target.Namespace == volume.SourcePVC.Namespace && target.PVCName == volume.SourcePVC.Name && s.sharedOpenEBSLVMSource(ctx, volume) {
+				target.WritablePVCMount = true
+				break
+			}
+		}
+	}
+}
+
+func (s *Service) sharedOpenEBSLVMSource(ctx context.Context, volume *domain.VolumeSpec) bool {
+	if s == nil || s.client == nil || volume == nil || volume.SourcePVCSpec.StorageClassName == nil {
+		return false
+	}
+	name := strings.TrimSpace(*volume.SourcePVCSpec.StorageClassName)
+	if name == "" {
+		return false
+	}
+	storageClass, err := s.client.StorageV1().StorageClasses().Get(ctx, name, metav1.GetOptions{})
+	return err == nil && storageClass != nil && isSharedOpenEBSLVMStorageClass(storageClass)
+}
+
+func isSharedOpenEBSLVMStorageClass(storageClass *storagev1.StorageClass) bool {
+	return storageClass != nil &&
+		storageClass.Provisioner == "local.csi.openebs.io" &&
+		strings.EqualFold(strings.TrimSpace(storageClass.Parameters["shared"]), "yes")
+}
+
+func (s *Service) resolveSourceToolProbeTargets(ctx context.Context, session *domain.Session, mountSourcePVC bool) ([]kube.ToolProbeTarget, error) {
 	if session == nil {
 		return nil, domain.NewError(domain.ErrorValidation, "tool image probe", "session is nil")
 	}
@@ -400,14 +441,18 @@ func (s *Service) resolveSourceToolProbeTargets(ctx context.Context, session *do
 	}
 
 	targets := make([]kube.ToolProbeTarget, 0, len(session.Spec.Volumes))
+	var sourceComponents []string
+	if sessionNeedsSourceSSHD(session) {
+		sourceComponents = []string{kube.ToolComponentSSHD}
+	}
 	for index := range session.Spec.Volumes {
 		volume := &session.Spec.Volumes[index]
 		target := kube.ToolProbeTarget{
 			Namespace:    volume.SourcePVC.Namespace,
 			NodeName:     resolvedNodes[index],
 			PVCName:      volume.SourcePVC.Name,
-			SkipPVCMount: resolvedNodes[index] != "",
-			Components:   []string{kube.ToolComponentSSHD},
+			SkipPVCMount: resolvedNodes[index] != "" && !mountSourcePVC,
+			Components:   slices.Clone(sourceComponents),
 		}
 		targets = append(targets, target)
 	}
@@ -444,18 +489,22 @@ func toolProbeTargetsForNamespaces(namespaces []string, nodeName string, compone
 	return targets
 }
 
-func sourceToolProbeTargets(session *domain.Session, nodeName string) []kube.ToolProbeTarget {
+func sourceToolProbeTargets(session *domain.Session, nodeName string, mountSourcePVC bool) []kube.ToolProbeTarget {
 	if session == nil {
 		return nil
 	}
 	targets := make([]kube.ToolProbeTarget, 0, len(session.Spec.Volumes))
+	var sourceComponents []string
+	if sessionNeedsSourceSSHD(session) {
+		sourceComponents = []string{kube.ToolComponentSSHD}
+	}
 	for _, volume := range session.Spec.Volumes {
 		targets = append(targets, kube.ToolProbeTarget{
 			Namespace:    volume.SourcePVC.Namespace,
 			NodeName:     nodeName,
 			PVCName:      volume.SourcePVC.Name,
-			SkipPVCMount: true,
-			Components:   []string{kube.ToolComponentSSHD},
+			SkipPVCMount: !mountSourcePVC,
+			Components:   slices.Clone(sourceComponents),
 		})
 	}
 	return targets
@@ -838,7 +887,7 @@ func (s *Service) ValidateCleanup(ctx context.Context, session *domain.Session, 
 			return domain.NewError(domain.ErrorPrecondition, "cleanup dry-run", "deleting the session requires --delete-rollback-pv while a rollback PV is recorded")
 		}
 		if options.DeleteTemporary && volume.DestinationPVC.UID != "" {
-			pvc, err := s.inspectPVCUnused(ctx, volume.DestinationPVC, session.ID)
+			pvc, err := s.inspectPVCUnusedForSession(ctx, volume.DestinationPVC, session)
 			if err != nil {
 				return err
 			}
@@ -1034,13 +1083,13 @@ func (s *Service) warmCopy(ctx context.Context, session *domain.Session) error {
 	if err := s.validateCopyConsumersBatch(ctx, session); err != nil {
 		return err
 	}
-	targets, err := s.resolveCopyToolProbeTargets(ctx, session)
+	targets, err := s.resolveCopyToolProbeTargets(ctx, session, true)
 	if err != nil {
 		return err
 	}
 	probeResults, err := s.probeToolImage(ctx, session, targets)
 	if err != nil {
-		return err
+		return warmCopyProbeError(session.Spec.Operation(), targets, err)
 	}
 	if session.Status.Phase == domain.PhaseWarmCopied {
 		for i := range session.Status.Volumes {
@@ -1071,6 +1120,39 @@ func (s *Service) warmCopy(ctx context.Context, session *domain.Session) error {
 		}
 	}
 	return s.finish(ctx, session, domain.PhaseWarmCopied, "warm copy completed for all volumes")
+}
+
+func warmCopyProbeError(operation domain.Operation, targets []kube.ToolProbeTarget, err error) error {
+	if err == nil || !kube.IsConcurrentMountFailureMessage(err.Error()) {
+		return err
+	}
+	pvcs := make([]string, 0, len(targets))
+	for _, target := range targets {
+		if target.PVCName == "" || target.SkipPVCMount {
+			continue
+		}
+		ref := target.Namespace + "/" + target.PVCName
+		if !slices.Contains(pvcs, ref) {
+			pvcs = append(pvcs, ref)
+		}
+	}
+	if len(pvcs) == 0 {
+		return err
+	}
+	sort.Strings(pvcs)
+	recovery := "disable warm copy after making sure the source PVC has no active Pod consumers"
+	switch operation {
+	case domain.OperationCopy:
+		recovery = "rerun the copy without --online after the source PVC has no active Pod consumers"
+	case domain.OperationMigrate, domain.OperationMigratePod:
+		recovery = "rerun the migration with --precopy-passes 0"
+	}
+	return domain.WrapError(
+		domain.ErrorPrecondition,
+		"warm-copy mount probe",
+		fmt.Sprintf("second-Pod mount failed for source PVC(s) %s while the source workload is active: %v; abort this pre-cutover session, clean its retained resources, and %s", strings.Join(pvcs, ","), err, recovery),
+		err,
+	)
 }
 
 func (s *Service) Pause(ctx context.Context, session *domain.Session) error {
@@ -1121,7 +1203,7 @@ func (s *Service) finalSync(ctx context.Context, session *domain.Session) error 
 	if err := s.controllers.VerifyPaused(ctx, session); err != nil {
 		return err
 	}
-	targets, err := s.resolveCopyToolProbeTargets(ctx, session)
+	targets, err := s.resolveCopyToolProbeTargets(ctx, session, false)
 	if err != nil {
 		return err
 	}
@@ -1161,7 +1243,7 @@ func (s *Service) pauseAndFinalSync(ctx context.Context, session *domain.Session
 			return err
 		}
 	}
-	targets, err := s.resolveCopyToolProbeTargets(ctx, session)
+	targets, err := s.resolveCopyToolProbeTargets(ctx, session, false)
 	if err != nil {
 		return err
 	}
@@ -1673,6 +1755,7 @@ func (s *Service) copyWithRetry(ctx context.Context, session *domain.Session, vo
 	values = append(values, pullSecretValues...)
 	var last error
 	options := session.Spec.WorkflowOptions()
+	sourceMountReadWrite := mode == copyengine.ModeWarm && s.sharedOpenEBSLVMSource(ctx, volume)
 	for retryIndex := 0; retryIndex < s.config.Retries; retryIndex++ {
 		status.Sync.Attempts++
 		status.Sync.LastError = ""
@@ -1691,6 +1774,7 @@ func (s *Service) copyWithRetry(ctx context.Context, session *domain.Session, vo
 			Strategies:            options.Strategies,
 			DeleteExtraneousFiles: options.DeleteExtraneous,
 			VerifyChecksum:        mode == copyengine.ModeFinal && options.VerifyChecksum,
+			SourceMountReadWrite:  sourceMountReadWrite,
 			NoCompress:            s.config.NoCompress,
 			HelmTimeout:           s.config.HelmTimeout,
 			HelmStringValues:      values,
@@ -1762,9 +1846,7 @@ func (s *Service) waitForCopyToolRelease(ctx context.Context, volume *domain.Vol
 }
 
 func isPVMigrateToolForClaims(pod *corev1.Pod, claims map[string]struct{}) bool {
-	instance := pod.Labels[kube.AppInstanceLabel]
-	component := pod.Labels[kube.AppComponentLabel]
-	if !strings.HasPrefix(instance, "pv-migrate-") || (component != "sshd" && component != "rsync" && component != "rclone") {
+	if _, tool := pvmigrateToolInstance(pod); !tool {
 		return false
 	}
 	for _, volume := range pod.Spec.Volumes {
@@ -1776,6 +1858,22 @@ func isPVMigrateToolForClaims(pod *corev1.Pod, claims map[string]struct{}) bool 
 		}
 	}
 	return false
+}
+
+func pvmigrateToolInstance(pod *corev1.Pod) (string, bool) {
+	if pod == nil {
+		return "", false
+	}
+	instance := pod.Labels[kube.AppInstanceLabel]
+	if !strings.HasPrefix(instance, "pv-migrate-") {
+		return "", false
+	}
+	switch pod.Labels[kube.AppComponentLabel] {
+	case kube.ToolComponentSSHD, kube.ToolComponentRsync, kube.ToolComponentRclone:
+		return instance, true
+	default:
+		return "", false
+	}
 }
 
 func (s *Service) helmSchedulingValues(ctx context.Context, session *domain.Session, sourceNode string) ([]string, error) {
