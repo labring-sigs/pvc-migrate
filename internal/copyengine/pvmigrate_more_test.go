@@ -65,6 +65,7 @@ func TestCopyBuildsCompleteUpstreamMigrationContract(t *testing.T) {
 		Strategies:            []string{"mount", "clusterip", "loadbalancer", "nodeport", "local"},
 		DeleteExtraneousFiles: true,
 		VerifyChecksum:        true,
+		SourceMountReadWrite:  true,
 		NoCompress:            true,
 		HelmTimeout:           37 * time.Second,
 		HelmStringValues:      []string{"sshd.nodeName=source-node"},
@@ -79,7 +80,7 @@ func TestCopyBuildsCompleteUpstreamMigrationContract(t *testing.T) {
 	if captured.ID != OperationID(request) || captured.Source != (pvmigrate.PVC{KubeconfigPath: "/tmp/kubeconfig", Context: "cluster-context", Namespace: "source-ns", Name: "source-pvc"}) || captured.Dest != (pvmigrate.PVC{KubeconfigPath: "/tmp/kubeconfig", Context: "cluster-context", Namespace: "target-ns", Name: "target-pvc"}) {
 		t.Fatalf("upstream PVC request=%#v", captured)
 	}
-	if !captured.DeleteExtraneousFiles || captured.IgnoreMounted || !captured.NoCompress || !captured.StructuredLogs || captured.Writer != writer || captured.Logger != logger {
+	if !captured.DeleteExtraneousFiles || captured.IgnoreMounted || !captured.SourceMountReadWrite || !captured.NoCompress || !captured.StructuredLogs || captured.Writer != writer || captured.Logger != logger {
 		t.Fatalf("upstream migration policy=%#v", captured)
 	}
 	if captured.RsyncExtraArgs != "-HAXS --numeric-ids --checksum" {

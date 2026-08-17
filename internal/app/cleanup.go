@@ -4,8 +4,10 @@ import (
 	"context"
 	"fmt"
 	"slices"
+	"strings"
 	"time"
 
+	"github.com/labring-sigs/pvc-migrate/internal/copyengine"
 	"github.com/labring-sigs/pvc-migrate/internal/domain"
 	"github.com/labring-sigs/pvc-migrate/internal/kube"
 	"github.com/labring-sigs/pvc-migrate/internal/parallel"
@@ -23,6 +25,39 @@ type CleanupOptions struct {
 	DeleteSession   bool
 }
 
+// CleanupPodBlockerError identifies the Pod and controller that keep a PVC
+// inside Kubernetes PVC protection. The CLI uses these fields to render
+// connection-aware inspection and deletion commands.
+type CleanupPodBlockerError struct {
+	PVCNamespace  string
+	PVCName       string
+	PodNamespace  string
+	PodName       string
+	PodPhase      corev1.PodPhase
+	OwnerKind     string
+	OwnerName     string
+	OwnerVerified bool
+	SessionOwned  bool
+	Terminal      bool
+	Cause         error
+}
+
+func (e *CleanupPodBlockerError) Error() string {
+	if e == nil {
+		return "cleanup is blocked by a Pod"
+	}
+	if e.Cause != nil {
+		return e.Cause.Error()
+	}
+	return fmt.Sprintf("cleanup is blocked by Pod %s/%s", e.PodNamespace, e.PodName)
+}
+func (e *CleanupPodBlockerError) Unwrap() error {
+	if e == nil {
+		return nil
+	}
+	return e.Cause
+}
+
 func (s *Service) Cleanup(ctx context.Context, session *domain.Session, options CleanupOptions) error {
 	return s.withSessionLock(ctx, session, func(lockedCtx context.Context) error {
 		return s.cleanup(lockedCtx, session, options)
@@ -35,6 +70,9 @@ func (s *Service) cleanup(ctx context.Context, session *domain.Session, options 
 	}
 	if !cleanupPhaseAllowed(session) {
 		return domain.NewError(domain.ErrorPrecondition, "cleanup", fmt.Sprintf("session phase %s is still active", session.Status.Phase))
+	}
+	if err := s.restoreOpenEBSLVMSharedMounts(ctx, session); err != nil {
+		return err
 	}
 	s.logInfo("cleanup started", "session", session.ID, "phase", session.Status.Phase, "deleteTemporary", options.DeleteTemporary, "deleteRollback", options.DeleteRollback, "finalize", options.Finalize, "deleteSession", options.DeleteSession)
 	if !session.Spec.Operation().RebindsPVC() && (options.DeleteTemporary || options.DeleteRollback || options.DeleteSession) {
@@ -82,7 +120,7 @@ func (s *Service) cleanup(ctx context.Context, session *domain.Session, options 
 			if volume.DestinationPVC.UID == "" {
 				continue
 			}
-			if err := s.ensurePVCUnused(ctx, volume.DestinationPVC, session.ID); err != nil {
+			if err := s.ensurePVCUnusedForSession(ctx, volume.DestinationPVC, session); err != nil {
 				return err
 			}
 			if err := s.deleteManagedPVC(ctx, session.ID, volume.DestinationPVC); err != nil {
@@ -220,6 +258,22 @@ func (s *Service) ensurePVCUnused(ctx context.Context, ref domain.ObjectReferenc
 }
 
 func (s *Service) inspectPVCUnused(ctx context.Context, ref domain.ObjectReference, sessionID string) (*corev1.PersistentVolumeClaim, error) {
+	return s.inspectPVCUnusedWithOperations(ctx, ref, sessionID, nil)
+}
+
+func (s *Service) ensurePVCUnusedForSession(ctx context.Context, ref domain.ObjectReference, session *domain.Session) error {
+	_, err := s.inspectPVCUnusedForSession(ctx, ref, session)
+	return err
+}
+
+func (s *Service) inspectPVCUnusedForSession(ctx context.Context, ref domain.ObjectReference, session *domain.Session) (*corev1.PersistentVolumeClaim, error) {
+	if session == nil {
+		return nil, domain.NewError(domain.ErrorValidation, "cleanup", "session is nil")
+	}
+	return s.inspectPVCUnusedWithOperations(ctx, ref, session.ID, sessionPVMigrateOperationIDs(session))
+}
+
+func (s *Service) inspectPVCUnusedWithOperations(ctx context.Context, ref domain.ObjectReference, sessionID string, operationIDs map[string]struct{}) (*corev1.PersistentVolumeClaim, error) {
 	pvc, err := s.client.CoreV1().PersistentVolumeClaims(ref.Namespace).Get(ctx, ref.Name, metav1.GetOptions{})
 	if apierrors.IsNotFound(err) {
 		return nil, nil
@@ -265,9 +319,11 @@ func (s *Service) inspectPVCUnused(ctx context.Context, ref domain.ObjectReferen
 		}
 		if kube.PodPreventsSafePVCDeletion(&pod, ref.Name) {
 			if pod.Status.Phase == corev1.PodSucceeded || pod.Status.Phase == corev1.PodFailed {
-				return nil, domain.NewError(domain.ErrorPrecondition, "cleanup", fmt.Sprintf("PVC %s/%s is still protected by terminal Pod %s (phase %s); delete the Pod object before cleanup", ref.Namespace, ref.Name, pod.Name, pod.Status.Phase))
+				cause := domain.NewError(domain.ErrorPrecondition, "cleanup", fmt.Sprintf("PVC %s/%s is still protected by terminal Pod %s (phase %s); delete the Pod object before cleanup", ref.Namespace, ref.Name, pod.Name, pod.Status.Phase))
+				return nil, s.cleanupPodBlockerError(ctx, ref, &pod, sessionID, operationIDs, true, cause)
 			}
-			return nil, domain.NewError(domain.ErrorPrecondition, "cleanup", fmt.Sprintf("PVC %s/%s is still referenced by Pod %s", ref.Namespace, ref.Name, pod.Name))
+			cause := domain.NewError(domain.ErrorPrecondition, "cleanup", fmt.Sprintf("PVC %s/%s is still referenced by Pod %s (phase %s); stop its controller or delete the Pod before cleanup", ref.Namespace, ref.Name, pod.Name, pod.Status.Phase))
+			return nil, s.cleanupPodBlockerError(ctx, ref, &pod, sessionID, operationIDs, false, cause)
 		}
 	}
 	if pvc.Spec.VolumeName == "" {
@@ -285,6 +341,128 @@ func (s *Service) inspectPVCUnused(ctx context.Context, ref domain.ObjectReferen
 		}
 	}
 	return pvc, nil
+}
+
+func (s *Service) cleanupPodBlockerError(ctx context.Context, pvc domain.ObjectReference, pod *corev1.Pod, sessionID string, operationIDs map[string]struct{}, terminal bool, cause error) error {
+	ownerKind, ownerName, ownerVerified := s.resolveCleanupPodOwner(ctx, pod)
+	sessionOwned := (sessionID != "" && pod.Labels[kube.ManagedByLabel] == kube.ManagedByValue && pod.Labels[kube.SessionKey] == sessionID) || isPVMigrateToolForOperationIDs(pod, operationIDs)
+	return &CleanupPodBlockerError{
+		PVCNamespace:  pvc.Namespace,
+		PVCName:       pvc.Name,
+		PodNamespace:  pod.Namespace,
+		PodName:       pod.Name,
+		PodPhase:      pod.Status.Phase,
+		OwnerKind:     ownerKind,
+		OwnerName:     ownerName,
+		OwnerVerified: ownerVerified,
+		SessionOwned:  sessionOwned,
+		Terminal:      terminal,
+		Cause:         cause,
+	}
+}
+
+func sessionPVMigrateOperationIDs(session *domain.Session) map[string]struct{} {
+	operationIDs := make(map[string]struct{})
+	if session == nil {
+		return operationIDs
+	}
+	for index, volume := range session.Spec.Volumes {
+		if index >= len(session.Status.Volumes) {
+			break
+		}
+		for attempt := 1; attempt <= session.Status.Volumes[index].Sync.Attempts; attempt++ {
+			for _, mode := range []copyengine.Mode{copyengine.ModeWarm, copyengine.ModeFinal} {
+				operationIDs[copyengine.OperationID(copyengine.Request{
+					SessionID: session.ID,
+					Source:    volume.SourcePVC,
+					Mode:      mode,
+					Attempt:   attempt,
+				})] = struct{}{}
+			}
+		}
+	}
+	return operationIDs
+}
+
+func isPVMigrateToolForOperationIDs(pod *corev1.Pod, operationIDs map[string]struct{}) bool {
+	instance, tool := pvmigrateToolInstance(pod)
+	if !tool || len(operationIDs) == 0 {
+		return false
+	}
+	for operationID := range operationIDs {
+		if strings.HasPrefix(instance, "pv-migrate-"+operationID+"-") {
+			return true
+		}
+	}
+	return false
+}
+
+func (s *Service) resolveCleanupPodOwner(ctx context.Context, pod *corev1.Pod) (string, string, bool) {
+	if pod == nil {
+		return "", "", false
+	}
+	owner := controllerOwnerReference(pod.OwnerReferences)
+	if owner == nil {
+		return "", "", false
+	}
+	if s == nil || s.client == nil {
+		return owner.Kind, owner.Name, false
+	}
+	switch owner.Kind {
+	case "Job":
+		job, err := s.client.BatchV1().Jobs(pod.Namespace).Get(ctx, owner.Name, metav1.GetOptions{})
+		return owner.Kind, owner.Name, err == nil && job != nil && ownerReferenceMatches(owner, job)
+	case "Deployment":
+		deployment, err := s.client.AppsV1().Deployments(pod.Namespace).Get(ctx, owner.Name, metav1.GetOptions{})
+		return owner.Kind, owner.Name, err == nil && deployment != nil && ownerReferenceMatches(owner, deployment)
+	case "StatefulSet":
+		statefulSet, err := s.client.AppsV1().StatefulSets(pod.Namespace).Get(ctx, owner.Name, metav1.GetOptions{})
+		return owner.Kind, owner.Name, err == nil && statefulSet != nil && ownerReferenceMatches(owner, statefulSet)
+	case "DaemonSet":
+		daemonSet, err := s.client.AppsV1().DaemonSets(pod.Namespace).Get(ctx, owner.Name, metav1.GetOptions{})
+		return owner.Kind, owner.Name, err == nil && daemonSet != nil && ownerReferenceMatches(owner, daemonSet)
+	case "ReplicaSet":
+		return s.resolveCleanupReplicaSetOwner(ctx, pod.Namespace, owner)
+	default:
+		return owner.Kind, owner.Name, false
+	}
+}
+
+func (s *Service) resolveCleanupReplicaSetOwner(ctx context.Context, namespace string, owner *metav1.OwnerReference) (string, string, bool) {
+	replicaSet, err := s.client.AppsV1().ReplicaSets(namespace).Get(ctx, owner.Name, metav1.GetOptions{})
+	if err != nil || replicaSet == nil || !ownerReferenceMatches(owner, replicaSet) {
+		return owner.Kind, owner.Name, false
+	}
+	parent := controllerOwnerReference(replicaSet.OwnerReferences)
+	if parent == nil {
+		return owner.Kind, owner.Name, true
+	}
+	if parent.Kind != "Deployment" {
+		return parent.Kind, parent.Name, false
+	}
+	deployment, err := s.client.AppsV1().Deployments(namespace).Get(ctx, parent.Name, metav1.GetOptions{})
+	if apierrors.IsNotFound(err) || (err == nil && deployment != nil && !ownerReferenceMatches(parent, deployment)) {
+		// The verified ReplicaSet is orphaned; deleting it cannot delete a
+		// replacement Deployment that happens to reuse the old name.
+		return owner.Kind, owner.Name, true
+	}
+	if err != nil || deployment == nil || !ownerReferenceMatches(parent, deployment) {
+		return parent.Kind, parent.Name, false
+	}
+	return parent.Kind, parent.Name, true
+}
+
+func ownerReferenceMatches(owner *metav1.OwnerReference, object metav1.Object) bool {
+	return owner != nil && object != nil && owner.UID != "" && owner.Name == object.GetName() && owner.UID == object.GetUID()
+}
+
+func controllerOwnerReference(owners []metav1.OwnerReference) *metav1.OwnerReference {
+	for index := range owners {
+		if owners[index].Controller != nil && *owners[index].Controller {
+			return &owners[index]
+		}
+	}
+	return nil
 }
 
 // discoverDestinationRefs recovers references lost after a destination PVC

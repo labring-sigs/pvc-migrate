@@ -358,7 +358,7 @@ func (s *Service) cleanupPreActivationOrphan(ctx context.Context, sessionID stri
 				TemporaryNamespace: resources.DestinationPVC.Namespace,
 				SessionNamespace:   resources.DestinationPVC.Namespace,
 				Volumes:            []domain.VolumeSpec{{DestinationPVC: resources.DestinationPVC}},
-			}, domain.WorkloadSpec{Adapter: domain.WorkloadNone}, false),
+			}, domain.WorkloadSpec{Adapter: domain.WorkloadNone}, false, domain.SessionWorkflowOptions{}),
 		}
 		if err := s.deleteReservationPods(ctx, session); err != nil {
 			return err

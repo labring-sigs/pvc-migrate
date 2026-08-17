@@ -16,7 +16,7 @@ func TestPlanRejectsPersistedSessionOwnershipBeforeMutation(t *testing.T) {
 	old := domain.NewSession("old-session", domain.NewSessionSpec(domain.OperationMigrate, domain.SessionCommon{
 		SourceNamespace: "app", TemporaryNamespace: "system", DestinationNamespace: "app", SessionNamespace: "system",
 		Volumes: []domain.VolumeSpec{{SourcePVC: domain.ObjectReference{Namespace: "app", Name: "data"}, SourcePV: domain.ObjectReference{Name: "pv-source"}}},
-	}, domain.WorkloadSpec{Adapter: domain.WorkloadNone}, false), time.Now())
+	}, domain.WorkloadSpec{Adapter: domain.WorkloadNone}, false, domain.SessionWorkflowOptions{}), time.Now())
 	old.Status.Phase = domain.PhaseCompleted
 	if err := kube.NewConfigMapSessionStore(client).Create(context.Background(), old); err != nil {
 		t.Fatal(err)

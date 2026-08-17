@@ -6,8 +6,11 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/labring-sigs/pvc-migrate/internal/copyengine"
 	"github.com/labring-sigs/pvc-migrate/internal/domain"
 	"github.com/labring-sigs/pvc-migrate/internal/kube"
+	appsv1 "k8s.io/api/apps/v1"
+	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	storagev1 "k8s.io/api/storage/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -580,6 +583,183 @@ func TestCleanupBlocksTerminalPVCConsumers(t *testing.T) {
 	}
 }
 
+func TestCleanupPodBlockerReportsOwningController(t *testing.T) {
+	controller := true
+	for _, test := range []struct {
+		name          string
+		pod           *corev1.Pod
+		objects       []runtime.Object
+		wantOwnerKind string
+		wantOwnerName string
+		wantOwned     bool
+		wantVerified  bool
+	}{
+		{
+			name: "Job",
+			pod: &corev1.Pod{ObjectMeta: metav1.ObjectMeta{
+				Name: "copy-tool", Labels: map[string]string{kube.ManagedByLabel: kube.ManagedByValue, kube.SessionKey: "session-123"},
+				OwnerReferences: []metav1.OwnerReference{{APIVersion: "batch/v1", Kind: "Job", Name: "copy-job", UID: types.UID("job-uid"), Controller: &controller}},
+			}},
+			objects:       []runtime.Object{&batchv1.Job{ObjectMeta: metav1.ObjectMeta{Namespace: "system", Name: "copy-job", UID: types.UID("job-uid")}}},
+			wantOwnerKind: "Job",
+			wantOwnerName: "copy-job",
+			wantOwned:     true,
+			wantVerified:  true,
+		},
+		{
+			name: "Deployment through ReplicaSet",
+			pod: &corev1.Pod{ObjectMeta: metav1.ObjectMeta{
+				Name: "copy-tool", Labels: map[string]string{kube.ManagedByLabel: kube.ManagedByValue, kube.SessionKey: "session-123", kube.AppInstanceLabel: "pv-migrate-pm-test-clusterip", kube.AppComponentLabel: "rsync"},
+				OwnerReferences: []metav1.OwnerReference{{APIVersion: "apps/v1", Kind: "ReplicaSet", Name: "copy-rs", UID: types.UID("rs-uid"), Controller: &controller}},
+			}},
+			objects: []runtime.Object{
+				&appsv1.ReplicaSet{ObjectMeta: metav1.ObjectMeta{
+					Namespace: "system", Name: "copy-rs", UID: types.UID("rs-uid"),
+					OwnerReferences: []metav1.OwnerReference{{APIVersion: "apps/v1", Kind: "Deployment", Name: "copy-deployment", UID: types.UID("deployment-uid"), Controller: &controller}},
+				}},
+				&appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Namespace: "system", Name: "copy-deployment", UID: types.UID("deployment-uid")}},
+			},
+			wantOwnerKind: "Deployment",
+			wantOwnerName: "copy-deployment",
+			wantOwned:     true,
+			wantVerified:  true,
+		},
+		{
+			name: "Session label collision",
+			pod: &corev1.Pod{ObjectMeta: metav1.ObjectMeta{
+				Name: "foreign-tool", Labels: map[string]string{kube.SessionKey: "session-123"},
+				OwnerReferences: []metav1.OwnerReference{{APIVersion: "batch/v1", Kind: "Job", Name: "foreign-job", UID: types.UID("foreign-job-uid"), Controller: &controller}},
+			}},
+			objects:       []runtime.Object{&batchv1.Job{ObjectMeta: metav1.ObjectMeta{Namespace: "system", Name: "foreign-job", UID: types.UID("foreign-job-uid")}}},
+			wantOwnerKind: "Job",
+			wantOwnerName: "foreign-job",
+			wantVerified:  true,
+		},
+		{
+			name: "Replacement Job UID",
+			pod: &corev1.Pod{ObjectMeta: metav1.ObjectMeta{
+				Name: "copy-tool", Labels: map[string]string{kube.ManagedByLabel: kube.ManagedByValue, kube.SessionKey: "session-123"},
+				OwnerReferences: []metav1.OwnerReference{{APIVersion: "batch/v1", Kind: "Job", Name: "copy-job", UID: types.UID("old-job-uid"), Controller: &controller}},
+			}},
+			objects:       []runtime.Object{&batchv1.Job{ObjectMeta: metav1.ObjectMeta{Namespace: "system", Name: "copy-job", UID: types.UID("replacement-job-uid")}}},
+			wantOwnerKind: "Job",
+			wantOwnerName: "copy-job",
+			wantOwned:     true,
+		},
+		{
+			name: "Replacement ReplicaSet UID",
+			pod: &corev1.Pod{ObjectMeta: metav1.ObjectMeta{
+				Name: "copy-tool", Labels: map[string]string{kube.ManagedByLabel: kube.ManagedByValue, kube.SessionKey: "session-123"},
+				OwnerReferences: []metav1.OwnerReference{{APIVersion: "apps/v1", Kind: "ReplicaSet", Name: "copy-rs", UID: types.UID("old-rs-uid"), Controller: &controller}},
+			}},
+			objects:       []runtime.Object{&appsv1.ReplicaSet{ObjectMeta: metav1.ObjectMeta{Namespace: "system", Name: "copy-rs", UID: types.UID("replacement-rs-uid")}}},
+			wantOwnerKind: "ReplicaSet",
+			wantOwnerName: "copy-rs",
+			wantOwned:     true,
+		},
+		{
+			name: "Replacement Deployment UID falls back to verified ReplicaSet",
+			pod: &corev1.Pod{ObjectMeta: metav1.ObjectMeta{
+				Name: "copy-tool", Labels: map[string]string{kube.ManagedByLabel: kube.ManagedByValue, kube.SessionKey: "session-123"},
+				OwnerReferences: []metav1.OwnerReference{{APIVersion: "apps/v1", Kind: "ReplicaSet", Name: "copy-rs", UID: types.UID("rs-uid"), Controller: &controller}},
+			}},
+			objects: []runtime.Object{
+				&appsv1.ReplicaSet{ObjectMeta: metav1.ObjectMeta{
+					Namespace: "system", Name: "copy-rs", UID: types.UID("rs-uid"),
+					OwnerReferences: []metav1.OwnerReference{{APIVersion: "apps/v1", Kind: "Deployment", Name: "copy-deployment", UID: types.UID("old-deployment-uid"), Controller: &controller}},
+				}},
+				&appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Namespace: "system", Name: "copy-deployment", UID: types.UID("replacement-deployment-uid")}},
+			},
+			wantOwnerKind: "ReplicaSet",
+			wantOwnerName: "copy-rs",
+			wantOwned:     true,
+			wantVerified:  true,
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			pvc := &corev1.PersistentVolumeClaim{ObjectMeta: metav1.ObjectMeta{Namespace: "system", Name: "data-migrated"}}
+			test.pod.Namespace = pvc.Namespace
+			test.pod.Spec.NodeName = "node-a"
+			test.pod.Spec.Volumes = []corev1.Volume{{VolumeSource: corev1.VolumeSource{PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: pvc.Name}}}}
+			test.pod.Status.Phase = corev1.PodFailed
+			objects := append([]runtime.Object{pvc, test.pod}, test.objects...)
+			service := &Service{client: fake.NewClientset(objects...)}
+
+			_, err := service.inspectPVCUnused(context.Background(), domain.ObjectReference{Namespace: pvc.Namespace, Name: pvc.Name}, "session-123")
+			var blocker *CleanupPodBlockerError
+			if !errors.As(err, &blocker) {
+				t.Fatalf("error=%T %v", err, err)
+			}
+			if blocker.OwnerKind != test.wantOwnerKind || blocker.OwnerName != test.wantOwnerName || blocker.SessionOwned != test.wantOwned || blocker.OwnerVerified != test.wantVerified || !blocker.Terminal {
+				t.Fatalf("blocker=%+v", blocker)
+			}
+		})
+	}
+}
+
+func TestCleanupPVMigratePodOwnershipUsesSessionOperationID(t *testing.T) {
+	session := appTestSession()
+	session.Status.Volumes[0].Sync.Attempts = 1
+	operationID := copyengine.OperationID(copyengine.Request{
+		SessionID: session.ID,
+		Source:    session.Spec.Volumes[0].SourcePVC,
+		Mode:      copyengine.ModeFinal,
+		Attempt:   1,
+	})
+	otherOperationID := copyengine.OperationID(copyengine.Request{
+		SessionID: "other-session",
+		Source:    session.Spec.Volumes[0].SourcePVC,
+		Mode:      copyengine.ModeFinal,
+		Attempt:   1,
+	})
+	for _, test := range []struct {
+		name        string
+		instance    string
+		withSession bool
+		wantOwned   bool
+	}{
+		{name: "current session", instance: "pv-migrate-" + operationID + "-clusterip", withSession: true, wantOwned: true},
+		{name: "other operation", instance: "pv-migrate-" + otherOperationID + "-clusterip", withSession: true, wantOwned: false},
+		{name: "operation prefix collision", instance: "pv-migrate-" + operationID + "extra-clusterip", withSession: true, wantOwned: false},
+		{name: "orphan cleanup has no operation identity", instance: "pv-migrate-" + operationID + "-clusterip", wantOwned: false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			pvc := &corev1.PersistentVolumeClaim{ObjectMeta: metav1.ObjectMeta{Namespace: "system", Name: "data-migrated"}}
+			pod := &corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{
+					Namespace: pvc.Namespace,
+					Name:      "copy-tool",
+					Labels: map[string]string{
+						kube.AppInstanceLabel:  test.instance,
+						kube.AppComponentLabel: "rsync",
+					},
+				},
+				Spec: corev1.PodSpec{
+					NodeName: "node-a",
+					Volumes: []corev1.Volume{{VolumeSource: corev1.VolumeSource{
+						PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: pvc.Name},
+					}}},
+				},
+				Status: corev1.PodStatus{Phase: corev1.PodFailed},
+			}
+			service := &Service{client: fake.NewClientset(pvc, pod)}
+			var err error
+			if test.withSession {
+				_, err = service.inspectPVCUnusedForSession(context.Background(), domain.ObjectReference{Namespace: pvc.Namespace, Name: pvc.Name}, session)
+			} else {
+				_, err = service.inspectPVCUnused(context.Background(), domain.ObjectReference{Namespace: pvc.Namespace, Name: pvc.Name}, session.ID)
+			}
+			var blocker *CleanupPodBlockerError
+			if !errors.As(err, &blocker) {
+				t.Fatalf("error=%T %v", err, err)
+			}
+			if blocker.SessionOwned != test.wantOwned {
+				t.Fatalf("SessionOwned=%t, want %t", blocker.SessionOwned, test.wantOwned)
+			}
+		})
+	}
+}
+
 func TestCleanupIgnoresUnscheduledTerminalPVCConsumers(t *testing.T) {
 	ctx := context.Background()
 	session := appTestSession()
@@ -845,7 +1025,7 @@ func TestCleanupFinalizeRequiresRecordedPolicyAndOwnedActivePV(t *testing.T) {
 func TestCleanupRenameFinalizesSourcePVWithoutRollbackDeletion(t *testing.T) {
 	ctx := context.Background()
 	session := appTestSession()
-	session.Spec = domain.NewSessionSpec(domain.OperationRename, session.Spec.SessionCommon, session.Spec.Workload(), false)
+	session.Spec = domain.NewSessionSpec(domain.OperationRename, session.Spec.SessionCommon, session.Spec.Workload(), false, domain.SessionWorkflowOptions{})
 	session.Status.Phase = domain.PhaseCompleted
 	session.Spec.Volumes[0].SourceReclaimPolicy = corev1.PersistentVolumeReclaimDelete
 	session.Status.Volumes[0].Activation.ActivePVC = domain.ObjectReference{

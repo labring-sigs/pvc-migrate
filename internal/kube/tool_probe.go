@@ -33,19 +33,22 @@ const (
 	toolProbeOperation  = "pvc-migrate.io/probe-operation"
 	toolProbeTimeout    = 2 * time.Minute
 	toolProbePoll       = 250 * time.Millisecond
+	toolProbeEventPoll  = time.Second
 	toolProbeCleanupTTL = 10 * time.Second
 )
 
 // ToolProbeTarget describes one node and namespace where a real tool Pod will
 // run. An empty NodeName lets the scheduler choose a node. PVCName identifies
 // the real volume for result correlation and, unless SkipPVCMount is set,
-// applies its scheduling and mount constraints to that choice.
+// applies its scheduling and mount constraints to that choice. PVC mounts are
+// read-only unless WritablePVCMount is set.
 type ToolProbeTarget struct {
-	Namespace    string
-	NodeName     string
-	PVCName      string
-	SkipPVCMount bool
-	Components   []string
+	Namespace        string
+	NodeName         string
+	PVCName          string
+	SkipPVCMount     bool
+	WritablePVCMount bool
+	Components       []string
 }
 
 // ToolImageProbeOptions controls a preflight Pod that verifies the image can
@@ -177,6 +180,7 @@ func (p *KubernetesToolImageProber) probeTarget(ctx context.Context, image, oper
 	p.outputMu.Lock()
 	logProbeWaiting(options, image, target, created.Name)
 	p.outputMu.Unlock()
+	nextEventCheck := time.Time{}
 	if err := WaitFor(ctx, poll, fmt.Sprintf("tool image probe Pod %s/%s", target.Namespace, created.Name), func(waitCtx context.Context) (bool, error) {
 		current, getErr := p.client.CoreV1().Pods(target.Namespace).Get(waitCtx, created.Name, metav1.GetOptions{})
 		if apierrors.IsNotFound(getErr) {
@@ -198,6 +202,13 @@ func (p *KubernetesToolImageProber) probeTarget(ctx context.Context, image, oper
 			if reason, message, fatal := toolProbePendingFailure(current); fatal {
 				return false, toolProbePodFailureWithMessage(current, image, observedTarget, reason, message)
 			}
+			now := time.Now()
+			if target.PVCName != "" && !target.SkipPVCMount && !now.Before(nextEventCheck) {
+				nextEventCheck = now.Add(toolProbeEventPoll)
+				if reason, message, failed := p.concurrentMountFailure(waitCtx, target.Namespace, created.Name, current.UID); failed {
+					return false, toolProbePodFailureWithMessage(current, image, observedTarget, reason, message)
+				}
+			}
 			return false, nil
 		}
 	}); err != nil {
@@ -216,6 +227,15 @@ func (p *KubernetesToolImageProber) probeTarget(ctx context.Context, image, oper
 		NodeName:         observedTarget.NodeName,
 		ImagePullSecrets: imagePullSecrets,
 	}, nil
+}
+
+func (p *KubernetesToolImageProber) concurrentMountFailure(ctx context.Context, namespace, name string, uid types.UID) (reason, message string, failed bool) {
+	for _, event := range p.probePodEvents(ctx, namespace, name, uid) {
+		if IsConcurrentMountFailureMessage(event.Message) {
+			return strings.TrimSpace(event.Reason), strings.TrimSpace(event.Message), true
+		}
+	}
+	return "", "", false
 }
 
 func (p *KubernetesToolImageProber) cleanupProbePod(namespace, name string, uid types.UID, poll time.Duration) error {
@@ -268,17 +288,27 @@ func (p *KubernetesToolImageProber) probeDiagnostics(namespace, name string, uid
 	if err == nil && pod != nil {
 		parts = append(parts, toolProbePodStatusParts(pod)...)
 	}
-	selector := fields.OneTermEqualSelector("involvedObject.name", name).String()
-	events, err := p.client.CoreV1().Events(namespace).List(ctx, metav1.ListOptions{FieldSelector: selector})
-	if err == nil && events != nil {
-		for _, event := range events.Items {
-			if event.InvolvedObject.Name != name || (uid != "" && event.InvolvedObject.UID != "" && event.InvolvedObject.UID != uid) {
-				continue
-			}
-			parts = append(parts, strings.TrimSpace(event.Reason+": "+event.Message))
-		}
+	for _, event := range p.probePodEvents(ctx, namespace, name, uid) {
+		parts = append(parts, strings.TrimSpace(event.Reason+": "+event.Message))
 	}
 	return joinProbeFailure(parts...)
+}
+
+// probePodEvents is best-effort because event RBAC or API failures must not
+// replace the probe's primary Pod result.
+func (p *KubernetesToolImageProber) probePodEvents(ctx context.Context, namespace, name string, uid types.UID) []corev1.Event {
+	selector := fields.OneTermEqualSelector("involvedObject.name", name).String()
+	events, err := p.client.CoreV1().Events(namespace).List(ctx, metav1.ListOptions{FieldSelector: selector})
+	if err != nil || events == nil {
+		return nil
+	}
+	matched := events.Items[:0]
+	for _, event := range events.Items {
+		if event.InvolvedObject.Name == name && (uid == "" || event.InvolvedObject.UID == "" || event.InvolvedObject.UID == uid) {
+			matched = append(matched, event)
+		}
+	}
+	return matched
 }
 
 func normalizeToolProbeTargets(targets []ToolProbeTarget) ([]ToolProbeTarget, error) {
@@ -288,11 +318,20 @@ func normalizeToolProbeTargets(targets []ToolProbeTarget) ([]ToolProbeTarget, er
 			return nil, domain.NewError(domain.ErrorValidation, "tool image probe", "target namespace is required")
 		}
 		key := target.Namespace + "\x00" + target.NodeName + "\x00" + target.PVCName
-		current := merged[key]
-		current.Namespace = target.Namespace
-		current.NodeName = target.NodeName
-		current.PVCName = target.PVCName
-		current.SkipPVCMount = target.SkipPVCMount
+		current, exists := merged[key]
+		if !exists {
+			current.Namespace = target.Namespace
+			current.NodeName = target.NodeName
+			current.PVCName = target.PVCName
+			current.SkipPVCMount = target.SkipPVCMount
+		} else {
+			// A merged probe must exercise the strictest requested behavior.
+			current.SkipPVCMount = current.SkipPVCMount && target.SkipPVCMount
+		}
+		current.WritablePVCMount = current.WritablePVCMount || target.WritablePVCMount
+		if current.WritablePVCMount {
+			current.SkipPVCMount = false
+		}
 		for _, component := range append([]string{ToolComponentShell}, target.Components...) {
 			if !validToolProbeComponent(component) {
 				return nil, domain.NewError(domain.ErrorValidation, "tool image probe", fmt.Sprintf("unsupported tool component %q", component))
@@ -419,14 +458,15 @@ func toolProbePod(image, operationID string, target ToolProbeTarget, node *corev
 		spec.Tolerations = nodeTolerations(node)
 	}
 	if target.PVCName != "" && !target.SkipPVCMount {
+		readOnly := !target.WritablePVCMount
 		spec.Volumes = []corev1.Volume{{
 			Name: "source-pvc",
 			VolumeSource: corev1.VolumeSource{PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
 				ClaimName: target.PVCName,
-				ReadOnly:  true,
+				ReadOnly:  readOnly,
 			}},
 		}}
-		spec.Containers[0].VolumeMounts = []corev1.VolumeMount{{Name: "source-pvc", MountPath: "/probe-volume", ReadOnly: true}}
+		spec.Containers[0].VolumeMounts = []corev1.VolumeMount{{Name: "source-pvc", MountPath: "/probe-volume", ReadOnly: readOnly}}
 	}
 	annotations := map[string]string{
 		"pvc-migrate.io/tool-components": strings.Join(target.Components, ","),
@@ -546,6 +586,25 @@ func toolProbePendingFailure(pod *corev1.Pod) (reason, message string, fatal boo
 		}
 	}
 	return "", "", false
+}
+
+// IsConcurrentMountFailureMessage identifies deterministic CSI or filesystem
+// exclusivity failures that cannot recover while the source Pod keeps its mount.
+func IsConcurrentMountFailureMessage(message string) bool {
+	message = strings.ToLower(message)
+	for _, fragment := range []string{
+		"already mounted",
+		"multi-attach",
+		"already in use by another pod",
+		"already in use by pod",
+		"readwriteoncepod access mode",
+		"volume is already exclusively attached",
+	} {
+		if strings.Contains(message, fragment) {
+			return true
+		}
+	}
+	return false
 }
 
 func joinProbeFailure(parts ...string) string {

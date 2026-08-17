@@ -138,7 +138,7 @@ func TestTableSessionRendersSyncAndActivationState(t *testing.T) {
 				{SourcePVC: domain.ObjectReference{Name: "data"}, DestinationPV: domain.ObjectReference{Name: "pv-new"}},
 				{SourcePVC: domain.ObjectReference{Name: "logs"}, DestinationPV: domain.ObjectReference{Name: "pv-logs"}},
 			},
-		}, domain.WorkloadSpec{Adapter: domain.WorkloadNone}, false),
+		}, domain.WorkloadSpec{Adapter: domain.WorkloadNone}, false, domain.SessionWorkflowOptions{}),
 		Status: domain.SessionStatus{
 			Phase:     domain.PhaseActivated,
 			UpdatedAt: warm,
@@ -166,7 +166,7 @@ func TestTableSessionShowsSourcePVAfterRollback(t *testing.T) {
 		ID: "mig-rollback",
 		Spec: domain.NewSessionSpec(domain.OperationMigrate, domain.SessionCommon{Volumes: []domain.VolumeSpec{{
 			SourcePV: domain.ObjectReference{Name: "pv-source"}, DestinationPV: domain.ObjectReference{Name: "pv-destination"},
-		}}}, domain.WorkloadSpec{Adapter: domain.WorkloadNone}, false),
+		}}}, domain.WorkloadSpec{Adapter: domain.WorkloadNone}, false, domain.SessionWorkflowOptions{}),
 		Status: domain.SessionStatus{
 			Phase: domain.PhaseRolledBack, UpdatedAt: now,
 			Volumes: []domain.VolumeStatus{{
@@ -190,7 +190,7 @@ func TestTableRenameShowsReboundSourcePV(t *testing.T) {
 		ID: "rename",
 		Spec: domain.NewSessionSpec(domain.OperationRename, domain.SessionCommon{Volumes: []domain.VolumeSpec{{
 			SourcePV: domain.ObjectReference{Name: "pv-rebound"},
-		}}}, domain.WorkloadSpec{Adapter: domain.WorkloadNone}, false),
+		}}}, domain.WorkloadSpec{Adapter: domain.WorkloadNone}, false, domain.SessionWorkflowOptions{}),
 		Status: domain.SessionStatus{
 			Phase: domain.PhaseCompleted, UpdatedAt: now,
 			Volumes: []domain.VolumeStatus{{SourcePVCName: "data", Activation: domain.ActivationState{ActivatedAt: &now}}},
@@ -209,7 +209,7 @@ func TestTableSessionListAndGenericFallback(t *testing.T) {
 	updated := metav1.NewTime(time.Date(2026, 8, 7, 1, 2, 3, 0, time.UTC))
 	sessions := []*domain.Session{{
 		ID:     "mig-1",
-		Spec:   domain.NewSessionSpec(domain.OperationRename, domain.SessionCommon{SourceNamespace: "app"}, domain.WorkloadSpec{Adapter: domain.WorkloadNone}, false),
+		Spec:   domain.NewSessionSpec(domain.OperationRename, domain.SessionCommon{SourceNamespace: "app"}, domain.WorkloadSpec{Adapter: domain.WorkloadNone}, false, domain.SessionWorkflowOptions{}),
 		Status: domain.SessionStatus{Phase: domain.PhaseCompleted, UpdatedAt: updated},
 	}}
 	var table bytes.Buffer

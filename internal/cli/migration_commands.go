@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"strings"
 	"time"
 
 	"github.com/labring-sigs/pvc-migrate/internal/domain"
@@ -12,25 +13,26 @@ import (
 )
 
 type migrationFlags struct {
-	sessionID            string
-	sourceNamespace      string
-	temporaryNamespace   string
-	destinationNamespace string
-	sourcePVCs           []string
-	destinationPVCs      []string
-	podName              string
-	sourceNode           string
-	targetNode           string
-	destinationClass     string
-	capacityAwareness    string
-	strategies           []string
-	verifyChecksum       bool
-	deleteExtraneous     bool
-	switchoverCandidate  string
-	allowLeaderDowntime  bool
-	forceReprovision     bool
-	precopyPasses        int
-	online               bool
+	sessionID              string
+	sourceNamespace        string
+	temporaryNamespace     string
+	destinationNamespace   string
+	sourcePVCs             []string
+	destinationPVCs        []string
+	podName                string
+	sourceNode             string
+	targetNode             string
+	destinationClass       string
+	capacityAwareness      string
+	strategies             []string
+	verifyChecksum         bool
+	deleteExtraneous       bool
+	switchoverCandidate    string
+	allowLeaderDowntime    bool
+	forceReprovision       bool
+	precopyPasses          int
+	openEBSLVMEnableShared bool
+	online                 bool
 }
 
 func (f *migrationFlags) bind(command *cobra.Command, includePod, includeSourceNode, includeController, includePrecopy bool) {
@@ -52,6 +54,7 @@ func (f *migrationFlags) bind(command *cobra.Command, includePod, includeSourceN
 	flags.BoolVar(&f.deleteExtraneous, "delete-extraneous", true, "Delete destination files absent from the source")
 	if includePrecopy {
 		flags.IntVar(&f.precopyPasses, "precopy-passes", 1, "Warm-copy passes before workload pause")
+		flags.BoolVar(&f.openEBSLVMEnableShared, "openebs-lvm-enable-shared", false, "Temporarily set existing OpenEBS LVMVolume spec.shared=yes for warm copy, then restore it")
 	}
 	if includePod {
 		podDescription := "Pod whose PVCs define the operation set"
@@ -91,28 +94,30 @@ func (f *migrationFlags) planOptions(state *rootState, operation domain.Operatio
 		temporaryNamespace = f.temporaryNamespace
 	}
 	return planner.Options{
-		SessionID:            id,
-		Operation:            operation,
-		SourceNamespace:      f.sourceNamespace,
-		TemporaryNamespace:   temporaryNamespace,
-		DestinationNamespace: destinationNamespace,
-		SessionNamespace:     state.global.sessionNamespace,
-		StagingNamespace:     stagingNamespace,
-		SourcePVCs:           append([]string(nil), f.sourcePVCs...),
-		DestinationPVCs:      append([]string(nil), f.destinationPVCs...),
-		PodName:              f.podName,
-		SourceNode:           f.sourceNode,
-		TargetNode:           f.targetNode,
-		ToolImage:            state.global.toolImage,
-		DestinationClass:     f.destinationClass,
-		CapacityAwareness:    domain.CapacityAwareness(f.capacityAwareness),
-		Strategies:           append([]string(nil), f.strategies...),
-		Online:               f.online,
-		VerifyChecksum:       f.verifyChecksum,
-		DeleteExtraneous:     f.deleteExtraneous,
-		SwitchoverCandidate:  f.switchoverCandidate,
-		AllowLeaderDowntime:  f.allowLeaderDowntime,
-		ForceReprovision:     f.forceReprovision,
+		SessionID:              id,
+		Operation:              operation,
+		SourceNamespace:        f.sourceNamespace,
+		TemporaryNamespace:     temporaryNamespace,
+		DestinationNamespace:   destinationNamespace,
+		SessionNamespace:       state.global.sessionNamespace,
+		StagingNamespace:       stagingNamespace,
+		SourcePVCs:             append([]string(nil), f.sourcePVCs...),
+		DestinationPVCs:        append([]string(nil), f.destinationPVCs...),
+		PodName:                f.podName,
+		SourceNode:             f.sourceNode,
+		TargetNode:             f.targetNode,
+		ToolImage:              state.global.toolImage,
+		DestinationClass:       f.destinationClass,
+		CapacityAwareness:      domain.CapacityAwareness(f.capacityAwareness),
+		Strategies:             append([]string(nil), f.strategies...),
+		Online:                 f.online,
+		VerifyChecksum:         f.verifyChecksum,
+		DeleteExtraneous:       f.deleteExtraneous,
+		SwitchoverCandidate:    f.switchoverCandidate,
+		AllowLeaderDowntime:    f.allowLeaderDowntime,
+		ForceReprovision:       f.forceReprovision,
+		PrecopyPasses:          f.precopyPasses,
+		OpenEBSLVMEnableShared: f.openEBSLVMEnableShared,
 	}, nil
 }
 
@@ -125,6 +130,9 @@ func (r *rootState) newMigrationPlanCommand(operation domain.Operation, useTempo
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			if operation == domain.OperationMigratePod && flags.podName == "" {
 				return domain.NewError(domain.ErrorValidation, "migrate-pod plan", "--pod is required")
+			}
+			if flags.precopyPasses < 0 {
+				return domain.NewError(domain.ErrorValidation, "plan", "--precopy-passes cannot be negative")
 			}
 			if flags.podName != "" && len(flags.sourcePVCs) > 0 {
 				return domain.NewError(domain.ErrorValidation, "plan", "--source-pvc cannot be combined with --pod; the Pod PVC set is migrated as one unit")
@@ -289,7 +297,7 @@ func (r *rootState) newCopyCommand() *cobra.Command {
 					if err := runtime.service.ValidateReservation(ctx, session); err != nil {
 						return reportSessionError(cmd, session, err)
 					}
-					return printSessionResult(cmd, runtime, session)
+					return printCopyDryRunResult(cmd, runtime, session, flags)
 				}
 				return printPlanResult(cmd, runtime, plan)
 			}
@@ -331,6 +339,25 @@ func prepareCopySession(session *domain.Session, flags *migrationFlags) error {
 		options.SourceNode = flags.sourceNode
 	}
 	return nil
+}
+
+func printCopyDryRunResult(cmd *cobra.Command, runtime *commandRuntime, session *domain.Session, flags *migrationFlags) error {
+	if err := runtime.printer.Print(session); err != nil {
+		return err
+	}
+	args := []string{
+		sessionCommandPrefixForCommand(cmd, session.Spec.SessionNamespace),
+		"copy", "--session", shellQuote(session.ID),
+	}
+	if flags.online {
+		args = append(args, "--online")
+	}
+	if flags.sourceNode != "" {
+		args = append(args, "--source-node", shellQuote(flags.sourceNode))
+	}
+	args = append(args, "--dry-run=false")
+	_, err := fmt.Fprintf(cmd.ErrOrStderr(), "\nCopy validation passed without persistent changes. The displayed Copy spec is a preview. Execute:\n  %s\n", strings.Join(args, " "))
+	return err
 }
 
 func (r *rootState) newFinalSyncCommand() *cobra.Command {
@@ -512,7 +539,7 @@ func (r *rootState) newMigrateCommand(podMode bool) *cobra.Command {
 			if err != nil {
 				return reportSessionCreationError(cmd, plan.SessionNamespace, plan.SessionID, err)
 			}
-			if err := runtime.service.Migrate(ctx, session, flags.precopyPasses); err != nil {
+			if err := runtime.service.Migrate(ctx, session); err != nil {
 				return reportSessionError(cmd, session, err)
 			}
 			return printSessionResult(cmd, runtime, session)
@@ -523,7 +550,7 @@ func (r *rootState) newMigrateCommand(podMode bool) *cobra.Command {
 		flags.bindForceReprovision(command)
 	}
 	bindDryRun(command, &dryRun)
-	command.AddCommand(r.newMigrationPlanCommand(operation, true, true, true, true, false, false))
+	command.AddCommand(r.newMigrationPlanCommand(operation, true, true, true, true, true, false))
 	return command
 }
 
@@ -586,23 +613,18 @@ func requireReady(plan *domain.MigrationPlan) error {
 	return domain.NewError(domain.ErrorPrecondition, "plan", "migration plan contains failed checks")
 }
 
-func requireReadyWithOutput(runtime *commandRuntime, plan *domain.MigrationPlan, guidance ...io.Writer) error {
+func requireReadyWithOutput(runtime *commandRuntime, plan *domain.MigrationPlan, guidance io.Writer) error {
 	if plan.Ready {
 		return nil
 	}
 	if err := runtime.printer.Print(plan); err != nil {
 		return err
 	}
-	for _, writer := range guidance {
-		if writer == nil {
-			continue
-		}
-		if _, err := fmt.Fprintln(writer, "\nNo session or migration resources were created. Resolve the failed plan checks, then rerun the command."); err != nil {
-			return err
-		}
-		if err := writePlanFailureGuidance(writer, plan); err != nil {
-			return err
-		}
+	if _, err := fmt.Fprintln(guidance, "\nNo session or migration resources were created. Resolve the failed plan checks, then rerun the command."); err != nil {
+		return err
+	}
+	if err := writePlanFailureGuidance(guidance, plan); err != nil {
+		return err
 	}
 	return requireReady(plan)
 }

@@ -93,7 +93,9 @@ func TestColorizeSessionGuidanceByAction(t *testing.T) {
 		"  Verify workload and active PVCs before closing the rollback window.\n" +
 		"  Validate rollback: pvc-migrate session rollback mig-test --dry-run\n" +
 		"  Roll back: pvc-migrate --yes session rollback mig-test --dry-run=false\n" +
-		"  Finalize and delete retained resources/session: pvc-migrate --yes session cleanup mig-test --dry-run=false\n"
+		"  Finalize and delete retained resources/session: pvc-migrate --yes session cleanup mig-test --dry-run=false\n" +
+		"Cleanup action for PVC system/data:\n" +
+		"  Delete terminal Pod object: kubectl --namespace system delete pod copy-tool\n"
 	output := string(colorizeLogText([]byte(input)))
 	for _, want := range []string{
 		"\x1b[1;36mNext steps for session mig-test (phase \x1b[0m",
@@ -104,6 +106,8 @@ func TestColorizeSessionGuidanceByAction(t *testing.T) {
 		"\x1b[1;33mValidate rollback:\x1b[0m pvc-migrate",
 		"\x1b[1;31mRoll back:\x1b[0m pvc-migrate",
 		"\x1b[1;31mFinalize and delete retained resources/session:\x1b[0m pvc-migrate",
+		"\x1b[1;33mCleanup action for PVC system/data:\x1b[0m",
+		"\x1b[1;31mDelete terminal Pod object:\x1b[0m kubectl",
 	} {
 		if !strings.Contains(output, want) {
 			t.Fatalf("colored guidance lacks %q: %q", want, output)

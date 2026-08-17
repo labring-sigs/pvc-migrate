@@ -32,13 +32,9 @@ const (
 // writeSessionGuidance keeps operational instructions on stderr so JSON and
 // YAML stdout remain one parseable document. Every destructive command is
 // shown with its dry-run form first and explicit approval on execution.
-func writeSessionGuidance(w io.Writer, session *domain.Session, supplied ...guidancePrefixes) error {
+func writeSessionGuidance(w io.Writer, session *domain.Session, prefixes guidancePrefixes) error {
 	if session == nil {
 		return nil
-	}
-	prefixes := guidancePrefixes{pvcMigrate: sessionCommandPrefix(session.Spec.SessionNamespace), kubectl: "kubectl"}
-	if len(supplied) > 0 {
-		prefixes = supplied[0]
 	}
 	prefix := prefixes.pvcMigrate
 	status := fmt.Sprintf("%s session status %s", prefix, session.ID)
@@ -255,6 +251,14 @@ func printSessionResult(cmd interface {
 }
 
 func reportSessionError(cmd interface{ ErrOrStderr() io.Writer }, session *domain.Session, err error) error {
+	var blocker *app.CleanupPodBlockerError
+	if errors.As(err, &blocker) {
+		_ = writeCleanupPodBlockerGuidance(cmd.ErrOrStderr(), cmd, blocker)
+	}
+	if session != nil && errorHasOperation(err, "warm-copy mount probe") {
+		_ = writeWarmCopyMountGuidance(cmd.ErrOrStderr(), cmd, session)
+		return err
+	}
 	if session != nil {
 		_ = writeSessionGuidance(cmd.ErrOrStderr(), session, guidancePrefixesForCommand(cmd, session.Spec.SessionNamespace))
 	}
@@ -297,11 +301,7 @@ func reportTransferError(cmd interface{ ErrOrStderr() io.Writer }, operation, na
 	return err
 }
 
-func writeTransferDryRunGuidance(w io.Writer, operation, namespace, pvc string, supplied ...string) error {
-	kubectlPrefix := "kubectl"
-	if len(supplied) > 0 {
-		kubectlPrefix = supplied[0]
-	}
+func writeTransferDryRunGuidance(w io.Writer, operation, namespace, pvc, kubectlPrefix string) error {
 	_, err := fmt.Fprintf(w, "\n%s dry-run completed without cluster mutations. Inspect the PVC with %s --namespace %s get pvc %s, then run the write command with --dry-run=false.\n", operation, kubectlPrefix, namespace, pvc)
 	return err
 }
@@ -315,6 +315,10 @@ func reportSessionCreationError(cmd interface{ ErrOrStderr() io.Writer }, namesp
 }
 
 func reportCleanupError(cmd interface{ ErrOrStderr() io.Writer }, session *domain.Session, options app.CleanupOptions, err error) error {
+	var blocker *app.CleanupPodBlockerError
+	if errors.As(err, &blocker) {
+		_ = writeCleanupPodBlockerGuidance(cmd.ErrOrStderr(), cmd, blocker)
+	}
 	deleteRecordFailed := errorHasOperation(err, "delete session", "delete session lock")
 	if session != nil && options.DeleteSession && deleteRecordFailed {
 		prefixes := guidancePrefixesForCommand(cmd, session.Spec.SessionNamespace)
@@ -330,6 +334,86 @@ func reportCleanupError(cmd interface{ ErrOrStderr() io.Writer }, session *domai
 		return err
 	}
 	return reportSessionError(cmd, session, err)
+}
+
+func writeWarmCopyMountGuidance(w io.Writer, command any, session *domain.Session) error {
+	if session == nil {
+		return nil
+	}
+	prefixes := guidancePrefixesForCommand(command, session.Spec.SessionNamespace)
+	abortArgs := fmt.Sprintf("session abort %s", session.ID)
+	cleanupArgs := cleanupCommandArgsForOptions(session.ID, app.CleanupOptions{
+		DeleteTemporary: true,
+		DeleteRollback:  true,
+		Finalize:        true,
+		DeleteSession:   true,
+	})
+	if _, err := fmt.Fprintln(w, "\nWarm-copy mount compatibility failed before the protected cutover began."); err != nil {
+		return err
+	}
+	if err := writeSessionInspection(w, session, prefixes.kubectl); err != nil {
+		return err
+	}
+	if _, err := fmt.Fprintf(w, "  Validate abort: %s %s --dry-run\n", prefixes.pvcMigrate, abortArgs); err != nil {
+		return err
+	}
+	if _, err := fmt.Fprintf(w, "  Abort the pre-cutover session: %s --yes %s --dry-run=false\n", prefixes.pvcMigrate, abortArgs); err != nil {
+		return err
+	}
+	if _, err := fmt.Fprintf(w, "  Validate cleanup after abort: %s %s --dry-run\n", prefixes.pvcMigrate, cleanupArgs); err != nil {
+		return err
+	}
+	if _, err := fmt.Fprintf(w, "  Delete retained resources/session after abort: %s --yes %s --dry-run=false\n", prefixes.pvcMigrate, cleanupArgs); err != nil {
+		return err
+	}
+	retry := "Rerun the original migration with --precopy-passes 0 after cleanup completes."
+	if session.Spec.Operation() == domain.OperationCopy {
+		retry = "Rerun the original copy without --online after cleanup completes and the source PVC has no active Pod consumers."
+	}
+	if _, err := fmt.Fprintln(w, "  "+retry); err != nil {
+		return err
+	}
+	return nil
+}
+
+func writeCleanupPodBlockerGuidance(w io.Writer, command any, blocker *app.CleanupPodBlockerError) error {
+	if blocker == nil {
+		return nil
+	}
+	kubectlPrefix := kubectlCommandPrefixForCommand(command)
+	if _, err := fmt.Fprintf(w, "\nCleanup action for PVC %s/%s:\n", blocker.PVCNamespace, blocker.PVCName); err != nil {
+		return err
+	}
+	if _, err := fmt.Fprintf(w, "  Inspect blocking Pod: %s --namespace %s get pod %s -o wide\n", kubectlPrefix, blocker.PodNamespace, blocker.PodName); err != nil {
+		return err
+	}
+	if blocker.OwnerKind != "" && blocker.OwnerName != "" {
+		resource := strings.ToLower(blocker.OwnerKind)
+		if _, err := fmt.Fprintf(w, "  Inspect owning %s: %s --namespace %s get %s %s -o wide\n", blocker.OwnerKind, kubectlPrefix, blocker.PodNamespace, resource, blocker.OwnerName); err != nil {
+			return err
+		}
+		if blocker.SessionOwned && blocker.OwnerVerified {
+			if _, err := fmt.Fprintf(w, "  Delete owning migration %s and its Pod(s): %s --namespace %s delete %s %s --ignore-not-found=true --wait=true\n", blocker.OwnerKind, kubectlPrefix, blocker.PodNamespace, resource, blocker.OwnerName); err != nil {
+				return err
+			}
+		} else if blocker.SessionOwned {
+			if _, err := fmt.Fprintf(w, "  The current %s/%s UID could not be verified against the Pod owner reference; inspect it before deleting any controller.\n", blocker.OwnerKind, blocker.OwnerName); err != nil {
+				return err
+			}
+		} else if _, err := fmt.Fprintf(w, "  Pod recreation is controlled by %s/%s; stop or remove that controller after verifying it is safe.\n", blocker.OwnerKind, blocker.OwnerName); err != nil {
+			return err
+		}
+	}
+	label := "Delete blocking Pod object"
+	if blocker.Terminal {
+		label = "Delete terminal Pod object"
+	} else if blocker.OwnerKind != "" && !blocker.SessionOwned {
+		label = "Delete blocking Pod after its controller is stopped"
+	}
+	if _, err := fmt.Fprintf(w, "  %s: %s --namespace %s delete pod %s --ignore-not-found=true --wait=true\n", label, kubectlPrefix, blocker.PodNamespace, blocker.PodName); err != nil {
+		return err
+	}
+	return nil
 }
 
 func errorHasOperation(err error, operations ...string) bool {
@@ -413,6 +497,13 @@ func writePlanFailureGuidance(w io.Writer, plan *domain.MigrationPlan) error {
 			advice = "Storage action: choose a compatible StorageClass or target node, then verify topology and capacity before rerunning the plan."
 		case check.Name == "migration-needed":
 			advice = "Migration action: the requested node and StorageClass already match; use --force-reprovision only for an intentional backing-PV replacement."
+		case check.Name == "warm-copy-mount" && plan.SessionSpec.Operation() == domain.OperationCopy:
+			advice = "Copy action: stop all active PVC consumers and rerun without --online, or use storage that explicitly supports a second same-node Pod mount."
+		case check.Name == "warm-copy-mount":
+			advice = "Warm-copy action: rerun with --precopy-passes 0 for offline final sync, or use storage that explicitly supports a second same-node Pod mount."
+			if strings.Contains(check.Message, "local.csi.openebs.io") {
+				advice = "OpenEBS LVM action: rerun with --precopy-passes 0 for offline final sync, or explicitly pass --openebs-lvm-enable-shared to temporarily patch the matching LVMVolume before the mount probe."
+			}
 		}
 		if advice == "" {
 			continue
@@ -513,11 +604,7 @@ func shellQuoteFor(value string, shell guidanceShell) string {
 	return "'" + strings.ReplaceAll(value, "'", `'"'"'`) + "'"
 }
 
-func writeSessionListGuidance(w io.Writer, namespace string, sessions []*domain.Session, supplied ...string) error {
-	prefix := sessionCommandPrefix(namespace)
-	if len(supplied) > 0 {
-		prefix = supplied[0]
-	}
+func writeSessionListGuidance(w io.Writer, namespace string, sessions []*domain.Session, prefix string) error {
 	if len(sessions) == 0 {
 		_, err := fmt.Fprintf(w, "\nNo migration sessions found in %s.\n", namespace)
 		return err

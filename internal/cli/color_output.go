@@ -193,11 +193,11 @@ func guidanceLabelColor(label string) string {
 	switch {
 	case strings.HasPrefix(normalized, "record"), strings.HasPrefix(normalized, "inspect"), strings.HasPrefix(normalized, "verify"):
 		return "36"
-	case strings.HasPrefix(normalized, "validate"):
+	case strings.HasPrefix(normalized, "validate"), strings.HasPrefix(normalized, "cleanup action"):
 		return "1;33"
 	case strings.HasPrefix(normalized, "continue"), strings.HasPrefix(normalized, "resume"), strings.HasPrefix(normalized, "keep"):
 		return "1;32"
-	case strings.HasPrefix(normalized, "abort"), strings.HasPrefix(normalized, "roll back"), strings.HasPrefix(normalized, "finalize"), strings.HasPrefix(normalized, "discard"), strings.HasPrefix(normalized, "close retained"):
+	case strings.HasPrefix(normalized, "abort"), strings.HasPrefix(normalized, "roll back"), strings.HasPrefix(normalized, "finalize"), strings.HasPrefix(normalized, "discard"), strings.HasPrefix(normalized, "close retained"), strings.HasPrefix(normalized, "delete"):
 		return "1;31"
 	default:
 		return ""

@@ -416,7 +416,7 @@ func TestPlanOrphanCleanupRejectsUnsafeStates(t *testing.T) {
 			rollback, _ := client.CoreV1().PersistentVolumes().Get(context.Background(), "pv-rollback", metav1.GetOptions{})
 			test.mutate(pvc, active, rollback)
 			if test.name == "session exists" {
-				session := domain.NewSession(options.SessionID, domain.NewSessionSpec(domain.OperationMigrate, domain.SessionCommon{SourceNamespace: "app", TemporaryNamespace: "system", DestinationNamespace: "app", SessionNamespace: "system", Volumes: []domain.VolumeSpec{{SourcePVC: domain.ObjectReference{Namespace: "app", Name: "data"}, SourcePV: domain.ObjectReference{Name: "pv-active"}}}}, domain.WorkloadSpec{Adapter: domain.WorkloadNone}, false), time.Now())
+				session := domain.NewSession(options.SessionID, domain.NewSessionSpec(domain.OperationMigrate, domain.SessionCommon{SourceNamespace: "app", TemporaryNamespace: "system", DestinationNamespace: "app", SessionNamespace: "system", Volumes: []domain.VolumeSpec{{SourcePVC: domain.ObjectReference{Namespace: "app", Name: "data"}, SourcePV: domain.ObjectReference{Name: "pv-active"}}}}, domain.WorkloadSpec{Adapter: domain.WorkloadNone}, false, domain.SessionWorkflowOptions{}), time.Now())
 				if err := kube.NewConfigMapSessionStore(client).Create(context.Background(), session); err != nil {
 					t.Fatal(err)
 				}

@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	corev1 "k8s.io/api/core/v1"
+	storagev1 "k8s.io/api/storage/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
@@ -51,5 +52,21 @@ func TestLoadPlanInventoryKeepsPVCPVAndStorageClassIndexes(t *testing.T) {
 	}
 	if inventory.targetNode == nil || inventory.targetNode.Name != "node-b" || inventory.targetNodeErr != nil {
 		t.Fatalf("target node result: node=%v err=%v", inventory.targetNode, inventory.targetNodeErr)
+	}
+}
+
+func TestLoadPlanInventoryLoadsSourceAndExplicitDestinationClasses(t *testing.T) {
+	objects := plannerObjects("2Gi")
+	destinationClass := &storagev1.StorageClass{ObjectMeta: metav1.ObjectMeta{Name: "archive"}, Provisioner: "archive.example.io"}
+	objects = append(objects, destinationClass)
+
+	inventory := New(plannerClient(objects...), nil).loadPlanInventory(context.Background(), Options{
+		SourceNamespace:  "app",
+		DestinationClass: destinationClass.Name,
+	}, []string{"data"}, false)
+	for _, name := range []string{"fast", destinationClass.Name} {
+		if inventory.storageClasses[name] == nil || inventory.storageClassError[name] != nil {
+			t.Fatalf("StorageClass %s result: classes=%v errors=%v", name, inventory.storageClasses, inventory.storageClassError)
+		}
 	}
 }

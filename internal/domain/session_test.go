@@ -22,7 +22,7 @@ func testSession(t *testing.T) *Session {
 			SourcePVCSpec:  corev1.PersistentVolumeClaimSpec{},
 			DestinationPVC: ObjectReference{Name: "target", Namespace: "pvc-migrate-system"},
 		}},
-	}, WorkloadSpec{Adapter: WorkloadNone}, false), time.Unix(100, 0))
+	}, WorkloadSpec{Adapter: WorkloadNone}, false, SessionWorkflowOptions{PrecopyPasses: 1}), time.Unix(100, 0))
 }
 
 func TestSessionSpecUsesConcretePayload(t *testing.T) {
@@ -30,7 +30,7 @@ func TestSessionSpecUsesConcretePayload(t *testing.T) {
 		SourceNamespace: "app", TemporaryNamespace: "system", DestinationNamespace: "app", SessionNamespace: "system",
 		Volumes: []VolumeSpec{{SourcePVC: ObjectReference{Namespace: "app", Name: "data"}}},
 	}
-	spec := NewSessionSpec(OperationCopy, common, WorkloadSpec{Adapter: WorkloadNone}, true)
+	spec := NewSessionSpec(OperationCopy, common, WorkloadSpec{Adapter: WorkloadNone}, true, SessionWorkflowOptions{})
 	if spec.Type != SessionTypeCopy || spec.Copy == nil || !spec.Copy.Online || spec.Migrate != nil || spec.Rename != nil || spec.Move != nil {
 		t.Fatalf("copy payload = %#v", spec)
 	}
@@ -55,9 +55,9 @@ func TestSessionWorkflowOptionsArePersistedInsideConcretePayload(t *testing.T) {
 		Volumes: []VolumeSpec{{SourcePVC: ObjectReference{Namespace: "app", Name: "data"}}},
 	}
 	spec := NewSessionSpec(OperationMigrate, common, WorkloadSpec{Adapter: WorkloadNone}, false, SessionWorkflowOptions{
-		SourceNode: "source-node", TargetNode: "target-node", ToolImage: "registry.example/pvc-migrate:aio", Strategies: []string{"mount", "clusterip"}, VerifyChecksum: true, DeleteExtraneous: true,
+		SourceNode: "source-node", TargetNode: "target-node", ToolImage: "registry.example/pvc-migrate:aio", Strategies: []string{"mount", "clusterip"}, VerifyChecksum: true, DeleteExtraneous: true, PrecopyPasses: 2, OpenEBSLVMEnableShared: true,
 	})
-	if got := spec.WorkflowOptions(); got.SourceNode != "source-node" || got.TargetNode != "target-node" || got.ToolImage != "registry.example/pvc-migrate:aio" || !got.VerifyChecksum || !got.DeleteExtraneous || len(got.Strategies) != 2 || got.Strategies[0] != "mount" || got.Strategies[1] != "clusterip" {
+	if got := spec.WorkflowOptions(); got.SourceNode != "source-node" || got.TargetNode != "target-node" || got.ToolImage != "registry.example/pvc-migrate:aio" || !got.VerifyChecksum || !got.DeleteExtraneous || got.PrecopyPasses != 2 || !got.OpenEBSLVMEnableShared || len(got.Strategies) != 2 || got.Strategies[0] != "mount" || got.Strategies[1] != "clusterip" {
 		t.Fatalf("workflow options = %#v", got)
 	}
 	raw, err := json.Marshal(spec)
@@ -75,7 +75,7 @@ func TestSessionWorkflowOptionsArePersistedInsideConcretePayload(t *testing.T) {
 	if err := json.Unmarshal(document["migrate"], &payload); err != nil {
 		t.Fatal(err)
 	}
-	for _, field := range []string{"sourceNode", "targetNode", "toolImage", "strategies", "verifyChecksum", "deleteExtraneous", "workload"} {
+	for _, field := range []string{"sourceNode", "targetNode", "toolImage", "strategies", "verifyChecksum", "deleteExtraneous", "precopyPasses", "openebsLvmEnableShared", "workload"} {
 		if _, exists := payload[field]; !exists {
 			t.Fatalf("migration payload lacks %s: %s", field, raw)
 		}
@@ -94,6 +94,17 @@ func TestSessionWorkflowOptionsCloneStrategies(t *testing.T) {
 	options.Strategies[1] = "mutated"
 	if got := spec.WorkflowOptions().Strategies[1]; got != "clusterip" {
 		t.Fatalf("value accessor exposed payload slice: %q", got)
+	}
+}
+
+func TestSessionTracksCompletedWarmPasses(t *testing.T) {
+	session := testSession(t)
+	if got := session.Status.WarmPassesCompleted; got != 0 {
+		t.Fatalf("initial completed warm passes=%d", got)
+	}
+	session.CompleteWarmPass()
+	if got := session.Status.WarmPassesCompleted; got != 1 {
+		t.Fatalf("completed warm passes=%d", got)
 	}
 }
 
@@ -146,7 +157,7 @@ func TestSessionRejectsUnsafeTransition(t *testing.T) {
 
 func TestMoveSessionUsesDedicatedRebindPhase(t *testing.T) {
 	session := testSession(t)
-	session.Spec = NewSessionSpec(OperationMove, session.Spec.SessionCommon, WorkloadSpec{Adapter: WorkloadNone}, false)
+	session.Spec = NewSessionSpec(OperationMove, session.Spec.SessionCommon, WorkloadSpec{Adapter: WorkloadNone}, false, SessionWorkflowOptions{})
 	session.Spec.SourceNamespace = "app"
 	session.Spec.DestinationNamespace = "archive"
 	if err := session.Transition(PhaseMoving, "move", time.Now()); err != nil {

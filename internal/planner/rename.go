@@ -256,7 +256,7 @@ func (p *Planner) PlanRename(ctx context.Context, options RenameOptions) (*domai
 		DestinationNamespace: options.DestinationNamespace,
 		SessionNamespace:     options.SessionNamespace,
 		Volumes:              []domain.VolumeSpec{volume},
-	}, domain.WorkloadSpec{Adapter: domain.WorkloadNone}, false)
+	}, domain.WorkloadSpec{Adapter: domain.WorkloadNone}, false, domain.SessionWorkflowOptions{})
 	p.logInfo("validating PVC identity cluster policies", "session", options.SessionID, "sourceNamespace", options.SourceNamespace, "destinationNamespace", options.DestinationNamespace)
 	runPlanCheckTasks(plan, []planCheckTask{
 		func(result *domain.MigrationPlan) {
