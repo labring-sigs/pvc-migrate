@@ -1370,6 +1370,56 @@ func podReference(pod *corev1.Pod) domain.ObjectReference {
 	return objectReference(domain.CoreAPIVersion, domain.KindPod, pod.Namespace, pod.Name, pod.UID, pod.ResourceVersion)
 }
 
+// waitForResumedPod fences readiness to the controller-owned Pod name and
+// refreshes every session reference for that name. Controllers commonly
+// recreate a Pod during resume, so retaining the paused Pod UID would make a
+// later pause or rollback reject the healthy replacement as an unsafe drift.
+func (m *Manager) waitForResumedPod(ctx context.Context, session *domain.Session, ref, controller domain.ObjectReference, operation string) error {
+	if session == nil || session.Spec.WorkloadPtr() == nil {
+		return domain.NewError(domain.ErrorValidation, operation, "session workload is required")
+	}
+	var ready *corev1.Pod
+	if err := m.waitFor(ctx, fmt.Sprintf("Pod %s/%s readiness", ref.Namespace, ref.Name), func(waitCtx context.Context) (bool, error) {
+		pod, err := m.typed.CoreV1().Pods(ref.Namespace).Get(waitCtx, ref.Name, metav1.GetOptions{})
+		if apierrors.IsNotFound(err) {
+			return false, nil
+		}
+		if err != nil {
+			return false, err
+		}
+		if err := validatePodController(pod, controller, operation); err != nil {
+			return false, err
+		}
+		if !podReady(pod) {
+			return false, nil
+		}
+		ready = pod.DeepCopy()
+		return true, nil
+	}); err != nil {
+		return err
+	}
+	if ready == nil {
+		return domain.NewError(domain.ErrorKubernetes, operation, fmt.Sprintf("Pod %s/%s readiness wait returned no Pod", ref.Namespace, ref.Name))
+	}
+	refreshResumedPodReference(session.Spec.WorkloadPtr(), ref, ready)
+	return nil
+}
+
+func refreshResumedPodReference(workload *domain.WorkloadSpec, previous domain.ObjectReference, pod *corev1.Pod) {
+	if workload == nil || pod == nil {
+		return
+	}
+	updated := podReference(pod)
+	if workload.Pod.Namespace == previous.Namespace && workload.Pod.Name == previous.Name {
+		workload.Pod = updated
+	}
+	for index := range workload.AffectedPods {
+		if workload.AffectedPods[index].Namespace == previous.Namespace && workload.AffectedPods[index].Name == previous.Name {
+			workload.AffectedPods[index] = updated
+		}
+	}
+}
+
 func objectReference(apiVersion, kind, namespace, name string, uid types.UID, resourceVersion string) domain.ObjectReference {
 	return domain.ObjectReference{APIVersion: apiVersion, Kind: kind, Namespace: namespace, Name: name, UID: uid, ResourceVersion: resourceVersion}
 }
@@ -1592,19 +1642,7 @@ func (m *Manager) resumeStatefulSet(ctx context.Context, session *domain.Session
 		return domain.WrapError(domain.ErrorKubernetes, "resume StatefulSet", "restore replicas", err)
 	}
 	for _, ref := range workload.AffectedPods {
-		if err := m.waitFor(ctx, fmt.Sprintf("Pod %s/%s readiness", ref.Namespace, ref.Name), func(waitCtx context.Context) (bool, error) {
-			pod, err := m.typed.CoreV1().Pods(ref.Namespace).Get(waitCtx, ref.Name, metav1.GetOptions{})
-			if apierrors.IsNotFound(err) {
-				return false, nil
-			}
-			if err != nil {
-				return false, err
-			}
-			if err := validatePodController(pod, workload.Controller, "resume StatefulSet"); err != nil {
-				return false, err
-			}
-			return podReady(pod), nil
-		}); err != nil {
+		if err := m.waitForResumedPod(ctx, session, ref, workload.Controller, "resume StatefulSet"); err != nil {
 			return err
 		}
 	}
@@ -1620,19 +1658,7 @@ func (m *Manager) resumeVictoriaLogs(ctx context.Context, session *domain.Sessio
 		return err
 	}
 	for _, ref := range workload.AffectedPods {
-		if err := m.waitFor(ctx, fmt.Sprintf("Pod %s/%s readiness", ref.Namespace, ref.Name), func(waitCtx context.Context) (bool, error) {
-			pod, err := m.typed.CoreV1().Pods(ref.Namespace).Get(waitCtx, ref.Name, metav1.GetOptions{})
-			if apierrors.IsNotFound(err) {
-				return false, nil
-			}
-			if err != nil {
-				return false, err
-			}
-			if err := validatePodController(pod, workload.Controller, "resume Victoria Logs"); err != nil {
-				return false, err
-			}
-			return podReady(pod), nil
-		}); err != nil {
+		if err := m.waitForResumedPod(ctx, session, ref, workload.Controller, "resume Victoria Logs"); err != nil {
 			return err
 		}
 	}
@@ -1766,19 +1792,7 @@ func (m *Manager) resumeVMCluster(ctx context.Context, session *domain.Session) 
 		return workloadScaleError("resume VMCluster", "restore component StatefulSet", err)
 	}
 	for _, ref := range workload.AffectedPods {
-		if err := m.waitFor(ctx, fmt.Sprintf("Pod %s/%s readiness", ref.Namespace, ref.Name), func(waitCtx context.Context) (bool, error) {
-			pod, err := m.typed.CoreV1().Pods(ref.Namespace).Get(waitCtx, ref.Name, metav1.GetOptions{})
-			if apierrors.IsNotFound(err) {
-				return false, nil
-			}
-			if err != nil {
-				return false, err
-			}
-			if err := validatePodController(pod, workload.Controller, "resume VMCluster"); err != nil {
-				return false, err
-			}
-			return podReady(pod), nil
-		}); err != nil {
+		if err := m.waitForResumedPod(ctx, session, ref, workload.Controller, "resume VMCluster"); err != nil {
 			return err
 		}
 	}
@@ -2162,7 +2176,15 @@ func (m *Manager) resumeGrafana(ctx context.Context, session *domain.Session) er
 		return err
 	}
 	if ready != nil {
-		session.Spec.WorkloadPtr().Pod = podReference(ready)
+		workload := session.Spec.WorkloadPtr()
+		previous := workload.Pod
+		refreshResumedPodReference(workload, previous, ready)
+		// Grafana discovery records one representative Deployment Pod. A new
+		// ReplicaSet can change its generated name, so refresh that single
+		// affected reference even when the name no longer matches.
+		if len(workload.AffectedPods) == 1 {
+			workload.AffectedPods[0] = podReference(ready)
+		}
 	}
 	return nil
 }
@@ -2606,19 +2628,8 @@ func (m *Manager) resumeKubeBlocks(ctx context.Context, session *domain.Session)
 	if err := m.setKubeBlocksPaused(ctx, session, false); err != nil {
 		return err
 	}
-	return m.waitFor(ctx, fmt.Sprintf("KubeBlocks Pod %s readiness", kb.Instance), func(waitCtx context.Context) (bool, error) {
-		pod, err := m.typed.CoreV1().Pods(session.Spec.Workload().Pod.Namespace).Get(waitCtx, kb.Instance, metav1.GetOptions{})
-		if apierrors.IsNotFound(err) {
-			return false, nil
-		}
-		if err != nil {
-			return false, err
-		}
-		if err := validatePodController(pod, session.Spec.Workload().Controller, "resume KubeBlocks"); err != nil {
-			return false, err
-		}
-		return podReady(pod), nil
-	})
+	workload := session.Spec.Workload()
+	return m.waitForResumedPod(ctx, session, workload.Pod, workload.Controller, "resume KubeBlocks")
 }
 
 func (m *Manager) setKubeBlocksPaused(ctx context.Context, session *domain.Session, paused bool) error {

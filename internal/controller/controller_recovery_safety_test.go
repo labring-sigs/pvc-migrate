@@ -361,16 +361,21 @@ func TestGrafanaResumeUsesCompleteDeploymentSelector(t *testing.T) {
 	originalReplicas := int32(1)
 	session := controllerSession(domain.WorkloadSpec{
 		Adapter:          domain.WorkloadGrafana,
-		Pod:              domain.ObjectReference{Namespace: "vm", Name: "old"},
+		Pod:              domain.ObjectReference{Namespace: "vm", Name: "old", UID: "old-uid"},
 		Controller:       domain.ObjectReference{Namespace: "vm", Name: deployment.Name, UID: deployment.UID},
 		OriginalReplicas: &originalReplicas,
+		AffectedPods:     []domain.ObjectReference{{Namespace: "vm", Name: "old", UID: "old-uid"}},
 		Grafana:          &domain.GrafanaSpec{APIVersion: grafanaAPIVersion, Name: "grafana", UID: "grafana-uid", OriginalReplicas: originalReplicas},
 	})
 	if err := manager.Resume(ctx, session); err != nil {
 		t.Fatal(err)
 	}
-	if session.Spec.Workload().Pod.Name != right.Name {
-		t.Fatalf("resumed Pod=%s want=%s", session.Spec.Workload().Pod.Name, right.Name)
+	workload := session.Spec.Workload()
+	if workload.Pod.Name != right.Name || workload.Pod.UID != right.UID {
+		t.Fatalf("resumed Pod=%+v want=%s/%s", workload.Pod, right.Name, right.UID)
+	}
+	if len(workload.AffectedPods) != 1 || workload.AffectedPods[0].Name != right.Name || workload.AffectedPods[0].UID != right.UID {
+		t.Fatalf("affected Pods=%+v want=%s/%s", workload.AffectedPods, right.Name, right.UID)
 	}
 }
 

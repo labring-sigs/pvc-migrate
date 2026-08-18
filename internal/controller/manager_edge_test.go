@@ -613,6 +613,7 @@ func TestStatefulSetPauseResumeWaitsForAffectedPods(t *testing.T) {
 			}
 		} else {
 			for _, pod := range []*corev1.Pod{readyPod("app", "db-1", "node-b"), readyPod("app", "db-2", "node-b")} {
+				pod.UID = types.UID(pod.Name + "-resumed-uid")
 				pod.OwnerReferences = []metav1.OwnerReference{{APIVersion: domain.AppsAPIVersion, Kind: domain.KindStatefulSet, Name: sts.Name, UID: sts.UID, Controller: boolPointer(true)}}
 				if err := client.Tracker().Create(podsResource, pod, "app"); err != nil && !apierrors.IsAlreadyExists(err) {
 					return true, nil, err
@@ -646,6 +647,19 @@ func TestStatefulSetPauseResumeWaitsForAffectedPods(t *testing.T) {
 		if err != nil || !podReady(pod) {
 			t.Fatalf("Pod %s readiness: pod=%#v error=%v", name, pod, err)
 		}
+		var recorded domain.ObjectReference
+		for _, ref := range session.Spec.Workload().AffectedPods {
+			if ref.Name == name {
+				recorded = ref
+				break
+			}
+		}
+		if recorded.UID != pod.UID {
+			t.Fatalf("Pod %s session UID=%s, current UID=%s", name, recorded.UID, pod.UID)
+		}
+	}
+	if session.Spec.Workload().Pod.UID != session.Spec.Workload().AffectedPods[0].UID {
+		t.Fatalf("workload Pod UID=%s, affected Pod UID=%s", session.Spec.Workload().Pod.UID, session.Spec.Workload().AffectedPods[0].UID)
 	}
 }
 
