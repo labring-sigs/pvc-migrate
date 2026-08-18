@@ -16,6 +16,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/kubernetes/fake"
 )
 
@@ -27,14 +28,21 @@ type recordingToolImageProber struct {
 }
 
 type recordingOpenEBSLVMSharedVolumeManager struct {
-	shared             bool
-	sharedPVs          []string
-	ensureErr          error
-	ensurePVs          []string
-	onEnsure           func()
-	restoreErr         error
-	restorePVs         []string
-	restoreContextErrs []error
+	shared              bool
+	sharedPVs           []string
+	sharedLVMVolumes    []domain.ObjectReference
+	sharedSessionIDs    []string
+	prepareErr          error
+	prepareErrs         map[string]error
+	preparePVs          []string
+	enablePVs           []string
+	onEnable            func()
+	restoreErr          error
+	validateRestoreErr  error
+	validateRestoreErrs map[string]error
+	validateRestorePVs  []string
+	restorePVs          []string
+	restoreContextErrs  []error
 }
 
 type toolProbeContextStore struct {
@@ -51,25 +59,49 @@ func (s *toolProbeContextStore) Update(ctx context.Context, session *domain.Sess
 	return s.memoryStore.Update(ctx, session)
 }
 
-func (m *recordingOpenEBSLVMSharedVolumeManager) Shared(_ context.Context, sourcePV string) (bool, error) {
-	m.sharedPVs = append(m.sharedPVs, sourcePV)
+func (m *recordingOpenEBSLVMSharedVolumeManager) Shared(_ context.Context, sourcePV, lvmVolume domain.ObjectReference, sessionID string) (bool, error) {
+	m.sharedPVs = append(m.sharedPVs, sourcePV.Name)
+	m.sharedLVMVolumes = append(m.sharedLVMVolumes, lvmVolume)
+	m.sharedSessionIDs = append(m.sharedSessionIDs, sessionID)
 	return m.shared, nil
 }
 
-func (m *recordingOpenEBSLVMSharedVolumeManager) EnsureShared(_ context.Context, sourcePV string) (kube.OpenEBSLVMSharedResult, error) {
-	m.ensurePVs = append(m.ensurePVs, sourcePV)
-	if m.ensureErr != nil {
-		return kube.OpenEBSLVMSharedResult{}, m.ensureErr
+func (m *recordingOpenEBSLVMSharedVolumeManager) PrepareShared(_ context.Context, sourcePV domain.ObjectReference) (kube.OpenEBSLVMSharedResult, error) {
+	m.preparePVs = append(m.preparePVs, sourcePV.Name)
+	if m.prepareErr != nil {
+		return kube.OpenEBSLVMSharedResult{}, m.prepareErr
 	}
-	m.shared = true
-	if m.onEnsure != nil {
-		m.onEnsure()
+	if err := m.prepareErrs[sourcePV.Name]; err != nil {
+		return kube.OpenEBSLVMSharedResult{}, err
 	}
-	return kube.OpenEBSLVMSharedResult{Reference: "LVMVolume openebs/" + sourcePV, PreviousShared: "no", PreviousSharedSet: true, Changed: true}, nil
+	return kube.OpenEBSLVMSharedResult{
+		Reference:         "LVMVolume openebs/" + sourcePV.Name,
+		LVMVolume:         domain.ObjectReference{APIVersion: "local.openebs.io/v1alpha1", Kind: "LVMVolume", Namespace: "openebs", Name: sourcePV.Name, UID: types.UID("lvm-" + sourcePV.Name)},
+		PreviousShared:    "no",
+		PreviousSharedSet: true,
+		NeedsChange:       true,
+	}, nil
 }
 
-func (m *recordingOpenEBSLVMSharedVolumeManager) RestoreShared(ctx context.Context, sourcePV, _ string, _ bool) error {
-	m.restorePVs = append(m.restorePVs, sourcePV)
+func (m *recordingOpenEBSLVMSharedVolumeManager) EnableShared(_ context.Context, _ string, state domain.OpenEBSLVMSharedMount) error {
+	m.enablePVs = append(m.enablePVs, state.SourcePV.Name)
+	m.shared = true
+	if m.onEnable != nil {
+		m.onEnable()
+	}
+	return nil
+}
+
+func (m *recordingOpenEBSLVMSharedVolumeManager) ValidateRestoreShared(_ context.Context, _ string, state domain.OpenEBSLVMSharedMount) error {
+	m.validateRestorePVs = append(m.validateRestorePVs, state.SourcePV.Name)
+	if err := m.validateRestoreErrs[state.SourcePV.Name]; err != nil {
+		return err
+	}
+	return m.validateRestoreErr
+}
+
+func (m *recordingOpenEBSLVMSharedVolumeManager) RestoreShared(ctx context.Context, _ string, state domain.OpenEBSLVMSharedMount) error {
+	m.restorePVs = append(m.restorePVs, state.SourcePV.Name)
 	m.restoreContextErrs = append(m.restoreContextErrs, ctx.Err())
 	if err := ctx.Err(); err != nil {
 		return err
@@ -79,6 +111,38 @@ func (m *recordingOpenEBSLVMSharedVolumeManager) RestoreShared(ctx context.Conte
 	}
 	m.shared = false
 	return nil
+}
+
+func openEBSLVMSourcePV(volume domain.VolumeSpec) *corev1.PersistentVolume {
+	return &corev1.PersistentVolume{
+		ObjectMeta: metav1.ObjectMeta{Name: volume.SourcePV.Name, UID: volume.SourcePV.UID},
+		Spec: corev1.PersistentVolumeSpec{
+			PersistentVolumeSource: corev1.PersistentVolumeSource{
+				CSI: &corev1.CSIPersistentVolumeSource{Driver: kube.OpenEBSLVMCSIDriver, VolumeHandle: volume.SourcePV.Name},
+			},
+			ClaimRef: &corev1.ObjectReference{Namespace: volume.SourcePVC.Namespace, Name: volume.SourcePVC.Name, UID: volume.SourcePVC.UID},
+		},
+	}
+}
+
+func openEBSLVMSourcePVC(volume domain.VolumeSpec) *corev1.PersistentVolumeClaim {
+	return &corev1.PersistentVolumeClaim{
+		ObjectMeta: metav1.ObjectMeta{Namespace: volume.SourcePVC.Namespace, Name: volume.SourcePVC.Name, UID: volume.SourcePVC.UID},
+		Spec:       corev1.PersistentVolumeClaimSpec{VolumeName: volume.SourcePV.Name},
+		Status:     corev1.PersistentVolumeClaimStatus{Phase: corev1.ClaimBound},
+	}
+}
+
+func createOpenEBSLVMSourceObjects(t *testing.T, client kubernetes.Interface, session *domain.Session) {
+	t.Helper()
+	for _, volume := range session.Spec.Volumes {
+		if _, err := client.CoreV1().PersistentVolumeClaims(volume.SourcePVC.Namespace).Create(context.Background(), openEBSLVMSourcePVC(volume), metav1.CreateOptions{}); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := client.CoreV1().PersistentVolumes().Create(context.Background(), openEBSLVMSourcePV(volume), metav1.CreateOptions{}); err != nil {
+			t.Fatal(err)
+		}
+	}
 }
 
 func (p *recordingToolImageProber) Probe(ctx context.Context, options kube.ToolImageProbeOptions) ([]kube.ToolImageProbeResult, error) {
@@ -365,8 +429,10 @@ func TestResolveSessionToolProbeTargetsUsesWritableMountForSharedOpenEBSLVM(t *t
 	client := fake.NewClientset(
 		&storagev1.StorageClass{ObjectMeta: metav1.ObjectMeta{Name: storageClass}, Provisioner: "local.csi.openebs.io", Parameters: map[string]string{"shared": "yes"}},
 		probeConsumerPod("consumer", session.Spec.Volumes[0].SourcePVC.Name, "node-a"),
+		openEBSLVMSourcePVC(session.Spec.Volumes[0]),
+		openEBSLVMSourcePV(session.Spec.Volumes[0]),
 	)
-	service := &Service{client: client}
+	service := &Service{client: client, config: Config{OpenEBSLVMSharedVolumeManager: &recordingOpenEBSLVMSharedVolumeManager{shared: true}}}
 
 	targets, err := service.resolveCopyToolProbeTargets(context.Background(), session, true)
 	if err != nil {
@@ -383,14 +449,74 @@ func TestResolveSessionToolProbeTargetsUsesWritableMountForSharedOpenEBSLVM(t *t
 	t.Fatal("shared LVM source target was not created")
 }
 
+func TestResolveSessionToolProbeTargetsRejectsActiveUnsharedOpenEBSLVM(t *testing.T) {
+	session := copyToolProbeSession(true)
+	session.Spec.WorkflowOptionsPtr().SourceNode = "node-a"
+	storageClass := *session.Spec.Volumes[0].SourcePVCSpec.StorageClassName
+	client := fake.NewClientset(
+		&storagev1.StorageClass{ObjectMeta: metav1.ObjectMeta{Name: storageClass}, Provisioner: kube.OpenEBSLVMCSIDriver, Parameters: map[string]string{"shared": "yes"}},
+		probeConsumerPod("consumer", session.Spec.Volumes[0].SourcePVC.Name, "node-a"),
+		openEBSLVMSourcePVC(session.Spec.Volumes[0]),
+		openEBSLVMSourcePV(session.Spec.Volumes[0]),
+	)
+	service := &Service{client: client, config: Config{OpenEBSLVMSharedVolumeManager: &recordingOpenEBSLVMSharedVolumeManager{}}}
+
+	_, err := service.resolveCopyToolProbeTargets(context.Background(), session, true)
+	if domain.CategoryOf(err) != domain.ErrorPrecondition || !strings.Contains(err.Error(), "does not currently have spec.shared=yes") || !strings.Contains(err.Error(), "without --online") {
+		t.Fatalf("category=%s error=%v", domain.CategoryOf(err), err)
+	}
+}
+
+func TestResolveSessionToolProbeTargetsAllowsInactiveUnsharedOpenEBSLVM(t *testing.T) {
+	session := copyToolProbeSession(true)
+	session.Spec.WorkflowOptionsPtr().SourceNode = "node-a"
+	client := fake.NewClientset(
+		openEBSLVMSourcePVC(session.Spec.Volumes[0]),
+		openEBSLVMSourcePV(session.Spec.Volumes[0]),
+	)
+	service := &Service{client: client, config: Config{OpenEBSLVMSharedVolumeManager: &recordingOpenEBSLVMSharedVolumeManager{}}}
+
+	targets, err := service.resolveCopyToolProbeTargets(context.Background(), session, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, target := range targets {
+		if target.Namespace == session.Spec.Volumes[0].SourcePVC.Namespace && target.PVCName == session.Spec.Volumes[0].SourcePVC.Name && target.WritablePVCMount {
+			t.Fatalf("inactive unshared LVMVolume produced writable probe mount: %#v", target)
+		}
+	}
+}
+
+func TestResolveSessionToolProbeTargetsGuidesUnsharedMigrationRecovery(t *testing.T) {
+	session := appTestSession()
+	client := fake.NewClientset(
+		probeConsumerPod("consumer", session.Spec.Volumes[0].SourcePVC.Name, "source-node"),
+		openEBSLVMSourcePVC(session.Spec.Volumes[0]),
+		openEBSLVMSourcePV(session.Spec.Volumes[0]),
+	)
+	service := &Service{client: client, config: Config{OpenEBSLVMSharedVolumeManager: &recordingOpenEBSLVMSharedVolumeManager{}}}
+
+	_, err := service.resolveCopyToolProbeTargets(context.Background(), session, true)
+	if domain.CategoryOf(err) != domain.ErrorPrecondition || !strings.Contains(err.Error(), "--precopy-passes 0") || !strings.Contains(err.Error(), "--openebs-lvm-enable-shared") {
+		t.Fatalf("category=%s error=%v", domain.CategoryOf(err), err)
+	}
+}
+
 func TestMarkSharedOpenEBSLVMProbeMountsReadsEachSourcePVCOnce(t *testing.T) {
 	session := appTestSession()
 	additional := session.Spec.Volumes[0]
 	additional.SourcePVC.Name = "data-2"
 	additional.SourcePV.Name = "pv-source-2"
+	additional.SourcePV.UID = "source-pv-2-uid"
 	session.Spec.Volumes = append(session.Spec.Volumes, additional)
 	storageClass := *session.Spec.Volumes[0].SourcePVCSpec.StorageClassName
-	client := fake.NewClientset(&storagev1.StorageClass{ObjectMeta: metav1.ObjectMeta{Name: storageClass}, Provisioner: "local.csi.openebs.io"})
+	client := fake.NewClientset(
+		&storagev1.StorageClass{ObjectMeta: metav1.ObjectMeta{Name: storageClass}, Provisioner: "local.csi.openebs.io"},
+		openEBSLVMSourcePVC(session.Spec.Volumes[0]),
+		openEBSLVMSourcePVC(session.Spec.Volumes[1]),
+		openEBSLVMSourcePV(session.Spec.Volumes[0]),
+		openEBSLVMSourcePV(session.Spec.Volumes[1]),
+	)
 	manager := &recordingOpenEBSLVMSharedVolumeManager{shared: true}
 	service := &Service{client: client, config: Config{OpenEBSLVMSharedVolumeManager: manager}}
 	targets := []kube.ToolProbeTarget{
@@ -560,10 +686,12 @@ func probeConsumerPod(name, claim, node string) *corev1.Pod {
 
 func TestCreateSessionPersistsBeforeStageProbe(t *testing.T) {
 	client := fake.NewClientset()
+	assignLeaseUIDs(client)
 	store := kube.NewConfigMapSessionStore(client)
 	probeErr := domain.NewError(domain.ErrorPrecondition, "tool image probe", "image pull failed")
 	prober := &recordingToolImageProber{err: probeErr}
-	service := NewService(client, store, nil, nil, nil, nil, Config{
+	reserver := &scriptedReserver{failures: map[string]error{}}
+	service := NewService(client, store, reserver, nil, nil, nil, Config{
 		HelmTimeout:     47 * time.Second,
 		ToolImageProber: prober,
 	})
@@ -593,6 +721,7 @@ func TestCreateSessionPersistsBeforeStageProbe(t *testing.T) {
 
 func TestStageProbeRunsInsideSessionLease(t *testing.T) {
 	client := fake.NewClientset()
+	assignLeaseUIDs(client)
 	store := kube.NewConfigMapSessionStore(client)
 	probeErr := domain.NewError(domain.ErrorPrecondition, "tool image probe", "stop after lock assertion")
 	prober := &recordingToolImageProber{err: probeErr, onProbe: func(ctx context.Context) {
@@ -600,7 +729,8 @@ func TestStageProbeRunsInsideSessionLease(t *testing.T) {
 			t.Fatal("probe did not inherit the held session Lease")
 		}
 	}}
-	service := NewService(client, store, nil, nil, nil, nil, Config{ToolImageProber: prober})
+	reserver := &scriptedReserver{failures: map[string]error{}}
+	service := NewService(client, store, reserver, nil, nil, nil, Config{ToolImageProber: prober})
 	session := appTestSession()
 	plan := &domain.MigrationPlan{SessionID: session.ID, SessionSpec: session.Spec, Ready: true}
 	created, err := service.CreateSession(context.Background(), plan, false)
@@ -671,6 +801,53 @@ func TestPauseAndFinalSyncProbesBeforeWorkloadPause(t *testing.T) {
 	}
 }
 
+func TestPauseAndFinalSyncRestoresPendingOpenEBSLVMSharedBeforePausing(t *testing.T) {
+	fixture := newRecoveryFixture(t)
+	session := appTestSession()
+	session.Status.Phase = domain.PhaseReserved
+	session.Status.OpenEBSLVMSharedMounts = []domain.OpenEBSLVMSharedMount{{
+		SourcePV:          session.Spec.Volumes[0].SourcePV,
+		LVMVolume:         domain.ObjectReference{Namespace: "openebs", Name: "pv-source", UID: "lvm-pv-source"},
+		PreviousShared:    "no",
+		PreviousSharedSet: true,
+	}}
+	manager := &recordingOpenEBSLVMSharedVolumeManager{shared: true}
+	fixture.service.config.OpenEBSLVMSharedVolumeManager = manager
+
+	if err := fixture.service.PauseAndFinalSync(context.Background(), session); err != nil {
+		t.Fatal(err)
+	}
+	if session.Status.Phase != domain.PhaseFinalSynced || fixture.controller.pauses != 1 {
+		t.Fatalf("phase=%s pauses=%d", session.Status.Phase, fixture.controller.pauses)
+	}
+	if !slices.Equal(manager.restorePVs, []string{"pv-source"}) || manager.shared || len(session.Status.OpenEBSLVMSharedMounts) != 0 {
+		t.Fatalf("restore=%v shared=%t pending=%#v", manager.restorePVs, manager.shared, session.Status.OpenEBSLVMSharedMounts)
+	}
+}
+
+func TestValidateFinalSyncRejectsUnsafePendingOpenEBSLVMRestore(t *testing.T) {
+	fixture := newRecoveryFixture(t)
+	session := appTestSession()
+	session.Status.Phase = domain.PhaseReserved
+	session.Status.OpenEBSLVMSharedMounts = []domain.OpenEBSLVMSharedMount{{
+		SourcePV:          session.Spec.Volumes[0].SourcePV,
+		LVMVolume:         domain.ObjectReference{Namespace: "openebs", Name: "pv-source", UID: "lvm-pv-source"},
+		PreviousShared:    "no",
+		PreviousSharedSet: true,
+	}}
+	validationErr := domain.NewError(domain.ErrorConflict, "restore OpenEBS LVM shared mount", "LVMVolume changed")
+	manager := &recordingOpenEBSLVMSharedVolumeManager{shared: true, validateRestoreErr: validationErr}
+	fixture.service.config.OpenEBSLVMSharedVolumeManager = manager
+
+	err := fixture.service.ValidateFinalSync(context.Background(), session)
+	if !errors.Is(err, validationErr) {
+		t.Fatalf("ValidateFinalSync() error=%v", err)
+	}
+	if fixture.controller.pauses != 0 || len(fixture.reserver.calls) != 0 {
+		t.Fatalf("controller pauses=%d reservation calls=%v", fixture.controller.pauses, fixture.reserver.calls)
+	}
+}
+
 func TestNoOpAndInvalidStagesSkipProbe(t *testing.T) {
 	fixture := newRecoveryFixture(t)
 	prober := &recordingToolImageProber{}
@@ -712,7 +889,7 @@ func TestWarmCopyReusesSchedulerSelectedProbeNodeAndPullSecrets(t *testing.T) {
 	session.Status.Phase = domain.PhaseReserved
 	session.Spec.WorkflowOptionsPtr().SourceNode = ""
 	session.Spec.WorkflowOptionsPtr().Strategies = []string{domain.StrategyClusterIP}
-	session.Spec.Volumes[0].SourcePV.Name = ""
+	createSourceStorage(t, fixture, session)
 	prober := &recordingToolImageProber{results: []kube.ToolImageProbeResult{
 		{
 			Target: kube.ToolProbeTarget{
@@ -758,6 +935,9 @@ func TestWarmCopyUsesWritableSourceMountForSharedOpenEBSLVM(t *testing.T) {
 		t.Fatal(err)
 	}
 	session := appTestSession()
+	createOpenEBSLVMSourceObjects(t, fixture.client, session)
+	manager := &recordingOpenEBSLVMSharedVolumeManager{shared: true}
+	fixture.service.config.OpenEBSLVMSharedVolumeManager = manager
 	setSessionOperation(session, domain.OperationCopy)
 	session.Status.Phase = domain.PhaseReserved
 	if err := fixture.service.WarmCopy(context.Background(), session); err != nil {
@@ -765,6 +945,45 @@ func TestWarmCopyUsesWritableSourceMountForSharedOpenEBSLVM(t *testing.T) {
 	}
 	if len(fixture.copier.requests) != 1 || !fixture.copier.requests[0].SourceMountReadWrite {
 		t.Fatalf("copy requests=%#v", fixture.copier.requests)
+	}
+	if !slices.Equal(manager.sharedSessionIDs, []string{"", ""}) {
+		t.Fatalf("shared session reads=%v", manager.sharedSessionIDs)
+	}
+}
+
+func TestWarmCopyRechecksOpenEBSLVMSourceIdentityBeforeRetry(t *testing.T) {
+	fixture := newRecoveryFixture(t)
+	fixture.service.config.Retries = 2
+	fixture.service.config.RetryBackoff = time.Millisecond
+	fixture.copier.failures["warm/data"] = 1
+	session := appTestSession()
+	createOpenEBSLVMSourceObjects(t, fixture.client, session)
+	manager := &recordingOpenEBSLVMSharedVolumeManager{shared: true}
+	fixture.service.config.OpenEBSLVMSharedVolumeManager = manager
+	fixture.copier.copyHook = func() {
+		if len(fixture.copier.requests) != 1 {
+			return
+		}
+		if err := fixture.client.CoreV1().PersistentVolumeClaims("app").Delete(context.Background(), "data", metav1.DeleteOptions{}); err != nil {
+			t.Fatal(err)
+		}
+		replacement := openEBSLVMSourcePVC(session.Spec.Volumes[0])
+		replacement.UID = "replacement-pvc-uid"
+		if _, err := fixture.client.CoreV1().PersistentVolumeClaims("app").Create(context.Background(), replacement, metav1.CreateOptions{}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	session.Status.Phase = domain.PhaseReserved
+
+	err := fixture.service.WarmCopy(context.Background(), session)
+	if domain.CategoryOf(err) != domain.ErrorConflict || !strings.Contains(err.Error(), "identity or binding changed") {
+		t.Fatalf("category=%s error=%v", domain.CategoryOf(err), err)
+	}
+	if len(fixture.copier.requests) != 1 {
+		t.Fatalf("copy attempts=%d want=1", len(fixture.copier.requests))
+	}
+	if !slices.Equal(manager.sharedPVs, []string{"pv-source", "pv-source"}) {
+		t.Fatalf("LVMVolume reads=%v", manager.sharedPVs)
 	}
 }
 
@@ -783,12 +1002,13 @@ func TestWarmCopyEnablesOpenEBSLVMSharedBeforeProbe(t *testing.T) {
 		t.Fatal(err)
 	}
 	manager := &recordingOpenEBSLVMSharedVolumeManager{}
+	createOpenEBSLVMSourceObjects(t, fixture.client, session)
 	fixture.service.config.OpenEBSLVMSharedVolumeManager = manager
 	if err := fixture.service.WarmCopy(context.Background(), session); err != nil {
 		t.Fatal(err)
 	}
-	if !slices.Equal(manager.ensurePVs, []string{"pv-source"}) {
-		t.Fatalf("shared volumes=%v", manager.ensurePVs)
+	if !slices.Equal(manager.preparePVs, []string{"pv-source", "pv-source"}) || !slices.Equal(manager.enablePVs, []string{"pv-source"}) {
+		t.Fatalf("prepared volumes=%v enabled volumes=%v", manager.preparePVs, manager.enablePVs)
 	}
 	if !slices.Equal(manager.restorePVs, []string{"pv-source"}) || manager.shared {
 		t.Fatalf("shared mount restore=%v shared=%t", manager.restorePVs, manager.shared)
@@ -798,6 +1018,142 @@ func TestWarmCopyEnablesOpenEBSLVMSharedBeforeProbe(t *testing.T) {
 	}
 	if len(fixture.copier.requests) != 1 || !fixture.copier.requests[0].SourceMountReadWrite {
 		t.Fatalf("copy requests=%#v", fixture.copier.requests)
+	}
+	for _, sessionID := range manager.sharedSessionIDs {
+		if sessionID != session.ID {
+			t.Fatalf("shared session reads=%v", manager.sharedSessionIDs)
+		}
+	}
+	for _, lvmVolume := range manager.sharedLVMVolumes {
+		if lvmVolume.Name != "pv-source" || lvmVolume.UID == "" {
+			t.Fatalf("shared LVMVolume reads=%#v", manager.sharedLVMVolumes)
+		}
+	}
+}
+
+func TestWarmCopyRejectsActiveUnsharedOpenEBSLVMBeforeProbe(t *testing.T) {
+	fixture := newRecoveryFixture(t)
+	session := appTestSession()
+	session.Status.Phase = domain.PhaseReserved
+	createOpenEBSLVMSourceObjects(t, fixture.client, session)
+	if _, err := fixture.client.CoreV1().Pods("app").Create(context.Background(), probeConsumerPod("database-0", "data", "source-node"), metav1.CreateOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	prober := &recordingToolImageProber{}
+	fixture.service.config.ToolImageProber = prober
+	fixture.service.config.OpenEBSLVMSharedVolumeManager = &recordingOpenEBSLVMSharedVolumeManager{}
+
+	err := fixture.service.WarmCopy(context.Background(), session)
+	if domain.CategoryOf(err) != domain.ErrorPrecondition || !strings.Contains(err.Error(), "--openebs-lvm-enable-shared") {
+		t.Fatalf("category=%s error=%v", domain.CategoryOf(err), err)
+	}
+	if len(prober.calls) != 0 || len(fixture.copier.requests) != 0 || session.Status.Phase != domain.PhaseReserved {
+		t.Fatalf("known invalid mount reached mutation: probes=%d copies=%d phase=%s", len(prober.calls), len(fixture.copier.requests), session.Status.Phase)
+	}
+}
+
+func TestValidateWarmCopyRejectsActiveUnsharedOpenEBSLVM(t *testing.T) {
+	fixture := newRecoveryFixture(t)
+	session := appTestSession()
+	session.Status.Phase = domain.PhaseReserved
+	createOpenEBSLVMSourceObjects(t, fixture.client, session)
+	if _, err := fixture.client.CoreV1().Pods("app").Create(context.Background(), probeConsumerPod("database-0", "data", "source-node"), metav1.CreateOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	fixture.service.config.OpenEBSLVMSharedVolumeManager = &recordingOpenEBSLVMSharedVolumeManager{}
+
+	err := fixture.service.ValidateWarmCopy(context.Background(), session)
+	if domain.CategoryOf(err) != domain.ErrorPrecondition || !strings.Contains(err.Error(), "--openebs-lvm-enable-shared") {
+		t.Fatalf("category=%s error=%v", domain.CategoryOf(err), err)
+	}
+	if fixture.store.updates != 0 || len(fixture.reserver.calls) != 0 {
+		t.Fatalf("warm-copy dry-run mutated state: updates=%d reserveCalls=%v", fixture.store.updates, fixture.reserver.calls)
+	}
+}
+
+func TestValidateWarmCopyAcceptsRestorableSessionManagedOpenEBSLVM(t *testing.T) {
+	fixture := newRecoveryFixture(t)
+	session := appTestSession()
+	session.Status.Phase = domain.PhaseWarmCopying
+	session.Spec.WorkflowOptionsPtr().OpenEBSLVMEnableShared = true
+	createOpenEBSLVMSourceObjects(t, fixture.client, session)
+	if _, err := fixture.client.CoreV1().Pods("app").Create(context.Background(), probeConsumerPod("database-0", "data", "source-node"), metav1.CreateOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	session.Status.OpenEBSLVMSharedMounts = []domain.OpenEBSLVMSharedMount{{
+		SourcePV:          session.Spec.Volumes[0].SourcePV,
+		LVMVolume:         domain.ObjectReference{Namespace: "openebs", Name: "pv-source", UID: "lvm-pv-source"},
+		PreviousShared:    "no",
+		PreviousSharedSet: true,
+	}}
+	prepareErr := domain.NewError(domain.ErrorConflict, "OpenEBS LVM shared mount", "session already owns the temporary shared mount")
+	manager := &recordingOpenEBSLVMSharedVolumeManager{shared: true, prepareErr: prepareErr}
+	fixture.service.config.OpenEBSLVMSharedVolumeManager = manager
+
+	if err := fixture.service.ValidateWarmCopy(context.Background(), session); err != nil {
+		t.Fatalf("ValidateWarmCopy() error=%v", err)
+	}
+	if !slices.Equal(manager.validateRestorePVs, []string{"pv-source"}) || len(manager.preparePVs) != 0 {
+		t.Fatalf("restore validation=%v prepare=%v", manager.validateRestorePVs, manager.preparePVs)
+	}
+	if fixture.store.updates != 0 || len(session.Status.OpenEBSLVMSharedMounts) != 1 {
+		t.Fatalf("warm-copy dry-run mutated state: updates=%d pending=%#v", fixture.store.updates, session.Status.OpenEBSLVMSharedMounts)
+	}
+}
+
+func TestWarmCopyPreparesEveryOpenEBSLVMVolumeBeforeEnable(t *testing.T) {
+	fixture := newRecoveryFixture(t)
+	session := appTestSession()
+	addSecondVolume(session)
+	session.Status.Phase = domain.PhaseReserved
+	session.Spec.WorkflowOptionsPtr().OpenEBSLVMEnableShared = true
+	createOpenEBSLVMSourceObjects(t, fixture.client, session)
+	for _, volume := range session.Spec.Volumes {
+		if _, err := fixture.client.CoreV1().Pods(volume.SourcePVC.Namespace).Create(context.Background(), probeConsumerPod("consumer-"+volume.SourcePVC.Name, volume.SourcePVC.Name, "source-node"), metav1.CreateOptions{}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	prepareErr := domain.NewError(domain.ErrorConflict, "OpenEBS LVM shared mount", "second LVMVolume changed")
+	manager := &recordingOpenEBSLVMSharedVolumeManager{prepareErrs: map[string]error{"pv-source-logs": prepareErr}}
+	fixture.service.config.OpenEBSLVMSharedVolumeManager = manager
+
+	err := fixture.service.WarmCopy(context.Background(), session)
+	if !errors.Is(err, prepareErr) {
+		t.Fatalf("WarmCopy() error=%v", err)
+	}
+	if want := []string{"pv-source", "pv-source-logs"}; !slices.Equal(manager.preparePVs, want) {
+		t.Fatalf("prepared=%v want=%v", manager.preparePVs, want)
+	}
+	if len(manager.enablePVs) != 0 || len(manager.restorePVs) != 0 || len(session.Status.OpenEBSLVMSharedMounts) != 0 || session.Status.Phase != domain.PhaseReserved {
+		t.Fatalf("shared state mutated before preparation completed: enabled=%v restored=%v pending=%#v phase=%s", manager.enablePVs, manager.restorePVs, session.Status.OpenEBSLVMSharedMounts, session.Status.Phase)
+	}
+}
+
+func TestOpenEBSLVMRestoreValidatesEveryVolumeBeforeMutation(t *testing.T) {
+	fixture := newRecoveryFixture(t)
+	session := appTestSession()
+	addSecondVolume(session)
+	for _, volume := range session.Spec.Volumes {
+		session.Status.OpenEBSLVMSharedMounts = append(session.Status.OpenEBSLVMSharedMounts, domain.OpenEBSLVMSharedMount{
+			SourcePV:          volume.SourcePV,
+			LVMVolume:         domain.ObjectReference{Namespace: "openebs", Name: volume.SourcePV.Name, UID: types.UID("lvm-" + volume.SourcePV.Name)},
+			PreviousShared:    "no",
+			PreviousSharedSet: true,
+		})
+	}
+	validationErr := domain.NewError(domain.ErrorConflict, "restore OpenEBS LVM shared mount", "second LVMVolume ownership changed")
+	manager := &recordingOpenEBSLVMSharedVolumeManager{validateRestoreErrs: map[string]error{"pv-source-logs": validationErr}}
+	fixture.service.config.OpenEBSLVMSharedVolumeManager = manager
+
+	err := fixture.service.restoreOpenEBSLVMSharedMounts(context.Background(), session)
+	if !errors.Is(err, validationErr) {
+		t.Fatalf("restoreOpenEBSLVMSharedMounts() error=%v", err)
+	}
+	if want := []string{"pv-source", "pv-source-logs"}; !slices.Equal(manager.validateRestorePVs, want) {
+		t.Fatalf("validated=%v want=%v", manager.validateRestorePVs, want)
+	}
+	if len(manager.restorePVs) != 0 || len(session.Status.OpenEBSLVMSharedMounts) != 2 || fixture.store.updates != 0 {
+		t.Fatalf("restore mutated before validation completed: restored=%v pending=%#v updates=%d", manager.restorePVs, session.Status.OpenEBSLVMSharedMounts, fixture.store.updates)
 	}
 }
 
@@ -818,6 +1174,7 @@ func TestWarmCopyRestoresOpenEBSLVMSharedAfterProbeFailure(t *testing.T) {
 	probeErr := errors.New("tool image probe failed")
 	fixture.service.config.ToolImageProber = &recordingToolImageProber{err: probeErr}
 	manager := &recordingOpenEBSLVMSharedVolumeManager{}
+	createOpenEBSLVMSourceObjects(t, fixture.client, session)
 	fixture.service.config.OpenEBSLVMSharedVolumeManager = manager
 
 	err := fixture.service.WarmCopy(context.Background(), session)
@@ -855,6 +1212,7 @@ func TestWarmCopyRestoresOpenEBSLVMSharedAfterProbeCancellation(t *testing.T) {
 		},
 	}
 	manager := &recordingOpenEBSLVMSharedVolumeManager{}
+	createOpenEBSLVMSourceObjects(t, fixture.client, session)
 	fixture.service.config.OpenEBSLVMSharedVolumeManager = manager
 
 	err := fixture.service.WarmCopy(ctx, session)
@@ -872,7 +1230,7 @@ func TestWarmCopyRestoresOpenEBSLVMSharedAfterProbeCancellation(t *testing.T) {
 	}
 }
 
-func TestWarmCopyRestoresOpenEBSLVMSharedWhenCheckpointIsCanceled(t *testing.T) {
+func TestWarmCopyRestoresOpenEBSLVMSharedWhenContextIsCanceledAfterEnable(t *testing.T) {
 	fixture := newRecoveryFixture(t)
 	session := appTestSession()
 	session.Status.Phase = domain.PhaseReserved
@@ -888,10 +1246,16 @@ func TestWarmCopyRestoresOpenEBSLVMSharedWhenCheckpointIsCanceled(t *testing.T) 
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	manager := &recordingOpenEBSLVMSharedVolumeManager{onEnsure: cancel}
-	fixture.service.config.OpenEBSLVMSharedVolumeManager = manager
+	createOpenEBSLVMSourceObjects(t, fixture.client, session)
 	store := &toolProbeContextStore{}
 	fixture.service.store = store
+	manager := &recordingOpenEBSLVMSharedVolumeManager{onEnable: func() {
+		if store.updates != 1 || len(session.Status.OpenEBSLVMSharedMounts) != 1 {
+			t.Errorf("shared state was not checkpointed before enable: updates=%d state=%#v", store.updates, session.Status.OpenEBSLVMSharedMounts)
+		}
+		cancel()
+	}}
+	fixture.service.config.OpenEBSLVMSharedVolumeManager = manager
 
 	err := fixture.service.WarmCopy(ctx, session)
 	if !errors.Is(err, context.Canceled) {
@@ -903,11 +1267,36 @@ func TestWarmCopyRestoresOpenEBSLVMSharedWhenCheckpointIsCanceled(t *testing.T) 
 	if !slices.Equal(manager.restoreContextErrs, []error{nil}) {
 		t.Fatalf("restore context errors=%v", manager.restoreContextErrs)
 	}
-	if len(store.updateContextErrs) != 2 || !errors.Is(store.updateContextErrs[0], context.Canceled) || store.updateContextErrs[1] != nil {
+	if len(store.updateContextErrs) != 3 || store.updateContextErrs[0] != nil || !errors.Is(store.updateContextErrs[1], context.Canceled) || store.updateContextErrs[2] != nil {
 		t.Fatalf("checkpoint context errors=%v", store.updateContextErrs)
 	}
 	if len(session.Status.OpenEBSLVMSharedMounts) != 0 {
 		t.Fatalf("pending shared mounts=%#v", session.Status.OpenEBSLVMSharedMounts)
+	}
+}
+
+func TestOpenEBSLVMFailureRestoreStopsAfterSessionFenceLoss(t *testing.T) {
+	fixture := newRecoveryFixture(t)
+	session := appTestSession()
+	session.Status.OpenEBSLVMSharedMounts = []domain.OpenEBSLVMSharedMount{{
+		SourcePV:          session.Spec.Volumes[0].SourcePV,
+		LVMVolume:         domain.ObjectReference{Namespace: "openebs", Name: "pv-source", UID: "lvm-pv-source"},
+		PreviousShared:    "no",
+		PreviousSharedSet: true,
+	}}
+	manager := &recordingOpenEBSLVMSharedVolumeManager{shared: true}
+	fixture.service.config.OpenEBSLVMSharedVolumeManager = manager
+	fenceErr := domain.NewError(domain.ErrorConflict, "session lock", "lease ownership was fenced")
+	ctx := context.WithValue(context.Background(), sessionLockContextKey{}, heldSessionLock{
+		lock: &fakeSessionLock{err: fenceErr}, namespace: session.Spec.SessionNamespace, id: session.ID,
+	})
+
+	err := fixture.service.restoreOpenEBSLVMSharedMountsAfterFailure(ctx, session)
+	if !errors.Is(err, fenceErr) {
+		t.Fatalf("restore error=%v", err)
+	}
+	if len(manager.validateRestorePVs) != 0 || len(manager.restorePVs) != 0 || !manager.shared || len(session.Status.OpenEBSLVMSharedMounts) != 1 {
+		t.Fatalf("fenced restore mutated state: validate=%v restore=%v shared=%t pending=%#v", manager.validateRestorePVs, manager.restorePVs, manager.shared, session.Status.OpenEBSLVMSharedMounts)
 	}
 }
 
@@ -916,7 +1305,9 @@ func TestAbortRestoresPendingOpenEBSLVMSharedMount(t *testing.T) {
 	session := appTestSession()
 	session.Status.Phase = domain.PhaseReserved
 	session.Status.OpenEBSLVMSharedMounts = []domain.OpenEBSLVMSharedMount{{
-		SourcePV: "pv-source", PreviousShared: "no", PreviousSharedSet: true,
+		SourcePV:       session.Spec.Volumes[0].SourcePV,
+		LVMVolume:      domain.ObjectReference{Namespace: "openebs", Name: "pv-source", UID: "lvm-pv-source"},
+		PreviousShared: "no", PreviousSharedSet: true,
 	}}
 	manager := &recordingOpenEBSLVMSharedVolumeManager{shared: true}
 	fixture.service.config.OpenEBSLVMSharedVolumeManager = manager
@@ -929,6 +1320,28 @@ func TestAbortRestoresPendingOpenEBSLVMSharedMount(t *testing.T) {
 	}
 	if len(session.Status.OpenEBSLVMSharedMounts) != 0 {
 		t.Fatalf("pending shared mounts=%#v", session.Status.OpenEBSLVMSharedMounts)
+	}
+}
+
+func TestAbortDryRunRejectsUnsafeOpenEBSLVMSharedRestore(t *testing.T) {
+	fixture := newRecoveryFixture(t)
+	session := appTestSession()
+	session.Status.Phase = domain.PhaseReserved
+	session.Status.OpenEBSLVMSharedMounts = []domain.OpenEBSLVMSharedMount{{
+		SourcePV:       session.Spec.Volumes[0].SourcePV,
+		LVMVolume:      domain.ObjectReference{Namespace: "openebs", Name: "pv-source", UID: "lvm-pv-source"},
+		PreviousShared: "no", PreviousSharedSet: true,
+	}}
+	validationErr := domain.NewError(domain.ErrorConflict, "restore OpenEBS LVM shared mount", "LVMVolume changed")
+	manager := &recordingOpenEBSLVMSharedVolumeManager{shared: true, validateRestoreErr: validationErr}
+	fixture.service.config.OpenEBSLVMSharedVolumeManager = manager
+
+	err := fixture.service.ValidateAbort(context.Background(), session)
+	if !errors.Is(err, validationErr) {
+		t.Fatalf("ValidateAbort() error=%v", err)
+	}
+	if !slices.Equal(manager.validateRestorePVs, []string{"pv-source"}) || len(manager.restorePVs) != 0 {
+		t.Fatalf("validate=%v restore=%v", manager.validateRestorePVs, manager.restorePVs)
 	}
 }
 

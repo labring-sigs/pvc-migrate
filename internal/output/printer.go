@@ -4,8 +4,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"strings"
 	"text/tabwriter"
 
+	"github.com/labring-sigs/pvc-migrate/internal/backup"
 	"github.com/labring-sigs/pvc-migrate/internal/domain"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/yaml"
@@ -50,6 +52,10 @@ func (p Printer) printTable(value any) error {
 		return p.printPlan(typed)
 	case *domain.OrphanCleanupPlan:
 		return p.printOrphanCleanupPlan(typed)
+	case *backup.Plan:
+		return p.printBackupPlan(typed)
+	case *backup.Result:
+		return p.printBackupResult(typed)
 	case *domain.Session:
 		return p.printSession(typed)
 	case []*domain.Session:
@@ -59,6 +65,53 @@ func (p Printer) printTable(value any) error {
 		encoder.SetIndent("", "  ")
 		return encoder.Encode(value)
 	}
+}
+
+func (p Printer) printBackupPlan(plan *backup.Plan) error {
+	w := tabwriter.NewWriter(p.Writer, 0, 4, 2, ' ', 0)
+	if _, err := fmt.Fprintln(w, "OPERATION\tPVC\tMODE\tCONSISTENCY\tCAPACITY\tVOLUME MODE\tTOOL NODE\tDESTINATION"); err != nil {
+		return err
+	}
+	if _, err := fmt.Fprintf(w, "%s\t%s/%s\t%s\t%s\t%s\t%s\t%s\t%s\n", plan.Operation, plan.Namespace, plan.PVC, plan.Mode, plan.Consistency, plan.Capacity, plan.VolumeMode, valueOrUnknown(plan.ToolNode), plan.Destination); err != nil {
+		return err
+	}
+	if _, err := fmt.Fprintln(w, "\nMANIFEST\tOBJECTS\tTOTAL BYTES\tINVENTORY SHA256\tDELETE EXTRA\tCOMPRESSION"); err != nil {
+		return err
+	}
+	manifest := "absent"
+	if plan.ManifestPresent {
+		manifest = "present"
+	}
+	if _, err := fmt.Fprintf(w, "%s\t%d\t%d\t%s\t%t\t%s\n", manifest, plan.ObjectCount, plan.TotalBytes, valueOrUnknown(plan.InventorySHA256), plan.DeleteExtraneous, plan.Compression); err != nil {
+		return err
+	}
+	if len(plan.MountedPods) > 0 {
+		if _, err := fmt.Fprintf(w, "\nMOUNTED PODS\t%s\n", strings.Join(plan.MountedPods, ", ")); err != nil {
+			return err
+		}
+	}
+	if len(plan.Warnings) > 0 {
+		if _, err := fmt.Fprintln(w, "\nWARNING"); err != nil {
+			return err
+		}
+		for _, warning := range plan.Warnings {
+			if _, err := fmt.Fprintln(w, warning); err != nil {
+				return err
+			}
+		}
+	}
+	return w.Flush()
+}
+
+func (p Printer) printBackupResult(result *backup.Result) error {
+	w := tabwriter.NewWriter(p.Writer, 0, 4, 2, ' ', 0)
+	if _, err := fmt.Fprintln(w, "OPERATION\tPVC\tMODE\tSTATUS\tDESTINATION"); err != nil {
+		return err
+	}
+	if _, err := fmt.Fprintf(w, "%s\t%s/%s\t%s\t%s\t%s\n", result.Operation, result.Namespace, result.PVC, result.Mode, result.Status, result.Destination); err != nil {
+		return err
+	}
+	return w.Flush()
 }
 
 func (p Printer) printOrphanCleanupPlan(plan *domain.OrphanCleanupPlan) error {

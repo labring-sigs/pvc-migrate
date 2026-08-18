@@ -33,6 +33,7 @@ func TestCleanupDeletesReservationPodsAcrossDestinationNamespaces(t *testing.T) 
 			Name:      name,
 			UID:       types.UID(name + "-uid"),
 			Labels: map[string]string{
+				kube.ManagedByLabel:    kube.ManagedByValue,
 				kube.SessionKey:        session.ID,
 				kube.ResourceRoleLabel: "reservation-consumer",
 			},
@@ -63,6 +64,37 @@ func TestCleanupDeletesReservationPodsAcrossDestinationNamespaces(t *testing.T) 
 		if _, err := client.CoreV1().Pods("system").Get(ctx, name, metav1.GetOptions{}); err != nil {
 			t.Fatalf("unrelated Pod %s: %v", name, err)
 		}
+	}
+}
+
+func TestCleanupRejectsReplacementReservationPodWhileWaitingForDeletion(t *testing.T) {
+	session := appTestSession()
+	session.Status.Phase = domain.PhaseCompleted
+	pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{
+		Namespace: "system", Name: "reserve-data", UID: "original-uid",
+		Labels: map[string]string{
+			kube.ManagedByLabel:    kube.ManagedByValue,
+			kube.SessionKey:        session.ID,
+			kube.ResourceRoleLabel: kube.ResourceRoleReservationConsumer,
+		},
+	}}
+	client := fake.NewClientset(pod)
+	deleted := false
+	client.PrependReactor("delete", "pods", func(clienttesting.Action) (bool, runtime.Object, error) {
+		deleted = true
+		return true, nil, nil
+	})
+	client.PrependReactor("get", "pods", func(clienttesting.Action) (bool, runtime.Object, error) {
+		if !deleted {
+			return false, nil, nil
+		}
+		replacement := pod.DeepCopy()
+		replacement.UID = "replacement-uid"
+		return true, replacement, nil
+	})
+	service := &Service{client: client, store: &memoryStore{}}
+	if err := service.deleteReservationPods(context.Background(), session); domain.CategoryOf(err) != domain.ErrorConflict {
+		t.Fatalf("category=%s error=%v", domain.CategoryOf(err), err)
 	}
 }
 
@@ -167,6 +199,36 @@ func TestCleanupDeletesOnlyOwnedTemporaryPVCs(t *testing.T) {
 	}
 }
 
+func TestCleanupValidatesEveryTemporaryPVCBeforeDeletion(t *testing.T) {
+	ctx := context.Background()
+	session := appTestSession()
+	addSecondVolume(session)
+	session.Status.Phase = domain.PhaseAborted
+	session.Spec.Volumes[0].DestinationPVC.UID = types.UID("temporary-uid-data")
+	session.Spec.Volumes[1].DestinationPVC.UID = types.UID("recorded-uid-logs")
+	client := fake.NewClientset(
+		&corev1.PersistentVolumeClaim{ObjectMeta: metav1.ObjectMeta{
+			Namespace: "system", Name: "data-migrated", UID: types.UID("temporary-uid-data"), ResourceVersion: "1",
+			Labels: map[string]string{kube.SessionKey: session.ID},
+		}},
+		&corev1.PersistentVolumeClaim{ObjectMeta: metav1.ObjectMeta{
+			Namespace: "system", Name: "logs-migrated", UID: types.UID("replacement-uid-logs"), ResourceVersion: "1",
+			Labels: map[string]string{kube.SessionKey: session.ID},
+		}},
+	)
+	service := &Service{client: client, store: &memoryStore{}}
+
+	err := service.Cleanup(ctx, session, CleanupOptions{DeleteTemporary: true})
+	if domain.CategoryOf(err) != domain.ErrorConflict {
+		t.Fatalf("category=%s error=%v", domain.CategoryOf(err), err)
+	}
+	for _, name := range []string{"data-migrated", "logs-migrated"} {
+		if _, getErr := client.CoreV1().PersistentVolumeClaims("system").Get(ctx, name, metav1.GetOptions{}); getErr != nil {
+			t.Fatalf("PVC %s mutated before batch validation: %v", name, getErr)
+		}
+	}
+}
+
 func TestCleanupValidationAccountsForOwnedReservationPod(t *testing.T) {
 	ctx := context.Background()
 	session := appTestSession()
@@ -183,6 +245,7 @@ func TestCleanupValidationAccountsForOwnedReservationPod(t *testing.T) {
 		Name:      "reservation-consumer",
 		UID:       types.UID("reservation-pod-uid"),
 		Labels: map[string]string{
+			kube.ManagedByLabel:    kube.ManagedByValue,
 			kube.SessionKey:        session.ID,
 			kube.ResourceRoleLabel: "reservation-consumer",
 		},
@@ -677,7 +740,7 @@ func TestCleanupPodBlockerReportsOwningController(t *testing.T) {
 		},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			pvc := &corev1.PersistentVolumeClaim{ObjectMeta: metav1.ObjectMeta{Namespace: "system", Name: "data-migrated"}}
+			pvc := &corev1.PersistentVolumeClaim{ObjectMeta: metav1.ObjectMeta{Namespace: "system", Name: "data-migrated", UID: types.UID("destination-pvc-uid")}}
 			test.pod.Namespace = pvc.Namespace
 			test.pod.Spec.NodeName = "node-a"
 			test.pod.Spec.Volumes = []corev1.Volume{{VolumeSource: corev1.VolumeSource{PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: pvc.Name}}}}
@@ -685,7 +748,7 @@ func TestCleanupPodBlockerReportsOwningController(t *testing.T) {
 			objects := append([]runtime.Object{pvc, test.pod}, test.objects...)
 			service := &Service{client: fake.NewClientset(objects...)}
 
-			_, err := service.inspectPVCUnused(context.Background(), domain.ObjectReference{Namespace: pvc.Namespace, Name: pvc.Name}, "session-123")
+			_, err := service.inspectPVCUnused(context.Background(), domain.ObjectReference{Namespace: pvc.Namespace, Name: pvc.Name, UID: pvc.UID}, "session-123")
 			var blocker *CleanupPodBlockerError
 			if !errors.As(err, &blocker) {
 				t.Fatalf("error=%T %v", err, err)
@@ -724,7 +787,7 @@ func TestCleanupPVMigratePodOwnershipUsesSessionOperationID(t *testing.T) {
 		{name: "orphan cleanup has no operation identity", instance: "pv-migrate-" + operationID + "-clusterip", wantOwned: false},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			pvc := &corev1.PersistentVolumeClaim{ObjectMeta: metav1.ObjectMeta{Namespace: "system", Name: "data-migrated"}}
+			pvc := &corev1.PersistentVolumeClaim{ObjectMeta: metav1.ObjectMeta{Namespace: "system", Name: "data-migrated", UID: types.UID("destination-pvc-uid")}}
 			pod := &corev1.Pod{
 				ObjectMeta: metav1.ObjectMeta{
 					Namespace: pvc.Namespace,
@@ -745,9 +808,9 @@ func TestCleanupPVMigratePodOwnershipUsesSessionOperationID(t *testing.T) {
 			service := &Service{client: fake.NewClientset(pvc, pod)}
 			var err error
 			if test.withSession {
-				_, err = service.inspectPVCUnusedForSession(context.Background(), domain.ObjectReference{Namespace: pvc.Namespace, Name: pvc.Name}, session)
+				_, err = service.inspectPVCUnusedForSession(context.Background(), domain.ObjectReference{Namespace: pvc.Namespace, Name: pvc.Name, UID: pvc.UID}, session)
 			} else {
-				_, err = service.inspectPVCUnused(context.Background(), domain.ObjectReference{Namespace: pvc.Namespace, Name: pvc.Name}, session.ID)
+				_, err = service.inspectPVCUnused(context.Background(), domain.ObjectReference{Namespace: pvc.Namespace, Name: pvc.Name, UID: pvc.UID}, session.ID)
 			}
 			var blocker *CleanupPodBlockerError
 			if !errors.As(err, &blocker) {

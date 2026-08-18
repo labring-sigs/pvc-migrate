@@ -245,6 +245,23 @@ func TestVerifyVolumesOfflineSharesInventoryAcrossVolumes(t *testing.T) {
 	}
 }
 
+func TestVerifyVolumesOfflineForSessionRejectsForeignOwnership(t *testing.T) {
+	switcher, _, volume, _ := switcherFixture(t)
+	client := switcher.client.(*fake.Clientset)
+	pv, err := client.CoreV1().PersistentVolumes().Get(context.Background(), volume.SourcePV.Name, metav1.GetOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	pv.Labels = map[string]string{SessionKey: "foreign-session"}
+	if _, err := client.CoreV1().PersistentVolumes().Update(context.Background(), pv, metav1.UpdateOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	err = switcher.VerifyVolumesOfflineForSession(context.Background(), "session", []*domain.VolumeSpec{volume})
+	if domain.CategoryOf(err) != domain.ErrorConflict {
+		t.Fatalf("category=%s error=%v", domain.CategoryOf(err), err)
+	}
+}
+
 func TestVerifyVolumeOfflineDeduplicatesRebindReferences(t *testing.T) {
 	switcher, _, volume, _ := switcherFixture(t)
 	client := switcher.client.(*fake.Clientset)
@@ -461,7 +478,7 @@ func TestMarkPVPairRejectsMissingSourceDuringActivation(t *testing.T) {
 
 func TestRenamePVCIdempotentDestinationKeepsActiveRole(t *testing.T) {
 	volume := &domain.VolumeSpec{
-		SourcePVC:      domain.ObjectReference{Namespace: "app", Name: "old"},
+		SourcePVC:      domain.ObjectReference{Namespace: "app", Name: "old", UID: types.UID("old-pvc-uid")},
 		DestinationPVC: domain.ObjectReference{Namespace: "app", Name: "new"},
 		SourcePV:       domain.ObjectReference{Name: "pv", UID: types.UID("pv-uid")},
 	}
@@ -470,10 +487,10 @@ func TestRenamePVCIdempotentDestinationKeepsActiveRole(t *testing.T) {
 		&corev1.PersistentVolume{ObjectMeta: metav1.ObjectMeta{
 			Name: "pv", UID: volume.SourcePV.UID,
 			Labels: map[string]string{SessionKey: session.ID, ResourceRoleLabel: "active"},
-		}, Spec: corev1.PersistentVolumeSpec{PersistentVolumeReclaimPolicy: corev1.PersistentVolumeReclaimRetain}},
+		}, Spec: corev1.PersistentVolumeSpec{PersistentVolumeReclaimPolicy: corev1.PersistentVolumeReclaimRetain, ClaimRef: &corev1.ObjectReference{Namespace: "app", Name: "new", UID: types.UID("new-pvc-uid")}}},
 		&corev1.PersistentVolumeClaim{ObjectMeta: metav1.ObjectMeta{
-			Namespace: "app", Name: "new", Annotations: map[string]string{SessionKey: session.ID},
-		}, Spec: corev1.PersistentVolumeClaimSpec{VolumeName: "pv"}},
+			Namespace: "app", Name: "new", UID: types.UID("new-pvc-uid"), Annotations: map[string]string{SessionKey: session.ID},
+		}, Spec: corev1.PersistentVolumeClaimSpec{VolumeName: "pv"}, Status: corev1.PersistentVolumeClaimStatus{Phase: corev1.ClaimBound}},
 	)
 	if _, err := NewSwitcher(client).RenamePVC(context.Background(), session, volume, nil); err != nil {
 		t.Fatal(err)
@@ -487,9 +504,36 @@ func TestRenamePVCIdempotentDestinationKeepsActiveRole(t *testing.T) {
 	}
 }
 
+func TestRenamePVCIdempotentDestinationRejectsBindingDrift(t *testing.T) {
+	volume := &domain.VolumeSpec{
+		SourcePVC:      domain.ObjectReference{Namespace: "app", Name: "old", UID: types.UID("old-pvc-uid")},
+		DestinationPVC: domain.ObjectReference{Namespace: "app", Name: "new"},
+		SourcePV:       domain.ObjectReference{Name: "pv", UID: types.UID("pv-uid")},
+	}
+	session := domain.NewSession("session", domain.SessionSpec{}, time.Unix(100, 0))
+	client := fake.NewClientset(
+		&corev1.PersistentVolume{
+			ObjectMeta: metav1.ObjectMeta{Name: "pv", UID: volume.SourcePV.UID},
+			Spec: corev1.PersistentVolumeSpec{ClaimRef: &corev1.ObjectReference{
+				Namespace: "app", Name: "new", UID: types.UID("replacement-pvc-uid"),
+			}},
+		},
+		&corev1.PersistentVolumeClaim{
+			ObjectMeta: metav1.ObjectMeta{Namespace: "app", Name: "new", UID: types.UID("new-pvc-uid"), Annotations: map[string]string{SessionKey: session.ID}},
+			Spec:       corev1.PersistentVolumeClaimSpec{VolumeName: "pv"},
+			Status:     corev1.PersistentVolumeClaimStatus{Phase: corev1.ClaimBound},
+		},
+	)
+
+	_, err := NewSwitcher(client).RenamePVC(context.Background(), session, volume, nil)
+	if domain.CategoryOf(err) != domain.ErrorConflict {
+		t.Fatalf("category=%s error=%v", domain.CategoryOf(err), err)
+	}
+}
+
 func TestRenamePVCIdempotentDestinationRejectsConsumers(t *testing.T) {
 	volume := &domain.VolumeSpec{
-		SourcePVC:      domain.ObjectReference{Namespace: "app", Name: "old"},
+		SourcePVC:      domain.ObjectReference{Namespace: "app", Name: "old", UID: types.UID("old-pvc-uid")},
 		DestinationPVC: domain.ObjectReference{Namespace: "app", Name: "new"},
 		SourcePV:       domain.ObjectReference{Name: "pv", UID: types.UID("pv-uid")},
 	}
@@ -498,10 +542,10 @@ func TestRenamePVCIdempotentDestinationRejectsConsumers(t *testing.T) {
 		&corev1.PersistentVolume{ObjectMeta: metav1.ObjectMeta{
 			Name: "pv", UID: volume.SourcePV.UID,
 			Labels: map[string]string{SessionKey: session.ID, ResourceRoleLabel: "active"},
-		}, Spec: corev1.PersistentVolumeSpec{PersistentVolumeReclaimPolicy: corev1.PersistentVolumeReclaimRetain}},
+		}, Spec: corev1.PersistentVolumeSpec{PersistentVolumeReclaimPolicy: corev1.PersistentVolumeReclaimRetain, ClaimRef: &corev1.ObjectReference{Namespace: "app", Name: "new", UID: types.UID("new-pvc-uid")}}},
 		&corev1.PersistentVolumeClaim{ObjectMeta: metav1.ObjectMeta{
-			Namespace: "app", Name: "new", Annotations: map[string]string{SessionKey: session.ID},
-		}, Spec: corev1.PersistentVolumeClaimSpec{VolumeName: "pv"}},
+			Namespace: "app", Name: "new", UID: types.UID("new-pvc-uid"), Annotations: map[string]string{SessionKey: session.ID},
+		}, Spec: corev1.PersistentVolumeClaimSpec{VolumeName: "pv"}, Status: corev1.PersistentVolumeClaimStatus{Phase: corev1.ClaimBound}},
 		&corev1.Pod{ObjectMeta: metav1.ObjectMeta{Namespace: "app", Name: "consumer"}, Spec: corev1.PodSpec{Volumes: []corev1.Volume{{VolumeSource: corev1.VolumeSource{PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: "new"}}}}}},
 	)
 	_, err := NewSwitcher(client).RenamePVC(context.Background(), session, volume, nil)
@@ -531,6 +575,48 @@ func TestActivateVolumeValidatesPreconditionsBeforeMutation(t *testing.T) {
 				t.Fatalf("source PVC was mutated: %v", getErr)
 			}
 		})
+	}
+}
+
+func TestActivateVolumeRejectsSourceBindingDriftBeforeDeletion(t *testing.T) {
+	ctx := context.Background()
+	switcher, session, volume, status := switcherFixture(t)
+	pv, err := switcher.client.CoreV1().PersistentVolumes().Get(ctx, volume.SourcePV.Name, metav1.GetOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	pv.Spec.ClaimRef.UID = types.UID("replacement-pvc-uid")
+	if _, err := switcher.client.CoreV1().PersistentVolumes().Update(ctx, pv, metav1.UpdateOptions{}); err != nil {
+		t.Fatal(err)
+	}
+
+	err = switcher.ActivateVolume(ctx, session, volume, status, nil)
+	if domain.CategoryOf(err) != domain.ErrorConflict {
+		t.Fatalf("category=%s error=%v", domain.CategoryOf(err), err)
+	}
+	if _, err := switcher.client.CoreV1().PersistentVolumeClaims(volume.SourcePVC.Namespace).Get(ctx, volume.SourcePVC.Name, metav1.GetOptions{}); err != nil {
+		t.Fatalf("source PVC was deleted: %v", err)
+	}
+}
+
+func TestActivateVolumeRejectsDestinationBindingDriftBeforeDeletion(t *testing.T) {
+	ctx := context.Background()
+	switcher, session, volume, status := switcherFixture(t)
+	pv, err := switcher.client.CoreV1().PersistentVolumes().Get(ctx, volume.DestinationPV.Name, metav1.GetOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	pv.Spec.ClaimRef.UID = types.UID("replacement-pvc-uid")
+	if _, err := switcher.client.CoreV1().PersistentVolumes().Update(ctx, pv, metav1.UpdateOptions{}); err != nil {
+		t.Fatal(err)
+	}
+
+	err = switcher.ActivateVolume(ctx, session, volume, status, nil)
+	if domain.CategoryOf(err) != domain.ErrorConflict {
+		t.Fatalf("category=%s error=%v", domain.CategoryOf(err), err)
+	}
+	if _, err := switcher.client.CoreV1().PersistentVolumeClaims(volume.DestinationPVC.Namespace).Get(ctx, volume.DestinationPVC.Name, metav1.GetOptions{}); err != nil {
+		t.Fatalf("temporary destination PVC was deleted: %v", err)
 	}
 }
 
@@ -609,6 +695,31 @@ func TestRollbackVolumeRejectsForeignActivePVC(t *testing.T) {
 	err := switcher.RollbackVolume(ctx, session, volume, status, nil)
 	if domain.CategoryOf(err) != domain.ErrorConflict {
 		t.Fatalf("category=%s error=%v", domain.CategoryOf(err), err)
+	}
+}
+
+func TestRollbackVolumeRejectsDestinationBindingDriftBeforeDeletion(t *testing.T) {
+	ctx := context.Background()
+	switcher, session, volume, status := switcherFixture(t)
+	if err := switcher.ActivateVolume(ctx, session, volume, status, nil); err != nil {
+		t.Fatal(err)
+	}
+	pv, err := switcher.client.CoreV1().PersistentVolumes().Get(ctx, volume.DestinationPV.Name, metav1.GetOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	pv.Spec.ClaimRef.UID = types.UID("replacement-pvc-uid")
+	if _, err := switcher.client.CoreV1().PersistentVolumes().Update(ctx, pv, metav1.UpdateOptions{}); err != nil {
+		t.Fatal(err)
+	}
+
+	err = switcher.RollbackVolume(ctx, session, volume, status, nil)
+	if domain.CategoryOf(err) != domain.ErrorConflict {
+		t.Fatalf("category=%s error=%v", domain.CategoryOf(err), err)
+	}
+	active, err := switcher.client.CoreV1().PersistentVolumeClaims(volume.SourcePVC.Namespace).Get(ctx, volume.SourcePVC.Name, metav1.GetOptions{})
+	if err != nil || active.Spec.VolumeName != volume.DestinationPV.Name {
+		t.Fatalf("active destination PVC changed: pvc=%#v error=%v", active, err)
 	}
 }
 
@@ -772,6 +883,37 @@ func TestReservePVIdempotencyAndConflictChecks(t *testing.T) {
 			t.Fatalf("reserved claimRef: %#v", pv.Spec.ClaimRef)
 		}
 	})
+	for _, test := range []struct {
+		name        string
+		claimRefUID types.UID
+	}{
+		{name: "stale claim UID", claimRefUID: types.UID("deleted-pvc")},
+		{name: "missing claim UID"},
+	} {
+		t.Run(test.name+" with replacement PVC", func(t *testing.T) {
+			client := fake.NewClientset(
+				&corev1.PersistentVolumeClaim{ObjectMeta: metav1.ObjectMeta{Namespace: "app", Name: "data", UID: types.UID("replacement-pvc")}},
+				&corev1.PersistentVolume{
+					ObjectMeta: metav1.ObjectMeta{Name: "pv", UID: ref.UID, Labels: map[string]string{SessionKey: "session"}},
+					Spec:       corev1.PersistentVolumeSpec{ClaimRef: &corev1.ObjectReference{Namespace: "app", Name: "data", UID: test.claimRefUID}},
+					Status:     corev1.PersistentVolumeStatus{Phase: corev1.VolumeBound},
+				},
+			)
+			switcher := NewSwitcher(client)
+			switcher.poll = time.Millisecond
+			err := switcher.reservePV(ctx, ref, "app", "data", "session")
+			if domain.CategoryOf(err) != domain.ErrorConflict {
+				t.Fatalf("category=%s error=%v", domain.CategoryOf(err), err)
+			}
+			pv, getErr := client.CoreV1().PersistentVolumes().Get(ctx, "pv", metav1.GetOptions{})
+			if getErr != nil {
+				t.Fatal(getErr)
+			}
+			if pv.Spec.ClaimRef == nil || pv.Spec.ClaimRef.UID != test.claimRefUID {
+				t.Fatalf("PV claimRef was changed: %#v", pv.Spec.ClaimRef)
+			}
+		})
+	}
 	for _, test := range []struct {
 		name string
 		pv   *corev1.PersistentVolume
@@ -950,11 +1092,61 @@ func TestCreateAndValidateActivePVCRejectUnexpectedObjects(t *testing.T) {
 	}
 }
 
+func TestCreateActivePVCRejectsReplacementWhileWaiting(t *testing.T) {
+	switcher, session, volume, _ := switcherFixture(t)
+	client := switcher.client.(*fake.Clientset)
+	resource := corev1.SchemeGroupVersion.WithResource("persistentvolumeclaims")
+	if err := client.Tracker().Delete(resource, volume.SourcePVC.Namespace, volume.SourcePVC.Name); err != nil {
+		t.Fatal(err)
+	}
+	var created *corev1.PersistentVolumeClaim
+	client.PrependReactor("create", "persistentvolumeclaims", func(action clienttesting.Action) (bool, runtime.Object, error) {
+		created = action.(clienttesting.CreateAction).GetObject().(*corev1.PersistentVolumeClaim)
+		created.UID = "created-uid"
+		return false, nil, nil
+	})
+	client.PrependReactor("get", "persistentvolumeclaims", func(clienttesting.Action) (bool, runtime.Object, error) {
+		if created == nil {
+			return false, nil, nil
+		}
+		replacement := created.DeepCopy()
+		replacement.UID = "replacement-uid"
+		replacement.Status.Phase = corev1.ClaimBound
+		return true, replacement, nil
+	})
+	switcher.poll = time.Millisecond
+	_, err := switcher.createActivePVC(context.Background(), session, volume, volume.DestinationPV, volume.StorageClass)
+	if domain.CategoryOf(err) != domain.ErrorConflict || !strings.Contains(err.Error(), "replaced while waiting") {
+		t.Fatalf("category=%s error=%v", domain.CategoryOf(err), err)
+	}
+}
+
 func configureRenameFixture(t *testing.T) (*Switcher, *domain.Session, *domain.VolumeSpec) {
 	t.Helper()
 	switcher, session, volume, _ := switcherFixture(t)
 	volume.DestinationPVC = domain.ObjectReference{Namespace: "app", Name: "data-renamed"}
 	return switcher, session, volume
+}
+
+func TestRenamePVCRejectsSourceBindingDriftBeforeDeletion(t *testing.T) {
+	ctx := context.Background()
+	switcher, session, volume := configureRenameFixture(t)
+	pv, err := switcher.client.CoreV1().PersistentVolumes().Get(ctx, volume.SourcePV.Name, metav1.GetOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	pv.Spec.ClaimRef.UID = types.UID("replacement-pvc-uid")
+	if _, err := switcher.client.CoreV1().PersistentVolumes().Update(ctx, pv, metav1.UpdateOptions{}); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err = switcher.RenamePVC(ctx, session, volume, nil)
+	if domain.CategoryOf(err) != domain.ErrorConflict {
+		t.Fatalf("category=%s error=%v", domain.CategoryOf(err), err)
+	}
+	if _, err := switcher.client.CoreV1().PersistentVolumeClaims(volume.SourcePVC.Namespace).Get(ctx, volume.SourcePVC.Name, metav1.GetOptions{}); err != nil {
+		t.Fatalf("source PVC was deleted: %v", err)
+	}
 }
 
 func TestRenamePVCSuccessIdempotencyAndRecovery(t *testing.T) {

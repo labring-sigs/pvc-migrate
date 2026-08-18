@@ -162,7 +162,14 @@ func TestExecutionRevalidationLogsItsDistinctPhase(t *testing.T) {
 func TestPreflightRejectsOfflineMountedAndOnlineRWOP(t *testing.T) {
 	mode := corev1.PersistentVolumeFilesystem
 	pvc := &corev1.PersistentVolumeClaim{ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "data", UID: "pvc"}, Spec: corev1.PersistentVolumeClaimSpec{VolumeName: "pv-data", VolumeMode: &mode, AccessModes: []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOncePod}}, Status: corev1.PersistentVolumeClaimStatus{Phase: corev1.ClaimBound}}
-	pv := &corev1.PersistentVolume{ObjectMeta: metav1.ObjectMeta{Name: "pv-data"}, Spec: corev1.PersistentVolumeSpec{Capacity: corev1.ResourceList{corev1.ResourceStorage: resource.MustParse("1Gi")}}}
+	pv := &corev1.PersistentVolume{
+		ObjectMeta: metav1.ObjectMeta{Name: "pv-data", UID: "pv"},
+		Spec: corev1.PersistentVolumeSpec{
+			Capacity: corev1.ResourceList{corev1.ResourceStorage: resource.MustParse("1Gi")},
+			ClaimRef: &corev1.ObjectReference{Namespace: pvc.Namespace, Name: pvc.Name, UID: pvc.UID},
+		},
+		Status: corev1.PersistentVolumeStatus{Phase: corev1.VolumeBound},
+	}
 	pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "consumer"}, Spec: corev1.PodSpec{Volumes: []corev1.Volume{{VolumeSource: corev1.VolumeSource{PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: "data"}}}}}}
 	client := fake.NewClientset(pvc, pv, pod)
 	store, _ := objectstore.NewWithClient(&preflightObjectStore{}, objectstore.Config{Bucket: "backups", Name: "daily"}, objectstore.Credentials{})
@@ -577,6 +584,33 @@ func TestRestoreLockRenewalPreservesTimeoutCategory(t *testing.T) {
 	}
 }
 
+func TestRestoreLockRenewalRejectsReplacementPVC(t *testing.T) {
+	const holder = "pvc-migrate/restore-attempt"
+	originalExpiry := time.Now().UTC().Add(time.Minute).Format(time.RFC3339Nano)
+	client := fake.NewClientset(&corev1.PersistentVolumeClaim{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: "default",
+			Name:      "data",
+			UID:       types.UID("replacement-pvc-uid"),
+			Annotations: map[string]string{
+				restoreLockAnnotation:       holder,
+				restoreLockExpiryAnnotation: originalExpiry,
+			},
+		},
+	})
+	err := renewRestoreLockOnce(context.Background(), client, "default", "data", holder, "original-pvc-uid", time.Hour)
+	if domain.CategoryOf(err) != domain.ErrorConflict {
+		t.Fatalf("category=%s error=%v", domain.CategoryOf(err), err)
+	}
+	current, getErr := client.CoreV1().PersistentVolumeClaims("default").Get(context.Background(), "data", metav1.GetOptions{})
+	if getErr != nil {
+		t.Fatal(getErr)
+	}
+	if current.Annotations[restoreLockExpiryAnnotation] != originalExpiry {
+		t.Fatalf("replacement PVC lock expiry changed to %q", current.Annotations[restoreLockExpiryAnnotation])
+	}
+}
+
 func TestOfflinePreflightIgnoresTerminalPVCConsumers(t *testing.T) {
 	client, request := preflightFixture(t, &preflightObjectStore{})
 	for _, podState := range []struct {
@@ -946,7 +980,7 @@ func TestBackupRejectsPVCIdentityChangeDuringToolProbe(t *testing.T) {
 	}
 
 	err := Run(context.Background(), client, request, false)
-	if domain.CategoryOf(err) != domain.ErrorConflict || !strings.Contains(err.Error(), "PVC identity changed") {
+	if domain.CategoryOf(err) != domain.ErrorConflict || !strings.Contains(err.Error(), "binding identity changed") {
 		t.Fatalf("category=%s error=%v", domain.CategoryOf(err), err)
 	}
 }
@@ -1087,6 +1121,42 @@ func TestVerifyPVCIdentityRejectsNameReuseAndClaimRefMismatch(t *testing.T) {
 	}
 	if _, _, err := verifyPVCIdentity(context.Background(), client, "default", "data", "pvc-new", "pv"); domain.CategoryOf(err) != domain.ErrorConflict {
 		t.Fatalf("claimRef mismatch category=%s error=%v", domain.CategoryOf(err), err)
+	}
+	pv.Spec.ClaimRef.UID = ""
+	if _, err := client.CoreV1().PersistentVolumes().Update(context.Background(), pv, metav1.UpdateOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := verifyPVCIdentity(context.Background(), client, "default", "data", "pvc-new", "pv"); domain.CategoryOf(err) != domain.ErrorConflict {
+		t.Fatalf("missing claimRef UID category=%s error=%v", domain.CategoryOf(err), err)
+	}
+	if _, _, err := verifyPVCIdentity(context.Background(), client, "default", "data", "", "pv"); domain.CategoryOf(err) != domain.ErrorPrecondition {
+		t.Fatalf("missing expected UID category=%s error=%v", domain.CategoryOf(err), err)
+	}
+}
+
+func TestPreflightRejectsPVBindingIdentityDrift(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		mutate func(*corev1.PersistentVolume)
+	}{
+		{name: "claimRef UID changed", mutate: func(pv *corev1.PersistentVolume) { pv.Spec.ClaimRef.UID = "replacement" }},
+		{name: "claimRef UID missing", mutate: func(pv *corev1.PersistentVolume) { pv.Spec.ClaimRef.UID = "" }},
+		{name: "PV released", mutate: func(pv *corev1.PersistentVolume) { pv.Status.Phase = corev1.VolumeReleased }},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			client, request := preflightFixture(t, &preflightObjectStore{})
+			pv, err := client.CoreV1().PersistentVolumes().Get(context.Background(), "pv-data", metav1.GetOptions{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			test.mutate(pv)
+			if _, err := client.CoreV1().PersistentVolumes().Update(context.Background(), pv, metav1.UpdateOptions{}); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := Preflight(context.Background(), client, request, false); err == nil {
+				t.Fatal("preflight accepted an invalid PVC/PV binding")
+			}
+		})
 	}
 }
 

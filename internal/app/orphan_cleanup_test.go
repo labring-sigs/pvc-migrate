@@ -8,6 +8,7 @@ import (
 
 	"github.com/labring-sigs/pvc-migrate/internal/domain"
 	"github.com/labring-sigs/pvc-migrate/internal/kube"
+	coordinationv1 "k8s.io/api/coordination/v1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -35,7 +36,9 @@ func orphanFixture() (*fake.Clientset, OrphanCleanupOptions) {
 		Labels:      map[string]string{kube.ManagedByLabel: kube.ManagedByValue, kube.SessionKey: sessionID, kube.ResourceRoleLabel: "rollback"},
 		Annotations: map[string]string{kube.PairedPVAnnotation: "pv-active"},
 	}, Spec: corev1.PersistentVolumeSpec{PersistentVolumeReclaimPolicy: corev1.PersistentVolumeReclaimRetain}, Status: corev1.PersistentVolumeStatus{Phase: corev1.VolumeReleased}}
-	return fake.NewClientset(pvc, active, rollback), OrphanCleanupOptions{SessionID: sessionID, SessionNamespace: "system", SourceNamespace: "app", SourcePVC: "data"}
+	client := fake.NewClientset(pvc, active, rollback)
+	assignLeaseUIDs(client)
+	return client, OrphanCleanupOptions{SessionID: sessionID, SessionNamespace: "system", SourceNamespace: "app", SourcePVC: "data"}
 }
 
 func preActivationOrphanFixture() (*fake.Clientset, OrphanCleanupOptions) {
@@ -70,11 +73,23 @@ func preActivationOrphanFixture() (*fake.Clientset, OrphanCleanupOptions) {
 	}, Status: corev1.PersistentVolumeStatus{Phase: corev1.VolumeBound}}
 	reservationPod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{
 		Namespace: destinationPVC.Namespace, Name: "reservation", UID: "reservation-uid",
-		Labels: map[string]string{kube.SessionKey: sessionID, kube.ResourceRoleLabel: kube.ResourceRoleReservationConsumer},
+		Labels: map[string]string{kube.ManagedByLabel: kube.ManagedByValue, kube.SessionKey: sessionID, kube.ResourceRoleLabel: kube.ResourceRoleReservationConsumer},
 	}, Spec: corev1.PodSpec{Volumes: []corev1.Volume{{
 		Name: "data", VolumeSource: corev1.VolumeSource{PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: destinationPVC.Name}},
 	}}}}
-	return fake.NewClientset(sourcePVC, sourcePV, destinationPVC, destinationPV, reservationPod), OrphanCleanupOptions{SessionID: sessionID, SessionNamespace: "system", SourceNamespace: "app", SourcePVC: "source"}
+	client := fake.NewClientset(sourcePVC, sourcePV, destinationPVC, destinationPV, reservationPod)
+	assignLeaseUIDs(client)
+	return client, OrphanCleanupOptions{SessionID: sessionID, SessionNamespace: "system", SourceNamespace: "app", SourcePVC: "source"}
+}
+
+func assignLeaseUIDs(client *fake.Clientset) {
+	client.PrependReactor("create", "leases", func(action k8stesting.Action) (bool, runtime.Object, error) {
+		lease := action.(k8stesting.CreateAction).GetObject().(*coordinationv1.Lease)
+		if lease.UID == "" {
+			lease.UID = types.UID("lease-" + lease.Name)
+		}
+		return false, nil, nil
+	})
 }
 
 func releaseDestinationPVOnPVCDelete(t *testing.T, client *fake.Clientset) {
@@ -416,7 +431,7 @@ func TestPlanOrphanCleanupRejectsUnsafeStates(t *testing.T) {
 			rollback, _ := client.CoreV1().PersistentVolumes().Get(context.Background(), "pv-rollback", metav1.GetOptions{})
 			test.mutate(pvc, active, rollback)
 			if test.name == "session exists" {
-				session := domain.NewSession(options.SessionID, domain.NewSessionSpec(domain.OperationMigrate, domain.SessionCommon{SourceNamespace: "app", TemporaryNamespace: "system", DestinationNamespace: "app", SessionNamespace: "system", Volumes: []domain.VolumeSpec{{SourcePVC: domain.ObjectReference{Namespace: "app", Name: "data"}, SourcePV: domain.ObjectReference{Name: "pv-active"}}}}, domain.WorkloadSpec{Adapter: domain.WorkloadNone}, false, domain.SessionWorkflowOptions{}), time.Now())
+				session := domain.NewSession(options.SessionID, domain.NewSessionSpec(domain.OperationMigrate, domain.SessionCommon{SourceNamespace: "app", TemporaryNamespace: "system", DestinationNamespace: "app", SessionNamespace: "system", Volumes: []domain.VolumeSpec{{SourcePVC: domain.ObjectReference{Namespace: "app", Name: "data", UID: pvc.UID}, SourcePV: domain.ObjectReference{Name: "pv-active", UID: active.UID}, DestinationPVC: domain.ObjectReference{Namespace: "system", Name: "data-migrated"}}}}, domain.WorkloadSpec{Adapter: domain.WorkloadNone}, false, domain.SessionWorkflowOptions{}), time.Now())
 				if err := kube.NewConfigMapSessionStore(client).Create(context.Background(), session); err != nil {
 					t.Fatal(err)
 				}

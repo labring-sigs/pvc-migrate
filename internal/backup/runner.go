@@ -726,7 +726,7 @@ func runRestore(ctx context.Context, client kubernetes.Interface, req Request, e
 	}
 	ttl := operationLockTTL(ctx, req.HelmTimeout)
 	logOperation(req, "acquiring restore operation lock", "namespace", req.Namespace, "pvc", req.PVCName)
-	unlock, err := acquireRestoreLock(ctx, client, req.Namespace, req.PVCName, holder, ttl, expectedPVCUID)
+	unlock, lockedPVCUID, err := acquireRestoreLock(ctx, client, req.Namespace, req.PVCName, holder, ttl, expectedPVCUID)
 	if err != nil {
 		return err
 	}
@@ -734,7 +734,7 @@ func runRestore(ctx context.Context, client kubernetes.Interface, req Request, e
 	leaseCtx, cancelLease := context.WithCancel(ctx)
 	leaseErrors := make(chan error, 1)
 	leaseDone := make(chan struct{})
-	go renewRestoreLock(leaseCtx, cancelLease, client, req.Namespace, req.PVCName, holder, ttl, leaseErrors, leaseDone)
+	go renewRestoreLock(leaseCtx, cancelLease, client, req.Namespace, req.PVCName, holder, lockedPVCUID, ttl, leaseErrors, leaseDone)
 	defer func() {
 		cancelLease()
 		<-leaseDone
@@ -915,6 +915,15 @@ func inspectPVC(ctx context.Context, client kubernetes.Interface, namespace, nam
 	if pv == nil || pv.Name == "" {
 		return nil, domain.NewError(domain.ErrorKubernetes, "backup preflight", fmt.Sprintf("read PV %s returned an empty object", pvc.Spec.VolumeName))
 	}
+	if pvc.UID == "" || pv.UID == "" {
+		return nil, domain.NewError(domain.ErrorPrecondition, "backup preflight", "PVC and PV must have stable Kubernetes identities")
+	}
+	if pv.Status.Phase != corev1.VolumeBound {
+		return nil, domain.NewError(domain.ErrorPrecondition, "backup preflight", fmt.Sprintf("PV %s must be Bound", pv.Name))
+	}
+	if pv.Spec.ClaimRef == nil || pv.Spec.ClaimRef.Namespace != pvc.Namespace || pv.Spec.ClaimRef.Name != pvc.Name || pv.Spec.ClaimRef.UID != pvc.UID {
+		return nil, domain.NewError(domain.ErrorConflict, "backup preflight", fmt.Sprintf("PVC/PV binding identity changed: PV %s claimRef does not match PVC %s/%s UID %s", pv.Name, pvc.Namespace, pvc.Name, pvc.UID))
+	}
 	capacity, ok := pv.Spec.Capacity[corev1.ResourceStorage]
 	if !ok || capacity.Sign() <= 0 {
 		return nil, domain.NewError(domain.ErrorPrecondition, "backup preflight", "PV has no positive storage capacity")
@@ -1083,7 +1092,10 @@ func hasRWO(pvc *corev1.PersistentVolumeClaim) bool {
 	return false
 }
 
-func acquireRestoreLock(ctx context.Context, client kubernetes.Interface, namespace, name, holder string, ttl time.Duration, expectedPVCUID string) (func(context.Context) error, error) {
+func acquireRestoreLock(ctx context.Context, client kubernetes.Interface, namespace, name, holder string, ttl time.Duration, expectedPVCUID string) (func(context.Context) error, string, error) {
+	if expectedPVCUID == "" {
+		return nil, "", domain.NewError(domain.ErrorPrecondition, "restore lock", "expected PVC identity is required")
+	}
 	annotation := restoreLockAnnotation
 	var originalUID string
 	err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
@@ -1092,7 +1104,7 @@ func acquireRestoreLock(ctx context.Context, client kubernetes.Interface, namesp
 			return err
 		}
 		originalUID = string(pvc.UID)
-		if expectedPVCUID != "" && originalUID != expectedPVCUID {
+		if originalUID != expectedPVCUID {
 			return domain.NewError(domain.ErrorConflict, "restore lock", "destination PVC identity changed since preflight")
 		}
 		if owner := pvc.Annotations[annotation]; owner != "" && owner != holder {
@@ -1111,12 +1123,12 @@ func acquireRestoreLock(ctx context.Context, client kubernetes.Interface, namesp
 	})
 	if err != nil {
 		if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) || errors.Is(ctx.Err(), context.DeadlineExceeded) || errors.Is(ctx.Err(), context.Canceled) {
-			return nil, domain.WrapError(domain.ErrorTimeout, "restore lock", "acquire PVC restore lock timed out", err)
+			return nil, "", domain.WrapError(domain.ErrorTimeout, "restore lock", "acquire PVC restore lock timed out", err)
 		}
 		if apierrors.IsConflict(err) {
-			return nil, domain.WrapError(domain.ErrorConflict, "restore lock", "PVC changed while acquiring lock", err)
+			return nil, "", domain.WrapError(domain.ErrorConflict, "restore lock", "PVC changed while acquiring lock", err)
 		}
-		return nil, domain.WrapError(domain.ErrorKubernetes, "restore lock", "acquire PVC lock", err)
+		return nil, "", domain.WrapError(domain.ErrorKubernetes, "restore lock", "acquire PVC lock", err)
 	}
 	return func(releaseCtx context.Context) error {
 		return retry.RetryOnConflict(retry.DefaultRetry, func() error {
@@ -1135,15 +1147,18 @@ func acquireRestoreLock(ctx context.Context, client kubernetes.Interface, namesp
 			_, err = client.CoreV1().PersistentVolumeClaims(namespace).Update(releaseCtx, pvc, metav1.UpdateOptions{})
 			return err
 		})
-	}, nil
+	}, originalUID, nil
 }
 
 func verifyPVCIdentity(ctx context.Context, client kubernetes.Interface, namespace, name, expectedPVCUID, expectedPVUID string) (*corev1.PersistentVolumeClaim, *corev1.PersistentVolume, error) {
+	if expectedPVCUID == "" || expectedPVUID == "" {
+		return nil, nil, domain.NewError(domain.ErrorPrecondition, "backup identity", "expected PVC and PV identities are required")
+	}
 	pvc, err := client.CoreV1().PersistentVolumeClaims(namespace).Get(ctx, name, metav1.GetOptions{})
 	if err != nil {
 		return nil, nil, domain.WrapError(domain.ErrorKubernetes, "backup identity", "read PVC", err)
 	}
-	if expectedPVCUID != "" && string(pvc.UID) != expectedPVCUID {
+	if string(pvc.UID) != expectedPVCUID {
 		return nil, nil, domain.NewError(domain.ErrorConflict, "backup identity", "PVC identity changed since preflight")
 	}
 	if pvc.Status.Phase != corev1.ClaimBound {
@@ -1156,19 +1171,19 @@ func verifyPVCIdentity(ctx context.Context, client kubernetes.Interface, namespa
 	if err != nil {
 		return nil, nil, domain.WrapError(domain.ErrorKubernetes, "backup identity", "read PV", err)
 	}
-	if expectedPVUID != "" && string(pv.UID) != expectedPVUID {
+	if string(pv.UID) != expectedPVUID {
 		return nil, nil, domain.NewError(domain.ErrorConflict, "backup identity", "PV identity changed since preflight")
 	}
 	if pv.Status.Phase != corev1.VolumeBound {
 		return nil, nil, domain.NewError(domain.ErrorPrecondition, "backup identity", "PV is no longer Bound")
 	}
-	if pv.Spec.ClaimRef == nil || pv.Spec.ClaimRef.Namespace != namespace || pv.Spec.ClaimRef.Name != name || (pv.Spec.ClaimRef.UID != "" && pv.Spec.ClaimRef.UID != pvc.UID) {
+	if pv.Spec.ClaimRef == nil || pv.Spec.ClaimRef.Namespace != namespace || pv.Spec.ClaimRef.Name != name || pv.Spec.ClaimRef.UID != pvc.UID {
 		return nil, nil, domain.NewError(domain.ErrorConflict, "backup identity", "PVC and PV claimRef no longer identify the same binding")
 	}
 	return pvc, pv, nil
 }
 
-func renewRestoreLock(ctx context.Context, cancel context.CancelFunc, client kubernetes.Interface, namespace, name, holder string, ttl time.Duration, leaseErrors chan<- error, done chan<- struct{}) {
+func renewRestoreLock(ctx context.Context, cancel context.CancelFunc, client kubernetes.Interface, namespace, name, holder, pvcUID string, ttl time.Duration, leaseErrors chan<- error, done chan<- struct{}) {
 	defer close(done)
 	interval := ttl / 3
 	if interval < 30*time.Second {
@@ -1184,21 +1199,7 @@ func renewRestoreLock(ctx context.Context, cancel context.CancelFunc, client kub
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
-				pvc, err := client.CoreV1().PersistentVolumeClaims(namespace).Get(ctx, name, metav1.GetOptions{})
-				if err != nil {
-					return err
-				}
-				if pvc.Annotations[restoreLockAnnotation] != holder {
-					return domain.NewError(domain.ErrorConflict, "restore lock", "PVC lock ownership changed during renewal")
-				}
-				if pvc.Annotations == nil {
-					pvc.Annotations = map[string]string{}
-				}
-				pvc.Annotations[restoreLockExpiryAnnotation] = time.Now().UTC().Add(ttl).Format(time.RFC3339Nano)
-				_, err = client.CoreV1().PersistentVolumeClaims(namespace).Update(ctx, pvc, metav1.UpdateOptions{})
-				return err
-			})
+			err := renewRestoreLockOnce(ctx, client, namespace, name, holder, pvcUID, ttl)
 			if err != nil {
 				select {
 				case leaseErrors <- classifyRestoreLockError(ctx, err):
@@ -1209,6 +1210,27 @@ func renewRestoreLock(ctx context.Context, cancel context.CancelFunc, client kub
 			}
 		}
 	}
+}
+
+func renewRestoreLockOnce(ctx context.Context, client kubernetes.Interface, namespace, name, holder, pvcUID string, ttl time.Duration) error {
+	if pvcUID == "" {
+		return domain.NewError(domain.ErrorPrecondition, "restore lock", "PVC identity is required for lock renewal")
+	}
+	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		pvc, err := client.CoreV1().PersistentVolumeClaims(namespace).Get(ctx, name, metav1.GetOptions{})
+		if err != nil {
+			return err
+		}
+		if string(pvc.UID) != pvcUID || pvc.Annotations[restoreLockAnnotation] != holder {
+			return domain.NewError(domain.ErrorConflict, "restore lock", "PVC lock ownership changed during renewal")
+		}
+		if pvc.Annotations == nil {
+			pvc.Annotations = map[string]string{}
+		}
+		pvc.Annotations[restoreLockExpiryAnnotation] = time.Now().UTC().Add(ttl).Format(time.RFC3339Nano)
+		_, err = client.CoreV1().PersistentVolumeClaims(namespace).Update(ctx, pvc, metav1.UpdateOptions{})
+		return err
+	})
 }
 
 func classifyRestoreLockError(ctx context.Context, err error) error {

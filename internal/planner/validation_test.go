@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/labring-sigs/pvc-migrate/internal/domain"
+	"github.com/labring-sigs/pvc-migrate/internal/kube"
 	corev1 "k8s.io/api/core/v1"
 	storagev1 "k8s.io/api/storage/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -14,6 +15,31 @@ import (
 	kubernetesfake "k8s.io/client-go/kubernetes/fake"
 	clienttesting "k8s.io/client-go/testing"
 )
+
+type plannerOpenEBSLVMSharedVolumeManager struct {
+	shared bool
+	err    error
+}
+
+func (m plannerOpenEBSLVMSharedVolumeManager) Shared(context.Context, domain.ObjectReference, domain.ObjectReference, string) (bool, error) {
+	return m.shared, m.err
+}
+
+func (plannerOpenEBSLVMSharedVolumeManager) PrepareShared(context.Context, domain.ObjectReference) (kube.OpenEBSLVMSharedResult, error) {
+	return kube.OpenEBSLVMSharedResult{}, nil
+}
+
+func (plannerOpenEBSLVMSharedVolumeManager) EnableShared(context.Context, string, domain.OpenEBSLVMSharedMount) error {
+	return nil
+}
+
+func (plannerOpenEBSLVMSharedVolumeManager) ValidateRestoreShared(context.Context, string, domain.OpenEBSLVMSharedMount) error {
+	return nil
+}
+
+func (plannerOpenEBSLVMSharedVolumeManager) RestoreShared(context.Context, string, domain.OpenEBSLVMSharedMount) error {
+	return nil
+}
 
 func TestCheckPVCReferencesModelsOfflineWarmCopyRWOPAndSharedUnit(t *testing.T) {
 	rwo := corev1.ReadWriteOnce
@@ -68,6 +94,10 @@ func TestCheckWarmCopyMountCompatibility(t *testing.T) {
 		wantText     string
 		wantChecks   int
 		wantInspect  bool
+		wantPatch    bool
+		lvmShared    bool
+		lvmErr       error
+		pvDriver     string
 	}{
 		{
 			name:      "OpenEBS LVM without shared blocks warm copy",
@@ -78,7 +108,7 @@ func TestCheckWarmCopyMountCompatibility(t *testing.T) {
 			name:         "OpenEBS LVM explicit enable permits warm-copy probe",
 			enableShared: true,
 			class:        &storagev1.StorageClass{ObjectMeta: metav1.ObjectMeta{Name: "openebs-lvmpv"}, Provisioner: "local.csi.openebs.io"},
-			consumers:    []*corev1.Pod{consumer}, wantReady: true, wantText: "LVMVolume spec.shared", wantLevel: domain.SeverityWarning, wantChecks: 1, wantInspect: true,
+			consumers:    []*corev1.Pod{consumer}, wantReady: true, wantText: "temporarily set it to yes", wantLevel: domain.SeverityInfo, wantChecks: 1, wantInspect: true, wantPatch: true,
 		},
 		{
 			name:      "online copy uses copy-specific fallback",
@@ -87,18 +117,36 @@ func TestCheckWarmCopyMountCompatibility(t *testing.T) {
 			consumers: []*corev1.Pod{consumer}, wantText: "without --online", wantLevel: domain.SeverityError, wantChecks: 1, wantInspect: true,
 		},
 		{
-			name:      "OpenEBS LVM shared supports runtime verification",
-			class:     &storagev1.StorageClass{ObjectMeta: metav1.ObjectMeta{Name: "openebs-lvmpv-shared"}, Provisioner: "local.csi.openebs.io", Parameters: map[string]string{"shared": "yes"}},
-			consumers: []*corev1.Pod{consumer}, wantReady: true, wantText: "declares shared=yes", wantLevel: domain.SeverityInfo, wantChecks: 1, wantInspect: true,
+			name:         "OpenEBS LVM current shared value supports runtime verification without patch",
+			enableShared: true,
+			class:        &storagev1.StorageClass{ObjectMeta: metav1.ObjectMeta{Name: "openebs-lvmpv-shared"}, Provisioner: "local.csi.openebs.io", Parameters: map[string]string{"shared": "yes"}},
+			consumers:    []*corev1.Pod{consumer}, lvmShared: true, wantReady: true, wantText: "currently has spec.shared=yes", wantLevel: domain.SeverityInfo, wantChecks: 1, wantInspect: true,
 		},
 		{
-			name:      "OpenEBS LVM undocumented true value is rejected",
-			class:     &storagev1.StorageClass{ObjectMeta: metav1.ObjectMeta{Name: "openebs-lvmpv"}, Provisioner: "local.csi.openebs.io", Parameters: map[string]string{"shared": "true"}},
-			consumers: []*corev1.Pod{consumer}, wantText: "shared: \"yes\"", wantLevel: domain.SeverityError, wantChecks: 1, wantInspect: true,
+			name:      "StorageClass shared does not override current unshared LVMVolume",
+			class:     &storagev1.StorageClass{ObjectMeta: metav1.ObjectMeta{Name: "openebs-lvmpv-shared"}, Provisioner: "local.csi.openebs.io", Parameters: map[string]string{"shared": "yes"}},
+			consumers: []*corev1.Pod{consumer}, wantText: "does not currently have spec.shared=yes", wantLevel: domain.SeverityError, wantChecks: 1, wantInspect: true,
+		},
+		{
+			name:      "OpenEBS LVM current state read failure blocks warm copy",
+			class:     &storagev1.StorageClass{ObjectMeta: metav1.ObjectMeta{Name: "openebs-lvmpv-shared"}, Provisioner: "local.csi.openebs.io", Parameters: map[string]string{"shared": "yes"}},
+			consumers: []*corev1.Pod{consumer}, lvmErr: errors.New("LVMVolume access denied"), wantText: "LVMVolume access denied", wantLevel: domain.SeverityError, wantChecks: 1, wantInspect: true,
 		},
 		{
 			name:      "unknown CSI is probed at runtime",
 			class:     &storagev1.StorageClass{ObjectMeta: metav1.ObjectMeta{Name: "other"}, Provisioner: "storage.example.com"},
+			consumers: []*corev1.Pod{consumer}, wantReady: true, wantText: "driver-specific", wantLevel: domain.SeverityWarning, wantChecks: 1,
+		},
+		{
+			name:      "source PV driver identifies OpenEBS LVM after StorageClass changes",
+			class:     &storagev1.StorageClass{ObjectMeta: metav1.ObjectMeta{Name: "changed"}, Provisioner: "storage.example.com"},
+			pvDriver:  kube.OpenEBSLVMCSIDriver,
+			consumers: []*corev1.Pod{consumer}, wantText: "does not currently have spec.shared=yes", wantLevel: domain.SeverityError, wantChecks: 1, wantInspect: true,
+		},
+		{
+			name:      "StorageClass provisioner does not override source PV driver",
+			class:     &storagev1.StorageClass{ObjectMeta: metav1.ObjectMeta{Name: "changed"}, Provisioner: kube.OpenEBSLVMCSIDriver},
+			pvDriver:  "storage.example.com",
 			consumers: []*corev1.Pod{consumer}, wantReady: true, wantText: "driver-specific", wantLevel: domain.SeverityWarning, wantChecks: 1,
 		},
 		{
@@ -115,9 +163,10 @@ func TestCheckWarmCopyMountCompatibility(t *testing.T) {
 			consumers: []*corev1.Pod{consumer}, wantReady: true, wantText: "StorageType=device", wantLevel: domain.SeverityWarning, wantChecks: 1,
 		},
 		{
-			name:      "offline OpenEBS source still requires runtime inspection",
-			class:     &storagev1.StorageClass{ObjectMeta: metav1.ObjectMeta{Name: "openebs-lvmpv"}, Provisioner: "local.csi.openebs.io"},
-			wantReady: true, wantInspect: true,
+			name:         "offline OpenEBS source still requires runtime inspection",
+			enableShared: true,
+			class:        &storagev1.StorageClass{ObjectMeta: metav1.ObjectMeta{Name: "openebs-lvmpv"}, Provisioner: "local.csi.openebs.io"},
+			wantReady:    true, wantInspect: true,
 		},
 	} {
 		t.Run(test.name, func(t *testing.T) {
@@ -126,9 +175,21 @@ func TestCheckWarmCopyMountCompatibility(t *testing.T) {
 			if operation == "" {
 				operation = domain.OperationMigrate
 			}
-			inspect := New(nil, nil).checkWarmCopyMountCompatibility(plan, operation, test.enableShared, pvc, test.class.Name, test.class, nil, test.consumers)
+			pvDriver := test.pvDriver
+			if pvDriver == "" && test.class.Provisioner != "openebs.io/local" {
+				pvDriver = test.class.Provisioner
+			}
+			pv := &corev1.PersistentVolume{ObjectMeta: metav1.ObjectMeta{Name: "pv-source"}}
+			if pvDriver != "" {
+				pv.Spec.CSI = &corev1.CSIPersistentVolumeSource{Driver: pvDriver, VolumeHandle: "pv-source"}
+			}
+			planner := New(nil, nil).WithOpenEBSLVMSharedVolumeManager(plannerOpenEBSLVMSharedVolumeManager{shared: test.lvmShared, err: test.lvmErr})
+			inspect, patch := planner.checkWarmCopyMountCompatibility(context.Background(), plan, operation, test.enableShared, pvc, pv, test.class.Name, test.class, nil, test.consumers)
 			if inspect != test.wantInspect {
 				t.Fatalf("inspect OpenEBS LVM=%t want=%t", inspect, test.wantInspect)
+			}
+			if patch != test.wantPatch {
+				t.Fatalf("patch OpenEBS LVM=%t want=%t", patch, test.wantPatch)
 			}
 			if plan.Ready != test.wantReady || len(plan.Checks) != test.wantChecks {
 				t.Fatalf("ready=%t checks=%#v", plan.Ready, plan.Checks)
@@ -146,6 +207,24 @@ func TestWarmCopyRequestedUsesPrecopyPasses(t *testing.T) {
 	}
 	if !warmCopyRequested(Options{Operation: domain.OperationMigratePod, PrecopyPasses: 1}) {
 		t.Fatal("precopy migration did not request warm copy")
+	}
+}
+
+func TestCheckWarmCopyMountCompatibilityUsesLVMSourcePVWithoutStorageClass(t *testing.T) {
+	plan := &domain.MigrationPlan{Ready: true}
+	pvc := &corev1.PersistentVolumeClaim{ObjectMeta: metav1.ObjectMeta{Namespace: "app", Name: "data"}}
+	pv := &corev1.PersistentVolume{
+		ObjectMeta: metav1.ObjectMeta{Name: "pv-source"},
+		Spec: corev1.PersistentVolumeSpec{PersistentVolumeSource: corev1.PersistentVolumeSource{
+			CSI: &corev1.CSIPersistentVolumeSource{Driver: kube.OpenEBSLVMCSIDriver, VolumeHandle: "pv-source"},
+		}},
+	}
+	consumer := podWithPVC("app", "database-0", "data")
+	planner := New(nil, nil).WithOpenEBSLVMSharedVolumeManager(plannerOpenEBSLVMSharedVolumeManager{})
+
+	inspect, patch := planner.checkWarmCopyMountCompatibility(context.Background(), plan, domain.OperationMigrate, false, pvc, pv, "deleted-class", nil, errors.New("not found"), []*corev1.Pod{consumer})
+	if !inspect || patch || plan.Ready || !hasFailedCheckContaining(plan, "warm-copy-mount", "LVMVolume") {
+		t.Fatalf("inspect=%t patch=%t ready=%t checks=%#v", inspect, patch, plan.Ready, plan.Checks)
 	}
 }
 
@@ -172,6 +251,7 @@ func TestPlanReportsOpenEBSWarmCopyMountCheck(t *testing.T) {
 	objects := plannerObjects("2Gi")
 	storageClass := objects[3].(*storagev1.StorageClass)
 	storageClass.Provisioner = "local.csi.openebs.io"
+	objects[6].(*corev1.PersistentVolume).Spec.CSI = &corev1.CSIPersistentVolumeSource{Driver: kube.OpenEBSLVMCSIDriver, VolumeHandle: "pv-source"}
 	consumer := podWithPVC("app", "database-0", "data")
 	consumer.Status.Phase = corev1.PodRunning
 	objects = append(objects, consumer)
@@ -181,7 +261,9 @@ func TestPlanReportsOpenEBSWarmCopyMountCheck(t *testing.T) {
 		SourcePVCs: []string{"data"}, TargetNode: "node-b", DestinationClass: "fast", PrecopyPasses: 1,
 	}
 
-	plan, err := New(plannerClient(objects...), nil).Plan(context.Background(), options)
+	plan, err := New(plannerClient(objects...), nil).
+		WithOpenEBSLVMSharedVolumeManager(plannerOpenEBSLVMSharedVolumeManager{}).
+		Plan(context.Background(), options)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -193,12 +275,38 @@ func TestPlanReportsOpenEBSWarmCopyMountCheck(t *testing.T) {
 	}
 
 	options.PrecopyPasses = 0
-	offlinePlan, err := New(plannerClient(objects...), nil).Plan(context.Background(), options)
+	offlinePlan, err := New(plannerClient(objects...), nil).
+		WithOpenEBSLVMSharedVolumeManager(plannerOpenEBSLVMSharedVolumeManager{}).
+		Plan(context.Background(), options)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if hasFailedCheck(offlinePlan, "warm-copy-mount") {
 		t.Fatalf("offline plan includes warm-copy mount check: %#v", offlinePlan.Checks)
+	}
+}
+
+func TestPlanRejectsSourcePVClaimRefDrift(t *testing.T) {
+	objects := plannerObjects("2Gi")
+	pv := objects[6].(*corev1.PersistentVolume)
+	pv.Spec.ClaimRef.Name = "other"
+	plan, err := New(plannerClient(objects...), nil).Plan(context.Background(), Options{
+		SessionID:          "binding-drift",
+		Operation:          domain.OperationMigrate,
+		SourceNamespace:    "app",
+		TemporaryNamespace: "system",
+		StagingNamespace:   "system",
+		SessionNamespace:   "system",
+		SourcePVCs:         []string{"data"},
+		TargetNode:         "node-b",
+		DestinationClass:   "fast",
+		PrecopyPasses:      0,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if plan.Ready || !hasFailedCheck(plan, "source-binding") {
+		t.Fatalf("plan=%#v", plan)
 	}
 }
 

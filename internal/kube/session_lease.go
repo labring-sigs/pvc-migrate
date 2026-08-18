@@ -12,6 +12,7 @@ import (
 	coordinationv1 "k8s.io/api/coordination/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/uuid"
 	coordinationclient "k8s.io/client-go/kubernetes/typed/coordination/v1"
 )
@@ -53,7 +54,7 @@ func (s *ConfigMapSessionStore) AcquireSessionLock(ctx context.Context, namespac
 	for attempt := 0; attempt < 2; attempt++ {
 		lease, err := leases.Get(ctx, name, metav1.GetOptions{})
 		if apierrors.IsNotFound(err) {
-			_, createErr := leases.Create(ctx, &coordinationv1.Lease{
+			created, createErr := leases.Create(ctx, &coordinationv1.Lease{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      name,
 					Namespace: namespace,
@@ -68,7 +69,10 @@ func (s *ConfigMapSessionStore) AcquireSessionLock(ctx context.Context, namespac
 				},
 			}, metav1.CreateOptions{})
 			if createErr == nil {
-				return newSessionLease(ctx, leases, namespace, name, id, holder), nil
+				if created == nil || created.UID == "" {
+					return nil, domain.NewError(domain.ErrorKubernetes, "acquire session lock", fmt.Sprintf("create Lease %s/%s returned an incomplete identity", namespace, name))
+				}
+				return newSessionLease(ctx, leases, namespace, name, id, holder, created.UID), nil
 			}
 			if apierrors.IsAlreadyExists(createErr) {
 				continue
@@ -77,6 +81,9 @@ func (s *ConfigMapSessionStore) AcquireSessionLock(ctx context.Context, namespac
 		}
 		if err != nil {
 			return nil, domain.WrapError(domain.ErrorKubernetes, "acquire session lock", fmt.Sprintf("read Lease %s/%s", namespace, name), err)
+		}
+		if lease.UID == "" {
+			return nil, domain.NewError(domain.ErrorKubernetes, "acquire session lock", fmt.Sprintf("Lease %s/%s has an incomplete identity", namespace, name))
 		}
 		if lease.Labels[ManagedByLabel] != ManagedByValue || lease.Labels[SessionKey] != id {
 			return nil, domain.NewError(domain.ErrorConflict, "acquire session lock", fmt.Sprintf("Lease %s/%s is owned by another resource", namespace, name))
@@ -94,14 +101,17 @@ func (s *ConfigMapSessionStore) AcquireSessionLock(ctx context.Context, namespac
 			transitions = *updated.Spec.LeaseTransitions + 1
 		}
 		updated.Spec.LeaseTransitions = &transitions
-		_, err = leases.Update(ctx, updated, metav1.UpdateOptions{})
+		claimed, err := leases.Update(ctx, updated, metav1.UpdateOptions{})
 		if apierrors.IsConflict(err) {
 			return nil, domain.NewError(domain.ErrorConflict, "acquire session lock", fmt.Sprintf("session %s changed while acquiring its lock", id))
 		}
 		if err != nil {
 			return nil, domain.WrapError(domain.ErrorKubernetes, "acquire session lock", fmt.Sprintf("claim Lease %s/%s", namespace, name), err)
 		}
-		return newSessionLease(ctx, leases, namespace, name, id, holder), nil
+		if claimed == nil || claimed.UID == "" {
+			return nil, domain.NewError(domain.ErrorKubernetes, "acquire session lock", fmt.Sprintf("claim Lease %s/%s returned an incomplete identity", namespace, name))
+		}
+		return newSessionLease(ctx, leases, namespace, name, id, holder, claimed.UID), nil
 	}
 	return nil, domain.NewError(domain.ErrorConflict, "acquire session lock", fmt.Sprintf("session %s lock acquisition raced with another process", id))
 }
@@ -126,10 +136,10 @@ func (s *ConfigMapSessionStore) DeleteSessionLease(ctx context.Context, namespac
 	if lease.Labels[ManagedByLabel] != ManagedByValue || lease.Labels[SessionKey] != id {
 		return domain.NewError(domain.ErrorConflict, "delete session lock", fmt.Sprintf("Lease %s/%s is owned by another resource", namespace, name))
 	}
-	preconditions := &metav1.Preconditions{ResourceVersion: &lease.ResourceVersion}
-	if lease.UID != "" {
-		preconditions.UID = &lease.UID
+	if lease.UID == "" {
+		return domain.NewError(domain.ErrorKubernetes, "delete session lock", fmt.Sprintf("Lease %s/%s has an incomplete identity", namespace, name))
 	}
+	preconditions := &metav1.Preconditions{UID: &lease.UID, ResourceVersion: &lease.ResourceVersion}
 	err = leases.Delete(ctx, name, metav1.DeleteOptions{Preconditions: preconditions})
 	if apierrors.IsNotFound(err) {
 		return nil
@@ -149,6 +159,7 @@ type sessionLease struct {
 	name       string
 	sessionID  string
 	holder     string
+	uid        types.UID
 	ctx        context.Context
 	cancel     context.CancelFunc
 	done       chan struct{}
@@ -159,11 +170,11 @@ type sessionLease struct {
 	deleted    bool
 }
 
-func newSessionLease(parent context.Context, leases coordinationclient.LeaseInterface, namespace, name, sessionID, holder string) *sessionLease {
+func newSessionLease(parent context.Context, leases coordinationclient.LeaseInterface, namespace, name, sessionID, holder string, uid types.UID) *sessionLease {
 	ctx, cancel := context.WithCancel(parent)
 	lock := &sessionLease{
 		leases: leases, namespace: namespace, name: name, sessionID: sessionID,
-		holder: holder, ctx: ctx, cancel: cancel, done: make(chan struct{}),
+		holder: holder, uid: uid, ctx: ctx, cancel: cancel, done: make(chan struct{}),
 	}
 	go lock.renewLoop()
 	return lock
@@ -207,7 +218,7 @@ func (l *sessionLease) renew() error {
 	if err != nil {
 		return domain.WrapError(domain.ErrorKubernetes, "renew session lock", "read session Lease", err)
 	}
-	if lease.Labels[ManagedByLabel] != ManagedByValue || lease.Labels[SessionKey] != l.sessionID || lease.Spec.HolderIdentity == nil || *lease.Spec.HolderIdentity != l.holder {
+	if !l.owns(lease) {
 		return domain.NewError(domain.ErrorConflict, "renew session lock", "session lock ownership was fenced")
 	}
 	now := metav1.NewMicroTime(time.Now().UTC())
@@ -264,7 +275,7 @@ func (l *sessionLease) Release(ctx context.Context) error {
 			l.setReleaseErr(domain.WrapError(domain.ErrorKubernetes, "release session lock", "read session Lease", err))
 			return
 		}
-		if lease.Spec.HolderIdentity == nil || *lease.Spec.HolderIdentity != l.holder {
+		if !l.owns(lease) {
 			l.setReleaseErr(domain.NewError(domain.ErrorConflict, "release session lock", "session lock ownership was fenced"))
 			return
 		}
@@ -299,13 +310,10 @@ func (l *sessionLease) Delete(ctx context.Context) error {
 	if err != nil {
 		return domain.WrapError(domain.ErrorKubernetes, "delete session lock", "read session Lease", err)
 	}
-	if lease.Labels[ManagedByLabel] != ManagedByValue || lease.Labels[SessionKey] != l.sessionID || lease.Spec.HolderIdentity == nil || *lease.Spec.HolderIdentity != l.holder {
+	if !l.owns(lease) {
 		return domain.NewError(domain.ErrorConflict, "delete session lock", "session lock ownership was fenced")
 	}
-	preconditions := &metav1.Preconditions{ResourceVersion: &lease.ResourceVersion}
-	if lease.UID != "" {
-		preconditions.UID = &lease.UID
-	}
+	preconditions := &metav1.Preconditions{UID: &lease.UID, ResourceVersion: &lease.ResourceVersion}
 	err = l.leases.Delete(ctx, l.name, metav1.DeleteOptions{Preconditions: preconditions})
 	if apierrors.IsNotFound(err) {
 		err = nil
@@ -326,6 +334,15 @@ func (l *sessionLease) setReleaseErr(err error) {
 	l.mu.Lock()
 	l.releaseErr = err
 	l.mu.Unlock()
+}
+
+func (l *sessionLease) owns(lease *coordinationv1.Lease) bool {
+	return lease != nil &&
+		l.uid != "" && lease.UID == l.uid &&
+		lease.Labels[ManagedByLabel] == ManagedByValue &&
+		lease.Labels[SessionKey] == l.sessionID &&
+		lease.Spec.HolderIdentity != nil &&
+		*lease.Spec.HolderIdentity == l.holder
 }
 
 func sessionLeaseExpired(lease *coordinationv1.Lease, now time.Time) bool {

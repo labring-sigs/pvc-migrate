@@ -134,7 +134,15 @@ func TestSessionValidateRejectsInvalidPersistentShapes(t *testing.T) {
 		{name: "volumes", mutate: func(s *Session) { s.Spec.Volumes = nil; s.Status.Volumes = nil }, text: "contains no volumes"},
 		{name: "status count", mutate: func(s *Session) { s.Status.Volumes = append(s.Status.Volumes, VolumeStatus{}) }, text: "counts differ"},
 		{name: "phase", mutate: func(s *Session) { s.Status.Phase = Phase("Unknown") }, text: "unsupported session phase"},
-		{name: "empty source PVC", mutate: func(s *Session) { s.Spec.Volumes[0].SourcePVC.Name = "" }, text: "source PVC name is required"},
+		{name: "empty source PVC", mutate: func(s *Session) { s.Spec.Volumes[0].SourcePVC.Name = "" }, text: "source PVC namespace, name, and UID are required"},
+		{name: "source PVC UID", mutate: func(s *Session) { s.Spec.Volumes[0].SourcePVC.UID = "" }, text: "source PVC namespace, name, and UID are required"},
+		{name: "source PV UID", mutate: func(s *Session) { s.Spec.Volumes[0].SourcePV.UID = "" }, text: "source PV name and UID are required"},
+		{name: "destination PVC name", mutate: func(s *Session) { s.Spec.Volumes[0].DestinationPVC.Name = "" }, text: "destination PVC namespace and name are required"},
+		{name: "destination PV UID", mutate: func(s *Session) { s.Spec.Volumes[0].DestinationPV.Name = "pv-destination" }, text: "destination PV name and UID must be recorded together"},
+		{name: "reserved destination identity", mutate: func(s *Session) { s.Status.Volumes[0].Reserved = true }, text: "reserved destination PVC and PV identities are incomplete"},
+		{name: "active PVC UID", mutate: func(s *Session) {
+			s.Status.Volumes[0].Activation.ActivePVC = ObjectReference{Namespace: "app", Name: "data"}
+		}, text: "active PVC namespace, name, and UID must be recorded together"},
 		{name: "status alignment", mutate: func(s *Session) { s.Status.Volumes[0].SourcePVCName = "other" }, text: "does not match source PVC"},
 		{name: "duplicate source PVC", mutate: func(s *Session) {
 			s.Spec.Volumes = append(s.Spec.Volumes, s.Spec.Volumes[0])
@@ -183,6 +191,37 @@ func TestSessionSerializationRoundTripOmitsStoreVersion(t *testing.T) {
 	}
 	if strings.Contains(string(yamlData), "sensitive-store-version") || strings.Contains(string(yamlData), "resourceVersion") {
 		t.Fatalf("YAML contains store resource version: %s", yamlData)
+	}
+}
+
+func TestSessionRejectsIncompleteWorkloadIdentity(t *testing.T) {
+	ref := ObjectReference{Namespace: "app", Name: "workload", UID: "workload-uid"}
+	for _, test := range []struct {
+		name     string
+		workload WorkloadSpec
+		mutate   func(*WorkloadSpec)
+	}{
+		{name: "standalone Pod", workload: WorkloadSpec{Adapter: WorkloadStandalone, Pod: ref}, mutate: func(workload *WorkloadSpec) { workload.Pod.UID = "" }},
+		{name: "StatefulSet controller", workload: WorkloadSpec{Adapter: WorkloadStatefulSet, Pod: ref, Controller: ref}, mutate: func(workload *WorkloadSpec) { workload.Controller.UID = "" }},
+		{name: "affected Pod", workload: WorkloadSpec{Adapter: WorkloadVictoriaLogs, Pod: ref, Controller: ref, AffectedPods: []ObjectReference{ref}}, mutate: func(workload *WorkloadSpec) { workload.AffectedPods[0].UID = "" }},
+		{name: "KubeBlocks Cluster", workload: WorkloadSpec{Adapter: WorkloadKubeBlocks, Pod: ref, Controller: ref, KubeBlocks: &KubeBlocksSpec{Cluster: "cluster", ClusterUID: "cluster-uid"}}, mutate: func(workload *WorkloadSpec) { workload.KubeBlocks.ClusterUID = "" }},
+		{name: "VMCluster", workload: WorkloadSpec{Adapter: WorkloadVMCluster, Pod: ref, Controller: ref, VMCluster: &VMClusterSpec{Name: "cluster", UID: "cluster-uid"}}, mutate: func(workload *WorkloadSpec) { workload.VMCluster.UID = "" }},
+		{name: "Grafana", workload: WorkloadSpec{Adapter: WorkloadGrafana, Pod: ref, Controller: ref, Grafana: &GrafanaSpec{Name: "grafana", UID: "grafana-uid"}}, mutate: func(workload *WorkloadSpec) { workload.Grafana.UID = "" }},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			session := testSession(t)
+			if err := session.Spec.SetWorkload(test.workload); err != nil {
+				t.Fatal(err)
+			}
+			if err := session.Validate(); err != nil {
+				t.Fatalf("valid workload rejected: %v", err)
+			}
+			workload := session.Spec.WorkloadPtr()
+			test.mutate(workload)
+			if err := session.Validate(); CategoryOf(err) != ErrorValidation {
+				t.Fatalf("category=%s error=%v", CategoryOf(err), err)
+			}
+		})
 	}
 }
 

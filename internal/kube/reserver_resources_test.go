@@ -26,6 +26,7 @@ func TestReservationToolPodUsesZeroResourceQuotaFootprint(t *testing.T) {
 	client.PrependReactor("create", "pods", func(action clienttesting.Action) (bool, runtime.Object, error) {
 		pod := action.(clienttesting.CreateAction).GetObject().(*corev1.Pod)
 		created = pod.DeepCopy()
+		pod.UID = "reservation-tool-uid"
 		pod.Status = corev1.PodStatus{
 			Phase: corev1.PodRunning,
 			Conditions: []corev1.PodCondition{{
@@ -99,6 +100,7 @@ func TestReservationKeepsPVCStorageRequestSeparateFromToolResources(t *testing.T
 	})
 	client.PrependReactor("create", "pods", func(action clienttesting.Action) (bool, runtime.Object, error) {
 		pod := action.(clienttesting.CreateAction).GetObject().(*corev1.Pod)
+		pod.UID = "reservation-tool-uid"
 		pvcObject, err := client.Tracker().Get(corev1.SchemeGroupVersion.WithResource("persistentvolumeclaims"), volume.DestinationPVC.Namespace, volume.DestinationPVC.Name)
 		if err != nil {
 			return true, nil, err

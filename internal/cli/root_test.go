@@ -40,7 +40,14 @@ func executeBackupCLI(t *testing.T, input string, args ...string) (string, strin
 			mode := corev1.PersistentVolumeFilesystem
 			return &commandRuntime{clients: &kube.Clients{Kubernetes: kubernetesfake.NewClientset(
 				&corev1.PersistentVolumeClaim{ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "data", UID: types.UID("pvc")}, Spec: corev1.PersistentVolumeClaimSpec{VolumeName: "pv-data", VolumeMode: &mode, AccessModes: []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce}}, Status: corev1.PersistentVolumeClaimStatus{Phase: corev1.ClaimBound}},
-				&corev1.PersistentVolume{ObjectMeta: metav1.ObjectMeta{Name: "pv-data", UID: types.UID("pv")}, Spec: corev1.PersistentVolumeSpec{Capacity: corev1.ResourceList{corev1.ResourceStorage: resource.MustParse("1Gi")}}},
+				&corev1.PersistentVolume{
+					ObjectMeta: metav1.ObjectMeta{Name: "pv-data", UID: types.UID("pv")},
+					Spec: corev1.PersistentVolumeSpec{
+						Capacity: corev1.ResourceList{corev1.ResourceStorage: resource.MustParse("1Gi")},
+						ClaimRef: &corev1.ObjectReference{Namespace: "default", Name: "data", UID: types.UID("pvc")},
+					},
+					Status: corev1.PersistentVolumeStatus{Phase: corev1.VolumeBound},
+				},
 			)}}, nil
 		},
 		objectStoreFactory: func(_ context.Context, cfg objectstore.Config) (*objectstore.Store, error) {

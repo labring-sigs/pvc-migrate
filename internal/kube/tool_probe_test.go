@@ -390,6 +390,28 @@ func TestToolImageProbeWaitsForPodDeletion(t *testing.T) {
 	}
 }
 
+func TestCleanupSessionToolProbePodsDeletesOnlyMatchingSessionProbes(t *testing.T) {
+	owned := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{
+		Namespace: "source", Name: "owned-probe", UID: "owned-uid",
+		Labels: map[string]string{ManagedByLabel: ManagedByValue, SessionKey: "session-1", ResourceRoleLabel: ResourceRoleToolProbe},
+	}}
+	foreign := owned.DeepCopy()
+	foreign.Name = "foreign-probe"
+	foreign.UID = "foreign-uid"
+	foreign.Labels = map[string]string{ManagedByLabel: ManagedByValue, SessionKey: "session-2", ResourceRoleLabel: ResourceRoleToolProbe}
+	client := fake.NewClientset(owned, foreign)
+
+	if err := CleanupSessionToolProbePods(context.Background(), client, "session-1", []string{"source", "source", ""}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := client.CoreV1().Pods("source").Get(context.Background(), owned.Name, metav1.GetOptions{}); !apierrors.IsNotFound(err) {
+		t.Fatalf("owned probe still exists: %v", err)
+	}
+	if _, err := client.CoreV1().Pods("source").Get(context.Background(), foreign.Name, metav1.GetOptions{}); err != nil {
+		t.Fatalf("foreign probe was deleted: %v", err)
+	}
+}
+
 func TestToolImageProbeCleanupRejectsReplacementPod(t *testing.T) {
 	client := fake.NewClientset(readyProbeNode("node-a"))
 	var createdName string
@@ -685,6 +707,31 @@ func TestToolImageProbeFailsImmediatelyWhenPodDisappears(t *testing.T) {
 	}
 	if elapsed := time.Since(started); elapsed > 250*time.Millisecond {
 		t.Fatalf("disappeared Pod detection took %s", elapsed)
+	}
+}
+
+func TestToolImageProbeRejectsReplacementBeforeCompletion(t *testing.T) {
+	client := fake.NewClientset(readyProbeNode("node-a"))
+	var created *corev1.Pod
+	client.PrependReactor("create", "pods", func(action clienttesting.Action) (bool, runtime.Object, error) {
+		created = action.(clienttesting.CreateAction).GetObject().(*corev1.Pod)
+		created.UID = "created-probe"
+		return false, nil, nil
+	})
+	client.PrependReactor("get", "pods", func(clienttesting.Action) (bool, runtime.Object, error) {
+		if created == nil {
+			return false, nil, nil
+		}
+		replacement := created.DeepCopy()
+		replacement.UID = "replacement-probe"
+		replacement.Status.Phase = corev1.PodSucceeded
+		return true, replacement, nil
+	})
+	_, err := NewToolImageProber(client).Probe(context.Background(), ToolImageProbeOptions{
+		Image: "registry.example/tool:test", Targets: []ToolProbeTarget{{Namespace: "system", NodeName: "node-a"}}, Timeout: time.Second, Poll: time.Millisecond,
+	})
+	if domain.CategoryOf(err) != domain.ErrorConflict || !strings.Contains(err.Error(), "replaced before completion") {
+		t.Fatalf("category=%s error=%v", domain.CategoryOf(err), err)
 	}
 }
 

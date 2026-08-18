@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/labring-sigs/pvc-migrate/internal/backup"
 	"github.com/labring-sigs/pvc-migrate/internal/domain"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
@@ -106,6 +107,53 @@ func TestTablePlanRendersChecksAndVolumes(t *testing.T) {
 	for _, want := range []string{"SESSION", "mig-1", "app/data", "pv-a", "staging/data-mig", "STORAGE CLASS", "20Gi", "15Gi", "sufficient", "PASS", "FAIL", "unavailable"} {
 		if !strings.Contains(output.String(), want) {
 			t.Fatalf("table missing %q:\n%s", want, output.String())
+		}
+	}
+}
+
+func TestTableBackupPlanAndResultAreHumanReadable(t *testing.T) {
+	plan := &backup.Plan{
+		Operation:        "restore",
+		ToolImage:        "ghcr.io/example/tool:latest",
+		Namespace:        "app",
+		PVC:              "data",
+		Mode:             backup.ModeRestore,
+		Consistency:      "destination PVC write; application must be quiesced",
+		Destination:      "s3://backups/pv-migrate/daily/",
+		ManifestPresent:  true,
+		Capacity:         "1Gi",
+		VolumeMode:       "Filesystem",
+		ToolNode:         "node-a",
+		ObjectCount:      3,
+		TotalBytes:       42,
+		InventorySHA256:  "digest",
+		DeleteExtraneous: true,
+		Compression:      "none",
+		MountedPods:      []string{"app/writer"},
+		Warnings:         []string{"restore is explicitly allowed while mounted"},
+	}
+	var output bytes.Buffer
+	if err := (Printer{Writer: &output}).Print(plan); err != nil {
+		t.Fatal(err)
+	}
+	text := output.String()
+	for _, want := range []string{"OPERATION", "restore", "app/data", "s3://backups/pv-migrate/daily/", "MANIFEST", "present", "3", "42", "digest", "MOUNTED PODS", "app/writer", "WARNING", "restore is explicitly allowed"} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("backup plan table missing %q:\n%s", want, text)
+		}
+	}
+	if strings.HasPrefix(strings.TrimSpace(text), "{") {
+		t.Fatalf("backup plan table unexpectedly used JSON fallback:\n%s", text)
+	}
+
+	output.Reset()
+	result := &backup.Result{Operation: "backup", Namespace: "app", PVC: "data", Mode: backup.ModeOffline, Status: "completed", Destination: "s3://backups/pv-migrate/daily/"}
+	if err := (Printer{Writer: &output}).Print(result); err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"OPERATION", "backup", "app/data", "offline", "completed", "s3://backups/pv-migrate/daily/"} {
+		if !strings.Contains(output.String(), want) {
+			t.Fatalf("backup result table missing %q:\n%s", want, output.String())
 		}
 	}
 }

@@ -18,6 +18,7 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/fields"
+	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/uuid"
 	utilvalidation "k8s.io/apimachinery/pkg/util/validation"
@@ -29,7 +30,6 @@ const (
 	ToolComponentRsync  = "rsync"
 	ToolComponentSSHD   = "sshd"
 	ToolComponentRclone = "rclone"
-	toolProbeRole       = "tool-probe"
 	toolProbeOperation  = "pvc-migrate.io/probe-operation"
 	toolProbeTimeout    = 2 * time.Minute
 	toolProbePoll       = 250 * time.Millisecond
@@ -189,6 +189,9 @@ func (p *KubernetesToolImageProber) probeTarget(ctx context.Context, image, oper
 		if getErr != nil {
 			return false, domain.WrapError(domain.ErrorKubernetes, "tool image probe", fmt.Sprintf("read probe Pod %s/%s", target.Namespace, created.Name), getErr)
 		}
+		if current.UID != created.UID {
+			return false, domain.NewError(domain.ErrorConflict, "tool image probe", fmt.Sprintf("probe Pod %s/%s was replaced before completion", target.Namespace, created.Name))
+		}
 		if current.Spec.NodeName != "" {
 			observedTarget.NodeName = current.Spec.NodeName
 		}
@@ -276,6 +279,70 @@ func (p *KubernetesToolImageProber) cleanupProbePod(namespace, name string, uid 
 			return domain.NewError(domain.ErrorConflict, "tool image probe cleanup", fmt.Sprintf("probe Pod %s/%s was replaced while waiting for probe cleanup", namespace, name))
 		}
 		return domain.WrapError(domain.ErrorTimeout, "tool image probe cleanup", fmt.Sprintf("probe Pod %s/%s deletion was not confirmed; inspect with kubectl --namespace %s get pod %s", namespace, name, namespace, name), err)
+	}
+	return nil
+}
+
+// CleanupSessionToolProbePods removes probes left behind when a process exits
+// before its normal deferred cleanup runs. Exact labels and UID-preconditioned
+// deletes keep cleanup within one migration session.
+func CleanupSessionToolProbePods(ctx context.Context, client kubernetes.Interface, sessionID string, namespaces []string) error {
+	if client == nil {
+		return domain.NewError(domain.ErrorInternal, "tool image probe cleanup", "Kubernetes client is required")
+	}
+	if strings.TrimSpace(sessionID) == "" {
+		return domain.NewError(domain.ErrorValidation, "tool image probe cleanup", "session ID is required")
+	}
+	uniqueNamespaces := make([]string, 0, len(namespaces))
+	for _, namespace := range namespaces {
+		namespace = strings.TrimSpace(namespace)
+		if namespace != "" && !slices.Contains(uniqueNamespaces, namespace) {
+			uniqueNamespaces = append(uniqueNamespaces, namespace)
+		}
+	}
+	sort.Strings(uniqueNamespaces)
+	selector := labels.SelectorFromSet(labels.Set{
+		ManagedByLabel:    ManagedByValue,
+		SessionKey:        sessionID,
+		ResourceRoleLabel: ResourceRoleToolProbe,
+	}).String()
+	for _, namespace := range uniqueNamespaces {
+		pods, err := client.CoreV1().Pods(namespace).List(ctx, metav1.ListOptions{LabelSelector: selector})
+		if err != nil {
+			return domain.WrapError(domain.ErrorKubernetes, "tool image probe cleanup", fmt.Sprintf("list session probe Pods in %s", namespace), err)
+		}
+		if pods == nil {
+			return domain.NewError(domain.ErrorKubernetes, "tool image probe cleanup", fmt.Sprintf("list session probe Pods in %s returned an empty object", namespace))
+		}
+		sort.Slice(pods.Items, func(i, j int) bool { return pods.Items[i].Name < pods.Items[j].Name })
+		for index := range pods.Items {
+			pod := &pods.Items[index]
+			if pod.Labels[ManagedByLabel] != ManagedByValue || pod.Labels[SessionKey] != sessionID || pod.Labels[ResourceRoleLabel] != ResourceRoleToolProbe {
+				continue
+			}
+			if pod.UID == "" {
+				return domain.NewError(domain.ErrorPrecondition, "tool image probe cleanup", fmt.Sprintf("probe Pod %s/%s has no UID", namespace, pod.Name))
+			}
+			uid := pod.UID
+			if err := client.CoreV1().Pods(namespace).Delete(ctx, pod.Name, metav1.DeleteOptions{Preconditions: &metav1.Preconditions{UID: &uid}}); err != nil && !apierrors.IsNotFound(err) {
+				return domain.WrapError(domain.ErrorKubernetes, "tool image probe cleanup", fmt.Sprintf("delete probe Pod %s/%s", namespace, pod.Name), err)
+			}
+			if err := WaitFor(ctx, toolProbePoll, fmt.Sprintf("probe Pod %s/%s deletion", namespace, pod.Name), func(waitCtx context.Context) (bool, error) {
+				current, getErr := client.CoreV1().Pods(namespace).Get(waitCtx, pod.Name, metav1.GetOptions{})
+				if apierrors.IsNotFound(getErr) {
+					return true, nil
+				}
+				if getErr != nil {
+					return false, domain.WrapError(domain.ErrorKubernetes, "tool image probe cleanup", fmt.Sprintf("confirm probe Pod %s/%s deletion", namespace, pod.Name), getErr)
+				}
+				if current.UID != uid {
+					return false, domain.NewError(domain.ErrorConflict, "tool image probe cleanup", fmt.Sprintf("probe Pod %s/%s was replaced while waiting for cleanup", namespace, pod.Name))
+				}
+				return false, nil
+			}); err != nil {
+				return err
+			}
+		}
 	}
 	return nil
 }
@@ -422,7 +489,7 @@ func toolProbePod(image, operationID string, target ToolProbeTarget, node *corev
 	name := BoundedName("pvc-migrate-probe", operationID, target.Namespace, target.NodeName, target.PVCName, string(uuid.NewUUID()))
 	labels := map[string]string{
 		ManagedByLabel:    ManagedByValue,
-		ResourceRoleLabel: toolProbeRole,
+		ResourceRoleLabel: ResourceRoleToolProbe,
 	}
 	if operationID != "" && len(utilvalidation.IsValidLabelValue(operationID)) == 0 {
 		labels[SessionKey] = operationID

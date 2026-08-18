@@ -74,6 +74,9 @@ func (s *Service) cleanup(ctx context.Context, session *domain.Session, options 
 	if err := s.restoreOpenEBSLVMSharedMounts(ctx, session); err != nil {
 		return err
 	}
+	if err := s.ValidateCleanup(ctx, session, options); err != nil {
+		return err
+	}
 	s.logInfo("cleanup started", "session", session.ID, "phase", session.Status.Phase, "deleteTemporary", options.DeleteTemporary, "deleteRollback", options.DeleteRollback, "finalize", options.Finalize, "deleteSession", options.DeleteSession)
 	if !session.Spec.Operation().RebindsPVC() && (options.DeleteTemporary || options.DeleteRollback || options.DeleteSession) {
 		if err := s.recoverDestinationRefs(ctx, session); err != nil {
@@ -197,7 +200,14 @@ func (s *Service) cleanup(ctx context.Context, session *domain.Session, options 
 		if err := s.store.Delete(ctx, session); err != nil {
 			return err
 		}
-		if cleaner, ok := s.store.(kube.SessionLeaseCleaner); ok {
+		if held, ok := ctx.Value(sessionLockContextKey{}).(heldSessionLock); ok {
+			deleteCtx, cancelDelete := context.WithTimeout(context.Background(), 10*time.Second)
+			err := held.lock.Delete(deleteCtx)
+			cancelDelete()
+			if err != nil {
+				return err
+			}
+		} else if cleaner, ok := s.store.(kube.SessionLeaseCleaner); ok {
 			if err := cleaner.DeleteSessionLease(ctx, session.Spec.SessionNamespace, session.ID); err != nil {
 				return err
 			}
@@ -284,7 +294,10 @@ func (s *Service) inspectPVCUnusedWithOperations(ctx context.Context, ref domain
 	if pvc == nil || pvc.Name == "" {
 		return nil, domain.NewError(domain.ErrorKubernetes, "cleanup", fmt.Sprintf("read PVC %s/%s returned an empty object", ref.Namespace, ref.Name))
 	}
-	if ref.UID != "" && pvc.UID != ref.UID {
+	if ref.UID == "" {
+		return nil, domain.NewError(domain.ErrorValidation, "cleanup", fmt.Sprintf("PVC %s/%s UID is required", ref.Namespace, ref.Name))
+	}
+	if pvc.UID != ref.UID {
 		return nil, domain.NewError(domain.ErrorConflict, "cleanup", fmt.Sprintf("PVC %s/%s identity changed", ref.Namespace, ref.Name))
 	}
 	var pods *corev1.PodList
@@ -574,7 +587,7 @@ func (s *Service) deleteReservationPods(ctx context.Context, session *domain.Ses
 	for _, volume := range session.Spec.Volumes {
 		namespaces[volume.DestinationPVC.Namespace] = struct{}{}
 	}
-	selector := kube.SessionKey + "=" + session.ID + "," + kube.ResourceRoleLabel + "=" + kube.ResourceRoleReservationConsumer
+	selector := reservationPodSelector(session.ID)
 	for namespace := range namespaces {
 		pods, err := s.client.CoreV1().Pods(namespace).List(ctx, metav1.ListOptions{LabelSelector: selector})
 		if err != nil && !apierrors.IsNotFound(err) {
@@ -591,9 +604,12 @@ func (s *Service) deleteReservationPods(ctx context.Context, session *domain.Ses
 			podName := pods.Items[i].Name
 			s.logInfo("waiting for reservation Pod deletion", "session", session.ID, "namespace", namespace, "pod", podName)
 			if err := kube.WaitFor(ctx, time.Second, fmt.Sprintf("reservation Pod %s/%s deletion", namespace, podName), func(waitCtx context.Context) (bool, error) {
-				_, getErr := s.client.CoreV1().Pods(namespace).Get(waitCtx, podName, metav1.GetOptions{})
+				current, getErr := s.client.CoreV1().Pods(namespace).Get(waitCtx, podName, metav1.GetOptions{})
 				if apierrors.IsNotFound(getErr) {
 					return true, nil
+				}
+				if getErr == nil && current.UID != uid {
+					return false, domain.NewError(domain.ErrorConflict, "cleanup", fmt.Sprintf("reservation Pod %s/%s was replaced while waiting for deletion", namespace, podName))
 				}
 				return false, getErr
 			}); err != nil {
@@ -602,6 +618,45 @@ func (s *Service) deleteReservationPods(ctx context.Context, session *domain.Ses
 		}
 	}
 	return nil
+}
+
+// validateReservationPods inventories every reservation consumer before any
+// cleanup deletion. This keeps a later namespace-list failure from leaving a
+// partially cleaned session and limits deletion to pvc-migrate-owned Pods.
+func (s *Service) validateReservationPods(ctx context.Context, session *domain.Session) error {
+	if session == nil {
+		return domain.NewError(domain.ErrorValidation, "cleanup dry-run", "session is nil")
+	}
+	namespaces := make(map[string]struct{})
+	for _, volume := range session.Spec.Volumes {
+		if volume.DestinationPVC.Namespace != "" {
+			namespaces[volume.DestinationPVC.Namespace] = struct{}{}
+		}
+	}
+	selector := reservationPodSelector(session.ID)
+	for namespace := range namespaces {
+		pods, err := s.client.CoreV1().Pods(namespace).List(ctx, metav1.ListOptions{LabelSelector: selector})
+		if err != nil && !apierrors.IsNotFound(err) {
+			return domain.WrapError(domain.ErrorKubernetes, "cleanup dry-run", fmt.Sprintf("list reservation Pods in %s", namespace), err)
+		}
+		if err == nil && pods == nil {
+			return domain.NewError(domain.ErrorKubernetes, "cleanup dry-run", fmt.Sprintf("list reservation Pods in %s returned an empty object", namespace))
+		}
+		if err != nil {
+			continue
+		}
+		for index := range pods.Items {
+			pod := &pods.Items[index]
+			if pod.Labels[kube.ManagedByLabel] != kube.ManagedByValue || pod.Labels[kube.SessionKey] != session.ID || pod.Labels[kube.ResourceRoleLabel] != kube.ResourceRoleReservationConsumer {
+				return domain.NewError(domain.ErrorConflict, "cleanup dry-run", fmt.Sprintf("reservation Pod %s/%s is not owned by session %s", pod.Namespace, pod.Name, session.ID))
+			}
+		}
+	}
+	return nil
+}
+
+func reservationPodSelector(sessionID string) string {
+	return kube.ManagedByLabel + "=" + kube.ManagedByValue + "," + kube.SessionKey + "=" + sessionID + "," + kube.ResourceRoleLabel + "=" + kube.ResourceRoleReservationConsumer
 }
 
 func (s *Service) releaseUncheckpointedSource(ctx context.Context, sessionID string, volume *domain.VolumeSpec) error {
@@ -621,7 +676,7 @@ func (s *Service) releaseUncheckpointedSource(ctx context.Context, sessionID str
 	if err != nil {
 		return domain.WrapError(domain.ErrorKubernetes, "cleanup", fmt.Sprintf("read source PV %s", volume.SourcePV.Name), err)
 	}
-	if volume.SourcePV.UID != "" && pv.UID != volume.SourcePV.UID {
+	if pv.UID != volume.SourcePV.UID {
 		return domain.NewError(domain.ErrorConflict, "cleanup", fmt.Sprintf("source PV %s identity changed", pv.Name))
 	}
 	if pv.Labels[kube.SessionKey] != sessionID {
@@ -645,7 +700,7 @@ func (s *Service) validateUncheckpointedSource(ctx context.Context, sessionID st
 	if pvcErr != nil && !apierrors.IsNotFound(pvcErr) {
 		return domain.WrapError(domain.ErrorKubernetes, "cleanup", fmt.Sprintf("read source PVC %s/%s", volume.SourcePVC.Namespace, volume.SourcePVC.Name), pvcErr)
 	}
-	if pvcErr == nil && volume.SourcePVC.UID != "" && pvc.UID != volume.SourcePVC.UID {
+	if pvcErr == nil && pvc.UID != volume.SourcePVC.UID {
 		return domain.NewError(domain.ErrorConflict, "cleanup", fmt.Sprintf("source PVC %s/%s identity changed", pvc.Namespace, pvc.Name))
 	}
 	pv, err := s.client.CoreV1().PersistentVolumes().Get(ctx, volume.SourcePV.Name, metav1.GetOptions{})
@@ -655,7 +710,7 @@ func (s *Service) validateUncheckpointedSource(ctx context.Context, sessionID st
 	if err != nil {
 		return domain.WrapError(domain.ErrorKubernetes, "cleanup", fmt.Sprintf("read source PV %s", volume.SourcePV.Name), err)
 	}
-	if volume.SourcePV.UID != "" && pv.UID != volume.SourcePV.UID {
+	if pv.UID != volume.SourcePV.UID {
 		return domain.NewError(domain.ErrorConflict, "cleanup", fmt.Sprintf("source PV %s identity changed", pv.Name))
 	}
 	if pv.Labels[kube.SessionKey] != sessionID {
@@ -705,12 +760,12 @@ func (s *Service) deleteRollbackPV(ctx context.Context, sessionID string, ref do
 	}
 	// PVC deletion and PV release are asynchronous Kubernetes controller updates.
 	if pv.Status.Phase == corev1.VolumeBound {
-		if pv.Spec.ClaimRef == nil || pv.Spec.ClaimRef.Namespace == "" || pv.Spec.ClaimRef.Name == "" {
+		if pv.Spec.ClaimRef == nil || pv.Spec.ClaimRef.Namespace == "" || pv.Spec.ClaimRef.Name == "" || pv.Spec.ClaimRef.UID == "" {
 			return domain.NewError(domain.ErrorPrecondition, "cleanup rollback PV", fmt.Sprintf("PV %s phase %s must be Released or Available", pv.Name, pv.Status.Phase))
 		}
 		claim, claimErr := s.client.CoreV1().PersistentVolumeClaims(pv.Spec.ClaimRef.Namespace).Get(ctx, pv.Spec.ClaimRef.Name, metav1.GetOptions{})
 		if claimErr == nil {
-			if pv.Spec.ClaimRef.UID != "" && claim.UID != pv.Spec.ClaimRef.UID {
+			if claim.UID != pv.Spec.ClaimRef.UID {
 				return domain.NewError(domain.ErrorConflict, "cleanup rollback PV", fmt.Sprintf("PV %s ClaimRef UID changed", pv.Name))
 			}
 			if claim.DeletionTimestamp == nil {
@@ -737,12 +792,12 @@ func (s *Service) deleteRollbackPV(ctx context.Context, sessionID string, ref do
 			if current.Status.Phase != corev1.VolumeBound {
 				return false, domain.NewError(domain.ErrorPrecondition, "cleanup rollback PV", fmt.Sprintf("PV %s phase %s must be Released or Available", current.Name, current.Status.Phase))
 			}
-			if current.Spec.ClaimRef == nil || current.Spec.ClaimRef.Namespace == "" || current.Spec.ClaimRef.Name == "" {
+			if current.Spec.ClaimRef == nil || current.Spec.ClaimRef.Namespace == "" || current.Spec.ClaimRef.Name == "" || current.Spec.ClaimRef.UID == "" {
 				return false, domain.NewError(domain.ErrorPrecondition, "cleanup rollback PV", fmt.Sprintf("PV %s phase %s has no ClaimRef", current.Name, current.Status.Phase))
 			}
 			claim, claimErr := s.client.CoreV1().PersistentVolumeClaims(current.Spec.ClaimRef.Namespace).Get(waitCtx, current.Spec.ClaimRef.Name, metav1.GetOptions{})
 			if claimErr == nil {
-				if current.Spec.ClaimRef.UID != "" && claim.UID != current.Spec.ClaimRef.UID {
+				if claim.UID != current.Spec.ClaimRef.UID {
 					return false, domain.NewError(domain.ErrorConflict, "cleanup rollback PV", fmt.Sprintf("PV %s ClaimRef UID changed while waiting for release", ref.Name))
 				}
 				if claim.DeletionTimestamp == nil {

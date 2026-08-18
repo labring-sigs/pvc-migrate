@@ -17,8 +17,8 @@ func testSession(t *testing.T) *Session {
 		DestinationNamespace: "app",
 		SessionNamespace:     "pvc-migrate-system",
 		Volumes: []VolumeSpec{{
-			SourcePVC:      ObjectReference{Name: "data", Namespace: "app"},
-			SourcePV:       ObjectReference{Name: "pv-source"},
+			SourcePVC:      ObjectReference{Name: "data", Namespace: "app", UID: "source-pvc-uid"},
+			SourcePV:       ObjectReference{Name: "pv-source", UID: "source-pv-uid"},
 			SourcePVCSpec:  corev1.PersistentVolumeClaimSpec{},
 			DestinationPVC: ObjectReference{Name: "target", Namespace: "pvc-migrate-system"},
 		}},

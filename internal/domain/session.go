@@ -196,12 +196,11 @@ type KubeBlocksSpec struct {
 	Instance                 string                       `json:"instance" yaml:"instance"`
 	Role                     string                       `json:"role,omitempty" yaml:"role,omitempty"`
 	SwitchoverCandidate      string                       `json:"switchoverCandidate,omitempty" yaml:"switchoverCandidate,omitempty"`
-	SwitchoverStrategy       KubeBlocksSwitchoverStrategy `json:"switchoverStrategy,omitempty" yaml:"switchoverStrategy,omitempty"`
+	SwitchoverStrategy       KubeBlocksSwitchoverStrategy `json:"switchoverStrategy" yaml:"switchoverStrategy"`
 	SwitchoverContainer      string                       `json:"switchoverContainer,omitempty" yaml:"switchoverContainer,omitempty"`
 	OpsAPIVersion            string                       `json:"opsAPIVersion" yaml:"opsAPIVersion"`
-	ClusterAPIVersion        string                       `json:"clusterAPIVersion,omitempty" yaml:"clusterAPIVersion,omitempty"`
-	ClusterUID               types.UID                    `json:"clusterUID,omitempty" yaml:"clusterUID,omitempty"`
-	OriginalStops            map[string]bool              `json:"originalStops,omitempty" yaml:"originalStops,omitempty"`
+	ClusterUID               types.UID                    `json:"clusterUID" yaml:"clusterUID"`
+	OriginalStops            map[string]bool              `json:"originalStops" yaml:"originalStops"`
 	OriginalPaused           bool                         `json:"originalPaused,omitempty" yaml:"originalPaused,omitempty"`
 	OriginalPausedConfigured bool                         `json:"originalPausedConfigured,omitempty" yaml:"originalPausedConfigured,omitempty"`
 }
@@ -224,6 +223,7 @@ type VMClusterSpec struct {
 	OriginalClusterPaused           bool      `json:"originalClusterPaused" yaml:"originalClusterPaused"`
 	OriginalClusterPausedConfigured bool      `json:"originalClusterPausedConfigured" yaml:"originalClusterPausedConfigured"`
 	OriginalReplicas                int32     `json:"originalReplicas" yaml:"originalReplicas"`
+	OriginalReplicasConfigured      bool      `json:"originalReplicasConfigured" yaml:"originalReplicasConfigured"`
 }
 
 type GrafanaSpec struct {
@@ -310,9 +310,10 @@ type HistoryEntry struct {
 // by this session. PreviousSharedSet distinguishes an absent field from an
 // explicitly empty value so cleanup can restore the original CR exactly.
 type OpenEBSLVMSharedMount struct {
-	SourcePV          string `json:"sourcePV" yaml:"sourcePV"`
-	PreviousShared    string `json:"previousShared,omitempty" yaml:"previousShared,omitempty"`
-	PreviousSharedSet bool   `json:"previousSharedSet,omitempty" yaml:"previousSharedSet,omitempty"`
+	SourcePV          ObjectReference `json:"sourcePV" yaml:"sourcePV"`
+	LVMVolume         ObjectReference `json:"lvmVolume" yaml:"lvmVolume"`
+	PreviousShared    string          `json:"previousShared,omitempty" yaml:"previousShared,omitempty"`
+	PreviousSharedSet bool            `json:"previousSharedSet,omitempty" yaml:"previousSharedSet,omitempty"`
 }
 
 type SessionStatus struct {
@@ -626,9 +627,29 @@ func (s *Session) Validate() error {
 	}
 	seen := make(map[string]struct{}, len(s.Spec.Volumes))
 	for index := range s.Spec.Volumes {
-		name := s.Spec.Volumes[index].SourcePVC.Name
-		if name == "" {
-			return NewError(ErrorValidation, "session", fmt.Sprintf("source PVC name is required for volume %d", index))
+		volume := &s.Spec.Volumes[index]
+		name := volume.SourcePVC.Name
+		if volume.SourcePVC.Namespace == "" || name == "" || volume.SourcePVC.UID == "" {
+			return NewError(ErrorValidation, "session", fmt.Sprintf("source PVC namespace, name, and UID are required for volume %d", index))
+		}
+		if volume.SourcePV.Name == "" || volume.SourcePV.UID == "" {
+			return NewError(ErrorValidation, "session", fmt.Sprintf("source PV name and UID are required for volume %d", index))
+		}
+		if volume.DestinationPVC.Namespace == "" || volume.DestinationPVC.Name == "" {
+			return NewError(ErrorValidation, "session", fmt.Sprintf("destination PVC namespace and name are required for volume %d", index))
+		}
+		if (volume.DestinationPV.Name == "") != (volume.DestinationPV.UID == "") {
+			return NewError(ErrorValidation, "session", fmt.Sprintf("destination PV name and UID must be recorded together for volume %d", index))
+		}
+		status := &s.Status.Volumes[index]
+		if status.Reserved && (volume.DestinationPVC.UID == "" || volume.DestinationPV.Name == "" || volume.DestinationPV.UID == "") {
+			return NewError(ErrorValidation, "session", fmt.Sprintf("reserved destination PVC and PV identities are incomplete for volume %d", index))
+		}
+		active := status.Activation.ActivePVC
+		if active.Name != "" || active.Namespace != "" || active.UID != "" {
+			if active.Namespace == "" || active.Name == "" || active.UID == "" {
+				return NewError(ErrorValidation, "session", fmt.Sprintf("active PVC namespace, name, and UID must be recorded together for volume %d", index))
+			}
 		}
 		if _, exists := seen[name]; exists {
 			return NewError(ErrorValidation, "session", fmt.Sprintf("duplicate source PVC %q", name))
@@ -637,6 +658,65 @@ func (s *Session) Validate() error {
 		if s.Status.Volumes[index].SourcePVCName != name {
 			return NewError(ErrorValidation, "session", fmt.Sprintf("volume status %d does not match source PVC %q", index, name))
 		}
+	}
+	if s.Spec.Orchestrated() {
+		if err := validateWorkloadIdentity(s.Spec.Workload()); err != nil {
+			return err
+		}
+	}
+	for index, mount := range s.Status.OpenEBSLVMSharedMounts {
+		if mount.SourcePV.Name == "" || mount.SourcePV.UID == "" {
+			return NewError(ErrorValidation, "session", fmt.Sprintf("OpenEBS shared mount %d has an incomplete source PV identity", index))
+		}
+		if mount.LVMVolume.Namespace == "" || mount.LVMVolume.Name == "" || mount.LVMVolume.UID == "" {
+			return NewError(ErrorValidation, "session", fmt.Sprintf("OpenEBS shared mount %d has an incomplete LVMVolume identity", index))
+		}
+	}
+	return nil
+}
+
+func validateWorkloadIdentity(workload WorkloadSpec) error {
+	if workload.Adapter == WorkloadNone {
+		return nil
+	}
+	if err := validateWorkloadObjectReference(workload.Pod, "workload Pod"); err != nil {
+		return err
+	}
+	if workload.Adapter == WorkloadStandalone {
+		return nil
+	}
+	if err := validateWorkloadObjectReference(workload.Controller, "workload controller"); err != nil {
+		return err
+	}
+	for index, ref := range workload.AffectedPods {
+		if err := validateWorkloadObjectReference(ref, fmt.Sprintf("affected Pod %d", index)); err != nil {
+			return err
+		}
+	}
+	switch workload.Adapter {
+	case WorkloadStatefulSet, WorkloadVictoriaLogs:
+		return nil
+	case WorkloadKubeBlocks:
+		if workload.KubeBlocks == nil || workload.KubeBlocks.Cluster == "" || workload.KubeBlocks.ClusterUID == "" {
+			return NewError(ErrorValidation, "session", "KubeBlocks workload Cluster name and UID are required")
+		}
+	case WorkloadVMCluster:
+		if workload.VMCluster == nil || workload.VMCluster.Name == "" || workload.VMCluster.UID == "" {
+			return NewError(ErrorValidation, "session", "VMCluster workload name and UID are required")
+		}
+	case WorkloadGrafana:
+		if workload.Grafana == nil || workload.Grafana.Name == "" || workload.Grafana.UID == "" {
+			return NewError(ErrorValidation, "session", "Grafana workload name and UID are required")
+		}
+	default:
+		return NewError(ErrorValidation, "session", fmt.Sprintf("unsupported workload adapter %q", workload.Adapter))
+	}
+	return nil
+}
+
+func validateWorkloadObjectReference(ref ObjectReference, description string) error {
+	if ref.Namespace == "" || ref.Name == "" || ref.UID == "" {
+		return NewError(ErrorValidation, "session", fmt.Sprintf("%s namespace, name, and UID are required", description))
 	}
 	return nil
 }

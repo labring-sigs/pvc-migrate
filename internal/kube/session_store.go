@@ -184,6 +184,9 @@ func (s *ConfigMapSessionStore) Delete(ctx context.Context, session *domain.Sess
 	if _, err := decodeSession(cm); err != nil {
 		return domain.WrapError(domain.ErrorConflict, "delete session", "ConfigMap ownership does not match the session", err)
 	}
+	if session.ResourceVersion != "" && cm.ResourceVersion != session.ResourceVersion {
+		return domain.NewError(domain.ErrorConflict, "delete session", "session ConfigMap changed after it was loaded")
+	}
 	if containsString(cm.Finalizers, SessionFinalizer) {
 		updated := cm.DeepCopy()
 		updated.Finalizers = removeString(updated.Finalizers, SessionFinalizer)

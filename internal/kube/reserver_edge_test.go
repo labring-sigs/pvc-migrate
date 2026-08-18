@@ -3,6 +3,7 @@ package kube
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -76,6 +77,7 @@ func reservationToolPod(session *domain.Session, uid types.UID) *corev1.Pod {
 			Name:      toolPodName(session.ID, volume.SourcePVC.Name),
 			UID:       uid,
 			Labels: map[string]string{
+				ManagedByLabel:    ManagedByValue,
 				SessionKey:        session.ID,
 				ResourceRoleLabel: ResourceRoleReservationConsumer,
 			},
@@ -86,6 +88,27 @@ func reservationToolPod(session *domain.Session, uid types.UID) *corev1.Pod {
 				ClaimName: volume.DestinationPVC.Name,
 			}},
 		}}},
+	}
+}
+
+func TestReservationPodRequiresServerIdentity(t *testing.T) {
+	session := reserveTestSession()
+	pod := reservationToolPod(session, "")
+	err := validateReservationPod(pod, session.ID, session.Spec.Volumes[0].DestinationPVC.Name)
+	if domain.CategoryOf(err) != domain.ErrorKubernetes {
+		t.Fatalf("category=%s error=%v", domain.CategoryOf(err), err)
+	}
+}
+
+func TestRetainPVRejectsMissingExpectedUID(t *testing.T) {
+	pv := &corev1.PersistentVolume{ObjectMeta: metav1.ObjectMeta{Name: "pv"}}
+	client := fake.NewClientset(pv)
+	err := NewReserver(client).retainPV(context.Background(), pv.Name, "", "session", ResourceRoleSource)
+	if domain.CategoryOf(err) != domain.ErrorValidation {
+		t.Fatalf("category=%s error=%v", domain.CategoryOf(err), err)
+	}
+	if updates := pvUpdateCount(client); updates != 0 {
+		t.Fatalf("PV updates=%d", updates)
 	}
 }
 
@@ -112,6 +135,21 @@ func TestReserveVolumeDryRunHasNoPersistentOwnershipChanges(t *testing.T) {
 	}
 	if session.Status.Volumes[0].Reserved {
 		t.Fatal("dry-run marked the volume reserved")
+	}
+}
+
+func TestReserveVolumeDryRunRejectsForeignSourceOwnership(t *testing.T) {
+	ctx := context.Background()
+	sourcePVC, sourcePV := reserveSourceObjects()
+	sourcePVC.Annotations = map[string]string{SessionKey: "foreign-session"}
+	client := fake.NewClientset(sourcePVC, sourcePV)
+	session := reserveTestSession()
+	err := NewReserver(client).ReserveVolume(ctx, session, &session.Spec.Volumes[0], &session.Status.Volumes[0], true)
+	if domain.CategoryOf(err) != domain.ErrorConflict {
+		t.Fatalf("category=%s error=%v", domain.CategoryOf(err), err)
+	}
+	if pvUpdateCount(client) != 0 {
+		t.Fatalf("foreign source ownership caused PV updates: %d", pvUpdateCount(client))
 	}
 }
 
@@ -165,7 +203,7 @@ func TestVerifySourceIdentityRejectsChangedObjects(t *testing.T) {
 			test.mutate(pvc, pv)
 			client := fake.NewClientset(pvc, pv)
 			session := reserveTestSession()
-			err := NewReserver(client).verifySourceIdentity(context.Background(), &session.Spec.Volumes[0])
+			err := NewReserver(client).verifySourceIdentity(context.Background(), session.ID, &session.Spec.Volumes[0])
 			if domain.CategoryOf(err) != domain.ErrorConflict {
 				t.Fatalf("category=%s error=%v", domain.CategoryOf(err), err)
 			}
@@ -183,9 +221,11 @@ func TestValidateDestinationPVCConflictMatrix(t *testing.T) {
 			ObjectMeta: metav1.ObjectMeta{
 				Namespace: volume.DestinationPVC.Namespace,
 				Name:      volume.DestinationPVC.Name,
-				Labels:    map[string]string{SessionKey: session.ID},
+				Labels:    map[string]string{ManagedByLabel: ManagedByValue, SessionKey: session.ID, ResourceRoleLabel: ResourceRoleDestination},
 				Annotations: map[string]string{
+					SessionKey:             session.ID,
 					SourcePVCUIDAnnotation: string(volume.SourcePVC.UID),
+					SourcePVAnnotation:     volume.SourcePV.Name,
 				},
 			},
 			Spec: corev1.PersistentVolumeClaimSpec{
@@ -233,6 +273,64 @@ func TestValidateDestinationPVCConflictMatrix(t *testing.T) {
 	pvc.Spec.Resources.Requests[corev1.ResourceStorage] = resource.MustParse("2Gi")
 	if err := validateDestinationPVC(pvc, session.ID, volume, capacity); err != nil {
 		t.Fatalf("larger compatible PVC: %v", err)
+	}
+}
+
+func TestReserveVolumeDryRunRejectsRecordedDestinationIdentityChanges(t *testing.T) {
+	ctx := context.Background()
+	sourcePVC, sourcePV := reserveSourceObjects()
+	session := reserveTestSession()
+	volume := &session.Spec.Volumes[0]
+	volume.DestinationPVC.UID = types.UID("destination-pvc-uid")
+	volume.DestinationPV = domain.ObjectReference{Name: "pv-destination", UID: types.UID("destination-pv-uid")}
+	class := volume.StorageClass
+	destinationPVC := &corev1.PersistentVolumeClaim{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: volume.DestinationPVC.Namespace,
+			Name:      volume.DestinationPVC.Name,
+			UID:       volume.DestinationPVC.UID,
+			Labels:    map[string]string{SessionKey: session.ID},
+			Annotations: map[string]string{
+				SourcePVCUIDAnnotation: string(volume.SourcePVC.UID),
+			},
+		},
+		Spec: corev1.PersistentVolumeClaimSpec{
+			AccessModes:      append([]corev1.PersistentVolumeAccessMode(nil), volume.AccessModes...),
+			StorageClassName: &class,
+			VolumeMode:       &volume.VolumeMode,
+			VolumeName:       volume.DestinationPV.Name,
+			Resources: corev1.VolumeResourceRequirements{Requests: corev1.ResourceList{
+				corev1.ResourceStorage: resource.MustParse(volume.Capacity),
+			}},
+		},
+		Status: corev1.PersistentVolumeClaimStatus{Phase: corev1.ClaimBound},
+	}
+	destinationPV := &corev1.PersistentVolume{
+		ObjectMeta: metav1.ObjectMeta{Name: volume.DestinationPV.Name, UID: volume.DestinationPV.UID},
+		Spec: corev1.PersistentVolumeSpec{ClaimRef: &corev1.ObjectReference{
+			Namespace: destinationPVC.Namespace, Name: destinationPVC.Name, UID: destinationPVC.UID,
+		}},
+	}
+	for _, mutate := range []struct {
+		name   string
+		mutate func(*corev1.PersistentVolumeClaim, *corev1.PersistentVolume)
+	}{
+		{name: "PVC UID", mutate: func(pvc *corev1.PersistentVolumeClaim, _ *corev1.PersistentVolume) { pvc.UID = "replacement-pvc-uid" }},
+		{name: "PV UID", mutate: func(_ *corev1.PersistentVolumeClaim, pv *corev1.PersistentVolume) { pv.UID = "replacement-pv-uid" }},
+		{name: "PV claimRef", mutate: func(_ *corev1.PersistentVolumeClaim, pv *corev1.PersistentVolume) {
+			pv.Spec.ClaimRef.UID = "replacement-pvc-uid"
+		}},
+	} {
+		t.Run(mutate.name, func(t *testing.T) {
+			pvc := destinationPVC.DeepCopy()
+			pv := destinationPV.DeepCopy()
+			mutate.mutate(pvc, pv)
+			client := fake.NewClientset(sourcePVC, sourcePV, pvc, pv)
+			err := NewReserver(client).ReserveVolume(ctx, session, volume, &session.Status.Volumes[0], true)
+			if domain.CategoryOf(err) != domain.ErrorConflict {
+				t.Fatalf("category=%s error=%v", domain.CategoryOf(err), err)
+			}
+		})
 	}
 }
 
@@ -346,9 +444,11 @@ func TestReserveVolumeCleansStaleReservationPodForBoundDestination(t *testing.T)
 			Namespace: volume.DestinationPVC.Namespace,
 			Name:      volume.DestinationPVC.Name,
 			UID:       "destination-pvc-uid",
-			Labels:    map[string]string{SessionKey: session.ID},
+			Labels:    map[string]string{ManagedByLabel: ManagedByValue, SessionKey: session.ID, ResourceRoleLabel: ResourceRoleDestination},
 			Annotations: map[string]string{
+				SessionKey:                           session.ID,
 				SourcePVCUIDAnnotation:               string(volume.SourcePVC.UID),
+				SourcePVAnnotation:                   volume.SourcePV.Name,
 				"volume.kubernetes.io/selected-node": session.Spec.WorkflowOptions().TargetNode,
 			},
 		},
@@ -469,6 +569,33 @@ func TestCleanupReservationPodOwnershipAndDeletionRaces(t *testing.T) {
 	})
 }
 
+func TestProvisionOnTargetRejectsReplacementWhileWaiting(t *testing.T) {
+	session := reserveTestSession()
+	volume := &session.Spec.Volumes[0]
+	client := fake.NewClientset(&corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "node-b", Labels: map[string]string{corev1.LabelHostname: "node-b"}}})
+	var created *corev1.Pod
+	client.PrependReactor("create", "pods", func(action clienttesting.Action) (bool, runtime.Object, error) {
+		created = action.(clienttesting.CreateAction).GetObject().(*corev1.Pod)
+		created.UID = "created-uid"
+		return false, nil, nil
+	})
+	client.PrependReactor("get", "pods", func(clienttesting.Action) (bool, runtime.Object, error) {
+		if created == nil {
+			return false, nil, nil
+		}
+		replacement := created.DeepCopy()
+		replacement.UID = "replacement-uid"
+		replacement.Status = corev1.PodStatus{Phase: corev1.PodRunning, Conditions: []corev1.PodCondition{{Type: corev1.PodReady, Status: corev1.ConditionTrue}}}
+		return true, replacement, nil
+	})
+	reserver := NewReserver(client)
+	reserver.poll = time.Millisecond
+	err := reserver.provisionOnTarget(context.Background(), session, volume)
+	if domain.CategoryOf(err) != domain.ErrorConflict || !strings.Contains(err.Error(), "replaced while waiting") {
+		t.Fatalf("category=%s error=%v", domain.CategoryOf(err), err)
+	}
+}
+
 func TestRetainPVPreservesPolicyAndRejectsOwnershipConflicts(t *testing.T) {
 	ctx := context.Background()
 	uid := types.UID("pv-uid")
@@ -548,10 +675,11 @@ func TestReserveVolumeRejectsBoundDestinationTopologyAndClaimRefConflicts(t *tes
 					Namespace: volume.DestinationPVC.Namespace,
 					Name:      volume.DestinationPVC.Name,
 					UID:       destinationUID,
-					Labels:    map[string]string{SessionKey: session.ID},
+					Labels:    map[string]string{ManagedByLabel: ManagedByValue, SessionKey: session.ID, ResourceRoleLabel: ResourceRoleDestination},
 					Annotations: map[string]string{
 						SessionKey:             session.ID,
 						SourcePVCUIDAnnotation: string(volume.SourcePVC.UID),
+						SourcePVAnnotation:     volume.SourcePV.Name,
 					},
 				},
 				Spec: corev1.PersistentVolumeClaimSpec{
