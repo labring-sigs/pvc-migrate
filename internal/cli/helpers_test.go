@@ -352,6 +352,48 @@ func TestKubernetesLogsFollowCLIFormat(t *testing.T) {
 	}
 }
 
+func TestKubernetesLoggerSuppressesExpectedWatchCancellation(t *testing.T) {
+	state := klog.CaptureState()
+	defer state.Restore()
+
+	var output bytes.Buffer
+	configureKubernetesLogger(slog.New(slog.NewJSONHandler(&output, nil)))
+	klog.ErrorS(context.Canceled, "Failed to watch", "resource", "pods")
+
+	if output.Len() != 0 {
+		t.Fatalf("expected canceled watch log to be suppressed, got %q", output.String())
+	}
+}
+
+func TestKubernetesLoggerKeepsUnexpectedWatchErrors(t *testing.T) {
+	state := klog.CaptureState()
+	defer state.Restore()
+
+	var output bytes.Buffer
+	configureKubernetesLogger(slog.New(slog.NewJSONHandler(&output, nil)))
+	klog.ErrorS(errors.New("forbidden"), "Failed to watch", "resource", "pods")
+
+	text := output.String()
+	for _, want := range []string{`"msg":"Failed to watch"`, `"component":"kubernetes"`, `"resource":"pods"`, `"err":"forbidden"`} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("unexpected watch error log lacks %q: %s", want, text)
+		}
+	}
+}
+
+func TestKubernetesLoggerKeepsCancellationForOtherMessages(t *testing.T) {
+	state := klog.CaptureState()
+	defer state.Restore()
+
+	var output bytes.Buffer
+	configureKubernetesLogger(slog.New(slog.NewJSONHandler(&output, nil)))
+	klog.ErrorS(context.Canceled, "Failed to list", "resource", "pods")
+
+	if output.Len() == 0 {
+		t.Fatal("expected cancellation for a non-watch message to be logged")
+	}
+}
+
 func TestRootContextTimeoutModes(t *testing.T) {
 	state := &rootState{global: globals{timeout: 5 * time.Second}}
 	ctx, cancel := state.context(context.Background())

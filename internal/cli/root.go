@@ -215,7 +215,8 @@ func (r *rootState) validateGlobalFlags() error {
 }
 
 func configureKubernetesLogger(logger *slog.Logger) {
-	klog.SetSlogLogger(logger.With("component", "kubernetes"))
+	handler := &kubernetesLogHandler{next: logger.With("component", "kubernetes").Handler()}
+	klog.SetSlogLogger(slog.New(handler))
 }
 
 func loggerFor(r *rootState) (*slog.Logger, error) {
