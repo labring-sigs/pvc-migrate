@@ -1706,6 +1706,9 @@ func (m *Manager) clearVictoriaLogsPauseOwner(ctx context.Context, session *doma
 		if annotations[pauseSessionAnnotation] != session.ID {
 			return domain.NewError(domain.ErrorConflict, "Victoria Logs resume", fmt.Sprintf("StatefulSet %s/%s pause ownership changed", ref.Namespace, ref.Name))
 		}
+		if session.Spec.Workload().OriginalReplicas == nil || statefulSetReplicas(sts) != *session.Spec.Workload().OriginalReplicas {
+			return domain.NewError(domain.ErrorConflict, "Victoria Logs resume", fmt.Sprintf("StatefulSet %s/%s replicas changed while pause ownership was active", ref.Namespace, ref.Name))
+		}
 		delete(annotations, pauseSessionAnnotation)
 		sts.SetAnnotations(annotations)
 		_, err = m.typed.AppsV1().StatefulSets(ref.Namespace).Update(ctx, sts, metav1.UpdateOptions{})
@@ -1892,8 +1895,21 @@ func (m *Manager) restoreVMClusterPause(ctx context.Context, session *domain.Ses
 			}
 			return nil
 		}
-		if !current && vm.OriginalPaused {
+		if !current {
 			return domain.NewError(domain.ErrorConflict, "restore VMCluster pause", fmt.Sprintf("VMCluster component %s paused changed while session was active", vm.Component))
+		}
+		if vm.OriginalReplicasConfigured {
+			if !replicasFound {
+				return domain.NewError(domain.ErrorConflict, "restore VMCluster pause", fmt.Sprintf("VMCluster component %s replicaCount was removed while session was active", vm.Component))
+			}
+			if currentReplicas != int64(vm.OriginalReplicas) {
+				workload := session.Spec.Workload()
+				if workload.Ordinal == nil || currentReplicas != int64(*workload.Ordinal) {
+					return domain.NewError(domain.ErrorConflict, "restore VMCluster pause", fmt.Sprintf("VMCluster component %s replicaCount changed while session was active", vm.Component))
+				}
+			}
+		} else if replicasFound {
+			return domain.NewError(domain.ErrorConflict, "restore VMCluster pause", fmt.Sprintf("VMCluster component %s replicaCount was added while session was active", vm.Component))
 		}
 		if current != vm.OriginalPaused {
 			if err := unstructured.SetNestedField(componentObject, vm.OriginalPaused, "paused"); err != nil {
@@ -2210,7 +2226,7 @@ func (m *Manager) restoreGrafanaPause(ctx context.Context, session *domain.Sessi
 			}
 			return nil
 		}
-		if !current && grafana.OriginalSuspend {
+		if !current {
 			return domain.NewError(domain.ErrorConflict, "restore Grafana suspend", "Grafana suspend state changed while session was active")
 		}
 		if current != grafana.OriginalSuspend {
