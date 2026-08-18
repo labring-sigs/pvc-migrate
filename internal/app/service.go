@@ -371,17 +371,24 @@ func (s *Service) sharedOpenEBSLVMSource(ctx context.Context, session *domain.Se
 	}
 	sharedSessionID := ""
 	expectedLVMVolume := domain.ObjectReference{}
-	if session != nil {
-		for _, state := range session.Status.OpenEBSLVMSharedMounts {
-			if state.SourcePV.Name == volume.SourcePV.Name && state.SourcePV.UID == volume.SourcePV.UID {
-				sharedSessionID = session.ID
-				expectedLVMVolume = state.LVMVolume
-				break
-			}
-		}
+	if state, found := pendingOpenEBSLVMSharedMount(session, volume); found {
+		sharedSessionID = session.ID
+		expectedLVMVolume = state.LVMVolume
 	}
 	shared, err := manager.Shared(ctx, volume.SourcePV, expectedLVMVolume, sharedSessionID)
 	return true, shared, err
+}
+
+func pendingOpenEBSLVMSharedMount(session *domain.Session, volume *domain.VolumeSpec) (domain.OpenEBSLVMSharedMount, bool) {
+	if session == nil || volume == nil {
+		return domain.OpenEBSLVMSharedMount{}, false
+	}
+	for _, state := range session.Status.OpenEBSLVMSharedMounts {
+		if state.SourcePV.Name == volume.SourcePV.Name && state.SourcePV.UID == volume.SourcePV.UID {
+			return state, true
+		}
+	}
+	return domain.OpenEBSLVMSharedMount{}, false
 }
 
 func (s *Service) openEBSLVMSource(ctx context.Context, volume *domain.VolumeSpec) (bool, error) {
@@ -509,11 +516,17 @@ func (s *Service) validateOpenEBSLVMSharedMountRestore(ctx context.Context, sess
 }
 
 func (s *Service) restoreOpenEBSLVMSharedMounts(ctx context.Context, session *domain.Session) error {
-	if session == nil || len(session.Status.OpenEBSLVMSharedMounts) == 0 {
+	if session == nil {
 		return nil
 	}
 	if err := sessionFenceError(ctx); err != nil {
 		return err
+	}
+	if err := kube.CleanupSessionToolProbePods(ctx, s.client, session.ID, sessionToolProbeNamespaces(session)); err != nil {
+		return err
+	}
+	if len(session.Status.OpenEBSLVMSharedMounts) == 0 {
+		return nil
 	}
 	manager := s.config.OpenEBSLVMSharedVolumeManager
 	if manager == nil {
@@ -542,6 +555,28 @@ func (s *Service) restoreOpenEBSLVMSharedMounts(ctx context.Context, session *do
 	}
 	session.Status.OpenEBSLVMSharedMounts = nil
 	return s.persist(ctx, session)
+}
+
+func sessionToolProbeNamespaces(session *domain.Session) []string {
+	if session == nil {
+		return nil
+	}
+	namespaces := []string{
+		session.Spec.SourceNamespace,
+		session.Spec.TemporaryNamespace,
+		session.Spec.DestinationNamespace,
+	}
+	for _, volume := range session.Spec.Volumes {
+		namespaces = append(namespaces, volume.SourcePVC.Namespace, volume.DestinationPVC.Namespace)
+	}
+	result := make([]string, 0, len(namespaces))
+	for _, namespace := range namespaces {
+		if namespace != "" && !slices.Contains(result, namespace) {
+			result = append(result, namespace)
+		}
+	}
+	sort.Strings(result)
+	return result
 }
 
 func (s *Service) sourcePVCIsActive(ctx context.Context, volume *domain.VolumeSpec) (bool, error) {
@@ -837,6 +872,17 @@ func (s *Service) validateWarmCopyOpenEBSLVM(ctx context.Context, session *domai
 			return err
 		}
 		if !active {
+			continue
+		}
+		if state, pending := pendingOpenEBSLVMSharedMount(session, volume); pending {
+			previousShared := strings.TrimSpace(state.PreviousShared)
+			if state.PreviousSharedSet && previousShared != "" && !strings.EqualFold(previousShared, "no") && !strings.EqualFold(previousShared, "yes") {
+				return domain.NewError(domain.ErrorPrecondition, "OpenEBS LVM shared mount", fmt.Sprintf("LVMVolume %s/%s has unsupported recorded spec.shared value %q", state.LVMVolume.Namespace, state.LVMVolume.Name, state.PreviousShared))
+			}
+			needsChange := !state.PreviousSharedSet || previousShared == "" || strings.EqualFold(previousShared, "no")
+			if needsChange && !session.Spec.WorkflowOptions().OpenEBSLVMEnableShared {
+				return activeUnsharedOpenEBSLVMError(session, volume)
+			}
 			continue
 		}
 		prepared, err := manager.PrepareShared(ctx, volume.SourcePV)

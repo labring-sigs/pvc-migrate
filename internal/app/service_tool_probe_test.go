@@ -1071,6 +1071,36 @@ func TestValidateWarmCopyRejectsActiveUnsharedOpenEBSLVM(t *testing.T) {
 	}
 }
 
+func TestValidateWarmCopyAcceptsRestorableSessionManagedOpenEBSLVM(t *testing.T) {
+	fixture := newRecoveryFixture(t)
+	session := appTestSession()
+	session.Status.Phase = domain.PhaseWarmCopying
+	session.Spec.WorkflowOptionsPtr().OpenEBSLVMEnableShared = true
+	createOpenEBSLVMSourceObjects(t, fixture.client, session)
+	if _, err := fixture.client.CoreV1().Pods("app").Create(context.Background(), probeConsumerPod("database-0", "data", "source-node"), metav1.CreateOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	session.Status.OpenEBSLVMSharedMounts = []domain.OpenEBSLVMSharedMount{{
+		SourcePV:          session.Spec.Volumes[0].SourcePV,
+		LVMVolume:         domain.ObjectReference{Namespace: "openebs", Name: "pv-source", UID: "lvm-pv-source"},
+		PreviousShared:    "no",
+		PreviousSharedSet: true,
+	}}
+	prepareErr := domain.NewError(domain.ErrorConflict, "OpenEBS LVM shared mount", "session already owns the temporary shared mount")
+	manager := &recordingOpenEBSLVMSharedVolumeManager{shared: true, prepareErr: prepareErr}
+	fixture.service.config.OpenEBSLVMSharedVolumeManager = manager
+
+	if err := fixture.service.ValidateWarmCopy(context.Background(), session); err != nil {
+		t.Fatalf("ValidateWarmCopy() error=%v", err)
+	}
+	if !slices.Equal(manager.validateRestorePVs, []string{"pv-source"}) || len(manager.preparePVs) != 0 {
+		t.Fatalf("restore validation=%v prepare=%v", manager.validateRestorePVs, manager.preparePVs)
+	}
+	if fixture.store.updates != 0 || len(session.Status.OpenEBSLVMSharedMounts) != 1 {
+		t.Fatalf("warm-copy dry-run mutated state: updates=%d pending=%#v", fixture.store.updates, session.Status.OpenEBSLVMSharedMounts)
+	}
+}
+
 func TestWarmCopyPreparesEveryOpenEBSLVMVolumeBeforeEnable(t *testing.T) {
 	fixture := newRecoveryFixture(t)
 	session := appTestSession()

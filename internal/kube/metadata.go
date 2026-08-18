@@ -29,4 +29,5 @@ const (
 	ResourceRoleRollback            = "rollback"
 	ResourceRoleRename              = "rename"
 	ResourceRoleReservationConsumer = "reservation-consumer"
+	ResourceRoleToolProbe           = "tool-probe"
 )
