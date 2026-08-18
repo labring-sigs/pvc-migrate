@@ -156,7 +156,11 @@ func (r *rootState) newMigrationPlanCommand(operation domain.Operation, useTempo
 						return reportSessionError(cmd, session, err)
 					}
 				}
-				if err := runtime.service.ValidateReservation(ctx, session); err != nil {
+				validate := runtime.service.ValidateReservation
+				if operation == domain.OperationCopy {
+					validate = runtime.service.ValidateWarmCopy
+				}
+				if err := validate(ctx, session); err != nil {
 					return reportSessionError(cmd, session, err)
 				}
 				return printSessionResult(cmd, runtime, session)
@@ -294,12 +298,15 @@ func (r *rootState) newCopyCommand() *cobra.Command {
 			}
 			if dryRun {
 				if targetsExistingSession(flags) {
-					if err := runtime.service.ValidateReservation(ctx, session); err != nil {
+					if err := runtime.service.ValidateWarmCopy(ctx, session); err != nil {
 						return reportSessionError(cmd, session, err)
 					}
 					return printCopyDryRunResult(cmd, runtime, session, flags)
 				}
 				return printPlanResult(cmd, runtime, plan)
+			}
+			if err := runtime.service.ValidateWarmCopy(ctx, session); err != nil {
+				return reportSessionError(cmd, session, err)
 			}
 			if err := runtime.service.Reserve(ctx, session); err != nil {
 				return reportSessionError(cmd, session, err)

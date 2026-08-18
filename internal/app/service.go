@@ -17,7 +17,6 @@ import (
 	"github.com/labring-sigs/pvc-migrate/internal/kube"
 	"github.com/labring-sigs/pvc-migrate/internal/parallel"
 	corev1 "k8s.io/api/core/v1"
-	storagev1 "k8s.io/api/storage/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
@@ -71,6 +70,10 @@ type volumeSwitcher interface {
 
 type batchVolumeSwitcher interface {
 	VerifyVolumesOffline(context.Context, []*domain.VolumeSpec) error
+}
+
+type sessionBatchVolumeSwitcher interface {
+	VerifyVolumesOfflineForSession(context.Context, string, []*domain.VolumeSpec) error
 }
 
 func NewService(
@@ -312,9 +315,18 @@ func (s *Service) markSharedOpenEBSLVMProbeMounts(ctx context.Context, session *
 		if _, probed := probedPVCs[key]; !probed {
 			continue
 		}
-		shared, err := s.sharedOpenEBSLVMSource(ctx, volume)
+		isLVM, shared, err := s.sharedOpenEBSLVMSource(ctx, session, volume)
 		if err != nil {
 			return err
+		}
+		if isLVM && !shared {
+			active, err := s.sourcePVCIsActive(ctx, volume)
+			if err != nil {
+				return err
+			}
+			if active && !session.Spec.WorkflowOptions().OpenEBSLVMEnableShared {
+				return activeUnsharedOpenEBSLVMError(session, volume)
+			}
 		}
 		sharedPVCs[key] = shared
 	}
@@ -327,33 +339,73 @@ func (s *Service) markSharedOpenEBSLVMProbeMounts(ctx context.Context, session *
 	return nil
 }
 
-func (s *Service) sharedOpenEBSLVMSource(ctx context.Context, volume *domain.VolumeSpec) (bool, error) {
-	isLVM, storageClass, err := s.openEBSLVMSource(ctx, volume)
-	if err != nil || !isLVM {
-		return false, err
+func activeUnsharedOpenEBSLVMError(session *domain.Session, volume *domain.VolumeSpec) error {
+	recovery := "stop all active PVC consumers and retry"
+	if session != nil {
+		switch session.Spec.Operation() {
+		case domain.OperationCopy:
+			recovery = "abort this pre-cutover session, clean its retained resources, and rerun the copy without --online"
+		case domain.OperationMigrate, domain.OperationMigratePod:
+			if session.Spec.WorkflowOptions().OpenEBSLVMEnableShared {
+				recovery = "retry the session so temporary shared-mount preparation can use the current active consumer state"
+			} else {
+				recovery = "abort this pre-cutover session, clean its retained resources, and rerun with --precopy-passes 0 or --openebs-lvm-enable-shared"
+			}
+		}
 	}
-	if s.config.OpenEBSLVMSharedVolumeManager != nil {
-		return s.config.OpenEBSLVMSharedVolumeManager.Shared(ctx, volume.SourcePV.Name)
-	}
-	return isSharedOpenEBSLVMStorageClass(storageClass), nil
+	return domain.NewError(
+		domain.ErrorPrecondition,
+		"warm-copy mount preflight",
+		fmt.Sprintf("source PVC %s/%s is active and its OpenEBS LVMVolume does not currently have spec.shared=yes; %s", volume.SourcePVC.Namespace, volume.SourcePVC.Name, recovery),
+	)
 }
 
-func (s *Service) openEBSLVMSource(ctx context.Context, volume *domain.VolumeSpec) (bool, *storagev1.StorageClass, error) {
-	if s == nil || s.client == nil || volume == nil || volume.SourcePVCSpec.StorageClassName == nil {
-		return false, nil, nil
+func (s *Service) sharedOpenEBSLVMSource(ctx context.Context, session *domain.Session, volume *domain.VolumeSpec) (bool, bool, error) {
+	manager := s.config.OpenEBSLVMSharedVolumeManager
+	if manager == nil {
+		return false, false, nil
 	}
-	name := strings.TrimSpace(*volume.SourcePVCSpec.StorageClassName)
-	if name == "" {
-		return false, nil, nil
+	isLVM, err := s.openEBSLVMSource(ctx, volume)
+	if err != nil || !isLVM {
+		return false, false, err
 	}
-	storageClass, err := s.client.StorageV1().StorageClasses().Get(ctx, name, metav1.GetOptions{})
-	if err != nil {
-		if apierrors.IsNotFound(err) {
-			return false, nil, nil
+	sharedSessionID := ""
+	expectedLVMVolume := domain.ObjectReference{}
+	if session != nil {
+		for _, state := range session.Status.OpenEBSLVMSharedMounts {
+			if state.SourcePV.Name == volume.SourcePV.Name && state.SourcePV.UID == volume.SourcePV.UID {
+				sharedSessionID = session.ID
+				expectedLVMVolume = state.LVMVolume
+				break
+			}
 		}
-		return false, nil, domain.WrapError(domain.ErrorKubernetes, "OpenEBS LVM shared mount", fmt.Sprintf("read StorageClass %s", name), err)
 	}
-	return storageClass != nil && storageClass.Provisioner == "local.csi.openebs.io", storageClass, nil
+	shared, err := manager.Shared(ctx, volume.SourcePV, expectedLVMVolume, sharedSessionID)
+	return true, shared, err
+}
+
+func (s *Service) openEBSLVMSource(ctx context.Context, volume *domain.VolumeSpec) (bool, error) {
+	if s == nil || s.client == nil || volume == nil {
+		return false, nil
+	}
+	if volume.SourcePVC.Namespace == "" || volume.SourcePVC.Name == "" || volume.SourcePV.Name == "" {
+		return false, domain.NewError(domain.ErrorValidation, "OpenEBS LVM shared mount", "source PVC and PV identities are required")
+	}
+	pvc, err := s.client.CoreV1().PersistentVolumeClaims(volume.SourcePVC.Namespace).Get(ctx, volume.SourcePVC.Name, metav1.GetOptions{})
+	if err != nil {
+		return false, domain.WrapError(domain.ErrorKubernetes, "OpenEBS LVM shared mount", fmt.Sprintf("read source PVC %s/%s", volume.SourcePVC.Namespace, volume.SourcePVC.Name), err)
+	}
+	if pvc.UID != volume.SourcePVC.UID || pvc.Status.Phase != corev1.ClaimBound || pvc.Spec.VolumeName != volume.SourcePV.Name {
+		return false, domain.NewError(domain.ErrorConflict, "OpenEBS LVM shared mount", fmt.Sprintf("source PVC %s/%s identity or binding changed", volume.SourcePVC.Namespace, volume.SourcePVC.Name))
+	}
+	pv, err := s.client.CoreV1().PersistentVolumes().Get(ctx, volume.SourcePV.Name, metav1.GetOptions{})
+	if err != nil {
+		return false, domain.WrapError(domain.ErrorKubernetes, "OpenEBS LVM shared mount", fmt.Sprintf("read source PV %s", volume.SourcePV.Name), err)
+	}
+	if pv.UID != volume.SourcePV.UID || pv.Spec.ClaimRef == nil || pv.Spec.ClaimRef.Namespace != pvc.Namespace || pv.Spec.ClaimRef.Name != pvc.Name || pv.Spec.ClaimRef.UID != pvc.UID {
+		return false, domain.NewError(domain.ErrorConflict, "OpenEBS LVM shared mount", fmt.Sprintf("source PV %s identity or claimRef changed", volume.SourcePV.Name))
+	}
+	return pv.Spec.CSI != nil && pv.Spec.CSI.Driver == kube.OpenEBSLVMCSIDriver, nil
 }
 
 func (s *Service) enableOpenEBSLVMSharedMounts(ctx context.Context, session *domain.Session) (resultErr error) {
@@ -372,9 +424,14 @@ func (s *Service) enableOpenEBSLVMSharedMounts(ctx context.Context, session *dom
 			resultErr = errors.Join(resultErr, err)
 		}
 	}()
+	type preparedSharedMount struct {
+		state     domain.OpenEBSLVMSharedMount
+		reference string
+	}
+	prepared := make([]preparedSharedMount, 0, len(session.Spec.Volumes))
 	for index := range session.Spec.Volumes {
 		volume := &session.Spec.Volumes[index]
-		isLVM, _, err := s.openEBSLVMSource(ctx, volume)
+		isLVM, err := s.openEBSLVMSource(ctx, volume)
 		if err != nil {
 			return err
 		}
@@ -388,23 +445,30 @@ func (s *Service) enableOpenEBSLVMSharedMounts(ctx context.Context, session *dom
 		if !active {
 			continue
 		}
-		result, err := manager.EnsureShared(ctx, volume.SourcePV.Name)
+		result, err := manager.PrepareShared(ctx, volume.SourcePV)
 		if err != nil {
 			return err
 		}
-		if !result.Changed {
+		if !result.NeedsChange {
 			continue
 		}
 		state := domain.OpenEBSLVMSharedMount{
-			SourcePV:          volume.SourcePV.Name,
+			SourcePV:          volume.SourcePV,
+			LVMVolume:         result.LVMVolume,
 			PreviousShared:    result.PreviousShared,
 			PreviousSharedSet: result.PreviousSharedSet,
 		}
-		session.Status.OpenEBSLVMSharedMounts = append(session.Status.OpenEBSLVMSharedMounts, state)
+		prepared = append(prepared, preparedSharedMount{state: state, reference: result.Reference})
+	}
+	for _, item := range prepared {
+		session.Status.OpenEBSLVMSharedMounts = append(session.Status.OpenEBSLVMSharedMounts, item.state)
 		if err := s.persist(ctx, session); err != nil {
 			return err
 		}
-		s.logInfo("OpenEBS LVM shared mount configured", "sourcePV", volume.SourcePV.Name, "resource", result.Reference, "previousShared", result.PreviousShared, "changed", result.Changed)
+		if err := manager.EnableShared(ctx, session.ID, item.state); err != nil {
+			return err
+		}
+		s.logInfo("OpenEBS LVM shared mount configured", "sourcePV", item.state.SourcePV.Name, "resource", item.reference, "previousShared", item.state.PreviousShared)
 	}
 	return nil
 }
@@ -413,12 +477,22 @@ func (s *Service) enableOpenEBSLVMSharedMounts(ctx context.Context, session *dom
 // deadline or cancellation fires. Preserve context values such as the session
 // lock while giving cleanup its own bounded lifetime.
 func (s *Service) restoreOpenEBSLVMSharedMountsAfterFailure(ctx context.Context, session *domain.Session) error {
+	if err := sessionFenceError(ctx); err != nil {
+		return err
+	}
 	restoreCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), openEBSLVMSharedMountCleanupTimeout)
 	defer cancel()
 	return s.restoreOpenEBSLVMSharedMounts(restoreCtx, session)
 }
 
-func (s *Service) restoreOpenEBSLVMSharedMounts(ctx context.Context, session *domain.Session) error {
+func sessionFenceError(ctx context.Context) error {
+	if held, ok := ctx.Value(sessionLockContextKey{}).(heldSessionLock); ok {
+		return held.lock.Err()
+	}
+	return nil
+}
+
+func (s *Service) validateOpenEBSLVMSharedMountRestore(ctx context.Context, session *domain.Session) error {
 	if session == nil || len(session.Status.OpenEBSLVMSharedMounts) == 0 {
 		return nil
 	}
@@ -426,9 +500,34 @@ func (s *Service) restoreOpenEBSLVMSharedMounts(ctx context.Context, session *do
 	if manager == nil {
 		return domain.NewError(domain.ErrorInternal, "restore OpenEBS LVM shared mount", "OpenEBS LVMVolume manager is required to restore session-managed shared mounts")
 	}
+	for _, state := range session.Status.OpenEBSLVMSharedMounts {
+		if err := manager.ValidateRestoreShared(ctx, session.ID, state); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (s *Service) restoreOpenEBSLVMSharedMounts(ctx context.Context, session *domain.Session) error {
+	if session == nil || len(session.Status.OpenEBSLVMSharedMounts) == 0 {
+		return nil
+	}
+	if err := sessionFenceError(ctx); err != nil {
+		return err
+	}
+	manager := s.config.OpenEBSLVMSharedVolumeManager
+	if manager == nil {
+		return domain.NewError(domain.ErrorInternal, "restore OpenEBS LVM shared mount", "OpenEBS LVMVolume manager is required to restore session-managed shared mounts")
+	}
+	if err := s.validateOpenEBSLVMSharedMountRestore(ctx, session); err != nil {
+		return err
+	}
 	remaining := make([]domain.OpenEBSLVMSharedMount, 0, len(session.Status.OpenEBSLVMSharedMounts))
 	for index, state := range session.Status.OpenEBSLVMSharedMounts {
-		if err := manager.RestoreShared(ctx, state.SourcePV, state.PreviousShared, state.PreviousSharedSet); err != nil {
+		if err := sessionFenceError(ctx); err != nil {
+			return err
+		}
+		if err := manager.RestoreShared(ctx, session.ID, state); err != nil {
 			remaining = append(remaining, session.Status.OpenEBSLVMSharedMounts[index:]...)
 			session.Status.OpenEBSLVMSharedMounts = remaining
 			if persistErr := s.persist(ctx, session); persistErr != nil {
@@ -436,7 +535,10 @@ func (s *Service) restoreOpenEBSLVMSharedMounts(ctx context.Context, session *do
 			}
 			return err
 		}
-		s.logInfo("OpenEBS LVM shared mount restored", "session", session.ID, "sourcePV", state.SourcePV, "previousShared", state.PreviousShared, "previousSharedSet", state.PreviousSharedSet)
+		s.logInfo("OpenEBS LVM shared mount restored", "session", session.ID, "sourcePV", state.SourcePV.Name, "previousShared", state.PreviousShared, "previousSharedSet", state.PreviousSharedSet)
+	}
+	if err := sessionFenceError(ctx); err != nil {
+		return err
 	}
 	session.Status.OpenEBSLVMSharedMounts = nil
 	return s.persist(ctx, session)
@@ -456,12 +558,6 @@ func (s *Service) sourcePVCIsActive(ctx context.Context, volume *domain.VolumeSp
 		}
 	}
 	return false, nil
-}
-
-func isSharedOpenEBSLVMStorageClass(storageClass *storagev1.StorageClass) bool {
-	return storageClass != nil &&
-		storageClass.Provisioner == "local.csi.openebs.io" &&
-		strings.EqualFold(strings.TrimSpace(storageClass.Parameters["shared"]), "yes")
 }
 
 func (s *Service) resolveSourceToolProbeTargets(ctx context.Context, session *domain.Session, mountSourcePVC bool) ([]kube.ToolProbeTarget, error) {
@@ -679,15 +775,85 @@ func (s *Service) ValidateReservation(ctx context.Context, session *domain.Sessi
 	if err := session.Validate(); err != nil {
 		return err
 	}
+	if err := s.validateOpenEBSLVMSharedMountRestore(ctx, session); err != nil {
+		return err
+	}
 	s.logInfo("reservation preflight started", "session", session.ID, "volumes", len(session.Spec.Volumes))
 	for index := range session.Spec.Volumes {
 		volume := session.Spec.Volumes[index]
 		status := session.Status.Volumes[index]
-		if err := s.reserver.ReserveVolume(ctx, session, &volume, &status, true); err != nil {
+		if err := s.validateReservedVolume(ctx, session, &volume, &status); err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+// ValidateWarmCopy performs every read-only check needed before reservation
+// or warm-copy mutation. It deliberately leaves source-node inference and
+// temporary OpenEBS shared-mount preparation unpersisted.
+func (s *Service) ValidateWarmCopy(ctx context.Context, session *domain.Session) error {
+	if session == nil {
+		return domain.NewError(domain.ErrorValidation, "warm copy dry-run", "session is nil")
+	}
+	valid := session.Status.Phase == domain.PhasePlanned ||
+		session.Status.Phase == domain.PhaseReserving ||
+		session.Status.Phase == domain.PhaseReserved ||
+		session.Status.Phase == domain.PhaseWarmCopied ||
+		session.Status.Phase == domain.PhaseWarmCopying ||
+		(session.Status.Phase == domain.PhaseFailed && (session.Status.ResumeFrom == domain.PhaseReserving || session.Status.ResumeFrom == domain.PhaseWarmCopying))
+	if !valid {
+		return domain.NewError(domain.ErrorPrecondition, "warm copy dry-run", fmt.Sprintf("session phase %s cannot warm-copy", session.Status.Phase))
+	}
+	if err := s.ValidateReservation(ctx, session); err != nil {
+		return err
+	}
+	if err := s.validateCopyConsumersBatch(ctx, session, false); err != nil {
+		return err
+	}
+	if err := s.validateWarmCopyOpenEBSLVM(ctx, session); err != nil {
+		return err
+	}
+	_, err := s.resolveSourceToolProbeTargets(ctx, session, true)
+	return err
+}
+
+func (s *Service) validateWarmCopyOpenEBSLVM(ctx context.Context, session *domain.Session) error {
+	manager := s.config.OpenEBSLVMSharedVolumeManager
+	if manager == nil {
+		return nil
+	}
+	for index := range session.Spec.Volumes {
+		volume := &session.Spec.Volumes[index]
+		isLVM, err := s.openEBSLVMSource(ctx, volume)
+		if err != nil {
+			return err
+		}
+		if !isLVM {
+			continue
+		}
+		active, err := s.sourcePVCIsActive(ctx, volume)
+		if err != nil {
+			return err
+		}
+		if !active {
+			continue
+		}
+		prepared, err := manager.PrepareShared(ctx, volume.SourcePV)
+		if err != nil {
+			return err
+		}
+		if prepared.NeedsChange && !session.Spec.WorkflowOptions().OpenEBSLVMEnableShared {
+			return activeUnsharedOpenEBSLVMError(session, volume)
+		}
+	}
+	return nil
+}
+
+func (s *Service) validateReservedVolume(ctx context.Context, session *domain.Session, volume *domain.VolumeSpec, status *domain.VolumeStatus) error {
+	checkVolume := *volume
+	checkStatus := *status
+	return s.reserver.ReserveVolume(ctx, session, &checkVolume, &checkStatus, true)
 }
 
 // ValidateResume performs the read-only checks for the next resumable stage.
@@ -699,6 +865,9 @@ func (s *Service) ValidateResume(ctx context.Context, session *domain.Session) e
 	if err := session.Validate(); err != nil {
 		return err
 	}
+	if err := s.validateOpenEBSLVMSharedMountRestore(ctx, session); err != nil {
+		return err
+	}
 	phase := session.Status.Phase
 	if phase == domain.PhaseFailed {
 		phase = session.Status.ResumeFrom
@@ -708,10 +877,20 @@ func (s *Service) ValidateResume(ctx context.Context, session *domain.Session) e
 		return s.validateSingleOperationResume(ctx, session, phase)
 	}
 	switch phase {
-	case domain.PhasePlanned, domain.PhaseReserving, domain.PhaseReserved, domain.PhaseWarmCopying, domain.PhaseWarmCopied:
+	case domain.PhasePlanned, domain.PhaseReserving, domain.PhaseReserved:
+		if session.Status.WarmPassesCompleted < session.Spec.PrecopyPasses() {
+			return s.ValidateWarmCopy(ctx, session)
+		}
+		return s.ValidateReservation(ctx, session)
+	case domain.PhaseWarmCopying:
+		return s.ValidateWarmCopy(ctx, session)
+	case domain.PhaseWarmCopied:
+		if session.Status.WarmPassesCompleted < session.Spec.PrecopyPasses() {
+			return s.ValidateWarmCopy(ctx, session)
+		}
 		return s.ValidateReservation(ctx, session)
 	case domain.PhasePausing:
-		return nil
+		return s.ValidateReservation(ctx, session)
 	case domain.PhasePaused, domain.PhaseFinalSyncing:
 		return s.ValidateFinalSync(ctx, session)
 	case domain.PhaseFinalSynced, domain.PhaseActivating:
@@ -761,9 +940,9 @@ func (s *Service) validateSingleOperationResume(ctx context.Context, session *do
 	case domain.OperationCopy:
 		switch phase {
 		case domain.PhasePlanned, domain.PhaseReserving:
-			return s.ValidateReservation(ctx, session)
+			return s.ValidateWarmCopy(ctx, session)
 		case domain.PhaseReserved, domain.PhaseWarmCopying:
-			return s.validateCopyConsumersBatch(ctx, session)
+			return s.ValidateWarmCopy(ctx, session)
 		case domain.PhaseWarmCopied:
 			return nil
 		default:
@@ -818,6 +997,9 @@ func (s *Service) ValidateAbort(ctx context.Context, session *domain.Session) er
 	if err := session.Validate(); err != nil {
 		return err
 	}
+	if err := s.validateOpenEBSLVMSharedMountRestore(ctx, session); err != nil {
+		return err
+	}
 	phase := session.Status.Phase
 	if phase == domain.PhaseFailed || phase == domain.PhaseAborting {
 		phase = session.Status.ResumeFrom
@@ -827,6 +1009,11 @@ func (s *Service) ValidateAbort(ctx context.Context, session *domain.Session) er
 	}
 	if phase == domain.PhaseActivated || phase == domain.PhaseCompleted || phase == domain.PhaseResuming || session.Status.ResumeFrom == domain.PhaseActivating || session.Status.ResumeFrom == domain.PhaseResuming {
 		return domain.NewError(domain.ErrorPrecondition, "abort dry-run", "activated sessions require rollback")
+	}
+	if abortRequiresWorkloadResume(session) {
+		if err := s.verifySourceStorage(ctx, session); err != nil {
+			return err
+		}
 	}
 	if phase == domain.PhasePaused || phase == domain.PhaseFinalSyncing || phase == domain.PhaseFinalSynced {
 		return s.controllers.VerifyPaused(ctx, session)
@@ -844,11 +1031,18 @@ func (s *Service) ValidateRollback(ctx context.Context, session *domain.Session)
 	if err := session.Validate(); err != nil {
 		return err
 	}
+	if err := s.validateOpenEBSLVMSharedMountRestore(ctx, session); err != nil {
+		return err
+	}
 	phase := session.Status.Phase
+	if phase == domain.PhaseRolledBack {
+		return nil
+	}
 	rollbackOrigin := session.Status.ResumeFrom
 	if rollbackOrigin == domain.PhaseRollingBack {
 		rollbackOrigin = phaseBefore(session, domain.PhaseRollingBack)
 	}
+	recoveringRollback := phase == domain.PhaseRollingBack || (phase == domain.PhaseFailed && session.Status.ResumeFrom == domain.PhaseRollingBack)
 	wasRunning := phase == domain.PhaseCompleted || ((phase == domain.PhaseFailed || phase == domain.PhaseRollingBack) && (rollbackOrigin == domain.PhaseResuming || rollbackOrigin == domain.PhaseCompleted))
 	failedDuringCutover := phase == domain.PhaseFailed && (session.Status.ResumeFrom == domain.PhaseActivating || session.Status.ResumeFrom == domain.PhaseResuming || session.Status.ResumeFrom == domain.PhaseRollingBack)
 	valid := wasRunning || phase == domain.PhaseActivated || phase == domain.PhaseActivating || phase == domain.PhaseFinalSynced || phase == domain.PhaseRollingBack || failedDuringCutover
@@ -858,16 +1052,22 @@ func (s *Service) ValidateRollback(ctx context.Context, session *domain.Session)
 	if session.Spec.Operation().RebindsPVC() {
 		return s.validateRebindRollbackVolumes(ctx, session)
 	}
-	if wasRunning {
-		if err := s.verifyActiveVolumes(ctx, session); err != nil {
-			return err
+	if err := s.validateRollbackStorage(ctx, session, phase, rollbackOrigin, recoveringRollback, wasRunning); err != nil {
+		return err
+	}
+	if recoveringRollback {
+		if wasRunning {
+			return s.validateRollbackConsumers(ctx, session)
 		}
+		return nil
+	}
+	if wasRunning {
 		return s.validateRollbackConsumers(ctx, session)
 	}
 	if err := s.controllers.VerifyPaused(ctx, session); err != nil {
 		return err
 	}
-	return s.validateOfflineVolumes(ctx, session)
+	return nil
 }
 
 // validateRollbackConsumers mirrors the Pod reference guard in RollbackVolume
@@ -945,15 +1145,7 @@ func (s *Service) validateRebindRollbackVolumes(ctx context.Context, session *do
 		if active.Name == "" || active.UID == "" {
 			return domain.NewError(domain.ErrorPrecondition, "rollback dry-run", fmt.Sprintf("PVC %s has no recorded active identity", volume.SourcePVC.Name))
 		}
-		check := *volume
-		check.SourcePVC = active
-		// VerifyVolumeOffline validates both sides of a migration volume. A
-		// rebind has one PVC and one retained PV, so use the active identity for
-		// both references to apply the same offline and binding checks.
-		check.SourcePV = volume.SourcePV
-		check.DestinationPVC = active
-		check.DestinationPV = volume.SourcePV
-		if err := s.switcher.VerifyVolumeOffline(ctx, &check); err != nil {
+		if err := s.validateRebindTransition(ctx, session, volume, active, volume.SourcePVC); err != nil {
 			return err
 		}
 	}
@@ -965,10 +1157,13 @@ func (s *Service) validateOfflineVolumes(ctx context.Context, session *domain.Se
 	for index := range session.Spec.Volumes {
 		volumes[index] = &session.Spec.Volumes[index]
 	}
-	return s.verifyVolumesOffline(ctx, volumes)
+	return s.verifyVolumesOffline(ctx, session, volumes)
 }
 
-func (s *Service) verifyVolumesOffline(ctx context.Context, volumes []*domain.VolumeSpec) error {
+func (s *Service) verifyVolumesOffline(ctx context.Context, session *domain.Session, volumes []*domain.VolumeSpec) error {
+	if switcher, ok := s.switcher.(sessionBatchVolumeSwitcher); ok {
+		return switcher.VerifyVolumesOfflineForSession(ctx, session.ID, volumes)
+	}
 	if switcher, ok := s.switcher.(batchVolumeSwitcher); ok {
 		return switcher.VerifyVolumesOffline(ctx, volumes)
 	}
@@ -982,15 +1177,69 @@ func (s *Service) verifyVolumesOffline(ctx context.Context, volumes []*domain.Vo
 
 func (s *Service) validateRebindOfflineVolumes(ctx context.Context, session *domain.Session) error {
 	for index := range session.Spec.Volumes {
-		volume := session.Spec.Volumes[index]
-		check := volume
-		check.DestinationPVC = volume.SourcePVC
-		check.DestinationPV = volume.SourcePV
-		if err := s.switcher.VerifyVolumeOffline(ctx, &check); err != nil {
+		volume := &session.Spec.Volumes[index]
+		if err := s.validateRebindTransition(ctx, session, volume, volume.SourcePVC, volume.DestinationPVC); err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+func (s *Service) validateRebindTransition(ctx context.Context, session *domain.Session, volume *domain.VolumeSpec, from, to domain.ObjectReference) error {
+	if from.Namespace == "" || from.Name == "" || to.Namespace == "" || to.Name == "" {
+		return domain.NewError(domain.ErrorPrecondition, "rebind PVC dry-run", "source and destination PVC identities are required")
+	}
+	fromPVC, fromErr := s.client.CoreV1().PersistentVolumeClaims(from.Namespace).Get(ctx, from.Name, metav1.GetOptions{})
+	sameEndpoint := from.Namespace == to.Namespace && from.Name == to.Name
+	toPVC, toErr := fromPVC, fromErr
+	if !sameEndpoint {
+		toPVC, toErr = s.client.CoreV1().PersistentVolumeClaims(to.Namespace).Get(ctx, to.Name, metav1.GetOptions{})
+	}
+	if fromErr != nil && !apierrors.IsNotFound(fromErr) {
+		return domain.WrapError(domain.ErrorKubernetes, "rebind PVC dry-run", fmt.Sprintf("read PVC %s/%s", from.Namespace, from.Name), fromErr)
+	}
+	if toErr != nil && !apierrors.IsNotFound(toErr) {
+		return domain.WrapError(domain.ErrorKubernetes, "rebind PVC dry-run", fmt.Sprintf("read PVC %s/%s", to.Namespace, to.Name), toErr)
+	}
+	fromExists := fromErr == nil
+	toExists := toErr == nil
+	if !sameEndpoint && fromExists && toExists {
+		return domain.NewError(domain.ErrorConflict, "rebind PVC dry-run", fmt.Sprintf("both PVC endpoints %s/%s and %s/%s exist", from.Namespace, from.Name, to.Namespace, to.Name))
+	}
+	if !fromExists && !toExists {
+		return domain.NewError(domain.ErrorPrecondition, "rebind PVC dry-run", fmt.Sprintf("neither PVC endpoint %s/%s nor %s/%s exists", from.Namespace, from.Name, to.Namespace, to.Name))
+	}
+	current := fromPVC
+	expected := from
+	if !fromExists {
+		current = toPVC
+		expected = to
+	}
+	if current == nil || current.Name == "" {
+		return domain.NewError(domain.ErrorKubernetes, "rebind PVC dry-run", "read PVC endpoint returned an empty object")
+	}
+	if !fromExists && current.Annotations[kube.SessionKey] != session.ID {
+		return domain.NewError(domain.ErrorConflict, "rebind PVC dry-run", fmt.Sprintf("destination PVC %s/%s is not owned by session %s", current.Namespace, current.Name, session.ID))
+	}
+	if expected.UID == "" {
+		return domain.NewError(domain.ErrorPrecondition, "rebind PVC dry-run", fmt.Sprintf("PVC %s/%s has no recorded UID", expected.Namespace, expected.Name))
+	}
+	if current.UID != expected.UID {
+		return domain.NewError(domain.ErrorConflict, "rebind PVC dry-run", fmt.Sprintf("PVC %s/%s UID changed", current.Namespace, current.Name))
+	}
+	currentRef := domain.ObjectReference{
+		APIVersion: domain.CoreAPIVersion,
+		Kind:       domain.KindPersistentVolumeClaim,
+		Namespace:  current.Namespace,
+		Name:       current.Name,
+		UID:        current.UID,
+	}
+	check := *volume
+	check.SourcePVC = currentRef
+	check.SourcePV = volume.SourcePV
+	check.DestinationPVC = currentRef
+	check.DestinationPV = volume.SourcePV
+	return s.switcher.VerifyVolumeOffline(ctx, &check)
 }
 
 // ValidateCleanup checks ownership, reclaim-policy, and deletion prerequisites
@@ -1004,6 +1253,12 @@ func (s *Service) ValidateCleanup(ctx context.Context, session *domain.Session, 
 	}
 	if !cleanupPhaseAllowed(session) {
 		return domain.NewError(domain.ErrorPrecondition, "cleanup dry-run", fmt.Sprintf("session phase %s is still active", session.Status.Phase))
+	}
+	if err := s.validateOpenEBSLVMSharedMountRestore(ctx, session); err != nil {
+		return err
+	}
+	if err := s.validateReservationPods(ctx, session); err != nil {
+		return err
 	}
 	s.logInfo("cleanup preflight started", "session", session.ID, "volumes", len(session.Spec.Volumes), "deleteTemporary", options.DeleteTemporary, "deleteRollback", options.DeleteRollback, "finalize", options.Finalize, "deleteSession", options.DeleteSession)
 	if options.DeleteSession && !options.Finalize {
@@ -1056,7 +1311,7 @@ func (s *Service) ValidateCleanup(ctx context.Context, session *domain.Session, 
 				if pv.Status.Phase != corev1.VolumeReleased && pv.Status.Phase != corev1.VolumeAvailable {
 					deletionWillReleaseClaim := options.DeleteTemporary && pv.Status.Phase == corev1.VolumeBound && pv.Spec.ClaimRef != nil &&
 						pv.Spec.ClaimRef.Namespace == volume.DestinationPVC.Namespace && pv.Spec.ClaimRef.Name == volume.DestinationPVC.Name &&
-						(pv.Spec.ClaimRef.UID == "" || pv.Spec.ClaimRef.UID == volume.DestinationPVC.UID)
+						pv.Spec.ClaimRef.UID != "" && pv.Spec.ClaimRef.UID == volume.DestinationPVC.UID
 					if !deletionWillReleaseClaim {
 						return domain.NewError(domain.ErrorPrecondition, "cleanup dry-run", fmt.Sprintf("PV %s phase %s must be Released or Available", pv.Name, pv.Status.Phase))
 					}
@@ -1073,15 +1328,19 @@ func (s *Service) ValidateCleanup(ctx context.Context, session *domain.Session, 
 			if active.Name == "" {
 				continue
 			}
-			if policy == "" {
+			maySkipMissingAbortedPV := session.Status.Phase == domain.PhaseAborted && session.Status.Volumes[index].Activation.ActivePVC.Name == ""
+			if policy == "" && !maySkipMissingAbortedPV {
 				return domain.NewError(domain.ErrorPrecondition, "cleanup dry-run", fmt.Sprintf("PV %s has no recorded reclaim policy", active.Name))
 			}
 			pv, err := s.client.CoreV1().PersistentVolumes().Get(ctx, active.Name, metav1.GetOptions{})
-			if session.Status.Phase == domain.PhaseAborted && session.Status.Volumes[index].Activation.ActivePVC.Name == "" && apierrors.IsNotFound(err) {
+			if maySkipMissingAbortedPV && apierrors.IsNotFound(err) {
 				continue
 			}
 			if err != nil {
 				return domain.WrapError(domain.ErrorKubernetes, "cleanup dry-run", fmt.Sprintf("read active PV %s", active.Name), err)
+			}
+			if policy == "" {
+				return domain.NewError(domain.ErrorPrecondition, "cleanup dry-run", fmt.Sprintf("PV %s has no recorded reclaim policy", active.Name))
 			}
 			if err := validateFinalizablePV(pv, active, session.ID, policy); err != nil {
 				return err
@@ -1123,8 +1382,14 @@ func (s *Service) ValidateFinalSync(ctx context.Context, session *domain.Session
 	if session == nil {
 		return domain.NewError(domain.ErrorValidation, "final sync dry-run", "session is nil")
 	}
+	if err := session.Validate(); err != nil {
+		return err
+	}
 	if !session.Spec.Orchestrated() {
 		return domain.NewError(domain.ErrorPrecondition, "final sync dry-run", "final sync requires an orchestrated migration session")
+	}
+	if err := s.validateOpenEBSLVMSharedMountRestore(ctx, session); err != nil {
+		return err
 	}
 	phase := session.Status.Phase
 	if phase == domain.PhaseFailed {
@@ -1149,10 +1414,20 @@ func (s *Service) ValidateActivation(ctx context.Context, session *domain.Sessio
 	if session == nil {
 		return domain.NewError(domain.ErrorValidation, "activation dry-run", "session is nil")
 	}
+	if err := session.Validate(); err != nil {
+		return err
+	}
 	if !session.Spec.Orchestrated() {
 		return domain.NewError(domain.ErrorPrecondition, "activation dry-run", "activation requires an orchestrated migration session")
 	}
-	valid := session.Status.Phase == domain.PhaseFinalSynced || session.Status.Phase == domain.PhaseActivating || (session.Status.Phase == domain.PhaseFailed && session.Status.ResumeFrom == domain.PhaseActivating)
+	if err := s.validateOpenEBSLVMSharedMountRestore(ctx, session); err != nil {
+		return err
+	}
+	phase := session.Status.Phase
+	if phase == domain.PhaseActivated || phase == domain.PhaseResuming || phase == domain.PhaseCompleted || (phase == domain.PhaseFailed && session.Status.ResumeFrom == domain.PhaseResuming) {
+		return nil
+	}
+	valid := phase == domain.PhaseFinalSynced || phase == domain.PhaseActivating || (phase == domain.PhaseFailed && session.Status.ResumeFrom == domain.PhaseActivating)
 	if !valid {
 		return domain.NewError(domain.ErrorPrecondition, "activation dry-run", fmt.Sprintf("session phase %s cannot activate", session.Status.Phase))
 	}
@@ -1166,6 +1441,9 @@ func (s *Service) ValidateActivation(ctx context.Context, session *domain.Sessio
 			return domain.NewError(domain.ErrorPrecondition, "activation dry-run", fmt.Sprintf("PVC %s has no completed final sync", volume.SourcePVC.Name))
 		}
 	}
+	if phase == domain.PhaseActivating || phase == domain.PhaseFailed {
+		return s.validateActivationStorage(ctx, session)
+	}
 	return s.validateOfflineVolumes(ctx, session)
 }
 
@@ -1174,8 +1452,14 @@ func (s *Service) Reserve(ctx context.Context, session *domain.Session) error {
 }
 
 func (s *Service) reserve(ctx context.Context, session *domain.Session) error {
+	if err := s.restoreOpenEBSLVMSharedMounts(ctx, session); err != nil {
+		return err
+	}
 	if session.Status.Phase == domain.PhaseReserved || phaseAfter(session.Status.Phase, domain.PhaseReserved) {
 		return nil
+	}
+	if err := s.ValidateReservation(ctx, session); err != nil {
+		return err
 	}
 	if _, err := s.probeToolImage(ctx, session, reservationToolProbeTargets(session)); err != nil {
 		return err
@@ -1219,10 +1503,12 @@ func (s *Service) warmCopy(ctx context.Context, session *domain.Session) (result
 		return s.failContext(ctx, session, err)
 	}
 	s.logInfo("warm copy preflight started", "session", session.ID, "volumes", len(session.Spec.Volumes))
-	// Infer and checkpoint an online copy's source node while the session Lease
-	// is held. Rechecks before each volume then reject a consumer that moves
-	// after the node-specific image probe.
-	if err := s.validateCopyConsumersBatch(ctx, session); err != nil {
+	if err := s.ValidateWarmCopy(ctx, session); err != nil {
+		return err
+	}
+	// Checkpoint inferred online-copy placement only after the full read-only
+	// preflight has passed for every volume.
+	if err := s.validateCopyConsumersBatch(ctx, session, true); err != nil {
 		return err
 	}
 	if err := s.enableOpenEBSLVMSharedMounts(ctx, session); err != nil {
@@ -1325,11 +1611,20 @@ func (s *Service) pause(ctx context.Context, session *domain.Session) error {
 		return domain.NewError(domain.ErrorPrecondition, "pause workload", "workload pause requires an orchestrated migration session")
 	}
 	if session.Status.Phase == domain.PhasePaused || session.Status.Phase == domain.PhaseFinalSyncing || session.Status.Phase == domain.PhaseFinalSynced {
+		if err := s.restoreOpenEBSLVMSharedMounts(ctx, session); err != nil {
+			return err
+		}
 		return s.controllers.VerifyPaused(ctx, session)
 	}
 	valid := session.Status.Phase == domain.PhaseReserved || session.Status.Phase == domain.PhaseWarmCopied || session.Status.Phase == domain.PhasePausing || (session.Status.Phase == domain.PhaseFailed && session.Status.ResumeFrom == domain.PhasePausing)
 	if !valid {
 		return domain.NewError(domain.ErrorPrecondition, "pause workload", fmt.Sprintf("session phase %s cannot pause", session.Status.Phase))
+	}
+	if err := s.restoreOpenEBSLVMSharedMounts(ctx, session); err != nil {
+		return err
+	}
+	if err := s.ValidateReservation(ctx, session); err != nil {
+		return err
 	}
 	if err := s.begin(ctx, session, domain.PhasePausing, "pausing workload"); err != nil {
 		return err
@@ -1360,8 +1655,14 @@ func (s *Service) finalSync(ctx context.Context, session *domain.Session) error 
 	if !valid {
 		return domain.NewError(domain.ErrorPrecondition, "final sync", fmt.Sprintf("session phase %s cannot final-sync", session.Status.Phase))
 	}
+	if err := s.restoreOpenEBSLVMSharedMounts(ctx, session); err != nil {
+		return err
+	}
 	s.logInfo("final sync preflight started", "session", session.ID, "volumes", len(session.Spec.Volumes))
 	if err := s.controllers.VerifyPaused(ctx, session); err != nil {
+		return err
+	}
+	if err := s.validateOfflineVolumes(ctx, session); err != nil {
 		return err
 	}
 	targets, err := s.resolveCopyToolProbeTargets(ctx, session, false)
@@ -1397,12 +1698,20 @@ func (s *Service) pauseAndFinalSync(ctx context.Context, session *domain.Session
 	default:
 		return domain.NewError(domain.ErrorPrecondition, "final sync", fmt.Sprintf("session phase %s cannot final-sync", session.Status.Phase))
 	}
+	if err := s.restoreOpenEBSLVMSharedMounts(ctx, session); err != nil {
+		return err
+	}
 	s.logInfo("pause and final sync preflight started", "session", session.ID, "volumes", len(session.Spec.Volumes), "alreadyPaused", phase == domain.PhasePaused || phase == domain.PhaseFinalSyncing || phase == domain.PhaseFinalSynced)
 	alreadyPaused := phase == domain.PhasePaused || phase == domain.PhaseFinalSyncing || phase == domain.PhaseFinalSynced
 	if alreadyPaused {
 		if err := s.controllers.VerifyPaused(ctx, session); err != nil {
 			return err
 		}
+		if err := s.validateOfflineVolumes(ctx, session); err != nil {
+			return err
+		}
+	} else if err := s.ValidateReservation(ctx, session); err != nil {
+		return err
 	}
 	targets, err := s.resolveCopyToolProbeTargets(ctx, session, false)
 	if err != nil {
@@ -1429,6 +1738,9 @@ func (s *Service) finalSyncWithProbeResults(ctx context.Context, session *domain
 	}
 	if err := s.begin(ctx, session, domain.PhaseFinalSyncing, "running offline final sync"); err != nil {
 		return err
+	}
+	if err := s.validateOfflineVolumes(ctx, session); err != nil {
+		return s.failContext(ctx, session, err)
 	}
 	for index := range session.Spec.Volumes {
 		volume := &session.Spec.Volumes[index]
@@ -1462,13 +1774,16 @@ func (s *Service) activate(ctx context.Context, session *domain.Session) error {
 		return domain.NewError(domain.ErrorPrecondition, "activate", "activation requires an orchestrated migration session")
 	}
 	if session.Status.Phase == domain.PhaseActivated || session.Status.Phase == domain.PhaseResuming || session.Status.Phase == domain.PhaseCompleted || (session.Status.Phase == domain.PhaseFailed && session.Status.ResumeFrom == domain.PhaseResuming) {
-		return nil
+		return s.restoreOpenEBSLVMSharedMounts(ctx, session)
 	}
 	valid := session.Status.Phase == domain.PhaseFinalSynced || session.Status.Phase == domain.PhaseActivating || (session.Status.Phase == domain.PhaseFailed && session.Status.ResumeFrom == domain.PhaseActivating)
 	if !valid {
 		return domain.NewError(domain.ErrorPrecondition, "activate", fmt.Sprintf("session phase %s cannot activate", session.Status.Phase))
 	}
-	if err := s.controllers.VerifyPaused(ctx, session); err != nil {
+	if err := s.restoreOpenEBSLVMSharedMounts(ctx, session); err != nil {
+		return err
+	}
+	if err := s.ValidateActivation(ctx, session); err != nil {
 		return err
 	}
 	if err := s.begin(ctx, session, domain.PhaseActivating, "activating destination volumes"); err != nil {
@@ -1478,6 +1793,9 @@ func (s *Service) activate(ctx context.Context, session *domain.Session) error {
 		volume := &session.Spec.Volumes[index]
 		status := &session.Status.Volumes[index]
 		if status.Activation.ActivatedAt != nil {
+			if err := s.verifyActiveStorageVolume(ctx, session, index); err != nil {
+				return s.failContext(ctx, session, err)
+			}
 			continue
 		}
 		s.logInfo("volume activation started", "session", session.ID, "index", index, "source", volume.SourcePVC.Namespace+"/"+volume.SourcePVC.Name, "destination", volume.DestinationPVC.Namespace+"/"+volume.DestinationPVC.Name, "pv", volume.DestinationPV.Name)
@@ -1498,6 +1816,12 @@ func (s *Service) resumeWorkload(ctx context.Context, session *domain.Session) e
 	valid := session.Status.Phase == domain.PhaseActivated || session.Status.Phase == domain.PhaseResuming || (session.Status.Phase == domain.PhaseFailed && session.Status.ResumeFrom == domain.PhaseResuming)
 	if !valid {
 		return domain.NewError(domain.ErrorPrecondition, "resume workload", fmt.Sprintf("session phase %s cannot resume", session.Status.Phase))
+	}
+	if err := s.restoreOpenEBSLVMSharedMounts(ctx, session); err != nil {
+		return err
+	}
+	if err := s.validateWorkloadResume(ctx, session); err != nil {
+		return err
 	}
 	if err := s.begin(ctx, session, domain.PhaseResuming, "resuming workload"); err != nil {
 		return err
@@ -1534,6 +1858,11 @@ func (s *Service) migrate(ctx context.Context, session *domain.Session) error {
 	}
 	if session.Spec.WorkflowOptionsPtr() == nil {
 		return domain.NewError(domain.ErrorValidation, "migrate", "session workflow options are missing")
+	}
+	if session.Status.WarmPassesCompleted < warmPasses {
+		if err := s.ValidateWarmCopy(ctx, session); err != nil {
+			return err
+		}
 	}
 	if err := s.Reserve(ctx, session); err != nil {
 		return err
@@ -1615,7 +1944,7 @@ func (s *Service) resumeSession(ctx context.Context, session *domain.Session) er
 			}
 			return domain.NewError(domain.ErrorPrecondition, "resume session", fmt.Sprintf("phase %s does not belong to operation %s", phase, session.Spec.Operation()))
 		case domain.PhaseWarmCopied, domain.PhaseCompleted, domain.PhaseAborted, domain.PhaseRolledBack:
-			return nil
+			return s.restoreOpenEBSLVMSharedMounts(ctx, session)
 		default:
 			return domain.NewError(domain.ErrorPrecondition, "resume session", fmt.Sprintf("phase %s cannot be resumed for operation %s", phase, session.Spec.Operation()))
 		}
@@ -1659,7 +1988,7 @@ func (s *Service) resumeSession(ctx context.Context, session *domain.Session) er
 	case domain.PhaseActivated, domain.PhaseResuming:
 		return s.ResumeWorkload(ctx, session)
 	case domain.PhaseCompleted, domain.PhaseAborted, domain.PhaseRolledBack:
-		return nil
+		return s.restoreOpenEBSLVMSharedMounts(ctx, session)
 	case domain.PhaseRollingBack:
 		return s.Rollback(ctx, session)
 	case domain.PhaseAborting:
@@ -1686,21 +2015,14 @@ func (s *Service) abort(ctx context.Context, session *domain.Session) error {
 	if err := s.restoreOpenEBSLVMSharedMounts(ctx, session); err != nil {
 		return s.failContext(ctx, session, err)
 	}
-	previous := session.Status.Phase
-	if session.Status.Phase == domain.PhaseFailed || session.Status.Phase == domain.PhaseAborting {
-		previous = session.Status.ResumeFrom
+	if err := s.ValidateAbort(ctx, session); err != nil {
+		return err
 	}
-	if previous == domain.PhaseAborting {
-		previous = phaseBefore(session, domain.PhaseAborting)
-	}
-	paused := previous == domain.PhasePausing || previous == domain.PhasePaused || previous == domain.PhaseFinalSyncing || previous == domain.PhaseFinalSynced
-	if !paused && (session.Status.Phase == domain.PhaseAborting || session.Status.ResumeFrom == domain.PhaseAborting) {
-		paused = abortOriginWasPaused(session)
-	}
+	resumeWorkload := abortRequiresWorkloadResume(session)
 	if err := s.begin(ctx, session, domain.PhaseAborting, "aborting migration"); err != nil {
 		return err
 	}
-	if paused {
+	if resumeWorkload {
 		if err := s.controllers.Resume(ctx, session); err != nil {
 			return s.failContext(ctx, session, err)
 		}
@@ -1728,6 +2050,9 @@ func (s *Service) rollback(ctx context.Context, session *domain.Session) error {
 	}
 	if err := s.restoreOpenEBSLVMSharedMounts(ctx, session); err != nil {
 		return s.failContext(ctx, session, err)
+	}
+	if err := s.ValidateRollback(ctx, session); err != nil {
+		return err
 	}
 	if err := s.begin(ctx, session, domain.PhaseRollingBack, "rolling back to source volumes"); err != nil {
 		return err
@@ -1772,6 +2097,9 @@ func (s *Service) rollback(ctx context.Context, session *domain.Session) error {
 			return s.failContext(ctx, session, err)
 		}
 	}
+	if err := s.verifyRollbackStorage(ctx, session); err != nil {
+		return s.failContext(ctx, session, err)
+	}
 	if err := s.controllers.Resume(ctx, session); err != nil {
 		return s.failContext(ctx, session, err)
 	}
@@ -1798,6 +2126,9 @@ func (s *Service) rename(ctx context.Context, session *domain.Session) error {
 	valid := session.Status.Phase == domain.PhasePlanned || session.Status.Phase == phase || (session.Status.Phase == domain.PhaseFailed && session.Status.ResumeFrom == phase)
 	if !valid {
 		return domain.NewError(domain.ErrorPrecondition, "rebind PVC", fmt.Sprintf("session phase %s cannot rebind PVC", session.Status.Phase))
+	}
+	if err := s.validateRebindOfflineVolumes(ctx, session); err != nil {
+		return err
 	}
 	if err := s.begin(ctx, session, phase, message); err != nil {
 		return err
@@ -1830,12 +2161,17 @@ func (s *Service) validateCopyConsumers(ctx context.Context, session *domain.Ses
 	if pods != nil {
 		items = pods.Items
 	}
-	return s.validateCopyConsumersFromPods(ctx, session, volume, items, err)
+	_, err = s.validateCopyConsumersFromPods(session, volume, items, err, session.Spec.WorkflowOptions().SourceNode)
+	return err
 }
 
-func (s *Service) validateCopyConsumersBatch(ctx context.Context, session *domain.Session) error {
+func (s *Service) validateCopyConsumersBatch(ctx context.Context, session *domain.Session, checkpointSourceNode bool) error {
 	if session.Spec.Operation() != domain.OperationCopy {
 		return nil
+	}
+	options := session.Spec.WorkflowOptionsPtr()
+	if options == nil {
+		return domain.NewError(domain.ErrorValidation, "copy preflight", "copy session workflow options are missing")
 	}
 	namespaces := make([]string, 0)
 	seen := map[string]struct{}{}
@@ -1863,20 +2199,35 @@ func (s *Service) validateCopyConsumersBatch(ctx context.Context, session *domai
 		}
 		results[index].err = err
 	})
+	resolvedSourceNode := options.SourceNode
 	for index := range session.Spec.Volumes {
 		volume := &session.Spec.Volumes[index]
 		namespaceIndex := sort.SearchStrings(namespaces, volume.SourcePVC.Namespace)
 		result := results[namespaceIndex]
-		if err := s.validateCopyConsumersFromPods(ctx, session, volume, result.pods, result.err); err != nil {
+		inferredSourceNode, err := s.validateCopyConsumersFromPods(session, volume, result.pods, result.err, resolvedSourceNode)
+		if err != nil {
 			return err
+		}
+		if resolvedSourceNode == "" {
+			resolvedSourceNode = inferredSourceNode
+		}
+	}
+	if !checkpointSourceNode || options.SourceNode != "" || resolvedSourceNode == "" {
+		return nil
+	}
+	options.SourceNode = resolvedSourceNode
+	if s.store != nil {
+		if err := s.store.Update(ctx, session); err != nil {
+			options.SourceNode = ""
+			return domain.WrapError(domain.ErrorKubernetes, "copy preflight", "persist inferred source node", err)
 		}
 	}
 	return nil
 }
 
-func (s *Service) validateCopyConsumersFromPods(ctx context.Context, session *domain.Session, volume *domain.VolumeSpec, pods []corev1.Pod, listErr error) error {
+func (s *Service) validateCopyConsumersFromPods(session *domain.Session, volume *domain.VolumeSpec, pods []corev1.Pod, listErr error, sourceNode string) (string, error) {
 	if listErr != nil {
-		return domain.WrapError(domain.ErrorKubernetes, "copy preflight", fmt.Sprintf("list PVC consumers in %s", volume.SourcePVC.Namespace), listErr)
+		return "", domain.WrapError(domain.ErrorKubernetes, "copy preflight", fmt.Sprintf("list PVC consumers in %s", volume.SourcePVC.Namespace), listErr)
 	}
 	active := make([]*corev1.Pod, 0)
 	nodes := map[string]struct{}{}
@@ -1893,40 +2244,32 @@ func (s *Service) validateCopyConsumersFromPods(ctx context.Context, session *do
 		}
 	}
 	if len(active) == 0 {
-		return nil
+		return "", nil
 	}
 	options := session.Spec.WorkflowOptionsPtr()
 	if options == nil {
-		return domain.NewError(domain.ErrorValidation, "copy preflight", "copy session workflow options are missing")
+		return "", domain.NewError(domain.ErrorValidation, "copy preflight", "copy session workflow options are missing")
 	}
 	if !session.Spec.Online() {
-		return domain.NewError(domain.ErrorPrecondition, "copy preflight", fmt.Sprintf("offline copy requires PVC %s/%s to have zero active Pod consumers", volume.SourcePVC.Namespace, volume.SourcePVC.Name))
+		return "", domain.NewError(domain.ErrorPrecondition, "copy preflight", fmt.Sprintf("offline copy requires PVC %s/%s to have zero active Pod consumers", volume.SourcePVC.Namespace, volume.SourcePVC.Name))
 	}
 	if kube.HasAccessMode(volume.AccessModes, corev1.ReadWriteOncePod) {
-		return domain.NewError(domain.ErrorPrecondition, "copy preflight", fmt.Sprintf("active RWOP PVC %s/%s cannot be warm-copied", volume.SourcePVC.Namespace, volume.SourcePVC.Name))
+		return "", domain.NewError(domain.ErrorPrecondition, "copy preflight", fmt.Sprintf("active RWOP PVC %s/%s cannot be warm-copied", volume.SourcePVC.Namespace, volume.SourcePVC.Name))
 	}
 	if kube.HasAccessMode(volume.AccessModes, corev1.ReadWriteOnce) && scheduledCount != len(active) {
-		return domain.NewError(domain.ErrorPrecondition, "copy preflight", fmt.Sprintf("every active consumer of RWO PVC %s/%s must be scheduled before online copy", volume.SourcePVC.Namespace, volume.SourcePVC.Name))
+		return "", domain.NewError(domain.ErrorPrecondition, "copy preflight", fmt.Sprintf("every active consumer of RWO PVC %s/%s must be scheduled before online copy", volume.SourcePVC.Namespace, volume.SourcePVC.Name))
 	}
 	if len(nodes) > 1 {
-		return domain.NewError(domain.ErrorPrecondition, "copy preflight", fmt.Sprintf("online copy consumers for PVC %s/%s moved across multiple nodes", volume.SourcePVC.Namespace, volume.SourcePVC.Name))
+		return "", domain.NewError(domain.ErrorPrecondition, "copy preflight", fmt.Sprintf("online copy consumers for PVC %s/%s moved across multiple nodes", volume.SourcePVC.Namespace, volume.SourcePVC.Name))
 	}
-	if options.SourceNode == "" && len(nodes) == 1 {
-		for node := range nodes {
-			options.SourceNode = node
-		}
-		if s.store != nil {
-			if err := s.store.Update(ctx, session); err != nil {
-				return domain.WrapError(domain.ErrorKubernetes, "copy preflight", "persist inferred source node", err)
-			}
-		}
-	}
+	inferredSourceNode := ""
 	for node := range nodes {
-		if options.SourceNode != "" && node != options.SourceNode {
-			return domain.NewError(domain.ErrorConflict, "copy preflight", fmt.Sprintf("PVC %s/%s consumer runs on %s, session source node is %s", volume.SourcePVC.Namespace, volume.SourcePVC.Name, node, options.SourceNode))
+		inferredSourceNode = node
+		if sourceNode != "" && node != sourceNode {
+			return "", domain.NewError(domain.ErrorConflict, "copy preflight", fmt.Sprintf("PVC %s/%s consumer runs on %s, session source node is %s", volume.SourcePVC.Namespace, volume.SourcePVC.Name, node, sourceNode))
 		}
 	}
-	return nil
+	return inferredSourceNode, nil
 }
 
 func (s *Service) copyWithRetry(ctx context.Context, session *domain.Session, volume *domain.VolumeSpec, status *domain.VolumeStatus, mode copyengine.Mode, probeResults []kube.ToolImageProbeResult) error {
@@ -1941,14 +2284,17 @@ func (s *Service) copyWithRetry(ctx context.Context, session *domain.Session, vo
 	values = append(values, pullSecretValues...)
 	var last error
 	options := session.Spec.WorkflowOptions()
-	sourceMountReadWrite := false
-	if mode == copyengine.ModeWarm {
-		sourceMountReadWrite, err = s.sharedOpenEBSLVMSource(ctx, volume)
-		if err != nil {
+	for retryIndex := 0; retryIndex < s.config.Retries; retryIndex++ {
+		if err := s.validateReservedVolume(ctx, session, volume, status); err != nil {
 			return err
 		}
-	}
-	for retryIndex := 0; retryIndex < s.config.Retries; retryIndex++ {
+		sourceMountReadWrite := false
+		if mode == copyengine.ModeWarm {
+			_, sourceMountReadWrite, err = s.sharedOpenEBSLVMSource(ctx, session, volume)
+			if err != nil {
+				return err
+			}
+		}
 		status.Sync.Attempts++
 		status.Sync.LastError = ""
 		if err := s.store.Update(ctx, session); err != nil {
@@ -2159,6 +2505,52 @@ func probedSourceNode(session *domain.Session, volume *domain.VolumeSpec, result
 	return ""
 }
 
+func (s *Service) verifySourceStorage(ctx context.Context, session *domain.Session) error {
+	results := make([]error, len(session.Spec.Volumes))
+	parallel.For(len(session.Spec.Volumes), func(index int) {
+		volume := &session.Spec.Volumes[index]
+		if volume.SourcePVC.Namespace == "" || volume.SourcePVC.Name == "" || volume.SourcePVC.UID == "" {
+			results[index] = domain.NewError(domain.ErrorPrecondition, "verify source storage", fmt.Sprintf("source PVC reference for volume %d is incomplete", index))
+			return
+		}
+		if volume.SourcePV.Name == "" || volume.SourcePV.UID == "" {
+			results[index] = domain.NewError(domain.ErrorPrecondition, "verify source storage", fmt.Sprintf("source PV reference for PVC %s/%s is incomplete", volume.SourcePVC.Namespace, volume.SourcePVC.Name))
+			return
+		}
+		pvc, err := s.client.CoreV1().PersistentVolumeClaims(volume.SourcePVC.Namespace).Get(ctx, volume.SourcePVC.Name, metav1.GetOptions{})
+		if err != nil {
+			results[index] = domain.WrapError(domain.ErrorKubernetes, "verify source storage", fmt.Sprintf("read source PVC %s/%s", volume.SourcePVC.Namespace, volume.SourcePVC.Name), err)
+			return
+		}
+		if pvc == nil || pvc.Name == "" {
+			results[index] = domain.NewError(domain.ErrorKubernetes, "verify source storage", fmt.Sprintf("read source PVC %s/%s returned an empty object", volume.SourcePVC.Namespace, volume.SourcePVC.Name))
+			return
+		}
+		if pvc.UID != volume.SourcePVC.UID || pvc.Status.Phase != corev1.ClaimBound || pvc.Spec.VolumeName != volume.SourcePV.Name {
+			results[index] = domain.NewError(domain.ErrorConflict, "verify source storage", fmt.Sprintf("source PVC %s/%s identity or binding changed", pvc.Namespace, pvc.Name))
+			return
+		}
+		pv, err := s.client.CoreV1().PersistentVolumes().Get(ctx, volume.SourcePV.Name, metav1.GetOptions{})
+		if err != nil {
+			results[index] = domain.WrapError(domain.ErrorKubernetes, "verify source storage", fmt.Sprintf("read source PV %s", volume.SourcePV.Name), err)
+			return
+		}
+		if pv == nil || pv.Name == "" {
+			results[index] = domain.NewError(domain.ErrorKubernetes, "verify source storage", fmt.Sprintf("read source PV %s returned an empty object", volume.SourcePV.Name))
+			return
+		}
+		if pv.UID != volume.SourcePV.UID || pv.Spec.ClaimRef == nil || pv.Spec.ClaimRef.Namespace != pvc.Namespace || pv.Spec.ClaimRef.Name != pvc.Name || pv.Spec.ClaimRef.UID != pvc.UID {
+			results[index] = domain.NewError(domain.ErrorConflict, "verify source storage", fmt.Sprintf("source PV %s identity or claimRef changed", pv.Name))
+		}
+	})
+	for _, err := range results {
+		if err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func (s *Service) verifyActiveStorage(ctx context.Context, session *domain.Session) error {
 	results := make([]error, len(session.Spec.Volumes))
 	parallel.For(len(session.Spec.Volumes), func(index int) {
@@ -2172,8 +2564,122 @@ func (s *Service) verifyActiveStorage(ctx context.Context, session *domain.Sessi
 	return nil
 }
 
+func (s *Service) validateActivationStorage(ctx context.Context, session *domain.Session) error {
+	offline := make([]*domain.VolumeSpec, 0, len(session.Spec.Volumes))
+	for index := range session.Spec.Volumes {
+		status := &session.Status.Volumes[index]
+		if status.Activation.ActivatedAt != nil || status.Activation.ActivePVC.Name != "" {
+			if err := s.verifyActiveStorageVolume(ctx, session, index); err != nil {
+				return err
+			}
+			continue
+		}
+		offline = append(offline, &session.Spec.Volumes[index])
+	}
+	return s.verifyVolumesOffline(ctx, session, offline)
+}
+
+func (s *Service) validateRollbackRecoveryStorage(ctx context.Context, session *domain.Session, rollbackOrigin domain.Phase) error {
+	offline := make([]*domain.VolumeSpec, 0, len(session.Spec.Volumes))
+	originWasActive := rollbackOrigin == domain.PhaseActivated || rollbackOrigin == domain.PhaseResuming || rollbackOrigin == domain.PhaseCompleted
+	for index := range session.Spec.Volumes {
+		status := &session.Status.Volumes[index]
+		if status.Activation.RolledBackAt != nil {
+			if err := s.verifyRollbackStorageVolume(ctx, session, index); err != nil {
+				return err
+			}
+			continue
+		}
+		if originWasActive || status.Activation.ActivatedAt != nil || status.Activation.ActivePVC.Name != "" {
+			if err := s.verifyActiveStorageVolume(ctx, session, index); err != nil {
+				return err
+			}
+			continue
+		}
+		offline = append(offline, &session.Spec.Volumes[index])
+	}
+	return s.verifyVolumesOffline(ctx, session, offline)
+}
+
+func (s *Service) validateRollbackStorage(ctx context.Context, session *domain.Session, phase, rollbackOrigin domain.Phase, recoveringRollback, wasRunning bool) error {
+	if recoveringRollback {
+		return s.validateRollbackRecoveryStorage(ctx, session, rollbackOrigin)
+	}
+	if wasRunning {
+		return s.verifyActiveVolumes(ctx, session)
+	}
+	if phase == domain.PhaseActivated {
+		return s.verifyActiveStorage(ctx, session)
+	}
+	if phase == domain.PhaseActivating || (phase == domain.PhaseFailed && session.Status.ResumeFrom == domain.PhaseActivating) {
+		return s.validateActivationStorage(ctx, session)
+	}
+	return s.validateOfflineVolumes(ctx, session)
+}
+
+func (s *Service) verifyRollbackStorage(ctx context.Context, session *domain.Session) error {
+	results := make([]error, len(session.Spec.Volumes))
+	parallel.For(len(session.Spec.Volumes), func(index int) {
+		results[index] = s.verifyRollbackStorageVolume(ctx, session, index)
+	})
+	for _, err := range results {
+		if err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (s *Service) verifyRollbackStorageVolume(ctx context.Context, session *domain.Session, index int) error {
+	volume := &session.Spec.Volumes[index]
+	active := session.Status.Volumes[index].Activation.ActivePVC
+	if active.Namespace == "" || active.Name == "" || active.UID == "" {
+		return domain.NewError(domain.ErrorPrecondition, "verify rollback", fmt.Sprintf("PVC %s/%s has no recorded restored identity", volume.SourcePVC.Namespace, volume.SourcePVC.Name))
+	}
+	if active.Namespace != volume.SourcePVC.Namespace || active.Name != volume.SourcePVC.Name {
+		return domain.NewError(domain.ErrorConflict, "verify rollback", fmt.Sprintf("recorded restored PVC %s/%s does not match source PVC %s/%s", active.Namespace, active.Name, volume.SourcePVC.Namespace, volume.SourcePVC.Name))
+	}
+	if volume.SourcePV.Name == "" || volume.SourcePV.UID == "" {
+		return domain.NewError(domain.ErrorPrecondition, "verify rollback", fmt.Sprintf("PVC %s/%s has no recorded source PV identity", volume.SourcePVC.Namespace, volume.SourcePVC.Name))
+	}
+	pvc, err := s.client.CoreV1().PersistentVolumeClaims(active.Namespace).Get(ctx, active.Name, metav1.GetOptions{})
+	if err != nil {
+		return domain.WrapError(domain.ErrorKubernetes, "verify rollback", fmt.Sprintf("read restored PVC %s/%s", active.Namespace, active.Name), err)
+	}
+	if pvc == nil || pvc.Name == "" {
+		return domain.NewError(domain.ErrorKubernetes, "verify rollback", fmt.Sprintf("read restored PVC %s/%s returned an empty object", active.Namespace, active.Name))
+	}
+	if pvc.UID != active.UID || pvc.Status.Phase != corev1.ClaimBound || pvc.Spec.VolumeName != volume.SourcePV.Name {
+		return domain.NewError(domain.ErrorConflict, "verify rollback", fmt.Sprintf("restored PVC %s/%s identity or binding changed", pvc.Namespace, pvc.Name))
+	}
+	if pvc.UID != volume.SourcePVC.UID && pvc.Annotations[kube.SessionKey] != session.ID {
+		return domain.NewError(domain.ErrorConflict, "verify rollback", fmt.Sprintf("restored PVC %s/%s is not the original or session-owned PVC", pvc.Namespace, pvc.Name))
+	}
+	pv, err := s.client.CoreV1().PersistentVolumes().Get(ctx, volume.SourcePV.Name, metav1.GetOptions{})
+	if err != nil {
+		return domain.WrapError(domain.ErrorKubernetes, "verify rollback", fmt.Sprintf("read restored PV %s", volume.SourcePV.Name), err)
+	}
+	if pv == nil || pv.Name == "" {
+		return domain.NewError(domain.ErrorKubernetes, "verify rollback", fmt.Sprintf("read restored PV %s returned an empty object", volume.SourcePV.Name))
+	}
+	if pv.UID != volume.SourcePV.UID || pv.Spec.ClaimRef == nil || pv.Spec.ClaimRef.Namespace != pvc.Namespace || pv.Spec.ClaimRef.Name != pvc.Name || pv.Spec.ClaimRef.UID != pvc.UID {
+		return domain.NewError(domain.ErrorConflict, "verify rollback", fmt.Sprintf("restored PV %s identity or claimRef changed", pv.Name))
+	}
+	return nil
+}
+
 func (s *Service) verifyActiveStorageVolume(ctx context.Context, session *domain.Session, index int) error {
 	volume := &session.Spec.Volumes[index]
+	active := session.Status.Volumes[index].Activation.ActivePVC
+	if active.Namespace == "" || active.Name == "" || active.UID == "" {
+		return domain.NewError(domain.ErrorPrecondition, "verify migration", fmt.Sprintf("PVC %s/%s has no recorded active identity", volume.SourcePVC.Namespace, volume.SourcePVC.Name))
+	}
+	if active.Namespace != volume.SourcePVC.Namespace || active.Name != volume.SourcePVC.Name {
+		return domain.NewError(domain.ErrorConflict, "verify migration", fmt.Sprintf("recorded active PVC %s/%s does not match application PVC %s/%s", active.Namespace, active.Name, volume.SourcePVC.Namespace, volume.SourcePVC.Name))
+	}
+	if volume.DestinationPV.Name == "" || volume.DestinationPV.UID == "" {
+		return domain.NewError(domain.ErrorPrecondition, "verify migration", fmt.Sprintf("PVC %s/%s has no recorded destination PV identity", volume.SourcePVC.Namespace, volume.SourcePVC.Name))
+	}
 	pvc, err := s.client.CoreV1().PersistentVolumeClaims(volume.SourcePVC.Namespace).Get(ctx, volume.SourcePVC.Name, metav1.GetOptions{})
 	if err != nil {
 		return domain.WrapError(domain.ErrorKubernetes, "verify migration", fmt.Sprintf("read PVC %s/%s", volume.SourcePVC.Namespace, volume.SourcePVC.Name), err)
@@ -2184,26 +2690,26 @@ func (s *Service) verifyActiveStorageVolume(ctx context.Context, session *domain
 	if pvc.Status.Phase != corev1.ClaimBound || pvc.Spec.VolumeName != volume.DestinationPV.Name || pvc.Annotations[kube.SessionKey] != session.ID {
 		return domain.NewError(domain.ErrorConflict, "verify migration", fmt.Sprintf("PVC %s/%s is not active on destination PV %s", pvc.Namespace, pvc.Name, volume.DestinationPV.Name))
 	}
-	active := session.Status.Volumes[index].Activation.ActivePVC
-	if active.UID != "" && pvc.UID != active.UID {
+	if pvc.UID != active.UID {
 		return domain.NewError(domain.ErrorConflict, "verify migration", fmt.Sprintf("active PVC %s/%s UID changed", pvc.Namespace, pvc.Name))
 	}
-	if active.UID != "" && volume.DestinationPV.UID != "" {
-		pv, err := s.client.CoreV1().PersistentVolumes().Get(ctx, volume.DestinationPV.Name, metav1.GetOptions{})
-		if err != nil {
-			return domain.WrapError(domain.ErrorKubernetes, "verify migration", fmt.Sprintf("read active PV %s", volume.DestinationPV.Name), err)
-		}
-		if pv == nil || pv.Name == "" {
-			return domain.NewError(domain.ErrorKubernetes, "verify migration", fmt.Sprintf("read active PV %s returned an empty object", volume.DestinationPV.Name))
-		}
-		if pv.UID != volume.DestinationPV.UID || pv.Spec.ClaimRef == nil || pv.Spec.ClaimRef.Namespace != pvc.Namespace || pv.Spec.ClaimRef.Name != pvc.Name || pv.Spec.ClaimRef.UID != pvc.UID {
-			return domain.NewError(domain.ErrorConflict, "verify migration", fmt.Sprintf("active PV %s identity or claimRef changed", pv.Name))
-		}
+	pv, err := s.client.CoreV1().PersistentVolumes().Get(ctx, volume.DestinationPV.Name, metav1.GetOptions{})
+	if err != nil {
+		return domain.WrapError(domain.ErrorKubernetes, "verify migration", fmt.Sprintf("read active PV %s", volume.DestinationPV.Name), err)
+	}
+	if pv == nil || pv.Name == "" {
+		return domain.NewError(domain.ErrorKubernetes, "verify migration", fmt.Sprintf("read active PV %s returned an empty object", volume.DestinationPV.Name))
+	}
+	if pv.UID != volume.DestinationPV.UID || pv.Spec.ClaimRef == nil || pv.Spec.ClaimRef.Namespace != pvc.Namespace || pv.Spec.ClaimRef.Name != pvc.Name || pv.Spec.ClaimRef.UID != pvc.UID {
+		return domain.NewError(domain.ErrorConflict, "verify migration", fmt.Sprintf("active PV %s identity or claimRef changed", pv.Name))
 	}
 	return nil
 }
 
 func (s *Service) validateWorkloadResume(ctx context.Context, session *domain.Session) error {
+	if err := s.validateOpenEBSLVMSharedMountRestore(ctx, session); err != nil {
+		return err
+	}
 	if err := s.verifyActiveStorage(ctx, session); err != nil {
 		return err
 	}
@@ -2235,9 +2741,13 @@ func (s *Service) verifyActiveVolumes(ctx context.Context, session *domain.Sessi
 	// workloads retain their own scheduler policy and may validly land on a
 	// different node when the destination volume is topology-independent.
 	if session.Spec.Workload().Adapter == domain.WorkloadStandalone && options.TargetNode != "" {
-		pod, err := s.client.CoreV1().Pods(session.Spec.Workload().Pod.Namespace).Get(ctx, session.Spec.Workload().Pod.Name, metav1.GetOptions{})
+		ref := session.Spec.Workload().Pod
+		pod, err := s.client.CoreV1().Pods(ref.Namespace).Get(ctx, ref.Name, metav1.GetOptions{})
 		if err != nil {
 			return domain.WrapError(domain.ErrorKubernetes, "verify migration", "read resumed Pod", err)
+		}
+		if ref.UID == "" || pod.UID != ref.UID || pod.Annotations[kube.SessionKey] != session.ID {
+			return domain.NewError(domain.ErrorConflict, "verify migration", fmt.Sprintf("Pod %s/%s identity or session ownership changed", pod.Namespace, pod.Name))
 		}
 		if pod.Spec.NodeName != options.TargetNode {
 			return domain.NewError(domain.ErrorPrecondition, "verify migration", fmt.Sprintf("Pod %s/%s runs on %s, expected %s", pod.Namespace, pod.Name, pod.Spec.NodeName, options.TargetNode))
@@ -2385,6 +2895,24 @@ func phaseBefore(session *domain.Session, target domain.Phase) domain.Phase {
 		}
 	}
 	return ""
+}
+
+func abortRequiresWorkloadResume(session *domain.Session) bool {
+	previous := session.Status.Phase
+	if previous == domain.PhaseFailed || previous == domain.PhaseAborting {
+		previous = session.Status.ResumeFrom
+	}
+	if previous == domain.PhaseAborting {
+		previous = phaseBefore(session, domain.PhaseAborting)
+	}
+	switch previous {
+	case domain.PhasePausing, domain.PhasePaused, domain.PhaseFinalSyncing, domain.PhaseFinalSynced:
+		return true
+	}
+	if session.Status.Phase == domain.PhaseAborting || session.Status.ResumeFrom == domain.PhaseAborting {
+		return abortOriginWasPaused(session)
+	}
+	return false
 }
 
 func abortOriginWasPaused(session *domain.Session) bool {

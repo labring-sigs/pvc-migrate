@@ -13,6 +13,7 @@ import (
 	"github.com/labring-sigs/pvc-migrate/internal/domain"
 	"github.com/labring-sigs/pvc-migrate/internal/kube"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
@@ -57,11 +58,17 @@ func (s *snapshotStore) Delete(context.Context, *domain.Session) error {
 }
 
 type scriptedReserver struct {
-	calls    []string
-	failures map[string]error
+	calls              []string
+	dryRunCalls        []string
+	failures           map[string]error
+	validationFailures map[string]error
 }
 
-func (r *scriptedReserver) ReserveVolume(_ context.Context, _ *domain.Session, volume *domain.VolumeSpec, status *domain.VolumeStatus, _ bool) error {
+func (r *scriptedReserver) ReserveVolume(_ context.Context, _ *domain.Session, volume *domain.VolumeSpec, status *domain.VolumeStatus, dryRun bool) error {
+	if dryRun {
+		r.dryRunCalls = append(r.dryRunCalls, volume.SourcePVC.Name)
+		return r.validationFailures[volume.SourcePVC.Name]
+	}
 	r.calls = append(r.calls, volume.SourcePVC.Name)
 	if err := r.failures[volume.SourcePVC.Name]; err != nil {
 		return err
@@ -146,22 +153,28 @@ func (c *scriptedCopier) Copy(_ context.Context, request copyengine.Request, _ c
 }
 
 type scriptedSwitcher struct {
+	client        kubernetes.Interface
 	offlineCalls  []string
 	activateCalls []string
 	rollbackCalls []string
 	renameCalls   []domain.VolumeSpec
 	offlineErr    error
+	offlineErrs   map[string]error
 	activateErr   error
 	rollbackErr   map[string]int
+	rollbackHook  func(context.Context, *domain.VolumeSpec) error
 	renameErr     error
 }
 
 func (s *scriptedSwitcher) VerifyVolumeOffline(_ context.Context, volume *domain.VolumeSpec) error {
 	s.offlineCalls = append(s.offlineCalls, volume.SourcePVC.Name)
+	if err := s.offlineErrs[volume.SourcePVC.Name]; err != nil {
+		return err
+	}
 	return s.offlineErr
 }
 
-func (s *scriptedSwitcher) ActivateVolume(_ context.Context, _ *domain.Session, volume *domain.VolumeSpec, status *domain.VolumeStatus, progress kube.ProgressFunc) error {
+func (s *scriptedSwitcher) ActivateVolume(ctx context.Context, session *domain.Session, volume *domain.VolumeSpec, status *domain.VolumeStatus, progress kube.ProgressFunc) error {
 	s.activateCalls = append(s.activateCalls, volume.SourcePVC.Name)
 	if s.activateErr != nil {
 		return s.activateErr
@@ -169,35 +182,157 @@ func (s *scriptedSwitcher) ActivateVolume(_ context.Context, _ *domain.Session, 
 	now := metav1.Now()
 	status.Activation.ActivatedAt = &now
 	status.Activation.ActivePVC = volume.SourcePVC
+	if s.client != nil && volume.DestinationPV.Name != "" && volume.DestinationPV.UID != "" {
+		pvc := &corev1.PersistentVolumeClaim{
+			ObjectMeta: metav1.ObjectMeta{
+				Namespace: volume.SourcePVC.Namespace,
+				Name:      volume.SourcePVC.Name,
+				UID:       volume.SourcePVC.UID,
+				Annotations: map[string]string{
+					kube.SessionKey: session.ID,
+				},
+			},
+			Spec:   corev1.PersistentVolumeClaimSpec{VolumeName: volume.DestinationPV.Name},
+			Status: corev1.PersistentVolumeClaimStatus{Phase: corev1.ClaimBound},
+		}
+		if _, err := s.client.CoreV1().PersistentVolumeClaims(pvc.Namespace).Create(ctx, pvc, metav1.CreateOptions{}); err != nil {
+			return err
+		}
+		pv := &corev1.PersistentVolume{
+			ObjectMeta: metav1.ObjectMeta{Name: volume.DestinationPV.Name, UID: volume.DestinationPV.UID},
+			Spec: corev1.PersistentVolumeSpec{ClaimRef: &corev1.ObjectReference{
+				Namespace: pvc.Namespace,
+				Name:      pvc.Name,
+				UID:       pvc.UID,
+			}},
+		}
+		if _, err := s.client.CoreV1().PersistentVolumes().Create(ctx, pv, metav1.CreateOptions{}); err != nil {
+			return err
+		}
+	}
 	if progress != nil {
 		return progress()
 	}
 	return nil
 }
 
-func (s *scriptedSwitcher) RollbackVolume(_ context.Context, _ *domain.Session, volume *domain.VolumeSpec, status *domain.VolumeStatus, progress kube.ProgressFunc) error {
+func (s *scriptedSwitcher) RollbackVolume(ctx context.Context, session *domain.Session, volume *domain.VolumeSpec, status *domain.VolumeStatus, progress kube.ProgressFunc) error {
 	s.rollbackCalls = append(s.rollbackCalls, volume.SourcePVC.Name)
 	if s.rollbackErr[volume.SourcePVC.Name] > 0 {
 		s.rollbackErr[volume.SourcePVC.Name]--
 		return domain.NewError(domain.ErrorKubernetes, "rollback", "injected rollback failure")
 	}
+	activePVC := volume.SourcePVC
+	if s.client != nil && volume.SourcePV.Name != "" && volume.SourcePV.UID != "" {
+		pvc := &corev1.PersistentVolumeClaim{
+			ObjectMeta: metav1.ObjectMeta{
+				Namespace: volume.SourcePVC.Namespace,
+				Name:      volume.SourcePVC.Name,
+				UID:       volume.SourcePVC.UID,
+				Annotations: map[string]string{
+					kube.SessionKey: session.ID,
+				},
+			},
+			Spec:   corev1.PersistentVolumeClaimSpec{VolumeName: volume.SourcePV.Name},
+			Status: corev1.PersistentVolumeClaimStatus{Phase: corev1.ClaimBound},
+		}
+		if current, err := s.client.CoreV1().PersistentVolumeClaims(pvc.Namespace).Get(ctx, pvc.Name, metav1.GetOptions{}); apierrors.IsNotFound(err) {
+			created, createErr := s.client.CoreV1().PersistentVolumeClaims(pvc.Namespace).Create(ctx, pvc, metav1.CreateOptions{})
+			if createErr != nil {
+				return createErr
+			}
+			activePVC.UID = created.UID
+		} else if err != nil {
+			return err
+		} else {
+			current.Spec.VolumeName = volume.SourcePV.Name
+			current.Status.Phase = corev1.ClaimBound
+			if current.Annotations == nil {
+				current.Annotations = map[string]string{}
+			}
+			current.Annotations[kube.SessionKey] = session.ID
+			updated, updateErr := s.client.CoreV1().PersistentVolumeClaims(current.Namespace).Update(ctx, current, metav1.UpdateOptions{})
+			if updateErr != nil {
+				return updateErr
+			}
+			activePVC.UID = updated.UID
+		}
+		pv := &corev1.PersistentVolume{
+			ObjectMeta: metav1.ObjectMeta{Name: volume.SourcePV.Name, UID: volume.SourcePV.UID},
+			Spec:       corev1.PersistentVolumeSpec{ClaimRef: &corev1.ObjectReference{Namespace: pvc.Namespace, Name: pvc.Name, UID: activePVC.UID}},
+		}
+		if _, err := s.client.CoreV1().PersistentVolumes().Get(ctx, pv.Name, metav1.GetOptions{}); apierrors.IsNotFound(err) {
+			if _, err := s.client.CoreV1().PersistentVolumes().Create(ctx, pv, metav1.CreateOptions{}); err != nil {
+				return err
+			}
+		} else if err != nil {
+			return err
+		}
+	}
 	now := metav1.Now()
 	status.Activation.RolledBackAt = &now
+	status.Activation.ActivePVC = activePVC
+	if s.rollbackHook != nil {
+		if err := s.rollbackHook(ctx, volume); err != nil {
+			return err
+		}
+	}
 	if progress != nil {
 		return progress()
 	}
 	return nil
 }
 
-func (s *scriptedSwitcher) RenamePVC(_ context.Context, _ *domain.Session, volume *domain.VolumeSpec, progress kube.ProgressFunc) (*corev1.PersistentVolumeClaim, error) {
+func (s *scriptedSwitcher) RenamePVC(ctx context.Context, session *domain.Session, volume *domain.VolumeSpec, progress kube.ProgressFunc) (*corev1.PersistentVolumeClaim, error) {
 	s.renameCalls = append(s.renameCalls, *volume)
 	if s.renameErr != nil {
 		return nil, s.renameErr
+	}
+	var renamed *corev1.PersistentVolumeClaim
+	if s.client != nil {
+		if source, err := s.client.CoreV1().PersistentVolumeClaims(volume.SourcePVC.Namespace).Get(ctx, volume.SourcePVC.Name, metav1.GetOptions{}); err == nil {
+			uid := source.UID
+			if err := s.client.CoreV1().PersistentVolumeClaims(source.Namespace).Delete(ctx, source.Name, metav1.DeleteOptions{Preconditions: &metav1.Preconditions{UID: &uid}}); err != nil {
+				return nil, err
+			}
+		} else if !apierrors.IsNotFound(err) {
+			return nil, err
+		}
+		renamed = &corev1.PersistentVolumeClaim{
+			ObjectMeta: metav1.ObjectMeta{
+				Namespace:       volume.DestinationPVC.Namespace,
+				Name:            volume.DestinationPVC.Name,
+				UID:             types.UID("renamed-pvc-uid"),
+				ResourceVersion: "23",
+				Annotations:     map[string]string{kube.SessionKey: session.ID},
+			},
+			Spec:   corev1.PersistentVolumeClaimSpec{VolumeName: volume.SourcePV.Name},
+			Status: corev1.PersistentVolumeClaimStatus{Phase: corev1.ClaimBound},
+		}
+		created, err := s.client.CoreV1().PersistentVolumeClaims(renamed.Namespace).Create(ctx, renamed, metav1.CreateOptions{})
+		if apierrors.IsAlreadyExists(err) {
+			created, err = s.client.CoreV1().PersistentVolumeClaims(renamed.Namespace).Get(ctx, renamed.Name, metav1.GetOptions{})
+		}
+		if err != nil {
+			return nil, err
+		}
+		renamed = created
+		pv, err := s.client.CoreV1().PersistentVolumes().Get(ctx, volume.SourcePV.Name, metav1.GetOptions{})
+		if err != nil {
+			return nil, err
+		}
+		pv.Spec.ClaimRef = &corev1.ObjectReference{Namespace: renamed.Namespace, Name: renamed.Name, UID: renamed.UID}
+		if _, err := s.client.CoreV1().PersistentVolumes().Update(ctx, pv, metav1.UpdateOptions{}); err != nil {
+			return nil, err
+		}
 	}
 	if progress != nil {
 		if err := progress(); err != nil {
 			return nil, err
 		}
+	}
+	if renamed != nil {
+		return renamed, nil
 	}
 	return &corev1.PersistentVolumeClaim{ObjectMeta: metav1.ObjectMeta{
 		Namespace:       volume.DestinationPVC.Namespace,
@@ -234,7 +369,7 @@ func newRecoveryFixture(t *testing.T) *recoveryFixture {
 	reserver := &scriptedReserver{failures: map[string]error{}}
 	controller := &scriptedController{}
 	copier := &scriptedCopier{failures: map[string]int{}}
-	switcher := &scriptedSwitcher{rollbackErr: map[string]int{}}
+	switcher := &scriptedSwitcher{client: client, rollbackErr: map[string]int{}}
 	service := NewService(client, store, reserver, copier, controller, switcher, Config{
 		Retries:      1,
 		RetryBackoff: time.Millisecond,
@@ -246,6 +381,18 @@ func newRecoveryFixture(t *testing.T) *recoveryFixture {
 	}
 }
 
+func markNodeReady(t *testing.T, client kubernetes.Interface, name string) {
+	t.Helper()
+	node, err := client.CoreV1().Nodes().Get(context.Background(), name, metav1.GetOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	node.Status.Conditions = []corev1.NodeCondition{{Type: corev1.NodeReady, Status: corev1.ConditionTrue}}
+	if _, err := client.CoreV1().Nodes().UpdateStatus(context.Background(), node, metav1.UpdateOptions{}); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func addSecondVolume(session *domain.Session) {
 	second := session.Spec.Volumes[0]
 	second.SourcePVC = domain.ObjectReference{Namespace: "app", Name: "logs", UID: types.UID("source-logs-uid")}
@@ -254,6 +401,82 @@ func addSecondVolume(session *domain.Session) {
 	second.DestinationPV = domain.ObjectReference{}
 	session.Spec.Volumes = append(session.Spec.Volumes, second)
 	session.Status.Volumes = append(session.Status.Volumes, domain.VolumeStatus{SourcePVCName: "logs"})
+}
+
+func createSourceStorage(t *testing.T, fixture *recoveryFixture, session *domain.Session) {
+	t.Helper()
+	for index := range session.Spec.Volumes {
+		volume := &session.Spec.Volumes[index]
+		pvc := &corev1.PersistentVolumeClaim{
+			ObjectMeta: metav1.ObjectMeta{Namespace: volume.SourcePVC.Namespace, Name: volume.SourcePVC.Name, UID: volume.SourcePVC.UID},
+			Spec:       corev1.PersistentVolumeClaimSpec{VolumeName: volume.SourcePV.Name},
+			Status:     corev1.PersistentVolumeClaimStatus{Phase: corev1.ClaimBound},
+		}
+		if _, err := fixture.client.CoreV1().PersistentVolumeClaims(pvc.Namespace).Create(context.Background(), pvc, metav1.CreateOptions{}); err != nil {
+			t.Fatal(err)
+		}
+		pv := &corev1.PersistentVolume{
+			ObjectMeta: metav1.ObjectMeta{Name: volume.SourcePV.Name, UID: volume.SourcePV.UID},
+			Spec: corev1.PersistentVolumeSpec{ClaimRef: &corev1.ObjectReference{
+				Namespace: pvc.Namespace,
+				Name:      pvc.Name,
+				UID:       pvc.UID,
+			}},
+		}
+		if _, err := fixture.client.CoreV1().PersistentVolumes().Create(context.Background(), pv, metav1.CreateOptions{}); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+func createActiveDestinationStorage(t *testing.T, fixture *recoveryFixture, session *domain.Session) {
+	t.Helper()
+	for index := range session.Spec.Volumes {
+		volume := &session.Spec.Volumes[index]
+		status := &session.Status.Volumes[index]
+		if volume.DestinationPV.Name == "" {
+			volume.DestinationPV = domain.ObjectReference{
+				Name: "dest-pv-" + volume.SourcePVC.Name,
+				UID:  types.UID("dest-pv-uid-" + volume.SourcePVC.Name),
+			}
+		}
+		if volume.DestinationPVC.UID == "" {
+			volume.DestinationPVC.UID = types.UID("destination-pvc-uid-" + volume.SourcePVC.Name)
+		}
+		activeUID := types.UID("active-pvc-uid-" + volume.SourcePVC.Name)
+		activatedAt := metav1.Now()
+		status.Reserved = true
+		status.Activation.ActivePVC = domain.ObjectReference{
+			Namespace: volume.SourcePVC.Namespace,
+			Name:      volume.SourcePVC.Name,
+			UID:       activeUID,
+		}
+		status.Activation.ActivatedAt = &activatedAt
+		pvc := &corev1.PersistentVolumeClaim{
+			ObjectMeta: metav1.ObjectMeta{
+				Namespace:   volume.SourcePVC.Namespace,
+				Name:        volume.SourcePVC.Name,
+				UID:         activeUID,
+				Annotations: map[string]string{kube.SessionKey: session.ID},
+			},
+			Spec:   corev1.PersistentVolumeClaimSpec{VolumeName: volume.DestinationPV.Name},
+			Status: corev1.PersistentVolumeClaimStatus{Phase: corev1.ClaimBound},
+		}
+		if _, err := fixture.client.CoreV1().PersistentVolumeClaims(pvc.Namespace).Create(context.Background(), pvc, metav1.CreateOptions{}); err != nil {
+			t.Fatal(err)
+		}
+		pv := &corev1.PersistentVolume{
+			ObjectMeta: metav1.ObjectMeta{Name: volume.DestinationPV.Name, UID: volume.DestinationPV.UID},
+			Spec: corev1.PersistentVolumeSpec{ClaimRef: &corev1.ObjectReference{
+				Namespace: pvc.Namespace,
+				Name:      pvc.Name,
+				UID:       pvc.UID,
+			}},
+		}
+		if _, err := fixture.client.CoreV1().PersistentVolumes().Create(context.Background(), pv, metav1.CreateOptions{}); err != nil {
+			t.Fatal(err)
+		}
+	}
 }
 
 func transitionThrough(t *testing.T, session *domain.Session, phases ...domain.Phase) {
@@ -303,6 +526,7 @@ func TestCreateSessionValidatesPlanAndCreatesDistinctNamespaces(t *testing.T) {
 
 func TestCreateSessionCreatesSessionNamespaceBeforeLease(t *testing.T) {
 	client := fake.NewClientset()
+	assignLeaseUIDs(client)
 	store := kube.NewConfigMapSessionStore(client)
 	reserver := &scriptedReserver{failures: map[string]error{}}
 	controller := &scriptedController{}
@@ -348,11 +572,103 @@ func TestCreateSessionDryRunValidatesEveryReservationWithoutPersistingState(t *t
 	if err != nil {
 		t.Fatal(err)
 	}
-	if want := []string{"data", "logs"}; !slices.Equal(fixture.reserver.calls, want) {
-		t.Fatalf("reservation validations=%v want=%v", fixture.reserver.calls, want)
+	if want := []string{"data", "logs"}; !slices.Equal(fixture.reserver.dryRunCalls, want) {
+		t.Fatalf("reservation validations=%v want=%v", fixture.reserver.dryRunCalls, want)
 	}
 	if fixture.store.creates != 0 || created.Status.Volumes[0].Reserved || created.Spec.Volumes[0].DestinationPV.Name != "" {
 		t.Fatalf("dry-run persisted or mutated session: creates=%d session=%+v", fixture.store.creates, created)
+	}
+}
+
+func TestReserveValidatesEveryVolumeBeforeMutation(t *testing.T) {
+	fixture := newRecoveryFixture(t)
+	session := appTestSession()
+	addSecondVolume(session)
+	fixture.reserver.validationFailures = map[string]error{
+		"logs": domain.NewError(domain.ErrorConflict, "reserve dry-run", "injected validation failure"),
+	}
+
+	err := fixture.service.Reserve(context.Background(), session)
+	if domain.CategoryOf(err) != domain.ErrorConflict {
+		t.Fatalf("category=%s error=%v", domain.CategoryOf(err), err)
+	}
+	if want := []string{"data", "logs"}; !slices.Equal(fixture.reserver.dryRunCalls, want) {
+		t.Fatalf("reservation validations=%v want=%v", fixture.reserver.dryRunCalls, want)
+	}
+	if len(fixture.reserver.calls) != 0 {
+		t.Fatalf("reservation mutated before validation completed: calls=%v", fixture.reserver.calls)
+	}
+	if session.Status.Phase != domain.PhasePlanned || session.Status.Volumes[0].Reserved || session.Spec.Volumes[0].DestinationPV.Name != "" {
+		t.Fatalf("failed preflight mutated session: phase=%s volume=%+v status=%+v", session.Status.Phase, session.Spec.Volumes[0], session.Status.Volumes[0])
+	}
+}
+
+func TestValidateResumeDoesNotCheckpointInferredCopySourceNode(t *testing.T) {
+	fixture := newRecoveryFixture(t)
+	session := appTestSession()
+	common := session.Spec.SessionCommon
+	options := session.Spec.WorkflowOptions()
+	options.SourceNode = ""
+	session.Spec = domain.NewSessionSpec(domain.OperationCopy, common, domain.WorkloadSpec{Adapter: domain.WorkloadNone}, true, options)
+	session.Status.Phase = domain.PhaseReserved
+	if _, err := fixture.client.CoreV1().Pods("app").Create(context.Background(), activePVCConsumer("app", "data-writer", "data", "source-node"), metav1.CreateOptions{}); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := fixture.service.ValidateResume(context.Background(), session); err != nil {
+		t.Fatal(err)
+	}
+	if got := session.Spec.WorkflowOptions().SourceNode; got != "" {
+		t.Fatalf("resume dry-run mutated source node=%q", got)
+	}
+	if fixture.store.updates != 0 {
+		t.Fatalf("resume dry-run persisted session %d time(s)", fixture.store.updates)
+	}
+}
+
+func TestWarmCopyValidatesEveryConsumerBeforeCheckpointingSourceNode(t *testing.T) {
+	fixture := newRecoveryFixture(t)
+	session := appTestSession()
+	addSecondVolume(session)
+	common := session.Spec.SessionCommon
+	options := session.Spec.WorkflowOptions()
+	options.SourceNode = ""
+	session.Spec = domain.NewSessionSpec(domain.OperationCopy, common, domain.WorkloadSpec{Adapter: domain.WorkloadNone}, true, options)
+	session.Status.Phase = domain.PhaseReserved
+	for _, pod := range []*corev1.Pod{
+		activePVCConsumer("app", "data-writer", "data", "source-node"),
+		activePVCConsumer("app", "logs-writer", "logs", "target-node"),
+	} {
+		if _, err := fixture.client.CoreV1().Pods(pod.Namespace).Create(context.Background(), pod, metav1.CreateOptions{}); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	err := fixture.service.WarmCopy(context.Background(), session)
+	if domain.CategoryOf(err) != domain.ErrorConflict {
+		t.Fatalf("category=%s error=%v", domain.CategoryOf(err), err)
+	}
+	if got := session.Spec.WorkflowOptions().SourceNode; got != "" {
+		t.Fatalf("failed batch preflight mutated source node=%q", got)
+	}
+	if fixture.store.updates != 0 || session.Status.Phase != domain.PhaseReserved {
+		t.Fatalf("failed batch preflight persisted session: updates=%d phase=%s", fixture.store.updates, session.Status.Phase)
+	}
+}
+
+func activePVCConsumer(namespace, name, claim, node string) *corev1.Pod {
+	return &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Namespace: namespace, Name: name},
+		Spec: corev1.PodSpec{
+			NodeName: node,
+			Volumes: []corev1.Volume{{
+				Name: "data",
+				VolumeSource: corev1.VolumeSource{PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
+					ClaimName: claim,
+				}},
+			}},
+		},
+		Status: corev1.PodStatus{Phase: corev1.PodRunning},
 	}
 }
 
@@ -361,6 +677,7 @@ func TestReserveResumesMultiVolumePartialProgress(t *testing.T) {
 	session := appTestSession()
 	addSecondVolume(session)
 	session.Status.Volumes[0].Reserved = true
+	session.Spec.Volumes[0].DestinationPVC.UID = types.UID("existing-destination-pvc-uid")
 	session.Spec.Volumes[0].DestinationPV = domain.ObjectReference{Name: "existing-destination", UID: types.UID("existing-destination-uid")}
 	fixture.reserver.failures["logs"] = domain.NewError(domain.ErrorKubernetes, "reserve", "injected reservation failure")
 
@@ -442,6 +759,27 @@ func TestCopyRetriesPersistAttemptsAndUseExponentialBackoff(t *testing.T) {
 		if request.Attempt != index+1 || request.Mode != copyengine.ModeWarm {
 			t.Fatalf("request %d attempt=%d mode=%s", index, request.Attempt, request.Mode)
 		}
+	}
+}
+
+func TestCopyRetryRevalidatesReservedVolumeIdentity(t *testing.T) {
+	fixture := newRecoveryFixture(t)
+	fixture.service.config.Retries = 2
+	fixture.copier.failures["warm/data"] = 1
+	fixture.copier.copyHook = func() {
+		if len(fixture.copier.requests) == 1 {
+			fixture.reserver.validationFailures = map[string]error{"data": domain.NewError(domain.ErrorConflict, "reserve volume", "destination PVC UID changed")}
+		}
+	}
+	session := appTestSession()
+	transitionThrough(t, session, domain.PhaseReserving, domain.PhaseReserved)
+
+	err := fixture.service.WarmCopy(context.Background(), session)
+	if domain.CategoryOf(err) != domain.ErrorConflict {
+		t.Fatalf("category=%s error=%v", domain.CategoryOf(err), err)
+	}
+	if len(fixture.copier.requests) != 1 {
+		t.Fatalf("copy attempts=%d want=1", len(fixture.copier.requests))
 	}
 }
 
@@ -567,6 +905,9 @@ func TestAbortResumesWorkloadsThatReachedOrMayHavePartiallyEnteredPause(t *testi
 			session := appTestSession()
 			session.Status.Phase = test.phase
 			session.Status.ResumeFrom = test.resumeFrom
+			if test.wantResumes > 0 {
+				createSourceStorage(t, fixture, session)
+			}
 			if err := fixture.service.Abort(context.Background(), session); err != nil {
 				t.Fatal(err)
 			}
@@ -578,6 +919,61 @@ func TestAbortResumesWorkloadsThatReachedOrMayHavePartiallyEnteredPause(t *testi
 			}
 			if fixture.controller.resumes != test.wantResumes {
 				t.Fatalf("idempotent abort resumes=%d want=%d", fixture.controller.resumes, test.wantResumes)
+			}
+		})
+	}
+}
+
+func TestAbortRejectsSourceIdentityDriftBeforeResumingWorkload(t *testing.T) {
+	tests := []struct {
+		name   string
+		mutate func(*corev1.PersistentVolumeClaim, *corev1.PersistentVolume)
+	}{
+		{name: "PVC UID", mutate: func(pvc *corev1.PersistentVolumeClaim, _ *corev1.PersistentVolume) {
+			pvc.UID = types.UID("replacement-pvc-uid")
+		}},
+		{name: "PV UID", mutate: func(_ *corev1.PersistentVolumeClaim, pv *corev1.PersistentVolume) {
+			pv.UID = types.UID("replacement-pv-uid")
+		}},
+		{name: "PV claimRef", mutate: func(_ *corev1.PersistentVolumeClaim, pv *corev1.PersistentVolume) {
+			pv.Spec.ClaimRef.UID = types.UID("other-pvc-uid")
+		}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			for _, execute := range []bool{false, true} {
+				fixture := newRecoveryFixture(t)
+				session := appTestSession()
+				session.Status.Phase = domain.PhasePaused
+				createSourceStorage(t, fixture, session)
+				pvc, err := fixture.client.CoreV1().PersistentVolumeClaims("app").Get(context.Background(), "data", metav1.GetOptions{})
+				if err != nil {
+					t.Fatal(err)
+				}
+				pv, err := fixture.client.CoreV1().PersistentVolumes().Get(context.Background(), "pv-source", metav1.GetOptions{})
+				if err != nil {
+					t.Fatal(err)
+				}
+				test.mutate(pvc, pv)
+				if _, err := fixture.client.CoreV1().PersistentVolumeClaims("app").Update(context.Background(), pvc, metav1.UpdateOptions{}); err != nil {
+					t.Fatal(err)
+				}
+				if _, err := fixture.client.CoreV1().PersistentVolumes().Update(context.Background(), pv, metav1.UpdateOptions{}); err != nil {
+					t.Fatal(err)
+				}
+
+				var got error
+				if execute {
+					got = fixture.service.Abort(context.Background(), session)
+				} else {
+					got = fixture.service.ValidateAbort(context.Background(), session)
+				}
+				if domain.CategoryOf(got) != domain.ErrorConflict {
+					t.Fatalf("execute=%t category=%s error=%v", execute, domain.CategoryOf(got), got)
+				}
+				if fixture.controller.resumes != 0 || session.Status.Phase != domain.PhasePaused {
+					t.Fatalf("execute=%t resumes=%d phase=%s", execute, fixture.controller.resumes, session.Status.Phase)
+				}
 			}
 		})
 	}
@@ -642,10 +1038,13 @@ func TestAbortRejectsRollbackRecoveryChain(t *testing.T) {
 func TestActivateResumesAtFirstIncompleteVolume(t *testing.T) {
 	fixture := newRecoveryFixture(t)
 	session := appTestSession()
+	createActiveDestinationStorage(t, fixture, session)
 	addSecondVolume(session)
 	session.Status.Phase = domain.PhaseFinalSynced
-	completed := metav1.NewTime(time.Unix(400, 0))
-	session.Status.Volumes[0].Activation.ActivatedAt = &completed
+	completed := metav1.Now()
+	for index := range session.Status.Volumes {
+		session.Status.Volumes[index].Sync.FinalCompletedAt = &completed
+	}
 
 	if err := fixture.service.Activate(context.Background(), session); err != nil {
 		t.Fatal(err)
@@ -655,6 +1054,27 @@ func TestActivateResumesAtFirstIncompleteVolume(t *testing.T) {
 	}
 	if session.Status.Phase != domain.PhaseActivated || session.Status.Volumes[1].Activation.ActivatedAt == nil {
 		t.Fatalf("phase=%s second activation=%+v", session.Status.Phase, session.Status.Volumes[1].Activation)
+	}
+}
+
+func TestActivatePreflightsAllVolumesBeforeSwitchingAnyPVC(t *testing.T) {
+	fixture := newRecoveryFixture(t)
+	session := appTestSession()
+	addSecondVolume(session)
+	session.Status.Phase = domain.PhaseFinalSynced
+	completed := metav1.Now()
+	for index := range session.Status.Volumes {
+		session.Status.Volumes[index].Sync.FinalCompletedAt = &completed
+	}
+	conflict := domain.NewError(domain.ErrorConflict, "verify PVC offline", "logs binding changed")
+	fixture.switcher.offlineErrs = map[string]error{"logs": conflict}
+
+	err := fixture.service.Activate(context.Background(), session)
+	if !errors.Is(err, conflict) {
+		t.Fatalf("Activate() error=%v", err)
+	}
+	if len(fixture.switcher.activateCalls) != 0 || session.Status.Phase != domain.PhaseFinalSynced {
+		t.Fatalf("activate calls=%v phase=%s", fixture.switcher.activateCalls, session.Status.Phase)
 	}
 }
 
@@ -676,6 +1096,9 @@ func TestActivateIsIdempotentAfterCutover(t *testing.T) {
 			session.Status.Phase = test.phase
 			session.Status.ResumeFrom = test.resumeFrom
 
+			if err := fixture.service.ValidateActivation(context.Background(), session); err != nil {
+				t.Fatal(err)
+			}
 			if err := fixture.service.Activate(context.Background(), session); err != nil {
 				t.Fatal(err)
 			}
@@ -694,7 +1117,9 @@ func TestResumeWorkloadPersistsRecreatedStandalonePodUID(t *testing.T) {
 		Adapter: domain.WorkloadStandalone,
 		Pod:     domain.ObjectReference{Namespace: "app", Name: "application", UID: types.UID("old-pod-uid")},
 	})
+	markNodeReady(t, fixture.client, "target-node")
 	session.Spec.Volumes[0].DestinationPV = domain.ObjectReference{Name: "pv-destination", UID: types.UID("destination-pv-uid")}
+	session.Status.Volumes[0].Activation.ActivePVC = domain.ObjectReference{Namespace: "app", Name: "data", UID: types.UID("active-pvc-uid")}
 	_, err := fixture.client.CoreV1().PersistentVolumeClaims("app").Create(context.Background(), &corev1.PersistentVolumeClaim{
 		ObjectMeta: metav1.ObjectMeta{
 			Namespace: "app", Name: "data", UID: types.UID("active-pvc-uid"),
@@ -706,11 +1131,20 @@ func TestResumeWorkloadPersistsRecreatedStandalonePodUID(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	_, err = fixture.client.CoreV1().PersistentVolumes().Create(context.Background(), &corev1.PersistentVolume{
+		ObjectMeta: metav1.ObjectMeta{Name: "pv-destination", UID: types.UID("destination-pv-uid")},
+		Spec: corev1.PersistentVolumeSpec{ClaimRef: &corev1.ObjectReference{
+			Namespace: "app", Name: "data", UID: types.UID("active-pvc-uid"),
+		}},
+	}, metav1.CreateOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
 	fixture.controller.resumeHook = func(ctx context.Context, current *domain.Session) error {
 		current.Spec.WorkloadPtr().Pod.UID = types.UID("new-pod-uid")
 		current.Spec.WorkloadPtr().Pod.ResourceVersion = "44"
 		_, createErr := fixture.client.CoreV1().Pods("app").Create(ctx, &corev1.Pod{
-			ObjectMeta: metav1.ObjectMeta{Namespace: "app", Name: "application", UID: types.UID("new-pod-uid")},
+			ObjectMeta: metav1.ObjectMeta{Namespace: "app", Name: "application", UID: types.UID("new-pod-uid"), Annotations: map[string]string{kube.SessionKey: current.ID}},
 			Spec:       corev1.PodSpec{NodeName: "target-node"},
 		}, metav1.CreateOptions{})
 		return createErr
@@ -727,10 +1161,42 @@ func TestResumeWorkloadPersistsRecreatedStandalonePodUID(t *testing.T) {
 	}
 }
 
+func TestResumeWorkloadRejectsReplacedStandalonePodAfterControllerResume(t *testing.T) {
+	fixture := newRecoveryFixture(t)
+	session := appTestSession()
+	session.Status.Phase = domain.PhaseActivated
+	_ = session.Spec.SetWorkload(domain.WorkloadSpec{
+		Adapter: domain.WorkloadStandalone,
+		Pod:     domain.ObjectReference{Namespace: "app", Name: "application", UID: "old-pod-uid"},
+	})
+	markNodeReady(t, fixture.client, "target-node")
+	createActiveDestinationStorage(t, fixture, session)
+	fixture.controller.resumeHook = func(ctx context.Context, current *domain.Session) error {
+		current.Spec.WorkloadPtr().Pod.UID = "expected-resumed-uid"
+		_, err := fixture.client.CoreV1().Pods("app").Create(ctx, &corev1.Pod{
+			ObjectMeta: metav1.ObjectMeta{
+				Namespace: "app", Name: "application", UID: "replacement-uid",
+				Annotations: map[string]string{kube.SessionKey: current.ID},
+			},
+			Spec: corev1.PodSpec{NodeName: "target-node"},
+		}, metav1.CreateOptions{})
+		return err
+	}
+
+	err := fixture.service.ResumeWorkload(context.Background(), session)
+	if domain.CategoryOf(err) != domain.ErrorConflict {
+		t.Fatalf("category=%s error=%v", domain.CategoryOf(err), err)
+	}
+	if session.Status.Phase != domain.PhaseFailed || session.Status.ResumeFrom != domain.PhaseResuming {
+		t.Fatalf("phase=%s resumeFrom=%s", session.Status.Phase, session.Status.ResumeFrom)
+	}
+}
+
 func TestRollbackMultiVolumeRunsInReverseAndRecoversFailure(t *testing.T) {
 	fixture := newRecoveryFixture(t)
 	session := appTestSession()
 	addSecondVolume(session)
+	createActiveDestinationStorage(t, fixture, session)
 	session.Status.Phase = domain.PhaseCompleted
 	session.Status.History = append(session.Status.History, domain.HistoryEntry{Phase: domain.PhaseCompleted, Time: metav1.Now()})
 	fixture.switcher.rollbackErr["data"] = 1
@@ -755,11 +1221,112 @@ func TestRollbackMultiVolumeRunsInReverseAndRecoversFailure(t *testing.T) {
 		t.Fatalf("pause calls=%d resume calls=%d", fixture.controller.pauses, fixture.controller.resumes)
 	}
 	before := len(fixture.switcher.rollbackCalls)
+	if err := fixture.service.ValidateRollback(context.Background(), session); err != nil {
+		t.Fatal(err)
+	}
 	if err := fixture.service.Rollback(context.Background(), session); err != nil {
 		t.Fatal(err)
 	}
 	if len(fixture.switcher.rollbackCalls) != before {
 		t.Fatalf("rolled-back session repeated switch calls=%v", fixture.switcher.rollbackCalls)
+	}
+}
+
+func TestRollbackRejectsSourceIdentityDriftBeforeResumingWorkload(t *testing.T) {
+	fixture := newRecoveryFixture(t)
+	session := appTestSession()
+	createActiveDestinationStorage(t, fixture, session)
+	session.Status.Phase = domain.PhaseCompleted
+	fixture.switcher.rollbackHook = func(ctx context.Context, volume *domain.VolumeSpec) error {
+		pv, err := fixture.client.CoreV1().PersistentVolumes().Get(ctx, volume.SourcePV.Name, metav1.GetOptions{})
+		if err != nil {
+			return err
+		}
+		pv.UID = types.UID("replacement-source-pv-uid")
+		_, err = fixture.client.CoreV1().PersistentVolumes().Update(ctx, pv, metav1.UpdateOptions{})
+		return err
+	}
+
+	err := fixture.service.Rollback(context.Background(), session)
+	if domain.CategoryOf(err) != domain.ErrorConflict {
+		t.Fatalf("category=%s error=%v", domain.CategoryOf(err), err)
+	}
+	if fixture.controller.resumes != 0 || session.Status.Phase != domain.PhaseFailed || session.Status.ResumeFrom != domain.PhaseRollingBack {
+		t.Fatalf("resumes=%d phase=%s resumeFrom=%s", fixture.controller.resumes, session.Status.Phase, session.Status.ResumeFrom)
+	}
+}
+
+func TestRollbackRejectsRunningStateConflictsBeforePausingWorkload(t *testing.T) {
+	tests := []struct {
+		name      string
+		configure func(*testing.T, *recoveryFixture, *domain.Session)
+	}{
+		{name: "active PV identity changed", configure: func(t *testing.T, fixture *recoveryFixture, session *domain.Session) {
+			pv, err := fixture.client.CoreV1().PersistentVolumes().Get(context.Background(), session.Spec.Volumes[0].DestinationPV.Name, metav1.GetOptions{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			pv.UID = types.UID("replacement-destination-pv-uid")
+			if _, err := fixture.client.CoreV1().PersistentVolumes().Update(context.Background(), pv, metav1.UpdateOptions{}); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{name: "consumer outside pause scope", configure: func(t *testing.T, fixture *recoveryFixture, _ *domain.Session) {
+			pod := &corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{Namespace: "app", Name: "external-writer"},
+				Spec: corev1.PodSpec{Volumes: []corev1.Volume{{
+					Name: "data",
+					VolumeSource: corev1.VolumeSource{PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
+						ClaimName: "data",
+					}},
+				}}},
+				Status: corev1.PodStatus{Phase: corev1.PodRunning},
+			}
+			if _, err := fixture.client.CoreV1().Pods(pod.Namespace).Create(context.Background(), pod, metav1.CreateOptions{}); err != nil {
+				t.Fatal(err)
+			}
+		}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			fixture := newRecoveryFixture(t)
+			session := appTestSession()
+			session.Status.Phase = domain.PhaseCompleted
+			createActiveDestinationStorage(t, fixture, session)
+			test.configure(t, fixture, session)
+
+			err := fixture.service.Rollback(context.Background(), session)
+			if category := domain.CategoryOf(err); category != domain.ErrorConflict && category != domain.ErrorPrecondition {
+				t.Fatalf("category=%s error=%v", category, err)
+			}
+			if fixture.controller.pauses != 0 || len(fixture.switcher.rollbackCalls) != 0 || session.Status.Phase != domain.PhaseCompleted {
+				t.Fatalf("pauses=%d rollbackCalls=%v phase=%s", fixture.controller.pauses, fixture.switcher.rollbackCalls, session.Status.Phase)
+			}
+		})
+	}
+}
+
+func TestRollbackFromPausedCutoverPreflightsAllVolumesBeforeSwitchingAnyPVC(t *testing.T) {
+	fixture := newRecoveryFixture(t)
+	session := appTestSession()
+	addSecondVolume(session)
+	session.Status.Phase = domain.PhaseActivated
+	createActiveDestinationStorage(t, fixture, session)
+	pv, err := fixture.client.CoreV1().PersistentVolumes().Get(context.Background(), session.Spec.Volumes[0].DestinationPV.Name, metav1.GetOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	pv.UID = types.UID("replacement-destination-pv-uid")
+	if _, err := fixture.client.CoreV1().PersistentVolumes().Update(context.Background(), pv, metav1.UpdateOptions{}); err != nil {
+		t.Fatal(err)
+	}
+
+	err = fixture.service.Rollback(context.Background(), session)
+	if domain.CategoryOf(err) != domain.ErrorConflict {
+		t.Fatalf("category=%s error=%v", domain.CategoryOf(err), err)
+	}
+	if fixture.controller.pauses != 0 || len(fixture.switcher.rollbackCalls) != 0 || session.Status.Phase != domain.PhaseActivated {
+		t.Fatalf("pauses=%d rollback calls=%v phase=%s", fixture.controller.pauses, fixture.switcher.rollbackCalls, session.Status.Phase)
 	}
 }
 
@@ -787,6 +1354,7 @@ func TestRenameAndRollbackPreservePVCIdentityDirection(t *testing.T) {
 	session := appTestSession()
 	setSessionOperation(session, domain.OperationRename)
 	session.Spec.Volumes[0].DestinationPVC = domain.ObjectReference{Namespace: "app", Name: "renamed-data"}
+	createSourceStorage(t, fixture, session)
 
 	if err := fixture.service.Rename(context.Background(), session); err != nil {
 		t.Fatal(err)
@@ -825,12 +1393,74 @@ func TestDryRunRenameRollbackChecksCurrentActivePVC(t *testing.T) {
 		Name:       "renamed-data",
 		UID:        types.UID("renamed-pvc-uid"),
 	}
+	if _, err := fixture.client.CoreV1().PersistentVolumeClaims("app").Create(context.Background(), &corev1.PersistentVolumeClaim{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "app", Name: "renamed-data", UID: types.UID("renamed-pvc-uid"), Annotations: map[string]string{kube.SessionKey: session.ID}},
+		Spec:       corev1.PersistentVolumeClaimSpec{VolumeName: "pv-source"},
+		Status:     corev1.PersistentVolumeClaimStatus{Phase: corev1.ClaimBound},
+	}, metav1.CreateOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fixture.client.CoreV1().PersistentVolumes().Create(context.Background(), &corev1.PersistentVolume{
+		ObjectMeta: metav1.ObjectMeta{Name: "pv-source", UID: types.UID("source-pv-uid")},
+		Spec:       corev1.PersistentVolumeSpec{ClaimRef: &corev1.ObjectReference{Namespace: "app", Name: "renamed-data", UID: types.UID("renamed-pvc-uid")}},
+	}, metav1.CreateOptions{}); err != nil {
+		t.Fatal(err)
+	}
 	if err := fixture.service.ValidateRollback(context.Background(), session); err != nil {
 		t.Fatal(err)
 	}
 	if len(fixture.switcher.offlineCalls) != 1 || fixture.switcher.offlineCalls[0] != "renamed-data" {
 		t.Fatalf("offline calls=%v", fixture.switcher.offlineCalls)
 	}
+}
+
+func TestDryRunRenameResumeAcceptsOnlyOneValidEndpoint(t *testing.T) {
+	t.Run("session-owned destination", func(t *testing.T) {
+		fixture := newRecoveryFixture(t)
+		session := appTestSession()
+		setSessionOperation(session, domain.OperationRename)
+		session.Spec.Volumes[0].DestinationPVC = domain.ObjectReference{Namespace: "app", Name: "renamed-data", UID: types.UID("renamed-pvc-uid")}
+		session.Status.Phase = domain.PhaseRenaming
+		if _, err := fixture.client.CoreV1().PersistentVolumeClaims("app").Create(context.Background(), &corev1.PersistentVolumeClaim{
+			ObjectMeta: metav1.ObjectMeta{Namespace: "app", Name: "renamed-data", UID: types.UID("renamed-pvc-uid"), Annotations: map[string]string{kube.SessionKey: session.ID}},
+			Spec:       corev1.PersistentVolumeClaimSpec{VolumeName: "pv-source"},
+			Status:     corev1.PersistentVolumeClaimStatus{Phase: corev1.ClaimBound},
+		}, metav1.CreateOptions{}); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := fixture.client.CoreV1().PersistentVolumes().Create(context.Background(), &corev1.PersistentVolume{
+			ObjectMeta: metav1.ObjectMeta{Name: "pv-source", UID: types.UID("source-pv-uid")},
+			Spec:       corev1.PersistentVolumeSpec{ClaimRef: &corev1.ObjectReference{Namespace: "app", Name: "renamed-data", UID: types.UID("renamed-pvc-uid")}},
+		}, metav1.CreateOptions{}); err != nil {
+			t.Fatal(err)
+		}
+
+		if err := fixture.service.ValidateResume(context.Background(), session); err != nil {
+			t.Fatal(err)
+		}
+		if want := []string{"renamed-data"}; !slices.Equal(fixture.switcher.offlineCalls, want) {
+			t.Fatalf("offline calls=%v want=%v", fixture.switcher.offlineCalls, want)
+		}
+	})
+
+	t.Run("both endpoints", func(t *testing.T) {
+		fixture := newRecoveryFixture(t)
+		session := appTestSession()
+		setSessionOperation(session, domain.OperationRename)
+		session.Spec.Volumes[0].DestinationPVC = domain.ObjectReference{Namespace: "app", Name: "renamed-data"}
+		session.Status.Phase = domain.PhaseRenaming
+		createSourceStorage(t, fixture, session)
+		if _, err := fixture.client.CoreV1().PersistentVolumeClaims("app").Create(context.Background(), &corev1.PersistentVolumeClaim{
+			ObjectMeta: metav1.ObjectMeta{Namespace: "app", Name: "renamed-data", UID: types.UID("renamed-pvc-uid"), Annotations: map[string]string{kube.SessionKey: session.ID}},
+		}, metav1.CreateOptions{}); err != nil {
+			t.Fatal(err)
+		}
+
+		err := fixture.service.ValidateResume(context.Background(), session)
+		if domain.CategoryOf(err) != domain.ErrorConflict || len(fixture.switcher.offlineCalls) != 0 {
+			t.Fatalf("category=%s offline=%v error=%v", domain.CategoryOf(err), fixture.switcher.offlineCalls, err)
+		}
+	})
 }
 
 func TestPauseRejectsNonOrchestratedSessionBeforePhaseMutation(t *testing.T) {
@@ -1008,6 +1638,9 @@ func TestResumeSessionDispatchesSingleOperationStages(t *testing.T) {
 			session := appTestSession()
 			setSessionOperation(session, test.operation)
 			session.Status.Phase = test.phase
+			if test.operation.RebindsPVC() {
+				createSourceStorage(t, fixture, session)
+			}
 			if err := fixture.service.ResumeSession(context.Background(), session); err != nil {
 				t.Fatal(err)
 			}
@@ -1036,6 +1669,9 @@ func TestResumeSessionDispatchesSingleOperationFirstStages(t *testing.T) {
 			session := appTestSession()
 			setSessionOperation(session, test.operation)
 			session.Status.Phase = test.phase
+			if test.operation.RebindsPVC() {
+				createSourceStorage(t, fixture, session)
+			}
 			if err := fixture.service.ResumeSession(context.Background(), session); err != nil {
 				t.Fatal(err)
 			}
@@ -1067,6 +1703,15 @@ func TestValidateResumeUsesOperationSpecificChecks(t *testing.T) {
 	session := appTestSession()
 	setSessionOperation(session, domain.OperationCopy)
 	session.Status.Phase = domain.PhaseReserved
+	fixture.reserver.validationFailures = map[string]error{"data": domain.NewError(domain.ErrorConflict, "reserve volume", "destination PVC UID changed")}
+	if err := fixture.service.ValidateResume(context.Background(), session); domain.CategoryOf(err) != domain.ErrorConflict {
+		t.Fatalf("copy reservation category=%s error=%v", domain.CategoryOf(err), err)
+	}
+
+	fixture = newRecoveryFixture(t)
+	session = appTestSession()
+	setSessionOperation(session, domain.OperationCopy)
+	session.Status.Phase = domain.PhaseReserved
 	pod := &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{Namespace: "app", Name: "consumer"},
 		Spec: corev1.PodSpec{Volumes: []corev1.Volume{{VolumeSource: corev1.VolumeSource{
@@ -1084,9 +1729,149 @@ func TestValidateResumeUsesOperationSpecificChecks(t *testing.T) {
 	session = appTestSession()
 	setSessionOperation(session, domain.OperationRename)
 	session.Status.Phase = domain.PhasePlanned
+	createSourceStorage(t, fixture, session)
 	fixture.switcher.offlineErr = domain.NewError(domain.ErrorPrecondition, "verify PVC offline", "source PVC has an active consumer")
 	if err := fixture.service.ValidateResume(context.Background(), session); domain.CategoryOf(err) != domain.ErrorPrecondition || len(fixture.switcher.offlineCalls) != 1 {
 		t.Fatalf("rename offline category=%s calls=%v error=%v", domain.CategoryOf(err), fixture.switcher.offlineCalls, err)
+	}
+}
+
+func TestValidateResumeChecksReservationBeforeContinuingPause(t *testing.T) {
+	fixture := newRecoveryFixture(t)
+	session := appTestSession()
+	session.Status.Phase = domain.PhasePausing
+	fixture.reserver.validationFailures = map[string]error{"data": domain.NewError(domain.ErrorConflict, "reserve volume", "destination PVC UID changed")}
+
+	err := fixture.service.ValidateResume(context.Background(), session)
+	if domain.CategoryOf(err) != domain.ErrorConflict {
+		t.Fatalf("category=%s error=%v", domain.CategoryOf(err), err)
+	}
+	if fixture.controller.pauses != 0 {
+		t.Fatalf("pause calls=%d", fixture.controller.pauses)
+	}
+}
+
+func TestPauseAndFinalSyncChecksReservationBeforePausing(t *testing.T) {
+	fixture := newRecoveryFixture(t)
+	session := appTestSession()
+	session.Status.Phase = domain.PhaseReserved
+	fixture.reserver.validationFailures = map[string]error{"data": domain.NewError(domain.ErrorConflict, "reserve volume", "destination PVC UID changed")}
+
+	err := fixture.service.PauseAndFinalSync(context.Background(), session)
+	if domain.CategoryOf(err) != domain.ErrorConflict {
+		t.Fatalf("category=%s error=%v", domain.CategoryOf(err), err)
+	}
+	if fixture.controller.pauses != 0 || fixture.controller.verifies != 0 {
+		t.Fatalf("controller calls pause=%d verify=%d", fixture.controller.pauses, fixture.controller.verifies)
+	}
+}
+
+func TestPauseChecksReservationBeforeWorkloadMutation(t *testing.T) {
+	fixture := newRecoveryFixture(t)
+	session := appTestSession()
+	session.Status.Phase = domain.PhaseReserved
+	fixture.reserver.validationFailures = map[string]error{
+		"data": domain.NewError(domain.ErrorConflict, "reserve volume", "destination PVC UID changed"),
+	}
+
+	err := fixture.service.Pause(context.Background(), session)
+	if domain.CategoryOf(err) != domain.ErrorConflict {
+		t.Fatalf("category=%s error=%v", domain.CategoryOf(err), err)
+	}
+	if fixture.controller.pauses != 0 || fixture.store.updates != 0 || session.Status.Phase != domain.PhaseReserved {
+		t.Fatalf("pause mutated before reservation validation: pauses=%d updates=%d phase=%s", fixture.controller.pauses, fixture.store.updates, session.Status.Phase)
+	}
+}
+
+func TestRenameChecksLiveEndpointsBeforeSessionMutation(t *testing.T) {
+	fixture := newRecoveryFixture(t)
+	session := appTestSession()
+	setSessionOperation(session, domain.OperationRename)
+	session.Spec.Volumes[0].DestinationPVC = domain.ObjectReference{Namespace: "app", Name: "renamed-data"}
+	createSourceStorage(t, fixture, session)
+	fixture.switcher.offlineErr = domain.NewError(domain.ErrorPrecondition, "verify PVC offline", "source PVC has an active consumer")
+
+	err := fixture.service.Rename(context.Background(), session)
+	if domain.CategoryOf(err) != domain.ErrorPrecondition {
+		t.Fatalf("category=%s error=%v", domain.CategoryOf(err), err)
+	}
+	if len(fixture.switcher.renameCalls) != 0 || fixture.store.updates != 0 || session.Status.Phase != domain.PhasePlanned {
+		t.Fatalf("rename mutated before endpoint validation: calls=%d updates=%d phase=%s", len(fixture.switcher.renameCalls), fixture.store.updates, session.Status.Phase)
+	}
+}
+
+func TestRenameRollbackChecksLiveEndpointsBeforeSessionMutation(t *testing.T) {
+	fixture := newRecoveryFixture(t)
+	session := appTestSession()
+	setSessionOperation(session, domain.OperationRename)
+	session.Spec.Volumes[0].DestinationPVC = domain.ObjectReference{Namespace: "app", Name: "renamed-data"}
+	session.Status.Phase = domain.PhaseCompleted
+	session.Status.Volumes[0].Activation.ActivePVC = domain.ObjectReference{Namespace: "app", Name: "renamed-data", UID: types.UID("renamed-pvc-uid")}
+	createSourceStorage(t, fixture, session)
+	if _, err := fixture.client.CoreV1().PersistentVolumeClaims("app").Create(context.Background(), &corev1.PersistentVolumeClaim{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "app", Name: "renamed-data", UID: types.UID("renamed-pvc-uid"), Annotations: map[string]string{kube.SessionKey: session.ID}},
+		Spec:       corev1.PersistentVolumeClaimSpec{VolumeName: session.Spec.Volumes[0].SourcePV.Name},
+		Status:     corev1.PersistentVolumeClaimStatus{Phase: corev1.ClaimBound},
+	}, metav1.CreateOptions{}); err != nil {
+		t.Fatal(err)
+	}
+
+	err := fixture.service.Rollback(context.Background(), session)
+	if domain.CategoryOf(err) != domain.ErrorConflict {
+		t.Fatalf("category=%s error=%v", domain.CategoryOf(err), err)
+	}
+	if len(fixture.switcher.renameCalls) != 0 || fixture.store.updates != 0 || session.Status.Phase != domain.PhaseCompleted {
+		t.Fatalf("rollback mutated before endpoint validation: calls=%d updates=%d phase=%s", len(fixture.switcher.renameCalls), fixture.store.updates, session.Status.Phase)
+	}
+}
+
+func TestActivateRecoveryValidatesEveryVolumeBeforeMutation(t *testing.T) {
+	fixture := newRecoveryFixture(t)
+	session := appTestSession()
+	addSecondVolume(session)
+	session.Status.Phase = domain.PhaseActivating
+	completed := metav1.Now()
+	for index := range session.Status.Volumes {
+		session.Status.Volumes[index].Reserved = true
+		session.Spec.Volumes[index].DestinationPVC.UID = types.UID("destination-pvc-uid-" + session.Spec.Volumes[index].SourcePVC.Name)
+		session.Spec.Volumes[index].DestinationPV = domain.ObjectReference{Name: "destination-pv-" + session.Spec.Volumes[index].SourcePVC.Name, UID: types.UID("destination-pv-uid-" + session.Spec.Volumes[index].SourcePVC.Name)}
+		session.Status.Volumes[index].Sync.FinalCompletedAt = &completed
+	}
+	fixture.switcher.offlineErrs = map[string]error{
+		"logs": domain.NewError(domain.ErrorConflict, "verify PVC offline", "second volume binding changed"),
+	}
+
+	err := fixture.service.Activate(context.Background(), session)
+	if domain.CategoryOf(err) != domain.ErrorConflict {
+		t.Fatalf("category=%s error=%v", domain.CategoryOf(err), err)
+	}
+	if len(fixture.switcher.activateCalls) != 0 || fixture.store.updates != 0 || session.Status.Phase != domain.PhaseActivating {
+		t.Fatalf("activation mutated before batch validation: calls=%v updates=%d phase=%s", fixture.switcher.activateCalls, fixture.store.updates, session.Status.Phase)
+	}
+}
+
+func TestRollbackRecoveryValidatesEveryVolumeBeforeMutation(t *testing.T) {
+	fixture := newRecoveryFixture(t)
+	session := appTestSession()
+	addSecondVolume(session)
+	session.Status.Phase = domain.PhaseFailed
+	session.Status.ResumeFrom = domain.PhaseRollingBack
+	session.Status.History = []domain.HistoryEntry{
+		{Phase: domain.PhasePlanned, Time: metav1.Now()},
+		{Phase: domain.PhaseFinalSynced, Time: metav1.Now()},
+		{Phase: domain.PhaseRollingBack, Time: metav1.Now()},
+		{Phase: domain.PhaseFailed, Time: metav1.Now()},
+	}
+	fixture.switcher.offlineErrs = map[string]error{
+		"logs": domain.NewError(domain.ErrorConflict, "verify PVC offline", "second volume binding changed"),
+	}
+
+	err := fixture.service.Rollback(context.Background(), session)
+	if domain.CategoryOf(err) != domain.ErrorConflict {
+		t.Fatalf("category=%s error=%v", domain.CategoryOf(err), err)
+	}
+	if len(fixture.switcher.rollbackCalls) != 0 || fixture.store.updates != 0 || session.Status.Phase != domain.PhaseFailed {
+		t.Fatalf("rollback mutated before batch validation: calls=%v updates=%d phase=%s", fixture.switcher.rollbackCalls, fixture.store.updates, session.Status.Phase)
 	}
 }
 
@@ -1132,6 +1917,7 @@ func TestResumeSessionHandlesRecoveryAndTerminalPhases(t *testing.T) {
 		session := appTestSession()
 		session.Status.Phase = domain.PhaseRollingBack
 		session.Status.ResumeFrom = domain.PhaseCompleted
+		createActiveDestinationStorage(t, fixture, session)
 		if err := fixture.service.ResumeSession(context.Background(), session); err != nil {
 			t.Fatal(err)
 		}
@@ -1168,6 +1954,7 @@ func TestResumeSessionHandlesRecoveryAndTerminalPhases(t *testing.T) {
 func TestAbortRetryAfterResumeFailureStillResumesPausedWorkload(t *testing.T) {
 	fixture := newRecoveryFixture(t)
 	session := appTestSession()
+	createSourceStorage(t, fixture, session)
 	session.Status.Phase = domain.PhaseFailed
 	session.Status.ResumeFrom = domain.PhaseAborting
 	session.Status.History = []domain.HistoryEntry{
@@ -1364,9 +2151,10 @@ func TestResumeWorkloadFailsWhenActiveResourcesDoNotMatchPlan(t *testing.T) {
 		fixture := newRecoveryFixture(t)
 		session := appTestSession()
 		session.Status.Phase = domain.PhaseActivated
-		session.Spec.Volumes[0].DestinationPV = domain.ObjectReference{Name: "pv-destination"}
+		session.Spec.Volumes[0].DestinationPV = domain.ObjectReference{Name: "pv-destination", UID: types.UID("destination-pv-uid")}
+		session.Status.Volumes[0].Activation.ActivePVC = domain.ObjectReference{Namespace: "app", Name: "data", UID: types.UID("active-pvc-uid")}
 		_, err := fixture.client.CoreV1().PersistentVolumeClaims("app").Create(context.Background(), &corev1.PersistentVolumeClaim{
-			ObjectMeta: metav1.ObjectMeta{Namespace: "app", Name: "data", Annotations: map[string]string{kube.SessionKey: session.ID}},
+			ObjectMeta: metav1.ObjectMeta{Namespace: "app", Name: "data", UID: types.UID("active-pvc-uid"), Annotations: map[string]string{kube.SessionKey: session.ID}},
 			Spec:       corev1.PersistentVolumeClaimSpec{VolumeName: "pv-source"},
 			Status:     corev1.PersistentVolumeClaimStatus{Phase: corev1.ClaimBound},
 		}, metav1.CreateOptions{})
@@ -1377,8 +2165,8 @@ func TestResumeWorkloadFailsWhenActiveResourcesDoNotMatchPlan(t *testing.T) {
 		if domain.CategoryOf(err) != domain.ErrorConflict {
 			t.Fatalf("category=%s error=%v", domain.CategoryOf(err), err)
 		}
-		if session.Status.Phase != domain.PhaseFailed || session.Status.ResumeFrom != domain.PhaseResuming {
-			t.Fatalf("phase=%s resumeFrom=%s", session.Status.Phase, session.Status.ResumeFrom)
+		if fixture.controller.resumes != 0 || session.Status.Phase != domain.PhaseActivated {
+			t.Fatalf("resumes=%d phase=%s", fixture.controller.resumes, session.Status.Phase)
 		}
 	})
 
@@ -1387,18 +2175,30 @@ func TestResumeWorkloadFailsWhenActiveResourcesDoNotMatchPlan(t *testing.T) {
 		session := appTestSession()
 		session.Status.Phase = domain.PhaseActivated
 		_ = session.Spec.SetWorkload(domain.WorkloadSpec{Adapter: domain.WorkloadStandalone, Pod: domain.ObjectReference{Namespace: "app", Name: "application"}})
-		session.Spec.Volumes[0].DestinationPV = domain.ObjectReference{Name: "pv-destination"}
+		markNodeReady(t, fixture.client, "target-node")
+		session.Spec.Volumes[0].DestinationPV = domain.ObjectReference{Name: "pv-destination", UID: types.UID("destination-pv-uid")}
+		session.Status.Volumes[0].Activation.ActivePVC = domain.ObjectReference{Namespace: "app", Name: "data", UID: types.UID("active-pvc-uid")}
 		_, err := fixture.client.CoreV1().PersistentVolumeClaims("app").Create(context.Background(), &corev1.PersistentVolumeClaim{
-			ObjectMeta: metav1.ObjectMeta{Namespace: "app", Name: "data", Annotations: map[string]string{kube.SessionKey: session.ID}},
+			ObjectMeta: metav1.ObjectMeta{Namespace: "app", Name: "data", UID: types.UID("active-pvc-uid"), Annotations: map[string]string{kube.SessionKey: session.ID}},
 			Spec:       corev1.PersistentVolumeClaimSpec{VolumeName: "pv-destination"},
 			Status:     corev1.PersistentVolumeClaimStatus{Phase: corev1.ClaimBound},
 		}, metav1.CreateOptions{})
 		if err != nil {
 			t.Fatal(err)
 		}
-		fixture.controller.resumeHook = func(ctx context.Context, _ *domain.Session) error {
+		_, err = fixture.client.CoreV1().PersistentVolumes().Create(context.Background(), &corev1.PersistentVolume{
+			ObjectMeta: metav1.ObjectMeta{Name: "pv-destination", UID: types.UID("destination-pv-uid")},
+			Spec: corev1.PersistentVolumeSpec{ClaimRef: &corev1.ObjectReference{
+				Namespace: "app", Name: "data", UID: types.UID("active-pvc-uid"),
+			}},
+		}, metav1.CreateOptions{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		fixture.controller.resumeHook = func(ctx context.Context, current *domain.Session) error {
+			current.Spec.WorkloadPtr().Pod.UID = "resumed-pod-uid"
 			_, createErr := fixture.client.CoreV1().Pods("app").Create(ctx, &corev1.Pod{
-				ObjectMeta: metav1.ObjectMeta{Namespace: "app", Name: "application"},
+				ObjectMeta: metav1.ObjectMeta{Namespace: "app", Name: "application", UID: "resumed-pod-uid", Annotations: map[string]string{kube.SessionKey: current.ID}},
 				Spec:       corev1.PodSpec{NodeName: "source-node"},
 			}, metav1.CreateOptions{})
 			return createErr
@@ -1418,7 +2218,16 @@ func TestResumeWorkloadFailsWhenActiveResourcesDoNotMatchPlan(t *testing.T) {
 		session.Status.Phase = domain.PhaseActivated
 		_ = session.Spec.SetWorkload(domain.WorkloadSpec{
 			Adapter: domain.WorkloadStatefulSet,
-			Pod:     domain.ObjectReference{Namespace: "app", Name: "application"},
+			Pod: domain.ObjectReference{
+				Namespace: "app",
+				Name:      "application",
+				UID:       types.UID("application-uid"),
+			},
+			Controller: domain.ObjectReference{
+				Namespace: "app",
+				Name:      "database",
+				UID:       types.UID("database-uid"),
+			},
 		})
 		session.Spec.Volumes[0].DestinationPV = domain.ObjectReference{Name: "pv-destination", UID: types.UID("destination-pv-uid")}
 		session.Status.Volumes[0].Activation.ActivePVC = domain.ObjectReference{Namespace: "app", Name: "data", UID: types.UID("active-pvc-uid")}
@@ -1460,7 +2269,16 @@ func TestResumeWorkloadFailsWhenActiveResourcesDoNotMatchPlan(t *testing.T) {
 		session.Status.Phase = domain.PhaseResuming
 		_ = session.Spec.SetWorkload(domain.WorkloadSpec{
 			Adapter: domain.WorkloadStatefulSet,
-			Pod:     domain.ObjectReference{Namespace: "app", Name: "application"},
+			Pod: domain.ObjectReference{
+				Namespace: "app",
+				Name:      "application",
+				UID:       types.UID("application-uid"),
+			},
+			Controller: domain.ObjectReference{
+				Namespace: "app",
+				Name:      "database",
+				UID:       types.UID("database-uid"),
+			},
 		})
 		session.Spec.Volumes[0].DestinationPV = domain.ObjectReference{Name: "pv-destination", UID: types.UID("destination-pv-uid")}
 		session.Status.Volumes[0].Activation.ActivePVC = domain.ObjectReference{Namespace: "app", Name: "data", UID: types.UID("active-pvc-uid")}
@@ -1485,6 +2303,89 @@ func TestResumeWorkloadFailsWhenActiveResourcesDoNotMatchPlan(t *testing.T) {
 			t.Fatal(err)
 		}
 	})
+}
+
+func TestResumeWorkloadRejectsActiveIdentityDriftBeforeControllerResume(t *testing.T) {
+	tests := []struct {
+		name  string
+		setup func(t *testing.T, fixture *recoveryFixture, session *domain.Session)
+	}{
+		{
+			name: "PVC UID changed",
+			setup: func(t *testing.T, fixture *recoveryFixture, session *domain.Session) {
+				session.Spec.Volumes[0].DestinationPV = domain.ObjectReference{Name: "pv-destination", UID: types.UID("destination-pv-uid")}
+				session.Status.Volumes[0].Activation.ActivePVC = domain.ObjectReference{Namespace: "app", Name: "data", UID: types.UID("recorded-pvc-uid")}
+				_, err := fixture.client.CoreV1().PersistentVolumeClaims("app").Create(context.Background(), &corev1.PersistentVolumeClaim{
+					ObjectMeta: metav1.ObjectMeta{Namespace: "app", Name: "data", UID: types.UID("replacement-pvc-uid"), Annotations: map[string]string{kube.SessionKey: session.ID}},
+					Spec:       corev1.PersistentVolumeClaimSpec{VolumeName: "pv-destination"},
+					Status:     corev1.PersistentVolumeClaimStatus{Phase: corev1.ClaimBound},
+				}, metav1.CreateOptions{})
+				if err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+		{
+			name: "destination PV UID changed",
+			setup: func(t *testing.T, fixture *recoveryFixture, session *domain.Session) {
+				session.Spec.Volumes[0].DestinationPV = domain.ObjectReference{Name: "pv-destination", UID: types.UID("recorded-pv-uid")}
+				session.Status.Volumes[0].Activation.ActivePVC = domain.ObjectReference{Namespace: "app", Name: "data", UID: types.UID("active-pvc-uid")}
+				_, err := fixture.client.CoreV1().PersistentVolumeClaims("app").Create(context.Background(), &corev1.PersistentVolumeClaim{
+					ObjectMeta: metav1.ObjectMeta{Namespace: "app", Name: "data", UID: types.UID("active-pvc-uid"), Annotations: map[string]string{kube.SessionKey: session.ID}},
+					Spec:       corev1.PersistentVolumeClaimSpec{VolumeName: "pv-destination"},
+					Status:     corev1.PersistentVolumeClaimStatus{Phase: corev1.ClaimBound},
+				}, metav1.CreateOptions{})
+				if err != nil {
+					t.Fatal(err)
+				}
+				_, err = fixture.client.CoreV1().PersistentVolumes().Create(context.Background(), &corev1.PersistentVolume{
+					ObjectMeta: metav1.ObjectMeta{Name: "pv-destination", UID: types.UID("replacement-pv-uid")},
+					Spec:       corev1.PersistentVolumeSpec{ClaimRef: &corev1.ObjectReference{Namespace: "app", Name: "data", UID: types.UID("active-pvc-uid")}},
+				}, metav1.CreateOptions{})
+				if err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+		{
+			name: "destination PV claimRef changed",
+			setup: func(t *testing.T, fixture *recoveryFixture, session *domain.Session) {
+				session.Spec.Volumes[0].DestinationPV = domain.ObjectReference{Name: "pv-destination", UID: types.UID("destination-pv-uid")}
+				session.Status.Volumes[0].Activation.ActivePVC = domain.ObjectReference{Namespace: "app", Name: "data", UID: types.UID("active-pvc-uid")}
+				_, err := fixture.client.CoreV1().PersistentVolumeClaims("app").Create(context.Background(), &corev1.PersistentVolumeClaim{
+					ObjectMeta: metav1.ObjectMeta{Namespace: "app", Name: "data", UID: types.UID("active-pvc-uid"), Annotations: map[string]string{kube.SessionKey: session.ID}},
+					Spec:       corev1.PersistentVolumeClaimSpec{VolumeName: "pv-destination"},
+					Status:     corev1.PersistentVolumeClaimStatus{Phase: corev1.ClaimBound},
+				}, metav1.CreateOptions{})
+				if err != nil {
+					t.Fatal(err)
+				}
+				_, err = fixture.client.CoreV1().PersistentVolumes().Create(context.Background(), &corev1.PersistentVolume{
+					ObjectMeta: metav1.ObjectMeta{Name: "pv-destination", UID: types.UID("destination-pv-uid")},
+					Spec:       corev1.PersistentVolumeSpec{ClaimRef: &corev1.ObjectReference{Namespace: "other", Name: "data", UID: types.UID("active-pvc-uid")}},
+				}, metav1.CreateOptions{})
+				if err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			fixture := newRecoveryFixture(t)
+			session := appTestSession()
+			session.Status.Phase = domain.PhaseActivated
+			test.setup(t, fixture, session)
+
+			err := fixture.service.ResumeWorkload(context.Background(), session)
+			if domain.CategoryOf(err) != domain.ErrorConflict {
+				t.Fatalf("category=%s error=%v", domain.CategoryOf(err), err)
+			}
+			if fixture.controller.resumes != 0 || session.Status.Phase != domain.PhaseActivated {
+				t.Fatalf("resumes=%d phase=%s", fixture.controller.resumes, session.Status.Phase)
+			}
+		})
+	}
 }
 
 func TestMigrateStopsAtEachFailedStageAndRecordsResumePoint(t *testing.T) {
@@ -1597,6 +2498,11 @@ func TestActivateRecoversAfterSwitcherCheckpointFailure(t *testing.T) {
 	session := appTestSession()
 	setSessionOperation(session, domain.OperationMigrate)
 	session.Status.Phase = domain.PhaseFinalSynced
+	session.Spec.Volumes[0].DestinationPVC.UID = types.UID("destination-pvc-uid")
+	session.Spec.Volumes[0].DestinationPV = domain.ObjectReference{Name: "dest-pv-data", UID: types.UID("dest-pv-uid-data")}
+	session.Status.Volumes[0].Reserved = true
+	completed := metav1.Now()
+	session.Status.Volumes[0].Sync.FinalCompletedAt = &completed
 
 	err := fixture.service.Activate(context.Background(), session)
 	if err == nil || err.Error() != "injected session update failure" {
@@ -1614,6 +2520,64 @@ func TestActivateRecoversAfterSwitcherCheckpointFailure(t *testing.T) {
 	}
 }
 
+func TestDryRunActivationAcceptsCheckpointedActiveStorage(t *testing.T) {
+	fixture := newRecoveryFixture(t)
+	session := appTestSession()
+	completed := metav1.Now()
+	session.Status.Phase = domain.PhaseFailed
+	session.Status.ResumeFrom = domain.PhaseActivating
+	session.Status.Volumes[0].Sync.FinalCompletedAt = &completed
+	createActiveDestinationStorage(t, fixture, session)
+
+	if err := fixture.service.ValidateResume(context.Background(), session); err != nil {
+		t.Fatal(err)
+	}
+	if len(fixture.switcher.offlineCalls) != 0 || fixture.controller.resumes != 0 || fixture.store.updates != 0 {
+		t.Fatalf("offline=%v resumes=%d updates=%d", fixture.switcher.offlineCalls, fixture.controller.resumes, fixture.store.updates)
+	}
+}
+
+func TestDryRunRollbackAcceptsActivatedAndPartiallyRestoredStorage(t *testing.T) {
+	t.Run("activated", func(t *testing.T) {
+		fixture := newRecoveryFixture(t)
+		session := appTestSession()
+		session.Status.Phase = domain.PhaseActivated
+		createActiveDestinationStorage(t, fixture, session)
+
+		if err := fixture.service.ValidateRollback(context.Background(), session); err != nil {
+			t.Fatal(err)
+		}
+		if len(fixture.switcher.offlineCalls) != 0 || fixture.controller.resumes != 0 || fixture.store.updates != 0 {
+			t.Fatalf("offline=%v resumes=%d updates=%d", fixture.switcher.offlineCalls, fixture.controller.resumes, fixture.store.updates)
+		}
+	})
+
+	t.Run("partial rollback", func(t *testing.T) {
+		fixture := newRecoveryFixture(t)
+		session := appTestSession()
+		addSecondVolume(session)
+		createActiveDestinationStorage(t, fixture, session)
+		if err := fixture.switcher.RollbackVolume(context.Background(), session, &session.Spec.Volumes[1], &session.Status.Volumes[1], nil); err != nil {
+			t.Fatal(err)
+		}
+		session.Status.Phase = domain.PhaseFailed
+		session.Status.ResumeFrom = domain.PhaseRollingBack
+		session.Status.History = []domain.HistoryEntry{
+			{Phase: domain.PhasePlanned, Time: metav1.Now()},
+			{Phase: domain.PhaseCompleted, Time: metav1.Now()},
+			{Phase: domain.PhaseRollingBack, Time: metav1.Now()},
+			{Phase: domain.PhaseFailed, Time: metav1.Now()},
+		}
+
+		if err := fixture.service.ValidateResume(context.Background(), session); err != nil {
+			t.Fatal(err)
+		}
+		if len(fixture.switcher.offlineCalls) != 0 || fixture.controller.resumes != 0 || fixture.store.updates != 0 {
+			t.Fatalf("offline=%v resumes=%d updates=%d", fixture.switcher.offlineCalls, fixture.controller.resumes, fixture.store.updates)
+		}
+	})
+}
+
 func TestDryRunRecoveryValidationUsesReadOnlyChecks(t *testing.T) {
 	fixture := newRecoveryFixture(t)
 	session := appTestSession()
@@ -1621,11 +2585,15 @@ func TestDryRunRecoveryValidationUsesReadOnlyChecks(t *testing.T) {
 	if err := fixture.service.ValidateResume(context.Background(), session); err != nil {
 		t.Fatal(err)
 	}
-	if fixture.store.updates != 0 || len(fixture.reserver.calls) != 1 {
+	if fixture.store.updates != 0 || len(fixture.reserver.calls) != 0 {
 		t.Fatalf("resume dry-run mutated state: updates=%d reserveCalls=%v", fixture.store.updates, fixture.reserver.calls)
+	}
+	if want := []string{"data"}; !slices.Equal(fixture.reserver.dryRunCalls, want) {
+		t.Fatalf("resume dry-run validations=%v want=%v", fixture.reserver.dryRunCalls, want)
 	}
 
 	session.Status.Phase = domain.PhasePaused
+	createSourceStorage(t, fixture, session)
 	if err := fixture.service.ValidateAbort(context.Background(), session); err != nil {
 		t.Fatal(err)
 	}
@@ -1641,7 +2609,11 @@ func TestDryRunResumeFromActivatedAcceptsPausedStandalonePod(t *testing.T) {
 	session.Status.Phase = domain.PhaseActivated
 	_ = session.Spec.SetWorkload(domain.WorkloadSpec{
 		Adapter: domain.WorkloadStandalone,
-		Pod:     domain.ObjectReference{Namespace: "app", Name: "application"},
+		Pod: domain.ObjectReference{
+			Namespace: "app",
+			Name:      "application",
+			UID:       types.UID("application-uid"),
+		},
 	})
 	session.Spec.WorkflowOptionsPtr().TargetNode = "target-node"
 	session.Spec.Volumes[0].DestinationPV = domain.ObjectReference{Name: "pv-destination", UID: types.UID("destination-pv-uid")}
@@ -1722,7 +2694,7 @@ func TestDryRunRollbackChecksConsumersOutsideTheWorkloadPauseScope(t *testing.T)
 			name: "migrate-pod allows its controlled consumer",
 			workload: domain.WorkloadSpec{
 				Adapter: domain.WorkloadStandalone,
-				Pod:     domain.ObjectReference{Namespace: "app", Name: "application"},
+				Pod:     domain.ObjectReference{Namespace: "app", Name: "application", UID: "application-uid"},
 			},
 			consumer: "application",
 			phase:    corev1.PodRunning,
@@ -1731,8 +2703,9 @@ func TestDryRunRollbackChecksConsumersOutsideTheWorkloadPauseScope(t *testing.T)
 			name: "migrate-pod rejects a terminal external consumer like execution",
 			workload: domain.WorkloadSpec{
 				Adapter:      domain.WorkloadStatefulSet,
-				Pod:          domain.ObjectReference{Namespace: "app", Name: "db-0"},
-				AffectedPods: []domain.ObjectReference{{Namespace: "app", Name: "db-0"}},
+				Pod:          domain.ObjectReference{Namespace: "app", Name: "db-0", UID: types.UID("db-0-uid")},
+				Controller:   domain.ObjectReference{Namespace: "app", Name: "db", UID: types.UID("db-controller-uid")},
+				AffectedPods: []domain.ObjectReference{{Namespace: "app", Name: "db-0", UID: types.UID("db-0-uid")}},
 			},
 			consumer: "stale-reader",
 			phase:    corev1.PodSucceeded,
@@ -1769,8 +2742,14 @@ func TestDryRunRollbackChecksConsumersOutsideTheWorkloadPauseScope(t *testing.T)
 			}, metav1.CreateOptions{}); err != nil {
 				t.Fatal(err)
 			}
+			podUID := types.UID(test.consumer + "-uid")
+			annotations := map[string]string{}
+			if test.workload.Adapter == domain.WorkloadStandalone && test.consumer == test.workload.Pod.Name {
+				podUID = test.workload.Pod.UID
+				annotations[kube.SessionKey] = session.ID
+			}
 			if _, err := fixture.client.CoreV1().Pods("app").Create(context.Background(), &corev1.Pod{
-				ObjectMeta: metav1.ObjectMeta{Namespace: "app", Name: test.consumer},
+				ObjectMeta: metav1.ObjectMeta{Namespace: "app", Name: test.consumer, UID: podUID, Annotations: annotations},
 				Spec: corev1.PodSpec{Volumes: []corev1.Volume{{
 					Name: "data", VolumeSource: corev1.VolumeSource{PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: "data"}},
 				}}, NodeName: "target-node"},

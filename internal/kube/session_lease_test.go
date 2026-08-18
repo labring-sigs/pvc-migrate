@@ -40,9 +40,21 @@ func (c *cancelAwareLeaseClient) Update(_ context.Context, lease *coordinationv1
 	return lease.DeepCopy(), nil
 }
 
+func newSessionLeaseTestClient(objects ...runtime.Object) *fake.Clientset {
+	client := fake.NewClientset(objects...)
+	client.PrependReactor("create", "leases", func(action clienttesting.Action) (bool, runtime.Object, error) {
+		lease := action.(clienttesting.CreateAction).GetObject().(*coordinationv1.Lease)
+		if lease.UID == "" {
+			lease.UID = types.UID("lease-" + lease.Name)
+		}
+		return false, nil, nil
+	})
+	return client
+}
+
 func TestConfigMapSessionStoreSessionLeaseContendsAndReleases(t *testing.T) {
 	ctx := context.Background()
-	store := NewConfigMapSessionStore(fake.NewClientset())
+	store := NewConfigMapSessionStore(newSessionLeaseTestClient())
 	first, err := store.AcquireSessionLock(ctx, "system", "session-1")
 	if err != nil {
 		t.Fatal(err)
@@ -65,7 +77,7 @@ func TestConfigMapSessionStoreSessionLeaseContendsAndReleases(t *testing.T) {
 
 func TestConfigMapSessionStoreDeletesSessionLease(t *testing.T) {
 	ctx := context.Background()
-	store := NewConfigMapSessionStore(fake.NewClientset())
+	store := NewConfigMapSessionStore(newSessionLeaseTestClient())
 	lock, err := store.AcquireSessionLock(ctx, "system", "session-delete")
 	if err != nil {
 		t.Fatal(err)
@@ -86,7 +98,7 @@ func TestConfigMapSessionStoreDeletesSessionLease(t *testing.T) {
 
 func TestSessionLeaseDeleteFencesReplacement(t *testing.T) {
 	ctx := context.Background()
-	client := fake.NewClientset()
+	client := newSessionLeaseTestClient()
 	store := NewConfigMapSessionStore(client)
 	lock, err := store.AcquireSessionLock(ctx, "system", "session-delete-fence")
 	if err != nil {
@@ -113,6 +125,50 @@ func TestSessionLeaseDeleteFencesReplacement(t *testing.T) {
 		t.Fatalf("replacement holder=%v", current.Spec.HolderIdentity)
 	}
 	_ = lock.Release(ctx)
+}
+
+func TestSessionLeaseFencesReplacementWithCopiedOwnership(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		run  func(*sessionLease) error
+	}{
+		{name: "renew", run: func(lock *sessionLease) error {
+			err := lock.renew()
+			lock.cancel()
+			<-lock.done
+			return err
+		}},
+		{name: "release", run: func(lock *sessionLease) error { return lock.Release(context.Background()) }},
+		{name: "delete", run: func(lock *sessionLease) error { return lock.Delete(context.Background()) }},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			const sessionID, holder = "session-replaced", "holder"
+			replacement := &coordinationv1.Lease{
+				ObjectMeta: metav1.ObjectMeta{
+					Namespace: "system",
+					Name:      SessionLockName(sessionID),
+					UID:       types.UID("replacement-lease-uid"),
+					Labels: map[string]string{
+						ManagedByLabel: ManagedByValue,
+						SessionKey:     sessionID,
+					},
+				},
+				Spec: coordinationv1.LeaseSpec{HolderIdentity: ptr(holder)},
+			}
+			client := fake.NewClientset(replacement)
+			lock := newSessionLease(context.Background(), client.CoordinationV1().Leases("system"), "system", replacement.Name, sessionID, holder, types.UID("original-lease-uid"))
+			if err := test.run(lock); domain.CategoryOf(err) != domain.ErrorConflict {
+				t.Fatalf("category=%s error=%v", domain.CategoryOf(err), err)
+			}
+			current, err := client.CoordinationV1().Leases("system").Get(context.Background(), replacement.Name, metav1.GetOptions{})
+			if err != nil {
+				t.Fatalf("replacement Lease was changed: %v", err)
+			}
+			if current.UID != replacement.UID || current.Spec.HolderIdentity == nil || *current.Spec.HolderIdentity != holder {
+				t.Fatalf("replacement Lease=%#v", current)
+			}
+		})
+	}
 }
 
 func TestConfigMapSessionStoreDeletesSessionLeaseWithPreconditions(t *testing.T) {
@@ -194,7 +250,7 @@ func TestSessionLeaseRenewFailureFencesContext(t *testing.T) {
 		sessionLeaseDuration = oldDuration
 	}()
 
-	client := fake.NewClientset()
+	client := newSessionLeaseTestClient()
 	client.PrependReactor("update", "leases", func(clienttesting.Action) (bool, runtime.Object, error) {
 		return true, nil, errors.New("injected lease API failure")
 	})
@@ -236,6 +292,7 @@ func TestSessionLeaseCancellationStopsInFlightRenewal(t *testing.T) {
 			ObjectMeta: metav1.ObjectMeta{
 				Namespace: "system",
 				Name:      SessionLockName(sessionID),
+				UID:       types.UID("lease-uid"),
 				Labels: map[string]string{
 					ManagedByLabel: ManagedByValue,
 					SessionKey:     sessionID,
@@ -244,7 +301,7 @@ func TestSessionLeaseCancellationStopsInFlightRenewal(t *testing.T) {
 			Spec: coordinationv1.LeaseSpec{HolderIdentity: ptr(holder)},
 		},
 	}
-	lock := newSessionLease(context.Background(), leaseClient, "system", leaseClient.lease.Name, sessionID, holder)
+	lock := newSessionLease(context.Background(), leaseClient, "system", leaseClient.lease.Name, sessionID, holder, leaseClient.lease.UID)
 	select {
 	case <-leaseClient.started:
 	case <-time.After(time.Second):
@@ -268,6 +325,7 @@ func TestSessionLeaseRecoversExpiredHolder(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{
 			Namespace: "system",
 			Name:      SessionLockName("session-expired"),
+			UID:       types.UID("expired-lease-uid"),
 			Labels: map[string]string{
 				ManagedByLabel: ManagedByValue,
 				SessionKey:     "session-expired",
@@ -286,5 +344,13 @@ func TestSessionLeaseRecoversExpiredHolder(t *testing.T) {
 	}
 	if err := lock.Release(context.Background()); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestAcquireSessionLockRejectsMissingLeaseUID(t *testing.T) {
+	store := NewConfigMapSessionStore(fake.NewClientset())
+	lock, err := store.AcquireSessionLock(context.Background(), "system", "session-missing-uid")
+	if lock != nil || domain.CategoryOf(err) != domain.ErrorKubernetes {
+		t.Fatalf("lock=%v category=%s error=%v", lock, domain.CategoryOf(err), err)
 	}
 }

@@ -236,6 +236,7 @@ func TestStandaloneRollbackRebuildsPodOnSourceNode(t *testing.T) {
 	client := kubernetesfake.NewClientset(pod, sourceNode, targetNode)
 	client.PrependReactor("create", "pods", func(action clienttesting.Action) (bool, runtime.Object, error) {
 		created := action.(clienttesting.CreateAction).GetObject().(*corev1.Pod)
+		created.UID = types.UID("recreated-worker-uid")
 		created.Status = corev1.PodStatus{Phase: corev1.PodRunning, Conditions: []corev1.PodCondition{{Type: corev1.PodReady, Status: corev1.ConditionTrue}}}
 		return false, nil, nil
 	})
@@ -278,6 +279,7 @@ func TestKubeBlocksUsesDiscoveredCurrentOpsAPI(t *testing.T) {
 		"kubeblocks.io/role":                "primary",
 	}
 	candidate := readyPod("db", "cluster-postgresql-1", "node-b")
+	candidate.OwnerReferences = selected.OwnerReferences
 	candidate.Labels = map[string]string{
 		"app.kubernetes.io/instance":        "cluster",
 		"apps.kubeblocks.io/component-name": "postgresql",
@@ -319,6 +321,7 @@ func TestKubeBlocksUsesDiscoveredCurrentOpsAPI(t *testing.T) {
 		if len(createOptions.DryRun) > 0 {
 			return false, nil, nil
 		}
+		object.SetUID(types.UID("opsrequest-" + operationType))
 		operationTypes = append(operationTypes, operationType)
 		if operationType == "Switchover" {
 			items, _, _ := unstructured.NestedSlice(object.Object, "spec", "switchover")

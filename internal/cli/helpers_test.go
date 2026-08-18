@@ -42,9 +42,8 @@ func TestRootCommandSurfaceAndGlobalDefaults(t *testing.T) {
 			t.Fatalf("Find(%q) command=%v error=%v", name, command, err)
 		}
 	}
-	mv, _, err := root.Find([]string{"mv"})
-	if err != nil || mv.Name() != "move" {
-		t.Fatalf("mv alias command=%v error=%v", mv, err)
+	if mv, _, err := root.Find([]string{"mv"}); err == nil && mv != root {
+		t.Fatalf("removed mv alias resolved to command %v", mv)
 	}
 	liveBackup, _, err := root.Find([]string{"live-backup"})
 	if err != nil || liveBackup.Name() != "live-backup" {

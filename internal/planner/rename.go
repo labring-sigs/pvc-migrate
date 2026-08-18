@@ -195,6 +195,9 @@ func (p *Planner) PlanRename(ctx context.Context, options RenameOptions) (*domai
 		plan.AddCheck(failed("source-pv", "read source PV returned an empty object"))
 		return plan, nil
 	}
+	if !sourceBindingMatches(pvc, pv) {
+		plan.AddCheck(failed("source-binding", fmt.Sprintf("PV %s claimRef does not match PVC %s/%s UID %s", pv.Name, pvc.Namespace, pvc.Name, pvc.UID)))
+	}
 	p.checkSessionOwnership(ctx, plan, options.SessionNamespace, pvc, pv)
 	capacity := pv.Spec.Capacity[corev1.ResourceStorage]
 	bindingMode := storagev1.VolumeBindingImmediate

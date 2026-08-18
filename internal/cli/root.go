@@ -156,6 +156,7 @@ func (r *rootState) runtime() (*commandRuntime, error) {
 	controllers := controller.NewManager(clients.Kubernetes, clients.Dynamic, clients.Discovery).WithRESTConfig(clients.RESTConfig).WithLogger(logger.With("component", "controller"))
 	store := kube.NewConfigMapSessionStore(clients.Kubernetes)
 	reserver := kube.NewReserver(clients.Kubernetes).WithLogger(logger.With("component", "reserver"))
+	openEBSLVMSharedVolumeManager := kube.NewOpenEBSLVMSharedVolumeManager(clients.Kubernetes, clients.Dynamic)
 	if r.global.streamToolLogs {
 		reserver = reserver.WithToolLogs(kube.ToolLogOptions{
 			Writer:     r.errWriter(),
@@ -182,13 +183,15 @@ func (r *rootState) runtime() (*commandRuntime, error) {
 			Writer:                        r.errWriter(),
 			Logger:                        logger.With("component", "migration"),
 			ToolImageProber:               kube.NewToolImageProber(clients.Kubernetes),
-			OpenEBSLVMSharedVolumeManager: kube.NewOpenEBSLVMSharedVolumeManager(clients.Kubernetes, clients.Dynamic),
+			OpenEBSLVMSharedVolumeManager: openEBSLVMSharedVolumeManager,
 		},
 	)
 	return &commandRuntime{
-		clients:     clients,
-		store:       store,
-		planner:     planner.New(clients.Kubernetes, controllers).WithLogger(logger.With("component", "planner")),
+		clients: clients,
+		store:   store,
+		planner: planner.New(clients.Kubernetes, controllers).
+			WithOpenEBSLVMSharedVolumeManager(openEBSLVMSharedVolumeManager).
+			WithLogger(logger.With("component", "planner")),
 		service:     service,
 		printer:     output.Printer{Writer: r.options.Out, Format: format},
 		logger:      logger.With("component", "backup"),

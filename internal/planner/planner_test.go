@@ -10,6 +10,7 @@ import (
 
 	"github.com/labring-sigs/pvc-migrate/internal/controller"
 	"github.com/labring-sigs/pvc-migrate/internal/domain"
+	"github.com/labring-sigs/pvc-migrate/internal/kube"
 	authorizationv1 "k8s.io/api/authorization/v1"
 	corev1 "k8s.io/api/core/v1"
 	storagev1 "k8s.io/api/storage/v1"
@@ -109,19 +110,28 @@ func TestPlanRejectsNegativePrecopyPasses(t *testing.T) {
 	}
 }
 
-func TestPlanChecksOpenEBSLVMRBACForOfflineWarmCopy(t *testing.T) {
+func TestPlanChecksOnlyRequiredOpenEBSLVMRBACForWarmCopy(t *testing.T) {
 	for _, test := range []struct {
-		name         string
-		enableShared bool
-		deniedVerb   string
+		name           string
+		enableShared   bool
+		shared         bool
+		activeConsumer bool
+		deniedVerb     string
+		wantDenied     bool
 	}{
-		{name: "inspect", deniedVerb: "list"},
-		{name: "enable shared", enableShared: true, deniedVerb: "patch"},
+		{name: "inspect", deniedVerb: "list", wantDenied: true},
+		{name: "enable shared for active unshared volume", enableShared: true, activeConsumer: true, deniedVerb: "patch", wantDenied: true},
+		{name: "enable shared for already shared volume", enableShared: true, shared: true, activeConsumer: true, deniedVerb: "patch"},
+		{name: "enable shared with no active consumer", enableShared: true, deniedVerb: "patch"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			objects := plannerObjects("2Gi")
 			storageClass := objects[3].(*storagev1.StorageClass)
 			storageClass.Provisioner = "local.csi.openebs.io"
+			objects[6].(*corev1.PersistentVolume).Spec.CSI = &corev1.CSIPersistentVolumeSource{Driver: kube.OpenEBSLVMCSIDriver, VolumeHandle: "pv-source"}
+			if test.activeConsumer {
+				objects = append(objects, podWithPVC("app", "database-0", "data"))
+			}
 			client := kubernetesfake.NewClientset(objects...)
 			client.PrependReactor("create", "selfsubjectaccessreviews", func(action clienttesting.Action) (bool, runtime.Object, error) {
 				review := action.(clienttesting.CreateAction).GetObject().(*authorizationv1.SelfSubjectAccessReview).DeepCopy()
@@ -129,7 +139,7 @@ func TestPlanChecksOpenEBSLVMRBACForOfflineWarmCopy(t *testing.T) {
 				review.Status.Allowed = attributes.Group != "local.openebs.io" || attributes.Resource != "lvmvolumes" || attributes.Verb != test.deniedVerb
 				return true, review, nil
 			})
-			plan, err := New(client, nil).Plan(context.Background(), Options{
+			plan, err := New(client, nil).WithOpenEBSLVMSharedVolumeManager(plannerOpenEBSLVMSharedVolumeManager{shared: test.shared}).Plan(context.Background(), Options{
 				SessionID: "migration", Operation: domain.OperationMigrate,
 				SourceNamespace: "app", TemporaryNamespace: "system", StagingNamespace: "system", SessionNamespace: "system",
 				SourcePVCs: []string{"data"}, TargetNode: "node-b", DestinationClass: "fast", PrecopyPasses: 1,
@@ -138,7 +148,13 @@ func TestPlanChecksOpenEBSLVMRBACForOfflineWarmCopy(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if plan.Ready || !hasFailedCheckContaining(plan, "rbac", test.deniedVerb) || !hasFailedCheckContaining(plan, "rbac", "lvmvolumes") {
+			if test.wantDenied {
+				if plan.Ready || !hasFailedCheckContaining(plan, "rbac", test.deniedVerb) || !hasFailedCheckContaining(plan, "rbac", "lvmvolumes") {
+					t.Fatalf("RBAC checks=%#v", plan.Checks)
+				}
+				return
+			}
+			if hasFailedCheck(plan, "rbac") {
 				t.Fatalf("RBAC checks=%#v", plan.Checks)
 			}
 		})
@@ -593,7 +609,7 @@ func TestPlanAllowsStandalonePodHostnameSelectorToMove(t *testing.T) {
 		},
 		&corev1.ServiceAccount{ObjectMeta: metav1.ObjectMeta{Namespace: "app", Name: "default"}},
 		&corev1.Pod{
-			ObjectMeta: metav1.ObjectMeta{Namespace: "app", Name: "application"},
+			ObjectMeta: metav1.ObjectMeta{Namespace: "app", Name: "application", UID: types.UID("application-uid")},
 			Spec: corev1.PodSpec{
 				NodeName:     "node-a",
 				NodeSelector: map[string]string{corev1.LabelHostname: "node-a", "disk": "fast"},
@@ -641,7 +657,7 @@ func TestMigratePodRequiresForceForSameNodeAndStorageClass(t *testing.T) {
 			AllowedTopologies: []corev1.TopologySelectorTerm{{MatchLabelExpressions: []corev1.TopologySelectorLabelRequirement{{Key: corev1.LabelTopologyZone, Values: []string{"zone-b"}}}}},
 		},
 		&corev1.Pod{
-			ObjectMeta: metav1.ObjectMeta{Namespace: "app", Name: "application"},
+			ObjectMeta: metav1.ObjectMeta{Namespace: "app", Name: "application", UID: types.UID("application-uid")},
 			Spec: corev1.PodSpec{
 				NodeName:   "node-b",
 				Containers: []corev1.Container{{Name: "app", Image: "busybox"}},

@@ -55,7 +55,9 @@ func TestVMClusterUsesComponentPauseAndStatefulSetScale(t *testing.T) {
 		if *updated.Spec.Replicas == 1 {
 			_ = client.Tracker().Delete(podsResource, "vm", pod.Name)
 		} else {
-			_ = client.Tracker().Create(podsResource, readyPod("vm", pod.Name, "node-b"), "vm")
+			resumed := readyPod("vm", pod.Name, "node-b")
+			resumed.OwnerReferences = pod.OwnerReferences
+			_ = client.Tracker().Create(podsResource, resumed, "vm")
 		}
 		return false, nil, nil
 	})
@@ -68,6 +70,9 @@ func TestVMClusterUsesComponentPauseAndStatefulSetScale(t *testing.T) {
 	}
 	if workload.Adapter != domain.WorkloadVMCluster || workload.VMCluster == nil || workload.VMCluster.Component != "vmstorage" {
 		t.Fatalf("workload=%#v", workload)
+	}
+	if !workload.VMCluster.OriginalReplicasConfigured || workload.VMCluster.OriginalReplicas != 2 {
+		t.Fatalf("VMCluster replica state=%#v", workload.VMCluster)
 	}
 	if !workload.VMCluster.OriginalClusterPaused || !workload.VMCluster.OriginalClusterPausedConfigured {
 		t.Fatalf("top-level VMCluster pause state=%#v", workload.VMCluster)
@@ -110,6 +115,28 @@ func TestVMClusterUsesComponentPauseAndStatefulSetScale(t *testing.T) {
 	}
 	if resumed.GetAnnotations()[pauseSessionAnnotation] != "" {
 		t.Fatalf("vmstorage pause owner=%q", resumed.GetAnnotations()[pauseSessionAnnotation])
+	}
+}
+
+func TestVMClusterDiscoveryRejectsUnconvergedReplicaCount(t *testing.T) {
+	replicas := int32(2)
+	vm := &unstructured.Unstructured{Object: map[string]any{
+		"apiVersion": vmClusterAPIVersion,
+		"kind":       "VMCluster",
+		"metadata":   map[string]any{"name": "metrics", "namespace": "vm", "uid": "vm-uid"},
+		"spec":       map[string]any{"vmstorage": map[string]any{"replicaCount": int64(3), "paused": false}},
+	}}
+	sts := &appsv1.StatefulSet{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "vm", Name: "vmstorage-metrics", UID: "sts-uid", OwnerReferences: []metav1.OwnerReference{{APIVersion: vmClusterAPIVersion, Kind: domain.KindVMCluster, Name: "metrics", UID: "vm-uid", Controller: boolPointer(true)}}},
+		Spec:       appsv1.StatefulSetSpec{Replicas: &replicas},
+	}
+	pod := readyPod("vm", "vmstorage-metrics-1", "node-a")
+	pod.OwnerReferences = []metav1.OwnerReference{{APIVersion: domain.AppsAPIVersion, Kind: domain.KindStatefulSet, Name: sts.Name, UID: sts.UID, Controller: boolPointer(true)}}
+	client := fake.NewClientset(sts, pod)
+	manager := NewManager(client, dynamicfake.NewSimpleDynamicClient(runtime.NewScheme(), vm), client.Discovery())
+	_, err := manager.Discover(context.Background(), DiscoverOptions{Namespace: pod.Namespace, PodName: pod.Name, AllowLeaderDowntime: true})
+	if domain.CategoryOf(err) != domain.ErrorPrecondition || !strings.Contains(err.Error(), "has not converged") {
+		t.Fatalf("category=%s error=%v", domain.CategoryOf(err), err)
 	}
 }
 
@@ -193,10 +220,10 @@ func TestGrafanaUsesCRSuspendAndDeploymentScale(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{Namespace: "vm", Name: "grafana-deployment", UID: types.UID("deployment-uid"), OwnerReferences: []metav1.OwnerReference{{APIVersion: grafanaAPIVersion, Kind: "Grafana", Name: "grafana", UID: "grafana-uid", Controller: boolPointer(true)}}},
 		Spec:       appsv1.DeploymentSpec{Replicas: &replicas, Selector: &metav1.LabelSelector{MatchLabels: map[string]string{"app": "grafana"}}},
 	}
-	rs := &appsv1.ReplicaSet{ObjectMeta: metav1.ObjectMeta{Namespace: "vm", Name: "grafana-rs", OwnerReferences: []metav1.OwnerReference{{APIVersion: "apps/v1", Kind: "Deployment", Name: deployment.Name, UID: deployment.UID, Controller: boolPointer(true)}}}}
+	rs := &appsv1.ReplicaSet{ObjectMeta: metav1.ObjectMeta{Namespace: "vm", Name: "grafana-rs", UID: types.UID("replicaset-uid"), OwnerReferences: []metav1.OwnerReference{{APIVersion: "apps/v1", Kind: "Deployment", Name: deployment.Name, UID: deployment.UID, Controller: boolPointer(true)}}}}
 	pod := readyPod("vm", "grafana-pod", "node-a")
 	pod.Labels = map[string]string{"app": "grafana"}
-	pod.OwnerReferences = []metav1.OwnerReference{{APIVersion: "apps/v1", Kind: "ReplicaSet", Name: rs.Name, Controller: boolPointer(true)}}
+	pod.OwnerReferences = []metav1.OwnerReference{{APIVersion: "apps/v1", Kind: "ReplicaSet", Name: rs.Name, UID: rs.UID, Controller: boolPointer(true)}}
 	client := fake.NewClientset(deployment, rs, pod)
 	podsResource := corev1.SchemeGroupVersion.WithResource("pods")
 	client.PrependReactor("update", "deployments", func(action clienttesting.Action) (bool, runtime.Object, error) {
@@ -206,6 +233,7 @@ func TestGrafanaUsesCRSuspendAndDeploymentScale(t *testing.T) {
 		} else {
 			resumed := readyPod("vm", pod.Name, "node-b")
 			resumed.Labels = map[string]string{"app": "grafana"}
+			resumed.OwnerReferences = []metav1.OwnerReference{{APIVersion: domain.AppsAPIVersion, Kind: domain.KindReplicaSet, Name: rs.Name, UID: rs.UID, Controller: boolPointer(true)}}
 			_ = client.Tracker().Create(podsResource, resumed, "vm")
 		}
 		return false, nil, nil
@@ -258,8 +286,8 @@ func TestDiscoverRejectsControllerSpecificUnsafeWorkloads(t *testing.T) {
 		want   string
 	}{
 		{name: "cockroach", labels: map[string]string{"app.kubernetes.io/name": "cockroachdb"}, want: "CockroachDB"},
-		{name: "backup workload", parent: &metav1.OwnerReference{APIVersion: "dataprotection.kubeblocks.io/v1alpha1", Kind: "Backup", Name: "archive"}, want: "backup workload"},
-		{name: "minio tenant", parent: &metav1.OwnerReference{APIVersion: "minio.min.io/v2", Kind: "Tenant", Name: "object-storage"}, want: "MinIO"},
+		{name: "backup workload", parent: &metav1.OwnerReference{APIVersion: "dataprotection.kubeblocks.io/v1alpha1", Kind: "Backup", Name: "archive", UID: types.UID("backup-uid")}, want: "backup workload"},
+		{name: "minio tenant", parent: &metav1.OwnerReference{APIVersion: "minio.min.io/v2", Kind: "Tenant", Name: "object-storage", UID: types.UID("tenant-uid")}, want: "MinIO"},
 		{name: "minio helm", labels: map[string]string{"app.kubernetes.io/name": "minio"}, want: "MinIO"},
 	}
 	for _, tt := range tests {
@@ -289,10 +317,12 @@ func TestDiscoverRejectsBackupWorkloadBeforeReadiness(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{
 			Namespace: "app",
 			Name:      "postgres-archive-wal",
+			UID:       types.UID("archive-sts-uid"),
 			OwnerReferences: []metav1.OwnerReference{{
 				APIVersion: "dataprotection.kubeblocks.io/v1alpha1",
 				Kind:       "Backup",
 				Name:       "postgres-backup",
+				UID:        types.UID("backup-uid"),
 				Controller: boolPointer(true),
 			}},
 		},
@@ -302,6 +332,7 @@ func TestDiscoverRejectsBackupWorkloadBeforeReadiness(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{
 			Namespace: "app",
 			Name:      "postgres-archive-wal-0",
+			UID:       types.UID("archive-pod-uid"),
 			OwnerReferences: []metav1.OwnerReference{{
 				APIVersion: "apps/v1",
 				Kind:       "StatefulSet",
@@ -323,10 +354,12 @@ func TestDiscoverRejectsBackupOwnedJobBeforeReadiness(t *testing.T) {
 	job := &batchv1.Job{ObjectMeta: metav1.ObjectMeta{
 		Namespace: "app",
 		Name:      "postgres-archive-wal",
+		UID:       types.UID("archive-job-uid"),
 		OwnerReferences: []metav1.OwnerReference{{
 			APIVersion: "dataprotection.kubeblocks.io/v1alpha1",
 			Kind:       "Backup",
 			Name:       "postgres-backup",
+			UID:        types.UID("backup-uid"),
 			Controller: boolPointer(true),
 		}},
 	}}
@@ -334,6 +367,7 @@ func TestDiscoverRejectsBackupOwnedJobBeforeReadiness(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{
 			Namespace: "app",
 			Name:      "postgres-archive-wal-failed",
+			UID:       types.UID("archive-job-pod-uid"),
 			OwnerReferences: []metav1.OwnerReference{{
 				APIVersion: "batch/v1",
 				Kind:       "Job",
@@ -357,6 +391,7 @@ func TestVictoriaLogsHelmStatefulSetUsesOrdinalAdapter(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{
 			Namespace: "logs",
 			Name:      "victoria-logs-vlstorage",
+			UID:       types.UID("victoria-logs-sts-uid"),
 			Annotations: map[string]string{
 				"meta.helm.sh/release-name": "victoria-logs",
 			},
@@ -476,7 +511,7 @@ func TestDiscoverRejectsUnsafeKubeBlocksInstanceSetComponents(t *testing.T) {
 				"app.kubernetes.io/instance":        "cluster",
 				"apps.kubeblocks.io/component-name": tt.component,
 			}
-			selected.OwnerReferences = []metav1.OwnerReference{{APIVersion: "workloads.kubeblocks.io/v1alpha1", Kind: "InstanceSet", Name: "cluster-" + tt.component, Controller: boolPointer(true)}}
+			selected.OwnerReferences = []metav1.OwnerReference{{APIVersion: "workloads.kubeblocks.io/v1alpha1", Kind: "InstanceSet", Name: "cluster-" + tt.component, UID: types.UID("instanceset-uid"), Controller: boolPointer(true)}}
 			typed := fake.NewClientset(selected)
 			discovery := typed.Discovery().(*discoveryfake.FakeDiscovery)
 			discovery.Resources = []*metav1.APIResourceList{{

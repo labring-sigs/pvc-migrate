@@ -32,13 +32,7 @@ func (r *rootState) newPVCIdentityCommand(move bool) *cobra.Command {
 		short = "Move an offline PVC identity to another namespace"
 	}
 	command := &cobra.Command{
-		Use: use,
-		Aliases: func() []string {
-			if move {
-				return []string{"mv"}
-			}
-			return nil
-		}(),
+		Use:   use,
 		Short: short,
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {

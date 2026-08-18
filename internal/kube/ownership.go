@@ -26,12 +26,15 @@ func markPVSession(labels map[string]string, sessionID, role string) (changed bo
 }
 
 func AcquirePVC(ctx context.Context, client kubernetes.Interface, ref domain.ObjectReference, sessionID string) error {
+	if err := validatePVCOwnershipInput(ref, sessionID, "acquire PVC"); err != nil {
+		return err
+	}
 	err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
 		pvc, err := client.CoreV1().PersistentVolumeClaims(ref.Namespace).Get(ctx, ref.Name, metav1.GetOptions{})
 		if err != nil {
 			return err
 		}
-		if ref.UID != "" && pvc.UID != ref.UID {
+		if pvc.UID != ref.UID {
 			return domain.NewError(domain.ErrorConflict, "acquire PVC", fmt.Sprintf("PVC %s/%s UID changed", ref.Namespace, ref.Name))
 		}
 		owner := pvc.Annotations[SessionKey]
@@ -61,6 +64,9 @@ func AcquirePVC(ctx context.Context, client kubernetes.Interface, ref domain.Obj
 }
 
 func ReleasePVC(ctx context.Context, client kubernetes.Interface, ref domain.ObjectReference, sessionID string) error {
+	if err := validatePVCOwnershipInput(ref, sessionID, "release PVC"); err != nil {
+		return err
+	}
 	err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
 		pvc, err := client.CoreV1().PersistentVolumeClaims(ref.Namespace).Get(ctx, ref.Name, metav1.GetOptions{})
 		if apierrors.IsNotFound(err) {
@@ -69,7 +75,7 @@ func ReleasePVC(ctx context.Context, client kubernetes.Interface, ref domain.Obj
 		if err != nil {
 			return err
 		}
-		if ref.UID != "" && pvc.UID != ref.UID {
+		if pvc.UID != ref.UID {
 			return domain.NewError(domain.ErrorConflict, "release PVC", fmt.Sprintf("PVC %s/%s UID changed", ref.Namespace, ref.Name))
 		}
 		if pvc.Annotations[SessionKey] != sessionID {
@@ -89,6 +95,9 @@ func ReleasePVC(ctx context.Context, client kubernetes.Interface, ref domain.Obj
 }
 
 func FinalizePVC(ctx context.Context, client kubernetes.Interface, ref domain.ObjectReference, sessionID string, original domain.PVCMetadata) error {
+	if err := validatePVCOwnershipInput(ref, sessionID, "finalize PVC"); err != nil {
+		return err
+	}
 	err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
 		pvc, err := client.CoreV1().PersistentVolumeClaims(ref.Namespace).Get(ctx, ref.Name, metav1.GetOptions{})
 		if apierrors.IsNotFound(err) {
@@ -97,7 +106,7 @@ func FinalizePVC(ctx context.Context, client kubernetes.Interface, ref domain.Ob
 		if err != nil {
 			return err
 		}
-		if ref.UID != "" && pvc.UID != ref.UID {
+		if pvc.UID != ref.UID {
 			return domain.NewError(domain.ErrorConflict, "finalize PVC", fmt.Sprintf("PVC %s/%s UID changed", ref.Namespace, ref.Name))
 		}
 		for _, owner := range []string{pvc.Annotations[SessionKey], pvc.Labels[SessionKey]} {
@@ -133,6 +142,16 @@ func FinalizePVC(ctx context.Context, client kubernetes.Interface, ref domain.Ob
 			return err
 		}
 		return domain.WrapError(domain.ErrorKubernetes, "finalize PVC", fmt.Sprintf("update %s/%s", ref.Namespace, ref.Name), err)
+	}
+	return nil
+}
+
+func validatePVCOwnershipInput(ref domain.ObjectReference, sessionID, operation string) error {
+	if ref.Namespace == "" || ref.Name == "" || ref.UID == "" {
+		return domain.NewError(domain.ErrorValidation, operation, "PVC namespace, name, and UID are required")
+	}
+	if sessionID == "" {
+		return domain.NewError(domain.ErrorValidation, operation, "session ID is required")
 	}
 	return nil
 }

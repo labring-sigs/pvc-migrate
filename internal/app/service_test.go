@@ -95,6 +95,7 @@ func (m *memoryStore) Delete(context.Context, *domain.Session) error {
 
 func TestSessionLockSupportsMultiLevelReentry(t *testing.T) {
 	client := fake.NewClientset()
+	assignLeaseUIDs(client)
 	service := &Service{store: kube.NewConfigMapSessionStore(client)}
 	calls := 0
 	err := service.withSessionIDLock(context.Background(), "system", "session", func(first context.Context) error {
@@ -273,6 +274,10 @@ func appTestService(t *testing.T, copier *fakeCopier) (*Service, *domain.Session
 			ObjectMeta: metav1.ObjectMeta{Name: "pv-destination", UID: types.UID("dest-pv-uid")},
 			Spec:       corev1.PersistentVolumeSpec{ClaimRef: &corev1.ObjectReference{Namespace: "app", Name: "data", UID: types.UID("source-pvc-uid")}},
 		},
+		&corev1.PersistentVolume{
+			ObjectMeta: metav1.ObjectMeta{Name: "pv-source", UID: types.UID("source-pv-uid")},
+			Spec:       corev1.PersistentVolumeSpec{ClaimRef: &corev1.ObjectReference{Namespace: "app", Name: "data", UID: types.UID("source-pvc-uid")}},
+		},
 	)
 	store := &memoryStore{}
 	controllers := &fakeController{}
@@ -283,6 +288,12 @@ func appTestService(t *testing.T, copier *fakeCopier) (*Service, *domain.Session
 	})
 	service.sleep = func(context.Context, time.Duration) error { return nil }
 	return service, appTestSession(), controllers, store
+}
+
+func markTestSessionReserved(session *domain.Session) {
+	session.Spec.Volumes[0].DestinationPVC.UID = types.UID("dest-pvc-uid")
+	session.Spec.Volumes[0].DestinationPV = domain.ObjectReference{Name: "pv-destination", UID: types.UID("dest-pv-uid")}
+	session.Status.Volumes[0].Reserved = true
 }
 
 func TestMigrateRunsAllStagesAndPersistsProgress(t *testing.T) {
@@ -318,6 +329,7 @@ func TestResumeSessionUsesPersistedPrecopyPasses(t *testing.T) {
 			copier := &fakeCopier{}
 			service, session, _, _ := appTestService(t, copier)
 			session.Status.Phase = domain.PhaseReserved
+			markTestSessionReserved(session)
 			session.Spec.Migrate.PrecopyPasses = test.passes
 			if err := service.ResumeSession(context.Background(), session); err != nil {
 				t.Fatal(err)
@@ -344,6 +356,7 @@ func TestResumeSessionCompletesRemainingPrecopyPasses(t *testing.T) {
 			copier := &fakeCopier{}
 			service, session, _, _ := appTestService(t, copier)
 			session.Status.Phase = test.phase
+			markTestSessionReserved(session)
 			session.Spec.Migrate.PrecopyPasses = test.passes
 			session.Status.WarmPassesCompleted = test.completed
 			if err := service.ResumeSession(context.Background(), session); err != nil {
@@ -457,6 +470,12 @@ func TestCopyConsumerPreflightSupportsOfflineAndOnlineBoundaries(t *testing.T) {
 	session.Spec.WorkflowOptionsPtr().SourceNode = ""
 	if err := service.validateCopyConsumers(context.Background(), session, &session.Spec.Volumes[0]); err != nil {
 		t.Fatalf("online RWO consumer error=%v", err)
+	}
+	if session.Spec.WorkflowOptions().SourceNode != "" {
+		t.Fatalf("single-volume recheck mutated source node=%q", session.Spec.WorkflowOptions().SourceNode)
+	}
+	if err := service.validateCopyConsumersBatch(context.Background(), session, true); err != nil {
+		t.Fatalf("online RWO batch error=%v", err)
 	}
 	if session.Spec.WorkflowOptions().SourceNode != "source-node" {
 		t.Fatalf("inferred source node=%q", session.Spec.WorkflowOptions().SourceNode)

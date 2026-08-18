@@ -257,6 +257,20 @@ func TestPlanRenameRejectsExistingDestination(t *testing.T) {
 	}
 }
 
+func TestPlanRenameRejectsSourcePVClaimRefDrift(t *testing.T) {
+	objects := plannerObjects("2Gi")
+	objects[6].(*corev1.PersistentVolume).Spec.ClaimRef.Name = "other"
+	plan, err := New(plannerClient(objects...), nil).PlanRename(context.Background(), RenameOptions{
+		SessionID: "rename-binding-drift", SourceNamespace: "app", SourcePVC: "data", DestinationPVC: "renamed", SessionNamespace: "system",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if plan.Ready || !hasFailedCheck(plan, "source-binding") {
+		t.Fatalf("plan=%#v", plan)
+	}
+}
+
 func TestPlanRenameChecksMutationRBAC(t *testing.T) {
 	client := plannerClient(plannerObjects("2Gi")...)
 	client.PrependReactor("create", "selfsubjectaccessreviews", func(action clienttesting.Action) (bool, runtime.Object, error) {

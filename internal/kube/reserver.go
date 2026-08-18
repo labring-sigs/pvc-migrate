@@ -50,7 +50,18 @@ func (r *Reserver) waitFor(ctx context.Context, description string, condition fu
 }
 
 func (r *Reserver) ReserveVolume(ctx context.Context, session *domain.Session, volume *domain.VolumeSpec, status *domain.VolumeStatus, dryRun bool) error {
-	if err := r.verifySourceIdentity(ctx, volume); err != nil {
+	if session == nil || session.ID == "" {
+		return domain.NewError(domain.ErrorValidation, "reserve volume", "session and session ID are required")
+	}
+	if volume == nil || status == nil {
+		return domain.NewError(domain.ErrorValidation, "reserve volume", "volume specification and status are required")
+	}
+	if volume.SourcePVC.Namespace == "" || volume.SourcePVC.Name == "" || volume.SourcePVC.UID == "" ||
+		volume.SourcePV.Name == "" || volume.SourcePV.UID == "" ||
+		volume.DestinationPVC.Namespace == "" || volume.DestinationPVC.Name == "" {
+		return domain.NewError(domain.ErrorValidation, "reserve volume", "source PVC, source PV, and destination PVC identities are required")
+	}
+	if err := r.verifySourceIdentity(ctx, session.ID, volume); err != nil {
 		return err
 	}
 	if !HasWritableAccessMode(volume.AccessModes) {
@@ -100,7 +111,16 @@ func (r *Reserver) ReserveVolume(ctx context.Context, session *domain.Session, v
 			if getErr != nil {
 				return domain.WrapError(domain.ErrorKubernetes, "reserve volume dry-run", fmt.Sprintf("read existing PVC %s/%s", pvc.Namespace, pvc.Name), getErr)
 			}
-			return validateDestinationPVC(existing, session.ID, volume, capacity)
+			if err := validateDestinationPVC(existing, session.ID, volume, capacity); err != nil {
+				return err
+			}
+			if status.Reserved && (volume.DestinationPVC.UID == "" || volume.DestinationPV.Name == "" || volume.DestinationPV.UID == "") {
+				return domain.NewError(domain.ErrorPrecondition, "reserve volume", fmt.Sprintf("recorded destination identity for PVC %s/%s is incomplete", existing.Namespace, existing.Name))
+			}
+			if status.Reserved || volume.DestinationPV.Name != "" || existing.Status.Phase == corev1.ClaimBound {
+				return r.verifyDestinationIdentity(ctx, existing, session.ID, volume, status.Reserved)
+			}
+			return nil
 		}
 		if err != nil {
 			return domain.WrapError(domain.ErrorPrecondition, "reserve volume dry-run", fmt.Sprintf("PVC %s/%s was rejected", pvc.Namespace, pvc.Name), err)
@@ -130,6 +150,9 @@ func (r *Reserver) ReserveVolume(ctx context.Context, session *domain.Session, v
 	if err != nil {
 		return domain.WrapError(domain.ErrorKubernetes, "reserve volume", "read bound destination PVC", err)
 	}
+	if err := validateDestinationPVC(bound, session.ID, volume, capacity); err != nil {
+		return err
+	}
 	if bound.Status.Phase != corev1.ClaimBound || bound.Spec.VolumeName == "" {
 		return domain.NewError(domain.ErrorPrecondition, "reserve volume", fmt.Sprintf("PVC %s/%s did not bind", bound.Namespace, bound.Name))
 	}
@@ -144,7 +167,10 @@ func (r *Reserver) ReserveVolume(ctx context.Context, session *domain.Session, v
 	if err != nil {
 		return domain.WrapError(domain.ErrorKubernetes, "reserve volume", "read destination PV", err)
 	}
-	if pv.Spec.ClaimRef == nil || pv.Spec.ClaimRef.UID != bound.UID {
+	if volume.DestinationPV.Name != "" && (pv.Name != volume.DestinationPV.Name || volume.DestinationPV.UID == "" || pv.UID != volume.DestinationPV.UID) {
+		return domain.NewError(domain.ErrorConflict, "reserve volume", fmt.Sprintf("destination PV %s identity changed", volume.DestinationPV.Name))
+	}
+	if pv.Spec.ClaimRef == nil || pv.Spec.ClaimRef.Namespace != bound.Namespace || pv.Spec.ClaimRef.Name != bound.Name || pv.Spec.ClaimRef.UID != bound.UID {
 		return domain.NewError(domain.ErrorConflict, "reserve volume", fmt.Sprintf("PV %s claimRef does not match destination PVC UID", pv.Name))
 	}
 	if options.TargetNode != "" {
@@ -172,7 +198,7 @@ func (r *Reserver) ReserveVolume(ctx context.Context, session *domain.Session, v
 	return nil
 }
 
-func (r *Reserver) verifySourceIdentity(ctx context.Context, volume *domain.VolumeSpec) error {
+func (r *Reserver) verifySourceIdentity(ctx context.Context, sessionID string, volume *domain.VolumeSpec) error {
 	pvc, err := r.client.CoreV1().PersistentVolumeClaims(volume.SourcePVC.Namespace).Get(ctx, volume.SourcePVC.Name, metav1.GetOptions{})
 	if err != nil {
 		return domain.WrapError(domain.ErrorKubernetes, "reserve volume", "read source PVC", err)
@@ -180,12 +206,20 @@ func (r *Reserver) verifySourceIdentity(ctx context.Context, volume *domain.Volu
 	if pvc.UID != volume.SourcePVC.UID || pvc.Spec.VolumeName != volume.SourcePV.Name || pvc.Status.Phase != corev1.ClaimBound {
 		return domain.NewError(domain.ErrorConflict, "reserve volume", fmt.Sprintf("source PVC %s/%s identity or binding changed", pvc.Namespace, pvc.Name))
 	}
+	for _, owner := range []string{pvc.Annotations[SessionKey], pvc.Labels[SessionKey]} {
+		if owner != "" && owner != sessionID {
+			return domain.NewError(domain.ErrorConflict, "reserve volume", fmt.Sprintf("source PVC %s/%s belongs to session %s", pvc.Namespace, pvc.Name, owner))
+		}
+	}
 	pv, err := r.client.CoreV1().PersistentVolumes().Get(ctx, volume.SourcePV.Name, metav1.GetOptions{})
 	if err != nil {
 		return domain.WrapError(domain.ErrorKubernetes, "reserve volume", "read source PV", err)
 	}
-	if pv.UID != volume.SourcePV.UID || pv.Spec.ClaimRef == nil || pv.Spec.ClaimRef.UID != pvc.UID {
+	if pv.UID != volume.SourcePV.UID || pv.Spec.ClaimRef == nil || pv.Spec.ClaimRef.Namespace != pvc.Namespace || pv.Spec.ClaimRef.Name != pvc.Name || pv.Spec.ClaimRef.UID != pvc.UID {
 		return domain.NewError(domain.ErrorConflict, "reserve volume", fmt.Sprintf("source PV %s identity or claimRef changed", pv.Name))
+	}
+	if err := validateReservationPVOwnership(pv, sessionID, ResourceRoleSource, false); err != nil {
+		return err
 	}
 	return nil
 }
@@ -194,8 +228,12 @@ func validateDestinationPVC(pvc *corev1.PersistentVolumeClaim, sessionID string,
 	if pvc.DeletionTimestamp != nil {
 		return domain.NewError(domain.ErrorConflict, "reserve volume", fmt.Sprintf("destination PVC %s/%s is terminating", pvc.Namespace, pvc.Name))
 	}
-	if pvc.Labels[SessionKey] != sessionID || pvc.Annotations[SourcePVCUIDAnnotation] != string(volume.SourcePVC.UID) {
+	if pvc.Labels[ManagedByLabel] != ManagedByValue || pvc.Labels[SessionKey] != sessionID || pvc.Labels[ResourceRoleLabel] != ResourceRoleDestination ||
+		pvc.Annotations[SessionKey] != sessionID || pvc.Annotations[SourcePVCUIDAnnotation] != string(volume.SourcePVC.UID) || pvc.Annotations[SourcePVAnnotation] != volume.SourcePV.Name {
 		return domain.NewError(domain.ErrorConflict, "reserve volume", fmt.Sprintf("destination PVC %s/%s belongs to another operation", pvc.Namespace, pvc.Name))
+	}
+	if volume.DestinationPVC.UID != "" && pvc.UID != volume.DestinationPVC.UID {
+		return domain.NewError(domain.ErrorConflict, "reserve volume", fmt.Sprintf("destination PVC %s/%s UID changed", pvc.Namespace, pvc.Name))
 	}
 	if pvc.Spec.StorageClassName == nil || *pvc.Spec.StorageClassName != volume.StorageClass {
 		return domain.NewError(domain.ErrorConflict, "reserve volume", fmt.Sprintf("destination PVC %s/%s StorageClass changed", pvc.Namespace, pvc.Name))
@@ -209,6 +247,46 @@ func validateDestinationPVC(pvc *corev1.PersistentVolumeClaim, sessionID string,
 	request := pvc.Spec.Resources.Requests[corev1.ResourceStorage]
 	if request.Cmp(capacity) < 0 {
 		return domain.NewError(domain.ErrorConflict, "reserve volume", fmt.Sprintf("destination PVC %s/%s capacity %s is below %s", pvc.Namespace, pvc.Name, request.String(), capacity.String()))
+	}
+	return nil
+}
+
+func (r *Reserver) verifyDestinationIdentity(ctx context.Context, pvc *corev1.PersistentVolumeClaim, sessionID string, volume *domain.VolumeSpec, requireOwned bool) error {
+	if volume.DestinationPVC.UID != "" && pvc.UID != volume.DestinationPVC.UID {
+		return domain.NewError(domain.ErrorConflict, "reserve volume", fmt.Sprintf("destination PVC %s/%s UID changed", pvc.Namespace, pvc.Name))
+	}
+	if pvc.Status.Phase != corev1.ClaimBound || pvc.Spec.VolumeName == "" {
+		return domain.NewError(domain.ErrorConflict, "reserve volume", fmt.Sprintf("destination PVC %s/%s binding changed", pvc.Namespace, pvc.Name))
+	}
+	if volume.DestinationPV.Name != "" && (volume.DestinationPV.UID == "" || pvc.Spec.VolumeName != volume.DestinationPV.Name) {
+		return domain.NewError(domain.ErrorConflict, "reserve volume", fmt.Sprintf("destination PVC %s/%s binding changed", pvc.Namespace, pvc.Name))
+	}
+	pvName := pvc.Spec.VolumeName
+	pv, err := r.client.CoreV1().PersistentVolumes().Get(ctx, pvName, metav1.GetOptions{})
+	if err != nil {
+		return domain.WrapError(domain.ErrorKubernetes, "reserve volume", fmt.Sprintf("read destination PV %s", pvName), err)
+	}
+	if volume.DestinationPV.UID != "" && pv.UID != volume.DestinationPV.UID {
+		return domain.NewError(domain.ErrorConflict, "reserve volume", fmt.Sprintf("destination PV %s identity changed", pv.Name))
+	}
+	if err := validateReservationPVOwnership(pv, sessionID, ResourceRoleDestination, requireOwned); err != nil {
+		return err
+	}
+	if pv.Spec.ClaimRef == nil || pv.Spec.ClaimRef.Namespace != pvc.Namespace || pv.Spec.ClaimRef.Name != pvc.Name || pv.Spec.ClaimRef.UID != pvc.UID {
+		return domain.NewError(domain.ErrorConflict, "reserve volume", fmt.Sprintf("destination PV %s identity or claimRef changed", pv.Name))
+	}
+	return nil
+}
+
+func validateReservationPVOwnership(pv *corev1.PersistentVolume, sessionID, expectedRole string, requireOwned bool) error {
+	owner := pv.Labels[SessionKey]
+	role := pv.Labels[ResourceRoleLabel]
+	managedBy := pv.Labels[ManagedByLabel]
+	if owner == "" && role == "" && managedBy == "" && !requireOwned {
+		return nil
+	}
+	if owner != sessionID || role != expectedRole || managedBy != ManagedByValue {
+		return domain.NewError(domain.ErrorConflict, "reserve volume", fmt.Sprintf("PV %s has unexpected session ownership or role", pv.Name))
 	}
 	return nil
 }
@@ -289,6 +367,12 @@ func (r *Reserver) provisionOnTarget(ctx context.Context, session *domain.Sessio
 		if getErr != nil {
 			return false, getErr
 		}
+		if current.UID != existing.UID {
+			return false, domain.NewError(domain.ErrorConflict, "provision target PVC", fmt.Sprintf("tool Pod %s/%s was replaced while waiting for readiness", pod.Namespace, pod.Name))
+		}
+		if err := validateReservationPod(current, session.ID, volume.DestinationPVC.Name); err != nil {
+			return false, err
+		}
 		if current.Status.Phase == corev1.PodFailed {
 			return false, domain.NewError(domain.ErrorPrecondition, "provision target PVC", fmt.Sprintf("tool Pod %s/%s failed", pod.Namespace, pod.Name))
 		}
@@ -332,7 +416,10 @@ func (r *Reserver) cleanupReservationPod(ctx context.Context, session *domain.Se
 }
 
 func validateReservationPod(pod *corev1.Pod, sessionID, destinationPVC string) error {
-	if pod.Labels[SessionKey] != sessionID || pod.Labels[ResourceRoleLabel] != ResourceRoleReservationConsumer {
+	if pod == nil || pod.Namespace == "" || pod.Name == "" || pod.UID == "" {
+		return domain.NewError(domain.ErrorKubernetes, "validate reservation Pod", "Kubernetes returned an incomplete reservation Pod identity")
+	}
+	if pod.Labels[ManagedByLabel] != ManagedByValue || pod.Labels[SessionKey] != sessionID || pod.Labels[ResourceRoleLabel] != ResourceRoleReservationConsumer {
 		return domain.NewError(domain.ErrorConflict, "validate reservation Pod", fmt.Sprintf("tool Pod %s/%s is not owned by session %s as a reservation consumer", pod.Namespace, pod.Name, sessionID))
 	}
 	if !PodUsesPVC(pod, destinationPVC) {
@@ -342,6 +429,9 @@ func validateReservationPod(pod *corev1.Pod, sessionID, destinationPVC string) e
 }
 
 func (r *Reserver) retainPV(ctx context.Context, name string, uid types.UID, sessionID, role string) error {
+	if name == "" || uid == "" || sessionID == "" || role == "" {
+		return domain.NewError(domain.ErrorValidation, "retain PV", "PV name, UID, session ID, and role are required")
+	}
 	err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
 		pv, err := r.client.CoreV1().PersistentVolumes().Get(ctx, name, metav1.GetOptions{})
 		if err != nil {

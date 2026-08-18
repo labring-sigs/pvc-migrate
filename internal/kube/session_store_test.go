@@ -23,8 +23,8 @@ func storeTestSession() *domain.Session {
 		DestinationNamespace: "app",
 		SessionNamespace:     "system",
 		Volumes: []domain.VolumeSpec{{
-			SourcePVC:      domain.ObjectReference{Name: "data", Namespace: "app"},
-			SourcePV:       domain.ObjectReference{Name: "source-pv"},
+			SourcePVC:      domain.ObjectReference{Name: "data", Namespace: "app", UID: "source-pvc-uid"},
+			SourcePV:       domain.ObjectReference{Name: "source-pv", UID: "source-pv-uid"},
 			SourcePVCSpec:  corev1.PersistentVolumeClaimSpec{},
 			DestinationPVC: domain.ObjectReference{Name: "dest", Namespace: "system"},
 		}},
@@ -130,6 +130,32 @@ func TestConfigMapSessionStoreDeleteUsesUIDPrecondition(t *testing.T) {
 	}
 	if err := store.Delete(ctx, session); err != nil {
 		t.Fatalf("idempotent delete: %v", err)
+	}
+}
+
+func TestConfigMapSessionStoreDeleteRejectsChangedSession(t *testing.T) {
+	ctx := context.Background()
+	client := fake.NewClientset()
+	store := NewConfigMapSessionStore(client)
+	session := storeTestSession()
+	if err := store.Create(ctx, session); err != nil {
+		t.Fatal(err)
+	}
+	session.ResourceVersion = "loaded-resource-version"
+	current, err := client.CoreV1().ConfigMaps("system").Get(ctx, SessionConfigMapName(session.ID), metav1.GetOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	current.UID = "replacement-session-uid"
+	current.ResourceVersion = "replacement-resource-version"
+	if _, err := client.CoreV1().ConfigMaps("system").Update(ctx, current, metav1.UpdateOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Delete(ctx, session); domain.CategoryOf(err) != domain.ErrorConflict {
+		t.Fatalf("category=%s error=%v", domain.CategoryOf(err), err)
+	}
+	if _, err := client.CoreV1().ConfigMaps("system").Get(ctx, current.Name, metav1.GetOptions{}); err != nil {
+		t.Fatalf("replacement session ConfigMap was changed: %v", err)
 	}
 }
 

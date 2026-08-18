@@ -117,8 +117,27 @@ func TestReleasePVCIsOwnershipSafeAndIdempotent(t *testing.T) {
 	if pvc.Annotations[SessionKey] != "other-session" {
 		t.Fatalf("foreign ownership changed: %#v", pvc.Annotations)
 	}
-	if err := ReleasePVC(ctx, client, domain.ObjectReference{Namespace: "app", Name: "missing"}, "session"); err != nil {
+	if err := ReleasePVC(ctx, client, domain.ObjectReference{Namespace: "app", Name: "missing", UID: "missing-uid"}, "session"); err != nil {
 		t.Fatalf("release missing PVC: %v", err)
+	}
+}
+
+func TestPVCOwnershipMutationsRequireStableIdentity(t *testing.T) {
+	ref := domain.ObjectReference{Namespace: "app", Name: "data"}
+	client := fake.NewClientset()
+	for _, test := range []struct {
+		name string
+		run  func() error
+	}{
+		{name: "acquire", run: func() error { return AcquirePVC(context.Background(), client, ref, "session") }},
+		{name: "release", run: func() error { return ReleasePVC(context.Background(), client, ref, "session") }},
+		{name: "finalize", run: func() error { return FinalizePVC(context.Background(), client, ref, "session", domain.PVCMetadata{}) }},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if err := test.run(); domain.CategoryOf(err) != domain.ErrorValidation {
+				t.Fatalf("category=%s error=%v", domain.CategoryOf(err), err)
+			}
+		})
 	}
 }
 

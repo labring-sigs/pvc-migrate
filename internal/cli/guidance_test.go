@@ -20,8 +20,15 @@ import (
 func guidanceSession(phase domain.Phase) *domain.Session {
 	session := domain.NewSession("mig-test", domain.NewSessionSpec(domain.OperationMigratePod, domain.SessionCommon{
 		SourceNamespace: "app", TemporaryNamespace: "pvc-migrate-system", DestinationNamespace: "app", SessionNamespace: "pvc-migrate-system",
-		Volumes: []domain.VolumeSpec{{SourcePVC: domain.ObjectReference{Namespace: "app", Name: "data"}, SourcePV: domain.ObjectReference{Name: "pv-source"}}},
-	}, domain.WorkloadSpec{Adapter: domain.WorkloadStandalone}, false, domain.SessionWorkflowOptions{PrecopyPasses: 1}), time.Now())
+		Volumes: []domain.VolumeSpec{{
+			SourcePVC:      domain.ObjectReference{Namespace: "app", Name: "data", UID: "source-pvc-uid"},
+			SourcePV:       domain.ObjectReference{Name: "pv-source", UID: "source-pv-uid"},
+			DestinationPVC: domain.ObjectReference{Namespace: "pvc-migrate-system", Name: "data-migrated"},
+		}},
+	}, domain.WorkloadSpec{
+		Adapter: domain.WorkloadStandalone,
+		Pod:     domain.ObjectReference{Namespace: "app", Name: "application", UID: "application-uid"},
+	}, false, domain.SessionWorkflowOptions{PrecopyPasses: 1}), time.Now())
 	session.Status.Phase = phase
 	return session
 }
@@ -585,7 +592,7 @@ func TestOpenEBSLVMPlanFailureGuidanceOffersBothRecoveryPaths(t *testing.T) {
 	var output bytes.Buffer
 	plan := &domain.MigrationPlan{
 		SessionSpec: domain.NewSessionSpec(domain.OperationMigrate, domain.SessionCommon{}, domain.WorkloadSpec{}, false, domain.SessionWorkflowOptions{}),
-		Checks:      []domain.Check{{Name: "warm-copy-mount", Severity: domain.SeverityError, Message: "StorageClass local.csi.openebs.io does not support a second mount"}},
+		Checks:      []domain.Check{{Name: "warm-copy-mount", Severity: domain.SeverityError, Message: "OpenEBS LVMVolume does not support a second mount"}},
 	}
 	if err := writePlanFailureGuidance(&output, plan); err != nil {
 		t.Fatal(err)

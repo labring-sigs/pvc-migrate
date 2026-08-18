@@ -36,7 +36,7 @@ func TestDiscoverRejectsUnsafePodAndControllerStates(t *testing.T) {
 		{
 			name: "Pod is unready",
 			pod: &corev1.Pod{
-				ObjectMeta: metav1.ObjectMeta{Namespace: "app", Name: "worker"},
+				ObjectMeta: metav1.ObjectMeta{Namespace: "app", Name: "worker", UID: types.UID("worker-uid")},
 				Status:     corev1.PodStatus{Phase: corev1.PodRunning},
 			},
 			want: "must be Running and Ready",
@@ -54,7 +54,7 @@ func TestDiscoverRejectsUnsafePodAndControllerStates(t *testing.T) {
 			name: "unsupported controller",
 			pod: func() *corev1.Pod {
 				pod := readyPod("app", "worker", "node-a")
-				pod.OwnerReferences = []metav1.OwnerReference{{APIVersion: "apps/v1", Kind: "Deployment", Name: "worker", Controller: boolPointer(true)}}
+				pod.OwnerReferences = []metav1.OwnerReference{{APIVersion: "apps/v1", Kind: "Deployment", Name: "worker", UID: types.UID("deployment-uid"), Controller: boolPointer(true)}}
 				return pod
 			}(),
 			want: "has no safe pause adapter",
@@ -63,7 +63,7 @@ func TestDiscoverRejectsUnsafePodAndControllerStates(t *testing.T) {
 			name: "malformed controller version",
 			pod: func() *corev1.Pod {
 				pod := readyPod("app", "worker", "node-a")
-				pod.OwnerReferences = []metav1.OwnerReference{{APIVersion: "bad/version/extra", Kind: "Controller", Name: "worker", Controller: boolPointer(true)}}
+				pod.OwnerReferences = []metav1.OwnerReference{{APIVersion: "bad/version/extra", Kind: "Controller", Name: "worker", UID: types.UID("controller-uid"), Controller: boolPointer(true)}}
 				return pod
 			}(),
 			want: "parse controller apiVersion",
@@ -81,6 +81,28 @@ func TestDiscoverRejectsUnsafePodAndControllerStates(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestDiscoverRejectsIncompleteKubernetesIdentity(t *testing.T) {
+	t.Run("Pod UID", func(t *testing.T) {
+		pod := readyPod("app", "worker", "node-a")
+		pod.UID = ""
+		manager := NewManager(kubernetesfake.NewClientset(), dynamicfake.NewSimpleDynamicClient(runtime.NewScheme()), nil)
+		_, err := manager.DiscoverPod(context.Background(), pod, DiscoverOptions{Namespace: pod.Namespace, PodName: pod.Name})
+		if domain.CategoryOf(err) != domain.ErrorKubernetes {
+			t.Fatalf("category=%s error=%v", domain.CategoryOf(err), err)
+		}
+	})
+
+	t.Run("owner UID", func(t *testing.T) {
+		pod := readyPod("app", "worker", "node-a")
+		pod.OwnerReferences = []metav1.OwnerReference{{APIVersion: domain.AppsAPIVersion, Kind: domain.KindStatefulSet, Name: "worker", Controller: boolPointer(true)}}
+		manager := NewManager(kubernetesfake.NewClientset(), dynamicfake.NewSimpleDynamicClient(runtime.NewScheme()), nil)
+		_, err := manager.DiscoverPod(context.Background(), pod, DiscoverOptions{Namespace: pod.Namespace, PodName: pod.Name})
+		if domain.CategoryOf(err) != domain.ErrorPrecondition {
+			t.Fatalf("category=%s error=%v", domain.CategoryOf(err), err)
+		}
+	})
 }
 
 func TestDiscoverStatefulSetSafetyChecks(t *testing.T) {
@@ -125,6 +147,40 @@ func TestDiscoverStatefulSetSafetyChecks(t *testing.T) {
 	}
 }
 
+func TestDiscoverRejectsReplacedControllerChain(t *testing.T) {
+	t.Run("StatefulSet", func(t *testing.T) {
+		replicas := int32(1)
+		sts := &appsv1.StatefulSet{
+			ObjectMeta: metav1.ObjectMeta{Namespace: "app", Name: "db", UID: "replacement-sts-uid"},
+			Spec:       appsv1.StatefulSetSpec{Replicas: &replicas},
+		}
+		pod := readyPod("app", "db-0", "node-a")
+		pod.OwnerReferences = []metav1.OwnerReference{{
+			APIVersion: domain.AppsAPIVersion, Kind: domain.KindStatefulSet, Name: sts.Name, UID: "original-sts-uid", Controller: boolPointer(true),
+		}}
+		client := kubernetesfake.NewClientset(sts, pod)
+		manager := NewManager(client, dynamicfake.NewSimpleDynamicClient(runtime.NewScheme()), client.Discovery())
+		_, err := manager.Discover(context.Background(), DiscoverOptions{Namespace: pod.Namespace, PodName: pod.Name})
+		if domain.CategoryOf(err) != domain.ErrorConflict || !strings.Contains(err.Error(), "StatefulSet owner UID changed") {
+			t.Fatalf("category=%s error=%v", domain.CategoryOf(err), err)
+		}
+	})
+
+	t.Run("ReplicaSet", func(t *testing.T) {
+		replicaSet := &appsv1.ReplicaSet{ObjectMeta: metav1.ObjectMeta{Namespace: "app", Name: "grafana-rs", UID: "replacement-rs-uid"}}
+		pod := readyPod("app", "grafana", "node-a")
+		pod.OwnerReferences = []metav1.OwnerReference{{
+			APIVersion: domain.AppsAPIVersion, Kind: domain.KindReplicaSet, Name: replicaSet.Name, UID: "original-rs-uid", Controller: boolPointer(true),
+		}}
+		client := kubernetesfake.NewClientset(replicaSet, pod)
+		manager := NewManager(client, dynamicfake.NewSimpleDynamicClient(runtime.NewScheme()), client.Discovery())
+		_, err := manager.Discover(context.Background(), DiscoverOptions{Namespace: pod.Namespace, PodName: pod.Name})
+		if domain.CategoryOf(err) != domain.ErrorConflict || !strings.Contains(err.Error(), "ReplicaSet owner UID changed") {
+			t.Fatalf("category=%s error=%v", domain.CategoryOf(err), err)
+		}
+	})
+}
+
 func TestDiscoverKubeBlocksValidatesIdentityAPIAndCandidate(t *testing.T) {
 	tests := []struct {
 		name          string
@@ -145,7 +201,7 @@ func TestDiscoverKubeBlocksValidatesIdentityAPIAndCandidate(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			selected := readyPod("db", "cluster-db-0", "node-a")
-			selected.OwnerReferences = []metav1.OwnerReference{{APIVersion: "workloads.kubeblocks.io/v1alpha1", Kind: "InstanceSet", Name: "cluster-db", Controller: boolPointer(true)}}
+			selected.OwnerReferences = []metav1.OwnerReference{{APIVersion: "workloads.kubeblocks.io/v1alpha1", Kind: "InstanceSet", Name: "cluster-db", UID: types.UID("instanceset-uid"), Controller: boolPointer(true)}}
 			selected.Labels = tt.labels
 			objects := []runtime.Object{selected}
 			if tt.candidate != nil {
@@ -167,9 +223,10 @@ func TestDiscoverKubeBlocksValidatesIdentityAPIAndCandidate(t *testing.T) {
 
 func TestDiscoverKubeBlocksMissingCandidateSuggestsReadySibling(t *testing.T) {
 	selected := readyPod("db", "cluster-db-0", "node-a")
-	selected.OwnerReferences = []metav1.OwnerReference{{APIVersion: "workloads.kubeblocks.io/v1alpha1", Kind: "InstanceSet", Name: "cluster-db", Controller: boolPointer(true)}}
+	selected.OwnerReferences = []metav1.OwnerReference{{APIVersion: "workloads.kubeblocks.io/v1alpha1", Kind: "InstanceSet", Name: "cluster-db", UID: types.UID("instanceset-uid"), Controller: boolPointer(true)}}
 	selected.Labels = map[string]string{kube.AppInstanceLabel: "cluster", kubeBlocksComponentLabel: "db", kubeBlocksRoleLabel: "primary"}
 	candidate := readyPod("db", "cluster-db-1", "node-b")
+	candidate.OwnerReferences = selected.OwnerReferences
 	candidate.Labels = map[string]string{kube.AppInstanceLabel: "cluster", kubeBlocksComponentLabel: "db", kubeBlocksRoleLabel: "secondary"}
 	client := kubernetesfake.NewClientset(selected, candidate)
 	discovery := client.Discovery().(*fake.FakeDiscovery)
@@ -194,7 +251,7 @@ func TestDiscoverRejectsKubeBlocksMinIOAndCockroachComponents(t *testing.T) {
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			selected := readyPod("db", "cluster-"+test.component+"-0", "node-a")
-			selected.OwnerReferences = []metav1.OwnerReference{{APIVersion: "workloads.kubeblocks.io/v1alpha1", Kind: "InstanceSet", Name: "cluster-" + test.component, Controller: boolPointer(true)}}
+			selected.OwnerReferences = []metav1.OwnerReference{{APIVersion: "workloads.kubeblocks.io/v1alpha1", Kind: "InstanceSet", Name: "cluster-" + test.component, UID: types.UID("instanceset-uid"), Controller: boolPointer(true)}}
 			selected.Labels = map[string]string{
 				"app.kubernetes.io/instance":        "cluster",
 				"apps.kubeblocks.io/component-name": test.component,
@@ -221,9 +278,10 @@ func TestDiscoverRejectsKubeBlocksMinIOAndCockroachComponents(t *testing.T) {
 
 func TestDiscoverRejectsKubeBlocksSwitchoverRejectedByAdmission(t *testing.T) {
 	selected := readyPod("db", "cluster-db-0", "node-a")
-	selected.OwnerReferences = []metav1.OwnerReference{{APIVersion: "workloads.kubeblocks.io/v1alpha1", Kind: "InstanceSet", Name: "cluster-db", Controller: boolPointer(true)}}
+	selected.OwnerReferences = []metav1.OwnerReference{{APIVersion: "workloads.kubeblocks.io/v1alpha1", Kind: "InstanceSet", Name: "cluster-db", UID: types.UID("instanceset-uid"), Controller: boolPointer(true)}}
 	selected.Labels = map[string]string{"app.kubernetes.io/instance": "cluster", "apps.kubeblocks.io/component-name": "db", "kubeblocks.io/role": "primary"}
 	candidate := readyPod("db", "cluster-db-1", "node-b")
+	candidate.OwnerReferences = selected.OwnerReferences
 	candidate.Labels = map[string]string{"app.kubernetes.io/instance": "cluster", "apps.kubeblocks.io/component-name": "db", "kubeblocks.io/role": "secondary"}
 	typed := kubernetesfake.NewClientset(selected, candidate)
 	discovery := typed.Discovery().(*fake.FakeDiscovery)
@@ -266,6 +324,7 @@ func TestDiscoverKubeBlocksMongoDBFallsBackToNativeSwitchover(t *testing.T) {
 		kubeBlocksRoleLabel:      "primary",
 	}
 	candidate := readyPod("db", "cluster-mongodb-1", "node-b")
+	candidate.OwnerReferences = selected.OwnerReferences
 	candidate.Labels = map[string]string{
 		kube.AppInstanceLabel:    "cluster",
 		kube.AppNameLabel:        "mongodb",
@@ -319,6 +378,8 @@ func TestDiscoverKubeBlocksMongoDBFallsBackToNativeSwitchover(t *testing.T) {
 
 func TestKubeBlocksLeaderGuidanceProvidesMongoDBNativeCommand(t *testing.T) {
 	selected := readyPod("db", "cluster-mongodb-0", "node-a")
+	owner := []metav1.OwnerReference{{APIVersion: "workloads.kubeblocks.io/v1alpha1", Kind: domain.KindInstanceSet, Name: "cluster-mongodb", UID: "instanceset-uid", Controller: boolPointer(true)}}
+	selected.OwnerReferences = owner
 	selected.Labels = map[string]string{
 		kube.AppInstanceLabel:    "cluster",
 		kube.AppNameLabel:        "mongodb",
@@ -326,6 +387,7 @@ func TestKubeBlocksLeaderGuidanceProvidesMongoDBNativeCommand(t *testing.T) {
 		kubeBlocksRoleLabel:      "primary",
 	}
 	candidate := readyPod("db", "cluster-mongodb-1", "node-b")
+	candidate.OwnerReferences = owner
 	candidate.Labels = map[string]string{
 		kube.AppInstanceLabel:    "cluster",
 		kube.AppNameLabel:        "mongodb",
@@ -365,8 +427,11 @@ func TestKubeBlocksMongoDBPreflightFailureProvidesRecoveryGuidance(t *testing.T)
 func TestRunMongoDBNativeSwitchoverExecutesScriptAndWaitsForRoleLabels(t *testing.T) {
 	var logs bytes.Buffer
 	selected := readyPod("db", "cluster-mongodb-0", "node-a")
+	owner := []metav1.OwnerReference{{APIVersion: "workloads.kubeblocks.io/v1alpha1", Kind: domain.KindInstanceSet, Name: "cluster-mongodb", UID: "instanceset-uid", Controller: boolPointer(true)}}
+	selected.OwnerReferences = owner
 	selected.Labels = map[string]string{kubeBlocksRoleLabel: "primary"}
 	candidate := readyPod("db", "cluster-mongodb-1", "node-b")
+	candidate.OwnerReferences = owner
 	candidate.Labels = map[string]string{kubeBlocksRoleLabel: "secondary"}
 	typed := kubernetesfake.NewClientset(selected, candidate)
 	manager := NewManager(typed, dynamicfake.NewSimpleDynamicClient(runtime.NewScheme()), nil).WithLogger(slog.New(slog.NewTextHandler(&logs, nil)))
@@ -391,6 +456,8 @@ func TestRunMongoDBNativeSwitchoverExecutesScriptAndWaitsForRoleLabels(t *testin
 		return podCommandResult{Stdout: "Switchover complete"}, err
 	})
 	session := kubeBlocksSession()
+	session.Spec.WorkloadPtr().Controller = objectReference(owner[0].APIVersion, owner[0].Kind, "db", owner[0].Name, owner[0].UID, "")
+	session.Spec.WorkloadPtr().Pod.UID = selected.UID
 	kb := session.Spec.Workload().KubeBlocks
 	kb.Component = "mongodb"
 	kb.Instance = selected.Name
@@ -417,8 +484,11 @@ func TestRunMongoDBNativeSwitchoverExecutesScriptAndWaitsForRoleLabels(t *testin
 
 func TestRunMongoDBNativeSwitchoverRequiresRoleConvergence(t *testing.T) {
 	selected := readyPod("db", "cluster-mongodb-0", "node-a")
+	owner := []metav1.OwnerReference{{APIVersion: "workloads.kubeblocks.io/v1alpha1", Kind: domain.KindInstanceSet, Name: "cluster-mongodb", UID: "instanceset-uid", Controller: boolPointer(true)}}
+	selected.OwnerReferences = owner
 	selected.Labels = map[string]string{kubeBlocksRoleLabel: "primary"}
 	candidate := readyPod("db", "cluster-mongodb-1", "node-b")
+	candidate.OwnerReferences = owner
 	candidate.Labels = map[string]string{kubeBlocksRoleLabel: "secondary"}
 	manager := NewManager(kubernetesfake.NewClientset(selected, candidate), dynamicfake.NewSimpleDynamicClient(runtime.NewScheme()), nil)
 	manager.poll = time.Millisecond
@@ -426,6 +496,8 @@ func TestRunMongoDBNativeSwitchoverRequiresRoleConvergence(t *testing.T) {
 		return podCommandResult{Stdout: "Switchover complete"}, nil
 	})
 	session := kubeBlocksSession()
+	session.Spec.WorkloadPtr().Controller = objectReference(owner[0].APIVersion, owner[0].Kind, "db", owner[0].Name, owner[0].UID, "")
+	session.Spec.WorkloadPtr().Pod.UID = selected.UID
 	kb := session.Spec.Workload().KubeBlocks
 	kb.Component = "mongodb"
 	kb.Instance = selected.Name
@@ -442,14 +514,19 @@ func TestRunMongoDBNativeSwitchoverRequiresRoleConvergence(t *testing.T) {
 
 func TestRunMongoDBNativeSwitchoverProvidesManualCommandAfterScriptFailure(t *testing.T) {
 	selected := readyPod("db", "cluster-mongodb-0", "node-a")
+	owner := []metav1.OwnerReference{{APIVersion: "workloads.kubeblocks.io/v1alpha1", Kind: domain.KindInstanceSet, Name: "cluster-mongodb", UID: "instanceset-uid", Controller: boolPointer(true)}}
+	selected.OwnerReferences = owner
 	selected.Labels = map[string]string{kubeBlocksRoleLabel: "primary"}
 	candidate := readyPod("db", "cluster-mongodb-1", "node-b")
+	candidate.OwnerReferences = owner
 	candidate.Labels = map[string]string{kubeBlocksRoleLabel: "secondary"}
 	manager := NewManager(kubernetesfake.NewClientset(selected, candidate), dynamicfake.NewSimpleDynamicClient(runtime.NewScheme()), nil)
 	manager.commandExecutor = podCommandExecutorFunc(func(context.Context, podCommandRequest) (podCommandResult, error) {
 		return podCommandResult{Stderr: "candidate is not caught up"}, errors.New("script exited with status 1")
 	})
 	session := kubeBlocksSession()
+	session.Spec.WorkloadPtr().Controller = objectReference(owner[0].APIVersion, owner[0].Kind, "db", owner[0].Name, owner[0].UID, "")
+	session.Spec.WorkloadPtr().Pod.UID = selected.UID
 	kb := session.Spec.Workload().KubeBlocks
 	kb.Component = "mongodb"
 	kb.Instance = selected.Name
@@ -502,7 +579,7 @@ func TestStatefulSetPauseResumeAreIdempotentAtDesiredReplicaCounts(t *testing.T)
 	manager := NewManager(client, dynamicfake.NewSimpleDynamicClient(runtime.NewScheme()), client.Discovery())
 	original, ordinal := int32(3), int32(1)
 	session := controllerSession(domain.WorkloadSpec{
-		Adapter: domain.WorkloadStatefulSet, Controller: domain.ObjectReference{Namespace: "app", Name: "db", UID: types.UID("sts-uid")}, OriginalReplicas: &original, Ordinal: &ordinal,
+		Adapter: domain.WorkloadStatefulSet, Controller: domain.ObjectReference{APIVersion: domain.AppsAPIVersion, Kind: domain.KindStatefulSet, Namespace: "app", Name: "db", UID: types.UID("sts-uid")}, OriginalReplicas: &original, Ordinal: &ordinal,
 	})
 	if err := manager.Pause(context.Background(), session); err != nil {
 		t.Fatal(err)
@@ -536,6 +613,7 @@ func TestStatefulSetPauseResumeWaitsForAffectedPods(t *testing.T) {
 			}
 		} else {
 			for _, pod := range []*corev1.Pod{readyPod("app", "db-1", "node-b"), readyPod("app", "db-2", "node-b")} {
+				pod.OwnerReferences = []metav1.OwnerReference{{APIVersion: domain.AppsAPIVersion, Kind: domain.KindStatefulSet, Name: sts.Name, UID: sts.UID, Controller: boolPointer(true)}}
 				if err := client.Tracker().Create(podsResource, pod, "app"); err != nil && !apierrors.IsAlreadyExists(err) {
 					return true, nil, err
 				}
@@ -548,11 +626,11 @@ func TestStatefulSetPauseResumeWaitsForAffectedPods(t *testing.T) {
 	original, ordinal := int32(3), int32(1)
 	session := controllerSession(domain.WorkloadSpec{
 		Adapter:          domain.WorkloadStatefulSet,
-		Pod:              domain.ObjectReference{Namespace: "app", Name: "db-1"},
-		Controller:       domain.ObjectReference{Namespace: "app", Name: "db", UID: sts.UID},
+		Pod:              domain.ObjectReference{Namespace: "app", Name: "db-1", UID: pod1.UID},
+		Controller:       domain.ObjectReference{APIVersion: domain.AppsAPIVersion, Kind: domain.KindStatefulSet, Namespace: "app", Name: "db", UID: sts.UID},
 		OriginalReplicas: &original,
 		Ordinal:          &ordinal,
-		AffectedPods:     []domain.ObjectReference{{Namespace: "app", Name: "db-1"}, {Namespace: "app", Name: "db-2"}},
+		AffectedPods:     []domain.ObjectReference{{Namespace: "app", Name: "db-1", UID: pod1.UID}, {Namespace: "app", Name: "db-2", UID: pod2.UID}},
 	})
 	if err := manager.Pause(context.Background(), session); err != nil {
 		t.Fatal(err)
@@ -571,13 +649,53 @@ func TestStatefulSetPauseResumeWaitsForAffectedPods(t *testing.T) {
 	}
 }
 
-func TestVerifyPausedChecksEveryAffectedPod(t *testing.T) {
-	stale := readyPod("app", "db-2", "node-a")
-	client := kubernetesfake.NewClientset(stale)
+func TestWaitForPodDeletionRejectsSameNameReplacement(t *testing.T) {
+	original := readyPod("app", "db-1", "node-a")
+	original.UID = types.UID("original-pod-uid")
+	replacement := original.DeepCopy()
+	replacement.UID = types.UID("replacement-pod-uid")
+	client := kubernetesfake.NewClientset(original)
+	getCount := 0
+	client.PrependReactor("get", "pods", func(action clienttesting.Action) (bool, runtime.Object, error) {
+		getCount++
+		if getCount == 1 {
+			return true, original.DeepCopy(), nil
+		}
+		return true, replacement, nil
+	})
 	manager := NewManager(client, dynamicfake.NewSimpleDynamicClient(runtime.NewScheme()), client.Discovery())
+	manager.poll = time.Millisecond
+	err := manager.waitForPodDeletion(context.Background(), domain.ObjectReference{
+		Namespace: "app",
+		Name:      "db-1",
+		UID:       original.UID,
+	}, "pause StatefulSet")
+	if domain.CategoryOf(err) != domain.ErrorConflict || !strings.Contains(err.Error(), "replaced while waiting") {
+		t.Fatalf("category=%s error=%v", domain.CategoryOf(err), err)
+	}
+}
+
+func TestWaitForPodDeletionRequiresExpectedUID(t *testing.T) {
+	manager := NewManager(kubernetesfake.NewClientset(), nil, nil)
+	err := manager.waitForPodDeletion(context.Background(), domain.ObjectReference{Namespace: "app", Name: "db-1"}, "pause StatefulSet")
+	if domain.CategoryOf(err) != domain.ErrorValidation {
+		t.Fatalf("category=%s error=%v", domain.CategoryOf(err), err)
+	}
+}
+
+func TestVerifyPausedChecksEveryAffectedPod(t *testing.T) {
+	replicas := int32(1)
+	sts := &appsv1.StatefulSet{ObjectMeta: metav1.ObjectMeta{Namespace: "app", Name: "db", UID: "sts-uid"}, Spec: appsv1.StatefulSetSpec{Replicas: &replicas}}
+	stale := readyPod("app", "db-2", "node-a")
+	client := kubernetesfake.NewClientset(sts, stale)
+	manager := NewManager(client, dynamicfake.NewSimpleDynamicClient(runtime.NewScheme()), client.Discovery())
+	original, ordinal := int32(3), int32(1)
 	session := controllerSession(domain.WorkloadSpec{
-		Adapter: domain.WorkloadStatefulSet,
-		Pod:     domain.ObjectReference{Namespace: "app", Name: "db-1"},
+		Adapter:          domain.WorkloadStatefulSet,
+		Pod:              domain.ObjectReference{Namespace: "app", Name: "db-1"},
+		Controller:       domain.ObjectReference{APIVersion: domain.AppsAPIVersion, Kind: domain.KindStatefulSet, Namespace: "app", Name: "db", UID: sts.UID},
+		OriginalReplicas: &original,
+		Ordinal:          &ordinal,
 		AffectedPods: []domain.ObjectReference{
 			{Namespace: "app", Name: "db-1"},
 			{Namespace: "app", Name: "db-2"},
@@ -585,6 +703,109 @@ func TestVerifyPausedChecksEveryAffectedPod(t *testing.T) {
 	})
 	if err := manager.VerifyPaused(context.Background(), session); domain.CategoryOf(err) != domain.ErrorPrecondition || !strings.Contains(err.Error(), "db-2") {
 		t.Fatalf("category=%s error=%v", domain.CategoryOf(err), err)
+	}
+}
+
+func TestVerifyPausedRejectsStatefulSetControlDrift(t *testing.T) {
+	for _, test := range []struct {
+		name        string
+		uid         types.UID
+		replicas    int32
+		category    domain.ErrorCategory
+		messagePart string
+	}{
+		{name: "controller replaced", uid: "replacement-uid", replicas: 1, category: domain.ErrorConflict, messagePart: "UID changed"},
+		{name: "replicas changed", uid: "sts-uid", replicas: 2, category: domain.ErrorPrecondition, messagePart: "replicas=2"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			sts := &appsv1.StatefulSet{ObjectMeta: metav1.ObjectMeta{Namespace: "app", Name: "db", UID: test.uid}, Spec: appsv1.StatefulSetSpec{Replicas: &test.replicas}}
+			client := kubernetesfake.NewClientset(sts)
+			manager := NewManager(client, dynamicfake.NewSimpleDynamicClient(runtime.NewScheme()), client.Discovery())
+			original, ordinal := int32(3), int32(1)
+			session := controllerSession(domain.WorkloadSpec{
+				Adapter:          domain.WorkloadStatefulSet,
+				Pod:              domain.ObjectReference{Namespace: "app", Name: "db-1"},
+				Controller:       domain.ObjectReference{APIVersion: domain.AppsAPIVersion, Kind: domain.KindStatefulSet, Namespace: "app", Name: "db", UID: "sts-uid"},
+				OriginalReplicas: &original,
+				Ordinal:          &ordinal,
+				AffectedPods:     []domain.ObjectReference{{Namespace: "app", Name: "db-1"}},
+			})
+			err := manager.VerifyPaused(context.Background(), session)
+			if domain.CategoryOf(err) != test.category || !strings.Contains(err.Error(), test.messagePart) {
+				t.Fatalf("category=%s error=%v", domain.CategoryOf(err), err)
+			}
+		})
+	}
+}
+
+func TestResumeStatefulSetRejectsForeignReadyPod(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	replicas := int32(1)
+	sts := &appsv1.StatefulSet{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "app", Name: "db", UID: "sts-uid"},
+		Spec:       appsv1.StatefulSetSpec{Replicas: &replicas},
+	}
+	client := kubernetesfake.NewClientset(sts)
+	client.PrependReactor("update", "statefulsets", func(action clienttesting.Action) (bool, runtime.Object, error) {
+		foreign := readyPod("app", "db-1", "node-b")
+		foreign.OwnerReferences = []metav1.OwnerReference{{
+			APIVersion: domain.AppsAPIVersion,
+			Kind:       domain.KindStatefulSet,
+			Name:       "other-db",
+			UID:        "other-sts-uid",
+			Controller: boolPointer(true),
+		}}
+		if err := client.Tracker().Create(corev1.SchemeGroupVersion.WithResource("pods"), foreign, "app"); err != nil && !apierrors.IsAlreadyExists(err) {
+			return true, nil, err
+		}
+		return false, nil, nil
+	})
+	manager := NewManager(client, dynamicfake.NewSimpleDynamicClient(runtime.NewScheme()), client.Discovery())
+	manager.poll = time.Millisecond
+	original, ordinal := int32(2), int32(1)
+	session := controllerSession(domain.WorkloadSpec{
+		Adapter:          domain.WorkloadStatefulSet,
+		Controller:       objectReference(domain.AppsAPIVersion, domain.KindStatefulSet, "app", "db", sts.UID, sts.ResourceVersion),
+		OriginalReplicas: &original,
+		Ordinal:          &ordinal,
+		AffectedPods:     []domain.ObjectReference{{Namespace: "app", Name: "db-1"}},
+	})
+	err := manager.Resume(ctx, session)
+	if domain.CategoryOf(err) != domain.ErrorConflict || !strings.Contains(err.Error(), "not controlled by the expected StatefulSet") {
+		t.Fatalf("category=%s error=%v", domain.CategoryOf(err), err)
+	}
+}
+
+func TestPodControlledByDeploymentRejectsMatchingForeignPod(t *testing.T) {
+	deployment := &appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Namespace: "app", Name: "grafana", UID: "deployment-uid"}}
+	replicaSet := &appsv1.ReplicaSet{ObjectMeta: metav1.ObjectMeta{
+		Namespace: "app",
+		Name:      "foreign-rs",
+		UID:       "foreign-rs-uid",
+		OwnerReferences: []metav1.OwnerReference{{
+			APIVersion: domain.AppsAPIVersion,
+			Kind:       domain.KindDeployment,
+			Name:       "other-deployment",
+			UID:        "other-deployment-uid",
+			Controller: boolPointer(true),
+		}},
+	}}
+	pod := readyPod("app", "matching-labels", "node-a")
+	pod.OwnerReferences = []metav1.OwnerReference{{
+		APIVersion: domain.AppsAPIVersion,
+		Kind:       domain.KindReplicaSet,
+		Name:       replicaSet.Name,
+		UID:        replicaSet.UID,
+		Controller: boolPointer(true),
+	}}
+	manager := NewManager(kubernetesfake.NewClientset(replicaSet), dynamicfake.NewSimpleDynamicClient(runtime.NewScheme()), nil)
+	owned, err := manager.podControlledByDeployment(context.Background(), pod, deployment)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if owned {
+		t.Fatal("foreign Pod with matching labels was accepted as a Deployment Pod")
 	}
 }
 
@@ -617,6 +838,31 @@ func TestStandalonePauseIsIdempotentAndProtectsUID(t *testing.T) {
 	manager = NewManager(client, dynamicfake.NewSimpleDynamicClient(runtime.NewScheme()), client.Discovery())
 	err := manager.Pause(context.Background(), session)
 	if domain.CategoryOf(err) != domain.ErrorConflict {
+		t.Fatalf("category=%s error=%v", domain.CategoryOf(err), err)
+	}
+}
+
+func TestStandalonePauseRejectsReplacementWhileWaitingForDeletion(t *testing.T) {
+	pod := readyPod("app", "worker", "node-a")
+	pod.UID = "original-uid"
+	client := kubernetesfake.NewClientset(pod)
+	deleted := false
+	client.PrependReactor("delete", "pods", func(clienttesting.Action) (bool, runtime.Object, error) {
+		deleted = true
+		return true, nil, nil
+	})
+	client.PrependReactor("get", "pods", func(clienttesting.Action) (bool, runtime.Object, error) {
+		if !deleted {
+			return false, nil, nil
+		}
+		replacement := pod.DeepCopy()
+		replacement.UID = "replacement-uid"
+		return true, replacement, nil
+	})
+	manager := NewManager(client, dynamicfake.NewSimpleDynamicClient(runtime.NewScheme()), client.Discovery())
+	manager.poll = time.Millisecond
+	session := controllerSession(domain.WorkloadSpec{Adapter: domain.WorkloadStandalone, Pod: domain.ObjectReference{Namespace: "app", Name: "worker", UID: pod.UID}})
+	if err := manager.Pause(context.Background(), session); domain.CategoryOf(err) != domain.ErrorConflict || !strings.Contains(err.Error(), "replaced while waiting for deletion") {
 		t.Fatalf("category=%s error=%v", domain.CategoryOf(err), err)
 	}
 }
@@ -725,6 +971,37 @@ func TestStandaloneResumeRejectsConcurrentForeignPod(t *testing.T) {
 	}
 }
 
+func TestStandaloneResumeRejectsReplacementWhileWaiting(t *testing.T) {
+	saved := readyPod("app", "worker", "node-a")
+	raw, err := json.Marshal(saved)
+	if err != nil {
+		t.Fatal(err)
+	}
+	client := kubernetesfake.NewClientset()
+	var created *corev1.Pod
+	client.PrependReactor("create", "pods", func(action clienttesting.Action) (bool, runtime.Object, error) {
+		created = action.(clienttesting.CreateAction).GetObject().(*corev1.Pod)
+		created.UID = "created-uid"
+		return false, nil, nil
+	})
+	client.PrependReactor("get", "pods", func(action clienttesting.Action) (bool, runtime.Object, error) {
+		if created == nil {
+			return false, nil, nil
+		}
+		replacement := created.DeepCopy()
+		replacement.UID = "replacement-uid"
+		replacement.Status = corev1.PodStatus{Phase: corev1.PodRunning, Conditions: []corev1.PodCondition{{Type: corev1.PodReady, Status: corev1.ConditionTrue}}}
+		return true, replacement, nil
+	})
+	manager := NewManager(client, dynamicfake.NewSimpleDynamicClient(runtime.NewScheme()), client.Discovery())
+	manager.poll = time.Millisecond
+	session := controllerSession(domain.WorkloadSpec{Adapter: domain.WorkloadStandalone, Pod: domain.ObjectReference{Namespace: "app", Name: "worker"}, OriginalObject: raw})
+	err = manager.Resume(context.Background(), session)
+	if domain.CategoryOf(err) != domain.ErrorConflict || !strings.Contains(err.Error(), "replaced while waiting") {
+		t.Fatalf("category=%s error=%v", domain.CategoryOf(err), err)
+	}
+}
+
 func controllerSession(workload domain.WorkloadSpec) *domain.Session {
 	return domain.NewSession("session", domain.NewSessionSpec(domain.OperationMigrate, domain.SessionCommon{
 		SourceNamespace: "app", TemporaryNamespace: "system", SessionNamespace: "system",
@@ -750,6 +1027,7 @@ func TestCreateAndWaitOpsReusesSucceededAndRetriesFailedRequests(t *testing.T) {
 	dynamicClient = dynamicfake.NewSimpleDynamicClient(runtime.NewScheme(), failed)
 	dynamicClient.PrependReactor("create", "opsrequests", func(action clienttesting.Action) (bool, runtime.Object, error) {
 		object := action.(clienttesting.CreateAction).GetObject().(*unstructured.Unstructured)
+		object.SetUID("created-request-uid")
 		_ = unstructured.SetNestedField(object.Object, "Succeed", "status", "phase")
 		return false, nil, nil
 	})
@@ -767,6 +1045,7 @@ func TestCreateAndWaitOpsReturnsTerminalFailure(t *testing.T) {
 	dynamicClient := dynamicfake.NewSimpleDynamicClient(runtime.NewScheme())
 	dynamicClient.PrependReactor("create", "opsrequests", func(action clienttesting.Action) (bool, runtime.Object, error) {
 		object := action.(clienttesting.CreateAction).GetObject().(*unstructured.Unstructured)
+		object.SetUID("created-request-uid")
 		_ = unstructured.SetNestedField(object.Object, "Cancelled", "status", "phase")
 		return false, nil, nil
 	})
@@ -774,6 +1053,56 @@ func TestCreateAndWaitOpsReturnsTerminalFailure(t *testing.T) {
 	manager.poll = time.Millisecond
 	err := manager.createAndWaitOps(context.Background(), kubeBlocksSession(), "offline", map[string]any{"type": "HorizontalScaling"})
 	if domain.CategoryOf(err) != domain.ErrorPrecondition || !strings.Contains(err.Error(), "Cancelled") {
+		t.Fatalf("category=%s error=%v", domain.CategoryOf(err), err)
+	}
+}
+
+func TestCreateAndWaitOpsRejectsMissingCreatedUID(t *testing.T) {
+	dynamicClient := dynamicfake.NewSimpleDynamicClient(runtime.NewScheme())
+	manager := NewManager(kubernetesfake.NewClientset(), dynamicClient, nil)
+	err := manager.createAndWaitOps(context.Background(), kubeBlocksSession(), "offline", map[string]any{"type": "HorizontalScaling"})
+	if domain.CategoryOf(err) != domain.ErrorKubernetes {
+		t.Fatalf("category=%s error=%v", domain.CategoryOf(err), err)
+	}
+}
+
+func TestCreateAndWaitOpsRejectsForeignExistingRequest(t *testing.T) {
+	foreign := opsRequest("session-offline", "Failed")
+	labels := foreign.GetLabels()
+	labels[kube.SessionKey] = "foreign-session"
+	foreign.SetLabels(labels)
+	dynamicClient := dynamicfake.NewSimpleDynamicClient(runtime.NewScheme(), foreign)
+	manager := NewManager(kubernetesfake.NewClientset(), dynamicClient, nil)
+	manager.poll = time.Millisecond
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	err := manager.createAndWaitOps(ctx, kubeBlocksSession(), "offline", map[string]any{"type": "HorizontalScaling"})
+	if domain.CategoryOf(err) != domain.ErrorConflict {
+		t.Fatalf("category=%s error=%v", domain.CategoryOf(err), err)
+	}
+	if countDynamicActions(dynamicClient.Actions(), "delete", "opsrequests") != 0 {
+		t.Fatal("foreign OpsRequest was deleted")
+	}
+}
+
+func TestCreateAndWaitOpsRejectsReplacementWhileWaiting(t *testing.T) {
+	original := opsRequest("session-offline", "Running")
+	replacement := original.DeepCopy()
+	replacement.SetUID("replacement-uid")
+	_ = unstructured.SetNestedField(replacement.Object, "Succeed", "status", "phase")
+	dynamicClient := dynamicfake.NewSimpleDynamicClient(runtime.NewScheme(), original)
+	reads := 0
+	dynamicClient.PrependReactor("get", "opsrequests", func(clienttesting.Action) (bool, runtime.Object, error) {
+		reads++
+		if reads == 1 {
+			return true, original.DeepCopy(), nil
+		}
+		return true, replacement.DeepCopy(), nil
+	})
+	manager := NewManager(kubernetesfake.NewClientset(), dynamicClient, nil)
+	manager.poll = time.Millisecond
+	err := manager.createAndWaitOps(context.Background(), kubeBlocksSession(), "offline", map[string]any{"type": "HorizontalScaling"})
+	if domain.CategoryOf(err) != domain.ErrorConflict || !strings.Contains(err.Error(), "replaced while waiting") {
 		t.Fatalf("category=%s error=%v", domain.CategoryOf(err), err)
 	}
 }
@@ -807,6 +1136,10 @@ func opsRequest(action, phase string) *unstructured.Unstructured {
 			"name":      "pvc-migrate-" + action,
 			"namespace": "db",
 			"uid":       "request-uid",
+			"labels": map[string]any{
+				kube.ManagedByLabel: kube.ManagedByValue,
+				kube.SessionKey:     "session",
+			},
 		},
 		"status": map[string]any{"phase": phase},
 	}}
@@ -817,7 +1150,11 @@ func kubeBlocksSession() *domain.Session {
 		Adapter: domain.WorkloadKubeBlocks,
 		Pod:     domain.ObjectReference{Namespace: "db", Name: "cluster-db-0"},
 		KubeBlocks: &domain.KubeBlocksSpec{
-			Cluster: "cluster", Component: "db", Instance: "cluster-db-0", OpsAPIVersion: "apps.kubeblocks.io/v1alpha1",
+			Cluster: "cluster", Component: "db", Instance: "cluster-db-0",
+			SwitchoverStrategy: domain.KubeBlocksSwitchoverOpsRequest,
+			OpsAPIVersion:      "apps.kubeblocks.io/v1alpha1",
+			ClusterUID:         "cluster-uid",
+			OriginalStops:      map[string]bool{"db": false},
 		},
 	})
 	return session
@@ -1110,7 +1447,7 @@ func TestKubeBlocksPauseOnlyStopsSelectedComponent(t *testing.T) {
 	manager := NewManager(kubernetesfake.NewClientset(), dynamicClient, nil)
 	session := kubeBlocksSession()
 	session.Spec.Workload().KubeBlocks.Component = "postgresql"
-	session.Spec.Workload().KubeBlocks.ClusterAPIVersion = "apps.kubeblocks.io/v1alpha1"
+	session.Spec.Workload().KubeBlocks.OriginalStops = map[string]bool{"postgresql": false}
 	if err := manager.setKubeBlocksPaused(ctx, session, true); err != nil {
 		t.Fatal(err)
 	}
@@ -1151,7 +1488,6 @@ func TestKubeBlocksPauseRejectsClusterUIDChange(t *testing.T) {
 	dynamicClient := dynamicfake.NewSimpleDynamicClient(runtime.NewScheme(), cluster)
 	manager := NewManager(kubernetesfake.NewClientset(), dynamicClient, nil)
 	session := kubeBlocksSession()
-	session.Spec.Workload().KubeBlocks.ClusterAPIVersion = "apps.kubeblocks.io/v1alpha1"
 	session.Spec.Workload().KubeBlocks.ClusterUID = "old-uid"
 	if err := manager.setKubeBlocksPaused(context.Background(), session, true); domain.CategoryOf(err) != domain.ErrorConflict {
 		t.Fatalf("category=%s error=%v", domain.CategoryOf(err), err)

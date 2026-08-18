@@ -51,13 +51,19 @@ type Options struct {
 }
 
 type Planner struct {
-	client      kubernetes.Interface
-	controllers *controller.Manager
-	logger      *slog.Logger
+	client                        kubernetes.Interface
+	controllers                   *controller.Manager
+	openEBSLVMSharedVolumeManager kube.OpenEBSLVMSharedVolumeManager
+	logger                        *slog.Logger
 }
 
 func New(client kubernetes.Interface, controllers *controller.Manager) *Planner {
 	return &Planner{client: client, controllers: controllers}
+}
+
+func (p *Planner) WithOpenEBSLVMSharedVolumeManager(manager kube.OpenEBSLVMSharedVolumeManager) *Planner {
+	p.openEBSLVMSharedVolumeManager = manager
+	return p
 }
 
 // WithLogger enables progress logs for cluster inventory and policy checks.
@@ -250,7 +256,8 @@ func (p *Planner) Plan(ctx context.Context, options Options) (*domain.MigrationP
 	storageByClass := map[string]resource.Quantity{}
 	pvcsByClass := map[string]int{}
 	storageClassChanged := false
-	openEBSLVMWarmCopy := false
+	inspectOpenEBSLVMShared := false
+	patchOpenEBSLVMShared := false
 	for index, pvcName := range pvcNames {
 		pvc, err := inventory.pvcs[index].pvc, inventory.pvcs[index].err
 		if err != nil || pvc == nil || pvc.Name == "" {
@@ -282,6 +289,9 @@ func (p *Planner) Plan(ctx context.Context, options Options) (*domain.MigrationP
 			}
 			plan.AddCheck(failed("source-pv", fmt.Sprintf("read PV %s: %v", pvc.Spec.VolumeName, err)))
 			continue
+		}
+		if !sourceBindingMatches(pvc, pv) {
+			plan.AddCheck(failed("source-binding", fmt.Sprintf("PV %s claimRef does not match PVC %s/%s UID %s", pv.Name, pvc.Namespace, pvc.Name, pvc.UID)))
 		}
 		p.checkSessionOwnership(ctx, plan, options.SessionNamespace, pvc, pv)
 		sourcePVs[pv.Name] = pv
@@ -368,7 +378,9 @@ func (p *Planner) Plan(ctx context.Context, options Options) (*domain.MigrationP
 		})
 		consumers := p.checkPVCReferencesFromPods(plan, pvc, sourcePod, options.Operation, options.Online, inventory.namespacePods, inventory.namespacePodsErr)
 		if warmCopyRequested(options) {
-			openEBSLVMWarmCopy = p.checkWarmCopyMountCompatibility(plan, options.Operation, options.OpenEBSLVMEnableShared, pvc, sourceClass, storageClasses[sourceClass], storageClassErrors[sourceClass], consumers) || openEBSLVMWarmCopy
+			inspectShared, patchShared := p.checkWarmCopyMountCompatibility(ctx, plan, options.Operation, options.OpenEBSLVMEnableShared, pvc, pv, sourceClass, storageClasses[sourceClass], storageClassErrors[sourceClass], consumers)
+			inspectOpenEBSLVMShared = inspectOpenEBSLVMShared || inspectShared
+			patchOpenEBSLVMShared = patchOpenEBSLVMShared || patchShared
 		}
 		if options.Operation == domain.OperationMigrate && sourcePod == nil {
 			for _, consumer := range consumers {
@@ -531,7 +543,7 @@ func (p *Planner) Plan(ctx context.Context, options Options) (*domain.MigrationP
 				p.checkNetworkPolicies(ctx, result, options.SourceNamespace, options.StagingNamespace)
 			},
 			func(result *domain.MigrationPlan) {
-				p.checkRBAC(ctx, result, options.SourceNamespace, options.StagingNamespace, options.SessionNamespace, workload, openEBSLVMWarmCopy, options.OpenEBSLVMEnableShared && openEBSLVMWarmCopy)
+				p.checkRBAC(ctx, result, options.SourceNamespace, options.StagingNamespace, options.SessionNamespace, workload, inspectOpenEBSLVMShared, patchOpenEBSLVMShared)
 			},
 		)
 		if sourcePod != nil {
@@ -572,6 +584,15 @@ func (p *Planner) Plan(ctx context.Context, options Options) (*domain.MigrationP
 		plan.Ready = false
 	}
 	return plan, nil
+}
+
+func sourceBindingMatches(pvc *corev1.PersistentVolumeClaim, pv *corev1.PersistentVolume) bool {
+	if pvc == nil || pv == nil || pvc.UID == "" || pv.UID == "" || pvc.Spec.VolumeName != pv.Name || pv.Spec.ClaimRef == nil || pv.Spec.ClaimRef.UID == "" {
+		return false
+	}
+	return pv.Spec.ClaimRef.Namespace == pvc.Namespace &&
+		pv.Spec.ClaimRef.Name == pvc.Name &&
+		pv.Spec.ClaimRef.UID == pvc.UID
 }
 
 func applyDefaults(options Options) Options {
@@ -851,8 +872,8 @@ func warmCopyRequested(options Options) bool {
 	}
 }
 
-func (p *Planner) checkWarmCopyMountCompatibility(plan *domain.MigrationPlan, operation domain.Operation, enableOpenEBSLVMShared bool, pvc *corev1.PersistentVolumeClaim, storageClassName string, storageClass *storagev1.StorageClass, storageClassErr error, consumers []*corev1.Pod) bool {
-	inspectOpenEBSLVMShared := storageClassErr == nil && storageClass != nil && storageClass.Name != "" && storageClass.Provisioner == "local.csi.openebs.io"
+func (p *Planner) checkWarmCopyMountCompatibility(ctx context.Context, plan *domain.MigrationPlan, operation domain.Operation, enableOpenEBSLVMShared bool, pvc *corev1.PersistentVolumeClaim, pv *corev1.PersistentVolume, storageClassName string, storageClass *storagev1.StorageClass, storageClassErr error, consumers []*corev1.Pod) (inspectShared, patchShared bool) {
+	inspectOpenEBSLVMShared := pv != nil && pv.Spec.CSI != nil && pv.Spec.CSI.Driver == kube.OpenEBSLVMCSIDriver
 	active := make([]string, 0, len(consumers))
 	for _, pod := range consumers {
 		if pod != nil && kube.ActivePodUsesPVC(pod, pvc.Name) {
@@ -864,50 +885,58 @@ func (p *Planner) checkWarmCopyMountCompatibility(plan *domain.MigrationPlan, op
 		}
 	}
 	if len(active) == 0 {
-		return inspectOpenEBSLVMShared
+		return inspectOpenEBSLVMShared, false
 	}
 	sort.Strings(active)
 	consumerList := strings.Join(active, ",")
-	if storageClassName == "" {
-		plan.AddCheck(warned("warm-copy-mount", fmt.Sprintf("PVC %s/%s is active on %s and has no StorageClass; execution will verify a read-only second-Pod mount before warm copy", pvc.Namespace, pvc.Name, consumerList)))
-		return false
-	}
-	if storageClassErr != nil || storageClass == nil || storageClass.Name == "" {
-		plan.AddCheck(warned("warm-copy-mount", fmt.Sprintf("PVC %s/%s is active on %s; concurrent mount support for StorageClass %s is unknown because it could not be read, so execution will run a read-only mount probe before warm copy", pvc.Namespace, pvc.Name, consumerList, storageClassName)))
-		return false
-	}
 	if inspectOpenEBSLVMShared {
-		shared := strings.TrimSpace(storageClass.Parameters["shared"])
-		if !strings.EqualFold(shared, "yes") {
+		if p == nil || p.openEBSLVMSharedVolumeManager == nil {
+			plan.AddCheck(failed("warm-copy-mount", fmt.Sprintf("PVC %s/%s uses OpenEBS LVM source PV %s, but the planner cannot inspect the current LVMVolume.spec.shared value", pvc.Namespace, pvc.Name, pv.Name)))
+			return true, false
+		}
+		shared, err := p.openEBSLVMSharedVolumeManager.Shared(ctx, domain.ObjectReference{Name: pv.Name, UID: pv.UID}, domain.ObjectReference{}, "")
+		if err != nil {
+			plan.AddCheck(failed("warm-copy-mount", fmt.Sprintf("read current OpenEBS LVMVolume.spec.shared for source PV %s used by PVC %s/%s: %v", pv.Name, pvc.Namespace, pvc.Name, err)))
+			return true, false
+		}
+		if !shared {
 			if enableOpenEBSLVMShared && (operation == domain.OperationMigrate || operation == domain.OperationMigratePod) {
-				plan.AddCheck(warned("warm-copy-mount", fmt.Sprintf("StorageClass %s uses local.csi.openebs.io without shared: \"yes\"; execution will temporarily set the matching existing OpenEBS LVMVolume spec.shared to \"yes\", then restore its original value after the warm-copy pass. It verifies a second-Pod read-write mount without writing data for active PVC %s/%s on %s. This enables same-node concurrent mounts only; coordinate application writes during warm copy", storageClass.Name, pvc.Namespace, pvc.Name, consumerList)))
-				return true
+				plan.AddCheck(passed("warm-copy-mount", fmt.Sprintf("OpenEBS LVMVolume for source PV %s does not currently have spec.shared=yes; execution will temporarily set it to yes, then restore its original value after the warm-copy pass. It verifies a second-Pod read-write mount without writing data for active PVC %s/%s on %s. This enables same-node concurrent mounts only; coordinate application writes during warm copy", pv.Name, pvc.Namespace, pvc.Name, consumerList)))
+				return true, true
 			}
-			message := fmt.Sprintf("StorageClass %s uses local.csi.openebs.io without shared: \"yes\"; PVC %s/%s is already mounted by %s, so a second Pod cannot mount it for warm copy; %s or migrate to a StorageClass configured with shared: \"yes\"", storageClass.Name, pvc.Namespace, pvc.Name, consumerList, warmCopyMountFallback(operation))
+			message := fmt.Sprintf("OpenEBS LVMVolume for source PV %s does not currently have spec.shared=yes; PVC %s/%s is already mounted by %s, so a second Pod cannot mount it for warm copy; %s", pv.Name, pvc.Namespace, pvc.Name, consumerList, warmCopyMountFallback(operation))
 			if operation == domain.OperationMigrate || operation == domain.OperationMigratePod {
 				message += "; alternatively, rerun with --openebs-lvm-enable-shared to patch the existing matching OpenEBS LVMVolume spec.shared to \"yes\" before the read-write mount probe"
 			}
 			plan.AddCheck(failed("warm-copy-mount", message))
-			return true
+			return true, false
 		}
-		plan.AddCheck(passed("warm-copy-mount", fmt.Sprintf("StorageClass %s declares shared=%s for PVC %s/%s; execution will verify a second-Pod read-write mount without writing data before warm copy", storageClass.Name, shared, pvc.Namespace, pvc.Name)))
-		return true
+		plan.AddCheck(passed("warm-copy-mount", fmt.Sprintf("OpenEBS LVMVolume for source PV %s currently has spec.shared=yes for PVC %s/%s; execution will verify a second-Pod read-write mount without writing data before warm copy", pv.Name, pvc.Namespace, pvc.Name)))
+		return true, false
+	}
+	if storageClassName == "" {
+		plan.AddCheck(warned("warm-copy-mount", fmt.Sprintf("PVC %s/%s is active on %s and has no StorageClass; execution will verify a read-only second-Pod mount before warm copy", pvc.Namespace, pvc.Name, consumerList)))
+		return false, false
+	}
+	if storageClassErr != nil || storageClass == nil || storageClass.Name == "" {
+		plan.AddCheck(warned("warm-copy-mount", fmt.Sprintf("PVC %s/%s is active on %s; concurrent mount support for StorageClass %s is unknown because it could not be read, so execution will run a read-only mount probe before warm copy", pvc.Namespace, pvc.Name, consumerList, storageClassName)))
+		return false, false
 	}
 	if storageClass.Provisioner == "openebs.io/local" {
 		storageType := openEBSLocalStorageType(storageClass)
 		if strings.EqualFold(storageType, "hostpath") {
 			plan.AddCheck(passed("warm-copy-mount", fmt.Sprintf("StorageClass %s uses OpenEBS Local PV Hostpath; same-node second-Pod mounts are supported for PVC %s/%s and execution will verify the read-only mount", storageClass.Name, pvc.Namespace, pvc.Name)))
-			return false
+			return false, false
 		}
 		detail := "has no recognizable StorageType metadata"
 		if storageType != "" {
 			detail = fmt.Sprintf("declares StorageType=%s", storageType)
 		}
 		plan.AddCheck(warned("warm-copy-mount", fmt.Sprintf("StorageClass %s uses the OpenEBS local provisioner and %s; only StorageType=hostpath has built-in concurrent same-node mount support, so execution will run a read-only mount probe for PVC %s/%s", storageClass.Name, detail, pvc.Namespace, pvc.Name)))
-		return false
+		return false, false
 	}
 	plan.AddCheck(warned("warm-copy-mount", fmt.Sprintf("StorageClass %s uses %s and PVC %s/%s is active on %s; concurrent mount support is driver-specific, so execution will run a read-only mount probe before warm copy; if the mount is rejected, %s", storageClass.Name, storageClass.Provisioner, pvc.Namespace, pvc.Name, consumerList, warmCopyMountFallback(operation))))
-	return false
+	return false, false
 }
 
 func warmCopyMountFallback(operation domain.Operation) string {

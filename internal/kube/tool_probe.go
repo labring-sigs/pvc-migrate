@@ -189,6 +189,9 @@ func (p *KubernetesToolImageProber) probeTarget(ctx context.Context, image, oper
 		if getErr != nil {
 			return false, domain.WrapError(domain.ErrorKubernetes, "tool image probe", fmt.Sprintf("read probe Pod %s/%s", target.Namespace, created.Name), getErr)
 		}
+		if current.UID != created.UID {
+			return false, domain.NewError(domain.ErrorConflict, "tool image probe", fmt.Sprintf("probe Pod %s/%s was replaced before completion", target.Namespace, created.Name))
+		}
 		if current.Spec.NodeName != "" {
 			observedTarget.NodeName = current.Spec.NodeName
 		}

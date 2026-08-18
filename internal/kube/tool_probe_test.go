@@ -688,6 +688,31 @@ func TestToolImageProbeFailsImmediatelyWhenPodDisappears(t *testing.T) {
 	}
 }
 
+func TestToolImageProbeRejectsReplacementBeforeCompletion(t *testing.T) {
+	client := fake.NewClientset(readyProbeNode("node-a"))
+	var created *corev1.Pod
+	client.PrependReactor("create", "pods", func(action clienttesting.Action) (bool, runtime.Object, error) {
+		created = action.(clienttesting.CreateAction).GetObject().(*corev1.Pod)
+		created.UID = "created-probe"
+		return false, nil, nil
+	})
+	client.PrependReactor("get", "pods", func(clienttesting.Action) (bool, runtime.Object, error) {
+		if created == nil {
+			return false, nil, nil
+		}
+		replacement := created.DeepCopy()
+		replacement.UID = "replacement-probe"
+		replacement.Status.Phase = corev1.PodSucceeded
+		return true, replacement, nil
+	})
+	_, err := NewToolImageProber(client).Probe(context.Background(), ToolImageProbeOptions{
+		Image: "registry.example/tool:test", Targets: []ToolProbeTarget{{Namespace: "system", NodeName: "node-a"}}, Timeout: time.Second, Poll: time.Millisecond,
+	})
+	if domain.CategoryOf(err) != domain.ErrorConflict || !strings.Contains(err.Error(), "replaced before completion") {
+		t.Fatalf("category=%s error=%v", domain.CategoryOf(err), err)
+	}
+}
+
 func TestToolImageProbeTimeoutIncludesPodEvents(t *testing.T) {
 	client := fake.NewClientset(readyProbeNode("node-a"))
 	listCalls := 0

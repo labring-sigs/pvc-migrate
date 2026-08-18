@@ -109,7 +109,6 @@ func TestDeploymentClusterRoleCoversPlannerAccessReviews(t *testing.T) {
 			Adapter: domain.WorkloadKubeBlocks,
 			KubeBlocks: &domain.KubeBlocksSpec{
 				OpsAPIVersion:      "operations.kubeblocks.io/v1alpha1",
-				ClusterAPIVersion:  "apps.kubeblocks.io/v1alpha1",
 				SwitchoverStrategy: domain.KubeBlocksSwitchoverMongoDBNative,
 			},
 		},
@@ -186,8 +185,7 @@ func TestCheckRBACIncludesControllerSpecificPermissions(t *testing.T) {
 				Adapter:    domain.WorkloadKubeBlocks,
 				Controller: domain.ObjectReference{APIVersion: "workloads.kubeblocks.io/v1alpha1", Kind: "InstanceSet", Namespace: "app", Name: "cluster-db"},
 				KubeBlocks: &domain.KubeBlocksSpec{
-					OpsAPIVersion:     "operations.kubeblocks.io/v1alpha1",
-					ClusterAPIVersion: "apps.kubeblocks.io/v1alpha1",
+					OpsAPIVersion: "operations.kubeblocks.io/v1alpha1",
 				},
 			},
 			want: []authorizationv1.ResourceAttributes{
