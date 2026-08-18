@@ -2877,10 +2877,3 @@ func (m *Manager) deleteKubeBlocksInstancePod(ctx context.Context, session *doma
 		return false, getErr
 	})
 }
-
-func ignoreNotFound(err error) error {
-	if err == nil || apierrors.IsNotFound(err) {
-		return nil
-	}
-	return err
-}
