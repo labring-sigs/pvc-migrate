@@ -694,6 +694,7 @@ func TestCommandsRejectInvalidInputBeforeClusterAccess(t *testing.T) {
 		{name: "zero destination capacity", args: []string{"reserve", "--destination-capacity", "0"}, category: domain.ErrorValidation, text: "must be positive"},
 		{name: "existing session capacity override", args: []string{"copy", "--session", "existing", "--destination-capacity", "2Gi"}, category: domain.ErrorValidation, text: "cannot modify an existing session"},
 		{name: "existing reserve session shrink override", args: []string{"reserve", "plan", "--session", "existing", "--destination-capacity", "1Gi", "--allow-volume-shrink"}, category: domain.ErrorValidation, text: "cannot modify an existing session"},
+		{name: "existing session usage check override", args: []string{"copy", "--session", "existing", "--skip-source-usage-check"}, category: domain.ErrorValidation, text: "cannot modify an existing session"},
 		{name: "zero retries", args: []string{"migrate", "plan", "--retries", "0"}, category: domain.ErrorValidation, text: "--retries"},
 		{name: "negative retry backoff", args: []string{"migrate", "plan", "--retry-backoff", "-1s"}, category: domain.ErrorValidation, text: "--retry-backoff"},
 		{name: "zero Helm timeout", args: []string{"migrate", "plan", "--helm-timeout", "0"}, category: domain.ErrorValidation, text: "--helm-timeout"},

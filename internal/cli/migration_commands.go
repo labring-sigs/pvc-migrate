@@ -354,14 +354,11 @@ func validateDestinationCapacityFlags(flags *migrationFlags, operation domain.Op
 	if flags == nil {
 		return domain.NewError(domain.ErrorValidation, string(operation), "migration flags are required")
 	}
-	if existingSession && (len(flags.destinationCapacities) > 0 || flags.allowVolumeShrink) {
-		return domain.NewError(domain.ErrorValidation, string(operation), "destination capacity and shrink flags cannot modify an existing session; create a new session with the requested destination capacity")
+	if existingSession && (len(flags.destinationCapacities) > 0 || flags.allowVolumeShrink || flags.skipSourceUsageCheck) {
+		return domain.NewError(domain.ErrorValidation, string(operation), "destination capacity, shrink, and source usage check flags cannot modify an existing session; create a new session with the requested options")
 	}
 	if flags.skipSourceUsageCheck && !flags.allowVolumeShrink {
 		return domain.NewError(domain.ErrorValidation, string(operation), "--skip-source-usage-check requires --allow-volume-shrink")
-	}
-	if existingSession && flags.skipSourceUsageCheck {
-		return domain.NewError(domain.ErrorValidation, string(operation), "shrink flags cannot modify an existing session; create a new session with the requested destination capacity")
 	}
 	if flags.allowVolumeShrink && len(flags.destinationCapacities) == 0 {
 		return domain.NewError(domain.ErrorValidation, string(operation), "--allow-volume-shrink requires --destination-capacity")
