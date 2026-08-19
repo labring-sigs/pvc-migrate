@@ -68,6 +68,9 @@ func TestPlanRenameSameNamespacePreservesDurableMetadataWithoutQuotaDemand(t *te
 	if plan.TemporaryUsage.StorageRequests != "0" || plan.TemporaryUsage.PVCs != 0 {
 		t.Fatalf("temporary usage=%#v", plan.TemporaryUsage)
 	}
+	if plan.Volumes[0].SourceCapacity != "2Gi" || plan.Volumes[0].Capacity != "2Gi" || plan.SessionSpec.Volumes[0].SourceCapacity != "2Gi" {
+		t.Fatalf("rename capacities=%#v session=%#v", plan.Volumes[0], plan.SessionSpec.Volumes[0])
+	}
 	metadata := plan.SessionSpec.Volumes[0].SourcePVCMetadata
 	if metadata.Labels["application"] != "database" || metadata.Annotations["application.example/setting"] != "keep" {
 		t.Fatalf("preserved metadata=%#v", metadata)

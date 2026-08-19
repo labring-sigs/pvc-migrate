@@ -154,6 +154,7 @@ type SessionWorkflowOptions struct {
 	DeleteExtraneous       bool     `json:"deleteExtraneous" yaml:"deleteExtraneous"`
 	PrecopyPasses          int      `json:"-" yaml:"-"`
 	OpenEBSLVMEnableShared bool     `json:"openebsLvmEnableShared,omitempty" yaml:"openebsLvmEnableShared,omitempty"`
+	SkipSourceUsageCheck   bool     `json:"skipSourceUsageCheck,omitempty" yaml:"skipSourceUsageCheck,omitempty"`
 }
 
 const (
@@ -261,10 +262,15 @@ type VolumeSpec struct {
 	DestinationPVC      ObjectReference                      `json:"destinationPVC" yaml:"destinationPVC"`
 	DestinationPV       ObjectReference                      `json:"destinationPV,omitempty" yaml:"destinationPV,omitempty"`
 	DestinationPolicy   corev1.PersistentVolumeReclaimPolicy `json:"destinationReclaimPolicy,omitempty" yaml:"destinationReclaimPolicy,omitempty"`
-	Capacity            string                               `json:"capacity" yaml:"capacity"`
-	StorageClass        string                               `json:"storageClass" yaml:"storageClass"`
-	AccessModes         []corev1.PersistentVolumeAccessMode  `json:"accessModes" yaml:"accessModes"`
-	VolumeMode          corev1.PersistentVolumeMode          `json:"volumeMode" yaml:"volumeMode"`
+	// Capacity is the requested destination PVC capacity. SourceCapacity
+	// records the original PV capacity used for resize safety checks.
+	Capacity         string                              `json:"capacity" yaml:"capacity"`
+	SourceCapacity   string                              `json:"sourceCapacity" yaml:"sourceCapacity"`
+	SourceUsedBytes  int64                               `json:"sourceUsedBytes,omitempty" yaml:"sourceUsedBytes,omitempty"`
+	SourceUsageKnown bool                                `json:"sourceUsageKnown,omitempty" yaml:"sourceUsageKnown,omitempty"`
+	StorageClass     string                              `json:"storageClass" yaml:"storageClass"`
+	AccessModes      []corev1.PersistentVolumeAccessMode `json:"accessModes" yaml:"accessModes"`
+	VolumeMode       corev1.PersistentVolumeMode         `json:"volumeMode" yaml:"volumeMode"`
 }
 
 type SyncState struct {

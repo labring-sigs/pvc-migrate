@@ -63,15 +63,18 @@ type ResourceEstimate struct {
 }
 
 type PlannedVolume struct {
-	SourcePVC      ObjectReference                     `json:"sourcePVC" yaml:"sourcePVC"`
-	SourcePV       ObjectReference                     `json:"sourcePV" yaml:"sourcePV"`
-	DestinationPVC ObjectReference                     `json:"destinationPVC" yaml:"destinationPVC"`
-	Capacity       string                              `json:"capacity" yaml:"capacity"`
-	AccessModes    []corev1.PersistentVolumeAccessMode `json:"accessModes" yaml:"accessModes"`
-	VolumeMode     corev1.PersistentVolumeMode         `json:"volumeMode" yaml:"volumeMode"`
-	StorageClass   string                              `json:"storageClass" yaml:"storageClass"`
-	BindingMode    storagev1.VolumeBindingMode         `json:"bindingMode" yaml:"bindingMode"`
-	CSIProvisioner string                              `json:"csiProvisioner" yaml:"csiProvisioner"`
+	SourcePVC        ObjectReference                     `json:"sourcePVC" yaml:"sourcePVC"`
+	SourcePV         ObjectReference                     `json:"sourcePV" yaml:"sourcePV"`
+	DestinationPVC   ObjectReference                     `json:"destinationPVC" yaml:"destinationPVC"`
+	Capacity         string                              `json:"capacity" yaml:"capacity"`
+	SourceCapacity   string                              `json:"sourceCapacity" yaml:"sourceCapacity"`
+	SourceUsedBytes  int64                               `json:"sourceUsedBytes,omitempty" yaml:"sourceUsedBytes,omitempty"`
+	SourceUsageKnown bool                                `json:"sourceUsageKnown,omitempty" yaml:"sourceUsageKnown,omitempty"`
+	AccessModes      []corev1.PersistentVolumeAccessMode `json:"accessModes" yaml:"accessModes"`
+	VolumeMode       corev1.PersistentVolumeMode         `json:"volumeMode" yaml:"volumeMode"`
+	StorageClass     string                              `json:"storageClass" yaml:"storageClass"`
+	BindingMode      storagev1.VolumeBindingMode         `json:"bindingMode" yaml:"bindingMode"`
+	CSIProvisioner   string                              `json:"csiProvisioner" yaml:"csiProvisioner"`
 }
 
 type StorageCapacityReport struct {

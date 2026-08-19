@@ -13,6 +13,7 @@ import (
 	"github.com/labring-sigs/pvc-migrate/internal/parallel"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/util/retry"
@@ -513,7 +514,10 @@ func (s *Switcher) activePVC(ctx context.Context, session *domain.Session, volum
 }
 
 func (s *Switcher) createActivePVC(ctx context.Context, session *domain.Session, volume *domain.VolumeSpec, pvRef domain.ObjectReference, storageClass string) (*corev1.PersistentVolumeClaim, error) {
-	pvc := activePVCManifest(session, volume, pvRef, storageClass)
+	pvc, err := activePVCManifest(session, volume, pvRef, storageClass)
+	if err != nil {
+		return nil, err
+	}
 	created, err := s.client.CoreV1().PersistentVolumeClaims(pvc.Namespace).Create(ctx, pvc, metav1.CreateOptions{})
 	if apierrors.IsAlreadyExists(err) {
 		created, err = s.client.CoreV1().PersistentVolumeClaims(pvc.Namespace).Get(ctx, pvc.Name, metav1.GetOptions{})
@@ -551,15 +555,31 @@ func (s *Switcher) createActivePVC(ctx context.Context, session *domain.Session,
 }
 
 func (s *Switcher) validateActivePVC(ctx context.Context, session *domain.Session, volume *domain.VolumeSpec, pvRef domain.ObjectReference, storageClass string) error {
-	pvc := activePVCManifest(session, volume, pvRef, storageClass)
+	pvc, err := activePVCManifest(session, volume, pvRef, storageClass)
+	if err != nil {
+		return err
+	}
 	if _, err := s.client.CoreV1().PersistentVolumeClaims(pvc.Namespace).Create(ctx, pvc, metav1.CreateOptions{DryRun: []string{metav1.DryRunAll}}); err != nil {
 		return domain.WrapError(domain.ErrorPrecondition, "validate active PVC", fmt.Sprintf("server-side dry-run rejected %s/%s", pvc.Namespace, pvc.Name), err)
 	}
 	return nil
 }
 
-func activePVCManifest(session *domain.Session, volume *domain.VolumeSpec, pvRef domain.ObjectReference, storageClass string) *corev1.PersistentVolumeClaim {
+func activePVCManifest(session *domain.Session, volume *domain.VolumeSpec, pvRef domain.ObjectReference, storageClass string) (*corev1.PersistentVolumeClaim, error) {
 	spec := *volume.SourcePVCSpec.DeepCopy()
+	if pvRef.Name == volume.DestinationPV.Name {
+		capacity, err := resource.ParseQuantity(volume.Capacity)
+		if err != nil || capacity.Sign() <= 0 {
+			if err == nil {
+				err = fmt.Errorf("capacity must be positive")
+			}
+			return nil, domain.NewError(domain.ErrorValidation, "active PVC", fmt.Sprintf("destination capacity %q is invalid: %v", volume.Capacity, err))
+		}
+		if spec.Resources.Requests == nil {
+			spec.Resources.Requests = corev1.ResourceList{}
+		}
+		spec.Resources.Requests[corev1.ResourceStorage] = capacity
+	}
 	spec.VolumeName = pvRef.Name
 	spec.Selector = nil
 	spec.DataSource = nil
@@ -600,10 +620,13 @@ func activePVCManifest(session *domain.Session, volume *domain.VolumeSpec, pvRef
 		rollbackPV = volume.DestinationPV.Name
 	}
 	pvc.Annotations[RollbackPVAnnotation] = rollbackPV
-	return pvc
+	return pvc, nil
 }
 
 func (s *Switcher) completeActivation(ctx context.Context, session *domain.Session, volume *domain.VolumeSpec, status *domain.VolumeStatus, pvc *corev1.PersistentVolumeClaim, progress ProgressFunc) error {
+	if err := validateActivePVCRequest(pvc, volume); err != nil {
+		return err
+	}
 	if err := s.verifyBinding(ctx, pvc, volume.DestinationPV); err != nil {
 		return err
 	}
@@ -617,6 +640,28 @@ func (s *Switcher) completeActivation(ctx context.Context, session *domain.Sessi
 	status.Activation.SourcePVCDeleted = true
 	status.Activation.DestinationReserved = true
 	return callProgress(progress)
+}
+
+func validateActivePVCRequest(pvc *corev1.PersistentVolumeClaim, volume *domain.VolumeSpec) error {
+	if pvc == nil || volume == nil {
+		return domain.NewError(domain.ErrorValidation, "active PVC", "PVC and volume are required")
+	}
+	capacity, err := resource.ParseQuantity(volume.Capacity)
+	if err != nil || capacity.Sign() <= 0 {
+		if err == nil {
+			err = fmt.Errorf("capacity must be positive")
+		}
+		return domain.NewError(domain.ErrorValidation, "active PVC", fmt.Sprintf("destination capacity %q is invalid: %v", volume.Capacity, err))
+	}
+	requested, ok := pvc.Spec.Resources.Requests[corev1.ResourceStorage]
+	if !ok || requested.Cmp(capacity) != 0 {
+		actual := "missing"
+		if ok {
+			actual = requested.String()
+		}
+		return domain.NewError(domain.ErrorConflict, "active PVC", fmt.Sprintf("PVC %s/%s requests %s, session requires %s", pvc.Namespace, pvc.Name, actual, capacity.String()))
+	}
+	return nil
 }
 
 func (s *Switcher) completeRollback(ctx context.Context, session *domain.Session, volume *domain.VolumeSpec, status *domain.VolumeStatus, pvc *corev1.PersistentVolumeClaim, progress ProgressFunc) error {

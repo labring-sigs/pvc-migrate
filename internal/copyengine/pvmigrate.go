@@ -58,6 +58,7 @@ func (p *PVMigrate) Copy(ctx context.Context, request Request, progress Progress
 		SourceMountReadWrite:  request.SourceMountReadWrite,
 		NoCompress:            request.NoCompress,
 		NoCleanupOnFailure:    false,
+		IgnoreSizes:           request.IgnoreSizes,
 		ShowProgressBar:       false,
 		RsyncExtraArgs:        rsyncArgs,
 		Strategies:            strategies,

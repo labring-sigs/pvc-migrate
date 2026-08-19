@@ -10,6 +10,7 @@ import (
 	"github.com/labring-sigs/pvc-migrate/internal/domain"
 	"github.com/labring-sigs/pvc-migrate/internal/planner"
 	"github.com/spf13/cobra"
+	"k8s.io/apimachinery/pkg/api/resource"
 )
 
 type migrationFlags struct {
@@ -19,6 +20,9 @@ type migrationFlags struct {
 	destinationNamespace   string
 	sourcePVCs             []string
 	destinationPVCs        []string
+	destinationCapacities  []string
+	allowVolumeShrink      bool
+	skipSourceUsageCheck   bool
 	podName                string
 	sourceNode             string
 	targetNode             string
@@ -42,7 +46,10 @@ func (f *migrationFlags) bind(command *cobra.Command, includePod, includeSourceN
 	flags.StringVar(&f.temporaryNamespace, "temporary-namespace", "pvc-migrate-system", "Namespace for staged destination PVCs")
 	flags.StringVar(&f.destinationNamespace, "destination-namespace", "", "Destination namespace; defaults to source namespace")
 	flags.StringSliceVar(&f.sourcePVCs, "source-pvc", nil, "Source PVC name; repeat for multiple claims")
-	flags.StringSliceVar(&f.destinationPVCs, "destination-pvc", nil, "Destination PVC name; repeat in source PVC order")
+	flags.StringSliceVar(&f.destinationPVCs, "destination-pvc", nil, "Destination PVC name; for multiple PVCs use source-pvc-name=destination-pvc-name")
+	flags.StringSliceVar(&f.destinationCapacities, "destination-capacity", nil, "Destination PVC storage capacity; one value applies to all PVCs, or use source-pvc-name=capacity for explicit mappings")
+	flags.BoolVar(&f.allowVolumeShrink, "allow-volume-shrink", false, "Allow destination capacity below the source PV capacity; only use when copied data is known to fit")
+	flags.BoolVar(&f.skipSourceUsageCheck, "skip-source-usage-check", false, "Skip the storage-backend CRD usage check for a smaller destination")
 	if includeSourceNode {
 		flags.StringVar(&f.sourceNode, "source-node", "", "Source tool node; inferred from active consumers when possible")
 	}
@@ -74,6 +81,9 @@ func (f *migrationFlags) bindForceReprovision(command *cobra.Command) {
 }
 
 func (f *migrationFlags) planOptions(state *rootState, operation domain.Operation, useTemporary bool) (planner.Options, error) {
+	if err := validateDestinationCapacityFlags(f, operation, false); err != nil {
+		return planner.Options{}, err
+	}
 	id := f.sessionID
 	if id == "" {
 		generated, err := domain.NewSessionID(time.Now())
@@ -103,6 +113,9 @@ func (f *migrationFlags) planOptions(state *rootState, operation domain.Operatio
 		StagingNamespace:       stagingNamespace,
 		SourcePVCs:             append([]string(nil), f.sourcePVCs...),
 		DestinationPVCs:        append([]string(nil), f.destinationPVCs...),
+		DestinationCapacities:  append([]string(nil), f.destinationCapacities...),
+		AllowVolumeShrink:      f.allowVolumeShrink,
+		SkipSourceUsageCheck:   f.skipSourceUsageCheck,
 		PodName:                f.podName,
 		SourceNode:             f.sourceNode,
 		TargetNode:             f.targetNode,
@@ -128,6 +141,9 @@ func (r *rootState) newMigrationPlanCommand(operation domain.Operation, useTempo
 		Short: "Inventory resources and validate this operation",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
+			if err := validateDestinationCapacityFlags(flags, operation, targetsExistingSession(flags)); err != nil {
+				return err
+			}
 			if operation == domain.OperationMigratePod && flags.podName == "" {
 				return domain.NewError(domain.ErrorValidation, "migrate-pod plan", "--pod is required")
 			}
@@ -197,6 +213,9 @@ func (r *rootState) newReserveCommand() *cobra.Command {
 		Short: "Provision and retain staged destination PVCs",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
+			if err := validateDestinationCapacityFlags(flags, domain.OperationReserve, targetsExistingSession(flags)); err != nil {
+				return reportPreSessionError(cmd, err)
+			}
 			runtime, err := r.runtime()
 			if err != nil {
 				return err
@@ -257,6 +276,9 @@ func (r *rootState) newCopyCommand() *cobra.Command {
 		Short: "Run an idempotent offline or online warm copy without workload cutover",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
+			if err := validateDestinationCapacityFlags(flags, domain.OperationCopy, targetsExistingSession(flags)); err != nil {
+				return reportPreSessionError(cmd, err)
+			}
 			runtime, err := r.runtime()
 			if err != nil {
 				return err
@@ -326,6 +348,41 @@ func (r *rootState) newCopyCommand() *cobra.Command {
 
 func targetsExistingSession(flags *migrationFlags) bool {
 	return flags.sessionID != "" && len(flags.sourcePVCs) == 0 && flags.podName == ""
+}
+
+func validateDestinationCapacityFlags(flags *migrationFlags, operation domain.Operation, existingSession bool) error {
+	if flags == nil {
+		return domain.NewError(domain.ErrorValidation, string(operation), "migration flags are required")
+	}
+	if existingSession && (len(flags.destinationCapacities) > 0 || flags.allowVolumeShrink) {
+		return domain.NewError(domain.ErrorValidation, string(operation), "destination capacity and shrink flags cannot modify an existing session; create a new session with the requested destination capacity")
+	}
+	if flags.skipSourceUsageCheck && !flags.allowVolumeShrink {
+		return domain.NewError(domain.ErrorValidation, string(operation), "--skip-source-usage-check requires --allow-volume-shrink")
+	}
+	if existingSession && flags.skipSourceUsageCheck {
+		return domain.NewError(domain.ErrorValidation, string(operation), "shrink flags cannot modify an existing session; create a new session with the requested destination capacity")
+	}
+	if flags.allowVolumeShrink && len(flags.destinationCapacities) == 0 {
+		return domain.NewError(domain.ErrorValidation, string(operation), "--allow-volume-shrink requires --destination-capacity")
+	}
+	for _, value := range flags.destinationCapacities {
+		capacityValue := strings.TrimSpace(value)
+		if key, mapped, ok := strings.Cut(capacityValue, "="); ok {
+			if strings.TrimSpace(key) == "" || strings.TrimSpace(mapped) == "" {
+				return domain.NewError(domain.ErrorValidation, string(operation), fmt.Sprintf("--destination-capacity %q must use source-pvc-name=capacity", value))
+			}
+			capacityValue = strings.TrimSpace(mapped)
+		}
+		parsed, err := resource.ParseQuantity(capacityValue)
+		if err != nil {
+			return domain.NewError(domain.ErrorValidation, string(operation), fmt.Sprintf("--destination-capacity %q is invalid: %v", value, err))
+		}
+		if parsed.Sign() <= 0 {
+			return domain.NewError(domain.ErrorValidation, string(operation), fmt.Sprintf("--destination-capacity %q must be positive", value))
+		}
+	}
+	return nil
 }
 
 func prepareCopySession(session *domain.Session, flags *migrationFlags) error {
@@ -507,6 +564,9 @@ func (r *rootState) newMigrateCommand(podMode bool) *cobra.Command {
 		Short: short,
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
+			if err := validateDestinationCapacityFlags(flags, operation, false); err != nil {
+				return reportPreSessionError(cmd, err)
+			}
 			if podMode && flags.podName == "" {
 				return domain.NewError(domain.ErrorValidation, use, "--pod is required")
 			}

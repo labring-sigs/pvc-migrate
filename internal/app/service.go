@@ -18,6 +18,7 @@ import (
 	"github.com/labring-sigs/pvc-migrate/internal/parallel"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
 )
@@ -36,6 +37,7 @@ type Config struct {
 	Writer                        io.Writer
 	Logger                        *slog.Logger
 	ToolImageProber               kube.ToolImageProber
+	VolumeUsageReader             kube.VolumeUsageReader
 	OpenEBSLVMSharedVolumeManager kube.OpenEBSLVMSharedVolumeManager
 }
 
@@ -813,6 +815,9 @@ func (s *Service) ValidateReservation(ctx context.Context, session *domain.Sessi
 	if err := s.validateOpenEBSLVMSharedMountRestore(ctx, session); err != nil {
 		return err
 	}
+	if err := s.verifyShrinkUsage(ctx, session); err != nil {
+		return err
+	}
 	s.logInfo("reservation preflight started", "session", session.ID, "volumes", len(session.Spec.Volumes))
 	for index := range session.Spec.Volumes {
 		volume := session.Spec.Volumes[index]
@@ -851,6 +856,42 @@ func (s *Service) ValidateWarmCopy(ctx context.Context, session *domain.Session)
 	}
 	_, err := s.resolveSourceToolProbeTargets(ctx, session, true)
 	return err
+}
+
+func (s *Service) verifyShrinkUsage(ctx context.Context, session *domain.Session) error {
+	if session == nil {
+		return domain.NewError(domain.ErrorValidation, "source usage check", "session is nil")
+	}
+	options := session.Spec.WorkflowOptions()
+	for _, volume := range session.Spec.Volumes {
+		source, sourceErr := resource.ParseQuantity(volume.SourceCapacity)
+		destination, destinationErr := resource.ParseQuantity(volume.Capacity)
+		if sourceErr != nil || destinationErr != nil || destination.Cmp(source) >= 0 {
+			continue
+		}
+		if options.SkipSourceUsageCheck {
+			s.logWarn("source usage check skipped by explicit approval", "session", session.ID, "pvc", volume.SourcePVC.Name, "destinationCapacity", destination.String())
+			continue
+		}
+		if s.config.VolumeUsageReader == nil {
+			return domain.NewError(domain.ErrorPrecondition, "source usage check", fmt.Sprintf("PVC %s/%s has no trusted storage-backend CRD usage reader; pass --skip-source-usage-check only after independently verifying that its data fits destination capacity %s", volume.SourcePVC.Namespace, volume.SourcePVC.Name, destination.String()))
+		}
+		usage, err := s.config.VolumeUsageReader.Read(ctx, kube.VolumeUsageReadOptions{SourcePVC: volume.SourcePVC, SourcePV: volume.SourcePV})
+		if err != nil {
+			return domain.WrapError(domain.ErrorPrecondition, "source usage check", fmt.Sprintf("PVC %s/%s usage could not be read from its storage backend CRD; pass --skip-source-usage-check only after independently verifying that its data fits", volume.SourcePVC.Namespace, volume.SourcePVC.Name), err)
+		}
+		if usage.UsedBytes < 0 {
+			return domain.NewError(domain.ErrorPrecondition, "source usage check", fmt.Sprintf("PVC %s/%s storage backend returned invalid used bytes %d", volume.SourcePVC.Namespace, volume.SourcePVC.Name, usage.UsedBytes))
+		}
+		usageSource := strings.TrimSpace(usage.Source)
+		if usageSource == "" {
+			usageSource = "the storage backend CRD"
+		}
+		if usage.UsedBytes > destination.Value() {
+			return domain.NewError(domain.ErrorConflict, "source usage check", fmt.Sprintf("PVC %s/%s uses %d bytes according to %s, above destination capacity %s; increase --destination-capacity or abort this shrink", volume.SourcePVC.Namespace, volume.SourcePVC.Name, usage.UsedBytes, usageSource, destination.String()))
+		}
+	}
+	return nil
 }
 
 func (s *Service) validateWarmCopyOpenEBSLVM(ctx context.Context, session *domain.Session) error {
@@ -1451,6 +1492,9 @@ func (s *Service) ValidateFinalSync(ctx context.Context, session *domain.Session
 	if err := s.controllers.VerifyPaused(ctx, session); err != nil {
 		return err
 	}
+	if err := s.verifyShrinkUsage(ctx, session); err != nil {
+		return err
+	}
 	return s.validateOfflineVolumes(ctx, session)
 }
 
@@ -1486,6 +1530,9 @@ func (s *Service) ValidateActivation(ctx context.Context, session *domain.Sessio
 		if status.Sync.FinalCompletedAt == nil {
 			return domain.NewError(domain.ErrorPrecondition, "activation dry-run", fmt.Sprintf("PVC %s has no completed final sync", volume.SourcePVC.Name))
 		}
+	}
+	if err := s.validateActivationPVCPolicies(ctx, session); err != nil {
+		return err
 	}
 	if phase == domain.PhaseActivating || phase == domain.PhaseFailed {
 		return s.validateActivationStorage(ctx, session)
@@ -1708,6 +1755,9 @@ func (s *Service) finalSync(ctx context.Context, session *domain.Session) error 
 	if err := s.controllers.VerifyPaused(ctx, session); err != nil {
 		return err
 	}
+	if err := s.verifyShrinkUsage(ctx, session); err != nil {
+		return s.failContext(ctx, session, err)
+	}
 	if err := s.validateOfflineVolumes(ctx, session); err != nil {
 		return err
 	}
@@ -1753,6 +1803,9 @@ func (s *Service) pauseAndFinalSync(ctx context.Context, session *domain.Session
 		if err := s.controllers.VerifyPaused(ctx, session); err != nil {
 			return err
 		}
+		if err := s.verifyShrinkUsage(ctx, session); err != nil {
+			return s.failContext(ctx, session, err)
+		}
 		if err := s.validateOfflineVolumes(ctx, session); err != nil {
 			return err
 		}
@@ -1770,6 +1823,9 @@ func (s *Service) pauseAndFinalSync(ctx context.Context, session *domain.Session
 	if !alreadyPaused {
 		if err := s.pause(ctx, session); err != nil {
 			return err
+		}
+		if err := s.verifyShrinkUsage(ctx, session); err != nil {
+			return s.failContext(ctx, session, err)
 		}
 	}
 	return s.finalSyncWithProbeResults(ctx, session, probeResults)
@@ -2359,6 +2415,7 @@ func (s *Service) copyWithRetry(ctx context.Context, session *domain.Session, vo
 			DeleteExtraneousFiles: options.DeleteExtraneous,
 			VerifyChecksum:        mode == copyengine.ModeFinal && options.VerifyChecksum,
 			SourceMountReadWrite:  sourceMountReadWrite,
+			IgnoreSizes:           volumeCapacityIsSmaller(volume),
 			NoCompress:            s.config.NoCompress,
 			HelmTimeout:           s.config.HelmTimeout,
 			HelmStringValues:      values,
@@ -2394,6 +2451,9 @@ func (s *Service) copyWithRetry(ctx context.Context, session *domain.Session, vo
 			}
 			return err
 		}
+		if isDestinationNoSpaceError(last) {
+			return domain.WrapError(domain.ErrorConflict, "copy capacity", fmt.Sprintf("destination PVC %s/%s ran out of space; increase --destination-capacity, then abort and rerun this session (or roll back before resuming the workload)", volume.DestinationPVC.Namespace, volume.DestinationPVC.Name), last)
+		}
 		if retryIndex+1 < s.config.Retries {
 			delay := time.Duration(math.Pow(2, float64(retryIndex))) * s.config.RetryBackoff
 			s.logInfo("copy retry scheduled", "session", session.ID, "pvc", volume.SourcePVC.Name, "mode", mode, "attempt", status.Sync.Attempts, "nextAttempt", status.Sync.Attempts+1, "backoff", delay, "error", last)
@@ -2403,6 +2463,41 @@ func (s *Service) copyWithRetry(ctx context.Context, session *domain.Session, vo
 		}
 	}
 	return last
+}
+
+func isDestinationNoSpaceError(err error) bool {
+	if err == nil {
+		return false
+	}
+	var visit func(error) bool
+	visit = func(candidate error) bool {
+		if candidate == nil {
+			return false
+		}
+		message := strings.ToLower(candidate.Error())
+		if strings.Contains(message, "no space left on device") || strings.Contains(message, "enospc") {
+			return true
+		}
+		if joined, ok := candidate.(interface{ Unwrap() []error }); ok {
+			for _, child := range joined.Unwrap() {
+				if visit(child) {
+					return true
+				}
+			}
+			return false
+		}
+		return visit(errors.Unwrap(candidate))
+	}
+	return visit(err)
+}
+
+func volumeCapacityIsSmaller(volume *domain.VolumeSpec) bool {
+	if volume == nil || volume.SourceCapacity == "" || volume.Capacity == "" {
+		return false
+	}
+	source, sourceErr := resource.ParseQuantity(volume.SourceCapacity)
+	destination, destinationErr := resource.ParseQuantity(volume.Capacity)
+	return sourceErr == nil && destinationErr == nil && destination.Cmp(source) < 0
 }
 
 func (s *Service) waitForCopyToolRelease(ctx context.Context, volume *domain.VolumeSpec) error {
@@ -2623,6 +2718,53 @@ func (s *Service) validateActivationStorage(ctx context.Context, session *domain
 		offline = append(offline, &session.Spec.Volumes[index])
 	}
 	return s.verifyVolumesOffline(ctx, session, offline)
+}
+
+func (s *Service) validateActivationPVCPolicies(ctx context.Context, session *domain.Session) error {
+	groups := make(map[string][]kube.PVCAdmissionChange)
+	for index := range session.Spec.Volumes {
+		volume := &session.Spec.Volumes[index]
+		status := &session.Status.Volumes[index]
+		if status.Activation.ActivatedAt != nil || status.Activation.ActivePVC.Name != "" {
+			continue
+		}
+		requested, err := resource.ParseQuantity(volume.Capacity)
+		if err != nil || requested.Sign() <= 0 {
+			return domain.NewError(domain.ErrorValidation, "activation preflight", fmt.Sprintf("PVC %s/%s has invalid destination capacity %q", volume.SourcePVC.Namespace, volume.SourcePVC.Name, volume.Capacity))
+		}
+		existing := volume.SourcePVCSpec.Resources.Requests[corev1.ResourceStorage]
+		sourceClass := ""
+		if volume.SourcePVCSpec.StorageClassName != nil {
+			sourceClass = *volume.SourcePVCSpec.StorageClassName
+		}
+		groups[volume.SourcePVC.Namespace] = append(groups[volume.SourcePVC.Namespace], kube.PVCAdmissionChange{
+			Namespace:             volume.SourcePVC.Namespace,
+			Name:                  volume.SourcePVC.Name,
+			RequestedStorage:      requested,
+			RequestedStorageClass: volume.StorageClass,
+			Existing:              !status.Activation.SourcePVCDeleted,
+			ExistingStorage:       existing,
+			ExistingStorageClass:  sourceClass,
+		})
+	}
+	namespaces := make([]string, 0, len(groups))
+	for namespace := range groups {
+		namespaces = append(namespaces, namespace)
+	}
+	sort.Strings(namespaces)
+	for _, namespace := range namespaces {
+		report, err := kube.CheckPVCAdmissionPolicies(ctx, s.client, groups[namespace])
+		if err != nil {
+			return domain.WrapError(domain.ErrorKubernetes, "activation preflight", fmt.Sprintf("check application PVC admission in %s", namespace), err)
+		}
+		if len(report.QuotaViolations) > 0 {
+			return domain.NewError(domain.ErrorPrecondition, "activation preflight", "application PVC quota rejected the replacement: "+strings.Join(report.QuotaViolations, "; "))
+		}
+		if len(report.LimitRangeViolations) > 0 {
+			return domain.NewError(domain.ErrorPrecondition, "activation preflight", "application PVC LimitRange rejected the replacement: "+strings.Join(report.LimitRangeViolations, "; "))
+		}
+	}
+	return nil
 }
 
 func (s *Service) validateRollbackRecoveryStorage(ctx context.Context, session *domain.Session, rollbackOrigin domain.Phase) error {

@@ -576,3 +576,18 @@ func TestPVMigrateToolIdentificationIsScopedToClaims(t *testing.T) {
 		t.Fatal("application Pod matched a pv-migrate tool")
 	}
 }
+
+func TestDestinationNoSpaceErrorStopsRetries(t *testing.T) {
+	if !isDestinationNoSpaceError(errors.New("rsync: write failed: No space left on device")) {
+		t.Fatal("expected ENOSPC to be recognized")
+	}
+	if !isDestinationNoSpaceError(errors.New("exit status 23: ENOSPC")) {
+		t.Fatal("expected ENOSPC token to be recognized")
+	}
+	if !isDestinationNoSpaceError(domain.WrapError(domain.ErrorCopy, "copy PVC", "pv-migrate operation failed", errors.New("rsync: No space left on device"))) {
+		t.Fatal("expected nested ENOSPC to be recognized")
+	}
+	if isDestinationNoSpaceError(errors.New("checksum mismatch")) {
+		t.Fatal("unexpected capacity error")
+	}
+}

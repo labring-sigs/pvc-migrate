@@ -262,6 +262,36 @@ pvc-migrate copy --dry-run=false --online \
 ```
 
 Cross-namespace copies reuse the source PVC name by default. Same-namespace copies generate a session-suffixed destination name unless `--destination-pvc` is supplied.
+For multiple explicit destination names, pass `--destination-pvc source-pvc-name=destination-pvc-name` once per source PVC; mappings must be complete and unique.
+
+### Destination Capacity
+
+`reserve`, `copy`, `migrate`, and `migrate-pod` accept `--destination-capacity` because they create destination PVCs. Omit it to keep each source PV capacity. Pass one value to apply it to every source PVC, or use explicit `source-pvc-name=capacity` entries for multiple PVCs. Plans and session status show both source and destination capacities.
+
+The planner rejects a destination smaller than its source PV by default. Add `--allow-volume-shrink` only after confirming that the copied data fits in every smaller PVC. pvc-migrate never mounts a source volume to measure usage during planning or execution. It accepts usage only from a trusted adapter for a known storage-backend CRD; provisioned capacity is not treated as used bytes. When no trusted adapter is available, the plan is blocked unless `--skip-source-usage-check` explicitly accepts the risk. The current release has no trusted usage adapter for OpenEBS LVM, OpenEBS HostPath, or S3 CSI because their CRDs do not expose per-volume filesystem usage. These flags apply only to a new session and cannot change an existing session. `rename` and `move` preserve PVC identity and do not expose capacity flags.
+
+For an orchestrated migration, the recreated application PVC uses the requested destination capacity after activation. Rollback recreates it with the original source PVC request.
+
+```bash
+pvc-migrate copy --dry-run=false \
+  --source-namespace application \
+  --source-pvc database-data \
+  --destination-capacity 200Gi
+
+# For a Pod with two PVCs, map each source PVC by name.
+pvc-migrate migrate-pod plan \
+  --source-namespace application \
+  --pod database-1 \
+  --destination-capacity data=200Gi \
+  --destination-capacity logs=256Gi
+
+pvc-migrate copy --dry-run=false \
+  --source-namespace application \
+  --source-pvc database-data \
+  --destination-capacity 32Gi \
+  --allow-volume-shrink \
+  --skip-source-usage-check
+```
 
 ## Backup and Restore
 

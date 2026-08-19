@@ -35,6 +35,9 @@ type Options struct {
 	CapacityAwareness      domain.CapacityAwareness
 	SourcePVCs             []string
 	DestinationPVCs        []string
+	DestinationCapacities  []string
+	AllowVolumeShrink      bool
+	SkipSourceUsageCheck   bool
 	PodName                string
 	SourceNode             string
 	TargetNode             string
@@ -54,6 +57,7 @@ type Planner struct {
 	client                        kubernetes.Interface
 	controllers                   *controller.Manager
 	openEBSLVMSharedVolumeManager kube.OpenEBSLVMSharedVolumeManager
+	volumeUsageReader             kube.VolumeUsageReader
 	logger                        *slog.Logger
 }
 
@@ -63,6 +67,11 @@ func New(client kubernetes.Interface, controllers *controller.Manager) *Planner 
 
 func (p *Planner) WithOpenEBSLVMSharedVolumeManager(manager kube.OpenEBSLVMSharedVolumeManager) *Planner {
 	p.openEBSLVMSharedVolumeManager = manager
+	return p
+}
+
+func (p *Planner) WithVolumeUsageReader(reader kube.VolumeUsageReader) *Planner {
+	p.volumeUsageReader = reader
 	return p
 }
 
@@ -127,6 +136,20 @@ func (p *Planner) Plan(ctx context.Context, options Options) (*domain.MigrationP
 	}
 	if options.PrecopyPasses < 0 {
 		plan.AddCheck(failed("precopy-passes", "warm-copy passes cannot be negative"))
+	}
+	if len(options.DestinationCapacities) > 0 && !supportsDestinationCapacity(options.Operation) {
+		plan.AddCheck(failed("destination-capacity", fmt.Sprintf("--destination-capacity is not supported for %s; this operation does not create a destination PVC", options.Operation)))
+	}
+	if options.AllowVolumeShrink && len(options.DestinationCapacities) == 0 {
+		plan.AddCheck(failed("destination-capacity", "--allow-volume-shrink requires --destination-capacity"))
+	}
+	if options.SkipSourceUsageCheck && !options.AllowVolumeShrink {
+		plan.AddCheck(failed("destination-capacity", "--skip-source-usage-check requires --allow-volume-shrink"))
+	}
+	for _, value := range options.DestinationCapacities {
+		if err := validateDestinationCapacityValue(value); err != nil {
+			plan.AddCheck(failed("destination-capacity", fmt.Sprintf("destination capacity %q is invalid: %v", value, err)))
+		}
 	}
 	for _, field := range []struct {
 		name  string
@@ -239,8 +262,9 @@ func (p *Planner) Plan(ctx context.Context, options Options) (*domain.MigrationP
 			p.checkPodTargetScheduling(plan, sourcePod, workload, node)
 		}
 	}
-	if len(options.DestinationPVCs) > 0 && len(options.DestinationPVCs) != len(pvcNames) {
-		plan.AddCheck(failed("destination-pvc", fmt.Sprintf("%d destination PVC name(s) supplied for %d source PVC(s)", len(options.DestinationPVCs), len(pvcNames))))
+	destinationPVCs, destinationPVCInputsErr := resolveDestinationPVCs(options.DestinationPVCs, pvcNames)
+	if destinationPVCInputsErr != nil {
+		plan.AddCheck(failed("destination-pvc", destinationPVCInputsErr.Error()))
 	}
 
 	volumeSpecs := make([]domain.VolumeSpec, 0, len(pvcNames))
@@ -253,9 +277,17 @@ func (p *Planner) Plan(ctx context.Context, options Options) (*domain.MigrationP
 	sourcePVs := make(map[string]*corev1.PersistentVolume)
 	mountTopologyConflict := ""
 	totalStorage := resource.MustParse("0")
+	rollbackStorage := resource.MustParse("0")
 	storageByClass := map[string]resource.Quantity{}
+	rollbackStorageByClass := map[string]resource.Quantity{}
 	pvcsByClass := map[string]int{}
+	rollbackPVCsByClass := map[string]int{}
 	storageClassChanged := false
+	requestedCapacities, capacityInputsErr := resolveDestinationCapacities(options.DestinationCapacities, pvcNames)
+	if capacityInputsErr != nil {
+		plan.AddCheck(failed("destination-capacity", capacityInputsErr.Error()))
+		requestedCapacities = make([]string, len(pvcNames))
+	}
 	inspectOpenEBSLVMShared := false
 	patchOpenEBSLVMShared := false
 	for index, pvcName := range pvcNames {
@@ -300,11 +332,74 @@ func (p *Planner) Plan(ctx context.Context, options Options) (*domain.MigrationP
 			plan.AddCheck(failed("capacity", fmt.Sprintf("PV %s has no positive storage capacity", pv.Name)))
 			continue
 		}
-		totalStorage.Add(capacity)
 		sourceClass := ""
 		if pvc.Spec.StorageClassName != nil {
 			sourceClass = *pvc.Spec.StorageClassName
 		}
+		sourceProvisioner := ""
+		if sourceStorageClass := storageClasses[sourceClass]; sourceStorageClass != nil {
+			sourceProvisioner = sourceStorageClass.Provisioner
+		}
+		destinationCapacity := capacity
+		var sourceUsedBytes int64
+		var sourceUsageKnown bool
+		if index < len(requestedCapacities) && requestedCapacities[index] != "" {
+			parsed, parseErr := resource.ParseQuantity(requestedCapacities[index])
+			if parseErr == nil && parsed.Sign() > 0 {
+				destinationCapacity = parsed
+				comparison := destinationCapacity.Cmp(capacity)
+				if comparison < 0 {
+					message := fmt.Sprintf("PVC %s/%s destination capacity %s is below source PV capacity %s; pass --allow-volume-shrink only when the copied data is known to fit", pvc.Namespace, pvc.Name, destinationCapacity.String(), capacity.String())
+					if options.AllowVolumeShrink {
+						plan.AddCheck(warned("destination-capacity", message))
+					} else {
+						plan.AddCheck(failed("destination-capacity", message))
+					}
+					if options.AllowVolumeShrink {
+						if options.SkipSourceUsageCheck {
+							plan.AddCheck(warned("source-usage", fmt.Sprintf("PVC %s/%s source usage check was explicitly skipped; independently verify that its data fits destination capacity %s", pvc.Namespace, pvc.Name, destinationCapacity.String())))
+						} else if p.volumeUsageReader == nil {
+							backend := sourceClass
+							if sourceProvisioner != "" {
+								backend += " (" + sourceProvisioner + ")"
+							}
+							if backend == "" {
+								backend = "<unknown>"
+							}
+							plan.AddCheck(failed("source-usage", fmt.Sprintf("PVC %s/%s uses StorageClass backend %s, which has no trusted CRD usage reader; pass --skip-source-usage-check only after independently verifying that the data fits", pvc.Namespace, pvc.Name, backend)))
+						} else {
+							usage, usageErr := p.volumeUsageReader.Read(ctx, kube.VolumeUsageReadOptions{SourcePVC: pvcReference(pvc), SourcePV: pvReference(pv)})
+							if usageErr != nil {
+								plan.AddCheck(failed("source-usage", fmt.Sprintf("PVC %s/%s usage could not be read from its storage backend CRD: %v; pass --skip-source-usage-check only after independently verifying that the data fits", pvc.Namespace, pvc.Name, usageErr)))
+							} else if usage.UsedBytes < 0 {
+								plan.AddCheck(failed("source-usage", fmt.Sprintf("PVC %s/%s storage backend returned invalid used bytes %d", pvc.Namespace, pvc.Name, usage.UsedBytes)))
+							} else {
+								sourceUsedBytes = usage.UsedBytes
+								sourceUsageKnown = true
+								usageSource := strings.TrimSpace(usage.Source)
+								if usageSource == "" {
+									usageSource = "the storage backend CRD"
+								}
+								plannedCapacityBytes := destinationCapacity.Value()
+								if usage.UsedBytes > plannedCapacityBytes {
+									plan.AddCheck(failed("source-usage", fmt.Sprintf("PVC %s/%s uses %d bytes according to %s, above destination capacity %s; shrink is unsafe", pvc.Namespace, pvc.Name, usage.UsedBytes, usageSource, destinationCapacity.String())))
+								} else {
+									plan.AddCheck(passed("source-usage", fmt.Sprintf("PVC %s/%s usage is %d bytes according to %s and fits destination capacity %s", pvc.Namespace, pvc.Name, usage.UsedBytes, usageSource, destinationCapacity.String())))
+								}
+							}
+						}
+					}
+				} else if comparison > 0 {
+					plan.AddCheck(passed("destination-capacity", fmt.Sprintf("PVC %s/%s destination capacity expands from %s to %s", pvc.Namespace, pvc.Name, capacity.String(), destinationCapacity.String())))
+				}
+			}
+		}
+		totalStorage.Add(destinationCapacity)
+		rollbackStorage.Add(capacity)
+		rollbackClassQuantity := rollbackStorageByClass[sourceClass]
+		rollbackClassQuantity.Add(capacity)
+		rollbackStorageByClass[sourceClass] = rollbackClassQuantity
+		rollbackPVCsByClass[sourceClass]++
 		destinationClass := options.DestinationClass
 		if destinationClass == "" {
 			destinationClass = sourceClass
@@ -333,10 +428,10 @@ func (p *Planner) Plan(ctx context.Context, options Options) (*domain.MigrationP
 			bindingMode = *sc.VolumeBindingMode
 		}
 		classQuantity := storageByClass[destinationClass]
-		classQuantity.Add(capacity)
+		classQuantity.Add(destinationCapacity)
 		storageByClass[destinationClass] = classQuantity
 		pvcsByClass[destinationClass]++
-		destinationName := destinationPVCName(options, pvc.Name, index)
+		destinationName := destinationPVCNameFor(options, destinationPVCs, pvc.Name, index)
 		if problems := validation.IsDNS1123Subdomain(destinationName); len(problems) > 0 {
 			plan.AddCheck(failed("destination-pvc", fmt.Sprintf("generated PVC name %q is invalid: %s", destinationName, strings.Join(problems, "; "))))
 			continue
@@ -350,15 +445,18 @@ func (p *Planner) Plan(ctx context.Context, options Options) (*domain.MigrationP
 		destinationRef := domain.ObjectReference{APIVersion: domain.CoreAPIVersion, Kind: domain.KindPersistentVolumeClaim, Namespace: options.StagingNamespace, Name: destinationName}
 		accessModes := append([]corev1.PersistentVolumeAccessMode(nil), pvc.Spec.AccessModes...)
 		plannedVolumes = append(plannedVolumes, domain.PlannedVolume{
-			SourcePVC:      pvcReference(pvc),
-			SourcePV:       pvReference(pv),
-			DestinationPVC: destinationRef,
-			Capacity:       capacity.String(),
-			AccessModes:    accessModes,
-			VolumeMode:     mode,
-			StorageClass:   destinationClass,
-			BindingMode:    bindingMode,
-			CSIProvisioner: sc.Provisioner,
+			SourcePVC:        pvcReference(pvc),
+			SourcePV:         pvReference(pv),
+			DestinationPVC:   destinationRef,
+			Capacity:         destinationCapacity.String(),
+			SourceCapacity:   capacity.String(),
+			SourceUsedBytes:  sourceUsedBytes,
+			SourceUsageKnown: sourceUsageKnown,
+			AccessModes:      accessModes,
+			VolumeMode:       mode,
+			StorageClass:     destinationClass,
+			BindingMode:      bindingMode,
+			CSIProvisioner:   sc.Provisioner,
 		})
 		volumeSpecs = append(volumeSpecs, domain.VolumeSpec{
 			SourcePVC:           pvcReference(pvc),
@@ -370,11 +468,14 @@ func (p *Planner) Plan(ctx context.Context, options Options) (*domain.MigrationP
 				Annotations:     filteredPVCAnnotations(pvc.Annotations),
 				OwnerReferences: append([]metav1.OwnerReference(nil), pvc.OwnerReferences...),
 			},
-			DestinationPVC: destinationRef,
-			Capacity:       capacity.String(),
-			StorageClass:   destinationClass,
-			AccessModes:    accessModes,
-			VolumeMode:     mode,
+			DestinationPVC:   destinationRef,
+			Capacity:         destinationCapacity.String(),
+			SourceCapacity:   capacity.String(),
+			SourceUsedBytes:  sourceUsedBytes,
+			SourceUsageKnown: sourceUsageKnown,
+			StorageClass:     destinationClass,
+			AccessModes:      accessModes,
+			VolumeMode:       mode,
 		})
 		consumers := p.checkPVCReferencesFromPods(plan, pvc, sourcePod, options.Operation, options.Online, inventory.namespacePods, inventory.namespacePodsErr)
 		if warmCopyRequested(options) {
@@ -488,13 +589,18 @@ func (p *Planner) Plan(ctx context.Context, options Options) (*domain.MigrationP
 	plan.TemporaryUsage.Secrets = max(1, 2*len(plannedVolumes))
 	plan.TemporaryUsage.ConfigMaps = 1
 	plan.TemporaryUsage.ServiceAccounts = max(1, 2*len(plannedVolumes))
-	plan.RollbackRetention.StorageRequests = totalStorage.String()
+	plan.RollbackRetention.StorageRequests = rollbackStorage.String()
 	plan.RollbackRetention.PVCs = len(plannedVolumes)
 	for class, quantity := range storageByClass {
 		plan.TemporaryUsage.ByStorageClass[class] = quantity.String()
-		plan.RollbackRetention.ByStorageClass[class] = quantity.String()
 		plan.TemporaryUsage.PVCsByStorageClass[class] = pvcsByClass[class]
-		plan.RollbackRetention.PVCsByStorageClass[class] = pvcsByClass[class]
+	}
+	for class, quantity := range rollbackStorageByClass {
+		plan.RollbackRetention.ByStorageClass[class] = quantity.String()
+		plan.RollbackRetention.PVCsByStorageClass[class] = rollbackPVCsByClass[class]
+	}
+	if options.Operation == domain.OperationMigrate || options.Operation == domain.OperationMigratePod {
+		p.checkActivationPVCPolicies(ctx, plan, volumeSpecs)
 	}
 	if len(plannedVolumes) > 0 {
 		p.logInfo("validating migration cluster policies", "session", options.SessionID, "sourceNamespace", options.SourceNamespace, "stagingNamespace", options.StagingNamespace, "sessionNamespace", options.SessionNamespace, "volumes", len(plannedVolumes))
@@ -578,6 +684,7 @@ func (p *Planner) Plan(ctx context.Context, options Options) (*domain.MigrationP
 		DeleteExtraneous:       options.DeleteExtraneous,
 		PrecopyPasses:          options.PrecopyPasses,
 		OpenEBSLVMEnableShared: options.OpenEBSLVMEnableShared,
+		SkipSourceUsageCheck:   options.SkipSourceUsageCheck,
 		ToolImage:              options.ToolImage,
 	})
 	if len(volumeSpecs) != len(pvcNames) {
@@ -1015,8 +1122,12 @@ func supportedStrategy(strategy string) bool {
 }
 
 func destinationPVCName(options Options, source string, index int) string {
-	if index < len(options.DestinationPVCs) && options.DestinationPVCs[index] != "" {
-		return options.DestinationPVCs[index]
+	return destinationPVCNameFor(options, nil, source, index)
+}
+
+func destinationPVCNameFor(options Options, mapped []string, source string, index int) string {
+	if index < len(mapped) && mapped[index] != "" {
+		return mapped[index]
 	}
 	if options.Operation == domain.OperationCopy && options.SourceNamespace != options.StagingNamespace {
 		return source

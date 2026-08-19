@@ -9,6 +9,7 @@ import (
 
 	"github.com/labring-sigs/pvc-migrate/internal/backup"
 	"github.com/labring-sigs/pvc-migrate/internal/domain"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/yaml"
 )
@@ -158,11 +159,11 @@ func (p Printer) printPlan(plan *domain.MigrationPlan) error {
 	if _, err := fmt.Fprintf(w, "SESSION\tREADY\tSOURCE\tSTAGING\tTARGET NODE\n%s\t%t\t%s\t%s\t%s\n\n", plan.SessionID, plan.Ready, plan.SourceNamespace, plan.TemporaryNamespace, plan.TargetNode); err != nil {
 		return err
 	}
-	if _, err := fmt.Fprintln(w, "PVC\tSOURCE PV\tDESTINATION PVC\tCAPACITY\tCLASS\tMODE"); err != nil {
+	if _, err := fmt.Fprintln(w, "PVC\tSOURCE PV\tDESTINATION PVC\tSOURCE CAPACITY\tSOURCE USED\tDESTINATION CAPACITY\tCLASS\tMODE"); err != nil {
 		return err
 	}
 	for _, volume := range plan.Volumes {
-		if _, err := fmt.Fprintf(w, "%s/%s\t%s\t%s/%s\t%s\t%s\t%s\n", volume.SourcePVC.Namespace, volume.SourcePVC.Name, volume.SourcePV.Name, volume.DestinationPVC.Namespace, volume.DestinationPVC.Name, volume.Capacity, volume.StorageClass, volume.VolumeMode); err != nil {
+		if _, err := fmt.Fprintf(w, "%s/%s\t%s\t%s/%s\t%s\t%s\t%s\t%s\t%s\n", volume.SourcePVC.Namespace, volume.SourcePVC.Name, volume.SourcePV.Name, volume.DestinationPVC.Namespace, volume.DestinationPVC.Name, valueOrUnknown(volume.SourceCapacity), sourceUsageText(volume.SourceUsageKnown, volume.SourceUsedBytes), volume.Capacity, volume.StorageClass, volume.VolumeMode); err != nil {
 			return err
 		}
 	}
@@ -206,7 +207,7 @@ func (p Printer) printSession(session *domain.Session) error {
 	if _, err := fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\n", session.ID, session.Spec.Operation(), session.Status.Phase, session.Status.UpdatedAt.UTC().Format("2006-01-02T15:04:05Z"), session.Status.Message); err != nil {
 		return err
 	}
-	if _, err := fmt.Fprintln(w, "\nPVC\tRESERVED\tWARM SYNC\tFINAL SYNC\tACTIVE PV"); err != nil {
+	if _, err := fmt.Fprintln(w, "\nPVC\tRESERVED\tWARM SYNC\tFINAL SYNC\tSOURCE CAPACITY\tSOURCE USED\tDESTINATION CAPACITY\tACTIVE PV"); err != nil {
 		return err
 	}
 	for index, status := range session.Status.Volumes {
@@ -220,7 +221,14 @@ func (p Printer) printSession(session *domain.Session) error {
 				activePV = session.Spec.Volumes[index].DestinationPV.Name
 			}
 		}
-		if _, err := fmt.Fprintf(w, "%s\t%t\t%s\t%s\t%s\n", status.SourcePVCName, status.Reserved, warm, final, activePV); err != nil {
+		source, destination, sourceUsed := "unknown", "unknown", "unknown"
+		if index < len(session.Spec.Volumes) {
+			volume := session.Spec.Volumes[index]
+			source = valueOrUnknown(volume.SourceCapacity)
+			sourceUsed = sourceUsageText(volume.SourceUsageKnown, volume.SourceUsedBytes)
+			destination = valueOrUnknown(volume.Capacity)
+		}
+		if _, err := fmt.Fprintf(w, "%s\t%t\t%s\t%s\t%s\t%s\t%s\t%s\n", status.SourcePVCName, status.Reserved, warm, final, source, sourceUsed, destination, activePV); err != nil {
 			return err
 		}
 	}
@@ -245,4 +253,11 @@ func timeValue(value *metav1.Time) string {
 		return "-"
 	}
 	return value.UTC().Format("2006-01-02T15:04:05Z")
+}
+
+func sourceUsageText(known bool, bytes int64) string {
+	if !known {
+		return "unknown"
+	}
+	return resource.NewQuantity(bytes, resource.BinarySI).String()
 }
