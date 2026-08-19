@@ -47,6 +47,18 @@ func readyPod(namespace, name, node string) *corev1.Pod {
 
 func boolPointer(value bool) *bool { return &value }
 
+func TestDiscoverRejectsPodOwnedByExistingSession(t *testing.T) {
+	pod := readyPod("app", "database", "node-a")
+	pod.Annotations = map[string]string{kube.SessionKey: "existing-session"}
+	client := kubernetesfake.NewClientset(pod)
+	manager := NewManager(client, dynamicfake.NewSimpleDynamicClient(runtime.NewScheme()), client.Discovery())
+
+	_, err := manager.Discover(context.Background(), DiscoverOptions{Namespace: pod.Namespace, PodName: pod.Name})
+	if domain.CategoryOf(err) != domain.ErrorConflict || !strings.Contains(err.Error(), "existing-session") {
+		t.Fatalf("category=%s error=%v", domain.CategoryOf(err), err)
+	}
+}
+
 func TestDiscoverStatefulSetArbitraryOrdinal(t *testing.T) {
 	ctx := context.Background()
 	replicas := int32(3)

@@ -135,6 +135,28 @@ func TestRootCommandSurfaceAndGlobalDefaults(t *testing.T) {
 			t.Fatalf("copy is missing --%s", name)
 		}
 	}
+	for _, path := range [][]string{{"reserve"}, {"reserve", "plan"}, {"copy"}, {"copy", "plan"}, {"migrate"}, {"migrate", "plan"}, {"migrate-pod"}, {"migrate-pod", "plan"}} {
+		command, _, err := root.Find(path)
+		if err != nil {
+			t.Fatalf("Find(%v): %v", path, err)
+		}
+		for _, name := range []string{"destination-capacity", "allow-volume-shrink"} {
+			if command.Flags().Lookup(name) == nil {
+				t.Fatalf("%v is missing --%s", path, name)
+			}
+		}
+	}
+	for _, path := range [][]string{{"rename"}, {"rename", "plan"}, {"move"}, {"move", "plan"}, {"backup"}, {"restore"}, {"final-sync"}, {"activate"}} {
+		command, _, err := root.Find(path)
+		if err != nil {
+			t.Fatalf("Find(%v): %v", path, err)
+		}
+		for _, name := range []string{"destination-capacity", "allow-volume-shrink"} {
+			if command.Flags().Lookup(name) != nil {
+				t.Fatalf("%v unexpectedly exposes --%s", path, name)
+			}
+		}
+	}
 	for _, name := range []string{"kubeblocks-candidate", "allow-leader-downtime", "force-reprovision", "precopy-passes", "openebs-lvm-enable-shared"} {
 		if copyCommand.Flags().Lookup(name) != nil {
 			t.Fatalf("copy exposes cutover-only --%s", name)
@@ -197,6 +219,9 @@ func TestMigrationFlagDefaultsAndPlanOptions(t *testing.T) {
 
 	for name, want := range map[string]string{
 		"capacity-awareness":        "auto",
+		"destination-capacity":      "[]",
+		"allow-volume-shrink":       "false",
+		"skip-source-usage-check":   "false",
 		"source-namespace":          "default",
 		"temporary-namespace":       "pvc-migrate-system",
 		"target-node":               "auto",
@@ -218,6 +243,8 @@ func TestMigrationFlagDefaultsAndPlanOptions(t *testing.T) {
 	flags.temporaryNamespace = "staging"
 	flags.sourcePVCs = []string{"data", "logs"}
 	flags.destinationPVCs = []string{"data-new", "logs-new"}
+	flags.destinationCapacities = []string{"3Gi", "4Gi"}
+	flags.allowVolumeShrink = true
 	flags.podName = "db-2"
 	flags.sourceNode = "node-a"
 	flags.targetNode = "node-b"
@@ -237,13 +264,14 @@ func TestMigrationFlagDefaultsAndPlanOptions(t *testing.T) {
 	if options.SessionID != "mig-fixed" || options.SourceNamespace != "source" || options.DestinationNamespace != "source" || options.TemporaryNamespace != "staging" || options.StagingNamespace != "staging" || options.SessionNamespace != "sessions" {
 		t.Fatalf("namespaces and identity = %#v", options)
 	}
-	if options.Operation != domain.OperationMigratePod || options.PodName != "db-2" || options.SourceNode != "node-a" || options.TargetNode != "node-b" || options.DestinationClass != "fast" || options.CapacityAwareness != domain.CapacityAwarenessRequire || options.SwitchoverCandidate != "db-1" || !options.AllowLeaderDowntime || !options.ForceReprovision || !options.VerifyChecksum || !options.DeleteExtraneous || !options.OpenEBSLVMEnableShared || options.PrecopyPasses != 1 {
+	if options.Operation != domain.OperationMigratePod || options.PodName != "db-2" || options.SourceNode != "node-a" || options.TargetNode != "node-b" || options.DestinationClass != "fast" || options.CapacityAwareness != domain.CapacityAwarenessRequire || options.SwitchoverCandidate != "db-1" || !options.AllowLeaderDowntime || !options.AllowVolumeShrink || !options.ForceReprovision || !options.VerifyChecksum || !options.DeleteExtraneous || !options.OpenEBSLVMEnableShared || options.PrecopyPasses != 1 {
 		t.Fatalf("options = %#v", options)
 	}
 	flags.sourcePVCs[0] = "mutated"
 	flags.destinationPVCs[0] = "mutated"
+	flags.destinationCapacities[0] = "mutated"
 	flags.strategies[0] = "mutated"
-	if options.SourcePVCs[0] != "data" || options.DestinationPVCs[0] != "data-new" || options.Strategies[0] != "local" {
+	if options.SourcePVCs[0] != "data" || options.DestinationPVCs[0] != "data-new" || options.DestinationCapacities[0] != "3Gi" || options.Strategies[0] != "local" {
 		t.Fatalf("plan options alias flag slices: %#v", options)
 	}
 }
@@ -660,6 +688,13 @@ func TestCommandsRejectInvalidInputBeforeClusterAccess(t *testing.T) {
 		{name: "orchestrated namespace", args: []string{"migrate", "--source-namespace", "app", "--destination-namespace", "other"}, category: domain.ErrorPrecondition, text: "source namespace"},
 		{name: "negative precopy passes", args: []string{"migrate", "--precopy-passes", "-1"}, category: domain.ErrorValidation, text: "cannot be negative"},
 		{name: "negative plan precopy passes", args: []string{"migrate", "plan", "--precopy-passes", "-1"}, category: domain.ErrorValidation, text: "cannot be negative"},
+		{name: "shrink opt-in without capacity", args: []string{"migrate", "--allow-volume-shrink"}, category: domain.ErrorValidation, text: "requires --destination-capacity"},
+		{name: "usage skip without shrink opt-in", args: []string{"migrate", "--skip-source-usage-check"}, category: domain.ErrorValidation, text: "requires --allow-volume-shrink"},
+		{name: "invalid destination capacity", args: []string{"copy", "--destination-capacity", "invalid"}, category: domain.ErrorValidation, text: "is invalid"},
+		{name: "zero destination capacity", args: []string{"reserve", "--destination-capacity", "0"}, category: domain.ErrorValidation, text: "must be positive"},
+		{name: "existing session capacity override", args: []string{"copy", "--session", "existing", "--destination-capacity", "2Gi"}, category: domain.ErrorValidation, text: "cannot modify an existing session"},
+		{name: "existing reserve session shrink override", args: []string{"reserve", "plan", "--session", "existing", "--destination-capacity", "1Gi", "--allow-volume-shrink"}, category: domain.ErrorValidation, text: "cannot modify an existing session"},
+		{name: "existing session usage check override", args: []string{"copy", "--session", "existing", "--skip-source-usage-check"}, category: domain.ErrorValidation, text: "cannot modify an existing session"},
 		{name: "zero retries", args: []string{"migrate", "plan", "--retries", "0"}, category: domain.ErrorValidation, text: "--retries"},
 		{name: "negative retry backoff", args: []string{"migrate", "plan", "--retry-backoff", "-1s"}, category: domain.ErrorValidation, text: "--retry-backoff"},
 		{name: "zero Helm timeout", args: []string{"migrate", "plan", "--helm-timeout", "0"}, category: domain.ErrorValidation, text: "--helm-timeout"},

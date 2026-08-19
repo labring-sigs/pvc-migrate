@@ -170,6 +170,7 @@ func (f *fakeController) VerifyPaused(context.Context, *domain.Session) error { 
 type fakeCopier struct {
 	modes     []copyengine.Mode
 	failFinal int
+	err       error
 }
 
 func (f *fakeCopier) Copy(_ context.Context, request copyengine.Request, _ copyengine.ProgressFunc) error {
@@ -178,7 +179,7 @@ func (f *fakeCopier) Copy(_ context.Context, request copyengine.Request, _ copye
 		f.failFinal--
 		return domain.NewError(domain.ErrorCopy, "copy", "injected final-sync failure")
 	}
-	return nil
+	return f.err
 }
 
 type fakeSwitcher struct {
@@ -574,5 +575,77 @@ func TestPVMigrateToolIdentificationIsScopedToClaims(t *testing.T) {
 	tool.Labels["app.kubernetes.io/instance"] = "application"
 	if isPVMigrateToolForClaims(tool, map[string]struct{}{"data": {}}) {
 		t.Fatal("application Pod matched a pv-migrate tool")
+	}
+}
+
+func TestDestinationNoSpaceErrorStopsRetries(t *testing.T) {
+	if !isDestinationNoSpaceError(errors.New("rsync: write failed: No space left on device")) {
+		t.Fatal("expected ENOSPC to be recognized")
+	}
+	if !isDestinationNoSpaceError(errors.New("exit status 23: ENOSPC")) {
+		t.Fatal("expected ENOSPC token to be recognized")
+	}
+	if !isDestinationNoSpaceError(domain.WrapError(domain.ErrorCopy, "copy PVC", "pv-migrate operation failed", errors.New("rsync: No space left on device"))) {
+		t.Fatal("expected nested ENOSPC to be recognized")
+	}
+	if isDestinationNoSpaceError(errors.New("checksum mismatch")) {
+		t.Fatal("unexpected capacity error")
+	}
+}
+
+func TestToolLogErrorOnlyClassifiesFailedCopy(t *testing.T) {
+	copyErr := errors.New("copy failed")
+	if err := mergeToolLogError(nil, kube.ErrToolPodNoSpace); err != nil {
+		t.Fatalf("successful copy was replaced by observed log error: %v", err)
+	}
+	err := mergeToolLogError(copyErr, kube.ErrToolPodNoSpace)
+	if !errors.Is(err, copyErr) || !errors.Is(err, kube.ErrToolPodNoSpace) {
+		t.Fatalf("merged error=%v", err)
+	}
+}
+
+func TestDestinationNoSpaceErrorRequiresNewSession(t *testing.T) {
+	copier := &fakeCopier{err: errors.New("rsync: write failed: No space left on device")}
+	service, session, _, _ := appTestService(t, copier)
+	markTestSessionReserved(session)
+
+	err := service.copyWithRetry(context.Background(), session, &session.Spec.Volumes[0], &session.Status.Volumes[0], copyengine.ModeWarm, nil)
+	if domain.CategoryOf(err) != domain.ErrorConflict || !strings.Contains(err.Error(), "create a new session with a larger --destination-capacity") {
+		t.Fatalf("category=%s error=%v", domain.CategoryOf(err), err)
+	}
+	if strings.Contains(err.Error(), "rerun this session") {
+		t.Fatalf("error suggests reusing an immutable session: %v", err)
+	}
+}
+
+func TestDestinationCapacityFailureCannotResume(t *testing.T) {
+	service, session, _, _ := appTestService(t, &fakeCopier{})
+	session.Status.Phase = domain.PhaseFailed
+	session.Status.ResumeFrom = domain.PhaseWarmCopying
+	session.Status.FailureReason = domain.FailureDestinationCapacityExhausted
+
+	for _, validate := range []func(context.Context, *domain.Session) error{
+		service.ValidateWarmCopy,
+		service.ValidateResume,
+		service.ResumeSession,
+	} {
+		err := validate(context.Background(), session)
+		if domain.CategoryOf(err) != domain.ErrorConflict || !strings.Contains(err.Error(), "larger --destination-capacity") {
+			t.Fatalf("error=%v category=%s", err, domain.CategoryOf(err))
+		}
+	}
+}
+
+func TestFailContextRecordsDestinationCapacityFailure(t *testing.T) {
+	service, session, _, _ := appTestService(t, &fakeCopier{})
+	session.Status.Phase = domain.PhaseWarmCopying
+	cause := domain.WrapError(domain.ErrorConflict, "copy capacity", "destination ran out of space", kube.ErrToolPodNoSpace)
+
+	err := service.failContext(context.Background(), session, cause)
+	if !errors.Is(err, cause) {
+		t.Fatalf("error=%v", err)
+	}
+	if session.Status.Phase != domain.PhaseFailed || session.Status.FailureReason != domain.FailureDestinationCapacityExhausted {
+		t.Fatalf("phase=%s failureReason=%s", session.Status.Phase, session.Status.FailureReason)
 	}
 }

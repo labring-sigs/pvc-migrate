@@ -81,7 +81,7 @@ func switcherFixture(t *testing.T) (*Switcher, *domain.Session, *domain.VolumeSp
 			Annotations:     map[string]string{OriginalPolicyAnnotation: string(corev1.PersistentVolumeReclaimDelete)},
 		},
 		Spec: corev1.PersistentVolumeSpec{
-			Capacity:                      corev1.ResourceList{corev1.ResourceStorage: resource.MustParse("1Gi")},
+			Capacity:                      corev1.ResourceList{corev1.ResourceStorage: resource.MustParse("2Gi")},
 			PersistentVolumeReclaimPolicy: corev1.PersistentVolumeReclaimRetain,
 			ClaimRef:                      &corev1.ObjectReference{Namespace: "system", Name: "data-migrated", UID: tempPVCUID},
 			StorageClassName:              storageClass,
@@ -160,7 +160,8 @@ func switcherFixture(t *testing.T) (*Switcher, *domain.Session, *domain.VolumeSp
 		DestinationPVC:    domain.ObjectReference{Namespace: "system", Name: "data-migrated", UID: tempPVCUID, ResourceVersion: "11"},
 		DestinationPV:     domain.ObjectReference{Name: "pv-destination", UID: destinationPVUID},
 		DestinationPolicy: corev1.PersistentVolumeReclaimDelete,
-		Capacity:          "1Gi",
+		SourceCapacity:    "1Gi",
+		Capacity:          "2Gi",
 		StorageClass:      storageClass,
 		AccessModes:       []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce},
 		VolumeMode:        mode,
@@ -204,6 +205,10 @@ func TestActivateVolumeRecoversAfterTemporaryPVCDeletion(t *testing.T) {
 	if active.Spec.VolumeName != "pv-destination" || active.Labels["app"] != "database" || len(active.OwnerReferences) != 1 {
 		t.Fatalf("active PVC: %#v", active)
 	}
+	activeCapacity := active.Spec.Resources.Requests[corev1.ResourceStorage]
+	if activeCapacity.Cmp(resource.MustParse("2Gi")) != 0 {
+		t.Fatalf("active PVC kept source capacity: %#v", active.Spec.Resources.Requests)
+	}
 	if active.Annotations["example.com/retained"] != "value" || active.Annotations["pv.kubernetes.io/bind-completed"] != "" || active.Annotations["volume.kubernetes.io/selected-node"] != "" || active.Annotations["volume.kubernetes.io/storage-provisioner"] != "" {
 		t.Fatalf("active PVC annotations: %#v", active.Annotations)
 	}
@@ -236,10 +241,28 @@ func TestRollbackVolumeRestoresOriginalPV(t *testing.T) {
 	if active.Spec.VolumeName != "pv-source" || active.Annotations[RollbackPVAnnotation] != "pv-destination" || status.Activation.RolledBackAt == nil {
 		t.Fatalf("rollback PVC/status: pvc=%#v status=%#v", active, status.Activation)
 	}
+	rollbackCapacity := active.Spec.Resources.Requests[corev1.ResourceStorage]
+	if rollbackCapacity.Cmp(resource.MustParse("1Gi")) != 0 {
+		t.Fatalf("rollback PVC did not restore source capacity: %#v", active.Spec.Resources.Requests)
+	}
 	source, _ := switcher.client.CoreV1().PersistentVolumes().Get(ctx, "pv-source", metav1.GetOptions{})
 	destination, _ := switcher.client.CoreV1().PersistentVolumes().Get(ctx, "pv-destination", metav1.GetOptions{})
 	if source.Labels[ResourceRoleLabel] != "active" || destination.Labels[ResourceRoleLabel] != "rollback" {
 		t.Fatalf("PV roles: source=%q destination=%q", source.Labels[ResourceRoleLabel], destination.Labels[ResourceRoleLabel])
+	}
+}
+
+func TestValidateActivePVCRequestRejectsCapacityDrift(t *testing.T) {
+	volume := &domain.VolumeSpec{Capacity: "2Gi"}
+	pvc := &corev1.PersistentVolumeClaim{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "app", Name: "data"},
+		Spec: corev1.PersistentVolumeClaimSpec{Resources: corev1.VolumeResourceRequirements{
+			Requests: corev1.ResourceList{corev1.ResourceStorage: resource.MustParse("3Gi")},
+		}},
+	}
+	err := validateActivePVCRequest(pvc, volume)
+	if err == nil || !strings.Contains(err.Error(), "requires 2Gi") {
+		t.Fatalf("expected active PVC capacity conflict, got %v", err)
 	}
 }
 

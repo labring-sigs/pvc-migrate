@@ -151,6 +151,9 @@ func (m *Manager) DiscoverPod(ctx context.Context, pod *corev1.Pod, options Disc
 	if pod.Annotations[corev1.MirrorPodAnnotationKey] != "" {
 		return domain.WorkloadSpec{}, domain.NewError(domain.ErrorPrecondition, "discover workload", "static mirror Pods are unsupported")
 	}
+	if owner := pod.Annotations[kube.SessionKey]; owner != "" {
+		return domain.WorkloadSpec{}, domain.NewError(domain.ErrorConflict, "discover workload", fmt.Sprintf("Pod %s/%s is still owned by migration session %s; finish or clean up that session before starting another migration", pod.Namespace, pod.Name, owner))
+	}
 	owner := controllerOwner(pod.OwnerReferences)
 	if owner == nil {
 		if err := requireReadyPod(pod, options.Namespace, options.PodName); err != nil {

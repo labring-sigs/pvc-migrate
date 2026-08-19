@@ -88,6 +88,7 @@ func TestTablePlanRendersChecksAndVolumes(t *testing.T) {
 			SourcePVC:      domain.ObjectReference{Namespace: "app", Name: "data"},
 			SourcePV:       domain.ObjectReference{Name: "pv-a"},
 			DestinationPVC: domain.ObjectReference{Namespace: "staging", Name: "data-mig"},
+			SourceCapacity: "8Gi",
 			Capacity:       "10Gi",
 			StorageClass:   "fast",
 			VolumeMode:     "Filesystem",
@@ -104,7 +105,7 @@ func TestTablePlanRendersChecksAndVolumes(t *testing.T) {
 	if err := (Printer{Writer: &output}).Print(plan); err != nil {
 		t.Fatal(err)
 	}
-	for _, want := range []string{"SESSION", "mig-1", "app/data", "pv-a", "staging/data-mig", "STORAGE CLASS", "20Gi", "15Gi", "sufficient", "PASS", "FAIL", "unavailable"} {
+	for _, want := range []string{"SESSION", "mig-1", "app/data", "pv-a", "staging/data-mig", "SOURCE CAPACITY", "DESTINATION CAPACITY", "8Gi", "10Gi", "STORAGE CLASS", "20Gi", "15Gi", "sufficient", "PASS", "FAIL", "unavailable"} {
 		if !strings.Contains(output.String(), want) {
 			t.Fatalf("table missing %q:\n%s", want, output.String())
 		}
@@ -183,7 +184,7 @@ func TestTableSessionRendersSyncAndActivationState(t *testing.T) {
 		ID: "mig-1",
 		Spec: domain.NewSessionSpec(domain.OperationMigrate, domain.SessionCommon{
 			Volumes: []domain.VolumeSpec{
-				{SourcePVC: domain.ObjectReference{Name: "data"}, DestinationPV: domain.ObjectReference{Name: "pv-new"}},
+				{SourcePVC: domain.ObjectReference{Name: "data"}, DestinationPV: domain.ObjectReference{Name: "pv-new"}, SourceCapacity: "2Gi", Capacity: "3Gi"},
 				{SourcePVC: domain.ObjectReference{Name: "logs"}, DestinationPV: domain.ObjectReference{Name: "pv-logs"}},
 			},
 		}, domain.WorkloadSpec{Adapter: domain.WorkloadNone}, false, domain.SessionWorkflowOptions{}),
@@ -201,7 +202,7 @@ func TestTableSessionRendersSyncAndActivationState(t *testing.T) {
 	if err := (Printer{Writer: &output, Format: Table}).Print(session); err != nil {
 		t.Fatal(err)
 	}
-	for _, want := range []string{"mig-1", "Activated", "cutover complete", "2026-08-07T01:02:03Z", "pv-new", "logs", "-"} {
+	for _, want := range []string{"mig-1", "Activated", "cutover complete", "2026-08-07T01:02:03Z", "SOURCE CAPACITY", "DESTINATION CAPACITY", "2Gi", "3Gi", "pv-new", "logs", "-"} {
 		if !strings.Contains(output.String(), want) {
 			t.Fatalf("session table missing %q:\n%s", want, output.String())
 		}

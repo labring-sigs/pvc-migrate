@@ -238,6 +238,29 @@ func TestSessionGuidanceCoversTerminalActions(t *testing.T) {
 	}
 }
 
+func TestDestinationCapacityFailureGuidanceRequiresNewSession(t *testing.T) {
+	session := guidanceSession(domain.PhaseFailed)
+	session.Status.FailureReason = domain.FailureDestinationCapacityExhausted
+	var output bytes.Buffer
+	if err := writeSessionGuidance(&output, session, guidancePrefixesForSession(session)); err != nil {
+		t.Fatal(err)
+	}
+	text := output.String()
+	for _, want := range []string{
+		"cannot resume because its destination capacity is immutable",
+		"session abort mig-test --dry-run",
+		"session cleanup mig-test --delete-temporary --delete-rollback-pv --finalize --delete-session --dry-run",
+		"new --session and a larger --destination-capacity",
+	} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("guidance=%q missing %q", text, want)
+		}
+	}
+	if strings.Contains(text, "session resume") {
+		t.Fatalf("guidance offers an ineffective resume: %q", text)
+	}
+}
+
 func TestSessionGuidanceIncludesCustomNamespaceAndApproval(t *testing.T) {
 	session := guidanceSession(domain.PhaseWarmCopied)
 	session.Spec.SessionNamespace = "migration-control"

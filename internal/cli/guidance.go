@@ -114,6 +114,27 @@ func writeSessionGuidance(w io.Writer, session *domain.Session, prefixes guidanc
 			}
 		}
 	case domain.PhaseFailed:
+		if session.Status.FailureReason == domain.FailureDestinationCapacityExhausted {
+			if _, err := fmt.Fprintln(w, "  This session cannot resume because its destination capacity is immutable."); err != nil {
+				return err
+			}
+			if _, err := fmt.Fprintln(w, "  Abort pre-cutover work (validate first):", abortPlan); err != nil {
+				return err
+			}
+			if _, err := fmt.Fprintln(w, "  Abort:", abort); err != nil {
+				return err
+			}
+			if _, err := fmt.Fprintln(w, "  After abort, validate cleanup:", cleanupPlan); err != nil {
+				return err
+			}
+			if _, err := fmt.Fprintln(w, "  After abort, finalize cleanup:", cleanup); err != nil {
+				return err
+			}
+			if _, err := fmt.Fprintf(w, "  Then rerun the original %s command with a new --session and a larger --destination-capacity.\n", session.Spec.Operation()); err != nil {
+				return err
+			}
+			break
+		}
 		if _, err := fmt.Fprintln(w, "  Validate recovery:", resumePlan); err != nil {
 			return err
 		}
@@ -257,6 +278,14 @@ func reportSessionError(cmd interface{ ErrOrStderr() io.Writer }, session *domai
 	}
 	if session != nil && errorHasOperation(err, "warm-copy mount probe") {
 		_ = writeWarmCopyMountGuidance(cmd.ErrOrStderr(), cmd, session)
+		return err
+	}
+	if session != nil && errorHasOperation(err, "copy capacity") {
+		_, _ = fmt.Fprintln(cmd.ErrOrStderr(), "\nDestination capacity was exhausted. Keep the workload paused when applicable, increase --destination-capacity in a new session, then clean up or roll back the failed session before retrying.")
+		return err
+	}
+	if session != nil && errorHasOperation(err, "source usage check") {
+		_, _ = fmt.Fprintln(cmd.ErrOrStderr(), "\nSource usage could not be read from a trusted storage-backend CRD. Increase --destination-capacity, or independently verify the data size and create a new session with --skip-source-usage-check.")
 		return err
 	}
 	if session != nil {
@@ -495,6 +524,10 @@ func writePlanFailureGuidance(w io.Writer, plan *domain.MigrationPlan) error {
 			advice = "Node action: choose a Ready, schedulable target with --target-node, or correct the target node condition before rerunning the plan."
 		case check.Name == "storage-topology" || check.Name == "storage-capacity":
 			advice = "Storage action: choose a compatible StorageClass or target node, then verify topology and capacity before rerunning the plan."
+		case check.Name == "destination-capacity":
+			advice = "Capacity action: correct --destination-capacity, or add --allow-volume-shrink only after verifying the copied data fits in every smaller destination PVC."
+		case check.Name == "source-usage":
+			advice = "Usage action: use a destination that is at least the source capacity, or independently verify the data size and rerun with --skip-source-usage-check."
 		case check.Name == "migration-needed":
 			advice = "Migration action: the requested node and StorageClass already match; use --force-reprovision only for an intentional backing-PV replacement."
 		case check.Name == "warm-copy-mount" && plan.SessionSpec.Operation() == domain.OperationCopy:

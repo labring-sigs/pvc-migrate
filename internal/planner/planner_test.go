@@ -182,7 +182,7 @@ func TestPlanPreservesExplicitPVCMappingAndRejectsDuplicateDestinations(t *testi
 		StagingNamespace:   "system",
 		SessionNamespace:   "system",
 		SourcePVCs:         []string{"logs", "data"},
-		DestinationPVCs:    []string{"logs-new", "data-new"},
+		DestinationPVCs:    []string{"logs=logs-new", "data=data-new"},
 		TargetNode:         "node-b",
 		DestinationClass:   "fast",
 	}
@@ -198,7 +198,7 @@ func TestPlanPreservesExplicitPVCMappingAndRejectsDuplicateDestinations(t *testi
 		t.Fatalf("explicit mapping was reordered: %#v", plan.Volumes)
 	}
 
-	base.DestinationPVCs = []string{"shared", "shared"}
+	base.DestinationPVCs = []string{"logs=shared", "data=shared"}
 	duplicate, err := New(plannerClient(objects...), nil).Plan(context.Background(), base)
 	if err != nil {
 		t.Fatal(err)
@@ -833,6 +833,26 @@ func TestPlanModelsTopologyQuotaAndSessionIdentity(t *testing.T) {
 	}
 	if plan.SessionSpec.Volumes[0].SourcePVC.UID != types.UID("pvc-uid") || plan.SessionSpec.Volumes[0].SourcePV.UID != types.UID("pv-uid") {
 		t.Fatalf("session resource identities: %#v", plan.SessionSpec.Volumes[0])
+	}
+}
+
+func TestPlanChecksApplicationPVCQuotaForOrchestratedActivation(t *testing.T) {
+	objects := plannerObjects("2Gi")
+	objects = append(objects, &corev1.ResourceQuota{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "app", Name: "application-storage"},
+		Spec:       corev1.ResourceQuotaSpec{Hard: corev1.ResourceList{corev1.ResourceRequestsStorage: resource.MustParse("2Gi")}},
+		Status:     corev1.ResourceQuotaStatus{Used: corev1.ResourceList{corev1.ResourceRequestsStorage: resource.MustParse("2Gi")}},
+	})
+	plan, err := New(plannerClient(objects...), nil).Plan(context.Background(), Options{
+		SessionID: "migration", Operation: domain.OperationMigrate,
+		SourceNamespace: "app", TemporaryNamespace: "system", DestinationNamespace: "app", StagingNamespace: "system", SessionNamespace: "system",
+		SourcePVCs: []string{"data"}, TargetNode: "node-b", DestinationClass: "fast", DestinationCapacities: []string{"3Gi"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if plan.Ready || !hasFailedCheckContaining(plan, "resource-quota", "activation PVC") {
+		t.Fatalf("application PVC activation quota check missing: %#v", plan.Checks)
 	}
 }
 

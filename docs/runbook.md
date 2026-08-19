@@ -11,6 +11,10 @@
 
 For a Pod with multiple PVCs, use `migrate-pod`. It creates one workload consistency boundary for the full set.
 
+When creating destination PVCs, use `--destination-capacity` on `reserve`, `copy`, `migrate`, or `migrate-pod`. One value applies to every source PVC; for multiple PVCs use explicit `source-pvc-name=capacity` entries. The planner compares every requested value with its source PV capacity and rejects shrink by default. Use `--allow-volume-shrink` only after checking that the data fits. pvc-migrate reads usage only through a trusted storage-backend CRD adapter and never creates a Pod or mounts a source volume for this check. If the backend does not expose reliable per-volume usage, the operation is blocked unless `--skip-source-usage-check` explicitly accepts the risk. Capacity flags cannot modify an existing session and are not available on `rename` or `move`.
+
+When naming multiple destination PVCs, use `--destination-pvc source-pvc-name=destination-pvc-name` for each claim. The planner rejects unknown, duplicate, or missing source-name mappings.
+
 ## Observe Progress
 
 ```bash
@@ -172,6 +176,8 @@ For a WFFC destination stuck in Pending:
 The copy engine tries configured strategies in order through upstream pv-migrate. `clusterip` requires policy and network reachability between source and staging namespaces. Node-local RWO volumes generally need source and destination tools on their respective nodes.
 
 `copy` defaults to an offline pass and requires zero active Pod consumers. Use `copy --online` for one finite warm pass with file-level consistency while consumers keep running. `--destination-storage-class`, `--target-node`, and `--source-node` control the destination class and tool placement; `--target-node` defaults to `auto`, which selects a compatible Ready node and prefers a node different from the source. The source node is inferred from a unique active consumer when possible. Cross-namespace copy defaults the destination PVC name to the source name.
+
+The destination PVC request is recorded separately from the source PV capacity. For orchestrated migration, activation recreates the application PVC with the requested destination capacity; rollback restores the original source PVC request.
 
 The CLI follows matching Helm-owned tool Pod logs through each attempt and prints the operation ID in progress records. Inspect Jobs, Deployments, Services, and Pods carrying that ID when cluster events require more context. The application service increments and persists copy attempts before each call. A later resume performs another incremental pass.
 

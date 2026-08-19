@@ -3,6 +3,7 @@ package kube
 import (
 	"bytes"
 	"context"
+	"errors"
 	"io"
 	"log/slog"
 	"strings"
@@ -159,6 +160,21 @@ func TestToolLogStreamerKeepsStructuredOutputParseable(t *testing.T) {
 		if !strings.Contains(records.String(), want) {
 			t.Fatalf("structured records lack %q: %s", want, records.String())
 		}
+	}
+}
+
+func TestToolLogStreamerDetectsNoSpaceWhenOutputIsDiscarded(t *testing.T) {
+	pod := upstreamToolPod("pm-no-space")
+	source := &fakeToolLogSource{pod: pod, streams: []string{"rsync: write failed: No space left on device (28)\n"}}
+	stream := startToolLogStream(t.Context(), source, ToolLogOptions{}, pod)
+
+	deadline := time.Now().Add(time.Second)
+	for !errors.Is(stream.ObservedError(), ErrToolPodNoSpace) && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	stream.Stop()
+	if !errors.Is(stream.ObservedError(), ErrToolPodNoSpace) {
+		t.Fatalf("observed error=%v", stream.ObservedError())
 	}
 }
 

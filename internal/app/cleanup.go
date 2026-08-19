@@ -195,6 +195,9 @@ func (s *Service) cleanup(ctx context.Context, session *domain.Session, options 
 				}
 			}
 		}
+		if err := s.releaseStandalonePodOwnership(ctx, session); err != nil {
+			return err
+		}
 	}
 	if options.DeleteSession {
 		if err := s.store.Delete(ctx, session); err != nil {
@@ -215,6 +218,70 @@ func (s *Service) cleanup(ctx context.Context, session *domain.Session, options 
 	}
 	s.logInfo("cleanup completed", "session", session.ID)
 	return nil
+}
+
+func (s *Service) validateStandalonePodOwnershipRelease(ctx context.Context, session *domain.Session) error {
+	if session == nil || session.Spec.Workload().Adapter != domain.WorkloadStandalone {
+		return nil
+	}
+	ref := session.Spec.Workload().Pod
+	pod, err := s.client.CoreV1().Pods(ref.Namespace).Get(ctx, ref.Name, metav1.GetOptions{})
+	if apierrors.IsNotFound(err) {
+		return nil
+	}
+	if err != nil {
+		return domain.WrapError(domain.ErrorKubernetes, "cleanup dry-run", fmt.Sprintf("read standalone Pod %s/%s", ref.Namespace, ref.Name), err)
+	}
+	owner := pod.Annotations[kube.SessionKey]
+	if pod.UID != ref.UID {
+		if owner == session.ID {
+			return domain.NewError(domain.ErrorConflict, "cleanup dry-run", fmt.Sprintf("standalone Pod %s/%s UID changed while retaining session ownership", ref.Namespace, ref.Name))
+		}
+		return nil
+	}
+	if owner != "" && owner != session.ID {
+		return domain.NewError(domain.ErrorConflict, "cleanup dry-run", fmt.Sprintf("standalone Pod %s/%s belongs to migration session %s", ref.Namespace, ref.Name, owner))
+	}
+	return nil
+}
+
+func (s *Service) releaseStandalonePodOwnership(ctx context.Context, session *domain.Session) error {
+	if session == nil || session.Spec.Workload().Adapter != domain.WorkloadStandalone {
+		return nil
+	}
+	ref := session.Spec.Workload().Pod
+	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		pod, err := s.client.CoreV1().Pods(ref.Namespace).Get(ctx, ref.Name, metav1.GetOptions{})
+		if apierrors.IsNotFound(err) {
+			return nil
+		}
+		if err != nil {
+			return domain.WrapError(domain.ErrorKubernetes, "cleanup", fmt.Sprintf("read standalone Pod %s/%s", ref.Namespace, ref.Name), err)
+		}
+		owner := pod.Annotations[kube.SessionKey]
+		if pod.UID != ref.UID {
+			if owner == session.ID {
+				return domain.NewError(domain.ErrorConflict, "cleanup", fmt.Sprintf("standalone Pod %s/%s UID changed while retaining session ownership", ref.Namespace, ref.Name))
+			}
+			return nil
+		}
+		if owner == "" {
+			return nil
+		}
+		if owner != session.ID {
+			return domain.NewError(domain.ErrorConflict, "cleanup", fmt.Sprintf("standalone Pod %s/%s belongs to migration session %s", ref.Namespace, ref.Name, owner))
+		}
+		updated := pod.DeepCopy()
+		delete(updated.Annotations, kube.SessionKey)
+		if len(updated.Annotations) == 0 {
+			updated.Annotations = nil
+		}
+		_, err = s.client.CoreV1().Pods(ref.Namespace).Update(ctx, updated, metav1.UpdateOptions{})
+		if err != nil {
+			return domain.WrapError(domain.ErrorKubernetes, "cleanup", fmt.Sprintf("release standalone Pod %s/%s ownership", ref.Namespace, ref.Name), err)
+		}
+		return nil
+	})
 }
 
 func (s *Service) recoverDestinationRefs(ctx context.Context, session *domain.Session) error {
