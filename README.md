@@ -264,6 +264,28 @@ pvc-migrate copy --dry-run=false --online \
 Cross-namespace copies reuse the source PVC name by default. Same-namespace copies generate a session-suffixed destination name unless `--destination-pvc` is supplied.
 For multiple explicit destination names, pass `--destination-pvc source-pvc-name=destination-pvc-name` once per source PVC; mappings must be complete and unique.
 
+### Partial Directory Transfers
+
+`reserve`, `copy`, `migrate`, and `migrate-pod` accept optional `--source-path` and `--destination-path` directory scopes. Omit both flags to copy the full PVC. Paths are relative to the PVC root, and `.` selects the root. A single-PVC operation accepts a bare path; multi-PVC operations use explicit `source-pvc-name=relative-path` mappings. Unmapped PVCs keep the full-volume scope.
+
+```bash
+pvc-migrate copy --dry-run=false \
+  --source-namespace application \
+  --source-pvc database-data \
+  --source-path mysql/current \
+  --destination-path restored/mysql
+
+pvc-migrate migrate-pod plan \
+  --source-namespace application \
+  --pod database-1 \
+  --source-path data=mysql/current \
+  --destination-path data=. \
+  --source-path logs=archive/current \
+  --destination-path logs=restored/logs
+```
+
+Each scope is persisted in the session and reused by warm copy, final sync, checksum verification, and resume. Execution verifies that source directories exist, creates nested destination directories, and rejects a selected path containing a symbolic-link component. `--delete-extraneous` remains confined to the selected destination directory. An orchestrated partial transfer still replaces the whole application PVC at cutover, so files outside each selected source directory are absent from the destination by explicit request.
+
 ### Destination Capacity
 
 `reserve`, `copy`, `migrate`, and `migrate-pod` accept `--destination-capacity` because they create destination PVCs. Omit it to keep each source PV capacity. Pass one value to apply it to every source PVC, or use explicit `source-pvc-name=capacity` entries for multiple PVCs. Plans and session status show both source and destination capacities.
@@ -309,7 +331,8 @@ pvc-migrate --kubeconfig /path/to/kubeconfig \
   --backend s3 \
   --bucket pvc-backups \
   --endpoint https://s3.example.com \
-  --name database-20260809
+  --name database-20260809 \
+  --path mysql/current
 
 pvc-migrate --kubeconfig /path/to/kubeconfig \
   restore --dry-run=false \
@@ -318,8 +341,11 @@ pvc-migrate --kubeconfig /path/to/kubeconfig \
   --backend s3 \
   --bucket pvc-backups \
   --endpoint https://s3.example.com \
-  --name database-20260809
+  --name database-20260809 \
+  --path mysql/current
 ```
+
+`backup`, `live-backup`, and `restore` use `--path` for one PVC subdirectory. The restore path must match the path recorded in the immutable completion manifest. Omitting `--path` selects the full PVC.
 
 Online backup provides a best-effort crash-consistent file copy. Application-consistent database recovery requires quiescence, a filesystem snapshot, or a database-native backup. File contents and paths are preserved; POSIX ownership, permissions, ACLs, extended attributes, hard links, device files, and empty directories remain outside the backup contract.
 

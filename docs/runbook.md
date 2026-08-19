@@ -15,6 +15,10 @@ When creating destination PVCs, use `--destination-capacity` on `reserve`, `copy
 
 When naming multiple destination PVCs, use `--destination-pvc source-pvc-name=destination-pvc-name` for each claim. The planner rejects unknown, duplicate, or missing source-name mappings.
 
+Use `--source-path` and `--destination-path` to copy directory contents instead of the full PVC. Paths are relative to the PVC root; `.` means the root. Use bare values only with one source PVC. For multiple PVCs, repeat explicit mappings such as `--source-path data=mysql/current --destination-path data=.`. Unmapped PVCs remain full-volume transfers. Paths are immutable after session creation and appear in plan and session output.
+
+Execution validates source directories after mounting the source PVC and creates destination directories after reservation. Missing directories, non-directory objects, parent traversal, and symbolic-link path components stop before rsync. For a migration without warm-copy passes, source validation occurs after the workload is paused; abort the session to restore the workload if validation cannot be corrected. A partial `migrate` or `migrate-pod` still activates a replacement PVC, which contains only the selected source contents at the selected destination path.
+
 ## Observe Progress
 
 ```bash
@@ -224,6 +228,8 @@ pvc-migrate --kubeconfig /path/to/config \
 ```
 
 S3 object-storage mode copies files individually and uses no archive compression. The resulting recovery point preserves file contents and paths; owner/group/mode, ACL, xattr, hardlink, device-file, and empty-directory metadata require an application-specific export or a future archive format. Restore keeps extra destination files by default; pass `--delete-extraneous` after reviewing the destructive deletion set. The immutable manifest binds the source PVC identity, capacity, VolumeMode, and `--path`, plus an object inventory containing count, total bytes, and a SHA-256 fingerprint over sorted object keys, sizes, and ETags. Restore checks the manifest and inventory before creating the tool and verifies the inventory after synchronization. The dry-run result displays the destination prefix, mode, consistency boundary, and compression policy without exposing credentials.
+
+For a partial object-storage recovery point, pass the same relative `--path` to backup and restore. Omitting it selects the PVC root. The plan and result output show the effective path.
 
 The manifest schema is version 2. Recovery points created by earlier builds need a fresh backup before restore.
 

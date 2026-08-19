@@ -121,7 +121,7 @@ func TestBackupDryRunPrintsStructuredPlanWithoutSecrets(t *testing.T) {
 	if err := json.Unmarshal([]byte(stdout), &result); err != nil {
 		t.Fatalf("decode output: %v\n%s", err, stdout)
 	}
-	if result["operation"] != "backup" || result["pvc"] != "data" || result["mode"] != "offline" {
+	if result["operation"] != "backup" || result["pvc"] != "data" || result["path"] != domain.VolumeRootPath || result["mode"] != "offline" {
 		t.Fatalf("output=%v", result)
 	}
 	if result["destination"] != "s3://backups/pv-migrate/daily/" {

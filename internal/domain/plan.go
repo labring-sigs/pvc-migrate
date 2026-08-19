@@ -75,6 +75,7 @@ type PlannedVolume struct {
 	StorageClass     string                              `json:"storageClass" yaml:"storageClass"`
 	BindingMode      storagev1.VolumeBindingMode         `json:"bindingMode" yaml:"bindingMode"`
 	CSIProvisioner   string                              `json:"csiProvisioner" yaml:"csiProvisioner"`
+	TransferScope    *TransferScope                      `json:"transferScope,omitempty" yaml:"transferScope,omitempty"`
 }
 
 type StorageCapacityReport struct {

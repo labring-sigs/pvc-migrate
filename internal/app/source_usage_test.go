@@ -70,6 +70,17 @@ func TestVerifyShrinkUsageRejectsBackendOverflow(t *testing.T) {
 	}
 }
 
+func TestVerifyPartialSourceShrinkReportsWholeVolumeUsageAsInconclusive(t *testing.T) {
+	reader := &staticVolumeUsageReader{result: kube.VolumeUsageReadResult{UsedBytes: 2 << 30, Source: "test storage CRD"}}
+	service := &Service{config: Config{VolumeUsageReader: reader}}
+	session := shrinkUsageSession(false)
+	session.Spec.Volumes[0].TransferScope = &domain.TransferScope{SourcePath: "selected/data", DestinationPath: "."}
+	err := service.verifyShrinkUsage(context.Background(), session)
+	if domain.CategoryOf(err) != domain.ErrorConflict || !strings.Contains(err.Error(), "cannot prove that selected source directory") || !strings.Contains(err.Error(), "selected/data") {
+		t.Fatalf("error=%v category=%s", err, domain.CategoryOf(err))
+	}
+}
+
 func TestVerifyShrinkUsageExplicitSkipBypassesReader(t *testing.T) {
 	reader := &staticVolumeUsageReader{err: fmt.Errorf("must not be called")}
 	service := &Service{config: Config{VolumeUsageReader: reader}}

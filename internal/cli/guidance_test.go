@@ -398,6 +398,45 @@ type guidanceErrorCommand struct{ stderr bytes.Buffer }
 
 func (c *guidanceErrorCommand) ErrOrStderr() io.Writer { return &c.stderr }
 
+func TestCapacityFailureGuidanceDoesNotRecommendResume(t *testing.T) {
+	command := &guidanceErrorCommand{}
+	session := guidanceSession(domain.PhaseFailed)
+	session.Status.ResumeFrom = domain.PhaseFinalSyncing
+	err := domain.NewError(domain.ErrorConflict, "copy capacity", "destination PVC ran out of space")
+	if got := reportSessionError(command, session, err); !errors.Is(got, err) {
+		t.Fatalf("returned error=%v", got)
+	}
+	text := command.stderr.String()
+	for _, want := range []string{
+		"Destination capacity was exhausted",
+		"session abort mig-test --dry-run",
+		"--yes session abort mig-test --dry-run=false",
+		"session cleanup mig-test --delete-temporary --delete-rollback-pv --finalize --delete-session --dry-run",
+		"larger --destination-capacity",
+	} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("guidance=%q missing %q", text, want)
+		}
+	}
+	if strings.Contains(text, "session resume") {
+		t.Fatalf("capacity guidance recommends retrying an undersized destination: %q", text)
+	}
+}
+
+func TestPersistedCapacityFailureStatusKeepsSpecializedGuidance(t *testing.T) {
+	session := guidanceSession(domain.PhaseFailed)
+	session.Status.ResumeFrom = domain.PhaseWarmCopying
+	session.Status.Message = "copy capacity: destination PVC is full"
+	var output bytes.Buffer
+	if err := writeSessionGuidance(&output, session, guidancePrefixesForSession(session)); err != nil {
+		t.Fatal(err)
+	}
+	text := output.String()
+	if !strings.Contains(text, "Destination capacity was exhausted") || !strings.Contains(text, "session abort mig-test") || strings.Contains(text, "session resume") {
+		t.Fatalf("persisted capacity guidance=%q", text)
+	}
+}
+
 func TestErrorGuidanceIncludesRecoveryInspection(t *testing.T) {
 	command := &guidanceErrorCommand{}
 	if err := reportSessionLookupError(command, "migration-control", "mig-test", domain.NewError(domain.ErrorValidation, "get session", "missing")); err == nil {
@@ -435,6 +474,21 @@ func TestTransferErrorGuidanceIncludesPVCInspection(t *testing.T) {
 	}
 	if !strings.Contains(command.stderr.String(), "kubectl --namespace app get pvc data") {
 		t.Fatalf("guidance=%q", command.stderr.String())
+	}
+}
+
+func TestTransferPathErrorGuidanceDoesNotClaimPlanMountsPVC(t *testing.T) {
+	command := &guidanceErrorCommand{}
+	err := domain.NewError(domain.ErrorPrecondition, "transfer path preflight", "selected path is a symbolic link")
+	if got := reportTransferError(command, "live-backup", "app", "data", err); !errors.Is(got, err) {
+		t.Fatalf("returned error=%v", got)
+	}
+	text := command.stderr.String()
+	if !strings.Contains(text, "Correct --path and rerun the write command") || !strings.Contains(text, "mounted directory") {
+		t.Fatalf("guidance=%q", text)
+	}
+	if strings.Contains(text, "rerun its plan") {
+		t.Fatalf("path guidance incorrectly claims plan performs the mount check: %q", text)
 	}
 }
 

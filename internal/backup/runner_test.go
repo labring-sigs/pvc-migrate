@@ -818,6 +818,35 @@ func TestRunProbesRcloneWhileHoldingTransferLock(t *testing.T) {
 	}
 }
 
+func TestTransferToolProbeValidatesBackupPathAndCreatesRestorePath(t *testing.T) {
+	for _, test := range []struct {
+		name    string
+		restore bool
+	}{
+		{name: "backup validates selected source"},
+		{name: "restore creates selected destination", restore: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			prober := &recordingBackupToolProber{}
+			request := Request{
+				ID: "partial", Namespace: "default", PVCName: "data", Path: "mysql/current",
+				ToolImage: "registry.example/pvc-migrate:test", ToolImageProber: prober,
+			}
+			result, err := probeTransferToolImage(t.Context(), request, "node-a", test.restore)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if result.NodeName != "node-a" || len(prober.calls) != 1 || len(prober.calls[0].Targets) != 1 {
+				t.Fatalf("result=%#v calls=%#v", result, prober.calls)
+			}
+			target := prober.calls[0].Targets[0]
+			if target.PVCName != request.PVCName || target.RequiredPath != request.Path || target.CreatePath != test.restore || !slices.Equal(target.Components, []string{kube.ToolComponentRclone}) {
+				t.Fatalf("target=%#v", target)
+			}
+		})
+	}
+}
+
 func TestRunRecomputesPVToolNodeAfterAcquiringLock(t *testing.T) {
 	storeAPI := &preflightObjectStore{}
 	client, request := preflightFixture(t, storeAPI)

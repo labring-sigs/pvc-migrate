@@ -66,6 +66,7 @@ type Plan struct {
 	ToolImage        string   `json:"toolImage" yaml:"toolImage"`
 	Namespace        string   `json:"namespace" yaml:"namespace"`
 	PVC              string   `json:"pvc" yaml:"pvc"`
+	Path             string   `json:"path" yaml:"path"`
 	Mode             Mode     `json:"mode" yaml:"mode"`
 	Consistency      string   `json:"consistency" yaml:"consistency"`
 	Destination      string   `json:"destination" yaml:"destination"`
@@ -88,6 +89,7 @@ type Result struct {
 	Operation   string `json:"operation" yaml:"operation"`
 	Namespace   string `json:"namespace" yaml:"namespace"`
 	PVC         string `json:"pvc" yaml:"pvc"`
+	Path        string `json:"path" yaml:"path"`
 	Name        string `json:"name" yaml:"name"`
 	Destination string `json:"destination" yaml:"destination"`
 	Mode        Mode   `json:"mode" yaml:"mode"`
@@ -162,6 +164,7 @@ func preflight(ctx context.Context, client kubernetes.Interface, req Request, re
 		ToolImage:        toolImage,
 		Namespace:        req.Namespace,
 		PVC:              req.PVCName,
+		Path:             transferDisplayPath(req.Path),
 		Mode:             ModeOffline,
 		Consistency:      backupConsistency(req.Online),
 		Destination:      req.Store.Destination(),
@@ -234,6 +237,13 @@ func preflight(ctx context.Context, client kubernetes.Interface, req Request, re
 	return plan, nil
 }
 
+func transferDisplayPath(value string) string {
+	if value == "" {
+		return domain.VolumeRootPath
+	}
+	return value
+}
+
 func uniquePVToolNode(ctx context.Context, client kubernetes.Interface, pv *corev1.PersistentVolume) (string, error) {
 	if pv == nil || pv.Spec.NodeAffinity == nil || pv.Spec.NodeAffinity.Required == nil || len(pv.Spec.NodeAffinity.Required.NodeSelectorTerms) == 0 {
 		return "", nil
@@ -261,24 +271,27 @@ func Run(ctx context.Context, client kubernetes.Interface, req Request, restore 
 	return runBackup(ctx, client, req, plan.PVCUID, plan.PVUID)
 }
 
-func probeTransferToolImage(ctx context.Context, req Request, nodeName string) (kube.ToolImageProbeResult, error) {
+func probeTransferToolImage(ctx context.Context, req Request, nodeName string, restore bool) (kube.ToolImageProbeResult, error) {
 	if req.ToolImageProber == nil {
 		return kube.ToolImageProbeResult{NodeName: nodeName}, nil
 	}
 	pvcName := ""
-	if nodeName == "" {
+	if nodeName == "" || req.Path != "" {
 		// Let the scheduler resolve the same storage topology as the real rclone
-		// Pod when preflight cannot identify one unique node.
+		// Pod when preflight cannot identify one unique node. A selected path
+		// must also be checked through the real PVC mount before rclone starts.
 		pvcName = req.PVCName
 	}
 	results, err := req.ToolImageProber.Probe(ctx, kube.ToolImageProbeOptions{
 		OperationID: req.ID,
 		Image:       req.ToolImage,
 		Targets: []kube.ToolProbeTarget{{
-			Namespace:  req.Namespace,
-			NodeName:   nodeName,
-			PVCName:    pvcName,
-			Components: []string{kube.ToolComponentRclone},
+			Namespace:    req.Namespace,
+			NodeName:     nodeName,
+			PVCName:      pvcName,
+			RequiredPath: req.Path,
+			CreatePath:   restore && req.Path != "",
+			Components:   []string{kube.ToolComponentRclone},
 		}},
 		Timeout: toolHelmTimeout(req.HelmTimeout),
 		Writer:  req.Writer,
@@ -465,7 +478,7 @@ func runBackup(ctx context.Context, client kubernetes.Interface, req Request, ex
 	if err := validateBackupToolStart(leaseCtx, client, req); err != nil {
 		return err
 	}
-	probeResult, err := probeTransferToolImage(leaseCtx, req, currentToolNode)
+	probeResult, err := probeTransferToolImage(leaseCtx, req, currentToolNode, false)
 	if err != nil {
 		return err
 	}
@@ -773,7 +786,7 @@ func runRestore(ctx context.Context, client kubernetes.Interface, req Request, e
 			return err
 		}
 	}
-	probeResult, err := probeTransferToolImage(leaseCtx, req, toolNode)
+	probeResult, err := probeTransferToolImage(leaseCtx, req, toolNode, true)
 	if err != nil {
 		return err
 	}

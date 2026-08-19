@@ -21,6 +21,8 @@ type Request struct {
 	ToolImage             string
 	Source                domain.ObjectReference
 	Destination           domain.ObjectReference
+	SourcePath            string
+	DestinationPath       string
 	Mode                  Mode
 	Attempt               int
 	KubeconfigPath        string

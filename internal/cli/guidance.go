@@ -36,6 +36,9 @@ func writeSessionGuidance(w io.Writer, session *domain.Session, prefixes guidanc
 	if session == nil {
 		return nil
 	}
+	if sessionHasCapacityFailure(session) {
+		return writeCapacityFailureGuidance(w, session, prefixes)
+	}
 	prefix := prefixes.pvcMigrate
 	status := fmt.Sprintf("%s session status %s", prefix, session.ID)
 	resumePlan := fmt.Sprintf("%s session resume %s --dry-run", prefix, session.ID)
@@ -281,17 +284,74 @@ func reportSessionError(cmd interface{ ErrOrStderr() io.Writer }, session *domai
 		return err
 	}
 	if session != nil && errorHasOperation(err, "copy capacity") {
-		_, _ = fmt.Fprintln(cmd.ErrOrStderr(), "\nDestination capacity was exhausted. Keep the workload paused when applicable, increase --destination-capacity in a new session, then clean up or roll back the failed session before retrying.")
+		_ = writeCapacityFailureGuidance(cmd.ErrOrStderr(), session, guidancePrefixesForCommand(cmd, session.Spec.SessionNamespace))
 		return err
 	}
 	if session != nil && errorHasOperation(err, "source usage check") {
 		_, _ = fmt.Fprintln(cmd.ErrOrStderr(), "\nSource usage could not be read from a trusted storage-backend CRD. Increase --destination-capacity, or independently verify the data size and create a new session with --skip-source-usage-check.")
 		return err
 	}
+	if session != nil && errorHasOperation(err, "transfer path preflight") {
+		_, _ = fmt.Fprintln(cmd.ErrOrStderr(), "\nTransfer directory validation failed. Correct the source or destination directory and retry. If the stored path is wrong, abort before activation, clean up the retained resources, and create a new session with corrected path flags; transfer paths cannot be changed on an existing session.")
+		_ = writeSessionGuidance(cmd.ErrOrStderr(), session, guidancePrefixesForCommand(cmd, session.Spec.SessionNamespace))
+		return err
+	}
 	if session != nil {
 		_ = writeSessionGuidance(cmd.ErrOrStderr(), session, guidancePrefixesForCommand(cmd, session.Spec.SessionNamespace))
 	}
 	return err
+}
+
+func writeCapacityFailureGuidance(w io.Writer, session *domain.Session, prefixes guidancePrefixes) error {
+	if session == nil {
+		return nil
+	}
+	prefix := prefixes.pvcMigrate
+	if _, err := fmt.Fprintln(w, "\nDestination capacity was exhausted. Keep the workload paused when applicable. Abort and clean up this session, then create a new session with a larger --destination-capacity."); err != nil {
+		return err
+	}
+	if _, err := fmt.Fprintf(w, "\nNext steps for session %s (phase %s):\n", session.ID, session.Status.Phase); err != nil {
+		return err
+	}
+	if _, err := fmt.Fprintf(w, "  Record: ConfigMap %s/%s\n", session.Spec.SessionNamespace, kube.SessionConfigMapName(session.ID)); err != nil {
+		return err
+	}
+	if _, err := fmt.Fprintln(w, "  Inspect:", fmt.Sprintf("%s session status %s", prefix, session.ID)); err != nil {
+		return err
+	}
+	if err := writeSessionInspection(w, session, prefixes.kubectl); err != nil {
+		return err
+	}
+	if !failedCanAbort(session) {
+		if _, err := fmt.Fprintln(w, "  Validate rollback:", fmt.Sprintf("%s session rollback %s --dry-run", prefix, session.ID)); err != nil {
+			return err
+		}
+		_, err := fmt.Fprintln(w, "  Roll back:", fmt.Sprintf("%s --yes session rollback %s --dry-run=false", prefix, session.ID))
+		return err
+	}
+	abortPlan := fmt.Sprintf("%s session abort %s --dry-run", prefix, session.ID)
+	abort := fmt.Sprintf("%s --yes session abort %s --dry-run=false", prefix, session.ID)
+	cleanupPlan := fmt.Sprintf("%s %s --dry-run", prefix, cleanupCommandArgs(session))
+	cleanup := fmt.Sprintf("%s --yes %s --dry-run=false", prefix, cleanupCommandArgs(session))
+	for _, step := range []struct {
+		label   string
+		command string
+	}{
+		{label: "Validate abort and workload restoration:", command: abortPlan},
+		{label: "Abort and restore the workload:", command: abort},
+		{label: "After abort, validate removal of the undersized destination:", command: cleanupPlan},
+		{label: "After abort, remove the undersized destination:", command: cleanup},
+	} {
+		if _, err := fmt.Fprintln(w, "  "+step.label, step.command); err != nil {
+			return err
+		}
+	}
+	_, err := fmt.Fprintln(w, "  Create a new session with a larger --destination-capacity; capacity cannot be changed on this session.")
+	return err
+}
+
+func sessionHasCapacityFailure(session *domain.Session) bool {
+	return session != nil && session.Status.Phase == domain.PhaseFailed && strings.HasPrefix(session.Status.Message, "copy capacity:")
 }
 
 func reportSessionLookupError(cmd interface{ ErrOrStderr() io.Writer }, namespace, id string, err error) error {
@@ -326,6 +386,10 @@ func reportRuntimeError(cmd interface{ ErrOrStderr() io.Writer }, err error) err
 
 func reportTransferError(cmd interface{ ErrOrStderr() io.Writer }, operation, namespace, pvc string, err error) error {
 	_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "\n%s stopped before confirmed completion. Inspect the PVC state: %s --namespace %s get pvc %s\n", operation, kubectlCommandPrefixForCommand(cmd), namespace, pvc)
+	if errorHasOperation(err, "transfer path preflight") {
+		_, _ = fmt.Fprintln(cmd.ErrOrStderr(), "Correct --path and rerun the write command. Object-storage plan validates the path syntax and PVC state, while the mounted directory and symbolic-link checks run immediately before data transfer.")
+		return err
+	}
 	_, _ = fmt.Fprintln(cmd.ErrOrStderr(), "Fix the reported condition, rerun its plan, then execute with --dry-run=false.")
 	return err
 }

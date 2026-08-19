@@ -239,11 +239,12 @@ func copyToolProbeTargets(session *domain.Session, mountSourcePVC bool) []kube.T
 	options := session.Spec.WorkflowOptions()
 	switch session.Spec.Operation() {
 	case domain.OperationCopy, domain.OperationMigrate, domain.OperationMigratePod:
+		targets := destinationTransferPathProbeTargets(session, options.TargetNode)
 		if options.TargetNode == "" {
-			return nil
+			return targets
 		}
 		targetNamespaces := destinationVolumeNamespaces(session)
-		targets := toolProbeTargetsForNamespaces(targetNamespaces, options.TargetNode, []string{kube.ToolComponentRsync})
+		targets = append(targets, toolProbeTargetsForNamespaces(targetNamespaces, options.TargetNode, []string{kube.ToolComponentRsync})...)
 		needsSSHD := sessionNeedsSourceSSHD(session)
 		if slices.Contains(options.Strategies, domain.StrategyLocal) {
 			targets = append(targets, toolProbeTargetsForNamespaces(targetNamespaces, options.TargetNode, []string{kube.ToolComponentSSHD})...)
@@ -726,6 +727,9 @@ func (s *Service) resolveSourceToolProbeTargets(ctx context.Context, session *do
 			SkipPVCMount: resolvedNodes[index] != "" && !mountSourcePVC,
 			Components:   slices.Clone(sourceComponents),
 		}
+		if mountSourcePVC && domain.SourceTransferPath(volume.TransferScope) != domain.VolumeRootPath {
+			target.RequiredPath = domain.SourceTransferPath(volume.TransferScope)
+		}
 		targets = append(targets, target)
 	}
 	return targets, nil
@@ -771,12 +775,39 @@ func sourceToolProbeTargets(session *domain.Session, nodeName string, mountSourc
 		sourceComponents = []string{kube.ToolComponentSSHD}
 	}
 	for _, volume := range session.Spec.Volumes {
-		targets = append(targets, kube.ToolProbeTarget{
+		target := kube.ToolProbeTarget{
 			Namespace:    volume.SourcePVC.Namespace,
 			NodeName:     nodeName,
 			PVCName:      volume.SourcePVC.Name,
 			SkipPVCMount: !mountSourcePVC,
 			Components:   slices.Clone(sourceComponents),
+		}
+		if mountSourcePVC && domain.SourceTransferPath(volume.TransferScope) != domain.VolumeRootPath {
+			target.RequiredPath = domain.SourceTransferPath(volume.TransferScope)
+		}
+		targets = append(targets, target)
+	}
+	return targets
+}
+
+func destinationTransferPathProbeTargets(session *domain.Session, nodeName string) []kube.ToolProbeTarget {
+	if session == nil {
+		return nil
+	}
+	targets := make([]kube.ToolProbeTarget, 0, len(session.Spec.Volumes))
+	for _, volume := range session.Spec.Volumes {
+		path := domain.DestinationTransferPath(volume.TransferScope)
+		if path == domain.VolumeRootPath {
+			continue
+		}
+		targets = append(targets, kube.ToolProbeTarget{
+			Namespace:        volume.DestinationPVC.Namespace,
+			NodeName:         nodeName,
+			PVCName:          volume.DestinationPVC.Name,
+			WritablePVCMount: true,
+			RequiredPath:     path,
+			CreatePath:       true,
+			Components:       []string{kube.ToolComponentRsync},
 		})
 	}
 	return targets
@@ -891,6 +922,9 @@ func (s *Service) verifyShrinkUsage(ctx context.Context, session *domain.Session
 			usageSource = "the storage backend CRD"
 		}
 		if usage.UsedBytes > destination.Value() {
+			if sourcePath := domain.SourceTransferPath(volume.TransferScope); sourcePath != domain.VolumeRootPath {
+				return domain.NewError(domain.ErrorConflict, "source usage check", fmt.Sprintf("PVC %s/%s whole-volume usage is %d bytes according to %s, above destination capacity %s; this cannot prove that selected source directory %q fits; abort this session and create a new one with a larger destination, or use --skip-source-usage-check only after independently measuring the selected data", volume.SourcePVC.Namespace, volume.SourcePVC.Name, usage.UsedBytes, usageSource, destination.String(), sourcePath))
+			}
 			return domain.NewError(domain.ErrorConflict, "source usage check", fmt.Sprintf("PVC %s/%s uses %d bytes according to %s, above destination capacity %s; increase --destination-capacity or abort this shrink", volume.SourcePVC.Namespace, volume.SourcePVC.Name, usage.UsedBytes, usageSource, destination.String()))
 		}
 	}
@@ -1846,6 +1880,15 @@ func (s *Service) pauseAndFinalSync(ctx context.Context, session *domain.Session
 }
 
 func (s *Service) finalSyncWithProbeResults(ctx context.Context, session *domain.Session, probeResults []kube.ToolImageProbeResult) error {
+	pathTargets, err := s.sourceTransferPathProbeTargets(ctx, session)
+	if err != nil {
+		return err
+	}
+	pathProbeResults, err := s.probeToolImage(ctx, session, pathTargets)
+	if err != nil {
+		return err
+	}
+	probeResults = append(probeResults, pathProbeResults...)
 	if session.Status.Phase == domain.PhaseFinalSynced {
 		for i := range session.Status.Volumes {
 			session.Status.Volumes[i].Sync.FinalCompletedAt = nil
@@ -1879,6 +1922,43 @@ func (s *Service) finalSyncWithProbeResults(ctx context.Context, session *domain
 		}
 	}
 	return s.finish(ctx, session, domain.PhaseFinalSynced, "offline final sync completed for all volumes")
+}
+
+func (s *Service) sourceTransferPathProbeTargets(ctx context.Context, session *domain.Session) ([]kube.ToolProbeTarget, error) {
+	if session == nil {
+		return nil, nil
+	}
+	hasPartialSource := false
+	for _, volume := range session.Spec.Volumes {
+		if domain.SourceTransferPath(volume.TransferScope) != domain.VolumeRootPath {
+			hasPartialSource = true
+			break
+		}
+	}
+	if !hasPartialSource {
+		return nil, nil
+	}
+	var (
+		targets []kube.ToolProbeTarget
+		err     error
+	)
+	if nodeName := session.Spec.WorkflowOptions().SourceNode; nodeName != "" {
+		targets = sourceToolProbeTargets(session, nodeName, true)
+	} else {
+		targets, err = s.resolveSourceToolProbeTargets(ctx, session, true)
+		if err != nil {
+			return nil, err
+		}
+	}
+	filtered := targets[:0]
+	for _, target := range targets {
+		if target.RequiredPath == "" {
+			continue
+		}
+		target.Components = nil
+		filtered = append(filtered, target)
+	}
+	return filtered, nil
 }
 
 func (s *Service) Activate(ctx context.Context, session *domain.Session) error {
@@ -2424,6 +2504,8 @@ func (s *Service) copyWithRetry(ctx context.Context, session *domain.Session, vo
 			ToolImage:             options.ToolImage,
 			Source:                volume.SourcePVC,
 			Destination:           volume.DestinationPVC,
+			SourcePath:            domain.SourceTransferPath(volume.TransferScope),
+			DestinationPath:       domain.DestinationTransferPath(volume.TransferScope),
 			Mode:                  mode,
 			Attempt:               status.Sync.Attempts,
 			KubeconfigPath:        s.config.KubeconfigPath,
@@ -2439,7 +2521,7 @@ func (s *Service) copyWithRetry(ctx context.Context, session *domain.Session, vo
 			Writer:                s.config.Writer,
 			Logger:                s.config.Logger,
 		}
-		s.logInfo("copy started", "session", session.ID, "pvc", volume.SourcePVC.Name, "mode", mode, "attempt", status.Sync.Attempts, "source", volume.SourcePVC.Namespace+"/"+volume.SourcePVC.Name, "destination", volume.DestinationPVC.Namespace+"/"+volume.DestinationPVC.Name)
+		s.logInfo("copy started", "session", session.ID, "pvc", volume.SourcePVC.Name, "mode", mode, "attempt", status.Sync.Attempts, "source", volume.SourcePVC.Namespace+"/"+volume.SourcePVC.Name, "sourcePath", request.SourcePath, "destination", volume.DestinationPVC.Namespace+"/"+volume.DestinationPVC.Name, "destinationPath", request.DestinationPath)
 		toolLogOptions := kube.ToolLogOptions{
 			Namespaces:  []string{volume.SourcePVC.Namespace, volume.DestinationPVC.Namespace},
 			OperationID: copyengine.OperationID(request),
@@ -2493,6 +2575,9 @@ func mergeToolLogError(copyErr, observedErr error) error {
 func isDestinationNoSpaceError(err error) bool {
 	if err == nil {
 		return false
+	}
+	if copyengine.IsDestinationNoSpaceError(err) {
+		return true
 	}
 	var visit func(error) bool
 	visit = func(candidate error) bool {

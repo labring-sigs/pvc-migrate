@@ -744,6 +744,7 @@ func TestCopyRetriesPersistAttemptsAndUseExponentialBackoff(t *testing.T) {
 	}
 	fixture.copier.failures["warm/data"] = 2
 	session := appTestSession()
+	session.Spec.Volumes[0].TransferScope = &domain.TransferScope{SourcePath: "mysql/current", DestinationPath: "restored/mysql"}
 	transitionThrough(t, session, domain.PhaseReserving, domain.PhaseReserved)
 
 	if err := fixture.service.WarmCopy(context.Background(), session); err != nil {
@@ -756,9 +757,29 @@ func TestCopyRetriesPersistAttemptsAndUseExponentialBackoff(t *testing.T) {
 		t.Fatalf("retry delays=%v want=%v", delays, want)
 	}
 	for index, request := range fixture.copier.requests {
-		if request.Attempt != index+1 || request.Mode != copyengine.ModeWarm {
+		if request.Attempt != index+1 || request.Mode != copyengine.ModeWarm || request.SourcePath != "mysql/current" || request.DestinationPath != "restored/mysql" {
 			t.Fatalf("request %d attempt=%d mode=%s", index, request.Attempt, request.Mode)
 		}
+	}
+}
+
+func TestDestinationENOSPCStopsSessionLevelRetries(t *testing.T) {
+	fixture := newRecoveryFixture(t)
+	fixture.service.config.Retries = 3
+	fixture.copier.failures["warm/data"] = 3
+	fixture.copier.failure = errors.New("rsync: write failed: No space left on device")
+	session := appTestSession()
+	transitionThrough(t, session, domain.PhaseReserving, domain.PhaseReserved)
+
+	err := fixture.service.WarmCopy(context.Background(), session)
+	if domain.CategoryOf(err) != domain.ErrorConflict || !strings.Contains(err.Error(), "copy capacity") {
+		t.Fatalf("category=%s error=%v", domain.CategoryOf(err), err)
+	}
+	if len(fixture.copier.requests) != 1 || session.Status.Volumes[0].Sync.Attempts != 1 {
+		t.Fatalf("copy requests=%d attempts=%d", len(fixture.copier.requests), session.Status.Volumes[0].Sync.Attempts)
+	}
+	if session.Status.Phase != domain.PhaseFailed || session.Status.ResumeFrom != domain.PhaseWarmCopying {
+		t.Fatalf("phase=%s resumeFrom=%s", session.Status.Phase, session.Status.ResumeFrom)
 	}
 }
 

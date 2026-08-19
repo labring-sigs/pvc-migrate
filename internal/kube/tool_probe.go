@@ -48,6 +48,8 @@ type ToolProbeTarget struct {
 	PVCName          string
 	SkipPVCMount     bool
 	WritablePVCMount bool
+	RequiredPath     string
+	CreatePath       bool
 	Components       []string
 }
 
@@ -384,13 +386,36 @@ func normalizeToolProbeTargets(targets []ToolProbeTarget) ([]ToolProbeTarget, er
 		if target.Namespace == "" {
 			return nil, domain.NewError(domain.ErrorValidation, "tool image probe", "target namespace is required")
 		}
-		key := target.Namespace + "\x00" + target.NodeName + "\x00" + target.PVCName
+		if target.RequiredPath != "" {
+			normalized, err := domain.NormalizeTransferPath(target.RequiredPath)
+			if err != nil {
+				return nil, domain.NewError(domain.ErrorValidation, "tool image probe", fmt.Sprintf("required PVC path %q is invalid: %v", target.RequiredPath, err))
+			}
+			if normalized == domain.VolumeRootPath {
+				target.RequiredPath = ""
+			} else {
+				target.RequiredPath = normalized
+			}
+			if target.PVCName == "" || target.SkipPVCMount {
+				return nil, domain.NewError(domain.ErrorValidation, "tool image probe", "a required PVC path needs a mounted PVC")
+			}
+		}
+		if target.CreatePath {
+			if target.RequiredPath == "" {
+				return nil, domain.NewError(domain.ErrorValidation, "tool image probe", "path creation requires a non-root PVC path")
+			}
+			target.WritablePVCMount = true
+			target.SkipPVCMount = false
+		}
+		key := target.Namespace + "\x00" + target.NodeName + "\x00" + target.PVCName + "\x00" + target.RequiredPath + fmt.Sprintf("\x00%t", target.CreatePath)
 		current, exists := merged[key]
 		if !exists {
 			current.Namespace = target.Namespace
 			current.NodeName = target.NodeName
 			current.PVCName = target.PVCName
 			current.SkipPVCMount = target.SkipPVCMount
+			current.RequiredPath = target.RequiredPath
+			current.CreatePath = target.CreatePath
 		} else {
 			// A merged probe must exercise the strictest requested behavior.
 			current.SkipPVCMount = current.SkipPVCMount && target.SkipPVCMount
@@ -421,7 +446,13 @@ func normalizeToolProbeTargets(targets []ToolProbeTarget) ([]ToolProbeTarget, er
 		if result[i].NodeName != result[j].NodeName {
 			return result[i].NodeName < result[j].NodeName
 		}
-		return result[i].PVCName < result[j].PVCName
+		if result[i].PVCName != result[j].PVCName {
+			return result[i].PVCName < result[j].PVCName
+		}
+		if result[i].RequiredPath != result[j].RequiredPath {
+			return result[i].RequiredPath < result[j].RequiredPath
+		}
+		return !result[i].CreatePath && result[j].CreatePath
 	})
 	return result, nil
 }
@@ -495,6 +526,9 @@ func toolProbePod(image, operationID string, target ToolProbeTarget, node *corev
 		labels[SessionKey] = operationID
 	}
 	command := toolProbeCommand(target.Components)
+	if target.RequiredPath != "" {
+		command += "; " + transferPathProbeCommand(target.RequiredPath, target.CreatePath)
+	}
 	securityContext := &corev1.SecurityContext{RunAsUser: int64Pointer(0), RunAsGroup: int64Pointer(0)}
 	if slices.Contains(target.Components, ToolComponentSSHD) {
 		securityContext.Capabilities = &corev1.Capabilities{Add: []corev1.Capability{"SYS_CHROOT"}}
@@ -541,6 +575,9 @@ func toolProbePod(image, operationID string, target ToolProbeTarget, node *corev
 	if target.PVCName != "" {
 		annotations["pvc-migrate.io/probe-pvc"] = target.PVCName
 	}
+	if target.RequiredPath != "" {
+		annotations["pvc-migrate.io/probe-path"] = target.RequiredPath
+	}
 	if operationID != "" {
 		annotations[toolProbeOperation] = operationID
 	}
@@ -585,6 +622,24 @@ func toolProbeCommand(components []string) string {
 	return "set -eu; " + strings.Join(commands, "; ")
 }
 
+func transferPathProbeCommand(relativePath string, create bool) string {
+	missingAction := `echo "transfer source directory does not exist: $transfer_path" >&2; exit 66`
+	if create {
+		missingAction = `command -v mkdir >/dev/null 2>&1 || { echo 'required tool command mkdir is missing' >&2; exit 127; }; mkdir "$current"`
+	}
+	return strings.Join([]string{
+		"set -f",
+		"transfer_path=" + probeShellQuote(relativePath),
+		"current=/probe-volume",
+		`remaining="$transfer_path"`,
+		`while test -n "$remaining"; do component=${remaining%%/*}; if test "$remaining" = "$component"; then remaining=; else remaining=${remaining#*/}; fi; current="$current/$component"; if test -L "$current"; then echo "transfer path contains a symbolic link: $transfer_path" >&2; exit 65; fi; if test -e "$current"; then test -d "$current" || { echo "transfer path is not a directory: $transfer_path" >&2; exit 66; }; else ` + missingAction + `; fi; done`,
+	}, "; ")
+}
+
+func probeShellQuote(value string) string {
+	return "'" + strings.ReplaceAll(value, "'", `'"'"'`) + "'"
+}
+
 func toolProbeComponentCommands(component string) []string {
 	switch component {
 	case ToolComponentShell:
@@ -614,7 +669,17 @@ func toolProbePodFailureWithMessage(pod *corev1.Pod, image string, target ToolPr
 	if node == "" {
 		node = "scheduler-selected node"
 	}
-	return domain.NewError(domain.ErrorPrecondition, "tool image probe", fmt.Sprintf("tool image %s failed on %s/%s for components %s: %s", image, target.Namespace, node, strings.Join(target.Components, ","), details))
+	operation := "tool image probe"
+	subject := fmt.Sprintf("tool image %s failed on %s/%s for components %s", image, target.Namespace, node, strings.Join(target.Components, ","))
+	if target.RequiredPath != "" {
+		operation = "transfer path preflight"
+		action := "validate"
+		if target.CreatePath {
+			action = "create"
+		}
+		subject = fmt.Sprintf("%s transfer directory %q on PVC %s/%s", action, target.RequiredPath, target.Namespace, target.PVCName)
+	}
+	return domain.NewError(domain.ErrorPrecondition, operation, subject+": "+details)
 }
 
 func toolProbePodStatusParts(pod *corev1.Pod) []string {
@@ -690,10 +755,10 @@ func logProbeStart(options ToolImageProbeOptions, image string, target ToolProbe
 		nodeName = "scheduler-selected"
 	}
 	if options.Logger != nil {
-		options.Logger.Info("tool image probe started", "image", image, "namespace", target.Namespace, "node", nodeName, "pvc", target.PVCName, "components", target.Components, "pod", podName)
+		options.Logger.Info("tool image probe started", "image", image, "namespace", target.Namespace, "node", nodeName, "pvc", target.PVCName, "path", target.RequiredPath, "createPath", target.CreatePath, "components", target.Components, "pod", podName)
 	}
 	if options.Logger == nil && options.Writer != nil {
-		_, _ = fmt.Fprintf(options.Writer, "tool image probe started: namespace=%s node=%s image=%s pvc=%s components=%s pod=%s\n", target.Namespace, nodeName, image, target.PVCName, strings.Join(target.Components, ","), podName)
+		_, _ = fmt.Fprintf(options.Writer, "tool image probe started: namespace=%s node=%s image=%s pvc=%s path=%s createPath=%t components=%s pod=%s\n", target.Namespace, nodeName, image, target.PVCName, target.RequiredPath, target.CreatePath, strings.Join(target.Components, ","), podName)
 	}
 }
 
@@ -703,10 +768,10 @@ func logProbeWaiting(options ToolImageProbeOptions, image string, target ToolPro
 		nodeName = "scheduler-selected"
 	}
 	if options.Logger != nil {
-		options.Logger.Info("tool image probe waiting", "image", image, "namespace", target.Namespace, "node", nodeName, "pvc", target.PVCName, "components", target.Components, "pod", podName)
+		options.Logger.Info("tool image probe waiting", "image", image, "namespace", target.Namespace, "node", nodeName, "pvc", target.PVCName, "path", target.RequiredPath, "createPath", target.CreatePath, "components", target.Components, "pod", podName)
 	}
 	if options.Logger == nil && options.Writer != nil {
-		_, _ = fmt.Fprintf(options.Writer, "tool image probe waiting: namespace=%s node=%s image=%s pvc=%s components=%s pod=%s\n", target.Namespace, nodeName, image, target.PVCName, strings.Join(target.Components, ","), podName)
+		_, _ = fmt.Fprintf(options.Writer, "tool image probe waiting: namespace=%s node=%s image=%s pvc=%s path=%s createPath=%t components=%s pod=%s\n", target.Namespace, nodeName, image, target.PVCName, target.RequiredPath, target.CreatePath, strings.Join(target.Components, ","), podName)
 	}
 }
 
@@ -716,10 +781,10 @@ func logProbeSuccess(options ToolImageProbeOptions, image string, target ToolPro
 		nodeName = "scheduler-selected"
 	}
 	if options.Logger != nil {
-		options.Logger.Info("tool image probe succeeded", "image", image, "namespace", target.Namespace, "node", nodeName, "components", target.Components, "pod", podName)
+		options.Logger.Info("tool image probe succeeded", "image", image, "namespace", target.Namespace, "node", nodeName, "pvc", target.PVCName, "path", target.RequiredPath, "createPath", target.CreatePath, "components", target.Components, "pod", podName)
 	}
 	if options.Logger == nil && options.Writer != nil {
-		_, _ = fmt.Fprintf(options.Writer, "tool image probe succeeded: namespace=%s node=%s image=%s components=%s\n", target.Namespace, nodeName, image, strings.Join(target.Components, ","))
+		_, _ = fmt.Fprintf(options.Writer, "tool image probe succeeded: namespace=%s node=%s image=%s pvc=%s path=%s createPath=%t components=%s\n", target.Namespace, nodeName, image, target.PVCName, target.RequiredPath, target.CreatePath, strings.Join(target.Components, ","))
 	}
 }
 

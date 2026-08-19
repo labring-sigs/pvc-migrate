@@ -21,6 +21,8 @@ type migrationFlags struct {
 	sourcePVCs             []string
 	destinationPVCs        []string
 	destinationCapacities  []string
+	sourcePaths            []string
+	destinationPaths       []string
 	allowVolumeShrink      bool
 	skipSourceUsageCheck   bool
 	podName                string
@@ -48,6 +50,8 @@ func (f *migrationFlags) bind(command *cobra.Command, includePod, includeSourceN
 	flags.StringSliceVar(&f.sourcePVCs, "source-pvc", nil, "Source PVC name; repeat for multiple claims")
 	flags.StringSliceVar(&f.destinationPVCs, "destination-pvc", nil, "Destination PVC name; for multiple PVCs use source-pvc-name=destination-pvc-name")
 	flags.StringSliceVar(&f.destinationCapacities, "destination-capacity", nil, "Destination PVC storage capacity; one value applies to all PVCs, or use source-pvc-name=capacity for explicit mappings")
+	flags.StringArrayVar(&f.sourcePaths, "source-path", nil, "Source directory inside a PVC; repeat and use source-pvc-name=relative-path for multiple PVCs")
+	flags.StringArrayVar(&f.destinationPaths, "destination-path", nil, "Destination directory inside a PVC; repeat and use source-pvc-name=relative-path for multiple PVCs")
 	flags.BoolVar(&f.allowVolumeShrink, "allow-volume-shrink", false, "Allow destination capacity below the source PV capacity; only use when copied data is known to fit")
 	flags.BoolVar(&f.skipSourceUsageCheck, "skip-source-usage-check", false, "Skip the storage-backend CRD usage check for a smaller destination")
 	if includeSourceNode {
@@ -114,6 +118,8 @@ func (f *migrationFlags) planOptions(state *rootState, operation domain.Operatio
 		SourcePVCs:             append([]string(nil), f.sourcePVCs...),
 		DestinationPVCs:        append([]string(nil), f.destinationPVCs...),
 		DestinationCapacities:  append([]string(nil), f.destinationCapacities...),
+		SourcePaths:            append([]string(nil), f.sourcePaths...),
+		DestinationPaths:       append([]string(nil), f.destinationPaths...),
 		AllowVolumeShrink:      f.allowVolumeShrink,
 		SkipSourceUsageCheck:   f.skipSourceUsageCheck,
 		PodName:                f.podName,
@@ -354,6 +360,9 @@ func validateDestinationCapacityFlags(flags *migrationFlags, operation domain.Op
 	if flags == nil {
 		return domain.NewError(domain.ErrorValidation, string(operation), "migration flags are required")
 	}
+	if err := validateTransferPathFlags(flags, operation, existingSession); err != nil {
+		return err
+	}
 	if existingSession && (len(flags.destinationCapacities) > 0 || flags.allowVolumeShrink || flags.skipSourceUsageCheck) {
 		return domain.NewError(domain.ErrorValidation, string(operation), "destination capacity, shrink, and source usage check flags cannot modify an existing session; create a new session with the requested options")
 	}
@@ -377,6 +386,28 @@ func validateDestinationCapacityFlags(flags *migrationFlags, operation domain.Op
 		}
 		if parsed.Sign() <= 0 {
 			return domain.NewError(domain.ErrorValidation, string(operation), fmt.Sprintf("--destination-capacity %q must be positive", value))
+		}
+	}
+	return nil
+}
+
+func validateTransferPathFlags(flags *migrationFlags, operation domain.Operation, existingSession bool) error {
+	if len(flags.sourcePaths) == 0 && len(flags.destinationPaths) == 0 {
+		return nil
+	}
+	if existingSession {
+		return domain.NewError(domain.ErrorValidation, string(operation), "transfer paths cannot modify an existing session; set them when creating the session")
+	}
+	for _, input := range append(append([]string(nil), flags.sourcePaths...), flags.destinationPaths...) {
+		value := strings.TrimSpace(input)
+		if _, mapped, ok := strings.Cut(value, "="); ok {
+			value = strings.TrimSpace(mapped)
+		}
+		if value == "" {
+			return domain.NewError(domain.ErrorValidation, string(operation), fmt.Sprintf("transfer path %q is empty; use . for the PVC root", input))
+		}
+		if _, err := domain.NormalizeTransferPath(value); err != nil {
+			return domain.NewError(domain.ErrorValidation, string(operation), fmt.Sprintf("transfer path %q is invalid: %v", input, err))
 		}
 	}
 	return nil

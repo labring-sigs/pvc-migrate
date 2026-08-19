@@ -18,10 +18,18 @@ func TestCleanupFinalizesActivePVAndClosesRollbackWindow(t *testing.T) {
 	ctx := context.Background()
 	session := appTestSession()
 	session.Status.Phase = domain.PhaseCompleted
+	*session.Spec.WorkloadPtr() = domain.WorkloadSpec{
+		Adapter: domain.WorkloadStandalone,
+		Pod:     domain.ObjectReference{Namespace: "app", Name: "database", UID: types.UID("pod-uid")},
+	}
 	session.Spec.Volumes[0].DestinationPV = domain.ObjectReference{Name: "pv-destination", UID: types.UID("dest-pv-uid")}
 	session.Spec.Volumes[0].DestinationPolicy = corev1.PersistentVolumeReclaimDelete
 	session.Status.Volumes[0].Activation.ActivePVC = domain.ObjectReference{Namespace: "app", Name: "data", UID: types.UID("active-pvc-uid")}
 	client := fake.NewClientset(
+		&corev1.Pod{ObjectMeta: metav1.ObjectMeta{
+			Namespace: "app", Name: "database", UID: types.UID("pod-uid"),
+			Annotations: map[string]string{kube.SessionKey: session.ID, "example.com/keep": "value"},
+		}},
 		&corev1.PersistentVolumeClaim{
 			ObjectMeta: metav1.ObjectMeta{
 				Namespace:   "app",
@@ -60,6 +68,13 @@ func TestCleanupFinalizesActivePVAndClosesRollbackWindow(t *testing.T) {
 	}
 	if pvc.Annotations[kube.SessionKey] != "" {
 		t.Fatalf("active PVC remains owned by %q", pvc.Annotations[kube.SessionKey])
+	}
+	pod, err := client.CoreV1().Pods("app").Get(ctx, "database", metav1.GetOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pod.Annotations[kube.SessionKey] != "" || pod.Annotations["example.com/keep"] != "value" {
+		t.Fatalf("standalone Pod annotations=%v", pod.Annotations)
 	}
 	if store.deletes != 1 {
 		t.Fatalf("session deletes=%d", store.deletes)
