@@ -356,9 +356,10 @@ func (p *Planner) Plan(ctx context.Context, options Options) (*domain.MigrationP
 						plan.AddCheck(failed("destination-capacity", message))
 					}
 					if options.AllowVolumeShrink {
-						if options.SkipSourceUsageCheck {
+						switch {
+						case options.SkipSourceUsageCheck:
 							plan.AddCheck(warned("source-usage", fmt.Sprintf("PVC %s/%s source usage check was explicitly skipped; independently verify that its data fits destination capacity %s", pvc.Namespace, pvc.Name, destinationCapacity.String())))
-						} else if p.volumeUsageReader == nil {
+						case p.volumeUsageReader == nil:
 							backend := sourceClass
 							if sourceProvisioner != "" {
 								backend += " (" + sourceProvisioner + ")"
@@ -367,13 +368,14 @@ func (p *Planner) Plan(ctx context.Context, options Options) (*domain.MigrationP
 								backend = "<unknown>"
 							}
 							plan.AddCheck(failed("source-usage", fmt.Sprintf("PVC %s/%s uses StorageClass backend %s, which has no trusted CRD usage reader; pass --skip-source-usage-check only after independently verifying that the data fits", pvc.Namespace, pvc.Name, backend)))
-						} else {
+						default:
 							usage, usageErr := p.volumeUsageReader.Read(ctx, kube.VolumeUsageReadOptions{SourcePVC: pvcReference(pvc), SourcePV: pvReference(pv)})
-							if usageErr != nil {
+							switch {
+							case usageErr != nil:
 								plan.AddCheck(failed("source-usage", fmt.Sprintf("PVC %s/%s usage could not be read from its storage backend CRD: %v; pass --skip-source-usage-check only after independently verifying that the data fits", pvc.Namespace, pvc.Name, usageErr)))
-							} else if usage.UsedBytes < 0 {
+							case usage.UsedBytes < 0:
 								plan.AddCheck(failed("source-usage", fmt.Sprintf("PVC %s/%s storage backend returned invalid used bytes %d", pvc.Namespace, pvc.Name, usage.UsedBytes)))
-							} else {
+							default:
 								sourceUsedBytes = usage.UsedBytes
 								sourceUsageKnown = true
 								usageSource := strings.TrimSpace(usage.Source)

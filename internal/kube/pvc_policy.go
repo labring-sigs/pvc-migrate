@@ -38,7 +38,7 @@ type PVCAdmissionReport struct {
 // constraints for a batch of replacements in one namespace.
 func CheckPVCAdmissionPolicies(ctx context.Context, client kubernetes.Interface, changes []PVCAdmissionChange) (PVCAdmissionReport, error) {
 	if client == nil {
-		return PVCAdmissionReport{}, fmt.Errorf("Kubernetes client is required")
+		return PVCAdmissionReport{}, fmt.Errorf("kubernetes client is required")
 	}
 	if len(changes) == 0 {
 		return PVCAdmissionReport{}, nil
