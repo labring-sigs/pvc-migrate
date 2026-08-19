@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -24,6 +25,10 @@ const (
 	toolLogMaxLine    = 1024 * 1024
 )
 
+// ErrToolPodNoSpace records destination exhaustion reported by a data-mover
+// Pod when upstream pv-migrate omits the Pod log tail from its returned error.
+var ErrToolPodNoSpace = errors.New("tool Pod reported no space left on device")
+
 // ToolLogOptions controls how logs from short-lived tool Pods are surfaced.
 // Writer is used for text logs; structured logs are emitted through Logger.
 type ToolLogOptions struct {
@@ -39,6 +44,9 @@ type ToolLogOptions struct {
 type ToolLogStream struct {
 	cancel context.CancelFunc
 	done   chan struct{}
+
+	mu            sync.Mutex
+	observedError error
 }
 
 // Stop closes active watches and log streams and waits for their goroutines.
@@ -48,6 +56,29 @@ func (s *ToolLogStream) Stop() {
 	}
 	s.cancel()
 	<-s.done
+}
+
+// ObservedError returns a terminal storage error seen in the tool Pod logs.
+func (s *ToolLogStream) ObservedError() error {
+	if s == nil {
+		return nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.observedError
+}
+
+func (s *ToolLogStream) observeLine(line string) {
+	if s == nil {
+		return
+	}
+	lower := strings.ToLower(line)
+	if !strings.Contains(lower, "no space left on device") && !strings.Contains(lower, "enospc") {
+		return
+	}
+	s.mu.Lock()
+	s.observedError = ErrToolPodNoSpace
+	s.mu.Unlock()
 }
 
 // StartPVMigrateToolLogs follows every upstream rsync, sshd, and rclone Pod
@@ -111,6 +142,7 @@ func (s kubernetesToolLogSource) streamPodLogs(
 type toolLogStreamer struct {
 	source  toolLogSource
 	options ToolLogOptions
+	stream  *ToolLogStream
 
 	mu      sync.Mutex
 	seen    map[string]struct{}
@@ -131,7 +163,7 @@ func startToolLogStream(
 	}
 	ctx, cancel := context.WithCancel(parent)
 	stream := &ToolLogStream{cancel: cancel, done: make(chan struct{})}
-	streamer := &toolLogStreamer{source: source, options: options, seen: make(map[string]struct{})}
+	streamer := &toolLogStreamer{source: source, options: options, stream: stream, seen: make(map[string]struct{})}
 	go func() {
 		defer close(stream.done)
 		if exactPod != nil {
@@ -355,6 +387,7 @@ func (s *toolLogStreamer) emitStart(ctx context.Context, namespace, pod, contain
 }
 
 func (s *toolLogStreamer) emitLine(ctx context.Context, namespace, pod, container, line string) {
+	s.stream.observeLine(line)
 	if s.options.Structured {
 		s.options.Logger.InfoContext(ctx, "tool Pod log", "namespace", namespace, "pod", pod, "container", container, "line", line)
 		return

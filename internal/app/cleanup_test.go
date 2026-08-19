@@ -9,6 +9,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes/fake"
 )
@@ -104,6 +105,126 @@ func TestCleanupAbortedSessionReleasesSourceAndDeletesDestination(t *testing.T) 
 	}
 	if pvc.Annotations[kube.SessionKey] != "" {
 		t.Fatalf("source PVC remains owned by %q", pvc.Annotations[kube.SessionKey])
+	}
+}
+
+func TestStandalonePodOwnershipRelease(t *testing.T) {
+	const (
+		podNamespace = "app"
+		podName      = "application"
+		podUID       = types.UID("application-uid")
+		foreignOwner = "foreign-session"
+	)
+	for _, test := range []struct {
+		name          string
+		pod           *corev1.Pod
+		wantConflict  bool
+		wantOwner     string
+		wantOtherAnno string
+	}{
+		{
+			name: "matching session ownership is released",
+			pod: &corev1.Pod{ObjectMeta: metav1.ObjectMeta{
+				Namespace: podNamespace,
+				Name:      podName,
+				UID:       podUID,
+				Annotations: map[string]string{
+					kube.SessionKey:        "session-123",
+					"example.com/business": "preserved",
+				},
+			}},
+			wantOtherAnno: "preserved",
+		},
+		{
+			name: "matching Pod transferred to another session",
+			pod: &corev1.Pod{ObjectMeta: metav1.ObjectMeta{
+				Namespace: podNamespace,
+				Name:      podName,
+				UID:       podUID,
+				Annotations: map[string]string{
+					kube.SessionKey: foreignOwner,
+				},
+			}},
+			wantConflict: true,
+			wantOwner:    foreignOwner,
+		},
+		{
+			name: "replacement Pod retaining stale ownership",
+			pod: &corev1.Pod{ObjectMeta: metav1.ObjectMeta{
+				Namespace: podNamespace,
+				Name:      podName,
+				UID:       "replacement-uid",
+				Annotations: map[string]string{
+					kube.SessionKey: "session-123",
+				},
+			}},
+			wantConflict: true,
+			wantOwner:    "session-123",
+		},
+		{
+			name: "unowned replacement Pod is preserved",
+			pod: &corev1.Pod{ObjectMeta: metav1.ObjectMeta{
+				Namespace: podNamespace,
+				Name:      podName,
+				UID:       "replacement-uid",
+			}},
+		},
+		{
+			name: "foreign replacement Pod is preserved",
+			pod: &corev1.Pod{ObjectMeta: metav1.ObjectMeta{
+				Namespace: podNamespace,
+				Name:      podName,
+				UID:       "replacement-uid",
+				Annotations: map[string]string{
+					kube.SessionKey: foreignOwner,
+				},
+			}},
+			wantOwner: foreignOwner,
+		},
+		{name: "deleted Pod is already released"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			session := appTestSession()
+			if err := session.Spec.SetWorkload(domain.WorkloadSpec{
+				Adapter: domain.WorkloadStandalone,
+				Pod: domain.ObjectReference{
+					Namespace: podNamespace,
+					Name:      podName,
+					UID:       podUID,
+				},
+			}); err != nil {
+				t.Fatal(err)
+			}
+			var objects []runtime.Object
+			if test.pod != nil {
+				objects = append(objects, test.pod)
+			}
+			client := fake.NewClientset(objects...)
+			service := &Service{client: client, store: &memoryStore{}}
+
+			validateErr := service.validateStandalonePodOwnershipRelease(context.Background(), session)
+			releaseErr := service.releaseStandalonePodOwnership(context.Background(), session)
+			if test.wantConflict {
+				if domain.CategoryOf(validateErr) != domain.ErrorConflict || domain.CategoryOf(releaseErr) != domain.ErrorConflict {
+					t.Fatalf("validate category=%s error=%v; release category=%s error=%v", domain.CategoryOf(validateErr), validateErr, domain.CategoryOf(releaseErr), releaseErr)
+				}
+			} else if validateErr != nil || releaseErr != nil {
+				t.Fatalf("validate error=%v; release error=%v", validateErr, releaseErr)
+			}
+			if test.pod == nil {
+				return
+			}
+			pod, err := client.CoreV1().Pods(podNamespace).Get(context.Background(), podName, metav1.GetOptions{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if owner := pod.Annotations[kube.SessionKey]; owner != test.wantOwner {
+				t.Fatalf("owner=%q want=%q annotations=%v", owner, test.wantOwner, pod.Annotations)
+			}
+			if other := pod.Annotations["example.com/business"]; other != test.wantOtherAnno {
+				t.Fatalf("business annotation=%q want=%q", other, test.wantOtherAnno)
+			}
+		})
 	}
 }
 

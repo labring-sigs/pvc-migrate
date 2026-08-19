@@ -114,6 +114,27 @@ func writeSessionGuidance(w io.Writer, session *domain.Session, prefixes guidanc
 			}
 		}
 	case domain.PhaseFailed:
+		if session.Status.FailureReason == domain.FailureDestinationCapacityExhausted {
+			if _, err := fmt.Fprintln(w, "  This session cannot resume because its destination capacity is immutable."); err != nil {
+				return err
+			}
+			if _, err := fmt.Fprintln(w, "  Abort pre-cutover work (validate first):", abortPlan); err != nil {
+				return err
+			}
+			if _, err := fmt.Fprintln(w, "  Abort:", abort); err != nil {
+				return err
+			}
+			if _, err := fmt.Fprintln(w, "  After abort, validate cleanup:", cleanupPlan); err != nil {
+				return err
+			}
+			if _, err := fmt.Fprintln(w, "  After abort, finalize cleanup:", cleanup); err != nil {
+				return err
+			}
+			if _, err := fmt.Fprintf(w, "  Then rerun the original %s command with a new --session and a larger --destination-capacity.\n", session.Spec.Operation()); err != nil {
+				return err
+			}
+			break
+		}
 		if _, err := fmt.Fprintln(w, "  Validate recovery:", resumePlan); err != nil {
 			return err
 		}

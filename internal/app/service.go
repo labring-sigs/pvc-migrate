@@ -836,6 +836,9 @@ func (s *Service) ValidateWarmCopy(ctx context.Context, session *domain.Session)
 	if session == nil {
 		return domain.NewError(domain.ErrorValidation, "warm copy dry-run", "session is nil")
 	}
+	if err := validateRetryableSessionFailure(session); err != nil {
+		return err
+	}
 	valid := session.Status.Phase == domain.PhasePlanned ||
 		session.Status.Phase == domain.PhaseReserving ||
 		session.Status.Phase == domain.PhaseReserved ||
@@ -950,6 +953,9 @@ func (s *Service) ValidateResume(ctx context.Context, session *domain.Session) e
 		return domain.NewError(domain.ErrorValidation, "resume dry-run", "session is nil")
 	}
 	if err := session.Validate(); err != nil {
+		return err
+	}
+	if err := validateRetryableSessionFailure(session); err != nil {
 		return err
 	}
 	if err := s.validateOpenEBSLVMSharedMountRestore(ctx, session); err != nil {
@@ -1347,6 +1353,11 @@ func (s *Service) ValidateCleanup(ctx context.Context, session *domain.Session, 
 	if err := s.validateReservationPods(ctx, session); err != nil {
 		return err
 	}
+	if options.Finalize {
+		if err := s.validateStandalonePodOwnershipRelease(ctx, session); err != nil {
+			return err
+		}
+	}
 	s.logInfo("cleanup preflight started", "session", session.ID, "volumes", len(session.Spec.Volumes), "deleteTemporary", options.DeleteTemporary, "deleteRollback", options.DeleteRollback, "finalize", options.Finalize, "deleteSession", options.DeleteSession)
 	if options.DeleteSession && !options.Finalize {
 		return domain.NewError(domain.ErrorPrecondition, "cleanup dry-run", "deleting the session requires --finalize")
@@ -1470,6 +1481,9 @@ func (s *Service) ValidateFinalSync(ctx context.Context, session *domain.Session
 		return domain.NewError(domain.ErrorValidation, "final sync dry-run", "session is nil")
 	}
 	if err := session.Validate(); err != nil {
+		return err
+	}
+	if err := validateRetryableSessionFailure(session); err != nil {
 		return err
 	}
 	if !session.Spec.Orchestrated() {
@@ -1989,6 +2003,9 @@ func (s *Service) ResumeSession(ctx context.Context, session *domain.Session) er
 }
 
 func (s *Service) resumeSession(ctx context.Context, session *domain.Session) error {
+	if err := validateRetryableSessionFailure(session); err != nil {
+		return err
+	}
 	phase := session.Status.Phase
 	if phase == domain.PhaseFailed {
 		phase = session.Status.ResumeFrom
@@ -2423,20 +2440,21 @@ func (s *Service) copyWithRetry(ctx context.Context, session *domain.Session, vo
 			Logger:                s.config.Logger,
 		}
 		s.logInfo("copy started", "session", session.ID, "pvc", volume.SourcePVC.Name, "mode", mode, "attempt", status.Sync.Attempts, "source", volume.SourcePVC.Namespace+"/"+volume.SourcePVC.Name, "destination", volume.DestinationPVC.Namespace+"/"+volume.DestinationPVC.Name)
-		var toolLogs *kube.ToolLogStream
-		if s.config.StreamToolLogs {
-			toolLogs = kube.StartPVMigrateToolLogs(ctx, s.client, kube.ToolLogOptions{
-				Namespaces:  []string{volume.SourcePVC.Namespace, volume.DestinationPVC.Namespace},
-				OperationID: copyengine.OperationID(request),
-				Writer:      s.config.Writer,
-				Logger:      s.config.Logger,
-				Structured:  s.config.StructuredLogs,
-			})
+		toolLogOptions := kube.ToolLogOptions{
+			Namespaces:  []string{volume.SourcePVC.Namespace, volume.DestinationPVC.Namespace},
+			OperationID: copyengine.OperationID(request),
 		}
+		if s.config.StreamToolLogs {
+			toolLogOptions.Writer = s.config.Writer
+			toolLogOptions.Logger = s.config.Logger
+			toolLogOptions.Structured = s.config.StructuredLogs
+		}
+		toolLogs := kube.StartPVMigrateToolLogs(ctx, s.client, toolLogOptions)
 		copyErr := s.copier.Copy(ctx, request, func(progress copyengine.Progress) {
 			s.logInfo("copy progress", "session", session.ID, "pvc", volume.SourcePVC.Name, "mode", progress.Mode, "attempt", progress.Attempt, "state", progress.State, "message", progress.Message)
 		})
 		toolLogs.Stop()
+		copyErr = mergeToolLogError(copyErr, toolLogs.ObservedError())
 		s.logInfo("waiting for copy tool Pods to release PVCs", "session", session.ID, "pvc", volume.SourcePVC.Name)
 		last = errors.Join(copyErr, s.waitForCopyToolRelease(ctx, volume))
 		if last == nil {
@@ -2452,7 +2470,7 @@ func (s *Service) copyWithRetry(ctx context.Context, session *domain.Session, vo
 			return err
 		}
 		if isDestinationNoSpaceError(last) {
-			return domain.WrapError(domain.ErrorConflict, "copy capacity", fmt.Sprintf("destination PVC %s/%s ran out of space; increase --destination-capacity, then abort and rerun this session (or roll back before resuming the workload)", volume.DestinationPVC.Namespace, volume.DestinationPVC.Name), last)
+			return domain.WrapError(domain.ErrorConflict, "copy capacity", fmt.Sprintf("destination PVC %s/%s ran out of space; abort and clean up this session, then create a new session with a larger --destination-capacity", volume.DestinationPVC.Namespace, volume.DestinationPVC.Name), last)
 		}
 		if retryIndex+1 < s.config.Retries {
 			delay := time.Duration(math.Pow(2, float64(retryIndex))) * s.config.RetryBackoff
@@ -2465,6 +2483,13 @@ func (s *Service) copyWithRetry(ctx context.Context, session *domain.Session, vo
 	return last
 }
 
+func mergeToolLogError(copyErr, observedErr error) error {
+	if copyErr == nil {
+		return nil
+	}
+	return errors.Join(copyErr, observedErr)
+}
+
 func isDestinationNoSpaceError(err error) bool {
 	if err == nil {
 		return false
@@ -2473,6 +2498,9 @@ func isDestinationNoSpaceError(err error) bool {
 	visit = func(candidate error) bool {
 		if candidate == nil {
 			return false
+		}
+		if errors.Is(candidate, kube.ErrToolPodNoSpace) {
+			return true
 		}
 		message := strings.ToLower(candidate.Error())
 		if strings.Contains(message, "no space left on device") || strings.Contains(message, "enospc") {
@@ -2999,6 +3027,7 @@ func (s *Service) fail(ctx context.Context, session *domain.Session, cause error
 
 func (s *Service) failContext(ctx context.Context, session *domain.Session, cause error) error {
 	if session.Status.Phase != domain.PhaseFailed {
+		session.Status.FailureReason = failureReason(cause)
 		if err := session.Transition(domain.PhaseFailed, cause.Error(), s.now()); err != nil {
 			return errors.Join(cause, err)
 		}
@@ -3023,6 +3052,20 @@ func (s *Service) failContext(ctx context.Context, session *domain.Session, caus
 		}
 	}
 	return cause
+}
+
+func failureReason(err error) domain.SessionFailureReason {
+	if isDestinationNoSpaceError(err) {
+		return domain.FailureDestinationCapacityExhausted
+	}
+	return ""
+}
+
+func validateRetryableSessionFailure(session *domain.Session) error {
+	if session != nil && session.Status.Phase == domain.PhaseFailed && session.Status.FailureReason == domain.FailureDestinationCapacityExhausted {
+		return domain.NewError(domain.ErrorConflict, "resume session", "destination capacity was exhausted and cannot be changed in this session; abort and clean up this session, then create a new session with a larger --destination-capacity")
+	}
+	return nil
 }
 
 func (s *Service) persist(ctx context.Context, session *domain.Session) error {

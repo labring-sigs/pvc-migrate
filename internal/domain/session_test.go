@@ -192,8 +192,32 @@ func TestFailedSessionRecordsResumePhase(t *testing.T) {
 	if session.Status.ResumeFrom != PhaseReserving {
 		t.Fatalf("resume phase = %q, want %q", session.Status.ResumeFrom, PhaseReserving)
 	}
+	session.Status.FailureReason = FailureDestinationCapacityExhausted
 	if err := session.Transition(PhaseReserving, "retry", time.Now()); err != nil {
 		t.Fatalf("resume: %v", err)
+	}
+	if session.Status.FailureReason != "" {
+		t.Fatalf("failure reason was not cleared: %q", session.Status.FailureReason)
+	}
+}
+
+func TestSessionRejectsInvalidFailureReasonState(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		phase  Phase
+		reason SessionFailureReason
+	}{
+		{name: "unknown reason", phase: PhaseFailed, reason: "Unknown"},
+		{name: "reason outside failure", phase: PhasePlanned, reason: FailureDestinationCapacityExhausted},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			session := testSession(t)
+			session.Status.Phase = test.phase
+			session.Status.FailureReason = test.reason
+			if err := session.Validate(); CategoryOf(err) != ErrorValidation {
+				t.Fatalf("error=%v category=%s", err, CategoryOf(err))
+			}
+		})
 	}
 }
 

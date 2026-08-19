@@ -312,6 +312,14 @@ type HistoryEntry struct {
 	Message string      `json:"message,omitempty" yaml:"message,omitempty"`
 }
 
+// SessionFailureReason identifies failures that require a new session instead
+// of retrying the persisted workflow inputs.
+type SessionFailureReason string
+
+const (
+	FailureDestinationCapacityExhausted SessionFailureReason = "DestinationCapacityExhausted"
+)
+
 // OpenEBSLVMSharedMount records a temporary LVMVolume.spec.shared change made
 // by this session. PreviousSharedSet distinguishes an absent field from an
 // explicitly empty value so cleanup can restore the original CR exactly.
@@ -325,6 +333,7 @@ type OpenEBSLVMSharedMount struct {
 type SessionStatus struct {
 	Phase                  Phase                   `json:"phase" yaml:"phase"`
 	ResumeFrom             Phase                   `json:"resumeFrom,omitempty" yaml:"resumeFrom,omitempty"`
+	FailureReason          SessionFailureReason    `json:"failureReason,omitempty" yaml:"failureReason,omitempty"`
 	WarmPassesCompleted    int                     `json:"warmPassesCompleted" yaml:"warmPassesCompleted"`
 	ObservedGeneration     int64                   `json:"observedGeneration,omitempty" yaml:"observedGeneration,omitempty"`
 	StartedAt              metav1.Time             `json:"startedAt" yaml:"startedAt"`
@@ -542,6 +551,9 @@ func (s *Session) Transition(next Phase, message string, now time.Time) error {
 		s.Status.ResumeFrom = s.Status.Phase
 	}
 	s.Status.Phase = next
+	if next != PhaseFailed {
+		s.Status.FailureReason = ""
+	}
 	s.Status.Message = message
 	s.Status.UpdatedAt = t
 	s.Status.History = append(s.Status.History, HistoryEntry{Phase: next, Time: t, Message: message})
@@ -630,6 +642,14 @@ func (s *Session) Validate() error {
 	}
 	if _, known := allowedTransitions[s.Status.Phase]; !known && s.Status.Phase != PhaseAborted {
 		return NewError(ErrorValidation, "session", fmt.Sprintf("unsupported session phase %q", s.Status.Phase))
+	}
+	if s.Status.FailureReason != "" {
+		if s.Status.FailureReason != FailureDestinationCapacityExhausted {
+			return NewError(ErrorValidation, "session", fmt.Sprintf("unsupported failure reason %q", s.Status.FailureReason))
+		}
+		if s.Status.Phase != PhaseFailed {
+			return NewError(ErrorValidation, "session", "failure reason is only valid in phase Failed")
+		}
 	}
 	seen := make(map[string]struct{}, len(s.Spec.Volumes))
 	for index := range s.Spec.Volumes {
