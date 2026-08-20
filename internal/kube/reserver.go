@@ -168,7 +168,8 @@ func destinationPVCForReservation(
 		Spec: corev1.PersistentVolumeClaimSpec{
 			AccessModes: append(
 				[]corev1.PersistentVolumeAccessMode(nil),
-				volume.AccessModes...),
+				volume.AccessModes...,
+			),
 			Resources: corev1.VolumeResourceRequirements{
 				Requests: corev1.ResourceList{corev1.ResourceStorage: capacity},
 			},

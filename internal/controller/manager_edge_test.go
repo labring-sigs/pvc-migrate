@@ -1032,13 +1032,10 @@ func TestRunMongoDBNativeSwitchoverProvidesManualCommandAfterScriptFailure(t *te
 		dynamicfake.NewSimpleDynamicClient(runtime.NewScheme()),
 		nil,
 	)
+	commandErr := errors.New("script exited with status 1")
 	manager.commandExecutor = podCommandExecutorFunc(
 		func(context.Context, podCommandRequest) (podCommandResult, error) {
-			return podCommandResult{
-				Stderr: "candidate is not caught up",
-			}, errors.New(
-				"script exited with status 1",
-			)
+			return podCommandResult{Stderr: "candidate is not caught up"}, commandErr
 		},
 	)
 	session := kubeBlocksSession()

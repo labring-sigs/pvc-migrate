@@ -131,10 +131,9 @@ func preflightFixture(t *testing.T, client objectstore.API) (kubernetes.Interfac
 		t.Fatal(err)
 	}
 
-	return fake.NewClientset(
-		pvc,
-		pv,
-	), Request{
+	clientset := fake.NewClientset(pvc, pv)
+
+	return clientset, Request{
 		ID:        "test",
 		Namespace: "default",
 		PVCName:   "data",
