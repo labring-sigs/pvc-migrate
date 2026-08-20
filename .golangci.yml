@@ -153,4 +153,4 @@ formatters:
       - third_party$
       - builtin$
       - examples$
-  settings:
+  settings: {}
