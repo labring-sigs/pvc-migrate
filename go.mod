@@ -1,6 +1,6 @@
 module github.com/labring-sigs/pvc-migrate
 
-go 1.26.5
+go 1.27
 
 require (
 	github.com/aws/aws-sdk-go-v2 v1.43.4

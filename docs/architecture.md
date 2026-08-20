@@ -42,6 +42,8 @@ The ConfigMap contains:
 - per-volume activation checkpoints and the active PVC UID;
 - phase history and `resumeFrom`.
 
+Cross-cluster copy uses a separate `CrossClusterCopySession` model. Its source and destination resource references carry independent cluster identities, and the session ConfigMap is stored only on the source cluster. Destination PVCs, reservation Pods, and PVs are owned and verified with session labels, PVC/PV UIDs, claim references, and StorageClass UIDs before every mutating operation. A cross-cluster workflow never changes StorageClass parameters.
+
 Session specifications use a discriminator with exactly one concrete payload. `reserve`, `migrate`, `migratePod`, `copy`, `rename`, and `move` each have their own typed payload; workflow options such as tool nodes, copy strategies, checksum verification, and extraneous-file policy live inside the applicable payload. `SessionCommon` contains only identities shared by every workflow: namespaces, creator, and volume records. `Session.Validate` rejects missing, mixed, or discriminator-mismatched payloads, so a persisted session cannot silently combine fields from different workflows.
 
 ConfigMap updates carry the current Kubernetes `resourceVersion`. A competing process receives a conflict and reloads the session before continuing. Mutating session commands also claim `pvc-migrate-lock-<sha256(session-id)>` in the session namespace. The holder renews the Lease while the operation runs; a renewal, ownership, or resource-version failure cancels the operation context, and the service refuses further mutations under the fenced holder. The Lease is released only by its current holder, with expiration recovering abandoned sessions.

@@ -13,11 +13,14 @@ func ForLimit(count, limit int, fn func(int)) {
 	if count <= 0 || fn == nil {
 		return
 	}
+
 	if limit <= 0 {
 		limit = 1
 	}
+
 	workers := min(count, limit)
 	jobs := make(chan int)
+
 	var wg sync.WaitGroup
 	for range workers {
 		wg.Go(func() {
@@ -26,9 +29,11 @@ func ForLimit(count, limit int, fn func(int)) {
 			}
 		})
 	}
+
 	for index := range count {
 		jobs <- index
 	}
+
 	close(jobs)
 	wg.Wait()
 }

@@ -20,10 +20,10 @@ const (
 
 // Error is an operation error with a stable category and optional wrapped cause.
 type Error struct {
-	Category ErrorCategory `json:"category" yaml:"category"`
+	Category ErrorCategory `json:"category"            yaml:"category"`
 	Op       string        `json:"operation,omitempty" yaml:"operation,omitempty"`
-	Message  string        `json:"message" yaml:"message"`
-	Cause    error         `json:"-" yaml:"-"`
+	Message  string        `json:"message"             yaml:"message"`
+	Cause    error         `json:"-"                   yaml:"-"`
 }
 
 func (e *Error) Error() string {
@@ -44,10 +44,10 @@ func WrapError(category ErrorCategory, op, message string, cause error) error {
 }
 
 func CategoryOf(err error) ErrorCategory {
-	var typed *Error
-	if errors.As(err, &typed) {
+	if typed, ok := errors.AsType[*Error](err); ok {
 		return typed.Category
 	}
+
 	return ErrorInternal
 }
 

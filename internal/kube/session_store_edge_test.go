@@ -14,15 +14,18 @@ import (
 
 func sessionConfigMap(t *testing.T, session *domain.Session, managed bool) *corev1.ConfigMap {
 	t.Helper()
+
 	data, err := json.Marshal(session)
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	labels := map[string]string{}
 	if managed {
 		labels[ManagedByLabel] = ManagedByValue
 		labels[SessionKey] = session.ID
 	}
+
 	return &corev1.ConfigMap{
 		ObjectMeta: metav1.ObjectMeta{
 			Namespace: session.Spec.SessionNamespace,
@@ -47,13 +50,17 @@ func TestConfigMapSessionStoreListSortsAndFilters(t *testing.T) {
 		sessionConfigMap(t, older, true),
 		sessionConfigMap(t, unmanaged, false),
 		&corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{
-			Namespace: "system", Name: "managed-without-session", Labels: map[string]string{ManagedByLabel: ManagedByValue},
+			Namespace: "system",
+			Name:      "managed-without-session",
+			Labels:    map[string]string{ManagedByLabel: ManagedByValue},
 		}},
 	)
+
 	sessions, err := NewConfigMapSessionStore(client).List(context.Background(), "system")
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	if len(sessions) != 2 || sessions[0].ID != "older" || sessions[1].ID != "newer" {
 		t.Fatalf("listed sessions: %#v", sessions)
 	}
@@ -71,7 +78,12 @@ func TestDecodeSessionRejectsMissingInvalidAndUnsupportedData(t *testing.T) {
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			_, err := decodeSession(&corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Namespace: "system", Name: "session"}, Data: test.data})
+			_, err := decodeSession(
+				&corev1.ConfigMap{
+					ObjectMeta: metav1.ObjectMeta{Namespace: "system", Name: "session"},
+					Data:       test.data,
+				},
+			)
 			if domain.CategoryOf(err) != domain.ErrorValidation {
 				t.Fatalf("category=%s error=%v", domain.CategoryOf(err), err)
 			}
@@ -83,27 +95,47 @@ func TestConfigMapSessionStoreCreateGetAndUpdateConflicts(t *testing.T) {
 	ctx := context.Background()
 	client := fake.NewClientset()
 	store := NewConfigMapSessionStore(client)
+
 	session := storeTestSession()
 	if err := store.Create(ctx, session); err != nil {
 		t.Fatal(err)
 	}
-	if err := store.Create(ctx, storeTestSession()); domain.CategoryOf(err) != domain.ErrorConflict {
+
+	if err := store.Create(
+		ctx,
+		storeTestSession(),
+	); domain.CategoryOf(
+		err,
+	) != domain.ErrorConflict {
 		t.Fatalf("duplicate create category=%s error=%v", domain.CategoryOf(err), err)
 	}
-	if _, err := store.Get(ctx, "system", "missing"); domain.CategoryOf(err) != domain.ErrorValidation {
+
+	if _, err := store.Get(
+		ctx,
+		"system",
+		"missing",
+	); domain.CategoryOf(
+		err,
+	) != domain.ErrorValidation {
 		t.Fatalf("missing get category=%s error=%v", domain.CategoryOf(err), err)
 	}
+
 	withoutVersion := storeTestSession()
 	if err := store.Update(ctx, withoutVersion); domain.CategoryOf(err) != domain.ErrorConflict {
 		t.Fatalf("empty resourceVersion category=%s error=%v", domain.CategoryOf(err), err)
 	}
+
 	loaded, err := store.Get(ctx, "system", session.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := client.CoreV1().ConfigMaps("system").Delete(ctx, SessionConfigMapName(session.ID), metav1.DeleteOptions{}); err != nil {
+
+	if err := client.CoreV1().
+		ConfigMaps("system").
+		Delete(ctx, SessionConfigMapName(session.ID), metav1.DeleteOptions{}); err != nil {
 		t.Fatal(err)
 	}
+
 	if err := store.Update(ctx, loaded); domain.CategoryOf(err) != domain.ErrorConflict {
 		t.Fatalf("disappeared ConfigMap category=%s error=%v", domain.CategoryOf(err), err)
 	}

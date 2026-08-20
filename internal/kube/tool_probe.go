@@ -79,7 +79,7 @@ type ToolImageProbeResult struct {
 // ToolImageProber is injected into higher-level workflows so unit tests can
 // model probe outcomes without creating Kubernetes Pods.
 type ToolImageProber interface {
-	Probe(context.Context, ToolImageProbeOptions) ([]ToolImageProbeResult, error)
+	Probe(ctx context.Context, options ToolImageProbeOptions) ([]ToolImageProbeResult, error)
 }
 
 type KubernetesToolImageProber struct {
@@ -92,142 +92,284 @@ func NewToolImageProber(client kubernetes.Interface) *KubernetesToolImageProber 
 	return &KubernetesToolImageProber{client: client, poll: toolProbePoll}
 }
 
-func (p *KubernetesToolImageProber) Probe(ctx context.Context, options ToolImageProbeOptions) ([]ToolImageProbeResult, error) {
+func (p *KubernetesToolImageProber) Probe(
+	ctx context.Context,
+	options ToolImageProbeOptions,
+) ([]ToolImageProbeResult, error) {
 	if p == nil || p.client == nil {
-		return nil, domain.NewError(domain.ErrorInternal, "tool image probe", "Kubernetes client is required")
+		return nil, domain.NewError(
+			domain.ErrorInternal,
+			"tool image probe",
+			"Kubernetes client is required",
+		)
 	}
+
 	image, err := NormalizeToolImage(options.Image)
 	if err != nil {
 		return nil, err
 	}
+
 	targets, err := normalizeToolProbeTargets(options.Targets)
 	if err != nil {
 		return nil, err
 	}
+
 	if len(targets) == 0 {
 		return nil, nil
 	}
+
 	timeout := options.Timeout
 	if timeout <= 0 {
 		timeout = toolProbeTimeout
 	}
+
 	poll := options.Poll
 	if poll <= 0 {
 		poll = p.poll
 	}
+
 	if poll <= 0 {
 		poll = toolProbePoll
 	}
+
 	probeCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
 	results := make([]ToolImageProbeResult, len(targets))
+
 	group, groupCtx := errgroup.WithContext(probeCtx)
 	for index := range targets {
-		index := index
 		group.Go(func() error {
-			result, probeErr := p.probeTarget(groupCtx, image, options.OperationID, targets[index], timeout, poll, options)
+			result, probeErr := p.probeTarget(
+				groupCtx,
+				image,
+				options.OperationID,
+				targets[index],
+				timeout,
+				poll,
+				options,
+			)
 			if probeErr != nil {
 				return probeErr
 			}
+
 			results[index] = result
+
 			return nil
 		})
 	}
+
 	if err := group.Wait(); err != nil {
 		return nil, err
 	}
+
 	return results, nil
 }
 
-func (p *KubernetesToolImageProber) probeTarget(ctx context.Context, image, operationID string, target ToolProbeTarget, timeout, poll time.Duration, options ToolImageProbeOptions) (result ToolImageProbeResult, retErr error) {
+func (p *KubernetesToolImageProber) probeTarget(
+	ctx context.Context,
+	image, operationID string,
+	target ToolProbeTarget,
+	timeout, poll time.Duration,
+	options ToolImageProbeOptions,
+) (result ToolImageProbeResult, retErr error) {
 	p.outputMu.Lock()
 	logProbeStart(options, image, target, "")
 	p.outputMu.Unlock()
+
 	var node *corev1.Node
 	if target.NodeName != "" {
 		var err error
+
 		node, err = p.client.CoreV1().Nodes().Get(ctx, target.NodeName, metav1.GetOptions{})
 		if err != nil {
-			return result, domain.WrapError(domain.ErrorKubernetes, "tool image probe", fmt.Sprintf("read node %s", target.NodeName), err)
+			return result, domain.WrapError(
+				domain.ErrorKubernetes,
+				"tool image probe",
+				"read node "+target.NodeName,
+				err,
+			)
 		}
+
 		if node == nil || node.Name == "" {
-			return result, domain.NewError(domain.ErrorKubernetes, "tool image probe", fmt.Sprintf("read node %s returned an empty object", target.NodeName))
+			return result, domain.NewError(
+				domain.ErrorKubernetes,
+				"tool image probe",
+				fmt.Sprintf("read node %s returned an empty object", target.NodeName),
+			)
 		}
+
 		if !nodeReadyAndSchedulable(node) {
-			return result, domain.NewError(domain.ErrorPrecondition, "tool image probe", fmt.Sprintf("node %s is not Ready and schedulable", node.Name))
+			return result, domain.NewError(
+				domain.ErrorPrecondition,
+				"tool image probe",
+				fmt.Sprintf("node %s is not Ready and schedulable", node.Name),
+			)
 		}
+
 		if node.Labels[corev1.LabelHostname] == "" {
-			return result, domain.NewError(domain.ErrorPrecondition, "tool image probe", fmt.Sprintf("node %s lacks %s", node.Name, corev1.LabelHostname))
+			return result, domain.NewError(
+				domain.ErrorPrecondition,
+				"tool image probe",
+				fmt.Sprintf("node %s lacks %s", node.Name, corev1.LabelHostname),
+			)
 		}
 	}
+
 	pod := toolProbePod(image, operationID, target, node, timeout)
-	created, err := p.client.CoreV1().Pods(target.Namespace).Create(ctx, pod, metav1.CreateOptions{})
+
+	created, err := p.client.CoreV1().
+		Pods(target.Namespace).
+		Create(ctx, pod, metav1.CreateOptions{})
 	if err != nil {
-		return result, domain.WrapError(domain.ErrorPrecondition, "tool image probe", fmt.Sprintf("create probe Pod %s/%s: %v", target.Namespace, pod.Name, err), err)
+		return result, domain.WrapError(
+			domain.ErrorPrecondition,
+			"tool image probe",
+			fmt.Sprintf("create probe Pod %s/%s: %v", target.Namespace, pod.Name, err),
+			err,
+		)
 	}
 	defer func() {
 		p.outputMu.Lock()
 		logProbeCleanupStart(options, target.Namespace, created.Name)
 		p.outputMu.Unlock()
-		if cleanupErr := p.cleanupProbePod(target.Namespace, created.Name, created.UID, poll); cleanupErr != nil {
+
+		if cleanupErr := p.cleanupProbePod(
+			target.Namespace,
+			created.Name,
+			created.UID,
+			poll,
+		); cleanupErr != nil {
 			if retErr != nil && errors.Is(retErr, context.Canceled) {
 				logProbeCleanupWarning(options, target.Namespace, created.Name, cleanupErr)
 				return
 			}
+
 			retErr = errors.Join(retErr, cleanupErr)
 		}
 	}()
+
 	observedTarget := target
 	imagePullSecrets := slices.Clone(created.Spec.ImagePullSecrets)
+
 	p.outputMu.Lock()
 	logProbeWaiting(options, image, target, created.Name)
 	p.outputMu.Unlock()
+
 	nextEventCheck := time.Time{}
-	if err := WaitFor(ctx, poll, fmt.Sprintf("tool image probe Pod %s/%s", target.Namespace, created.Name), func(waitCtx context.Context) (bool, error) {
-		current, getErr := p.client.CoreV1().Pods(target.Namespace).Get(waitCtx, created.Name, metav1.GetOptions{})
-		if apierrors.IsNotFound(getErr) {
-			return false, domain.NewError(domain.ErrorConflict, "tool image probe", fmt.Sprintf("probe Pod %s/%s disappeared before completion", target.Namespace, created.Name))
-		}
-		if getErr != nil {
-			return false, domain.WrapError(domain.ErrorKubernetes, "tool image probe", fmt.Sprintf("read probe Pod %s/%s", target.Namespace, created.Name), getErr)
-		}
-		if current.UID != created.UID {
-			return false, domain.NewError(domain.ErrorConflict, "tool image probe", fmt.Sprintf("probe Pod %s/%s was replaced before completion", target.Namespace, created.Name))
-		}
-		if current.Spec.NodeName != "" {
-			observedTarget.NodeName = current.Spec.NodeName
-		}
-		imagePullSecrets = slices.Clone(current.Spec.ImagePullSecrets)
-		switch current.Status.Phase {
-		case corev1.PodSucceeded:
-			return true, nil
-		case corev1.PodFailed:
-			return false, toolProbePodFailure(current, image, observedTarget)
-		default:
-			if reason, message, fatal := toolProbePendingFailure(current); fatal {
-				return false, toolProbePodFailureWithMessage(current, image, observedTarget, reason, message)
+	if err := WaitFor(
+		ctx,
+		poll,
+		fmt.Sprintf("tool image probe Pod %s/%s", target.Namespace, created.Name),
+		func(waitCtx context.Context) (bool, error) {
+			current, getErr := p.client.CoreV1().
+				Pods(target.Namespace).
+				Get(waitCtx, created.Name, metav1.GetOptions{})
+			if apierrors.IsNotFound(getErr) {
+				return false, domain.NewError(
+					domain.ErrorConflict,
+					"tool image probe",
+					fmt.Sprintf(
+						"probe Pod %s/%s disappeared before completion",
+						target.Namespace,
+						created.Name,
+					),
+				)
 			}
-			now := time.Now()
-			if target.PVCName != "" && !target.SkipPVCMount && !now.Before(nextEventCheck) {
-				nextEventCheck = now.Add(toolProbeEventPoll)
-				if reason, message, failed := p.concurrentMountFailure(waitCtx, target.Namespace, created.Name, current.UID); failed {
-					return false, toolProbePodFailureWithMessage(current, image, observedTarget, reason, message)
+
+			if getErr != nil {
+				return false, domain.WrapError(
+					domain.ErrorKubernetes,
+					"tool image probe",
+					fmt.Sprintf("read probe Pod %s/%s", target.Namespace, created.Name),
+					getErr,
+				)
+			}
+
+			if current.UID != created.UID {
+				return false, domain.NewError(
+					domain.ErrorConflict,
+					"tool image probe",
+					fmt.Sprintf(
+						"probe Pod %s/%s was replaced before completion",
+						target.Namespace,
+						created.Name,
+					),
+				)
+			}
+
+			if current.Spec.NodeName != "" {
+				observedTarget.NodeName = current.Spec.NodeName
+			}
+
+			imagePullSecrets = slices.Clone(current.Spec.ImagePullSecrets)
+			switch current.Status.Phase {
+			case corev1.PodSucceeded:
+				return true, nil
+			case corev1.PodFailed:
+				return false, toolProbePodFailure(current, image, observedTarget)
+			default:
+				if reason, message, fatal := toolProbePendingFailure(current); fatal {
+					return false, toolProbePodFailureWithMessage(
+						current,
+						image,
+						observedTarget,
+						reason,
+						message,
+					)
 				}
+
+				now := time.Now()
+				if target.PVCName != "" && !target.SkipPVCMount && !now.Before(nextEventCheck) {
+					nextEventCheck = now.Add(toolProbeEventPoll)
+
+					if reason, message, failed := p.concurrentMountFailure(
+						waitCtx,
+						target.Namespace,
+						created.Name,
+						current.UID,
+					); failed {
+						return false, toolProbePodFailureWithMessage(
+							current,
+							image,
+							observedTarget,
+							reason,
+							message,
+						)
+					}
+				}
+
+				return false, nil
 			}
-			return false, nil
-		}
-	}); err != nil {
+		},
+	); err != nil {
 		if domain.CategoryOf(err) == domain.ErrorTimeout && !errors.Is(err, context.Canceled) {
-			if details := p.probeDiagnostics(target.Namespace, created.Name, created.UID); details != "" {
-				return result, domain.WrapError(domain.ErrorTimeout, "tool image probe", fmt.Sprintf("probe Pod %s/%s did not complete: %s", target.Namespace, created.Name, details), err)
+			if details := p.probeDiagnostics(
+				target.Namespace,
+				created.Name,
+				created.UID,
+			); details != "" {
+				return result, domain.WrapError(
+					domain.ErrorTimeout,
+					"tool image probe",
+					fmt.Sprintf(
+						"probe Pod %s/%s did not complete: %s",
+						target.Namespace,
+						created.Name,
+						details,
+					),
+					err,
+				)
 			}
 		}
+
 		return result, err
 	}
+
 	p.outputMu.Lock()
 	logProbeSuccess(options, image, observedTarget, created.Name)
 	p.outputMu.Unlock()
+
 	return ToolImageProbeResult{
 		Target:           observedTarget,
 		NodeName:         observedTarget.NodeName,
@@ -235,67 +377,153 @@ func (p *KubernetesToolImageProber) probeTarget(ctx context.Context, image, oper
 	}, nil
 }
 
-func (p *KubernetesToolImageProber) concurrentMountFailure(ctx context.Context, namespace, name string, uid types.UID) (reason, message string, failed bool) {
+func (p *KubernetesToolImageProber) concurrentMountFailure(
+	ctx context.Context,
+	namespace, name string,
+	uid types.UID,
+) (reason, message string, failed bool) {
 	for _, event := range p.probePodEvents(ctx, namespace, name, uid) {
 		if IsConcurrentMountFailureMessage(event.Message) {
 			return strings.TrimSpace(event.Reason), strings.TrimSpace(event.Message), true
 		}
 	}
+
 	return "", "", false
 }
 
-func (p *KubernetesToolImageProber) cleanupProbePod(namespace, name string, uid types.UID, poll time.Duration) error {
+func (p *KubernetesToolImageProber) cleanupProbePod(
+	namespace, name string,
+	uid types.UID,
+	poll time.Duration,
+) error {
 	cleanupCtx, cancel := context.WithTimeout(context.Background(), toolProbeCleanupTTL)
 	defer cancel()
+
 	deleteErr := p.client.CoreV1().Pods(namespace).Delete(cleanupCtx, name, metav1.DeleteOptions{
 		Preconditions: &metav1.Preconditions{UID: &uid},
 	})
 	if apierrors.IsNotFound(deleteErr) {
 		return nil
 	}
+
 	if deleteErr != nil {
-		return domain.WrapError(domain.ErrorKubernetes, "tool image probe", fmt.Sprintf("delete probe Pod %s/%s", namespace, name), deleteErr)
+		return domain.WrapError(
+			domain.ErrorKubernetes,
+			"tool image probe",
+			fmt.Sprintf("delete probe Pod %s/%s", namespace, name),
+			deleteErr,
+		)
 	}
-	if err := WaitFor(cleanupCtx, poll, fmt.Sprintf("probe Pod %s/%s deletion", namespace, name), func(waitCtx context.Context) (bool, error) {
-		current, err := p.client.CoreV1().Pods(namespace).Get(waitCtx, name, metav1.GetOptions{})
-		if apierrors.IsNotFound(err) {
-			return true, nil
-		}
-		if err != nil {
-			return false, domain.WrapError(domain.ErrorKubernetes, "tool image probe", fmt.Sprintf("confirm probe Pod %s/%s deletion", namespace, name), err)
-		}
-		if current == nil || current.UID != uid {
-			return false, domain.NewError(domain.ErrorConflict, "tool image probe", fmt.Sprintf("Pod %s/%s was replaced while waiting for probe cleanup", namespace, name))
-		}
-		return false, nil
-	}); err != nil {
+
+	if err := WaitFor(
+		cleanupCtx,
+		poll,
+		fmt.Sprintf("probe Pod %s/%s deletion", namespace, name),
+		func(waitCtx context.Context) (bool, error) {
+			current, err := p.client.CoreV1().
+				Pods(namespace).
+				Get(waitCtx, name, metav1.GetOptions{})
+			if apierrors.IsNotFound(err) {
+				return true, nil
+			}
+
+			if err != nil {
+				return false, domain.WrapError(
+					domain.ErrorKubernetes,
+					"tool image probe",
+					fmt.Sprintf("confirm probe Pod %s/%s deletion", namespace, name),
+					err,
+				)
+			}
+
+			if current == nil || current.UID != uid {
+				return false, domain.NewError(
+					domain.ErrorConflict,
+					"tool image probe",
+					fmt.Sprintf(
+						"Pod %s/%s was replaced while waiting for probe cleanup",
+						namespace,
+						name,
+					),
+				)
+			}
+
+			return false, nil
+		},
+	); err != nil {
 		inspectCtx, inspectCancel := context.WithTimeout(context.Background(), time.Second)
 		defer inspectCancel()
-		current, inspectErr := p.client.CoreV1().Pods(namespace).Get(inspectCtx, name, metav1.GetOptions{})
+
+		current, inspectErr := p.client.CoreV1().
+			Pods(namespace).
+			Get(inspectCtx, name, metav1.GetOptions{})
 		if apierrors.IsNotFound(inspectErr) {
 			return nil
 		}
+
 		if inspectErr != nil {
-			return domain.WrapError(domain.ErrorKubernetes, "tool image probe cleanup", fmt.Sprintf("inspect probe Pod %s/%s after cleanup timeout", namespace, name), inspectErr)
+			return domain.WrapError(
+				domain.ErrorKubernetes,
+				"tool image probe cleanup",
+				fmt.Sprintf("inspect probe Pod %s/%s after cleanup timeout", namespace, name),
+				inspectErr,
+			)
 		}
+
 		if current != nil && current.UID != uid {
-			return domain.NewError(domain.ErrorConflict, "tool image probe cleanup", fmt.Sprintf("probe Pod %s/%s was replaced while waiting for probe cleanup", namespace, name))
+			return domain.NewError(
+				domain.ErrorConflict,
+				"tool image probe cleanup",
+				fmt.Sprintf(
+					"probe Pod %s/%s was replaced while waiting for probe cleanup",
+					namespace,
+					name,
+				),
+			)
 		}
-		return domain.WrapError(domain.ErrorTimeout, "tool image probe cleanup", fmt.Sprintf("probe Pod %s/%s deletion was not confirmed; inspect with kubectl --namespace %s get pod %s", namespace, name, namespace, name), err)
+
+		return domain.WrapError(
+			domain.ErrorTimeout,
+			"tool image probe cleanup",
+			fmt.Sprintf(
+				"probe Pod %s/%s deletion was not confirmed; inspect with kubectl --namespace %s get pod %s",
+				namespace,
+				name,
+				namespace,
+				name,
+			),
+			err,
+		)
 	}
+
 	return nil
 }
 
 // CleanupSessionToolProbePods removes probes left behind when a process exits
 // before its normal deferred cleanup runs. Exact labels and UID-preconditioned
 // deletes keep cleanup within one migration session.
-func CleanupSessionToolProbePods(ctx context.Context, client kubernetes.Interface, sessionID string, namespaces []string) error {
+func CleanupSessionToolProbePods(
+	ctx context.Context,
+	client kubernetes.Interface,
+	sessionID string,
+	namespaces []string,
+) error {
 	if client == nil {
-		return domain.NewError(domain.ErrorInternal, "tool image probe cleanup", "Kubernetes client is required")
+		return domain.NewError(
+			domain.ErrorInternal,
+			"tool image probe cleanup",
+			"Kubernetes client is required",
+		)
 	}
+
 	if strings.TrimSpace(sessionID) == "" {
-		return domain.NewError(domain.ErrorValidation, "tool image probe cleanup", "session ID is required")
+		return domain.NewError(
+			domain.ErrorValidation,
+			"tool image probe cleanup",
+			"session ID is required",
+		)
 	}
+
 	uniqueNamespaces := make([]string, 0, len(namespaces))
 	for _, namespace := range namespaces {
 		namespace = strings.TrimSpace(namespace)
@@ -303,81 +531,155 @@ func CleanupSessionToolProbePods(ctx context.Context, client kubernetes.Interfac
 			uniqueNamespaces = append(uniqueNamespaces, namespace)
 		}
 	}
+
 	sort.Strings(uniqueNamespaces)
+
 	selector := labels.SelectorFromSet(labels.Set{
 		ManagedByLabel:    ManagedByValue,
 		SessionKey:        sessionID,
 		ResourceRoleLabel: ResourceRoleToolProbe,
 	}).String()
 	for _, namespace := range uniqueNamespaces {
-		pods, err := client.CoreV1().Pods(namespace).List(ctx, metav1.ListOptions{LabelSelector: selector})
+		pods, err := client.CoreV1().
+			Pods(namespace).
+			List(ctx, metav1.ListOptions{LabelSelector: selector})
 		if err != nil {
-			return domain.WrapError(domain.ErrorKubernetes, "tool image probe cleanup", fmt.Sprintf("list session probe Pods in %s", namespace), err)
+			return domain.WrapError(
+				domain.ErrorKubernetes,
+				"tool image probe cleanup",
+				"list session probe Pods in "+namespace,
+				err,
+			)
 		}
+
 		if pods == nil {
-			return domain.NewError(domain.ErrorKubernetes, "tool image probe cleanup", fmt.Sprintf("list session probe Pods in %s returned an empty object", namespace))
+			return domain.NewError(
+				domain.ErrorKubernetes,
+				"tool image probe cleanup",
+				fmt.Sprintf("list session probe Pods in %s returned an empty object", namespace),
+			)
 		}
-		sort.Slice(pods.Items, func(i, j int) bool { return pods.Items[i].Name < pods.Items[j].Name })
+
+		sort.Slice(
+			pods.Items,
+			func(i, j int) bool { return pods.Items[i].Name < pods.Items[j].Name },
+		)
+
 		for index := range pods.Items {
 			pod := &pods.Items[index]
-			if pod.Labels[ManagedByLabel] != ManagedByValue || pod.Labels[SessionKey] != sessionID || pod.Labels[ResourceRoleLabel] != ResourceRoleToolProbe {
+			if pod.Labels[ManagedByLabel] != ManagedByValue ||
+				pod.Labels[SessionKey] != sessionID ||
+				pod.Labels[ResourceRoleLabel] != ResourceRoleToolProbe {
 				continue
 			}
+
 			if pod.UID == "" {
-				return domain.NewError(domain.ErrorPrecondition, "tool image probe cleanup", fmt.Sprintf("probe Pod %s/%s has no UID", namespace, pod.Name))
+				return domain.NewError(
+					domain.ErrorPrecondition,
+					"tool image probe cleanup",
+					fmt.Sprintf("probe Pod %s/%s has no UID", namespace, pod.Name),
+				)
 			}
+
 			uid := pod.UID
-			if err := client.CoreV1().Pods(namespace).Delete(ctx, pod.Name, metav1.DeleteOptions{Preconditions: &metav1.Preconditions{UID: &uid}}); err != nil && !apierrors.IsNotFound(err) {
-				return domain.WrapError(domain.ErrorKubernetes, "tool image probe cleanup", fmt.Sprintf("delete probe Pod %s/%s", namespace, pod.Name), err)
+			if err := client.CoreV1().
+				Pods(namespace).
+				Delete(ctx, pod.Name, metav1.DeleteOptions{Preconditions: &metav1.Preconditions{UID: &uid}}); err != nil &&
+				!apierrors.IsNotFound(err) {
+				return domain.WrapError(
+					domain.ErrorKubernetes,
+					"tool image probe cleanup",
+					fmt.Sprintf("delete probe Pod %s/%s", namespace, pod.Name),
+					err,
+				)
 			}
-			if err := WaitFor(ctx, toolProbePoll, fmt.Sprintf("probe Pod %s/%s deletion", namespace, pod.Name), func(waitCtx context.Context) (bool, error) {
-				current, getErr := client.CoreV1().Pods(namespace).Get(waitCtx, pod.Name, metav1.GetOptions{})
-				if apierrors.IsNotFound(getErr) {
-					return true, nil
-				}
-				if getErr != nil {
-					return false, domain.WrapError(domain.ErrorKubernetes, "tool image probe cleanup", fmt.Sprintf("confirm probe Pod %s/%s deletion", namespace, pod.Name), getErr)
-				}
-				if current.UID != uid {
-					return false, domain.NewError(domain.ErrorConflict, "tool image probe cleanup", fmt.Sprintf("probe Pod %s/%s was replaced while waiting for cleanup", namespace, pod.Name))
-				}
-				return false, nil
-			}); err != nil {
+
+			if err := WaitFor(
+				ctx,
+				toolProbePoll,
+				fmt.Sprintf("probe Pod %s/%s deletion", namespace, pod.Name),
+				func(waitCtx context.Context) (bool, error) {
+					current, getErr := client.CoreV1().
+						Pods(namespace).
+						Get(waitCtx, pod.Name, metav1.GetOptions{})
+					if apierrors.IsNotFound(getErr) {
+						return true, nil
+					}
+
+					if getErr != nil {
+						return false, domain.WrapError(
+							domain.ErrorKubernetes,
+							"tool image probe cleanup",
+							fmt.Sprintf("confirm probe Pod %s/%s deletion", namespace, pod.Name),
+							getErr,
+						)
+					}
+
+					if current.UID != uid {
+						return false, domain.NewError(
+							domain.ErrorConflict,
+							"tool image probe cleanup",
+							fmt.Sprintf(
+								"probe Pod %s/%s was replaced while waiting for cleanup",
+								namespace,
+								pod.Name,
+							),
+						)
+					}
+
+					return false, nil
+				},
+			); err != nil {
 				return err
 			}
 		}
 	}
+
 	return nil
 }
 
 func (p *KubernetesToolImageProber) probeDiagnostics(namespace, name string, uid types.UID) string {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
+
 	parts := make([]string, 0)
+
 	pod, err := p.client.CoreV1().Pods(namespace).Get(ctx, name, metav1.GetOptions{})
 	if err == nil && pod != nil {
 		parts = append(parts, toolProbePodStatusParts(pod)...)
 	}
+
 	for _, event := range p.probePodEvents(ctx, namespace, name, uid) {
 		parts = append(parts, strings.TrimSpace(event.Reason+": "+event.Message))
 	}
+
 	return joinProbeFailure(parts...)
 }
 
 // probePodEvents is best-effort because event RBAC or API failures must not
 // replace the probe's primary Pod result.
-func (p *KubernetesToolImageProber) probePodEvents(ctx context.Context, namespace, name string, uid types.UID) []corev1.Event {
+func (p *KubernetesToolImageProber) probePodEvents(
+	ctx context.Context,
+	namespace, name string,
+	uid types.UID,
+) []corev1.Event {
 	selector := fields.OneTermEqualSelector("involvedObject.name", name).String()
-	events, err := p.client.CoreV1().Events(namespace).List(ctx, metav1.ListOptions{FieldSelector: selector})
+
+	events, err := p.client.CoreV1().
+		Events(namespace).
+		List(ctx, metav1.ListOptions{FieldSelector: selector})
 	if err != nil || events == nil {
 		return nil
 	}
+
 	matched := events.Items[:0]
 	for _, event := range events.Items {
-		if event.InvolvedObject.Name == name && (uid == "" || event.InvolvedObject.UID == "" || event.InvolvedObject.UID == uid) {
+		if event.InvolvedObject.Name == name &&
+			(uid == "" || event.InvolvedObject.UID == "" || event.InvolvedObject.UID == uid) {
 			matched = append(matched, event)
 		}
 	}
+
 	return matched
 }
 
@@ -385,30 +687,56 @@ func normalizeToolProbeTargets(targets []ToolProbeTarget) ([]ToolProbeTarget, er
 	merged := make(map[string]ToolProbeTarget, len(targets))
 	for _, target := range targets {
 		if target.Namespace == "" {
-			return nil, domain.NewError(domain.ErrorValidation, "tool image probe", "target namespace is required")
+			return nil, domain.NewError(
+				domain.ErrorValidation,
+				"tool image probe",
+				"target namespace is required",
+			)
 		}
+
 		if target.RequiredPath != "" {
 			normalized, err := domain.NormalizeTransferPath(target.RequiredPath)
 			if err != nil {
-				return nil, domain.NewError(domain.ErrorValidation, "tool image probe", fmt.Sprintf("required PVC path %q is invalid: %v", target.RequiredPath, err))
+				return nil, domain.NewError(
+					domain.ErrorValidation,
+					"tool image probe",
+					fmt.Sprintf("required PVC path %q is invalid: %v", target.RequiredPath, err),
+				)
 			}
+
 			if normalized == domain.VolumeRootPath {
 				target.RequiredPath = ""
 			} else {
 				target.RequiredPath = normalized
 			}
+
 			if target.PVCName == "" || target.SkipPVCMount {
-				return nil, domain.NewError(domain.ErrorValidation, "tool image probe", "a required PVC path needs a mounted PVC")
+				return nil, domain.NewError(
+					domain.ErrorValidation,
+					"tool image probe",
+					"a required PVC path needs a mounted PVC",
+				)
 			}
 		}
+
 		if target.CreatePath {
 			if target.RequiredPath == "" {
-				return nil, domain.NewError(domain.ErrorValidation, "tool image probe", "path creation requires a non-root PVC path")
+				return nil, domain.NewError(
+					domain.ErrorValidation,
+					"tool image probe",
+					"path creation requires a non-root PVC path",
+				)
 			}
+
 			target.WritablePVCMount = true
 			target.SkipPVCMount = false
 		}
-		key := target.Namespace + "\x00" + target.NodeName + "\x00" + target.PVCName + "\x00" + target.RequiredPath + fmt.Sprintf("\x00%t", target.CreatePath)
+
+		key := target.Namespace + "\x00" + target.NodeName + "\x00" + target.PVCName + "\x00" + target.RequiredPath + fmt.Sprintf(
+			"\x00%t",
+			target.CreatePath,
+		)
+
 		current, exists := merged[key]
 		if !exists {
 			current.Namespace = target.Namespace
@@ -421,40 +749,55 @@ func normalizeToolProbeTargets(targets []ToolProbeTarget) ([]ToolProbeTarget, er
 			// A merged probe must exercise the strictest requested behavior.
 			current.SkipPVCMount = current.SkipPVCMount && target.SkipPVCMount
 		}
+
 		current.WritablePVCMount = current.WritablePVCMount || target.WritablePVCMount
 		if current.WritablePVCMount {
 			current.SkipPVCMount = false
 		}
+
 		for _, component := range append([]string{ToolComponentShell}, target.Components...) {
 			if !validToolProbeComponent(component) {
-				return nil, domain.NewError(domain.ErrorValidation, "tool image probe", fmt.Sprintf("unsupported tool component %q", component))
+				return nil, domain.NewError(
+					domain.ErrorValidation,
+					"tool image probe",
+					fmt.Sprintf("unsupported tool component %q", component),
+				)
 			}
+
 			if !slices.Contains(current.Components, component) {
 				current.Components = append(current.Components, component)
 			}
 		}
+
 		merged[key] = current
 	}
+
 	result := make([]ToolProbeTarget, 0, len(merged))
 	for _, target := range merged {
 		slices.Sort(target.Components)
 		result = append(result, target)
 	}
+
 	sort.Slice(result, func(i, j int) bool {
 		if result[i].Namespace != result[j].Namespace {
 			return result[i].Namespace < result[j].Namespace
 		}
+
 		if result[i].NodeName != result[j].NodeName {
 			return result[i].NodeName < result[j].NodeName
 		}
+
 		if result[i].PVCName != result[j].PVCName {
 			return result[i].PVCName < result[j].PVCName
 		}
+
 		if result[i].RequiredPath != result[j].RequiredPath {
 			return result[i].RequiredPath < result[j].RequiredPath
 		}
+
 		return !result[i].CreatePath && result[j].CreatePath
 	})
+
 	return result, nil
 }
 
@@ -485,19 +828,33 @@ func ToolImagePullSecretHelmValues(results []ToolImageProbeResult) ([]string, er
 			if !ok {
 				continue
 			}
+
 			secrets := make([]string, 0, len(result.ImagePullSecrets))
 			for _, secret := range result.ImagePullSecrets {
 				if secret.Name != "" && !slices.Contains(secrets, secret.Name) {
 					secrets = append(secrets, secret.Name)
 				}
 			}
+
 			slices.Sort(secrets)
-			if previous, exists := namespaces[result.Target.Namespace]; exists && !slices.Equal(previous, secrets) {
-				return nil, domain.NewError(domain.ErrorPrecondition, "tool image probe", fmt.Sprintf("imagePullSecrets for tool component %s differ between probe Pods in namespace %s", component, result.Target.Namespace))
+
+			if previous, exists := namespaces[result.Target.Namespace]; exists &&
+				!slices.Equal(previous, secrets) {
+				return nil, domain.NewError(
+					domain.ErrorPrecondition,
+					"tool image probe",
+					fmt.Sprintf(
+						"imagePullSecrets for tool component %s differ between probe Pods in namespace %s",
+						component,
+						result.Target.Namespace,
+					),
+				)
 			}
+
 			namespaces[result.Target.Namespace] = secrets
 		}
 	}
+
 	values := make([]string, 0)
 	for _, component := range []string{ToolComponentRsync, ToolComponentSSHD, ToolComponentRclone} {
 		var selected []string
@@ -506,19 +863,46 @@ func ToolImagePullSecretHelmValues(results []ToolImageProbeResult) ([]string, er
 				selected = names
 				continue
 			}
+
 			if !slices.Equal(selected, names) {
-				return nil, domain.NewError(domain.ErrorPrecondition, "tool image probe", fmt.Sprintf("imagePullSecrets for tool component %s differ between namespaces (including %s); create the same Secret names in every namespace or provide a shared pull credential", component, namespace))
+				return nil, domain.NewError(
+					domain.ErrorPrecondition,
+					"tool image probe",
+					fmt.Sprintf(
+						"imagePullSecrets for tool component %s differ between namespaces (including %s); create the same Secret names in every namespace or provide a shared pull credential",
+						component,
+						namespace,
+					),
+				)
 			}
 		}
+
 		for index, name := range selected {
-			values = append(values, fmt.Sprintf("%s.imagePullSecrets[%d].name=%s", component, index, name))
+			values = append(
+				values,
+				fmt.Sprintf("%s.imagePullSecrets[%d].name=%s", component, index, name),
+			)
 		}
 	}
+
 	return values, nil
 }
 
-func toolProbePod(image, operationID string, target ToolProbeTarget, node *corev1.Node, timeout time.Duration) *corev1.Pod {
-	name := BoundedName("pvc-migrate-probe", operationID, target.Namespace, target.NodeName, target.PVCName, string(uuid.NewUUID()))
+func toolProbePod(
+	image, operationID string,
+	target ToolProbeTarget,
+	node *corev1.Node,
+	timeout time.Duration,
+) *corev1.Pod {
+	name := BoundedName(
+		"pvc-migrate-probe",
+		operationID,
+		target.Namespace,
+		target.NodeName,
+		target.PVCName,
+		string(uuid.NewUUID()),
+	)
+
 	labels := map[string]string{
 		ManagedByLabel:    ManagedByValue,
 		ResourceRoleLabel: ResourceRoleToolProbe,
@@ -526,23 +910,31 @@ func toolProbePod(image, operationID string, target ToolProbeTarget, node *corev
 	if operationID != "" && len(utilvalidation.IsValidLabelValue(operationID)) == 0 {
 		labels[SessionKey] = operationID
 	}
+
 	command := toolProbeCommand(target.Components)
 	if target.RequiredPath != "" {
 		command += "; " + transferPathProbeCommand(target.RequiredPath, target.CreatePath)
 	}
-	securityContext := &corev1.SecurityContext{RunAsUser: int64Pointer(0), RunAsGroup: int64Pointer(0)}
+
+	securityContext := &corev1.SecurityContext{
+		RunAsUser:  new(int64(0)),
+		RunAsGroup: new(int64(0)),
+	}
 	if slices.Contains(target.Components, ToolComponentSSHD) {
 		securityContext.Capabilities = &corev1.Capabilities{Add: []corev1.Capability{"SYS_CHROOT"}}
 	}
+
 	activeDeadline := int64(timeout / time.Second)
 	if timeout%time.Second != 0 {
 		activeDeadline++
 	}
+
 	activeDeadline = max(activeDeadline, 1)
 	automountServiceAccountToken := false
+
 	spec := corev1.PodSpec{
 		RestartPolicy:                 corev1.RestartPolicyNever,
-		TerminationGracePeriodSeconds: int64Pointer(1),
+		TerminationGracePeriodSeconds: new(int64(1)),
 		ActiveDeadlineSeconds:         &activeDeadline,
 		AutomountServiceAccountToken:  &automountServiceAccountToken,
 		Containers: []corev1.Container{{
@@ -556,32 +948,45 @@ func toolProbePod(image, operationID string, target ToolProbeTarget, node *corev
 		}},
 	}
 	if node != nil {
-		spec.NodeSelector = map[string]string{corev1.LabelHostname: node.Labels[corev1.LabelHostname]}
+		spec.NodeSelector = map[string]string{
+			corev1.LabelHostname: node.Labels[corev1.LabelHostname],
+		}
 		spec.Tolerations = nodeTolerations(node)
 	}
+
 	if target.PVCName != "" && !target.SkipPVCMount {
 		readOnly := !target.WritablePVCMount
-		spec.Volumes = []corev1.Volume{{
-			Name: "source-pvc",
-			VolumeSource: corev1.VolumeSource{PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
-				ClaimName: target.PVCName,
-				ReadOnly:  readOnly,
-			}},
-		}}
-		spec.Containers[0].VolumeMounts = []corev1.VolumeMount{{Name: "source-pvc", MountPath: "/probe-volume", ReadOnly: readOnly}}
+		spec.Volumes = []corev1.Volume{
+			{
+				Name: "source-pvc",
+				VolumeSource: corev1.VolumeSource{
+					PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
+						ClaimName: target.PVCName,
+						ReadOnly:  readOnly,
+					},
+				},
+			},
+		}
+		spec.Containers[0].VolumeMounts = []corev1.VolumeMount{
+			{Name: "source-pvc", MountPath: "/probe-volume", ReadOnly: readOnly},
+		}
 	}
+
 	annotations := map[string]string{
 		"pvc-migrate.io/tool-components": strings.Join(target.Components, ","),
 	}
 	if target.PVCName != "" {
 		annotations["pvc-migrate.io/probe-pvc"] = target.PVCName
 	}
+
 	if target.RequiredPath != "" {
 		annotations["pvc-migrate.io/probe-path"] = target.RequiredPath
 	}
+
 	if operationID != "" {
 		annotations[toolProbeOperation] = operationID
 	}
+
 	return &corev1.Pod{ObjectMeta: metav1.ObjectMeta{
 		Name:        name,
 		Namespace:   target.Namespace,
@@ -599,16 +1004,26 @@ func toolProbeCommand(components []string) string {
 			}
 		}
 	}
+
 	commands := make([]string, 0, len(requiredCommands)+len(components))
 	for _, command := range requiredCommands {
-		commands = append(commands, fmt.Sprintf("command -v %s >/dev/null 2>&1 || { echo 'required tool command %s is missing' >&2; exit 127; }", command, command))
+		commands = append(
+			commands,
+			fmt.Sprintf(
+				"command -v %s >/dev/null 2>&1 || { echo 'required tool command %s is missing' >&2; exit 127; }",
+				command,
+				command,
+			),
+		)
 	}
+
 	for _, component := range components {
 		switch component {
 		case ToolComponentRsync:
 			commands = append(commands, "rsync --version >/dev/null", "ssh -V >/dev/null 2>&1")
 		case ToolComponentSSHD:
-			commands = append(commands,
+			commands = append(
+				commands,
 				"rsync --version >/dev/null",
 				"test -x /usr/sbin/sshd || { echo 'required tool path /usr/sbin/sshd is unavailable' >&2; exit 127; }",
 				"test -r /etc/ssh/sshd_config || { echo 'required tool file /etc/ssh/sshd_config is unavailable' >&2; exit 127; }",
@@ -620,6 +1035,7 @@ func toolProbeCommand(components []string) string {
 			commands = append(commands, "rclone version >/dev/null")
 		}
 	}
+
 	return "set -eu; " + strings.Join(commands, "; ")
 }
 
@@ -628,6 +1044,7 @@ func transferPathProbeCommand(relativePath string, create bool) string {
 	if create {
 		missingAction = `command -v mkdir >/dev/null 2>&1 || { echo 'required tool command mkdir is missing' >&2; exit 127; }; mkdir "$current" || transfer_path_fail 73 "create transfer directory failed: $transfer_path"`
 	}
+
 	return strings.Join([]string{
 		"set -f",
 		`transfer_path_fail() { code=$1; message=$2; marked="` + transferPathFailureMarker + ` $message"; printf '%s\n' "$marked" >&2; printf '%s\n' "$marked" 2>/dev/null > /dev/termination-log || true; exit "$code"; }`,
@@ -649,7 +1066,17 @@ func toolProbeComponentCommands(component string) []string {
 	case ToolComponentRsync:
 		return []string{"rsync", "ssh", "awk", "id", "basename", "mkdir", "chmod", "cp"}
 	case ToolComponentSSHD:
-		return []string{"sshd", "ssh-keygen", "rsync", "awk", "id", "basename", "mkdir", "chmod", "cp"}
+		return []string{
+			"sshd",
+			"ssh-keygen",
+			"rsync",
+			"awk",
+			"id",
+			"basename",
+			"mkdir",
+			"chmod",
+			"cp",
+		}
 	case ToolComponentRclone:
 		return []string{"rclone", "base64", "sleep"}
 	default:
@@ -661,26 +1088,50 @@ func toolProbePodFailure(pod *corev1.Pod, image string, target ToolProbeTarget) 
 	return toolProbePodFailureWithMessage(pod, image, target, "", "")
 }
 
-func toolProbePodFailureWithMessage(pod *corev1.Pod, image string, target ToolProbeTarget, reason, message string) error {
+func toolProbePodFailureWithMessage(
+	pod *corev1.Pod,
+	image string,
+	target ToolProbeTarget,
+	reason, message string,
+) error {
 	parts := append([]string{message, reason}, toolProbePodStatusParts(pod)...)
+
 	details := joinProbeFailure(parts...)
 	if details == "" {
 		details = "Pod entered Failed phase"
 	}
+
 	node := target.NodeName
 	if node == "" {
 		node = "scheduler-selected node"
 	}
+
 	operation := "tool image probe"
-	subject := fmt.Sprintf("tool image %s failed on %s/%s for components %s", image, target.Namespace, node, strings.Join(target.Components, ","))
+
+	subject := fmt.Sprintf(
+		"tool image %s failed on %s/%s for components %s",
+		image,
+		target.Namespace,
+		node,
+		strings.Join(target.Components, ","),
+	)
 	if target.RequiredPath != "" && reportedTransferPathProbeFailure(pod) {
 		operation = "transfer path preflight"
+
 		action := "validate"
 		if target.CreatePath {
 			action = "create"
 		}
-		subject = fmt.Sprintf("%s transfer directory %q on PVC %s/%s", action, target.RequiredPath, target.Namespace, target.PVCName)
+
+		subject = fmt.Sprintf(
+			"%s transfer directory %q on PVC %s/%s",
+			action,
+			target.RequiredPath,
+			target.Namespace,
+			target.PVCName,
+		)
 	}
+
 	return domain.NewError(domain.ErrorPrecondition, operation, subject+": "+details)
 }
 
@@ -688,11 +1139,14 @@ func reportedTransferPathProbeFailure(pod *corev1.Pod) bool {
 	if pod == nil {
 		return false
 	}
+
 	for _, status := range pod.Status.ContainerStatuses {
-		if status.State.Terminated != nil && strings.Contains(status.State.Terminated.Message, transferPathFailureMarker) {
+		if status.State.Terminated != nil &&
+			strings.Contains(status.State.Terminated.Message, transferPathFailureMarker) {
 			return true
 		}
 	}
+
 	return false
 }
 
@@ -700,11 +1154,13 @@ func toolProbePodStatusParts(pod *corev1.Pod) []string {
 	if pod == nil {
 		return nil
 	}
+
 	parts := []string{pod.Status.Message, pod.Status.Reason}
 	for _, status := range pod.Status.ContainerStatuses {
 		if status.State.Waiting != nil {
 			parts = append(parts, status.State.Waiting.Reason, status.State.Waiting.Message)
 		}
+
 		if status.State.Terminated != nil {
 			parts = append(parts, status.State.Terminated.Reason, status.State.Terminated.Message)
 			if status.State.Terminated.ExitCode != 0 {
@@ -712,6 +1168,7 @@ func toolProbePodStatusParts(pod *corev1.Pod) []string {
 			}
 		}
 	}
+
 	return parts
 }
 
@@ -721,16 +1178,24 @@ func toolProbePendingFailure(pod *corev1.Pod) (reason, message string, fatal boo
 			return condition.Reason, condition.Message, true
 		}
 	}
+
 	for _, status := range pod.Status.ContainerStatuses {
 		if status.State.Waiting == nil {
 			continue
 		}
+
 		reason = status.State.Waiting.Reason
 		switch reason {
-		case "ErrImagePull", "ImagePullBackOff", "InvalidImageName", "CreateContainerConfigError", "CreateContainerError", "RunContainerError":
+		case "ErrImagePull",
+			"ImagePullBackOff",
+			"InvalidImageName",
+			"CreateContainerConfigError",
+			"CreateContainerError",
+			"RunContainerError":
 			return reason, status.State.Waiting.Message, true
 		}
 	}
+
 	return "", "", false
 }
 
@@ -750,6 +1215,7 @@ func IsConcurrentMountFailureMessage(message string) bool {
 			return true
 		}
 	}
+
 	return false
 }
 
@@ -760,63 +1226,198 @@ func joinProbeFailure(parts ...string) string {
 			filtered = append(filtered, value)
 		}
 	}
+
 	return strings.Join(filtered, "; ")
 }
 
-func logProbeStart(options ToolImageProbeOptions, image string, target ToolProbeTarget, podName string) {
+func logProbeStart(
+	options ToolImageProbeOptions,
+	image string,
+	target ToolProbeTarget,
+	podName string,
+) {
 	nodeName := target.NodeName
 	if nodeName == "" {
 		nodeName = "scheduler-selected"
 	}
+
 	if options.Logger != nil {
-		options.Logger.Info("tool image probe started", "image", image, "namespace", target.Namespace, "node", nodeName, "pvc", target.PVCName, "path", target.RequiredPath, "createPath", target.CreatePath, "components", target.Components, "pod", podName)
+		options.Logger.Info(
+			"tool image probe started",
+			"image",
+			image,
+			"namespace",
+			target.Namespace,
+			"node",
+			nodeName,
+			"pvc",
+			target.PVCName,
+			"path",
+			target.RequiredPath,
+			"createPath",
+			target.CreatePath,
+			"components",
+			target.Components,
+			"pod",
+			podName,
+		)
 	}
+
 	if options.Logger == nil && options.Writer != nil {
-		_, _ = fmt.Fprintf(options.Writer, "tool image probe started: namespace=%s node=%s image=%s pvc=%s path=%s createPath=%t components=%s pod=%s\n", target.Namespace, nodeName, image, target.PVCName, target.RequiredPath, target.CreatePath, strings.Join(target.Components, ","), podName)
+		_, _ = fmt.Fprintf(
+			options.Writer,
+			"tool image probe started: namespace=%s node=%s image=%s pvc=%s path=%s createPath=%t components=%s pod=%s\n",
+			target.Namespace,
+			nodeName,
+			image,
+			target.PVCName,
+			target.RequiredPath,
+			target.CreatePath,
+			strings.Join(target.Components, ","),
+			podName,
+		)
 	}
 }
 
-func logProbeWaiting(options ToolImageProbeOptions, image string, target ToolProbeTarget, podName string) {
+func logProbeWaiting(
+	options ToolImageProbeOptions,
+	image string,
+	target ToolProbeTarget,
+	podName string,
+) {
 	nodeName := target.NodeName
 	if nodeName == "" {
 		nodeName = "scheduler-selected"
 	}
+
 	if options.Logger != nil {
-		options.Logger.Info("tool image probe waiting", "image", image, "namespace", target.Namespace, "node", nodeName, "pvc", target.PVCName, "path", target.RequiredPath, "createPath", target.CreatePath, "components", target.Components, "pod", podName)
+		options.Logger.Info(
+			"tool image probe waiting",
+			"image",
+			image,
+			"namespace",
+			target.Namespace,
+			"node",
+			nodeName,
+			"pvc",
+			target.PVCName,
+			"path",
+			target.RequiredPath,
+			"createPath",
+			target.CreatePath,
+			"components",
+			target.Components,
+			"pod",
+			podName,
+		)
 	}
+
 	if options.Logger == nil && options.Writer != nil {
-		_, _ = fmt.Fprintf(options.Writer, "tool image probe waiting: namespace=%s node=%s image=%s pvc=%s path=%s createPath=%t components=%s pod=%s\n", target.Namespace, nodeName, image, target.PVCName, target.RequiredPath, target.CreatePath, strings.Join(target.Components, ","), podName)
+		_, _ = fmt.Fprintf(
+			options.Writer,
+			"tool image probe waiting: namespace=%s node=%s image=%s pvc=%s path=%s createPath=%t components=%s pod=%s\n",
+			target.Namespace,
+			nodeName,
+			image,
+			target.PVCName,
+			target.RequiredPath,
+			target.CreatePath,
+			strings.Join(target.Components, ","),
+			podName,
+		)
 	}
 }
 
-func logProbeSuccess(options ToolImageProbeOptions, image string, target ToolProbeTarget, podName string) {
+func logProbeSuccess(
+	options ToolImageProbeOptions,
+	image string,
+	target ToolProbeTarget,
+	podName string,
+) {
 	nodeName := target.NodeName
 	if nodeName == "" {
 		nodeName = "scheduler-selected"
 	}
+
 	if options.Logger != nil {
-		options.Logger.Info("tool image probe succeeded", "image", image, "namespace", target.Namespace, "node", nodeName, "pvc", target.PVCName, "path", target.RequiredPath, "createPath", target.CreatePath, "components", target.Components, "pod", podName)
+		options.Logger.Info(
+			"tool image probe succeeded",
+			"image",
+			image,
+			"namespace",
+			target.Namespace,
+			"node",
+			nodeName,
+			"pvc",
+			target.PVCName,
+			"path",
+			target.RequiredPath,
+			"createPath",
+			target.CreatePath,
+			"components",
+			target.Components,
+			"pod",
+			podName,
+		)
 	}
+
 	if options.Logger == nil && options.Writer != nil {
-		_, _ = fmt.Fprintf(options.Writer, "tool image probe succeeded: namespace=%s node=%s image=%s pvc=%s path=%s createPath=%t components=%s\n", target.Namespace, nodeName, image, target.PVCName, target.RequiredPath, target.CreatePath, strings.Join(target.Components, ","))
+		_, _ = fmt.Fprintf(
+			options.Writer,
+			"tool image probe succeeded: namespace=%s node=%s image=%s pvc=%s path=%s createPath=%t components=%s\n",
+			target.Namespace,
+			nodeName,
+			image,
+			target.PVCName,
+			target.RequiredPath,
+			target.CreatePath,
+			strings.Join(target.Components, ","),
+		)
 	}
 }
 
 func logProbeCleanupWarning(options ToolImageProbeOptions, namespace, podName string, err error) {
 	if options.Logger != nil {
-		options.Logger.Warn("tool image probe cleanup was not confirmed", "namespace", namespace, "pod", podName, "error", err)
+		options.Logger.Warn(
+			"tool image probe cleanup was not confirmed",
+			"namespace",
+			namespace,
+			"pod",
+			podName,
+			"error",
+			err,
+		)
 	}
+
 	if options.Logger == nil && options.Writer != nil {
-		_, _ = fmt.Fprintf(options.Writer, "warning: tool image probe cleanup was not confirmed for %s/%s: %v\n", namespace, podName, err)
+		_, _ = fmt.Fprintf(
+			options.Writer,
+			"warning: tool image probe cleanup was not confirmed for %s/%s: %v\n",
+			namespace,
+			podName,
+			err,
+		)
 	}
 }
 
 func logProbeCleanupStart(options ToolImageProbeOptions, namespace, podName string) {
 	if options.Logger != nil {
-		options.Logger.Info("tool image probe cleanup started", "namespace", namespace, "pod", podName)
+		options.Logger.Info(
+			"tool image probe cleanup started",
+			"namespace",
+			namespace,
+			"pod",
+			podName,
+		)
 	}
+
 	if options.Logger == nil && options.Writer != nil {
-		_, _ = fmt.Fprintf(options.Writer, "tool image probe cleanup started: namespace=%s pod=%s\n", namespace, podName)
+		_, _ = fmt.Fprintf(
+			options.Writer,
+			"tool image probe cleanup started: namespace=%s pod=%s\n",
+			namespace,
+			podName,
+		)
 	}
 }
 
@@ -824,11 +1425,13 @@ func nodeReadyAndSchedulable(node *corev1.Node) bool {
 	if node == nil || node.Spec.Unschedulable {
 		return false
 	}
+
 	for _, condition := range node.Status.Conditions {
 		if condition.Type == corev1.NodeReady {
 			return condition.Status == corev1.ConditionTrue
 		}
 	}
+
 	return false
 }
 

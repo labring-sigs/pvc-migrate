@@ -69,17 +69,23 @@ func NewRoot(options Options) *cobra.Command {
 	if options.In == nil {
 		options.In = strings.NewReader("")
 	}
+
 	if options.Out == nil {
 		options.Out = io.Discard
 	}
+
 	if options.ErrOut == nil {
 		options.ErrOut = io.Discard
 	}
+
 	state := &rootState{options: options}
 	coloredErrOut := newColorOutputWriter(options.ErrOut, func() bool {
 		return state.global.logFormat != "json" && colorEnabled(state.global.color, options.ErrOut)
 	})
-	state.errOut = newLogOutputWriter(coloredErrOut, func() bool { return state.global.logFormat == "json" })
+	state.errOut = newLogOutputWriter(
+		coloredErrOut,
+		func() bool { return state.global.logFormat == "json" },
+	)
 	command := &cobra.Command{
 		Use:           "pvc-migrate",
 		Short:         "Resumable Kubernetes PVC migration",
@@ -96,19 +102,66 @@ func NewRoot(options Options) *cobra.Command {
 	flags := command.PersistentFlags()
 	flags.StringVar(&state.global.kubeconfig, "kubeconfig", "", "Kubeconfig path")
 	flags.StringVar(&state.global.kubeContext, "context", "", "Kubernetes context")
-	flags.StringVar(&state.global.sessionNamespace, "session-namespace", "pvc-migrate-system", "Namespace for persistent migration sessions")
+	flags.StringVar(
+		&state.global.sessionNamespace,
+		"session-namespace",
+		"pvc-migrate-system",
+		"Namespace for persistent migration sessions",
+	)
 	flags.DurationVar(&state.global.timeout, "timeout", 30*time.Minute, "Operation timeout")
 	flags.IntVar(&state.global.retries, "retries", 3, "Copy retry attempts")
-	flags.DurationVar(&state.global.retryBackoff, "retry-backoff", 2*time.Second, "Initial copy retry backoff")
-	flags.DurationVar(&state.global.helmTimeout, "helm-timeout", 10*time.Minute, "pv-migrate tool deployment timeout")
-	flags.StringVarP(&state.global.output, "output", "o", "table", "Output format: table, json, yaml")
+	flags.DurationVar(
+		&state.global.retryBackoff,
+		"retry-backoff",
+		2*time.Second,
+		"Initial copy retry backoff",
+	)
+	flags.DurationVar(
+		&state.global.helmTimeout,
+		"helm-timeout",
+		10*time.Minute,
+		"pv-migrate tool deployment timeout",
+	)
+	flags.StringVarP(
+		&state.global.output,
+		"output",
+		"o",
+		"table",
+		"Output format: table, json, yaml",
+	)
 	flags.StringVar(&state.global.logFormat, "log-format", "text", "Log format: text, json")
-	flags.StringVar(&state.global.logLevel, "log-level", "info", "Log level: debug, info, warn, error")
-	flags.StringVar(&state.global.color, "color", colorAuto, "Colorize text logs: auto, always, never")
-	flags.BoolVar(&state.global.streamToolLogs, "stream-tool-logs", true, "Stream generated tool Pod logs to stderr")
+	flags.StringVar(
+		&state.global.logLevel,
+		"log-level",
+		"info",
+		"Log level: debug, info, warn, error",
+	)
+	flags.StringVar(
+		&state.global.color,
+		"color",
+		colorAuto,
+		"Colorize text logs: auto, always, never",
+	)
+	flags.BoolVar(
+		&state.global.streamToolLogs,
+		"stream-tool-logs",
+		true,
+		"Stream generated tool Pod logs to stderr",
+	)
 	flags.BoolVar(&state.global.noCompress, "no-compress", false, "Disable rsync compression")
-	flags.BoolVarP(&state.global.assumeYes, "yes", "y", false, "Approve workload pause and storage identity changes")
-	flags.StringVar(&state.global.toolImage, "tool-image", kube.DefaultToolImage(options.ToolImageRepository, options.Version), "Tool image used by PVC reservation, copy, SSHD, and backup tools")
+	flags.BoolVarP(
+		&state.global.assumeYes,
+		"yes",
+		"y",
+		false,
+		"Approve workload pause and storage identity changes",
+	)
+	flags.StringVar(
+		&state.global.toolImage,
+		"tool-image",
+		kube.DefaultToolImage(options.ToolImageRepository, options.Version),
+		"Tool image used by PVC reservation, copy, SSHD, and backup tools",
+	)
 
 	command.AddCommand(
 		state.newReserveCommand(),
@@ -125,38 +178,67 @@ func NewRoot(options Options) *cobra.Command {
 		state.newSessionCommand(),
 		newVersionCommand(options.Version),
 	)
+	// Cross-cluster workflows have an independent session and resource model.
+	for _, parent := range command.Commands() {
+		switch parent.Name() {
+		case "copy":
+			parent.AddCommand(state.newCrossClusterCopyCommand())
+		case "reserve":
+			parent.AddCommand(state.newCrossClusterReserveCommand())
+		}
+	}
+
 	command.AddCommand(newCompletionCommand(command))
+
 	return command
 }
 
 func bindDryRun(command *cobra.Command, target *bool) {
-	command.Flags().BoolVar(target, "dry-run", true, "Validate and print the plan without mutations; use --dry-run=false to execute")
+	command.Flags().
+		BoolVar(target, "dry-run", true, "Validate and print the plan without mutations; use --dry-run=false to execute")
 }
 
 func (r *rootState) runtime() (*commandRuntime, error) {
 	if r.options.runtimeFactory != nil {
 		return r.options.runtimeFactory(r)
 	}
+
 	if err := r.validateGlobalFlags(); err != nil {
 		return nil, err
 	}
+
 	format := output.Format(r.global.output)
 	if format != output.Table && format != output.JSON && format != output.YAML {
-		return nil, domain.NewError(domain.ErrorValidation, "flags", fmt.Sprintf("unsupported output format %q", r.global.output))
+		return nil, domain.NewError(
+			domain.ErrorValidation,
+			"flags",
+			fmt.Sprintf("unsupported output format %q", r.global.output),
+		)
 	}
+
 	logger, err := loggerFor(r)
 	if err != nil {
 		return nil, err
 	}
+
 	configureKubernetesLogger(logger)
+
 	clients, err := kube.NewClients(r.global.kubeconfig, r.global.kubeContext)
 	if err != nil {
 		return nil, err
 	}
-	controllers := controller.NewManager(clients.Kubernetes, clients.Dynamic, clients.Discovery).WithRESTConfig(clients.RESTConfig).WithLogger(logger.With("component", "controller"))
+
+	controllers := controller.NewManager(clients.Kubernetes, clients.Dynamic, clients.Discovery).
+		WithRESTConfig(clients.RESTConfig).
+		WithLogger(logger.With("component", "controller"))
 	store := kube.NewConfigMapSessionStore(clients.Kubernetes)
-	reserver := kube.NewReserver(clients.Kubernetes).WithLogger(logger.With("component", "reserver"))
-	openEBSLVMSharedVolumeManager := kube.NewOpenEBSLVMSharedVolumeManager(clients.Kubernetes, clients.Dynamic)
+	reserver := kube.NewReserver(clients.Kubernetes).
+		WithLogger(logger.With("component", "reserver"))
+	openEBSLVMSharedVolumeManager := kube.NewOpenEBSLVMSharedVolumeManager(
+		clients.Kubernetes,
+		clients.Dynamic,
+	)
+
 	if r.global.streamToolLogs {
 		reserver = reserver.WithToolLogs(kube.ToolLogOptions{
 			Writer:     r.errWriter(),
@@ -164,6 +246,7 @@ func (r *rootState) runtime() (*commandRuntime, error) {
 			Structured: r.global.logFormat == "json",
 		})
 	}
+
 	service := app.NewService(
 		clients.Kubernetes,
 		store,
@@ -186,6 +269,7 @@ func (r *rootState) runtime() (*commandRuntime, error) {
 			OpenEBSLVMSharedVolumeManager: openEBSLVMSharedVolumeManager,
 		},
 	)
+
 	return &commandRuntime{
 		clients: clients,
 		store:   store,
@@ -204,13 +288,31 @@ func (r *rootState) validateGlobalFlags() error {
 	case r.global.retries < 1:
 		return domain.NewError(domain.ErrorValidation, "flags", "--retries must be at least 1")
 	case r.global.retryBackoff <= 0:
-		return domain.NewError(domain.ErrorValidation, "flags", "--retry-backoff must be greater than 0")
+		return domain.NewError(
+			domain.ErrorValidation,
+			"flags",
+			"--retry-backoff must be greater than 0",
+		)
 	case r.global.helmTimeout <= 0:
-		return domain.NewError(domain.ErrorValidation, "flags", "--helm-timeout must be greater than 0")
+		return domain.NewError(
+			domain.ErrorValidation,
+			"flags",
+			"--helm-timeout must be greater than 0",
+		)
 	}
+
 	if problems := validation.IsDNS1123Label(r.global.sessionNamespace); len(problems) > 0 {
-		return domain.NewError(domain.ErrorValidation, "flags", fmt.Sprintf("--session-namespace %q is invalid: %s", r.global.sessionNamespace, strings.Join(problems, "; ")))
+		return domain.NewError(
+			domain.ErrorValidation,
+			"flags",
+			fmt.Sprintf(
+				"--session-namespace %q is invalid: %s",
+				r.global.sessionNamespace,
+				strings.Join(problems, "; "),
+			),
+		)
 	}
+
 	return nil
 }
 
@@ -223,10 +325,12 @@ func loggerFor(r *rootState) (*slog.Logger, error) {
 	if _, err := parseColorMode(r.global.color); err != nil {
 		return nil, err
 	}
+
 	level, err := parseLogLevel(r.global.logLevel)
 	if err != nil {
 		return nil, err
 	}
+
 	handlerOptions := &slog.HandlerOptions{Level: level}
 	switch r.global.logFormat {
 	case "text":
@@ -234,7 +338,11 @@ func loggerFor(r *rootState) (*slog.Logger, error) {
 	case "json":
 		return slog.New(slog.NewJSONHandler(r.errWriter(), handlerOptions)), nil
 	default:
-		return nil, domain.NewError(domain.ErrorValidation, "flags", fmt.Sprintf("unsupported log format %q", r.global.logFormat))
+		return nil, domain.NewError(
+			domain.ErrorValidation,
+			"flags",
+			fmt.Sprintf("unsupported log format %q", r.global.logFormat),
+		)
 	}
 }
 
@@ -267,7 +375,11 @@ func parseLogLevel(value string) (slog.Level, error) {
 	case "error":
 		return slog.LevelError, nil
 	default:
-		return 0, domain.NewError(domain.ErrorValidation, "flags", fmt.Sprintf("unsupported log level %q", value))
+		return 0, domain.NewError(
+			domain.ErrorValidation,
+			"flags",
+			fmt.Sprintf("unsupported log level %q", value),
+		)
 	}
 }
 
@@ -300,7 +412,11 @@ func newCompletionCommand(root *cobra.Command) *cobra.Command {
 			case "powershell":
 				return root.GenPowerShellCompletion(cmd.OutOrStdout())
 			default:
-				return domain.NewError(domain.ErrorValidation, "completion", "supported shells are bash, zsh, fish, and powershell")
+				return domain.NewError(
+					domain.ErrorValidation,
+					"completion",
+					"supported shells are bash, zsh, fish, and powershell",
+				)
 			}
 		},
 	}

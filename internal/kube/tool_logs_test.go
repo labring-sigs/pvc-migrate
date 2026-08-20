@@ -49,14 +49,22 @@ func (b *lockedBuffer) Len() int {
 	return b.buffer.Len()
 }
 
-func (s *fakeToolLogSource) listPods(context.Context, string, metav1.ListOptions) (*corev1.PodList, error) {
+func (s *fakeToolLogSource) listPods(
+	context.Context,
+	string,
+	metav1.ListOptions,
+) (*corev1.PodList, error) {
 	if s.list == nil {
 		return &corev1.PodList{}, nil
 	}
 	return s.list.DeepCopy(), nil
 }
 
-func (s *fakeToolLogSource) watchPods(context.Context, string, metav1.ListOptions) (watch.Interface, error) {
+func (s *fakeToolLogSource) watchPods(
+	context.Context,
+	string,
+	metav1.ListOptions,
+) (watch.Interface, error) {
 	if s.podWatch == nil {
 		s.podWatch = watch.NewRaceFreeFake()
 	}
@@ -66,12 +74,14 @@ func (s *fakeToolLogSource) watchPods(context.Context, string, metav1.ListOption
 func (s *fakeToolLogSource) getPod(context.Context, string, string) (*corev1.Pod, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+
 	pod := s.pod.DeepCopy()
 	if len(s.streamCalls) >= len(s.streams) {
 		pod.Status.Phase = corev1.PodSucceeded
 	} else {
 		pod.Status.Phase = corev1.PodRunning
 	}
+
 	return pod, nil
 }
 
@@ -82,24 +92,32 @@ func (s *fakeToolLogSource) streamPodLogs(
 ) (io.ReadCloser, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+
 	copyOptions := options.DeepCopy()
 	s.streamCalls = append(s.streamCalls, copyOptions)
+
 	index := len(s.streamCalls) - 1
 	if index >= len(s.streams) {
 		return io.NopCloser(strings.NewReader("")), nil
 	}
+
 	return io.NopCloser(strings.NewReader(s.streams[index])), nil
 }
 
 func TestToolLogStreamerFollowsAndPrefixesEveryLine(t *testing.T) {
 	pod := upstreamToolPod("pm-operation")
 	source := &fakeToolLogSource{
-		list:     &corev1.PodList{ListMeta: metav1.ListMeta{ResourceVersion: "7"}, Items: []corev1.Pod{*pod}},
+		list: &corev1.PodList{
+			ListMeta: metav1.ListMeta{ResourceVersion: "7"},
+			Items:    []corev1.Pod{*pod},
+		},
 		podWatch: watch.NewRaceFreeFake(),
 		pod:      pod,
 		streams:  []string{"10% copied\r20% copied\r\n100% copied\n"},
 	}
+
 	var output lockedBuffer
+
 	stream := startToolLogStream(t.Context(), source, ToolLogOptions{
 		Namespaces:  []string{"staging", "staging"},
 		OperationID: "pm-operation",
@@ -119,7 +137,9 @@ func TestToolLogStreamerFollowsAndPrefixesEveryLine(t *testing.T) {
 			t.Fatalf("tool log output lacks %q: %s", want, text)
 		}
 	}
-	if len(source.streamCalls) != 1 || source.streamCalls[0].TailLines != nil || !source.streamCalls[0].Follow {
+
+	if len(source.streamCalls) != 1 || source.streamCalls[0].TailLines != nil ||
+		!source.streamCalls[0].Follow {
 		t.Fatalf("initial log options=%#v", source.streamCalls)
 	}
 }
@@ -127,7 +147,9 @@ func TestToolLogStreamerFollowsAndPrefixesEveryLine(t *testing.T) {
 func TestToolLogStreamerReconnectsWithoutReplayingHistory(t *testing.T) {
 	pod := upstreamToolPod("pm-retry")
 	source := &fakeToolLogSource{pod: pod, streams: []string{"first\n", "second\n"}}
+
 	var output lockedBuffer
+
 	stream := startToolLogStream(t.Context(), source, ToolLogOptions{Writer: &output}, pod)
 	waitForText(t, &output, "second")
 	stream.Stop()
@@ -135,6 +157,7 @@ func TestToolLogStreamerReconnectsWithoutReplayingHistory(t *testing.T) {
 	if len(source.streamCalls) != 2 {
 		t.Fatalf("stream calls=%d", len(source.streamCalls))
 	}
+
 	if source.streamCalls[1].TailLines == nil || *source.streamCalls[1].TailLines != 0 {
 		t.Fatalf("reconnect options=%#v", source.streamCalls[1])
 	}
@@ -143,7 +166,9 @@ func TestToolLogStreamerReconnectsWithoutReplayingHistory(t *testing.T) {
 func TestToolLogStreamerKeepsStructuredOutputParseable(t *testing.T) {
 	pod := upstreamToolPod("pm-json")
 	source := &fakeToolLogSource{pod: pod, streams: []string{"copied 42 bytes\n"}}
+
 	var raw, records lockedBuffer
+
 	logger := slog.New(slog.NewJSONHandler(&records, nil))
 	stream := startToolLogStream(t.Context(), source, ToolLogOptions{
 		Writer:     &raw,
@@ -156,6 +181,7 @@ func TestToolLogStreamerKeepsStructuredOutputParseable(t *testing.T) {
 	if raw.Len() != 0 {
 		t.Fatalf("structured tool logs wrote raw output: %q", raw.String())
 	}
+
 	for _, want := range []string{`"msg":"tool Pod log"`, `"namespace":"staging"`, `"container":"rsync"`, `"line":"copied 42 bytes"`} {
 		if !strings.Contains(records.String(), want) {
 			t.Fatalf("structured records lack %q: %s", want, records.String())
@@ -165,14 +191,19 @@ func TestToolLogStreamerKeepsStructuredOutputParseable(t *testing.T) {
 
 func TestToolLogStreamerDetectsNoSpaceWhenOutputIsDiscarded(t *testing.T) {
 	pod := upstreamToolPod("pm-no-space")
-	source := &fakeToolLogSource{pod: pod, streams: []string{"rsync: write failed: No space left on device (28)\n"}}
+	source := &fakeToolLogSource{
+		pod:     pod,
+		streams: []string{"rsync: write failed: No space left on device (28)\n"},
+	}
 	stream := startToolLogStream(t.Context(), source, ToolLogOptions{}, pod)
 
 	deadline := time.Now().Add(time.Second)
 	for !errors.Is(stream.ObservedError(), ErrToolPodNoSpace) && time.Now().Before(deadline) {
 		time.Sleep(time.Millisecond)
 	}
+
 	stream.Stop()
+
 	if !errors.Is(stream.ObservedError(), ErrToolPodNoSpace) {
 		t.Fatalf("observed error=%v", stream.ObservedError())
 	}
@@ -220,12 +251,15 @@ func upstreamToolPod(operationID string) *corev1.Pod {
 
 func waitForText(t *testing.T, buffer *lockedBuffer, text string) {
 	t.Helper()
+
 	deadline := time.Now().Add(3 * time.Second)
 	for time.Now().Before(deadline) {
 		if strings.Contains(buffer.String(), text) {
 			return
 		}
+
 		time.Sleep(10 * time.Millisecond)
 	}
+
 	t.Fatalf("timed out waiting for %q in %q", text, buffer.String())
 }

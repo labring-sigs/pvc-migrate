@@ -28,20 +28,37 @@ func (p *PVMigrate) Copy(ctx context.Context, request Request, progress Progress
 		if err != nil {
 			return err
 		}
+
 		strategies = append(strategies, converted)
 	}
+
 	rsyncArgs := "-HAXS --numeric-ids"
 	if request.VerifyChecksum {
 		rsyncArgs += " --checksum"
 	}
+
+	if request.DestinationPath != "" && request.DestinationPath != domain.VolumeRootPath {
+		rsyncArgs += " --mkpath"
+	}
+
 	operationID := OperationID(request)
+
 	imageValues, err := kube.ToolImageHelmValues(request.ToolImage)
 	if err != nil {
 		return err
 	}
+
 	if progress != nil {
-		progress(Progress{Mode: request.Mode, Attempt: request.Attempt, State: "running", Message: operationID})
+		progress(
+			Progress{
+				Mode:    request.Mode,
+				Attempt: request.Attempt,
+				State:   "running",
+				Message: operationID,
+			},
+		)
 	}
+
 	helmValues := kube.ToolSecurityContextHelmValues()
 	if request.IgnoreSizes {
 		// A smaller destination can deterministically exhaust its filesystem.
@@ -49,9 +66,12 @@ func (p *PVMigrate) Copy(ctx context.Context, request Request, progress Progress
 		// ENOSPC result is surfaced without repeated in-Job attempts.
 		helmValues = append(helmValues, "rsync.maxRetries=0")
 	}
+
 	runCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
+
 	detector := &destinationNoSpaceDetector{cancel: cancel}
+
 	migration := pvmigrate.Migration{
 		ID: operationID,
 		Source: pvmigrate.PVC{
@@ -62,8 +82,8 @@ func (p *PVMigrate) Copy(ctx context.Context, request Request, progress Progress
 			Path:           transferEnginePath(request.SourcePath),
 		},
 		Dest: pvmigrate.PVC{
-			KubeconfigPath: request.KubeconfigPath,
-			Context:        request.Context,
+			KubeconfigPath: request.DestinationKubeconfigPath,
+			Context:        request.DestinationContext,
 			Namespace:      request.Destination.Namespace,
 			Name:           request.Destination.Name,
 			Path:           transferEnginePath(request.DestinationPath),
@@ -84,23 +104,49 @@ func (p *PVMigrate) Copy(ctx context.Context, request Request, progress Progress
 		Logger:                loggerWithDestinationNoSpaceDetection(request.Logger, detector),
 		StructuredLogs:        true,
 	}
+	if migration.Dest.KubeconfigPath == "" {
+		migration.Dest.KubeconfigPath = request.KubeconfigPath
+		if migration.Dest.Context == "" {
+			migration.Dest.Context = request.Context
+		}
+	}
+
 	if migration.HelmTimeout == 0 {
 		migration.HelmTimeout = 10 * time.Minute
 	}
+
 	run := p.run
 	if run == nil {
 		run = pvmigrate.Run
 	}
+
 	if err := run(runCtx, migration); err != nil {
 		classified := classifyRunError(ctx, operationID, err, detector.Detected())
 		if progress != nil {
-			progress(Progress{Mode: request.Mode, Attempt: request.Attempt, State: "failed", Message: classified.Error()})
+			progress(
+				Progress{
+					Mode:    request.Mode,
+					Attempt: request.Attempt,
+					State:   "failed",
+					Message: classified.Error(),
+				},
+			)
 		}
+
 		return classified
 	}
+
 	if progress != nil {
-		progress(Progress{Mode: request.Mode, Attempt: request.Attempt, State: "completed", Message: operationID})
+		progress(
+			Progress{
+				Mode:    request.Mode,
+				Attempt: request.Attempt,
+				State:   "completed",
+				Message: operationID,
+			},
+		)
 	}
+
 	return nil
 }
 
@@ -111,18 +157,31 @@ func transferEnginePath(value string) string {
 	return value + "/."
 }
 
-func classifyRunError(ctx context.Context, operationID string, err error, destinationNoSpace bool) error {
+func classifyRunError(
+	ctx context.Context,
+	operationID string,
+	err error,
+	destinationNoSpace bool,
+) error {
 	message := fmt.Sprintf("pv-migrate operation %s failed", operationID)
 	if destinationNoSpace {
-		return domain.WrapError(domain.ErrorCopy, "copy PVC", message+": destination volume ran out of space (ENOSPC)", &destinationNoSpaceError{cause: err})
+		return domain.WrapError(
+			domain.ErrorCopy,
+			"copy PVC",
+			message+": destination volume ran out of space (ENOSPC)",
+			&destinationNoSpaceError{cause: err},
+		)
 	}
+
 	contextErr := ctx.Err()
 	if errors.Is(err, context.DeadlineExceeded) || errors.Is(contextErr, context.DeadlineExceeded) {
 		return domain.WrapError(domain.ErrorTimeout, "copy PVC", message+": deadline exceeded", err)
 	}
+
 	if errors.Is(err, context.Canceled) || errors.Is(contextErr, context.Canceled) {
 		return domain.WrapError(domain.ErrorTimeout, "copy PVC", message+": canceled", err)
 	}
+
 	return domain.WrapError(domain.ErrorCopy, "copy PVC", message, err)
 }
 
@@ -152,6 +211,7 @@ func (d *destinationNoSpaceDetector) Observe(value string) {
 	if d == nil || !containsDestinationNoSpace(value) || !d.detected.CompareAndSwap(false, true) {
 		return
 	}
+
 	if d.cancel != nil {
 		d.cancel()
 	}
@@ -171,7 +231,10 @@ type destinationNoSpaceHandler struct {
 	detector *destinationNoSpaceDetector
 }
 
-func loggerWithDestinationNoSpaceDetection(logger *slog.Logger, detector *destinationNoSpaceDetector) *slog.Logger {
+func loggerWithDestinationNoSpaceDetection(
+	logger *slog.Logger,
+	detector *destinationNoSpaceDetector,
+) *slog.Logger {
 	if logger == nil {
 		logger = slog.New(slog.DiscardHandler)
 	}
@@ -189,12 +252,20 @@ func (h *destinationNoSpaceHandler) Handle(ctx context.Context, record slog.Reco
 		h.observeAttr(attr)
 		return true
 	})
+
 	if h.detector.Detected() {
-		record.Message = strings.Replace(record.Message, ", will try with the remaining strategies", "; destination capacity is exhausted, stopping strategy attempts", 1)
+		record.Message = strings.Replace(
+			record.Message,
+			", will try with the remaining strategies",
+			"; destination capacity is exhausted, stopping strategy attempts",
+			1,
+		)
 	}
+
 	if !h.delegate.Enabled(ctx, record.Level) {
 		return nil
 	}
+
 	return h.delegate.Handle(ctx, record)
 }
 
@@ -217,6 +288,7 @@ func (h *destinationNoSpaceHandler) observeAttr(attr slog.Attr) {
 		}
 		return
 	}
+
 	if attr.Key == "error" || attr.Key == "tail" {
 		h.detector.Observe(value.String())
 	}
@@ -235,14 +307,26 @@ func strategyValue(value string) (pvmigrate.Strategy, error) {
 	case string(pvmigrate.Local):
 		return pvmigrate.Local, nil
 	default:
-		return "", domain.NewError(domain.ErrorValidation, "copy strategy", fmt.Sprintf("unsupported strategy %q", value))
+		return "", domain.NewError(
+			domain.ErrorValidation,
+			"copy strategy",
+			fmt.Sprintf("unsupported strategy %q", value),
+		)
 	}
 }
 
 // OperationID returns the stable upstream operation identity used in Helm
 // release names and tool Pod labels.
 func OperationID(request Request) string {
-	value := fmt.Sprintf("%s/%s/%s/%s/%d", request.SessionID, request.Source.Namespace, request.Source.Name, request.Mode, request.Attempt)
+	value := fmt.Sprintf(
+		"%s/%s/%s/%s/%d",
+		request.SessionID,
+		request.Source.Namespace,
+		request.Source.Name,
+		request.Mode,
+		request.Attempt,
+	)
 	digest := sha256.Sum256([]byte(value))
+
 	return fmt.Sprintf("pm-%x", digest[:8])
 }

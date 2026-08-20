@@ -1,9 +1,11 @@
-package parallel
+package parallel_test
 
 import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	. "github.com/labring-sigs/pvc-migrate/internal/parallel"
 )
 
 func TestForLimitRunsEachIndexWithinLimit(t *testing.T) {
@@ -11,9 +13,13 @@ func TestForLimitRunsEachIndexWithinLimit(t *testing.T) {
 		count = 41
 		limit = 4
 	)
+
 	seen := make([]atomic.Int32, count)
-	var active atomic.Int32
-	var maximum atomic.Int32
+
+	var (
+		active  atomic.Int32
+		maximum atomic.Int32
+	)
 	ForLimit(count, limit, func(index int) {
 		current := active.Add(1)
 		for {
@@ -22,13 +28,16 @@ func TestForLimitRunsEachIndexWithinLimit(t *testing.T) {
 				break
 			}
 		}
+
 		seen[index].Add(1)
 		time.Sleep(time.Millisecond)
 		active.Add(-1)
 	})
+
 	if maximum.Load() > limit {
 		t.Fatalf("maximum concurrency = %d, want <= %d", maximum.Load(), limit)
 	}
+
 	for index := range seen {
 		if seen[index].Load() != 1 {
 			t.Fatalf("index %d ran %d times", index, seen[index].Load())
@@ -41,6 +50,7 @@ func TestForLimitHandlesInvalidInputs(t *testing.T) {
 	ForLimit(0, 1, func(int) { calls.Add(1) })
 	ForLimit(1, 0, func(int) { calls.Add(1) })
 	ForLimit(1, 1, nil)
+
 	if calls.Load() != 1 {
 		t.Fatalf("calls = %d, want 1", calls.Load())
 	}

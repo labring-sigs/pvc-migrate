@@ -1,8 +1,9 @@
-package copyengine
+package copyengine_test
 
 import (
 	"testing"
 
+	. "github.com/labring-sigs/pvc-migrate/internal/copyengine"
 	"github.com/labring-sigs/pvc-migrate/internal/domain"
 	"github.com/utkuozdemir/pv-migrate/pvmigrate"
 )
@@ -15,10 +16,12 @@ func TestOperationIDIsStableAndValid(t *testing.T) {
 		Attempt:   2,
 	}
 	first := OperationID(request)
+
 	second := OperationID(request)
 	if first != second {
 		t.Fatalf("operation IDs differ: %q != %q", first, second)
 	}
+
 	if len(first) > pvmigrate.MaxIDLength {
 		t.Fatalf("operation ID length %d exceeds %d", len(first), pvmigrate.MaxIDLength)
 	}
@@ -26,11 +29,12 @@ func TestOperationIDIsStableAndValid(t *testing.T) {
 
 func TestStrategyValidation(t *testing.T) {
 	for _, value := range []string{"mount", "clusterip", "loadbalancer", "nodeport", "local"} {
-		if _, err := strategyValue(value); err != nil {
+		if _, err := StrategyValueForTest(value); err != nil {
 			t.Fatalf("strategy %q: %v", value, err)
 		}
 	}
-	if _, err := strategyValue("exec"); domain.CategoryOf(err) != domain.ErrorValidation {
+
+	if _, err := StrategyValueForTest("exec"); domain.CategoryOf(err) != domain.ErrorValidation {
 		t.Fatalf("invalid strategy category=%q error=%v", domain.CategoryOf(err), err)
 	}
 }

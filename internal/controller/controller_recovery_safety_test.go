@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/labring-sigs/pvc-migrate/internal/domain"
+	"github.com/labring-sigs/pvc-migrate/internal/testutil"
 	appsv1 "k8s.io/api/apps/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -23,20 +24,39 @@ func TestControllerCRUIDChangesRejectPause(t *testing.T) {
 	t.Run("VMCluster", func(t *testing.T) {
 		replicas, ordinal := int32(1), int32(0)
 		vm := vmClusterObject("new-uid", false)
-		sts := &appsv1.StatefulSet{ObjectMeta: metav1.ObjectMeta{Namespace: "vm", Name: "vmstorage-metrics", UID: "sts-uid"}, Spec: appsv1.StatefulSetSpec{Replicas: &replicas}}
+		sts := &appsv1.StatefulSet{
+			ObjectMeta: metav1.ObjectMeta{
+				Namespace: "vm",
+				Name:      "vmstorage-metrics",
+				UID:       "sts-uid",
+			},
+			Spec: appsv1.StatefulSetSpec{Replicas: &replicas},
+		}
 		dynamicClient := dynamicfake.NewSimpleDynamicClient(runtime.NewScheme(), vm)
 		manager := NewManager(fake.NewClientset(sts), dynamicClient, nil)
+
 		session := controllerSession(domain.WorkloadSpec{
 			Adapter:          domain.WorkloadVMCluster,
 			Pod:              domain.ObjectReference{Namespace: "vm", Name: "vmstorage-metrics-0"},
 			Controller:       domain.ObjectReference{Namespace: "vm", Name: sts.Name, UID: sts.UID},
 			OriginalReplicas: &replicas,
 			Ordinal:          &ordinal,
-			VMCluster:        &domain.VMClusterSpec{APIVersion: vmClusterAPIVersion, Name: "metrics", UID: "old-uid", Component: "vmstorage"},
+			VMCluster: &domain.VMClusterSpec{
+				APIVersion: vmClusterAPIVersion,
+				Name:       "metrics",
+				UID:        "old-uid",
+				Component:  "vmstorage",
+			},
 		})
-		if err := manager.Pause(context.Background(), session); domain.CategoryOf(err) != domain.ErrorConflict {
+		if err := manager.Pause(
+			context.Background(),
+			session,
+		); domain.CategoryOf(
+			err,
+		) != domain.ErrorConflict {
 			t.Fatalf("category=%s error=%v", domain.CategoryOf(err), err)
 		}
+
 		if countDynamicActions(dynamicClient.Actions(), "update", vmClusterResource) != 0 {
 			t.Fatal("VMCluster was updated after UID replacement")
 		}
@@ -45,19 +65,38 @@ func TestControllerCRUIDChangesRejectPause(t *testing.T) {
 	t.Run("Grafana", func(t *testing.T) {
 		replicas := int32(1)
 		grafana := grafanaObject("new-uid", false)
-		deployment := &appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Namespace: "vm", Name: "grafana", UID: "deployment-uid"}, Spec: appsv1.DeploymentSpec{Replicas: &replicas}}
+		deployment := &appsv1.Deployment{
+			ObjectMeta: metav1.ObjectMeta{Namespace: "vm", Name: "grafana", UID: "deployment-uid"},
+			Spec:       appsv1.DeploymentSpec{Replicas: &replicas},
+		}
 		dynamicClient := dynamicfake.NewSimpleDynamicClient(runtime.NewScheme(), grafana)
 		manager := NewManager(fake.NewClientset(deployment), dynamicClient, nil)
+
 		session := controllerSession(domain.WorkloadSpec{
-			Adapter:          domain.WorkloadGrafana,
-			Pod:              domain.ObjectReference{Namespace: "vm", Name: "grafana-pod"},
-			Controller:       domain.ObjectReference{Namespace: "vm", Name: deployment.Name, UID: deployment.UID},
+			Adapter: domain.WorkloadGrafana,
+			Pod:     domain.ObjectReference{Namespace: "vm", Name: "grafana-pod"},
+			Controller: domain.ObjectReference{
+				Namespace: "vm",
+				Name:      deployment.Name,
+				UID:       deployment.UID,
+			},
 			OriginalReplicas: &replicas,
-			Grafana:          &domain.GrafanaSpec{APIVersion: grafanaAPIVersion, Name: "grafana", UID: "old-uid", OriginalReplicas: replicas},
+			Grafana: &domain.GrafanaSpec{
+				APIVersion:       grafanaAPIVersion,
+				Name:             "grafana",
+				UID:              "old-uid",
+				OriginalReplicas: replicas,
+			},
 		})
-		if err := manager.Pause(context.Background(), session); domain.CategoryOf(err) != domain.ErrorConflict {
+		if err := manager.Pause(
+			context.Background(),
+			session,
+		); domain.CategoryOf(
+			err,
+		) != domain.ErrorConflict {
 			t.Fatalf("category=%s error=%v", domain.CategoryOf(err), err)
 		}
+
 		if countDynamicActions(dynamicClient.Actions(), "update", grafanaResource) != 0 {
 			t.Fatal("Grafana was updated after UID replacement")
 		}
@@ -68,21 +107,43 @@ func TestControllerScaleConflictsPreserveCategoryAndPauseState(t *testing.T) {
 	t.Run("VMCluster pause", func(t *testing.T) {
 		currentReplicas, originalReplicas, ordinal := int32(3), int32(2), int32(1)
 		vm := vmClusterObject("vm-uid", false)
-		sts := &appsv1.StatefulSet{ObjectMeta: metav1.ObjectMeta{Namespace: "vm", Name: "vmstorage-metrics", UID: "sts-uid"}, Spec: appsv1.StatefulSetSpec{Replicas: &currentReplicas}}
+		sts := &appsv1.StatefulSet{
+			ObjectMeta: metav1.ObjectMeta{
+				Namespace: "vm",
+				Name:      "vmstorage-metrics",
+				UID:       "sts-uid",
+			},
+			Spec: appsv1.StatefulSetSpec{Replicas: &currentReplicas},
+		}
 		dynamicClient := dynamicfake.NewSimpleDynamicClient(runtime.NewScheme(), vm)
 		manager := NewManager(fake.NewClientset(sts), dynamicClient, nil)
+
 		session := controllerSession(domain.WorkloadSpec{
 			Adapter:          domain.WorkloadVMCluster,
 			Pod:              domain.ObjectReference{Namespace: "vm", Name: "vmstorage-metrics-1"},
 			Controller:       domain.ObjectReference{Namespace: "vm", Name: sts.Name, UID: sts.UID},
 			OriginalReplicas: &originalReplicas,
 			Ordinal:          &ordinal,
-			VMCluster:        &domain.VMClusterSpec{APIVersion: vmClusterAPIVersion, Name: "metrics", UID: "vm-uid", Component: "vmstorage"},
+			VMCluster: &domain.VMClusterSpec{
+				APIVersion: vmClusterAPIVersion,
+				Name:       "metrics",
+				UID:        "vm-uid",
+				Component:  "vmstorage",
+			},
 		})
-		if err := manager.Pause(context.Background(), session); domain.CategoryOf(err) != domain.ErrorConflict {
+		if err := manager.Pause(
+			context.Background(),
+			session,
+		); domain.CategoryOf(
+			err,
+		) != domain.ErrorConflict {
 			t.Fatalf("category=%s error=%v", domain.CategoryOf(err), err)
 		}
-		current, _ := dynamicClient.Resource(mustGVR(vmClusterAPIVersion, vmClusterResource)).Namespace("vm").Get(context.Background(), "metrics", metav1.GetOptions{})
+
+		current, _ := dynamicClient.Resource(mustGVR(vmClusterAPIVersion, vmClusterResource)).
+			Namespace("vm").
+			Get(context.Background(), "metrics", metav1.GetOptions{})
+
 		paused, _, _ := unstructured.NestedBool(current.Object, "spec", "vmstorage", "paused")
 		if paused {
 			t.Fatal("VMCluster pause state was not compensated")
@@ -92,20 +153,42 @@ func TestControllerScaleConflictsPreserveCategoryAndPauseState(t *testing.T) {
 	t.Run("Grafana pause", func(t *testing.T) {
 		currentReplicas, originalReplicas := int32(2), int32(1)
 		grafana := grafanaObject("grafana-uid", false)
-		deployment := &appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Namespace: "vm", Name: "grafana", UID: "deployment-uid"}, Spec: appsv1.DeploymentSpec{Replicas: &currentReplicas}}
+		deployment := &appsv1.Deployment{
+			ObjectMeta: metav1.ObjectMeta{Namespace: "vm", Name: "grafana", UID: "deployment-uid"},
+			Spec:       appsv1.DeploymentSpec{Replicas: &currentReplicas},
+		}
 		dynamicClient := dynamicfake.NewSimpleDynamicClient(runtime.NewScheme(), grafana)
 		manager := NewManager(fake.NewClientset(deployment), dynamicClient, nil)
+
 		session := controllerSession(domain.WorkloadSpec{
-			Adapter:          domain.WorkloadGrafana,
-			Pod:              domain.ObjectReference{Namespace: "vm", Name: "grafana-pod"},
-			Controller:       domain.ObjectReference{Namespace: "vm", Name: deployment.Name, UID: deployment.UID},
+			Adapter: domain.WorkloadGrafana,
+			Pod:     domain.ObjectReference{Namespace: "vm", Name: "grafana-pod"},
+			Controller: domain.ObjectReference{
+				Namespace: "vm",
+				Name:      deployment.Name,
+				UID:       deployment.UID,
+			},
 			OriginalReplicas: &originalReplicas,
-			Grafana:          &domain.GrafanaSpec{APIVersion: grafanaAPIVersion, Name: "grafana", UID: "grafana-uid", OriginalReplicas: originalReplicas},
+			Grafana: &domain.GrafanaSpec{
+				APIVersion:       grafanaAPIVersion,
+				Name:             "grafana",
+				UID:              "grafana-uid",
+				OriginalReplicas: originalReplicas,
+			},
 		})
-		if err := manager.Pause(context.Background(), session); domain.CategoryOf(err) != domain.ErrorConflict {
+		if err := manager.Pause(
+			context.Background(),
+			session,
+		); domain.CategoryOf(
+			err,
+		) != domain.ErrorConflict {
 			t.Fatalf("category=%s error=%v", domain.CategoryOf(err), err)
 		}
-		current, _ := dynamicClient.Resource(mustGVR(grafanaAPIVersion, grafanaResource)).Namespace("vm").Get(context.Background(), "grafana", metav1.GetOptions{})
+
+		current, _ := dynamicClient.Resource(mustGVR(grafanaAPIVersion, grafanaResource)).
+			Namespace("vm").
+			Get(context.Background(), "grafana", metav1.GetOptions{})
+
 		suspended, _, _ := unstructured.NestedBool(current.Object, "spec", "suspend")
 		if suspended {
 			t.Fatal("Grafana suspend state was not compensated")
@@ -117,17 +200,39 @@ func TestControllerResumeScaleConflictsPreserveCategory(t *testing.T) {
 	t.Run("VMCluster", func(t *testing.T) {
 		currentReplicas, originalReplicas, ordinal := int32(3), int32(2), int32(1)
 		vm := vmClusterObject("vm-uid", true)
-		sts := &appsv1.StatefulSet{ObjectMeta: metav1.ObjectMeta{Namespace: "vm", Name: "vmstorage-metrics", UID: "sts-uid"}, Spec: appsv1.StatefulSetSpec{Replicas: &currentReplicas}}
-		manager := NewManager(fake.NewClientset(sts), dynamicfake.NewSimpleDynamicClient(runtime.NewScheme(), vm), nil)
+		sts := &appsv1.StatefulSet{
+			ObjectMeta: metav1.ObjectMeta{
+				Namespace: "vm",
+				Name:      "vmstorage-metrics",
+				UID:       "sts-uid",
+			},
+			Spec: appsv1.StatefulSetSpec{Replicas: &currentReplicas},
+		}
+		manager := NewManager(
+			fake.NewClientset(sts),
+			dynamicfake.NewSimpleDynamicClient(runtime.NewScheme(), vm),
+			nil,
+		)
+
 		session := controllerSession(domain.WorkloadSpec{
 			Adapter:          domain.WorkloadVMCluster,
 			Pod:              domain.ObjectReference{Namespace: "vm", Name: "vmstorage-metrics-1"},
 			Controller:       domain.ObjectReference{Namespace: "vm", Name: sts.Name, UID: sts.UID},
 			OriginalReplicas: &originalReplicas,
 			Ordinal:          &ordinal,
-			VMCluster:        &domain.VMClusterSpec{APIVersion: vmClusterAPIVersion, Name: "metrics", UID: "vm-uid", Component: "vmstorage"},
+			VMCluster: &domain.VMClusterSpec{
+				APIVersion: vmClusterAPIVersion,
+				Name:       "metrics",
+				UID:        "vm-uid",
+				Component:  "vmstorage",
+			},
 		})
-		if err := manager.Resume(context.Background(), session); domain.CategoryOf(err) != domain.ErrorConflict {
+		if err := manager.Resume(
+			context.Background(),
+			session,
+		); domain.CategoryOf(
+			err,
+		) != domain.ErrorConflict {
 			t.Fatalf("category=%s error=%v", domain.CategoryOf(err), err)
 		}
 	})
@@ -135,16 +240,38 @@ func TestControllerResumeScaleConflictsPreserveCategory(t *testing.T) {
 	t.Run("Grafana", func(t *testing.T) {
 		currentReplicas, originalReplicas := int32(2), int32(1)
 		grafana := grafanaObject("grafana-uid", true)
-		deployment := &appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Namespace: "vm", Name: "grafana", UID: "deployment-uid"}, Spec: appsv1.DeploymentSpec{Replicas: &currentReplicas}}
-		manager := NewManager(fake.NewClientset(deployment), dynamicfake.NewSimpleDynamicClient(runtime.NewScheme(), grafana), nil)
+		deployment := &appsv1.Deployment{
+			ObjectMeta: metav1.ObjectMeta{Namespace: "vm", Name: "grafana", UID: "deployment-uid"},
+			Spec:       appsv1.DeploymentSpec{Replicas: &currentReplicas},
+		}
+		manager := NewManager(
+			fake.NewClientset(deployment),
+			dynamicfake.NewSimpleDynamicClient(runtime.NewScheme(), grafana),
+			nil,
+		)
+
 		session := controllerSession(domain.WorkloadSpec{
-			Adapter:          domain.WorkloadGrafana,
-			Pod:              domain.ObjectReference{Namespace: "vm", Name: "grafana-pod"},
-			Controller:       domain.ObjectReference{Namespace: "vm", Name: deployment.Name, UID: deployment.UID},
+			Adapter: domain.WorkloadGrafana,
+			Pod:     domain.ObjectReference{Namespace: "vm", Name: "grafana-pod"},
+			Controller: domain.ObjectReference{
+				Namespace: "vm",
+				Name:      deployment.Name,
+				UID:       deployment.UID,
+			},
 			OriginalReplicas: &originalReplicas,
-			Grafana:          &domain.GrafanaSpec{APIVersion: grafanaAPIVersion, Name: "grafana", UID: "grafana-uid", OriginalReplicas: originalReplicas},
+			Grafana: &domain.GrafanaSpec{
+				APIVersion:       grafanaAPIVersion,
+				Name:             "grafana",
+				UID:              "grafana-uid",
+				OriginalReplicas: originalReplicas,
+			},
 		})
-		if err := manager.Resume(context.Background(), session); domain.CategoryOf(err) != domain.ErrorConflict {
+		if err := manager.Resume(
+			context.Background(),
+			session,
+		); domain.CategoryOf(
+			err,
+		) != domain.ErrorConflict {
 			t.Fatalf("category=%s error=%v", domain.CategoryOf(err), err)
 		}
 	})
@@ -154,14 +281,26 @@ func TestVMClusterInvalidSessionDoesNotPauseCR(t *testing.T) {
 	vm := vmClusterObject("vm-uid", false)
 	dynamicClient := dynamicfake.NewSimpleDynamicClient(runtime.NewScheme(), vm)
 	manager := NewManager(fake.NewClientset(), dynamicClient, nil)
+
 	session := controllerSession(domain.WorkloadSpec{
-		Adapter:   domain.WorkloadVMCluster,
-		Pod:       domain.ObjectReference{Namespace: "vm"},
-		VMCluster: &domain.VMClusterSpec{APIVersion: vmClusterAPIVersion, Name: "metrics", UID: "vm-uid", Component: "vmstorage"},
+		Adapter: domain.WorkloadVMCluster,
+		Pod:     domain.ObjectReference{Namespace: "vm"},
+		VMCluster: &domain.VMClusterSpec{
+			APIVersion: vmClusterAPIVersion,
+			Name:       "metrics",
+			UID:        "vm-uid",
+			Component:  "vmstorage",
+		},
 	})
-	if err := manager.Pause(context.Background(), session); domain.CategoryOf(err) != domain.ErrorInternal {
+	if err := manager.Pause(
+		context.Background(),
+		session,
+	); domain.CategoryOf(
+		err,
+	) != domain.ErrorInternal {
 		t.Fatalf("category=%s error=%v", domain.CategoryOf(err), err)
 	}
+
 	if countDynamicActions(dynamicClient.Actions(), "update", vmClusterResource) != 0 {
 		t.Fatal("invalid session updated VMCluster")
 	}
@@ -171,125 +310,220 @@ func TestGrafanaPauseNoOpAvoidsUpdates(t *testing.T) {
 	grafana := grafanaObject("grafana-uid", true)
 	dynamicClient := dynamicfake.NewSimpleDynamicClient(runtime.NewScheme(), grafana)
 	manager := NewManager(fake.NewClientset(), dynamicClient, nil)
+
 	session := controllerSession(domain.WorkloadSpec{
-		Pod:     domain.ObjectReference{Namespace: "vm"},
-		Grafana: &domain.GrafanaSpec{APIVersion: grafanaAPIVersion, Name: "grafana", UID: "grafana-uid", OriginalSuspend: true},
+		Pod: domain.ObjectReference{Namespace: "vm"},
+		Grafana: &domain.GrafanaSpec{
+			APIVersion:      grafanaAPIVersion,
+			Name:            "grafana",
+			UID:             "grafana-uid",
+			OriginalSuspend: true,
+		},
 	})
-	if err := manager.setGrafanaPaused(context.Background(), session, true); err != nil {
+	if err := manager.setGrafanaPaused(context.Background(), session); err != nil {
 		t.Fatal(err)
 	}
+
 	updates := countDynamicActions(dynamicClient.Actions(), "update", grafanaResource)
-	if err := manager.setGrafanaPaused(context.Background(), session, true); err != nil {
+
+	if err := manager.setGrafanaPaused(context.Background(), session); err != nil {
 		t.Fatal(err)
 	}
+
 	if countDynamicActions(dynamicClient.Actions(), "update", grafanaResource) != updates {
 		t.Fatal("idempotent Grafana pause issued an update")
 	}
 }
 
 func TestGrafanaSuspendRestoresOmittedField(t *testing.T) {
-	dynamicClient := dynamicfake.NewSimpleDynamicClient(runtime.NewScheme(), grafanaObject("grafana-uid", false))
-	object, err := dynamicClient.Resource(mustGVR(grafanaAPIVersion, grafanaResource)).Namespace("vm").Get(context.Background(), "grafana", metav1.GetOptions{})
+	dynamicClient := dynamicfake.NewSimpleDynamicClient(
+		runtime.NewScheme(),
+		grafanaObject("grafana-uid", false),
+	)
+
+	object, err := dynamicClient.Resource(mustGVR(grafanaAPIVersion, grafanaResource)).
+		Namespace("vm").
+		Get(context.Background(), "grafana", metav1.GetOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	unstructured.RemoveNestedField(object.Object, "spec", "suspend")
-	if _, err := dynamicClient.Resource(mustGVR(grafanaAPIVersion, grafanaResource)).Namespace("vm").Update(context.Background(), object, metav1.UpdateOptions{}); err != nil {
+
+	if _, err := dynamicClient.Resource(mustGVR(grafanaAPIVersion, grafanaResource)).
+		Namespace("vm").
+		Update(context.Background(), object, metav1.UpdateOptions{}); err != nil {
 		t.Fatal(err)
 	}
+
 	manager := NewManager(fake.NewClientset(), dynamicClient, nil)
+
 	session := controllerSession(domain.WorkloadSpec{
-		Pod:     domain.ObjectReference{Namespace: "vm"},
-		Grafana: &domain.GrafanaSpec{APIVersion: grafanaAPIVersion, Name: "grafana", UID: "grafana-uid", OriginalSuspend: false, OriginalSuspendConfigured: false},
+		Pod: domain.ObjectReference{Namespace: "vm"},
+		Grafana: &domain.GrafanaSpec{
+			APIVersion:                grafanaAPIVersion,
+			Name:                      "grafana",
+			UID:                       "grafana-uid",
+			OriginalSuspend:           false,
+			OriginalSuspendConfigured: false,
+		},
 	})
-	if err := manager.setGrafanaPaused(context.Background(), session, true); err != nil {
+	if err := manager.setGrafanaPaused(context.Background(), session); err != nil {
 		t.Fatal(err)
 	}
+
 	if err := manager.restoreGrafanaPause(context.Background(), session); err != nil {
 		t.Fatal(err)
 	}
-	current, err := dynamicClient.Resource(mustGVR(grafanaAPIVersion, grafanaResource)).Namespace("vm").Get(context.Background(), "grafana", metav1.GetOptions{})
+
+	current, err := dynamicClient.Resource(mustGVR(grafanaAPIVersion, grafanaResource)).
+		Namespace("vm").
+		Get(context.Background(), "grafana", metav1.GetOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, found, nestedErr := unstructured.NestedFieldNoCopy(current.Object, "spec", "suspend"); nestedErr != nil || found {
+
+	if _, found, nestedErr := unstructured.NestedFieldNoCopy(
+		current.Object,
+		"spec",
+		"suspend",
+	); nestedErr != nil ||
+		found {
 		t.Fatalf("suspend field was added after restore: found=%t err=%v", found, nestedErr)
 	}
 }
 
 func TestRestoreVMClusterPauseClearsOwnerAndAllowsNextSession(t *testing.T) {
-	dynamicClient := dynamicfake.NewSimpleDynamicClient(runtime.NewScheme(), vmClusterObject("vm-uid", true))
+	dynamicClient := dynamicfake.NewSimpleDynamicClient(
+		runtime.NewScheme(),
+		vmClusterObject("vm-uid", true),
+	)
 	manager := NewManager(fake.NewClientset(), dynamicClient, nil)
+
 	session := controllerSession(domain.WorkloadSpec{
-		Pod:       domain.ObjectReference{Namespace: "vm"},
-		VMCluster: &domain.VMClusterSpec{APIVersion: vmClusterAPIVersion, Name: "metrics", UID: "vm-uid", Component: "vmstorage", OriginalPaused: true},
+		Pod: domain.ObjectReference{Namespace: "vm"},
+		VMCluster: &domain.VMClusterSpec{
+			APIVersion:     vmClusterAPIVersion,
+			Name:           "metrics",
+			UID:            "vm-uid",
+			Component:      "vmstorage",
+			OriginalPaused: true,
+		},
 	})
-	if err := manager.setVMClusterPaused(context.Background(), session, true); err != nil {
+	if err := manager.setVMClusterPaused(context.Background(), session); err != nil {
 		t.Fatal(err)
 	}
+
 	if err := manager.restoreVMClusterPause(context.Background(), session); err != nil {
 		t.Fatal(err)
 	}
-	current, err := dynamicClient.Resource(mustGVR(vmClusterAPIVersion, vmClusterResource)).Namespace("vm").Get(context.Background(), "metrics", metav1.GetOptions{})
+
+	current, err := dynamicClient.Resource(mustGVR(vmClusterAPIVersion, vmClusterResource)).
+		Namespace("vm").
+		Get(context.Background(), "metrics", metav1.GetOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	if current.GetAnnotations()[pauseSessionAnnotation] != "" {
 		t.Fatalf("pause owner=%q", current.GetAnnotations()[pauseSessionAnnotation])
 	}
 
 	next := controllerSession(domain.WorkloadSpec{
-		Pod:       domain.ObjectReference{Namespace: "vm"},
-		VMCluster: &domain.VMClusterSpec{APIVersion: vmClusterAPIVersion, Name: "metrics", UID: "vm-uid", Component: "vmstorage", OriginalPaused: true},
+		Pod: domain.ObjectReference{Namespace: "vm"},
+		VMCluster: &domain.VMClusterSpec{
+			APIVersion:     vmClusterAPIVersion,
+			Name:           "metrics",
+			UID:            "vm-uid",
+			Component:      "vmstorage",
+			OriginalPaused: true,
+		},
 	})
+
 	next.ID = "next-session"
-	if err := manager.setVMClusterPaused(context.Background(), next, true); err != nil {
+	if err := manager.setVMClusterPaused(context.Background(), next); err != nil {
 		t.Fatal(err)
 	}
-	current, err = dynamicClient.Resource(mustGVR(vmClusterAPIVersion, vmClusterResource)).Namespace("vm").Get(context.Background(), "metrics", metav1.GetOptions{})
+
+	current, err = dynamicClient.Resource(mustGVR(vmClusterAPIVersion, vmClusterResource)).
+		Namespace("vm").
+		Get(context.Background(), "metrics", metav1.GetOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	if current.GetAnnotations()[pauseSessionAnnotation] != next.ID {
-		t.Fatalf("next pause owner=%q want=%q", current.GetAnnotations()[pauseSessionAnnotation], next.ID)
+		t.Fatalf(
+			"next pause owner=%q want=%q",
+			current.GetAnnotations()[pauseSessionAnnotation],
+			next.ID,
+		)
 	}
 }
 
 func TestRestoreGrafanaPauseClearsOwnerAndAllowsNextSession(t *testing.T) {
-	dynamicClient := dynamicfake.NewSimpleDynamicClient(runtime.NewScheme(), grafanaObject("grafana-uid", true))
+	dynamicClient := dynamicfake.NewSimpleDynamicClient(
+		runtime.NewScheme(),
+		grafanaObject("grafana-uid", true),
+	)
 	manager := NewManager(fake.NewClientset(), dynamicClient, nil)
+
 	session := controllerSession(domain.WorkloadSpec{
-		Pod:     domain.ObjectReference{Namespace: "vm"},
-		Grafana: &domain.GrafanaSpec{APIVersion: grafanaAPIVersion, Name: "grafana", UID: "grafana-uid", OriginalSuspend: true},
+		Pod: domain.ObjectReference{Namespace: "vm"},
+		Grafana: &domain.GrafanaSpec{
+			APIVersion:      grafanaAPIVersion,
+			Name:            "grafana",
+			UID:             "grafana-uid",
+			OriginalSuspend: true,
+		},
 	})
-	if err := manager.setGrafanaPaused(context.Background(), session, true); err != nil {
+	if err := manager.setGrafanaPaused(context.Background(), session); err != nil {
 		t.Fatal(err)
 	}
+
 	if err := manager.restoreGrafanaPause(context.Background(), session); err != nil {
 		t.Fatal(err)
 	}
-	current, err := dynamicClient.Resource(mustGVR(grafanaAPIVersion, grafanaResource)).Namespace("vm").Get(context.Background(), "grafana", metav1.GetOptions{})
+
+	current, err := dynamicClient.Resource(mustGVR(grafanaAPIVersion, grafanaResource)).
+		Namespace("vm").
+		Get(context.Background(), "grafana", metav1.GetOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	if current.GetAnnotations()[pauseSessionAnnotation] != "" {
 		t.Fatalf("pause owner=%q", current.GetAnnotations()[pauseSessionAnnotation])
 	}
 
 	next := controllerSession(domain.WorkloadSpec{
-		Pod:     domain.ObjectReference{Namespace: "vm"},
-		Grafana: &domain.GrafanaSpec{APIVersion: grafanaAPIVersion, Name: "grafana", UID: "grafana-uid", OriginalSuspend: true},
+		Pod: domain.ObjectReference{Namespace: "vm"},
+		Grafana: &domain.GrafanaSpec{
+			APIVersion:      grafanaAPIVersion,
+			Name:            "grafana",
+			UID:             "grafana-uid",
+			OriginalSuspend: true,
+		},
 	})
+
 	next.ID = "next-session"
-	if err := manager.setGrafanaPaused(context.Background(), next, true); err != nil {
+	if err := manager.setGrafanaPaused(context.Background(), next); err != nil {
 		t.Fatal(err)
 	}
-	current, err = dynamicClient.Resource(mustGVR(grafanaAPIVersion, grafanaResource)).Namespace("vm").Get(context.Background(), "grafana", metav1.GetOptions{})
+
+	current, err = dynamicClient.Resource(mustGVR(grafanaAPIVersion, grafanaResource)).
+		Namespace("vm").
+		Get(context.Background(), "grafana", metav1.GetOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	if current.GetAnnotations()[pauseSessionAnnotation] != next.ID {
-		t.Fatalf("next pause owner=%q want=%q", current.GetAnnotations()[pauseSessionAnnotation], next.ID)
+		t.Fatalf(
+			"next pause owner=%q want=%q",
+			current.GetAnnotations()[pauseSessionAnnotation],
+			next.ID,
+		)
 	}
 }
 
@@ -298,8 +532,25 @@ func TestControllerPauseDetectsExternalCRPauseState(t *testing.T) {
 		vm := vmClusterObject("vm-uid", true)
 		dynamicClient := dynamicfake.NewSimpleDynamicClient(runtime.NewScheme(), vm)
 		manager := NewManager(fake.NewClientset(), dynamicClient, nil)
-		session := controllerSession(domain.WorkloadSpec{Pod: domain.ObjectReference{Namespace: "vm"}, VMCluster: &domain.VMClusterSpec{APIVersion: vmClusterAPIVersion, Name: "metrics", UID: "vm-uid", Component: "vmstorage", OriginalPaused: false}})
-		if err := manager.setVMClusterPaused(context.Background(), session, true); domain.CategoryOf(err) != domain.ErrorConflict {
+
+		session := controllerSession(
+			domain.WorkloadSpec{
+				Pod: domain.ObjectReference{Namespace: "vm"},
+				VMCluster: &domain.VMClusterSpec{
+					APIVersion:     vmClusterAPIVersion,
+					Name:           "metrics",
+					UID:            "vm-uid",
+					Component:      "vmstorage",
+					OriginalPaused: false,
+				},
+			},
+		)
+		if err := manager.setVMClusterPaused(
+			context.Background(),
+			session,
+		); domain.CategoryOf(
+			err,
+		) != domain.ErrorConflict {
 			t.Fatalf("category=%s error=%v", domain.CategoryOf(err), err)
 		}
 	})
@@ -308,8 +559,24 @@ func TestControllerPauseDetectsExternalCRPauseState(t *testing.T) {
 		grafana := grafanaObject("grafana-uid", true)
 		dynamicClient := dynamicfake.NewSimpleDynamicClient(runtime.NewScheme(), grafana)
 		manager := NewManager(fake.NewClientset(), dynamicClient, nil)
-		session := controllerSession(domain.WorkloadSpec{Pod: domain.ObjectReference{Namespace: "vm"}, Grafana: &domain.GrafanaSpec{APIVersion: grafanaAPIVersion, Name: "grafana", UID: "grafana-uid", OriginalSuspend: false}})
-		if err := manager.setGrafanaPaused(context.Background(), session, true); domain.CategoryOf(err) != domain.ErrorConflict {
+
+		session := controllerSession(
+			domain.WorkloadSpec{
+				Pod: domain.ObjectReference{Namespace: "vm"},
+				Grafana: &domain.GrafanaSpec{
+					APIVersion:      grafanaAPIVersion,
+					Name:            "grafana",
+					UID:             "grafana-uid",
+					OriginalSuspend: false,
+				},
+			},
+		)
+		if err := manager.setGrafanaPaused(
+			context.Background(),
+			session,
+		); domain.CategoryOf(
+			err,
+		) != domain.ErrorConflict {
 			t.Fatalf("category=%s error=%v", domain.CategoryOf(err), err)
 		}
 	})
@@ -320,10 +587,21 @@ func TestGrafanaSuspendOwnershipConflictUsesSuspendTerminology(t *testing.T) {
 	grafana.SetAnnotations(map[string]string{pauseSessionAnnotation: "other-session"})
 	dynamicClient := dynamicfake.NewSimpleDynamicClient(runtime.NewScheme(), grafana)
 	manager := NewManager(fake.NewClientset(), dynamicClient, nil)
-	session := controllerSession(domain.WorkloadSpec{Pod: domain.ObjectReference{Namespace: "vm"}, Grafana: &domain.GrafanaSpec{APIVersion: grafanaAPIVersion, Name: "grafana", UID: "grafana-uid", OriginalSuspend: false}})
+	session := controllerSession(
+		domain.WorkloadSpec{
+			Pod: domain.ObjectReference{Namespace: "vm"},
+			Grafana: &domain.GrafanaSpec{
+				APIVersion:      grafanaAPIVersion,
+				Name:            "grafana",
+				UID:             "grafana-uid",
+				OriginalSuspend: false,
+			},
+		},
+	)
 
-	err := manager.setGrafanaPaused(context.Background(), session, true)
-	if domain.CategoryOf(err) != domain.ErrorConflict || !strings.Contains(err.Error(), "suspend is owned") {
+	err := manager.setGrafanaPaused(context.Background(), session)
+	if domain.CategoryOf(err) != domain.ErrorConflict ||
+		!strings.Contains(err.Error(), "suspend is owned") {
 		t.Fatalf("category=%s error=%v", domain.CategoryOf(err), err)
 	}
 }
@@ -331,6 +609,7 @@ func TestGrafanaSuspendOwnershipConflictUsesSuspendTerminology(t *testing.T) {
 func TestGrafanaResumeUsesCompleteDeploymentSelector(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
+
 	replicas := int32(0)
 	deployment := &appsv1.Deployment{
 		ObjectMeta: metav1.ObjectMeta{Namespace: "vm", Name: "grafana", UID: "deployment-uid"},
@@ -349,32 +628,67 @@ func TestGrafanaResumeUsesCompleteDeploymentSelector(t *testing.T) {
 	right := readyPod("vm", "right", "node-a")
 	right.Labels = map[string]string{"app": "grafana", "tenant": "selected"}
 	replicaSet := &appsv1.ReplicaSet{ObjectMeta: metav1.ObjectMeta{
-		Namespace: "vm", Name: "grafana-rs", UID: "grafana-rs-uid",
-		OwnerReferences: []metav1.OwnerReference{{APIVersion: domain.AppsAPIVersion, Kind: domain.KindDeployment, Name: deployment.Name, UID: deployment.UID, Controller: boolPointer(true)}},
+		Namespace: "vm",
+		Name:      "grafana-rs",
+		UID:       "grafana-rs-uid",
+		OwnerReferences: []metav1.OwnerReference{
+			{
+				APIVersion: domain.AppsAPIVersion,
+				Kind:       domain.KindDeployment,
+				Name:       deployment.Name,
+				UID:        deployment.UID,
+				Controller: new(true),
+			},
+		},
 	}}
-	right.OwnerReferences = []metav1.OwnerReference{{APIVersion: domain.AppsAPIVersion, Kind: domain.KindReplicaSet, Name: replicaSet.Name, UID: replicaSet.UID, Controller: boolPointer(true)}}
+	right.OwnerReferences = []metav1.OwnerReference{
+		{
+			APIVersion: domain.AppsAPIVersion,
+			Kind:       domain.KindReplicaSet,
+			Name:       replicaSet.Name,
+			UID:        replicaSet.UID,
+			Controller: new(true),
+		},
+	}
 	grafana := grafanaObject("grafana-uid", true)
 	grafana.SetAnnotations(map[string]string{pauseSessionAnnotation: "session"})
 	dynamicClient := dynamicfake.NewSimpleDynamicClient(runtime.NewScheme(), grafana)
-	manager := NewManager(fake.NewClientset(deployment, replicaSet, wrong, right), dynamicClient, nil)
+	manager := NewManager(
+		fake.NewClientset(deployment, replicaSet, wrong, right),
+		dynamicClient,
+		nil,
+	)
 	manager.poll = time.Millisecond
 	originalReplicas := int32(1)
+
 	session := controllerSession(domain.WorkloadSpec{
-		Adapter:          domain.WorkloadGrafana,
-		Pod:              domain.ObjectReference{Namespace: "vm", Name: "old", UID: "old-uid"},
-		Controller:       domain.ObjectReference{Namespace: "vm", Name: deployment.Name, UID: deployment.UID},
+		Adapter: domain.WorkloadGrafana,
+		Pod:     domain.ObjectReference{Namespace: "vm", Name: "old", UID: "old-uid"},
+		Controller: domain.ObjectReference{
+			Namespace: "vm",
+			Name:      deployment.Name,
+			UID:       deployment.UID,
+		},
 		OriginalReplicas: &originalReplicas,
 		AffectedPods:     []domain.ObjectReference{{Namespace: "vm", Name: "old", UID: "old-uid"}},
-		Grafana:          &domain.GrafanaSpec{APIVersion: grafanaAPIVersion, Name: "grafana", UID: "grafana-uid", OriginalReplicas: originalReplicas},
+		Grafana: &domain.GrafanaSpec{
+			APIVersion:       grafanaAPIVersion,
+			Name:             "grafana",
+			UID:              "grafana-uid",
+			OriginalReplicas: originalReplicas,
+		},
 	})
 	if err := manager.Resume(ctx, session); err != nil {
 		t.Fatal(err)
 	}
+
 	workload := session.Spec.Workload()
 	if workload.Pod.Name != right.Name || workload.Pod.UID != right.UID {
 		t.Fatalf("resumed Pod=%+v want=%s/%s", workload.Pod, right.Name, right.UID)
 	}
-	if len(workload.AffectedPods) != 1 || workload.AffectedPods[0].Name != right.Name || workload.AffectedPods[0].UID != right.UID {
+
+	if len(workload.AffectedPods) != 1 || workload.AffectedPods[0].Name != right.Name ||
+		workload.AffectedPods[0].UID != right.UID {
 		t.Fatalf("affected Pods=%+v want=%s/%s", workload.AffectedPods, right.Name, right.UID)
 	}
 }
@@ -384,13 +698,24 @@ func TestKubeBlocksStopDriftReturnsConflict(t *testing.T) {
 		cluster := kubeBlocksClusterObject(false)
 		dynamicClient := dynamicfake.NewSimpleDynamicClient(runtime.NewScheme(), cluster)
 		manager := NewManager(fake.NewClientset(), dynamicClient, nil)
-		session := kubeBlocksRecoverySession(false)
+		session := kubeBlocksRecoverySession()
+
 		session.Spec.Workload().KubeBlocks.OriginalStops = map[string]bool{}
-		if err := manager.setKubeBlocksPaused(context.Background(), session, true); domain.CategoryOf(err) != domain.ErrorConflict {
+		if err := manager.setKubeBlocksPaused(
+			context.Background(),
+			session,
+			true,
+		); domain.CategoryOf(
+			err,
+		) != domain.ErrorConflict {
 			t.Fatalf("category=%s error=%v", domain.CategoryOf(err), err)
 		}
+
 		if len(session.Spec.Workload().KubeBlocks.OriginalStops) != 0 {
-			t.Fatalf("missing original state was captured during execution: %v", session.Spec.Workload().KubeBlocks.OriginalStops)
+			t.Fatalf(
+				"missing original state was captured during execution: %v",
+				session.Spec.Workload().KubeBlocks.OriginalStops,
+			)
 		}
 	})
 
@@ -398,8 +723,15 @@ func TestKubeBlocksStopDriftReturnsConflict(t *testing.T) {
 		cluster := kubeBlocksClusterObject(true)
 		dynamicClient := dynamicfake.NewSimpleDynamicClient(runtime.NewScheme(), cluster)
 		manager := NewManager(fake.NewClientset(), dynamicClient, nil)
-		session := kubeBlocksRecoverySession(false)
-		if err := manager.setKubeBlocksPaused(context.Background(), session, true); domain.CategoryOf(err) != domain.ErrorConflict {
+
+		session := kubeBlocksRecoverySession()
+		if err := manager.setKubeBlocksPaused(
+			context.Background(),
+			session,
+			true,
+		); domain.CategoryOf(
+			err,
+		) != domain.ErrorConflict {
 			t.Fatalf("category=%s error=%v", domain.CategoryOf(err), err)
 		}
 	})
@@ -409,19 +741,34 @@ func TestKubeBlocksStopDriftReturnsConflict(t *testing.T) {
 		cluster := kubeBlocksClusterObject(false)
 		dynamicClient := dynamicfake.NewSimpleDynamicClient(runtime.NewScheme(), cluster)
 		manager := NewManager(fake.NewClientset(), dynamicClient, nil)
-		session := kubeBlocksRecoverySession(false)
+
+		session := kubeBlocksRecoverySession()
 		if err := manager.setKubeBlocksPaused(ctx, session, true); err != nil {
 			t.Fatal(err)
 		}
-		resource := dynamicClient.Resource(mustGVR(kubeBlocksClusterAPIVersion, clusterResource)).Namespace("db")
+
+		resource := dynamicClient.Resource(mustGVR(kubeBlocksClusterAPIVersion, clusterResource)).
+			Namespace("db")
 		current, _ := resource.Get(ctx, "cluster", metav1.GetOptions{})
 		components, _, _ := unstructured.NestedSlice(current.Object, "spec", "componentSpecs")
-		_ = unstructured.SetNestedField(components[0].(map[string]any), false, "stop")
+
+		component := testutil.MustType[map[string]any](t, components[0])
+		if err := unstructured.SetNestedField(component, false, "stop"); err != nil {
+			t.Fatal(err)
+		}
+
 		_ = unstructured.SetNestedField(current.Object, components, "spec", "componentSpecs")
 		if _, err := resource.Update(ctx, current, metav1.UpdateOptions{}); err != nil {
 			t.Fatal(err)
 		}
-		if err := manager.setKubeBlocksPaused(ctx, session, false); domain.CategoryOf(err) != domain.ErrorConflict {
+
+		if err := manager.setKubeBlocksPaused(
+			ctx,
+			session,
+			false,
+		); domain.CategoryOf(
+			err,
+		) != domain.ErrorConflict {
 			t.Fatalf("category=%s error=%v", domain.CategoryOf(err), err)
 		}
 	})
@@ -430,11 +777,20 @@ func TestKubeBlocksStopDriftReturnsConflict(t *testing.T) {
 func TestVMClusterReplicaDriftIsNotOverwritten(t *testing.T) {
 	vm := vmClusterObject("vm-uid", true)
 	vm.SetAnnotations(map[string]string{pauseSessionAnnotation: "session"})
-	if err := unstructured.SetNestedField(vm.Object, int64(3), "spec", "vmstorage", "replicaCount"); err != nil {
+
+	if err := unstructured.SetNestedField(
+		vm.Object,
+		int64(3),
+		"spec",
+		"vmstorage",
+		"replicaCount",
+	); err != nil {
 		t.Fatal(err)
 	}
+
 	dynamicClient := dynamicfake.NewSimpleDynamicClient(runtime.NewScheme(), vm)
 	manager := NewManager(fake.NewClientset(), dynamicClient, nil)
+
 	session := controllerSession(domain.WorkloadSpec{
 		Pod: domain.ObjectReference{Namespace: "vm"},
 		VMCluster: &domain.VMClusterSpec{
@@ -442,14 +798,30 @@ func TestVMClusterReplicaDriftIsNotOverwritten(t *testing.T) {
 			OriginalReplicas: 2, OriginalReplicasConfigured: true,
 		},
 	})
-	if err := manager.setVMClusterReplicaCount(context.Background(), session, 1, 2); domain.CategoryOf(err) != domain.ErrorConflict {
+	if err := manager.setVMClusterReplicaCount(
+		context.Background(),
+		session,
+		1,
+		2,
+	); domain.CategoryOf(
+		err,
+	) != domain.ErrorConflict {
 		t.Fatalf("category=%s error=%v", domain.CategoryOf(err), err)
 	}
-	current, err := dynamicClient.Resource(mustGVR(vmClusterAPIVersion, vmClusterResource)).Namespace("vm").Get(context.Background(), "metrics", metav1.GetOptions{})
+
+	current, err := dynamicClient.Resource(mustGVR(vmClusterAPIVersion, vmClusterResource)).
+		Namespace("vm").
+		Get(context.Background(), "metrics", metav1.GetOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if replicas, _, _ := unstructured.NestedInt64(current.Object, "spec", "vmstorage", "replicaCount"); replicas != 3 {
+
+	if replicas, _, _ := unstructured.NestedInt64(
+		current.Object,
+		"spec",
+		"vmstorage",
+		"replicaCount",
+	); replicas != 3 {
 		t.Fatalf("replicaCount=%d want=3", replicas)
 	}
 }
@@ -457,6 +829,7 @@ func TestVMClusterReplicaDriftIsNotOverwritten(t *testing.T) {
 func TestRestoreVMClusterPauseRejectsActiveSessionDrift(t *testing.T) {
 	replicaDrift := int64(3)
 	pausedOrdinal := int32(1)
+
 	tests := []struct {
 		name             string
 		paused           bool
@@ -484,28 +857,51 @@ func TestRestoreVMClusterPauseRejectsActiveSessionDrift(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			vm := vmClusterObject("vm-uid", tt.paused)
 			vm.SetAnnotations(map[string]string{pauseSessionAnnotation: "session"})
+
 			if tt.replicaCount != nil {
-				if err := unstructured.SetNestedField(vm.Object, *tt.replicaCount, "spec", "vmstorage", "replicaCount"); err != nil {
+				if err := unstructured.SetNestedField(
+					vm.Object,
+					*tt.replicaCount,
+					"spec",
+					"vmstorage",
+					"replicaCount",
+				); err != nil {
 					t.Fatal(err)
 				}
 			}
+
 			dynamicClient := dynamicfake.NewSimpleDynamicClient(runtime.NewScheme(), vm)
 			manager := NewManager(fake.NewClientset(), dynamicClient, nil)
+
 			session := controllerSession(domain.WorkloadSpec{
 				Pod:     domain.ObjectReference{Namespace: "vm"},
 				Ordinal: tt.ordinal,
 				VMCluster: &domain.VMClusterSpec{
-					APIVersion: vmClusterAPIVersion, Name: "metrics", UID: "vm-uid", Component: "vmstorage",
-					OriginalPaused: tt.originalPaused, OriginalReplicas: tt.originalReplicas, OriginalReplicasConfigured: tt.configured,
+					APIVersion:                 vmClusterAPIVersion,
+					Name:                       "metrics",
+					UID:                        "vm-uid",
+					Component:                  "vmstorage",
+					OriginalPaused:             tt.originalPaused,
+					OriginalReplicas:           tt.originalReplicas,
+					OriginalReplicasConfigured: tt.configured,
 				},
 			})
-			if err := manager.restoreVMClusterPause(context.Background(), session); domain.CategoryOf(err) != domain.ErrorConflict {
+			if err := manager.restoreVMClusterPause(
+				context.Background(),
+				session,
+			); domain.CategoryOf(
+				err,
+			) != domain.ErrorConflict {
 				t.Fatalf("category=%s error=%v", domain.CategoryOf(err), err)
 			}
-			current, err := dynamicClient.Resource(mustGVR(vmClusterAPIVersion, vmClusterResource)).Namespace("vm").Get(context.Background(), "metrics", metav1.GetOptions{})
+
+			current, err := dynamicClient.Resource(mustGVR(vmClusterAPIVersion, vmClusterResource)).
+				Namespace("vm").
+				Get(context.Background(), "metrics", metav1.GetOptions{})
 			if err != nil {
 				t.Fatal(err)
 			}
+
 			if owner := current.GetAnnotations()[pauseSessionAnnotation]; owner != "session" {
 				t.Fatalf("pause owner=%q want session", owner)
 			}
@@ -518,17 +914,32 @@ func TestRestoreGrafanaPauseRejectsActiveSessionDrift(t *testing.T) {
 	grafana.SetAnnotations(map[string]string{pauseSessionAnnotation: "session"})
 	dynamicClient := dynamicfake.NewSimpleDynamicClient(runtime.NewScheme(), grafana)
 	manager := NewManager(fake.NewClientset(), dynamicClient, nil)
+
 	session := controllerSession(domain.WorkloadSpec{
-		Pod:     domain.ObjectReference{Namespace: "vm"},
-		Grafana: &domain.GrafanaSpec{APIVersion: grafanaAPIVersion, Name: "grafana", UID: "grafana-uid", OriginalSuspend: false},
+		Pod: domain.ObjectReference{Namespace: "vm"},
+		Grafana: &domain.GrafanaSpec{
+			APIVersion:      grafanaAPIVersion,
+			Name:            "grafana",
+			UID:             "grafana-uid",
+			OriginalSuspend: false,
+		},
 	})
-	if err := manager.restoreGrafanaPause(context.Background(), session); domain.CategoryOf(err) != domain.ErrorConflict {
+	if err := manager.restoreGrafanaPause(
+		context.Background(),
+		session,
+	); domain.CategoryOf(
+		err,
+	) != domain.ErrorConflict {
 		t.Fatalf("category=%s error=%v", domain.CategoryOf(err), err)
 	}
-	current, err := dynamicClient.Resource(mustGVR(grafanaAPIVersion, grafanaResource)).Namespace("vm").Get(context.Background(), "grafana", metav1.GetOptions{})
+
+	current, err := dynamicClient.Resource(mustGVR(grafanaAPIVersion, grafanaResource)).
+		Namespace("vm").
+		Get(context.Background(), "grafana", metav1.GetOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	if owner := current.GetAnnotations()[pauseSessionAnnotation]; owner != "session" {
 		t.Fatalf("pause owner=%q want session", owner)
 	}
@@ -547,20 +958,31 @@ func TestClearVictoriaLogsPauseOwnerRejectsReplicaDrift(t *testing.T) {
 		Spec: appsv1.StatefulSetSpec{Replicas: &currentReplicas},
 	}
 	manager := NewManager(fake.NewClientset(sts), nil, nil)
+
 	session := controllerSession(domain.WorkloadSpec{
 		Controller:       domain.ObjectReference{Namespace: "logs", Name: sts.Name, UID: sts.UID},
 		OriginalReplicas: &originalReplicas,
 	})
-	if err := manager.clearVictoriaLogsPauseOwner(context.Background(), session); domain.CategoryOf(err) != domain.ErrorConflict {
+	if err := manager.clearVictoriaLogsPauseOwner(
+		context.Background(),
+		session,
+	); domain.CategoryOf(
+		err,
+	) != domain.ErrorConflict {
 		t.Fatalf("category=%s error=%v", domain.CategoryOf(err), err)
 	}
-	current, err := manager.typed.AppsV1().StatefulSets("logs").Get(context.Background(), sts.Name, metav1.GetOptions{})
+
+	current, err := manager.typed.AppsV1().
+		StatefulSets("logs").
+		Get(context.Background(), sts.Name, metav1.GetOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	if owner := current.GetAnnotations()[pauseSessionAnnotation]; owner != "session" {
 		t.Fatalf("pause owner=%q want session", owner)
 	}
+
 	if replicas := statefulSetReplicas(current); replicas != currentReplicas {
 		t.Fatalf("replicas=%d want %d", replicas, currentReplicas)
 	}
@@ -570,22 +992,36 @@ func TestKubeBlocksPauseRetriesAPIServerConflictWithDriftCheck(t *testing.T) {
 	cluster := kubeBlocksClusterObject(false)
 	dynamicClient := dynamicfake.NewSimpleDynamicClient(runtime.NewScheme(), cluster)
 	updates := 0
-	dynamicClient.PrependReactor("update", "clusters", func(clienttesting.Action) (bool, runtime.Object, error) {
-		updates++
-		if updates == 1 {
-			return true, nil, apierrors.NewConflict(schema.GroupResource{Group: "apps.kubeblocks.io", Resource: "clusters"}, "cluster", nil)
-		}
-		return false, nil, nil
-	})
+	dynamicClient.PrependReactor(
+		"update",
+		"clusters",
+		func(clienttesting.Action) (bool, runtime.Object, error) {
+			updates++
+			if updates == 1 {
+				return true, nil, apierrors.NewConflict(
+					schema.GroupResource{Group: "apps.kubeblocks.io", Resource: "clusters"},
+					"cluster",
+					nil,
+				)
+			}
+
+			return false, nil, nil
+		},
+	)
 	manager := NewManager(fake.NewClientset(), dynamicClient, nil)
-	session := kubeBlocksRecoverySession(false)
+
+	session := kubeBlocksRecoverySession()
 	if err := manager.setKubeBlocksPaused(context.Background(), session, true); err != nil {
 		t.Fatal(err)
 	}
+
 	if updates != 2 {
 		t.Fatalf("updates=%d want=2", updates)
 	}
-	current, _ := dynamicClient.Resource(mustGVR(kubeBlocksClusterAPIVersion, clusterResource)).Namespace("db").Get(context.Background(), "cluster", metav1.GetOptions{})
+
+	current, _ := dynamicClient.Resource(mustGVR(kubeBlocksClusterAPIVersion, clusterResource)).
+		Namespace("db").
+		Get(context.Background(), "cluster", metav1.GetOptions{})
 	if current.GetAnnotations()[pauseSessionAnnotation] != session.ID {
 		t.Fatalf("annotations=%v", current.GetAnnotations())
 	}
@@ -620,10 +1056,13 @@ func kubeBlocksClusterObject(stopped bool) *unstructured.Unstructured {
 	}}
 }
 
-func kubeBlocksRecoverySession(originalStopped bool) *domain.Session {
+func kubeBlocksRecoverySession() *domain.Session {
 	session := kubeBlocksSession()
 	session.Spec.Workload().KubeBlocks.Component = "postgresql"
 	session.Spec.Workload().KubeBlocks.ClusterUID = "cluster-uid"
-	session.Spec.Workload().KubeBlocks.OriginalStops = map[string]bool{"postgresql": originalStopped}
+	session.Spec.Workload().KubeBlocks.OriginalStops = map[string]bool{
+		"postgresql": false,
+	}
+
 	return session
 }

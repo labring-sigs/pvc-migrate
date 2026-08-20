@@ -25,5 +25,5 @@ type VolumeUsageReadResult struct {
 // An unsupported backend must return an error instead of estimating usage from
 // provisioned capacity.
 type VolumeUsageReader interface {
-	Read(context.Context, VolumeUsageReadOptions) (VolumeUsageReadResult, error)
+	Read(ctx context.Context, options VolumeUsageReadOptions) (VolumeUsageReadResult, error)
 }

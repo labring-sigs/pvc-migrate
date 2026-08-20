@@ -18,7 +18,7 @@
 - A Kubernetes cluster with filesystem PVC support
 - Kubernetes credentials with the permissions validated by the relevant `plan` command
 - Network access for the temporary tool image on source and target nodes
-- Go 1.26.5 or a compatible newer toolchain when building from source
+- Go 1.27.0 or a compatible newer toolchain when building from source
 
 ## Installation
 
@@ -216,6 +216,8 @@ See [Architecture](docs/architecture.md) for consistency boundaries and [Runbook
 | `<operation> plan` | Validate an operation and print its resource inventory |
 | `reserve` | Provision and retain staged destination PVCs |
 | `copy` | Run a resumable offline copy or one online warm-copy pass without cutover |
+| `copy cross-cluster` | Copy PVC data between two Kubernetes clusters with separate source and destination connections |
+| `reserve cross-cluster` | Provision destination PVCs in another cluster and persist a cross-cluster session |
 | `final-sync` | Pause the recorded workload and run the final offline sync |
 | `activate` | Bind staged PVs to application PVC identities |
 | `migrate` | Run reserve, copy, pause, final sync, activation, and resume |
@@ -229,6 +231,7 @@ See [Architecture](docs/architecture.md) for consistency boundaries and [Runbook
 | `session abort` | Restore a paused workload before activation |
 | `session rollback` | Restore retained source PVs and resume the workload |
 | `session cleanup` | Delete staged resources or close the rollback window |
+| `session status/resume/cleanup cross-cluster` | Inspect, continue, or clean up a cross-cluster session |
 | `session cleanup-orphan` | Validate and clear ownership after a session ConfigMap was lost |
 | `completion` | Generate shell completion |
 | `version` | Print version information |
@@ -285,6 +288,33 @@ pvc-migrate migrate-pod plan \
 ```
 
 Each scope is persisted in the session and reused by warm copy, final sync, checksum verification, and resume. Execution verifies that source directories exist, creates nested destination directories, and rejects a selected path containing a symbolic-link component. `--delete-extraneous` remains confined to the selected destination directory. An orchestrated partial transfer still replaces the whole application PVC at cutover, so files outside each selected source directory are absent from the destination by explicit request.
+
+### Cross-Cluster Copy
+
+Cross-cluster workflows use explicit subcommands and keep their session state on the source cluster. The destination kubeconfig is required, and the source and destination cluster identities must differ. StorageClass objects are read-only inputs; their parameters are never changed.
+
+```bash
+pvc-migrate copy cross-cluster plan \
+  --source-kubeconfig ~/.kube/source \
+  --destination-kubeconfig ~/.kube/destination \
+  --source-namespace application \
+  --source-pvc database-data \
+  --destination-namespace archive \
+  --destination-pvc database-data \
+  --destination-storage-class fast
+
+pvc-migrate copy cross-cluster \
+  --source-kubeconfig ~/.kube/source \
+  --destination-kubeconfig ~/.kube/destination \
+  --source-namespace application \
+  --source-pvc database-data \
+  --destination-namespace archive \
+  --destination-pvc database-data \
+  --destination-storage-class fast \
+  --dry-run=false
+```
+
+Use `reserve cross-cluster` to provision and inspect destination PVCs before copying. `session status cross-cluster`, `session resume cross-cluster`, and `session cleanup cross-cluster` require both connections so resource identities can be verified on each cluster. Multiple PVCs use explicit `source=destination`, `source=capacity`, and `source=path` mappings. Cross-cluster shrink keeps the same safety defaults as local copy: `--allow-volume-shrink` and an explicit `--skip-source-usage-check` are required when no trusted usage reader exists.
 
 ### Destination Capacity
 
