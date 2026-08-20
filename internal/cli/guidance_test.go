@@ -18,45 +18,84 @@ import (
 )
 
 func guidanceSession(phase domain.Phase) *domain.Session {
-	session := domain.NewSession("mig-test", domain.NewSessionSpec(domain.OperationMigratePod, domain.SessionCommon{
-		SourceNamespace: "app", TemporaryNamespace: "pvc-migrate-system", DestinationNamespace: "app", SessionNamespace: "pvc-migrate-system",
-		Volumes: []domain.VolumeSpec{{
-			SourcePVC:      domain.ObjectReference{Namespace: "app", Name: "data", UID: "source-pvc-uid"},
-			SourcePV:       domain.ObjectReference{Name: "pv-source", UID: "source-pv-uid"},
-			DestinationPVC: domain.ObjectReference{Namespace: "pvc-migrate-system", Name: "data-migrated"},
-		}},
-	}, domain.WorkloadSpec{
-		Adapter: domain.WorkloadStandalone,
-		Pod:     domain.ObjectReference{Namespace: "app", Name: "application", UID: "application-uid"},
-	}, false, domain.SessionWorkflowOptions{PrecopyPasses: 1}), time.Now())
+	session := domain.NewSession(
+		"mig-test",
+		domain.NewSessionSpec(domain.OperationMigratePod, domain.SessionCommon{
+			SourceNamespace:      "app",
+			TemporaryNamespace:   "pvc-migrate-system",
+			DestinationNamespace: "app",
+			SessionNamespace:     "pvc-migrate-system",
+			Volumes: []domain.VolumeSpec{
+				{
+					SourcePVC: domain.ObjectReference{
+						Namespace: "app",
+						Name:      "data",
+						UID:       "source-pvc-uid",
+					},
+					SourcePV: domain.ObjectReference{Name: "pv-source", UID: "source-pv-uid"},
+					DestinationPVC: domain.ObjectReference{
+						Namespace: "pvc-migrate-system",
+						Name:      "data-migrated",
+					},
+				},
+			},
+		}, domain.WorkloadSpec{
+			Adapter: domain.WorkloadStandalone,
+			Pod: domain.ObjectReference{
+				Namespace: "app",
+				Name:      "application",
+				UID:       "application-uid",
+			},
+		}, false, domain.SessionWorkflowOptions{PrecopyPasses: 1}),
+		time.Now(),
+	)
 	session.Status.Phase = phase
+
 	return session
 }
 
 func guidancePrefixesForSession(session *domain.Session) guidancePrefixes {
-	return guidancePrefixes{pvcMigrate: sessionCommandPrefix(session.Spec.SessionNamespace), kubectl: "kubectl"}
+	return guidancePrefixes{
+		pvcMigrate: sessionCommandPrefix(session.Spec.SessionNamespace),
+		kubectl:    "kubectl",
+	}
 }
 
 func TestSessionStatusKeepsStructuredOutputSeparateFromGuidance(t *testing.T) {
 	client := fake.NewClientset()
 	store := kube.NewConfigMapSessionStore(client)
+
 	session := guidanceSession(domain.PhaseCompleted)
 	if err := store.Create(context.Background(), session); err != nil {
 		t.Fatal(err)
 	}
+
 	var stdout, stderr bytes.Buffer
-	command := NewRoot(Options{Version: "test", In: strings.NewReader(""), Out: &stdout, ErrOut: &stderr, runtimeFactory: func(state *rootState) (*commandRuntime, error) {
-		return &commandRuntime{store: store, printer: printerFor(state)}, nil
-	}})
+
+	command := NewRoot(
+		Options{
+			Version: "test",
+			In:      strings.NewReader(""),
+			Out:     &stdout,
+			ErrOut:  &stderr,
+			runtimeFactory: func(state *rootState) (*commandRuntime, error) {
+				return &commandRuntime{store: store, printer: printerFor(state)}, nil
+			},
+		},
+	)
 	command.SetArgs([]string{"--output", "json", "session", "status", session.ID})
+
 	if err := command.Execute(); err != nil {
 		t.Fatal(err)
 	}
+
 	var decoded domain.Session
 	if err := json.Unmarshal(stdout.Bytes(), &decoded); err != nil {
 		t.Fatalf("stdout is not one JSON document: %v\n%s", err, stdout.String())
 	}
-	if decoded.ID != session.ID || !strings.Contains(stderr.String(), "Next steps") || strings.Contains(stdout.String(), "Next steps") {
+
+	if decoded.ID != session.ID || !strings.Contains(stderr.String(), "Next steps") ||
+		strings.Contains(stdout.String(), "Next steps") {
 		t.Fatalf("stdout=%q stderr=%q", stdout.String(), stderr.String())
 	}
 }
@@ -65,14 +104,24 @@ func TestSessionGuidancePreservesCommandConnectionSettings(t *testing.T) {
 	client := fake.NewClientset()
 	store := kube.NewConfigMapSessionStore(client)
 	session := guidanceSession(domain.PhaseCompleted)
+
 	session.Spec.SessionNamespace = "migration-control"
 	if err := store.Create(context.Background(), session); err != nil {
 		t.Fatal(err)
 	}
+
 	var stdout, stderr bytes.Buffer
-	command := NewRoot(Options{Version: "test", Out: &stdout, ErrOut: &stderr, runtimeFactory: func(state *rootState) (*commandRuntime, error) {
-		return &commandRuntime{store: store, printer: printerFor(state)}, nil
-	}})
+
+	command := NewRoot(
+		Options{
+			Version: "test",
+			Out:     &stdout,
+			ErrOut:  &stderr,
+			runtimeFactory: func(state *rootState) (*commandRuntime, error) {
+				return &commandRuntime{store: store, printer: printerFor(state)}, nil
+			},
+		},
+	)
 	command.SetArgs([]string{
 		"--kubeconfig", "/tmp/config local",
 		"--context", "cluster-a",
@@ -88,10 +137,13 @@ func TestSessionGuidancePreservesCommandConnectionSettings(t *testing.T) {
 		"--color", "never",
 		"session", "status", session.ID,
 	})
+
 	if err := command.Execute(); err != nil {
 		t.Fatal(err)
 	}
+
 	text := stderr.String()
+
 	pvcMigratePrefix := "pvc-migrate --kubeconfig '/tmp/config local' --context cluster-a --timeout=45m0s --retries=5 --retry-backoff=3s --helm-timeout=12m0s --stream-tool-logs=false --no-compress=true --session-namespace migration-control"
 	for _, want := range []string{
 		pvcMigratePrefix + " session status " + session.ID,
@@ -101,15 +153,21 @@ func TestSessionGuidancePreservesCommandConnectionSettings(t *testing.T) {
 			t.Fatalf("guidance=%q missing %q", text, want)
 		}
 	}
+
 	for _, excluded := range []string{"registry.example/tool:dev", "--log-level", "--color"} {
 		if strings.Contains(text, excluded) {
-			t.Fatalf("guidance=%q includes presentation or stored-session setting %q", text, excluded)
+			t.Fatalf(
+				"guidance=%q includes presentation or stored-session setting %q",
+				text,
+				excluded,
+			)
 		}
 	}
 }
 
 func TestCopySessionDryRunGuidanceContinuesWithCopyCommand(t *testing.T) {
 	var stdout, stderr bytes.Buffer
+
 	root := NewRoot(Options{Version: "test", Out: &stdout, ErrOut: &stderr})
 	for name, value := range map[string]string{
 		"kubeconfig":        "/tmp/config local",
@@ -121,26 +179,38 @@ func TestCopySessionDryRunGuidanceContinuesWithCopyCommand(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
+
 	command, _, err := root.Find([]string{"copy"})
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	session := guidanceSession(domain.PhaseReserved)
 	session.Spec.SessionNamespace = "migration-control"
-	session.Spec = domain.NewSessionSpec(domain.OperationCopy, session.Spec.SessionCommon, domain.WorkloadSpec{}, true, domain.SessionWorkflowOptions{SourceNode: "node-a"})
+	session.Spec = domain.NewSessionSpec(
+		domain.OperationCopy,
+		session.Spec.SessionCommon,
+		domain.WorkloadSpec{},
+		true,
+		domain.SessionWorkflowOptions{SourceNode: "node-a"},
+	)
 	runtime := &commandRuntime{printer: output.Printer{Writer: &stdout, Format: output.JSON}}
+
 	flags := &migrationFlags{online: true, sourceNode: "node-a"}
 	if err := printCopyDryRunResult(command, runtime, session, flags); err != nil {
 		t.Fatal(err)
 	}
+
 	var decoded domain.Session
 	if err := json.Unmarshal(stdout.Bytes(), &decoded); err != nil {
 		t.Fatalf("stdout is not one JSON document: %v\n%s", err, stdout.String())
 	}
+
 	want := "pvc-migrate --kubeconfig '/tmp/config local' --context cluster-a --timeout=45m0s --session-namespace migration-control copy --session mig-test --online --source-node node-a --dry-run=false"
 	if !strings.Contains(stderr.String(), want) {
 		t.Fatalf("guidance=%q missing %q", stderr.String(), want)
 	}
+
 	if strings.Contains(stderr.String(), "session resume") {
 		t.Fatalf("copy dry-run guidance points to generic resume: %q", stderr.String())
 	}
@@ -191,6 +261,7 @@ func TestDetectGuidanceShell(t *testing.T) {
 func TestGuidancePrefixesUsePowerShellQuoting(t *testing.T) {
 	t.Setenv("PSModulePath", "/opt/powershell/modules")
 	t.Setenv("MSYSTEM", "")
+
 	root := NewRoot(Options{Version: "test"})
 	for name, value := range map[string]string{
 		"kubeconfig": "config 'local'",
@@ -200,14 +271,17 @@ func TestGuidancePrefixesUsePowerShellQuoting(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
+
 	command, _, err := root.Find([]string{"session", "status"})
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	prefixes := guidancePrefixesForCommand(command, "pvc-migrate-system")
 	if want := "pvc-migrate --kubeconfig 'config ''local''' --context '@prod'"; prefixes.pvcMigrate != want {
 		t.Fatalf("pvc-migrate prefix=%q want %q", prefixes.pvcMigrate, want)
 	}
+
 	if want := "kubectl --kubeconfig 'config ''local''' --context '@prod'"; prefixes.kubectl != want {
 		t.Fatalf("kubectl prefix=%q want %q", prefixes.kubectl, want)
 	}
@@ -225,10 +299,16 @@ func TestSessionGuidanceCoversTerminalActions(t *testing.T) {
 	} {
 		t.Run(string(test.phase), func(t *testing.T) {
 			var output bytes.Buffer
+
 			session := guidanceSession(test.phase)
-			if err := writeSessionGuidance(&output, session, guidancePrefixesForSession(session)); err != nil {
+			if err := writeSessionGuidance(
+				&output,
+				session,
+				guidancePrefixesForSession(session),
+			); err != nil {
 				t.Fatal(err)
 			}
+
 			for _, want := range test.want {
 				if !strings.Contains(output.String(), want) {
 					t.Fatalf("phase=%s guidance=%q missing %q", test.phase, output.String(), want)
@@ -241,10 +321,16 @@ func TestSessionGuidanceCoversTerminalActions(t *testing.T) {
 func TestDestinationCapacityFailureGuidanceRequiresNewSession(t *testing.T) {
 	session := guidanceSession(domain.PhaseFailed)
 	session.Status.FailureReason = domain.FailureDestinationCapacityExhausted
+
 	var output bytes.Buffer
-	if err := writeSessionGuidance(&output, session, guidancePrefixesForSession(session)); err != nil {
+	if err := writeSessionGuidance(
+		&output,
+		session,
+		guidancePrefixesForSession(session),
+	); err != nil {
 		t.Fatal(err)
 	}
+
 	text := output.String()
 	for _, want := range []string{
 		"cannot resume because its destination capacity is immutable",
@@ -256,6 +342,7 @@ func TestDestinationCapacityFailureGuidanceRequiresNewSession(t *testing.T) {
 			t.Fatalf("guidance=%q missing %q", text, want)
 		}
 	}
+
 	if strings.Contains(text, "session resume") {
 		t.Fatalf("guidance offers an ineffective resume: %q", text)
 	}
@@ -264,10 +351,16 @@ func TestDestinationCapacityFailureGuidanceRequiresNewSession(t *testing.T) {
 func TestSessionGuidanceIncludesCustomNamespaceAndApproval(t *testing.T) {
 	session := guidanceSession(domain.PhaseWarmCopied)
 	session.Spec.SessionNamespace = "migration-control"
+
 	var output bytes.Buffer
-	if err := writeSessionGuidance(&output, session, guidancePrefixesForSession(session)); err != nil {
+	if err := writeSessionGuidance(
+		&output,
+		session,
+		guidancePrefixesForSession(session),
+	); err != nil {
 		t.Fatal(err)
 	}
+
 	text := output.String()
 	for _, want := range []string{"--session-namespace migration-control", "--yes", "--dry-run=false"} {
 		if !strings.Contains(text, want) {
@@ -280,10 +373,16 @@ func TestSessionGuidanceAbortIncludesValidationAndApproval(t *testing.T) {
 	for _, phase := range []domain.Phase{domain.PhasePlanned, domain.PhaseReserving, domain.PhaseReserved, domain.PhaseWarmCopying, domain.PhasePaused, domain.PhaseFinalSyncing, domain.PhaseFinalSynced} {
 		t.Run(string(phase), func(t *testing.T) {
 			var output bytes.Buffer
+
 			session := guidanceSession(phase)
-			if err := writeSessionGuidance(&output, session, guidancePrefixesForSession(session)); err != nil {
+			if err := writeSessionGuidance(
+				&output,
+				session,
+				guidancePrefixesForSession(session),
+			); err != nil {
 				t.Fatal(err)
 			}
+
 			text := output.String()
 			for _, want := range []string{
 				"session abort mig-test --dry-run",
@@ -297,11 +396,23 @@ func TestSessionGuidanceAbortIncludesValidationAndApproval(t *testing.T) {
 	}
 
 	copySession := guidanceSession(domain.PhaseWarmCopied)
-	copySession.Spec = domain.NewSessionSpec(domain.OperationCopy, copySession.Spec.SessionCommon, domain.WorkloadSpec{}, false, domain.SessionWorkflowOptions{})
+	copySession.Spec = domain.NewSessionSpec(
+		domain.OperationCopy,
+		copySession.Spec.SessionCommon,
+		domain.WorkloadSpec{},
+		false,
+		domain.SessionWorkflowOptions{},
+	)
+
 	var output bytes.Buffer
-	if err := writeSessionGuidance(&output, copySession, guidancePrefixesForSession(copySession)); err != nil {
+	if err := writeSessionGuidance(
+		&output,
+		copySession,
+		guidancePrefixesForSession(copySession),
+	); err != nil {
 		t.Fatal(err)
 	}
+
 	if strings.Contains(output.String(), "session abort") {
 		t.Fatalf("completed copy guidance contains redundant abort action: %q", output.String())
 	}
@@ -310,9 +421,16 @@ func TestSessionGuidanceAbortIncludesValidationAndApproval(t *testing.T) {
 func TestTransferDryRunGuidanceUsesOperationName(t *testing.T) {
 	for _, operation := range []string{"backup plan", "live-backup plan", "restore plan"} {
 		var output bytes.Buffer
-		if err := writeTransferDryRunGuidance(&output, operation, "app", "data", "kubectl"); err != nil {
+		if err := writeTransferDryRunGuidance(
+			&output,
+			operation,
+			"app",
+			"data",
+			"kubectl",
+		); err != nil {
 			t.Fatal(err)
 		}
+
 		if !strings.Contains(output.String(), operation+" dry-run completed") {
 			t.Fatalf("operation=%q guidance=%q", operation, output.String())
 		}
@@ -321,31 +439,65 @@ func TestTransferDryRunGuidanceUsesOperationName(t *testing.T) {
 
 func TestTransferDryRunGuidanceUsesKubectlConnectionSettings(t *testing.T) {
 	var output bytes.Buffer
-	if err := writeTransferDryRunGuidance(&output, "backup plan", "app", "data", "kubectl --kubeconfig '/tmp/config local' --context cluster-a"); err != nil {
+	if err := writeTransferDryRunGuidance(
+		&output,
+		"backup plan",
+		"app",
+		"data",
+		"kubectl --kubeconfig '/tmp/config local' --context cluster-a",
+	); err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(output.String(), "kubectl --kubeconfig '/tmp/config local' --context cluster-a --namespace app get pvc data") {
+
+	if !strings.Contains(
+		output.String(),
+		"kubectl --kubeconfig '/tmp/config local' --context cluster-a --namespace app get pvc data",
+	) {
 		t.Fatalf("guidance=%q", output.String())
 	}
 }
 
 func TestSessionGuidanceUsesOperationSpecificCompletionPaths(t *testing.T) {
 	reserve := guidanceSession(domain.PhaseReserved)
-	reserve.Spec = domain.NewSessionSpec(domain.OperationReserve, reserve.Spec.SessionCommon, domain.WorkloadSpec{}, false, domain.SessionWorkflowOptions{})
+	reserve.Spec = domain.NewSessionSpec(
+		domain.OperationReserve,
+		reserve.Spec.SessionCommon,
+		domain.WorkloadSpec{},
+		false,
+		domain.SessionWorkflowOptions{},
+	)
+
 	var reserveOutput bytes.Buffer
-	if err := writeSessionGuidance(&reserveOutput, reserve, guidancePrefixesForSession(reserve)); err != nil {
+	if err := writeSessionGuidance(
+		&reserveOutput,
+		reserve,
+		guidancePrefixesForSession(reserve),
+	); err != nil {
 		t.Fatal(err)
 	}
+
 	if !strings.Contains(reserveOutput.String(), "copy --session mig-test --dry-run") {
 		t.Fatalf("reserve guidance=%q", reserveOutput.String())
 	}
 
 	copySession := guidanceSession(domain.PhaseWarmCopied)
-	copySession.Spec = domain.NewSessionSpec(domain.OperationCopy, copySession.Spec.SessionCommon, domain.WorkloadSpec{}, false, domain.SessionWorkflowOptions{})
+	copySession.Spec = domain.NewSessionSpec(
+		domain.OperationCopy,
+		copySession.Spec.SessionCommon,
+		domain.WorkloadSpec{},
+		false,
+		domain.SessionWorkflowOptions{},
+	)
+
 	var copyOutput bytes.Buffer
-	if err := writeSessionGuidance(&copyOutput, copySession, guidancePrefixesForSession(copySession)); err != nil {
+	if err := writeSessionGuidance(
+		&copyOutput,
+		copySession,
+		guidancePrefixesForSession(copySession),
+	); err != nil {
 		t.Fatal(err)
 	}
+
 	for _, want := range []string{"Keep the copied PVC", "Discard the copied PVC", "--finalize --delete-session"} {
 		if !strings.Contains(copyOutput.String(), want) {
 			t.Fatalf("copy guidance=%q missing %q", copyOutput.String(), want)
@@ -354,11 +506,18 @@ func TestSessionGuidanceUsesOperationSpecificCompletionPaths(t *testing.T) {
 
 	failed := guidanceSession(domain.PhaseFailed)
 	failed.Status.ResumeFrom = domain.PhaseActivating
+
 	var failedOutput bytes.Buffer
-	if err := writeSessionGuidance(&failedOutput, failed, guidancePrefixesForSession(failed)); err != nil {
+	if err := writeSessionGuidance(
+		&failedOutput,
+		failed,
+		guidancePrefixesForSession(failed),
+	); err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(failedOutput.String(), "rollback after cutover failure") || strings.Contains(failedOutput.String(), "Abort pre-cutover") {
+
+	if !strings.Contains(failedOutput.String(), "rollback after cutover failure") ||
+		strings.Contains(failedOutput.String(), "Abort pre-cutover") {
 		t.Fatalf("failed guidance=%q", failedOutput.String())
 	}
 }
@@ -367,16 +526,30 @@ func TestSessionGuidanceKeepsPVCIdentityCleanupFreeOfPVDeletion(t *testing.T) {
 	for _, operation := range []domain.Operation{domain.OperationRename, domain.OperationMove} {
 		t.Run(string(operation), func(t *testing.T) {
 			session := guidanceSession(domain.PhaseCompleted)
-			session.Spec = domain.NewSessionSpec(operation, session.Spec.SessionCommon, domain.WorkloadSpec{}, false, domain.SessionWorkflowOptions{})
+			session.Spec = domain.NewSessionSpec(
+				operation,
+				session.Spec.SessionCommon,
+				domain.WorkloadSpec{},
+				false,
+				domain.SessionWorkflowOptions{},
+			)
+
 			var output bytes.Buffer
-			if err := writeSessionGuidance(&output, session, guidancePrefixesForSession(session)); err != nil {
+			if err := writeSessionGuidance(
+				&output,
+				session,
+				guidancePrefixesForSession(session),
+			); err != nil {
 				t.Fatal(err)
 			}
+
 			text := output.String()
 			if !strings.Contains(text, "session cleanup mig-test --finalize --delete-session") {
 				t.Fatalf("guidance=%q", text)
 			}
-			if strings.Contains(text, "--delete-rollback-pv") || strings.Contains(text, "--delete-temporary") {
+
+			if strings.Contains(text, "--delete-rollback-pv") ||
+				strings.Contains(text, "--delete-temporary") {
 				t.Fatalf("identity cleanup contains storage deletion flags: %q", text)
 			}
 		})
@@ -385,11 +558,20 @@ func TestSessionGuidanceKeepsPVCIdentityCleanupFreeOfPVDeletion(t *testing.T) {
 
 func TestSessionListGuidancePointsToStatusCommand(t *testing.T) {
 	var output bytes.Buffer
-	if err := writeSessionListGuidance(&output, "migration-control", []*domain.Session{guidanceSession(domain.PhaseFailed)}, sessionCommandPrefix("migration-control")); err != nil {
+	if err := writeSessionListGuidance(
+		&output,
+		"migration-control",
+		[]*domain.Session{guidanceSession(domain.PhaseFailed)},
+		sessionCommandPrefix("migration-control"),
+	); err != nil {
 		t.Fatal(err)
 	}
+
 	text := output.String()
-	if !strings.Contains(text, "pvc-migrate --session-namespace migration-control session status SESSION") {
+	if !strings.Contains(
+		text,
+		"pvc-migrate --session-namespace migration-control session status SESSION",
+	) {
 		t.Fatalf("guidance=%q", text)
 	}
 }
@@ -402,10 +584,16 @@ func TestCapacityFailureGuidanceDoesNotRecommendResume(t *testing.T) {
 	command := &guidanceErrorCommand{}
 	session := guidanceSession(domain.PhaseFailed)
 	session.Status.ResumeFrom = domain.PhaseFinalSyncing
-	err := domain.NewError(domain.ErrorConflict, "copy capacity", "destination PVC ran out of space")
+
+	err := domain.NewError(
+		domain.ErrorConflict,
+		"copy capacity",
+		"destination PVC ran out of space",
+	)
 	if got := reportSessionError(command, session, err); !errors.Is(got, err) {
 		t.Fatalf("returned error=%v", got)
 	}
+
 	text := command.stderr.String()
 	for _, want := range []string{
 		"Destination capacity was exhausted",
@@ -418,6 +606,7 @@ func TestCapacityFailureGuidanceDoesNotRecommendResume(t *testing.T) {
 			t.Fatalf("guidance=%q missing %q", text, want)
 		}
 	}
+
 	if strings.Contains(text, "session resume") {
 		t.Fatalf("capacity guidance recommends retrying an undersized destination: %q", text)
 	}
@@ -427,21 +616,35 @@ func TestPersistedCapacityFailureStatusKeepsSpecializedGuidance(t *testing.T) {
 	session := guidanceSession(domain.PhaseFailed)
 	session.Status.ResumeFrom = domain.PhaseWarmCopying
 	session.Status.Message = "copy capacity: destination PVC is full"
+
 	var output bytes.Buffer
-	if err := writeSessionGuidance(&output, session, guidancePrefixesForSession(session)); err != nil {
+	if err := writeSessionGuidance(
+		&output,
+		session,
+		guidancePrefixesForSession(session),
+	); err != nil {
 		t.Fatal(err)
 	}
+
 	text := output.String()
-	if !strings.Contains(text, "Destination capacity was exhausted") || !strings.Contains(text, "session abort mig-test") || strings.Contains(text, "session resume") {
+	if !strings.Contains(text, "Destination capacity was exhausted") ||
+		!strings.Contains(text, "session abort mig-test") ||
+		strings.Contains(text, "session resume") {
 		t.Fatalf("persisted capacity guidance=%q", text)
 	}
 }
 
 func TestErrorGuidanceIncludesRecoveryInspection(t *testing.T) {
 	command := &guidanceErrorCommand{}
-	if err := reportSessionLookupError(command, "migration-control", "mig-test", domain.NewError(domain.ErrorValidation, "get session", "missing")); err == nil {
+	if err := reportSessionLookupError(
+		command,
+		"migration-control",
+		"mig-test",
+		domain.NewError(domain.ErrorValidation, "get session", "missing"),
+	); err == nil {
 		t.Fatal("expected original lookup error")
 	}
+
 	text := command.stderr.String()
 	for _, want := range []string{
 		"session status",
@@ -455,10 +658,24 @@ func TestErrorGuidanceIncludesRecoveryInspection(t *testing.T) {
 
 func TestSessionCreationErrorGuidanceInspectsPotentialRecord(t *testing.T) {
 	command := &guidanceErrorCommand{}
-	creationErr := domain.NewError(domain.ErrorKubernetes, "create session", "connection reset after create")
-	if err := reportSessionCreationError(command, "migration-control", "mig-test", creationErr); !errors.Is(err, creationErr) {
+
+	creationErr := domain.NewError(
+		domain.ErrorKubernetes,
+		"create session",
+		"connection reset after create",
+	)
+	if err := reportSessionCreationError(
+		command,
+		"migration-control",
+		"mig-test",
+		creationErr,
+	); !errors.Is(
+		err,
+		creationErr,
+	) {
 		t.Fatalf("returned error=%v", err)
 	}
+
 	text := command.stderr.String()
 	for _, want := range []string{"session status mig-test", "get configmap pvc-migrate-session-mig-test"} {
 		if !strings.Contains(text, want) {
@@ -469,9 +686,16 @@ func TestSessionCreationErrorGuidanceInspectsPotentialRecord(t *testing.T) {
 
 func TestTransferErrorGuidanceIncludesPVCInspection(t *testing.T) {
 	command := &guidanceErrorCommand{}
-	if err := reportTransferError(command, "backup", "app", "data", domain.NewError(domain.ErrorPrecondition, "backup", "offline")); err == nil {
+	if err := reportTransferError(
+		command,
+		"backup",
+		"app",
+		"data",
+		domain.NewError(domain.ErrorPrecondition, "backup", "offline"),
+	); err == nil {
 		t.Fatal("expected original transfer error")
 	}
+
 	if !strings.Contains(command.stderr.String(), "kubectl --namespace app get pvc data") {
 		t.Fatalf("guidance=%q", command.stderr.String())
 	}
@@ -479,14 +703,31 @@ func TestTransferErrorGuidanceIncludesPVCInspection(t *testing.T) {
 
 func TestTransferPathErrorGuidanceDoesNotClaimPlanMountsPVC(t *testing.T) {
 	command := &guidanceErrorCommand{}
-	err := domain.NewError(domain.ErrorPrecondition, "transfer path preflight", "selected path is a symbolic link")
-	if got := reportTransferError(command, "live-backup", "app", "data", err); !errors.Is(got, err) {
+
+	err := domain.NewError(
+		domain.ErrorPrecondition,
+		"transfer path preflight",
+		"selected path is a symbolic link",
+	)
+	if got := reportTransferError(
+		command,
+		"live-backup",
+		"app",
+		"data",
+		err,
+	); !errors.Is(
+		got,
+		err,
+	) {
 		t.Fatalf("returned error=%v", got)
 	}
+
 	text := command.stderr.String()
-	if !strings.Contains(text, "Correct --path and rerun the write command") || !strings.Contains(text, "mounted directory") {
+	if !strings.Contains(text, "Correct --path and rerun the write command") ||
+		!strings.Contains(text, "mounted directory") {
 		t.Fatalf("guidance=%q", text)
 	}
+
 	if strings.Contains(text, "rerun its plan") {
 		t.Fatalf("path guidance incorrectly claims plan performs the mount check: %q", text)
 	}
@@ -494,28 +735,42 @@ func TestTransferPathErrorGuidanceDoesNotClaimPlanMountsPVC(t *testing.T) {
 
 func TestRuntimeErrorGuidanceAvoidsPVCInspection(t *testing.T) {
 	command := &guidanceErrorCommand{}
-	if err := reportRuntimeError(command, domain.NewError(domain.ErrorValidation, "flags", "unsupported output format")); err == nil {
+	if err := reportRuntimeError(
+		command,
+		domain.NewError(domain.ErrorValidation, "flags", "unsupported output format"),
+	); err == nil {
 		t.Fatal("expected original runtime error")
 	}
+
 	text := command.stderr.String()
-	if strings.Contains(text, "get pvc") || !strings.Contains(text, "--kubeconfig") || !strings.Contains(text, "--output") {
+	if strings.Contains(text, "get pvc") || !strings.Contains(text, "--kubeconfig") ||
+		!strings.Contains(text, "--output") {
 		t.Fatalf("guidance=%q", text)
 	}
 }
 
 func TestCleanupErrorGuidanceUsesActualLeaseName(t *testing.T) {
 	command := &guidanceErrorCommand{}
+
 	session := guidanceSession(domain.PhaseCompleted)
-	if err := reportCleanupError(command, session, app.CleanupOptions{DeleteSession: true}, domain.NewError(domain.ErrorKubernetes, "delete session", "delete failed")); err == nil {
+	if err := reportCleanupError(
+		command,
+		session,
+		app.CleanupOptions{DeleteSession: true},
+		domain.NewError(domain.ErrorKubernetes, "delete session", "delete failed"),
+	); err == nil {
 		t.Fatal("expected original cleanup error")
 	}
+
 	text := command.stderr.String()
 	if !strings.Contains(text, "get configmap "+kube.SessionConfigMapName(session.ID)) {
 		t.Fatalf("guidance=%q", text)
 	}
+
 	if !strings.Contains(text, "get lease "+kube.SessionLockName(session.ID)) {
 		t.Fatalf("guidance=%q", text)
 	}
+
 	if strings.Contains(text, "get configmap,lease "+kube.SessionConfigMapName(session.ID)) {
 		t.Fatalf("guidance still uses ConfigMap name for Lease: %q", text)
 	}
@@ -524,15 +779,26 @@ func TestCleanupErrorGuidanceUsesActualLeaseName(t *testing.T) {
 func TestCleanupErrorGuidanceFindsJoinedLeaseDeletion(t *testing.T) {
 	command := &guidanceErrorCommand{}
 	session := guidanceSession(domain.PhaseCompleted)
+
 	cleanupErr := errors.Join(
 		domain.NewError(domain.ErrorKubernetes, "cleanup", "resource cleanup failed"),
 		domain.NewError(domain.ErrorKubernetes, "delete session lock", "Lease deletion failed"),
 	)
-	if err := reportCleanupError(command, session, app.CleanupOptions{DeleteSession: true}, cleanupErr); !errors.Is(err, cleanupErr) {
+	if err := reportCleanupError(
+		command,
+		session,
+		app.CleanupOptions{DeleteSession: true},
+		cleanupErr,
+	); !errors.Is(
+		err,
+		cleanupErr,
+	) {
 		t.Fatalf("returned error=%v", err)
 	}
+
 	text := command.stderr.String()
-	if !strings.Contains(text, "session record removal") || !strings.Contains(text, "get lease "+kube.SessionLockName(session.ID)) {
+	if !strings.Contains(text, "session record removal") ||
+		!strings.Contains(text, "get lease "+kube.SessionLockName(session.ID)) {
 		t.Fatalf("guidance=%q", text)
 	}
 }
@@ -540,11 +806,30 @@ func TestCleanupErrorGuidanceFindsJoinedLeaseDeletion(t *testing.T) {
 func TestCleanupLockErrorGuidanceDescribesRetryableCleanup(t *testing.T) {
 	command := &guidanceErrorCommand{}
 	session := guidanceSession(domain.PhaseCompleted)
-	options := app.CleanupOptions{DeleteTemporary: true, DeleteRollback: true, Finalize: true, DeleteSession: true}
-	cleanupErr := domain.NewError(domain.ErrorKubernetes, "acquire session lock", "read Lease failed")
-	if err := reportCleanupError(command, session, options, cleanupErr); !errors.Is(err, cleanupErr) {
+	options := app.CleanupOptions{
+		DeleteTemporary: true,
+		DeleteRollback:  true,
+		Finalize:        true,
+		DeleteSession:   true,
+	}
+
+	cleanupErr := domain.NewError(
+		domain.ErrorKubernetes,
+		"acquire session lock",
+		"read Lease failed",
+	)
+	if err := reportCleanupError(
+		command,
+		session,
+		options,
+		cleanupErr,
+	); !errors.Is(
+		err,
+		cleanupErr,
+	) {
 		t.Fatalf("returned error=%v", err)
 	}
+
 	text := command.stderr.String()
 	for _, want := range []string{
 		"Cleanup stopped before confirmed completion",
@@ -555,7 +840,9 @@ func TestCleanupLockErrorGuidanceDescribesRetryableCleanup(t *testing.T) {
 			t.Fatalf("guidance=%q missing %q", text, want)
 		}
 	}
-	if strings.Contains(text, "session record removal") || strings.Contains(text, "cleanup-orphan") {
+
+	if strings.Contains(text, "session record removal") ||
+		strings.Contains(text, "cleanup-orphan") {
 		t.Fatalf("lock acquisition was misreported as record removal: %q", text)
 	}
 }
@@ -570,23 +857,35 @@ func TestCleanupPodBlockerGuidanceNamesOwnerAndPreservesConnection(t *testing.T)
 	} {
 		t.Run(test.kind, func(t *testing.T) {
 			var stderr bytes.Buffer
+
 			root := NewRoot(Options{Version: "test", ErrOut: &stderr})
 			for name, value := range map[string]string{"kubeconfig": "/tmp/config local", "context": "cluster-a"} {
 				if err := root.PersistentFlags().Set(name, value); err != nil {
 					t.Fatal(err)
 				}
 			}
+
 			command, _, err := root.Find([]string{"session", "cleanup"})
 			if err != nil {
 				t.Fatal(err)
 			}
+
 			blocker := &app.CleanupPodBlockerError{
-				PVCNamespace: "system", PVCName: "data-migrated", PodNamespace: "system", PodName: "copy-tool",
-				PodPhase: "Failed", OwnerKind: test.kind, OwnerName: "copy-owner", OwnerVerified: true, SessionOwned: true, Terminal: true,
+				PVCNamespace:  "system",
+				PVCName:       "data-migrated",
+				PodNamespace:  "system",
+				PodName:       "copy-tool",
+				PodPhase:      "Failed",
+				OwnerKind:     test.kind,
+				OwnerName:     "copy-owner",
+				OwnerVerified: true,
+				SessionOwned:  true,
+				Terminal:      true,
 			}
 			if err := writeCleanupPodBlockerGuidance(&stderr, command, blocker); err != nil {
 				t.Fatal(err)
 			}
+
 			prefix := "kubectl --kubeconfig '/tmp/config local' --context cluster-a --namespace system"
 			for _, want := range []string{
 				prefix + " get " + test.resource + " copy-owner -o wide",
@@ -603,15 +902,28 @@ func TestCleanupPodBlockerGuidanceNamesOwnerAndPreservesConnection(t *testing.T)
 
 func TestCleanupPodBlockerGuidanceDoesNotDeleteUnverifiedOwner(t *testing.T) {
 	var output bytes.Buffer
+
 	blocker := &app.CleanupPodBlockerError{
-		PVCNamespace: "system", PVCName: "data-migrated", PodNamespace: "system", PodName: "copy-tool",
-		OwnerKind: "Job", OwnerName: "copy-owner", SessionOwned: true, Terminal: true,
+		PVCNamespace: "system",
+		PVCName:      "data-migrated",
+		PodNamespace: "system",
+		PodName:      "copy-tool",
+		OwnerKind:    "Job",
+		OwnerName:    "copy-owner",
+		SessionOwned: true,
+		Terminal:     true,
 	}
-	if err := writeCleanupPodBlockerGuidance(&output, &guidanceErrorCommand{}, blocker); err != nil {
+	if err := writeCleanupPodBlockerGuidance(
+		&output,
+		&guidanceErrorCommand{},
+		blocker,
+	); err != nil {
 		t.Fatal(err)
 	}
+
 	text := output.String()
-	if !strings.Contains(text, "UID could not be verified") || strings.Contains(text, "delete job copy-owner") {
+	if !strings.Contains(text, "UID could not be verified") ||
+		strings.Contains(text, "delete job copy-owner") {
 		t.Fatalf("unsafe unverified owner guidance=%q", text)
 	}
 }
@@ -627,13 +939,26 @@ func TestWarmCopyMountGuidanceIncludesAbortCleanupAndOfflineRetry(t *testing.T) 
 	} {
 		t.Run(string(test.operation), func(t *testing.T) {
 			var output bytes.Buffer
+
 			session := guidanceSession(domain.PhaseFailed)
 			if test.operation == domain.OperationCopy {
-				session.Spec = domain.NewSessionSpec(domain.OperationCopy, session.Spec.SessionCommon, domain.WorkloadSpec{}, true, session.Spec.WorkflowOptions())
+				session.Spec = domain.NewSessionSpec(
+					domain.OperationCopy,
+					session.Spec.SessionCommon,
+					domain.WorkloadSpec{},
+					true,
+					session.Spec.WorkflowOptions(),
+				)
 			}
-			if err := writeWarmCopyMountGuidance(&output, &guidanceErrorCommand{}, session); err != nil {
+
+			if err := writeWarmCopyMountGuidance(
+				&output,
+				&guidanceErrorCommand{},
+				session,
+			); err != nil {
 				t.Fatal(err)
 			}
+
 			text := output.String()
 			for _, want := range []string{
 				"session abort mig-test --dry-run",
@@ -644,6 +969,7 @@ func TestWarmCopyMountGuidanceIncludesAbortCleanupAndOfflineRetry(t *testing.T) 
 					t.Fatalf("guidance=%q missing %q", text, want)
 				}
 			}
+
 			if strings.Contains(text, test.absent) {
 				t.Fatalf("guidance=%q contains operation-invalid advice %q", text, test.absent)
 			}
@@ -653,27 +979,50 @@ func TestWarmCopyMountGuidanceIncludesAbortCleanupAndOfflineRetry(t *testing.T) 
 
 func TestCopyPlanFailureGuidanceDoesNotSuggestPrecopyPasses(t *testing.T) {
 	var output bytes.Buffer
+
 	plan := &domain.MigrationPlan{
-		SessionSpec: domain.NewSessionSpec(domain.OperationCopy, domain.SessionCommon{}, domain.WorkloadSpec{}, true, domain.SessionWorkflowOptions{}),
-		Checks:      []domain.Check{{Name: "warm-copy-mount", Severity: domain.SeverityError}},
+		SessionSpec: domain.NewSessionSpec(
+			domain.OperationCopy,
+			domain.SessionCommon{},
+			domain.WorkloadSpec{},
+			true,
+			domain.SessionWorkflowOptions{},
+		),
+		Checks: []domain.Check{{Name: "warm-copy-mount", Severity: domain.SeverityError}},
 	}
 	if err := writePlanFailureGuidance(&output, plan); err != nil {
 		t.Fatal(err)
 	}
-	if text := output.String(); !strings.Contains(text, "without --online") || strings.Contains(text, "--precopy-passes") {
+
+	if text := output.String(); !strings.Contains(text, "without --online") ||
+		strings.Contains(text, "--precopy-passes") {
 		t.Fatalf("copy plan guidance=%q", text)
 	}
 }
 
 func TestOpenEBSLVMPlanFailureGuidanceOffersBothRecoveryPaths(t *testing.T) {
 	var output bytes.Buffer
+
 	plan := &domain.MigrationPlan{
-		SessionSpec: domain.NewSessionSpec(domain.OperationMigrate, domain.SessionCommon{}, domain.WorkloadSpec{}, false, domain.SessionWorkflowOptions{}),
-		Checks:      []domain.Check{{Name: "warm-copy-mount", Severity: domain.SeverityError, Message: "OpenEBS LVMVolume does not support a second mount"}},
+		SessionSpec: domain.NewSessionSpec(
+			domain.OperationMigrate,
+			domain.SessionCommon{},
+			domain.WorkloadSpec{},
+			false,
+			domain.SessionWorkflowOptions{},
+		),
+		Checks: []domain.Check{
+			{
+				Name:     "warm-copy-mount",
+				Severity: domain.SeverityError,
+				Message:  "OpenEBS LVMVolume does not support a second mount",
+			},
+		},
 	}
 	if err := writePlanFailureGuidance(&output, plan); err != nil {
 		t.Fatal(err)
 	}
+
 	text := output.String()
 	for _, want := range []string{"--precopy-passes 0", "--openebs-lvm-enable-shared"} {
 		if !strings.Contains(text, want) {
@@ -684,12 +1033,21 @@ func TestOpenEBSLVMPlanFailureGuidanceOffersBothRecoveryPaths(t *testing.T) {
 
 func TestApprovalErrorGuidanceStatesProtectedActionDidNotStart(t *testing.T) {
 	command := &guidanceErrorCommand{}
-	approvalErr := domain.WrapError(domain.ErrorTimeout, "approval", "typed approval canceled", context.Canceled)
+
+	approvalErr := domain.WrapError(
+		domain.ErrorTimeout,
+		"approval",
+		"typed approval canceled",
+		context.Canceled,
+	)
 	if err := reportApprovalError(command, approvalErr); !errors.Is(err, approvalErr) {
 		t.Fatalf("returned error=%v", err)
 	}
+
 	text := command.stderr.String()
-	if !strings.Contains(text, "before the protected action began") || !strings.Contains(text, "--dry-run") || !strings.Contains(text, "--yes") {
+	if !strings.Contains(text, "before the protected action began") ||
+		!strings.Contains(text, "--dry-run") ||
+		!strings.Contains(text, "--yes") {
 		t.Fatalf("guidance=%q", text)
 	}
 }

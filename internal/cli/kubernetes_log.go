@@ -35,15 +35,19 @@ func isExpectedWatchCancellation(record slog.Record) bool {
 	if record.Message != "Failed to watch" {
 		return false
 	}
+
 	var canceled bool
 	record.Attrs(func(attr slog.Attr) bool {
 		if attr.Key != "err" {
 			return true
 		}
+
 		if err, ok := attr.Value.Any().(error); ok {
 			canceled = errors.Is(err, context.Canceled)
 		}
+
 		return false
 	})
+
 	return canceled
 }

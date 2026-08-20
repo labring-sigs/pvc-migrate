@@ -13,6 +13,7 @@ import (
 // PVC storage remains represented by the PVC requests.storage field.
 func ZeroResourceRequirements() corev1.ResourceRequirements {
 	zero := resource.MustParse("0")
+
 	return corev1.ResourceRequirements{
 		Requests: corev1.ResourceList{
 			corev1.ResourceCPU:              zero.DeepCopy(),
@@ -37,11 +38,13 @@ func ZeroResourceHelmValues() []string {
 		"limits.cpu",
 		"limits.memory",
 	}
+
 	values := make([]string, 0, len(components)*len(resources))
 	for _, component := range components {
 		for _, resourceName := range resources {
 			values = append(values, component+".resources."+resourceName+"=0")
 		}
 	}
+
 	return values
 }

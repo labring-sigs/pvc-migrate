@@ -35,41 +35,50 @@ func WriteCommandError(w io.Writer, err error) {
 		writer.writeCommandError(err)
 		return
 	}
+
 	_, _ = fmt.Fprintf(w, "error: %v\n", err)
 }
 
 func (w *logOutputWriter) writeCommandError(err error) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
+
 	if w.structured != nil && w.structured() {
 		record := slog.NewRecord(time.Now(), slog.LevelError, "command failed", 0)
 		record.AddAttrs(slog.String("error", err.Error()))
 		_ = slog.NewJSONHandler(w.target, nil).Handle(context.Background(), record)
 		return
 	}
+
 	_, _ = fmt.Fprintf(w.target, "error: %v\n", err)
 }
 
 func (w *logOutputWriter) Write(data []byte) (int, error) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
+
 	if w.structured == nil || !w.structured() {
 		return w.target.Write(data)
 	}
-	for _, line := range bytes.Split(data, []byte{'\n'}) {
+
+	for line := range bytes.SplitSeq(data, []byte{'\n'}) {
 		line = bytes.TrimSpace(line)
 		if len(line) == 0 {
 			continue
 		}
+
 		if json.Valid(line) {
 			if _, err := w.target.Write(append(line, '\n')); err != nil {
 				return 0, err
 			}
 			continue
 		}
-		if err := slog.NewJSONHandler(w.target, nil).Handle(context.Background(), slog.NewRecord(time.Now(), slog.LevelInfo, string(line), 0)); err != nil {
+
+		if err := slog.NewJSONHandler(w.target, nil).
+			Handle(context.Background(), slog.NewRecord(time.Now(), slog.LevelInfo, string(line), 0)); err != nil {
 			return 0, err
 		}
 	}
+
 	return len(data), nil
 }

@@ -20,10 +20,12 @@ func DefaultToolImage(repository, version string) string {
 	if repository == "" {
 		repository = DefaultToolImageRepository
 	}
+
 	tag := strings.TrimPrefix(strings.TrimSpace(version), "v")
 	if tag == "" || tag == "dev" {
 		tag = "main"
 	}
+
 	return repository + ":" + tag
 }
 
@@ -36,17 +38,34 @@ func NormalizeToolImage(value string) (string, error) {
 	if value == "" {
 		value = DefaultToolImageRepository + ":main"
 	}
+
 	if strings.Contains(value, "@") {
-		return "", domain.NewError(domain.ErrorValidation, "tool image", "digest references are unsupported; use repository:tag")
+		return "", domain.NewError(
+			domain.ErrorValidation,
+			"tool image",
+			"digest references are unsupported; use repository:tag",
+		)
 	}
+
 	named, err := reference.ParseNormalizedNamed(value)
 	if err != nil {
-		return "", domain.WrapError(domain.ErrorValidation, "tool image", fmt.Sprintf("invalid image reference %q", value), err)
+		return "", domain.WrapError(
+			domain.ErrorValidation,
+			"tool image",
+			fmt.Sprintf("invalid image reference %q", value),
+			err,
+		)
 	}
+
 	tagged, ok := named.(reference.NamedTagged)
 	if !ok || tagged.Tag() == "" {
-		return "", domain.NewError(domain.ErrorValidation, "tool image", fmt.Sprintf("image %q must include an explicit tag", value))
+		return "", domain.NewError(
+			domain.ErrorValidation,
+			"tool image",
+			fmt.Sprintf("image %q must include an explicit tag", value),
+		)
 	}
+
 	return tagged.Name() + ":" + tagged.Tag(), nil
 }
 
@@ -58,15 +77,35 @@ func ToolImageHelmValues(image string) ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
+
 	named, err := reference.ParseNormalizedNamed(normalized)
 	if err != nil {
-		return nil, domain.WrapError(domain.ErrorInternal, "tool image", "parse normalized image", err)
+		return nil, domain.WrapError(
+			domain.ErrorInternal,
+			"tool image",
+			"parse normalized image",
+			err,
+		)
 	}
-	tagged := named.(reference.NamedTagged)
+
+	tagged, ok := named.(reference.NamedTagged)
+	if !ok || tagged.Tag() == "" {
+		return nil, domain.NewError(
+			domain.ErrorInternal,
+			"tool image",
+			"normalized image does not contain a tag",
+		)
+	}
+
 	values := make([]string, 0, 6)
 	for _, component := range []string{"rsync", "sshd", "rclone"} {
-		values = append(values, component+".image.repository="+tagged.Name(), component+".image.tag="+tagged.Tag())
+		values = append(
+			values,
+			component+".image.repository="+tagged.Name(),
+			component+".image.tag="+tagged.Tag(),
+		)
 	}
+
 	return values, nil
 }
 
@@ -76,7 +115,12 @@ func ToolImageHelmValues(image string) ([]string, error) {
 func ToolSecurityContextHelmValues() []string {
 	values := make([]string, 0, 6)
 	for _, component := range []string{"rsync", "sshd", "rclone"} {
-		values = append(values, component+".securityContext.runAsUser=0", component+".securityContext.runAsGroup=0")
+		values = append(
+			values,
+			component+".securityContext.runAsUser=0",
+			component+".securityContext.runAsGroup=0",
+		)
 	}
+
 	return values
 }

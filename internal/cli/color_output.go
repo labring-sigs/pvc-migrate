@@ -20,10 +20,12 @@ const (
 )
 
 var (
-	logLevelToken          = regexp.MustCompile(`(^|[ \t])level=(DEBUG|INFO|WARN|ERROR)`)
-	componentToken         = regexp.MustCompile(`(^|[ \t])component=("[^"]*"|[^\s]+)`)
-	toolPrefix             = regexp.MustCompile(`\[tool [^\]\r\n]+\]`)
-	guidanceTitle          = regexp.MustCompile(`^(\s*Next steps for session .+ \(phase )([^)]+)(\):\s*)$`)
+	logLevelToken  = regexp.MustCompile(`(^|[ \t])level=(DEBUG|INFO|WARN|ERROR)`)
+	componentToken = regexp.MustCompile(`(^|[ \t])component=("[^"]*"|[^\s]+)`)
+	toolPrefix     = regexp.MustCompile(`\[tool [^\]\r\n]+\]`)
+	guidanceTitle  = regexp.MustCompile(
+		`^(\s*Next steps for session .+ \(phase )([^)]+)(\):\s*)$`,
+	)
 	guidanceCompletedToken = regexp.MustCompile(`(?i)\bcompleted\b`)
 	componentColors        = map[string]string{
 		"controller": "36",
@@ -58,17 +60,22 @@ func newColorOutputWriter(target io.Writer, enabled func() bool) io.Writer {
 func (w *colorOutputWriter) Write(data []byte) (int, error) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
+
 	if w.enabled == nil || !w.enabled() || bytes.Contains(data, []byte("\x1b[")) {
 		return w.target.Write(data)
 	}
+
 	colored := colorizeLogText(data)
+
 	n, err := w.target.Write(colored)
 	if err != nil {
 		return 0, err
 	}
+
 	if n != len(colored) {
 		return 0, io.ErrShortWrite
 	}
+
 	return len(data), nil
 }
 
@@ -81,7 +88,11 @@ func parseColorMode(value string) (string, error) {
 	case colorNever:
 		return colorNever, nil
 	default:
-		return "", domain.NewError(domain.ErrorValidation, "flags", fmt.Sprintf("unsupported color mode %q", value))
+		return "", domain.NewError(
+			domain.ErrorValidation,
+			"flags",
+			fmt.Sprintf("unsupported color mode %q", value),
+		)
 	}
 }
 
@@ -90,23 +101,29 @@ func colorEnabled(mode string, target io.Writer) bool {
 	if err != nil || parsed == colorNever {
 		return false
 	}
+
 	if parsed == colorAlways {
 		return true
 	}
+
 	if os.Getenv("NO_COLOR") != "" || os.Getenv("TERM") == "dumb" {
 		return false
 	}
+
 	file, ok := target.(*os.File)
 	if !ok {
 		return false
 	}
+
 	info, err := file.Stat()
+
 	return err == nil && info.Mode()&os.ModeCharDevice != 0
 }
 
 func colorizeLogText(data []byte) []byte {
 	var output strings.Builder
 	output.Grow(len(data) + 32)
+
 	for start := 0; start < len(data); {
 		end := bytes.IndexByte(data[start:], '\n')
 		if end < 0 {
@@ -114,25 +131,33 @@ func colorizeLogText(data []byte) []byte {
 		} else {
 			end += start
 		}
+
 		output.WriteString(colorizeLogLine(string(data[start:end])))
+
 		if end < len(data) {
 			output.WriteByte('\n')
+
 			end++
 		}
+
 		start = end
 	}
+
 	return []byte(output.String())
 }
 
 func colorizeLogLine(line string) string {
 	trimmed := strings.TrimSpace(line)
+
 	lower := strings.ToLower(trimmed)
 	if strings.HasPrefix(lower, "error:") {
 		return ansi("1;31", line)
 	}
+
 	if strings.HasPrefix(lower, "warning:") {
 		return ansi("1;33", line)
 	}
+
 	line = colorizeGuidanceLine(line)
 
 	line = logLevelToken.ReplaceAllStringFunc(line, func(token string) string {
@@ -145,12 +170,15 @@ func colorizeLogLine(line string) string {
 		value := strings.TrimPrefix(token, "component=")
 		return prefix + "component=" + ansi(componentColor(value), value)
 	})
+
 	return toolPrefix.ReplaceAllStringFunc(line, func(token string) string {
 		fields := strings.Fields(strings.TrimSuffix(strings.TrimPrefix(token, "[tool "), "]"))
+
 		component := token
 		if len(fields) > 0 {
 			component = fields[len(fields)-1]
 		}
+
 		return ansi(componentColor(component), token)
 	})
 }
@@ -163,15 +191,18 @@ func colorizeGuidanceLine(line string) string {
 	}
 
 	leadingLength := len(line) - len(strings.TrimLeft(line, " \t"))
+
 	leading, content := line[:leadingLength], line[leadingLength:]
 	if label, rest, found := strings.Cut(content, ":"); found {
 		if color := guidanceLabelColor(label); color != "" {
 			return leading + ansi(color, label+":") + rest
 		}
 	}
+
 	if strings.HasPrefix(strings.ToLower(content), "verify ") {
 		return leading + ansi("36", content)
 	}
+
 	return guidanceCompletedToken.ReplaceAllStringFunc(line, func(token string) string {
 		return ansi("1;32", token)
 	})
@@ -191,13 +222,22 @@ func guidancePhaseColor(phase string) string {
 func guidanceLabelColor(label string) string {
 	normalized := strings.ToLower(strings.TrimSpace(label))
 	switch {
-	case strings.HasPrefix(normalized, "record"), strings.HasPrefix(normalized, "inspect"), strings.HasPrefix(normalized, "verify"):
+	case strings.HasPrefix(normalized, "record"),
+		strings.HasPrefix(normalized, "inspect"),
+		strings.HasPrefix(normalized, "verify"):
 		return "36"
 	case strings.HasPrefix(normalized, "validate"), strings.HasPrefix(normalized, "cleanup action"):
 		return "1;33"
-	case strings.HasPrefix(normalized, "continue"), strings.HasPrefix(normalized, "resume"), strings.HasPrefix(normalized, "keep"):
+	case strings.HasPrefix(normalized, "continue"),
+		strings.HasPrefix(normalized, "resume"),
+		strings.HasPrefix(normalized, "keep"):
 		return "1;32"
-	case strings.HasPrefix(normalized, "abort"), strings.HasPrefix(normalized, "roll back"), strings.HasPrefix(normalized, "finalize"), strings.HasPrefix(normalized, "discard"), strings.HasPrefix(normalized, "close retained"), strings.HasPrefix(normalized, "delete"):
+	case strings.HasPrefix(normalized, "abort"),
+		strings.HasPrefix(normalized, "roll back"),
+		strings.HasPrefix(normalized, "finalize"),
+		strings.HasPrefix(normalized, "discard"),
+		strings.HasPrefix(normalized, "close retained"),
+		strings.HasPrefix(normalized, "delete"):
 		return "1;31"
 	default:
 		return ""
@@ -231,13 +271,30 @@ func componentColor(value string) string {
 	if color, ok := componentColors[value]; ok {
 		return color
 	}
+
 	var hash uint32 = 2166136261
-	for index := 0; index < len(value); index++ {
+	for index := range len(value) {
 		hash ^= uint32(value[index])
 		hash *= 16777619
 	}
+
 	const paletteSize = 12
-	palette := [paletteSize]string{"36", "35", "34", "32", "33", "31", "96", "95", "94", "92", "93", "91"}
+
+	palette := [paletteSize]string{
+		"36",
+		"35",
+		"34",
+		"32",
+		"33",
+		"31",
+		"96",
+		"95",
+		"94",
+		"92",
+		"93",
+		"91",
+	}
+
 	return palette[hash%paletteSize]
 }
 

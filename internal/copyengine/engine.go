@@ -17,38 +17,40 @@ const (
 )
 
 type Request struct {
-	SessionID             string
-	ToolImage             string
-	Source                domain.ObjectReference
-	Destination           domain.ObjectReference
-	SourcePath            string
-	DestinationPath       string
-	Mode                  Mode
-	Attempt               int
-	KubeconfigPath        string
-	Context               string
-	Strategies            []string
-	DeleteExtraneousFiles bool
-	VerifyChecksum        bool
-	SourceMountReadWrite  bool
-	IgnoreSizes           bool
-	NoCompress            bool
-	HelmTimeout           time.Duration
-	HelmStringValues      []string
-	Writer                io.Writer
-	Logger                *slog.Logger
+	SessionID                 string
+	ToolImage                 string
+	Source                    domain.ObjectReference
+	Destination               domain.ObjectReference
+	SourcePath                string
+	DestinationPath           string
+	Mode                      Mode
+	Attempt                   int
+	KubeconfigPath            string
+	Context                   string
+	DestinationKubeconfigPath string
+	DestinationContext        string
+	Strategies                []string
+	DeleteExtraneousFiles     bool
+	VerifyChecksum            bool
+	SourceMountReadWrite      bool
+	IgnoreSizes               bool
+	NoCompress                bool
+	HelmTimeout               time.Duration
+	HelmStringValues          []string
+	Writer                    io.Writer
+	Logger                    *slog.Logger
 }
 
 type Progress struct {
-	Mode    Mode   `json:"mode" yaml:"mode"`
-	Attempt int    `json:"attempt" yaml:"attempt"`
-	State   string `json:"state" yaml:"state"`
+	Mode    Mode   `json:"mode"              yaml:"mode"`
+	Attempt int    `json:"attempt"           yaml:"attempt"`
+	State   string `json:"state"             yaml:"state"`
 	Message string `json:"message,omitempty" yaml:"message,omitempty"`
-	Bytes   int64  `json:"bytes,omitempty" yaml:"bytes,omitempty"`
+	Bytes   int64  `json:"bytes,omitempty"   yaml:"bytes,omitempty"`
 }
 
 type ProgressFunc func(Progress)
 
 type Engine interface {
-	Copy(context.Context, Request, ProgressFunc) error
+	Copy(ctx context.Context, request Request, progress ProgressFunc) error
 }

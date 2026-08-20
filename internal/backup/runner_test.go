@@ -17,6 +17,7 @@ import (
 	"github.com/labring-sigs/pvc-migrate/internal/domain"
 	"github.com/labring-sigs/pvc-migrate/internal/kube"
 	"github.com/labring-sigs/pvc-migrate/internal/objectstore"
+	"github.com/labring-sigs/pvc-migrate/internal/testutil"
 	"github.com/utkuozdemir/pv-migrate/pvmigrate"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
@@ -36,53 +37,81 @@ type preflightObjectStore struct {
 	deleteErr error
 }
 
-func (f *preflightObjectStore) HeadObject(context.Context, *s3.HeadObjectInput, ...func(*s3.Options)) (*s3.HeadObjectOutput, error) {
-	return nil, preflightMissingObject{}
+func (f *preflightObjectStore) HeadObject(
+	context.Context,
+	*s3.HeadObjectInput,
+	...func(*s3.Options),
+) (*s3.HeadObjectOutput, error) {
+	return nil, preflightMissingObjectError{}
 }
 
-func (f *preflightObjectStore) GetObject(_ context.Context, _ *s3.GetObjectInput, _ ...func(*s3.Options)) (*s3.GetObjectOutput, error) {
+func (f *preflightObjectStore) GetObject(
+	_ context.Context,
+	_ *s3.GetObjectInput,
+	_ ...func(*s3.Options),
+) (*s3.GetObjectOutput, error) {
 	if f.getErr != nil {
 		return nil, f.getErr
 	}
+
 	if len(f.manifest) == 0 {
-		return nil, preflightMissingObject{}
+		return nil, preflightMissingObjectError{}
 	}
+
 	return &s3.GetObjectOutput{Body: io.NopCloser(bytes.NewReader(f.manifest))}, nil
 }
 
-func (f *preflightObjectStore) PutObject(context.Context, *s3.PutObjectInput, ...func(*s3.Options)) (*s3.PutObjectOutput, error) {
+func (f *preflightObjectStore) PutObject(
+	context.Context,
+	*s3.PutObjectInput,
+	...func(*s3.Options),
+) (*s3.PutObjectOutput, error) {
 	f.puts++
 	if f.onPut != nil {
 		f.onPut()
 	}
+
 	return &s3.PutObjectOutput{ETag: aws.String("etag")}, nil
 }
 
-func (f *preflightObjectStore) DeleteObject(context.Context, *s3.DeleteObjectInput, ...func(*s3.Options)) (*s3.DeleteObjectOutput, error) {
+func (f *preflightObjectStore) DeleteObject(
+	context.Context,
+	*s3.DeleteObjectInput,
+	...func(*s3.Options),
+) (*s3.DeleteObjectOutput, error) {
 	if f.deleteErr != nil {
 		return nil, f.deleteErr
 	}
 	return &s3.DeleteObjectOutput{}, nil
 }
 
-func (*preflightObjectStore) ListObjectsV2(context.Context, *s3.ListObjectsV2Input, ...func(*s3.Options)) (*s3.ListObjectsV2Output, error) {
+func (*preflightObjectStore) ListObjectsV2(
+	context.Context,
+	*s3.ListObjectsV2Input,
+	...func(*s3.Options),
+) (*s3.ListObjectsV2Output, error) {
 	return &s3.ListObjectsV2Output{}, nil
 }
 
-type preflightMissingObject struct{}
+type preflightMissingObjectError struct{}
 
-func (preflightMissingObject) Error() string                 { return "missing" }
-func (preflightMissingObject) ErrorCode() string             { return "NoSuchKey" }
-func (preflightMissingObject) ErrorMessage() string          { return "missing" }
-func (preflightMissingObject) ErrorFault() smithy.ErrorFault { return smithy.FaultClient }
+func (preflightMissingObjectError) Error() string                 { return "missing" }
+func (preflightMissingObjectError) ErrorCode() string             { return "NoSuchKey" }
+func (preflightMissingObjectError) ErrorMessage() string          { return "missing" }
+func (preflightMissingObjectError) ErrorFault() smithy.ErrorFault { return smithy.FaultClient }
 
 func preflightFixture(t *testing.T, client objectstore.API) (kubernetes.Interface, Request) {
 	t.Helper()
+
 	mode := corev1.PersistentVolumeFilesystem
 	pvc := &corev1.PersistentVolumeClaim{
 		ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "data", UID: types.UID("pvc")},
-		Spec:       corev1.PersistentVolumeClaimSpec{VolumeName: "pv-data", VolumeMode: &mode, AccessModes: []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce}},
-		Status:     corev1.PersistentVolumeClaimStatus{Phase: corev1.ClaimBound},
+		Spec: corev1.PersistentVolumeClaimSpec{
+			VolumeName:  "pv-data",
+			VolumeMode:  &mode,
+			AccessModes: []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce},
+		},
+		Status: corev1.PersistentVolumeClaimStatus{Phase: corev1.ClaimBound},
 	}
 	pv := &corev1.PersistentVolume{
 		ObjectMeta: metav1.ObjectMeta{Name: "pv-data", UID: types.UID("pv")},
@@ -92,30 +121,52 @@ func preflightFixture(t *testing.T, client objectstore.API) (kubernetes.Interfac
 		},
 		Status: corev1.PersistentVolumeStatus{Phase: corev1.VolumeBound},
 	}
-	store, err := objectstore.NewWithClient(client, objectstore.Config{Bucket: "backups", Prefix: "pv-migrate", Name: "daily"}, objectstore.Credentials{AccessKey: "key", SecretKey: "secret"})
+
+	store, err := objectstore.NewWithClient(
+		client,
+		objectstore.Config{Bucket: "backups", Prefix: "pv-migrate", Name: "daily"},
+		objectstore.Credentials{AccessKey: "key", SecretKey: "secret"},
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
-	return fake.NewClientset(pvc, pv), Request{ID: "test", Namespace: "default", PVCName: "data", Store: store}
+
+	clientset := fake.NewClientset(pvc, pv)
+
+	return clientset, Request{
+		ID:        "test",
+		Namespace: "default",
+		PVCName:   "data",
+		Store:     store,
+	}
 }
 
 func TestRunWithCleanupTimeout(t *testing.T) {
 	t.Run("deadline bounds cleanup", func(t *testing.T) {
 		started := time.Now()
+
 		err := runWithCleanupTimeout(10*time.Millisecond, func(ctx context.Context) error {
 			<-ctx.Done()
 			return ctx.Err()
 		})
-		if domain.CategoryOf(err) != domain.ErrorTimeout || !errors.Is(err, context.DeadlineExceeded) {
+		if domain.CategoryOf(err) != domain.ErrorTimeout ||
+			!errors.Is(err, context.DeadlineExceeded) {
 			t.Fatalf("error=%v category=%q", err, domain.CategoryOf(err))
 		}
+
 		if elapsed := time.Since(started); elapsed > time.Second {
 			t.Fatalf("cleanup elapsed=%v", elapsed)
 		}
 	})
 	t.Run("preserves cleanup error", func(t *testing.T) {
 		wantErr := domain.NewError(domain.ErrorConflict, "release lock", "ownership changed")
-		if err := runWithCleanupTimeout(time.Second, func(context.Context) error { return wantErr }); !errors.Is(err, wantErr) {
+		if err := runWithCleanupTimeout(
+			time.Second,
+			func(context.Context) error { return wantErr },
+		); !errors.Is(
+			err,
+			wantErr,
+		) {
 			t.Fatalf("error=%v", err)
 		}
 	})
@@ -131,6 +182,7 @@ func TestRunBackupPreservesOperationAndLockCleanupErrors(t *testing.T) {
 	cleanupErr := errors.New("lock delete failed")
 	storeAPI := &preflightObjectStore{getErr: operationErr, deleteErr: cleanupErr}
 	client, request := preflightFixture(t, storeAPI)
+
 	err := runBackup(context.Background(), client, request, "pvc", "pv")
 	if !errors.Is(err, operationErr) || !errors.Is(err, cleanupErr) {
 		t.Fatalf("error=%v", err)
@@ -139,10 +191,12 @@ func TestRunBackupPreservesOperationAndLockCleanupErrors(t *testing.T) {
 
 func TestPreflightLogsStartBeforeValidationFailure(t *testing.T) {
 	var logs bytes.Buffer
+
 	request := Request{Logger: slog.New(slog.NewTextHandler(&logs, nil))}
 	if _, err := Preflight(context.Background(), nil, request, false); err == nil {
 		t.Fatal("expected preflight validation failure")
 	}
+
 	if !strings.Contains(logs.String(), "backup preflight started") {
 		t.Fatalf("logs=%q", logs.String())
 	}
@@ -150,10 +204,18 @@ func TestPreflightLogsStartBeforeValidationFailure(t *testing.T) {
 
 func TestExecutionRevalidationLogsItsDistinctPhase(t *testing.T) {
 	var logs bytes.Buffer
+
 	request := Request{Logger: slog.New(slog.NewTextHandler(&logs, nil))}
-	if _, err := preflight(context.Background(), nil, request, false, "execution revalidation"); err == nil {
+	if _, err := preflight(
+		context.Background(),
+		nil,
+		request,
+		false,
+		"execution revalidation",
+	); err == nil {
 		t.Fatal("expected execution revalidation failure")
 	}
+
 	if !strings.Contains(logs.String(), "backup execution revalidation started") {
 		t.Fatalf("logs=%q", logs.String())
 	}
@@ -161,45 +223,108 @@ func TestExecutionRevalidationLogsItsDistinctPhase(t *testing.T) {
 
 func TestPreflightRejectsOfflineMountedAndOnlineRWOP(t *testing.T) {
 	mode := corev1.PersistentVolumeFilesystem
-	pvc := &corev1.PersistentVolumeClaim{ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "data", UID: "pvc"}, Spec: corev1.PersistentVolumeClaimSpec{VolumeName: "pv-data", VolumeMode: &mode, AccessModes: []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOncePod}}, Status: corev1.PersistentVolumeClaimStatus{Phase: corev1.ClaimBound}}
+	pvc := &corev1.PersistentVolumeClaim{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "data", UID: "pvc"},
+		Spec: corev1.PersistentVolumeClaimSpec{
+			VolumeName:  "pv-data",
+			VolumeMode:  &mode,
+			AccessModes: []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOncePod},
+		},
+		Status: corev1.PersistentVolumeClaimStatus{Phase: corev1.ClaimBound},
+	}
 	pv := &corev1.PersistentVolume{
 		ObjectMeta: metav1.ObjectMeta{Name: "pv-data", UID: "pv"},
 		Spec: corev1.PersistentVolumeSpec{
 			Capacity: corev1.ResourceList{corev1.ResourceStorage: resource.MustParse("1Gi")},
-			ClaimRef: &corev1.ObjectReference{Namespace: pvc.Namespace, Name: pvc.Name, UID: pvc.UID},
+			ClaimRef: &corev1.ObjectReference{
+				Namespace: pvc.Namespace,
+				Name:      pvc.Name,
+				UID:       pvc.UID,
+			},
 		},
 		Status: corev1.PersistentVolumeStatus{Phase: corev1.VolumeBound},
 	}
-	pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "consumer"}, Spec: corev1.PodSpec{Volumes: []corev1.Volume{{VolumeSource: corev1.VolumeSource{PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: "data"}}}}}}
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "consumer"},
+		Spec: corev1.PodSpec{
+			Volumes: []corev1.Volume{
+				{
+					VolumeSource: corev1.VolumeSource{
+						PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
+							ClaimName: "data",
+						},
+					},
+				},
+			},
+		},
+	}
 	client := fake.NewClientset(pvc, pv, pod)
-	store, _ := objectstore.NewWithClient(&preflightObjectStore{}, objectstore.Config{Bucket: "backups", Name: "daily"}, objectstore.Credentials{})
+	store, _ := objectstore.NewWithClient(
+		&preflightObjectStore{},
+		objectstore.Config{Bucket: "backups", Name: "daily"},
+		objectstore.Credentials{},
+	)
+
 	request := Request{Namespace: "default", PVCName: "data", Store: store}
-	if _, err := Preflight(context.Background(), client, request, false); domain.CategoryOf(err) != domain.ErrorPrecondition {
+	if _, err := Preflight(
+		context.Background(),
+		client,
+		request,
+		false,
+	); domain.CategoryOf(
+		err,
+	) != domain.ErrorPrecondition {
 		t.Fatalf("offline mounted category=%s error=%v", domain.CategoryOf(err), err)
 	}
+
 	request.Online = true
-	if _, err := Preflight(context.Background(), client, request, false); domain.CategoryOf(err) != domain.ErrorPrecondition {
+	if _, err := Preflight(
+		context.Background(),
+		client,
+		request,
+		false,
+	); domain.CategoryOf(
+		err,
+	) != domain.ErrorPrecondition {
 		t.Fatalf("online RWOP category=%s error=%v", domain.CategoryOf(err), err)
 	}
+
 	request.Online = false
+
 	request.AllowMounted = true
-	if _, err := Preflight(context.Background(), client, request, true); domain.CategoryOf(err) != domain.ErrorPrecondition || !strings.Contains(err.Error(), "ReadWriteOncePod") {
+	if _, err := Preflight(
+		context.Background(),
+		client,
+		request,
+		true,
+	); domain.CategoryOf(err) != domain.ErrorPrecondition ||
+		!strings.Contains(err.Error(), "ReadWriteOncePod") {
 		t.Fatalf("mounted restore RWOP category=%s error=%v", domain.CategoryOf(err), err)
 	}
 }
 
 func TestPreflightRejectsToolObjectQuotaExhaustion(t *testing.T) {
 	baseClient, request := preflightFixture(t, &preflightObjectStore{})
+
 	quota := &corev1.ResourceQuota{
 		ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "tool-limit"},
 		Spec: corev1.ResourceQuotaSpec{Hard: corev1.ResourceList{
 			corev1.ResourceName("count/jobs.batch"): resource.MustParse("0"),
 		}},
 	}
-	if _, err := baseClient.CoreV1().ResourceQuotas("default").Create(context.Background(), quota, metav1.CreateOptions{}); err != nil {
+	if _, err := baseClient.CoreV1().
+		ResourceQuotas("default").
+		Create(context.Background(), quota, metav1.CreateOptions{}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := Preflight(context.Background(), baseClient, request, false); domain.CategoryOf(err) != domain.ErrorPrecondition || !strings.Contains(err.Error(), "count/jobs.batch") {
+
+	if _, err := Preflight(
+		context.Background(),
+		baseClient,
+		request,
+		false,
+	); domain.CategoryOf(err) != domain.ErrorPrecondition ||
+		!strings.Contains(err.Error(), "count/jobs.batch") {
 		t.Fatalf("quota category=%s error=%v", domain.CategoryOf(err), err)
 	}
 }
@@ -207,33 +332,59 @@ func TestPreflightRejectsToolObjectQuotaExhaustion(t *testing.T) {
 func TestPreflightAccountsForHelmReleaseSecret(t *testing.T) {
 	t.Setenv("HELM_DRIVER", "secret")
 	client, request := preflightFixture(t, &preflightObjectStore{})
+
 	quota := &corev1.ResourceQuota{
 		ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "secret-limit"},
 		Spec: corev1.ResourceQuotaSpec{
-			Hard: corev1.ResourceList{corev1.ResourceName("count/secrets"): resource.MustParse("2")},
+			Hard: corev1.ResourceList{
+				corev1.ResourceName("count/secrets"): resource.MustParse("2"),
+			},
 		},
-		Status: corev1.ResourceQuotaStatus{Used: corev1.ResourceList{corev1.ResourceName("count/secrets"): resource.MustParse("1")}},
+		Status: corev1.ResourceQuotaStatus{
+			Used: corev1.ResourceList{
+				corev1.ResourceName("count/secrets"): resource.MustParse("1"),
+			},
+		},
 	}
-	if _, err := client.CoreV1().ResourceQuotas("default").Create(context.Background(), quota, metav1.CreateOptions{}); err != nil {
+	if _, err := client.CoreV1().
+		ResourceQuotas("default").
+		Create(context.Background(), quota, metav1.CreateOptions{}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := Preflight(context.Background(), client, request, false); domain.CategoryOf(err) != domain.ErrorPrecondition || !strings.Contains(err.Error(), "count/secrets") {
+
+	if _, err := Preflight(
+		context.Background(),
+		client,
+		request,
+		false,
+	); domain.CategoryOf(err) != domain.ErrorPrecondition ||
+		!strings.Contains(err.Error(), "count/secrets") {
 		t.Fatalf("quota category=%s error=%v", domain.CategoryOf(err), err)
 	}
 }
 
 func TestPreflightRejectsEphemeralStorageLimitQuota(t *testing.T) {
 	client, request := preflightFixture(t, &preflightObjectStore{})
+
 	quota := &corev1.ResourceQuota{
 		ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "ephemeral-limit"},
 		Spec: corev1.ResourceQuotaSpec{Hard: corev1.ResourceList{
 			corev1.ResourceLimitsEphemeralStorage: resource.MustParse("1Gi"),
 		}},
 	}
-	if _, err := client.CoreV1().ResourceQuotas("default").Create(context.Background(), quota, metav1.CreateOptions{}); err != nil {
+	if _, err := client.CoreV1().
+		ResourceQuotas("default").
+		Create(context.Background(), quota, metav1.CreateOptions{}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := Preflight(context.Background(), client, request, false); domain.CategoryOf(err) != domain.ErrorPrecondition || !strings.Contains(err.Error(), "limits.ephemeral-storage") {
+
+	if _, err := Preflight(
+		context.Background(),
+		client,
+		request,
+		false,
+	); domain.CategoryOf(err) != domain.ErrorPrecondition ||
+		!strings.Contains(err.Error(), "limits.ephemeral-storage") {
 		t.Fatalf("quota category=%s error=%v", domain.CategoryOf(err), err)
 	}
 }
@@ -252,18 +403,24 @@ func TestToolQuotaDemandFollowsHelmReleaseDriver(t *testing.T) {
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			t.Setenv("HELM_DRIVER", test.driver)
+
 			demand := toolQuotaDemand()
+
 			quantityString := func(name corev1.ResourceName) string {
 				quantity, ok := demand[name]
 				if !ok {
 					return "0"
 				}
+
 				return quantity.String()
 			}
 			if got := quantityString(corev1.ResourceName("count/secrets")); got != test.secrets {
 				t.Fatalf("secret demand=%s want=%s", got, test.secrets)
 			}
-			if got := quantityString(corev1.ResourceName("count/configmaps")); got != test.configMaps {
+
+			if got := quantityString(
+				corev1.ResourceName("count/configmaps"),
+			); got != test.configMaps {
 				t.Fatalf("ConfigMap demand=%s want=%s", got, test.configMaps)
 			}
 		})
@@ -272,6 +429,7 @@ func TestToolQuotaDemandFollowsHelmReleaseDriver(t *testing.T) {
 
 func TestPreflightRejectsToolLimitRangeMinimum(t *testing.T) {
 	client, request := preflightFixture(t, &preflightObjectStore{})
+
 	limitRange := &corev1.LimitRange{
 		ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "tool-minimum"},
 		Spec: corev1.LimitRangeSpec{Limits: []corev1.LimitRangeItem{{
@@ -279,51 +437,126 @@ func TestPreflightRejectsToolLimitRangeMinimum(t *testing.T) {
 			Min:  corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("1m")},
 		}}},
 	}
-	if _, err := client.CoreV1().LimitRanges("default").Create(context.Background(), limitRange, metav1.CreateOptions{}); err != nil {
+	if _, err := client.CoreV1().
+		LimitRanges("default").
+		Create(context.Background(), limitRange, metav1.CreateOptions{}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := Preflight(context.Background(), client, request, false); domain.CategoryOf(err) != domain.ErrorPrecondition || !strings.Contains(err.Error(), "minimum") {
+
+	if _, err := Preflight(
+		context.Background(),
+		client,
+		request,
+		false,
+	); domain.CategoryOf(err) != domain.ErrorPrecondition ||
+		!strings.Contains(err.Error(), "minimum") {
 		t.Fatalf("limit range category=%s error=%v", domain.CategoryOf(err), err)
 	}
 }
 
 func TestRestorePreflightRequiresPublishedManifestCapacityAndMode(t *testing.T) {
-	client, request := preflightFixture(t, &preflightObjectStore{manifest: []byte(`{"version":2,"createdAt":"2026-08-07T00:00:00Z","bucket":"backups","prefix":"pv-migrate","name":"daily","sourceNamespace":"default","sourcePVC":"data","sourcePVCUID":"pvc","capacity":"2Gi","volumeMode":"Filesystem","consistency":"offline file-consistent copy","compression":"none","objectCount":0,"totalBytes":0,"inventorySHA256":"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"}`)})
-	if _, err := Preflight(context.Background(), client, request, true); domain.CategoryOf(err) != domain.ErrorPrecondition {
+	client, request := preflightFixture(
+		t,
+		&preflightObjectStore{
+			manifest: []byte(
+				`{"version":2,"createdAt":"2026-08-07T00:00:00Z","bucket":"backups","prefix":"pv-migrate","name":"daily","sourceNamespace":"default","sourcePVC":"data","sourcePVCUID":"pvc","capacity":"2Gi","volumeMode":"Filesystem","consistency":"offline file-consistent copy","compression":"none","objectCount":0,"totalBytes":0,"inventorySHA256":"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"}`,
+			),
+		},
+	)
+	if _, err := Preflight(
+		context.Background(),
+		client,
+		request,
+		true,
+	); domain.CategoryOf(
+		err,
+	) != domain.ErrorPrecondition {
 		t.Fatalf("capacity category=%s error=%v", domain.CategoryOf(err), err)
 	}
-	request.Store, _ = objectstore.NewWithClient(&preflightObjectStore{manifest: []byte(`{"version":2,"createdAt":"2026-08-07T00:00:00Z","bucket":"backups","prefix":"pv-migrate","name":"daily","sourceNamespace":"default","sourcePVC":"data","sourcePVCUID":"pvc","capacity":"1Gi","volumeMode":"Block","consistency":"offline file-consistent copy","compression":"none","objectCount":0,"totalBytes":0,"inventorySHA256":"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"}`)}, objectstore.Config{Bucket: "backups", Prefix: "pv-migrate", Name: "daily"}, objectstore.Credentials{})
-	if _, err := Preflight(context.Background(), client, request, true); domain.CategoryOf(err) != domain.ErrorPrecondition {
+
+	request.Store, _ = objectstore.NewWithClient(
+		&preflightObjectStore{
+			manifest: []byte(
+				`{"version":2,"createdAt":"2026-08-07T00:00:00Z","bucket":"backups","prefix":"pv-migrate","name":"daily","sourceNamespace":"default","sourcePVC":"data","sourcePVCUID":"pvc","capacity":"1Gi","volumeMode":"Block","consistency":"offline file-consistent copy","compression":"none","objectCount":0,"totalBytes":0,"inventorySHA256":"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"}`,
+			),
+		},
+		objectstore.Config{Bucket: "backups", Prefix: "pv-migrate", Name: "daily"},
+		objectstore.Credentials{},
+	)
+	if _, err := Preflight(
+		context.Background(),
+		client,
+		request,
+		true,
+	); domain.CategoryOf(
+		err,
+	) != domain.ErrorPrecondition {
 		t.Fatalf("mode category=%s error=%v", domain.CategoryOf(err), err)
 	}
 }
 
 func TestWrapBackupErrorPreservesStructuredInventoryDetails(t *testing.T) {
-	cause := domain.NewError(domain.ErrorConflict, "S3 inventory", "published backup objects changed: count=2/1")
-	err := wrapBackupError(domain.ErrorPrecondition, "restore preflight", "verify S3 backup inventory", cause)
-	if domain.CategoryOf(err) != domain.ErrorConflict || !strings.Contains(err.Error(), "published backup objects changed: count=2/1") {
+	cause := domain.NewError(
+		domain.ErrorConflict,
+		"S3 inventory",
+		"published backup objects changed: count=2/1",
+	)
+
+	err := wrapBackupError(
+		domain.ErrorPrecondition,
+		"restore preflight",
+		"verify S3 backup inventory",
+		cause,
+	)
+	if domain.CategoryOf(err) != domain.ErrorConflict ||
+		!strings.Contains(err.Error(), "published backup objects changed: count=2/1") {
 		t.Fatalf("category=%s error=%v", domain.CategoryOf(err), err)
 	}
 }
 
 func TestRestorePlanDefaultsToKeepingExtraFiles(t *testing.T) {
-	client, request := preflightFixture(t, &preflightObjectStore{manifest: []byte(`{"version":2,"createdAt":"2026-08-07T00:00:00Z","bucket":"backups","prefix":"pv-migrate","name":"daily","sourceNamespace":"default","sourcePVC":"data","sourcePVCUID":"pvc","capacity":"1Gi","volumeMode":"Filesystem","consistency":"offline file-consistent copy","compression":"none","objectCount":0,"totalBytes":0,"inventorySHA256":"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"}`)})
+	client, request := preflightFixture(
+		t,
+		&preflightObjectStore{
+			manifest: []byte(
+				`{"version":2,"createdAt":"2026-08-07T00:00:00Z","bucket":"backups","prefix":"pv-migrate","name":"daily","sourceNamespace":"default","sourcePVC":"data","sourcePVCUID":"pvc","capacity":"1Gi","volumeMode":"Filesystem","consistency":"offline file-consistent copy","compression":"none","objectCount":0,"totalBytes":0,"inventorySHA256":"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"}`,
+			),
+		},
+	)
+
 	plan, err := Preflight(context.Background(), client, request, true)
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	if plan.DeleteExtraneous {
 		t.Fatal("restore plan enables destructive deletion by default")
 	}
+
 	if plan.Compression != "none" {
 		t.Fatalf("restore plan compression=%q", plan.Compression)
 	}
 }
 
 func TestRestorePreflightRejectsPathMismatch(t *testing.T) {
-	client, request := preflightFixture(t, &preflightObjectStore{manifest: []byte(`{"version":2,"createdAt":"2026-08-07T00:00:00Z","bucket":"backups","prefix":"pv-migrate","name":"daily","sourceNamespace":"default","sourcePVC":"data","sourcePVCUID":"pvc","capacity":"1Gi","volumeMode":"Filesystem","consistency":"offline file-consistent copy","compression":"none","objectCount":0,"totalBytes":0,"inventorySHA256":"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855","path":"subdir"}`)})
+	client, request := preflightFixture(
+		t,
+		&preflightObjectStore{
+			manifest: []byte(
+				`{"version":2,"createdAt":"2026-08-07T00:00:00Z","bucket":"backups","prefix":"pv-migrate","name":"daily","sourceNamespace":"default","sourcePVC":"data","sourcePVCUID":"pvc","capacity":"1Gi","volumeMode":"Filesystem","consistency":"offline file-consistent copy","compression":"none","objectCount":0,"totalBytes":0,"inventorySHA256":"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855","path":"subdir"}`,
+			),
+		},
+	)
+
 	request.Path = "other"
-	if _, err := Preflight(context.Background(), client, request, true); domain.CategoryOf(err) != domain.ErrorPrecondition {
+	if _, err := Preflight(
+		context.Background(),
+		client,
+		request,
+		true,
+	); domain.CategoryOf(
+		err,
+	) != domain.ErrorPrecondition {
 		t.Fatalf("path mismatch category=%s error=%v", domain.CategoryOf(err), err)
 	}
 }
@@ -331,10 +564,12 @@ func TestRestorePreflightRejectsPathMismatch(t *testing.T) {
 func TestBackupPreflightNormalizesPVCPath(t *testing.T) {
 	client, request := preflightFixture(t, &preflightObjectStore{})
 	request.Path = "tenant data//当前's files/"
+
 	plan, err := Preflight(context.Background(), client, request, false)
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	if plan.Path != "tenant data/当前's files" {
 		t.Fatalf("normalized plan path=%q", plan.Path)
 	}
@@ -344,6 +579,7 @@ func TestBackupConsistencyRecordsOnlineBoundary(t *testing.T) {
 	if got := backupConsistency(true); got != "best-effort crash-consistent file copy" {
 		t.Fatalf("online consistency=%q", got)
 	}
+
 	if got := backupConsistency(false); got != "offline file-consistent copy" {
 		t.Fatalf("offline consistency=%q", got)
 	}
@@ -351,59 +587,106 @@ func TestBackupConsistencyRecordsOnlineBoundary(t *testing.T) {
 
 func TestPVMigrateBackupAndRestoreHonorMountedPolicy(t *testing.T) {
 	client := &preflightObjectStore{}
-	store, err := objectstore.NewWithClient(client, objectstore.Config{Bucket: "backups", Prefix: "pv-migrate", Name: "daily"}, objectstore.Credentials{})
+
+	store, err := objectstore.NewWithClient(
+		client,
+		objectstore.Config{Bucket: "backups", Prefix: "pv-migrate", Name: "daily"},
+		objectstore.Credentials{},
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
-	request := Request{ID: "operation", ToolImage: "registry.example/pvc-migrate:aio", Namespace: "default", PVCName: "data", Store: store, DeleteExtraneousFiles: true, AllowMounted: true, Online: true}
+
+	request := Request{
+		ID:                    "operation",
+		ToolImage:             "registry.example/pvc-migrate:aio",
+		Namespace:             "default",
+		PVCName:               "data",
+		Store:                 store,
+		DeleteExtraneousFiles: true,
+		AllowMounted:          true,
+		Online:                true,
+	}
+
 	backupRequest, err := pvmigrateBackupRequest(request, "/tmp/rclone.conf", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !containsString(backupRequest.HelmStringValues, "rclone.image.repository=registry.example/pvc-migrate") || !containsString(backupRequest.HelmStringValues, "rclone.image.tag=aio") {
+
+	if !containsString(
+		backupRequest.HelmStringValues,
+		"rclone.image.repository=registry.example/pvc-migrate",
+	) ||
+		!containsString(backupRequest.HelmStringValues, "rclone.image.tag=aio") {
 		t.Fatalf("backup tool image values=%v", backupRequest.HelmStringValues)
 	}
+
 	for _, expected := range kube.ToolSecurityContextHelmValues() {
 		if !containsString(backupRequest.HelmValues, expected) {
 			t.Fatalf("backup typed Helm values lack %q: %v", expected, backupRequest.HelmValues)
 		}
 	}
+
 	if !backupRequest.IgnoreMounted {
 		t.Fatal("online backup did not ignore mounted source")
 	}
+
 	restoreRequest, err := pvmigrateRestoreRequest(request, "/tmp/rclone.conf", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !containsString(restoreRequest.HelmStringValues, "rclone.image.repository=registry.example/pvc-migrate") || !containsString(restoreRequest.HelmStringValues, "rclone.image.tag=aio") {
+
+	if !containsString(
+		restoreRequest.HelmStringValues,
+		"rclone.image.repository=registry.example/pvc-migrate",
+	) ||
+		!containsString(restoreRequest.HelmStringValues, "rclone.image.tag=aio") {
 		t.Fatalf("restore tool image values=%v", restoreRequest.HelmStringValues)
 	}
+
 	for _, expected := range kube.ToolSecurityContextHelmValues() {
 		if !containsString(restoreRequest.HelmValues, expected) {
 			t.Fatalf("restore typed Helm values lack %q: %v", expected, restoreRequest.HelmValues)
 		}
 	}
+
 	if !restoreRequest.IgnoreMounted || !restoreRequest.DeleteExtraneousFiles {
-		t.Fatalf("restore mounted policy=%t delete=%t", restoreRequest.IgnoreMounted, restoreRequest.DeleteExtraneousFiles)
+		t.Fatalf(
+			"restore mounted policy=%t delete=%t",
+			restoreRequest.IgnoreMounted,
+			restoreRequest.DeleteExtraneousFiles,
+		)
 	}
 }
 
 func TestPVMigrateBackupAndRestoreDeferMountedPolicyToPhaseAwarePreflight(t *testing.T) {
-	store, err := objectstore.NewWithClient(&preflightObjectStore{}, objectstore.Config{Bucket: "backups", Name: "daily"}, objectstore.Credentials{})
+	store, err := objectstore.NewWithClient(
+		&preflightObjectStore{},
+		objectstore.Config{Bucket: "backups", Name: "daily"},
+		objectstore.Credentials{},
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	request := Request{Namespace: "default", PVCName: "data", Store: store}
+
 	backupRequest, err := pvmigrateBackupRequest(request, "/tmp/rclone.conf", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	restoreRequest, err := pvmigrateRestoreRequest(request, "/tmp/rclone.conf", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	if !backupRequest.IgnoreMounted || !restoreRequest.IgnoreMounted {
-		t.Fatalf("upstream mounted checks backup=%t restore=%t", backupRequest.IgnoreMounted, restoreRequest.IgnoreMounted)
+		t.Fatalf(
+			"upstream mounted checks backup=%t restore=%t",
+			backupRequest.IgnoreMounted,
+			restoreRequest.IgnoreMounted,
+		)
 	}
 }
 
@@ -414,8 +697,9 @@ func TestPVMigrateBackupAndRestoreForwardFullRequestContract(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	writer := &bytes.Buffer{}
-	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	logger := slog.New(slog.DiscardHandler)
 	request := Request{
 		ID:                    "operation",
 		ToolImage:             "registry.example/team/pvc-migrate:contract",
@@ -433,66 +717,163 @@ func TestPVMigrateBackupAndRestoreForwardFullRequestContract(t *testing.T) {
 		Logger:                logger,
 	}
 	customValues := []string{"rclone.nodeName=source-node"}
+
 	backupRequest, err := pvmigrateBackupRequest(request, "/tmp/rclone.conf", customValues)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if backupRequest.ID != request.ID || backupRequest.PVC != (pvmigrate.PVC{KubeconfigPath: request.KubeconfigPath, Context: request.KubeContext, Namespace: request.Namespace, Name: request.PVCName}) || backupRequest.Backend != "s3" || backupRequest.Bucket != "bucket" || backupRequest.Name != "recovery-point" || backupRequest.Prefix != "prefix" || backupRequest.Path != request.Path || backupRequest.RcloneConfigFile != "/tmp/rclone.conf" || backupRequest.Remote != store.RemotePath() {
-		t.Fatalf("backup upstream request=%#v", backupRequest)
-	}
-	if !backupRequest.IgnoreMounted || backupRequest.RcloneExtraArgs != rclonePreserveLinksArgs || backupRequest.HelmTimeout != request.HelmTimeout || !backupRequest.StructuredLogs || backupRequest.Writer != writer || backupRequest.Logger != logger || backupRequest.HelmStringValues[len(backupRequest.HelmStringValues)-1] != customValues[0] {
-		t.Fatalf("backup execution fields=%#v helmValues=%v", backupRequest, backupRequest.HelmStringValues)
-	}
+
+	assertBackupRequestContract(
+		t,
+		backupRequest,
+		request,
+		store.RemotePath(),
+		writer,
+		logger,
+		customValues[0],
+	)
 
 	restoreRequest, err := pvmigrateRestoreRequest(request, "/tmp/rclone.conf", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if restoreRequest.ID != request.ID || restoreRequest.PVC != backupRequest.PVC || restoreRequest.Backend != "s3" || restoreRequest.Bucket != backupRequest.Bucket || restoreRequest.Name != backupRequest.Name || restoreRequest.Prefix != backupRequest.Prefix || restoreRequest.Path != request.Path || restoreRequest.RcloneConfigFile != "/tmp/rclone.conf" || restoreRequest.Remote != store.RemotePath() {
-		t.Fatalf("restore upstream request=%#v", restoreRequest)
+
+	assertRestoreRequestContract(
+		t,
+		restoreRequest,
+		backupRequest,
+		request,
+		store.RemotePath(),
+		writer,
+		logger,
+	)
+}
+
+func assertBackupRequestContract(
+	t *testing.T,
+	got pvmigrate.Backup,
+	request Request,
+	remote string,
+	writer io.Writer,
+	logger *slog.Logger,
+	customValue string,
+) {
+	t.Helper()
+
+	if got.ID != request.ID ||
+		got.PVC != (pvmigrate.PVC{KubeconfigPath: request.KubeconfigPath, Context: request.KubeContext, Namespace: request.Namespace, Name: request.PVCName}) ||
+		got.Backend != "s3" ||
+		got.Bucket != "bucket" ||
+		got.Name != "recovery-point" ||
+		got.Prefix != "prefix" ||
+		got.Path != request.Path ||
+		got.RcloneConfigFile != "/tmp/rclone.conf" ||
+		got.Remote != remote {
+		t.Fatalf("backup upstream request=%#v", got)
 	}
-	if !restoreRequest.IgnoreMounted || !restoreRequest.DeleteExtraneousFiles || restoreRequest.RcloneExtraArgs != rclonePreserveLinksArgs || restoreRequest.HelmTimeout != request.HelmTimeout || !restoreRequest.StructuredLogs || restoreRequest.Writer != writer || restoreRequest.Logger != logger {
-		t.Fatalf("restore execution fields=%#v", restoreRequest)
+
+	if !got.IgnoreMounted || got.RcloneExtraArgs != rclonePreserveLinksArgs ||
+		got.HelmTimeout != request.HelmTimeout ||
+		!got.StructuredLogs ||
+		got.Writer != writer ||
+		got.Logger != logger ||
+		got.HelmStringValues[len(got.HelmStringValues)-1] != customValue {
+		t.Fatalf("backup execution fields=%#v helmValues=%v", got, got.HelmStringValues)
+	}
+}
+
+func assertRestoreRequestContract(
+	t *testing.T,
+	got pvmigrate.Restore,
+	backup pvmigrate.Backup,
+	request Request,
+	remote string,
+	writer io.Writer,
+	logger *slog.Logger,
+) {
+	t.Helper()
+
+	if got.ID != request.ID || got.PVC != backup.PVC || got.Backend != "s3" ||
+		got.Bucket != backup.Bucket ||
+		got.Name != backup.Name ||
+		got.Prefix != backup.Prefix ||
+		got.Path != request.Path ||
+		got.RcloneConfigFile != "/tmp/rclone.conf" ||
+		got.Remote != remote {
+		t.Fatalf("restore upstream request=%#v", got)
+	}
+
+	if !got.IgnoreMounted || !got.DeleteExtraneousFiles ||
+		got.RcloneExtraArgs != rclonePreserveLinksArgs ||
+		got.HelmTimeout != request.HelmTimeout ||
+		!got.StructuredLogs ||
+		got.Writer != writer ||
+		got.Logger != logger {
+		t.Fatalf("restore execution fields=%#v", got)
 	}
 }
 
 func TestPVMigrateBackupAndRestoreForwardLogger(t *testing.T) {
-	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	store, err := objectstore.NewWithClient(&preflightObjectStore{}, objectstore.Config{Bucket: "backups", Prefix: "pv-migrate", Name: "daily"}, objectstore.Credentials{})
+	logger := slog.New(slog.DiscardHandler)
+
+	store, err := objectstore.NewWithClient(
+		&preflightObjectStore{},
+		objectstore.Config{Bucket: "backups", Prefix: "pv-migrate", Name: "daily"},
+		objectstore.Credentials{},
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
-	request := Request{ID: "operation", Namespace: "default", PVCName: "data", Store: store, Logger: logger}
+
+	request := Request{
+		ID:        "operation",
+		Namespace: "default",
+		PVCName:   "data",
+		Store:     store,
+		Logger:    logger,
+	}
+
 	backupRequest, err := pvmigrateBackupRequest(request, "/tmp/rclone.conf", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	if got := backupRequest.Logger; got != logger {
 		t.Fatal("backup logger was not forwarded")
 	}
+
 	restoreRequest, err := pvmigrateRestoreRequest(request, "/tmp/rclone.conf", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	if got := restoreRequest.Logger; got != logger {
 		t.Fatal("restore logger was not forwarded")
 	}
 }
 
 func TestPVMigrateBackupAndRestoreUseZeroToolResources(t *testing.T) {
-	store, err := objectstore.NewWithClient(&preflightObjectStore{}, objectstore.Config{Bucket: "backups", Name: "daily"}, objectstore.Credentials{})
+	store, err := objectstore.NewWithClient(
+		&preflightObjectStore{},
+		objectstore.Config{Bucket: "backups", Name: "daily"},
+		objectstore.Credentials{},
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	request := Request{Namespace: "default", PVCName: "data", Store: store}
+
 	backupRequest, err := pvmigrateBackupRequest(request, "/tmp/rclone.conf", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	restoreRequest, err := pvmigrateRestoreRequest(request, "/tmp/rclone.conf", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	for _, values := range [][]string{backupRequest.HelmStringValues, restoreRequest.HelmStringValues} {
 		for _, expected := range kube.ZeroResourceHelmValues() {
 			if !containsString(values, expected) {
@@ -503,22 +884,31 @@ func TestPVMigrateBackupAndRestoreUseZeroToolResources(t *testing.T) {
 }
 
 func TestPVMigrateBackupAndRestorePinDefaultToolTimeout(t *testing.T) {
-	store, err := objectstore.NewWithClient(&preflightObjectStore{}, objectstore.Config{Bucket: "backups", Name: "daily"}, objectstore.Credentials{})
+	store, err := objectstore.NewWithClient(
+		&preflightObjectStore{},
+		objectstore.Config{Bucket: "backups", Name: "daily"},
+		objectstore.Credentials{},
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	request := Request{Namespace: "default", PVCName: "data", Store: store}
+
 	backupRequest, err := pvmigrateBackupRequest(request, "/tmp/rclone.conf", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	if backupRequest.HelmTimeout != 10*time.Minute {
 		t.Fatalf("backup default HelmTimeout=%s, want 10m", backupRequest.HelmTimeout)
 	}
+
 	restoreRequest, err := pvmigrateRestoreRequest(request, "/tmp/rclone.conf", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	if restoreRequest.HelmTimeout != 10*time.Minute {
 		t.Fatalf("restore default HelmTimeout=%s, want 10m", restoreRequest.HelmTimeout)
 	}
@@ -529,10 +919,12 @@ func TestRestoreLockHolderGeneratesUniqueDefaultIdentity(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	second, err := operationLockHolder("")
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	if first == second {
 		t.Fatalf("default restore lock holders collided: %q", first)
 	}
@@ -543,13 +935,16 @@ func TestRestoreLockHolderGeneratesUniqueAttemptForExplicitID(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	second, err := operationLockHolder("daily")
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	if first == second {
 		t.Fatalf("explicit operation lock holders collided: %q", first)
 	}
+
 	if toolOperationID(first) == toolOperationID(second) {
 		t.Fatalf("explicit operation tool IDs collided: %q", toolOperationID(first))
 	}
@@ -557,11 +952,14 @@ func TestRestoreLockHolderGeneratesUniqueAttemptForExplicitID(t *testing.T) {
 
 func TestToolOperationIDIsUniqueSafeAndBounded(t *testing.T) {
 	first := toolOperationID("pvc-migrate-first")
+
 	second := toolOperationID("pvc-migrate-second")
 	if first == second || len(first) > 24 || len(second) > 24 {
 		t.Fatalf("tool IDs first=%q second=%q", first, second)
 	}
-	if !strings.HasPrefix(first, "pm-") || strings.ContainsAny(first[3:], "ABCDEFGHIJKLMNOPQRSTUVWXYZ_/") {
+
+	if !strings.HasPrefix(first, "pm-") ||
+		strings.ContainsAny(first[3:], "ABCDEFGHIJKLMNOPQRSTUVWXYZ_/") {
 		t.Fatalf("tool ID %q is not DNS-safe", first)
 	}
 }
@@ -569,35 +967,57 @@ func TestToolOperationIDIsUniqueSafeAndBounded(t *testing.T) {
 func TestCheckObjectStoreLeaseClassifiesLossAndCancellation(t *testing.T) {
 	leaseErrors := make(chan error, 1)
 	leaseErrors <- io.ErrUnexpectedEOF
-	if category := domain.CategoryOf(checkObjectStoreLease(context.Background(), leaseErrors, "backup")); category != domain.ErrorConflict {
+
+	if category := domain.CategoryOf(
+		checkObjectStoreLease(context.Background(), leaseErrors),
+	); category != domain.ErrorConflict {
 		t.Fatalf("lease loss category=%s, want conflict", category)
 	}
+
 	leaseErrors <- domain.NewError(domain.ErrorTimeout, "renew", "deadline")
-	if category := domain.CategoryOf(checkObjectStoreLease(context.Background(), leaseErrors, "backup")); category != domain.ErrorTimeout {
+
+	if category := domain.CategoryOf(
+		checkObjectStoreLease(context.Background(), leaseErrors),
+	); category != domain.ErrorTimeout {
 		t.Fatalf("lease timeout category=%s, want timeout", category)
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	if category := domain.CategoryOf(checkObjectStoreLease(ctx, make(chan error), "backup")); category != domain.ErrorTimeout {
+
+	if category := domain.CategoryOf(
+		checkObjectStoreLease(ctx, make(chan error)),
+	); category != domain.ErrorTimeout {
 		t.Fatalf("lease cancellation category=%s, want timeout", category)
 	}
 }
 
 func TestRestoreLockRenewalPreservesTimeoutCategory(t *testing.T) {
-	if category := domain.CategoryOf(classifyRestoreLockError(context.Background(), domain.NewError(domain.ErrorTimeout, "renew", "deadline"))); category != domain.ErrorTimeout {
+	if category := domain.CategoryOf(
+		classifyRestoreLockError(
+			context.Background(),
+			domain.NewError(domain.ErrorTimeout, "renew", "deadline"),
+		),
+	); category != domain.ErrorTimeout {
 		t.Fatalf("renewal timeout category=%s, want timeout", category)
 	}
-	if category := domain.CategoryOf(classifyRestoreLockError(context.Background(), context.DeadlineExceeded)); category != domain.ErrorTimeout {
+
+	if category := domain.CategoryOf(
+		classifyRestoreLockError(context.Background(), context.DeadlineExceeded),
+	); category != domain.ErrorTimeout {
 		t.Fatalf("context deadline category=%s, want timeout", category)
 	}
-	if category := domain.CategoryOf(classifyRestoreLockError(context.Background(), io.ErrUnexpectedEOF)); category != domain.ErrorConflict {
+
+	if category := domain.CategoryOf(
+		classifyRestoreLockError(context.Background(), io.ErrUnexpectedEOF),
+	); category != domain.ErrorConflict {
 		t.Fatalf("renewal ownership category=%s, want conflict", category)
 	}
 }
 
 func TestRestoreLockRenewalRejectsReplacementPVC(t *testing.T) {
 	const holder = "pvc-migrate/restore-attempt"
+
 	originalExpiry := time.Now().UTC().Add(time.Minute).Format(time.RFC3339Nano)
 	client := fake.NewClientset(&corev1.PersistentVolumeClaim{
 		ObjectMeta: metav1.ObjectMeta{
@@ -610,16 +1030,32 @@ func TestRestoreLockRenewalRejectsReplacementPVC(t *testing.T) {
 			},
 		},
 	})
-	err := renewRestoreLockOnce(context.Background(), client, "default", "data", holder, "original-pvc-uid", time.Hour)
+
+	err := renewRestoreLockOnce(
+		context.Background(),
+		client,
+		"default",
+		"data",
+		holder,
+		"original-pvc-uid",
+		time.Hour,
+	)
 	if domain.CategoryOf(err) != domain.ErrorConflict {
 		t.Fatalf("category=%s error=%v", domain.CategoryOf(err), err)
 	}
-	current, getErr := client.CoreV1().PersistentVolumeClaims("default").Get(context.Background(), "data", metav1.GetOptions{})
+
+	current, getErr := client.CoreV1().
+		PersistentVolumeClaims("default").
+		Get(context.Background(), "data", metav1.GetOptions{})
 	if getErr != nil {
 		t.Fatal(getErr)
 	}
+
 	if current.Annotations[restoreLockExpiryAnnotation] != originalExpiry {
-		t.Fatalf("replacement PVC lock expiry changed to %q", current.Annotations[restoreLockExpiryAnnotation])
+		t.Fatalf(
+			"replacement PVC lock expiry changed to %q",
+			current.Annotations[restoreLockExpiryAnnotation],
+		)
 	}
 }
 
@@ -637,19 +1073,28 @@ func TestOfflinePreflightIgnoresTerminalPVCConsumers(t *testing.T) {
 	} {
 		pod := &corev1.Pod{
 			ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: podState.name},
-			Spec: corev1.PodSpec{NodeName: podState.nodeName, Volumes: []corev1.Volume{{VolumeSource: corev1.VolumeSource{
-				PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: "data"},
-			}}}},
+			Spec: corev1.PodSpec{
+				NodeName: podState.nodeName,
+				Volumes: []corev1.Volume{{VolumeSource: corev1.VolumeSource{
+					PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
+						ClaimName: "data",
+					},
+				}}},
+			},
 			Status: corev1.PodStatus{Phase: podState.phase},
 		}
-		if _, err := client.CoreV1().Pods("default").Create(context.Background(), pod, metav1.CreateOptions{}); err != nil {
+		if _, err := client.CoreV1().
+			Pods("default").
+			Create(context.Background(), pod, metav1.CreateOptions{}); err != nil {
 			t.Fatal(err)
 		}
 	}
+
 	plan, err := Preflight(context.Background(), client, request, false)
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	if len(plan.MountedPods) != 0 {
 		t.Fatalf("terminal Pod consumers=%v, want none", plan.MountedPods)
 	}
@@ -660,47 +1105,73 @@ func TestOfflineBackupToolStartRechecksConsumers(t *testing.T) {
 	if err := validateBackupToolStart(context.Background(), client, request); err != nil {
 		t.Fatal(err)
 	}
+
 	pod := &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "consumer"},
 		Spec: corev1.PodSpec{Volumes: []corev1.Volume{{VolumeSource: corev1.VolumeSource{
 			PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: "data"},
 		}}}},
 	}
-	if _, err := client.CoreV1().Pods("default").Create(context.Background(), pod, metav1.CreateOptions{}); err != nil {
+	if _, err := client.CoreV1().
+		Pods("default").
+		Create(context.Background(), pod, metav1.CreateOptions{}); err != nil {
 		t.Fatal(err)
 	}
-	if err := validateBackupToolStart(context.Background(), client, request); domain.CategoryOf(err) != domain.ErrorPrecondition {
+
+	if err := validateBackupToolStart(
+		context.Background(),
+		client,
+		request,
+	); domain.CategoryOf(
+		err,
+	) != domain.ErrorPrecondition {
 		t.Fatalf("category=%s error=%v", domain.CategoryOf(err), err)
 	}
 }
 
 func containsString(values []string, want string) bool {
-	for _, value := range values {
-		if value == want {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(values, want)
 }
 
 func TestOnlineBackupPinsRWOToolToConsumerNode(t *testing.T) {
 	client, request := preflightFixture(t, &preflightObjectStore{})
 	request.Online = true
-	pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "consumer"}, Spec: corev1.PodSpec{NodeName: "node-a", Volumes: []corev1.Volume{{VolumeSource: corev1.VolumeSource{PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: "data"}}}}}}
-	if _, err := client.CoreV1().Pods("default").Create(context.Background(), pod, metav1.CreateOptions{}); err != nil {
+
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "consumer"},
+		Spec: corev1.PodSpec{
+			NodeName: "node-a",
+			Volumes: []corev1.Volume{
+				{
+					VolumeSource: corev1.VolumeSource{
+						PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
+							ClaimName: "data",
+						},
+					},
+				},
+			},
+		},
+	}
+	if _, err := client.CoreV1().
+		Pods("default").
+		Create(context.Background(), pod, metav1.CreateOptions{}); err != nil {
 		t.Fatal(err)
 	}
+
 	node, err := onlineBackupToolNode(context.Background(), client, request)
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	if node != "node-a" {
 		t.Fatalf("tool node=%q", node)
 	}
+
 	plan, err := Preflight(context.Background(), client, request, false)
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	if plan.ToolNode != "node-a" {
 		t.Fatalf("plan toolNode=%q", plan.ToolNode)
 	}
@@ -710,8 +1181,11 @@ func TestMountedRestorePinsRWOToolToConsumerNode(t *testing.T) {
 	storeAPI := &preflightObjectStore{manifest: emptyBackupManifest()}
 	client, request := preflightFixture(t, storeAPI)
 	request.AllowMounted = true
+
 	pod := mountedConsumerPod("consumer", "node-a")
-	if _, err := client.CoreV1().Pods("default").Create(context.Background(), pod, metav1.CreateOptions{}); err != nil {
+	if _, err := client.CoreV1().
+		Pods("default").
+		Create(context.Background(), pod, metav1.CreateOptions{}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -719,6 +1193,7 @@ func TestMountedRestorePinsRWOToolToConsumerNode(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	if plan.ToolNode != "node-a" {
 		t.Fatalf("plan toolNode=%q", plan.ToolNode)
 	}
@@ -726,21 +1201,36 @@ func TestMountedRestorePinsRWOToolToConsumerNode(t *testing.T) {
 
 func TestOfflinePreflightPinsToolToUniquePVNode(t *testing.T) {
 	client, request := preflightFixture(t, &preflightObjectStore{})
-	pv, err := client.CoreV1().PersistentVolumes().Get(context.Background(), "pv-data", metav1.GetOptions{})
+
+	pv, err := client.CoreV1().
+		PersistentVolumes().
+		Get(context.Background(), "pv-data", metav1.GetOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
-	pv.Spec.NodeAffinity = &corev1.VolumeNodeAffinity{Required: &corev1.NodeSelector{NodeSelectorTerms: []corev1.NodeSelectorTerm{{
-		MatchExpressions: []corev1.NodeSelectorRequirement{{
-			Key: corev1.LabelHostname, Operator: corev1.NodeSelectorOpIn, Values: []string{"host-a"},
-		}},
-	}}}}
-	if _, err := client.CoreV1().PersistentVolumes().Update(context.Background(), pv, metav1.UpdateOptions{}); err != nil {
+
+	pv.Spec.NodeAffinity = &corev1.VolumeNodeAffinity{
+		Required: &corev1.NodeSelector{NodeSelectorTerms: []corev1.NodeSelectorTerm{{
+			MatchExpressions: []corev1.NodeSelectorRequirement{
+				{
+					Key:      corev1.LabelHostname,
+					Operator: corev1.NodeSelectorOpIn,
+					Values:   []string{"host-a"},
+				},
+			},
+		}}},
+	}
+	if _, err := client.CoreV1().
+		PersistentVolumes().
+		Update(context.Background(), pv, metav1.UpdateOptions{}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := client.CoreV1().Nodes().Create(context.Background(), &corev1.Node{ObjectMeta: metav1.ObjectMeta{
-		Name: "node-a", Labels: map[string]string{corev1.LabelHostname: "host-a"},
-	}}, metav1.CreateOptions{}); err != nil {
+
+	if _, err := client.CoreV1().
+		Nodes().
+		Create(context.Background(), &corev1.Node{ObjectMeta: metav1.ObjectMeta{
+			Name: "node-a", Labels: map[string]string{corev1.LabelHostname: "host-a"},
+		}}, metav1.CreateOptions{}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -748,6 +1238,7 @@ func TestOfflinePreflightPinsToolToUniquePVNode(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	if plan.ToolNode != "node-a" {
 		t.Fatalf("plan toolNode=%q", plan.ToolNode)
 	}
@@ -760,22 +1251,30 @@ type recordingBackupToolProber struct {
 	onProbe func(kube.ToolImageProbeOptions)
 }
 
-func (p *recordingBackupToolProber) Probe(_ context.Context, options kube.ToolImageProbeOptions) ([]kube.ToolImageProbeResult, error) {
+func (p *recordingBackupToolProber) Probe(
+	_ context.Context,
+	options kube.ToolImageProbeOptions,
+) ([]kube.ToolImageProbeResult, error) {
 	p.calls = append(p.calls, options)
 	if p.onProbe != nil {
 		p.onProbe(options)
 	}
+
 	if p.err != nil {
 		return nil, p.err
 	}
+
 	if p.results != nil {
 		return slices.Clone(p.results), nil
 	}
+
 	target := options.Targets[0]
+
 	nodeName := target.NodeName
 	if nodeName == "" {
 		nodeName = "scheduler-node"
 	}
+
 	return []kube.ToolImageProbeResult{{Target: target, NodeName: nodeName}}, nil
 }
 
@@ -791,17 +1290,36 @@ func TestRunProbesRcloneWhileHoldingTransferLock(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			storeAPI := &preflightObjectStore{}
 			client, request := preflightFixture(t, storeAPI)
+
 			request.Online = test.online
 			if test.online {
-				pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "consumer"}, Spec: corev1.PodSpec{
-					NodeName: "node-a",
-					Volumes:  []corev1.Volume{{VolumeSource: corev1.VolumeSource{PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: "data"}}}},
-				}}
-				if _, err := client.CoreV1().Pods("default").Create(context.Background(), pod, metav1.CreateOptions{}); err != nil {
+				pod := &corev1.Pod{
+					ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "consumer"},
+					Spec: corev1.PodSpec{
+						NodeName: "node-a",
+						Volumes: []corev1.Volume{
+							{
+								VolumeSource: corev1.VolumeSource{
+									PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
+										ClaimName: "data",
+									},
+								},
+							},
+						},
+					},
+				}
+				if _, err := client.CoreV1().
+					Pods("default").
+					Create(context.Background(), pod, metav1.CreateOptions{}); err != nil {
 					t.Fatal(err)
 				}
 			}
-			probeErr := domain.NewError(domain.ErrorPrecondition, "tool image probe", "stopped before transfer")
+
+			probeErr := domain.NewError(
+				domain.ErrorPrecondition,
+				"tool image probe",
+				"stopped before transfer",
+			)
 			prober := &recordingBackupToolProber{err: probeErr}
 			request.ToolImage = "registry.example/pvc-migrate:test"
 			request.ToolImageProber = prober
@@ -809,20 +1327,28 @@ func TestRunProbesRcloneWhileHoldingTransferLock(t *testing.T) {
 			if err := Run(context.Background(), client, request, false); !errors.Is(err, probeErr) {
 				t.Fatalf("Run() error=%v", err)
 			}
+
 			if len(prober.calls) != 1 {
 				t.Fatalf("probe calls=%d", len(prober.calls))
 			}
+
 			probe := prober.calls[0]
-			if probe.Image != request.ToolImage || len(probe.Targets) != 1 || probe.Targets[0].Namespace != "default" || probe.Targets[0].NodeName != test.wantNode || !slices.Equal(probe.Targets[0].Components, []string{kube.ToolComponentRclone}) {
+			if probe.Image != request.ToolImage || len(probe.Targets) != 1 ||
+				probe.Targets[0].Namespace != "default" ||
+				probe.Targets[0].NodeName != test.wantNode ||
+				!slices.Equal(probe.Targets[0].Components, []string{kube.ToolComponentRclone}) {
 				t.Fatalf("probe=%#v", probe)
 			}
+
 			wantPVC := ""
 			if test.wantNode == "" {
 				wantPVC = request.PVCName
 			}
+
 			if probe.Targets[0].PVCName != wantPVC {
 				t.Fatalf("probe PVC=%q want=%q", probe.Targets[0].PVCName, wantPVC)
 			}
+
 			if storeAPI.puts != 1 {
 				t.Fatalf("lock writes before probe=%d", storeAPI.puts)
 			}
@@ -844,15 +1370,21 @@ func TestTransferToolProbeValidatesBackupPathAndCreatesRestorePath(t *testing.T)
 				ID: "partial", Namespace: "default", PVCName: "data", Path: "mysql/current",
 				ToolImage: "registry.example/pvc-migrate:test", ToolImageProber: prober,
 			}
+
 			result, err := probeTransferToolImage(t.Context(), request, "node-a", test.restore)
 			if err != nil {
 				t.Fatal(err)
 			}
-			if result.NodeName != "node-a" || len(prober.calls) != 1 || len(prober.calls[0].Targets) != 1 {
+
+			if result.NodeName != "node-a" || len(prober.calls) != 1 ||
+				len(prober.calls[0].Targets) != 1 {
 				t.Fatalf("result=%#v calls=%#v", result, prober.calls)
 			}
+
 			target := prober.calls[0].Targets[0]
-			if target.PVCName != request.PVCName || target.RequiredPath != request.Path || target.CreatePath != test.restore || !slices.Equal(target.Components, []string{kube.ToolComponentRclone}) {
+			if target.PVCName != request.PVCName || target.RequiredPath != request.Path ||
+				target.CreatePath != test.restore ||
+				!slices.Equal(target.Components, []string{kube.ToolComponentRclone}) {
 				t.Fatalf("target=%#v", target)
 			}
 		})
@@ -861,41 +1393,62 @@ func TestTransferToolProbeValidatesBackupPathAndCreatesRestorePath(t *testing.T)
 
 func TestRunRecomputesPVToolNodeAfterAcquiringLock(t *testing.T) {
 	storeAPI := &preflightObjectStore{}
+
 	client, request := preflightFixture(t, storeAPI)
 	for _, node := range []*corev1.Node{
 		{ObjectMeta: metav1.ObjectMeta{Name: "node-a", Labels: map[string]string{corev1.LabelHostname: "host-a"}}},
 		{ObjectMeta: metav1.ObjectMeta{Name: "node-b", Labels: map[string]string{corev1.LabelHostname: "host-b"}}},
 	} {
-		if _, err := client.CoreV1().Nodes().Create(context.Background(), node, metav1.CreateOptions{}); err != nil {
+		if _, err := client.CoreV1().
+			Nodes().
+			Create(context.Background(), node, metav1.CreateOptions{}); err != nil {
 			t.Fatal(err)
 		}
 	}
-	pv, err := client.CoreV1().PersistentVolumes().Get(context.Background(), "pv-data", metav1.GetOptions{})
+
+	pv, err := client.CoreV1().
+		PersistentVolumes().
+		Get(context.Background(), "pv-data", metav1.GetOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	pv.Spec.NodeAffinity = probePVNodeAffinity("host-a")
-	if _, err := client.CoreV1().PersistentVolumes().Update(context.Background(), pv, metav1.UpdateOptions{}); err != nil {
+	if _, err := client.CoreV1().
+		PersistentVolumes().
+		Update(context.Background(), pv, metav1.UpdateOptions{}); err != nil {
 		t.Fatal(err)
 	}
+
 	storeAPI.onPut = func() {
-		current, getErr := client.CoreV1().PersistentVolumes().Get(context.Background(), "pv-data", metav1.GetOptions{})
+		current, getErr := client.CoreV1().
+			PersistentVolumes().
+			Get(context.Background(), "pv-data", metav1.GetOptions{})
 		if getErr != nil {
 			t.Fatal(getErr)
 		}
+
 		current.Spec.NodeAffinity = probePVNodeAffinity("host-b")
-		if _, updateErr := client.CoreV1().PersistentVolumes().Update(context.Background(), current, metav1.UpdateOptions{}); updateErr != nil {
+		if _, updateErr := client.CoreV1().
+			PersistentVolumes().
+			Update(context.Background(), current, metav1.UpdateOptions{}); updateErr != nil {
 			t.Fatal(updateErr)
 		}
+
 		storeAPI.onPut = nil
 	}
-	probeErr := domain.NewError(domain.ErrorPrecondition, "tool image probe", "stop after placement assertion")
+	probeErr := domain.NewError(
+		domain.ErrorPrecondition,
+		"tool image probe",
+		"stop after placement assertion",
+	)
 	prober := &recordingBackupToolProber{err: probeErr}
 	request.ToolImageProber = prober
 
 	if err := Run(context.Background(), client, request, false); !errors.Is(err, probeErr) {
 		t.Fatalf("Run() error=%v", err)
 	}
+
 	if len(prober.calls) != 1 || prober.calls[0].Targets[0].NodeName != "node-b" {
 		t.Fatalf("probe calls=%#v", prober.calls)
 	}
@@ -904,41 +1457,64 @@ func TestRunRecomputesPVToolNodeAfterAcquiringLock(t *testing.T) {
 func TestRestoreRecomputesMountedRWOConsumerNodeAfterAcquiringLock(t *testing.T) {
 	storeAPI := &preflightObjectStore{manifest: emptyBackupManifest()}
 	clientAPI, request := preflightFixture(t, storeAPI)
-	client := clientAPI.(*fake.Clientset)
+	client := testutil.MustType[*fake.Clientset](t, clientAPI)
 	request.AllowMounted = true
 	request.ToolImage = "registry.example/pvc-migrate:test"
-	if _, err := client.CoreV1().Pods("default").Create(context.Background(), mountedConsumerPod("consumer", "node-a"), metav1.CreateOptions{}); err != nil {
+
+	if _, err := client.CoreV1().
+		Pods("default").
+		Create(context.Background(), mountedConsumerPod("consumer", "node-a"), metav1.CreateOptions{}); err != nil {
 		t.Fatal(err)
 	}
+
 	moved := false
-	client.PrependReactor("update", "persistentvolumeclaims", func(action ktesting.Action) (bool, runtime.Object, error) {
-		if moved {
+	client.PrependReactor(
+		"update",
+		"persistentvolumeclaims",
+		func(action ktesting.Action) (bool, runtime.Object, error) {
+			if moved {
+				return false, nil, nil
+			}
+
+			update := testutil.MustType[ktesting.UpdateAction](t, action)
+
+			pvc := testutil.MustType[*corev1.PersistentVolumeClaim](t, update.GetObject())
+			if pvc.Annotations[restoreLockAnnotation] == "" {
+				return false, nil, nil
+			}
+
+			pod, err := client.Tracker().
+				Get(corev1.SchemeGroupVersion.WithResource("pods"), "default", "consumer")
+			if err != nil {
+				return true, nil, err
+			}
+
+			consumer := testutil.MustType[*corev1.Pod](t, pod).DeepCopy()
+
+			consumer.Spec.NodeName = "node-b"
+			if err := client.Tracker().
+				Update(corev1.SchemeGroupVersion.WithResource("pods"), consumer, "default"); err != nil {
+				return true, nil, err
+			}
+
+			moved = true
+
 			return false, nil, nil
-		}
-		update := action.(ktesting.UpdateAction)
-		pvc := update.GetObject().(*corev1.PersistentVolumeClaim)
-		if pvc.Annotations[restoreLockAnnotation] == "" {
-			return false, nil, nil
-		}
-		pod, err := client.Tracker().Get(corev1.SchemeGroupVersion.WithResource("pods"), "default", "consumer")
-		if err != nil {
-			return true, nil, err
-		}
-		consumer := pod.(*corev1.Pod).DeepCopy()
-		consumer.Spec.NodeName = "node-b"
-		if err := client.Tracker().Update(corev1.SchemeGroupVersion.WithResource("pods"), consumer, "default"); err != nil {
-			return true, nil, err
-		}
-		moved = true
-		return false, nil, nil
-	})
-	probeErr := domain.NewError(domain.ErrorPrecondition, "tool image probe", "stop after placement assertion")
+		},
+	)
+
+	probeErr := domain.NewError(
+		domain.ErrorPrecondition,
+		"tool image probe",
+		"stop after placement assertion",
+	)
 	prober := &recordingBackupToolProber{err: probeErr}
 	request.ToolImageProber = prober
 
 	if err := Run(context.Background(), client, request, true); !errors.Is(err, probeErr) {
 		t.Fatalf("Run() error=%v", err)
 	}
+
 	if len(prober.calls) != 1 || prober.calls[0].Targets[0].NodeName != "node-b" {
 		t.Fatalf("probe calls=%#v", prober.calls)
 	}
@@ -957,20 +1533,25 @@ func TestRunRejectsConsumerCreatedDuringToolProbe(t *testing.T) {
 			if test.restore {
 				storeAPI.manifest = emptyBackupManifest()
 			}
+
 			client, request := preflightFixture(t, storeAPI)
 			addTransferTestNode(t, client, "node-a")
+
 			request.ToolImage = "registry.example/pvc-migrate:test"
 			request.ToolImageProber = &recordingBackupToolProber{
 				results: []kube.ToolImageProbeResult{{NodeName: "node-a"}},
 				onProbe: func(kube.ToolImageProbeOptions) {
-					if _, err := client.CoreV1().Pods("default").Create(context.Background(), mountedConsumerPod("late-consumer", "node-a"), metav1.CreateOptions{}); err != nil {
+					if _, err := client.CoreV1().
+						Pods("default").
+						Create(context.Background(), mountedConsumerPod("late-consumer", "node-a"), metav1.CreateOptions{}); err != nil {
 						t.Fatal(err)
 					}
 				},
 			}
 
 			err := Run(context.Background(), client, request, test.restore)
-			if domain.CategoryOf(err) != domain.ErrorPrecondition || !strings.Contains(err.Error(), "late-consumer") {
+			if domain.CategoryOf(err) != domain.ErrorPrecondition ||
+				!strings.Contains(err.Error(), "late-consumer") {
 				t.Fatalf("category=%s error=%v", domain.CategoryOf(err), err)
 			}
 		})
@@ -980,24 +1561,35 @@ func TestRunRejectsConsumerCreatedDuringToolProbe(t *testing.T) {
 func TestRestoreRejectsRWOConsumerNodeChangeDuringToolProbe(t *testing.T) {
 	client, request := preflightFixture(t, &preflightObjectStore{manifest: emptyBackupManifest()})
 	addTransferTestNode(t, client, "node-a")
+
 	request.AllowMounted = true
 	request.ToolImage = "registry.example/pvc-migrate:test"
-	if _, err := client.CoreV1().Pods("default").Create(context.Background(), mountedConsumerPod("consumer", "node-a"), metav1.CreateOptions{}); err != nil {
+
+	if _, err := client.CoreV1().
+		Pods("default").
+		Create(context.Background(), mountedConsumerPod("consumer", "node-a"), metav1.CreateOptions{}); err != nil {
 		t.Fatal(err)
 	}
+
 	request.ToolImageProber = &recordingBackupToolProber{onProbe: func(kube.ToolImageProbeOptions) {
-		pod, err := client.CoreV1().Pods("default").Get(context.Background(), "consumer", metav1.GetOptions{})
+		pod, err := client.CoreV1().
+			Pods("default").
+			Get(context.Background(), "consumer", metav1.GetOptions{})
 		if err != nil {
 			t.Fatal(err)
 		}
+
 		pod.Spec.NodeName = "node-b"
-		if _, err := client.CoreV1().Pods("default").Update(context.Background(), pod, metav1.UpdateOptions{}); err != nil {
+		if _, err := client.CoreV1().
+			Pods("default").
+			Update(context.Background(), pod, metav1.UpdateOptions{}); err != nil {
 			t.Fatal(err)
 		}
 	}}
 
 	err := Run(context.Background(), client, request, true)
-	if domain.CategoryOf(err) != domain.ErrorConflict || !strings.Contains(err.Error(), "node-a to node-b") {
+	if domain.CategoryOf(err) != domain.ErrorConflict ||
+		!strings.Contains(err.Error(), "node-a to node-b") {
 		t.Fatalf("category=%s error=%v", domain.CategoryOf(err), err)
 	}
 }
@@ -1005,31 +1597,42 @@ func TestRestoreRejectsRWOConsumerNodeChangeDuringToolProbe(t *testing.T) {
 func TestBackupRejectsPVCIdentityChangeDuringToolProbe(t *testing.T) {
 	client, request := preflightFixture(t, &preflightObjectStore{})
 	addTransferTestNode(t, client, "node-a")
+
 	request.ToolImage = "registry.example/pvc-migrate:test"
 	request.ToolImageProber = &recordingBackupToolProber{
 		results: []kube.ToolImageProbeResult{{NodeName: "node-a"}},
 		onProbe: func(kube.ToolImageProbeOptions) {
-			pvc, err := client.CoreV1().PersistentVolumeClaims("default").Get(context.Background(), "data", metav1.GetOptions{})
+			pvc, err := client.CoreV1().
+				PersistentVolumeClaims("default").
+				Get(context.Background(), "data", metav1.GetOptions{})
 			if err != nil {
 				t.Fatal(err)
 			}
+
 			pvc.UID = types.UID("replacement-pvc")
-			if _, err := client.CoreV1().PersistentVolumeClaims("default").Update(context.Background(), pvc, metav1.UpdateOptions{}); err != nil {
+			if _, err := client.CoreV1().
+				PersistentVolumeClaims("default").
+				Update(context.Background(), pvc, metav1.UpdateOptions{}); err != nil {
 				t.Fatal(err)
 			}
 		},
 	}
 
 	err := Run(context.Background(), client, request, false)
-	if domain.CategoryOf(err) != domain.ErrorConflict || !strings.Contains(err.Error(), "binding identity changed") {
+	if domain.CategoryOf(err) != domain.ErrorConflict ||
+		!strings.Contains(err.Error(), "binding identity changed") {
 		t.Fatalf("category=%s error=%v", domain.CategoryOf(err), err)
 	}
 }
 
 func addTransferTestNode(t *testing.T, client kubernetes.Interface, name string) {
 	t.Helper()
+
 	_, err := client.CoreV1().Nodes().Create(context.Background(), &corev1.Node{
-		ObjectMeta: metav1.ObjectMeta{Name: name, Labels: map[string]string{corev1.LabelHostname: name}},
+		ObjectMeta: metav1.ObjectMeta{
+			Name:   name,
+			Labels: map[string]string{corev1.LabelHostname: name},
+		},
 	}, metav1.CreateOptions{})
 	if err != nil {
 		t.Fatal(err)
@@ -1037,20 +1640,28 @@ func addTransferTestNode(t *testing.T, client kubernetes.Interface, name string)
 }
 
 func probePVNodeAffinity(hostname string) *corev1.VolumeNodeAffinity {
-	return &corev1.VolumeNodeAffinity{Required: &corev1.NodeSelector{NodeSelectorTerms: []corev1.NodeSelectorTerm{{
-		MatchExpressions: []corev1.NodeSelectorRequirement{{
-			Key: corev1.LabelHostname, Operator: corev1.NodeSelectorOpIn, Values: []string{hostname},
-		}},
-	}}}}
+	return &corev1.VolumeNodeAffinity{
+		Required: &corev1.NodeSelector{NodeSelectorTerms: []corev1.NodeSelectorTerm{{
+			MatchExpressions: []corev1.NodeSelectorRequirement{
+				{
+					Key:      corev1.LabelHostname,
+					Operator: corev1.NodeSelectorOpIn,
+					Values:   []string{hostname},
+				},
+			},
+		}}},
+	}
 }
 
 func TestBackupPreflightDoesNotProbeToolImage(t *testing.T) {
 	client, request := preflightFixture(t, &preflightObjectStore{})
 	prober := &recordingBackupToolProber{}
+
 	request.ToolImageProber = prober
 	if _, err := Preflight(context.Background(), client, request, false); err != nil {
 		t.Fatal(err)
 	}
+
 	if len(prober.calls) != 0 {
 		t.Fatalf("preflight probe calls=%d", len(prober.calls))
 	}
@@ -1070,10 +1681,12 @@ func TestTransferToolHelmValuesUseObservedNodeTaintsAndPullSecrets(t *testing.T)
 		NodeName:         "node-a",
 		ImagePullSecrets: []corev1.LocalObjectReference{{Name: "registry-pull"}},
 	}
+
 	values, err := transferToolHelmValues(context.Background(), client, probe)
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	for _, expected := range []string{
 		"rclone.nodeName=node-a",
 		"rclone.tolerations[0].key=storage",
@@ -1091,16 +1704,48 @@ func TestTransferToolHelmValuesUseObservedNodeTaintsAndPullSecrets(t *testing.T)
 func TestOnlineBackupRejectsRWOConsumersOnDifferentNodes(t *testing.T) {
 	client, request := preflightFixture(t, &preflightObjectStore{})
 	request.Online = true
+
 	for name, node := range map[string]string{"consumer-a": "node-a", "consumer-b": "node-b"} {
-		pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: name}, Spec: corev1.PodSpec{NodeName: node, Volumes: []corev1.Volume{{VolumeSource: corev1.VolumeSource{PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: "data"}}}}}}
-		if _, err := client.CoreV1().Pods("default").Create(context.Background(), pod, metav1.CreateOptions{}); err != nil {
+		pod := &corev1.Pod{
+			ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: name},
+			Spec: corev1.PodSpec{
+				NodeName: node,
+				Volumes: []corev1.Volume{
+					{
+						VolumeSource: corev1.VolumeSource{
+							PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
+								ClaimName: "data",
+							},
+						},
+					},
+				},
+			},
+		}
+		if _, err := client.CoreV1().
+			Pods("default").
+			Create(context.Background(), pod, metav1.CreateOptions{}); err != nil {
 			t.Fatal(err)
 		}
 	}
-	if _, err := onlineBackupToolNode(context.Background(), client, request); domain.CategoryOf(err) != domain.ErrorPrecondition {
+
+	if _, err := onlineBackupToolNode(
+		context.Background(),
+		client,
+		request,
+	); domain.CategoryOf(
+		err,
+	) != domain.ErrorPrecondition {
 		t.Fatalf("category=%s error=%v", domain.CategoryOf(err), err)
 	}
-	if _, err := Preflight(context.Background(), client, request, false); domain.CategoryOf(err) != domain.ErrorPrecondition {
+
+	if _, err := Preflight(
+		context.Background(),
+		client,
+		request,
+		false,
+	); domain.CategoryOf(
+		err,
+	) != domain.ErrorPrecondition {
 		t.Fatalf("preflight category=%s error=%v", domain.CategoryOf(err), err)
 	}
 }
@@ -1108,12 +1753,22 @@ func TestOnlineBackupRejectsRWOConsumersOnDifferentNodes(t *testing.T) {
 func TestMountedRestoreRejectsRWOConsumersOnDifferentNodes(t *testing.T) {
 	client, request := preflightFixture(t, &preflightObjectStore{manifest: emptyBackupManifest()})
 	request.AllowMounted = true
+
 	for name, node := range map[string]string{"consumer-a": "node-a", "consumer-b": "node-b"} {
-		if _, err := client.CoreV1().Pods("default").Create(context.Background(), mountedConsumerPod(name, node), metav1.CreateOptions{}); err != nil {
+		if _, err := client.CoreV1().
+			Pods("default").
+			Create(context.Background(), mountedConsumerPod(name, node), metav1.CreateOptions{}); err != nil {
 			t.Fatal(err)
 		}
 	}
-	if _, err := Preflight(context.Background(), client, request, true); domain.CategoryOf(err) != domain.ErrorPrecondition || !strings.Contains(err.Error(), "span nodes") {
+
+	if _, err := Preflight(
+		context.Background(),
+		client,
+		request,
+		true,
+	); domain.CategoryOf(err) != domain.ErrorPrecondition ||
+		!strings.Contains(err.Error(), "span nodes") {
 		t.Fatalf("category=%s error=%v", domain.CategoryOf(err), err)
 	}
 }
@@ -1131,46 +1786,110 @@ func mountedConsumerPod(name, node string) *corev1.Pod {
 }
 
 func emptyBackupManifest() []byte {
-	return []byte(`{"version":2,"createdAt":"2026-08-07T00:00:00Z","bucket":"backups","prefix":"pv-migrate","name":"daily","sourceNamespace":"default","sourcePVC":"data","sourcePVCUID":"pvc","capacity":"1Gi","volumeMode":"Filesystem","consistency":"offline file-consistent copy","compression":"none","objectCount":0,"totalBytes":0,"inventorySHA256":"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"}`)
+	return []byte(
+		`{"version":2,"createdAt":"2026-08-07T00:00:00Z","bucket":"backups","prefix":"pv-migrate","name":"daily","sourceNamespace":"default","sourcePVC":"data","sourcePVCUID":"pvc","capacity":"1Gi","volumeMode":"Filesystem","consistency":"offline file-consistent copy","compression":"none","objectCount":0,"totalBytes":0,"inventorySHA256":"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"}`,
+	)
 }
 
 func TestVerifyPVCIdentityRejectsNameReuseAndClaimRefMismatch(t *testing.T) {
 	mode := corev1.PersistentVolumeFilesystem
 	pvc := &corev1.PersistentVolumeClaim{
-		ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "data", UID: types.UID("pvc-new")},
-		Spec:       corev1.PersistentVolumeClaimSpec{VolumeName: "pv-data", VolumeMode: &mode},
-		Status:     corev1.PersistentVolumeClaimStatus{Phase: corev1.ClaimBound},
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: "default",
+			Name:      "data",
+			UID:       types.UID("pvc-new"),
+		},
+		Spec:   corev1.PersistentVolumeClaimSpec{VolumeName: "pv-data", VolumeMode: &mode},
+		Status: corev1.PersistentVolumeClaimStatus{Phase: corev1.ClaimBound},
 	}
 	pv := &corev1.PersistentVolume{
 		ObjectMeta: metav1.ObjectMeta{Name: "pv-data", UID: types.UID("pv")},
 		Spec: corev1.PersistentVolumeSpec{
-			ClaimRef: &corev1.ObjectReference{Namespace: "default", Name: "data", UID: types.UID("pvc-new")},
+			ClaimRef: &corev1.ObjectReference{
+				Namespace: "default",
+				Name:      "data",
+				UID:       types.UID("pvc-new"),
+			},
 			Capacity: corev1.ResourceList{corev1.ResourceStorage: resource.MustParse("1Gi")},
 		},
 		Status: corev1.PersistentVolumeStatus{Phase: corev1.VolumeBound},
 	}
+
 	client := fake.NewClientset(pvc, pv)
-	if _, _, err := verifyPVCIdentity(context.Background(), client, "default", "data", "pvc-old", "pv"); domain.CategoryOf(err) != domain.ErrorConflict {
+	if _, _, err := verifyPVCIdentity(
+		context.Background(),
+		client,
+		"default",
+		"data",
+		"pvc-old",
+		"pv",
+	); domain.CategoryOf(
+		err,
+	) != domain.ErrorConflict {
 		t.Fatalf("PVC name reuse category=%s error=%v", domain.CategoryOf(err), err)
 	}
-	if _, _, err := verifyPVCIdentity(context.Background(), client, "default", "data", "pvc-new", "pv"); err != nil {
+
+	if _, _, err := verifyPVCIdentity(
+		context.Background(),
+		client,
+		"default",
+		"data",
+		"pvc-new",
+		"pv",
+	); err != nil {
 		t.Fatal(err)
 	}
+
 	pv.Spec.ClaimRef.UID = types.UID("foreign")
-	if _, err := client.CoreV1().PersistentVolumes().Update(context.Background(), pv, metav1.UpdateOptions{}); err != nil {
+	if _, err := client.CoreV1().
+		PersistentVolumes().
+		Update(context.Background(), pv, metav1.UpdateOptions{}); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := verifyPVCIdentity(context.Background(), client, "default", "data", "pvc-new", "pv"); domain.CategoryOf(err) != domain.ErrorConflict {
+
+	if _, _, err := verifyPVCIdentity(
+		context.Background(),
+		client,
+		"default",
+		"data",
+		"pvc-new",
+		"pv",
+	); domain.CategoryOf(
+		err,
+	) != domain.ErrorConflict {
 		t.Fatalf("claimRef mismatch category=%s error=%v", domain.CategoryOf(err), err)
 	}
+
 	pv.Spec.ClaimRef.UID = ""
-	if _, err := client.CoreV1().PersistentVolumes().Update(context.Background(), pv, metav1.UpdateOptions{}); err != nil {
+	if _, err := client.CoreV1().
+		PersistentVolumes().
+		Update(context.Background(), pv, metav1.UpdateOptions{}); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := verifyPVCIdentity(context.Background(), client, "default", "data", "pvc-new", "pv"); domain.CategoryOf(err) != domain.ErrorConflict {
+
+	if _, _, err := verifyPVCIdentity(
+		context.Background(),
+		client,
+		"default",
+		"data",
+		"pvc-new",
+		"pv",
+	); domain.CategoryOf(
+		err,
+	) != domain.ErrorConflict {
 		t.Fatalf("missing claimRef UID category=%s error=%v", domain.CategoryOf(err), err)
 	}
-	if _, _, err := verifyPVCIdentity(context.Background(), client, "default", "data", "", "pv"); domain.CategoryOf(err) != domain.ErrorPrecondition {
+
+	if _, _, err := verifyPVCIdentity(
+		context.Background(),
+		client,
+		"default",
+		"data",
+		"",
+		"pv",
+	); domain.CategoryOf(
+		err,
+	) != domain.ErrorPrecondition {
 		t.Fatalf("missing expected UID category=%s error=%v", domain.CategoryOf(err), err)
 	}
 }
@@ -1186,14 +1905,22 @@ func TestPreflightRejectsPVBindingIdentityDrift(t *testing.T) {
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			client, request := preflightFixture(t, &preflightObjectStore{})
-			pv, err := client.CoreV1().PersistentVolumes().Get(context.Background(), "pv-data", metav1.GetOptions{})
+
+			pv, err := client.CoreV1().
+				PersistentVolumes().
+				Get(context.Background(), "pv-data", metav1.GetOptions{})
 			if err != nil {
 				t.Fatal(err)
 			}
+
 			test.mutate(pv)
-			if _, err := client.CoreV1().PersistentVolumes().Update(context.Background(), pv, metav1.UpdateOptions{}); err != nil {
+
+			if _, err := client.CoreV1().
+				PersistentVolumes().
+				Update(context.Background(), pv, metav1.UpdateOptions{}); err != nil {
 				t.Fatal(err)
 			}
+
 			if _, err := Preflight(context.Background(), client, request, false); err == nil {
 				t.Fatal("preflight accepted an invalid PVC/PV binding")
 			}
@@ -1233,8 +1960,10 @@ func TestClassifyToolAndLeaseErrorPreservesBothFailures(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			leaseErrors := make(chan error, 1)
 			leaseErrors <- test.leaseErr
+
 			err := classifyToolAndLeaseError(context.Background(), "backup", toolErr, leaseErrors)
-			if domain.CategoryOf(err) != test.category || !errors.Is(err, test.leaseErr) || !errors.Is(err, toolErr) {
+			if domain.CategoryOf(err) != test.category || !errors.Is(err, test.leaseErr) ||
+				!errors.Is(err, toolErr) {
 				t.Fatalf("category=%s error=%v", domain.CategoryOf(err), err)
 			}
 		})

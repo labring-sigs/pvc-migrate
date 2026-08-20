@@ -8,6 +8,7 @@ import (
 
 	"github.com/labring-sigs/pvc-migrate/internal/domain"
 	"github.com/labring-sigs/pvc-migrate/internal/kube"
+	"github.com/labring-sigs/pvc-migrate/internal/testutil"
 	corev1 "k8s.io/api/core/v1"
 	storagev1 "k8s.io/api/storage/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -21,29 +22,50 @@ type plannerOpenEBSLVMSharedVolumeManager struct {
 	err    error
 }
 
-func (m plannerOpenEBSLVMSharedVolumeManager) Shared(context.Context, domain.ObjectReference, domain.ObjectReference, string) (bool, error) {
+func (m plannerOpenEBSLVMSharedVolumeManager) Shared(
+	context.Context,
+	domain.ObjectReference,
+	domain.ObjectReference,
+	string,
+) (bool, error) {
 	return m.shared, m.err
 }
 
-func (plannerOpenEBSLVMSharedVolumeManager) PrepareShared(context.Context, domain.ObjectReference) (kube.OpenEBSLVMSharedResult, error) {
+func (plannerOpenEBSLVMSharedVolumeManager) PrepareShared(
+	context.Context,
+	domain.ObjectReference,
+) (kube.OpenEBSLVMSharedResult, error) {
 	return kube.OpenEBSLVMSharedResult{}, nil
 }
 
-func (plannerOpenEBSLVMSharedVolumeManager) EnableShared(context.Context, string, domain.OpenEBSLVMSharedMount) error {
+func (plannerOpenEBSLVMSharedVolumeManager) EnableShared(
+	context.Context,
+	string,
+	domain.OpenEBSLVMSharedMount,
+) error {
 	return nil
 }
 
-func (plannerOpenEBSLVMSharedVolumeManager) ValidateRestoreShared(context.Context, string, domain.OpenEBSLVMSharedMount) error {
+func (plannerOpenEBSLVMSharedVolumeManager) ValidateRestoreShared(
+	context.Context,
+	string,
+	domain.OpenEBSLVMSharedMount,
+) error {
 	return nil
 }
 
-func (plannerOpenEBSLVMSharedVolumeManager) RestoreShared(context.Context, string, domain.OpenEBSLVMSharedMount) error {
+func (plannerOpenEBSLVMSharedVolumeManager) RestoreShared(
+	context.Context,
+	string,
+	domain.OpenEBSLVMSharedMount,
+) error {
 	return nil
 }
 
 func TestCheckPVCReferencesModelsOfflineWarmCopyRWOPAndSharedUnit(t *testing.T) {
 	rwo := corev1.ReadWriteOnce
 	rwop := corev1.ReadWriteOncePod
+
 	tests := []struct {
 		name      string
 		operation domain.Operation
@@ -54,26 +76,70 @@ func TestCheckPVCReferencesModelsOfflineWarmCopyRWOPAndSharedUnit(t *testing.T) 
 		severity  domain.CheckSeverity
 		message   string
 	}{
-		{name: "offline", operation: domain.OperationCopy, mode: rwo, ready: true, severity: domain.SeverityInfo, message: "is offline"},
-		{name: "active RWO warns", operation: domain.OperationCopy, mode: rwo, pods: []runtime.Object{podWithPVC("app", "consumer", "data")}, ready: true, severity: domain.SeverityWarning, message: "warm copy has file-level consistency"},
-		{name: "active RWOP fails", operation: domain.OperationCopy, mode: rwop, pods: []runtime.Object{podWithPVC("app", "consumer", "data")}, severity: domain.SeverityError, message: "cannot be warm-copied"},
-		{name: "active RWOP reserve warns accurately", operation: domain.OperationReserve, mode: rwop, pods: []runtime.Object{podWithPVC("app", "consumer", "data")}, ready: true, severity: domain.SeverityWarning, message: "reservation keeps the source PVC mounted"},
+		{
+			name:      "offline",
+			operation: domain.OperationCopy,
+			mode:      rwo,
+			ready:     true,
+			severity:  domain.SeverityInfo,
+			message:   "is offline",
+		},
+		{
+			name:      "active RWO warns",
+			operation: domain.OperationCopy,
+			mode:      rwo,
+			pods:      []runtime.Object{podWithPVC("consumer")},
+			ready:     true,
+			severity:  domain.SeverityWarning,
+			message:   "warm copy has file-level consistency",
+		},
+		{
+			name:      "active RWOP fails",
+			operation: domain.OperationCopy,
+			mode:      rwop,
+			pods:      []runtime.Object{podWithPVC("consumer")},
+			severity:  domain.SeverityError,
+			message:   "cannot be warm-copied",
+		},
+		{
+			name:      "active RWOP reserve warns accurately",
+			operation: domain.OperationReserve,
+			mode:      rwop,
+			pods:      []runtime.Object{podWithPVC("consumer")},
+			ready:     true,
+			severity:  domain.SeverityWarning,
+			message:   "reservation keeps the source PVC mounted",
+		},
 		{
 			name:      "selected unit has another consumer",
 			operation: domain.OperationCopy,
 			mode:      rwo,
-			pods:      []runtime.Object{podWithPVC("app", "selected", "data"), podWithPVC("app", "other", "data")},
-			sourcePod: podWithPVC("app", "selected", "data"),
+			pods: []runtime.Object{
+				podWithPVC("selected"),
+				podWithPVC("other"),
+			},
+			sourcePod: podWithPVC("selected"),
 			severity:  domain.SeverityError,
 			message:   "shared with Pod(s): other",
 		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			pvc := &corev1.PersistentVolumeClaim{ObjectMeta: metav1.ObjectMeta{Namespace: "app", Name: "data"}, Spec: corev1.PersistentVolumeClaimSpec{AccessModes: []corev1.PersistentVolumeAccessMode{tt.mode}}}
+			pvc := &corev1.PersistentVolumeClaim{
+				ObjectMeta: metav1.ObjectMeta{Namespace: "app", Name: "data"},
+				Spec: corev1.PersistentVolumeClaimSpec{
+					AccessModes: []corev1.PersistentVolumeAccessMode{tt.mode},
+				},
+			}
 			plan := &domain.MigrationPlan{Ready: true}
-			New(kubernetesfake.NewClientset(tt.pods...), nil).checkPVCReferences(context.Background(), plan, pvc, tt.sourcePod, tt.operation, true)
-			if plan.Ready != tt.ready || len(plan.Checks) != 1 || plan.Checks[0].Severity != tt.severity || !strings.Contains(plan.Checks[0].Message, tt.message) {
+			New(
+				kubernetesfake.NewClientset(tt.pods...),
+				nil,
+			).checkPVCReferences(context.Background(), plan, pvc, tt.sourcePod, tt.operation, true)
+
+			if plan.Ready != tt.ready || len(plan.Checks) != 1 ||
+				plan.Checks[0].Severity != tt.severity ||
+				!strings.Contains(plan.Checks[0].Message, tt.message) {
 				t.Fatalf("plan ready=%t checks=%#v", plan.Ready, plan.Checks)
 			}
 		})
@@ -81,8 +147,11 @@ func TestCheckPVCReferencesModelsOfflineWarmCopyRWOPAndSharedUnit(t *testing.T) 
 }
 
 func TestCheckWarmCopyMountCompatibility(t *testing.T) {
-	pvc := &corev1.PersistentVolumeClaim{ObjectMeta: metav1.ObjectMeta{Namespace: "app", Name: "data"}}
-	consumer := podWithPVC("app", "database-0", "data")
+	pvc := &corev1.PersistentVolumeClaim{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "app", Name: "data"},
+	}
+
+	consumer := podWithPVC("database-0")
 	for _, test := range []struct {
 		name         string
 		operation    domain.Operation
@@ -171,30 +240,56 @@ func TestCheckWarmCopyMountCompatibility(t *testing.T) {
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			plan := &domain.MigrationPlan{Ready: true}
+
 			operation := test.operation
 			if operation == "" {
 				operation = domain.OperationMigrate
 			}
+
 			pvDriver := test.pvDriver
 			if pvDriver == "" && test.class.Provisioner != "openebs.io/local" {
 				pvDriver = test.class.Provisioner
 			}
+
 			pv := &corev1.PersistentVolume{ObjectMeta: metav1.ObjectMeta{Name: "pv-source"}}
 			if pvDriver != "" {
-				pv.Spec.CSI = &corev1.CSIPersistentVolumeSource{Driver: pvDriver, VolumeHandle: "pv-source"}
+				pv.Spec.CSI = &corev1.CSIPersistentVolumeSource{
+					Driver:       pvDriver,
+					VolumeHandle: "pv-source",
+				}
 			}
-			planner := New(nil, nil).WithOpenEBSLVMSharedVolumeManager(plannerOpenEBSLVMSharedVolumeManager{shared: test.lvmShared, err: test.lvmErr})
-			inspect, patch := planner.checkWarmCopyMountCompatibility(context.Background(), plan, operation, test.enableShared, pvc, pv, test.class.Name, test.class, nil, test.consumers)
+
+			planner := New(
+				nil,
+				nil,
+			).WithOpenEBSLVMSharedVolumeManager(plannerOpenEBSLVMSharedVolumeManager{shared: test.lvmShared, err: test.lvmErr})
+
+			inspect, patch := planner.checkWarmCopyMountCompatibility(
+				context.Background(),
+				plan,
+				operation,
+				test.enableShared,
+				pvc,
+				pv,
+				test.class.Name,
+				test.class,
+				nil,
+				test.consumers,
+			)
 			if inspect != test.wantInspect {
 				t.Fatalf("inspect OpenEBS LVM=%t want=%t", inspect, test.wantInspect)
 			}
+
 			if patch != test.wantPatch {
 				t.Fatalf("patch OpenEBS LVM=%t want=%t", patch, test.wantPatch)
 			}
+
 			if plan.Ready != test.wantReady || len(plan.Checks) != test.wantChecks {
 				t.Fatalf("ready=%t checks=%#v", plan.Ready, plan.Checks)
 			}
-			if test.wantChecks > 0 && (plan.Checks[0].Severity != test.wantLevel || !strings.Contains(plan.Checks[0].Message, test.wantText)) {
+
+			if test.wantChecks > 0 &&
+				(plan.Checks[0].Severity != test.wantLevel || !strings.Contains(plan.Checks[0].Message, test.wantText)) {
 				t.Fatalf("check=%#v", plan.Checks[0])
 			}
 		})
@@ -205,6 +300,7 @@ func TestWarmCopyRequestedUsesPrecopyPasses(t *testing.T) {
 	if warmCopyRequested(Options{Operation: domain.OperationMigratePod, PrecopyPasses: 0}) {
 		t.Fatal("offline migration requested warm copy")
 	}
+
 	if !warmCopyRequested(Options{Operation: domain.OperationMigratePod, PrecopyPasses: 1}) {
 		t.Fatal("precopy migration did not request warm copy")
 	}
@@ -212,18 +308,38 @@ func TestWarmCopyRequestedUsesPrecopyPasses(t *testing.T) {
 
 func TestCheckWarmCopyMountCompatibilityUsesLVMSourcePVWithoutStorageClass(t *testing.T) {
 	plan := &domain.MigrationPlan{Ready: true}
-	pvc := &corev1.PersistentVolumeClaim{ObjectMeta: metav1.ObjectMeta{Namespace: "app", Name: "data"}}
+	pvc := &corev1.PersistentVolumeClaim{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "app", Name: "data"},
+	}
 	pv := &corev1.PersistentVolume{
 		ObjectMeta: metav1.ObjectMeta{Name: "pv-source"},
 		Spec: corev1.PersistentVolumeSpec{PersistentVolumeSource: corev1.PersistentVolumeSource{
-			CSI: &corev1.CSIPersistentVolumeSource{Driver: kube.OpenEBSLVMCSIDriver, VolumeHandle: "pv-source"},
+			CSI: &corev1.CSIPersistentVolumeSource{
+				Driver:       kube.OpenEBSLVMCSIDriver,
+				VolumeHandle: "pv-source",
+			},
 		}},
 	}
-	consumer := podWithPVC("app", "database-0", "data")
-	planner := New(nil, nil).WithOpenEBSLVMSharedVolumeManager(plannerOpenEBSLVMSharedVolumeManager{})
+	consumer := podWithPVC("database-0")
+	planner := New(
+		nil,
+		nil,
+	).WithOpenEBSLVMSharedVolumeManager(plannerOpenEBSLVMSharedVolumeManager{})
 
-	inspect, patch := planner.checkWarmCopyMountCompatibility(context.Background(), plan, domain.OperationMigrate, false, pvc, pv, "deleted-class", nil, errors.New("not found"), []*corev1.Pod{consumer})
-	if !inspect || patch || plan.Ready || !hasFailedCheckContaining(plan, "warm-copy-mount", "LVMVolume") {
+	inspect, patch := planner.checkWarmCopyMountCompatibility(
+		context.Background(),
+		plan,
+		domain.OperationMigrate,
+		false,
+		pvc,
+		pv,
+		"deleted-class",
+		nil,
+		errors.New("not found"),
+		[]*corev1.Pod{consumer},
+	)
+	if !inspect || patch || plan.Ready ||
+		!hasFailedCheckContaining(plan, "warm-copy-mount", "LVMVolume") {
 		t.Fatalf("inspect=%t patch=%t ready=%t checks=%#v", inspect, patch, plan.Ready, plan.Checks)
 	}
 }
@@ -249,16 +365,28 @@ func TestOpenEBSLocalStorageTypeParsesParametersAndConfig(t *testing.T) {
 
 func TestPlanReportsOpenEBSWarmCopyMountCheck(t *testing.T) {
 	objects := plannerObjects("2Gi")
-	storageClass := objects[3].(*storagev1.StorageClass)
+	storageClass := testutil.MustType[*storagev1.StorageClass](t, objects[3])
 	storageClass.Provisioner = "local.csi.openebs.io"
-	objects[6].(*corev1.PersistentVolume).Spec.CSI = &corev1.CSIPersistentVolumeSource{Driver: kube.OpenEBSLVMCSIDriver, VolumeHandle: "pv-source"}
-	consumer := podWithPVC("app", "database-0", "data")
+	testutil.MustType[*corev1.PersistentVolume](t, objects[6]).Spec.CSI = &corev1.CSIPersistentVolumeSource{
+		Driver:       kube.OpenEBSLVMCSIDriver,
+		VolumeHandle: "pv-source",
+	}
+	consumer := podWithPVC("database-0")
 	consumer.Status.Phase = corev1.PodRunning
 	objects = append(objects, consumer)
 	options := Options{
-		SessionID: "migration", Operation: domain.OperationMigrate,
-		SourceNamespace: "app", TemporaryNamespace: "system", StagingNamespace: "system", SessionNamespace: "system",
-		SourcePVCs: []string{"data"}, TargetNode: "node-b", DestinationClass: "fast", PrecopyPasses: 1,
+		SessionID:          "migration",
+		Operation:          domain.OperationMigrate,
+		SourceNamespace:    "app",
+		TemporaryNamespace: "system",
+		StagingNamespace:   "system",
+		SessionNamespace:   "system",
+		SourcePVCs: []string{
+			"data",
+		},
+		TargetNode:       "node-b",
+		DestinationClass: "fast",
+		PrecopyPasses:    1,
 	}
 
 	plan, err := New(plannerClient(objects...), nil).
@@ -267,20 +395,24 @@ func TestPlanReportsOpenEBSWarmCopyMountCheck(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	if !hasFailedCheckContaining(plan, "warm-copy-mount", "--precopy-passes 0") {
 		t.Fatalf("warm-copy mount check missing: %#v", plan.Checks)
 	}
+
 	if !hasFailedCheckContaining(plan, "warm-copy-mount", "--openebs-lvm-enable-shared") {
 		t.Fatalf("OpenEBS LVM shared recovery missing: %#v", plan.Checks)
 	}
 
 	options.PrecopyPasses = 0
+
 	offlinePlan, err := New(plannerClient(objects...), nil).
 		WithOpenEBSLVMSharedVolumeManager(plannerOpenEBSLVMSharedVolumeManager{}).
 		Plan(context.Background(), options)
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	if hasFailedCheck(offlinePlan, "warm-copy-mount") {
 		t.Fatalf("offline plan includes warm-copy mount check: %#v", offlinePlan.Checks)
 	}
@@ -288,8 +420,9 @@ func TestPlanReportsOpenEBSWarmCopyMountCheck(t *testing.T) {
 
 func TestPlanRejectsSourcePVClaimRefDrift(t *testing.T) {
 	objects := plannerObjects("2Gi")
-	pv := objects[6].(*corev1.PersistentVolume)
+	pv := testutil.MustType[*corev1.PersistentVolume](t, objects[6])
 	pv.Spec.ClaimRef.Name = "other"
+
 	plan, err := New(plannerClient(objects...), nil).Plan(context.Background(), Options{
 		SessionID:          "binding-drift",
 		Operation:          domain.OperationMigrate,
@@ -305,6 +438,7 @@ func TestPlanRejectsSourcePVClaimRefDrift(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	if plan.Ready || !hasFailedCheck(plan, "source-binding") {
 		t.Fatalf("plan=%#v", plan)
 	}
@@ -315,9 +449,15 @@ func TestCheckPVCReferencesReportsListErrors(t *testing.T) {
 	client.PrependReactor("list", "pods", func(clienttesting.Action) (bool, runtime.Object, error) {
 		return true, nil, errors.New("list timeout")
 	})
+
 	plan := &domain.MigrationPlan{Ready: true}
-	New(client, nil).checkPVCReferences(context.Background(), plan, &corev1.PersistentVolumeClaim{ObjectMeta: metav1.ObjectMeta{Namespace: "app", Name: "data"}}, nil, domain.OperationMigrate, false)
-	if plan.Ready || len(plan.Checks) != 1 || !strings.Contains(plan.Checks[0].Message, "list timeout") {
+	New(
+		client,
+		nil,
+	).checkPVCReferences(context.Background(), plan, &corev1.PersistentVolumeClaim{ObjectMeta: metav1.ObjectMeta{Namespace: "app", Name: "data"}}, nil, domain.OperationMigrate, false)
+
+	if plan.Ready || len(plan.Checks) != 1 ||
+		!strings.Contains(plan.Checks[0].Message, "list timeout") {
 		t.Fatalf("checks=%#v", plan.Checks)
 	}
 }
@@ -334,13 +474,21 @@ func TestPlanRejectsUnschedulableTopologyAndBlockVolumes(t *testing.T) {
 			value.Spec.VolumeMode = &mode
 		}
 	}
+
 	plan, err := New(plannerClient(objects...), nil).Plan(context.Background(), Options{
-		SessionID: "migration", SourceNamespace: "app", StagingNamespace: "system", SessionNamespace: "system", TemporaryNamespace: "system",
-		SourcePVCs: []string{"data"}, TargetNode: "node-b", DestinationClass: "fast",
+		SessionID:          "migration",
+		SourceNamespace:    "app",
+		StagingNamespace:   "system",
+		SessionNamespace:   "system",
+		TemporaryNamespace: "system",
+		SourcePVCs:         []string{"data"},
+		TargetNode:         "node-b",
+		DestinationClass:   "fast",
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	for _, checkName := range []string{"target-node", "storage-topology", "volume-mode"} {
 		if !hasFailedCheck(plan, checkName) {
 			t.Fatalf("failed check %q missing: %#v", checkName, plan.Checks)
@@ -349,21 +497,42 @@ func TestPlanRejectsUnschedulableTopologyAndBlockVolumes(t *testing.T) {
 }
 
 func TestCheckCSINodeTreatsMissingAndUnregisteredDriversAsWarnings(t *testing.T) {
-	sc := &storagev1.StorageClass{ObjectMeta: metav1.ObjectMeta{Name: "fast"}, Provisioner: "example.csi.io"}
+	sc := &storagev1.StorageClass{
+		ObjectMeta:  metav1.ObjectMeta{Name: "fast"},
+		Provisioner: "example.csi.io",
+	}
 	node := &corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "node-b"}}
+
 	tests := []struct {
 		name    string
 		objects []runtime.Object
 		message string
 	}{
 		{name: "CSINode absent", message: "has no CSINode object"},
-		{name: "driver absent", objects: []runtime.Object{&storagev1.CSINode{ObjectMeta: metav1.ObjectMeta{Name: "node-b"}, Spec: storagev1.CSINodeSpec{Drivers: []storagev1.CSINodeDriver{{Name: "other.csi.io"}}}}}, message: "is absent from CSINode"},
+		{
+			name: "driver absent",
+			objects: []runtime.Object{
+				&storagev1.CSINode{
+					ObjectMeta: metav1.ObjectMeta{Name: "node-b"},
+					Spec: storagev1.CSINodeSpec{
+						Drivers: []storagev1.CSINodeDriver{{Name: "other.csi.io"}},
+					},
+				},
+			},
+			message: "is absent from CSINode",
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			plan := &domain.MigrationPlan{Ready: true}
-			New(kubernetesfake.NewClientset(tt.objects...), nil).checkCSINode(context.Background(), plan, sc, node)
-			if !plan.Ready || len(plan.Checks) != 1 || plan.Checks[0].Severity != domain.SeverityWarning || !strings.Contains(plan.Checks[0].Message, tt.message) {
+			New(
+				kubernetesfake.NewClientset(tt.objects...),
+				nil,
+			).checkCSINode(context.Background(), plan, sc, node)
+
+			if !plan.Ready || len(plan.Checks) != 1 ||
+				plan.Checks[0].Severity != domain.SeverityWarning ||
+				!strings.Contains(plan.Checks[0].Message, tt.message) {
 				t.Fatalf("checks=%#v", plan.Checks)
 			}
 		})
@@ -372,36 +541,76 @@ func TestCheckCSINodeTreatsMissingAndUnregisteredDriversAsWarnings(t *testing.T)
 
 func TestCheckCSINodeFailsOnEmptyObject(t *testing.T) {
 	client := kubernetesfake.NewClientset()
-	client.PrependReactor("get", "csinodes", func(clienttesting.Action) (bool, runtime.Object, error) {
-		return true, nil, nil
-	})
+	client.PrependReactor(
+		"get",
+		"csinodes",
+		func(clienttesting.Action) (bool, runtime.Object, error) {
+			return true, nil, nil
+		},
+	)
+
 	plan := &domain.MigrationPlan{Ready: true}
 	New(client, nil).checkCSINode(context.Background(), plan,
-		&storagev1.StorageClass{ObjectMeta: metav1.ObjectMeta{Name: "fast"}, Provisioner: "example.csi.io"},
+		&storagev1.StorageClass{
+			ObjectMeta:  metav1.ObjectMeta{Name: "fast"},
+			Provisioner: "example.csi.io",
+		},
 		&corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "node-b"}})
-	if plan.Ready || len(plan.Checks) != 1 || plan.Checks[0].Severity != domain.SeverityError || !strings.Contains(plan.Checks[0].Message, "returned an empty object") {
+
+	if plan.Ready || len(plan.Checks) != 1 || plan.Checks[0].Severity != domain.SeverityError ||
+		!strings.Contains(plan.Checks[0].Message, "returned an empty object") {
 		t.Fatalf("plan ready=%t checks=%#v", plan.Ready, plan.Checks)
 	}
 }
 
 func TestPodPVCNamesAreUniqueAndSorted(t *testing.T) {
 	pod := &corev1.Pod{Spec: corev1.PodSpec{Volumes: []corev1.Volume{
-		{Name: "z", VolumeSource: corev1.VolumeSource{PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: "z-data"}}},
-		{Name: "a", VolumeSource: corev1.VolumeSource{PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: "a-data"}}},
-		{Name: "duplicate", VolumeSource: corev1.VolumeSource{PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: "z-data"}}},
-		{Name: "empty", VolumeSource: corev1.VolumeSource{PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{}}},
+		{
+			Name: "z",
+			VolumeSource: corev1.VolumeSource{
+				PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
+					ClaimName: "z-data",
+				},
+			},
+		},
+		{
+			Name: "a",
+			VolumeSource: corev1.VolumeSource{
+				PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
+					ClaimName: "a-data",
+				},
+			},
+		},
+		{
+			Name: "duplicate",
+			VolumeSource: corev1.VolumeSource{
+				PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
+					ClaimName: "z-data",
+				},
+			},
+		},
+		{
+			Name: "empty",
+			VolumeSource: corev1.VolumeSource{
+				PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{},
+			},
+		},
 	}}}
+
 	names := podPVCNames(pod)
 	if len(names) != 2 || names[0] != "a-data" || names[1] != "z-data" {
 		t.Fatalf("PVC names=%v", names)
 	}
 }
 
-func podWithPVC(namespace, name, claim string) *corev1.Pod {
+func podWithPVC(name string) *corev1.Pod {
 	return &corev1.Pod{
-		ObjectMeta: metav1.ObjectMeta{Namespace: namespace, Name: name},
-		Spec: corev1.PodSpec{NodeName: "node-a", Volumes: []corev1.Volume{{Name: "data", VolumeSource: corev1.VolumeSource{
-			PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: claim},
-		}}}},
+		ObjectMeta: metav1.ObjectMeta{Namespace: "app", Name: name},
+		Spec: corev1.PodSpec{
+			NodeName: "node-a",
+			Volumes: []corev1.Volume{{Name: "data", VolumeSource: corev1.VolumeSource{
+				PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: "data"},
+			}}},
+		},
 	}
 }

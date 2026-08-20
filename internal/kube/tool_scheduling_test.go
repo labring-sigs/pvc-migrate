@@ -1,10 +1,11 @@
-package kube
+package kube_test
 
 import (
 	"slices"
 	"testing"
 
 	"github.com/labring-sigs/pvc-migrate/internal/domain"
+	. "github.com/labring-sigs/pvc-migrate/internal/kube"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
@@ -18,10 +19,12 @@ func TestToolComponentNodeHelmValuesMirrorHardTaints(t *testing.T) {
 			{Key: "preference", Effect: corev1.TaintEffectPreferNoSchedule},
 		}},
 	}
+
 	values, err := ToolComponentNodeHelmValues(ToolComponentRclone, node)
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	for _, expected := range []string{
 		"rclone.nodeName=storage-node",
 		"rclone.tolerations[0].key=dedicated",
@@ -34,6 +37,7 @@ func TestToolComponentNodeHelmValuesMirrorHardTaints(t *testing.T) {
 			t.Fatalf("missing %q in %v", expected, values)
 		}
 	}
+
 	for _, value := range values {
 		if value == "rclone.tolerations[2].key=preference" {
 			t.Fatalf("PreferNoSchedule taint emitted: %v", values)
@@ -42,16 +46,28 @@ func TestToolComponentNodeHelmValuesMirrorHardTaints(t *testing.T) {
 }
 
 func TestToolComponentNodeHelmValuesValidateInputs(t *testing.T) {
-	if _, err := ToolComponentNodeHelmValues(ToolComponentShell, &corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "node"}}); domain.CategoryOf(err) != domain.ErrorValidation {
+	if _, err := ToolComponentNodeHelmValues(
+		ToolComponentShell,
+		&corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "node"}},
+	); domain.CategoryOf(
+		err,
+	) != domain.ErrorValidation {
 		t.Fatalf("component category=%s error=%v", domain.CategoryOf(err), err)
 	}
-	if _, err := ToolComponentNodeHelmValues(ToolComponentRclone, nil); domain.CategoryOf(err) != domain.ErrorKubernetes {
+
+	if _, err := ToolComponentNodeHelmValues(
+		ToolComponentRclone,
+		nil,
+	); domain.CategoryOf(
+		err,
+	) != domain.ErrorKubernetes {
 		t.Fatalf("node category=%s error=%v", domain.CategoryOf(err), err)
 	}
 }
 
 func TestToolComponentTolerationsDeduplicateAcrossNodes(t *testing.T) {
 	taint := corev1.Taint{Key: "storage", Value: "true", Effect: corev1.TaintEffectNoSchedule}
+
 	values := ToolComponentTolerationHelmValues(ToolComponentSSHD,
 		&corev1.Node{Spec: corev1.NodeSpec{Taints: []corev1.Taint{taint}}},
 		&corev1.Node{Spec: corev1.NodeSpec{Taints: []corev1.Taint{taint}}},

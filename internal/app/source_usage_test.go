@@ -2,7 +2,7 @@ package app
 
 import (
 	"context"
-	"fmt"
+	"errors"
 	"strings"
 	"testing"
 
@@ -19,14 +19,20 @@ type staticVolumeUsageReader struct {
 	calls  int
 }
 
-func (r *staticVolumeUsageReader) Read(context.Context, kube.VolumeUsageReadOptions) (kube.VolumeUsageReadResult, error) {
+func (r *staticVolumeUsageReader) Read(
+	context.Context,
+	kube.VolumeUsageReadOptions,
+) (kube.VolumeUsageReadResult, error) {
 	r.calls++
 	return r.result, r.err
 }
 
 type volumeUsageReaderFunc func(context.Context, kube.VolumeUsageReadOptions) (kube.VolumeUsageReadResult, error)
 
-func (f volumeUsageReaderFunc) Read(ctx context.Context, options kube.VolumeUsageReadOptions) (kube.VolumeUsageReadResult, error) {
+func (f volumeUsageReaderFunc) Read(
+	ctx context.Context,
+	options kube.VolumeUsageReadOptions,
+) (kube.VolumeUsageReadResult, error) {
 	return f(ctx, options)
 }
 
@@ -37,9 +43,16 @@ func shrinkUsageSession(skip bool) *domain.Session {
 		SourceCapacity: "2Gi",
 		Capacity:       "1Gi",
 	}}}
+
 	return &domain.Session{
-		ID:   "usage-test",
-		Spec: domain.NewSessionSpec(domain.OperationCopy, common, domain.WorkloadSpec{}, false, domain.SessionWorkflowOptions{SkipSourceUsageCheck: skip}),
+		ID: "usage-test",
+		Spec: domain.NewSessionSpec(
+			domain.OperationCopy,
+			common,
+			domain.WorkloadSpec{},
+			false,
+			domain.SessionWorkflowOptions{SkipSourceUsageCheck: skip},
+		),
 	}
 }
 
@@ -51,19 +64,29 @@ func TestVerifyShrinkUsageRequiresTrustedBackendReader(t *testing.T) {
 }
 
 func TestVerifyShrinkUsageUsesBackendResult(t *testing.T) {
-	reader := &staticVolumeUsageReader{result: kube.VolumeUsageReadResult{UsedBytes: 512 << 20, Source: "test storage CRD"}}
+	reader := &staticVolumeUsageReader{
+		result: kube.VolumeUsageReadResult{UsedBytes: 512 << 20, Source: "test storage CRD"},
+	}
+
 	service := &Service{config: Config{VolumeUsageReader: reader}}
-	if err := service.verifyShrinkUsage(context.Background(), shrinkUsageSession(false)); err != nil {
+	if err := service.verifyShrinkUsage(
+		context.Background(),
+		shrinkUsageSession(false),
+	); err != nil {
 		t.Fatal(err)
 	}
+
 	if reader.calls != 1 {
 		t.Fatalf("calls=%d", reader.calls)
 	}
 }
 
 func TestVerifyShrinkUsageRejectsBackendOverflow(t *testing.T) {
-	reader := &staticVolumeUsageReader{result: kube.VolumeUsageReadResult{UsedBytes: 2 << 30, Source: "test storage CRD"}}
+	reader := &staticVolumeUsageReader{
+		result: kube.VolumeUsageReadResult{UsedBytes: 2 << 30, Source: "test storage CRD"},
+	}
 	service := &Service{config: Config{VolumeUsageReader: reader}}
+
 	err := service.verifyShrinkUsage(context.Background(), shrinkUsageSession(false))
 	if err == nil || !strings.Contains(err.Error(), "above destination capacity") {
 		t.Fatalf("error=%v", err)
@@ -71,22 +94,35 @@ func TestVerifyShrinkUsageRejectsBackendOverflow(t *testing.T) {
 }
 
 func TestVerifyPartialSourceShrinkReportsWholeVolumeUsageAsInconclusive(t *testing.T) {
-	reader := &staticVolumeUsageReader{result: kube.VolumeUsageReadResult{UsedBytes: 2 << 30, Source: "test storage CRD"}}
+	reader := &staticVolumeUsageReader{
+		result: kube.VolumeUsageReadResult{UsedBytes: 2 << 30, Source: "test storage CRD"},
+	}
 	service := &Service{config: Config{VolumeUsageReader: reader}}
 	session := shrinkUsageSession(false)
-	session.Spec.Volumes[0].TransferScope = &domain.TransferScope{SourcePath: "selected/data", DestinationPath: "."}
+	session.Spec.Volumes[0].TransferScope = &domain.TransferScope{
+		SourcePath:      "selected/data",
+		DestinationPath: ".",
+	}
+
 	err := service.verifyShrinkUsage(context.Background(), session)
-	if domain.CategoryOf(err) != domain.ErrorConflict || !strings.Contains(err.Error(), "cannot prove that selected source directory") || !strings.Contains(err.Error(), "selected/data") {
+	if domain.CategoryOf(err) != domain.ErrorConflict ||
+		!strings.Contains(err.Error(), "cannot prove that selected source directory") ||
+		!strings.Contains(err.Error(), "selected/data") {
 		t.Fatalf("error=%v category=%s", err, domain.CategoryOf(err))
 	}
 }
 
 func TestVerifyShrinkUsageExplicitSkipBypassesReader(t *testing.T) {
-	reader := &staticVolumeUsageReader{err: fmt.Errorf("must not be called")}
+	reader := &staticVolumeUsageReader{err: errors.New("must not be called")}
+
 	service := &Service{config: Config{VolumeUsageReader: reader}}
-	if err := service.verifyShrinkUsage(context.Background(), shrinkUsageSession(true)); err != nil {
+	if err := service.verifyShrinkUsage(
+		context.Background(),
+		shrinkUsageSession(true),
+	); err != nil {
 		t.Fatal(err)
 	}
+
 	if reader.calls != 0 {
 		t.Fatalf("calls=%d", reader.calls)
 	}
@@ -98,13 +134,16 @@ func TestValidateFinalSyncRechecksShrinkUsageWhenAlreadyPaused(t *testing.T) {
 	session.Status.Phase = domain.PhasePaused
 	session.Spec.Volumes[0].SourceCapacity = "2Gi"
 	session.Spec.Volumes[0].Capacity = "1Gi"
-	reader := &staticVolumeUsageReader{result: kube.VolumeUsageReadResult{UsedBytes: 2 << 30, Source: "test storage CRD"}}
+	reader := &staticVolumeUsageReader{
+		result: kube.VolumeUsageReadResult{UsedBytes: 2 << 30, Source: "test storage CRD"},
+	}
 	fixture.service.config.VolumeUsageReader = reader
 
 	err := fixture.service.ValidateFinalSync(context.Background(), session)
 	if err == nil || !strings.Contains(err.Error(), "above destination capacity") {
 		t.Fatalf("error=%v", err)
 	}
+
 	if reader.calls != 1 {
 		t.Fatalf("reader calls=%d", reader.calls)
 	}
@@ -116,12 +155,15 @@ func TestPauseAndFinalSyncRechecksShrinkUsageWhenAlreadyPaused(t *testing.T) {
 	session.Status.Phase = domain.PhasePaused
 	session.Spec.Volumes[0].SourceCapacity = "2Gi"
 	session.Spec.Volumes[0].Capacity = "1Gi"
-	fixture.service.config.VolumeUsageReader = &staticVolumeUsageReader{result: kube.VolumeUsageReadResult{UsedBytes: 2 << 30, Source: "test storage CRD"}}
+	fixture.service.config.VolumeUsageReader = &staticVolumeUsageReader{
+		result: kube.VolumeUsageReadResult{UsedBytes: 2 << 30, Source: "test storage CRD"},
+	}
 
 	err := fixture.service.PauseAndFinalSync(context.Background(), session)
 	if err == nil || !strings.Contains(err.Error(), "above destination capacity") {
 		t.Fatalf("error=%v", err)
 	}
+
 	if len(fixture.copier.requests) != 0 {
 		t.Fatalf("copy started despite usage overflow: %v", fixture.copier.requests)
 	}
@@ -134,22 +176,27 @@ func TestPauseAndFinalSyncRechecksShrinkUsageAfterPause(t *testing.T) {
 	session.Spec.Volumes[0].SourceCapacity = "2Gi"
 	session.Spec.Volumes[0].Capacity = "1Gi"
 	checkedWhilePaused := false
-	fixture.service.config.VolumeUsageReader = volumeUsageReaderFunc(func(context.Context, kube.VolumeUsageReadOptions) (kube.VolumeUsageReadResult, error) {
-		usedBytes := int64(512 << 20)
-		if session.Status.Phase == domain.PhasePaused {
-			checkedWhilePaused = true
-			usedBytes = 2 << 30
-		}
-		return kube.VolumeUsageReadResult{UsedBytes: usedBytes, Source: "test storage CRD"}, nil
-	})
+	fixture.service.config.VolumeUsageReader = volumeUsageReaderFunc(
+		func(context.Context, kube.VolumeUsageReadOptions) (kube.VolumeUsageReadResult, error) {
+			usedBytes := int64(512 << 20)
+			if session.Status.Phase == domain.PhasePaused {
+				checkedWhilePaused = true
+				usedBytes = 2 << 30
+			}
+
+			return kube.VolumeUsageReadResult{UsedBytes: usedBytes, Source: "test storage CRD"}, nil
+		},
+	)
 
 	err := fixture.service.PauseAndFinalSync(context.Background(), session)
 	if err == nil || !strings.Contains(err.Error(), "above destination capacity") {
 		t.Fatalf("error=%v", err)
 	}
+
 	if !checkedWhilePaused {
 		t.Fatal("source usage was not checked after the workload paused")
 	}
+
 	if len(fixture.copier.requests) != 0 {
 		t.Fatalf("copy started despite post-pause usage overflow: %v", fixture.copier.requests)
 	}
@@ -164,12 +211,25 @@ func TestValidateActivationRejectsApplicationPVCQuotaBeforeSwitch(t *testing.T) 
 	session.Status.Volumes[0].Sync.FinalCompletedAt = &completed
 	session.Spec.Volumes[0].SourceCapacity = "1Gi"
 	session.Spec.Volumes[0].Capacity = "2Gi"
-	session.Spec.Volumes[0].SourcePVCSpec.Resources.Requests = corev1.ResourceList{corev1.ResourceStorage: resource.MustParse("1Gi")}
-	if _, err := fixture.client.CoreV1().ResourceQuotas("app").Create(context.Background(), &corev1.ResourceQuota{
-		ObjectMeta: metav1.ObjectMeta{Namespace: "app", Name: "application-storage"},
-		Spec:       corev1.ResourceQuotaSpec{Hard: corev1.ResourceList{corev1.ResourceRequestsStorage: resource.MustParse("1Gi")}},
-		Status:     corev1.ResourceQuotaStatus{Used: corev1.ResourceList{corev1.ResourceRequestsStorage: resource.MustParse("1Gi")}},
-	}, metav1.CreateOptions{}); err != nil {
+
+	session.Spec.Volumes[0].SourcePVCSpec.Resources.Requests = corev1.ResourceList{
+		corev1.ResourceStorage: resource.MustParse("1Gi"),
+	}
+	if _, err := fixture.client.CoreV1().
+		ResourceQuotas("app").
+		Create(context.Background(), &corev1.ResourceQuota{
+			ObjectMeta: metav1.ObjectMeta{Namespace: "app", Name: "application-storage"},
+			Spec: corev1.ResourceQuotaSpec{
+				Hard: corev1.ResourceList{
+					corev1.ResourceRequestsStorage: resource.MustParse("1Gi"),
+				},
+			},
+			Status: corev1.ResourceQuotaStatus{
+				Used: corev1.ResourceList{
+					corev1.ResourceRequestsStorage: resource.MustParse("1Gi"),
+				},
+			},
+		}, metav1.CreateOptions{}); err != nil {
 		t.Fatal(err)
 	}
 

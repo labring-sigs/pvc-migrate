@@ -1,7 +1,7 @@
 version: "2"
 
 run:
-  go: "1.26"
+  go: "1.27"
   relative-path-mode: gomod
   modules-download-mode: readonly
 
@@ -12,21 +12,66 @@ issues:
 linters:
   default: none
   enable:
+    - asasalint
     - asciicheck
     - bidichk
     - bodyclose
+    - canonicalheader
+    - containedctx
+    - copyloopvar
     - durationcheck
     - errcheck
+    - errchkjson
+    - errname
     - errorlint
+    - exptostd
+    - fatcontext
+    - forbidigo
+    - ginkgolinter
+    - gocheckcompilerdirectives
     - gocritic
+    - gocyclo
+    - goprintffuncname
     - gosec
     - govet
+    - iface
+    - importas
+    - iotamixing
+    - inamedparam
     - ineffassign
+    - intrange
+    - loggercheck
+    - mirror
     - misspell
+    - modernize
+    - musttag
+    - nakedret
     - noctx
     - nolintlint
+    - nosprintfhostport
+    - perfsprint
+    - prealloc
+    - predeclared
+    - promlinter
+    - protogetter
+    - reassign
+    - revive
+    - rowserrcheck
+    - sloglint
+    - spancheck
+    - sqlclosecheck
     - staticcheck
+    - testpackage
+    - thelper
+    - tparallel
+    - unconvert
+    - unparam
     - unused
+    - usestdlibvars
+    - usetesting
+    - wastedassign
+    - whitespace
+    - wsl_v5
   exclusions:
     generated: lax
     presets:
@@ -39,18 +84,70 @@ linters:
       - builtin$
       - examples$
   settings:
+    revive:
+      rules:
+        - name: var-naming
+          arguments:
+            - []
+            - []
+            - [{ skipPackageNameChecks: true }]
+    copyloopvar:
+      check-alias: true
+    cyclop:
+      max-complexity: 15
     errcheck:
-      check-type-assertions: false
+      check-type-assertions: true
+    forbidigo:
+      forbid:
+        - pattern: ^print(ln)?$
+      analyze-types: true
+    prealloc:
+      for-loops: true
+    gocyclo:
+      min-complexity: 30
+    testpackage:
+      allow-packages:
+        - app
+        - backup
+        - cli
+        - controller
+        - kube
+        - main
+        - planner
     staticcheck:
       dot-import-whitelist: []
       http-status-code-whitelist: []
+    modernize:
+      disable:
+        - embedlit
+        - forvar
+        - omitzero
+    perfsprint:
+      # use modernize stringsbuilder
+      concat-loop: false
+    usestdlibvars:
+      time-date-month: true
+      time-month: true
+      time-layout: true
+      crypto-hash: true
+      default-rpc-path: true
+      sql-isolation-level: true
+      tls-signature-scheme: true
+      constant-kind: true
+    usetesting:
+      os-temp-dir: true
     gosec:
       excludes:
         - G404
+    wsl_v5:
+      allow-whole-block: true
+      branch-max-lines: 4
 
 formatters:
   enable:
-    - gofmt
+    - gci
+    - gofumpt
+    - golines
   exclusions:
     generated: lax
     paths:
@@ -58,7 +155,7 @@ formatters:
       - builtin$
       - examples$
   settings:
-    gofmt:
-      rewrite-rules:
-        - pattern: "a[b:len(a)]"
-          replacement: "a[b:]"
+    gofumpt:
+      extra:
+        group-params: true
+        balance-calls: true
