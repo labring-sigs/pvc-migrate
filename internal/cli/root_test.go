@@ -135,6 +135,20 @@ func TestBackupDryRunPrintsStructuredPlanWithoutSecrets(t *testing.T) {
 	}
 }
 
+func TestBackupDryRunPrintsNormalizedPath(t *testing.T) {
+	stdout, _, err := executeBackupCLI(t, "", "backup", "--dry-run", "--output", "json", "--source-pvc", "data", "--backend", "s3", "--bucket", "backups", "--name", "daily", "--path", "  tenant data//当前's files/  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var result map[string]any
+	if err := json.Unmarshal([]byte(stdout), &result); err != nil {
+		t.Fatalf("decode output: %v\n%s", err, stdout)
+	}
+	if result["path"] != "tenant data/当前's files" {
+		t.Fatalf("path=%v", result["path"])
+	}
+}
+
 func TestLiveBackupDryRunAllowsMountedSourceSemantics(t *testing.T) {
 	stdout, _, err := executeBackupCLI(t, "", "live-backup", "--output", "json", "--source-pvc", "data", "--backend", "s3", "--bucket", "backups", "--name", "daily")
 	if err != nil {

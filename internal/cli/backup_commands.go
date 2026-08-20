@@ -139,7 +139,7 @@ func (r *rootState) newObjectTransferCommand(restore, forceOnline bool) *cobra.C
 					Operation:   use,
 					Namespace:   flags.namespace,
 					PVC:         flags.pvc,
-					Path:        backupDisplayPath(flags.path),
+					Path:        plan.Path,
 					Name:        flags.name,
 					Destination: store.Destination(),
 					Mode:        mode,
@@ -162,13 +162,6 @@ func (r *rootState) newObjectTransferCommand(restore, forceOnline bool) *cobra.C
 	bindDryRun(command, &dryRun)
 	command.AddCommand(r.newBackupPlanCommand(restore, forceOnline))
 	return command
-}
-
-func backupDisplayPath(value string) string {
-	if value == "" {
-		return domain.VolumeRootPath
-	}
-	return value
 }
 
 func (r *rootState) newBackupPlanCommand(restore, forceOnline bool) *cobra.Command {

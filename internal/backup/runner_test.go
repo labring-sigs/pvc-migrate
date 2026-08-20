@@ -328,6 +328,18 @@ func TestRestorePreflightRejectsPathMismatch(t *testing.T) {
 	}
 }
 
+func TestBackupPreflightNormalizesPVCPath(t *testing.T) {
+	client, request := preflightFixture(t, &preflightObjectStore{})
+	request.Path = "tenant data//当前's files/"
+	plan, err := Preflight(context.Background(), client, request, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if plan.Path != "tenant data/当前's files" {
+		t.Fatalf("normalized plan path=%q", plan.Path)
+	}
+}
+
 func TestBackupConsistencyRecordsOnlineBoundary(t *testing.T) {
 	if got := backupConsistency(true); got != "best-effort crash-consistent file copy" {
 		t.Fatalf("online consistency=%q", got)

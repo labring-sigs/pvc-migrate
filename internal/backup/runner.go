@@ -118,6 +118,11 @@ func preflight(ctx context.Context, client kubernetes.Interface, req Request, re
 	if client == nil || req.Store == nil {
 		return nil, domain.NewError(domain.ErrorInternal, "backup preflight", "Kubernetes client and S3 store are required")
 	}
+	normalizedPath, err := normalizeObjectTransferPath(req.Path)
+	if err != nil {
+		return nil, err
+	}
+	req.Path = normalizedPath
 	if err := objectstore.ValidatePath(req.Path); err != nil {
 		return nil, err
 	}
@@ -244,6 +249,17 @@ func transferDisplayPath(value string) string {
 	return value
 }
 
+func normalizeObjectTransferPath(value string) (string, error) {
+	normalized, err := domain.NormalizeTransferPath(value)
+	if err != nil {
+		return "", domain.WrapError(domain.ErrorValidation, "transfer path", fmt.Sprintf("PVC path %q is invalid", value), err)
+	}
+	if normalized == domain.VolumeRootPath {
+		return "", nil
+	}
+	return normalized, nil
+}
+
 func uniquePVToolNode(ctx context.Context, client kubernetes.Interface, pv *corev1.PersistentVolume) (string, error) {
 	if pv == nil || pv.Spec.NodeAffinity == nil || pv.Spec.NodeAffinity.Required == nil || len(pv.Spec.NodeAffinity.Required.NodeSelectorTerms) == 0 {
 		return "", nil
@@ -261,6 +277,10 @@ func Run(ctx context.Context, client kubernetes.Interface, req Request, restore 
 		operation = "restore"
 	}
 	plan, err := preflight(ctx, client, req, restore, "execution revalidation")
+	if err != nil {
+		return err
+	}
+	req.Path, err = normalizeObjectTransferPath(req.Path)
 	if err != nil {
 		return err
 	}

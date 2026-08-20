@@ -578,6 +578,32 @@ func TestToolProbeFailureDeduplicatesPodAndContainerDetails(t *testing.T) {
 	}
 }
 
+func TestToolProbeFailureClassifiesOnlyReportedTransferPathErrors(t *testing.T) {
+	target := ToolProbeTarget{
+		Namespace: "system", NodeName: "node-a", PVCName: "data",
+		RequiredPath: "mysql/current", Components: []string{ToolComponentRsync},
+	}
+	imageFailure := &corev1.Pod{Status: corev1.PodStatus{ContainerStatuses: []corev1.ContainerStatus{{
+		State: corev1.ContainerState{Waiting: &corev1.ContainerStateWaiting{Reason: "ImagePullBackOff"}},
+	}}}}
+	err := toolProbePodFailureWithMessage(imageFailure, "registry.example/private/tool:test", target, "ImagePullBackOff", "authentication required")
+	var typed *domain.Error
+	if !errors.As(err, &typed) || typed.Op != "tool image probe" {
+		t.Fatalf("image failure error=%v", err)
+	}
+
+	pathFailure := &corev1.Pod{Status: corev1.PodStatus{ContainerStatuses: []corev1.ContainerStatus{{
+		State: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{
+			ExitCode: 66, Message: transferPathFailureMarker + " transfer source directory does not exist: mysql/current",
+		}},
+	}}}}
+	err = toolProbePodFailureWithMessage(pathFailure, "registry.example/tool:test", target, "Error", "")
+	typed = nil
+	if !errors.As(err, &typed) || typed.Op != "transfer path preflight" {
+		t.Fatalf("path failure error=%v", err)
+	}
+}
+
 func TestToolImageProbeReportsCommandFailure(t *testing.T) {
 	client := fake.NewClientset(readyProbeNode("node-a"))
 	client.PrependReactor("create", "pods", func(action clienttesting.Action) (bool, runtime.Object, error) {

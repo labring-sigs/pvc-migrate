@@ -26,15 +26,16 @@ import (
 )
 
 const (
-	ToolComponentShell  = "sh"
-	ToolComponentRsync  = "rsync"
-	ToolComponentSSHD   = "sshd"
-	ToolComponentRclone = "rclone"
-	toolProbeOperation  = "pvc-migrate.io/probe-operation"
-	toolProbeTimeout    = 2 * time.Minute
-	toolProbePoll       = 250 * time.Millisecond
-	toolProbeEventPoll  = time.Second
-	toolProbeCleanupTTL = 10 * time.Second
+	ToolComponentShell        = "sh"
+	ToolComponentRsync        = "rsync"
+	ToolComponentSSHD         = "sshd"
+	ToolComponentRclone       = "rclone"
+	toolProbeOperation        = "pvc-migrate.io/probe-operation"
+	toolProbeTimeout          = 2 * time.Minute
+	toolProbePoll             = 250 * time.Millisecond
+	toolProbeEventPoll        = time.Second
+	toolProbeCleanupTTL       = 10 * time.Second
+	transferPathFailureMarker = "pvc-migrate: transfer path preflight:"
 )
 
 // ToolProbeTarget describes one node and namespace where a real tool Pod will
@@ -623,16 +624,17 @@ func toolProbeCommand(components []string) string {
 }
 
 func transferPathProbeCommand(relativePath string, create bool) string {
-	missingAction := `echo "transfer source directory does not exist: $transfer_path" >&2; exit 66`
+	missingAction := `transfer_path_fail 66 "transfer source directory does not exist: $transfer_path"`
 	if create {
-		missingAction = `command -v mkdir >/dev/null 2>&1 || { echo 'required tool command mkdir is missing' >&2; exit 127; }; mkdir "$current"`
+		missingAction = `command -v mkdir >/dev/null 2>&1 || { echo 'required tool command mkdir is missing' >&2; exit 127; }; mkdir "$current" || transfer_path_fail 73 "create transfer directory failed: $transfer_path"`
 	}
 	return strings.Join([]string{
 		"set -f",
+		`transfer_path_fail() { code=$1; message=$2; marked="` + transferPathFailureMarker + ` $message"; printf '%s\n' "$marked" >&2; printf '%s\n' "$marked" 2>/dev/null > /dev/termination-log || true; exit "$code"; }`,
 		"transfer_path=" + probeShellQuote(relativePath),
 		"current=/probe-volume",
 		`remaining="$transfer_path"`,
-		`while test -n "$remaining"; do component=${remaining%%/*}; if test "$remaining" = "$component"; then remaining=; else remaining=${remaining#*/}; fi; current="$current/$component"; if test -L "$current"; then echo "transfer path contains a symbolic link: $transfer_path" >&2; exit 65; fi; if test -e "$current"; then test -d "$current" || { echo "transfer path is not a directory: $transfer_path" >&2; exit 66; }; else ` + missingAction + `; fi; done`,
+		`while test -n "$remaining"; do component=${remaining%%/*}; if test "$remaining" = "$component"; then remaining=; else remaining=${remaining#*/}; fi; current="$current/$component"; if test -L "$current"; then transfer_path_fail 65 "transfer path contains a symbolic link: $transfer_path"; fi; if test -e "$current"; then test -d "$current" || transfer_path_fail 66 "transfer path is not a directory: $transfer_path"; else ` + missingAction + `; fi; done`,
 	}, "; ")
 }
 
@@ -671,7 +673,7 @@ func toolProbePodFailureWithMessage(pod *corev1.Pod, image string, target ToolPr
 	}
 	operation := "tool image probe"
 	subject := fmt.Sprintf("tool image %s failed on %s/%s for components %s", image, target.Namespace, node, strings.Join(target.Components, ","))
-	if target.RequiredPath != "" {
+	if target.RequiredPath != "" && reportedTransferPathProbeFailure(pod) {
 		operation = "transfer path preflight"
 		action := "validate"
 		if target.CreatePath {
@@ -680,6 +682,18 @@ func toolProbePodFailureWithMessage(pod *corev1.Pod, image string, target ToolPr
 		subject = fmt.Sprintf("%s transfer directory %q on PVC %s/%s", action, target.RequiredPath, target.Namespace, target.PVCName)
 	}
 	return domain.NewError(domain.ErrorPrecondition, operation, subject+": "+details)
+}
+
+func reportedTransferPathProbeFailure(pod *corev1.Pod) bool {
+	if pod == nil {
+		return false
+	}
+	for _, status := range pod.Status.ContainerStatuses {
+		if status.State.Terminated != nil && strings.Contains(status.State.Terminated.Message, transferPathFailureMarker) {
+			return true
+		}
+	}
+	return false
 }
 
 func toolProbePodStatusParts(pod *corev1.Pod) []string {
