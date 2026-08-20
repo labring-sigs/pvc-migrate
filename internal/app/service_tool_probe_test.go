@@ -270,6 +270,43 @@ func TestSessionToolProbeTargetsUseActualVolumeNamespaces(t *testing.T) {
 	}
 }
 
+func TestPartialTransferProbeTargetsValidateSourceAndCreateDestination(t *testing.T) {
+	session := appTestSession()
+	session.Spec.Volumes[0].TransferScope = &domain.TransferScope{SourcePath: "mysql/current", DestinationPath: "restored/mysql"}
+	targets := copyToolProbeTargets(session, true)
+	var source, destination *kube.ToolProbeTarget
+	for index := range targets {
+		target := &targets[index]
+		if target.PVCName == session.Spec.Volumes[0].SourcePVC.Name && target.RequiredPath != "" {
+			source = target
+		}
+		if target.PVCName == session.Spec.Volumes[0].DestinationPVC.Name && target.RequiredPath != "" {
+			destination = target
+		}
+	}
+	if source == nil || source.RequiredPath != "mysql/current" || source.SkipPVCMount || source.CreatePath {
+		t.Fatalf("source target=%#v all=%#v", source, targets)
+	}
+	if destination == nil || destination.RequiredPath != "restored/mysql" || !destination.CreatePath || !destination.WritablePVCMount {
+		t.Fatalf("destination target=%#v all=%#v", destination, targets)
+	}
+}
+
+func TestPartialTransferPreparesDestinationWithoutPreselectedTargetNode(t *testing.T) {
+	session := appTestSession()
+	session.Spec.WorkflowOptionsPtr().TargetNode = ""
+	session.Spec.Volumes[0].TransferScope = &domain.TransferScope{SourcePath: ".", DestinationPath: "restored/mysql"}
+
+	targets := copyToolProbeTargets(session, false)
+	if len(targets) != 1 {
+		t.Fatalf("targets=%#v", targets)
+	}
+	target := targets[0]
+	if target.NodeName != "" || target.PVCName != session.Spec.Volumes[0].DestinationPVC.Name || target.RequiredPath != "restored/mysql" || !target.CreatePath || !target.WritablePVCMount || !slices.Equal(target.Components, []string{kube.ToolComponentRsync}) {
+		t.Fatalf("target=%#v", target)
+	}
+}
+
 func TestResolveSessionToolProbeTargetsUsesActiveConsumerNode(t *testing.T) {
 	session := copyToolProbeSession(true)
 	client := fake.NewClientset(&corev1.Pod{
@@ -798,6 +835,40 @@ func TestPauseAndFinalSyncProbesBeforeWorkloadPause(t *testing.T) {
 	}
 	if fixture.controller.pauses != 0 || session.Status.Phase != domain.PhaseWarmCopied {
 		t.Fatalf("pauses=%d phase=%s", fixture.controller.pauses, session.Status.Phase)
+	}
+}
+
+func TestPartialPauseAndFinalSyncCreatesDestinationBeforePauseAndValidatesSourceAfterPause(t *testing.T) {
+	fixture := newRecoveryFixture(t)
+	session := appTestSession()
+	session.Status.Phase = domain.PhaseWarmCopied
+	session.Spec.Volumes[0].TransferScope = &domain.TransferScope{SourcePath: "mysql/current", DestinationPath: "restored/mysql"}
+	prober := &recordingToolImageProber{}
+	prober.onProbe = func(context.Context) {
+		if len(prober.calls) == 1 && fixture.controller.pauses != 0 {
+			t.Fatalf("destination preparation ran after pause: pauses=%d", fixture.controller.pauses)
+		}
+		if len(prober.calls) == 2 && fixture.controller.pauses != 1 {
+			t.Fatalf("source path validation ran before pause: pauses=%d", fixture.controller.pauses)
+		}
+	}
+	fixture.service.config.ToolImageProber = prober
+
+	if err := fixture.service.PauseAndFinalSync(context.Background(), session); err != nil {
+		t.Fatal(err)
+	}
+	if len(prober.calls) != 2 {
+		t.Fatalf("probe calls=%d", len(prober.calls))
+	}
+	first, second := prober.calls[0].Targets, prober.calls[1].Targets
+	foundDestination := false
+	for _, target := range first {
+		if target.PVCName == session.Spec.Volumes[0].DestinationPVC.Name && target.RequiredPath == "restored/mysql" && target.CreatePath {
+			foundDestination = true
+		}
+	}
+	if !foundDestination || len(second) != 1 || second[0].PVCName != session.Spec.Volumes[0].SourcePVC.Name || second[0].RequiredPath != "mysql/current" || second[0].CreatePath {
+		t.Fatalf("first targets=%#v second targets=%#v", first, second)
 	}
 }
 

@@ -195,18 +195,18 @@ func ValidateConfig(cfg Config) error {
 	return nil
 }
 
-// ValidatePath accepts only a relative slash-separated PVC subdirectory.
+// ValidatePath accepts a canonical relative slash-separated PVC subdirectory.
+// The empty string is the canonical full-volume root used by backup manifests.
 func ValidatePath(value string) error {
 	if value == "" {
 		return nil
 	}
-	if strings.HasPrefix(value, "/") || strings.Contains(value, "\\") {
-		return domain.NewError(domain.ErrorValidation, "S3 path", "path must be relative and use slash separators")
+	normalized, err := domain.NormalizeTransferPath(value)
+	if err != nil {
+		return domain.WrapError(domain.ErrorValidation, "PVC path", fmt.Sprintf("path %q is invalid", value), err)
 	}
-	for _, segment := range strings.Split(value, "/") {
-		if segment == "" || segment == "." || segment == ".." || !safeSegment.MatchString(segment) {
-			return domain.NewError(domain.ErrorValidation, "S3 path", "path contains an unsafe segment")
-		}
+	if normalized == domain.VolumeRootPath || normalized != value {
+		return domain.NewError(domain.ErrorValidation, "PVC path", "path must be stored in normalized form; use an empty path for the PVC root")
 	}
 	return nil
 }

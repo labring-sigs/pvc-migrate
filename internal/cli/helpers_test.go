@@ -140,7 +140,7 @@ func TestRootCommandSurfaceAndGlobalDefaults(t *testing.T) {
 		if err != nil {
 			t.Fatalf("Find(%v): %v", path, err)
 		}
-		for _, name := range []string{"destination-capacity", "allow-volume-shrink"} {
+		for _, name := range []string{"destination-capacity", "allow-volume-shrink", "source-path", "destination-path"} {
 			if command.Flags().Lookup(name) == nil {
 				t.Fatalf("%v is missing --%s", path, name)
 			}
@@ -151,7 +151,7 @@ func TestRootCommandSurfaceAndGlobalDefaults(t *testing.T) {
 		if err != nil {
 			t.Fatalf("Find(%v): %v", path, err)
 		}
-		for _, name := range []string{"destination-capacity", "allow-volume-shrink"} {
+		for _, name := range []string{"destination-capacity", "allow-volume-shrink", "source-path", "destination-path"} {
 			if command.Flags().Lookup(name) != nil {
 				t.Fatalf("%v unexpectedly exposes --%s", path, name)
 			}
@@ -244,6 +244,8 @@ func TestMigrationFlagDefaultsAndPlanOptions(t *testing.T) {
 	flags.sourcePVCs = []string{"data", "logs"}
 	flags.destinationPVCs = []string{"data-new", "logs-new"}
 	flags.destinationCapacities = []string{"3Gi", "4Gi"}
+	flags.sourcePaths = []string{"data=data/current", "logs=logs/current"}
+	flags.destinationPaths = []string{"data=.", "logs=restored/logs"}
 	flags.allowVolumeShrink = true
 	flags.podName = "db-2"
 	flags.sourceNode = "node-a"
@@ -270,9 +272,33 @@ func TestMigrationFlagDefaultsAndPlanOptions(t *testing.T) {
 	flags.sourcePVCs[0] = "mutated"
 	flags.destinationPVCs[0] = "mutated"
 	flags.destinationCapacities[0] = "mutated"
+	flags.sourcePaths[0] = "mutated"
+	flags.destinationPaths[0] = "mutated"
 	flags.strategies[0] = "mutated"
-	if options.SourcePVCs[0] != "data" || options.DestinationPVCs[0] != "data-new" || options.DestinationCapacities[0] != "3Gi" || options.Strategies[0] != "local" {
+	if options.SourcePVCs[0] != "data" || options.DestinationPVCs[0] != "data-new" || options.DestinationCapacities[0] != "3Gi" || options.SourcePaths[0] != "data=data/current" || options.DestinationPaths[0] != "data=." || options.Strategies[0] != "local" {
 		t.Fatalf("plan options alias flag slices: %#v", options)
+	}
+}
+
+func TestTransferPathFlagsRejectUnsafeAndExistingSessionChanges(t *testing.T) {
+	for _, test := range []struct {
+		name     string
+		flags    migrationFlags
+		existing bool
+	}{
+		{name: "existing session", flags: migrationFlags{sourcePaths: []string{"data=partial"}}, existing: true},
+		{name: "absolute", flags: migrationFlags{sourcePaths: []string{"data=/etc"}}},
+		{name: "traversal", flags: migrationFlags{destinationPaths: []string{"data=../outside"}}},
+		{name: "empty mapping", flags: migrationFlags{sourcePaths: []string{"data="}}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if err := validateTransferPathFlags(&test.flags, domain.OperationCopy, test.existing); domain.CategoryOf(err) != domain.ErrorValidation {
+				t.Fatalf("error=%v category=%s", err, domain.CategoryOf(err))
+			}
+		})
+	}
+	if err := validateTransferPathFlags(&migrationFlags{sourcePaths: []string{"data=tenant/current"}, destinationPaths: []string{"data=."}}, domain.OperationCopy, false); err != nil {
+		t.Fatal(err)
 	}
 }
 

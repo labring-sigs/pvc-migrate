@@ -3,6 +3,7 @@ package copyengine
 import (
 	"bytes"
 	"context"
+	"errors"
 	"io"
 	"log/slog"
 	"strings"
@@ -58,6 +59,8 @@ func TestCopyBuildsCompleteUpstreamMigrationContract(t *testing.T) {
 		ToolImage:             "registry.example:5000/team/pvc-migrate:tool-image",
 		Source:                domain.ObjectReference{Namespace: "source-ns", Name: "source-pvc"},
 		Destination:           domain.ObjectReference{Namespace: "target-ns", Name: "target-pvc"},
+		SourcePath:            "data/mysql",
+		DestinationPath:       "restored/mysql",
 		Mode:                  ModeFinal,
 		Attempt:               4,
 		KubeconfigPath:        "/tmp/kubeconfig",
@@ -78,10 +81,10 @@ func TestCopyBuildsCompleteUpstreamMigrationContract(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if captured.ID != OperationID(request) || captured.Source != (pvmigrate.PVC{KubeconfigPath: "/tmp/kubeconfig", Context: "cluster-context", Namespace: "source-ns", Name: "source-pvc"}) || captured.Dest != (pvmigrate.PVC{KubeconfigPath: "/tmp/kubeconfig", Context: "cluster-context", Namespace: "target-ns", Name: "target-pvc"}) {
+	if captured.ID != OperationID(request) || captured.Source != (pvmigrate.PVC{KubeconfigPath: "/tmp/kubeconfig", Context: "cluster-context", Namespace: "source-ns", Name: "source-pvc", Path: "data/mysql/."}) || captured.Dest != (pvmigrate.PVC{KubeconfigPath: "/tmp/kubeconfig", Context: "cluster-context", Namespace: "target-ns", Name: "target-pvc", Path: "restored/mysql/."}) {
 		t.Fatalf("upstream PVC request=%#v", captured)
 	}
-	if !captured.DeleteExtraneousFiles || captured.IgnoreMounted || !captured.SourceMountReadWrite || !captured.IgnoreSizes || !captured.NoCompress || !captured.StructuredLogs || captured.Writer != writer || captured.Logger != logger {
+	if !captured.DeleteExtraneousFiles || captured.IgnoreMounted || !captured.SourceMountReadWrite || !captured.IgnoreSizes || !captured.NoCompress || !captured.StructuredLogs || captured.Writer != writer || captured.Logger == nil || captured.Logger == logger {
 		t.Fatalf("upstream migration policy=%#v", captured)
 	}
 	if captured.RsyncExtraArgs != "-HAXS --numeric-ids --checksum" {
@@ -90,11 +93,27 @@ func TestCopyBuildsCompleteUpstreamMigrationContract(t *testing.T) {
 	if captured.HelmTimeout != request.HelmTimeout || len(captured.Strategies) != len(request.Strategies) || captured.Strategies[0] != pvmigrate.Mount || captured.Strategies[4] != pvmigrate.Local {
 		t.Fatalf("upstream execution fields timeout=%s strategies=%v", captured.HelmTimeout, captured.Strategies)
 	}
-	if len(captured.HelmValues) != len(kube.ToolSecurityContextHelmValues()) || len(captured.HelmStringValues) != 7 || captured.HelmStringValues[len(captured.HelmStringValues)-1] != "sshd.nodeName=source-node" {
+	if len(captured.HelmValues) != len(kube.ToolSecurityContextHelmValues())+1 || captured.HelmValues[len(captured.HelmValues)-1] != "rsync.maxRetries=0" || len(captured.HelmStringValues) != 7 || captured.HelmStringValues[len(captured.HelmStringValues)-1] != "sshd.nodeName=source-node" {
 		t.Fatalf("upstream Helm values=%v stringValues=%v", captured.HelmValues, captured.HelmStringValues)
 	}
 	if len(updates) != 2 || updates[0].State != "running" || updates[1].State != "completed" || updates[0].Mode != ModeFinal || updates[1].Attempt != request.Attempt {
 		t.Fatalf("progress=%#v", updates)
+	}
+}
+
+func TestTransferEnginePathAlwaysCopiesDirectoryContents(t *testing.T) {
+	for _, test := range []struct {
+		input string
+		want  string
+	}{
+		{input: "", want: ""},
+		{input: ".", want: ""},
+		{input: "data", want: "data/."},
+		{input: "nested/data", want: "nested/data/."},
+	} {
+		if got := transferEnginePath(test.input); got != test.want {
+			t.Fatalf("transferEnginePath(%q)=%q want=%q", test.input, got, test.want)
+		}
 	}
 }
 
@@ -219,6 +238,59 @@ func TestCopyReportsUpstreamFailureWithStableOperationIdentity(t *testing.T) {
 	}
 }
 
+func TestCopyClassifiesDestinationENOSPCFromStructuredFailureTail(t *testing.T) {
+	var runContext context.Context
+	var logs bytes.Buffer
+	engine := &PVMigrate{run: func(ctx context.Context, migration pvmigrate.Migration) error {
+		runContext = ctx
+		migration.Logger.Warn("data mover failed", "tail", "rsync: write failed: No space left on device (28)")
+		migration.Logger.Warn("migration failed with this strategy, will try with the remaining strategies")
+		return errors.New("migration ladder exhausted")
+	}}
+	request := Request{
+		SessionID:   "shrink-session",
+		Source:      domain.ObjectReference{Namespace: "app", Name: "source"},
+		Destination: domain.ObjectReference{Namespace: "staging", Name: "destination"},
+		Mode:        ModeFinal,
+		Attempt:     1,
+		Strategies:  []string{"mount", "clusterip"},
+		IgnoreSizes: true,
+		Logger:      slog.New(slog.NewTextHandler(&logs, nil)),
+	}
+	err := engine.Copy(context.Background(), request, nil)
+	if domain.CategoryOf(err) != domain.ErrorCopy || !IsDestinationNoSpaceError(err) {
+		t.Fatalf("Copy() error=%v category=%q", err, domain.CategoryOf(err))
+	}
+	if !strings.Contains(err.Error(), "destination volume ran out of space (ENOSPC)") {
+		t.Fatalf("capacity details missing from %q", err)
+	}
+	if runContext == nil || !errors.Is(runContext.Err(), context.Canceled) {
+		t.Fatalf("upstream strategy context was not canceled after ENOSPC: %v", runContext)
+	}
+	if strings.Contains(logs.String(), "will try with the remaining strategies") || !strings.Contains(logs.String(), "destination capacity is exhausted, stopping strategy attempts") {
+		t.Fatalf("ENOSPC strategy log is misleading: %s", logs.String())
+	}
+}
+
+func TestCopyDoesNotInferENOSPCFromRsyncExitCode(t *testing.T) {
+	engine := &PVMigrate{run: func(_ context.Context, migration pvmigrate.Migration) error {
+		migration.Logger.Info("attempting migration", "dest", "staging/enospc-test-destination")
+		migration.Logger.Warn("data mover failed", "tail", "rsync job failed with exit code 11")
+		return errors.New("migration ladder exhausted")
+	}}
+	err := engine.Copy(context.Background(), Request{
+		SessionID:   "ordinary-copy-failure",
+		Source:      domain.ObjectReference{Namespace: "app", Name: "source"},
+		Destination: domain.ObjectReference{Namespace: "staging", Name: "destination"},
+		Mode:        ModeFinal,
+		Attempt:     1,
+		Strategies:  []string{"mount"},
+	}, nil)
+	if domain.CategoryOf(err) != domain.ErrorCopy || IsDestinationNoSpaceError(err) {
+		t.Fatalf("Copy() error=%v category=%q", err, domain.CategoryOf(err))
+	}
+}
+
 func TestProgressSerializesStableFields(t *testing.T) {
 	progress := Progress{Mode: ModeFinal, Attempt: 3, State: "completed", Message: "pm-id", Bytes: 42}
 	if progress.Mode != ModeFinal || progress.Attempt != 3 || progress.State != "completed" || progress.Message != "pm-id" || progress.Bytes != 42 {
@@ -248,7 +320,7 @@ func TestClassifyRunErrorPreservesTimeoutAndCancellation(t *testing.T) {
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			err := classifyRunError(test.ctx, "pm-test", test.err)
+			err := classifyRunError(test.ctx, "pm-test", test.err, false)
 			if domain.CategoryOf(err) != test.category {
 				t.Fatalf("category=%s error=%v", domain.CategoryOf(err), err)
 			}

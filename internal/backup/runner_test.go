@@ -328,6 +328,18 @@ func TestRestorePreflightRejectsPathMismatch(t *testing.T) {
 	}
 }
 
+func TestBackupPreflightNormalizesPVCPath(t *testing.T) {
+	client, request := preflightFixture(t, &preflightObjectStore{})
+	request.Path = "tenant data//当前's files/"
+	plan, err := Preflight(context.Background(), client, request, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if plan.Path != "tenant data/当前's files" {
+		t.Fatalf("normalized plan path=%q", plan.Path)
+	}
+}
+
 func TestBackupConsistencyRecordsOnlineBoundary(t *testing.T) {
 	if got := backupConsistency(true); got != "best-effort crash-consistent file copy" {
 		t.Fatalf("online consistency=%q", got)
@@ -813,6 +825,35 @@ func TestRunProbesRcloneWhileHoldingTransferLock(t *testing.T) {
 			}
 			if storeAPI.puts != 1 {
 				t.Fatalf("lock writes before probe=%d", storeAPI.puts)
+			}
+		})
+	}
+}
+
+func TestTransferToolProbeValidatesBackupPathAndCreatesRestorePath(t *testing.T) {
+	for _, test := range []struct {
+		name    string
+		restore bool
+	}{
+		{name: "backup validates selected source"},
+		{name: "restore creates selected destination", restore: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			prober := &recordingBackupToolProber{}
+			request := Request{
+				ID: "partial", Namespace: "default", PVCName: "data", Path: "mysql/current",
+				ToolImage: "registry.example/pvc-migrate:test", ToolImageProber: prober,
+			}
+			result, err := probeTransferToolImage(t.Context(), request, "node-a", test.restore)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if result.NodeName != "node-a" || len(prober.calls) != 1 || len(prober.calls[0].Targets) != 1 {
+				t.Fatalf("result=%#v calls=%#v", result, prober.calls)
+			}
+			target := prober.calls[0].Targets[0]
+			if target.PVCName != request.PVCName || target.RequiredPath != request.Path || target.CreatePath != test.restore || !slices.Equal(target.Components, []string{kube.ToolComponentRclone}) {
+				t.Fatalf("target=%#v", target)
 			}
 		})
 	}

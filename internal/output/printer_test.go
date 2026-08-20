@@ -92,6 +92,7 @@ func TestTablePlanRendersChecksAndVolumes(t *testing.T) {
 			Capacity:       "10Gi",
 			StorageClass:   "fast",
 			VolumeMode:     "Filesystem",
+			TransferScope:  &domain.TransferScope{SourcePath: "mysql/data", DestinationPath: "."},
 		}},
 		Checks: []domain.Check{
 			{Name: "quota", Passed: true, Severity: domain.SeverityInfo, Message: "enough"},
@@ -105,7 +106,7 @@ func TestTablePlanRendersChecksAndVolumes(t *testing.T) {
 	if err := (Printer{Writer: &output}).Print(plan); err != nil {
 		t.Fatal(err)
 	}
-	for _, want := range []string{"SESSION", "mig-1", "app/data", "pv-a", "staging/data-mig", "SOURCE CAPACITY", "DESTINATION CAPACITY", "8Gi", "10Gi", "STORAGE CLASS", "20Gi", "15Gi", "sufficient", "PASS", "FAIL", "unavailable"} {
+	for _, want := range []string{"SESSION", "mig-1", "app/data", "pv-a", "staging/data-mig", "TRANSFER SCOPE", "mysql/data -> .", "SOURCE CAPACITY", "DESTINATION CAPACITY", "8Gi", "10Gi", "STORAGE CLASS", "20Gi", "15Gi", "sufficient", "PASS", "FAIL", "unavailable"} {
 		if !strings.Contains(output.String(), want) {
 			t.Fatalf("table missing %q:\n%s", want, output.String())
 		}
@@ -118,6 +119,7 @@ func TestTableBackupPlanAndResultAreHumanReadable(t *testing.T) {
 		ToolImage:        "ghcr.io/example/tool:latest",
 		Namespace:        "app",
 		PVC:              "data",
+		Path:             "database/current",
 		Mode:             backup.ModeRestore,
 		Consistency:      "destination PVC write; application must be quiesced",
 		Destination:      "s3://backups/pv-migrate/daily/",
@@ -138,7 +140,7 @@ func TestTableBackupPlanAndResultAreHumanReadable(t *testing.T) {
 		t.Fatal(err)
 	}
 	text := output.String()
-	for _, want := range []string{"OPERATION", "restore", "app/data", "s3://backups/pv-migrate/daily/", "MANIFEST", "present", "3", "42", "digest", "MOUNTED PODS", "app/writer", "WARNING", "restore is explicitly allowed"} {
+	for _, want := range []string{"OPERATION", "restore", "app/data", "PATH", "database/current", "s3://backups/pv-migrate/daily/", "MANIFEST", "present", "3", "42", "digest", "MOUNTED PODS", "app/writer", "WARNING", "restore is explicitly allowed"} {
 		if !strings.Contains(text, want) {
 			t.Fatalf("backup plan table missing %q:\n%s", want, text)
 		}
@@ -148,11 +150,11 @@ func TestTableBackupPlanAndResultAreHumanReadable(t *testing.T) {
 	}
 
 	output.Reset()
-	result := &backup.Result{Operation: "backup", Namespace: "app", PVC: "data", Mode: backup.ModeOffline, Status: "completed", Destination: "s3://backups/pv-migrate/daily/"}
+	result := &backup.Result{Operation: "backup", Namespace: "app", PVC: "data", Path: "database/current", Mode: backup.ModeOffline, Status: "completed", Destination: "s3://backups/pv-migrate/daily/"}
 	if err := (Printer{Writer: &output}).Print(result); err != nil {
 		t.Fatal(err)
 	}
-	for _, want := range []string{"OPERATION", "backup", "app/data", "offline", "completed", "s3://backups/pv-migrate/daily/"} {
+	for _, want := range []string{"OPERATION", "backup", "app/data", "database/current", "offline", "completed", "s3://backups/pv-migrate/daily/"} {
 		if !strings.Contains(output.String(), want) {
 			t.Fatalf("backup result table missing %q:\n%s", want, output.String())
 		}
@@ -184,7 +186,7 @@ func TestTableSessionRendersSyncAndActivationState(t *testing.T) {
 		ID: "mig-1",
 		Spec: domain.NewSessionSpec(domain.OperationMigrate, domain.SessionCommon{
 			Volumes: []domain.VolumeSpec{
-				{SourcePVC: domain.ObjectReference{Name: "data"}, DestinationPV: domain.ObjectReference{Name: "pv-new"}, SourceCapacity: "2Gi", Capacity: "3Gi"},
+				{SourcePVC: domain.ObjectReference{Name: "data"}, DestinationPV: domain.ObjectReference{Name: "pv-new"}, SourceCapacity: "2Gi", Capacity: "3Gi", TransferScope: &domain.TransferScope{SourcePath: "data/current", DestinationPath: "."}},
 				{SourcePVC: domain.ObjectReference{Name: "logs"}, DestinationPV: domain.ObjectReference{Name: "pv-logs"}},
 			},
 		}, domain.WorkloadSpec{Adapter: domain.WorkloadNone}, false, domain.SessionWorkflowOptions{}),
@@ -202,7 +204,7 @@ func TestTableSessionRendersSyncAndActivationState(t *testing.T) {
 	if err := (Printer{Writer: &output, Format: Table}).Print(session); err != nil {
 		t.Fatal(err)
 	}
-	for _, want := range []string{"mig-1", "Activated", "cutover complete", "2026-08-07T01:02:03Z", "SOURCE CAPACITY", "DESTINATION CAPACITY", "2Gi", "3Gi", "pv-new", "logs", "-"} {
+	for _, want := range []string{"mig-1", "Activated", "cutover complete", "2026-08-07T01:02:03Z", "TRANSFER SCOPE", "data/current -> .", "full", "SOURCE CAPACITY", "DESTINATION CAPACITY", "2Gi", "3Gi", "pv-new", "logs", "-"} {
 		if !strings.Contains(output.String(), want) {
 			t.Fatalf("session table missing %q:\n%s", want, output.String())
 		}

@@ -4,6 +4,9 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
@@ -115,6 +118,65 @@ func TestToolProbePodUsesWritablePVCMountWhenRequested(t *testing.T) {
 	}
 	if strings.Contains(pod.Spec.Containers[0].Command[2], "/probe-volume") {
 		t.Fatalf("probe command writes or otherwise references the mounted PVC: %q", pod.Spec.Containers[0].Command[2])
+	}
+}
+
+func TestTransferPathProbeCreatesNestedDestinationAndRejectsSymlinks(t *testing.T) {
+	root := t.TempDir()
+	relative := "tenant data/current's files"
+	command := strings.Replace(transferPathProbeCommand(relative, true), "current=/probe-volume", "current="+probeShellQuote(root), 1)
+	if output, err := exec.CommandContext(t.Context(), "sh", "-c", command).CombinedOutput(); err != nil {
+		t.Fatalf("create path: %v: %s", err, output)
+	}
+	if info, err := os.Stat(filepath.Join(root, "tenant data", "current's files")); err != nil || !info.IsDir() {
+		t.Fatalf("created directory info=%v error=%v", info, err)
+	}
+
+	escape := t.TempDir()
+	if err := os.Symlink(escape, filepath.Join(root, "link")); err != nil {
+		t.Fatal(err)
+	}
+	command = strings.Replace(transferPathProbeCommand("link/child", true), "current=/probe-volume", "current="+probeShellQuote(root), 1)
+	output, err := exec.CommandContext(t.Context(), "sh", "-c", command).CombinedOutput()
+	if err == nil || !strings.Contains(string(output), "symbolic link") {
+		t.Fatalf("symlink path error=%v output=%q", err, output)
+	}
+	if _, err := os.Stat(filepath.Join(escape, "child")); !os.IsNotExist(err) {
+		t.Fatalf("path probe wrote through symlink: %v", err)
+	}
+}
+
+func TestTransferPathProbeRequiresExistingSourceDirectory(t *testing.T) {
+	root := t.TempDir()
+	command := strings.Replace(transferPathProbeCommand("missing/source", false), "current=/probe-volume", "current="+probeShellQuote(root), 1)
+	output, err := exec.CommandContext(t.Context(), "sh", "-c", command).CombinedOutput()
+	if err == nil || !strings.Contains(string(output), "source directory does not exist") {
+		t.Fatalf("missing source error=%v output=%q", err, output)
+	}
+}
+
+func TestNormalizeToolProbeTargetMakesPathCreationWritable(t *testing.T) {
+	targets, err := normalizeToolProbeTargets([]ToolProbeTarget{{
+		Namespace: "system", NodeName: "node-a", PVCName: "data", RequiredPath: "nested//data/", CreatePath: true,
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(targets) != 1 || targets[0].RequiredPath != "nested/data" || !targets[0].WritablePVCMount || targets[0].SkipPVCMount {
+		t.Fatalf("targets=%#v", targets)
+	}
+	pod := toolProbePod("registry.example/tool:test", "operation", targets[0], readyProbeNode("node-a"), time.Minute)
+	if pod.Annotations["pvc-migrate.io/probe-path"] != "nested/data" || !strings.Contains(pod.Spec.Containers[0].Command[2], "transfer_path='nested/data'") {
+		t.Fatalf("path probe Pod=%#v command=%q", pod.Annotations, pod.Spec.Containers[0].Command)
+	}
+	for _, target := range []ToolProbeTarget{
+		{Namespace: "system", RequiredPath: "data"},
+		{Namespace: "system", PVCName: "data", SkipPVCMount: true, RequiredPath: "data"},
+		{Namespace: "system", PVCName: "data", RequiredPath: ".", CreatePath: true},
+	} {
+		if _, err := normalizeToolProbeTargets([]ToolProbeTarget{target}); domain.CategoryOf(err) != domain.ErrorValidation {
+			t.Fatalf("target=%#v error=%v category=%s", target, err, domain.CategoryOf(err))
+		}
 	}
 }
 
@@ -513,6 +575,32 @@ func TestToolProbeFailureDeduplicatesPodAndContainerDetails(t *testing.T) {
 	)
 	if strings.Count(err.Error(), "ErrImagePull") != 1 || strings.Count(err.Error(), "authentication required") != 1 {
 		t.Fatalf("probe error contains duplicate details: %v", err)
+	}
+}
+
+func TestToolProbeFailureClassifiesOnlyReportedTransferPathErrors(t *testing.T) {
+	target := ToolProbeTarget{
+		Namespace: "system", NodeName: "node-a", PVCName: "data",
+		RequiredPath: "mysql/current", Components: []string{ToolComponentRsync},
+	}
+	imageFailure := &corev1.Pod{Status: corev1.PodStatus{ContainerStatuses: []corev1.ContainerStatus{{
+		State: corev1.ContainerState{Waiting: &corev1.ContainerStateWaiting{Reason: "ImagePullBackOff"}},
+	}}}}
+	err := toolProbePodFailureWithMessage(imageFailure, "registry.example/private/tool:test", target, "ImagePullBackOff", "authentication required")
+	var typed *domain.Error
+	if !errors.As(err, &typed) || typed.Op != "tool image probe" {
+		t.Fatalf("image failure error=%v", err)
+	}
+
+	pathFailure := &corev1.Pod{Status: corev1.PodStatus{ContainerStatuses: []corev1.ContainerStatus{{
+		State: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{
+			ExitCode: 66, Message: transferPathFailureMarker + " transfer source directory does not exist: mysql/current",
+		}},
+	}}}}
+	err = toolProbePodFailureWithMessage(pathFailure, "registry.example/tool:test", target, "Error", "")
+	typed = nil
+	if !errors.As(err, &typed) || typed.Op != "transfer path preflight" {
+		t.Fatalf("path failure error=%v", err)
 	}
 }
 

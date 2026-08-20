@@ -36,6 +36,8 @@ type Options struct {
 	SourcePVCs             []string
 	DestinationPVCs        []string
 	DestinationCapacities  []string
+	SourcePaths            []string
+	DestinationPaths       []string
 	AllowVolumeShrink      bool
 	SkipSourceUsageCheck   bool
 	PodName                string
@@ -266,6 +268,11 @@ func (p *Planner) Plan(ctx context.Context, options Options) (*domain.MigrationP
 	if destinationPVCInputsErr != nil {
 		plan.AddCheck(failed("destination-pvc", destinationPVCInputsErr.Error()))
 	}
+	transferScopes, transferInputsErr := resolveTransferScopes(options.SourcePaths, options.DestinationPaths, pvcNames)
+	if transferInputsErr != nil {
+		plan.AddCheck(failed("transfer-path", transferInputsErr.Error()))
+		transferScopes = make([]*domain.TransferScope, len(pvcNames))
+	}
 
 	volumeSpecs := make([]domain.VolumeSpec, 0, len(pvcNames))
 	plannedVolumes := make([]domain.PlannedVolume, 0, len(pvcNames))
@@ -349,6 +356,7 @@ func (p *Planner) Plan(ctx context.Context, options Options) (*domain.MigrationP
 				destinationCapacity = parsed
 				comparison := destinationCapacity.Cmp(capacity)
 				if comparison < 0 {
+					partialSource := index < len(transferScopes) && domain.SourceTransferPath(transferScopes[index]) != domain.VolumeRootPath
 					message := fmt.Sprintf("PVC %s/%s destination capacity %s is below source PV capacity %s; pass --allow-volume-shrink only when the copied data is known to fit", pvc.Namespace, pvc.Name, destinationCapacity.String(), capacity.String())
 					if options.AllowVolumeShrink {
 						plan.AddCheck(warned("destination-capacity", message))
@@ -384,7 +392,11 @@ func (p *Planner) Plan(ctx context.Context, options Options) (*domain.MigrationP
 								}
 								plannedCapacityBytes := destinationCapacity.Value()
 								if usage.UsedBytes > plannedCapacityBytes {
-									plan.AddCheck(failed("source-usage", fmt.Sprintf("PVC %s/%s uses %d bytes according to %s, above destination capacity %s; shrink is unsafe", pvc.Namespace, pvc.Name, usage.UsedBytes, usageSource, destinationCapacity.String())))
+									if partialSource {
+										plan.AddCheck(failed("source-usage", fmt.Sprintf("PVC %s/%s whole-volume usage is %d bytes according to %s, above destination capacity %s; this cannot prove that selected source directory %q fits; pass --skip-source-usage-check only after independently measuring the selected data", pvc.Namespace, pvc.Name, usage.UsedBytes, usageSource, destinationCapacity.String(), domain.SourceTransferPath(transferScopes[index]))))
+									} else {
+										plan.AddCheck(failed("source-usage", fmt.Sprintf("PVC %s/%s uses %d bytes according to %s, above destination capacity %s; shrink is unsafe", pvc.Namespace, pvc.Name, usage.UsedBytes, usageSource, destinationCapacity.String())))
+									}
 								} else {
 									plan.AddCheck(passed("source-usage", fmt.Sprintf("PVC %s/%s usage is %d bytes according to %s and fits destination capacity %s", pvc.Namespace, pvc.Name, usage.UsedBytes, usageSource, destinationCapacity.String())))
 								}
@@ -446,6 +458,18 @@ func (p *Planner) Plan(ctx context.Context, options Options) (*domain.MigrationP
 		}
 		destinationRef := domain.ObjectReference{APIVersion: domain.CoreAPIVersion, Kind: domain.KindPersistentVolumeClaim, Namespace: options.StagingNamespace, Name: destinationName}
 		accessModes := append([]corev1.PersistentVolumeAccessMode(nil), pvc.Spec.AccessModes...)
+		var transferScope *domain.TransferScope
+		if index < len(transferScopes) {
+			transferScope = transferScopes[index]
+		}
+		if transferScope != nil {
+			message := transferScopePlanMessage(pvc.Namespace, pvc.Name, transferScope)
+			if options.Operation == domain.OperationCopy {
+				plan.AddCheck(passed("transfer-scope", message))
+			} else {
+				plan.AddCheck(warned("transfer-scope", message))
+			}
+		}
 		plannedVolumes = append(plannedVolumes, domain.PlannedVolume{
 			SourcePVC:        pvcReference(pvc),
 			SourcePV:         pvReference(pv),
@@ -459,6 +483,7 @@ func (p *Planner) Plan(ctx context.Context, options Options) (*domain.MigrationP
 			StorageClass:     destinationClass,
 			BindingMode:      bindingMode,
 			CSIProvisioner:   sc.Provisioner,
+			TransferScope:    domain.CloneTransferScope(transferScope),
 		})
 		volumeSpecs = append(volumeSpecs, domain.VolumeSpec{
 			SourcePVC:           pvcReference(pvc),
@@ -478,6 +503,7 @@ func (p *Planner) Plan(ctx context.Context, options Options) (*domain.MigrationP
 			StorageClass:     destinationClass,
 			AccessModes:      accessModes,
 			VolumeMode:       mode,
+			TransferScope:    domain.CloneTransferScope(transferScope),
 		})
 		consumers := p.checkPVCReferencesFromPods(plan, pvc, sourcePod, options.Operation, options.Online, inventory.namespacePods, inventory.namespacePodsErr)
 		if warmCopyRequested(options) {

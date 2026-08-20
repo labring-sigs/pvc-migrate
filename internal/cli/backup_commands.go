@@ -139,6 +139,7 @@ func (r *rootState) newObjectTransferCommand(restore, forceOnline bool) *cobra.C
 					Operation:   use,
 					Namespace:   flags.namespace,
 					PVC:         flags.pvc,
+					Path:        plan.Path,
 					Name:        flags.name,
 					Destination: store.Destination(),
 					Mode:        mode,

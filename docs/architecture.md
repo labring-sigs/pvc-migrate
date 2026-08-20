@@ -66,6 +66,8 @@ The session preserves business labels, annotations, and owner references for the
 
 Multi-PVC Pod migration reserves and warm-copies every volume, pauses once, final-syncs every volume, activates every volume, and resumes once. A partial activation keeps the workload paused while resume completes the remaining volumes.
 
+Each planned volume can carry an optional transfer scope with normalized source and destination paths. No scope means both PVC roots. The scope is immutable session state and is applied to every copy attempt, warm pass, final sync, checksum pass, and resume. Execution validates source paths and prepares destination paths through short-lived PVC-mounted tool probes before invoking the copy engine.
+
 ## Consistency Boundary
 
 Warm copy provides file-level convergence while the application can still write. Open files, application caches, and write ordering remain application concerns during this phase.

@@ -121,7 +121,7 @@ func TestBackupDryRunPrintsStructuredPlanWithoutSecrets(t *testing.T) {
 	if err := json.Unmarshal([]byte(stdout), &result); err != nil {
 		t.Fatalf("decode output: %v\n%s", err, stdout)
 	}
-	if result["operation"] != "backup" || result["pvc"] != "data" || result["mode"] != "offline" {
+	if result["operation"] != "backup" || result["pvc"] != "data" || result["path"] != domain.VolumeRootPath || result["mode"] != "offline" {
 		t.Fatalf("output=%v", result)
 	}
 	if result["destination"] != "s3://backups/pv-migrate/daily/" {
@@ -132,6 +132,20 @@ func TestBackupDryRunPrintsStructuredPlanWithoutSecrets(t *testing.T) {
 	}
 	if !strings.Contains(stderr, "dry-run completed") || !strings.Contains(stderr, "--dry-run=false") {
 		t.Fatalf("missing follow-up guidance: %s", stderr)
+	}
+}
+
+func TestBackupDryRunPrintsNormalizedPath(t *testing.T) {
+	stdout, _, err := executeBackupCLI(t, "", "backup", "--dry-run", "--output", "json", "--source-pvc", "data", "--backend", "s3", "--bucket", "backups", "--name", "daily", "--path", "  tenant data//当前's files/  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var result map[string]any
+	if err := json.Unmarshal([]byte(stdout), &result); err != nil {
+		t.Fatalf("decode output: %v\n%s", err, stdout)
+	}
+	if result["path"] != "tenant data/当前's files" {
+		t.Fatalf("path=%v", result["path"])
 	}
 }
 

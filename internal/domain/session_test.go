@@ -122,6 +122,41 @@ func TestSessionRejectsMixedConcretePayloads(t *testing.T) {
 	}
 }
 
+func TestSessionPersistsValidTransferScopeAndOmitsFullVolumeDefault(t *testing.T) {
+	session := testSession(t)
+	raw, err := json.Marshal(session.Spec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(raw), "transferScope") {
+		t.Fatalf("full-volume session contains transfer scope: %s", raw)
+	}
+	session.Spec.Volumes[0].TransferScope = &TransferScope{SourcePath: "mysql/data", DestinationPath: "."}
+	if err := session.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	raw, err = json.Marshal(session.Spec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(raw), `"transferScope":{"sourcePath":"mysql/data","destinationPath":"."}`) {
+		t.Fatalf("partial session JSON=%s", raw)
+	}
+	session.Spec.Volumes[0].TransferScope.SourcePath = "../outside"
+	if err := session.Validate(); CategoryOf(err) != ErrorValidation {
+		t.Fatalf("unsafe transfer error=%v category=%s", err, CategoryOf(err))
+	}
+}
+
+func TestSessionRejectsTransferScopeForIdentityOnlyOperations(t *testing.T) {
+	session := testSession(t)
+	session.Spec = NewSessionSpec(OperationRename, session.Spec.SessionCommon, WorkloadSpec{}, false, SessionWorkflowOptions{})
+	session.Spec.Volumes[0].TransferScope = &TransferScope{SourcePath: "data", DestinationPath: "."}
+	if err := session.Validate(); CategoryOf(err) != ErrorValidation {
+		t.Fatalf("rename transfer error=%v category=%s", err, CategoryOf(err))
+	}
+}
+
 func TestSessionTransitions(t *testing.T) {
 	session := testSession(t)
 	for _, phase := range []Phase{

@@ -271,6 +271,7 @@ type VolumeSpec struct {
 	StorageClass     string                              `json:"storageClass" yaml:"storageClass"`
 	AccessModes      []corev1.PersistentVolumeAccessMode `json:"accessModes" yaml:"accessModes"`
 	VolumeMode       corev1.PersistentVolumeMode         `json:"volumeMode" yaml:"volumeMode"`
+	TransferScope    *TransferScope                      `json:"transferScope,omitempty" yaml:"transferScope,omitempty"`
 }
 
 type SyncState struct {
@@ -663,6 +664,12 @@ func (s *Session) Validate() error {
 		}
 		if volume.DestinationPVC.Namespace == "" || volume.DestinationPVC.Name == "" {
 			return NewError(ErrorValidation, "session", fmt.Sprintf("destination PVC namespace and name are required for volume %d", index))
+		}
+		if err := ValidateTransferScope(volume.TransferScope); err != nil {
+			return NewError(ErrorValidation, "session", fmt.Sprintf("invalid transfer scope for source PVC %s: %v", name, err))
+		}
+		if volume.TransferScope != nil && (s.Spec.Type == SessionTypeRename || s.Spec.Type == SessionTypeMove) {
+			return NewError(ErrorValidation, "session", fmt.Sprintf("%s sessions cannot contain transfer paths", s.Spec.Type))
 		}
 		if (volume.DestinationPV.Name == "") != (volume.DestinationPV.UID == "") {
 			return NewError(ErrorValidation, "session", fmt.Sprintf("destination PV name and UID must be recorded together for volume %d", index))

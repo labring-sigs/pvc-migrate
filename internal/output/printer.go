@@ -70,10 +70,10 @@ func (p Printer) printTable(value any) error {
 
 func (p Printer) printBackupPlan(plan *backup.Plan) error {
 	w := tabwriter.NewWriter(p.Writer, 0, 4, 2, ' ', 0)
-	if _, err := fmt.Fprintln(w, "OPERATION\tPVC\tMODE\tCONSISTENCY\tCAPACITY\tVOLUME MODE\tTOOL NODE\tDESTINATION"); err != nil {
+	if _, err := fmt.Fprintln(w, "OPERATION\tPVC\tPATH\tMODE\tCONSISTENCY\tCAPACITY\tVOLUME MODE\tTOOL NODE\tDESTINATION"); err != nil {
 		return err
 	}
-	if _, err := fmt.Fprintf(w, "%s\t%s/%s\t%s\t%s\t%s\t%s\t%s\t%s\n", plan.Operation, plan.Namespace, plan.PVC, plan.Mode, plan.Consistency, plan.Capacity, plan.VolumeMode, valueOrUnknown(plan.ToolNode), plan.Destination); err != nil {
+	if _, err := fmt.Fprintf(w, "%s\t%s/%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n", plan.Operation, plan.Namespace, plan.PVC, transferPathOrRoot(plan.Path), plan.Mode, plan.Consistency, plan.Capacity, plan.VolumeMode, valueOrUnknown(plan.ToolNode), plan.Destination); err != nil {
 		return err
 	}
 	if _, err := fmt.Fprintln(w, "\nMANIFEST\tOBJECTS\tTOTAL BYTES\tINVENTORY SHA256\tDELETE EXTRA\tCOMPRESSION"); err != nil {
@@ -106,10 +106,10 @@ func (p Printer) printBackupPlan(plan *backup.Plan) error {
 
 func (p Printer) printBackupResult(result *backup.Result) error {
 	w := tabwriter.NewWriter(p.Writer, 0, 4, 2, ' ', 0)
-	if _, err := fmt.Fprintln(w, "OPERATION\tPVC\tMODE\tSTATUS\tDESTINATION"); err != nil {
+	if _, err := fmt.Fprintln(w, "OPERATION\tPVC\tPATH\tMODE\tSTATUS\tDESTINATION"); err != nil {
 		return err
 	}
-	if _, err := fmt.Fprintf(w, "%s\t%s/%s\t%s\t%s\t%s\n", result.Operation, result.Namespace, result.PVC, result.Mode, result.Status, result.Destination); err != nil {
+	if _, err := fmt.Fprintf(w, "%s\t%s/%s\t%s\t%s\t%s\t%s\n", result.Operation, result.Namespace, result.PVC, transferPathOrRoot(result.Path), result.Mode, result.Status, result.Destination); err != nil {
 		return err
 	}
 	return w.Flush()
@@ -159,11 +159,11 @@ func (p Printer) printPlan(plan *domain.MigrationPlan) error {
 	if _, err := fmt.Fprintf(w, "SESSION\tREADY\tSOURCE\tSTAGING\tTARGET NODE\n%s\t%t\t%s\t%s\t%s\n\n", plan.SessionID, plan.Ready, plan.SourceNamespace, plan.TemporaryNamespace, plan.TargetNode); err != nil {
 		return err
 	}
-	if _, err := fmt.Fprintln(w, "PVC\tSOURCE PV\tDESTINATION PVC\tSOURCE CAPACITY\tSOURCE USED\tDESTINATION CAPACITY\tCLASS\tMODE"); err != nil {
+	if _, err := fmt.Fprintln(w, "PVC\tSOURCE PV\tDESTINATION PVC\tTRANSFER SCOPE\tSOURCE CAPACITY\tSOURCE USED\tDESTINATION CAPACITY\tCLASS\tMODE"); err != nil {
 		return err
 	}
 	for _, volume := range plan.Volumes {
-		if _, err := fmt.Fprintf(w, "%s/%s\t%s\t%s/%s\t%s\t%s\t%s\t%s\t%s\n", volume.SourcePVC.Namespace, volume.SourcePVC.Name, volume.SourcePV.Name, volume.DestinationPVC.Namespace, volume.DestinationPVC.Name, valueOrUnknown(volume.SourceCapacity), sourceUsageText(volume.SourceUsageKnown, volume.SourceUsedBytes), volume.Capacity, volume.StorageClass, volume.VolumeMode); err != nil {
+		if _, err := fmt.Fprintf(w, "%s/%s\t%s\t%s/%s\t%s\t%s\t%s\t%s\t%s\t%s\n", volume.SourcePVC.Namespace, volume.SourcePVC.Name, volume.SourcePV.Name, volume.DestinationPVC.Namespace, volume.DestinationPVC.Name, transferScopeText(volume.TransferScope), valueOrUnknown(volume.SourceCapacity), sourceUsageText(volume.SourceUsageKnown, volume.SourceUsedBytes), volume.Capacity, volume.StorageClass, volume.VolumeMode); err != nil {
 			return err
 		}
 	}
@@ -207,7 +207,7 @@ func (p Printer) printSession(session *domain.Session) error {
 	if _, err := fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\n", session.ID, session.Spec.Operation(), session.Status.Phase, session.Status.UpdatedAt.UTC().Format("2006-01-02T15:04:05Z"), session.Status.Message); err != nil {
 		return err
 	}
-	if _, err := fmt.Fprintln(w, "\nPVC\tRESERVED\tWARM SYNC\tFINAL SYNC\tSOURCE CAPACITY\tSOURCE USED\tDESTINATION CAPACITY\tACTIVE PV"); err != nil {
+	if _, err := fmt.Fprintln(w, "\nPVC\tTRANSFER SCOPE\tRESERVED\tWARM SYNC\tFINAL SYNC\tSOURCE CAPACITY\tSOURCE USED\tDESTINATION CAPACITY\tACTIVE PV"); err != nil {
 		return err
 	}
 	for index, status := range session.Status.Volumes {
@@ -221,14 +221,15 @@ func (p Printer) printSession(session *domain.Session) error {
 				activePV = session.Spec.Volumes[index].DestinationPV.Name
 			}
 		}
-		source, destination, sourceUsed := "unknown", "unknown", "unknown"
+		source, destination, sourceUsed, scope := "unknown", "unknown", "unknown", "unknown"
 		if index < len(session.Spec.Volumes) {
 			volume := session.Spec.Volumes[index]
 			source = valueOrUnknown(volume.SourceCapacity)
 			sourceUsed = sourceUsageText(volume.SourceUsageKnown, volume.SourceUsedBytes)
 			destination = valueOrUnknown(volume.Capacity)
+			scope = transferScopeText(volume.TransferScope)
 		}
-		if _, err := fmt.Fprintf(w, "%s\t%t\t%s\t%s\t%s\t%s\t%s\t%s\n", status.SourcePVCName, status.Reserved, warm, final, source, sourceUsed, destination, activePV); err != nil {
+		if _, err := fmt.Fprintf(w, "%s\t%s\t%t\t%s\t%s\t%s\t%s\t%s\t%s\n", status.SourcePVCName, scope, status.Reserved, warm, final, source, sourceUsed, destination, activePV); err != nil {
 			return err
 		}
 	}
@@ -260,4 +261,18 @@ func sourceUsageText(known bool, bytes int64) string {
 		return "unknown"
 	}
 	return resource.NewQuantity(bytes, resource.BinarySI).String()
+}
+
+func transferPathOrRoot(value string) string {
+	if value == "" {
+		return domain.VolumeRootPath
+	}
+	return value
+}
+
+func transferScopeText(scope *domain.TransferScope) string {
+	if scope == nil {
+		return "full"
+	}
+	return scope.SourcePath + " -> " + scope.DestinationPath
 }

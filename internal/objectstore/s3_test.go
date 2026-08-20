@@ -345,12 +345,12 @@ func TestValidateConfigSecurityBoundaries(t *testing.T) {
 }
 
 func TestValidatePathRejectsAbsoluteAndTraversalPaths(t *testing.T) {
-	for _, path := range []string{"/data", "../data", "data/../other", "data\\child", "data//other"} {
+	for _, path := range []string{"/data", "../data", "data/../other", "data\\child", "data//other", "data/", "."} {
 		if err := ValidatePath(path); err == nil {
 			t.Fatalf("accepted unsafe path %q", path)
 		}
 	}
-	for _, path := range []string{"", "data", "data/nested-1"} {
+	for _, path := range []string{"", "data", "data/nested-1", "tenant data/当前's files"} {
 		if err := ValidatePath(path); err != nil {
 			t.Fatalf("rejected safe path %q: %v", path, err)
 		}
