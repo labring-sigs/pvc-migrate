@@ -1361,6 +1361,10 @@ func (s *Switcher) deletePVC(ctx context.Context, ref domain.ObjectReference) er
 		)
 	}
 
+	if err := validatePVCDeletionFinalizers(pvc, "delete PVC"); err != nil {
+		return err
+	}
+
 	preconditions := &metav1.Preconditions{UID: &pvc.UID, ResourceVersion: &pvc.ResourceVersion}
 	if err := s.client.CoreV1().
 		PersistentVolumeClaims(ref.Namespace).
@@ -1741,6 +1745,10 @@ func (s *Switcher) verifyPVCAndPVIdentity(
 				pvc.UID,
 			),
 		)
+	}
+
+	if err := validatePVCDeletionFinalizers(pvc, "verify PVC offline"); err != nil {
+		return err
 	}
 
 	if sessionID != "" {
