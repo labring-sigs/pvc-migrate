@@ -100,6 +100,73 @@ func TestSessionStatusKeepsStructuredOutputSeparateFromGuidance(t *testing.T) {
 	}
 }
 
+func TestCompletedBackupGuidanceOmitsRollback(t *testing.T) {
+	spec := domain.NewSessionSpec(
+		domain.OperationBackup,
+		domain.SessionCommon{SourceNamespace: "app", SessionNamespace: "pvc-migrate-system"},
+		domain.WorkloadSpec{Adapter: domain.WorkloadNone},
+		true,
+		domain.SessionWorkflowOptions{},
+	)
+	spec.Backup.SourcePVC = domain.ObjectReference{Namespace: "app", Name: "data", UID: "pvc-uid"}
+	spec.Backup.SourcePV = domain.ObjectReference{Name: "pv-data", UID: "pv-uid"}
+	spec.Backup.Backend = "s3"
+	spec.Backup.Bucket = "backups"
+	spec.Backup.Name = "daily"
+	session := domain.NewSession("backup-test", spec, time.Now())
+	session.Status.Phase = domain.PhaseCompleted
+
+	var output bytes.Buffer
+	if err := writeSessionGuidance(
+		&output,
+		session,
+		guidancePrefixesForSession(session),
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	text := output.String()
+	if strings.Contains(text, "session rollback ") ||
+		strings.Contains(text, "--delete-rollback-pv") ||
+		!strings.Contains(text, "Validate cleanup:") ||
+		!strings.Contains(text, "published recovery point") {
+		t.Fatalf("backup guidance=%q", text)
+	}
+}
+
+func TestAbortedBackupGuidanceUsesBackupTerms(t *testing.T) {
+	spec := domain.NewSessionSpec(
+		domain.OperationBackup,
+		domain.SessionCommon{SourceNamespace: "app", SessionNamespace: "pvc-migrate-system"},
+		domain.WorkloadSpec{Adapter: domain.WorkloadNone},
+		true,
+		domain.SessionWorkflowOptions{},
+	)
+	spec.Backup.SourcePVC = domain.ObjectReference{Namespace: "app", Name: "data", UID: "pvc-uid"}
+	spec.Backup.SourcePV = domain.ObjectReference{Name: "pv-data", UID: "pv-uid"}
+	spec.Backup.Backend = "s3"
+	spec.Backup.Bucket = "backups"
+	spec.Backup.Name = "daily"
+	session := domain.NewSession("backup-test", spec, time.Now())
+	session.Status.Phase = domain.PhaseAborted
+
+	var output bytes.Buffer
+	if err := writeSessionGuidance(
+		&output,
+		session,
+		guidancePrefixesForSession(session),
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	text := output.String()
+	if strings.Contains(text, "retained resources") ||
+		!strings.Contains(text, "source workload and PVC") ||
+		!strings.Contains(text, "Delete retained credentials and session") {
+		t.Fatalf("backup guidance=%q", text)
+	}
+}
+
 func TestSessionGuidancePreservesCommandConnectionSettings(t *testing.T) {
 	client := fake.NewClientset()
 	store := kube.NewConfigMapSessionStore(client)

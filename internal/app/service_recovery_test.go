@@ -4025,6 +4025,78 @@ func TestDryRunRollbackRejectsUnactivatedSession(t *testing.T) {
 	}
 }
 
+func TestBackupSessionRollbackIsRejected(t *testing.T) {
+	fixture := newRecoveryFixture(t)
+	spec := domain.NewSessionSpec(
+		domain.OperationBackup,
+		domain.SessionCommon{SourceNamespace: "app", SessionNamespace: "sessions"},
+		domain.WorkloadSpec{Adapter: domain.WorkloadNone},
+		true,
+		domain.SessionWorkflowOptions{},
+	)
+	spec.Backup.SourcePVC = domain.ObjectReference{Namespace: "app", Name: "data", UID: "pvc-uid"}
+	spec.Backup.SourcePV = domain.ObjectReference{Name: "pv-data", UID: "pv-uid"}
+	spec.Backup.Backend = "s3"
+	spec.Backup.Bucket = "backups"
+	spec.Backup.Name = "daily"
+	session := domain.NewSession("backup-session", spec, time.Now())
+	session.Status.Phase = domain.PhaseCompleted
+
+	if err := fixture.service.ValidateRollback(
+		context.Background(),
+		session,
+	); domain.CategoryOf(
+		err,
+	) != domain.ErrorPrecondition {
+		t.Fatalf("dry-run category=%s error=%v", domain.CategoryOf(err), err)
+	}
+
+	if err := fixture.service.Rollback(
+		context.Background(),
+		session,
+	); domain.CategoryOf(
+		err,
+	) != domain.ErrorPrecondition {
+		t.Fatalf("execution category=%s error=%v", domain.CategoryOf(err), err)
+	}
+
+	if session.Status.Phase != domain.PhaseCompleted || fixture.store.updates != 0 {
+		t.Fatalf(
+			"rollback mutated backup session: phase=%s updates=%d",
+			session.Status.Phase,
+			fixture.store.updates,
+		)
+	}
+}
+
+func TestBackupSessionAbortUsesBackupMessage(t *testing.T) {
+	fixture := newRecoveryFixture(t)
+	spec := domain.NewSessionSpec(
+		domain.OperationBackup,
+		domain.SessionCommon{SourceNamespace: "app", SessionNamespace: "sessions"},
+		domain.WorkloadSpec{Adapter: domain.WorkloadNone},
+		true,
+		domain.SessionWorkflowOptions{},
+	)
+	spec.Backup.SourcePVC = domain.ObjectReference{Namespace: "app", Name: "data", UID: "pvc-uid"}
+	spec.Backup.SourcePV = domain.ObjectReference{Name: "pv-data", UID: "pv-uid"}
+	spec.Backup.Backend = "s3"
+	spec.Backup.Bucket = "backups"
+	spec.Backup.Name = "daily"
+	session := domain.NewSession("backup-session", spec, time.Now())
+	session.Status.Phase = domain.PhaseFailed
+	session.Status.ResumeFrom = domain.PhaseWarmCopied
+
+	if err := fixture.service.Abort(context.Background(), session); err != nil {
+		t.Fatal(err)
+	}
+
+	if session.Status.Phase != domain.PhaseAborted ||
+		session.Status.Message != "backup aborted; no recovery point was published" {
+		t.Fatalf("phase=%s message=%q", session.Status.Phase, session.Status.Message)
+	}
+}
+
 func TestDryRunRollbackChecksConsumersOutsideTheWorkloadPauseScope(t *testing.T) {
 	tests := []struct {
 		name     string

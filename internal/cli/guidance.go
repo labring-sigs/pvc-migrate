@@ -142,8 +142,14 @@ func writeSessionPhaseGuidance(
 	case domain.PhaseFailed:
 		return writeFailedSessionGuidance(w, session, commands)
 	case domain.PhaseCompleted:
+		if session.Spec.Type == domain.SessionTypeBackup {
+			return writeCompletedBackupSessionGuidance(w, commands)
+		}
 		return writeCompletedSessionGuidance(w, commands)
 	case domain.PhaseAborted, domain.PhaseRolledBack:
+		if session.Spec.Type == domain.SessionTypeBackup {
+			return writeClosedBackupSessionGuidance(w, commands)
+		}
 		return writeClosedSessionGuidance(w, commands)
 	default:
 		_, err := fmt.Fprintln(
@@ -331,11 +337,31 @@ func writeCompletedSessionGuidance(w io.Writer, commands sessionGuidanceCommands
 	return writeGuidanceLines(w, lines)
 }
 
+func writeCompletedBackupSessionGuidance(w io.Writer, commands sessionGuidanceCommands) error {
+	lines := [][2]string{
+		{"  Verify the published recovery point before deleting session credentials.", ""},
+		{"  Validate cleanup:", commands.cleanupPlan},
+		{"  Finalize and delete retained resources/session:", commands.cleanup},
+	}
+
+	return writeGuidanceLines(w, lines)
+}
+
 func writeClosedSessionGuidance(w io.Writer, commands sessionGuidanceCommands) error {
 	lines := [][2]string{
 		{"  Verify workload and PVC state before deleting retained resources.", ""},
 		{"  Validate cleanup:", commands.cleanupPlan},
 		{"  Finalize and delete retained resources/session:", commands.cleanup},
+	}
+
+	return writeGuidanceLines(w, lines)
+}
+
+func writeClosedBackupSessionGuidance(w io.Writer, commands sessionGuidanceCommands) error {
+	lines := [][2]string{
+		{"  Verify the source workload and PVC remain healthy.", ""},
+		{"  Validate cleanup:", commands.cleanupPlan},
+		{"  Delete retained credentials and session:", commands.cleanup},
 	}
 
 	return writeGuidanceLines(w, lines)
@@ -380,7 +406,7 @@ func phaseCanAbortBeforeActivation(session *domain.Session) bool {
 
 func cleanupCommandArgs(session *domain.Session) string {
 	args := []string{"session", "cleanup", session.ID}
-	if !session.Spec.Operation().RebindsPVC() {
+	if session.Spec.Type != domain.SessionTypeBackup && !session.Spec.Operation().RebindsPVC() {
 		args = append(args, "--delete-temporary", "--delete-rollback-pv")
 	}
 

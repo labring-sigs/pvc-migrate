@@ -155,6 +155,7 @@ const (
 	SessionTypeMigrate    SessionType = "Migrate"
 	SessionTypeMigratePod SessionType = "MigratePod"
 	SessionTypeCopy       SessionType = "Copy"
+	SessionTypeBackup     SessionType = "Backup"
 	SessionTypeRename     SessionType = "Rename"
 	SessionTypeMove       SessionType = "Move"
 )
@@ -208,6 +209,27 @@ type MigratePodSessionSpec struct {
 type CopySessionSpec struct {
 	SessionWorkflowOptions `     json:",inline"          yaml:",inline"`
 	Online                 bool `json:"online,omitempty" yaml:"online,omitempty"`
+}
+
+// BackupSessionSpec is the backup-specific payload carried by the durable
+// Session envelope. Object-store credentials are deliberately excluded.
+type BackupSessionSpec struct {
+	SessionWorkflowOptions `                json:",inline"                         yaml:",inline"`
+	Online                 bool            `json:"online,omitempty"                yaml:"online,omitempty"`
+	SourcePVC              ObjectReference `json:"sourcePVC"                       yaml:"sourcePVC"`
+	SourcePV               ObjectReference `json:"sourcePV"                        yaml:"sourcePV"`
+	Path                   string          `json:"path,omitempty"                  yaml:"path,omitempty"`
+	Backend                string          `json:"backend"                         yaml:"backend"`
+	Bucket                 string          `json:"bucket"                          yaml:"bucket"`
+	Prefix                 string          `json:"prefix,omitempty"                yaml:"prefix,omitempty"`
+	Name                   string          `json:"name"                            yaml:"name"`
+	Provider               string          `json:"provider,omitempty"              yaml:"provider,omitempty"`
+	Endpoint               string          `json:"endpoint,omitempty"              yaml:"endpoint,omitempty"`
+	Region                 string          `json:"region,omitempty"                yaml:"region,omitempty"`
+	AllowInsecureEndpoint  bool            `json:"allowInsecureEndpoint,omitempty" yaml:"allowInsecureEndpoint,omitempty"`
+	ServerSideEncryption   string          `json:"serverSideEncryption,omitempty"  yaml:"serverSideEncryption,omitempty"`
+	SSEKMSKeyID            string          `json:"sseKmsKeyID,omitempty"           yaml:"sseKmsKeyID,omitempty"`
+	CredentialsSecret      ObjectReference `json:"credentialsSecret,omitempty"     yaml:"credentialsSecret,omitempty"`
 }
 
 type RenameSessionSpec struct{}
@@ -266,6 +288,7 @@ type SessionSpec struct {
 	Migrate       *MigrateSessionSpec    `json:"migrate,omitempty"    yaml:"migrate,omitempty"`
 	MigratePod    *MigratePodSessionSpec `json:"migratePod,omitempty" yaml:"migratePod,omitempty"`
 	Copy          *CopySessionSpec       `json:"copy,omitempty"       yaml:"copy,omitempty"`
+	Backup        *BackupSessionSpec     `json:"backup,omitempty"     yaml:"backup,omitempty"`
 	Rename        *RenameSessionSpec     `json:"rename,omitempty"     yaml:"rename,omitempty"`
 	Move          *MoveSessionSpec       `json:"move,omitempty"       yaml:"move,omitempty"`
 }
@@ -388,6 +411,8 @@ func SessionTypeForOperation(operation Operation) SessionType {
 		return SessionTypeMigratePod
 	case OperationCopy:
 		return SessionTypeCopy
+	case OperationBackup:
+		return SessionTypeBackup
 	case OperationRename:
 		return SessionTypeRename
 	case OperationMove:
@@ -424,6 +449,8 @@ func NewSessionSpec(
 		}
 	case SessionTypeCopy:
 		spec.Copy = &CopySessionSpec{SessionWorkflowOptions: options, Online: online}
+	case SessionTypeBackup:
+		spec.Backup = &BackupSessionSpec{SessionWorkflowOptions: options, Online: online}
 	case SessionTypeRename:
 		spec.Rename = &RenameSessionSpec{}
 	case SessionTypeMove:
@@ -485,6 +512,10 @@ func (s *SessionSpec) WorkflowOptionsPtr() *SessionWorkflowOptions {
 		if s.Copy != nil {
 			return &s.Copy.SessionWorkflowOptions
 		}
+	case SessionTypeBackup:
+		if s.Backup != nil {
+			return &s.Backup.SessionWorkflowOptions
+		}
 	}
 
 	return nil
@@ -498,6 +529,8 @@ func (s SessionSpec) Operation() Operation {
 		return OperationMigratePod
 	case SessionTypeCopy:
 		return OperationCopy
+	case SessionTypeBackup:
+		return OperationBackup
 	case SessionTypeRename:
 		return OperationRename
 	case SessionTypeMove:
@@ -538,7 +571,8 @@ func (s *SessionSpec) WorkloadPtr() *WorkloadSpec {
 }
 
 func (s SessionSpec) Online() bool {
-	return s.Type == SessionTypeCopy && s.Copy != nil && s.Copy.Online
+	return (s.Type == SessionTypeCopy && s.Copy != nil && s.Copy.Online) ||
+		(s.Type == SessionTypeBackup && s.Backup != nil && s.Backup.Online)
 }
 
 func (s SessionSpec) Orchestrated() bool {
@@ -605,7 +639,10 @@ func (s *Session) Transition(next Phase, message string, now time.Time) error {
 		return nil
 	}
 
-	if !slices.Contains(allowedTransitions[s.Status.Phase], next) {
+	backupTransition := s.Spec.Type == SessionTypeBackup &&
+		((s.Status.Phase == PhasePlanned && next == PhaseWarmCopying) ||
+			(s.Status.Phase == PhaseWarmCopied && next == PhaseCompleted))
+	if !backupTransition && !slices.Contains(allowedTransitions[s.Status.Phase], next) {
 		return NewError(
 			ErrorConflict,
 			"transition",
@@ -675,7 +712,11 @@ func (s *Session) Validate() error {
 		return err
 	}
 
-	if err := validateSessionVolumes(s); err != nil {
+	if s.Spec.Type == SessionTypeBackup {
+		if err := validateBackupSession(s); err != nil {
+			return err
+		}
+	} else if err := validateSessionVolumes(s); err != nil {
 		return err
 	}
 
@@ -726,6 +767,10 @@ func validateSessionHeader(s *Session) error {
 		payloads++
 	}
 
+	if s.Spec.Backup != nil {
+		payloads++
+	}
+
 	if payloads != 1 {
 		return NewError(
 			ErrorValidation,
@@ -738,6 +783,7 @@ func validateSessionHeader(s *Session) error {
 		(s.Spec.Type == SessionTypeMigrate && s.Spec.Migrate != nil) ||
 		(s.Spec.Type == SessionTypeMigratePod && s.Spec.MigratePod != nil) ||
 		(s.Spec.Type == SessionTypeCopy && s.Spec.Copy != nil) ||
+		(s.Spec.Type == SessionTypeBackup && s.Spec.Backup != nil) ||
 		(s.Spec.Type == SessionTypeRename && s.Spec.Rename != nil) ||
 		(s.Spec.Type == SessionTypeMove && s.Spec.Move != nil)
 	if !validPayload {
@@ -752,7 +798,7 @@ func validateSessionHeader(s *Session) error {
 }
 
 func validateSessionMode(s *Session) error {
-	if s.Spec.Online() && s.Spec.Type != SessionTypeCopy {
+	if s.Spec.Online() && s.Spec.Type != SessionTypeCopy && s.Spec.Type != SessionTypeBackup {
 		return NewError(ErrorValidation, "session", "online mode is only valid for copy sessions")
 	}
 
@@ -776,7 +822,7 @@ func validateSessionMode(s *Session) error {
 }
 
 func validateSessionStatus(s *Session) error {
-	if len(s.Spec.Volumes) == 0 {
+	if s.Spec.Type != SessionTypeBackup && len(s.Spec.Volumes) == 0 {
 		return NewError(ErrorValidation, "session", "session contains no volumes")
 	}
 
@@ -808,6 +854,53 @@ func validateSessionStatus(s *Session) error {
 				"failure reason is only valid in phase Failed",
 			)
 		}
+	}
+
+	return nil
+}
+
+func validateBackupSession(s *Session) error {
+	payload := s.Spec.Backup
+	if payload == nil {
+		return NewError(ErrorValidation, "backup session", "backup payload is required")
+	}
+
+	if payload.SourcePVC.Namespace == "" || payload.SourcePVC.Name == "" ||
+		payload.SourcePVC.UID == "" {
+		return NewError(
+			ErrorValidation,
+			"backup session",
+			"source PVC namespace, name, and UID are required",
+		)
+	}
+
+	if payload.SourcePV.Name == "" || payload.SourcePV.UID == "" {
+		return NewError(ErrorValidation, "backup session", "source PV name and UID are required")
+	}
+
+	if payload.Backend == "" || payload.Bucket == "" || payload.Name == "" {
+		return NewError(
+			ErrorValidation,
+			"backup session",
+			"object-store backend, bucket, and name are required",
+		)
+	}
+
+	if payload.CredentialsSecret.Name != "" &&
+		payload.CredentialsSecret.Namespace != s.Spec.SessionNamespace {
+		return NewError(
+			ErrorValidation,
+			"backup session",
+			"credentials Secret must be in the session namespace",
+		)
+	}
+
+	if len(s.Spec.Volumes) != 0 || len(s.Status.Volumes) != 0 {
+		return NewError(
+			ErrorValidation,
+			"backup session",
+			"backup sessions cannot contain migration volumes",
+		)
 	}
 
 	return nil

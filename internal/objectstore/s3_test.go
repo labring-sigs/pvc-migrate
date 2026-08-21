@@ -278,9 +278,12 @@ func TestManifestMissingAndImmutable(t *testing.T) {
 
 	want := Manifest{
 		CreatedAt:       time.Unix(10, 0).UTC(),
+		SessionID:       "backup-session",
 		SourceNamespace: "default",
 		SourcePVC:       "data",
 		SourcePVCUID:    "uid",
+		SourcePV:        "pv-data",
+		SourcePVUID:     "pv-uid",
 		Capacity:        "1Gi",
 		VolumeMode:      "Filesystem",
 		Consistency:     "offline file-consistent copy",
@@ -293,6 +296,7 @@ func TestManifestMissingAndImmutable(t *testing.T) {
 
 	got, err := store.Manifest(context.Background())
 	if err != nil || got == nil || got.SourcePVCUID != want.SourcePVCUID ||
+		got.SourcePVUID != want.SourcePVUID || got.SessionID != want.SessionID ||
 		got.Version != ManifestVersionForTest {
 		t.Fatalf("manifest = %#v, err=%v", got, err)
 	}

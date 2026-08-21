@@ -56,13 +56,14 @@ type rootState struct {
 }
 
 type commandRuntime struct {
-	clients     *kube.Clients
-	store       kube.SessionStore
-	planner     *planner.Planner
-	service     *app.Service
-	printer     output.Printer
-	logger      *slog.Logger
-	controllers *controller.Manager
+	clients                       *kube.Clients
+	store                         kube.SessionStore
+	planner                       *planner.Planner
+	service                       *app.Service
+	printer                       output.Printer
+	logger                        *slog.Logger
+	controllers                   *controller.Manager
+	openEBSLVMSharedVolumeManager kube.OpenEBSLVMSharedVolumeManager
 }
 
 func NewRoot(options Options) *cobra.Command {
@@ -276,10 +277,11 @@ func (r *rootState) runtime() (*commandRuntime, error) {
 		planner: planner.New(clients.Kubernetes, controllers).
 			WithOpenEBSLVMSharedVolumeManager(openEBSLVMSharedVolumeManager).
 			WithLogger(logger.With("component", "planner")),
-		service:     service,
-		printer:     output.Printer{Writer: r.options.Out, Format: format},
-		logger:      logger.With("component", "backup"),
-		controllers: controllers,
+		service:                       service,
+		printer:                       output.Printer{Writer: r.options.Out, Format: format},
+		logger:                        logger.With("component", "backup"),
+		controllers:                   controllers,
+		openEBSLVMSharedVolumeManager: openEBSLVMSharedVolumeManager,
 	}, nil
 }
 

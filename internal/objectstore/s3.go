@@ -60,10 +60,13 @@ type Manifest struct {
 	Bucket          string    `json:"bucket"`
 	Prefix          string    `json:"prefix,omitempty"`
 	Name            string    `json:"name"`
+	SessionID       string    `json:"sessionID,omitempty"`
 	Path            string    `json:"path,omitempty"`
 	SourceNamespace string    `json:"sourceNamespace"`
 	SourcePVC       string    `json:"sourcePVC"`
 	SourcePVCUID    string    `json:"sourcePVCUID"`
+	SourcePV        string    `json:"sourcePV,omitempty"`
+	SourcePVUID     string    `json:"sourcePVUID,omitempty"`
 	Capacity        string    `json:"capacity"`
 	VolumeMode      string    `json:"volumeMode"`
 	Consistency     string    `json:"consistency"`
@@ -831,6 +834,14 @@ func validateManifest(manifest Manifest) error {
 			domain.ErrorPrecondition,
 			"S3 manifest",
 			"completion manifest source identity is incomplete",
+		)
+	}
+
+	if (manifest.SourcePV == "") != (manifest.SourcePVUID == "") {
+		return domain.NewError(
+			domain.ErrorPrecondition,
+			"S3 manifest",
+			"completion manifest source PV identity is incomplete",
 		)
 	}
 
