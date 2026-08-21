@@ -94,7 +94,6 @@ func (p Printer) printCrossClusterPlan(plan *crosscluster.Plan) error {
 	); err != nil {
 		return err
 	}
-
 	if _, err := fmt.Fprintln(
 		w,
 		"SOURCE PVC\tDESTINATION PVC\tSOURCE PATH\tDESTINATION PATH\tSOURCE CAPACITY\tDESTINATION CAPACITY\tSTORAGE CLASS",
@@ -152,7 +151,6 @@ func (p Printer) printCrossClusterSession(session *crosscluster.Session) error {
 	); err != nil {
 		return err
 	}
-
 	if _, err := fmt.Fprintln(
 		w,
 		"SOURCE PVC\tDESTINATION PVC\tRESERVED PV\tTRANSFER\tATTEMPTS\tLAST ERROR",
@@ -265,14 +263,28 @@ func (p Printer) printBackupPlan(plan *backup.Plan) error {
 
 func (p Printer) printBackupResult(result *backup.Result) error {
 	w := tabwriter.NewWriter(p.Writer, 0, 4, 2, ' ', 0)
-	if _, err := fmt.Fprintln(w, "OPERATION\tPVC\tPATH\tMODE\tSTATUS\tDESTINATION"); err != nil {
+	identityHeader := "SESSION"
+	identity := result.SessionID
+	if result.Mode == backup.ModeRestore || result.OperationID != "" {
+		identityHeader = "OPERATION ID"
+		identity = result.OperationID
+	}
+	if _, err := fmt.Fprintf(
+		w,
+		"OPERATION\t%s\tPVC\tPATH\tMODE\tSTATUS\tDESTINATION\n",
+		identityHeader,
+	); err != nil {
 		return err
+	}
+	if identity == "" {
+		identity = "-"
 	}
 
 	if _, err := fmt.Fprintf(
 		w,
-		"%s\t%s/%s\t%s\t%s\t%s\t%s\n",
+		"%s\t%s\t%s/%s\t%s\t%s\t%s\t%s\n",
 		result.Operation,
+		identity,
 		result.Namespace,
 		result.PVC,
 		transferPathOrRoot(result.Path),
@@ -488,6 +500,9 @@ func (p Printer) printSession(session *domain.Session) error {
 	); err != nil {
 		return err
 	}
+	if session.Spec.Type == domain.SessionTypeBackup && session.Spec.Backup != nil {
+		return printBackupSessionDetails(w, session.Spec.Backup)
+	}
 
 	if _, err := fmt.Fprintln(
 		w,
@@ -535,6 +550,47 @@ func (p Printer) printSession(session *domain.Session) error {
 		}
 	}
 
+	return w.Flush()
+}
+
+func printBackupSessionDetails(w *tabwriter.Writer, payload *domain.BackupSessionSpec) error {
+	mode := "offline"
+	if payload.Online {
+		mode = "online"
+	}
+	transferPath := payload.Path
+	if transferPath == "" {
+		transferPath = "."
+	}
+	destinationParts := []string{payload.Bucket}
+	if payload.Prefix != "" {
+		destinationParts = append(destinationParts, payload.Prefix)
+	}
+	destinationParts = append(destinationParts, payload.Name)
+	credentials := "-"
+	if payload.CredentialsSecret.Name != "" {
+		credentials = payload.CredentialsSecret.Namespace + "/" + payload.CredentialsSecret.Name
+	}
+
+	if _, err := fmt.Fprintln(
+		w,
+		"\nSOURCE PVC\tSOURCE PV\tMODE\tPATH\tDESTINATION\tCREDENTIALS SECRET",
+	); err != nil {
+		return err
+	}
+	if _, err := fmt.Fprintf(
+		w,
+		"%s/%s\t%s\t%s\t%s\ts3://%s/\t%s\n",
+		payload.SourcePVC.Namespace,
+		payload.SourcePVC.Name,
+		payload.SourcePV.Name,
+		mode,
+		transferPath,
+		strings.Join(destinationParts, "/"),
+		credentials,
+	); err != nil {
+		return err
+	}
 	return w.Flush()
 }
 

@@ -216,6 +216,23 @@ func testCopyBackupRestoreFlags(t *testing.T, root *cobra.Command) {
 	if restoreCommand.Flags().Lookup("allow-mounted") == nil {
 		t.Fatal("restore is missing --allow-mounted")
 	}
+	backupID := backupCommand.Flags().Lookup("id")
+	restoreID := restoreCommand.Flags().Lookup("id")
+	if backupID == nil || !strings.Contains(backupID.Usage, "Session ID") {
+		t.Fatalf("backup --id usage=%v", backupID)
+	}
+	if restoreID == nil || !strings.Contains(restoreID.Usage, "no Session is created") {
+		t.Fatalf("restore --id usage=%v", restoreID)
+	}
+	if label, value := transferResultIdentity(false, "backup-1"); label != "session" || value != "backup-1" {
+		t.Fatalf("backup result identity=%q/%q", label, value)
+	}
+	if label, value := transferResultIdentity(true, "restore-1"); label != "operation-id" || value != "restore-1" {
+		t.Fatalf("restore result identity=%q/%q", label, value)
+	}
+	if label, value := transferResultIdentity(true, ""); label != "operation-id" || value != "-" {
+		t.Fatalf("anonymous restore result identity=%q/%q", label, value)
+	}
 
 	for _, name := range []string{"capacity-awareness", "destination-storage-class", "source-node", "target-node", "pod"} {
 		if copyCommand.Flags().Lookup(name) == nil {

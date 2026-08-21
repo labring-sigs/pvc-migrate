@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/labring-sigs/pvc-migrate/internal/domain"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
@@ -356,6 +357,14 @@ func (m *openEBSLVMSharedVolumeManager) patchShared(
 	if _, err := m.dynamic.Resource(openEBSLVMVolumeGVR).
 		Namespace(volume.namespace).
 		Patch(ctx, volume.name, types.MergePatchType, patch, metav1.PatchOptions{}); err != nil {
+		if apierrors.IsConflict(err) {
+			return domain.WrapError(
+				domain.ErrorConflict,
+				"OpenEBS LVM shared mount",
+				"patch "+volume.reference()+" was rejected because the resource changed concurrently; retry the operation",
+				err,
+			)
+		}
 		return domain.WrapError(
 			domain.ErrorKubernetes,
 			"OpenEBS LVM shared mount",

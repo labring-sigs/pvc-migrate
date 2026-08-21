@@ -19,6 +19,7 @@ import (
 	"github.com/labring-sigs/pvc-migrate/internal/objectstore"
 	"github.com/labring-sigs/pvc-migrate/internal/testutil"
 	"github.com/utkuozdemir/pv-migrate/pvmigrate"
+	coordinationv1 "k8s.io/api/coordination/v1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -175,6 +176,22 @@ func TestRunWithCleanupTimeout(t *testing.T) {
 			t.Fatal(err)
 		}
 	})
+	t.Run("preserves parent values while ignoring cancellation", func(t *testing.T) {
+		type contextKey struct{}
+		parent, cancel := context.WithCancel(context.WithValue(context.Background(), contextKey{}, "value"))
+		cancel()
+		if err := runWithPreservedCleanupTimeout(parent, time.Second, func(ctx context.Context) error {
+			if ctx.Err() != nil {
+				t.Fatalf("cleanup inherited cancellation: %v", ctx.Err())
+			}
+			if got := ctx.Value(contextKey{}); got != "value" {
+				t.Fatalf("context value=%v", got)
+			}
+			return nil
+		}); err != nil {
+			t.Fatal(err)
+		}
+	})
 }
 
 func TestRunBackupPreservesOperationAndLockCleanupErrors(t *testing.T) {
@@ -186,6 +203,89 @@ func TestRunBackupPreservesOperationAndLockCleanupErrors(t *testing.T) {
 	err := runBackup(context.Background(), client, request, "pvc", "pv")
 	if !errors.Is(err, operationErr) || !errors.Is(err, cleanupErr) {
 		t.Fatalf("error=%v", err)
+	}
+}
+
+func TestBackupTargetLeaseSerializesOneRecoveryPoint(t *testing.T) {
+	client, request := preflightFixture(t, &preflightObjectStore{})
+	fakeClient := client.(*fake.Clientset)
+	fakeClient.PrependReactor(
+		"create",
+		"leases",
+		func(action ktesting.Action) (bool, runtime.Object, error) {
+			lease, err := testutil.ActionObject[*coordinationv1.Lease](action)
+			if err != nil {
+				return true, nil, err
+			}
+			lease.UID = types.UID("lease-" + lease.Name)
+			return false, nil, nil
+		},
+	)
+	request.SessionStore = kube.NewConfigMapSessionStore(fakeClient)
+	request.SessionNamespace = "sessions"
+
+	firstCtx, first, cancelFirst, err := acquireBackupTargetLock(context.Background(), request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cancelFirst()
+	if firstCtx == nil || first == nil {
+		t.Fatal("first target Lease was not acquired")
+	}
+
+	secondCtx, second, cancelSecond, err := acquireBackupTargetLock(context.Background(), request)
+	if secondCtx != nil || second != nil || cancelSecond != nil || domain.CategoryOf(err) != domain.ErrorConflict {
+		t.Fatalf("second context=%v lock=%v cancel=%v category=%q error=%v", secondCtx, second, cancelSecond, domain.CategoryOf(err), err)
+	}
+
+	if err := first.Delete(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	secondCtx, second, cancelSecond, err = acquireBackupTargetLock(context.Background(), request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cancelSecond()
+	if secondCtx == nil || second == nil {
+		t.Fatal("target Lease was not reacquired after deletion")
+	}
+	if err := second.Delete(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+
+	leases, err := fakeClient.CoordinationV1().Leases("sessions").List(context.Background(), metav1.ListOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(leases.Items) != 0 {
+		t.Fatalf("temporary target Leases remain: %#v", leases.Items)
+	}
+}
+
+func TestBackupTargetLockIDUsesTheFullRecoveryPoint(t *testing.T) {
+	store, err := objectstore.NewWithClient(
+		&preflightObjectStore{},
+		objectstore.Config{Bucket: "backups", Prefix: "team", Name: "daily"},
+		objectstore.Credentials{AccessKey: "key", SecretKey: "secret"},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	other, err := objectstore.NewWithClient(
+		&preflightObjectStore{},
+		objectstore.Config{Bucket: "backups", Prefix: "other", Name: "daily"},
+		objectstore.Credentials{AccessKey: "key", SecretKey: "secret"},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	first := backupTargetLockID(store)
+	if first != backupTargetLockID(store) || first == backupTargetLockID(other) {
+		t.Fatalf("target lock IDs first=%q other=%q", first, backupTargetLockID(other))
+	}
+	if !strings.HasPrefix(first, "backup-target-") || len(first) > 63 {
+		t.Fatalf("target lock ID is not a DNS label-sized value: %q", first)
 	}
 }
 
@@ -782,6 +882,30 @@ func assertBackupRequestContract(
 	}
 }
 
+func TestPVMigrateBackupRequestUsesWritableMountForSharedOnlinePVC(t *testing.T) {
+	request := Request{
+		ID:               "backup-test",
+		KubeconfigPath:   "/tmp/kubeconfig",
+		KubeContext:      "cluster",
+		Namespace:        "source",
+		PVCName:          "data",
+		Path:             "",
+		HelmTimeout:      time.Minute,
+		WritablePVCMount: true,
+		Store:            testBackupObjectStore(t),
+	}
+	got, err := pvmigrateBackupRequest(request, "/tmp/rclone.conf", []string{"rclone.nodeName=node-a"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Contains(
+		got.HelmStringValues,
+		"rclone.pvcMounts[0].name=data,rclone.pvcMounts[0].mountPath=/data,rclone.pvcMounts[0].readOnly=false",
+	) {
+		t.Fatalf("helm values=%v", got.HelmStringValues)
+	}
+}
+
 func assertRestoreRequestContract(
 	t *testing.T,
 	got pvmigrate.Restore,
@@ -947,6 +1071,84 @@ func TestRestoreLockHolderGeneratesUniqueAttemptForExplicitID(t *testing.T) {
 
 	if toolOperationID(first) == toolOperationID(second) {
 		t.Fatalf("explicit operation tool IDs collided: %q", toolOperationID(first))
+	}
+}
+
+func TestRestoreLockSupportsRetryAfterReleaseAndExpiredAttempt(t *testing.T) {
+	const (
+		namespace = "default"
+		name      = "restore-target"
+		pvcUID    = "restore-pvc-uid"
+	)
+	client := fake.NewClientset(&corev1.PersistentVolumeClaim{ObjectMeta: metav1.ObjectMeta{
+		Namespace: namespace,
+		Name:      name,
+		UID:       types.UID(pvcUID),
+	}})
+
+	firstRelease, _, err := acquireRestoreLock(
+		context.Background(), client, namespace, name, "first-attempt", time.Minute, pvcUID,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := acquireRestoreLock(
+		context.Background(), client, namespace, name, "concurrent-attempt", time.Minute, pvcUID,
+	); domain.CategoryOf(err) != domain.ErrorConflict {
+		t.Fatalf("active lock category=%q error=%v", domain.CategoryOf(err), err)
+	}
+	if err := firstRelease(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+
+	staleRelease, _, err := acquireRestoreLock(
+		context.Background(), client, namespace, name, "stale-attempt", time.Minute, pvcUID,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pvc, err := client.CoreV1().PersistentVolumeClaims(namespace).Get(
+		context.Background(), name, metav1.GetOptions{},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pvc.Annotations[restoreLockExpiryAnnotation] = time.Now().UTC().Add(-time.Minute).Format(time.RFC3339Nano)
+	if _, err := client.CoreV1().PersistentVolumeClaims(namespace).Update(
+		context.Background(), pvc, metav1.UpdateOptions{},
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	finalRelease, _, err := acquireRestoreLock(
+		context.Background(), client, namespace, name, "retry-attempt", time.Minute, pvcUID,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := staleRelease(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	pvc, err = client.CoreV1().PersistentVolumeClaims(namespace).Get(
+		context.Background(), name, metav1.GetOptions{},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pvc.Annotations[restoreLockAnnotation] != "retry-attempt" {
+		t.Fatalf("stale release cleared retry owner: %#v", pvc.Annotations)
+	}
+	if err := finalRelease(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	pvc, err = client.CoreV1().PersistentVolumeClaims(namespace).Get(
+		context.Background(), name, metav1.GetOptions{},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pvc.Annotations[restoreLockAnnotation] != "" || pvc.Annotations[restoreLockExpiryAnnotation] != "" {
+		t.Fatalf("restore lock annotations remain after retry: %#v", pvc.Annotations)
 	}
 }
 
@@ -1341,7 +1543,7 @@ func TestRunProbesRcloneWhileHoldingTransferLock(t *testing.T) {
 			}
 
 			wantPVC := ""
-			if test.wantNode == "" {
+			if test.wantNode == "" || request.Online {
 				wantPVC = request.PVCName
 			}
 

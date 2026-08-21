@@ -5,7 +5,9 @@ import (
 	"fmt"
 
 	"github.com/labring-sigs/pvc-migrate/internal/app"
+	"github.com/labring-sigs/pvc-migrate/internal/backup"
 	"github.com/labring-sigs/pvc-migrate/internal/domain"
+	"github.com/labring-sigs/pvc-migrate/internal/kube"
 	"github.com/spf13/cobra"
 )
 
@@ -130,6 +132,13 @@ func (r *rootState) newSessionResumeCommand() *cobra.Command {
 			}
 
 			if dryRun {
+				if session.Spec.Type == domain.SessionTypeBackup {
+					err := backup.ValidateResume(ctx, runtime.clients.Kubernetes, r.backupResumeRequest(runtime), session)
+					if err != nil {
+						return reportSessionError(cmd, session, err)
+					}
+					return printSessionResult(cmd, runtime, session)
+				}
 				if err := runtime.service.ValidateResume(ctx, session); err != nil {
 					return reportSessionError(cmd, session, err)
 				}
@@ -141,14 +150,20 @@ func (r *rootState) newSessionResumeCommand() *cobra.Command {
 				phase = session.Status.ResumeFrom
 			}
 
-			if requiresResumeApproval(phase) ||
+			if (session.Spec.Type == domain.SessionTypeBackup && phase != domain.PhaseCompleted) ||
+				requiresResumeApproval(phase) ||
 				requiresOperationResumeApproval(session.Spec.Operation(), phase) {
 				if err := r.confirm(ctx, cmd, args[0]); err != nil {
 					return reportApprovalError(cmd, err)
 				}
 			}
 
-			if err := runtime.service.ResumeSession(ctx, session); err != nil {
+			if session.Spec.Type == domain.SessionTypeBackup {
+				err = backup.Resume(ctx, runtime.clients.Kubernetes, r.backupResumeRequest(runtime), session)
+			} else {
+				err = runtime.service.ResumeSession(ctx, session)
+			}
+			if err != nil {
 				return reportSessionError(cmd, session, err)
 			}
 
@@ -160,6 +175,9 @@ func (r *rootState) newSessionResumeCommand() *cobra.Command {
 		r.newSessionActionPlanCommand(
 			"resume",
 			func(ctx context.Context, runtime *commandRuntime, session *domain.Session) error {
+				if session.Spec.Type == domain.SessionTypeBackup {
+					return backup.ValidateResume(ctx, runtime.clients.Kubernetes, r.backupResumeRequest(runtime), session)
+				}
 				return runtime.service.ValidateResume(ctx, session)
 			},
 		),
@@ -167,6 +185,23 @@ func (r *rootState) newSessionResumeCommand() *cobra.Command {
 	command.AddCommand(r.newCrossClusterSessionResumeCommand())
 
 	return command
+}
+
+func (r *rootState) backupResumeRequest(runtime *commandRuntime) backup.Request {
+	return backup.Request{
+		HelmTimeout:        r.global.helmTimeout,
+		KubeconfigPath:     r.global.kubeconfig,
+		KubeContext:        r.global.kubeContext,
+		StreamToolLogs:     r.global.streamToolLogs,
+		StructuredLogs:     r.global.logFormat == "json",
+		Writer:             r.errWriter(),
+		Logger:             runtime.logger,
+		ToolImageProber:    kube.NewToolImageProber(runtime.clients.Kubernetes),
+		SessionStore:       runtime.store,
+		SessionNamespace:   r.global.sessionNamespace,
+		OpenEBSLVMManager:  runtime.openEBSLVMSharedVolumeManager,
+		ObjectStoreFactory: r.options.objectStoreFactory,
+	}
 }
 
 func requiresResumeApproval(phase domain.Phase) bool {

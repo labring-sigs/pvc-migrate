@@ -190,6 +190,7 @@ func TestTableBackupPlanAndResultAreHumanReadable(t *testing.T) {
 
 	result := &backup.Result{
 		Operation:   "backup",
+		SessionID:   "backup-test",
 		Namespace:   "app",
 		PVC:         "data",
 		Path:        "database/current",
@@ -201,10 +202,34 @@ func TestTableBackupPlanAndResultAreHumanReadable(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	for _, want := range []string{"OPERATION", "backup", "app/data", "database/current", "offline", "completed", "s3://backups/pv-migrate/daily/"} {
+	for _, want := range []string{"OPERATION", "backup", "backup-test", "app/data", "database/current", "offline", "completed", "s3://backups/pv-migrate/daily/"} {
 		if !strings.Contains(output.String(), want) {
 			t.Fatalf("backup result table missing %q:\n%s", want, output.String())
 		}
+	}
+
+	output.Reset()
+	restoreResult := &backup.Result{
+		Operation: "restore", OperationID: "restore-attempt", SessionID: "must-not-print",
+		Namespace: "app", PVC: "restored", Mode: backup.ModeRestore, Status: "completed",
+		Destination: "s3://backups/pv-migrate/daily/",
+	}
+	if err := (printeroutput.Printer{Writer: &output}).Print(restoreResult); err != nil {
+		t.Fatal(err)
+	}
+	if text := output.String(); !strings.Contains(text, "OPERATION ID") ||
+		!strings.Contains(text, "restore-attempt") || strings.Contains(text, "must-not-print") {
+		t.Fatalf("restore result table has the wrong identity:\n%s", text)
+	}
+
+	restoreResult.SessionID = ""
+	encoded, err := json.Marshal(restoreResult)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if text := string(encoded); !strings.Contains(text, `"operationID":"restore-attempt"`) ||
+		strings.Contains(text, `"sessionID"`) {
+		t.Fatalf("restore JSON has the wrong identity: %s", text)
 	}
 }
 
@@ -258,6 +283,43 @@ func TestTableSessionRendersSyncAndActivationState(t *testing.T) {
 		if !strings.Contains(output.String(), want) {
 			t.Fatalf("session table missing %q:\n%s", want, output.String())
 		}
+	}
+}
+
+func TestTableBackupSessionRendersBackupDetails(t *testing.T) {
+	now := metav1.NewTime(time.Date(2026, time.August, 21, 1, 2, 3, 0, time.UTC))
+	spec := domain.NewSessionSpec(
+		domain.OperationBackup,
+		domain.SessionCommon{SourceNamespace: "app", SessionNamespace: "sessions"},
+		domain.WorkloadSpec{Adapter: domain.WorkloadNone},
+		true,
+		domain.SessionWorkflowOptions{},
+	)
+	spec.Backup.SourcePVC = domain.ObjectReference{Namespace: "app", Name: "data"}
+	spec.Backup.SourcePV = domain.ObjectReference{Name: "pv-data"}
+	spec.Backup.Bucket = "backups"
+	spec.Backup.Prefix = "daily"
+	spec.Backup.Name = "point"
+	spec.Backup.CredentialsSecret = domain.ObjectReference{Namespace: "sessions", Name: "backup-credentials"}
+	session := &domain.Session{
+		ID: "backup-test", Spec: spec,
+		Status: domain.SessionStatus{Phase: domain.PhaseCompleted, UpdatedAt: now, Message: "backup completed"},
+	}
+
+	var output bytes.Buffer
+	if err := (printeroutput.Printer{Writer: &output, Format: printeroutput.Table}).Print(session); err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		"SOURCE PVC", "SOURCE PV", "MODE", "DESTINATION", "CREDENTIALS SECRET",
+		"app/data", "pv-data", "online", "s3://backups/daily/point/", "sessions/backup-credentials",
+	} {
+		if !strings.Contains(output.String(), want) {
+			t.Fatalf("backup table missing %q:\n%s", want, output.String())
+		}
+	}
+	if strings.Contains(output.String(), "WARM SYNC") {
+		t.Fatalf("backup table contains migration columns:\n%s", output.String())
 	}
 }
 

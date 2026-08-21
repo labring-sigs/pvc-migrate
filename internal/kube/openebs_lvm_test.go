@@ -2,16 +2,19 @@ package kube
 
 import (
 	"context"
+	"fmt"
 	"testing"
 
 	"github.com/labring-sigs/pvc-migrate/internal/domain"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	dynamicfake "k8s.io/client-go/dynamic/fake"
 	kubernetesfake "k8s.io/client-go/kubernetes/fake"
+	k8stesting "k8s.io/client-go/testing"
 )
 
 func TestOpenEBSLVMSharedVolumeManager(t *testing.T) {
@@ -30,6 +33,29 @@ func TestOpenEBSLVMSharedVolumeManager(t *testing.T) {
 		testOpenEBSLVMRejectsReplacementShared,
 	)
 	t.Run("requires source PV identity", testOpenEBSLVMRequiresSourceIdentity)
+	t.Run("classifies patch races as conflicts", testOpenEBSLVMPatchConflict)
+}
+
+func testOpenEBSLVMPatchConflict(t *testing.T) {
+	manager, dynamicClient := newOpenEBSLVMTestManager(t, "no")
+	result, err := manager.PrepareShared(context.Background(), openEBSLVMSourcePV)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dynamicClient.PrependReactor("patch", "lvmvolumes", func(k8stesting.Action) (bool, runtime.Object, error) {
+		return true, nil, apierrors.NewConflict(
+			schema.GroupResource{Group: openEBSLVMVolumeGVR.Group, Resource: openEBSLVMVolumeGVR.Resource},
+			result.LVMVolume.Name,
+			fmt.Errorf("resource version changed"),
+		)
+	})
+	mount := domain.OpenEBSLVMSharedMount{
+		SourcePV: openEBSLVMSourcePV, LVMVolume: result.LVMVolume,
+		PreviousShared: result.PreviousShared, PreviousSharedSet: result.PreviousSharedSet,
+	}
+	if err := manager.EnableShared(context.Background(), "session-1", mount); domain.CategoryOf(err) != domain.ErrorConflict {
+		t.Fatalf("category=%s error=%v", domain.CategoryOf(err), err)
+	}
 }
 
 var openEBSLVMSourcePV = domain.ObjectReference{Name: "pv-source", UID: "pv-uid"}

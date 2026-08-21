@@ -4,7 +4,10 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"fmt"
+	"strings"
 	"time"
+
+	"k8s.io/apimachinery/pkg/util/validation"
 )
 
 func NewSessionID(now time.Time) (string, error) {
@@ -18,4 +21,15 @@ func NewSessionID(now time.Time) (string, error) {
 		now.UTC().Format("20060102-150405"),
 		hex.EncodeToString(random),
 	), nil
+}
+
+func ValidateSessionID(id string) error {
+	if problems := validation.IsDNS1123Label(id); len(problems) > 0 {
+		return NewError(
+			ErrorValidation,
+			"session ID",
+			"must be a DNS-1123 label: "+strings.Join(problems, "; "),
+		)
+	}
+	return nil
 }

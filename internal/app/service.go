@@ -1702,6 +1702,8 @@ func (s *Service) ValidateResume(ctx context.Context, session *domain.Session) e
 		domain.OperationRename,
 		domain.OperationMove:
 		return s.validateSingleOperationResume(ctx, session, phase)
+	case domain.OperationBackup:
+		return domain.NewError(domain.ErrorPrecondition, "resume session", "backup sessions require the backup resume workflow")
 	}
 
 	switch phase {
@@ -1917,6 +1919,13 @@ func (s *Service) ValidateRollback(ctx context.Context, session *domain.Session)
 
 	if err := session.Validate(); err != nil {
 		return err
+	}
+	if session.Spec.Type == domain.SessionTypeBackup {
+		return domain.NewError(
+			domain.ErrorPrecondition,
+			"rollback dry-run",
+			"backup sessions do not change PVC identity and cannot be rolled back",
+		)
 	}
 
 	if err := s.validateOpenEBSLVMSharedMountRestore(ctx, session); err != nil {
@@ -2319,6 +2328,16 @@ func (s *Service) ValidateCleanup(
 
 	if err := s.validateOpenEBSLVMSharedMountRestore(ctx, session); err != nil {
 		return err
+	}
+	if session.Spec.Type == domain.SessionTypeBackup && (options.Finalize || options.DeleteSession) {
+		if err := kube.ValidateBackupCredentialsSecretCleanup(
+			ctx,
+			s.client,
+			backupCredentialsCleanupReference(session),
+			session.ID,
+		); err != nil {
+			return err
+		}
 	}
 
 	if err := s.validateReservationPods(ctx, session); err != nil {
@@ -3577,6 +3596,10 @@ func (s *Service) resumeSingle(
 	session *domain.Session,
 	phase domain.Phase,
 ) error {
+	if session.Spec.Operation() == domain.OperationBackup {
+		return domain.NewError(domain.ErrorPrecondition, "resume session", "backup sessions require the backup resume workflow")
+	}
+
 	if err := validateSingleResumePhase(session.Spec.Operation(), phase); err != nil {
 		return err
 	}
@@ -3782,12 +3805,11 @@ func (s *Service) abort(ctx context.Context, session *domain.Session) error {
 		}
 	}
 
-	return s.finish(
-		ctx,
-		session,
-		domain.PhaseAborted,
-		"migration aborted; reserved volumes are retained for cleanup",
-	)
+	message := "migration aborted; reserved volumes are retained for cleanup"
+	if session.Spec.Type == domain.SessionTypeBackup {
+		message = "backup aborted; no recovery point was published"
+	}
+	return s.finish(ctx, session, domain.PhaseAborted, message)
 }
 
 func (s *Service) Rollback(ctx context.Context, session *domain.Session) error {
@@ -3799,6 +3821,13 @@ func (s *Service) Rollback(ctx context.Context, session *domain.Session) error {
 }
 
 func (s *Service) rollback(ctx context.Context, session *domain.Session) error {
+	if session != nil && session.Spec.Type == domain.SessionTypeBackup {
+		return domain.NewError(
+			domain.ErrorPrecondition,
+			"rollback",
+			"backup sessions do not change PVC identity and cannot be rolled back",
+		)
+	}
 	if session.Status.Phase == domain.PhaseRolledBack {
 		return s.restoreOpenEBSLVMSharedMounts(ctx, session)
 	}

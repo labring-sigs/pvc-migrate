@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"time"
 
 	"github.com/labring-sigs/pvc-migrate/internal/backup"
 	"github.com/labring-sigs/pvc-migrate/internal/domain"
@@ -15,33 +16,34 @@ import (
 )
 
 type bucketFlags struct {
-	id                   string
-	namespace            string
-	pvc                  string
-	backend              string
-	bucket               string
-	name                 string
-	prefix               string
-	path                 string
-	s3Provider           string
-	endpoint             string
-	region               string
-	accessKey            string
-	secretKey            string
-	sessionToken         string
-	credentialsSecret    string
-	accessKeyKey         string
-	secretKeyKey         string
-	sessionTokenKey      string
-	accessKeyExplicit    bool
-	secretKeyExplicit    bool
-	sessionTokenExplicit bool
-	allowInsecure        bool
-	serverEncryption     string
-	sseKMSKeyID          string
-	online               bool
-	allowMounted         bool
-	deleteExtraneous     bool
+	id                     string
+	namespace              string
+	pvc                    string
+	backend                string
+	bucket                 string
+	name                   string
+	prefix                 string
+	path                   string
+	s3Provider             string
+	endpoint               string
+	region                 string
+	accessKey              string
+	secretKey              string
+	sessionToken           string
+	credentialsSecret      string
+	accessKeyKey           string
+	secretKeyKey           string
+	sessionTokenKey        string
+	accessKeyExplicit      bool
+	secretKeyExplicit      bool
+	sessionTokenExplicit   bool
+	allowInsecure          bool
+	serverEncryption       string
+	sseKMSKeyID            string
+	online                 bool
+	allowMounted           bool
+	deleteExtraneous       bool
+	openEBSLVMEnableShared bool
 }
 
 func (r *rootState) newBackupCommand(restore bool) *cobra.Command {
@@ -78,6 +80,11 @@ func (r *rootState) newObjectTransferCommand(restore, forceOnline bool) *cobra.C
 			if err := validateBucketFlags(flags, pvcFlag); err != nil {
 				return reportPreSessionError(cmd, err)
 			}
+			if !restore && flags.id != "" {
+				if err := domain.ValidateSessionID(flags.id); err != nil {
+					return reportPreSessionError(cmd, err)
+				}
+			}
 
 			online := !restore && (forceOnline || flags.online)
 
@@ -101,25 +108,35 @@ func (r *rootState) newObjectTransferCommand(restore, forceOnline bool) *cobra.C
 			if err != nil {
 				return reportTransferError(cmd, use, flags.namespace, flags.pvc, err)
 			}
+			if !restore && !dryRun && flags.id == "" {
+				flags.id, err = domain.NewSessionID(time.Now())
+				if err != nil {
+					return reportTransferError(cmd, use, flags.namespace, flags.pvc, err)
+				}
+			}
 
 			request := backup.Request{
-				ID:                    flags.id,
-				ToolImage:             r.global.toolImage,
-				Namespace:             flags.namespace,
-				PVCName:               flags.pvc,
-				Path:                  flags.path,
-				Online:                online,
-				AllowMounted:          flags.allowMounted,
-				DeleteExtraneousFiles: flags.deleteExtraneous,
-				HelmTimeout:           r.global.helmTimeout,
-				KubeconfigPath:        r.global.kubeconfig,
-				KubeContext:           r.global.kubeContext,
-				StreamToolLogs:        r.global.streamToolLogs,
-				StructuredLogs:        r.global.logFormat == "json",
-				Store:                 store,
-				Writer:                r.errWriter(),
-				Logger:                runtime.logger,
-				ToolImageProber:       kube.NewToolImageProber(runtime.clients.Kubernetes),
+				ID:                     flags.id,
+				ToolImage:              r.global.toolImage,
+				Namespace:              flags.namespace,
+				PVCName:                flags.pvc,
+				Path:                   flags.path,
+				Online:                 online,
+				AllowMounted:           flags.allowMounted,
+				DeleteExtraneousFiles:  flags.deleteExtraneous,
+				HelmTimeout:            r.global.helmTimeout,
+				KubeconfigPath:         r.global.kubeconfig,
+				KubeContext:            r.global.kubeContext,
+				StreamToolLogs:         r.global.streamToolLogs,
+				StructuredLogs:         r.global.logFormat == "json",
+				Store:                  store,
+				Writer:                 r.errWriter(),
+				Logger:                 runtime.logger,
+				ToolImageProber:        kube.NewToolImageProber(runtime.clients.Kubernetes),
+				SessionStore:           runtime.store,
+				SessionNamespace:       r.global.sessionNamespace,
+				OpenEBSLVMEnableShared: flags.openEBSLVMEnableShared,
+				OpenEBSLVMManager:      runtime.openEBSLVMSharedVolumeManager,
 			}
 
 			plan, err := backup.Preflight(ctx, runtime.clients.Kubernetes, request, restore)
@@ -147,7 +164,25 @@ func (r *rootState) newObjectTransferCommand(restore, forceOnline bool) *cobra.C
 
 			err = backup.Run(ctx, runtime.clients.Kubernetes, request, restore)
 			if err != nil {
+				if !restore {
+					lookupCtx, lookupCancel := context.WithTimeout(context.Background(), 5*time.Second)
+					session, lookupErr := runtime.store.Get(lookupCtx, r.global.sessionNamespace, flags.id)
+					lookupCancel()
+					if lookupErr == nil {
+						return reportSessionError(cmd, session, err)
+					}
+				}
 				return reportTransferError(cmd, use, flags.namespace, flags.pvc, err)
+			}
+
+			var completedSession *domain.Session
+			if !restore {
+				lookupCtx, lookupCancel := context.WithTimeout(context.Background(), 5*time.Second)
+				completedSession, err = runtime.store.Get(lookupCtx, r.global.sessionNamespace, flags.id)
+				lookupCancel()
+				if err != nil {
+					return reportSessionLookupError(cmd, r.global.sessionNamespace, flags.id, err)
+				}
 			}
 
 			if r.global.output != "table" {
@@ -159,9 +194,17 @@ func (r *rootState) newObjectTransferCommand(restore, forceOnline bool) *cobra.C
 				if restore {
 					mode = backup.ModeRestore
 				}
+				sessionID := flags.id
+				operationID := ""
+				if restore {
+					sessionID = ""
+					operationID = flags.id
+				}
 
 				if err := printerFor(r).Print(&backup.Result{
 					Operation:   use,
+					OperationID: operationID,
+					SessionID:   sessionID,
 					Namespace:   flags.namespace,
 					PVC:         flags.pvc,
 					Path:        plan.Path,
@@ -178,17 +221,26 @@ func (r *rootState) newObjectTransferCommand(restore, forceOnline bool) *cobra.C
 					"%s completed. Verify the backup or restore result before the next workload change.\n",
 					use,
 				)
-
-				return err
+				if err != nil || completedSession == nil {
+					return err
+				}
+				return writeSessionGuidance(
+					cmd.ErrOrStderr(),
+					completedSession,
+					guidancePrefixesForCommand(cmd, completedSession.Spec.SessionNamespace),
+				)
 			}
 
+			identityLabel, identity := transferResultIdentity(restore, flags.id)
 			_, err = fmt.Fprintf(
 				cmd.OutOrStdout(),
-				"%s completed: %s/%s name=%s\n",
+				"%s completed: %s/%s name=%s %s=%s\n",
 				use,
 				flags.namespace,
 				flags.pvc,
 				flags.name,
+				identityLabel,
+				identity,
 			)
 			if err != nil {
 				return err
@@ -200,7 +252,14 @@ func (r *rootState) newObjectTransferCommand(restore, forceOnline bool) *cobra.C
 				use,
 			)
 
-			return err
+			if err != nil || completedSession == nil {
+				return err
+			}
+			return writeSessionGuidance(
+				cmd.ErrOrStderr(),
+				completedSession,
+				guidancePrefixesForCommand(cmd, completedSession.Spec.SessionNamespace),
+			)
 		},
 	}
 	bindBucketFlags(command, flags, restore, !restore && !forceOnline)
@@ -256,22 +315,26 @@ func (r *rootState) newBackupPlanCommand(restore, forceOnline bool) *cobra.Comma
 			}
 
 			request := backup.Request{
-				ID:                    flags.id,
-				ToolImage:             r.global.toolImage,
-				Namespace:             flags.namespace,
-				PVCName:               flags.pvc,
-				Path:                  flags.path,
-				Online:                online,
-				AllowMounted:          flags.allowMounted,
-				DeleteExtraneousFiles: flags.deleteExtraneous,
-				HelmTimeout:           r.global.helmTimeout,
-				KubeconfigPath:        r.global.kubeconfig,
-				KubeContext:           r.global.kubeContext,
-				StreamToolLogs:        r.global.streamToolLogs,
-				StructuredLogs:        r.global.logFormat == "json",
-				Store:                 store,
-				Writer:                r.errWriter(),
-				Logger:                runtime.logger,
+				ID:                     flags.id,
+				ToolImage:              r.global.toolImage,
+				Namespace:              flags.namespace,
+				PVCName:                flags.pvc,
+				Path:                   flags.path,
+				Online:                 online,
+				AllowMounted:           flags.allowMounted,
+				DeleteExtraneousFiles:  flags.deleteExtraneous,
+				HelmTimeout:            r.global.helmTimeout,
+				KubeconfigPath:         r.global.kubeconfig,
+				KubeContext:            r.global.kubeContext,
+				StreamToolLogs:         r.global.streamToolLogs,
+				StructuredLogs:         r.global.logFormat == "json",
+				Store:                  store,
+				Writer:                 r.errWriter(),
+				Logger:                 runtime.logger,
+				SessionStore:           runtime.store,
+				SessionNamespace:       r.global.sessionNamespace,
+				OpenEBSLVMEnableShared: flags.openEBSLVMEnableShared,
+				OpenEBSLVMManager:      runtime.openEBSLVMSharedVolumeManager,
 			}
 
 			plan, err := backup.Preflight(ctx, runtime.clients.Kubernetes, request, restore)
@@ -303,7 +366,11 @@ func bindBucketFlags(command *cobra.Command, flags *bucketFlags, restore, includ
 		pvcFlag = "destination-pvc"
 	}
 
-	command.Flags().StringVar(&flags.id, "id", "", "pv-migrate operation ID")
+	idHelp := "Backup Session ID; generated when omitted during execution"
+	if restore {
+		idHelp = "Restore attempt ID used for logs and temporary tool resources; no Session is created"
+	}
+	command.Flags().StringVar(&flags.id, "id", "", idHelp)
 	command.Flags().StringVarP(&flags.namespace, "namespace", "n", "default", "PVC namespace")
 	command.Flags().StringVar(&flags.pvc, pvcFlag, "", "PVC name")
 	command.Flags().StringVar(&flags.backend, "backend", "s3", "S3-compatible object backend")
@@ -340,12 +407,27 @@ func bindBucketFlags(command *cobra.Command, flags *bucketFlags, restore, includ
 			BoolVar(&flags.online, "online", false, "Run a best-effort online backup while Pods keep using the source PVC")
 	}
 
+	if !restore {
+		command.Flags().BoolVar(&flags.openEBSLVMEnableShared, "openebs-lvm-enable-shared", false, "Temporarily enable OpenEBS LVM shared mounts for an active source PVC")
+	}
+
 	if restore {
 		command.Flags().
 			BoolVar(&flags.allowMounted, "allow-mounted", false, "Allow restore while the destination PVC has Pod consumers")
 		command.Flags().
 			BoolVar(&flags.deleteExtraneous, "delete-extraneous", false, "Delete destination files absent from the backup (destructive)")
 	}
+}
+
+func transferResultIdentity(restore bool, id string) (string, string) {
+	label := "session"
+	if restore {
+		label = "operation-id"
+	}
+	if id == "" {
+		id = "-"
+	}
+	return label, id
 }
 
 func validateBucketFlags(flags *bucketFlags, pvcFlag string) error {

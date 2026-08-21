@@ -120,6 +120,103 @@ func TestCleanupFinalizesActivePVAndClosesRollbackWindow(t *testing.T) {
 	}
 }
 
+func TestCleanupFinalizesBackupCredentialsSecret(t *testing.T) {
+	ctx := context.Background()
+	session := completedBackupCleanupSession(t)
+
+	client := fake.NewClientset()
+	secret, err := kube.CreateBackupCredentialsSecret(ctx, client, "sessions", session.ID, map[string][]byte{
+		kube.BackupAccessKeyDataKey: []byte("access"),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	session.Spec.Backup.CredentialsSecret = domain.ObjectReference{
+		Namespace: secret.Namespace,
+		Name:      secret.Name,
+		UID:       secret.UID,
+	}
+	store := &memoryStore{}
+	service := &Service{client: client, store: store}
+	secret.Labels[kube.SessionKey] = "wrong-owner"
+	if _, err := client.CoreV1().Secrets(secret.Namespace).Update(ctx, secret, metav1.UpdateOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	if err := service.ValidateCleanup(ctx, session, CleanupOptions{Finalize: true}); domain.CategoryOf(err) != domain.ErrorConflict {
+		t.Fatalf("cleanup validation category=%s error=%v", domain.CategoryOf(err), err)
+	}
+	secret.Labels[kube.SessionKey] = session.ID
+	if _, err := client.CoreV1().Secrets(secret.Namespace).Update(ctx, secret, metav1.UpdateOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	if err := service.Cleanup(ctx, session, CleanupOptions{Finalize: true}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := client.CoreV1().Secrets("sessions").Get(ctx, secret.Name, metav1.GetOptions{}); !apierrors.IsNotFound(err) {
+		t.Fatalf("credentials Secret still exists: %v", err)
+	}
+	if session.Spec.Backup.CredentialsSecret.Name != "" {
+		t.Fatalf("credentials Secret reference remains: %#v", session.Spec.Backup.CredentialsSecret)
+	}
+}
+
+func TestCleanupFindsCredentialsSecretMissingFromBackupCheckpoint(t *testing.T) {
+	ctx := context.Background()
+	session := completedBackupCleanupSession(t)
+	client := fake.NewClientset()
+	secret, err := kube.CreateBackupCredentialsSecret(ctx, client, "sessions", session.ID, map[string][]byte{
+		kube.BackupAccessKeyDataKey: []byte("access"),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	secret.Labels[kube.SessionKey] = "wrong-owner"
+	if _, err := client.CoreV1().Secrets(secret.Namespace).Update(ctx, secret, metav1.UpdateOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	service := &Service{client: client, store: &memoryStore{}}
+	if err := service.ValidateCleanup(ctx, session, CleanupOptions{Finalize: true}); domain.CategoryOf(err) != domain.ErrorConflict {
+		t.Fatalf("cleanup validation category=%s error=%v", domain.CategoryOf(err), err)
+	}
+	secret.Labels[kube.SessionKey] = session.ID
+	if _, err := client.CoreV1().Secrets(secret.Namespace).Update(ctx, secret, metav1.UpdateOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	if err := service.Cleanup(ctx, session, CleanupOptions{Finalize: true}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := client.CoreV1().Secrets(secret.Namespace).Get(ctx, secret.Name, metav1.GetOptions{}); !apierrors.IsNotFound(err) {
+		t.Fatalf("uncheckpointed credentials Secret still exists: %v", err)
+	}
+}
+
+func completedBackupCleanupSession(t *testing.T) *domain.Session {
+	t.Helper()
+	spec := domain.NewSessionSpec(
+		domain.OperationBackup,
+		domain.SessionCommon{SourceNamespace: "app", SessionNamespace: "sessions", CreatedBy: "test"},
+		domain.WorkloadSpec{Adapter: domain.WorkloadNone},
+		false,
+		domain.SessionWorkflowOptions{},
+	)
+	spec.Backup.SourcePVC = domain.ObjectReference{Namespace: "app", Name: "data", UID: types.UID("pvc-uid")}
+	spec.Backup.SourcePV = domain.ObjectReference{Name: "pv-data", UID: types.UID("pv-uid")}
+	spec.Backup.Backend = "s3"
+	spec.Backup.Bucket = "backups"
+	spec.Backup.Name = "daily"
+	session := domain.NewSession("backup-test", spec, metav1.Now().Time)
+	if err := session.Transition(domain.PhaseWarmCopying, "copying", metav1.Now().Time); err != nil {
+		t.Fatal(err)
+	}
+	if err := session.Transition(domain.PhaseWarmCopied, "copied", metav1.Now().Time); err != nil {
+		t.Fatal(err)
+	}
+	if err := session.Transition(domain.PhaseCompleted, "completed", metav1.Now().Time); err != nil {
+		t.Fatal(err)
+	}
+	return session
+}
+
 func TestCleanupAbortedSessionReleasesSourceAndDeletesDestination(t *testing.T) {
 	ctx := context.Background()
 	session := appTestSession()
