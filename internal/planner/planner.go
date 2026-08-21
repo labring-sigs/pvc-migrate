@@ -2837,18 +2837,11 @@ func (p *Planner) checkPVCFinalizers(
 		return
 	}
 
-	custom := make([]string, 0, len(pvc.Finalizers))
-	for _, finalizer := range pvc.Finalizers {
-		if finalizer != "" && finalizer != kube.PVCProtectionFinalizer {
-			custom = append(custom, finalizer)
-		}
-	}
-
+	custom := kube.BlockingPVCFinalizers(pvc)
 	if len(custom) == 0 {
 		return
 	}
 
-	slices.Sort(custom)
 	plan.AddCheck(
 		failed(
 			"pvc-finalizers",

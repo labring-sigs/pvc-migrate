@@ -13,7 +13,7 @@ func TestPlanRejectsCustomPVCFinalizerBeforeRecreate(t *testing.T) {
 	objects := plannerObjects("2Gi")
 	for _, object := range objects {
 		if pvc, ok := object.(*corev1.PersistentVolumeClaim); ok {
-			pvc.Finalizers = []string{"storage.example/protect"}
+			pvc.Finalizers = []string{"apps.victoriametrics.com/finalizer"}
 		}
 	}
 
@@ -32,25 +32,38 @@ func TestPlanRejectsCustomPVCFinalizerBeforeRecreate(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if plan.Ready || !hasFailedCheck(plan, "pvc-finalizers") {
+	if plan.Ready || !hasFailedCheckContaining(
+		plan,
+		"pvc-finalizers",
+		"apps.victoriametrics.com/finalizer",
+	) {
 		t.Fatalf("plan=%#v", plan)
 	}
 }
 
 func TestPlanAllowsPVCProtectionFinalizerAndCopyKeepsSource(t *testing.T) {
 	tests := []struct {
-		name      string
-		operation domain.Operation
+		name       string
+		operation  domain.Operation
+		finalizers []string
 	}{
-		{name: "protection finalizer", operation: domain.OperationMigrate},
-		{name: "copy source", operation: domain.OperationCopy},
+		{
+			name:       "protection finalizer",
+			operation:  domain.OperationMigrate,
+			finalizers: []string{kube.PVCProtectionFinalizer},
+		},
+		{
+			name:       "copy source with custom finalizer",
+			operation:  domain.OperationCopy,
+			finalizers: []string{"apps.victoriametrics.com/finalizer"},
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			objects := plannerObjects("2Gi")
 			for _, object := range objects {
 				if pvc, ok := object.(*corev1.PersistentVolumeClaim); ok {
-					pvc.Finalizers = []string{kube.PVCProtectionFinalizer}
+					pvc.Finalizers = tt.finalizers
 				}
 			}
 

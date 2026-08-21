@@ -76,6 +76,66 @@ func TestVerifyVolumeOfflineChecksSourceAndDestinationConsumers(t *testing.T) {
 	}
 }
 
+func TestVerifyVolumeOfflineRejectsCustomPVCFinalizer(t *testing.T) {
+	switcher, _, volume, _ := switcherFixture(t)
+	client := testutil.MustType[*fake.Clientset](t, switcher.client)
+
+	pvc, err := client.CoreV1().
+		PersistentVolumeClaims(volume.SourcePVC.Namespace).
+		Get(context.Background(), volume.SourcePVC.Name, metav1.GetOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	pvc.Finalizers = []string{
+		PVCProtectionFinalizer,
+		"apps.victoriametrics.com/finalizer",
+	}
+	if _, err := client.CoreV1().
+		PersistentVolumeClaims(pvc.Namespace).
+		Update(context.Background(), pvc, metav1.UpdateOptions{}); err != nil {
+		t.Fatal(err)
+	}
+
+	err = switcher.VerifyVolumeOffline(context.Background(), volume)
+	if domain.CategoryOf(err) != domain.ErrorPrecondition ||
+		!strings.Contains(err.Error(), "apps.victoriametrics.com/finalizer") {
+		t.Fatalf("category=%s error=%v", domain.CategoryOf(err), err)
+	}
+}
+
+func TestDeletePVCRejectsCustomFinalizerBeforeMutation(t *testing.T) {
+	switcher, _, volume, _ := switcherFixture(t)
+	client := testutil.MustType[*fake.Clientset](t, switcher.client)
+
+	pvc, err := client.CoreV1().
+		PersistentVolumeClaims(volume.SourcePVC.Namespace).
+		Get(context.Background(), volume.SourcePVC.Name, metav1.GetOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	pvc.Finalizers = []string{"storage.example/protect"}
+	if _, err := client.CoreV1().
+		PersistentVolumeClaims(pvc.Namespace).
+		Update(context.Background(), pvc, metav1.UpdateOptions{}); err != nil {
+		t.Fatal(err)
+	}
+
+	err = switcher.deletePVC(context.Background(), volume.SourcePVC)
+	if domain.CategoryOf(err) != domain.ErrorPrecondition ||
+		!strings.Contains(err.Error(), "storage.example/protect") {
+		t.Fatalf("category=%s error=%v", domain.CategoryOf(err), err)
+	}
+
+	for _, action := range client.Actions() {
+		if action.GetVerb() == "delete" &&
+			action.GetResource().Resource == "persistentvolumeclaims" {
+			t.Fatalf("PVC delete was issued: %#v", action)
+		}
+	}
+}
+
 func TestVerifyVolumeOfflineReturnsConsumerBeforeAttachmentTimeout(t *testing.T) {
 	switcher, _, volume, _ := switcherFixture(t)
 
