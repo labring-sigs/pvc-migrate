@@ -209,6 +209,7 @@ func TestTableBackupPlanAndResultAreHumanReadable(t *testing.T) {
 	}
 
 	output.Reset()
+
 	restoreResult := &backup.Result{
 		Operation: "restore", OperationID: "restore-attempt", SessionID: "must-not-print",
 		Namespace: "app", PVC: "restored", Mode: backup.ModeRestore, Status: "completed",
@@ -217,16 +218,19 @@ func TestTableBackupPlanAndResultAreHumanReadable(t *testing.T) {
 	if err := (printeroutput.Printer{Writer: &output}).Print(restoreResult); err != nil {
 		t.Fatal(err)
 	}
+
 	if text := output.String(); !strings.Contains(text, "OPERATION ID") ||
 		!strings.Contains(text, "restore-attempt") || strings.Contains(text, "must-not-print") {
 		t.Fatalf("restore result table has the wrong identity:\n%s", text)
 	}
 
 	restoreResult.SessionID = ""
+
 	encoded, err := json.Marshal(restoreResult)
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	if text := string(encoded); !strings.Contains(text, `"operationID":"restore-attempt"`) ||
 		strings.Contains(text, `"sessionID"`) {
 		t.Fatalf("restore JSON has the wrong identity: %s", text)
@@ -300,16 +304,27 @@ func TestTableBackupSessionRendersBackupDetails(t *testing.T) {
 	spec.Backup.Bucket = "backups"
 	spec.Backup.Prefix = "daily"
 	spec.Backup.Name = "point"
-	spec.Backup.CredentialsSecret = domain.ObjectReference{Namespace: "sessions", Name: "backup-credentials"}
+	spec.Backup.CredentialsSecret = domain.ObjectReference{
+		Namespace: "sessions",
+		Name:      "backup-credentials",
+	}
 	session := &domain.Session{
-		ID: "backup-test", Spec: spec,
-		Status: domain.SessionStatus{Phase: domain.PhaseCompleted, UpdatedAt: now, Message: "backup completed"},
+		ID:   "backup-test",
+		Spec: spec,
+		Status: domain.SessionStatus{
+			Phase:     domain.PhaseCompleted,
+			UpdatedAt: now,
+			Message:   "backup completed",
+		},
 	}
 
 	var output bytes.Buffer
-	if err := (printeroutput.Printer{Writer: &output, Format: printeroutput.Table}).Print(session); err != nil {
+	if err := (printeroutput.Printer{Writer: &output, Format: printeroutput.Table}).Print(
+		session,
+	); err != nil {
 		t.Fatal(err)
 	}
+
 	for _, want := range []string{
 		"SOURCE PVC", "SOURCE PV", "MODE", "DESTINATION", "CREDENTIALS SECRET",
 		"app/data", "pv-data", "online", "s3://backups/daily/point/", "sessions/backup-credentials",
@@ -318,6 +333,7 @@ func TestTableBackupSessionRendersBackupDetails(t *testing.T) {
 			t.Fatalf("backup table missing %q:\n%s", want, output.String())
 		}
 	}
+
 	if strings.Contains(output.String(), "WARM SYNC") {
 		t.Fatalf("backup table contains migration columns:\n%s", output.String())
 	}

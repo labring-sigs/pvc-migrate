@@ -27,7 +27,11 @@ func (s *recordingBackupSessionStore) Create(_ context.Context, session *domain.
 	return session.Validate()
 }
 
-func (s *recordingBackupSessionStore) Get(context.Context, string, string) (*domain.Session, error) {
+func (s *recordingBackupSessionStore) Get(
+	context.Context,
+	string,
+	string,
+) (*domain.Session, error) {
 	return s.created, nil
 }
 
@@ -49,7 +53,9 @@ type recordingBackupSessionLock struct {
 	releaseErr error
 }
 
-func (l *recordingBackupSessionLock) Bind(ctx context.Context) (context.Context, context.CancelFunc) {
+func (l *recordingBackupSessionLock) Bind(
+	ctx context.Context,
+) (context.Context, context.CancelFunc) {
 	l.bound = true
 	return context.WithCancel(ctx)
 }
@@ -82,13 +88,19 @@ func (s *lockingBackupSessionStore) Update(ctx context.Context, session *domain.
 	if s.lock != nil && s.leaseErrOnUpdate != nil {
 		s.lock.err = s.leaseErrOnUpdate
 	}
+
 	if s.updateErr != nil {
 		return s.updateErr
 	}
+
 	return s.recordingBackupSessionStore.Update(ctx, session)
 }
 
-func (s *lockingBackupSessionStore) AcquireSessionLock(context.Context, string, string) (kube.SessionLock, error) {
+func (s *lockingBackupSessionStore) AcquireSessionLock(
+	context.Context,
+	string,
+	string,
+) (kube.SessionLock, error) {
 	return s.lock, nil
 }
 
@@ -104,37 +116,59 @@ type recordingBackupOpenEBSManager struct {
 	onRestore          func()
 }
 
-func (m *recordingBackupOpenEBSManager) Shared(context.Context, domain.ObjectReference, domain.ObjectReference, string) (bool, error) {
+func (m *recordingBackupOpenEBSManager) Shared(
+	context.Context,
+	domain.ObjectReference,
+	domain.ObjectReference,
+	string,
+) (bool, error) {
 	if m.sharedErr != nil || m.shared {
 		return m.shared, m.sharedErr
 	}
 	return !m.prepared.NeedsChange, nil
 }
 
-func (m *recordingBackupOpenEBSManager) PrepareShared(context.Context, domain.ObjectReference) (kube.OpenEBSLVMSharedResult, error) {
+func (m *recordingBackupOpenEBSManager) PrepareShared(
+	context.Context,
+	domain.ObjectReference,
+) (kube.OpenEBSLVMSharedResult, error) {
 	return m.prepared, nil
 }
 
-func (m *recordingBackupOpenEBSManager) EnableShared(_ context.Context, _ string, mount domain.OpenEBSLVMSharedMount) error {
+func (m *recordingBackupOpenEBSManager) EnableShared(
+	_ context.Context,
+	_ string,
+	mount domain.OpenEBSLVMSharedMount,
+) error {
 	m.enabled = append(m.enabled, mount)
 	return m.enableErr
 }
 
-func (m *recordingBackupOpenEBSManager) ValidateRestoreShared(_ context.Context, _ string, mount domain.OpenEBSLVMSharedMount) error {
+func (m *recordingBackupOpenEBSManager) ValidateRestoreShared(
+	_ context.Context,
+	_ string,
+	mount domain.OpenEBSLVMSharedMount,
+) error {
 	m.validatedRestores = append(m.validatedRestores, mount)
 	return m.validateRestoreErr
 }
 
-func (m *recordingBackupOpenEBSManager) RestoreShared(_ context.Context, _ string, mount domain.OpenEBSLVMSharedMount) error {
+func (m *recordingBackupOpenEBSManager) RestoreShared(
+	_ context.Context,
+	_ string,
+	mount domain.OpenEBSLVMSharedMount,
+) error {
 	m.restored = append(m.restored, mount)
 	if m.onRestore != nil {
 		m.onRestore()
 	}
+
 	return nil
 }
 
 func testBackupObjectStore(t *testing.T) *objectstore.Store {
 	t.Helper()
+
 	store, err := objectstore.NewWithClient(
 		&preflightObjectStore{},
 		objectstore.Config{Bucket: "backups", Prefix: "pv-migrate", Name: "daily"},
@@ -143,6 +177,7 @@ func testBackupObjectStore(t *testing.T) *objectstore.Store {
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	return store
 }
 
@@ -158,25 +193,36 @@ func TestBuildBackupSessionIncludesMetadataWithoutCredentials(t *testing.T) {
 		Store:                  testBackupObjectStore(t),
 		SessionStore:           store,
 	}
-	pvc := &corev1.PersistentVolumeClaim{ObjectMeta: metav1.ObjectMeta{Namespace: "app", Name: "data", UID: types.UID("pvc-uid")}}
-	pv := &corev1.PersistentVolume{ObjectMeta: metav1.ObjectMeta{Name: "pv-data", UID: types.UID("pv-uid")}}
+	pvc := &corev1.PersistentVolumeClaim{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "app", Name: "data", UID: types.UID("pvc-uid")},
+	}
+	pv := &corev1.PersistentVolume{
+		ObjectMeta: metav1.ObjectMeta{Name: "pv-data", UID: types.UID("pv-uid")},
+	}
 
 	session, err := buildBackupSession(req, pvc, pv)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if session.Spec.Type != domain.SessionTypeBackup || session.Spec.Backup == nil || !session.Spec.Backup.Online {
+
+	if session.Spec.Type != domain.SessionTypeBackup || session.Spec.Backup == nil ||
+		!session.Spec.Backup.Online {
 		t.Fatalf("backup session payload = %#v", session.Spec)
 	}
+
 	if session.Spec.Backup.SourcePVC.UID != pvc.UID || session.Spec.Backup.SourcePV.UID != pv.UID {
 		t.Fatalf("source identities = %#v", session.Spec.Backup)
 	}
-	if session.Spec.Backup.SourcePVC.Name != pvc.Name || session.Spec.Backup.SourcePV.Name != pv.Name {
+
+	if session.Spec.Backup.SourcePVC.Name != pvc.Name ||
+		session.Spec.Backup.SourcePV.Name != pv.Name {
 		t.Fatalf("source names = %#v", session.Spec.Backup)
 	}
+
 	if session.Spec.Backup.Path != "" || session.Status.OpenEBSLVMSharedMounts != nil {
 		t.Fatalf("unexpected backup state = %#v", session)
 	}
+
 	if err := session.Validate(); err != nil {
 		t.Fatal(err)
 	}
@@ -191,12 +237,23 @@ func TestBuildBackupSessionRejectsInvalidIDBeforePersistence(t *testing.T) {
 		Store:            testBackupObjectStore(t),
 		SessionStore:     store,
 	}
-	pvc := &corev1.PersistentVolumeClaim{ObjectMeta: metav1.ObjectMeta{Namespace: "app", Name: "data", UID: types.UID("pvc-uid")}}
-	pv := &corev1.PersistentVolume{ObjectMeta: metav1.ObjectMeta{Name: "pv-data", UID: types.UID("pv-uid")}}
+	pvc := &corev1.PersistentVolumeClaim{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "app", Name: "data", UID: types.UID("pvc-uid")},
+	}
+	pv := &corev1.PersistentVolume{
+		ObjectMeta: metav1.ObjectMeta{Name: "pv-data", UID: types.UID("pv-uid")},
+	}
 
-	if _, err := buildBackupSession(req, pvc, pv); domain.CategoryOf(err) != domain.ErrorValidation {
+	if _, err := buildBackupSession(
+		req,
+		pvc,
+		pv,
+	); domain.CategoryOf(
+		err,
+	) != domain.ErrorValidation {
 		t.Fatalf("category=%s error=%v", domain.CategoryOf(err), err)
 	}
+
 	if store.created != nil {
 		t.Fatal("invalid session ID was persisted")
 	}
@@ -212,22 +269,31 @@ func TestBackupCredentialsAreStoredOnlyInSecret(t *testing.T) {
 		Store:            testBackupObjectStore(t),
 		SessionStore:     store,
 	}
-	pvc := &corev1.PersistentVolumeClaim{ObjectMeta: metav1.ObjectMeta{Namespace: "app", Name: "data", UID: types.UID("pvc-uid")}}
-	pv := &corev1.PersistentVolume{ObjectMeta: metav1.ObjectMeta{Name: "pv-data", UID: types.UID("pv-uid")}}
+	pvc := &corev1.PersistentVolumeClaim{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "app", Name: "data", UID: types.UID("pvc-uid")},
+	}
+	pv := &corev1.PersistentVolume{
+		ObjectMeta: metav1.ObjectMeta{Name: "pv-data", UID: types.UID("pv-uid")},
+	}
+
 	session, err := buildBackupSession(req, pvc, pv)
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	if err := persistBackupCredentials(context.Background(), client, req, session); err != nil {
 		t.Fatal(err)
 	}
+
 	if session.Spec.Backup.CredentialsSecret.Name == "" {
 		t.Fatal("credentials Secret reference was not persisted")
 	}
+
 	credentials, err := loadBackupCredentials(context.Background(), client, session)
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	if credentials.AccessKey != "key" || credentials.SecretKey != "secret" {
 		t.Fatalf("credentials = %#v", credentials)
 	}
@@ -235,6 +301,7 @@ func TestBackupCredentialsAreStoredOnlyInSecret(t *testing.T) {
 
 func TestLoadBackupCredentialsRecoversUncheckpointedSecret(t *testing.T) {
 	client := fake.NewClientset()
+
 	session := testBackupSession(t, "backup-test")
 	if _, err := kube.CreateBackupCredentialsSecret(
 		context.Background(),
@@ -253,6 +320,7 @@ func TestLoadBackupCredentialsRecoversUncheckpointedSecret(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	if credentials.AccessKey != "access" || credentials.SecretKey != "secret" {
 		t.Fatalf("credentials=%#v", credentials)
 	}
@@ -265,6 +333,7 @@ func TestLoadBackupCredentialsRecoversUncheckpointedSecret(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	secret.Labels[kube.SessionKey] = "another-session"
 	if _, err := client.CoreV1().Secrets(secret.Namespace).Update(
 		context.Background(),
@@ -273,7 +342,14 @@ func TestLoadBackupCredentialsRecoversUncheckpointedSecret(t *testing.T) {
 	); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := loadBackupCredentials(context.Background(), client, session); domain.CategoryOf(err) != domain.ErrorConflict {
+
+	if _, err := loadBackupCredentials(
+		context.Background(),
+		client,
+		session,
+	); domain.CategoryOf(
+		err,
+	) != domain.ErrorConflict {
 		t.Fatalf("category=%s error=%v", domain.CategoryOf(err), err)
 	}
 }
@@ -285,9 +361,18 @@ func TestPersistBackupCredentialsKeepsSecretWhenCheckpointResultIsUnknown(t *tes
 	req := Request{Store: testBackupObjectStore(t), SessionStore: store}
 	session := testBackupSession(t, "backup-test")
 
-	if err := persistBackupCredentials(context.Background(), client, req, session); !errors.Is(err, updateErr) {
+	if err := persistBackupCredentials(
+		context.Background(),
+		client,
+		req,
+		session,
+	); !errors.Is(
+		err,
+		updateErr,
+	) {
 		t.Fatalf("error=%v", err)
 	}
+
 	if _, err := client.CoreV1().Secrets(session.Spec.SessionNamespace).Get(
 		context.Background(),
 		kube.BackupCredentialsSecretName(session.ID),
@@ -313,12 +398,15 @@ func TestInitialBackupHoldsSessionLeaseWhilePersistingCredentials(t *testing.T) 
 	if !errors.Is(err, updateErr) || !errors.Is(err, leaseErr) || !errors.Is(err, releaseErr) {
 		t.Fatalf("error=%v", err)
 	}
+
 	if !store.updateWhileBound {
 		t.Fatal("credentials reference was persisted without holding the session Lease")
 	}
+
 	if !store.createWhileBound {
 		t.Fatal("backup session was created without holding the session Lease")
 	}
+
 	if !lock.released {
 		t.Fatal("session Lease was not released after backup setup failed")
 	}
@@ -334,25 +422,40 @@ func TestRestoreBackupSharedMountsStopsPersistingAfterLeaseLoss(t *testing.T) {
 		SourcePV:  domain.ObjectReference{Name: "pv-data", UID: "pv-uid"},
 		LVMVolume: domain.ObjectReference{Namespace: "openebs", Name: "lvm-data", UID: "lvm-uid"},
 	}}
-	ctx := context.WithValue(context.Background(), backupSessionLockContextKey{}, kube.SessionLock(lock))
+	ctx := context.WithValue(
+		context.Background(),
+		backupSessionLockContextKey{},
+		kube.SessionLock(lock),
+	)
 
-	err := restoreBackupSharedMounts(ctx, Request{SessionStore: store, OpenEBSLVMManager: manager}, session)
+	err := restoreBackupSharedMounts(
+		ctx,
+		Request{SessionStore: store, OpenEBSLVMManager: manager},
+		session,
+	)
 	if !errors.Is(err, leaseErr) {
 		t.Fatalf("error=%v", err)
 	}
+
 	if len(manager.restored) != 1 {
 		t.Fatalf("restore calls=%d", len(manager.restored))
 	}
+
 	if len(store.updated) != 0 {
 		t.Fatalf("session updates after Lease loss=%d", len(store.updated))
 	}
+
 	if len(session.Status.OpenEBSLVMSharedMounts) != 1 {
-		t.Fatalf("recovery checkpoint was cleared after Lease loss: %#v", session.Status.OpenEBSLVMSharedMounts)
+		t.Fatalf(
+			"recovery checkpoint was cleared after Lease loss: %#v",
+			session.Status.OpenEBSLVMSharedMounts,
+		)
 	}
 }
 
 func testBackupSession(t *testing.T, id string) *domain.Session {
 	t.Helper()
+
 	spec := domain.NewSessionSpec(
 		domain.OperationBackup,
 		domain.SessionCommon{
@@ -369,6 +472,7 @@ func testBackupSession(t *testing.T, id string) *domain.Session {
 	spec.Backup.Backend = "s3"
 	spec.Backup.Bucket = "backups"
 	spec.Backup.Name = "daily"
+
 	return domain.NewSession(id, spec, time.Now())
 }
 
@@ -376,36 +480,65 @@ func TestFailBackupSessionDoesNotPersistAfterLeaseLoss(t *testing.T) {
 	leaseErr := errors.New("injected session lease loss")
 	lock := &recordingBackupSessionLock{err: leaseErr}
 	store := &recordingBackupSessionStore{}
-	ctx := context.WithValue(context.Background(), backupSessionLockContextKey{}, kube.SessionLock(lock))
+	ctx := context.WithValue(
+		context.Background(),
+		backupSessionLockContextKey{},
+		kube.SessionLock(lock),
+	)
 	session := &domain.Session{ID: "backup-test"}
 
 	err := failBackupSession(ctx, Request{SessionStore: store}, session, errors.New("copy failed"))
 	if !errors.Is(err, leaseErr) {
 		t.Fatalf("error=%v", err)
 	}
+
 	if len(store.updated) != 0 || session.Status.Phase != "" {
-		t.Fatalf("session changed after Lease loss: phase=%s updates=%d", session.Status.Phase, len(store.updated))
+		t.Fatalf(
+			"session changed after Lease loss: phase=%s updates=%d",
+			session.Status.Phase,
+			len(store.updated),
+		)
 	}
 }
 
 func TestValidateBackupOpenEBSStateRequiresFlagForUnsharedActivePVC(t *testing.T) {
 	manager := &recordingBackupOpenEBSManager{prepared: kube.OpenEBSLVMSharedResult{
 		NeedsChange: true,
-		LVMVolume:   domain.ObjectReference{Namespace: "openebs", Name: "lvm-data", UID: types.UID("lvm-uid")},
+		LVMVolume: domain.ObjectReference{
+			Namespace: "openebs",
+			Name:      "lvm-data",
+			UID:       types.UID("lvm-uid"),
+		},
 	}}
 	info := &PVCInfo{
-		PVC:       &corev1.PersistentVolumeClaim{ObjectMeta: metav1.ObjectMeta{Namespace: "app", Name: "data"}},
-		PV:        &corev1.PersistentVolume{ObjectMeta: metav1.ObjectMeta{Name: "pv-data", UID: types.UID("pv-uid")}, Spec: corev1.PersistentVolumeSpec{CSI: &corev1.CSIPersistentVolumeSource{Driver: kube.OpenEBSLVMCSIDriver}}},
+		PVC: &corev1.PersistentVolumeClaim{
+			ObjectMeta: metav1.ObjectMeta{Namespace: "app", Name: "data"},
+		},
+		PV: &corev1.PersistentVolume{
+			ObjectMeta: metav1.ObjectMeta{Name: "pv-data", UID: types.UID("pv-uid")},
+			Spec: corev1.PersistentVolumeSpec{
+				CSI: &corev1.CSIPersistentVolumeSource{Driver: kube.OpenEBSLVMCSIDriver},
+			},
+		},
 		Consumers: []string{"app/writer"},
 	}
+
 	req := Request{OpenEBSLVMManager: manager}
 	if err := validateBackupOpenEBSState(context.Background(), req, info); err == nil {
 		t.Fatal("expected unshared active PVC rejection")
 	}
+
 	req.OpenEBSLVMEnableShared = true
-	if err := validateBackupOpenEBSState(context.Background(), req, info); domain.CategoryOf(err) != domain.ErrorPrecondition {
+	if err := validateBackupOpenEBSState(
+		context.Background(),
+		req,
+		info,
+	); domain.CategoryOf(
+		err,
+	) != domain.ErrorPrecondition {
 		t.Fatalf("missing session store category=%s error=%v", domain.CategoryOf(err), err)
 	}
+
 	req.SessionStore = &recordingBackupSessionStore{}
 	if err := validateBackupOpenEBSState(context.Background(), req, info); err != nil {
 		t.Fatal(err)
@@ -415,27 +548,48 @@ func TestValidateBackupOpenEBSStateRequiresFlagForUnsharedActivePVC(t *testing.T
 func TestBackupSessionOpenEBSStatePersistsAndRestores(t *testing.T) {
 	store := &recordingBackupSessionStore{}
 	manager := &recordingBackupOpenEBSManager{prepared: kube.OpenEBSLVMSharedResult{
-		NeedsChange:       true,
-		LVMVolume:         domain.ObjectReference{Namespace: "openebs", Name: "lvm-data", UID: types.UID("lvm-uid")},
+		NeedsChange: true,
+		LVMVolume: domain.ObjectReference{
+			Namespace: "openebs",
+			Name:      "lvm-data",
+			UID:       types.UID("lvm-uid"),
+		},
 		PreviousShared:    "no",
 		PreviousSharedSet: true,
 	}}
 	info := &PVCInfo{
-		PVC:       &corev1.PersistentVolumeClaim{ObjectMeta: metav1.ObjectMeta{Namespace: "app", Name: "data"}},
-		PV:        &corev1.PersistentVolume{ObjectMeta: metav1.ObjectMeta{Name: "pv-data", UID: types.UID("pv-uid")}, Spec: corev1.PersistentVolumeSpec{CSI: &corev1.CSIPersistentVolumeSource{Driver: kube.OpenEBSLVMCSIDriver}}},
+		PVC: &corev1.PersistentVolumeClaim{
+			ObjectMeta: metav1.ObjectMeta{Namespace: "app", Name: "data"},
+		},
+		PV: &corev1.PersistentVolume{
+			ObjectMeta: metav1.ObjectMeta{Name: "pv-data", UID: types.UID("pv-uid")},
+			Spec: corev1.PersistentVolumeSpec{
+				CSI: &corev1.CSIPersistentVolumeSource{Driver: kube.OpenEBSLVMCSIDriver},
+			},
+		},
 		Consumers: []string{"app/writer"},
 	}
 	req := Request{SessionStore: store, OpenEBSLVMManager: manager, OpenEBSLVMEnableShared: true}
+
 	session := &domain.Session{ID: "backup-test"}
 	if err := backupSessionOpenEBSState(context.Background(), req, session, info); err != nil {
 		t.Fatal(err)
 	}
-	if len(session.Status.OpenEBSLVMSharedMounts) != 1 || len(manager.enabled) != 1 || len(store.updated) != 1 {
-		t.Fatalf("state was not persisted before enable: session=%#v enabled=%d updates=%d", session.Status.OpenEBSLVMSharedMounts, len(manager.enabled), len(store.updated))
+
+	if len(session.Status.OpenEBSLVMSharedMounts) != 1 || len(manager.enabled) != 1 ||
+		len(store.updated) != 1 {
+		t.Fatalf(
+			"state was not persisted before enable: session=%#v enabled=%d updates=%d",
+			session.Status.OpenEBSLVMSharedMounts,
+			len(manager.enabled),
+			len(store.updated),
+		)
 	}
+
 	if err := restoreBackupSharedMounts(context.Background(), req, session); err != nil {
 		t.Fatal(err)
 	}
+
 	if len(manager.restored) != 1 || manager.restored[0].PreviousShared != "no" {
 		t.Fatalf("restore calls = %#v", manager.restored)
 	}
@@ -445,27 +599,53 @@ func TestBackupSessionDropsSharedRecoveryWhenEnableDidNotAcquireOwnership(t *tes
 	store := &recordingBackupSessionStore{}
 	manager := &recordingBackupOpenEBSManager{
 		prepared: kube.OpenEBSLVMSharedResult{
-			NeedsChange: true, LVMVolume: domain.ObjectReference{Namespace: "openebs", Name: "lvm-data", UID: "lvm-uid"},
-			PreviousShared: "no", PreviousSharedSet: true,
+			NeedsChange: true,
+			LVMVolume: domain.ObjectReference{
+				Namespace: "openebs",
+				Name:      "lvm-data",
+				UID:       "lvm-uid",
+			},
+			PreviousShared:    "no",
+			PreviousSharedSet: true,
 		},
-		enableErr: domain.NewError(domain.ErrorConflict, "OpenEBS LVM shared mount", "ownership changed"),
+		enableErr: domain.NewError(
+			domain.ErrorConflict,
+			"OpenEBS LVM shared mount",
+			"ownership changed",
+		),
 	}
 	info := &PVCInfo{
-		PVC: &corev1.PersistentVolumeClaim{ObjectMeta: metav1.ObjectMeta{Namespace: "app", Name: "data"}},
+		PVC: &corev1.PersistentVolumeClaim{
+			ObjectMeta: metav1.ObjectMeta{Namespace: "app", Name: "data"},
+		},
 		PV: &corev1.PersistentVolume{
 			ObjectMeta: metav1.ObjectMeta{Name: "pv-data", UID: "pv-uid"},
-			Spec:       corev1.PersistentVolumeSpec{CSI: &corev1.CSIPersistentVolumeSource{Driver: kube.OpenEBSLVMCSIDriver}},
+			Spec: corev1.PersistentVolumeSpec{
+				CSI: &corev1.CSIPersistentVolumeSource{Driver: kube.OpenEBSLVMCSIDriver},
+			},
 		},
 		Consumers: []string{"app/writer"},
 	}
 	req := Request{SessionStore: store, OpenEBSLVMManager: manager, OpenEBSLVMEnableShared: true}
 	session := &domain.Session{ID: "backup-test"}
 
-	if err := backupSessionOpenEBSState(context.Background(), req, session, info); domain.CategoryOf(err) != domain.ErrorConflict {
+	if err := backupSessionOpenEBSState(
+		context.Background(),
+		req,
+		session,
+		info,
+	); domain.CategoryOf(
+		err,
+	) != domain.ErrorConflict {
 		t.Fatalf("category=%s error=%v", domain.CategoryOf(err), err)
 	}
+
 	if len(session.Status.OpenEBSLVMSharedMounts) != 0 || len(store.updated) != 2 {
-		t.Fatalf("stale recovery state=%#v updates=%d", session.Status.OpenEBSLVMSharedMounts, len(store.updated))
+		t.Fatalf(
+			"stale recovery state=%#v updates=%d",
+			session.Status.OpenEBSLVMSharedMounts,
+			len(store.updated),
+		)
 	}
 }
 
@@ -473,43 +653,78 @@ func TestBackupSessionRetainsSharedRecoveryAfterAmbiguousEnableErrorWhenOwned(t 
 	store := &recordingBackupSessionStore{}
 	manager := &recordingBackupOpenEBSManager{
 		prepared: kube.OpenEBSLVMSharedResult{
-			NeedsChange: true, LVMVolume: domain.ObjectReference{Namespace: "openebs", Name: "lvm-data", UID: "lvm-uid"},
+			NeedsChange: true,
+			LVMVolume: domain.ObjectReference{
+				Namespace: "openebs",
+				Name:      "lvm-data",
+				UID:       "lvm-uid",
+			},
 		},
-		enableErr: domain.NewError(domain.ErrorKubernetes, "OpenEBS LVM shared mount", "connection lost"),
-		shared:    true,
+		enableErr: domain.NewError(
+			domain.ErrorKubernetes,
+			"OpenEBS LVM shared mount",
+			"connection lost",
+		),
+		shared: true,
 	}
 	info := &PVCInfo{
-		PVC: &corev1.PersistentVolumeClaim{ObjectMeta: metav1.ObjectMeta{Namespace: "app", Name: "data"}},
+		PVC: &corev1.PersistentVolumeClaim{
+			ObjectMeta: metav1.ObjectMeta{Namespace: "app", Name: "data"},
+		},
 		PV: &corev1.PersistentVolume{
 			ObjectMeta: metav1.ObjectMeta{Name: "pv-data", UID: "pv-uid"},
-			Spec:       corev1.PersistentVolumeSpec{CSI: &corev1.CSIPersistentVolumeSource{Driver: kube.OpenEBSLVMCSIDriver}},
+			Spec: corev1.PersistentVolumeSpec{
+				CSI: &corev1.CSIPersistentVolumeSource{Driver: kube.OpenEBSLVMCSIDriver},
+			},
 		},
 		Consumers: []string{"app/writer"},
 	}
 	req := Request{SessionStore: store, OpenEBSLVMManager: manager, OpenEBSLVMEnableShared: true}
 	session := &domain.Session{ID: "backup-test"}
 
-	if err := backupSessionOpenEBSState(context.Background(), req, session, info); domain.CategoryOf(err) != domain.ErrorKubernetes {
+	if err := backupSessionOpenEBSState(
+		context.Background(),
+		req,
+		session,
+		info,
+	); domain.CategoryOf(
+		err,
+	) != domain.ErrorKubernetes {
 		t.Fatalf("category=%s error=%v", domain.CategoryOf(err), err)
 	}
+
 	if len(session.Status.OpenEBSLVMSharedMounts) != 1 {
 		t.Fatalf("recovery state=%#v", session.Status.OpenEBSLVMSharedMounts)
 	}
 }
 
 func TestBackupSessionResumesCheckpointBeforeSharedMountWasEnabled(t *testing.T) {
-	conflictErr := domain.NewError(domain.ErrorConflict, "OpenEBS LVM shared mount", "temporary ownership is absent")
+	conflictErr := domain.NewError(
+		domain.ErrorConflict,
+		"OpenEBS LVM shared mount",
+		"temporary ownership is absent",
+	)
 	manager := &recordingBackupOpenEBSManager{sharedErr: conflictErr}
 	mount := domain.OpenEBSLVMSharedMount{
-		SourcePV:          domain.ObjectReference{Kind: "PersistentVolume", Name: "pv-data", UID: "pv-uid"},
-		LVMVolume:         domain.ObjectReference{Namespace: "openebs", Name: "lvm-data", UID: "lvm-uid"},
+		SourcePV: domain.ObjectReference{
+			Kind: "PersistentVolume",
+			Name: "pv-data",
+			UID:  "pv-uid",
+		},
+		LVMVolume: domain.ObjectReference{
+			Namespace: "openebs",
+			Name:      "lvm-data",
+			UID:       "lvm-uid",
+		},
 		PreviousShared:    "no",
 		PreviousSharedSet: true,
 	}
 	session := &domain.Session{ID: "backup-test"}
 	session.Status.OpenEBSLVMSharedMounts = []domain.OpenEBSLVMSharedMount{mount}
 	info := &PVCInfo{
-		PVC: &corev1.PersistentVolumeClaim{ObjectMeta: metav1.ObjectMeta{Namespace: "app", Name: "data"}},
+		PVC: &corev1.PersistentVolumeClaim{
+			ObjectMeta: metav1.ObjectMeta{Namespace: "app", Name: "data"},
+		},
 		PV: &corev1.PersistentVolume{
 			ObjectMeta: metav1.ObjectMeta{Name: "pv-data", UID: "pv-uid"},
 			Spec: corev1.PersistentVolumeSpec{
@@ -523,13 +738,19 @@ func TestBackupSessionResumesCheckpointBeforeSharedMountWasEnabled(t *testing.T)
 	if err := validateBackupOpenEBSState(context.Background(), req, info); err != nil {
 		t.Fatalf("preflight rejected recoverable checkpoint: %v", err)
 	}
+
 	if len(manager.enabled) != 0 || len(manager.validatedRestores) != 1 {
-		t.Fatalf("preflight enabled=%d restore validations=%d", len(manager.enabled), len(manager.validatedRestores))
+		t.Fatalf(
+			"preflight enabled=%d restore validations=%d",
+			len(manager.enabled),
+			len(manager.validatedRestores),
+		)
 	}
 
 	if err := backupSessionOpenEBSState(context.Background(), req, session, info); err != nil {
 		t.Fatalf("resume failed to enable checkpointed shared mount: %v", err)
 	}
+
 	if len(manager.enabled) != 1 || manager.enabled[0] != mount {
 		t.Fatalf("enabled mounts=%#v", manager.enabled)
 	}
@@ -537,8 +758,16 @@ func TestBackupSessionResumesCheckpointBeforeSharedMountWasEnabled(t *testing.T)
 
 func TestBackupSessionRejectsCheckpointWithConflictingSharedMountOwnership(t *testing.T) {
 	manager := &recordingBackupOpenEBSManager{
-		sharedErr:          domain.NewError(domain.ErrorConflict, "OpenEBS LVM shared mount", "owned by another session"),
-		validateRestoreErr: domain.NewError(domain.ErrorConflict, "restore OpenEBS LVM shared mount", "ownership changed"),
+		sharedErr: domain.NewError(
+			domain.ErrorConflict,
+			"OpenEBS LVM shared mount",
+			"owned by another session",
+		),
+		validateRestoreErr: domain.NewError(
+			domain.ErrorConflict,
+			"restore OpenEBS LVM shared mount",
+			"ownership changed",
+		),
 	}
 	mount := domain.OpenEBSLVMSharedMount{
 		SourcePV:  domain.ObjectReference{Kind: "PersistentVolume", Name: "pv-data", UID: "pv-uid"},
@@ -547,7 +776,9 @@ func TestBackupSessionRejectsCheckpointWithConflictingSharedMountOwnership(t *te
 	session := &domain.Session{ID: "backup-test"}
 	session.Status.OpenEBSLVMSharedMounts = []domain.OpenEBSLVMSharedMount{mount}
 	info := &PVCInfo{
-		PVC: &corev1.PersistentVolumeClaim{ObjectMeta: metav1.ObjectMeta{Namespace: "app", Name: "data"}},
+		PVC: &corev1.PersistentVolumeClaim{
+			ObjectMeta: metav1.ObjectMeta{Namespace: "app", Name: "data"},
+		},
 		PV: &corev1.PersistentVolume{
 			ObjectMeta: metav1.ObjectMeta{Name: "pv-data", UID: "pv-uid"},
 			Spec: corev1.PersistentVolumeSpec{
@@ -558,9 +789,16 @@ func TestBackupSessionRejectsCheckpointWithConflictingSharedMountOwnership(t *te
 	}
 	req := Request{BackupSession: session, OpenEBSLVMManager: manager}
 
-	if err := validateBackupOpenEBSState(context.Background(), req, info); domain.CategoryOf(err) != domain.ErrorConflict {
+	if err := validateBackupOpenEBSState(
+		context.Background(),
+		req,
+		info,
+	); domain.CategoryOf(
+		err,
+	) != domain.ErrorConflict {
 		t.Fatalf("category=%s error=%v", domain.CategoryOf(err), err)
 	}
+
 	if len(manager.enabled) != 0 {
 		t.Fatalf("conflicting mount was enabled: %#v", manager.enabled)
 	}
@@ -581,20 +819,27 @@ func TestResumeCompletesMatchingPublishedBackupWithoutRunningTool(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	pv, err := client.CoreV1().PersistentVolumes().Get(context.Background(), "pv-data", metav1.GetOptions{})
+
+	pv, err := client.CoreV1().
+		PersistentVolumes().
+		Get(context.Background(), "pv-data", metav1.GetOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	session, err := buildBackupSession(req, pvc, pv)
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	if err := persistBackupCredentials(context.Background(), client, req, session); err != nil {
 		t.Fatal(err)
 	}
+
 	if err := session.Transition(domain.PhaseWarmCopying, "copying", time.Now()); err != nil {
 		t.Fatal(err)
 	}
+
 	if err := session.Transition(domain.PhaseWarmCopied, "copied", time.Now()); err != nil {
 		t.Fatal(err)
 	}
@@ -617,10 +862,12 @@ func TestResumeCompletesMatchingPublishedBackupWithoutRunningTool(t *testing.T) 
 		Compression:     "none",
 		InventorySHA256: "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
 	}
+
 	storeAPI.manifest, err = json.Marshal(manifest)
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	staleProbe := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{
 		Namespace: pvc.Namespace,
 		Name:      "stale-backup-probe",
@@ -635,10 +882,16 @@ func TestResumeCompletesMatchingPublishedBackupWithoutRunningTool(t *testing.T) 
 	foreignProbe.Name = "foreign-backup-probe"
 	foreignProbe.UID = "foreign-probe-uid"
 	foreignProbe.Labels[kube.SessionKey] = "other-session"
-	if _, err := client.CoreV1().Pods(pvc.Namespace).Create(context.Background(), staleProbe, metav1.CreateOptions{}); err != nil {
+
+	if _, err := client.CoreV1().
+		Pods(pvc.Namespace).
+		Create(context.Background(), staleProbe, metav1.CreateOptions{}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := client.CoreV1().Pods(pvc.Namespace).Create(context.Background(), foreignProbe, metav1.CreateOptions{}); err != nil {
+
+	if _, err := client.CoreV1().
+		Pods(pvc.Namespace).
+		Create(context.Background(), foreignProbe, metav1.CreateOptions{}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -655,28 +908,49 @@ func TestResumeCompletesMatchingPublishedBackupWithoutRunningTool(t *testing.T) 
 	if err := ValidateResume(context.Background(), client, resumeReq, session); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := client.CoreV1().Pods(pvc.Namespace).Get(context.Background(), staleProbe.Name, metav1.GetOptions{}); err != nil {
+
+	if _, err := client.CoreV1().
+		Pods(pvc.Namespace).
+		Get(context.Background(), staleProbe.Name, metav1.GetOptions{}); err != nil {
 		t.Fatalf("dry-run deleted stale backup probe: %v", err)
 	}
+
 	if err := Resume(context.Background(), client, resumeReq, session); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := client.CoreV1().Pods(pvc.Namespace).Get(context.Background(), staleProbe.Name, metav1.GetOptions{}); !apierrors.IsNotFound(err) {
+
+	if _, err := client.CoreV1().
+		Pods(pvc.Namespace).
+		Get(context.Background(), staleProbe.Name, metav1.GetOptions{}); !apierrors.IsNotFound(
+		err,
+	) {
 		t.Fatalf("stale backup probe remains: %v", err)
 	}
-	if _, err := client.CoreV1().Pods(pvc.Namespace).Get(context.Background(), foreignProbe.Name, metav1.GetOptions{}); err != nil {
+
+	if _, err := client.CoreV1().
+		Pods(pvc.Namespace).
+		Get(context.Background(), foreignProbe.Name, metav1.GetOptions{}); err != nil {
 		t.Fatalf("foreign backup probe was deleted: %v", err)
 	}
+
 	if session.Status.Phase != domain.PhaseCompleted {
 		t.Fatalf("phase=%s", session.Status.Phase)
 	}
+
 	if storeAPI.puts != 0 {
 		t.Fatalf("published manifest was rewritten %d times", storeAPI.puts)
 	}
+
 	secretRef := session.Spec.Backup.CredentialsSecret
-	if err := kube.DeleteBackupCredentialsSecret(context.Background(), client, secretRef, session.ID); err != nil {
+	if err := kube.DeleteBackupCredentialsSecret(
+		context.Background(),
+		client,
+		secretRef,
+		session.ID,
+	); err != nil {
 		t.Fatal(err)
 	}
+
 	if err := ValidateResume(context.Background(), client, Request{}, session); err != nil {
 		t.Fatalf("completed session required deleted credentials: %v", err)
 	}
@@ -688,38 +962,78 @@ func TestValidateResumeRejectsPublishedBackupFromAnotherSession(t *testing.T) {
 	sessionStore := &recordingBackupSessionStore{}
 	req.SessionNamespace = "sessions"
 	req.SessionStore = sessionStore
-	pvc, _ := client.CoreV1().PersistentVolumeClaims("default").Get(context.Background(), "data", metav1.GetOptions{})
-	pv, _ := client.CoreV1().PersistentVolumes().Get(context.Background(), "pv-data", metav1.GetOptions{})
+	pvc, _ := client.CoreV1().
+		PersistentVolumeClaims("default").
+		Get(context.Background(), "data", metav1.GetOptions{})
+	pv, _ := client.CoreV1().
+		PersistentVolumes().
+		Get(context.Background(), "pv-data", metav1.GetOptions{})
+
 	session, err := buildBackupSession(req, pvc, pv)
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	if err := persistBackupCredentials(context.Background(), client, req, session); err != nil {
 		t.Fatal(err)
 	}
+
 	manifest := objectstore.Manifest{
-		Version: 2, CreatedAt: time.Now().UTC(), Bucket: "backups", Prefix: "pv-migrate", Name: "daily",
-		SessionID: "another-session", SourceNamespace: "default", SourcePVC: "data", SourcePVCUID: "pvc",
-		SourcePV: "pv-data", SourcePVUID: "pv", Capacity: "1Gi", VolumeMode: "Filesystem",
-		Consistency: backupConsistency(false), Compression: "none",
+		Version:         2,
+		CreatedAt:       time.Now().UTC(),
+		Bucket:          "backups",
+		Prefix:          "pv-migrate",
+		Name:            "daily",
+		SessionID:       "another-session",
+		SourceNamespace: "default",
+		SourcePVC:       "data",
+		SourcePVCUID:    "pvc",
+		SourcePV:        "pv-data",
+		SourcePVUID:     "pv",
+		Capacity:        "1Gi",
+		VolumeMode:      "Filesystem",
+		Consistency:     backupConsistency(false),
+		Compression:     "none",
 		InventorySHA256: "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
 	}
+
 	storeAPI.manifest, err = json.Marshal(manifest)
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	resumeReq := Request{
 		SessionStore: sessionStore,
 		ObjectStoreFactory: func(_ context.Context, config objectstore.Config) (*objectstore.Store, error) {
-			return objectstore.NewWithClient(storeAPI, config, objectstore.Credentials{AccessKey: config.AccessKey, SecretKey: config.SecretKey})
+			return objectstore.NewWithClient(
+				storeAPI,
+				config,
+				objectstore.Credentials{AccessKey: config.AccessKey, SecretKey: config.SecretKey},
+			)
 		},
 	}
-	if err := ValidateResume(context.Background(), client, resumeReq, session); domain.CategoryOf(err) != domain.ErrorConflict {
+	if err := ValidateResume(
+		context.Background(),
+		client,
+		resumeReq,
+		session,
+	); domain.CategoryOf(
+		err,
+	) != domain.ErrorConflict {
 		t.Fatalf("category=%s error=%v", domain.CategoryOf(err), err)
 	}
-	if err := Resume(context.Background(), client, resumeReq, session); domain.CategoryOf(err) != domain.ErrorConflict {
+
+	if err := Resume(
+		context.Background(),
+		client,
+		resumeReq,
+		session,
+	); domain.CategoryOf(
+		err,
+	) != domain.ErrorConflict {
 		t.Fatalf("resume category=%s error=%v", domain.CategoryOf(err), err)
 	}
+
 	if session.Status.Phase != domain.PhasePlanned {
 		t.Fatalf("foreign manifest changed session phase to %s", session.Status.Phase)
 	}

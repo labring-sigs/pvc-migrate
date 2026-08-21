@@ -80,6 +80,7 @@ func (r *rootState) newObjectTransferCommand(restore, forceOnline bool) *cobra.C
 			if err := validateBucketFlags(flags, pvcFlag); err != nil {
 				return reportPreSessionError(cmd, err)
 			}
+
 			if !restore && flags.id != "" {
 				if err := domain.ValidateSessionID(flags.id); err != nil {
 					return reportPreSessionError(cmd, err)
@@ -108,6 +109,7 @@ func (r *rootState) newObjectTransferCommand(restore, forceOnline bool) *cobra.C
 			if err != nil {
 				return reportTransferError(cmd, use, flags.namespace, flags.pvc, err)
 			}
+
 			if !restore && !dryRun && flags.id == "" {
 				flags.id, err = domain.NewSessionID(time.Now())
 				if err != nil {
@@ -165,100 +167,35 @@ func (r *rootState) newObjectTransferCommand(restore, forceOnline bool) *cobra.C
 			err = backup.Run(ctx, runtime.clients.Kubernetes, request, restore)
 			if err != nil {
 				if !restore {
-					lookupCtx, lookupCancel := context.WithTimeout(context.Background(), 5*time.Second)
-					session, lookupErr := runtime.store.Get(lookupCtx, r.global.sessionNamespace, flags.id)
+					lookupCtx, lookupCancel := context.WithTimeout(
+						context.Background(),
+						5*time.Second,
+					)
+					session, lookupErr := runtime.store.Get(
+						lookupCtx,
+						r.global.sessionNamespace,
+						flags.id,
+					)
+
 					lookupCancel()
+
 					if lookupErr == nil {
 						return reportSessionError(cmd, session, err)
 					}
 				}
+
 				return reportTransferError(cmd, use, flags.namespace, flags.pvc, err)
 			}
 
-			var completedSession *domain.Session
-			if !restore {
-				lookupCtx, lookupCancel := context.WithTimeout(context.Background(), 5*time.Second)
-				completedSession, err = runtime.store.Get(lookupCtx, r.global.sessionNamespace, flags.id)
-				lookupCancel()
-				if err != nil {
-					return reportSessionLookupError(cmd, r.global.sessionNamespace, flags.id, err)
-				}
-			}
-
-			if r.global.output != "table" {
-				mode := backup.ModeOffline
-				if online {
-					mode = backup.ModeOnline
-				}
-
-				if restore {
-					mode = backup.ModeRestore
-				}
-				sessionID := flags.id
-				operationID := ""
-				if restore {
-					sessionID = ""
-					operationID = flags.id
-				}
-
-				if err := printerFor(r).Print(&backup.Result{
-					Operation:   use,
-					OperationID: operationID,
-					SessionID:   sessionID,
-					Namespace:   flags.namespace,
-					PVC:         flags.pvc,
-					Path:        plan.Path,
-					Name:        flags.name,
-					Destination: store.Destination(),
-					Mode:        mode,
-					Status:      "completed",
-				}); err != nil {
-					return err
-				}
-
-				_, err := fmt.Fprintf(
-					cmd.ErrOrStderr(),
-					"%s completed. Verify the backup or restore result before the next workload change.\n",
-					use,
-				)
-				if err != nil || completedSession == nil {
-					return err
-				}
-				return writeSessionGuidance(
-					cmd.ErrOrStderr(),
-					completedSession,
-					guidancePrefixesForCommand(cmd, completedSession.Spec.SessionNamespace),
-				)
-			}
-
-			identityLabel, identity := transferResultIdentity(restore, flags.id)
-			_, err = fmt.Fprintf(
-				cmd.OutOrStdout(),
-				"%s completed: %s/%s name=%s %s=%s\n",
+			return r.printObjectTransferResult(
+				cmd,
+				runtime,
+				flags,
 				use,
-				flags.namespace,
-				flags.pvc,
-				flags.name,
-				identityLabel,
-				identity,
-			)
-			if err != nil {
-				return err
-			}
-
-			_, err = fmt.Fprintf(
-				cmd.ErrOrStderr(),
-				"%s completed. Verify the backup or restore result before the next workload change.\n",
-				use,
-			)
-
-			if err != nil || completedSession == nil {
-				return err
-			}
-			return writeSessionGuidance(
-				cmd.ErrOrStderr(),
-				completedSession,
-				guidancePrefixesForCommand(cmd, completedSession.Spec.SessionNamespace),
+				restore,
+				online,
+				plan,
+				store,
 			)
 		},
 	}
@@ -267,6 +204,116 @@ func (r *rootState) newObjectTransferCommand(restore, forceOnline bool) *cobra.C
 	command.AddCommand(r.newBackupPlanCommand(restore, forceOnline))
 
 	return command
+}
+
+func (r *rootState) printObjectTransferResult(
+	cmd *cobra.Command,
+	runtime *commandRuntime,
+	flags *bucketFlags,
+	use string,
+	restore, online bool,
+	plan *backup.Plan,
+	store *objectstore.Store,
+) error {
+	var completedSession *domain.Session
+	if !restore {
+		lookupCtx, lookupCancel := context.WithTimeout(context.Background(), 5*time.Second)
+
+		var err error
+
+		completedSession, err = runtime.store.Get(
+			lookupCtx,
+			r.global.sessionNamespace,
+			flags.id,
+		)
+
+		lookupCancel()
+
+		if err != nil {
+			return reportSessionLookupError(cmd, r.global.sessionNamespace, flags.id, err)
+		}
+	}
+
+	if r.global.output != "table" {
+		mode := backup.ModeOffline
+		if online {
+			mode = backup.ModeOnline
+		}
+
+		if restore {
+			mode = backup.ModeRestore
+		}
+
+		sessionID := flags.id
+
+		operationID := ""
+		if restore {
+			sessionID = ""
+			operationID = flags.id
+		}
+
+		if err := printerFor(r).Print(&backup.Result{
+			Operation:   use,
+			OperationID: operationID,
+			SessionID:   sessionID,
+			Namespace:   flags.namespace,
+			PVC:         flags.pvc,
+			Path:        plan.Path,
+			Name:        flags.name,
+			Destination: store.Destination(),
+			Mode:        mode,
+			Status:      "completed",
+		}); err != nil {
+			return err
+		}
+
+		_, err := fmt.Fprintf(
+			cmd.ErrOrStderr(),
+			"%s completed. Verify the backup or restore result before the next workload change.\n",
+			use,
+		)
+		if err != nil || completedSession == nil {
+			return err
+		}
+
+		return writeSessionGuidance(
+			cmd.ErrOrStderr(),
+			completedSession,
+			guidancePrefixesForCommand(cmd, completedSession.Spec.SessionNamespace),
+		)
+	}
+
+	identityLabel, identity := transferResultIdentity(restore, flags.id)
+
+	_, err := fmt.Fprintf(
+		cmd.OutOrStdout(),
+		"%s completed: %s/%s name=%s %s=%s\n",
+		use,
+		flags.namespace,
+		flags.pvc,
+		flags.name,
+		identityLabel,
+		identity,
+	)
+	if err != nil {
+		return err
+	}
+
+	_, err = fmt.Fprintf(
+		cmd.ErrOrStderr(),
+		"%s completed. Verify the backup or restore result before the next workload change.\n",
+		use,
+	)
+
+	if err != nil || completedSession == nil {
+		return err
+	}
+
+	return writeSessionGuidance(
+		cmd.ErrOrStderr(),
+		completedSession,
+		guidancePrefixesForCommand(cmd, completedSession.Spec.SessionNamespace),
+	)
 }
 
 func (r *rootState) newBackupPlanCommand(restore, forceOnline bool) *cobra.Command {
@@ -370,6 +417,7 @@ func bindBucketFlags(command *cobra.Command, flags *bucketFlags, restore, includ
 	if restore {
 		idHelp = "Restore attempt ID used for logs and temporary tool resources; no Session is created"
 	}
+
 	command.Flags().StringVar(&flags.id, "id", "", idHelp)
 	command.Flags().StringVarP(&flags.namespace, "namespace", "n", "default", "PVC namespace")
 	command.Flags().StringVar(&flags.pvc, pvcFlag, "", "PVC name")
@@ -408,7 +456,8 @@ func bindBucketFlags(command *cobra.Command, flags *bucketFlags, restore, includ
 	}
 
 	if !restore {
-		command.Flags().BoolVar(&flags.openEBSLVMEnableShared, "openebs-lvm-enable-shared", false, "Temporarily enable OpenEBS LVM shared mounts for an active source PVC")
+		command.Flags().
+			BoolVar(&flags.openEBSLVMEnableShared, "openebs-lvm-enable-shared", false, "Temporarily enable OpenEBS LVM shared mounts for an active source PVC")
 	}
 
 	if restore {
@@ -424,9 +473,11 @@ func transferResultIdentity(restore bool, id string) (string, string) {
 	if restore {
 		label = "operation-id"
 	}
+
 	if id == "" {
 		id = "-"
 	}
+
 	return label, id
 }
 

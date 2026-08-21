@@ -31,5 +31,6 @@ func ValidateSessionID(id string) error {
 			"must be a DNS-1123 label: "+strings.Join(problems, "; "),
 		)
 	}
+
 	return nil
 }

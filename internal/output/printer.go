@@ -94,6 +94,7 @@ func (p Printer) printCrossClusterPlan(plan *crosscluster.Plan) error {
 	); err != nil {
 		return err
 	}
+
 	if _, err := fmt.Fprintln(
 		w,
 		"SOURCE PVC\tDESTINATION PVC\tSOURCE PATH\tDESTINATION PATH\tSOURCE CAPACITY\tDESTINATION CAPACITY\tSTORAGE CLASS",
@@ -151,6 +152,7 @@ func (p Printer) printCrossClusterSession(session *crosscluster.Session) error {
 	); err != nil {
 		return err
 	}
+
 	if _, err := fmt.Fprintln(
 		w,
 		"SOURCE PVC\tDESTINATION PVC\tRESERVED PV\tTRANSFER\tATTEMPTS\tLAST ERROR",
@@ -264,11 +266,13 @@ func (p Printer) printBackupPlan(plan *backup.Plan) error {
 func (p Printer) printBackupResult(result *backup.Result) error {
 	w := tabwriter.NewWriter(p.Writer, 0, 4, 2, ' ', 0)
 	identityHeader := "SESSION"
+
 	identity := result.SessionID
 	if result.Mode == backup.ModeRestore || result.OperationID != "" {
 		identityHeader = "OPERATION ID"
 		identity = result.OperationID
 	}
+
 	if _, err := fmt.Fprintf(
 		w,
 		"OPERATION\t%s\tPVC\tPATH\tMODE\tSTATUS\tDESTINATION\n",
@@ -276,6 +280,7 @@ func (p Printer) printBackupResult(result *backup.Result) error {
 	); err != nil {
 		return err
 	}
+
 	if identity == "" {
 		identity = "-"
 	}
@@ -500,6 +505,7 @@ func (p Printer) printSession(session *domain.Session) error {
 	); err != nil {
 		return err
 	}
+
 	if session.Spec.Type == domain.SessionTypeBackup && session.Spec.Backup != nil {
 		return printBackupSessionDetails(w, session.Spec.Backup)
 	}
@@ -558,15 +564,19 @@ func printBackupSessionDetails(w *tabwriter.Writer, payload *domain.BackupSessio
 	if payload.Online {
 		mode = "online"
 	}
+
 	transferPath := payload.Path
 	if transferPath == "" {
 		transferPath = "."
 	}
+
 	destinationParts := []string{payload.Bucket}
 	if payload.Prefix != "" {
 		destinationParts = append(destinationParts, payload.Prefix)
 	}
+
 	destinationParts = append(destinationParts, payload.Name)
+
 	credentials := "-"
 	if payload.CredentialsSecret.Name != "" {
 		credentials = payload.CredentialsSecret.Namespace + "/" + payload.CredentialsSecret.Name
@@ -578,6 +588,7 @@ func printBackupSessionDetails(w *tabwriter.Writer, payload *domain.BackupSessio
 	); err != nil {
 		return err
 	}
+
 	if _, err := fmt.Fprintf(
 		w,
 		"%s/%s\t%s\t%s\t%s\ts3://%s/\t%s\n",
@@ -591,6 +602,7 @@ func printBackupSessionDetails(w *tabwriter.Writer, payload *domain.BackupSessio
 	); err != nil {
 		return err
 	}
+
 	return w.Flush()
 }
 

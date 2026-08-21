@@ -133,15 +133,23 @@ func (r *rootState) newSessionResumeCommand() *cobra.Command {
 
 			if dryRun {
 				if session.Spec.Type == domain.SessionTypeBackup {
-					err := backup.ValidateResume(ctx, runtime.clients.Kubernetes, r.backupResumeRequest(runtime), session)
+					err := backup.ValidateResume(
+						ctx,
+						runtime.clients.Kubernetes,
+						r.backupResumeRequest(runtime),
+						session,
+					)
 					if err != nil {
 						return reportSessionError(cmd, session, err)
 					}
+
 					return printSessionResult(cmd, runtime, session)
 				}
+
 				if err := runtime.service.ValidateResume(ctx, session); err != nil {
 					return reportSessionError(cmd, session, err)
 				}
+
 				return printSessionResult(cmd, runtime, session)
 			}
 
@@ -159,10 +167,16 @@ func (r *rootState) newSessionResumeCommand() *cobra.Command {
 			}
 
 			if session.Spec.Type == domain.SessionTypeBackup {
-				err = backup.Resume(ctx, runtime.clients.Kubernetes, r.backupResumeRequest(runtime), session)
+				err = backup.Resume(
+					ctx,
+					runtime.clients.Kubernetes,
+					r.backupResumeRequest(runtime),
+					session,
+				)
 			} else {
 				err = runtime.service.ResumeSession(ctx, session)
 			}
+
 			if err != nil {
 				return reportSessionError(cmd, session, err)
 			}
@@ -176,8 +190,14 @@ func (r *rootState) newSessionResumeCommand() *cobra.Command {
 			"resume",
 			func(ctx context.Context, runtime *commandRuntime, session *domain.Session) error {
 				if session.Spec.Type == domain.SessionTypeBackup {
-					return backup.ValidateResume(ctx, runtime.clients.Kubernetes, r.backupResumeRequest(runtime), session)
+					return backup.ValidateResume(
+						ctx,
+						runtime.clients.Kubernetes,
+						r.backupResumeRequest(runtime),
+						session,
+					)
 				}
+
 				return runtime.service.ValidateResume(ctx, session)
 			},
 		),

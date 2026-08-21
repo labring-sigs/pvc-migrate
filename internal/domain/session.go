@@ -214,22 +214,22 @@ type CopySessionSpec struct {
 // BackupSessionSpec is the backup-specific payload carried by the durable
 // Session envelope. Object-store credentials are deliberately excluded.
 type BackupSessionSpec struct {
-	SessionWorkflowOptions `json:",inline" yaml:",inline"`
-	Online                 bool            `json:"online,omitempty" yaml:"online,omitempty"`
-	SourcePVC              ObjectReference `json:"sourcePVC" yaml:"sourcePVC"`
-	SourcePV               ObjectReference `json:"sourcePV" yaml:"sourcePV"`
-	Path                   string          `json:"path,omitempty" yaml:"path,omitempty"`
-	Backend                string          `json:"backend" yaml:"backend"`
-	Bucket                 string          `json:"bucket" yaml:"bucket"`
-	Prefix                 string          `json:"prefix,omitempty" yaml:"prefix,omitempty"`
-	Name                   string          `json:"name" yaml:"name"`
-	Provider               string          `json:"provider,omitempty" yaml:"provider,omitempty"`
-	Endpoint               string          `json:"endpoint,omitempty" yaml:"endpoint,omitempty"`
-	Region                 string          `json:"region,omitempty" yaml:"region,omitempty"`
+	SessionWorkflowOptions `                json:",inline"                         yaml:",inline"`
+	Online                 bool            `json:"online,omitempty"                yaml:"online,omitempty"`
+	SourcePVC              ObjectReference `json:"sourcePVC"                       yaml:"sourcePVC"`
+	SourcePV               ObjectReference `json:"sourcePV"                        yaml:"sourcePV"`
+	Path                   string          `json:"path,omitempty"                  yaml:"path,omitempty"`
+	Backend                string          `json:"backend"                         yaml:"backend"`
+	Bucket                 string          `json:"bucket"                          yaml:"bucket"`
+	Prefix                 string          `json:"prefix,omitempty"                yaml:"prefix,omitempty"`
+	Name                   string          `json:"name"                            yaml:"name"`
+	Provider               string          `json:"provider,omitempty"              yaml:"provider,omitempty"`
+	Endpoint               string          `json:"endpoint,omitempty"              yaml:"endpoint,omitempty"`
+	Region                 string          `json:"region,omitempty"                yaml:"region,omitempty"`
 	AllowInsecureEndpoint  bool            `json:"allowInsecureEndpoint,omitempty" yaml:"allowInsecureEndpoint,omitempty"`
-	ServerSideEncryption   string          `json:"serverSideEncryption,omitempty" yaml:"serverSideEncryption,omitempty"`
-	SSEKMSKeyID            string          `json:"sseKmsKeyID,omitempty" yaml:"sseKmsKeyID,omitempty"`
-	CredentialsSecret      ObjectReference `json:"credentialsSecret,omitempty" yaml:"credentialsSecret,omitempty"`
+	ServerSideEncryption   string          `json:"serverSideEncryption,omitempty"  yaml:"serverSideEncryption,omitempty"`
+	SSEKMSKeyID            string          `json:"sseKmsKeyID,omitempty"           yaml:"sseKmsKeyID,omitempty"`
+	CredentialsSecret      ObjectReference `json:"credentialsSecret,omitempty"     yaml:"credentialsSecret,omitempty"`
 }
 
 type RenameSessionSpec struct{}
@@ -288,7 +288,7 @@ type SessionSpec struct {
 	Migrate       *MigrateSessionSpec    `json:"migrate,omitempty"    yaml:"migrate,omitempty"`
 	MigratePod    *MigratePodSessionSpec `json:"migratePod,omitempty" yaml:"migratePod,omitempty"`
 	Copy          *CopySessionSpec       `json:"copy,omitempty"       yaml:"copy,omitempty"`
-	Backup        *BackupSessionSpec     `json:"backup,omitempty"      yaml:"backup,omitempty"`
+	Backup        *BackupSessionSpec     `json:"backup,omitempty"     yaml:"backup,omitempty"`
 	Rename        *RenameSessionSpec     `json:"rename,omitempty"     yaml:"rename,omitempty"`
 	Move          *MoveSessionSpec       `json:"move,omitempty"       yaml:"move,omitempty"`
 }
@@ -864,21 +864,45 @@ func validateBackupSession(s *Session) error {
 	if payload == nil {
 		return NewError(ErrorValidation, "backup session", "backup payload is required")
 	}
-	if payload.SourcePVC.Namespace == "" || payload.SourcePVC.Name == "" || payload.SourcePVC.UID == "" {
-		return NewError(ErrorValidation, "backup session", "source PVC namespace, name, and UID are required")
+
+	if payload.SourcePVC.Namespace == "" || payload.SourcePVC.Name == "" ||
+		payload.SourcePVC.UID == "" {
+		return NewError(
+			ErrorValidation,
+			"backup session",
+			"source PVC namespace, name, and UID are required",
+		)
 	}
+
 	if payload.SourcePV.Name == "" || payload.SourcePV.UID == "" {
 		return NewError(ErrorValidation, "backup session", "source PV name and UID are required")
 	}
+
 	if payload.Backend == "" || payload.Bucket == "" || payload.Name == "" {
-		return NewError(ErrorValidation, "backup session", "object-store backend, bucket, and name are required")
+		return NewError(
+			ErrorValidation,
+			"backup session",
+			"object-store backend, bucket, and name are required",
+		)
 	}
-	if payload.CredentialsSecret.Name != "" && payload.CredentialsSecret.Namespace != s.Spec.SessionNamespace {
-		return NewError(ErrorValidation, "backup session", "credentials Secret must be in the session namespace")
+
+	if payload.CredentialsSecret.Name != "" &&
+		payload.CredentialsSecret.Namespace != s.Spec.SessionNamespace {
+		return NewError(
+			ErrorValidation,
+			"backup session",
+			"credentials Secret must be in the session namespace",
+		)
 	}
+
 	if len(s.Spec.Volumes) != 0 || len(s.Status.Volumes) != 0 {
-		return NewError(ErrorValidation, "backup session", "backup sessions cannot contain migration volumes")
+		return NewError(
+			ErrorValidation,
+			"backup session",
+			"backup sessions cannot contain migration volumes",
+		)
 	}
+
 	return nil
 }
 

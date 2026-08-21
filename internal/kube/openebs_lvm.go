@@ -365,6 +365,7 @@ func (m *openEBSLVMSharedVolumeManager) patchShared(
 				err,
 			)
 		}
+
 		return domain.WrapError(
 			domain.ErrorKubernetes,
 			"OpenEBS LVM shared mount",

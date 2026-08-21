@@ -153,7 +153,8 @@ func (s *Service) cleanup(
 		}
 	}
 
-	if session.Spec.Type == domain.SessionTypeBackup && (options.Finalize || options.DeleteSession) {
+	if session.Spec.Type == domain.SessionTypeBackup &&
+		(options.Finalize || options.DeleteSession) {
 		if err := s.cleanupBackupCredentials(ctx, session); err != nil {
 			return err
 		}
@@ -175,13 +176,16 @@ func (s *Service) cleanupBackupCredentials(ctx context.Context, session *domain.
 	if ref.Name == "" {
 		return nil
 	}
+
 	if err := kube.DeleteBackupCredentialsSecret(ctx, s.client, ref, session.ID); err != nil {
 		return err
 	}
+
 	session.Spec.Backup.CredentialsSecret = domain.ObjectReference{}
 	if session.ResourceVersion != "" {
 		return s.persist(ctx, session)
 	}
+
 	return nil
 }
 
@@ -189,12 +193,15 @@ func backupCredentialsCleanupReference(session *domain.Session) domain.ObjectRef
 	if session == nil || session.Spec.Backup == nil {
 		return domain.ObjectReference{}
 	}
+
 	if session.Spec.Backup.CredentialsSecret.Name != "" {
 		return session.Spec.Backup.CredentialsSecret
 	}
+
 	if session.ID == "" || session.Spec.SessionNamespace == "" {
 		return domain.ObjectReference{}
 	}
+
 	return domain.ObjectReference{
 		APIVersion: "v1",
 		Kind:       "Secret",

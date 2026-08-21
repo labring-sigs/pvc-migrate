@@ -224,6 +224,7 @@ func preflight(
 	if infoErr != nil {
 		return nil, infoErr
 	}
+
 	if !restore && manifest == nil {
 		if err := validateBackupOpenEBSState(ctx, req, info); err != nil {
 			return nil, err
@@ -278,109 +279,7 @@ func preflight(
 	}
 
 	if restore {
-		plan.Operation = "restore"
-		plan.Mode = ModeRestore
-		plan.Consistency = "destination PVC write; application must be quiesced"
-
-		if manifest == nil {
-			return nil, domain.NewError(
-				domain.ErrorPrecondition,
-				"restore preflight",
-				"S3 completion manifest is missing; the backup is not a published recovery point",
-			)
-		}
-
-		plan.ObjectCount = manifest.ObjectCount
-		plan.TotalBytes = manifest.TotalBytes
-		plan.InventorySHA256 = manifest.InventorySHA256
-
-		logOperation(
-			req,
-			"restore "+stage+" verifying backup inventory",
-			"namespace",
-			req.Namespace,
-			"pvc",
-			req.PVCName,
-		)
-
-		if err := req.Store.VerifyInventory(ctx, *manifest); err != nil {
-			return nil, wrapBackupError(
-				domain.ErrorPrecondition,
-				"restore preflight",
-				"verify S3 backup inventory",
-				err,
-			)
-		}
-
-		if manifest.Capacity != "" {
-			backupCapacity, parseErr := resource.ParseQuantity(manifest.Capacity)
-			if parseErr != nil {
-				return nil, domain.WrapError(
-					domain.ErrorPrecondition,
-					"restore preflight",
-					"parse backup capacity",
-					parseErr,
-				)
-			}
-
-			if info.Capacity.Cmp(backupCapacity) < 0 {
-				return nil, domain.NewError(
-					domain.ErrorPrecondition,
-					"restore preflight",
-					fmt.Sprintf(
-						"destination PVC capacity %s is below backup capacity %s",
-						info.Capacity.String(),
-						backupCapacity.String(),
-					),
-				)
-			}
-		}
-
-		if manifest.VolumeMode != "" && manifest.VolumeMode != string(info.Mode) {
-			return nil, domain.NewError(
-				domain.ErrorPrecondition,
-				"restore preflight",
-				fmt.Sprintf(
-					"destination PVC volume mode %s differs from backup volume mode %s",
-					info.Mode,
-					manifest.VolumeMode,
-				),
-			)
-		}
-
-		if manifest.Path != req.Path {
-			return nil, domain.NewError(
-				domain.ErrorPrecondition,
-				"restore preflight",
-				fmt.Sprintf("restore path %q differs from backup path %q", req.Path, manifest.Path),
-			)
-		}
-
-		if req.AllowMounted && len(info.Consumers) > 0 {
-			plan.Warnings = append(
-				plan.Warnings,
-				"restore is explicitly allowed while the destination PVC has consumers",
-			)
-		}
-
-		if node, nodeErr := rwoConsumerNode(info, "restore scheduling"); nodeErr != nil {
-			return nil, nodeErr
-		} else if node != "" {
-			plan.ToolNode = node
-			plan.Warnings = append(
-				plan.Warnings,
-				"mounted RWO restore tool will be pinned to consumer node "+node,
-			)
-		}
-
-		if req.DeleteExtraneousFiles {
-			plan.Warnings = append(
-				plan.Warnings,
-				"restore will delete destination files absent from the published backup",
-			)
-		}
-
-		return plan, nil
+		return prepareRestorePlan(ctx, req, info, manifest, plan, stage)
 	}
 
 	if manifest != nil {
@@ -388,15 +287,131 @@ func preflight(
 			if err := validatePublishedBackupSession(ctx, req, manifest); err != nil {
 				return nil, err
 			}
+
 			plan.ObjectCount = manifest.ObjectCount
 			plan.TotalBytes = manifest.TotalBytes
 			plan.InventorySHA256 = manifest.InventorySHA256
+
 			return plan, nil
 		}
+
 		return nil, domain.NewError(
 			domain.ErrorConflict,
 			"backup preflight",
 			"S3 completion manifest already exists; use a new backup name to preserve the published recovery point",
+		)
+	}
+
+	return plan, nil
+}
+
+func prepareRestorePlan(
+	ctx context.Context,
+	req Request,
+	info *PVCInfo,
+	manifest *objectstore.Manifest,
+	plan *Plan,
+	stage string,
+) (*Plan, error) {
+	plan.Operation = "restore"
+	plan.Mode = ModeRestore
+	plan.Consistency = "destination PVC write; application must be quiesced"
+
+	if manifest == nil {
+		return nil, domain.NewError(
+			domain.ErrorPrecondition,
+			"restore preflight",
+			"S3 completion manifest is missing; the backup is not a published recovery point",
+		)
+	}
+
+	plan.ObjectCount = manifest.ObjectCount
+	plan.TotalBytes = manifest.TotalBytes
+	plan.InventorySHA256 = manifest.InventorySHA256
+
+	logOperation(
+		req,
+		"restore "+stage+" verifying backup inventory",
+		"namespace",
+		req.Namespace,
+		"pvc",
+		req.PVCName,
+	)
+
+	if err := req.Store.VerifyInventory(ctx, *manifest); err != nil {
+		return nil, wrapBackupError(
+			domain.ErrorPrecondition,
+			"restore preflight",
+			"verify S3 backup inventory",
+			err,
+		)
+	}
+
+	if manifest.Capacity != "" {
+		backupCapacity, parseErr := resource.ParseQuantity(manifest.Capacity)
+		if parseErr != nil {
+			return nil, domain.WrapError(
+				domain.ErrorPrecondition,
+				"restore preflight",
+				"parse backup capacity",
+				parseErr,
+			)
+		}
+
+		if info.Capacity.Cmp(backupCapacity) < 0 {
+			return nil, domain.NewError(
+				domain.ErrorPrecondition,
+				"restore preflight",
+				fmt.Sprintf(
+					"destination PVC capacity %s is below backup capacity %s",
+					info.Capacity.String(),
+					backupCapacity.String(),
+				),
+			)
+		}
+	}
+
+	if manifest.VolumeMode != "" && manifest.VolumeMode != string(info.Mode) {
+		return nil, domain.NewError(
+			domain.ErrorPrecondition,
+			"restore preflight",
+			fmt.Sprintf(
+				"destination PVC volume mode %s differs from backup volume mode %s",
+				info.Mode,
+				manifest.VolumeMode,
+			),
+		)
+	}
+
+	if manifest.Path != req.Path {
+		return nil, domain.NewError(
+			domain.ErrorPrecondition,
+			"restore preflight",
+			fmt.Sprintf("restore path %q differs from backup path %q", req.Path, manifest.Path),
+		)
+	}
+
+	if req.AllowMounted && len(info.Consumers) > 0 {
+		plan.Warnings = append(
+			plan.Warnings,
+			"restore is explicitly allowed while the destination PVC has consumers",
+		)
+	}
+
+	if node, nodeErr := rwoConsumerNode(info, "restore scheduling"); nodeErr != nil {
+		return nil, nodeErr
+	} else if node != "" {
+		plan.ToolNode = node
+		plan.Warnings = append(
+			plan.Warnings,
+			"mounted RWO restore tool will be pinned to consumer node "+node,
+		)
+	}
+
+	if req.DeleteExtraneousFiles {
+		plan.Warnings = append(
+			plan.Warnings,
+			"restore will delete destination files absent from the published backup",
 		)
 	}
 
@@ -504,22 +519,34 @@ func runBackupWithSession(
 		return runBackup(ctx, client, req, expectedPVCUID, expectedPVUID)
 	}
 
-	pvc, pv, err := verifyPVCIdentity(ctx, client, req.Namespace, req.PVCName, expectedPVCUID, expectedPVUID)
+	pvc, pv, err := verifyPVCIdentity(
+		ctx,
+		client,
+		req.Namespace,
+		req.PVCName,
+		expectedPVCUID,
+		expectedPVUID,
+	)
 	if err != nil {
 		return err
 	}
+
 	session, err := buildBackupSession(req, pvc, pv)
 	if err != nil {
 		return err
 	}
+
 	return withBackupSessionLock(ctx, req, session, func(lockedCtx context.Context) error {
 		if err := req.SessionStore.Create(lockedCtx, session); err != nil {
 			return err
 		}
+
 		if err := persistBackupCredentials(lockedCtx, client, req, session); err != nil {
 			return err
 		}
+
 		req.BackupSession = session
+
 		return runBackupSession(lockedCtx, client, req, session)
 	})
 }
@@ -531,11 +558,21 @@ func runBackupSession(
 	session *domain.Session,
 ) (retErr error) {
 	if session == nil {
-		return domain.NewError(domain.ErrorValidation, "backup resume", "backup session is required")
+		return domain.NewError(
+			domain.ErrorValidation,
+			"backup resume",
+			"backup session is required",
+		)
 	}
+
 	if session.Spec.Backup == nil {
-		return domain.NewError(domain.ErrorValidation, "backup resume", "backup session payload is required")
+		return domain.NewError(
+			domain.ErrorValidation,
+			"backup resume",
+			"backup session payload is required",
+		)
 	}
+
 	req.ID = session.ID
 	expectedPVCUID := string(session.Spec.Backup.SourcePVC.UID)
 	expectedPVUID := string(session.Spec.Backup.SourcePV.UID)
@@ -546,22 +583,34 @@ func runBackupSession(
 			retErr = errors.Join(retErr, fenceErr)
 			return
 		}
+
 		if !sharedRestored {
-			cleanupErr := runWithPreservedCleanupTimeout(ctx, lockReleaseTimeout, func(cleanupCtx context.Context) error {
-				return restoreBackupSharedMounts(cleanupCtx, req, session)
-			})
+			cleanupErr := runWithPreservedCleanupTimeout(
+				ctx,
+				lockReleaseTimeout,
+				func(cleanupCtx context.Context) error {
+					return restoreBackupSharedMounts(cleanupCtx, req, session)
+				},
+			)
 			if cleanupErr != nil {
 				retErr = errors.Join(retErr, cleanupErr)
 			}
 		}
+
 		if fenceErr := backupSessionFenceError(ctx); fenceErr != nil {
 			retErr = errors.Join(retErr, fenceErr)
 			return
 		}
+
 		if retErr != nil {
-			failureCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), lockReleaseTimeout)
+			failureCtx, cancel := context.WithTimeout(
+				context.WithoutCancel(ctx),
+				lockReleaseTimeout,
+			)
 			failureErr := failBackupSession(failureCtx, req, session, retErr)
+
 			cancel()
+
 			retErr = errors.Join(retErr, failureErr)
 		}
 	}()
@@ -569,37 +618,75 @@ func runBackupSession(
 	if session.Status.Phase == domain.PhaseCompleted {
 		return nil
 	}
-	if err := updateBackupSession(ctx, req, session, domain.PhaseWarmCopying, "backup preparing source PVC"); err != nil {
+
+	if err := updateBackupSession(
+		ctx,
+		req,
+		session,
+		domain.PhaseWarmCopying,
+		"backup preparing source PVC",
+	); err != nil {
 		return err
 	}
 
-	info, err := inspectPVC(ctx, client, req.Namespace, req.PVCName, req.Online, req.AllowMounted, false)
+	info, err := inspectPVC(
+		ctx,
+		client,
+		req.Namespace,
+		req.PVCName,
+		req.Online,
+		req.AllowMounted,
+		false,
+	)
 	if err != nil {
 		return err
 	}
-	if info.PV.Spec.CSI != nil && info.PV.Spec.CSI.Driver == kube.OpenEBSLVMCSIDriver && len(info.Consumers) > 0 {
+
+	if info.PV.Spec.CSI != nil && info.PV.Spec.CSI.Driver == kube.OpenEBSLVMCSIDriver &&
+		len(info.Consumers) > 0 {
 		req.WritablePVCMount = true
 	}
+
 	if err := backupSessionOpenEBSState(ctx, req, session, info); err != nil {
 		return err
 	}
-	if err := updateBackupSession(ctx, req, session, domain.PhaseWarmCopied, "backup source PVC prepared"); err != nil {
+
+	if err := updateBackupSession(
+		ctx,
+		req,
+		session,
+		domain.PhaseWarmCopied,
+		"backup source PVC prepared",
+	); err != nil {
 		return err
 	}
 
 	if err := runBackup(ctx, client, req, expectedPVCUID, expectedPVUID); err != nil {
 		return err
 	}
-	if err := runWithPreservedCleanupTimeout(ctx, lockReleaseTimeout, func(cleanupCtx context.Context) error {
-		return restoreBackupSharedMounts(cleanupCtx, req, session)
-	}); err != nil {
+
+	if err := runWithPreservedCleanupTimeout(
+		ctx,
+		lockReleaseTimeout,
+		func(cleanupCtx context.Context) error {
+			return restoreBackupSharedMounts(cleanupCtx, req, session)
+		},
+	); err != nil {
 		return err
 	}
+
 	sharedRestored = true
 
-	if err := updateBackupSession(ctx, req, session, domain.PhaseCompleted, "backup completed"); err != nil {
+	if err := updateBackupSession(
+		ctx,
+		req,
+		session,
+		domain.PhaseCompleted,
+		"backup completed",
+	); err != nil {
 		return err
 	}
+
 	return nil
 }
 
@@ -872,18 +959,32 @@ func runBackup(
 	if err != nil {
 		return err
 	}
+
 	if targetLock != nil {
 		ctx = targetCtx
+
 		defer func() {
 			cancelTarget()
+
 			if lockErr := targetLock.Err(); lockErr != nil {
-				retErr = errors.Join(retErr, wrapBackupTargetLockError(req, "backup target lock ownership was lost", lockErr))
+				retErr = errors.Join(
+					retErr,
+					wrapBackupTargetLockError(
+						req,
+						"backup target lock ownership was lost",
+						lockErr,
+					),
+				)
 			}
+
 			if deleteErr := runWithCleanupTimeout(
 				lockReleaseTimeout,
 				targetLock.Delete,
 			); deleteErr != nil {
-				retErr = errors.Join(retErr, wrapBackupTargetLockError(req, "delete backup target Lease", deleteErr))
+				retErr = errors.Join(
+					retErr,
+					wrapBackupTargetLockError(req, "delete backup target Lease", deleteErr),
+				)
 			}
 		}()
 	}
@@ -962,6 +1063,7 @@ func runBackup(
 		if req.BackupSession != nil {
 			return validatePublishedBackupSession(leaseCtx, req, manifest)
 		}
+
 		return domain.NewError(
 			domain.ErrorConflict,
 			"backup",
@@ -981,28 +1083,12 @@ func runBackup(
 		return err
 	}
 
-	currentToolNode, err := onlineBackupToolNode(leaseCtx, client, req)
-	if err != nil {
-		return err
-	}
-
-	if currentToolNode == "" {
-		currentToolNode, err = uniquePVToolNode(leaseCtx, client, currentPV)
-		if err != nil {
-			return err
-		}
-	}
-
-	if err := validateBackupToolStart(leaseCtx, client, req); err != nil {
-		return err
-	}
-
-	probeResult, err := probeTransferToolImage(leaseCtx, req, currentToolNode, false)
-	if err != nil {
-		return err
-	}
-
-	helmValues, err := transferToolHelmValues(leaseCtx, client, probeResult)
+	probeResult, helmValues, err := prepareBackupTransferTool(
+		leaseCtx,
+		client,
+		req,
+		currentPV,
+	)
 	if err != nil {
 		return err
 	}
@@ -1064,8 +1150,8 @@ func runBackup(
 	toolErr := pvmigrate.RunBackup(leaseCtx, backupRequest)
 
 	toolLogs.Stop()
-	toolErr = errors.Join(toolErr, toolLogs.ObservedError())
 
+	toolErr = errors.Join(toolErr, toolLogs.ObservedError())
 	if toolErr != nil {
 		return classifyToolAndLeaseError(leaseCtx, "backup", toolErr, leaseErrors)
 	}
@@ -1155,6 +1241,41 @@ func runBackup(
 	})
 }
 
+func prepareBackupTransferTool(
+	ctx context.Context,
+	client kubernetes.Interface,
+	req Request,
+	pv *corev1.PersistentVolume,
+) (kube.ToolImageProbeResult, []string, error) {
+	toolNode, err := onlineBackupToolNode(ctx, client, req)
+	if err != nil {
+		return kube.ToolImageProbeResult{}, nil, err
+	}
+
+	if toolNode == "" {
+		toolNode, err = uniquePVToolNode(ctx, client, pv)
+		if err != nil {
+			return kube.ToolImageProbeResult{}, nil, err
+		}
+	}
+
+	if err := validateBackupToolStart(ctx, client, req); err != nil {
+		return kube.ToolImageProbeResult{}, nil, err
+	}
+
+	probeResult, err := probeTransferToolImage(ctx, req, toolNode, false)
+	if err != nil {
+		return kube.ToolImageProbeResult{}, nil, err
+	}
+
+	helmValues, err := transferToolHelmValues(ctx, client, probeResult)
+	if err != nil {
+		return kube.ToolImageProbeResult{}, nil, err
+	}
+
+	return probeResult, helmValues, nil
+}
+
 func acquireBackupTargetLock(
 	ctx context.Context,
 	req Request,
@@ -1163,6 +1284,7 @@ func acquireBackupTargetLock(
 	if !ok {
 		return ctx, nil, func() {}, nil
 	}
+
 	if req.Store == nil || strings.TrimSpace(req.SessionNamespace) == "" {
 		return nil, nil, nil, domain.NewError(
 			domain.ErrorValidation,
@@ -1172,7 +1294,13 @@ func acquireBackupTargetLock(
 	}
 
 	lockID := backupTargetLockID(req.Store)
-	logOperation(req, "acquiring Kubernetes backup target Lease", "destination", req.Store.Destination())
+	logOperation(
+		req,
+		"acquiring Kubernetes backup target Lease",
+		"destination",
+		req.Store.Destination(),
+	)
+
 	lock, err := locker.AcquireSessionLock(ctx, req.SessionNamespace, lockID)
 	if err != nil {
 		return nil, nil, nil, wrapBackupTargetLockError(
@@ -1183,7 +1311,14 @@ func acquireBackupTargetLock(
 	}
 
 	boundCtx, cancel := lock.Bind(ctx)
-	logOperation(req, "Kubernetes backup target Lease acquired", "destination", req.Store.Destination())
+
+	logOperation(
+		req,
+		"Kubernetes backup target Lease acquired",
+		"destination",
+		req.Store.Destination(),
+	)
+
 	return boundCtx, lock, cancel, nil
 }
 
@@ -1198,10 +1333,12 @@ func wrapBackupTargetLockError(req Request, message string, err error) error {
 	if category == domain.ErrorInternal {
 		category = domain.ErrorConflict
 	}
+
 	destination := "unknown"
 	if req.Store != nil {
 		destination = req.Store.Destination()
 	}
+
 	return domain.WrapError(
 		category,
 		"backup target lock",
@@ -1643,8 +1780,8 @@ func runRestore(
 	toolErr := pvmigrate.RunRestore(leaseCtx, restoreRequest)
 
 	toolLogs.Stop()
-	toolErr = errors.Join(toolErr, toolLogs.ObservedError())
 
+	toolErr = errors.Join(toolErr, toolLogs.ObservedError())
 	if toolErr != nil {
 		return classifyToolAndLeaseError(leaseCtx, "restore", toolErr, leaseErrors)
 	}
@@ -2289,8 +2426,8 @@ func acquireRestoreLock(
 				err,
 			)
 		}
-		var domainErr *domain.Error
-		if errors.As(err, &domainErr) {
+
+		if _, ok := errors.AsType[*domain.Error](err); ok {
 			return nil, "", err
 		}
 

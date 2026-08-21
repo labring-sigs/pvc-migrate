@@ -4042,14 +4042,30 @@ func TestBackupSessionRollbackIsRejected(t *testing.T) {
 	session := domain.NewSession("backup-session", spec, time.Now())
 	session.Status.Phase = domain.PhaseCompleted
 
-	if err := fixture.service.ValidateRollback(context.Background(), session); domain.CategoryOf(err) != domain.ErrorPrecondition {
+	if err := fixture.service.ValidateRollback(
+		context.Background(),
+		session,
+	); domain.CategoryOf(
+		err,
+	) != domain.ErrorPrecondition {
 		t.Fatalf("dry-run category=%s error=%v", domain.CategoryOf(err), err)
 	}
-	if err := fixture.service.Rollback(context.Background(), session); domain.CategoryOf(err) != domain.ErrorPrecondition {
+
+	if err := fixture.service.Rollback(
+		context.Background(),
+		session,
+	); domain.CategoryOf(
+		err,
+	) != domain.ErrorPrecondition {
 		t.Fatalf("execution category=%s error=%v", domain.CategoryOf(err), err)
 	}
+
 	if session.Status.Phase != domain.PhaseCompleted || fixture.store.updates != 0 {
-		t.Fatalf("rollback mutated backup session: phase=%s updates=%d", session.Status.Phase, fixture.store.updates)
+		t.Fatalf(
+			"rollback mutated backup session: phase=%s updates=%d",
+			session.Status.Phase,
+			fixture.store.updates,
+		)
 	}
 }
 
@@ -4074,7 +4090,9 @@ func TestBackupSessionAbortUsesBackupMessage(t *testing.T) {
 	if err := fixture.service.Abort(context.Background(), session); err != nil {
 		t.Fatal(err)
 	}
-	if session.Status.Phase != domain.PhaseAborted || session.Status.Message != "backup aborted; no recovery point was published" {
+
+	if session.Status.Phase != domain.PhaseAborted ||
+		session.Status.Message != "backup aborted; no recovery point was published" {
 		t.Fatalf("phase=%s message=%q", session.Status.Phase, session.Status.Message)
 	}
 }

@@ -1703,7 +1703,11 @@ func (s *Service) ValidateResume(ctx context.Context, session *domain.Session) e
 		domain.OperationMove:
 		return s.validateSingleOperationResume(ctx, session, phase)
 	case domain.OperationBackup:
-		return domain.NewError(domain.ErrorPrecondition, "resume session", "backup sessions require the backup resume workflow")
+		return domain.NewError(
+			domain.ErrorPrecondition,
+			"resume session",
+			"backup sessions require the backup resume workflow",
+		)
 	}
 
 	switch phase {
@@ -1920,6 +1924,7 @@ func (s *Service) ValidateRollback(ctx context.Context, session *domain.Session)
 	if err := session.Validate(); err != nil {
 		return err
 	}
+
 	if session.Spec.Type == domain.SessionTypeBackup {
 		return domain.NewError(
 			domain.ErrorPrecondition,
@@ -2329,7 +2334,9 @@ func (s *Service) ValidateCleanup(
 	if err := s.validateOpenEBSLVMSharedMountRestore(ctx, session); err != nil {
 		return err
 	}
-	if session.Spec.Type == domain.SessionTypeBackup && (options.Finalize || options.DeleteSession) {
+
+	if session.Spec.Type == domain.SessionTypeBackup &&
+		(options.Finalize || options.DeleteSession) {
 		if err := kube.ValidateBackupCredentialsSecretCleanup(
 			ctx,
 			s.client,
@@ -3597,7 +3604,11 @@ func (s *Service) resumeSingle(
 	phase domain.Phase,
 ) error {
 	if session.Spec.Operation() == domain.OperationBackup {
-		return domain.NewError(domain.ErrorPrecondition, "resume session", "backup sessions require the backup resume workflow")
+		return domain.NewError(
+			domain.ErrorPrecondition,
+			"resume session",
+			"backup sessions require the backup resume workflow",
+		)
 	}
 
 	if err := validateSingleResumePhase(session.Spec.Operation(), phase); err != nil {
@@ -3809,6 +3820,7 @@ func (s *Service) abort(ctx context.Context, session *domain.Session) error {
 	if session.Spec.Type == domain.SessionTypeBackup {
 		message = "backup aborted; no recovery point was published"
 	}
+
 	return s.finish(ctx, session, domain.PhaseAborted, message)
 }
 
@@ -3828,6 +3840,11 @@ func (s *Service) rollback(ctx context.Context, session *domain.Session) error {
 			"backup sessions do not change PVC identity and cannot be rolled back",
 		)
 	}
+
+	return s.rollbackMigration(ctx, session)
+}
+
+func (s *Service) rollbackMigration(ctx context.Context, session *domain.Session) error {
 	if session.Status.Phase == domain.PhaseRolledBack {
 		return s.restoreOpenEBSLVMSharedMounts(ctx, session)
 	}

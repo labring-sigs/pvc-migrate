@@ -2,7 +2,7 @@ package kube
 
 import (
 	"context"
-	"fmt"
+	"errors"
 	"testing"
 
 	"github.com/labring-sigs/pvc-migrate/internal/domain"
@@ -38,22 +38,38 @@ func TestOpenEBSLVMSharedVolumeManager(t *testing.T) {
 
 func testOpenEBSLVMPatchConflict(t *testing.T) {
 	manager, dynamicClient := newOpenEBSLVMTestManager(t, "no")
+
 	result, err := manager.PrepareShared(context.Background(), openEBSLVMSourcePV)
 	if err != nil {
 		t.Fatal(err)
 	}
-	dynamicClient.PrependReactor("patch", "lvmvolumes", func(k8stesting.Action) (bool, runtime.Object, error) {
-		return true, nil, apierrors.NewConflict(
-			schema.GroupResource{Group: openEBSLVMVolumeGVR.Group, Resource: openEBSLVMVolumeGVR.Resource},
-			result.LVMVolume.Name,
-			fmt.Errorf("resource version changed"),
-		)
-	})
+
+	dynamicClient.PrependReactor(
+		"patch",
+		"lvmvolumes",
+		func(k8stesting.Action) (bool, runtime.Object, error) {
+			return true, nil, apierrors.NewConflict(
+				schema.GroupResource{
+					Group:    openEBSLVMVolumeGVR.Group,
+					Resource: openEBSLVMVolumeGVR.Resource,
+				},
+				result.LVMVolume.Name,
+				errors.New("resource version changed"),
+			)
+		},
+	)
+
 	mount := domain.OpenEBSLVMSharedMount{
 		SourcePV: openEBSLVMSourcePV, LVMVolume: result.LVMVolume,
 		PreviousShared: result.PreviousShared, PreviousSharedSet: result.PreviousSharedSet,
 	}
-	if err := manager.EnableShared(context.Background(), "session-1", mount); domain.CategoryOf(err) != domain.ErrorConflict {
+	if err := manager.EnableShared(
+		context.Background(),
+		"session-1",
+		mount,
+	); domain.CategoryOf(
+		err,
+	) != domain.ErrorConflict {
 		t.Fatalf("category=%s error=%v", domain.CategoryOf(err), err)
 	}
 }
