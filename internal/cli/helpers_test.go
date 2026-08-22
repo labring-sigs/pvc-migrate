@@ -278,9 +278,24 @@ func testCapacityAndPathFlagPlacement(t *testing.T, root *cobra.Command) {
 		}
 
 		for _, name := range []string{"destination-capacity", "allow-volume-shrink", "source-path", "destination-path"} {
+			if path[0] == "restore" && name == "destination-capacity" {
+				continue
+			}
+
 			if command.Flags().Lookup(name) != nil {
 				t.Fatalf("%v unexpectedly exposes --%s", path, name)
 			}
+		}
+	}
+
+	restore, _, err := root.Find([]string{"restore"})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for _, name := range []string{"create-pvc", "destination-storage-class", "destination-access-mode", "destination-capacity", "target-node"} {
+		if restore.Flags().Lookup(name) == nil {
+			t.Fatalf("restore is missing --%s", name)
 		}
 	}
 }

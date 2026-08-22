@@ -375,6 +375,13 @@ pvc-migrate --kubeconfig /path/to/kubeconfig \
   --path mysql/current
 ```
 
+By default, restore requires an existing destination PVC. To create the PVC, use `--create-pvc`,
+`--destination-storage-class`, and `--destination-access-mode`. Automatic creation uses the backup
+capacity by default. `--destination-capacity` can increase the capacity and cannot decrease it. Use
+`--target-node` when a local or `WaitForFirstConsumer` volume must bind on a selected node. A failed
+restore keeps its automatically created PVC for a retry with the same recovery-point parameters.
+Restore rejects a same-named PVC from another restore.
+
 `backup`, `live-backup`, and `restore` use `--path` for one PVC subdirectory. The restore path must match the path recorded in the immutable completion manifest. Omitting `--path` selects the full PVC.
 
 Online backup provides a best-effort crash-consistent file copy. Application-consistent database recovery requires quiescence, a filesystem snapshot, or a database-native backup. File contents and paths are preserved; POSIX ownership, permissions, ACLs, extended attributes, hard links, device files, and empty directories remain outside the backup contract.
