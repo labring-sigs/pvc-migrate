@@ -16,43 +16,37 @@ import (
 )
 
 type bucketFlags struct {
-	id                      string
-	namespace               string
-	pvc                     string
-	createPVC               bool
-	destinationStorageClass string
-	destinationAccessMode   string
-	destinationCapacity     string
-	targetNode              string
-	backend                 string
-	bucket                  string
-	name                    string
-	prefix                  string
-	path                    string
-	s3Provider              string
-	endpoint                string
-	region                  string
-	accessKey               string
-	secretKey               string
-	sessionToken            string
-	credentialsSecret       string
-	accessKeyKey            string
-	secretKeyKey            string
-	sessionTokenKey         string
-	accessKeyExplicit       bool
-	secretKeyExplicit       bool
-	sessionTokenExplicit    bool
-	allowInsecure           bool
-	serverEncryption        string
-	sseKMSKeyID             string
-	online                  bool
-	allowMounted            bool
-	deleteExtraneous        bool
-	openEBSLVMEnableShared  bool
+	id                     string
+	namespace              string
+	pvc                    string
+	backend                string
+	bucket                 string
+	name                   string
+	prefix                 string
+	path                   string
+	s3Provider             string
+	endpoint               string
+	region                 string
+	accessKey              string
+	secretKey              string
+	sessionToken           string
+	credentialsSecret      string
+	accessKeyKey           string
+	secretKeyKey           string
+	sessionTokenKey        string
+	accessKeyExplicit      bool
+	secretKeyExplicit      bool
+	sessionTokenExplicit   bool
+	allowInsecure          bool
+	serverEncryption       string
+	sseKMSKeyID            string
+	online                 bool
+	openEBSLVMEnableShared bool
+	restore                restoreBucketFlags
 }
 
-func (r *rootState) newBackupCommand(restore bool) *cobra.Command {
-	return r.newObjectTransferCommand(restore, false)
+func (r *rootState) newBackupCommand() *cobra.Command {
+	return r.newObjectTransferCommand(false, false)
 }
 
 func (r *rootState) newLiveBackupCommand() *cobra.Command {
@@ -122,33 +116,11 @@ func (r *rootState) newObjectTransferCommand(restore, forceOnline bool) *cobra.C
 				}
 			}
 
-			request := backup.Request{
-				ID:                      flags.id,
-				ToolImage:               r.global.toolImage,
-				Namespace:               flags.namespace,
-				PVCName:                 flags.pvc,
-				CreatePVC:               flags.createPVC,
-				DestinationStorageClass: flags.destinationStorageClass,
-				DestinationAccessMode:   flags.destinationAccessMode,
-				DestinationCapacity:     flags.destinationCapacity,
-				TargetNode:              flags.targetNode,
-				Path:                    flags.path,
-				Online:                  online,
-				AllowMounted:            flags.allowMounted,
-				DeleteExtraneousFiles:   flags.deleteExtraneous,
-				HelmTimeout:             r.global.helmTimeout,
-				KubeconfigPath:          r.global.kubeconfig,
-				KubeContext:             r.global.kubeContext,
-				StreamToolLogs:          r.global.streamToolLogs,
-				StructuredLogs:          r.global.logFormat == "json",
-				Store:                   store,
-				Writer:                  r.errWriter(),
-				Logger:                  runtime.logger,
-				ToolImageProber:         kube.NewToolImageProber(runtime.clients.Kubernetes),
-				SessionStore:            runtime.store,
-				SessionNamespace:        r.global.sessionNamespace,
-				OpenEBSLVMEnableShared:  flags.openEBSLVMEnableShared,
-				OpenEBSLVMManager:       runtime.openEBSLVMSharedVolumeManager,
+			request := r.objectTransferRequest(runtime, flags, store, online)
+
+			request.ToolImageProber = kube.NewToolImageProber(runtime.clients.Kubernetes)
+			if restore {
+				applyRestoreRequest(&request, flags.restore)
 			}
 
 			plan, err := backup.Preflight(ctx, runtime.clients.Kubernetes, request, restore)
@@ -371,32 +343,9 @@ func (r *rootState) newBackupPlanCommand(restore, forceOnline bool) *cobra.Comma
 				return reportTransferError(cmd, operation, flags.namespace, flags.pvc, err)
 			}
 
-			request := backup.Request{
-				ID:                      flags.id,
-				ToolImage:               r.global.toolImage,
-				Namespace:               flags.namespace,
-				PVCName:                 flags.pvc,
-				CreatePVC:               flags.createPVC,
-				DestinationStorageClass: flags.destinationStorageClass,
-				DestinationAccessMode:   flags.destinationAccessMode,
-				DestinationCapacity:     flags.destinationCapacity,
-				TargetNode:              flags.targetNode,
-				Path:                    flags.path,
-				Online:                  online,
-				AllowMounted:            flags.allowMounted,
-				DeleteExtraneousFiles:   flags.deleteExtraneous,
-				HelmTimeout:             r.global.helmTimeout,
-				KubeconfigPath:          r.global.kubeconfig,
-				KubeContext:             r.global.kubeContext,
-				StreamToolLogs:          r.global.streamToolLogs,
-				StructuredLogs:          r.global.logFormat == "json",
-				Store:                   store,
-				Writer:                  r.errWriter(),
-				Logger:                  runtime.logger,
-				SessionStore:            runtime.store,
-				SessionNamespace:        r.global.sessionNamespace,
-				OpenEBSLVMEnableShared:  flags.openEBSLVMEnableShared,
-				OpenEBSLVMManager:       runtime.openEBSLVMSharedVolumeManager,
+			request := r.objectTransferRequest(runtime, flags, store, online)
+			if restore {
+				applyRestoreRequest(&request, flags.restore)
 			}
 
 			plan, err := backup.Preflight(ctx, runtime.clients.Kubernetes, request, restore)
@@ -420,6 +369,34 @@ func (r *rootState) newBackupPlanCommand(restore, forceOnline bool) *cobra.Comma
 	bindBucketFlags(command, flags, restore, !restore && !forceOnline)
 
 	return command
+}
+
+func (r *rootState) objectTransferRequest(
+	runtime *commandRuntime,
+	flags *bucketFlags,
+	store *objectstore.Store,
+	online bool,
+) backup.Request {
+	return backup.Request{
+		ID:                     flags.id,
+		ToolImage:              r.global.toolImage,
+		Namespace:              flags.namespace,
+		PVCName:                flags.pvc,
+		Path:                   flags.path,
+		Online:                 online,
+		HelmTimeout:            r.global.helmTimeout,
+		KubeconfigPath:         r.global.kubeconfig,
+		KubeContext:            r.global.kubeContext,
+		StreamToolLogs:         r.global.streamToolLogs,
+		StructuredLogs:         r.global.logFormat == "json",
+		Store:                  store,
+		Writer:                 r.errWriter(),
+		Logger:                 runtime.logger,
+		SessionStore:           runtime.store,
+		SessionNamespace:       r.global.sessionNamespace,
+		OpenEBSLVMEnableShared: flags.openEBSLVMEnableShared,
+		OpenEBSLVMManager:      runtime.openEBSLVMSharedVolumeManager,
+	}
 }
 
 func bindBucketFlags(command *cobra.Command, flags *bucketFlags, restore, includeOnline bool) {
@@ -476,20 +453,7 @@ func bindBucketFlags(command *cobra.Command, flags *bucketFlags, restore, includ
 	}
 
 	if restore {
-		command.Flags().
-			BoolVar(&flags.createPVC, "create-pvc", false, "Create the destination PVC when it does not exist")
-		command.Flags().
-			StringVar(&flags.destinationStorageClass, "destination-storage-class", "", "StorageClass for a destination PVC created by restore")
-		command.Flags().
-			StringVar(&flags.destinationAccessMode, "destination-access-mode", "", "Access mode for a destination PVC created by restore")
-		command.Flags().
-			StringVar(&flags.destinationCapacity, "destination-capacity", "", "Capacity for a destination PVC created by restore; defaults to the backup capacity")
-		command.Flags().
-			StringVar(&flags.targetNode, "target-node", "", "Node for a destination PVC created by restore; useful for local PVs and WaitForFirstConsumer StorageClasses")
-		command.Flags().
-			BoolVar(&flags.allowMounted, "allow-mounted", false, "Allow restore while the destination PVC has Pod consumers")
-		command.Flags().
-			BoolVar(&flags.deleteExtraneous, "delete-extraneous", false, "Delete destination files absent from the backup (destructive)")
+		bindRestoreBucketFlags(command, &flags.restore)
 	}
 }
 
