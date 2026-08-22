@@ -173,9 +173,9 @@ func NewRoot(options Options) *cobra.Command {
 		state.newMigrateCommand(true),
 		state.newRenameCommand(),
 		state.newMoveCommand(),
-		state.newBackupCommand(false),
+		state.newBackupCommand(),
 		state.newLiveBackupCommand(),
-		state.newBackupCommand(true),
+		state.newRestoreCommand(),
 		state.newSessionCommand(),
 		newVersionCommand(options.Version),
 	)

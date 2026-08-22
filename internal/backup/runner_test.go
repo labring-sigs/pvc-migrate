@@ -21,9 +21,12 @@ import (
 	"github.com/utkuozdemir/pv-migrate/pvmigrate"
 	coordinationv1 "k8s.io/api/coordination/v1"
 	corev1 "k8s.io/api/core/v1"
+	storagev1 "k8s.io/api/storage/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/kubernetes/fake"
@@ -139,6 +142,117 @@ func preflightFixture(t *testing.T, client objectstore.API) (kubernetes.Interfac
 		Namespace: "default",
 		PVCName:   "data",
 		Store:     store,
+	}
+}
+
+func restorePVCCreationFixture(
+	t *testing.T,
+	storeAPI *preflightObjectStore,
+) (*fake.Clientset, Request) {
+	t.Helper()
+
+	if storeAPI == nil {
+		storeAPI = &preflightObjectStore{manifest: emptyBackupManifest()}
+	}
+
+	store, err := objectstore.NewWithClient(
+		storeAPI,
+		objectstore.Config{Bucket: "backups", Prefix: "pv-migrate", Name: "daily"},
+		objectstore.Credentials{},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	bindingMode := storagev1.VolumeBindingWaitForFirstConsumer
+	allObjects := make([]runtime.Object, 0, 1)
+	allObjects = append(allObjects, &storagev1.StorageClass{
+		ObjectMeta:        metav1.ObjectMeta{Name: "restore-sc"},
+		VolumeBindingMode: &bindingMode,
+	})
+
+	return fake.NewClientset(allObjects...), Request{
+		ID:                      "restore-create-test",
+		ToolImage:               "registry.example/pvc-migrate:test",
+		Namespace:               "default",
+		PVCName:                 "restored-data",
+		CreatePVC:               true,
+		DestinationStorageClass: "restore-sc",
+		DestinationAccessMode:   string(corev1.ReadWriteOnce),
+		Store:                   store,
+	}
+}
+
+func ownedRestorePVC(
+	request Request,
+	phase corev1.PersistentVolumeClaimPhase,
+) *corev1.PersistentVolumeClaim {
+	storageClass := request.DestinationStorageClass
+	mode := corev1.PersistentVolumeFilesystem
+
+	return &corev1.PersistentVolumeClaim{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: request.Namespace,
+			Name:      request.PVCName,
+			UID:       types.UID("restore-pvc"),
+			Annotations: map[string]string{
+				restoreBucketAnnotation: request.Store.Config().Bucket,
+				restorePrefixAnnotation: request.Store.Config().Prefix,
+				restoreNameAnnotation:   request.Store.Config().Name,
+			},
+		},
+		Spec: corev1.PersistentVolumeClaimSpec{
+			StorageClassName: &storageClass,
+			AccessModes:      []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce},
+			VolumeMode:       &mode,
+			Resources: corev1.VolumeResourceRequirements{
+				Requests: corev1.ResourceList{corev1.ResourceStorage: resource.MustParse("1Gi")},
+			},
+		},
+		Status: corev1.PersistentVolumeClaimStatus{Phase: phase},
+	}
+}
+
+func bindRestoreTestPVC(
+	t *testing.T,
+	client *fake.Clientset,
+	request Request,
+	pvcUID types.UID,
+	claimUID types.UID,
+) {
+	t.Helper()
+
+	pvc, err := client.CoreV1().PersistentVolumeClaims(request.Namespace).
+		Get(t.Context(), request.PVCName, metav1.GetOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	pvc.Spec.VolumeName = "pv-restored-data"
+	pvc.Status.Phase = corev1.ClaimBound
+
+	pvc.UID = pvcUID
+	if _, err := client.CoreV1().PersistentVolumeClaims(request.Namespace).
+		Update(t.Context(), pvc, metav1.UpdateOptions{}); err != nil {
+		t.Fatal(err)
+	}
+
+	pv := &corev1.PersistentVolume{
+		ObjectMeta: metav1.ObjectMeta{Name: pvc.Spec.VolumeName, UID: types.UID("restore-pv")},
+		Spec: corev1.PersistentVolumeSpec{
+			Capacity: corev1.ResourceList{corev1.ResourceStorage: resource.MustParse("1Gi")},
+			ClaimRef: &corev1.ObjectReference{
+				Namespace: request.Namespace,
+				Name:      request.PVCName,
+				UID:       claimUID,
+			},
+		},
+		Status: corev1.PersistentVolumeStatus{Phase: corev1.VolumeBound},
+	}
+	if _, err := client.CoreV1().
+		PersistentVolumes().
+		Create(t.Context(), pv, metav1.CreateOptions{}); err != nil {
+		t.Fatal(err)
 	}
 }
 
@@ -589,44 +703,121 @@ func TestPreflightRejectsToolLimitRangeMinimum(t *testing.T) {
 	}
 }
 
-func TestRestorePreflightRequiresPublishedManifestCapacityAndMode(t *testing.T) {
-	client, request := preflightFixture(
-		t,
-		&preflightObjectStore{
-			manifest: []byte(
-				`{"version":2,"createdAt":"2026-08-07T00:00:00Z","bucket":"backups","prefix":"pv-migrate","name":"daily","sourceNamespace":"default","sourcePVC":"data","sourcePVCUID":"pvc","capacity":"2Gi","volumeMode":"Filesystem","consistency":"offline file-consistent copy","compression":"none","objectCount":0,"totalBytes":0,"inventorySHA256":"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"}`,
-			),
-		},
+func TestBackupLaunchSkipsPVTopologyListWhenMountedConsumerPinsNode(t *testing.T) {
+	client, request := preflightFixture(t, &preflightObjectStore{})
+	request.Online = true
+	request.AllowMounted = true
+
+	pv, err := client.CoreV1().PersistentVolumes().Get(
+		t.Context(),
+		"pv-data",
+		metav1.GetOptions{},
 	)
-	if _, err := Preflight(
-		context.Background(),
-		client,
-		request,
-		true,
-	); domain.CategoryOf(
-		err,
-	) != domain.ErrorPrecondition {
-		t.Fatalf("capacity category=%s error=%v", domain.CategoryOf(err), err)
+	if err != nil {
+		t.Fatal(err)
 	}
 
-	request.Store, _ = objectstore.NewWithClient(
-		&preflightObjectStore{
-			manifest: []byte(
-				`{"version":2,"createdAt":"2026-08-07T00:00:00Z","bucket":"backups","prefix":"pv-migrate","name":"daily","sourceNamespace":"default","sourcePVC":"data","sourcePVCUID":"pvc","capacity":"1Gi","volumeMode":"Block","consistency":"offline file-consistent copy","compression":"none","objectCount":0,"totalBytes":0,"inventorySHA256":"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"}`,
-			),
+	pv.Spec.NodeAffinity = probePVNodeAffinity("worker-a")
+	if _, err := client.CoreV1().PersistentVolumes().Update(
+		t.Context(),
+		pv,
+		metav1.UpdateOptions{},
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := client.CoreV1().Pods(request.Namespace).Create(
+		t.Context(),
+		mountedConsumerPod("consumer", "worker-a"),
+		metav1.CreateOptions{},
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	fakeClient, ok := client.(*fake.Clientset)
+	if !ok {
+		t.Fatalf("client type=%T, want *fake.Clientset", client)
+	}
+
+	fakeClient.PrependReactor(
+		"list",
+		"nodes",
+		func(ktesting.Action) (bool, runtime.Object, error) {
+			return true, nil, apierrors.NewForbidden(
+				schema.GroupResource{Resource: "nodes"},
+				"",
+				errors.New("node list is unavailable"),
+			)
 		},
-		objectstore.Config{Bucket: "backups", Prefix: "pv-migrate", Name: "daily"},
-		objectstore.Credentials{},
 	)
-	if _, err := Preflight(
-		context.Background(),
+
+	if err := validateTransferToolLaunch(
+		t.Context(),
 		client,
 		request,
-		true,
-	); domain.CategoryOf(
-		err,
-	) != domain.ErrorPrecondition {
-		t.Fatalf("mode category=%s error=%v", domain.CategoryOf(err), err)
+		"pvc",
+		"pv",
+		kube.ToolImageProbeResult{NodeName: "worker-a"},
+		false,
+	); err != nil {
+		t.Fatalf("validateTransferToolLaunch() error=%v", err)
+	}
+}
+
+func TestRestoreSkipsPVTopologyListWhenMountedConsumerPinsNode(t *testing.T) {
+	client, request := preflightFixture(t, &preflightObjectStore{manifest: emptyBackupManifest()})
+	request.AllowMounted = true
+
+	pv, err := client.CoreV1().PersistentVolumes().Get(
+		t.Context(),
+		"pv-data",
+		metav1.GetOptions{},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	pv.Spec.NodeAffinity = probePVNodeAffinity("worker-a")
+	if _, err := client.CoreV1().PersistentVolumes().Update(
+		t.Context(),
+		pv,
+		metav1.UpdateOptions{},
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := client.CoreV1().Pods(request.Namespace).Create(
+		t.Context(),
+		mountedConsumerPod("consumer", "worker-a"),
+		metav1.CreateOptions{},
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	fakeClient, ok := client.(*fake.Clientset)
+	if !ok {
+		t.Fatalf("client type=%T, want *fake.Clientset", client)
+	}
+
+	fakeClient.PrependReactor(
+		"list",
+		"nodes",
+		func(ktesting.Action) (bool, runtime.Object, error) {
+			return true, nil, apierrors.NewForbidden(
+				schema.GroupResource{Resource: "nodes"},
+				"",
+				errors.New("node list is unavailable"),
+			)
+		},
+	)
+
+	plan, err := Preflight(t.Context(), client, request, true)
+	if err != nil {
+		t.Fatalf("Preflight() error=%v", err)
+	}
+
+	if plan.ToolNode != "worker-a" {
+		t.Fatalf("plan toolNode=%q, want worker-a", plan.ToolNode)
 	}
 }
 
@@ -2046,6 +2237,12 @@ func mountedConsumerPod(name, node string) *corev1.Pod {
 func emptyBackupManifest() []byte {
 	return []byte(
 		`{"version":2,"createdAt":"2026-08-07T00:00:00Z","bucket":"backups","prefix":"pv-migrate","name":"daily","sourceNamespace":"default","sourcePVC":"data","sourcePVCUID":"pvc","capacity":"1Gi","volumeMode":"Filesystem","consistency":"offline file-consistent copy","compression":"none","objectCount":0,"totalBytes":0,"inventorySHA256":"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"}`,
+	)
+}
+
+func emptyBackupManifestForPath() []byte {
+	return []byte(
+		`{"version":2,"createdAt":"2026-08-07T00:00:00Z","bucket":"backups","prefix":"pv-migrate","name":"daily","sourceNamespace":"default","sourcePVC":"data","sourcePVCUID":"pvc","capacity":"1Gi","volumeMode":"Filesystem","path":"mysql/current","consistency":"offline file-consistent copy","compression":"none","objectCount":0,"totalBytes":0,"inventorySHA256":"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"}`,
 	)
 }
 

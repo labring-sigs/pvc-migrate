@@ -227,9 +227,43 @@ pvc-migrate --kubeconfig /path/to/config \
   --name database-20260807
 ```
 
+Restore requires the destination PVC to exist by default. To create a Filesystem PVC from the
+published backup manifest, pass `--create-pvc` with its StorageClass and access mode:
+
+```bash
+pvc-migrate --kubeconfig /path/to/config \
+  restore --dry-run=false \
+  --namespace application \
+  --destination-pvc restored-data \
+  --create-pvc \
+  --destination-storage-class openebs-lvm \
+  --destination-access-mode ReadWriteOnce \
+  --destination-capacity 20Gi \
+  --target-node worker-1 \
+  --backend s3 \
+  --bucket pvc-backups \
+  --endpoint https://s3.example.com \
+  --name database-20260807
+```
+
+Omit `--destination-capacity` to use the capacity recorded in the manifest. An explicit capacity
+can be larger and cannot be smaller. Supported access modes are `ReadWriteOnce`,
+`ReadWriteOncePod`, and `ReadWriteMany`. `--target-node` pins the binding probe and restore tool.
+Use it for local volumes, OpenEBS LVM, `WaitForFirstConsumer` StorageClasses, and restricted
+`allowedTopologies`.
+
+An automatically created PVC remains after a probe, binding, preflight, or restore failure. Use the
+same values for the bucket, prefix, name, PVC settings, and target node when you retry. The restore
+annotations identify the recovery point that owns the PVC. Restore reports a conflict for a
+same-named PVC without matching annotations. Restore does not adopt or overwrite the PVC.
+
 S3 object-storage mode copies files individually and uses no archive compression. The resulting recovery point preserves file contents and paths; owner/group/mode, ACL, xattr, hardlink, device-file, and empty-directory metadata require an application-specific export or a future archive format. Restore keeps extra destination files by default; pass `--delete-extraneous` after reviewing the destructive deletion set. The immutable manifest binds the source PVC identity, capacity, VolumeMode, and `--path`, plus an object inventory containing count, total bytes, and a SHA-256 fingerprint over sorted object keys, sizes, and ETags. Restore checks the manifest and inventory before creating the tool and verifies the inventory after synchronization. The dry-run result displays the destination prefix, mode, consistency boundary, and compression policy without exposing credentials.
 
 For a partial object-storage recovery point, pass the same relative `--path` to backup and restore. Omitting it selects the PVC root. The plan and result output show the effective path.
+
+Keep the destination application stopped or otherwise quiesced for the complete restore. The
+`--allow-mounted` override can cause application writes during the restore. These writes can make
+the result inconsistent.
 
 The manifest schema is version 2. Recovery points created by earlier builds need a fresh backup before restore.
 
