@@ -6,6 +6,7 @@ import (
 	"slices"
 
 	"github.com/labring-sigs/pvc-migrate/internal/domain"
+	"github.com/labring-sigs/pvc-migrate/internal/kube"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -170,7 +171,7 @@ func (m *Manager) statefulSetWorkload(
 			)
 		}
 
-		if candidate.Status.Phase != corev1.PodRunning || !podReady(candidate) {
+		if candidate.Status.Phase != corev1.PodRunning || !kube.PodReady(candidate) {
 			return domain.WorkloadSpec{}, domain.NewError(
 				domain.ErrorPrecondition,
 				"discover StatefulSet",
@@ -259,7 +260,7 @@ func (m *Manager) victoriaLogsWorkload(
 			)
 		}
 
-		if candidate.Status.Phase != corev1.PodRunning || !podReady(candidate) {
+		if candidate.Status.Phase != corev1.PodRunning || !kube.PodReady(candidate) {
 			return domain.WorkloadSpec{}, domain.NewError(
 				domain.ErrorPrecondition,
 				"discover Victoria Logs",

@@ -6,6 +6,7 @@ import (
 	"maps"
 
 	"github.com/labring-sigs/pvc-migrate/internal/domain"
+	"github.com/labring-sigs/pvc-migrate/internal/kube"
 	"github.com/labring-sigs/pvc-migrate/internal/parallel"
 	corev1 "k8s.io/api/core/v1"
 	storagev1 "k8s.io/api/storage/v1"
@@ -219,13 +220,13 @@ func (p *Planner) PlanRename(
 		Name:       options.DestinationPVC,
 	}
 	volume := domain.VolumeSpec{
-		SourcePVC:           pvcReference(pvc),
-		SourcePV:            pvReference(pv),
+		SourcePVC:           kube.PVCReference(pvc),
+		SourcePV:            kube.PVReference(pv),
 		SourceReclaimPolicy: pv.Spec.PersistentVolumeReclaimPolicy,
 		SourcePVCSpec:       *pvc.Spec.DeepCopy(),
 		SourcePVCMetadata: domain.PVCMetadata{
 			Labels:          maps.Clone(pvc.Labels),
-			Annotations:     filteredPVCAnnotations(pvc.Annotations),
+			Annotations:     kube.PVCAnnotationsForRecreation(pvc.Annotations),
 			OwnerReferences: append([]metav1.OwnerReference(nil), pvc.OwnerReferences...),
 		},
 		DestinationPVC: destinationRef,

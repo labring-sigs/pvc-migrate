@@ -4,6 +4,7 @@ import (
 	"testing"
 
 	"github.com/labring-sigs/pvc-migrate/internal/domain"
+	"github.com/labring-sigs/pvc-migrate/internal/kube"
 	corev1 "k8s.io/api/core/v1"
 	storagev1 "k8s.io/api/storage/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
@@ -401,12 +402,12 @@ func TestAllowedTopologiesUseORBetweenTermsAndANDBetweenExpressions(t *testing.T
 			},
 		},
 	}}
-	if !matchesAllowedTopologies(sc, node) {
+	if !kube.StorageClassAllowsNode(sc, node) {
 		t.Fatal("second topology term should match")
 	}
 
 	sc.AllowedTopologies[1].MatchLabelExpressions[1].Values = []string{"3"}
-	if matchesAllowedTopologies(sc, node) {
+	if kube.StorageClassAllowsNode(sc, node) {
 		t.Fatal("all expressions within a topology term must match")
 	}
 }

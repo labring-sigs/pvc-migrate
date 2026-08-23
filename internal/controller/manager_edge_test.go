@@ -1259,7 +1259,7 @@ func TestStatefulSetPauseResumeWaitsForAffectedPods(t *testing.T) {
 
 	for _, name := range []string{"db-1", "db-2"} {
 		pod, err := client.CoreV1().Pods("app").Get(context.Background(), name, metav1.GetOptions{})
-		if err != nil || !podReady(pod) {
+		if err != nil || !kube.PodReady(pod) {
 			t.Fatalf("Pod %s readiness: pod=%#v error=%v", name, pod, err)
 		}
 

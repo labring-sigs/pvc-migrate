@@ -291,7 +291,7 @@ func (m *Manager) discoverKubeBlocksCandidate(
 		return nil, err
 	}
 
-	if !podReady(candidate) {
+	if !kube.PodReady(candidate) {
 		return nil, domain.NewError(
 			domain.ErrorPrecondition,
 			"discover KubeBlocks",
@@ -833,7 +833,7 @@ func (m *Manager) readyKubeBlocksCandidate(
 		candidate := &pods.Items[index]
 		if candidate.Name == selected.Name || candidate.Labels[kube.AppInstanceLabel] != cluster ||
 			kubeBlocksComponent(candidate) != component ||
-			!podReady(candidate) ||
+			!kube.PodReady(candidate) ||
 			isLeaderRole(podRole(candidate)) ||
 			!sameControllerOwner(controllerOwner(candidate.OwnerReferences), selectedOwner) {
 			continue

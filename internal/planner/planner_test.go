@@ -64,7 +64,12 @@ func plannerClient(objects ...runtime.Object) *kubernetesfake.Clientset {
 }
 
 func TestDestinationPVCNameTrimsTruncatedDNSBoundaries(t *testing.T) {
-	name := destinationPVCName(Options{SessionID: "pod-full-v2-20260807"}, "pod-data-a", 0)
+	name := destinationPVCNameFor(
+		Options{SessionID: "pod-full-v2-20260807"},
+		nil,
+		"pod-data-a",
+		0,
+	)
 	if name != "pod-data-a-migrated-pod-full-v2" {
 		t.Fatalf("name=%q", name)
 	}
@@ -73,8 +78,9 @@ func TestDestinationPVCNameTrimsTruncatedDNSBoundaries(t *testing.T) {
 		t.Fatalf("name=%q is invalid: %v", name, problems)
 	}
 
-	long := destinationPVCName(
+	long := destinationPVCNameFor(
 		Options{SessionID: "migration-20260807"},
+		nil,
 		strings.Repeat("a", 250),
 		0,
 	)

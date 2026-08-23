@@ -108,7 +108,7 @@ func (m *Manager) resumeStandalone(ctx context.Context, session *domain.Session)
 		}
 
 		expectedUID = existing.UID
-		if podReady(existing) {
+		if kube.PodReady(existing) {
 			session.Spec.WorkloadPtr().Pod = podReference(existing)
 			return nil
 		}
@@ -264,7 +264,7 @@ func (m *Manager) resumeStandalone(ctx context.Context, session *domain.Session)
 				)
 			}
 
-			if podReady(current) {
+			if kube.PodReady(current) {
 				ready = current
 				return true, nil
 			}

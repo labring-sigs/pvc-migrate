@@ -289,8 +289,8 @@ func (s *Service) planPostActivationOrphan(
 ) (*domain.OrphanCleanupPlan, error) {
 	plan.Mode = domain.OrphanCleanupPostActivation
 	resources := &domain.OrphanPostActivationCleanup{
-		SourcePVC: pvcObjectReference(pvc),
-		ActivePV:  pvObjectReference(active),
+		SourcePVC: kube.PVCReference(pvc),
+		ActivePV:  kube.PVReference(active),
 	}
 	plan.PostActivation = resources
 
@@ -354,7 +354,7 @@ func (s *Service) planPostActivationOrphan(
 		)
 		return plan, nil
 	default:
-		resources.RollbackPV = pvObjectReference(rollback)
+		resources.RollbackPV = kube.PVReference(rollback)
 		if rollback.Labels[kube.SessionKey] != options.SessionID ||
 			rollback.Labels[kube.ResourceRoleLabel] != kube.ResourceRoleRollback {
 			plan.AddCheck(
@@ -455,8 +455,8 @@ func (s *Service) planPreActivationOrphan(
 ) (*domain.OrphanCleanupPlan, error) {
 	plan.Mode = domain.OrphanCleanupPreActivation
 	resources := &domain.OrphanPreActivationCleanup{
-		SourcePVC: pvcObjectReference(pvc),
-		SourcePV:  pvObjectReference(sourcePV),
+		SourcePVC: kube.PVCReference(pvc),
+		SourcePV:  kube.PVReference(sourcePV),
 	}
 	plan.PreActivation = resources
 
@@ -515,7 +515,7 @@ func (s *Service) planPreActivationOrphan(
 		pvToPVC,
 	)
 	if destinationPV != nil {
-		resources.DestinationPV = pvObjectReference(destinationPV)
+		resources.DestinationPV = kube.PVReference(destinationPV)
 		validatePreActivationDestinationPV(plan, options, resources, destinationPV)
 	}
 
@@ -602,7 +602,7 @@ func matchPreActivationDestinationPVC(
 	}
 
 	if len(matching) == 1 {
-		resources.DestinationPVC = pvcObjectReference(&matching[0])
+		resources.DestinationPVC = kube.PVCReference(&matching[0])
 	}
 
 	return matching, pvToPVC
@@ -1100,27 +1100,6 @@ func (s *Service) hasOrphanSessionResources(ctx context.Context, sessionID strin
 	}
 
 	return len(pods.Items) > 0, nil
-}
-
-func pvcObjectReference(pvc *corev1.PersistentVolumeClaim) domain.ObjectReference {
-	return domain.ObjectReference{
-		APIVersion:      domain.CoreAPIVersion,
-		Kind:            domain.KindPersistentVolumeClaim,
-		Namespace:       pvc.Namespace,
-		Name:            pvc.Name,
-		UID:             pvc.UID,
-		ResourceVersion: pvc.ResourceVersion,
-	}
-}
-
-func pvObjectReference(pv *corev1.PersistentVolume) domain.ObjectReference {
-	return domain.ObjectReference{
-		APIVersion:      domain.CoreAPIVersion,
-		Kind:            domain.KindPersistentVolume,
-		Name:            pv.Name,
-		UID:             pv.UID,
-		ResourceVersion: pv.ResourceVersion,
-	}
 }
 
 func orphanPassed(name, message string) domain.Check {
