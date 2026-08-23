@@ -3,6 +3,7 @@ package backup
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/labring-sigs/pvc-migrate/internal/domain"
@@ -96,7 +97,56 @@ func preflightRestorePVCCreation(
 		)
 	}
 
-	if err := checkToolQuota(ctx, client, req.Namespace); err != nil {
+	if existing == nil {
+		report, policyErr := kube.CheckPVCAdmissionPolicies(
+			ctx,
+			client,
+			[]kube.PVCAdmissionChange{{
+				Namespace:             req.Namespace,
+				Name:                  req.PVCName,
+				RequestedStorage:      capacity,
+				RequestedStorageClass: req.DestinationStorageClass,
+			}},
+		)
+		if policyErr != nil {
+			return nil, domain.WrapError(
+				domain.ErrorKubernetes,
+				"restore preflight",
+				"check destination PVC admission policies",
+				policyErr,
+			)
+		}
+
+		if len(report.QuotaViolations) > 0 {
+			return nil, domain.NewError(
+				domain.ErrorPrecondition,
+				"restore preflight",
+				"destination PVC quota rejected the request: "+strings.Join(
+					report.QuotaViolations,
+					"; ",
+				),
+			)
+		}
+
+		if len(report.LimitRangeViolations) > 0 {
+			return nil, domain.NewError(
+				domain.ErrorPrecondition,
+				"restore preflight",
+				"destination PVC LimitRange rejected the request: "+strings.Join(
+					report.LimitRangeViolations,
+					"; ",
+				),
+			)
+		}
+	}
+
+	if err := checkNamespaceResourceQuota(
+		ctx,
+		client,
+		req.Namespace,
+		"restore",
+		objectTransferToolResourceEstimate(),
+	); err != nil {
 		return nil, err
 	}
 

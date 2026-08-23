@@ -560,6 +560,14 @@ func TestPreflightRejectsToolObjectQuotaExhaustion(t *testing.T) {
 		Spec: corev1.ResourceQuotaSpec{Hard: corev1.ResourceList{
 			corev1.ResourceName("count/jobs.batch"): resource.MustParse("0"),
 		}},
+		Status: corev1.ResourceQuotaStatus{
+			Hard: corev1.ResourceList{
+				corev1.ResourceName("count/jobs.batch"): resource.MustParse("0"),
+			},
+			Used: corev1.ResourceList{
+				corev1.ResourceName("count/jobs.batch"): resource.MustParse("0"),
+			},
+		},
 	}
 	if _, err := baseClient.CoreV1().
 		ResourceQuotas("default").
@@ -578,6 +586,14 @@ func TestPreflightRejectsToolObjectQuotaExhaustion(t *testing.T) {
 	}
 }
 
+func TestObjectTransferResourceEstimateCoversProbeAndChartPodScopes(t *testing.T) {
+	estimate := objectTransferToolResourceEstimate()
+	if estimate.Pods != 1 || estimate.TerminatingPods != 1 ||
+		estimate.NotTerminatingPods != 1 {
+		t.Fatalf("object transfer Pod peaks=%#v", estimate)
+	}
+}
+
 func TestPreflightAccountsForHelmReleaseSecret(t *testing.T) {
 	t.Setenv("HELM_DRIVER", "secret")
 	client, request := preflightFixture(t, &preflightObjectStore{})
@@ -590,6 +606,9 @@ func TestPreflightAccountsForHelmReleaseSecret(t *testing.T) {
 			},
 		},
 		Status: corev1.ResourceQuotaStatus{
+			Hard: corev1.ResourceList{
+				corev1.ResourceName("count/secrets"): resource.MustParse("2"),
+			},
 			Used: corev1.ResourceList{
 				corev1.ResourceName("count/secrets"): resource.MustParse("1"),
 			},
@@ -612,7 +631,7 @@ func TestPreflightAccountsForHelmReleaseSecret(t *testing.T) {
 	}
 }
 
-func TestPreflightRejectsEphemeralStorageLimitQuota(t *testing.T) {
+func TestPreflightAllowsOmittedEphemeralStorageLimitUnderQuota(t *testing.T) {
 	client, request := preflightFixture(t, &preflightObjectStore{})
 
 	quota := &corev1.ResourceQuota{
@@ -620,6 +639,14 @@ func TestPreflightRejectsEphemeralStorageLimitQuota(t *testing.T) {
 		Spec: corev1.ResourceQuotaSpec{Hard: corev1.ResourceList{
 			corev1.ResourceLimitsEphemeralStorage: resource.MustParse("1Gi"),
 		}},
+		Status: corev1.ResourceQuotaStatus{
+			Hard: corev1.ResourceList{
+				corev1.ResourceLimitsEphemeralStorage: resource.MustParse("1Gi"),
+			},
+			Used: corev1.ResourceList{
+				corev1.ResourceLimitsEphemeralStorage: resource.MustParse("0"),
+			},
+		},
 	}
 	if _, err := client.CoreV1().
 		ResourceQuotas("default").
@@ -632,9 +659,289 @@ func TestPreflightRejectsEphemeralStorageLimitQuota(t *testing.T) {
 		client,
 		request,
 		false,
+	); err != nil {
+		t.Fatalf("quota rejected an omitted ephemeral-storage limit: %v", err)
+	}
+}
+
+func TestPreflightAccountsForDefaultedEphemeralStorageLimit(t *testing.T) {
+	client, request := preflightFixture(t, &preflightObjectStore{})
+
+	limitRange := &corev1.LimitRange{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "tool-defaults"},
+		Spec: corev1.LimitRangeSpec{Limits: []corev1.LimitRangeItem{{
+			Type: corev1.LimitTypeContainer,
+			Default: corev1.ResourceList{
+				corev1.ResourceEphemeralStorage: resource.MustParse("2Gi"),
+			},
+		}}},
+	}
+	if _, err := client.CoreV1().LimitRanges("default").Create(
+		context.Background(),
+		limitRange,
+		metav1.CreateOptions{},
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	quota := &corev1.ResourceQuota{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "ephemeral-limit"},
+		Spec: corev1.ResourceQuotaSpec{Hard: corev1.ResourceList{
+			corev1.ResourceLimitsEphemeralStorage: resource.MustParse("1Gi"),
+		}},
+		Status: corev1.ResourceQuotaStatus{
+			Hard: corev1.ResourceList{
+				corev1.ResourceLimitsEphemeralStorage: resource.MustParse("1Gi"),
+			},
+			Used: corev1.ResourceList{
+				corev1.ResourceLimitsEphemeralStorage: resource.MustParse("0"),
+			},
+		},
+	}
+	if _, err := client.CoreV1().ResourceQuotas("default").Create(
+		context.Background(),
+		quota,
+		metav1.CreateOptions{},
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := Preflight(
+		context.Background(),
+		client,
+		request,
+		false,
 	); domain.CategoryOf(err) != domain.ErrorPrecondition ||
-		!strings.Contains(err.Error(), "limits.ephemeral-storage") {
+		!strings.Contains(err.Error(), "limits.ephemeral-storage") ||
+		!strings.Contains(err.Error(), "2Gi") {
 		t.Fatalf("quota category=%s error=%v", domain.CategoryOf(err), err)
+	}
+}
+
+func TestPreflightAccountsForBackupSessionNamespaceQuota(t *testing.T) {
+	client, request := preflightFixture(t, &preflightObjectStore{})
+	request.SessionNamespace = "sessions"
+	request.SessionStore = kube.NewConfigMapSessionStore(client)
+
+	quota := &corev1.ResourceQuota{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "sessions", Name: "session-limit"},
+		Status: corev1.ResourceQuotaStatus{
+			Hard: corev1.ResourceList{
+				corev1.ResourceName("count/configmaps"): resource.MustParse("0"),
+			},
+			Used: corev1.ResourceList{
+				corev1.ResourceName("count/configmaps"): resource.MustParse("0"),
+			},
+		},
+	}
+	if _, err := client.CoreV1().ResourceQuotas("sessions").Create(
+		context.Background(),
+		quota,
+		metav1.CreateOptions{},
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := Preflight(
+		context.Background(),
+		client,
+		request,
+		false,
+	); domain.CategoryOf(
+		err,
+	) != domain.ErrorPrecondition ||
+		!strings.Contains(err.Error(), "sessions/session-limit") ||
+		!strings.Contains(err.Error(), "count/configmaps") {
+		t.Fatalf("session quota category=%s error=%v", domain.CategoryOf(err), err)
+	}
+}
+
+func TestBackupSessionObjectQuotaDoesNotListLimitRanges(t *testing.T) {
+	client, request := preflightFixture(t, &preflightObjectStore{})
+	request.SessionNamespace = "sessions"
+	request.SessionStore = kube.NewConfigMapSessionStore(client)
+
+	fakeClient, ok := client.(*fake.Clientset)
+	if !ok {
+		t.Fatalf("client type=%T, want *fake.Clientset", client)
+	}
+
+	fakeClient.PrependReactor(
+		"list",
+		"limitranges",
+		func(action ktesting.Action) (bool, runtime.Object, error) {
+			if action.GetNamespace() == request.SessionNamespace {
+				return true, nil, errors.New("LimitRange access denied")
+			}
+
+			return false, nil, nil
+		},
+	)
+
+	if _, err := Preflight(context.Background(), client, request, false); err != nil {
+		t.Fatalf("object-only session quota queried LimitRanges: %v", err)
+	}
+
+	for _, action := range fakeClient.Actions() {
+		if action.GetNamespace() == request.SessionNamespace &&
+			action.GetResource().Resource == "limitranges" {
+			t.Fatalf("session quota listed LimitRanges: %#v", action)
+		}
+	}
+}
+
+func TestPreflightCombinesToolAndSessionQuotaInOneNamespace(t *testing.T) {
+	t.Setenv("HELM_DRIVER", "memory")
+	client, request := preflightFixture(t, &preflightObjectStore{})
+	request.SessionNamespace = request.Namespace
+	request.SessionStore = kube.NewConfigMapSessionStore(client)
+
+	quota := &corev1.ResourceQuota{
+		ObjectMeta: metav1.ObjectMeta{Namespace: request.Namespace, Name: "secret-limit"},
+		Status: corev1.ResourceQuotaStatus{
+			Hard: corev1.ResourceList{corev1.ResourceSecrets: resource.MustParse("1")},
+			Used: corev1.ResourceList{corev1.ResourceSecrets: resource.MustParse("0")},
+		},
+	}
+	if _, err := client.CoreV1().ResourceQuotas(request.Namespace).Create(
+		context.Background(),
+		quota,
+		metav1.CreateOptions{},
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := Preflight(
+		context.Background(),
+		client,
+		request,
+		false,
+	); domain.CategoryOf(
+		err,
+	) != domain.ErrorPrecondition ||
+		!strings.Contains(err.Error(), "requested 2") {
+		t.Fatalf("combined quota category=%s error=%v", domain.CategoryOf(err), err)
+	}
+}
+
+func TestBackupResumeDoesNotCountExistingSessionObjects(t *testing.T) {
+	client, request := preflightFixture(t, &preflightObjectStore{})
+	request.SessionNamespace = "sessions"
+	request.SessionStore = kube.NewConfigMapSessionStore(client)
+	request.BackupSession = &domain.Session{ID: "resume-test"}
+
+	objects := []runtime.Object{
+		&corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{
+			Namespace: request.SessionNamespace,
+			Name:      kube.SessionConfigMapName(request.BackupSession.ID),
+		}},
+		&corev1.Secret{ObjectMeta: metav1.ObjectMeta{
+			Namespace: request.SessionNamespace,
+			Name:      kube.BackupCredentialsSecretName(request.BackupSession.ID),
+		}},
+		&coordinationv1.Lease{ObjectMeta: metav1.ObjectMeta{
+			Namespace: request.SessionNamespace,
+			Name:      kube.SessionLockName(request.BackupSession.ID),
+		}},
+		&coordinationv1.Lease{ObjectMeta: metav1.ObjectMeta{
+			Namespace: request.SessionNamespace,
+			Name:      kube.SessionLockName(backupTargetLockID(request.Store)),
+		}},
+		&corev1.ResourceQuota{
+			ObjectMeta: metav1.ObjectMeta{Namespace: request.SessionNamespace, Name: "full"},
+			Status: corev1.ResourceQuotaStatus{
+				Hard: corev1.ResourceList{
+					corev1.ResourceSecrets: resource.MustParse(
+						"1",
+					),
+					corev1.ResourceName("count/configmaps"): resource.MustParse(
+						"1",
+					),
+					corev1.ResourceName("count/leases.coordination.k8s.io"): resource.MustParse(
+						"2",
+					),
+				},
+				Used: corev1.ResourceList{
+					corev1.ResourceSecrets: resource.MustParse(
+						"1",
+					),
+					corev1.ResourceName("count/configmaps"): resource.MustParse(
+						"1",
+					),
+					corev1.ResourceName("count/leases.coordination.k8s.io"): resource.MustParse(
+						"2",
+					),
+				},
+			},
+		},
+	}
+	for _, object := range objects {
+		switch value := object.(type) {
+		case *corev1.ConfigMap:
+			if _, err := client.CoreV1().ConfigMaps(value.Namespace).Create(
+				context.Background(), value, metav1.CreateOptions{},
+			); err != nil {
+				t.Fatal(err)
+			}
+		case *corev1.Secret:
+			if _, err := client.CoreV1().Secrets(value.Namespace).Create(
+				context.Background(), value, metav1.CreateOptions{},
+			); err != nil {
+				t.Fatal(err)
+			}
+		case *coordinationv1.Lease:
+			if _, err := client.CoordinationV1().Leases(value.Namespace).Create(
+				context.Background(), value, metav1.CreateOptions{},
+			); err != nil {
+				t.Fatal(err)
+			}
+		case *corev1.ResourceQuota:
+			if _, err := client.CoreV1().ResourceQuotas(value.Namespace).Create(
+				context.Background(), value, metav1.CreateOptions{},
+			); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+
+	if err := checkObjectTransferQuota(
+		context.Background(),
+		client,
+		request,
+		"backup",
+	); err != nil {
+		t.Fatalf("resume counted existing session objects: %v", err)
+	}
+}
+
+func TestPreflightRejectsToolLimitRangeRatio(t *testing.T) {
+	client, request := preflightFixture(t, &preflightObjectStore{})
+
+	limitRange := &corev1.LimitRange{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "tool-ratio"},
+		Spec: corev1.LimitRangeSpec{Limits: []corev1.LimitRangeItem{{
+			Type: corev1.LimitTypeContainer,
+			MaxLimitRequestRatio: corev1.ResourceList{
+				corev1.ResourceCPU: resource.MustParse("2"),
+			},
+		}}},
+	}
+	if _, err := client.CoreV1().LimitRanges("default").Create(
+		context.Background(),
+		limitRange,
+		metav1.CreateOptions{},
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := Preflight(
+		context.Background(),
+		client,
+		request,
+		false,
+	); domain.CategoryOf(err) != domain.ErrorPrecondition ||
+		!strings.Contains(err.Error(), "maxLimitRequestRatio") {
+		t.Fatalf("limit range category=%s error=%v", domain.CategoryOf(err), err)
 	}
 }
 
@@ -642,35 +949,24 @@ func TestToolQuotaDemandFollowsHelmReleaseDriver(t *testing.T) {
 	tests := []struct {
 		name       string
 		driver     string
-		secrets    string
-		configMaps string
+		secrets    int
+		configMaps int
 	}{
-		{name: "default secret", driver: "", secrets: "2", configMaps: "0"},
-		{name: "configmap", driver: "configmap", secrets: "1", configMaps: "1"},
-		{name: "memory", driver: "memory", secrets: "1", configMaps: "0"},
+		{name: "default secret", driver: "", secrets: 2},
+		{name: "configmap", driver: "configmap", secrets: 1, configMaps: 1},
+		{name: "memory", driver: "memory", secrets: 1},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			t.Setenv("HELM_DRIVER", test.driver)
 
-			demand := toolQuotaDemand()
-
-			quantityString := func(name corev1.ResourceName) string {
-				quantity, ok := demand[name]
-				if !ok {
-					return "0"
-				}
-
-				return quantity.String()
-			}
-			if got := quantityString(corev1.ResourceName("count/secrets")); got != test.secrets {
-				t.Fatalf("secret demand=%s want=%s", got, test.secrets)
+			estimate := objectTransferToolResourceEstimate()
+			if estimate.Secrets != test.secrets {
+				t.Fatalf("secret estimate=%d want=%d", estimate.Secrets, test.secrets)
 			}
 
-			if got := quantityString(
-				corev1.ResourceName("count/configmaps"),
-			); got != test.configMaps {
-				t.Fatalf("ConfigMap demand=%s want=%s", got, test.configMaps)
+			if estimate.ConfigMaps != test.configMaps {
+				t.Fatalf("ConfigMap estimate=%d want=%d", estimate.ConfigMaps, test.configMaps)
 			}
 		})
 	}

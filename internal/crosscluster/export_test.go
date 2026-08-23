@@ -41,3 +41,11 @@ func ResolvePathsForTest(values, source []string) ([]string, error) {
 func ReservationConsumerNameForTest(sessionID, pvc string) string {
 	return reservationConsumerName(sessionID, pvc)
 }
+
+func (s *Service) CreateReservationConsumerForTest(
+	ctx context.Context,
+	session *Session,
+	volume *VolumeSpec,
+) error {
+	return s.createReservationConsumer(ctx, session, volume)
+}

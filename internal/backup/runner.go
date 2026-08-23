@@ -8,9 +8,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
-	"os"
 	"slices"
-	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -154,7 +152,7 @@ func preflight(
 	if client == nil || req.Store == nil {
 		return nil, domain.NewError(
 			domain.ErrorInternal,
-			"backup preflight",
+			operation+" preflight",
 			"Kubernetes client and S3 store are required",
 		)
 	}
@@ -242,7 +240,7 @@ func preflight(
 			"pvc",
 			req.PVCName,
 		)
-		quotaErr = checkToolQuota(ctx, client, req.Namespace)
+		quotaErr = checkObjectTransferQuota(ctx, client, req, operation)
 	})
 	wg.Go(func() {
 		logOperation(
@@ -349,7 +347,7 @@ func preflightToolNode(
 	info *PVCInfo,
 ) (string, error) {
 	if !req.Online && !strings.EqualFold(operation, "restore") {
-		return uniquePVToolNode(ctx, client, info.PV)
+		return uniquePVToolNode(ctx, client, info.PV, operation+" preflight")
 	}
 
 	consumerNode, err := rwoConsumerNode(info, operation+" scheduling")
@@ -367,7 +365,7 @@ func preflightToolNode(
 		return "", nil
 	}
 
-	return uniquePVToolNode(ctx, client, info.PV)
+	return uniquePVToolNode(ctx, client, info.PV, operation+" preflight")
 }
 
 func transferDisplayPath(value string) string {
@@ -399,6 +397,7 @@ func uniquePVToolNode(
 	ctx context.Context,
 	client kubernetes.Interface,
 	pv *corev1.PersistentVolume,
+	phase string,
 ) (string, error) {
 	if pv == nil || pv.Spec.NodeAffinity == nil || pv.Spec.NodeAffinity.Required == nil ||
 		len(pv.Spec.NodeAffinity.Required.NodeSelectorTerms) == 0 {
@@ -409,7 +408,7 @@ func uniquePVToolNode(
 	if err != nil {
 		return "", domain.WrapError(
 			domain.ErrorKubernetes,
-			"backup preflight",
+			phase,
 			"list nodes for PV tool placement",
 			err,
 		)
@@ -629,7 +628,12 @@ func validateTransferToolLaunch(
 
 	var pvNode string
 	if requiredNode == "" || (restore && req.TargetNode != "") {
-		pvNode, err = uniquePVToolNode(ctx, client, pv)
+		operation := "backup"
+		if restore {
+			operation = "restore"
+		}
+
+		pvNode, err = uniquePVToolNode(ctx, client, pv, operation+" preflight")
 		if err != nil {
 			return err
 		}
@@ -838,6 +842,13 @@ func inspectPVC(
 	namespace, name string,
 	online, allowMounted, restore bool,
 ) (*PVCInfo, error) {
+	operation := "backup"
+	if restore {
+		operation = "restore"
+	}
+
+	phase := operation + " preflight"
+
 	var (
 		pvc                          *corev1.PersistentVolumeClaim
 		pvcErr                       error
@@ -851,11 +862,17 @@ func inspectPVC(
 			Get(ctx, name, metav1.GetOptions{})
 	})
 	wg.Go(func() {
-		consumerNames, consumerNodes, consumerErr = pvcConsumerDetails(ctx, client, namespace, name)
+		consumerNames, consumerNodes, consumerErr = pvcConsumerDetails(
+			ctx,
+			client,
+			namespace,
+			name,
+			phase,
+		)
 	})
 	wg.Wait()
 
-	if err := validateInspectedPVC(pvc, pvcErr, namespace, name); err != nil {
+	if err := validateInspectedPVC(pvc, pvcErr, namespace, name, phase); err != nil {
 		return nil, err
 	}
 
@@ -865,10 +882,10 @@ func inspectPVC(
 		PersistentVolumes().
 		Get(ctx, pvc.Spec.VolumeName, metav1.GetOptions{})
 	if err != nil {
-		return nil, domain.WrapError(domain.ErrorKubernetes, "backup preflight", "read PV", err)
+		return nil, domain.WrapError(domain.ErrorKubernetes, phase, "read PV", err)
 	}
 
-	capacity, err := validateInspectedPV(pv, pvc)
+	capacity, err := validateInspectedPV(pv, pvc, phase)
 	if err != nil {
 		return nil, err
 	}
@@ -901,15 +918,16 @@ func validateInspectedPVC(
 	pvc *corev1.PersistentVolumeClaim,
 	pvcErr error,
 	namespace, name string,
+	phase string,
 ) error {
 	if pvcErr != nil {
-		return domain.WrapError(domain.ErrorKubernetes, "backup preflight", "read PVC", pvcErr)
+		return domain.WrapError(domain.ErrorKubernetes, phase, "read PVC", pvcErr)
 	}
 
 	if pvc == nil || pvc.Name == "" {
 		return domain.NewError(
 			domain.ErrorKubernetes,
-			"backup preflight",
+			phase,
 			fmt.Sprintf("read PVC %s/%s returned an empty object", namespace, name),
 		)
 	}
@@ -917,7 +935,7 @@ func validateInspectedPVC(
 	if pvc.Status.Phase != corev1.ClaimBound || pvc.Spec.VolumeName == "" {
 		return domain.NewError(
 			domain.ErrorPrecondition,
-			"backup preflight",
+			phase,
 			fmt.Sprintf("PVC %s/%s must be Bound", namespace, name),
 		)
 	}
@@ -925,7 +943,7 @@ func validateInspectedPVC(
 	if pvcVolumeMode(pvc) != corev1.PersistentVolumeFilesystem {
 		return domain.NewError(
 			domain.ErrorPrecondition,
-			"backup preflight",
+			phase,
 			"S3 backup and restore require a Filesystem PVC",
 		)
 	}
@@ -943,11 +961,12 @@ func pvcVolumeMode(pvc *corev1.PersistentVolumeClaim) corev1.PersistentVolumeMod
 func validateInspectedPV(
 	pv *corev1.PersistentVolume,
 	pvc *corev1.PersistentVolumeClaim,
+	phase string,
 ) (resource.Quantity, error) {
 	if pv == nil || pv.Name == "" {
 		return resource.Quantity{}, domain.NewError(
 			domain.ErrorKubernetes,
-			"backup preflight",
+			phase,
 			fmt.Sprintf("read PV %s returned an empty object", pvc.Spec.VolumeName),
 		)
 	}
@@ -955,7 +974,7 @@ func validateInspectedPV(
 	if pvc.UID == "" || pv.UID == "" {
 		return resource.Quantity{}, domain.NewError(
 			domain.ErrorPrecondition,
-			"backup preflight",
+			phase,
 			"PVC and PV must have stable Kubernetes identities",
 		)
 	}
@@ -963,7 +982,7 @@ func validateInspectedPV(
 	if pv.Status.Phase != corev1.VolumeBound {
 		return resource.Quantity{}, domain.NewError(
 			domain.ErrorPrecondition,
-			"backup preflight",
+			phase,
 			fmt.Sprintf("PV %s must be Bound", pv.Name),
 		)
 	}
@@ -972,7 +991,7 @@ func validateInspectedPV(
 		pv.Spec.ClaimRef.Name != pvc.Name || pv.Spec.ClaimRef.UID != pvc.UID {
 		return resource.Quantity{}, domain.NewError(
 			domain.ErrorConflict,
-			"backup preflight",
+			phase,
 			fmt.Sprintf(
 				"PVC/PV binding identity changed: PV %s claimRef does not match PVC %s/%s UID %s",
 				pv.Name,
@@ -987,7 +1006,7 @@ func validateInspectedPV(
 	if !ok || capacity.Sign() <= 0 {
 		return resource.Quantity{}, domain.NewError(
 			domain.ErrorPrecondition,
-			"backup preflight",
+			phase,
 			"PV has no positive storage capacity",
 		)
 	}
@@ -1047,186 +1066,17 @@ func validateInspectionConsumers(
 	return nil
 }
 
-func checkToolQuota(ctx context.Context, client kubernetes.Interface, namespace string) error {
-	var (
-		quotas                  *corev1.ResourceQuotaList
-		limitRanges             *corev1.LimitRangeList
-		quotaErr, limitRangeErr error
-		wg                      sync.WaitGroup
-	)
-	wg.Go(func() {
-		quotas, quotaErr = client.CoreV1().ResourceQuotas(namespace).List(ctx, metav1.ListOptions{})
-	})
-	wg.Go(func() {
-		limitRanges, limitRangeErr = client.CoreV1().
-			LimitRanges(namespace).
-			List(ctx, metav1.ListOptions{})
-	})
-	wg.Wait()
-
-	if quotaErr != nil {
-		return domain.WrapError(
-			domain.ErrorKubernetes,
-			"backup preflight",
-			"list tool ResourceQuotas",
-			quotaErr,
-		)
-	}
-
-	if quotas == nil {
-		return domain.NewError(
-			domain.ErrorKubernetes,
-			"backup preflight",
-			"list tool ResourceQuotas returned an empty object",
-		)
-	}
-
-	demand := toolQuotaDemand()
-
-	violations := make([]string, 0)
-	for _, quota := range quotas.Items {
-		// The zero-resource policy deliberately omits an ephemeral-storage
-		// limit. Kubernetes requires an explicit limit when a namespace quota
-		// tracks limits.ephemeral-storage, so this tool Pod would be rejected
-		// by admission even though its requested quantity is zero.
-		if _, bounded := quota.Spec.Hard[corev1.ResourceLimitsEphemeralStorage]; bounded {
-			violations = append(
-				violations,
-				fmt.Sprintf(
-					"%s/%s %s: tool omits an ephemeral-storage limit required by this quota",
-					namespace,
-					quota.Name,
-					corev1.ResourceLimitsEphemeralStorage,
-				),
-			)
-		}
-
-		for name, requested := range demand {
-			hard, bounded := quota.Spec.Hard[name]
-			if !bounded {
-				continue
-			}
-
-			used := quota.Status.Used[name]
-			total := used.DeepCopy()
-			total.Add(requested)
-
-			if total.Cmp(hard) > 0 {
-				violations = append(
-					violations,
-					fmt.Sprintf(
-						"%s/%s %s: used %s + tool demand %s exceeds hard %s",
-						namespace,
-						quota.Name,
-						name,
-						used.String(),
-						requested.String(),
-						hard.String(),
-					),
-				)
-			}
-		}
-	}
-
-	if len(violations) > 0 {
-		sort.Strings(violations)
-
-		return domain.NewError(
-			domain.ErrorPrecondition,
-			"backup preflight",
-			"tool resources exceed namespace quota: "+strings.Join(violations, "; "),
-		)
-	}
-
-	if limitRangeErr != nil {
-		return domain.WrapError(
-			domain.ErrorKubernetes,
-			"backup preflight",
-			"list tool LimitRanges",
-			limitRangeErr,
-		)
-	}
-
-	if limitRanges == nil {
-		return domain.NewError(
-			domain.ErrorKubernetes,
-			"backup preflight",
-			"list tool LimitRanges returned an empty object",
-		)
-	}
-
-	for _, limitRange := range limitRanges.Items {
-		for _, item := range limitRange.Spec.Limits {
-			if item.Type != corev1.LimitTypeContainer && item.Type != corev1.LimitTypePod {
-				continue
-			}
-
-			for _, name := range []corev1.ResourceName{corev1.ResourceCPU, corev1.ResourceMemory, corev1.ResourceEphemeralStorage} {
-				if minimum, ok := item.Min[name]; ok && minimum.Sign() > 0 {
-					return domain.NewError(
-						domain.ErrorPrecondition,
-						"backup preflight",
-						fmt.Sprintf(
-							"tool resource %s=0 is below LimitRange %s minimum %s",
-							name,
-							limitRange.Name,
-							minimum.String(),
-						),
-					)
-				}
-			}
-		}
-	}
-
-	return nil
-}
-
-// toolQuotaDemand describes the objects created by the embedded pv-migrate
-// bucket-storage chart. Every run creates one ServiceAccount, Job, and Job Pod
-// plus one chart Secret. Helm's default Secret storage driver creates a second
-// Secret for the release record; configmap storage creates a release ConfigMap.
-// Memory and SQL drivers keep release state outside the namespace.
-func toolQuotaDemand() map[corev1.ResourceName]resource.Quantity {
-	demand := map[corev1.ResourceName]resource.Quantity{}
-	add := func(name corev1.ResourceName, count int64) {
-		demand[name] = *resource.NewQuantity(count, resource.DecimalSI)
-	}
-	add(corev1.ResourcePods, 1)
-	add(corev1.ResourceName("count/pods"), 1)
-	add(corev1.ResourceName("count/jobs.batch"), 1)
-	add(corev1.ResourceName("jobs.batch"), 1)
-	add(corev1.ResourceName("count/serviceaccounts"), 1)
-	add(corev1.ResourceName("serviceaccounts"), 1)
-	add(corev1.ResourceName("count/secrets"), 1)
-	add(corev1.ResourceName("secrets"), 1)
-
-	switch strings.ToLower(strings.TrimSpace(os.Getenv("HELM_DRIVER"))) {
-	case "configmap", "configmaps":
-		add(corev1.ResourceConfigMaps, 1)
-		add(corev1.ResourceName("count/configmaps"), 1)
-	case "memory", "sql":
-		// The release record is kept outside the namespace.
-	default:
-		// Helm defaults to the Secret driver when HELM_DRIVER is empty. Treat
-		// unknown values conservatively; Helm will either use a Secret driver
-		// alias or fail before creating tool resources.
-		add(corev1.ResourceSecrets, 2)
-		add(corev1.ResourceName("count/secrets"), 2)
-	}
-
-	return demand
-}
-
 func pvcConsumerDetails(
 	ctx context.Context,
 	client kubernetes.Interface,
 	namespace, claim string,
+	phase string,
 ) ([]string, []string, error) {
 	pods, err := client.CoreV1().Pods(namespace).List(ctx, metav1.ListOptions{})
 	if err != nil {
 		return nil, nil, domain.WrapError(
 			domain.ErrorKubernetes,
-			"backup preflight",
+			phase,
 			"list PVC consumers",
 			err,
 		)
@@ -1235,7 +1085,7 @@ func pvcConsumerDetails(
 	if pods == nil {
 		return nil, nil, domain.NewError(
 			domain.ErrorKubernetes,
-			"backup preflight",
+			phase,
 			"list PVC consumers returned an empty object",
 		)
 	}

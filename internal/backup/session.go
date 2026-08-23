@@ -548,6 +548,7 @@ func buildResumeRequest(
 	req.ToolImage = payload.ToolImage
 	req.OpenEBSLVMEnableShared = payload.OpenEBSLVMEnableShared
 	req.Store = store
+	req.SessionNamespace = session.Spec.SessionNamespace
 	req.BackupSession = session
 
 	return &req, nil

@@ -560,7 +560,7 @@ func prepareBackupTransferTool(
 	}
 
 	if toolNode == "" {
-		toolNode, err = uniquePVToolNode(ctx, client, pv)
+		toolNode, err = uniquePVToolNode(ctx, client, pv, "backup preflight")
 		if err != nil {
 			return kube.ToolImageProbeResult{}, nil, err
 		}

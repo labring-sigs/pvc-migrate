@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"sort"
 	"strings"
 
@@ -11,6 +12,7 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes"
 )
 
@@ -23,8 +25,13 @@ type PVCAdmissionChange struct {
 	RequestedStorage      resource.Quantity
 	RequestedStorageClass string
 	Existing              bool
+	ExistingUID           types.UID
 	ExistingStorage       resource.Quantity
 	ExistingStorageClass  string
+	// These sets include every VAC name that can make the respective PVC
+	// match a VolumeAttributesClass-scoped quota.
+	RequestedVolumeAttributesClassNames []string
+	ExistingVolumeAttributesClassNames  []string
 }
 
 // PVCAdmissionReport contains policy violations for a projected PVC
@@ -86,11 +93,40 @@ func CheckPVCAdmissionPolicies(
 
 	report := PVCAdmissionReport{}
 	if quotas != nil {
+		changes, err = resolveExistingPVCAdmissionState(ctx, client, quotas.Items, changes)
+		if err != nil {
+			return PVCAdmissionReport{}, err
+		}
+
 		for _, quota := range quotas.Items {
-			for resourceName, hard := range quota.Spec.Hard {
+			if !quotaCanMatchRequestedPVC(quota, changes) {
+				continue
+			}
+
+			for resourceName, hard := range quota.Status.Hard {
+				if !isPVCQuotaResource(resourceName) {
+					continue
+				}
+
+				used, known := quota.Status.Used[resourceName]
+				if !known {
+					report.QuotaViolations = append(
+						report.QuotaViolations,
+						fmt.Sprintf(
+							"%s/%s %s: quota status has no current usage",
+							namespace,
+							quota.Name,
+							resourceName,
+						),
+					)
+
+					continue
+				}
+
 				projected, ok := projectedQuotaResource(
 					resourceName,
-					quota.Status.Used[resourceName],
+					used,
+					quota,
 					changes,
 				)
 				if !ok {
@@ -162,85 +198,340 @@ func CheckPVCAdmissionPolicies(
 	return report, nil
 }
 
-func projectedQuotaResource(
-	resourceName corev1.ResourceName,
-	used resource.Quantity,
+func resolveExistingPVCAdmissionState(
+	ctx context.Context,
+	client kubernetes.Interface,
+	quotas []corev1.ResourceQuota,
 	changes []PVCAdmissionChange,
-) (resource.Quantity, bool) {
-	projected := used.DeepCopy()
+) ([]PVCAdmissionChange, error) {
+	resolveVolumeAttributesClasses := hasVolumeAttributesClassQuota(quotas)
 
-	name := string(resourceName)
+	resolveStorage := hasPVCStorageQuota(quotas)
+	if !resolveVolumeAttributesClasses && !resolveStorage {
+		return changes, nil
+	}
+
+	resolved := append([]PVCAdmissionChange(nil), changes...)
+	for index := range resolved {
+		change := &resolved[index]
+		change.RequestedVolumeAttributesClassNames = uniqueNonEmptyStrings(
+			change.RequestedVolumeAttributesClassNames,
+		)
+
+		change.ExistingVolumeAttributesClassNames = uniqueNonEmptyStrings(
+			change.ExistingVolumeAttributesClassNames,
+		)
+		if !change.Existing ||
+			(change.ExistingUID == "" && !resolveVolumeAttributesClasses) {
+			continue
+		}
+
+		pvc, err := client.CoreV1().PersistentVolumeClaims(change.Namespace).Get(
+			ctx,
+			change.Name,
+			metav1.GetOptions{},
+		)
+		if err != nil {
+			return nil, fmt.Errorf(
+				"read existing PVC %s/%s for quota projection: %w",
+				change.Namespace,
+				change.Name,
+				err,
+			)
+		}
+
+		if change.ExistingUID != "" && pvc.UID != change.ExistingUID {
+			return nil, fmt.Errorf(
+				"existing PVC %s/%s UID changed while checking quota",
+				change.Namespace,
+				change.Name,
+			)
+		}
+
+		if resolveStorage {
+			effectiveStorage := effectivePVCQuotaStorage(pvc)
+			if effectiveStorage.Cmp(change.ExistingStorage) > 0 {
+				change.ExistingStorage = effectiveStorage
+			}
+		}
+
+		if resolveVolumeAttributesClasses {
+			change.ExistingVolumeAttributesClassNames = referencedVolumeAttributesClassNames(pvc)
+		}
+	}
+
+	return resolved, nil
+}
+
+func hasPVCStorageQuota(quotas []corev1.ResourceQuota) bool {
+	for _, quota := range quotas {
+		for resourceName := range quota.Status.Hard {
+			if resourceName == corev1.ResourceRequestsStorage ||
+				strings.HasSuffix(
+					string(resourceName),
+					".storageclass.storage.k8s.io/requests.storage",
+				) {
+				return true
+			}
+		}
+	}
+
+	return false
+}
+
+func effectivePVCQuotaStorage(pvc *corev1.PersistentVolumeClaim) resource.Quantity {
+	requested := pvc.Spec.Resources.Requests[corev1.ResourceStorage]
+
+	allocated := pvc.Status.AllocatedResources[corev1.ResourceStorage]
+	if allocated.Cmp(requested) > 0 {
+		return allocated.DeepCopy()
+	}
+
+	return requested.DeepCopy()
+}
+
+func hasVolumeAttributesClassQuota(quotas []corev1.ResourceQuota) bool {
+	for _, quota := range quotas {
+		if slices.Contains(quota.Spec.Scopes, corev1.ResourceQuotaScopeVolumeAttributesClass) {
+			return true
+		}
+
+		if quota.Spec.ScopeSelector != nil {
+			for _, selector := range quota.Spec.ScopeSelector.MatchExpressions {
+				if selector.ScopeName == corev1.ResourceQuotaScopeVolumeAttributesClass {
+					return true
+				}
+			}
+		}
+	}
+
+	return false
+}
+
+func quotaCanMatchRequestedPVC(
+	quota corev1.ResourceQuota,
+	changes []PVCAdmissionChange,
+) bool {
+	for _, change := range changes {
+		if pvcMatchesQuotaScopes(quota, change.RequestedVolumeAttributesClassNames) {
+			return true
+		}
+	}
+
+	return false
+}
+
+func pvcMatchesQuotaScopes(quota corev1.ResourceQuota, classNames []string) bool {
+	for _, scope := range quota.Spec.Scopes {
+		if !pvcMatchesScope(corev1.ScopedResourceSelectorRequirement{
+			ScopeName: scope,
+			Operator:  corev1.ScopeSelectorOpExists,
+		}, classNames) {
+			return false
+		}
+	}
+
+	if quota.Spec.ScopeSelector != nil {
+		for _, selector := range quota.Spec.ScopeSelector.MatchExpressions {
+			if !pvcMatchesScope(selector, classNames) {
+				return false
+			}
+		}
+	}
+
+	return true
+}
+
+func pvcMatchesScope(
+	selector corev1.ScopedResourceSelectorRequirement,
+	classNames []string,
+) bool {
+	if selector.ScopeName != corev1.ResourceQuotaScopeVolumeAttributesClass {
+		return false
+	}
+
+	values := make(map[string]struct{}, len(selector.Values))
+	for _, value := range selector.Values {
+		values[value] = struct{}{}
+	}
+
+	switch selector.Operator {
+	case corev1.ScopeSelectorOpExists:
+		return len(classNames) > 0
+	case corev1.ScopeSelectorOpDoesNotExist:
+		return len(classNames) == 0
+	case corev1.ScopeSelectorOpIn:
+		for _, name := range classNames {
+			if _, exists := values[name]; exists {
+				return true
+			}
+		}
+	case corev1.ScopeSelectorOpNotIn:
+		if len(classNames) == 0 {
+			return true
+		}
+
+		for _, name := range classNames {
+			if _, exists := values[name]; !exists {
+				return true
+			}
+		}
+	}
+
+	return false
+}
+
+func referencedVolumeAttributesClassNames(pvc *corev1.PersistentVolumeClaim) []string {
+	if pvc == nil {
+		return nil
+	}
+
+	names := make([]string, 0, 3)
+	if pvc.Spec.VolumeAttributesClassName != nil {
+		names = append(names, *pvc.Spec.VolumeAttributesClassName)
+	}
+
+	if pvc.Status.CurrentVolumeAttributesClassName != nil {
+		names = append(names, *pvc.Status.CurrentVolumeAttributesClassName)
+	}
+
+	if pvc.Status.ModifyVolumeStatus != nil {
+		names = append(names, pvc.Status.ModifyVolumeStatus.TargetVolumeAttributesClassName)
+	}
+
+	return uniqueNonEmptyStrings(names)
+}
+
+// RequestedVolumeAttributesClassNames returns the VAC names referenced by a
+// newly created PVC. Current and target names only exist on admitted objects.
+func RequestedVolumeAttributesClassNames(spec corev1.PersistentVolumeClaimSpec) []string {
+	if spec.VolumeAttributesClassName == nil || *spec.VolumeAttributesClassName == "" {
+		return nil
+	}
+
+	return []string{*spec.VolumeAttributesClassName}
+}
+
+func uniqueNonEmptyStrings(values []string) []string {
+	result := make([]string, 0, len(values))
+
+	seen := make(map[string]struct{}, len(values))
+	for _, value := range values {
+		if value == "" {
+			continue
+		}
+
+		if _, exists := seen[value]; exists {
+			continue
+		}
+
+		seen[value] = struct{}{}
+		result = append(result, value)
+	}
+
+	return result
+}
+
+func isPVCQuotaResource(resourceName corev1.ResourceName) bool {
 	switch resourceName {
-	case corev1.ResourceRequestsStorage:
-		for _, change := range changes {
-			projected.Add(change.RequestedStorage)
-
-			if change.Existing {
-				projected.Sub(change.ExistingStorage)
-			}
-		}
-
-		return clampNonNegative(projected), true
-	case corev1.ResourcePersistentVolumeClaims, corev1.ResourceName("count/persistentvolumeclaims"):
-		for _, change := range changes {
-			if !change.Existing {
-				projected.Add(*resource.NewQuantity(1, resource.DecimalSI))
-			}
-		}
-
-		return clampNonNegative(projected), true
+	case corev1.ResourceRequestsStorage,
+		corev1.ResourcePersistentVolumeClaims,
+		corev1.ResourceName("count/persistentvolumeclaims"):
+		return true
 	}
 
 	const classPrefix = ".storageclass.storage.k8s.io/"
 
-	class, suffix, ok := strings.Cut(name, classPrefix)
+	_, suffix, ok := strings.Cut(string(resourceName), classPrefix)
+
+	return ok && (suffix == "requests.storage" || suffix == "persistentvolumeclaims")
+}
+
+func projectedQuotaResource(
+	resourceName corev1.ResourceName,
+	used resource.Quantity,
+	quota corev1.ResourceQuota,
+	changes []PVCAdmissionChange,
+) (resource.Quantity, bool) {
+	switch resourceName {
+	case corev1.ResourceRequestsStorage:
+		return projectedPVCStorage(used, quota, changes, ""), true
+	case corev1.ResourcePersistentVolumeClaims, corev1.ResourceName("count/persistentvolumeclaims"):
+		return projectedPVCCount(used, quota, changes, ""), true
+	}
+
+	const classPrefix = ".storageclass.storage.k8s.io/"
+
+	class, suffix, ok := strings.Cut(string(resourceName), classPrefix)
 	if !ok {
 		return resource.Quantity{}, false
 	}
 
-	var delta resource.Quantity
+	switch suffix {
+	case "requests.storage":
+		return projectedPVCStorage(used, quota, changes, class), true
+	case "persistentvolumeclaims":
+		return projectedPVCCount(used, quota, changes, class), true
+	default:
+		return resource.Quantity{}, false
+	}
+}
+
+func projectedPVCStorage(
+	used resource.Quantity,
+	quota corev1.ResourceQuota,
+	changes []PVCAdmissionChange,
+	storageClass string,
+) resource.Quantity {
+	projected := used.DeepCopy()
 	for _, change := range changes {
-		if change.Existing && (class == "" || change.ExistingStorageClass == class) {
-			delta.Sub(change.ExistingStorage)
+		if existingPVCMatchesQuota(change, quota) &&
+			(storageClass == "" || change.ExistingStorageClass == storageClass) {
+			projected.Sub(change.ExistingStorage)
 		}
 
-		if class == "" || change.RequestedStorageClass == class {
-			delta.Add(change.RequestedStorage)
+		if requestedPVCMatchesQuota(change, quota) &&
+			(storageClass == "" || change.RequestedStorageClass == storageClass) {
+			projected.Add(change.RequestedStorage)
 		}
 	}
 
-	if suffix == "requests.storage" {
-		projected.Add(delta)
-		return clampNonNegative(projected), true
+	return clampNonNegative(projected)
+}
+
+func projectedPVCCount(
+	used resource.Quantity,
+	quota corev1.ResourceQuota,
+	changes []PVCAdmissionChange,
+	storageClass string,
+) resource.Quantity {
+	projected := used.DeepCopy()
+	one := resource.NewQuantity(1, resource.DecimalSI)
+
+	for _, change := range changes {
+		requestedMatches := requestedPVCMatchesQuota(change, quota) &&
+			(storageClass == "" || change.RequestedStorageClass == storageClass)
+		existingMatches := existingPVCMatchesQuota(change, quota) &&
+			(storageClass == "" || change.ExistingStorageClass == storageClass)
+
+		switch {
+		case requestedMatches && !existingMatches:
+			projected.Add(*one)
+		case !requestedMatches && existingMatches:
+			projected.Sub(*one)
+		}
 	}
 
-	if suffix == "persistentvolumeclaims" {
-		if class == "" {
-			for _, change := range changes {
-				if !change.Existing {
-					projected.Add(*resource.NewQuantity(1, resource.DecimalSI))
-				}
-			}
+	return clampNonNegative(projected)
+}
 
-			return clampNonNegative(projected), true
-		}
+func requestedPVCMatchesQuota(change PVCAdmissionChange, quota corev1.ResourceQuota) bool {
+	return pvcMatchesQuotaScopes(quota, change.RequestedVolumeAttributesClassNames)
+}
 
-		for _, change := range changes {
-			if change.Existing && change.ExistingStorageClass == class &&
-				change.RequestedStorageClass != class {
-				projected.Sub(*resource.NewQuantity(1, resource.DecimalSI))
-			}
-
-			if change.RequestedStorageClass == class &&
-				(!change.Existing || change.ExistingStorageClass != class) {
-				projected.Add(*resource.NewQuantity(1, resource.DecimalSI))
-			}
-		}
-
-		return clampNonNegative(projected), true
-	}
-
-	return resource.Quantity{}, false
+func existingPVCMatchesQuota(change PVCAdmissionChange, quota corev1.ResourceQuota) bool {
+	return change.Existing &&
+		pvcMatchesQuotaScopes(quota, change.ExistingVolumeAttributesClassNames)
 }
 
 func clampNonNegative(value resource.Quantity) resource.Quantity {

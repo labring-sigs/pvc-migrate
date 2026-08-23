@@ -3,10 +3,10 @@ package planner
 import (
 	"context"
 	"fmt"
-	"sort"
 	"strings"
 
 	"github.com/labring-sigs/pvc-migrate/internal/domain"
+	"github.com/labring-sigs/pvc-migrate/internal/kube"
 	"github.com/labring-sigs/pvc-migrate/internal/parallel"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -19,6 +19,7 @@ func (p *Planner) checkLimitRanges(
 	plan *domain.MigrationPlan,
 	namespace string,
 	volumes []domain.PlannedVolume,
+	toolPods int,
 ) {
 	p.logInfo("checking LimitRanges", "namespace", namespace, "volumes", len(volumes))
 
@@ -57,50 +58,13 @@ func (p *Planner) checkLimitRanges(
 
 	violations := make([]string, 0)
 
-	zero := resource.MustParse("0")
+	if toolPods > 0 {
+		violations = append(violations, kube.ToolLimitRangeViolations(items.Items)...)
+	}
+
 	for _, limitRange := range items.Items {
 		for _, item := range limitRange.Spec.Limits {
 			if item.Type == corev1.LimitTypeContainer || item.Type == corev1.LimitTypePod {
-				for _, resourceName := range []corev1.ResourceName{corev1.ResourceCPU, corev1.ResourceMemory, corev1.ResourceEphemeralStorage} {
-					if minimum, ok := item.Min[resourceName]; ok && minimum.Cmp(zero) > 0 {
-						scope := "tool Pod"
-						if item.Type == corev1.LimitTypeContainer {
-							scope = "tool container"
-						}
-
-						violations = append(
-							violations,
-							fmt.Sprintf(
-								"%s resource %s=0 is below %s minimum %s",
-								scope,
-								resourceName,
-								limitRange.Name,
-								minimum.String(),
-							),
-						)
-					}
-
-					if ratio, ok := item.MaxLimitRequestRatio[resourceName]; ok &&
-						ratio.Cmp(zero) > 0 {
-						scope := "tool Pod"
-						if item.Type == corev1.LimitTypeContainer {
-							scope = "tool container"
-						}
-						// Tool containers explicitly set both request and limit to zero. Kubernetes
-						// rejects that pair when a LimitRange requires a non-zero ratio.
-						violations = append(
-							violations,
-							fmt.Sprintf(
-								"%s resource %s=0/0 violates %s maxLimitRequestRatio %s",
-								scope,
-								resourceName,
-								limitRange.Name,
-								ratio.String(),
-							),
-						)
-					}
-				}
-
 				continue
 			}
 
@@ -208,49 +172,54 @@ func (p *Planner) checkQuotas(
 		return
 	}
 
-	demand, err := quotaDemand(estimate)
+	var limitRanges []corev1.LimitRange
+	if estimate.Pods > 0 {
+		items, listErr := p.client.CoreV1().LimitRanges(namespace).List(ctx, metav1.ListOptions{})
+		if listErr != nil {
+			plan.AddCheck(
+				failed(
+					"resource-quota",
+					fmt.Sprintf(
+						"list LimitRanges for ResourceQuota evaluation in %s: %v",
+						namespace,
+						listErr,
+					),
+				),
+			)
+
+			return
+		}
+
+		if items == nil {
+			plan.AddCheck(
+				failed(
+					"resource-quota",
+					fmt.Sprintf(
+						"list LimitRanges for ResourceQuota evaluation in %s returned an empty object",
+						namespace,
+					),
+				),
+			)
+
+			return
+		}
+
+		limitRanges = items.Items
+	}
+
+	report, err := kube.EvaluateResourceQuotaCapacity(
+		namespace,
+		items.Items,
+		limitRanges,
+		estimate,
+	)
 	if err != nil {
 		plan.AddCheck(failed("resource-quota", err.Error()))
 		return
 	}
 
-	violations := make([]string, 0)
-
-	checked := 0
-	for _, quota := range items.Items {
-		hard := quota.Spec.Hard
-		for name, requested := range demand {
-			limit, bounded := hard[name]
-			if !bounded {
-				continue
-			}
-
-			checked++
-			used := quota.Status.Used[name]
-			total := used.DeepCopy()
-			total.Add(requested)
-
-			if total.Cmp(limit) > 0 {
-				violations = append(
-					violations,
-					fmt.Sprintf(
-						"%s/%s %s: used %s + requested %s exceeds hard %s",
-						namespace,
-						quota.Name,
-						name,
-						used.String(),
-						requested.String(),
-						limit.String(),
-					),
-				)
-			}
-		}
-	}
-
-	sort.Strings(violations)
-
-	if len(violations) > 0 {
-		plan.AddCheck(failed("resource-quota", strings.Join(violations, "; ")))
+	if len(report.Violations) > 0 {
+		plan.AddCheck(failed("resource-quota", strings.Join(report.Violations, "; ")))
 		return
 	}
 
@@ -260,68 +229,10 @@ func (p *Planner) checkQuotas(
 			fmt.Sprintf(
 				"%d ResourceQuota object(s), %d bounded resource(s), all have capacity",
 				len(items.Items),
-				checked,
+				report.Checked,
 			),
 		),
 	)
-}
-
-func quotaDemand(estimate domain.ResourceEstimate) (corev1.ResourceList, error) {
-	storage, err := resource.ParseQuantity(estimate.StorageRequests)
-	if err != nil {
-		return nil, domain.WrapError(
-			domain.ErrorInternal,
-			"quota estimate",
-			"parse storage demand",
-			err,
-		)
-	}
-
-	result := corev1.ResourceList{
-		corev1.ResourceRequestsStorage:                          storage,
-		corev1.ResourcePersistentVolumeClaims:                   *resource.NewQuantity(int64(estimate.PVCs), resource.DecimalSI),
-		corev1.ResourcePods:                                     *resource.NewQuantity(int64(estimate.Pods), resource.DecimalSI),
-		corev1.ResourceServices:                                 *resource.NewQuantity(int64(estimate.Services), resource.DecimalSI),
-		corev1.ResourceSecrets:                                  *resource.NewQuantity(int64(estimate.Secrets), resource.DecimalSI),
-		corev1.ResourceConfigMaps:                               *resource.NewQuantity(int64(estimate.ConfigMaps), resource.DecimalSI),
-		corev1.ResourceName("count/jobs.batch"):                 *resource.NewQuantity(int64(estimate.Jobs), resource.DecimalSI),
-		corev1.ResourceName("count/services"):                   *resource.NewQuantity(int64(estimate.Services), resource.DecimalSI),
-		corev1.ResourceName("count/secrets"):                    *resource.NewQuantity(int64(estimate.Secrets), resource.DecimalSI),
-		corev1.ResourceName("count/configmaps"):                 *resource.NewQuantity(int64(estimate.ConfigMaps), resource.DecimalSI),
-		corev1.ResourceName("count/serviceaccounts"):            *resource.NewQuantity(int64(estimate.ServiceAccounts), resource.DecimalSI),
-		corev1.ResourceName("count/persistentvolumeclaims"):     *resource.NewQuantity(int64(estimate.PVCs), resource.DecimalSI),
-		corev1.ResourceName("count/leases.coordination.k8s.io"): *resource.NewQuantity(int64(estimate.Leases), resource.DecimalSI),
-	}
-	for class, value := range estimate.ByStorageClass {
-		if class == "" {
-			continue
-		}
-
-		quantity, parseErr := resource.ParseQuantity(value)
-		if parseErr != nil {
-			return nil, domain.WrapError(
-				domain.ErrorInternal,
-				"quota estimate",
-				fmt.Sprintf("parse StorageClass %s demand", class),
-				parseErr,
-			)
-		}
-
-		result[corev1.ResourceName(class+".storageclass.storage.k8s.io/requests.storage")] = quantity
-
-		classPVCs, known := estimate.PVCsByStorageClass[class]
-		if !known {
-			return nil, domain.NewError(
-				domain.ErrorInternal,
-				"quota estimate",
-				fmt.Sprintf("StorageClass %s PVC demand is missing", class),
-			)
-		}
-
-		result[corev1.ResourceName(class+".storageclass.storage.k8s.io/persistentvolumeclaims")] = *resource.NewQuantity(int64(classPVCs), resource.DecimalSI)
-	}
-
-	return result, nil
 }
 
 func (p *Planner) checkNetworkPolicies(

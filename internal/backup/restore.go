@@ -204,7 +204,7 @@ func runRestore(
 
 	pvNode := ""
 	if consumerNode == "" || req.TargetNode != "" {
-		pvNode, err = uniquePVToolNode(leaseCtx, client, currentPV)
+		pvNode, err = uniquePVToolNode(leaseCtx, client, currentPV, "restore preflight")
 		if err != nil {
 			return err
 		}

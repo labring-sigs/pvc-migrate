@@ -43,16 +43,21 @@ func (p *Planner) checkActivationPVCPolicies(
 			sourceClass = *volume.SourcePVCSpec.StorageClassName
 		}
 
+		volumeAttributesClasses := kube.RequestedVolumeAttributesClassNames(volume.SourcePVCSpec)
+
 		groups[volume.SourcePVC.Namespace] = append(
 			groups[volume.SourcePVC.Namespace],
 			kube.PVCAdmissionChange{
-				Namespace:             volume.SourcePVC.Namespace,
-				Name:                  volume.SourcePVC.Name,
-				RequestedStorage:      requested,
-				RequestedStorageClass: volume.StorageClass,
-				Existing:              true,
-				ExistingStorage:       existing,
-				ExistingStorageClass:  sourceClass,
+				Namespace:                           volume.SourcePVC.Namespace,
+				Name:                                volume.SourcePVC.Name,
+				RequestedStorage:                    requested,
+				RequestedStorageClass:               volume.StorageClass,
+				Existing:                            true,
+				ExistingUID:                         volume.SourcePVC.UID,
+				ExistingStorage:                     existing,
+				ExistingStorageClass:                sourceClass,
+				RequestedVolumeAttributesClassNames: volumeAttributesClasses,
+				ExistingVolumeAttributesClassNames:  volumeAttributesClasses,
 			},
 		)
 	}

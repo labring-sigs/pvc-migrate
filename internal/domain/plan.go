@@ -49,17 +49,25 @@ type Check struct {
 }
 
 type ResourceEstimate struct {
-	StorageRequests    string            `json:"storageRequests"                      yaml:"storageRequests"`
-	PVCs               int               `json:"persistentVolumeClaims"               yaml:"persistentVolumeClaims"`
-	Pods               int               `json:"pods"                                 yaml:"pods"`
-	Jobs               int               `json:"jobs"                                 yaml:"jobs"`
-	Services           int               `json:"services"                             yaml:"services"`
-	Secrets            int               `json:"secrets"                              yaml:"secrets"`
-	ConfigMaps         int               `json:"configMaps"                           yaml:"configMaps"`
-	ServiceAccounts    int               `json:"serviceAccounts"                      yaml:"serviceAccounts"`
-	Leases             int               `json:"leases,omitempty"                     yaml:"leases,omitempty"`
-	ByStorageClass     map[string]string `json:"byStorageClass"                       yaml:"byStorageClass"`
-	PVCsByStorageClass map[string]int    `json:"persistentVolumeClaimsByStorageClass" yaml:"persistentVolumeClaimsByStorageClass"`
+	StorageRequests      string            `json:"storageRequests"                      yaml:"storageRequests"`
+	PVCs                 int               `json:"persistentVolumeClaims"               yaml:"persistentVolumeClaims"`
+	Pods                 int               `json:"pods"                                 yaml:"pods"`
+	TerminatingPods      int               `json:"terminatingPods,omitempty"            yaml:"terminatingPods,omitempty"`
+	NotTerminatingPods   int               `json:"notTerminatingPods,omitempty"         yaml:"notTerminatingPods,omitempty"`
+	Jobs                 int               `json:"jobs"                                 yaml:"jobs"`
+	Deployments          int               `json:"deployments"                          yaml:"deployments"`
+	ReplicaSets          int               `json:"replicaSets"                          yaml:"replicaSets"`
+	Services             int               `json:"services"                             yaml:"services"`
+	ServiceNodePorts     int               `json:"serviceNodePorts"                     yaml:"serviceNodePorts"`
+	ServiceLoadBalancers int               `json:"serviceLoadBalancers"                 yaml:"serviceLoadBalancers"`
+	Endpoints            int               `json:"endpoints"                            yaml:"endpoints"`
+	EndpointSlices       int               `json:"endpointSlices"                       yaml:"endpointSlices"`
+	Secrets              int               `json:"secrets"                              yaml:"secrets"`
+	ConfigMaps           int               `json:"configMaps"                           yaml:"configMaps"`
+	ServiceAccounts      int               `json:"serviceAccounts"                      yaml:"serviceAccounts"`
+	Leases               int               `json:"leases,omitempty"                     yaml:"leases,omitempty"`
+	ByStorageClass       map[string]string `json:"byStorageClass"                       yaml:"byStorageClass"`
+	PVCsByStorageClass   map[string]int    `json:"persistentVolumeClaimsByStorageClass" yaml:"persistentVolumeClaimsByStorageClass"`
 }
 
 type PlannedVolume struct {

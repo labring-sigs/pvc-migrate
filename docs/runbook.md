@@ -165,7 +165,7 @@ Keep PV reclaim policies at `Retain` while investigating. Preserve the session C
 
 ## Quota And Provisioning Failures
 
-`plan` evaluates every ResourceQuota and PVC LimitRange in the staging namespace. Reservation remains the authoritative backend test because CSI capacity, topology, and external provisioner health can change after planning.
+`plan` evaluates ResourceQuota and LimitRange policies in every namespace where the workflow creates resources, including separate source, staging, destination, and session namespaces. It checks the maximum concurrent Pod count for unscoped quota and separate probe and transfer peaks for `Terminating` and `NotTerminating` quota. ResourceQuota limits existing and requested usage; it does not add a missing container resource value. pvc-migrate leaves the tool `ephemeral-storage` limit unset. If a container LimitRange supplies `default.ephemeral-storage`, Kubernetes adds that limit and the planner includes it in `limits.ephemeral-storage` quota demand. A `defaultRequest` does not create a limit, and the tool's explicit zero request prevents it from changing the request. Reservation and actual PVC binding remain the authoritative backend tests because CSI capacity, topology, quota usage, and external provisioner health can change after planning.
 
 For a WFFC destination stuck in Pending:
 

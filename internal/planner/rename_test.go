@@ -10,6 +10,7 @@ import (
 	"github.com/labring-sigs/pvc-migrate/internal/testutil"
 	authorizationv1 "k8s.io/api/authorization/v1"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
@@ -111,6 +112,105 @@ func TestPlanRenameSameNamespacePreservesDurableMetadataWithoutQuotaDemand(t *te
 		if _, exists := metadata.Annotations[key]; exists {
 			t.Fatalf("transient annotation %q was preserved", key)
 		}
+	}
+}
+
+func TestPlanRenameAccountsForSessionObjectsInTheirNamespace(t *testing.T) {
+	t.Run("destination namespace", func(t *testing.T) {
+		objects := append(plannerObjects("2Gi"), &corev1.ResourceQuota{
+			ObjectMeta: metav1.ObjectMeta{Namespace: "app", Name: "session-objects"},
+			Spec: corev1.ResourceQuotaSpec{Hard: corev1.ResourceList{
+				corev1.ResourceConfigMaps:                               resource.MustParse("0"),
+				corev1.ResourceName("count/leases.coordination.k8s.io"): resource.MustParse("0"),
+			}},
+		})
+
+		plan, err := New(plannerClient(objects...), nil).PlanRename(
+			context.Background(),
+			RenameOptions{
+				SessionID:            "rename-session-quota",
+				SourceNamespace:      "app",
+				SourcePVC:            "data",
+				DestinationNamespace: "app",
+				DestinationPVC:       "renamed",
+				SessionNamespace:     "app",
+			},
+		)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		if plan.TemporaryUsage.ConfigMaps != 1 || plan.TemporaryUsage.Leases != 1 ||
+			!hasFailedCheckContaining(plan, "resource-quota", "app/session-objects") {
+			t.Fatalf("plan=%#v", plan)
+		}
+	})
+
+	t.Run("separate session namespace", func(t *testing.T) {
+		objects := append(
+			plannerObjects("2Gi"),
+			&corev1.ResourceQuota{
+				ObjectMeta: metav1.ObjectMeta{Namespace: "app", Name: "destination-objects"},
+				Spec: corev1.ResourceQuotaSpec{Hard: corev1.ResourceList{
+					corev1.ResourceConfigMaps: resource.MustParse("0"),
+				}},
+			},
+			&corev1.ResourceQuota{
+				ObjectMeta: metav1.ObjectMeta{Namespace: "system", Name: "session-objects"},
+				Spec: corev1.ResourceQuotaSpec{Hard: corev1.ResourceList{
+					corev1.ResourceName("count/leases.coordination.k8s.io"): resource.MustParse(
+						"0",
+					),
+				}},
+			},
+		)
+
+		plan, err := New(plannerClient(objects...), nil).PlanRename(
+			context.Background(),
+			RenameOptions{
+				SessionID:            "rename-split-session-quota",
+				SourceNamespace:      "app",
+				SourcePVC:            "data",
+				DestinationNamespace: "app",
+				DestinationPVC:       "renamed",
+				SessionNamespace:     "system",
+			},
+		)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		if plan.TemporaryUsage.ConfigMaps != 0 || plan.TemporaryUsage.Leases != 0 ||
+			!hasFailedCheckContaining(plan, "resource-quota", "system/session-objects") ||
+			hasFailedCheckContaining(plan, "resource-quota", "app/destination-objects") {
+			t.Fatalf("plan=%#v", plan)
+		}
+	})
+}
+
+func TestPlanRenameDoesNotApplyToolPodLimitRange(t *testing.T) {
+	objects := append(plannerObjects("2Gi"), &corev1.LimitRange{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "app", Name: "tool-pod-minimum"},
+		Spec: corev1.LimitRangeSpec{Limits: []corev1.LimitRangeItem{{
+			Type: corev1.LimitTypeContainer,
+			Min:  corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("10m")},
+		}}},
+	})
+
+	plan, err := New(plannerClient(objects...), nil).PlanRename(context.Background(), RenameOptions{
+		SessionID:            "rename-no-tool-pod",
+		SourceNamespace:      "app",
+		SourcePVC:            "data",
+		DestinationNamespace: "app",
+		DestinationPVC:       "renamed",
+		SessionNamespace:     "system",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if !plan.Ready {
+		t.Fatalf("checks=%#v", plan.Checks)
 	}
 }
 
@@ -415,11 +515,8 @@ func TestPlanRenameChecksMutationRBAC(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if plan.Ready || !hasFailedCheck(plan, "rbac") ||
-		!strings.Contains(
-			plan.Checks[len(plan.Checks)-1].Message,
-			"delete app/persistentvolumeclaims",
-		) {
+	if plan.Ready ||
+		!hasFailedCheckContaining(plan, "rbac", "delete app/persistentvolumeclaims") {
 		t.Fatalf("checks=%#v", plan.Checks)
 	}
 }
