@@ -325,7 +325,7 @@ func (m *Manager) resumeGrafana(ctx context.Context, session *domain.Session) er
 					return false, ownerErr
 				}
 
-				if owned && podReady(&pods.Items[index]) {
+				if owned && kube.PodReady(&pods.Items[index]) {
 					ready = &pods.Items[index]
 					return true, nil
 				}

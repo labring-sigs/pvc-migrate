@@ -228,28 +228,13 @@ func activePVCManifest(
 			Name:            volume.SourcePVC.Name,
 			Namespace:       volume.SourcePVC.Namespace,
 			Labels:          maps.Clone(metadata.Labels),
-			Annotations:     maps.Clone(metadata.Annotations),
+			Annotations:     PVCAnnotationsForRecreation(metadata.Annotations),
 			OwnerReferences: append([]metav1.OwnerReference(nil), metadata.OwnerReferences...),
 		},
 		Spec: spec,
 	}
 	if pvc.Labels == nil {
 		pvc.Labels = map[string]string{}
-	}
-
-	if pvc.Annotations == nil {
-		pvc.Annotations = map[string]string{}
-	}
-
-	for _, key := range []string{
-		"pv.kubernetes.io/bind-completed",
-		"pv.kubernetes.io/bound-by-controller",
-		"volume.beta.kubernetes.io/storage-provisioner",
-		"volume.kubernetes.io/selected-node",
-		"volume.kubernetes.io/storage-provisioner",
-		PVCStorageResizerAnnotation,
-	} {
-		delete(pvc.Annotations, key)
 	}
 
 	pvc.Labels[ManagedByLabel] = ManagedByValue

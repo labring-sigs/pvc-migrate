@@ -199,7 +199,7 @@ func (p *KubernetesToolImageProber) probeTarget(
 			)
 		}
 
-		if !nodeReadyAndSchedulable(node) {
+		if !NodeReadyAndSchedulable(node) {
 			return result, domain.NewError(
 				domain.ErrorPrecondition,
 				"tool image probe",
@@ -1419,20 +1419,6 @@ func logProbeCleanupStart(options ToolImageProbeOptions, namespace, podName stri
 			podName,
 		)
 	}
-}
-
-func nodeReadyAndSchedulable(node *corev1.Node) bool {
-	if node == nil || node.Spec.Unschedulable {
-		return false
-	}
-
-	for _, condition := range node.Status.Conditions {
-		if condition.Type == corev1.NodeReady {
-			return condition.Status == corev1.ConditionTrue
-		}
-	}
-
-	return false
 }
 
 var _ ToolImageProber = (*KubernetesToolImageProber)(nil)

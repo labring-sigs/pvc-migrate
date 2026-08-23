@@ -775,7 +775,7 @@ func isVictoriaLogsStatefulSet(sts *appsv1.StatefulSet) bool {
 }
 
 func requireReadyPod(pod *corev1.Pod, namespace, name string) error {
-	if pod.Status.Phase != corev1.PodRunning || !podReady(pod) {
+	if pod.Status.Phase != corev1.PodRunning || !kube.PodReady(pod) {
 		return domain.NewError(
 			domain.ErrorPrecondition,
 			"discover workload",
@@ -950,7 +950,7 @@ func (m *Manager) waitForResumedPod(
 				return false, err
 			}
 
-			if !podReady(pod) {
+			if !kube.PodReady(pod) {
 				return false, nil
 			}
 
@@ -1010,16 +1010,6 @@ func objectReference(
 		UID:             uid,
 		ResourceVersion: resourceVersion,
 	}
-}
-
-func podReady(pod *corev1.Pod) bool {
-	for _, condition := range pod.Status.Conditions {
-		if condition.Type == corev1.PodReady {
-			return condition.Status == corev1.ConditionTrue
-		}
-	}
-
-	return false
 }
 
 func podRole(pod *corev1.Pod) string {

@@ -11,10 +11,9 @@ import (
 	"github.com/labring-sigs/pvc-migrate/internal/testutil"
 	corev1 "k8s.io/api/core/v1"
 	storagev1 "k8s.io/api/storage/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/runtime"
-	kubernetesfake "k8s.io/client-go/kubernetes/fake"
-	clienttesting "k8s.io/client-go/testing"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 )
 
 type plannerOpenEBSLVMSharedVolumeManager struct {
@@ -70,7 +69,7 @@ func TestCheckPVCReferencesModelsOfflineWarmCopyRWOPAndSharedUnit(t *testing.T) 
 		name      string
 		operation domain.Operation
 		mode      corev1.PersistentVolumeAccessMode
-		pods      []runtime.Object
+		pods      []*corev1.Pod
 		sourcePod *corev1.Pod
 		ready     bool
 		severity  domain.CheckSeverity
@@ -88,7 +87,7 @@ func TestCheckPVCReferencesModelsOfflineWarmCopyRWOPAndSharedUnit(t *testing.T) 
 			name:      "active RWO warns",
 			operation: domain.OperationCopy,
 			mode:      rwo,
-			pods:      []runtime.Object{podWithPVC("consumer")},
+			pods:      []*corev1.Pod{podWithPVC("consumer")},
 			ready:     true,
 			severity:  domain.SeverityWarning,
 			message:   "warm copy has file-level consistency",
@@ -97,7 +96,7 @@ func TestCheckPVCReferencesModelsOfflineWarmCopyRWOPAndSharedUnit(t *testing.T) 
 			name:      "active RWOP fails",
 			operation: domain.OperationCopy,
 			mode:      rwop,
-			pods:      []runtime.Object{podWithPVC("consumer")},
+			pods:      []*corev1.Pod{podWithPVC("consumer")},
 			severity:  domain.SeverityError,
 			message:   "cannot be warm-copied",
 		},
@@ -105,7 +104,7 @@ func TestCheckPVCReferencesModelsOfflineWarmCopyRWOPAndSharedUnit(t *testing.T) 
 			name:      "active RWOP reserve warns accurately",
 			operation: domain.OperationReserve,
 			mode:      rwop,
-			pods:      []runtime.Object{podWithPVC("consumer")},
+			pods:      []*corev1.Pod{podWithPVC("consumer")},
 			ready:     true,
 			severity:  domain.SeverityWarning,
 			message:   "reservation keeps the source PVC mounted",
@@ -114,7 +113,7 @@ func TestCheckPVCReferencesModelsOfflineWarmCopyRWOPAndSharedUnit(t *testing.T) 
 			name:      "selected unit has another consumer",
 			operation: domain.OperationCopy,
 			mode:      rwo,
-			pods: []runtime.Object{
+			pods: []*corev1.Pod{
 				podWithPVC("selected"),
 				podWithPVC("other"),
 			},
@@ -132,10 +131,21 @@ func TestCheckPVCReferencesModelsOfflineWarmCopyRWOPAndSharedUnit(t *testing.T) 
 				},
 			}
 			plan := &domain.MigrationPlan{Ready: true}
-			New(
-				kubernetesfake.NewClientset(tt.pods...),
+
+			pods := make([]corev1.Pod, len(tt.pods))
+			for index, pod := range tt.pods {
+				pods[index] = *pod
+			}
+
+			New(nil, nil).checkPVCReferencesFromPods(
+				plan,
+				pvc,
+				tt.sourcePod,
+				tt.operation,
+				true,
+				pods,
 				nil,
-			).checkPVCReferences(context.Background(), plan, pvc, tt.sourcePod, tt.operation, true)
+			)
 
 			if plan.Ready != tt.ready || len(plan.Checks) != 1 ||
 				plan.Checks[0].Severity != tt.severity ||
@@ -445,16 +455,18 @@ func TestPlanRejectsSourcePVClaimRefDrift(t *testing.T) {
 }
 
 func TestCheckPVCReferencesReportsListErrors(t *testing.T) {
-	client := kubernetesfake.NewClientset()
-	client.PrependReactor("list", "pods", func(clienttesting.Action) (bool, runtime.Object, error) {
-		return true, nil, errors.New("list timeout")
-	})
-
 	plan := &domain.MigrationPlan{Ready: true}
-	New(
-		client,
+	New(nil, nil).checkPVCReferencesFromPods(
+		plan,
+		&corev1.PersistentVolumeClaim{
+			ObjectMeta: metav1.ObjectMeta{Namespace: "app", Name: "data"},
+		},
 		nil,
-	).checkPVCReferences(context.Background(), plan, &corev1.PersistentVolumeClaim{ObjectMeta: metav1.ObjectMeta{Namespace: "app", Name: "data"}}, nil, domain.OperationMigrate, false)
+		domain.OperationMigrate,
+		false,
+		nil,
+		errors.New("list timeout"),
+	)
 
 	if plan.Ready || len(plan.Checks) != 1 ||
 		!strings.Contains(plan.Checks[0].Message, "list timeout") {
@@ -505,18 +517,16 @@ func TestCheckCSINodeTreatsMissingAndUnregisteredDriversAsWarnings(t *testing.T)
 
 	tests := []struct {
 		name    string
-		objects []runtime.Object
+		csiNode *storagev1.CSINode
 		message string
 	}{
 		{name: "CSINode absent", message: "has no CSINode object"},
 		{
 			name: "driver absent",
-			objects: []runtime.Object{
-				&storagev1.CSINode{
-					ObjectMeta: metav1.ObjectMeta{Name: "node-b"},
-					Spec: storagev1.CSINodeSpec{
-						Drivers: []storagev1.CSINodeDriver{{Name: "other.csi.io"}},
-					},
+			csiNode: &storagev1.CSINode{
+				ObjectMeta: metav1.ObjectMeta{Name: "node-b"},
+				Spec: storagev1.CSINodeSpec{
+					Drivers: []storagev1.CSINodeDriver{{Name: "other.csi.io"}},
 				},
 			},
 			message: "is absent from CSINode",
@@ -525,10 +535,16 @@ func TestCheckCSINodeTreatsMissingAndUnregisteredDriversAsWarnings(t *testing.T)
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			plan := &domain.MigrationPlan{Ready: true}
-			New(
-				kubernetesfake.NewClientset(tt.objects...),
-				nil,
-			).checkCSINode(context.Background(), plan, sc, node)
+
+			var err error
+			if tt.csiNode == nil {
+				err = apierrors.NewNotFound(
+					schema.GroupResource{Group: "storage.k8s.io", Resource: "csinodes"},
+					node.Name,
+				)
+			}
+
+			New(nil, nil).checkCSINodeFromObject(plan, sc, node, tt.csiNode, err)
 
 			if !plan.Ready || len(plan.Checks) != 1 ||
 				plan.Checks[0].Severity != domain.SeverityWarning ||
@@ -540,22 +556,16 @@ func TestCheckCSINodeTreatsMissingAndUnregisteredDriversAsWarnings(t *testing.T)
 }
 
 func TestCheckCSINodeFailsOnEmptyObject(t *testing.T) {
-	client := kubernetesfake.NewClientset()
-	client.PrependReactor(
-		"get",
-		"csinodes",
-		func(clienttesting.Action) (bool, runtime.Object, error) {
-			return true, nil, nil
-		},
-	)
-
 	plan := &domain.MigrationPlan{Ready: true}
-	New(client, nil).checkCSINode(context.Background(), plan,
+	New(nil, nil).checkCSINodeFromObject(plan,
 		&storagev1.StorageClass{
 			ObjectMeta:  metav1.ObjectMeta{Name: "fast"},
 			Provisioner: "example.csi.io",
 		},
-		&corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "node-b"}})
+		&corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "node-b"}},
+		nil,
+		nil,
+	)
 
 	if plan.Ready || len(plan.Checks) != 1 || plan.Checks[0].Severity != domain.SeverityError ||
 		!strings.Contains(plan.Checks[0].Message, "returned an empty object") {

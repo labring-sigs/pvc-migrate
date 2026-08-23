@@ -2,6 +2,7 @@ package planner
 
 import (
 	"fmt"
+	"slices"
 	"sort"
 	"strconv"
 
@@ -230,9 +231,9 @@ func selectorRequirementMatches(
 
 	switch requirement.Operator {
 	case corev1.NodeSelectorOpIn:
-		return exists && contains(requirement.Values, actual)
+		return exists && slices.Contains(requirement.Values, actual)
 	case corev1.NodeSelectorOpNotIn:
-		return !exists || !contains(requirement.Values, actual)
+		return !exists || !slices.Contains(requirement.Values, actual)
 	case corev1.NodeSelectorOpExists:
 		return exists
 	case corev1.NodeSelectorOpDoesNotExist:

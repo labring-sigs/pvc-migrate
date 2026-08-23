@@ -5,7 +5,6 @@ import (
 	"crypto/sha256"
 	"errors"
 	"fmt"
-	"slices"
 	"strings"
 
 	"github.com/labring-sigs/pvc-migrate/internal/domain"
@@ -435,8 +434,7 @@ func (s *Service) selectTargetNode(
 			continue
 		}
 
-		if node.Spec.Unschedulable || !nodeReady(node) ||
-			(sc.AllowedTopologies != nil && !matchesAllowedTopologies(sc, node)) {
+		if !kube.NodeReadyAndSchedulable(node) || !kube.StorageClassAllowsNode(sc, node) {
 			continue
 		}
 
@@ -454,44 +452,4 @@ func (s *Service) selectTargetNode(
 		"no Ready, schedulable destination node is compatible with StorageClass %s",
 		sc.Name,
 	)
-}
-
-func nodeReady(node *corev1.Node) bool {
-	for _, condition := range node.Status.Conditions {
-		if condition.Type == corev1.NodeReady {
-			return condition.Status == corev1.ConditionTrue
-		}
-	}
-
-	return false
-}
-
-func matchesAllowedTopologies(sc *storagev1.StorageClass, node *corev1.Node) bool {
-	if len(sc.AllowedTopologies) == 0 {
-		return true
-	}
-
-	for _, term := range sc.AllowedTopologies {
-		matched := true
-		for _, expr := range term.MatchLabelExpressions {
-			value, ok := node.Labels[expr.Key]
-			if !ok {
-				matched = false
-				break
-			}
-
-			found := slices.Contains(expr.Values, value)
-
-			if !found {
-				matched = false
-				break
-			}
-		}
-
-		if matched {
-			return true
-		}
-	}
-
-	return false
 }

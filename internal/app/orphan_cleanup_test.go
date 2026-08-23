@@ -841,7 +841,7 @@ func TestDeleteOrphanRollbackPVRequiresRetainPolicy(t *testing.T) {
 	err = service.deleteOrphanRollbackPV(
 		context.Background(),
 		options.SessionID,
-		pvObjectReference(pv),
+		kube.PVReference(pv),
 	)
 	if domain.CategoryOf(err) != domain.ErrorPrecondition {
 		t.Fatalf("category=%s error=%v", domain.CategoryOf(err), err)

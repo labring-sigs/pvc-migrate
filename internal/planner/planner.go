@@ -449,7 +449,7 @@ func (p *Planner) loadPlanContext(ctx context.Context, state *planState) {
 			state.plan.AddCheck(failed("target-node", "read target node returned an empty object"))
 		default:
 			state.targetNode = node
-			if !nodeReady(node) || node.Spec.Unschedulable {
+			if !kube.NodeReadyAndSchedulable(node) {
 				state.plan.AddCheck(
 					failed(
 						"target-node",
@@ -705,7 +705,7 @@ func (p *Planner) checkPlanTargetTopology(
 			continue
 		}
 
-		if !matchesAllowedTopologies(sc, state.targetNode) {
+		if !kube.StorageClassAllowsNode(sc, state.targetNode) {
 			state.plan.AddCheck(failed(
 				"storage-topology",
 				fmt.Sprintf(
@@ -738,7 +738,7 @@ func (p *Planner) checkPlanSourceNode(state *planState) {
 		state.plan.AddCheck(failed("source-node", fmt.Sprintf("read source node: %v", err)))
 	case node == nil || node.Name == "":
 		state.plan.AddCheck(failed("source-node", "read source node returned an empty object"))
-	case !nodeReady(node) || node.Spec.Unschedulable:
+	case !kube.NodeReadyAndSchedulable(node):
 		state.plan.AddCheck(failed(
 			"source-node",
 			fmt.Sprintf("node %s must be Ready and schedulable for the source tool", node.Name),
@@ -1101,8 +1101,8 @@ func (p *Planner) appendPlanVolume(
 	accessModes := append([]corev1.PersistentVolumeAccessMode(nil), input.pvc.Spec.AccessModes...)
 
 	state.plannedVolumes = append(state.plannedVolumes, domain.PlannedVolume{
-		SourcePVC:        pvcReference(input.pvc),
-		SourcePV:         pvReference(input.pv),
+		SourcePVC:        kube.PVCReference(input.pvc),
+		SourcePV:         kube.PVReference(input.pv),
 		DestinationPVC:   destinationRef,
 		Capacity:         destinationCapacity.String(),
 		SourceCapacity:   input.capacity.String(),
@@ -1120,13 +1120,13 @@ func (p *Planner) appendPlanVolume(
 	}
 
 	state.volumeSpecs = append(state.volumeSpecs, domain.VolumeSpec{
-		SourcePVC:           pvcReference(input.pvc),
-		SourcePV:            pvReference(input.pv),
+		SourcePVC:           kube.PVCReference(input.pvc),
+		SourcePV:            kube.PVReference(input.pv),
 		SourceReclaimPolicy: input.pv.Spec.PersistentVolumeReclaimPolicy,
 		SourcePVCSpec:       *input.pvc.Spec.DeepCopy(),
 		SourcePVCMetadata: domain.PVCMetadata{
 			Labels:          maps.Clone(input.pvc.Labels),
-			Annotations:     filteredPVCAnnotations(input.pvc.Annotations),
+			Annotations:     kube.PVCAnnotationsForRecreation(input.pvc.Annotations),
 			OwnerReferences: append([]metav1.OwnerReference(nil), input.pvc.OwnerReferences...),
 		},
 		DestinationPVC:   destinationRef,
@@ -1266,8 +1266,8 @@ func (p *Planner) checkPlanVolumeShrink(
 	}
 
 	usage, err := p.volumeUsageReader.Read(ctx, kube.VolumeUsageReadOptions{
-		SourcePVC: pvcReference(input.pvc),
-		SourcePV:  pvReference(input.pv),
+		SourcePVC: kube.PVCReference(input.pvc),
+		SourcePV:  kube.PVReference(input.pv),
 	})
 	if err != nil {
 		state.plan.AddCheck(failed(
@@ -1566,7 +1566,7 @@ func (p *Planner) selectTargetNodeFromNodes(
 	candidates := make([]targetNodeCandidate, 0, len(nodes))
 	for i := range nodes {
 		node := &nodes[i]
-		if !nodeReady(node) || node.Spec.Unschedulable {
+		if !kube.NodeReadyAndSchedulable(node) {
 			continue
 		}
 
@@ -1598,7 +1598,7 @@ func (p *Planner) selectTargetNodeFromNodes(
 		sourcePVMatches := 0
 		for _, volume := range volumes {
 			if sc := storageClasses[volume.StorageClass]; sc != nil &&
-				!matchesAllowedTopologies(sc, node) {
+				!kube.StorageClassAllowsNode(sc, node) {
 				compatible = false
 				break
 			}
@@ -2117,10 +2117,6 @@ func supportedStrategy(strategy string) bool {
 	}
 }
 
-func destinationPVCName(options Options, source string, index int) string {
-	return destinationPVCNameFor(options, nil, source, index)
-}
-
 func destinationPVCNameFor(options Options, mapped []string, source string, index int) string {
 	if index < len(mapped) && mapped[index] != "" {
 		return mapped[index]
@@ -2164,74 +2160,6 @@ func warned(name, message string) domain.Check {
 
 func failed(name, message string) domain.Check {
 	return domain.Check{Name: name, Severity: domain.SeverityError, Passed: false, Message: message}
-}
-
-func pvcReference(pvc *corev1.PersistentVolumeClaim) domain.ObjectReference {
-	return domain.ObjectReference{
-		APIVersion:      domain.CoreAPIVersion,
-		Kind:            domain.KindPersistentVolumeClaim,
-		Namespace:       pvc.Namespace,
-		Name:            pvc.Name,
-		UID:             pvc.UID,
-		ResourceVersion: pvc.ResourceVersion,
-	}
-}
-
-func pvReference(pv *corev1.PersistentVolume) domain.ObjectReference {
-	return domain.ObjectReference{
-		APIVersion:      domain.CoreAPIVersion,
-		Kind:            domain.KindPersistentVolume,
-		Name:            pv.Name,
-		UID:             pv.UID,
-		ResourceVersion: pv.ResourceVersion,
-	}
-}
-
-func nodeReady(node *corev1.Node) bool {
-	if node == nil {
-		return false
-	}
-
-	for _, condition := range node.Status.Conditions {
-		if condition.Type == corev1.NodeReady {
-			return condition.Status == corev1.ConditionTrue
-		}
-	}
-
-	return false
-}
-
-func matchesAllowedTopologies(sc *storagev1.StorageClass, node *corev1.Node) bool {
-	if len(sc.AllowedTopologies) == 0 {
-		return true
-	}
-
-	for _, term := range sc.AllowedTopologies {
-		matches := true
-		for _, expression := range term.MatchLabelExpressions {
-			actual, exists := node.Labels[expression.Key]
-			if !exists || !contains(expression.Values, actual) {
-				matches = false
-				break
-			}
-		}
-
-		if matches {
-			return true
-		}
-	}
-
-	return false
-}
-
-func (p *Planner) checkCSINode(
-	ctx context.Context,
-	plan *domain.MigrationPlan,
-	sc *storagev1.StorageClass,
-	node *corev1.Node,
-) {
-	csiNode, err := p.client.StorageV1().CSINodes().Get(ctx, node.Name, metav1.GetOptions{})
-	p.checkCSINodeFromObject(plan, sc, node, csiNode, err)
 }
 
 func (p *Planner) checkCSINodeFromObject(
@@ -2296,24 +2224,6 @@ func (p *Planner) checkCSINodeFromObject(
 			),
 		),
 	)
-}
-
-func (p *Planner) checkPVCReferences(
-	ctx context.Context,
-	plan *domain.MigrationPlan,
-	pvc *corev1.PersistentVolumeClaim,
-	sourcePod *corev1.Pod,
-	operation domain.Operation,
-	online bool,
-) {
-	pods, err := p.client.CoreV1().Pods(pvc.Namespace).List(ctx, metav1.ListOptions{})
-	if err != nil {
-		p.checkPVCReferencesFromPods(plan, pvc, sourcePod, operation, online, nil, err)
-
-		return
-	}
-
-	p.checkPVCReferencesFromPods(plan, pvc, sourcePod, operation, online, pods.Items, nil)
 }
 
 func (p *Planner) checkPVCReferencesFromPods(
@@ -2622,31 +2532,6 @@ func uniqueSorted(values []string) []string {
 	sort.Strings(result)
 
 	return result
-}
-
-func filteredPVCAnnotations(input map[string]string) map[string]string {
-	result := map[string]string{}
-	for key, value := range input {
-		switch key {
-		case "pv.kubernetes.io/bind-completed",
-			"pv.kubernetes.io/bound-by-controller",
-			"volume.kubernetes.io/selected-node",
-			"volume.kubernetes.io/storage-provisioner",
-			"volume.beta.kubernetes.io/storage-provisioner",
-			kube.PVCStorageResizerAnnotation,
-			"kubectl.kubernetes.io/last-applied-configuration",
-			kube.SessionKey:
-			continue
-		default:
-			result[key] = value
-		}
-	}
-
-	return result
-}
-
-func contains(values []string, expected string) bool {
-	return slices.Contains(values, expected)
 }
 
 func isRiskRole(role string) bool {

@@ -1,5 +1,7 @@
 package kube
 
+import "maps"
+
 const (
 	AppNameLabel      = "app.kubernetes.io/name"
 	AppInstanceLabel  = "app.kubernetes.io/instance"
@@ -20,6 +22,13 @@ const (
 	RollbackPVAnnotation        = "pvc-migrate.io/rollback-pv"
 	PairedPVAnnotation          = "pvc-migrate.io/paired-pv"
 	PauseSessionAnnotation      = "pvc-migrate.io/pause-session"
+
+	pvcBindCompletedAnnotation          = "pv.kubernetes.io/bind-completed"
+	pvcBoundByControllerAnnotation      = "pv.kubernetes.io/bound-by-controller"
+	pvcSelectedNodeAnnotation           = "volume.kubernetes.io/selected-node"
+	pvcStorageProvisionerAnnotation     = "volume.kubernetes.io/storage-provisioner"
+	pvcBetaStorageProvisionerAnnotation = "volume.beta.kubernetes.io/storage-provisioner"
+	kubectlLastAppliedConfigAnnotation  = "kubectl.kubernetes.io/last-applied-configuration"
 )
 
 const (
@@ -31,3 +40,27 @@ const (
 	ResourceRoleReservationConsumer = "reservation-consumer"
 	ResourceRoleToolProbe           = "tool-probe"
 )
+
+// PVCAnnotationsForRecreation copies user annotations while removing
+// controller-owned binding state and stale pvc-migrate ownership.
+func PVCAnnotationsForRecreation(input map[string]string) map[string]string {
+	result := maps.Clone(input)
+	if result == nil {
+		return map[string]string{}
+	}
+
+	for _, key := range []string{
+		pvcBindCompletedAnnotation,
+		pvcBoundByControllerAnnotation,
+		pvcSelectedNodeAnnotation,
+		pvcStorageProvisionerAnnotation,
+		pvcBetaStorageProvisionerAnnotation,
+		PVCStorageResizerAnnotation,
+		kubectlLastAppliedConfigAnnotation,
+		SessionKey,
+	} {
+		delete(result, key)
+	}
+
+	return result
+}

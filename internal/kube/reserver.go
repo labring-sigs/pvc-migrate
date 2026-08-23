@@ -801,7 +801,7 @@ func (r *Reserver) provisionOnTarget(
 				)
 			}
 
-			return isPodReady(current), nil
+			return PodReady(current), nil
 		},
 	); err != nil {
 		return err
@@ -1018,16 +1018,6 @@ func nodeTolerations(node *corev1.Node) []corev1.Toleration {
 	}
 
 	return result
-}
-
-func isPodReady(pod *corev1.Pod) bool {
-	for _, condition := range pod.Status.Conditions {
-		if condition.Type == corev1.PodReady {
-			return condition.Status == corev1.ConditionTrue
-		}
-	}
-
-	return false
 }
 
 // PVSupportsNode reports whether a PV's required node affinity permits a node.

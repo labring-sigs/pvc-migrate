@@ -612,7 +612,7 @@ func (s *Service) validateWorkloadResume(ctx context.Context, session *domain.Se
 		return domain.WrapError(domain.ErrorKubernetes, "resume dry-run", "read target node", err)
 	}
 
-	if !nodeReadyAndSchedulable(node) {
+	if !kube.NodeReadyAndSchedulable(node) {
 		return domain.NewError(
 			domain.ErrorPrecondition,
 			"resume dry-run",
@@ -674,18 +674,4 @@ func (s *Service) verifyActiveVolumes(ctx context.Context, session *domain.Sessi
 	}
 
 	return nil
-}
-
-func nodeReadyAndSchedulable(node *corev1.Node) bool {
-	if node == nil || node.Spec.Unschedulable {
-		return false
-	}
-
-	for _, condition := range node.Status.Conditions {
-		if condition.Type == corev1.NodeReady {
-			return condition.Status == corev1.ConditionTrue
-		}
-	}
-
-	return false
 }
