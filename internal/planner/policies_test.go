@@ -6,92 +6,71 @@ import (
 	"testing"
 
 	"github.com/labring-sigs/pvc-migrate/internal/domain"
+	"github.com/labring-sigs/pvc-migrate/internal/kube"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	kubernetesfake "k8s.io/client-go/kubernetes/fake"
 )
 
-func TestQuotaDemandIncludesObjectAndStorageClassResources(t *testing.T) {
-	demand, err := quotaDemand(domain.ResourceEstimate{
-		StorageRequests:    "3Gi",
-		PVCs:               2,
-		Pods:               4,
-		Jobs:               2,
-		Services:           2,
-		Secrets:            1,
-		ConfigMaps:         1,
-		ServiceAccounts:    2,
-		Leases:             1,
-		ByStorageClass:     map[string]string{"fast": "3Gi", "": "100Gi"},
-		PVCsByStorageClass: map[string]int{"fast": 2},
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	want := map[corev1.ResourceName]string{
-		corev1.ResourceRequestsStorage:                                                 "3Gi",
-		corev1.ResourcePersistentVolumeClaims:                                          "2",
-		corev1.ResourcePods:                                                            "4",
-		corev1.ResourceServices:                                                        "2",
-		corev1.ResourceSecrets:                                                         "1",
-		corev1.ResourceConfigMaps:                                                      "1",
-		corev1.ResourceName("count/jobs.batch"):                                        "2",
-		corev1.ResourceName("count/services"):                                          "2",
-		corev1.ResourceName("count/secrets"):                                           "1",
-		corev1.ResourceName("count/configmaps"):                                        "1",
-		corev1.ResourceName("count/serviceaccounts"):                                   "2",
-		corev1.ResourceName("count/persistentvolumeclaims"):                            "2",
-		corev1.ResourceName("count/leases.coordination.k8s.io"):                        "1",
-		corev1.ResourceName("fast.storageclass.storage.k8s.io/requests.storage"):       "3Gi",
-		corev1.ResourceName("fast.storageclass.storage.k8s.io/persistentvolumeclaims"): "2",
-	}
-	for name, expected := range want {
-		quantity, ok := demand[name]
-		if !ok || quantity.Cmp(resource.MustParse(expected)) != 0 {
-			t.Fatalf("demand[%s]=%s want=%s", name, quantity.String(), expected)
-		}
-	}
-
-	if _, exists := demand[corev1.ResourceName(".storageclass.storage.k8s.io/requests.storage")]; exists {
-		t.Fatal("empty StorageClass should be omitted")
-	}
+func checkQuotasForTest(
+	ctx context.Context,
+	planner *Planner,
+	plan *domain.MigrationPlan,
+	namespace string,
+	estimate domain.ResourceEstimate,
+) {
+	policies := kube.ReadNamespaceResourcePolicies(
+		ctx,
+		planner.client,
+		namespace,
+		estimate.Pods > 0,
+	)
+	planner.checkQuotas(plan, namespace, estimate, policies)
 }
 
-func TestQuotaDemandCountsPVCsPerStorageClass(t *testing.T) {
-	demand, err := quotaDemand(domain.ResourceEstimate{
-		StorageRequests:    "3Gi",
-		PVCs:               2,
-		ByStorageClass:     map[string]string{"fast": "1Gi", "slow": "2Gi"},
-		PVCsByStorageClass: map[string]int{"fast": 1, "slow": 1},
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	for _, class := range []string{"fast", "slow"} {
-		name := corev1.ResourceName(class + ".storageclass.storage.k8s.io/persistentvolumeclaims")
-		if quantity := demand[name]; quantity.Cmp(resource.MustParse("1")) != 0 {
-			t.Fatalf("demand[%s]=%s want=1", name, quantity.String())
-		}
-	}
+func checkLimitRangesForTest(
+	ctx context.Context,
+	planner *Planner,
+	plan *domain.MigrationPlan,
+	volumes []domain.PlannedVolume,
+	toolPods int,
+) {
+	policies := kube.ReadNamespaceResourcePolicies(ctx, planner.client, "stage", true)
+	planner.checkLimitRanges(plan, "stage", volumes, toolPods, policies)
 }
 
-func TestQuotaDemandRejectsInvalidQuantities(t *testing.T) {
-	tests := []domain.ResourceEstimate{
-		{StorageRequests: "bad", ByStorageClass: map[string]string{}},
-		{StorageRequests: "1Gi", ByStorageClass: map[string]string{"fast": "bad"}},
-		{
+func TestCheckNamespaceResourcePoliciesReadsOneSnapshot(t *testing.T) {
+	client := kubernetesfake.NewClientset()
+	planner := New(client, nil)
+	plan := &domain.MigrationPlan{Ready: true}
+
+	planner.checkNamespaceResourcePolicies(
+		context.Background(),
+		plan,
+		"stage",
+		[]domain.PlannedVolume{{Capacity: "1Gi"}},
+		domain.ResourceEstimate{
 			StorageRequests:    "1Gi",
-			ByStorageClass:     map[string]string{"fast": "1Gi"},
+			Pods:               1,
+			ByStorageClass:     map[string]string{},
 			PVCsByStorageClass: map[string]int{},
 		},
+	)
+
+	if !plan.Ready || len(plan.Checks) != 2 {
+		t.Fatalf("policy checks=%#v", plan.Checks)
 	}
-	for _, estimate := range tests {
-		if _, err := quotaDemand(estimate); domain.CategoryOf(err) != domain.ErrorInternal {
-			t.Fatalf("category=%s error=%v", domain.CategoryOf(err), err)
+
+	lists := map[string]int{}
+	for _, action := range client.Actions() {
+		if action.GetVerb() == "list" {
+			lists[action.GetResource().Resource]++
 		}
+	}
+
+	if lists["resourcequotas"] != 1 || lists["limitranges"] != 1 {
+		t.Fatalf("policy list actions=%v, want one list per resource", lists)
 	}
 }
 
@@ -105,12 +84,16 @@ func TestCheckQuotasAllowsExactCapacityAndReportsAllExcess(t *testing.T) {
 		Status: corev1.ResourceQuotaStatus{Used: corev1.ResourceList{
 			corev1.ResourceRequestsStorage: resource.MustParse("1Gi"),
 			corev1.ResourcePods:            resource.MustParse("4"),
+		}, Hard: corev1.ResourceList{
+			corev1.ResourceRequestsStorage: resource.MustParse("3Gi"),
+			corev1.ResourcePods:            resource.MustParse("5"),
 		}},
 	}
 	planner := New(kubernetesfake.NewClientset(quota), nil)
 	plan := &domain.MigrationPlan{Ready: true}
-	planner.checkQuotas(
+	checkQuotasForTest(
 		context.Background(),
+		planner,
 		plan,
 		"stage",
 		domain.ResourceEstimate{
@@ -125,8 +108,9 @@ func TestCheckQuotasAllowsExactCapacityAndReportsAllExcess(t *testing.T) {
 	}
 
 	plan = &domain.MigrationPlan{Ready: true}
-	planner.checkQuotas(
+	checkQuotasForTest(
 		context.Background(),
+		planner,
 		plan,
 		"stage",
 		domain.ResourceEstimate{
@@ -147,6 +131,137 @@ func TestCheckQuotasAllowsExactCapacityAndReportsAllExcess(t *testing.T) {
 	}
 }
 
+func TestCheckQuotasAccountsForDefaultedToolResources(t *testing.T) {
+	quota := &corev1.ResourceQuota{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "stage", Name: "ephemeral"},
+		Spec: corev1.ResourceQuotaSpec{Hard: corev1.ResourceList{
+			corev1.ResourceLimitsEphemeralStorage: resource.MustParse("3Gi"),
+		}},
+	}
+	limitRange := &corev1.LimitRange{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "stage", Name: "defaults"},
+		Spec: corev1.LimitRangeSpec{Limits: []corev1.LimitRangeItem{{
+			Type: corev1.LimitTypeContainer,
+			Default: corev1.ResourceList{
+				corev1.ResourceEphemeralStorage: resource.MustParse("2Gi"),
+			},
+		}}},
+	}
+	planner := New(plannerClient(quota, limitRange), nil)
+	plan := &domain.MigrationPlan{Ready: true}
+	checkQuotasForTest(context.Background(), planner, plan, "stage", domain.ResourceEstimate{
+		StorageRequests:    "0",
+		Pods:               2,
+		ByStorageClass:     map[string]string{},
+		PVCsByStorageClass: map[string]int{},
+	})
+
+	if plan.Ready || len(plan.Checks) != 1 ||
+		!strings.Contains(plan.Checks[0].Message, "limits.ephemeral-storage") ||
+		!strings.Contains(plan.Checks[0].Message, "4Gi") {
+		t.Fatalf("defaulted resource quota check: %#v", plan.Checks)
+	}
+}
+
+func TestCheckQuotasIgnoresNonmatchingToolScope(t *testing.T) {
+	quota := &corev1.ResourceQuota{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "stage", Name: "non-best-effort"},
+		Spec: corev1.ResourceQuotaSpec{
+			Scopes: []corev1.ResourceQuotaScope{corev1.ResourceQuotaScopeNotBestEffort},
+			Hard: corev1.ResourceList{
+				corev1.ResourcePods: resource.MustParse("0"),
+			},
+		},
+	}
+	planner := New(plannerClient(quota), nil)
+	plan := &domain.MigrationPlan{Ready: true}
+	checkQuotasForTest(context.Background(), planner, plan, "stage", domain.ResourceEstimate{
+		StorageRequests:    "0",
+		Pods:               1,
+		ByStorageClass:     map[string]string{},
+		PVCsByStorageClass: map[string]int{},
+	})
+
+	if !plan.Ready || len(plan.Checks) != 1 || !plan.Checks[0].Passed {
+		t.Fatalf("nonmatching scoped quota rejected tool: %#v", plan.Checks)
+	}
+}
+
+func TestCheckQuotasEnforcesToolObjectCounts(t *testing.T) {
+	quota := &corev1.ResourceQuota{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "stage", Name: "objects"},
+		Spec: corev1.ResourceQuotaSpec{Hard: corev1.ResourceList{
+			corev1.ResourceName("count/pods"):             resource.MustParse("4"),
+			corev1.ResourceName("count/deployments.apps"): resource.MustParse("1"),
+			corev1.ResourceName("count/replicasets.apps"): resource.MustParse("2"),
+		}},
+		Status: corev1.ResourceQuotaStatus{
+			Used: corev1.ResourceList{
+				corev1.ResourceName("count/pods"):             resource.MustParse("3"),
+				corev1.ResourceName("count/deployments.apps"): resource.MustParse("0"),
+				corev1.ResourceName("count/replicasets.apps"): resource.MustParse("2"),
+			},
+		},
+	}
+	planner := New(plannerClient(quota), nil)
+	plan := &domain.MigrationPlan{Ready: true}
+	checkQuotasForTest(context.Background(), planner, plan, "stage", domain.ResourceEstimate{
+		StorageRequests:    "0",
+		Pods:               2,
+		Deployments:        2,
+		ReplicaSets:        1,
+		ByStorageClass:     map[string]string{},
+		PVCsByStorageClass: map[string]int{},
+	})
+
+	if plan.Ready || len(plan.Checks) != 1 {
+		t.Fatalf("tool object-count quota check: %#v", plan.Checks)
+	}
+
+	for _, resourceName := range []string{"count/pods", "count/deployments.apps", "count/replicasets.apps"} {
+		if !strings.Contains(plan.Checks[0].Message, resourceName) {
+			t.Fatalf(
+				"object-count quota message omits %s: %s",
+				resourceName,
+				plan.Checks[0].Message,
+			)
+		}
+	}
+}
+
+func TestCheckQuotasSkipsLimitRangesWithoutPods(t *testing.T) {
+	quota := &corev1.ResourceQuota{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "session", Name: "objects"},
+		Status: corev1.ResourceQuotaStatus{
+			Hard: corev1.ResourceList{
+				corev1.ResourceConfigMaps: resource.MustParse("1"),
+			},
+			Used: corev1.ResourceList{
+				corev1.ResourceConfigMaps: resource.MustParse("0"),
+			},
+		},
+	}
+	client := kubernetesfake.NewClientset(quota)
+	planner := New(client, nil)
+	plan := &domain.MigrationPlan{Ready: true}
+	checkQuotasForTest(context.Background(), planner, plan, "session", domain.ResourceEstimate{
+		StorageRequests:    "0",
+		ConfigMaps:         1,
+		ByStorageClass:     map[string]string{},
+		PVCsByStorageClass: map[string]int{},
+	})
+
+	if !plan.Ready || len(plan.Checks) != 1 || !plan.Checks[0].Passed {
+		t.Fatalf("object-only quota check: %#v", plan.Checks)
+	}
+
+	for _, action := range client.Actions() {
+		if action.GetResource().Resource == "limitranges" {
+			t.Fatalf("object-only quota check listed LimitRanges: %#v", client.Actions())
+		}
+	}
+}
+
 func TestCheckLimitRangesValidatesMinimumMaximumAndMalformedCapacity(t *testing.T) {
 	limitRange := &corev1.LimitRange{
 		ObjectMeta: metav1.ObjectMeta{Namespace: "stage", Name: "pvc-bounds"},
@@ -158,7 +273,7 @@ func TestCheckLimitRangesValidatesMinimumMaximumAndMalformedCapacity(t *testing.
 	}
 	planner := New(kubernetesfake.NewClientset(limitRange), nil)
 	plan := &domain.MigrationPlan{Ready: true}
-	planner.checkLimitRanges(context.Background(), plan, "stage", []domain.PlannedVolume{
+	checkLimitRangesForTest(context.Background(), planner, plan, []domain.PlannedVolume{
 		{
 			SourcePVC:      domain.ObjectReference{Name: "small"},
 			DestinationPVC: domain.ObjectReference{Name: "small-target"},
@@ -174,7 +289,7 @@ func TestCheckLimitRangesValidatesMinimumMaximumAndMalformedCapacity(t *testing.
 			DestinationPVC: domain.ObjectReference{Name: "broken-target"},
 			Capacity:       "invalid",
 		},
-	})
+	}, 0)
 
 	if plan.Ready || len(plan.Checks) != 1 {
 		t.Fatalf("limit checks: %#v", plan.Checks)
@@ -197,15 +312,16 @@ func TestCheckLimitRangesRejectsPositiveToolPodMinimums(t *testing.T) {
 	}
 	planner := New(kubernetesfake.NewClientset(limitRange), nil)
 	plan := &domain.MigrationPlan{Ready: true}
-	planner.checkLimitRanges(
+	checkLimitRangesForTest(
 		context.Background(),
+		planner,
 		plan,
-		"stage",
 		[]domain.PlannedVolume{{Capacity: "1Gi"}},
+		1,
 	)
 
 	if plan.Ready || len(plan.Checks) != 1 ||
-		!strings.Contains(plan.Checks[0].Message, "tool Pod resource cpu=0") {
+		!strings.Contains(plan.Checks[0].Message, "tool Pod resource cpu request 0") {
 		t.Fatalf("pod minimum check: %#v", plan.Checks)
 	}
 }
@@ -220,11 +336,12 @@ func TestCheckLimitRangesRejectsPositiveToolContainerMinimums(t *testing.T) {
 	}
 	planner := New(kubernetesfake.NewClientset(limitRange), nil)
 	plan := &domain.MigrationPlan{Ready: true}
-	planner.checkLimitRanges(
+	checkLimitRangesForTest(
 		context.Background(),
+		planner,
 		plan,
-		"stage",
 		[]domain.PlannedVolume{{Capacity: "1Gi"}},
+		1,
 	)
 
 	if plan.Ready || len(plan.Checks) != 1 ||
@@ -260,10 +377,17 @@ func TestCheckLimitRangesModelsToolDefaultsAndMaxRequestRatio(t *testing.T) {
 
 	t.Run("defaults and max permit explicit zero", func(t *testing.T) {
 		plan := &domain.MigrationPlan{Ready: true}
-		New(
+		planner := New(
 			kubernetesfake.NewClientset(newLimitRange(nil)),
 			nil,
-		).checkLimitRanges(context.Background(), plan, "stage", []domain.PlannedVolume{{Capacity: "1Gi"}})
+		)
+		checkLimitRangesForTest(
+			context.Background(),
+			planner,
+			plan,
+			[]domain.PlannedVolume{{Capacity: "1Gi"}},
+			1,
+		)
 
 		if !plan.Ready || len(plan.Checks) != 1 || !plan.Checks[0].Passed {
 			t.Fatalf("limit check: %#v", plan.Checks)
@@ -272,12 +396,19 @@ func TestCheckLimitRangesModelsToolDefaultsAndMaxRequestRatio(t *testing.T) {
 
 	t.Run("max request ratio rejects zero pair", func(t *testing.T) {
 		plan := &domain.MigrationPlan{Ready: true}
-		New(
+		planner := New(
 			kubernetesfake.NewClientset(
 				newLimitRange(corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("2")}),
 			),
 			nil,
-		).checkLimitRanges(context.Background(), plan, "stage", []domain.PlannedVolume{{Capacity: "1Gi"}})
+		)
+		checkLimitRangesForTest(
+			context.Background(),
+			planner,
+			plan,
+			[]domain.PlannedVolume{{Capacity: "1Gi"}},
+			1,
+		)
 
 		if plan.Ready || len(plan.Checks) != 1 ||
 			!strings.Contains(plan.Checks[0].Message, "maxLimitRequestRatio") {

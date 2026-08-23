@@ -360,8 +360,12 @@ func (s *Service) copy(ctx context.Context, session *Session, retries int, noCom
 				),
 				NoCompress:  noCompress,
 				HelmTimeout: s.helmTimeout,
-				Writer:      s.writer,
-				Logger:      s.logger,
+				HelmStringValues: append(
+					[]string(nil),
+					kube.ZeroResourceHelmValues()...,
+				),
+				Writer: s.writer,
+				Logger: s.logger,
 			}
 
 			last = s.copier.Copy(ctx, req, nil)

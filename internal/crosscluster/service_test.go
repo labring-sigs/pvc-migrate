@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"slices"
 	"testing"
 	"time"
 
@@ -185,6 +186,249 @@ func TestPlanAndCreateSessionKeepClustersSeparate(t *testing.T) {
 	}
 }
 
+func TestPlanChecksDestinationPVCQuota(t *testing.T) {
+	service, options, _ := crossFixture()
+
+	quota := &corev1.ResourceQuota{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: options.DestinationNamespace,
+			Name:      "storage-limit",
+		},
+		Status: corev1.ResourceQuotaStatus{
+			Hard: corev1.ResourceList{corev1.ResourceRequestsStorage: resource.MustParse("1Gi")},
+			Used: corev1.ResourceList{corev1.ResourceRequestsStorage: resource.MustParse("0")},
+		},
+	}
+	if _, err := service.DestinationClientForTest().CoreV1().
+		ResourceQuotas(options.DestinationNamespace).
+		Create(context.Background(), quota, metav1.CreateOptions{}); err != nil {
+		t.Fatal(err)
+	}
+
+	plan, err := service.Plan(context.Background(), options)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if plan.Ready || !hasCrossClusterFailedCheck(plan, "destination-pvc-policy") {
+		t.Fatalf("destination PVC quota was not enforced: %#v", plan.Checks)
+	}
+}
+
+func TestPlanChecksSourceSessionQuota(t *testing.T) {
+	service, options, _ := crossFixture()
+
+	quota := &corev1.ResourceQuota{
+		ObjectMeta: metav1.ObjectMeta{Namespace: options.SessionNamespace, Name: "session-limit"},
+		Status: corev1.ResourceQuotaStatus{
+			Hard: corev1.ResourceList{
+				corev1.ResourceName("count/leases.coordination.k8s.io"): resource.MustParse("0"),
+			},
+			Used: corev1.ResourceList{
+				corev1.ResourceName("count/leases.coordination.k8s.io"): resource.MustParse("0"),
+			},
+		},
+	}
+	if _, err := service.SourceClientForTest().CoreV1().ResourceQuotas(options.SessionNamespace).
+		Create(context.Background(), quota, metav1.CreateOptions{}); err != nil {
+		t.Fatal(err)
+	}
+
+	plan, err := service.Plan(context.Background(), options)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if plan.Ready || !hasCrossClusterFailedCheck(plan, "source-session-resource-quota") {
+		t.Fatalf("source session quota was not enforced: %#v", plan.Checks)
+	}
+}
+
+func TestPlanChecksSourceToolQuota(t *testing.T) {
+	service, options, _ := crossFixture()
+
+	quota := &corev1.ResourceQuota{
+		ObjectMeta: metav1.ObjectMeta{Namespace: options.SourceNamespace, Name: "tool-limit"},
+		Status: corev1.ResourceQuotaStatus{
+			Hard: corev1.ResourceList{
+				corev1.ResourceName("count/deployments.apps"): resource.MustParse("0"),
+			},
+			Used: corev1.ResourceList{
+				corev1.ResourceName("count/deployments.apps"): resource.MustParse("0"),
+			},
+		},
+	}
+	if _, err := service.SourceClientForTest().CoreV1().ResourceQuotas(options.SourceNamespace).
+		Create(context.Background(), quota, metav1.CreateOptions{}); err != nil {
+		t.Fatal(err)
+	}
+
+	plan, err := service.Plan(context.Background(), options)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if plan.Ready || !hasCrossClusterFailedCheck(plan, "source-tool-resource-quota") {
+		t.Fatalf("source tool quota was not enforced: %#v", plan.Checks)
+	}
+}
+
+func TestPlanAppliesCrossClusterToolPodQuotaToNotTerminatingScope(t *testing.T) {
+	for _, test := range []struct {
+		name      string
+		scope     corev1.ResourceQuotaScope
+		wantReady bool
+	}{
+		{
+			name:      "Terminating excludes chart Pods",
+			scope:     corev1.ResourceQuotaScopeTerminating,
+			wantReady: true,
+		},
+		{
+			name:  "NotTerminating includes chart Pods",
+			scope: corev1.ResourceQuotaScopeNotTerminating,
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			service, options, _ := crossFixture()
+
+			quota := &corev1.ResourceQuota{
+				ObjectMeta: metav1.ObjectMeta{
+					Namespace: options.SourceNamespace,
+					Name:      "tool-pods",
+				},
+				Spec: corev1.ResourceQuotaSpec{
+					Scopes: []corev1.ResourceQuotaScope{test.scope},
+				},
+				Status: corev1.ResourceQuotaStatus{
+					Hard: corev1.ResourceList{corev1.ResourcePods: resource.MustParse("0")},
+					Used: corev1.ResourceList{corev1.ResourcePods: resource.MustParse("0")},
+				},
+			}
+			if _, err := service.SourceClientForTest().CoreV1().
+				ResourceQuotas(options.SourceNamespace).
+				Create(context.Background(), quota, metav1.CreateOptions{}); err != nil {
+				t.Fatal(err)
+			}
+
+			plan, err := service.Plan(context.Background(), options)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			if plan.Ready != test.wantReady {
+				t.Fatalf("ready=%t checks=%#v", plan.Ready, plan.Checks)
+			}
+		})
+	}
+}
+
+func TestPlanAccountsForDestinationLimitRangeDefault(t *testing.T) {
+	service, options, _ := crossFixture()
+	limitRange := &corev1.LimitRange{
+		ObjectMeta: metav1.ObjectMeta{Namespace: options.DestinationNamespace, Name: "defaults"},
+		Spec: corev1.LimitRangeSpec{Limits: []corev1.LimitRangeItem{{
+			Type: corev1.LimitTypeContainer,
+			Default: corev1.ResourceList{
+				corev1.ResourceEphemeralStorage: resource.MustParse("2Gi"),
+			},
+		}}},
+	}
+
+	quota := &corev1.ResourceQuota{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: options.DestinationNamespace,
+			Name:      "ephemeral-limit",
+		},
+		Status: corev1.ResourceQuotaStatus{
+			Hard: corev1.ResourceList{
+				corev1.ResourceLimitsEphemeralStorage: resource.MustParse("1Gi"),
+			},
+			Used: corev1.ResourceList{
+				corev1.ResourceLimitsEphemeralStorage: resource.MustParse("0"),
+			},
+		},
+	}
+	if _, err := service.DestinationClientForTest().CoreV1().
+		LimitRanges(options.DestinationNamespace).
+		Create(context.Background(), limitRange, metav1.CreateOptions{}); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := service.DestinationClientForTest().CoreV1().
+		ResourceQuotas(options.DestinationNamespace).
+		Create(context.Background(), quota, metav1.CreateOptions{}); err != nil {
+		t.Fatal(err)
+	}
+
+	plan, err := service.Plan(context.Background(), options)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if plan.Ready || !hasCrossClusterFailedCheck(plan, "destination-tool-resource-quota") {
+		t.Fatalf("LimitRange default was not included in destination quota: %#v", plan.Checks)
+	}
+}
+
+func TestPlanDoesNotTurnLimitRangeDefaultRequestIntoLimit(t *testing.T) {
+	service, options, _ := crossFixture()
+	limitRange := &corev1.LimitRange{
+		ObjectMeta: metav1.ObjectMeta{Namespace: options.DestinationNamespace, Name: "requests"},
+		Spec: corev1.LimitRangeSpec{Limits: []corev1.LimitRangeItem{{
+			Type: corev1.LimitTypeContainer,
+			DefaultRequest: corev1.ResourceList{
+				corev1.ResourceEphemeralStorage: resource.MustParse("100Mi"),
+			},
+		}}},
+	}
+
+	quota := &corev1.ResourceQuota{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: options.DestinationNamespace,
+			Name:      "ephemeral-limit",
+		},
+		Status: corev1.ResourceQuotaStatus{
+			Hard: corev1.ResourceList{
+				corev1.ResourceLimitsEphemeralStorage: resource.MustParse("0"),
+			},
+			Used: corev1.ResourceList{
+				corev1.ResourceLimitsEphemeralStorage: resource.MustParse("0"),
+			},
+		},
+	}
+	if _, err := service.DestinationClientForTest().CoreV1().
+		LimitRanges(options.DestinationNamespace).
+		Create(context.Background(), limitRange, metav1.CreateOptions{}); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := service.DestinationClientForTest().CoreV1().
+		ResourceQuotas(options.DestinationNamespace).
+		Create(context.Background(), quota, metav1.CreateOptions{}); err != nil {
+		t.Fatal(err)
+	}
+
+	plan, err := service.Plan(context.Background(), options)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if !plan.Ready {
+		t.Fatalf("defaultRequest became an ephemeral-storage limit: %#v", plan.Checks)
+	}
+}
+
+func hasCrossClusterFailedCheck(plan *Plan, name string) bool {
+	for _, check := range plan.Checks {
+		if check.Name == name && !check.Passed {
+			return true
+		}
+	}
+
+	return false
+}
+
 func TestPlanMissingDestinationStorageClassReturnsFailedPlan(t *testing.T) {
 	service, options, _ := crossFixture()
 	options.DestinationStorageClass = "missing"
@@ -350,6 +594,90 @@ func TestCopyUsesBothConnectionsAndPersistsTransferState(t *testing.T) {
 	if len(copier.requests) != 1 || copier.requests[0].KubeconfigPath != "source.yaml" ||
 		copier.requests[0].DestinationKubeconfigPath != "destination.yaml" {
 		t.Fatalf("copy request did not preserve two connections: %#v", copier.requests)
+	}
+
+	for _, expected := range kube.ZeroResourceHelmValues() {
+		if !slices.Contains(copier.requests[0].HelmStringValues, expected) {
+			t.Fatalf(
+				"copy request lacks zero resource value %q: %v",
+				expected,
+				copier.requests[0].HelmStringValues,
+			)
+		}
+	}
+}
+
+func TestReservationConsumerUsesZeroToolResources(t *testing.T) {
+	service, options, _ := crossFixture()
+	options.TargetNode = "destination-node"
+
+	plan, err := service.Plan(context.Background(), options)
+	if err != nil || !plan.Ready {
+		t.Fatalf("plan ready=%v err=%v checks=%#v", plan.Ready, err, plan.Checks)
+	}
+
+	session, err := service.CreateSession(context.Background(), options, plan)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	destination := service.DestinationClientForTest()
+
+	destinationFake, ok := destination.(*fake.Clientset)
+	if !ok {
+		t.Fatalf("destination client type=%T", destination)
+	}
+
+	destinationFake.PrependReactor(
+		"create",
+		"pods",
+		func(action clienttesting.Action) (bool, runtime.Object, error) {
+			pod, err := testutil.ActionObject[*corev1.Pod](action)
+			if err != nil {
+				return true, nil, err
+			}
+
+			pod.UID = "reservation-pod"
+			pod.Status.Phase = corev1.PodRunning
+			pod.Status.Conditions = []corev1.PodCondition{{
+				Type: corev1.PodScheduled, Status: corev1.ConditionTrue,
+			}}
+
+			return false, nil, nil
+		},
+	)
+
+	if err := service.CreateReservationConsumerForTest(
+		context.Background(),
+		session,
+		&session.Spec.Volumes[0],
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	pods, err := destination.CoreV1().Pods(options.DestinationNamespace).List(
+		context.Background(),
+		metav1.ListOptions{},
+	)
+	if err != nil || len(pods.Items) != 1 {
+		t.Fatalf("reservation Pods=%d err=%v", len(pods.Items), err)
+	}
+
+	resources := pods.Items[0].Spec.Containers[0].Resources
+
+	zero := resource.MustParse("0")
+	for _, name := range []corev1.ResourceName{
+		corev1.ResourceCPU,
+		corev1.ResourceMemory,
+		corev1.ResourceEphemeralStorage,
+	} {
+		if got := resources.Requests[name]; got.Cmp(zero) != 0 {
+			t.Fatalf("reservation request %s=%s, want 0", name, got.String())
+		}
+	}
+
+	if _, exists := resources.Limits[corev1.ResourceEphemeralStorage]; exists {
+		t.Fatal("reservation Pod sets an ephemeral-storage limit")
 	}
 }
 

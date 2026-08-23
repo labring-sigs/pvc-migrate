@@ -216,6 +216,19 @@ func TestValidateActivationRejectsApplicationPVCQuotaBeforeSwitch(t *testing.T) 
 		corev1.ResourceStorage: resource.MustParse("1Gi"),
 	}
 	if _, err := fixture.client.CoreV1().
+		PersistentVolumeClaims("app").
+		Create(context.Background(), &corev1.PersistentVolumeClaim{
+			ObjectMeta: metav1.ObjectMeta{
+				Namespace: "app",
+				Name:      session.Spec.Volumes[0].SourcePVC.Name,
+				UID:       session.Spec.Volumes[0].SourcePVC.UID,
+			},
+			Spec: session.Spec.Volumes[0].SourcePVCSpec,
+		}, metav1.CreateOptions{}); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := fixture.client.CoreV1().
 		ResourceQuotas("app").
 		Create(context.Background(), &corev1.ResourceQuota{
 			ObjectMeta: metav1.ObjectMeta{Namespace: "app", Name: "application-storage"},
@@ -225,6 +238,9 @@ func TestValidateActivationRejectsApplicationPVCQuotaBeforeSwitch(t *testing.T) 
 				},
 			},
 			Status: corev1.ResourceQuotaStatus{
+				Hard: corev1.ResourceList{
+					corev1.ResourceRequestsStorage: resource.MustParse("1Gi"),
+				},
 				Used: corev1.ResourceList{
 					corev1.ResourceRequestsStorage: resource.MustParse("1Gi"),
 				},

@@ -22,7 +22,7 @@ func (s *Service) verifySourceStorage(ctx context.Context, session *domain.Sessi
 			volume.SourcePVC.UID == "" {
 			results[index] = domain.NewError(
 				domain.ErrorPrecondition,
-				"verify source storage",
+				verifySourceStoragePhase,
 				fmt.Sprintf("source PVC reference for volume %d is incomplete", index),
 			)
 
@@ -32,7 +32,7 @@ func (s *Service) verifySourceStorage(ctx context.Context, session *domain.Sessi
 		if volume.SourcePV.Name == "" || volume.SourcePV.UID == "" {
 			results[index] = domain.NewError(
 				domain.ErrorPrecondition,
-				"verify source storage",
+				verifySourceStoragePhase,
 				fmt.Sprintf(
 					"source PV reference for PVC %s/%s is incomplete",
 					volume.SourcePVC.Namespace,
@@ -49,7 +49,7 @@ func (s *Service) verifySourceStorage(ctx context.Context, session *domain.Sessi
 		if err != nil {
 			results[index] = domain.WrapError(
 				domain.ErrorKubernetes,
-				"verify source storage",
+				verifySourceStoragePhase,
 				fmt.Sprintf(
 					"read source PVC %s/%s",
 					volume.SourcePVC.Namespace,
@@ -64,7 +64,7 @@ func (s *Service) verifySourceStorage(ctx context.Context, session *domain.Sessi
 		if pvc == nil || pvc.Name == "" {
 			results[index] = domain.NewError(
 				domain.ErrorKubernetes,
-				"verify source storage",
+				verifySourceStoragePhase,
 				fmt.Sprintf(
 					"read source PVC %s/%s returned an empty object",
 					volume.SourcePVC.Namespace,
@@ -79,7 +79,7 @@ func (s *Service) verifySourceStorage(ctx context.Context, session *domain.Sessi
 			pvc.Spec.VolumeName != volume.SourcePV.Name {
 			results[index] = domain.NewError(
 				domain.ErrorConflict,
-				"verify source storage",
+				verifySourceStoragePhase,
 				fmt.Sprintf(
 					"source PVC %s/%s identity or binding changed",
 					pvc.Namespace,
@@ -96,7 +96,7 @@ func (s *Service) verifySourceStorage(ctx context.Context, session *domain.Sessi
 		if err != nil {
 			results[index] = domain.WrapError(
 				domain.ErrorKubernetes,
-				"verify source storage",
+				verifySourceStoragePhase,
 				"read source PV "+volume.SourcePV.Name,
 				err,
 			)
@@ -107,7 +107,7 @@ func (s *Service) verifySourceStorage(ctx context.Context, session *domain.Sessi
 		if pv == nil || pv.Name == "" {
 			results[index] = domain.NewError(
 				domain.ErrorKubernetes,
-				"verify source storage",
+				verifySourceStoragePhase,
 				fmt.Sprintf("read source PV %s returned an empty object", volume.SourcePV.Name),
 			)
 
@@ -120,7 +120,7 @@ func (s *Service) verifySourceStorage(ctx context.Context, session *domain.Sessi
 			pv.Spec.ClaimRef.UID != pvc.UID {
 			results[index] = domain.NewError(
 				domain.ErrorConflict,
-				"verify source storage",
+				verifySourceStoragePhase,
 				fmt.Sprintf("source PV %s identity or claimRef changed", pv.Name),
 			)
 		}
@@ -184,7 +184,7 @@ func (s *Service) validateActivationPVCPolicies(
 		if err != nil || requested.Sign() <= 0 {
 			return domain.NewError(
 				domain.ErrorValidation,
-				"activation preflight",
+				activationPreflightPhase,
 				fmt.Sprintf(
 					"PVC %s/%s has invalid destination capacity %q",
 					volume.SourcePVC.Namespace,
@@ -201,16 +201,21 @@ func (s *Service) validateActivationPVCPolicies(
 			sourceClass = *volume.SourcePVCSpec.StorageClassName
 		}
 
+		volumeAttributesClasses := kube.RequestedVolumeAttributesClassNames(volume.SourcePVCSpec)
+
 		groups[volume.SourcePVC.Namespace] = append(
 			groups[volume.SourcePVC.Namespace],
 			kube.PVCAdmissionChange{
-				Namespace:             volume.SourcePVC.Namespace,
-				Name:                  volume.SourcePVC.Name,
-				RequestedStorage:      requested,
-				RequestedStorageClass: volume.StorageClass,
-				Existing:              !status.Activation.SourcePVCDeleted,
-				ExistingStorage:       existing,
-				ExistingStorageClass:  sourceClass,
+				Namespace:                           volume.SourcePVC.Namespace,
+				Name:                                volume.SourcePVC.Name,
+				RequestedStorage:                    requested,
+				RequestedStorageClass:               volume.StorageClass,
+				Existing:                            !status.Activation.SourcePVCDeleted,
+				ExistingUID:                         volume.SourcePVC.UID,
+				ExistingStorage:                     existing,
+				ExistingStorageClass:                sourceClass,
+				RequestedVolumeAttributesClassNames: volumeAttributesClasses,
+				ExistingVolumeAttributesClassNames:  volumeAttributesClasses,
 			},
 		)
 	}
@@ -227,7 +232,7 @@ func (s *Service) validateActivationPVCPolicies(
 		if err != nil {
 			return domain.WrapError(
 				domain.ErrorKubernetes,
-				"activation preflight",
+				activationPreflightPhase,
 				"check application PVC admission in "+namespace,
 				err,
 			)
@@ -236,7 +241,7 @@ func (s *Service) validateActivationPVCPolicies(
 		if len(report.QuotaViolations) > 0 {
 			return domain.NewError(
 				domain.ErrorPrecondition,
-				"activation preflight",
+				activationPreflightPhase,
 				"application PVC quota rejected the replacement: "+strings.Join(
 					report.QuotaViolations,
 					"; ",
@@ -247,7 +252,7 @@ func (s *Service) validateActivationPVCPolicies(
 		if len(report.LimitRangeViolations) > 0 {
 			return domain.NewError(
 				domain.ErrorPrecondition,
-				"activation preflight",
+				activationPreflightPhase,
 				"application PVC LimitRange rejected the replacement: "+strings.Join(
 					report.LimitRangeViolations,
 					"; ",
@@ -344,7 +349,7 @@ func (s *Service) verifyRollbackStorageVolume(
 	if active.Namespace == "" || active.Name == "" || active.UID == "" {
 		return domain.NewError(
 			domain.ErrorPrecondition,
-			"verify rollback",
+			verifyRollbackPhase,
 			fmt.Sprintf(
 				"PVC %s/%s has no recorded restored identity",
 				volume.SourcePVC.Namespace,
@@ -356,7 +361,7 @@ func (s *Service) verifyRollbackStorageVolume(
 	if active.Namespace != volume.SourcePVC.Namespace || active.Name != volume.SourcePVC.Name {
 		return domain.NewError(
 			domain.ErrorConflict,
-			"verify rollback",
+			verifyRollbackPhase,
 			fmt.Sprintf(
 				"recorded restored PVC %s/%s does not match source PVC %s/%s",
 				active.Namespace,
@@ -370,7 +375,7 @@ func (s *Service) verifyRollbackStorageVolume(
 	if volume.SourcePV.Name == "" || volume.SourcePV.UID == "" {
 		return domain.NewError(
 			domain.ErrorPrecondition,
-			"verify rollback",
+			verifyRollbackPhase,
 			fmt.Sprintf(
 				"PVC %s/%s has no recorded source PV identity",
 				volume.SourcePVC.Namespace,
@@ -385,7 +390,7 @@ func (s *Service) verifyRollbackStorageVolume(
 	if err != nil {
 		return domain.WrapError(
 			domain.ErrorKubernetes,
-			"verify rollback",
+			verifyRollbackPhase,
 			fmt.Sprintf("read restored PVC %s/%s", active.Namespace, active.Name),
 			err,
 		)
@@ -394,7 +399,7 @@ func (s *Service) verifyRollbackStorageVolume(
 	if pvc == nil || pvc.Name == "" {
 		return domain.NewError(
 			domain.ErrorKubernetes,
-			"verify rollback",
+			verifyRollbackPhase,
 			fmt.Sprintf(
 				"read restored PVC %s/%s returned an empty object",
 				active.Namespace,
@@ -407,7 +412,7 @@ func (s *Service) verifyRollbackStorageVolume(
 		pvc.Spec.VolumeName != volume.SourcePV.Name {
 		return domain.NewError(
 			domain.ErrorConflict,
-			"verify rollback",
+			verifyRollbackPhase,
 			fmt.Sprintf("restored PVC %s/%s identity or binding changed", pvc.Namespace, pvc.Name),
 		)
 	}
@@ -415,7 +420,7 @@ func (s *Service) verifyRollbackStorageVolume(
 	if pvc.UID != volume.SourcePVC.UID && pvc.Annotations[kube.SessionKey] != session.ID {
 		return domain.NewError(
 			domain.ErrorConflict,
-			"verify rollback",
+			verifyRollbackPhase,
 			fmt.Sprintf(
 				"restored PVC %s/%s is not the original or session-owned PVC",
 				pvc.Namespace,
@@ -430,7 +435,7 @@ func (s *Service) verifyRollbackStorageVolume(
 	if err != nil {
 		return domain.WrapError(
 			domain.ErrorKubernetes,
-			"verify rollback",
+			verifyRollbackPhase,
 			"read restored PV "+volume.SourcePV.Name,
 			err,
 		)
@@ -439,7 +444,7 @@ func (s *Service) verifyRollbackStorageVolume(
 	if pv == nil || pv.Name == "" {
 		return domain.NewError(
 			domain.ErrorKubernetes,
-			"verify rollback",
+			verifyRollbackPhase,
 			fmt.Sprintf("read restored PV %s returned an empty object", volume.SourcePV.Name),
 		)
 	}
@@ -450,7 +455,7 @@ func (s *Service) verifyRollbackStorageVolume(
 		pv.Spec.ClaimRef.UID != pvc.UID {
 		return domain.NewError(
 			domain.ErrorConflict,
-			"verify rollback",
+			verifyRollbackPhase,
 			fmt.Sprintf("restored PV %s identity or claimRef changed", pv.Name),
 		)
 	}
@@ -469,7 +474,7 @@ func (s *Service) verifyActiveStorageVolume(
 	if active.Namespace == "" || active.Name == "" || active.UID == "" {
 		return domain.NewError(
 			domain.ErrorPrecondition,
-			"verify migration",
+			verifyMigrationPhase,
 			fmt.Sprintf(
 				"PVC %s/%s has no recorded active identity",
 				volume.SourcePVC.Namespace,
@@ -481,7 +486,7 @@ func (s *Service) verifyActiveStorageVolume(
 	if active.Namespace != volume.SourcePVC.Namespace || active.Name != volume.SourcePVC.Name {
 		return domain.NewError(
 			domain.ErrorConflict,
-			"verify migration",
+			verifyMigrationPhase,
 			fmt.Sprintf(
 				"recorded active PVC %s/%s does not match application PVC %s/%s",
 				active.Namespace,
@@ -495,7 +500,7 @@ func (s *Service) verifyActiveStorageVolume(
 	if volume.DestinationPV.Name == "" || volume.DestinationPV.UID == "" {
 		return domain.NewError(
 			domain.ErrorPrecondition,
-			"verify migration",
+			verifyMigrationPhase,
 			fmt.Sprintf(
 				"PVC %s/%s has no recorded destination PV identity",
 				volume.SourcePVC.Namespace,
@@ -510,7 +515,7 @@ func (s *Service) verifyActiveStorageVolume(
 	if err != nil {
 		return domain.WrapError(
 			domain.ErrorKubernetes,
-			"verify migration",
+			verifyMigrationPhase,
 			fmt.Sprintf("read PVC %s/%s", volume.SourcePVC.Namespace, volume.SourcePVC.Name),
 			err,
 		)
@@ -519,7 +524,7 @@ func (s *Service) verifyActiveStorageVolume(
 	if pvc == nil || pvc.Name == "" {
 		return domain.NewError(
 			domain.ErrorKubernetes,
-			"verify migration",
+			verifyMigrationPhase,
 			fmt.Sprintf(
 				"read PVC %s/%s returned an empty object",
 				volume.SourcePVC.Namespace,
@@ -532,7 +537,7 @@ func (s *Service) verifyActiveStorageVolume(
 		pvc.Annotations[kube.SessionKey] != session.ID {
 		return domain.NewError(
 			domain.ErrorConflict,
-			"verify migration",
+			verifyMigrationPhase,
 			fmt.Sprintf(
 				"PVC %s/%s is not active on destination PV %s",
 				pvc.Namespace,
@@ -545,7 +550,7 @@ func (s *Service) verifyActiveStorageVolume(
 	if pvc.UID != active.UID {
 		return domain.NewError(
 			domain.ErrorConflict,
-			"verify migration",
+			verifyMigrationPhase,
 			fmt.Sprintf("active PVC %s/%s UID changed", pvc.Namespace, pvc.Name),
 		)
 	}
@@ -556,7 +561,7 @@ func (s *Service) verifyActiveStorageVolume(
 	if err != nil {
 		return domain.WrapError(
 			domain.ErrorKubernetes,
-			"verify migration",
+			verifyMigrationPhase,
 			"read active PV "+volume.DestinationPV.Name,
 			err,
 		)
@@ -565,7 +570,7 @@ func (s *Service) verifyActiveStorageVolume(
 	if pv == nil || pv.Name == "" {
 		return domain.NewError(
 			domain.ErrorKubernetes,
-			"verify migration",
+			verifyMigrationPhase,
 			fmt.Sprintf("read active PV %s returned an empty object", volume.DestinationPV.Name),
 		)
 	}
@@ -576,7 +581,7 @@ func (s *Service) verifyActiveStorageVolume(
 		pv.Spec.ClaimRef.UID != pvc.UID {
 		return domain.NewError(
 			domain.ErrorConflict,
-			"verify migration",
+			verifyMigrationPhase,
 			fmt.Sprintf("active PV %s identity or claimRef changed", pv.Name),
 		)
 	}
@@ -635,7 +640,7 @@ func (s *Service) verifyActiveVolumes(ctx context.Context, session *domain.Sessi
 		if err != nil {
 			return domain.WrapError(
 				domain.ErrorKubernetes,
-				"verify migration",
+				verifyMigrationPhase,
 				"read resumed Pod",
 				err,
 			)
@@ -644,7 +649,7 @@ func (s *Service) verifyActiveVolumes(ctx context.Context, session *domain.Sessi
 		if ref.UID == "" || pod.UID != ref.UID || pod.Annotations[kube.SessionKey] != session.ID {
 			return domain.NewError(
 				domain.ErrorConflict,
-				"verify migration",
+				verifyMigrationPhase,
 				fmt.Sprintf(
 					"Pod %s/%s identity or session ownership changed",
 					pod.Namespace,
@@ -656,7 +661,7 @@ func (s *Service) verifyActiveVolumes(ctx context.Context, session *domain.Sessi
 		if pod.Spec.NodeName != options.TargetNode {
 			return domain.NewError(
 				domain.ErrorPrecondition,
-				"verify migration",
+				verifyMigrationPhase,
 				fmt.Sprintf(
 					"Pod %s/%s runs on %s, expected %s",
 					pod.Namespace,

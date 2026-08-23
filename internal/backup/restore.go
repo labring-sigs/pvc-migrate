@@ -191,7 +191,7 @@ func runRestore(
 		)
 	}
 
-	consumerNode, err := rwoConsumerNode(currentInfo, "restore scheduling")
+	consumerNode, err := rwoConsumerNode(currentInfo, restoreSchedulingPhase)
 	if err != nil {
 		return err
 	}
@@ -204,7 +204,7 @@ func runRestore(
 
 	pvNode := ""
 	if consumerNode == "" || req.TargetNode != "" {
-		pvNode, err = uniquePVToolNode(leaseCtx, client, currentPV)
+		pvNode, err = uniquePVToolNode(leaseCtx, client, currentPV, restorePreflightPhase)
 		if err != nil {
 			return err
 		}
@@ -330,7 +330,7 @@ func acquireRestoreLock(
 	if expectedPVCUID == "" {
 		return nil, "", domain.NewError(
 			domain.ErrorPrecondition,
-			"restore lock",
+			restoreLockPhase,
 			"expected PVC identity is required",
 		)
 	}
@@ -351,7 +351,7 @@ func acquireRestoreLock(
 		if originalUID != expectedPVCUID {
 			return domain.NewError(
 				domain.ErrorConflict,
-				"restore lock",
+				restoreLockPhase,
 				"destination PVC identity changed since preflight",
 			)
 		}
@@ -364,7 +364,7 @@ func acquireRestoreLock(
 			if parseErr != nil || time.Now().UTC().Before(expiresAt) {
 				return domain.NewError(
 					domain.ErrorConflict,
-					"restore lock",
+					restoreLockPhase,
 					"PVC is locked by "+owner,
 				)
 			}
@@ -391,7 +391,7 @@ func acquireRestoreLock(
 			errors.Is(ctx.Err(), context.Canceled) {
 			return nil, "", domain.WrapError(
 				domain.ErrorTimeout,
-				"restore lock",
+				restoreLockPhase,
 				"acquire PVC restore lock timed out",
 				err,
 			)
@@ -404,7 +404,7 @@ func acquireRestoreLock(
 		if apierrors.IsConflict(err) {
 			return nil, "", domain.WrapError(
 				domain.ErrorConflict,
-				"restore lock",
+				restoreLockPhase,
 				"PVC changed while acquiring lock",
 				err,
 			)
@@ -412,7 +412,7 @@ func acquireRestoreLock(
 
 		return nil, "", domain.WrapError(
 			domain.ErrorKubernetes,
-			"restore lock",
+			restoreLockPhase,
 			"acquire PVC lock",
 			err,
 		)
@@ -493,7 +493,7 @@ func renewRestoreLockOnce(
 	if pvcUID == "" {
 		return domain.NewError(
 			domain.ErrorPrecondition,
-			"restore lock",
+			restoreLockPhase,
 			"PVC identity is required for lock renewal",
 		)
 	}
@@ -509,7 +509,7 @@ func renewRestoreLockOnce(
 		if string(pvc.UID) != pvcUID || pvc.Annotations[restoreLockAnnotation] != holder {
 			return domain.NewError(
 				domain.ErrorConflict,
-				"restore lock",
+				restoreLockPhase,
 				"PVC lock ownership changed during renewal",
 			)
 		}
@@ -537,11 +537,11 @@ func classifyRestoreLockError(ctx context.Context, err error) error {
 		errors.Is(ctx.Err(), context.Canceled) {
 		return domain.WrapError(
 			domain.ErrorTimeout,
-			"restore lock",
+			restoreLockPhase,
 			"renew PVC restore lock timed out",
 			err,
 		)
 	}
 
-	return domain.WrapError(domain.ErrorConflict, "restore lock", "renew PVC restore lock", err)
+	return domain.WrapError(domain.ErrorConflict, restoreLockPhase, "renew PVC restore lock", err)
 }

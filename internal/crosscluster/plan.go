@@ -51,6 +51,10 @@ func (s *Service) Plan(ctx context.Context, options Options) (*Plan, error) {
 
 	s.planCrossClusterVolumes(ctx, plan, options, destinationClass, inputs)
 
+	if len(plan.Volumes) == len(options.SourcePVCs) {
+		s.planCrossClusterPolicies(ctx, plan, options, destinationClass)
+	}
+
 	return plan, nil
 }
 

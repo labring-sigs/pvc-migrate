@@ -151,7 +151,7 @@ func loadBackupCredentials(
 	if session == nil || session.Spec.Backup == nil {
 		return objectstore.Credentials{}, domain.NewError(
 			domain.ErrorValidation,
-			"backup resume",
+			backupResumePhase,
 			"backup session payload is required",
 		)
 	}
@@ -412,7 +412,7 @@ func inspectBackupSessionSharedMount(
 		if !shared {
 			return false, domain.NewError(
 				domain.ErrorConflict,
-				"backup resume",
+				backupResumePhase,
 				"session-managed OpenEBS LVM shared mount is no longer enabled",
 			)
 		}
@@ -444,7 +444,7 @@ func validateBackupOpenEBSState(ctx context.Context, req Request, info *PVCInfo)
 	if req.OpenEBSLVMManager == nil {
 		return domain.NewError(
 			domain.ErrorInternal,
-			"backup preflight",
+			backupPreflightPhase,
 			"OpenEBS LVM manager is required to inspect an active OpenEBS LVM PVC",
 		)
 	}
@@ -466,7 +466,7 @@ func validateBackupOpenEBSState(ctx context.Context, req Request, info *PVCInfo)
 	if prepared.NeedsChange && !req.OpenEBSLVMEnableShared {
 		return domain.NewError(
 			domain.ErrorPrecondition,
-			"backup preflight",
+			backupPreflightPhase,
 			fmt.Sprintf(
 				"source PVC %s/%s is active and its OpenEBS LVMVolume is unshared; retry with --openebs-lvm-enable-shared or stop consumers",
 				info.PVC.Namespace,
@@ -478,7 +478,7 @@ func validateBackupOpenEBSState(ctx context.Context, req Request, info *PVCInfo)
 	if prepared.NeedsChange && req.SessionStore == nil {
 		return domain.NewError(
 			domain.ErrorPrecondition,
-			"backup preflight",
+			backupPreflightPhase,
 			"a session store is required to recover temporary OpenEBS LVM shared state",
 		)
 	}
@@ -495,7 +495,7 @@ func buildResumeRequest(
 	if client == nil || req.SessionStore == nil || session == nil || session.Spec.Backup == nil {
 		return nil, domain.NewError(
 			domain.ErrorValidation,
-			"backup resume",
+			backupResumePhase,
 			"Kubernetes client, session store, and backup session are required",
 		)
 	}
@@ -548,6 +548,7 @@ func buildResumeRequest(
 	req.ToolImage = payload.ToolImage
 	req.OpenEBSLVMEnableShared = payload.OpenEBSLVMEnableShared
 	req.Store = store
+	req.SessionNamespace = session.Spec.SessionNamespace
 	req.BackupSession = session
 
 	return &req, nil
@@ -568,7 +569,7 @@ func validateBackupResumePhase(session *domain.Session) error {
 	default:
 		return domain.NewError(
 			domain.ErrorPrecondition,
-			"backup resume",
+			backupResumePhase,
 			fmt.Sprintf("phase %s cannot be resumed for backup", phase),
 		)
 	}
@@ -582,7 +583,7 @@ func validatePublishedBackupSession(
 	if manifest == nil || req.BackupSession == nil || req.BackupSession.Spec.Backup == nil {
 		return domain.NewError(
 			domain.ErrorValidation,
-			"backup resume",
+			backupResumePhase,
 			"published manifest and backup session are required",
 		)
 	}
@@ -598,7 +599,7 @@ func validatePublishedBackupSession(
 		manifest.Consistency != backupConsistency(payload.Online) {
 		return domain.NewError(
 			domain.ErrorConflict,
-			"backup resume",
+			backupResumePhase,
 			"published completion manifest does not belong to this backup session",
 		)
 	}
@@ -606,7 +607,7 @@ func validatePublishedBackupSession(
 	if err := req.Store.VerifyInventory(ctx, *manifest); err != nil {
 		return wrapBackupError(
 			domain.ErrorConflict,
-			"backup resume",
+			backupResumePhase,
 			"verify published backup inventory",
 			err,
 		)
@@ -627,7 +628,7 @@ func validateBackupSharedMountRestore(
 	if req.OpenEBSLVMManager == nil {
 		return domain.NewError(
 			domain.ErrorInternal,
-			"backup resume",
+			backupResumePhase,
 			"OpenEBS LVM manager is required to restore session-managed shared mounts",
 		)
 	}
@@ -717,7 +718,7 @@ func ValidateResume(
 	if plan.PVCUID != string(payload.SourcePVC.UID) || plan.PVUID != string(payload.SourcePV.UID) {
 		return domain.NewError(
 			domain.ErrorConflict,
-			"backup resume",
+			backupResumePhase,
 			"source PVC or PV identity changed",
 		)
 	}
@@ -774,7 +775,7 @@ func Resume(
 			plan.PVUID != string(payload.SourcePV.UID) {
 			return domain.NewError(
 				domain.ErrorConflict,
-				"backup resume",
+				backupResumePhase,
 				"source PVC or PV identity changed",
 			)
 		}
@@ -799,7 +800,7 @@ func cleanupBackupSessionToolProbePods(
 	if session == nil || session.Spec.Backup == nil {
 		return domain.NewError(
 			domain.ErrorValidation,
-			"backup resume",
+			backupResumePhase,
 			"backup session payload is required",
 		)
 	}

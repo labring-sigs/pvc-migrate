@@ -3,6 +3,7 @@ package backup
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/labring-sigs/pvc-migrate/internal/domain"
@@ -38,7 +39,7 @@ func preflightRestorePVCCreation(
 	if req.DestinationStorageClass == "" || req.DestinationAccessMode == "" {
 		return nil, domain.NewError(
 			domain.ErrorValidation,
-			"restore preflight",
+			restorePreflightPhase,
 			"--create-pvc requires --destination-storage-class and --destination-access-mode",
 		)
 	}
@@ -51,7 +52,7 @@ func preflightRestorePVCCreation(
 	if manifest == nil {
 		return nil, domain.NewError(
 			domain.ErrorPrecondition,
-			"restore preflight",
+			restorePreflightPhase,
 			"S3 completion manifest is missing; the backup is not a published recovery point",
 		)
 	}
@@ -59,7 +60,7 @@ func preflightRestorePVCCreation(
 	if err := req.Store.VerifyInventory(ctx, *manifest); err != nil {
 		return nil, wrapBackupError(
 			domain.ErrorPrecondition,
-			"restore preflight",
+			restorePreflightPhase,
 			"verify S3 backup inventory",
 			err,
 		)
@@ -68,7 +69,7 @@ func preflightRestorePVCCreation(
 	if manifest.VolumeMode != string(corev1.PersistentVolumeFilesystem) {
 		return nil, domain.NewError(
 			domain.ErrorPrecondition,
-			"restore preflight",
+			restorePreflightPhase,
 			"automatic destination PVC creation requires a Filesystem backup, got "+manifest.VolumeMode,
 		)
 	}
@@ -90,13 +91,62 @@ func preflightRestorePVCCreation(
 	); err != nil {
 		return nil, domain.WrapError(
 			domain.ErrorPrecondition,
-			"restore preflight",
+			restorePreflightPhase,
 			"read destination StorageClass "+req.DestinationStorageClass,
 			err,
 		)
 	}
 
-	if err := checkToolQuota(ctx, client, req.Namespace); err != nil {
+	if existing == nil {
+		report, policyErr := kube.CheckPVCAdmissionPolicies(
+			ctx,
+			client,
+			[]kube.PVCAdmissionChange{{
+				Namespace:             req.Namespace,
+				Name:                  req.PVCName,
+				RequestedStorage:      capacity,
+				RequestedStorageClass: req.DestinationStorageClass,
+			}},
+		)
+		if policyErr != nil {
+			return nil, domain.WrapError(
+				domain.ErrorKubernetes,
+				restorePreflightPhase,
+				"check destination PVC admission policies",
+				policyErr,
+			)
+		}
+
+		if len(report.QuotaViolations) > 0 {
+			return nil, domain.NewError(
+				domain.ErrorPrecondition,
+				restorePreflightPhase,
+				"destination PVC quota rejected the request: "+strings.Join(
+					report.QuotaViolations,
+					"; ",
+				),
+			)
+		}
+
+		if len(report.LimitRangeViolations) > 0 {
+			return nil, domain.NewError(
+				domain.ErrorPrecondition,
+				restorePreflightPhase,
+				"destination PVC LimitRange rejected the request: "+strings.Join(
+					report.LimitRangeViolations,
+					"; ",
+				),
+			)
+		}
+	}
+
+	if err := checkNamespaceAdmissionPolicies(
+		ctx,
+		client,
+		req.Namespace,
+		"restore",
+		objectTransferToolResourceEstimate(),
+	); err != nil {
 		return nil, err
 	}
 
@@ -117,7 +167,7 @@ func preflightRestorePVCCreation(
 		case existing.Status.Phase != corev1.ClaimPending:
 			return nil, domain.NewError(
 				domain.ErrorPrecondition,
-				"restore preflight",
+				restorePreflightPhase,
 				fmt.Sprintf(
 					"destination PVC %s/%s created by this restore is %s and cannot be resumed",
 					req.Namespace,
@@ -162,7 +212,7 @@ func preflightRestorePVCCreation(
 	if manifest.Path != req.Path {
 		return nil, domain.NewError(
 			domain.ErrorPrecondition,
-			"restore preflight",
+			restorePreflightPhase,
 			fmt.Sprintf("restore path %q differs from backup path %q", req.Path, manifest.Path),
 		)
 	}
@@ -185,7 +235,7 @@ func prepareRestorePlan(
 	if manifest == nil {
 		return nil, domain.NewError(
 			domain.ErrorPrecondition,
-			"restore preflight",
+			restorePreflightPhase,
 			"S3 completion manifest is missing; the backup is not a published recovery point",
 		)
 	}
@@ -206,7 +256,7 @@ func prepareRestorePlan(
 	if err := req.Store.VerifyInventory(ctx, *manifest); err != nil {
 		return nil, wrapBackupError(
 			domain.ErrorPrecondition,
-			"restore preflight",
+			restorePreflightPhase,
 			"verify S3 backup inventory",
 			err,
 		)
@@ -217,7 +267,7 @@ func prepareRestorePlan(
 		if parseErr != nil {
 			return nil, domain.WrapError(
 				domain.ErrorPrecondition,
-				"restore preflight",
+				restorePreflightPhase,
 				"parse backup capacity",
 				parseErr,
 			)
@@ -226,7 +276,7 @@ func prepareRestorePlan(
 		if info.Capacity.Cmp(backupCapacity) < 0 {
 			return nil, domain.NewError(
 				domain.ErrorPrecondition,
-				"restore preflight",
+				restorePreflightPhase,
 				fmt.Sprintf(
 					"destination PVC capacity %s is below backup capacity %s",
 					info.Capacity.String(),
@@ -239,7 +289,7 @@ func prepareRestorePlan(
 	if manifest.VolumeMode != "" && manifest.VolumeMode != string(info.Mode) {
 		return nil, domain.NewError(
 			domain.ErrorPrecondition,
-			"restore preflight",
+			restorePreflightPhase,
 			fmt.Sprintf(
 				"destination PVC volume mode %s differs from backup volume mode %s",
 				info.Mode,
@@ -251,7 +301,7 @@ func prepareRestorePlan(
 	if manifest.Path != req.Path {
 		return nil, domain.NewError(
 			domain.ErrorPrecondition,
-			"restore preflight",
+			restorePreflightPhase,
 			fmt.Sprintf("restore path %q differs from backup path %q", req.Path, manifest.Path),
 		)
 	}
@@ -263,7 +313,7 @@ func prepareRestorePlan(
 		)
 	}
 
-	consumerNode, err := rwoConsumerNode(info, "restore scheduling")
+	consumerNode, err := rwoConsumerNode(info, restoreSchedulingPhase)
 	if err != nil {
 		return nil, err
 	}
@@ -310,7 +360,7 @@ func selectRestoreToolNode(targetNode, consumerNode, pvNode string) (string, err
 		if required.node != "" && required.node != targetNode {
 			return "", domain.NewError(
 				domain.ErrorConflict,
-				"restore scheduling",
+				restoreSchedulingPhase,
 				fmt.Sprintf(
 					"destination PVC %s requires node %s, but target node %s was requested",
 					required.requirement,
@@ -332,7 +382,7 @@ func restoreDestinationCapacity(
 	if err != nil {
 		return resource.Quantity{}, domain.WrapError(
 			domain.ErrorPrecondition,
-			"restore preflight",
+			restorePreflightPhase,
 			"parse backup capacity",
 			err,
 		)
@@ -346,7 +396,7 @@ func restoreDestinationCapacity(
 	if err != nil {
 		return resource.Quantity{}, domain.WrapError(
 			domain.ErrorValidation,
-			"restore preflight",
+			restorePreflightPhase,
 			"parse --destination-capacity",
 			err,
 		)
@@ -355,7 +405,7 @@ func restoreDestinationCapacity(
 	if capacity.Sign() <= 0 {
 		return resource.Quantity{}, domain.NewError(
 			domain.ErrorValidation,
-			"restore preflight",
+			restorePreflightPhase,
 			"--destination-capacity must be positive",
 		)
 	}
@@ -363,7 +413,7 @@ func restoreDestinationCapacity(
 	if capacity.Cmp(backupCapacity) < 0 {
 		return resource.Quantity{}, domain.NewError(
 			domain.ErrorPrecondition,
-			"restore preflight",
+			restorePreflightPhase,
 			fmt.Sprintf(
 				"destination PVC capacity %s is below backup capacity %s",
 				capacity.String(),
@@ -383,7 +433,7 @@ func parseRestoreAccessMode(value string) (corev1.PersistentVolumeAccessMode, er
 	default:
 		return "", domain.NewError(
 			domain.ErrorValidation,
-			"restore preflight",
+			restorePreflightPhase,
 			fmt.Sprintf(
 				"unsupported --destination-access-mode %q; use ReadWriteOnce, ReadWriteOncePod, or ReadWriteMany",
 				value,

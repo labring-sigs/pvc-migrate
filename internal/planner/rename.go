@@ -258,10 +258,14 @@ func (p *Planner) PlanRename(
 	plan.TemporaryUsage = domain.ResourceEstimate{
 		StorageRequests:    requestedCapacity,
 		PVCs:               requestedPVCs,
-		ConfigMaps:         1,
 		ByStorageClass:     map[string]string{storageClass: requestedCapacity},
 		PVCsByStorageClass: map[string]int{storageClass: requestedPVCs},
 	}
+	if options.SessionNamespace == options.DestinationNamespace {
+		plan.TemporaryUsage.ConfigMaps = 1
+		plan.TemporaryUsage.Leases = 1
+	}
+
 	plan.SessionSpec = domain.NewSessionSpec(options.Operation, domain.SessionCommon{
 		SourceNamespace:      options.SourceNamespace,
 		TemporaryNamespace:   options.DestinationNamespace,
@@ -278,12 +282,16 @@ func (p *Planner) PlanRename(
 		"destinationNamespace",
 		options.DestinationNamespace,
 	)
-	runPlanCheckTasks(plan, []planCheckTask{
+
+	tasks := []planCheckTask{
 		func(result *domain.MigrationPlan) {
-			p.checkLimitRanges(ctx, result, options.DestinationNamespace, plan.Volumes)
-		},
-		func(result *domain.MigrationPlan) {
-			p.checkQuotas(ctx, result, options.DestinationNamespace, plan.TemporaryUsage)
+			p.checkNamespaceResourcePolicies(
+				ctx,
+				result,
+				options.DestinationNamespace,
+				plan.Volumes,
+				plan.TemporaryUsage,
+			)
 		},
 		func(result *domain.MigrationPlan) {
 			p.checkRenameRBAC(
@@ -294,7 +302,26 @@ func (p *Planner) PlanRename(
 				options.SessionNamespace,
 			)
 		},
-	})
+	}
+	if options.SessionNamespace != options.DestinationNamespace {
+		tasks = append(tasks, func(result *domain.MigrationPlan) {
+			p.checkNamespaceResourcePolicies(
+				ctx,
+				result,
+				options.SessionNamespace,
+				nil,
+				domain.ResourceEstimate{
+					StorageRequests:    "0",
+					ConfigMaps:         1,
+					Leases:             1,
+					ByStorageClass:     map[string]string{},
+					PVCsByStorageClass: map[string]int{},
+				},
+			)
+		})
+	}
+
+	runPlanCheckTasks(plan, tasks)
 
 	return plan, nil
 }

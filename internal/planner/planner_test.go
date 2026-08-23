@@ -25,6 +25,24 @@ import (
 )
 
 func plannerClient(objects ...runtime.Object) *kubernetesfake.Clientset {
+	for _, object := range objects {
+		quota, ok := object.(*corev1.ResourceQuota)
+		if !ok {
+			continue
+		}
+
+		quota.Status.Hard = quota.Spec.Hard.DeepCopy()
+		if quota.Status.Used == nil {
+			quota.Status.Used = corev1.ResourceList{}
+		}
+
+		for name := range quota.Status.Hard {
+			if _, exists := quota.Status.Used[name]; !exists {
+				quota.Status.Used[name] = resource.MustParse("0")
+			}
+		}
+	}
+
 	client := kubernetesfake.NewClientset(objects...)
 	client.PrependReactor(
 		"create",
@@ -1145,6 +1163,10 @@ func TestPlanModelsTopologyQuotaAndSessionIdentity(t *testing.T) {
 		SourcePVCs:         []string{"data"},
 		TargetNode:         "node-b",
 		DestinationClass:   "fast",
+		Strategies: []string{
+			domain.StrategyNodePort,
+			domain.StrategyLoadBalancer,
+		},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -1170,6 +1192,34 @@ func TestPlanModelsTopologyQuotaAndSessionIdentity(t *testing.T) {
 
 	if plan.TemporaryUsage.Secrets != 2 {
 		t.Fatalf("temporary Secret estimate=%d, want 2", plan.TemporaryUsage.Secrets)
+	}
+
+	if plan.TemporaryUsage.Deployments != 0 || plan.TemporaryUsage.ReplicaSets != 0 {
+		t.Fatalf(
+			"temporary controller estimate deployments=%d replicaSets=%d, want 0/0",
+			plan.TemporaryUsage.Deployments,
+			plan.TemporaryUsage.ReplicaSets,
+		)
+	}
+
+	if plan.TemporaryUsage.Endpoints != plan.TemporaryUsage.Services ||
+		plan.TemporaryUsage.EndpointSlices != plan.TemporaryUsage.Services {
+		t.Fatalf(
+			"temporary endpoint estimates endpoints=%d endpointSlices=%d, want %d",
+			plan.TemporaryUsage.Endpoints,
+			plan.TemporaryUsage.EndpointSlices,
+			plan.TemporaryUsage.Services,
+		)
+	}
+
+	if plan.TemporaryUsage.ServiceNodePorts != plan.TemporaryUsage.Services ||
+		plan.TemporaryUsage.ServiceLoadBalancers != plan.TemporaryUsage.Services {
+		t.Fatalf(
+			"temporary Service type estimates nodePorts=%d loadBalancers=%d, want %d",
+			plan.TemporaryUsage.ServiceNodePorts,
+			plan.TemporaryUsage.ServiceLoadBalancers,
+			plan.TemporaryUsage.Services,
+		)
 	}
 
 	if plan.SessionSpec.Volumes[0].SourcePVC.UID != types.UID("pvc-uid") ||

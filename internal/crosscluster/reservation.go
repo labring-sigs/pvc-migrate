@@ -296,6 +296,7 @@ func (s *Service) createReservationConsumer(
 					Name:            "reserve",
 					Image:           session.Spec.ToolImage,
 					Command:         []string{"sh", "-c", "test -d /data && sleep 3600"},
+					Resources:       kube.ZeroResourceRequirements(),
 					SecurityContext: &corev1.SecurityContext{RunAsUser: &runAs, RunAsGroup: &runAs},
 					VolumeMounts:    []corev1.VolumeMount{{Name: "data", MountPath: "/data"}},
 				},

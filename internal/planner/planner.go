@@ -583,6 +583,7 @@ func (p *Planner) finalizePlan(ctx context.Context, state *planState) {
 	}
 
 	p.finalizePlanTarget(ctx, state, capacityInventory)
+	p.finalizePlanStrategies(state)
 	p.finalizePlanResources(ctx, state)
 	p.finalizePlanSession(state)
 }
@@ -749,152 +750,8 @@ func (p *Planner) checkPlanSourceNode(state *planState) {
 	}
 }
 
-func (p *Planner) finalizePlanResources(
-	ctx context.Context,
-	state *planState,
-) {
-	state.plan.Volumes = state.plannedVolumes
-	state.plan.TemporaryUsage.StorageRequests = state.totalStorage.String()
-	state.plan.TemporaryUsage.PVCs = len(state.plannedVolumes)
-	state.plan.TemporaryUsage.Pods = max(1, 2*len(state.plannedVolumes))
-	state.plan.TemporaryUsage.Jobs = max(1, len(state.plannedVolumes))
-	state.plan.TemporaryUsage.Services = max(1, len(state.plannedVolumes))
-	state.plan.TemporaryUsage.Secrets = max(1, 2*len(state.plannedVolumes))
-	state.plan.TemporaryUsage.ConfigMaps = 1
-	state.plan.TemporaryUsage.ServiceAccounts = max(1, 2*len(state.plannedVolumes))
-	state.plan.RollbackRetention.StorageRequests = state.rollbackStorage.String()
-
-	state.plan.RollbackRetention.PVCs = len(state.plannedVolumes)
-	for class, quantity := range state.storageByClass {
-		state.plan.TemporaryUsage.ByStorageClass[class] = quantity.String()
-		state.plan.TemporaryUsage.PVCsByStorageClass[class] = state.pvcsByClass[class]
-	}
-
-	for class, quantity := range state.rollbackByClass {
-		state.plan.RollbackRetention.ByStorageClass[class] = quantity.String()
-		state.plan.RollbackRetention.PVCsByStorageClass[class] = state.rollbackPVCsByClass[class]
-	}
-
-	if state.options.Operation == domain.OperationMigrate ||
-		state.options.Operation == domain.OperationMigratePod {
-		p.checkActivationPVCPolicies(ctx, state.plan, state.volumeSpecs)
-	}
-
-	if len(state.plannedVolumes) == 0 {
-		return
-	}
-
-	p.runPlanPolicyChecks(ctx, state)
-}
-
-func (p *Planner) runPlanPolicyChecks(ctx context.Context, state *planState) {
-	options := state.options
-	p.logInfo(
-		"validating migration cluster policies",
-		"session", options.SessionID,
-		"sourceNamespace", options.SourceNamespace,
-		"stagingNamespace", options.StagingNamespace,
-		"sessionNamespace", options.SessionNamespace,
-		"volumes", len(state.plannedVolumes),
-	)
-
-	tasks := []planCheckTask{
-		func(result *domain.MigrationPlan) {
-			p.checkLimitRanges(ctx, result, options.StagingNamespace, state.plannedVolumes)
-		},
-		func(result *domain.MigrationPlan) {
-			p.checkQuotas(ctx, result, options.StagingNamespace, state.plan.TemporaryUsage)
-		},
-	}
-	if options.SourceNamespace != options.StagingNamespace {
-		sourceTools := domain.ResourceEstimate{
-			StorageRequests:    "0",
-			Pods:               len(state.plannedVolumes),
-			Services:           len(state.plannedVolumes),
-			Secrets:            len(state.plannedVolumes),
-			ServiceAccounts:    len(state.plannedVolumes),
-			ByStorageClass:     map[string]string{},
-			PVCsByStorageClass: map[string]int{},
-		}
-
-		tasks = append(tasks,
-			func(result *domain.MigrationPlan) {
-				p.checkLimitRanges(ctx, result, options.SourceNamespace, nil)
-			},
-			func(result *domain.MigrationPlan) {
-				p.checkQuotas(ctx, result, options.SourceNamespace, sourceTools)
-			},
-		)
-	}
-
-	if options.SessionNamespace != options.StagingNamespace &&
-		options.SessionNamespace != options.SourceNamespace {
-		sessionResources := domain.ResourceEstimate{
-			StorageRequests:    "0",
-			ConfigMaps:         1,
-			Leases:             1,
-			ByStorageClass:     map[string]string{},
-			PVCsByStorageClass: map[string]int{},
-		}
-
-		tasks = append(tasks, func(result *domain.MigrationPlan) {
-			p.checkQuotas(ctx, result, options.SessionNamespace, sessionResources)
-		})
-	}
-
-	tasks = append(tasks,
-		func(result *domain.MigrationPlan) {
-			p.checkNetworkPolicies(ctx, result, options.SourceNamespace, options.StagingNamespace)
-		},
-		func(result *domain.MigrationPlan) {
-			p.checkRBAC(
-				ctx,
-				result,
-				options.SourceNamespace,
-				options.StagingNamespace,
-				options.SessionNamespace,
-				state.workload,
-				state.inspectOpenEBSShared,
-				state.patchOpenEBSShared,
-			)
-		},
-	)
-	if state.sourcePod != nil {
-		tasks = append(tasks, func(result *domain.MigrationPlan) {
-			p.checkPodDependencies(ctx, result, state.sourcePod)
-		})
-	}
-
-	runPlanCheckTasks(state.plan, tasks)
-
-	if state.sourcePod != nil {
-		for _, issue := range podMigrationIssues(
-			state.sourcePod.Spec,
-			options.SourceNode,
-			options.TargetNode,
-		) {
-			state.plan.AddCheck(failed("pod-scheduling", issue))
-		}
-	}
-}
-
 func (p *Planner) finalizePlanSession(state *planState) {
 	options := state.options
-
-	options.Strategies = filterStrategies(state.plan, options, state.mountTopologyConflict)
-	if len(options.Strategies) == 0 {
-		state.plan.AddCheck(
-			failed(
-				"strategy",
-				"no selected pv-migrate strategy can handle the requested source and destination",
-			),
-		)
-	} else if state.autoStrategyRequested {
-		state.plan.AddCheck(passed(
-			"strategy-selection",
-			"auto selected strategy order: "+strings.Join(options.Strategies, ","),
-		))
-	}
 
 	state.plan.SourceNode = options.SourceNode
 	state.plan.Strategies = slices.Clone(options.Strategies)

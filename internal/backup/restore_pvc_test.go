@@ -63,6 +63,32 @@ func TestRestorePreflightRequiresPublishedManifestCapacityAndMode(t *testing.T) 
 	}
 }
 
+func TestRestorePreflightMissingExistingPVCUsesRestoreContext(t *testing.T) {
+	client, request := preflightFixture(
+		t,
+		&preflightObjectStore{
+			manifest: []byte(
+				`{"version":2,"createdAt":"2026-08-07T00:00:00Z","bucket":"backups","prefix":"pv-migrate","name":"daily","sourceNamespace":"default","sourcePVC":"data","sourcePVCUID":"pvc","capacity":"1Gi","volumeMode":"Filesystem","consistency":"offline file-consistent copy","compression":"none","objectCount":0,"totalBytes":0,"inventorySHA256":"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"}`,
+			),
+		},
+	)
+
+	if err := client.CoreV1().PersistentVolumeClaims(request.Namespace).Delete(
+		t.Context(),
+		request.PVCName,
+		metav1.DeleteOptions{},
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := Preflight(t.Context(), client, request, true)
+	if domain.CategoryOf(err) != domain.ErrorKubernetes ||
+		!strings.Contains(err.Error(), "restore preflight: read PVC") ||
+		strings.Contains(err.Error(), "backup preflight") {
+		t.Fatalf("category=%s error=%v", domain.CategoryOf(err), err)
+	}
+}
+
 func TestRestorePVCCreationRequiresStorageClassAndAccessMode(t *testing.T) {
 	for _, test := range []struct {
 		name         string
@@ -83,6 +109,100 @@ func TestRestorePVCCreationRequiresStorageClassAndAccessMode(t *testing.T) {
 				t.Fatalf("category=%s error=%v", domain.CategoryOf(err), err)
 			}
 		})
+	}
+}
+
+func TestRestorePVCCreationReportsRestoreQuotaContext(t *testing.T) {
+	client, request := restorePVCCreationFixture(t, nil)
+
+	quota := &corev1.ResourceQuota{
+		ObjectMeta: metav1.ObjectMeta{Namespace: request.Namespace, Name: "jobs"},
+		Status: corev1.ResourceQuotaStatus{
+			Hard: corev1.ResourceList{
+				corev1.ResourceName("count/jobs.batch"): resource.MustParse("0"),
+			},
+			Used: corev1.ResourceList{
+				corev1.ResourceName("count/jobs.batch"): resource.MustParse("0"),
+			},
+		},
+	}
+	if _, err := client.CoreV1().ResourceQuotas(request.Namespace).Create(
+		t.Context(),
+		quota,
+		metav1.CreateOptions{},
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := Preflight(t.Context(), client, request, true)
+	if domain.CategoryOf(err) != domain.ErrorPrecondition ||
+		!strings.Contains(err.Error(), "restore preflight") ||
+		strings.Contains(err.Error(), "backup preflight") {
+		t.Fatalf("category=%s error=%v", domain.CategoryOf(err), err)
+	}
+}
+
+func TestRestorePVCCreationChecksPVCAdmissionPolicies(t *testing.T) {
+	client, request := restorePVCCreationFixture(t, nil)
+
+	limitRange := &corev1.LimitRange{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: request.Namespace,
+			Name:      "pvc-min",
+		},
+		Spec: corev1.LimitRangeSpec{Limits: []corev1.LimitRangeItem{{
+			Type: corev1.LimitTypePersistentVolumeClaim,
+			Min: corev1.ResourceList{
+				corev1.ResourceStorage: resource.MustParse("2Gi"),
+			},
+		}}},
+	}
+	if _, err := client.CoreV1().LimitRanges(request.Namespace).Create(
+		t.Context(),
+		limitRange,
+		metav1.CreateOptions{},
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := Preflight(t.Context(), client, request, true)
+	if domain.CategoryOf(err) != domain.ErrorPrecondition ||
+		!strings.Contains(err.Error(), "destination PVC LimitRange rejected the request") ||
+		!strings.Contains(err.Error(), "pvc-min") {
+		t.Fatalf("category=%s error=%v", domain.CategoryOf(err), err)
+	}
+}
+
+func TestRestorePVCCreationChecksPVCQuota(t *testing.T) {
+	client, request := restorePVCCreationFixture(t, nil)
+
+	quota := &corev1.ResourceQuota{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: request.Namespace,
+			Name:      "pvc-count",
+		},
+		Status: corev1.ResourceQuotaStatus{
+			Hard: corev1.ResourceList{
+				corev1.ResourcePersistentVolumeClaims: resource.MustParse("0"),
+			},
+			Used: corev1.ResourceList{
+				corev1.ResourcePersistentVolumeClaims: resource.MustParse("0"),
+			},
+		},
+	}
+	if _, err := client.CoreV1().ResourceQuotas(request.Namespace).Create(
+		t.Context(),
+		quota,
+		metav1.CreateOptions{},
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := Preflight(t.Context(), client, request, true)
+	if domain.CategoryOf(err) != domain.ErrorPrecondition ||
+		!strings.Contains(err.Error(), "destination PVC quota rejected the request") ||
+		!strings.Contains(err.Error(), "pvc-count") {
+		t.Fatalf("category=%s error=%v", domain.CategoryOf(err), err)
 	}
 }
 

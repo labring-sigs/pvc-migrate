@@ -1,9 +1,11 @@
 package kube_test
 
 import (
+	"reflect"
 	"slices"
 	"testing"
 
+	"github.com/labring-sigs/pvc-migrate/internal/domain"
 	. "github.com/labring-sigs/pvc-migrate/internal/kube"
 	"github.com/labring-sigs/pvc-migrate/internal/testutil"
 	"helm.sh/helm/v4/pkg/cli"
@@ -242,5 +244,177 @@ func TestZeroResourceHelmValuesParseAsChartOverrides(t *testing.T) {
 				t.Fatalf("component %s sets an evicting ephemeral-storage limit", component)
 			}
 		}
+	}
+}
+
+func TestPVMigrateResourceEstimateMatchesStrategyTopology(t *testing.T) {
+	t.Setenv("HELM_DRIVER", "secret")
+
+	tests := []struct {
+		name            string
+		strategies      []string
+		sameNamespace   bool
+		destinationSide bool
+		want            domain.ResourceEstimate
+	}{
+		{
+			name:            "mount",
+			strategies:      []string{domain.StrategyMount},
+			sameNamespace:   true,
+			destinationSide: true,
+			want: domain.ResourceEstimate{
+				Pods: 1, NotTerminatingPods: 1, Jobs: 1, Secrets: 1, ServiceAccounts: 1,
+			},
+		},
+		{
+			name:            "clusterip same namespace",
+			strategies:      []string{domain.StrategyClusterIP},
+			sameNamespace:   true,
+			destinationSide: true,
+			want: domain.ResourceEstimate{
+				Pods: 2, NotTerminatingPods: 2, Jobs: 1,
+				Deployments: 1, ReplicaSets: 1, Services: 1,
+				Endpoints: 1, EndpointSlices: 1, Secrets: 3, ServiceAccounts: 2,
+			},
+		},
+		{
+			name: "nodeport and loadbalancer same namespace",
+			strategies: []string{
+				domain.StrategyNodePort,
+				domain.StrategyLoadBalancer,
+			},
+			sameNamespace:   true,
+			destinationSide: true,
+			want: domain.ResourceEstimate{
+				Pods: 2, NotTerminatingPods: 2, Jobs: 1,
+				Deployments: 1, ReplicaSets: 1, Services: 1,
+				ServiceNodePorts: 1, ServiceLoadBalancers: 1,
+				Endpoints: 1, EndpointSlices: 1, Secrets: 4, ServiceAccounts: 2,
+			},
+		},
+		{
+			name:            "local same namespace",
+			strategies:      []string{domain.StrategyLocal},
+			sameNamespace:   true,
+			destinationSide: true,
+			want: domain.ResourceEstimate{
+				Pods: 2, NotTerminatingPods: 2, Deployments: 2, ReplicaSets: 2, Services: 2,
+				Endpoints: 2, EndpointSlices: 2, Secrets: 4, ServiceAccounts: 2,
+			},
+		},
+		{
+			name:          "clusterip source side",
+			strategies:    []string{domain.StrategyClusterIP},
+			sameNamespace: false,
+			want: domain.ResourceEstimate{
+				Pods: 1, NotTerminatingPods: 1, Deployments: 1, ReplicaSets: 1, Services: 1,
+				Endpoints: 1, EndpointSlices: 1, Secrets: 1, ServiceAccounts: 1,
+			},
+		},
+		{
+			name:            "clusterip destination side",
+			strategies:      []string{domain.StrategyClusterIP},
+			sameNamespace:   false,
+			destinationSide: true,
+			want: domain.ResourceEstimate{
+				Pods: 1, NotTerminatingPods: 1, Jobs: 1, Secrets: 2, ServiceAccounts: 1,
+			},
+		},
+		{
+			name:          "nodeport source side",
+			strategies:    []string{domain.StrategyNodePort},
+			sameNamespace: false,
+			want: domain.ResourceEstimate{
+				Pods: 1, NotTerminatingPods: 1, Deployments: 1, ReplicaSets: 1, Services: 1,
+				ServiceNodePorts: 1, Endpoints: 1, EndpointSlices: 1, Secrets: 2,
+				ServiceAccounts: 1,
+			},
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			got := PVMigrateResourceEstimate(
+				test.strategies,
+				test.sameNamespace,
+				test.destinationSide,
+			)
+			if !reflect.DeepEqual(got, test.want) {
+				t.Fatalf("estimate=%#v, want %#v", got, test.want)
+			}
+		})
+	}
+}
+
+func TestPVMigrateResourceEstimateFollowsHelmReleaseDriver(t *testing.T) {
+	for _, test := range []struct {
+		name                  string
+		driver                string
+		sameSecrets           int
+		sameConfigMaps        int
+		destinationSecrets    int
+		destinationConfigMaps int
+	}{
+		{
+			name: "secret", driver: "secret", sameSecrets: 3, destinationSecrets: 2,
+		},
+		{
+			name: "configmap", driver: "configmap", sameSecrets: 2, sameConfigMaps: 1,
+			destinationSecrets: 1, destinationConfigMaps: 1,
+		},
+		{
+			name: "memory", driver: "memory", sameSecrets: 2, destinationSecrets: 1,
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Setenv("HELM_DRIVER", test.driver)
+
+			sameNamespace := PVMigrateResourceEstimate(
+				[]string{domain.StrategyClusterIP},
+				true,
+				true,
+			)
+			if sameNamespace.Secrets != test.sameSecrets ||
+				sameNamespace.ConfigMaps != test.sameConfigMaps {
+				t.Fatalf(
+					"driver %s same-namespace estimate secrets=%d configMaps=%d, want %d/%d",
+					test.driver,
+					sameNamespace.Secrets,
+					sameNamespace.ConfigMaps,
+					test.sameSecrets,
+					test.sameConfigMaps,
+				)
+			}
+
+			source := PVMigrateResourceEstimate(
+				[]string{domain.StrategyClusterIP},
+				false,
+				false,
+			)
+			if source.Secrets != 1 || source.ConfigMaps != 0 {
+				t.Fatalf(
+					"driver %s source estimate=%#v, want one component Secret",
+					test.driver,
+					source,
+				)
+			}
+
+			destination := PVMigrateResourceEstimate(
+				[]string{domain.StrategyClusterIP},
+				false,
+				true,
+			)
+			if destination.Secrets != test.destinationSecrets ||
+				destination.ConfigMaps != test.destinationConfigMaps {
+				t.Fatalf(
+					"driver %s destination estimate secrets=%d configMaps=%d, want %d/%d",
+					test.driver,
+					destination.Secrets,
+					destination.ConfigMaps,
+					test.destinationSecrets,
+					test.destinationConfigMaps,
+				)
+			}
+		})
 	}
 }
