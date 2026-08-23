@@ -70,7 +70,7 @@ func runBackupSession(
 	if session == nil {
 		return domain.NewError(
 			domain.ErrorValidation,
-			"backup resume",
+			backupResumePhase,
 			"backup session is required",
 		)
 	}
@@ -78,7 +78,7 @@ func runBackupSession(
 	if session.Spec.Backup == nil {
 		return domain.NewError(
 			domain.ErrorValidation,
-			"backup resume",
+			backupResumePhase,
 			"backup session payload is required",
 		)
 	}
@@ -560,7 +560,7 @@ func prepareBackupTransferTool(
 	}
 
 	if toolNode == "" {
-		toolNode, err = uniquePVToolNode(ctx, client, pv, "backup preflight")
+		toolNode, err = uniquePVToolNode(ctx, client, pv, backupPreflightPhase)
 		if err != nil {
 			return kube.ToolImageProbeResult{}, nil, err
 		}

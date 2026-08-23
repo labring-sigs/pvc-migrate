@@ -1,15 +1,68 @@
 package kube
 
 import (
+	"context"
 	"fmt"
 	"maps"
 	"sort"
 	"strings"
+	"sync"
 
 	"github.com/labring-sigs/pvc-migrate/internal/domain"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/client-go/kubernetes"
 )
+
+const (
+	countResourcePrefix            = "count/"
+	storageClassQuotaResourceInfix = ".storageclass.storage.k8s.io/"
+
+	countPodsResource                   corev1.ResourceName = "count/pods"
+	countPersistentVolumeClaimsResource corev1.ResourceName = "count/persistentvolumeclaims"
+)
+
+// NamespaceResourcePolicies contains ResourceQuota and LimitRange objects
+// collected in one pass. Errors stay separate so callers can report both
+// policy checks independently.
+type NamespaceResourcePolicies struct {
+	ResourceQuotas   *corev1.ResourceQuotaList
+	LimitRanges      *corev1.LimitRangeList
+	ResourceQuotaErr error
+	LimitRangeErr    error
+}
+
+// ReadNamespaceResourcePolicies reads quota and, when requested, LimitRange
+// state concurrently. The collected result can feed both LimitRange validation
+// and quota projection without listing LimitRanges twice.
+func ReadNamespaceResourcePolicies(
+	ctx context.Context,
+	client kubernetes.Interface,
+	namespace string,
+	includeLimitRanges bool,
+) NamespaceResourcePolicies {
+	var result NamespaceResourcePolicies
+
+	var wg sync.WaitGroup
+	wg.Go(func() {
+		result.ResourceQuotas, result.ResourceQuotaErr = client.CoreV1().
+			ResourceQuotas(namespace).
+			List(ctx, metav1.ListOptions{})
+	})
+
+	if includeLimitRanges {
+		wg.Go(func() {
+			result.LimitRanges, result.LimitRangeErr = client.CoreV1().
+				LimitRanges(namespace).
+				List(ctx, metav1.ListOptions{})
+		})
+	}
+
+	wg.Wait()
+
+	return result
+}
 
 // ResourceQuotaReport describes the bounded resources evaluated for one
 // namespace and every projected overflow found in admitted quota status.
@@ -46,7 +99,7 @@ func resourceQuotaDemand(estimate domain.ResourceEstimate) (corev1.ResourceList,
 	}
 	addCount(corev1.ResourcePersistentVolumeClaims, estimate.PVCs)
 	addCount(corev1.ResourcePods, estimate.Pods)
-	addCount(corev1.ResourceName("count/pods"), estimate.Pods)
+	addCount(countPodsResource, estimate.Pods)
 	addCount(corev1.ResourceName("count/deployments.apps"), estimate.Deployments)
 	addCount(corev1.ResourceName("count/replicasets.apps"), estimate.ReplicaSets)
 	addCount(corev1.ResourceServices, estimate.Services)
@@ -64,7 +117,7 @@ func resourceQuotaDemand(estimate domain.ResourceEstimate) (corev1.ResourceList,
 	addCount(corev1.ResourceName("count/secrets"), estimate.Secrets)
 	addCount(corev1.ResourceName("count/configmaps"), estimate.ConfigMaps)
 	addCount(corev1.ResourceName("count/serviceaccounts"), estimate.ServiceAccounts)
-	addCount(corev1.ResourceName("count/persistentvolumeclaims"), estimate.PVCs)
+	addCount(countPersistentVolumeClaimsResource, estimate.PVCs)
 	addCount(corev1.ResourceName("count/leases.coordination.k8s.io"), estimate.Leases)
 
 	for class, value := range estimate.ByStorageClass {
@@ -92,20 +145,31 @@ func resourceQuotaDemand(estimate domain.ResourceEstimate) (corev1.ResourceList,
 		}
 
 		if quantity.Sign() > 0 {
-			result[corev1.ResourceName(
-				class+".storageclass.storage.k8s.io/requests.storage",
-			)] = quantity
+			result[storageClassQuotaResourceName(class, corev1.ResourceRequestsStorage)] = quantity
 		}
 
-		addCount(
-			corev1.ResourceName(
-				class+".storageclass.storage.k8s.io/persistentvolumeclaims",
-			),
-			classPVCs,
-		)
+		addCount(storageClassQuotaResourceName(
+			class,
+			corev1.ResourcePersistentVolumeClaims,
+		), classPVCs)
 	}
 
 	return result, nil
+}
+
+func storageClassQuotaResourceName(
+	class string,
+	resourceName corev1.ResourceName,
+) corev1.ResourceName {
+	return corev1.ResourceName(class + storageClassQuotaResourceInfix + string(resourceName))
+}
+
+func splitStorageClassQuotaResourceName(
+	name corev1.ResourceName,
+) (string, corev1.ResourceName, bool) {
+	class, resourceName, found := strings.Cut(string(name), storageClassQuotaResourceInfix)
+
+	return class, corev1.ResourceName(resourceName), found
 }
 
 // EvaluateResourceQuotaCapacity projects one workflow's peak demand against

@@ -79,26 +79,30 @@ func CheckPVCAdmissionPolicies(
 		}
 	}
 
-	quotas, err := client.CoreV1().ResourceQuotas(namespace).List(ctx, metav1.ListOptions{})
-	if err != nil && !apierrors.IsNotFound(err) {
-		return PVCAdmissionReport{}, err
+	policies := ReadNamespaceResourcePolicies(ctx, client, namespace, true)
+	if policies.ResourceQuotaErr != nil && !apierrors.IsNotFound(policies.ResourceQuotaErr) {
+		return PVCAdmissionReport{}, policies.ResourceQuotaErr
 	}
 
-	limitRanges, limitRangeErr := client.CoreV1().
-		LimitRanges(namespace).
-		List(ctx, metav1.ListOptions{})
-	if limitRangeErr != nil && !apierrors.IsNotFound(limitRangeErr) {
-		return PVCAdmissionReport{}, limitRangeErr
+	if policies.LimitRangeErr != nil && !apierrors.IsNotFound(policies.LimitRangeErr) {
+		return PVCAdmissionReport{}, policies.LimitRangeErr
 	}
 
 	report := PVCAdmissionReport{}
-	if quotas != nil {
-		changes, err = resolveExistingPVCAdmissionState(ctx, client, quotas.Items, changes)
+	if policies.ResourceQuotas != nil {
+		resolved, err := resolveExistingPVCAdmissionState(
+			ctx,
+			client,
+			policies.ResourceQuotas.Items,
+			changes,
+		)
 		if err != nil {
 			return PVCAdmissionReport{}, err
 		}
 
-		for _, quota := range quotas.Items {
+		changes = resolved
+
+		for _, quota := range policies.ResourceQuotas.Items {
 			if !quotaCanMatchRequestedPVC(quota, changes) {
 				continue
 			}
@@ -150,8 +154,8 @@ func CheckPVCAdmissionPolicies(
 		}
 	}
 
-	if limitRanges != nil {
-		for _, limitRange := range limitRanges.Items {
+	if policies.LimitRanges != nil {
+		for _, limitRange := range policies.LimitRanges.Items {
 			for _, item := range limitRange.Spec.Limits {
 				if item.Type != corev1.LimitTypePersistentVolumeClaim {
 					continue
@@ -266,11 +270,11 @@ func resolveExistingPVCAdmissionState(
 func hasPVCStorageQuota(quotas []corev1.ResourceQuota) bool {
 	for _, quota := range quotas {
 		for resourceName := range quota.Status.Hard {
+			_, scopedResource, storageClassScoped := splitStorageClassQuotaResourceName(
+				resourceName,
+			)
 			if resourceName == corev1.ResourceRequestsStorage ||
-				strings.HasSuffix(
-					string(resourceName),
-					".storageclass.storage.k8s.io/requests.storage",
-				) {
+				(storageClassScoped && scopedResource == corev1.ResourceRequestsStorage) {
 				return true
 			}
 		}
@@ -436,15 +440,14 @@ func isPVCQuotaResource(resourceName corev1.ResourceName) bool {
 	switch resourceName {
 	case corev1.ResourceRequestsStorage,
 		corev1.ResourcePersistentVolumeClaims,
-		corev1.ResourceName("count/persistentvolumeclaims"):
+		countPersistentVolumeClaimsResource:
 		return true
 	}
 
-	const classPrefix = ".storageclass.storage.k8s.io/"
+	_, suffix, ok := splitStorageClassQuotaResourceName(resourceName)
 
-	_, suffix, ok := strings.Cut(string(resourceName), classPrefix)
-
-	return ok && (suffix == "requests.storage" || suffix == "persistentvolumeclaims")
+	return ok && (suffix == corev1.ResourceRequestsStorage ||
+		suffix == corev1.ResourcePersistentVolumeClaims)
 }
 
 func projectedQuotaResource(
@@ -456,21 +459,19 @@ func projectedQuotaResource(
 	switch resourceName {
 	case corev1.ResourceRequestsStorage:
 		return projectedPVCStorage(used, quota, changes, ""), true
-	case corev1.ResourcePersistentVolumeClaims, corev1.ResourceName("count/persistentvolumeclaims"):
+	case corev1.ResourcePersistentVolumeClaims, countPersistentVolumeClaimsResource:
 		return projectedPVCCount(used, quota, changes, ""), true
 	}
 
-	const classPrefix = ".storageclass.storage.k8s.io/"
-
-	class, suffix, ok := strings.Cut(string(resourceName), classPrefix)
+	class, suffix, ok := splitStorageClassQuotaResourceName(resourceName)
 	if !ok {
 		return resource.Quantity{}, false
 	}
 
 	switch suffix {
-	case "requests.storage":
+	case corev1.ResourceRequestsStorage:
 		return projectedPVCStorage(used, quota, changes, class), true
-	case "persistentvolumeclaims":
+	case corev1.ResourcePersistentVolumeClaims:
 		return projectedPVCCount(used, quota, changes, class), true
 	default:
 		return resource.Quantity{}, false

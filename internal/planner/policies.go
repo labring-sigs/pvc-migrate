@@ -14,20 +14,25 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
+const (
+	limitRangeCheckName    = "limit-range"
+	resourceQuotaCheckName = "resource-quota"
+)
+
 func (p *Planner) checkLimitRanges(
-	ctx context.Context,
 	plan *domain.MigrationPlan,
 	namespace string,
 	volumes []domain.PlannedVolume,
 	toolPods int,
+	policies kube.NamespaceResourcePolicies,
 ) {
 	p.logInfo("checking LimitRanges", "namespace", namespace, "volumes", len(volumes))
 
-	items, err := p.client.CoreV1().LimitRanges(namespace).List(ctx, metav1.ListOptions{})
+	items, err := policies.LimitRanges, policies.LimitRangeErr
 	if apierrors.IsNotFound(err) {
 		plan.AddCheck(
 			warned(
-				"limit-range",
+				limitRangeCheckName,
 				fmt.Sprintf(
 					"namespace %s does not exist yet; reservation will create it",
 					namespace,
@@ -40,7 +45,7 @@ func (p *Planner) checkLimitRanges(
 
 	if err != nil {
 		plan.AddCheck(
-			failed("limit-range", fmt.Sprintf("list LimitRanges in %s: %v", namespace, err)),
+			failed(limitRangeCheckName, fmt.Sprintf("list LimitRanges in %s: %v", namespace, err)),
 		)
 		return
 	}
@@ -48,7 +53,7 @@ func (p *Planner) checkLimitRanges(
 	if items == nil {
 		plan.AddCheck(
 			failed(
-				"limit-range",
+				limitRangeCheckName,
 				fmt.Sprintf("list LimitRanges in %s returned an empty object", namespace),
 			),
 		)
@@ -119,31 +124,31 @@ func (p *Planner) checkLimitRanges(
 	}
 
 	if len(violations) > 0 {
-		plan.AddCheck(failed("limit-range", strings.Join(violations, "; ")))
+		plan.AddCheck(failed(limitRangeCheckName, strings.Join(violations, "; ")))
 		return
 	}
 
 	plan.AddCheck(
 		passed(
-			"limit-range",
+			limitRangeCheckName,
 			fmt.Sprintf("%d LimitRange object(s) permit all target PVC requests", len(items.Items)),
 		),
 	)
 }
 
 func (p *Planner) checkQuotas(
-	ctx context.Context,
 	plan *domain.MigrationPlan,
 	namespace string,
 	estimate domain.ResourceEstimate,
+	policies kube.NamespaceResourcePolicies,
 ) {
 	p.logInfo("checking ResourceQuotas", "namespace", namespace)
 
-	items, err := p.client.CoreV1().ResourceQuotas(namespace).List(ctx, metav1.ListOptions{})
+	items, err := policies.ResourceQuotas, policies.ResourceQuotaErr
 	if apierrors.IsNotFound(err) {
 		plan.AddCheck(
 			warned(
-				"resource-quota",
+				resourceQuotaCheckName,
 				fmt.Sprintf(
 					"namespace %s does not exist yet; no quota is currently applied",
 					namespace,
@@ -156,15 +161,19 @@ func (p *Planner) checkQuotas(
 
 	if err != nil {
 		plan.AddCheck(
-			failed("resource-quota", fmt.Sprintf("list ResourceQuotas in %s: %v", namespace, err)),
+			failed(
+				resourceQuotaCheckName,
+				fmt.Sprintf("list ResourceQuotas in %s: %v", namespace, err),
+			),
 		)
+
 		return
 	}
 
 	if items == nil {
 		plan.AddCheck(
 			failed(
-				"resource-quota",
+				resourceQuotaCheckName,
 				fmt.Sprintf("list ResourceQuotas in %s returned an empty object", namespace),
 			),
 		)
@@ -174,15 +183,14 @@ func (p *Planner) checkQuotas(
 
 	var limitRanges []corev1.LimitRange
 	if estimate.Pods > 0 {
-		items, listErr := p.client.CoreV1().LimitRanges(namespace).List(ctx, metav1.ListOptions{})
-		if listErr != nil {
+		if policies.LimitRangeErr != nil {
 			plan.AddCheck(
 				failed(
-					"resource-quota",
+					resourceQuotaCheckName,
 					fmt.Sprintf(
 						"list LimitRanges for ResourceQuota evaluation in %s: %v",
 						namespace,
-						listErr,
+						policies.LimitRangeErr,
 					),
 				),
 			)
@@ -190,10 +198,10 @@ func (p *Planner) checkQuotas(
 			return
 		}
 
-		if items == nil {
+		if policies.LimitRanges == nil {
 			plan.AddCheck(
 				failed(
-					"resource-quota",
+					resourceQuotaCheckName,
 					fmt.Sprintf(
 						"list LimitRanges for ResourceQuota evaluation in %s returned an empty object",
 						namespace,
@@ -204,7 +212,7 @@ func (p *Planner) checkQuotas(
 			return
 		}
 
-		limitRanges = items.Items
+		limitRanges = policies.LimitRanges.Items
 	}
 
 	report, err := kube.EvaluateResourceQuotaCapacity(
@@ -214,18 +222,18 @@ func (p *Planner) checkQuotas(
 		estimate,
 	)
 	if err != nil {
-		plan.AddCheck(failed("resource-quota", err.Error()))
+		plan.AddCheck(failed(resourceQuotaCheckName, err.Error()))
 		return
 	}
 
 	if len(report.Violations) > 0 {
-		plan.AddCheck(failed("resource-quota", strings.Join(report.Violations, "; ")))
+		plan.AddCheck(failed(resourceQuotaCheckName, strings.Join(report.Violations, "; ")))
 		return
 	}
 
 	plan.AddCheck(
 		passed(
-			"resource-quota",
+			resourceQuotaCheckName,
 			fmt.Sprintf(
 				"%d ResourceQuota object(s), %d bounded resource(s), all have capacity",
 				len(items.Items),
@@ -233,6 +241,28 @@ func (p *Planner) checkQuotas(
 			),
 		),
 	)
+}
+
+func (p *Planner) checkNamespaceResourcePolicies(
+	ctx context.Context,
+	plan *domain.MigrationPlan,
+	namespace string,
+	volumes []domain.PlannedVolume,
+	estimate domain.ResourceEstimate,
+) {
+	includeLimitRanges := len(volumes) > 0 || estimate.Pods > 0
+	policies := kube.ReadNamespaceResourcePolicies(
+		ctx,
+		p.client,
+		namespace,
+		includeLimitRanges,
+	)
+
+	if includeLimitRanges {
+		p.checkLimitRanges(plan, namespace, volumes, estimate.Pods, policies)
+	}
+
+	p.checkQuotas(plan, namespace, estimate, policies)
 }
 
 func (p *Planner) checkNetworkPolicies(

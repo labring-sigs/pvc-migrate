@@ -332,24 +332,22 @@ func isToolQuotaResource(name corev1.ResourceName) bool {
 	}
 
 	value := string(name)
-	if strings.HasPrefix(value, "count/") {
-		return len(value) > len("count/")
+	if strings.HasPrefix(value, countResourcePrefix) {
+		return len(value) > len(countResourcePrefix)
 	}
 
-	const storageClassQuotaSegment = ".storageclass.storage.k8s.io/"
-
-	class, resourceName, found := strings.Cut(value, storageClassQuotaSegment)
+	class, resourceName, found := splitStorageClassQuotaResourceName(name)
 	if !found || class == "" {
 		return false
 	}
 
-	return resourceName == string(corev1.ResourceRequestsStorage) ||
-		resourceName == string(corev1.ResourcePersistentVolumeClaims)
+	return resourceName == corev1.ResourceRequestsStorage ||
+		resourceName == corev1.ResourcePersistentVolumeClaims
 }
 
 var toolPodQuotaResources = map[corev1.ResourceName]bool{
 	corev1.ResourcePods:                     true,
-	corev1.ResourceName("count/pods"):       true,
+	countPodsResource:                       true,
 	corev1.ResourceCPU:                      true,
 	corev1.ResourceMemory:                   true,
 	corev1.ResourceEphemeralStorage:         true,

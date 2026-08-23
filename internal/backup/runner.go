@@ -182,7 +182,7 @@ func preflight(
 		if getErr != nil {
 			return nil, domain.WrapError(
 				domain.ErrorKubernetes,
-				"restore preflight",
+				restorePreflightPhase,
 				"read destination PVC",
 				getErr,
 			)
@@ -331,7 +331,7 @@ func preflight(
 
 		return nil, domain.NewError(
 			domain.ErrorConflict,
-			"backup preflight",
+			backupPreflightPhase,
 			"S3 completion manifest already exists; use a new backup name to preserve the published recovery point",
 		)
 	}
@@ -548,7 +548,7 @@ func transferToolHelmValues(
 	if err != nil {
 		return nil, domain.WrapError(
 			domain.ErrorKubernetes,
-			"tool scheduling",
+			toolSchedulingPhase,
 			"read node "+probe.NodeName,
 			err,
 		)
@@ -603,14 +603,14 @@ func validateTransferToolLaunch(
 	if info.PVC.UID != pvc.UID || info.PV.UID != pv.UID {
 		return domain.NewError(
 			domain.ErrorConflict,
-			"tool scheduling",
+			toolSchedulingPhase,
 			"PVC or PV identity changed during final tool launch validation",
 		)
 	}
 
 	operation := "backup scheduling"
 	if restore {
-		operation = "restore scheduling"
+		operation = restoreSchedulingPhase
 	}
 
 	consumerNode, err := rwoConsumerNode(info, operation)
@@ -651,7 +651,7 @@ func validateTransferToolLaunch(
 	if requiredNode != "" && requiredNode != probe.NodeName {
 		return domain.NewError(
 			domain.ErrorConflict,
-			"tool scheduling",
+			toolSchedulingPhase,
 			fmt.Sprintf(
 				"required tool node changed from %s to %s during image probe",
 				probe.NodeName,
@@ -1023,7 +1023,7 @@ func validateInspectionConsumers(
 		if !kube.HasWritableAccessMode(pvc.Spec.AccessModes) {
 			return domain.NewError(
 				domain.ErrorPrecondition,
-				"restore preflight",
+				restorePreflightPhase,
 				"destination PVC has no writable access mode",
 			)
 		}
@@ -1031,7 +1031,7 @@ func validateInspectionConsumers(
 		if len(consumerNames) > 0 && !allowMounted {
 			return domain.NewError(
 				domain.ErrorPrecondition,
-				"restore preflight",
+				restorePreflightPhase,
 				"destination PVC is referenced by Pod(s) "+strings.Join(consumerNames, ","),
 			)
 		}
@@ -1039,7 +1039,7 @@ func validateInspectionConsumers(
 		if len(consumerNames) > 0 && hasRWOP(pvc) {
 			return domain.NewError(
 				domain.ErrorPrecondition,
-				"restore preflight",
+				restorePreflightPhase,
 				"restore cannot mount an active ReadWriteOncePod PVC",
 			)
 		}
@@ -1050,7 +1050,7 @@ func validateInspectionConsumers(
 	if !online && len(consumerNames) > 0 {
 		return domain.NewError(
 			domain.ErrorPrecondition,
-			"backup preflight",
+			backupPreflightPhase,
 			"source PVC is referenced by Pod(s) "+strings.Join(consumerNames, ","),
 		)
 	}
@@ -1058,7 +1058,7 @@ func validateInspectionConsumers(
 	if online && hasRWOP(pvc) && len(consumerNames) > 0 {
 		return domain.NewError(
 			domain.ErrorPrecondition,
-			"backup preflight",
+			backupPreflightPhase,
 			"online backup cannot mount an active ReadWriteOncePod PVC",
 		)
 	}
@@ -1130,7 +1130,7 @@ func verifyPVCIdentity(
 	if expectedPVCUID == "" || expectedPVUID == "" {
 		return nil, nil, domain.NewError(
 			domain.ErrorPrecondition,
-			"backup identity",
+			backupIdentityPhase,
 			"expected PVC and PV identities are required",
 		)
 	}
@@ -1141,7 +1141,7 @@ func verifyPVCIdentity(
 	if err != nil {
 		return nil, nil, domain.WrapError(
 			domain.ErrorKubernetes,
-			"backup identity",
+			backupIdentityPhase,
 			"read PVC",
 			err,
 		)
@@ -1150,7 +1150,7 @@ func verifyPVCIdentity(
 	if string(pvc.UID) != expectedPVCUID {
 		return nil, nil, domain.NewError(
 			domain.ErrorConflict,
-			"backup identity",
+			backupIdentityPhase,
 			"PVC identity changed since preflight",
 		)
 	}
@@ -1158,7 +1158,7 @@ func verifyPVCIdentity(
 	if pvc.Status.Phase != corev1.ClaimBound {
 		return nil, nil, domain.NewError(
 			domain.ErrorPrecondition,
-			"backup identity",
+			backupIdentityPhase,
 			"PVC is no longer Bound",
 		)
 	}
@@ -1166,7 +1166,7 @@ func verifyPVCIdentity(
 	if pvc.Spec.VolumeName == "" {
 		return nil, nil, domain.NewError(
 			domain.ErrorPrecondition,
-			"backup identity",
+			backupIdentityPhase,
 			"PVC is no longer bound to a PV",
 		)
 	}
@@ -1175,13 +1175,18 @@ func verifyPVCIdentity(
 		PersistentVolumes().
 		Get(ctx, pvc.Spec.VolumeName, metav1.GetOptions{})
 	if err != nil {
-		return nil, nil, domain.WrapError(domain.ErrorKubernetes, "backup identity", "read PV", err)
+		return nil, nil, domain.WrapError(
+			domain.ErrorKubernetes,
+			backupIdentityPhase,
+			"read PV",
+			err,
+		)
 	}
 
 	if string(pv.UID) != expectedPVUID {
 		return nil, nil, domain.NewError(
 			domain.ErrorConflict,
-			"backup identity",
+			backupIdentityPhase,
 			"PV identity changed since preflight",
 		)
 	}
@@ -1189,7 +1194,7 @@ func verifyPVCIdentity(
 	if pv.Status.Phase != corev1.VolumeBound {
 		return nil, nil, domain.NewError(
 			domain.ErrorPrecondition,
-			"backup identity",
+			backupIdentityPhase,
 			"PV is no longer Bound",
 		)
 	}
@@ -1199,7 +1204,7 @@ func verifyPVCIdentity(
 		pv.Spec.ClaimRef.UID != pvc.UID {
 		return nil, nil, domain.NewError(
 			domain.ErrorConflict,
-			"backup identity",
+			backupIdentityPhase,
 			"PVC and PV claimRef no longer identify the same binding",
 		)
 	}

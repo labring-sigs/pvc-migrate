@@ -285,10 +285,13 @@ func (p *Planner) PlanRename(
 
 	tasks := []planCheckTask{
 		func(result *domain.MigrationPlan) {
-			p.checkLimitRanges(ctx, result, options.DestinationNamespace, plan.Volumes, 0)
-		},
-		func(result *domain.MigrationPlan) {
-			p.checkQuotas(ctx, result, options.DestinationNamespace, plan.TemporaryUsage)
+			p.checkNamespaceResourcePolicies(
+				ctx,
+				result,
+				options.DestinationNamespace,
+				plan.Volumes,
+				plan.TemporaryUsage,
+			)
 		},
 		func(result *domain.MigrationPlan) {
 			p.checkRenameRBAC(
@@ -302,13 +305,19 @@ func (p *Planner) PlanRename(
 	}
 	if options.SessionNamespace != options.DestinationNamespace {
 		tasks = append(tasks, func(result *domain.MigrationPlan) {
-			p.checkQuotas(ctx, result, options.SessionNamespace, domain.ResourceEstimate{
-				StorageRequests:    "0",
-				ConfigMaps:         1,
-				Leases:             1,
-				ByStorageClass:     map[string]string{},
-				PVCsByStorageClass: map[string]int{},
-			})
+			p.checkNamespaceResourcePolicies(
+				ctx,
+				result,
+				options.SessionNamespace,
+				nil,
+				domain.ResourceEstimate{
+					StorageRequests:    "0",
+					ConfigMaps:         1,
+					Leases:             1,
+					ByStorageClass:     map[string]string{},
+					PVCsByStorageClass: map[string]int{},
+				},
+			)
 		})
 	}
 

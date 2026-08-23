@@ -253,29 +253,27 @@ func (p *Planner) runPlanPolicyChecks(
 
 	tasks := []planCheckTask{
 		func(result *domain.MigrationPlan) {
-			p.checkLimitRanges(
+			p.checkNamespaceResourcePolicies(
 				ctx,
 				result,
 				options.StagingNamespace,
 				state.plannedVolumes,
-				staging.Pods,
+				staging,
 			)
-		},
-		func(result *domain.MigrationPlan) {
-			p.checkQuotas(ctx, result, options.StagingNamespace, staging)
 		},
 	}
 	if options.SourceNamespace != options.StagingNamespace {
 		source := estimates[options.SourceNamespace]
 
-		tasks = append(tasks,
-			func(result *domain.MigrationPlan) {
-				p.checkLimitRanges(ctx, result, options.SourceNamespace, nil, source.Pods)
-			},
-			func(result *domain.MigrationPlan) {
-				p.checkQuotas(ctx, result, options.SourceNamespace, source)
-			},
-		)
+		tasks = append(tasks, func(result *domain.MigrationPlan) {
+			p.checkNamespaceResourcePolicies(
+				ctx,
+				result,
+				options.SourceNamespace,
+				nil,
+				source,
+			)
+		})
 	}
 
 	if options.SessionNamespace != options.StagingNamespace &&
@@ -283,7 +281,13 @@ func (p *Planner) runPlanPolicyChecks(
 		session := estimates[options.SessionNamespace]
 
 		tasks = append(tasks, func(result *domain.MigrationPlan) {
-			p.checkQuotas(ctx, result, options.SessionNamespace, session)
+			p.checkNamespaceResourcePolicies(
+				ctx,
+				result,
+				options.SessionNamespace,
+				nil,
+				session,
+			)
 		})
 	}
 

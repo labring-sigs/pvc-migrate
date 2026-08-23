@@ -11,7 +11,6 @@ import (
 	storagev1 "k8s.io/api/storage/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
 )
 
@@ -21,6 +20,8 @@ func (s *Service) planCrossClusterPolicies(
 	options Options,
 	destinationClass *storagev1.StorageClass,
 ) {
+	const pvcPolicyCheckName = "destination-pvc-policy"
+
 	if len(plan.Volumes) == 0 {
 		return
 	}
@@ -34,23 +35,25 @@ func (s *Service) planCrossClusterPolicies(
 		sourceResources.ConfigMaps++
 		sourceResources.Leases++
 	} else {
-		addCrossClusterQuotaCheck(
+		addCrossClusterPolicyChecks(
 			ctx,
 			plan,
 			s.source.Kubernetes,
 			options.SessionNamespace,
 			"source-session",
 			sessionResources,
+			false,
 		)
 	}
 
-	addCrossClusterToolPolicyChecks(
+	addCrossClusterPolicyChecks(
 		ctx,
 		plan,
 		s.source.Kubernetes,
 		options.SourceNamespace,
 		"source-tool",
 		sourceResources,
+		true,
 	)
 
 	destinationResources := kube.PVMigrateResourceEstimate(
@@ -65,13 +68,14 @@ func (s *Service) planCrossClusterPolicies(
 		destinationResources.NotTerminatingPods = 1
 	}
 
-	addCrossClusterToolPolicyChecks(
+	addCrossClusterPolicyChecks(
 		ctx,
 		plan,
 		s.destination.Kubernetes,
 		options.DestinationNamespace,
 		"destination-tool",
 		destinationResources,
+		true,
 	)
 
 	changes := make([]kube.PVCAdmissionChange, 0, len(plan.Volumes))
@@ -79,7 +83,7 @@ func (s *Service) planCrossClusterPolicies(
 		capacity, err := resource.ParseQuantity(volume.Capacity)
 		if err != nil {
 			plan.AddCheck(
-				"destination-pvc-policy",
+				pvcPolicyCheckName,
 				false,
 				fmt.Sprintf(
 					"destination PVC %s/%s has invalid planned capacity %q",
@@ -107,7 +111,7 @@ func (s *Service) planCrossClusterPolicies(
 	)
 	if err != nil {
 		plan.AddCheck(
-			"destination-pvc-policy",
+			pvcPolicyCheckName,
 			false,
 			"evaluate destination PVC admission policies: "+err.Error(),
 		)
@@ -121,7 +125,7 @@ func (s *Service) planCrossClusterPolicies(
 	)
 	if len(violations) > 0 {
 		plan.AddCheck(
-			"destination-pvc-policy",
+			pvcPolicyCheckName,
 			false,
 			strings.Join(violations, "; "),
 		)
@@ -130,7 +134,7 @@ func (s *Service) planCrossClusterPolicies(
 	}
 
 	plan.AddCheck(
-		"destination-pvc-policy",
+		pvcPolicyCheckName,
 		true,
 		fmt.Sprintf(
 			"destination namespace policies permit %d PVC request(s)",
@@ -139,61 +143,30 @@ func (s *Service) planCrossClusterPolicies(
 	)
 }
 
-func addCrossClusterToolPolicyChecks(
+func addCrossClusterPolicyChecks(
 	ctx context.Context,
 	plan *Plan,
 	client kubernetes.Interface,
 	namespace string,
 	name string,
 	estimate domain.ResourceEstimate,
+	checkToolLimitRanges bool,
 ) {
-	limitRanges, err := client.CoreV1().LimitRanges(namespace).List(ctx, metav1.ListOptions{})
-	if apierrors.IsNotFound(err) {
-		plan.AddCheck(
-			name+"-limit-range",
-			true,
-			fmt.Sprintf(
-				"namespace %s does not exist yet; no LimitRange is currently applied",
-				namespace,
-			),
-		)
-	} else if err != nil {
-		plan.AddCheck(
-			name+"-limit-range",
-			false,
-			fmt.Sprintf("list LimitRanges in %s: %v", namespace, err),
-		)
-	} else if limitRanges == nil {
-		plan.AddCheck(
-			name+"-limit-range",
-			false,
-			fmt.Sprintf("list LimitRanges in %s returned an empty object", namespace),
-		)
-	} else if violations := kube.ToolLimitRangeViolations(limitRanges.Items); len(violations) > 0 {
-		plan.AddCheck(name+"-limit-range", false, strings.Join(violations, "; "))
-	} else {
-		plan.AddCheck(
-			name+"-limit-range",
-			true,
-			fmt.Sprintf("%d LimitRange object(s) permit tool resources", len(limitRanges.Items)),
-		)
+	quotaCheckName := name + "-resource-quota"
+
+	policies := kube.ReadNamespaceResourcePolicies(
+		ctx,
+		client,
+		namespace,
+		checkToolLimitRanges || estimate.Pods > 0,
+	)
+	if checkToolLimitRanges {
+		addCrossClusterLimitRangeCheck(plan, namespace, name, policies)
 	}
 
-	addCrossClusterQuotaCheck(ctx, plan, client, namespace, name, estimate)
-}
-
-func addCrossClusterQuotaCheck(
-	ctx context.Context,
-	plan *Plan,
-	client kubernetes.Interface,
-	namespace string,
-	name string,
-	estimate domain.ResourceEstimate,
-) {
-	quotas, err := client.CoreV1().ResourceQuotas(namespace).List(ctx, metav1.ListOptions{})
-	if apierrors.IsNotFound(err) {
+	if apierrors.IsNotFound(policies.ResourceQuotaErr) {
 		plan.AddCheck(
-			name+"-resource-quota",
+			quotaCheckName,
 			true,
 			fmt.Sprintf(
 				"namespace %s does not exist yet; no ResourceQuota is currently applied",
@@ -204,19 +177,23 @@ func addCrossClusterQuotaCheck(
 		return
 	}
 
-	if err != nil {
+	if policies.ResourceQuotaErr != nil {
 		plan.AddCheck(
-			name+"-resource-quota",
+			quotaCheckName,
 			false,
-			fmt.Sprintf("list ResourceQuotas in %s: %v", namespace, err),
+			fmt.Sprintf(
+				"list ResourceQuotas in %s: %v",
+				namespace,
+				policies.ResourceQuotaErr,
+			),
 		)
 
 		return
 	}
 
-	if quotas == nil {
+	if policies.ResourceQuotas == nil {
 		plan.AddCheck(
-			name+"-resource-quota",
+			quotaCheckName,
 			false,
 			fmt.Sprintf("list ResourceQuotas in %s returned an empty object", namespace),
 		)
@@ -226,40 +203,40 @@ func addCrossClusterQuotaCheck(
 
 	var limitRangeItems []corev1.LimitRange
 	if estimate.Pods > 0 {
-		limitRanges, listErr := client.CoreV1().LimitRanges(namespace).List(
-			ctx,
-			metav1.ListOptions{},
-		)
-		if listErr != nil && !apierrors.IsNotFound(listErr) {
+		if policies.LimitRangeErr != nil && !apierrors.IsNotFound(policies.LimitRangeErr) {
 			plan.AddCheck(
-				name+"-resource-quota",
+				quotaCheckName,
 				false,
-				fmt.Sprintf("list LimitRanges in %s for quota evaluation: %v", namespace, listErr),
+				fmt.Sprintf(
+					"list LimitRanges in %s for quota evaluation: %v",
+					namespace,
+					policies.LimitRangeErr,
+				),
 			)
 
 			return
 		}
 
-		if limitRanges != nil {
-			limitRangeItems = limitRanges.Items
+		if policies.LimitRanges != nil {
+			limitRangeItems = policies.LimitRanges.Items
 		}
 	}
 
 	report, err := kube.EvaluateResourceQuotaCapacity(
 		namespace,
-		quotas.Items,
+		policies.ResourceQuotas.Items,
 		limitRangeItems,
 		estimate,
 	)
 	if err != nil {
-		plan.AddCheck(name+"-resource-quota", false, err.Error())
+		plan.AddCheck(quotaCheckName, false, err.Error())
 
 		return
 	}
 
 	if len(report.Violations) > 0 {
 		plan.AddCheck(
-			name+"-resource-quota",
+			quotaCheckName,
 			false,
 			strings.Join(report.Violations, "; "),
 		)
@@ -268,12 +245,59 @@ func addCrossClusterQuotaCheck(
 	}
 
 	plan.AddCheck(
-		name+"-resource-quota",
+		quotaCheckName,
 		true,
 		fmt.Sprintf(
 			"%d ResourceQuota object(s), %d bounded resource(s), all have capacity",
-			len(quotas.Items),
+			len(policies.ResourceQuotas.Items),
 			report.Checked,
 		),
 	)
+}
+
+func addCrossClusterLimitRangeCheck(
+	plan *Plan,
+	namespace string,
+	name string,
+	policies kube.NamespaceResourcePolicies,
+) {
+	checkName := name + "-limit-range"
+	switch {
+	case apierrors.IsNotFound(policies.LimitRangeErr):
+		plan.AddCheck(
+			checkName,
+			true,
+			fmt.Sprintf(
+				"namespace %s does not exist yet; no LimitRange is currently applied",
+				namespace,
+			),
+		)
+	case policies.LimitRangeErr != nil:
+		plan.AddCheck(
+			checkName,
+			false,
+			fmt.Sprintf("list LimitRanges in %s: %v", namespace, policies.LimitRangeErr),
+		)
+	case policies.LimitRanges == nil:
+		plan.AddCheck(
+			checkName,
+			false,
+			fmt.Sprintf("list LimitRanges in %s returned an empty object", namespace),
+		)
+	default:
+		violations := kube.ToolLimitRangeViolations(policies.LimitRanges.Items)
+		if len(violations) > 0 {
+			plan.AddCheck(checkName, false, strings.Join(violations, "; "))
+			return
+		}
+
+		plan.AddCheck(
+			checkName,
+			true,
+			fmt.Sprintf(
+				"%d LimitRange object(s) permit tool resources",
+				len(policies.LimitRanges.Items),
+			),
+		)
+	}
 }

@@ -3,7 +3,6 @@ package backup
 import (
 	"context"
 	"strings"
-	"sync"
 
 	"github.com/labring-sigs/pvc-migrate/internal/domain"
 	"github.com/labring-sigs/pvc-migrate/internal/kube"
@@ -21,7 +20,7 @@ func checkObjectTransferQuota(
 ) error {
 	toolResources := objectTransferToolResourceEstimate()
 	if operation != "backup" || req.SessionStore == nil {
-		return checkNamespaceResourceQuota(
+		return checkNamespaceAdmissionPolicies(
 			ctx,
 			client,
 			req.Namespace,
@@ -33,7 +32,7 @@ func checkObjectTransferQuota(
 	if strings.TrimSpace(req.SessionNamespace) == "" {
 		return domain.NewError(
 			domain.ErrorValidation,
-			"backup preflight",
+			backupPreflightPhase,
 			"session namespace is required when backup sessions are enabled",
 		)
 	}
@@ -48,7 +47,7 @@ func checkObjectTransferQuota(
 		toolResources.ConfigMaps += sessionResources.ConfigMaps
 		toolResources.Leases += sessionResources.Leases
 
-		return checkNamespaceResourceQuota(
+		return checkNamespaceAdmissionPolicies(
 			ctx,
 			client,
 			req.Namespace,
@@ -57,7 +56,7 @@ func checkObjectTransferQuota(
 		)
 	}
 
-	if err := checkNamespaceResourceQuota(
+	if err := checkNamespaceAdmissionPolicies(
 		ctx,
 		client,
 		req.Namespace,
@@ -67,7 +66,7 @@ func checkObjectTransferQuota(
 		return err
 	}
 
-	return checkNamespaceResourceQuota(
+	return checkNamespaceAdmissionPolicies(
 		ctx,
 		client,
 		req.SessionNamespace,
@@ -76,7 +75,7 @@ func checkObjectTransferQuota(
 	)
 }
 
-func checkNamespaceResourceQuota(
+func checkNamespaceAdmissionPolicies(
 	ctx context.Context,
 	client kubernetes.Interface,
 	namespace string,
@@ -85,36 +84,18 @@ func checkNamespaceResourceQuota(
 ) error {
 	phase := operation + " preflight"
 
-	var (
-		quotas                  *corev1.ResourceQuotaList
-		limitRanges             *corev1.LimitRangeList
-		quotaErr, limitRangeErr error
-		wg                      sync.WaitGroup
-	)
-	wg.Go(func() {
-		quotas, quotaErr = client.CoreV1().ResourceQuotas(namespace).List(ctx, metav1.ListOptions{})
-	})
+	policies := kube.ReadNamespaceResourcePolicies(ctx, client, namespace, estimate.Pods > 0)
 
-	if estimate.Pods > 0 {
-		wg.Go(func() {
-			limitRanges, limitRangeErr = client.CoreV1().
-				LimitRanges(namespace).
-				List(ctx, metav1.ListOptions{})
-		})
-	}
-
-	wg.Wait()
-
-	if quotaErr != nil {
+	if policies.ResourceQuotaErr != nil {
 		return domain.WrapError(
 			domain.ErrorKubernetes,
 			phase,
 			"list ResourceQuotas in "+namespace,
-			quotaErr,
+			policies.ResourceQuotaErr,
 		)
 	}
 
-	if quotas == nil {
+	if policies.ResourceQuotas == nil {
 		return domain.NewError(
 			domain.ErrorKubernetes,
 			phase,
@@ -122,16 +103,16 @@ func checkNamespaceResourceQuota(
 		)
 	}
 
-	if limitRangeErr != nil {
+	if policies.LimitRangeErr != nil {
 		return domain.WrapError(
 			domain.ErrorKubernetes,
 			phase,
 			"list LimitRanges in "+namespace,
-			limitRangeErr,
+			policies.LimitRangeErr,
 		)
 	}
 
-	if estimate.Pods > 0 && limitRanges == nil {
+	if estimate.Pods > 0 && policies.LimitRanges == nil {
 		return domain.NewError(
 			domain.ErrorKubernetes,
 			phase,
@@ -140,7 +121,7 @@ func checkNamespaceResourceQuota(
 	}
 
 	if estimate.Pods > 0 {
-		violations := kube.ToolLimitRangeViolations(limitRanges.Items)
+		violations := kube.ToolLimitRangeViolations(policies.LimitRanges.Items)
 		if len(violations) > 0 {
 			return domain.NewError(
 				domain.ErrorPrecondition,
@@ -151,13 +132,13 @@ func checkNamespaceResourceQuota(
 	}
 
 	var limitRangeItems []corev1.LimitRange
-	if limitRanges != nil {
-		limitRangeItems = limitRanges.Items
+	if policies.LimitRanges != nil {
+		limitRangeItems = policies.LimitRanges.Items
 	}
 
 	report, err := kube.EvaluateResourceQuotaCapacity(
 		namespace,
-		quotas.Items,
+		policies.ResourceQuotas.Items,
 		limitRangeItems,
 		estimate,
 	)
@@ -279,7 +260,7 @@ func backupResourceExists(get func() error) (bool, error) {
 	if err != nil {
 		return false, domain.WrapError(
 			domain.ErrorKubernetes,
-			"backup preflight",
+			backupPreflightPhase,
 			"read session resource for quota evaluation",
 			err,
 		)
