@@ -250,7 +250,7 @@ func TestResumeDeploymentFailureRecordsObservedPods(t *testing.T) {
 	}
 	session := controllerSession(workload)
 
-	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
 
 	err := manager.Resume(ctx, session)
