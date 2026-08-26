@@ -304,14 +304,16 @@ func (s *Service) deleteTemporaryPVCs(ctx context.Context, session *domain.Sessi
 func (s *Service) deleteRollbackPVs(ctx context.Context, session *domain.Session) error {
 	expectedRole := cleanupRollbackRole(session)
 	for index := range session.Spec.Volumes {
-		_, rollback, _ := cleanupPVRefs(session, &session.Spec.Volumes[index])
+		volume := &session.Spec.Volumes[index]
+
+		_, rollback, _ := cleanupPVRefs(session, volume)
 		if rollback.Name == "" {
 			continue
 		}
 
 		var uncheckpointedClaim *domain.ObjectReference
 		if uncheckpointedDestination(session, index) {
-			uncheckpointedClaim = &session.Spec.Volumes[index].DestinationPVC
+			uncheckpointedClaim = &volume.DestinationPVC
 		}
 
 		if err := s.deleteRollbackPV(
@@ -319,6 +321,7 @@ func (s *Service) deleteRollbackPVs(ctx context.Context, session *domain.Session
 			session.ID,
 			rollback,
 			expectedRole,
+			cleanupRollbackReclaimPolicy(session, volume),
 			uncheckpointedClaim,
 		); err != nil {
 			return err
@@ -1204,6 +1207,22 @@ func cleanupPVRefs(
 	return volume.DestinationPV, volume.SourcePV, volume.DestinationPolicy
 }
 
+func cleanupRollbackReclaimPolicy(
+	session *domain.Session,
+	volume *domain.VolumeSpec,
+) corev1.PersistentVolumeReclaimPolicy {
+	if cleanupKeepsSource(session) || session.Status.Phase == domain.PhaseRolledBack ||
+		session.Status.Phase == domain.PhaseAborted {
+		return volume.DestinationPolicy
+	}
+
+	if session.Spec.Operation().RebindsPVC() {
+		return ""
+	}
+
+	return volume.SourceReclaimPolicy
+}
+
 func cleanupKeepsSource(session *domain.Session) bool {
 	if session == nil {
 		return false
@@ -1604,6 +1623,7 @@ func (s *Service) deleteRollbackPV(
 	sessionID string,
 	ref domain.ObjectReference,
 	expectedRole string,
+	policy corev1.PersistentVolumeReclaimPolicy,
 	uncheckpointedClaim *domain.ObjectReference,
 ) error {
 	pv, err := s.client.CoreV1().PersistentVolumes().Get(ctx, ref.Name, metav1.GetOptions{})
@@ -1650,9 +1670,19 @@ func (s *Service) deleteRollbackPV(
 		)
 	}
 
-	uid := pv.UID
+	pv, err = s.restoreRollbackPVReclaimPolicy(
+		ctx,
+		ref,
+		sessionID,
+		expectedRole,
+		policy,
+		uncheckpointedClaim,
+	)
+	if err != nil || pv == nil {
+		return err
+	}
 
-	resourceVersion := pv.ResourceVersion
+	uid, resourceVersion := pv.UID, pv.ResourceVersion
 	if err := s.client.CoreV1().
 		PersistentVolumes().
 		Delete(ctx, pv.Name, metav1.DeleteOptions{Preconditions: &metav1.Preconditions{UID: &uid, ResourceVersion: &resourceVersion}}); err != nil &&
@@ -1665,7 +1695,146 @@ func (s *Service) deleteRollbackPV(
 		)
 	}
 
-	return nil
+	return s.waitForRollbackPVDeletion(ctx, ref)
+}
+
+func (s *Service) restoreRollbackPVReclaimPolicy(
+	ctx context.Context,
+	ref domain.ObjectReference,
+	sessionID string,
+	expectedRole string,
+	policy corev1.PersistentVolumeReclaimPolicy,
+	uncheckpointedClaim *domain.ObjectReference,
+) (*corev1.PersistentVolume, error) {
+	if !validReclaimPolicy(policy) {
+		return nil, domain.NewError(
+			domain.ErrorPrecondition,
+			"cleanup rollback PV",
+			fmt.Sprintf("PV %s has no valid original reclaim policy", ref.Name),
+		)
+	}
+
+	var prepared *corev1.PersistentVolume
+
+	err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		current, err := s.client.CoreV1().
+			PersistentVolumes().
+			Get(ctx, ref.Name, metav1.GetOptions{})
+		if apierrors.IsNotFound(err) {
+			prepared = nil
+
+			return nil
+		}
+
+		if err != nil {
+			return err
+		}
+
+		if !cleanupPVIdentityMatches(current, ref, sessionID, expectedRole, uncheckpointedClaim) ||
+			(current.Status.Phase != corev1.VolumeReleased && current.Status.Phase != corev1.VolumeAvailable) ||
+			!cleanupRollbackPVPolicyMatches(current, policy, uncheckpointedClaim) {
+			return domain.NewError(
+				domain.ErrorConflict,
+				"cleanup rollback PV",
+				fmt.Sprintf(
+					"PV %s identity, ownership, state, or reclaim policy changed",
+					ref.Name,
+				),
+			)
+		}
+
+		if current.Spec.PersistentVolumeReclaimPolicy == policy {
+			prepared = current
+
+			return nil
+		}
+
+		current.Spec.PersistentVolumeReclaimPolicy = policy
+		prepared, err = s.client.CoreV1().PersistentVolumes().Update(
+			ctx,
+			current,
+			metav1.UpdateOptions{},
+		)
+
+		return err
+	})
+	if err != nil {
+		if domain.CategoryOf(err) == domain.ErrorConflict {
+			return nil, err
+		}
+
+		return nil, domain.WrapError(
+			domain.ErrorKubernetes,
+			"cleanup rollback PV",
+			"restore reclaim policy for PV "+ref.Name,
+			err,
+		)
+	}
+
+	return prepared, nil
+}
+
+func cleanupRollbackPVPolicyMatches(
+	pv *corev1.PersistentVolume,
+	policy corev1.PersistentVolumeReclaimPolicy,
+	uncheckpointedClaim *domain.ObjectReference,
+) bool {
+	if pv == nil || !validReclaimPolicy(policy) {
+		return false
+	}
+
+	if uncheckpointedClaim != nil && uncheckpointedDestinationPVMatches(pv, *uncheckpointedClaim) {
+		return policy == corev1.PersistentVolumeReclaimDelete
+	}
+
+	return pv.Annotations[kube.OriginalPolicyAnnotation] == string(policy) &&
+		(pv.Spec.PersistentVolumeReclaimPolicy == corev1.PersistentVolumeReclaimRetain ||
+			pv.Spec.PersistentVolumeReclaimPolicy == policy)
+}
+
+func (s *Service) waitForRollbackPVDeletion(
+	ctx context.Context,
+	ref domain.ObjectReference,
+) error {
+	err := kube.WaitFor(
+		ctx,
+		time.Second,
+		fmt.Sprintf("PV %s deletion", ref.Name),
+		func(waitCtx context.Context) (bool, error) {
+			current, err := s.client.CoreV1().PersistentVolumes().Get(
+				waitCtx,
+				ref.Name,
+				metav1.GetOptions{},
+			)
+			if apierrors.IsNotFound(err) {
+				return true, nil
+			}
+
+			if err != nil {
+				return false, err
+			}
+
+			if current.UID != ref.UID {
+				return false, domain.NewError(
+					domain.ErrorConflict,
+					"cleanup rollback PV",
+					fmt.Sprintf("PV %s was replaced while waiting for deletion", ref.Name),
+				)
+			}
+
+			return false, nil
+		},
+	)
+	if err != nil && domain.CategoryOf(err) == domain.ErrorInternal {
+		return domain.WrapError(
+			domain.ErrorKubernetes,
+			"cleanup rollback PV",
+			"wait for PV "+ref.Name+" deletion",
+			err,
+		)
+	}
+
+	return err
 }
 
 func (s *Service) waitForRollbackPVRelease(

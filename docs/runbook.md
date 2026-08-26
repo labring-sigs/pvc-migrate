@@ -11,6 +11,14 @@
 
 For a Pod with multiple PVCs, use `migrate-pod`. It creates one workload consistency boundary for the full set.
 
+For an ordinary Deployment, `migrate-pod` pauses the complete Deployment by setting its replica count to zero. All replicas stop for the final sync, PVC switch, and initial recovery. Start from a fully rolled-out Deployment and plan a downtime window for every replica. Delete any HorizontalPodAutoscaler that targets the Deployment before planning. A Deployment controlled by another operator is rejected; use that operator's native maintenance procedure before migration. Resume restores the recorded replica count and waits for all replacement Pods to become Ready.
+
+For a StatefulSet-backed workload, `migrate-pod` scales to the selected Pod ordinal or zero and later restores the recorded replica count. Delete any HorizontalPodAutoscaler that targets a native StatefulSet, VMCluster StatefulSet, or Victoria Logs StatefulSet before planning. If another autoscaling controller creates the HPA, suspend that controller and wait for the HPA to be deleted. The same restriction applies to the Deployment managed by the Grafana adapter. Discovery and execution reject every matching HPA so that Pods cannot reappear during final sync or PVC switching.
+
+OpenEBS LVM shared-mount checks are volume-level checks for every workload adapter. During warm copy, an active source PVC gains a second writer from the tool Pod. The planner reads the actual source PV and LVMVolume. Pass `--openebs-lvm-enable-shared` to temporarily set an unshared source LVMVolume to `shared=yes`; pvc-migrate restores its original value after the probe or copy attempt. Use `--precopy-passes 0` when temporary sharing is not acceptable.
+
+The planner also counts how many Pods in the selected migration unit use each PVC. If multiple Pods will resume against one RWO PVC and the destination is predicted to use OpenEBS LVM, pass `--openebs-lvm-enable-shared` to authorize the destination setting. After provisioning, execution verifies the actual destination PV UID, CSI driver, and matching LVMVolume before it persists `spec.shared=yes`. It repeats this check before workload resume. The destination setting remains because the application requires it. All consumers must run on one node; this setting does not provide RWX storage across nodes. The plan rejects required Pod anti-affinity that matches another consumer and `DoNotSchedule` topology-spread rules whose `maxSkew` and eligible domains cannot permit this co-location.
+
 When creating destination PVCs, use `--destination-capacity` on `reserve`, `copy`, `migrate`, or `migrate-pod`. One value applies to every source PVC; for multiple PVCs use explicit `source-pvc-name=capacity` entries. The planner compares every requested value with its source PV capacity and rejects shrink by default. Use `--allow-volume-shrink` only after checking that the data fits. pvc-migrate reads usage only through a trusted storage-backend CRD adapter and never creates a Pod or mounts a source volume for this check. If the backend does not expose reliable per-volume usage, the operation is blocked unless `--skip-source-usage-check` explicitly accepts the risk. Capacity flags cannot modify an existing session and are not available on `rename` or `move`.
 
 When naming multiple destination PVCs, use `--destination-pvc source-pvc-name=destination-pvc-name` for each claim. The planner rejects unknown, duplicate, or missing source-name mappings.
@@ -82,7 +90,7 @@ pvc-migrate --kubeconfig /path/to/config \
   --delete-temporary --delete-rollback-pv --finalize --delete-session
 ```
 
-This sequence deletes the staged PVC, deletes its Released destination PV object, restores the source PV reclaim policy, releases source ownership, and deletes the ConfigMap. A retained PV object preserves backend data according to CSI behavior.
+This sequence deletes the staged PVC, restores the Released destination PV's recorded reclaim policy before deleting the PV, restores the source PV reclaim policy, releases source ownership, and deletes the ConfigMap. A recorded `Delete` policy lets Kubernetes and the CSI driver delete the destination backend volume. A recorded `Retain` policy preserves it.
 
 ## Rollback After Activation
 
@@ -95,7 +103,7 @@ pvc-migrate --kubeconfig /path/to/config \
   --yes session rollback SESSION --dry-run=false
 ```
 
-For standalone Pods, rollback recreates the Pod on the recorded source node. StatefulSets restore scheduling through their controller. Validate application data and readiness after rollback.
+For standalone Pods, rollback recreates the Pod on the recorded source node. Deployments and StatefulSets restore scheduling through their controllers. Validate application data and readiness after rollback.
 
 ## Close The Rollback Window
 
@@ -104,7 +112,7 @@ Cleanup flags have independent resource effects:
 | Flag | Effect |
 | --- | --- |
 | `--delete-temporary` | Delete a staged PVC whose UID and session ownership still match. |
-| `--delete-rollback-pv` | Delete the session-owned Released or Available rollback PV object. |
+| `--delete-rollback-pv` | Restore each session-owned Released or Available rollback PV's recorded reclaim policy, then delete the PV. |
 | `--finalize` | Restore the active PV reclaim policy and release active PV/PVC ownership. |
 | `--delete-session` | Delete the ConfigMap after finalize and rollback-PV deletion are requested. |
 
@@ -117,7 +125,7 @@ pvc-migrate --kubeconfig /path/to/config \
   --delete-rollback-pv --finalize --delete-session
 ```
 
-For a `Retain` rollback PV, deleting the Kubernetes PV object preserves backend data. Keep the rollback PV at `Retain` during cleanup. Use the CSI driver's documented backend deletion procedure when storage reclamation is intended.
+Cleanup verifies the recorded rollback reclaim policy before making changes. A recorded `Delete` policy lets the PV controller call the CSI driver and remove the backend volume. A recorded `Retain` policy preserves backend data after the Kubernetes PV object is deleted.
 
 ## Recover A Missing Session Record
 
@@ -142,7 +150,7 @@ pvc-migrate --kubeconfig /path/to/config \
   --dry-run=false
 ```
 
-The command requires matching session ownership, active PVC/PV claimRef UIDs, reciprocal `paired-pv` metadata, a recorded active reclaim policy, and a Released or Available rollback PV with `Retain` reclaim policy. It deletes the rollback PV object, restores the active reclaim policy, clears session metadata, and removes the orphan Lease.
+The command requires matching session ownership, active PVC/PV claimRef UIDs, reciprocal `paired-pv` metadata, recorded active and rollback reclaim policies, and a Released or Available rollback PV. The rollback PV policy must still be `Retain` or already equal its recorded original value from a prior cleanup attempt. The command restores that policy before deleting the rollback PV, restores the active reclaim policy, clears session metadata, and removes the orphan Lease. A recorded `Delete` policy triggers normal Kubernetes and CSI backend deletion.
 
 ## Inspect A Stuck Cutover
 

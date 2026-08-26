@@ -125,6 +125,7 @@ type WorkloadKind string
 const (
 	WorkloadNone         WorkloadKind = "None"
 	WorkloadStandalone   WorkloadKind = "StandalonePod"
+	WorkloadDeployment   WorkloadKind = "Deployment"
 	WorkloadStatefulSet  WorkloadKind = "StatefulSet"
 	WorkloadVictoriaLogs WorkloadKind = "VictoriaLogs"
 	WorkloadKubeBlocks   WorkloadKind = "KubeBlocks"
@@ -310,14 +311,20 @@ type VolumeSpec struct {
 	DestinationPolicy   corev1.PersistentVolumeReclaimPolicy `json:"destinationReclaimPolicy,omitempty" yaml:"destinationReclaimPolicy,omitempty"`
 	// Capacity is the requested destination PVC capacity. SourceCapacity
 	// records the original PV capacity used for resize safety checks.
-	Capacity         string                              `json:"capacity"                   yaml:"capacity"`
-	SourceCapacity   string                              `json:"sourceCapacity"             yaml:"sourceCapacity"`
-	SourceUsedBytes  int64                               `json:"sourceUsedBytes,omitempty"  yaml:"sourceUsedBytes,omitempty"`
-	SourceUsageKnown bool                                `json:"sourceUsageKnown,omitempty" yaml:"sourceUsageKnown,omitempty"`
-	StorageClass     string                              `json:"storageClass"               yaml:"storageClass"`
-	AccessModes      []corev1.PersistentVolumeAccessMode `json:"accessModes"                yaml:"accessModes"`
-	VolumeMode       corev1.PersistentVolumeMode         `json:"volumeMode"                 yaml:"volumeMode"`
-	TransferScope    *TransferScope                      `json:"transferScope,omitempty"    yaml:"transferScope,omitempty"`
+	Capacity            string                              `json:"capacity"                      yaml:"capacity"`
+	SourceCapacity      string                              `json:"sourceCapacity"                yaml:"sourceCapacity"`
+	SourceUsedBytes     int64                               `json:"sourceUsedBytes,omitempty"     yaml:"sourceUsedBytes,omitempty"`
+	SourceUsageKnown    bool                                `json:"sourceUsageKnown,omitempty"    yaml:"sourceUsageKnown,omitempty"`
+	StorageClass        string                              `json:"storageClass"                  yaml:"storageClass"`
+	AccessModes         []corev1.PersistentVolumeAccessMode `json:"accessModes"                   yaml:"accessModes"`
+	VolumeMode          corev1.PersistentVolumeMode         `json:"volumeMode"                    yaml:"volumeMode"`
+	ConcurrentConsumers int                                 `json:"concurrentConsumers,omitempty" yaml:"concurrentConsumers,omitempty"`
+	TransferScope       *TransferScope                      `json:"transferScope,omitempty"       yaml:"transferScope,omitempty"`
+}
+
+func (v VolumeSpec) RequiresConcurrentRWOMount() bool {
+	return v.ConcurrentConsumers > 1 &&
+		slices.Contains(v.AccessModes, corev1.ReadWriteOnce)
 }
 
 type SyncState struct {
@@ -963,6 +970,14 @@ func validateSessionVolume(s *Session, index int, volume *VolumeSpec) error {
 		)
 	}
 
+	if volume.ConcurrentConsumers < 0 {
+		return NewError(
+			ErrorValidation,
+			"session",
+			fmt.Sprintf("concurrent consumers cannot be negative for volume %d", index),
+		)
+	}
+
 	if err := ValidateTransferScope(volume.TransferScope); err != nil {
 		return NewError(
 			ErrorValidation,
@@ -1073,6 +1088,8 @@ func validateWorkloadIdentity(workload WorkloadSpec) error {
 	}
 
 	switch workload.Adapter {
+	case WorkloadDeployment:
+		return validateDeploymentWorkload(workload)
 	case WorkloadStatefulSet, WorkloadVictoriaLogs:
 		return nil
 	case WorkloadKubeBlocks:
@@ -1110,6 +1127,36 @@ func validateWorkloadIdentity(workload WorkloadSpec) error {
 	}
 
 	return nil
+}
+
+func validateDeploymentWorkload(workload WorkloadSpec) error {
+	if workload.OriginalReplicas == nil || *workload.OriginalReplicas <= 0 {
+		return NewError(
+			ErrorValidation,
+			"session",
+			"Deployment workload original replicas must be positive",
+		)
+	}
+
+	if len(workload.AffectedPods) == 0 {
+		return NewError(
+			ErrorValidation,
+			"session",
+			"Deployment workload must record at least one affected Pod",
+		)
+	}
+
+	for _, ref := range workload.AffectedPods {
+		if ref.UID == workload.Pod.UID {
+			return nil
+		}
+	}
+
+	return NewError(
+		ErrorValidation,
+		"session",
+		"Deployment workload selected Pod is outside the affected set",
+	)
 }
 
 func validateWorkloadObjectReference(ref ObjectReference, description string) error {

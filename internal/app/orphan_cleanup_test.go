@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -62,7 +63,10 @@ func orphanFixture() (*fake.Clientset, OrphanCleanupOptions) {
 			kube.SessionKey:        sessionID,
 			kube.ResourceRoleLabel: "rollback",
 		},
-		Annotations: map[string]string{kube.PairedPVAnnotation: "pv-active"},
+		Annotations: map[string]string{
+			kube.OriginalPolicyAnnotation: string(corev1.PersistentVolumeReclaimDelete),
+			kube.PairedPVAnnotation:       "pv-active",
+		},
 	}, Spec: corev1.PersistentVolumeSpec{PersistentVolumeReclaimPolicy: corev1.PersistentVolumeReclaimRetain}, Status: corev1.PersistentVolumeStatus{Phase: corev1.VolumeReleased}}
 	client := fake.NewClientset(pvc, active, rollback)
 	assignLeaseUIDs(client)
@@ -312,11 +316,11 @@ func TestPlanPreActivationOrphanRejectsUnsafeDestinationStates(t *testing.T) {
 		want   string
 	}{
 		{
-			name: "delete reclaim policy",
+			name: "unexpected reclaim policy",
 			mutate: func(_ *corev1.PersistentVolumeClaim, pv *corev1.PersistentVolume) {
-				pv.Spec.PersistentVolumeReclaimPolicy = corev1.PersistentVolumeReclaimDelete
+				pv.Spec.PersistentVolumeReclaimPolicy = corev1.PersistentVolumeReclaimRecycle
 			},
-			want: "reclaim policy must be Retain",
+			want: "Retain or its recorded original policy",
 		},
 		{
 			name: "claim UID mismatch",
@@ -703,11 +707,11 @@ func TestPlanOrphanCleanupRejectsUnsafeStates(t *testing.T) {
 			want: "Released or Available",
 		},
 		{
-			name: "rollback delete policy",
+			name: "rollback unexpected policy",
 			mutate: func(_ *corev1.PersistentVolumeClaim, _, rollback *corev1.PersistentVolume) {
-				rollback.Spec.PersistentVolumeReclaimPolicy = corev1.PersistentVolumeReclaimDelete
+				rollback.Spec.PersistentVolumeReclaimPolicy = corev1.PersistentVolumeReclaimRecycle
 			},
-			want: "reclaim policy must be Retain",
+			want: "Retain or its recorded original policy",
 		},
 		{
 			name: "active claim UID missing",
@@ -730,6 +734,13 @@ func TestPlanOrphanCleanupRejectsUnsafeStates(t *testing.T) {
 				active.Annotations = nil
 			},
 			want: "original-reclaim-policy",
+		},
+		{
+			name: "missing rollback original policy",
+			mutate: func(_ *corev1.PersistentVolumeClaim, _, rollback *corev1.PersistentVolume) {
+				delete(rollback.Annotations, kube.OriginalPolicyAnnotation)
+			},
+			want: "no valid original reclaim policy",
 		},
 	}
 	for _, test := range tests {
@@ -819,7 +830,7 @@ func TestPlanOrphanCleanupRejectsUnsafeStates(t *testing.T) {
 	}
 }
 
-func TestDeleteOrphanRollbackPVRequiresRetainPolicy(t *testing.T) {
+func TestDeleteOrphanRollbackPVRejectsUnexpectedPolicy(t *testing.T) {
 	client, options := orphanFixture()
 
 	pv, err := client.CoreV1().
@@ -829,7 +840,7 @@ func TestDeleteOrphanRollbackPVRequiresRetainPolicy(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	pv.Spec.PersistentVolumeReclaimPolicy = corev1.PersistentVolumeReclaimDelete
+	pv.Spec.PersistentVolumeReclaimPolicy = corev1.PersistentVolumeReclaimRecycle
 	if _, err := client.CoreV1().
 		PersistentVolumes().
 		Update(context.Background(), pv, metav1.UpdateOptions{}); err != nil {
@@ -842,8 +853,9 @@ func TestDeleteOrphanRollbackPVRequiresRetainPolicy(t *testing.T) {
 		context.Background(),
 		options.SessionID,
 		kube.PVReference(pv),
+		corev1.PersistentVolumeReclaimDelete,
 	)
-	if domain.CategoryOf(err) != domain.ErrorPrecondition {
+	if domain.CategoryOf(err) != domain.ErrorConflict {
 		t.Fatalf("category=%s error=%v", domain.CategoryOf(err), err)
 	}
 
@@ -851,6 +863,69 @@ func TestDeleteOrphanRollbackPVRequiresRetainPolicy(t *testing.T) {
 		PersistentVolumes().
 		Get(context.Background(), pv.Name, metav1.GetOptions{}); err != nil {
 		t.Fatalf("rollback PV was deleted: %v", err)
+	}
+}
+
+func TestDeleteOrphanRollbackPVRejectsChangeAfterPolicyRestore(t *testing.T) {
+	client, options := orphanFixture()
+
+	pv, err := client.CoreV1().
+		PersistentVolumes().
+		Get(context.Background(), "pv-rollback", metav1.GetOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	client.PrependReactor(
+		"delete",
+		"persistentvolumes",
+		func(action k8stesting.Action) (bool, runtime.Object, error) {
+			deleted := testutil.MustType[k8stesting.DeleteAction](t, action)
+
+			preconditions := deleted.GetDeleteOptions().Preconditions
+			if preconditions == nil || preconditions.ResourceVersion == nil {
+				return false, nil, nil
+			}
+
+			resource := corev1.SchemeGroupVersion.WithResource("persistentvolumes")
+
+			stored, err := client.Tracker().Get(resource, "", pv.Name)
+			if err != nil {
+				return true, nil, err
+			}
+
+			changed := testutil.MustType[*corev1.PersistentVolume](t, stored).DeepCopy()
+
+			changed.ResourceVersion = "concurrent-update"
+			if err := client.Tracker().Update(resource, changed, ""); err != nil {
+				return true, nil, err
+			}
+
+			return true, nil, apierrors.NewConflict(
+				schema.GroupResource{Resource: "persistentvolumes"},
+				pv.Name,
+				errors.New("simulated concurrent PV update"),
+			)
+		},
+	)
+	service := &Service{client: client, store: &memoryStore{}}
+
+	err = service.deleteOrphanRollbackPV(
+		context.Background(),
+		options.SessionID,
+		kube.PVReference(pv),
+		corev1.PersistentVolumeReclaimDelete,
+	)
+	if err == nil {
+		t.Fatal("delete succeeded after the validated orphan PV changed")
+	}
+
+	if _, err := client.CoreV1().PersistentVolumes().Get(
+		context.Background(),
+		pv.Name,
+		metav1.GetOptions{},
+	); err != nil {
+		t.Fatalf("orphan rollback PV was deleted after a concurrent change: %v", err)
 	}
 }
 

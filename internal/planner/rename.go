@@ -424,6 +424,7 @@ func (p *Planner) validateRenameInventory(
 		plan,
 		pvc,
 		nil,
+		domain.WorkloadSpec{},
 		domain.OperationRename,
 		false,
 		podItems,

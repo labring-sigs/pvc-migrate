@@ -35,6 +35,10 @@ type recordingOpenEBSLVMSharedVolumeManager struct {
 	prepareErr          error
 	prepareErrs         map[string]error
 	preparePVs          []string
+	ensurePVCs          []string
+	ensurePVCUIDs       []types.UID
+	ensurePVs           []string
+	ensureErr           error
 	enablePVs           []string
 	onEnable            func()
 	restoreErr          error
@@ -97,6 +101,25 @@ func (m *recordingOpenEBSLVMSharedVolumeManager) PrepareShared(
 		PreviousShared:    "no",
 		PreviousSharedSet: true,
 		NeedsChange:       true,
+	}, nil
+}
+
+func (m *recordingOpenEBSLVMSharedVolumeManager) EnsureShared(
+	_ context.Context,
+	pvc domain.ObjectReference,
+	pv domain.ObjectReference,
+) (kube.OpenEBSLVMSharedResult, error) {
+	m.ensurePVCs = append(m.ensurePVCs, pvc.Namespace+"/"+pvc.Name)
+	m.ensurePVCUIDs = append(m.ensurePVCUIDs, pvc.UID)
+
+	m.ensurePVs = append(m.ensurePVs, pv.Name)
+	if m.ensureErr != nil {
+		return kube.OpenEBSLVMSharedResult{}, m.ensureErr
+	}
+
+	return kube.OpenEBSLVMSharedResult{
+		Reference:   "LVMVolume openebs/" + pv.Name,
+		NeedsChange: true,
 	}, nil
 }
 
@@ -177,6 +200,275 @@ func openEBSLVMSourcePVC(volume domain.VolumeSpec) *corev1.PersistentVolumeClaim
 		},
 		Spec:   corev1.PersistentVolumeClaimSpec{VolumeName: volume.SourcePV.Name},
 		Status: corev1.PersistentVolumeClaimStatus{Phase: corev1.ClaimBound},
+	}
+}
+
+func TestConcurrentDestinationMountUsesActualVolumeAndConsumerCount(t *testing.T) {
+	for _, test := range []struct {
+		name           string
+		consumerCount  int
+		accessModes    []corev1.PersistentVolumeAccessMode
+		driver         string
+		flag           bool
+		operation      domain.Operation
+		withoutManager bool
+		actualUID      types.UID
+		wantCategory   domain.ErrorCategory
+		wantEnsure     bool
+	}{
+		{
+			name:          "authorized OpenEBS RWO target",
+			consumerCount: 2,
+			accessModes:   []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce},
+			driver:        kube.OpenEBSLVMCSIDriver,
+			flag:          true,
+			actualUID:     "destination-pv-uid",
+			wantEnsure:    true,
+		},
+		{
+			name:           "OpenEBS target requires manager",
+			consumerCount:  2,
+			accessModes:    []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce},
+			driver:         kube.OpenEBSLVMCSIDriver,
+			flag:           true,
+			withoutManager: true,
+			actualUID:      "destination-pv-uid",
+			wantCategory:   domain.ErrorInternal,
+		},
+		{
+			name:          "OpenEBS target requires authorization",
+			consumerCount: 2,
+			accessModes:   []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce},
+			driver:        kube.OpenEBSLVMCSIDriver,
+			actualUID:     "destination-pv-uid",
+			wantCategory:  domain.ErrorPrecondition,
+		},
+		{
+			name:          "destination PV identity changed",
+			consumerCount: 2,
+			accessModes:   []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce},
+			driver:        kube.OpenEBSLVMCSIDriver,
+			flag:          true,
+			actualUID:     "replacement-pv-uid",
+			wantCategory:  domain.ErrorConflict,
+		},
+		{
+			name:          "non OpenEBS target",
+			consumerCount: 2,
+			accessModes:   []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce},
+			driver:        "example.csi.io",
+			actualUID:     "destination-pv-uid",
+		},
+		{
+			name:          "copy workflow has no application destination",
+			consumerCount: 2,
+			accessModes:   []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce},
+			operation:     domain.OperationCopy,
+		},
+		{
+			name:          "single RWO consumer",
+			consumerCount: 1,
+			accessModes:   []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce},
+		},
+		{
+			name:          "multiple RWX consumers",
+			consumerCount: 2,
+			accessModes:   []corev1.PersistentVolumeAccessMode{corev1.ReadWriteMany},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			manager := &recordingOpenEBSLVMSharedVolumeManager{}
+
+			objects := []runtime.Object{}
+			if test.driver != "" {
+				objects = append(objects, &corev1.PersistentVolume{
+					ObjectMeta: metav1.ObjectMeta{Name: "pv-destination", UID: test.actualUID},
+					Spec: corev1.PersistentVolumeSpec{
+						PersistentVolumeSource: corev1.PersistentVolumeSource{
+							CSI: &corev1.CSIPersistentVolumeSource{Driver: test.driver},
+						},
+					},
+				})
+			}
+
+			config := Config{OpenEBSLVMSharedVolumeManager: manager}
+			if test.withoutManager {
+				config.OpenEBSLVMSharedVolumeManager = nil
+			}
+
+			service := &Service{client: fake.NewClientset(objects...), config: config}
+
+			session := appTestSession()
+			if test.operation != "" {
+				setSessionOperation(session, test.operation)
+			}
+
+			if session.Spec.Migrate != nil {
+				session.Spec.Migrate.Workload.Adapter = domain.WorkloadStatefulSet
+			}
+
+			if options := session.Spec.WorkflowOptionsPtr(); options != nil {
+				options.OpenEBSLVMEnableShared = test.flag
+			}
+
+			volume := &session.Spec.Volumes[0]
+			volume.AccessModes = test.accessModes
+			volume.ConcurrentConsumers = test.consumerCount
+			volume.DestinationPV = domain.ObjectReference{
+				Name: "pv-destination",
+				UID:  "destination-pv-uid",
+			}
+
+			err := service.ensureConcurrentDestinationMount(context.Background(), session, 0)
+			if test.wantCategory == "" {
+				if err != nil {
+					t.Fatalf("error=%v", err)
+				}
+			} else if got := domain.CategoryOf(err); got != test.wantCategory {
+				t.Fatalf("category=%s error=%v, want %s", got, err, test.wantCategory)
+			}
+
+			if got := len(manager.ensurePVs) == 1; got != test.wantEnsure {
+				t.Fatalf("ensure calls=%v, want call=%t", manager.ensurePVs, test.wantEnsure)
+			}
+		})
+	}
+}
+
+func TestReserveRetryRevalidatesConcurrentDestinationMount(t *testing.T) {
+	fixture := newRecoveryFixture(t)
+	session := appTestSession()
+	addSecondVolume(session)
+	volume := &session.Spec.Volumes[0]
+	volume.ConcurrentConsumers = 2
+	volume.DestinationPVC.UID = "existing-destination-pvc-uid"
+	volume.DestinationPV = domain.ObjectReference{
+		Name: "existing-destination-pv",
+		UID:  "existing-destination-pv-uid",
+	}
+	session.Status.Volumes[0].Reserved = true
+	session.Spec.Migrate.OpenEBSLVMEnableShared = true
+	manager := &recordingOpenEBSLVMSharedVolumeManager{}
+	fixture.service.config.OpenEBSLVMSharedVolumeManager = manager
+
+	if _, err := fixture.client.CoreV1().PersistentVolumes().Create(
+		context.Background(),
+		&corev1.PersistentVolume{
+			ObjectMeta: metav1.ObjectMeta{
+				Name: volume.DestinationPV.Name,
+				UID:  volume.DestinationPV.UID,
+			},
+			Spec: corev1.PersistentVolumeSpec{
+				PersistentVolumeSource: corev1.PersistentVolumeSource{
+					CSI: &corev1.CSIPersistentVolumeSource{Driver: kube.OpenEBSLVMCSIDriver},
+				},
+			},
+		},
+		metav1.CreateOptions{},
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	fixture.reserver.failures["logs"] = errors.New("reservation failed")
+	if err := fixture.service.Reserve(context.Background(), session); err == nil {
+		t.Fatal("Reserve() unexpectedly succeeded")
+	}
+
+	delete(fixture.reserver.failures, "logs")
+
+	if err := fixture.service.Reserve(context.Background(), session); err != nil {
+		t.Fatal(err)
+	}
+
+	if !slices.Equal(
+		manager.ensurePVs,
+		[]string{"existing-destination-pv", "existing-destination-pv"},
+	) {
+		t.Fatalf("destination shared validations=%v", manager.ensurePVs)
+	}
+
+	if !slices.Equal(
+		manager.ensurePVCs,
+		[]string{
+			volume.DestinationPVC.Namespace + "/" + volume.DestinationPVC.Name,
+			volume.DestinationPVC.Namespace + "/" + volume.DestinationPVC.Name,
+		},
+	) {
+		t.Fatalf("destination shared PVC validations=%v", manager.ensurePVCs)
+	}
+}
+
+func TestResumeRevalidatesConcurrentDestinationMountBeforeController(t *testing.T) {
+	fixture := newRecoveryFixture(t)
+	session := appTestSession()
+	session.Status.Phase = domain.PhaseActivated
+	session.Spec.Volumes[0].ConcurrentConsumers = 2
+	session.Spec.Migrate.OpenEBSLVMEnableShared = true
+	_ = session.Spec.SetWorkload(domain.WorkloadSpec{
+		Adapter: domain.WorkloadStatefulSet,
+		Pod: domain.ObjectReference{
+			Namespace: "app",
+			Name:      "database-0",
+			UID:       "database-0-uid",
+		},
+		Controller: domain.ObjectReference{
+			Namespace: "app",
+			Name:      "database",
+			UID:       "database-uid",
+		},
+	})
+	createActiveDestinationStorage(t, fixture, session)
+
+	pv, err := fixture.client.CoreV1().PersistentVolumes().Get(
+		context.Background(),
+		session.Spec.Volumes[0].DestinationPV.Name,
+		metav1.GetOptions{},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	pv.Spec.CSI = &corev1.CSIPersistentVolumeSource{Driver: kube.OpenEBSLVMCSIDriver}
+	if _, err := fixture.client.CoreV1().PersistentVolumes().Update(
+		context.Background(),
+		pv,
+		metav1.UpdateOptions{},
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	manager := &recordingOpenEBSLVMSharedVolumeManager{}
+	fixture.service.config.OpenEBSLVMSharedVolumeManager = manager
+	controllerCalledAfterEnsure := false
+	fixture.controller.resumeHook = func(context.Context, *domain.Session) error {
+		controllerCalledAfterEnsure = len(manager.ensurePVs) == 1
+		return nil
+	}
+
+	if err := fixture.service.ResumeWorkload(context.Background(), session); err != nil {
+		t.Fatal(err)
+	}
+
+	if !controllerCalledAfterEnsure {
+		t.Fatalf(
+			"controller resumed before destination shared validation: calls=%v",
+			manager.ensurePVs,
+		)
+	}
+
+	activePVC := session.Status.Volumes[0].Activation.ActivePVC
+	if !slices.Equal(
+		manager.ensurePVCs,
+		[]string{activePVC.Namespace + "/" + activePVC.Name},
+	) || !slices.Equal(manager.ensurePVCUIDs, []types.UID{activePVC.UID}) {
+		t.Fatalf(
+			"destination shared PVC validations=%v UIDs=%v, want active PVC %s/%s UID %s",
+			manager.ensurePVCs,
+			manager.ensurePVCUIDs,
+			activePVC.Namespace,
+			activePVC.Name,
+			activePVC.UID,
+		)
 	}
 }
 

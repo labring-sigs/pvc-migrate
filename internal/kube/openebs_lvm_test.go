@@ -18,6 +18,19 @@ import (
 )
 
 func TestOpenEBSLVMSharedVolumeManager(t *testing.T) {
+	t.Run("persists shared for concurrent consumers", testOpenEBSLVMEnsuresShared)
+	t.Run(
+		"rejects persistent shared while temporary ownership exists",
+		testOpenEBSLVMEnsureRejectsTemporaryOwnership,
+	)
+	t.Run(
+		"classifies persistent shared patch races as conflicts",
+		testOpenEBSLVMEnsurePatchConflict,
+	)
+	t.Run(
+		"rejects persistent shared after PV claimRef changes",
+		testOpenEBSLVMEnsureRejectsClaimRefChange,
+	)
 	t.Run("enables an existing unshared volume", testOpenEBSLVMEnablesUnshared)
 	t.Run("restores an absent shared field", testOpenEBSLVMRestoresAbsentField)
 	t.Run("does not patch an already shared volume", testOpenEBSLVMAlreadyShared)
@@ -34,6 +47,115 @@ func TestOpenEBSLVMSharedVolumeManager(t *testing.T) {
 	)
 	t.Run("requires source PV identity", testOpenEBSLVMRequiresSourceIdentity)
 	t.Run("classifies patch races as conflicts", testOpenEBSLVMPatchConflict)
+}
+
+func testOpenEBSLVMEnsurePatchConflict(t *testing.T) {
+	manager, dynamicClient := newOpenEBSLVMTestManager(t, "no")
+	dynamicClient.PrependReactor(
+		"patch",
+		"lvmvolumes",
+		func(k8stesting.Action) (bool, runtime.Object, error) {
+			return true, nil, apierrors.NewConflict(
+				schema.GroupResource{
+					Group:    openEBSLVMVolumeGVR.Group,
+					Resource: openEBSLVMVolumeGVR.Resource,
+				},
+				"pvc-123",
+				errors.New("resource version changed"),
+			)
+		},
+	)
+
+	_, err := manager.EnsureShared(
+		context.Background(),
+		openEBSLVMClaim,
+		openEBSLVMSourcePV,
+	)
+	if domain.CategoryOf(err) != domain.ErrorConflict {
+		t.Fatalf("category=%s error=%v", domain.CategoryOf(err), err)
+	}
+}
+
+func testOpenEBSLVMEnsuresShared(t *testing.T) {
+	manager, dynamicClient := newOpenEBSLVMTestManager(t, "no")
+
+	result, err := manager.EnsureShared(
+		context.Background(),
+		openEBSLVMClaim,
+		openEBSLVMSourcePV,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if !result.NeedsChange || result.Reference != "LVMVolume openebs/pvc-123" {
+		t.Fatalf("result=%#v", result)
+	}
+
+	volume, err := dynamicClient.Resource(openEBSLVMVolumeGVR).
+		Namespace("openebs").
+		Get(context.Background(), "pvc-123", metav1.GetOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	shared, found, err := unstructured.NestedString(volume.Object, "spec", "shared")
+	if err != nil || !found || shared != "yes" {
+		t.Fatalf("spec.shared=%q found=%t error=%v", shared, found, err)
+	}
+
+	if _, exists := volume.GetAnnotations()[openEBSLVMSharedSessionAnnotation]; exists {
+		t.Fatalf("persistent shared setting has temporary ownership: %#v", volume.GetAnnotations())
+	}
+
+	patches := 0
+	for _, action := range dynamicClient.Actions() {
+		if action.GetVerb() == "patch" {
+			patches++
+		}
+	}
+
+	if patches != 1 {
+		t.Fatalf("patches=%d, want 1", patches)
+	}
+
+	result, err = manager.EnsureShared(
+		context.Background(),
+		openEBSLVMClaim,
+		openEBSLVMSourcePV,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if result.NeedsChange {
+		t.Fatalf("second ensure result=%#v", result)
+	}
+
+	patches = 0
+	for _, action := range dynamicClient.Actions() {
+		if action.GetVerb() == "patch" {
+			patches++
+		}
+	}
+
+	if patches != 1 {
+		t.Fatalf("patches after retry=%d, want 1", patches)
+	}
+}
+
+func testOpenEBSLVMEnsureRejectsTemporaryOwnership(t *testing.T) {
+	manager, _ := newOpenEBSLVMTestManager(t, "no")
+	_, _ = prepareOpenEBSLVMTest(t, manager)
+
+	_, err := manager.EnsureShared(
+		context.Background(),
+		openEBSLVMClaim,
+		openEBSLVMSourcePV,
+	)
+	if domain.CategoryOf(err) != domain.ErrorConflict {
+		t.Fatalf("category=%s error=%v", domain.CategoryOf(err), err)
+	}
 }
 
 func testOpenEBSLVMPatchConflict(t *testing.T) {
@@ -74,7 +196,14 @@ func testOpenEBSLVMPatchConflict(t *testing.T) {
 	}
 }
 
-var openEBSLVMSourcePV = domain.ObjectReference{Name: "pv-source", UID: "pv-uid"}
+var (
+	openEBSLVMClaim = domain.ObjectReference{
+		Namespace: "app",
+		Name:      "data",
+		UID:       "pvc-uid",
+	}
+	openEBSLVMSourcePV = domain.ObjectReference{Name: "pv-source", UID: "pv-uid"}
+)
 
 func newOpenEBSLVMTestManager(
 	t *testing.T,
@@ -106,6 +235,11 @@ func newOpenEBSLVMTestManager(
 	typed := kubernetesfake.NewClientset(&corev1.PersistentVolume{
 		ObjectMeta: metav1.ObjectMeta{Name: openEBSLVMSourcePV.Name, UID: openEBSLVMSourcePV.UID},
 		Spec: corev1.PersistentVolumeSpec{
+			ClaimRef: &corev1.ObjectReference{
+				Namespace: openEBSLVMClaim.Namespace,
+				Name:      openEBSLVMClaim.Name,
+				UID:       openEBSLVMClaim.UID,
+			},
 			PersistentVolumeSource: corev1.PersistentVolumeSource{
 				CSI: &corev1.CSIPersistentVolumeSource{
 					Driver:       "local.csi.openebs.io",
@@ -116,6 +250,52 @@ func newOpenEBSLVMTestManager(
 	})
 
 	return NewOpenEBSLVMSharedVolumeManager(typed, dynamicClient), dynamicClient
+}
+
+func testOpenEBSLVMEnsureRejectsClaimRefChange(t *testing.T) {
+	manager, dynamicClient := newOpenEBSLVMTestManager(t, "no")
+
+	typedManager, ok := manager.(*openEBSLVMSharedVolumeManager)
+	if !ok {
+		t.Fatalf("manager type=%T, want *openEBSLVMSharedVolumeManager", manager)
+	}
+
+	pv, err := typedManager.typed.CoreV1().PersistentVolumes().Get(
+		context.Background(),
+		openEBSLVMSourcePV.Name,
+		metav1.GetOptions{},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	pv.Spec.ClaimRef = &corev1.ObjectReference{
+		Namespace: "other",
+		Name:      "replacement",
+		UID:       "replacement-uid",
+	}
+	if _, err := typedManager.typed.CoreV1().PersistentVolumes().Update(
+		context.Background(),
+		pv,
+		metav1.UpdateOptions{},
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err = manager.EnsureShared(
+		context.Background(),
+		openEBSLVMClaim,
+		openEBSLVMSourcePV,
+	)
+	if domain.CategoryOf(err) != domain.ErrorConflict {
+		t.Fatalf("category=%s error=%v", domain.CategoryOf(err), err)
+	}
+
+	for _, action := range dynamicClient.Actions() {
+		if action.GetVerb() == "patch" {
+			t.Fatalf("LVMVolume was patched after claimRef drift: %#v", action)
+		}
+	}
 }
 
 func prepareOpenEBSLVMTest(

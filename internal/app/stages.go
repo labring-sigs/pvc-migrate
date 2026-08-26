@@ -64,26 +64,30 @@ func (s *Service) reserve(ctx context.Context, session *domain.Session) error {
 
 		status := &session.Status.Volumes[index]
 		if status.Reserved && volume.DestinationPV.UID != "" {
-			continue
+			// A retry still revalidates backend settings applied after provisioning.
+		} else {
+			s.logInfo(
+				"destination storage reservation started",
+				"session",
+				session.ID,
+				"pvc",
+				volume.SourcePVC.Name,
+				"destination",
+				volume.DestinationPVC.Namespace+"/"+volume.DestinationPVC.Name,
+				"node",
+				session.Spec.WorkflowOptions().TargetNode,
+			)
+
+			if err := s.reserver.ReserveVolume(ctx, session, volume, status, false); err != nil {
+				return s.failContext(ctx, session, err)
+			}
+
+			if err := s.store.Update(ctx, session); err != nil {
+				return s.failContext(ctx, session, err)
+			}
 		}
 
-		s.logInfo(
-			"destination storage reservation started",
-			"session",
-			session.ID,
-			"pvc",
-			volume.SourcePVC.Name,
-			"destination",
-			volume.DestinationPVC.Namespace+"/"+volume.DestinationPVC.Name,
-			"node",
-			session.Spec.WorkflowOptions().TargetNode,
-		)
-
-		if err := s.reserver.ReserveVolume(ctx, session, volume, status, false); err != nil {
-			return s.failContext(ctx, session, err)
-		}
-
-		if err := s.store.Update(ctx, session); err != nil {
+		if err := s.ensureConcurrentDestinationMount(ctx, session, index); err != nil {
 			return s.failContext(ctx, session, err)
 		}
 	}
@@ -732,6 +736,16 @@ func (s *Service) resumeWorkload(ctx context.Context, session *domain.Session) e
 		return err
 	}
 
+	for index := range session.Spec.Volumes {
+		if err := s.ensureConcurrentDestinationMount(
+			ctx,
+			session,
+			index,
+		); err != nil {
+			return s.failContext(ctx, session, err)
+		}
+	}
+
 	if err := s.controllers.Resume(ctx, session); err != nil {
 		return s.failContext(ctx, session, err)
 	}
@@ -1119,7 +1133,7 @@ func (s *Service) rollbackMigration(ctx context.Context, session *domain.Session
 		return s.failContext(ctx, session, err)
 	}
 
-	if err := s.ValidateRollback(ctx, session); err != nil {
+	if err := s.prepareRollback(ctx, session, wasRunning); err != nil {
 		return err
 	}
 
@@ -1227,6 +1241,102 @@ func (s *Service) rollbackMigration(ctx context.Context, session *domain.Session
 		domain.PhaseRolledBack,
 		"source volumes restored and workload resumed",
 	)
+}
+
+func (s *Service) prepareRollback(
+	ctx context.Context,
+	session *domain.Session,
+	wasRunning bool,
+) error {
+	if err := s.ValidateRollback(ctx, session); err != nil {
+		return err
+	}
+
+	if !wasRunning {
+		return nil
+	}
+
+	return s.checkpointRollbackPods(ctx, session)
+}
+
+func (s *Service) checkpointRollbackPods(ctx context.Context, session *domain.Session) error {
+	const operation = "rollback"
+
+	current, err := s.controllers.CurrentRollbackPods(ctx, session)
+	if err != nil {
+		return err
+	}
+
+	workload := session.Spec.WorkloadPtr()
+	if workload == nil || len(current) == 0 || !refreshRollbackPodReferences(workload, current) {
+		return nil
+	}
+
+	if s.store == nil {
+		return domain.NewError(
+			domain.ErrorInternal,
+			operation,
+			"session store is required to checkpoint current workload Pods",
+		)
+	}
+
+	if err := s.store.Update(ctx, session); err != nil {
+		return domain.WrapError(
+			domain.ErrorKubernetes,
+			operation,
+			"checkpoint current workload Pods",
+			err,
+		)
+	}
+
+	return nil
+}
+
+func refreshRollbackPodReferences(
+	workload *domain.WorkloadSpec,
+	current []domain.ObjectReference,
+) bool {
+	beforePod := workload.Pod
+	beforeAffected := slices.Clone(workload.AffectedPods)
+
+	switch workload.Adapter {
+	case domain.WorkloadDeployment, domain.WorkloadGrafana:
+		workload.AffectedPods = slices.Clone(current)
+		workload.Pod = current[0]
+	default:
+		byName := make(map[string]domain.ObjectReference, len(current))
+		for _, ref := range current {
+			byName[ref.Namespace+"/"+ref.Name] = ref
+		}
+
+		if ref, ok := byName[workload.Pod.Namespace+"/"+workload.Pod.Name]; ok {
+			workload.Pod = ref
+		}
+
+		if len(workload.AffectedPods) == 0 {
+			workload.AffectedPods = slices.Clone(current)
+		} else {
+			seen := make(map[string]struct{}, len(workload.AffectedPods))
+			for index, ref := range workload.AffectedPods {
+				key := ref.Namespace + "/" + ref.Name
+				seen[key] = struct{}{}
+
+				if updated, ok := byName[key]; ok {
+					workload.AffectedPods[index] = updated
+				}
+			}
+
+			for _, ref := range current {
+				key := ref.Namespace + "/" + ref.Name
+
+				if _, ok := seen[key]; !ok {
+					workload.AffectedPods = append(workload.AffectedPods, ref)
+				}
+			}
+		}
+	}
+
+	return workload.Pod != beforePod || !slices.Equal(workload.AffectedPods, beforeAffected)
 }
 
 func (s *Service) Rename(ctx context.Context, session *domain.Session) error {

@@ -627,7 +627,7 @@ func bindCleanupFlags(command *cobra.Command, options *app.CleanupOptions) {
 	command.Flags().
 		BoolVar(&options.DeleteTemporary, "delete-temporary", false, "Delete retained staged PVCs owned by the session")
 	command.Flags().
-		BoolVar(&options.DeleteRollback, "delete-rollback-pv", false, "Delete Released rollback PV objects; Retain preserves backend data")
+		BoolVar(&options.DeleteRollback, "delete-rollback-pv", false, "Restore each Released rollback PV's recorded reclaim policy, then delete it")
 	command.Flags().
 		BoolVar(&options.Finalize, "finalize", false, "Restore the active PV's recorded reclaim policy")
 	command.Flags().

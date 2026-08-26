@@ -612,7 +612,18 @@ func TestGrafanaResumeUsesCompleteDeploymentSelector(t *testing.T) {
 
 	replicas := int32(0)
 	deployment := &appsv1.Deployment{
-		ObjectMeta: metav1.ObjectMeta{Namespace: "vm", Name: "grafana", UID: "deployment-uid"},
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: "vm",
+			Name:      "grafana",
+			UID:       "deployment-uid",
+			OwnerReferences: []metav1.OwnerReference{{
+				APIVersion: grafanaAPIVersion,
+				Kind:       domain.KindGrafana,
+				Name:       "grafana",
+				UID:        "grafana-uid",
+				Controller: new(true),
+			}},
+		},
 		Spec: appsv1.DeploymentSpec{
 			Replicas: &replicas,
 			Selector: &metav1.LabelSelector{
@@ -653,8 +664,26 @@ func TestGrafanaResumeUsesCompleteDeploymentSelector(t *testing.T) {
 	grafana := grafanaObject("grafana-uid", true)
 	grafana.SetAnnotations(map[string]string{pauseSessionAnnotation: "session"})
 	dynamicClient := dynamicfake.NewSimpleDynamicClient(runtime.NewScheme(), grafana)
+	typedClient := fake.NewClientset(deployment, replicaSet, wrong, right)
+	typedClient.PrependReactor(
+		"update",
+		"deployments",
+		func(action clienttesting.Action) (bool, runtime.Object, error) {
+			updated := testutil.MustActionObject[*appsv1.Deployment](t, action)
+			replicas := deploymentReplicas(updated)
+			updated.Status = appsv1.DeploymentStatus{
+				ObservedGeneration: updated.Generation,
+				Replicas:           replicas,
+				UpdatedReplicas:    replicas,
+				ReadyReplicas:      replicas,
+				AvailableReplicas:  replicas,
+			}
+
+			return false, nil, nil
+		},
+	)
 	manager := NewManager(
-		fake.NewClientset(deployment, replicaSet, wrong, right),
+		typedClient,
 		dynamicClient,
 		nil,
 	)

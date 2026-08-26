@@ -301,6 +301,7 @@ func TestCleanupAbortedSessionReleasesSourceAndDeletesDestination(t *testing.T) 
 		Name: "pv-destination",
 		UID:  types.UID("dest-pv-uid"),
 	}
+	session.Spec.Volumes[0].DestinationPolicy = corev1.PersistentVolumeReclaimDelete
 	client := fake.NewClientset(
 		&corev1.PersistentVolumeClaim{
 			ObjectMeta: metav1.ObjectMeta{
@@ -505,6 +506,7 @@ func TestCleanupAbortedSessionSkipsReplacedSourceResources(t *testing.T) {
 		Name: "pv-destination",
 		UID:  types.UID("dest-pv-uid"),
 	}
+	session.Spec.Volumes[0].DestinationPolicy = corev1.PersistentVolumeReclaimDelete
 	client := fake.NewClientset(
 		&corev1.PersistentVolumeClaim{ObjectMeta: metav1.ObjectMeta{
 			Namespace: "app", Name: "data", UID: types.UID("recreated-pvc-uid"),

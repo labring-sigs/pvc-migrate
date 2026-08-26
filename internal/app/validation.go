@@ -14,6 +14,7 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 )
 
 func (s *Service) ValidateReservation(ctx context.Context, session *domain.Session) error {
@@ -616,13 +617,21 @@ func (s *Service) ValidateRollback(ctx context.Context, session *domain.Session)
 // validateRollbackConsumers mirrors the Pod reference guard in RollbackVolume
 // while allowing consumers that the recorded workload adapter will pause.
 func (s *Service) validateRollbackConsumers(ctx context.Context, session *domain.Session) error {
-	allowed := make(map[string]struct{})
+	allowed := make(map[string]types.UID)
 
 	workload := session.Spec.Workload()
 	if workload.Adapter != domain.WorkloadNone {
-		for _, ref := range append([]domain.ObjectReference{workload.Pod}, workload.AffectedPods...) {
-			if ref.Namespace != "" && ref.Name != "" {
-				allowed[ref.Namespace+"/"+ref.Name] = struct{}{}
+		current, err := s.controllers.CurrentRollbackPods(ctx, session)
+		if err != nil {
+			return err
+		}
+
+		references := append([]domain.ObjectReference{workload.Pod}, workload.AffectedPods...)
+
+		references = append(references, current...)
+		for _, ref := range references {
+			if ref.Namespace != "" && ref.Name != "" && ref.UID != "" {
+				allowed[ref.Namespace+"/"+ref.Name] = ref.UID
 			}
 		}
 	}
@@ -680,7 +689,8 @@ func (s *Service) validateRollbackConsumers(ctx context.Context, session *domain
 				continue
 			}
 
-			if _, controlled := allowed[pod.Namespace+"/"+pod.Name]; controlled {
+			expectedUID, controlled := allowed[pod.Namespace+"/"+pod.Name]
+			if controlled && expectedUID == pod.UID {
 				continue
 			}
 
@@ -1133,23 +1143,29 @@ func (s *Service) validateCleanupRollbackPV(
 		)
 	}
 
-	if pv.Status.Phase == corev1.VolumeReleased || pv.Status.Phase == corev1.VolumeAvailable {
-		return nil
-	}
-
 	deletionWillReleaseClaim := options.DeleteTemporary && pv.Status.Phase == corev1.VolumeBound &&
 		pv.Spec.ClaimRef != nil && pv.Spec.ClaimRef.Namespace == volume.DestinationPVC.Namespace &&
 		pv.Spec.ClaimRef.Name == volume.DestinationPVC.Name && pv.Spec.ClaimRef.UID != "" &&
 		pv.Spec.ClaimRef.UID == volume.DestinationPVC.UID
-	if deletionWillReleaseClaim {
-		return nil
+	if pv.Status.Phase != corev1.VolumeReleased && pv.Status.Phase != corev1.VolumeAvailable &&
+		!deletionWillReleaseClaim {
+		return domain.NewError(
+			domain.ErrorPrecondition,
+			"cleanup dry-run",
+			fmt.Sprintf("PV %s phase %s must be Released or Available", pv.Name, pv.Status.Phase),
+		)
 	}
 
-	return domain.NewError(
-		domain.ErrorPrecondition,
-		"cleanup dry-run",
-		fmt.Sprintf("PV %s phase %s must be Released or Available", pv.Name, pv.Status.Phase),
-	)
+	policy := cleanupRollbackReclaimPolicy(session, volume)
+	if !cleanupRollbackPVPolicyMatches(pv, policy, uncheckpointedClaim) {
+		return domain.NewError(
+			domain.ErrorConflict,
+			"cleanup dry-run",
+			fmt.Sprintf("PV %s original reclaim policy changed", pv.Name),
+		)
+	}
+
+	return nil
 }
 
 func (s *Service) validateCleanupActivePV(

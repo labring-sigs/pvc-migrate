@@ -173,6 +173,45 @@ func TestSessionTracksCompletedWarmPasses(t *testing.T) {
 	}
 }
 
+func TestVolumeSpecRequiresConcurrentRWOMount(t *testing.T) {
+	tests := []struct {
+		name     string
+		volume   VolumeSpec
+		required bool
+	}{
+		{
+			name: "multiple RWO consumers",
+			volume: VolumeSpec{
+				ConcurrentConsumers: 2,
+				AccessModes:         []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce},
+			},
+			required: true,
+		},
+		{
+			name: "single RWO consumer",
+			volume: VolumeSpec{
+				ConcurrentConsumers: 1,
+				AccessModes:         []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce},
+			},
+		},
+		{
+			name: "multiple RWX consumers",
+			volume: VolumeSpec{
+				ConcurrentConsumers: 3,
+				AccessModes:         []corev1.PersistentVolumeAccessMode{corev1.ReadWriteMany},
+			},
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := test.volume.RequiresConcurrentRWOMount(); got != test.required {
+				t.Fatalf("RequiresConcurrentRWOMount()=%t, want %t", got, test.required)
+			}
+		})
+	}
+}
+
 func TestSessionRejectsMixedConcretePayloads(t *testing.T) {
 	session := testSession(t)
 

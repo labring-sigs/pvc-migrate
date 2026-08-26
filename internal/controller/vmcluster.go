@@ -22,20 +22,30 @@ func (m *Manager) verifyVMClusterPaused(
 	session *domain.Session,
 	workload domain.WorkloadSpec,
 ) error {
-	if m.dynamic == nil {
-		return domain.NewError(
-			domain.ErrorPrecondition,
-			"verify paused",
-			"dynamic client is required for VMCluster pause verification",
-		)
-	}
-
 	vm := workload.VMCluster
 	if vm == nil {
 		return domain.NewError(
 			domain.ErrorInternal,
 			"verify paused",
 			"session lacks VMCluster state",
+		)
+	}
+
+	if err := m.rejectHorizontalPodAutoscaler(
+		ctx,
+		workload.Controller.Namespace,
+		domain.KindStatefulSet,
+		workload.Controller.Name,
+		"verify paused",
+	); err != nil {
+		return err
+	}
+
+	if m.dynamic == nil {
+		return domain.NewError(
+			domain.ErrorPrecondition,
+			"verify paused",
+			"dynamic client is required for VMCluster pause verification",
 		)
 	}
 
@@ -82,6 +92,169 @@ func (m *Manager) verifyVMClusterPaused(
 			domain.ErrorPrecondition,
 			"verify paused",
 			fmt.Sprintf("VMCluster component %s is not paused", vm.Component),
+		)
+	}
+
+	return nil
+}
+
+func (m *Manager) validateVMClusterResume(
+	ctx context.Context,
+	session *domain.Session,
+) error {
+	workload := session.Spec.Workload()
+
+	vm := workload.VMCluster
+	if vm == nil {
+		return domain.NewError(
+			domain.ErrorInternal,
+			"resume VMCluster",
+			"session lacks VMCluster state",
+		)
+	}
+
+	if workload.OriginalReplicas == nil || workload.Ordinal == nil {
+		return domain.NewError(
+			domain.ErrorInternal,
+			"resume VMCluster",
+			"session lacks StatefulSet replica state",
+		)
+	}
+
+	if err := m.validateStatefulSetTransitionReplicas(
+		ctx,
+		session,
+		"resume VMCluster",
+	); err != nil {
+		return err
+	}
+
+	if m.dynamic == nil {
+		return domain.NewError(
+			domain.ErrorPrecondition,
+			"resume VMCluster",
+			"dynamic client is required for VMCluster resume validation",
+		)
+	}
+
+	gvr, err := kube.ParseGroupVersionResource(vm.APIVersion, vmClusterResource)
+	if err != nil {
+		return err
+	}
+
+	object, err := m.dynamic.Resource(gvr).
+		Namespace(workload.Pod.Namespace).
+		Get(ctx, vm.Name, metav1.GetOptions{})
+	if err != nil {
+		return domain.WrapError(domain.ErrorKubernetes, "resume VMCluster", "read VMCluster", err)
+	}
+
+	if object.GetUID() != vm.UID {
+		return domain.NewError(
+			domain.ErrorConflict,
+			"resume VMCluster",
+			fmt.Sprintf("VMCluster %s/%s UID changed", object.GetNamespace(), object.GetName()),
+		)
+	}
+
+	component, found, nestedErr := unstructured.NestedMap(object.Object, "spec", vm.Component)
+	if nestedErr != nil {
+		return domain.WrapError(
+			domain.ErrorPrecondition,
+			"resume VMCluster",
+			"read component state",
+			nestedErr,
+		)
+	}
+
+	if !found {
+		return domain.NewError(
+			domain.ErrorPrecondition,
+			"resume VMCluster",
+			fmt.Sprintf("VMCluster component %s is absent", vm.Component),
+		)
+	}
+
+	paused, _, nestedErr := unstructured.NestedBool(component, "paused")
+	if nestedErr != nil {
+		return domain.WrapError(
+			domain.ErrorPrecondition,
+			"resume VMCluster",
+			"read component pause state",
+			nestedErr,
+		)
+	}
+
+	currentReplicas, replicasFound, nestedErr := unstructured.NestedInt64(component, "replicaCount")
+	if nestedErr != nil {
+		return domain.WrapError(
+			domain.ErrorPrecondition,
+			"resume VMCluster",
+			"read component replica count",
+			nestedErr,
+		)
+	}
+
+	owner := object.GetAnnotations()[pauseSessionAnnotation]
+	if vm.OriginalReplicasConfigured && owner != session.ID {
+		return domain.NewError(
+			domain.ErrorConflict,
+			"resume VMCluster",
+			fmt.Sprintf(
+				"VMCluster %s/%s pause ownership changed",
+				object.GetNamespace(),
+				object.GetName(),
+			),
+		)
+	}
+
+	if _, err := validateVMClusterPauseRestoreState(
+		session,
+		vm,
+		object,
+		owner,
+		paused,
+		currentReplicas,
+		replicasFound,
+	); err != nil {
+		return err
+	}
+
+	clusterPaused, clusterPausedFound, nestedErr := unstructured.NestedBool(
+		object.Object,
+		"spec",
+		"paused",
+	)
+	if nestedErr != nil {
+		return domain.WrapError(
+			domain.ErrorPrecondition,
+			"resume VMCluster",
+			"read top-level pause state",
+			nestedErr,
+		)
+	}
+
+	if vm.OriginalClusterPausedConfigured {
+		if !clusterPausedFound || clusterPaused != vm.OriginalClusterPaused {
+			return domain.NewError(
+				domain.ErrorConflict,
+				"resume VMCluster",
+				fmt.Sprintf(
+					"VMCluster %s/%s top-level paused changed",
+					object.GetNamespace(),
+					object.GetName(),
+				),
+			)
+		}
+	} else if clusterPausedFound && clusterPaused {
+		return domain.NewError(
+			domain.ErrorConflict,
+			"resume VMCluster",
+			fmt.Sprintf(
+				"VMCluster %s/%s was paused externally during migration",
+				object.GetNamespace(),
+				object.GetName(),
+			),
 		)
 	}
 
@@ -302,6 +475,16 @@ func (m *Manager) pauseVMCluster(ctx context.Context, session *domain.Session) e
 		)
 	}
 
+	if err := m.rejectHorizontalPodAutoscaler(
+		ctx,
+		workload.Controller.Namespace,
+		domain.KindStatefulSet,
+		workload.Controller.Name,
+		"pause VMCluster",
+	); err != nil {
+		return err
+	}
+
 	if err := m.setVMClusterPaused(ctx, session); err != nil {
 		return err
 	}
@@ -371,6 +554,16 @@ func (m *Manager) resumeVMCluster(ctx context.Context, session *domain.Session) 
 		)
 	}
 
+	if err := m.rejectHorizontalPodAutoscaler(
+		ctx,
+		workload.Controller.Namespace,
+		domain.KindStatefulSet,
+		workload.Controller.Name,
+		"resume VMCluster",
+	); err != nil {
+		return err
+	}
+
 	if err := m.setVMClusterReplicaCount(
 		ctx,
 		session,
@@ -401,11 +594,19 @@ func (m *Manager) resumeVMCluster(ctx context.Context, session *domain.Session) 
 		}
 	}
 
+	if err := m.validateStatefulSetResumed(ctx, workload, "resume VMCluster"); err != nil {
+		return err
+	}
+
 	if err := m.restoreVMClusterPause(ctx, session); err != nil {
 		return err
 	}
 
-	return m.waitForVMClusterOperational(ctx, session)
+	if err := m.waitForVMClusterOperational(ctx, session); err != nil {
+		return err
+	}
+
+	return m.validateStatefulSetResumed(ctx, workload, "resume VMCluster")
 }
 
 func (m *Manager) waitForVMClusterOperational(ctx context.Context, session *domain.Session) error {

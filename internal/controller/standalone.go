@@ -279,3 +279,68 @@ func (m *Manager) resumeStandalone(ctx context.Context, session *domain.Session)
 
 	return nil
 }
+
+func (m *Manager) validateStandaloneResume(
+	ctx context.Context,
+	session *domain.Session,
+) error {
+	workload := session.Spec.Workload()
+
+	pod, err := m.typed.CoreV1().
+		Pods(workload.Pod.Namespace).
+		Get(ctx, workload.Pod.Name, metav1.GetOptions{})
+	if apierrors.IsNotFound(err) {
+		return nil
+	}
+
+	if err != nil {
+		return domain.WrapError(
+			domain.ErrorKubernetes,
+			"resume standalone Pod",
+			"read Pod",
+			err,
+		)
+	}
+
+	if pod.Annotations[kube.SessionKey] != session.ID {
+		return domain.NewError(
+			domain.ErrorConflict,
+			"resume standalone Pod",
+			fmt.Sprintf(
+				"Pod %s/%s was recreated outside this session",
+				pod.Namespace,
+				pod.Name,
+			),
+		)
+	}
+
+	return nil
+}
+
+func (m *Manager) currentStandaloneRollbackPods(
+	ctx context.Context,
+	session *domain.Session,
+) ([]domain.ObjectReference, error) {
+	const operation = validateRollbackConsumers
+
+	ref := session.Spec.Workload().Pod
+
+	pod, err := m.typed.CoreV1().Pods(ref.Namespace).Get(ctx, ref.Name, metav1.GetOptions{})
+	if apierrors.IsNotFound(err) {
+		return nil, nil
+	}
+
+	if err != nil {
+		return nil, domain.WrapError(domain.ErrorKubernetes, operation, "read standalone Pod", err)
+	}
+
+	if pod.Annotations[kube.SessionKey] != session.ID {
+		return nil, domain.NewError(
+			domain.ErrorConflict,
+			operation,
+			fmt.Sprintf("Pod %s/%s was recreated outside this session", pod.Namespace, pod.Name),
+		)
+	}
+
+	return []domain.ObjectReference{podReference(pod)}, nil
+}

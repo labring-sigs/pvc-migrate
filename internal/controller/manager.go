@@ -40,6 +40,7 @@ const (
 	kubeBlocksRoleLabel         = "kubeblocks.io/role"
 	kubeBlocksAppsRoleLabel     = "apps.kubeblocks.io/role"
 	genericRoleLabel            = "role"
+	validateRollbackConsumers   = "validate rollback consumers"
 )
 
 type DiscoverOptions struct {
@@ -556,15 +557,7 @@ func (m *Manager) discoverReplicaSetOwner(
 		return domain.WorkloadSpec{}, err
 	}
 
-	return domain.WorkloadSpec{}, domain.NewError(
-		domain.ErrorPrecondition,
-		"discover workload",
-		fmt.Sprintf(
-			"Deployment %s/%s has no safe pause adapter",
-			options.Namespace,
-			deployment.Name,
-		),
-	)
+	return m.deploymentWorkload(ctx, pod, deploymentObject)
 }
 
 func (m *Manager) Pause(ctx context.Context, session *domain.Session) error {
@@ -573,6 +566,8 @@ func (m *Manager) Pause(ctx context.Context, session *domain.Session) error {
 		return nil
 	case domain.WorkloadStandalone:
 		return m.pauseStandalone(ctx, session)
+	case domain.WorkloadDeployment:
+		return m.pauseDeployment(ctx, session)
 	case domain.WorkloadStatefulSet:
 		return m.pauseStatefulSet(ctx, session)
 	case domain.WorkloadVictoriaLogs:
@@ -598,6 +593,8 @@ func (m *Manager) Resume(ctx context.Context, session *domain.Session) error {
 		return nil
 	case domain.WorkloadStandalone:
 		return m.resumeStandalone(ctx, session)
+	case domain.WorkloadDeployment:
+		return m.resumeDeployment(ctx, session)
 	case domain.WorkloadStatefulSet:
 		return m.resumeStatefulSet(ctx, session)
 	case domain.WorkloadVictoriaLogs:
@@ -615,6 +612,111 @@ func (m *Manager) Resume(ctx context.Context, session *domain.Session) error {
 			fmt.Sprintf("adapter %q is unsupported", session.Spec.Workload().Adapter),
 		)
 	}
+}
+
+func (m *Manager) ValidateResume(ctx context.Context, session *domain.Session) error {
+	if session == nil {
+		return domain.NewError(
+			domain.ErrorValidation,
+			"validate workload resume",
+			"session is nil",
+		)
+	}
+
+	switch session.Spec.Workload().Adapter {
+	case domain.WorkloadNone:
+		return nil
+	case domain.WorkloadStandalone:
+		return m.validateStandaloneResume(ctx, session)
+	case domain.WorkloadDeployment:
+		return m.validateDeploymentResume(ctx, session)
+	case domain.WorkloadStatefulSet:
+		return m.validateStatefulSetResume(ctx, session)
+	case domain.WorkloadVictoriaLogs:
+		return m.validateVictoriaLogsResume(ctx, session)
+	case domain.WorkloadVMCluster:
+		return m.validateVMClusterResume(ctx, session)
+	case domain.WorkloadKubeBlocks:
+		return m.validateKubeBlocksResume(ctx, session)
+	case domain.WorkloadGrafana:
+		return m.validateGrafanaResume(ctx, session)
+	default:
+		return domain.NewError(
+			domain.ErrorPrecondition,
+			"validate workload resume",
+			fmt.Sprintf("adapter %q is unsupported", session.Spec.Workload().Adapter),
+		)
+	}
+}
+
+func (m *Manager) CurrentRollbackPods(
+	ctx context.Context,
+	session *domain.Session,
+) ([]domain.ObjectReference, error) {
+	if session == nil {
+		return nil, domain.NewError(
+			domain.ErrorValidation,
+			validateRollbackConsumers,
+			"session is nil",
+		)
+	}
+
+	switch session.Spec.Workload().Adapter {
+	case domain.WorkloadNone:
+		return nil, nil
+	case domain.WorkloadStandalone:
+		return m.currentStandaloneRollbackPods(ctx, session)
+	case domain.WorkloadDeployment:
+		return m.currentDeploymentRollbackPods(ctx, session)
+	case domain.WorkloadStatefulSet,
+		domain.WorkloadVictoriaLogs,
+		domain.WorkloadVMCluster:
+		return m.currentStatefulSetRollbackPods(ctx, session)
+	case domain.WorkloadKubeBlocks:
+		return m.currentKubeBlocksRollbackPods(ctx, session)
+	case domain.WorkloadGrafana:
+		return m.currentGrafanaRollbackPods(ctx, session)
+	default:
+		return nil, domain.NewError(
+			domain.ErrorPrecondition,
+			validateRollbackConsumers,
+			fmt.Sprintf("adapter %q is unsupported", session.Spec.Workload().Adapter),
+		)
+	}
+}
+
+func (m *Manager) currentControllerPods(
+	ctx context.Context,
+	references []domain.ObjectReference,
+	controller domain.ObjectReference,
+	operation string,
+) ([]domain.ObjectReference, error) {
+	pods, errors := m.readPodReferences(ctx, references)
+	current := make([]domain.ObjectReference, 0, len(references))
+
+	for index, ref := range references {
+		err := errors[index]
+		if apierrors.IsNotFound(err) {
+			continue
+		}
+
+		if err != nil {
+			return nil, domain.WrapError(
+				domain.ErrorKubernetes,
+				operation,
+				fmt.Sprintf("read Pod %s/%s", ref.Namespace, ref.Name),
+				err,
+			)
+		}
+
+		if err := validatePodController(pods[index], controller, operation); err != nil {
+			return nil, err
+		}
+
+		current = append(current, podReference(pods[index]))
+	}
+
+	return current, nil
 }
 
 func (m *Manager) VerifyPaused(ctx context.Context, session *domain.Session) error {
@@ -716,6 +818,8 @@ func (m *Manager) readPods(
 func (m *Manager) verifyPauseControl(ctx context.Context, session *domain.Session) error {
 	workload := session.Spec.Workload()
 	switch workload.Adapter {
+	case domain.WorkloadDeployment:
+		return m.verifyDeploymentPaused(ctx, workload)
 	case domain.WorkloadStatefulSet:
 		return m.verifyStatefulSetPaused(ctx, workload)
 	case domain.WorkloadVictoriaLogs:

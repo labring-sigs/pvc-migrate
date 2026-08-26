@@ -18,6 +18,7 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/validation"
 	"k8s.io/client-go/kubernetes"
 	"sigs.k8s.io/yaml"
@@ -618,6 +619,8 @@ func (p *Planner) finalizePlanTarget(
 		}
 	}
 
+	p.checkSharedRWOScheduling(state)
+
 	if state.options.Operation == domain.OperationMigratePod &&
 		state.sourcePod != nil &&
 		state.sourcePod.Spec.NodeName != "" &&
@@ -1152,11 +1155,22 @@ func (p *Planner) checkPlanVolumeConsumers(
 		state.plan,
 		input.pvc,
 		state.sourcePod,
+		state.workload,
 		state.options.Operation,
 		state.options.Online,
 		state.inventory.namespacePods,
 		state.inventory.namespacePodsErr,
 	)
+	concurrentConsumers := migrationUnitConsumerCount(
+		state.workload,
+		state.sourcePod,
+		consumers,
+	)
+	plannedIndex := len(state.plannedVolumes) - 1
+	volumeIndex := len(state.volumeSpecs) - 1
+	state.plannedVolumes[plannedIndex].ConcurrentConsumers = concurrentConsumers
+	state.volumeSpecs[volumeIndex].ConcurrentConsumers = concurrentConsumers
+
 	if warmCopyRequested(state.options) {
 		inspect, patch := p.checkWarmCopyMountCompatibility(
 			ctx,
@@ -1172,6 +1186,38 @@ func (p *Planner) checkPlanVolumeConsumers(
 		)
 		state.inspectOpenEBSShared = state.inspectOpenEBSShared || inspect
 		state.patchOpenEBSShared = state.patchOpenEBSShared || patch
+	}
+
+	planned := state.plannedVolumes[plannedIndex]
+	volume := state.volumeSpecs[volumeIndex]
+
+	orchestratedMigration := state.options.Operation == domain.OperationMigrate ||
+		state.options.Operation == domain.OperationMigratePod
+	if orchestratedMigration && volume.RequiresConcurrentRWOMount() &&
+		planned.CSIProvisioner == kube.OpenEBSLVMCSIDriver {
+		state.inspectOpenEBSShared = true
+		if state.options.OpenEBSLVMEnableShared {
+			state.patchOpenEBSShared = true
+			state.plan.AddCheck(passed(
+				"destination-shared-mount",
+				fmt.Sprintf(
+					"execution will verify the provisioned destination PV and set its OpenEBS LVMVolume spec.shared=yes so %d consumers can mount RWO PVC %s/%s on one node",
+					concurrentConsumers,
+					input.pvc.Namespace,
+					input.pvc.Name,
+				),
+			))
+		} else {
+			state.plan.AddCheck(failed(
+				"destination-shared-mount",
+				fmt.Sprintf(
+					"destination OpenEBS LVM volume for RWO PVC %s/%s must support %d concurrent consumers; rerun with --openebs-lvm-enable-shared to authorize spec.shared=yes after provisioning",
+					input.pvc.Namespace,
+					input.pvc.Name,
+					concurrentConsumers,
+				),
+			))
+		}
 	}
 
 	if state.options.Operation == domain.OperationMigrate && state.sourcePod == nil {
@@ -2230,6 +2276,7 @@ func (p *Planner) checkPVCReferencesFromPods(
 	plan *domain.MigrationPlan,
 	pvc *corev1.PersistentVolumeClaim,
 	sourcePod *corev1.Pod,
+	workload domain.WorkloadSpec,
 	operation domain.Operation,
 	online bool,
 	pods []corev1.Pod,
@@ -2312,63 +2359,15 @@ func (p *Planner) checkPVCReferencesFromPods(
 	}
 
 	if sourcePod != nil {
-		others := make([]string, 0)
-		for _, consumer := range consumers {
-			if consumer.Name != sourcePod.Name {
-				others = append(others, consumer.Name)
-			}
-		}
-
-		sort.Strings(others)
-
-		switch {
-		case len(others) > 0:
-			plan.AddCheck(
-				failed(
-					"pvc-consumers",
-					fmt.Sprintf(
-						"PVC %s/%s is shared with Pod(s): %s",
-						pvc.Namespace,
-						pvc.Name,
-						strings.Join(others, ","),
-					),
-				),
-			)
-		case operation == domain.OperationCopy && online && kube.HasAccessMode(pvc.Spec.AccessModes, corev1.ReadWriteOncePod):
-			plan.AddCheck(
-				failed(
-					"pvc-consumers",
-					fmt.Sprintf(
-						"active RWOP PVC %s/%s cannot be warm-copied",
-						pvc.Namespace,
-						pvc.Name,
-					),
-				),
-			)
-		case operation == domain.OperationCopy && online:
-			plan.AddCheck(
-				warned(
-					"pvc-consumers",
-					fmt.Sprintf(
-						"PVC %s/%s is active on selected Pod %s; online copy has file-level consistency",
-						pvc.Namespace,
-						pvc.Name,
-						sourcePod.Name,
-					),
-				),
-			)
-		default:
-			plan.AddCheck(
-				passed(
-					"pvc-consumers",
-					fmt.Sprintf(
-						"PVC %s/%s belongs to the selected migration unit",
-						pvc.Namespace,
-						pvc.Name,
-					),
-				),
-			)
-		}
+		checkSelectedMigrationUnitConsumers(
+			plan,
+			pvc,
+			sourcePod,
+			workload,
+			operation,
+			online,
+			consumers,
+		)
 
 		return consumers
 	}
@@ -2424,6 +2423,135 @@ func (p *Planner) checkPVCReferencesFromPods(
 	)
 
 	return consumers
+}
+
+func checkSelectedMigrationUnitConsumers(
+	plan *domain.MigrationPlan,
+	pvc *corev1.PersistentVolumeClaim,
+	sourcePod *corev1.Pod,
+	workload domain.WorkloadSpec,
+	operation domain.Operation,
+	online bool,
+	consumers []*corev1.Pod,
+) {
+	migrationUnit := workloadPodUIDs(workload, sourcePod, pvc.Namespace)
+	others := migrationUnitExternalConsumers(workload, migrationUnit, consumers)
+
+	switch {
+	case len(others) > 0:
+		plan.AddCheck(
+			failed(
+				"pvc-consumers",
+				fmt.Sprintf(
+					"PVC %s/%s is shared with Pod(s): %s",
+					pvc.Namespace,
+					pvc.Name,
+					strings.Join(others, ","),
+				),
+			),
+		)
+	case operation == domain.OperationCopy && online && kube.HasAccessMode(
+		pvc.Spec.AccessModes,
+		corev1.ReadWriteOncePod,
+	):
+		plan.AddCheck(
+			failed(
+				"pvc-consumers",
+				fmt.Sprintf(
+					"active RWOP PVC %s/%s cannot be warm-copied",
+					pvc.Namespace,
+					pvc.Name,
+				),
+			),
+		)
+	case operation == domain.OperationCopy && online:
+		plan.AddCheck(
+			warned(
+				"pvc-consumers",
+				fmt.Sprintf(
+					"PVC %s/%s is active on selected Pod %s; online copy has file-level consistency",
+					pvc.Namespace,
+					pvc.Name,
+					sourcePod.Name,
+				),
+			),
+		)
+	default:
+		plan.AddCheck(
+			passed(
+				"pvc-consumers",
+				fmt.Sprintf(
+					"PVC %s/%s belongs to the selected migration unit",
+					pvc.Namespace,
+					pvc.Name,
+				),
+			),
+		)
+	}
+}
+
+func migrationUnitExternalConsumers(
+	workload domain.WorkloadSpec,
+	migrationUnit map[string]types.UID,
+	consumers []*corev1.Pod,
+) []string {
+	others := make([]string, 0)
+
+	for _, consumer := range consumers {
+		expectedUID, belongs := migrationUnit[consumer.Name]
+		identityChanged := workload.Adapter != domain.WorkloadNone &&
+			(expectedUID == "" || consumer.UID == "" || expectedUID != consumer.UID)
+
+		if !belongs || identityChanged {
+			others = append(others, consumer.Name)
+		}
+	}
+
+	sort.Strings(others)
+
+	return others
+}
+
+func migrationUnitConsumerCount(
+	workload domain.WorkloadSpec,
+	selected *corev1.Pod,
+	consumers []*corev1.Pod,
+) int {
+	if selected == nil {
+		return 0
+	}
+
+	migrationUnit := workloadPodUIDs(workload, selected, selected.Namespace)
+
+	count := 0
+	for _, consumer := range consumers {
+		expectedUID, belongs := migrationUnit[consumer.Name]
+		if belongs && expectedUID != "" && consumer.UID == expectedUID {
+			count++
+		}
+	}
+
+	return count
+}
+
+func workloadPodUIDs(
+	workload domain.WorkloadSpec,
+	selected *corev1.Pod,
+	namespace string,
+) map[string]types.UID {
+	uids := map[string]types.UID{selected.Name: selected.UID}
+	for _, ref := range workload.AffectedPods {
+		if ref.Namespace == namespace {
+			if existing, ok := uids[ref.Name]; ok && existing != ref.UID {
+				uids[ref.Name] = ""
+				continue
+			}
+
+			uids[ref.Name] = ref.UID
+		}
+	}
+
+	return uids
 }
 
 func inferOnlineCopySourceNode(

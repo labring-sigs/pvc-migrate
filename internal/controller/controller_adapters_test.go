@@ -429,6 +429,15 @@ func TestGrafanaUsesCRSuspendAndDeploymentScale(t *testing.T) {
 		"deployments",
 		func(action clienttesting.Action) (bool, runtime.Object, error) {
 			updated := testutil.MustActionObject[*appsv1.Deployment](t, action)
+			replicas := deploymentReplicas(updated)
+
+			updated.Status = appsv1.DeploymentStatus{
+				ObservedGeneration: updated.Generation,
+				Replicas:           replicas,
+				UpdatedReplicas:    replicas,
+				ReadyReplicas:      replicas,
+				AvailableReplicas:  replicas,
+			}
 			if *updated.Spec.Replicas == 0 {
 				_ = client.Tracker().Delete(podsResource, "vm", pod.Name)
 			} else {

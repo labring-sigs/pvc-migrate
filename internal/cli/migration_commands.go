@@ -160,7 +160,7 @@ func (f *migrationFlags) bind(
 			&f.openEBSLVMEnableShared,
 			"openebs-lvm-enable-shared",
 			false,
-			"Temporarily set existing OpenEBS LVMVolume spec.shared=yes for warm copy, then restore it",
+			"Enable same-node shared mounts for OpenEBS LVM warm copy and multi-consumer RWO destinations",
 		)
 	}
 
