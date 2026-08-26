@@ -1514,7 +1514,12 @@ func TestPodControlledByDeploymentRejectsMatchingForeignPod(t *testing.T) {
 		nil,
 	)
 
-	owned, err := manager.podControlledByDeployment(context.Background(), pod, deployment)
+	owned, err := manager.podControlledByDeployment(
+		context.Background(),
+		pod,
+		deployment,
+		make(map[string]*appsv1.ReplicaSet),
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1718,6 +1723,31 @@ func TestStandaloneResumeHandlesExistingPodsAndNodeValidation(t *testing.T) {
 	err = manager.Resume(context.Background(), nodeSession)
 	if domain.CategoryOf(err) != domain.ErrorPrecondition ||
 		!strings.Contains(err.Error(), "lacks kubernetes.io/hostname") {
+		t.Fatalf("category=%s error=%v", domain.CategoryOf(err), err)
+	}
+}
+
+func TestValidateStandaloneResumeRejectsForeignReplacement(t *testing.T) {
+	foreign := readyPod("app", "worker", "node-a")
+	foreign.Annotations = map[string]string{kube.SessionKey: "another-session"}
+	client := kubernetesfake.NewClientset(foreign)
+	manager := NewManager(
+		client,
+		dynamicfake.NewSimpleDynamicClient(runtime.NewScheme()),
+		client.Discovery(),
+	)
+	session := controllerSession(domain.WorkloadSpec{
+		Adapter: domain.WorkloadStandalone,
+		Pod: domain.ObjectReference{
+			Namespace: foreign.Namespace,
+			Name:      foreign.Name,
+			UID:       "original-pod-uid",
+		},
+	})
+
+	err := manager.ValidateResume(context.Background(), session)
+	if domain.CategoryOf(err) != domain.ErrorConflict ||
+		!strings.Contains(err.Error(), "recreated outside this session") {
 		t.Fatalf("category=%s error=%v", domain.CategoryOf(err), err)
 	}
 }

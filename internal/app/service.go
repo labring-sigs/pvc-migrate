@@ -58,8 +58,13 @@ type volumeReserver interface {
 
 type workloadController interface {
 	Pause(ctx context.Context, session *domain.Session) error
+	ValidateResume(ctx context.Context, session *domain.Session) error
 	Resume(ctx context.Context, session *domain.Session) error
 	VerifyPaused(ctx context.Context, session *domain.Session) error
+	CurrentRollbackPods(
+		ctx context.Context,
+		session *domain.Session,
+	) ([]domain.ObjectReference, error)
 }
 
 type volumeSwitcher interface {

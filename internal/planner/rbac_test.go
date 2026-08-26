@@ -165,8 +165,16 @@ func TestDeploymentClusterRoleCoversPlannerAccessReviews(t *testing.T) {
 	workloads := []domain.WorkloadSpec{
 		{},
 		{
+			Adapter:    domain.WorkloadDeployment,
+			Controller: domain.ObjectReference{Namespace: "app", Name: "web"},
+		},
+		{
 			Adapter:    domain.WorkloadStatefulSet,
 			Controller: domain.ObjectReference{Namespace: "app", Name: "db"},
+		},
+		{
+			Adapter:    domain.WorkloadVictoriaLogs,
+			Controller: domain.ObjectReference{Namespace: "app", Name: "logs"},
 		},
 		{
 			Adapter: domain.WorkloadKubeBlocks,
@@ -238,6 +246,12 @@ func TestCheckRBACIncludesControllerSpecificPermissions(t *testing.T) {
 			},
 			want: []authorizationv1.ResourceAttributes{
 				{Namespace: "app", Verb: "update", Group: "apps", Resource: "statefulsets"},
+				{
+					Namespace: "app",
+					Verb:      "list",
+					Group:     "autoscaling",
+					Resource:  "horizontalpodautoscalers",
+				},
 			},
 		},
 		{
@@ -374,6 +388,12 @@ func TestCheckRBACIncludesControllerSpecificPermissions(t *testing.T) {
 				{Namespace: "app", Verb: "update", Group: "apps", Resource: "deployments"},
 				{
 					Namespace: "app",
+					Verb:      "list",
+					Group:     "autoscaling",
+					Resource:  "horizontalpodautoscalers",
+				},
+				{
+					Namespace: "app",
 					Verb:      "get",
 					Group:     "grafana.integreatly.org",
 					Resource:  "grafanas",
@@ -389,6 +409,40 @@ func TestCheckRBACIncludesControllerSpecificPermissions(t *testing.T) {
 					Verb:      "patch",
 					Group:     "grafana.integreatly.org",
 					Resource:  "grafanas",
+				},
+			},
+		},
+		{
+			name: "Deployment",
+			workload: domain.WorkloadSpec{
+				Adapter:    domain.WorkloadDeployment,
+				Controller: domain.ObjectReference{Namespace: "app", Name: "web"},
+			},
+			want: []authorizationv1.ResourceAttributes{
+				{Namespace: "app", Verb: "get", Group: "apps", Resource: "deployments"},
+				{Namespace: "app", Verb: "update", Group: "apps", Resource: "deployments"},
+				{
+					Namespace: "app",
+					Verb:      "list",
+					Group:     "autoscaling",
+					Resource:  "horizontalpodautoscalers",
+				},
+			},
+		},
+		{
+			name: "Victoria Logs",
+			workload: domain.WorkloadSpec{
+				Adapter:    domain.WorkloadVictoriaLogs,
+				Controller: domain.ObjectReference{Namespace: "app", Name: "logs"},
+			},
+			want: []authorizationv1.ResourceAttributes{
+				{Namespace: "app", Verb: "get", Group: "apps", Resource: "statefulsets"},
+				{Namespace: "app", Verb: "update", Group: "apps", Resource: "statefulsets"},
+				{
+					Namespace: "app",
+					Verb:      "list",
+					Group:     "autoscaling",
+					Resource:  "horizontalpodautoscalers",
 				},
 			},
 		},

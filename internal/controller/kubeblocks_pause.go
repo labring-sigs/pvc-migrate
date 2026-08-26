@@ -599,6 +599,20 @@ func (m *Manager) runMongoDBNativeSwitchover(ctx context.Context, session *domai
 }
 
 func (m *Manager) resumeKubeBlocks(ctx context.Context, session *domain.Session) error {
+	if err := m.validateKubeBlocksResume(ctx, session); err != nil {
+		return err
+	}
+
+	if err := m.setKubeBlocksPaused(ctx, session, false); err != nil {
+		return err
+	}
+
+	workload := session.Spec.Workload()
+
+	return m.waitForResumedPod(ctx, session, workload.Pod, workload.Controller, "resume KubeBlocks")
+}
+
+func (m *Manager) validateKubeBlocksResume(ctx context.Context, session *domain.Session) error {
 	kb := session.Spec.Workload().KubeBlocks
 	if kb == nil {
 		return domain.NewError(
@@ -616,13 +630,172 @@ func (m *Manager) resumeKubeBlocks(ctx context.Context, session *domain.Session)
 		)
 	}
 
-	if err := m.setKubeBlocksPaused(ctx, session, false); err != nil {
-		return err
+	if m.dynamic == nil {
+		return domain.NewError(
+			domain.ErrorPrecondition,
+			"resume KubeBlocks",
+			"dynamic client is required for KubeBlocks resume validation",
+		)
 	}
 
 	workload := session.Spec.Workload()
+	if workload.Controller.Kind == domain.KindInstanceSet {
+		gvr, err := kube.ParseGroupVersionResource(
+			workload.Controller.APIVersion,
+			instanceSetResource,
+		)
+		if err != nil {
+			return err
+		}
 
-	return m.waitForResumedPod(ctx, session, workload.Pod, workload.Controller, "resume KubeBlocks")
+		object, err := m.dynamic.Resource(gvr).Namespace(workload.Controller.Namespace).
+			Get(ctx, workload.Controller.Name, metav1.GetOptions{})
+		if err != nil {
+			return domain.WrapError(
+				domain.ErrorKubernetes,
+				"resume KubeBlocks",
+				"read InstanceSet",
+				err,
+			)
+		}
+
+		if object.GetUID() != workload.Controller.UID {
+			return domain.NewError(
+				domain.ErrorConflict,
+				"resume KubeBlocks",
+				fmt.Sprintf(
+					"InstanceSet %s/%s UID changed",
+					object.GetNamespace(),
+					object.GetName(),
+				),
+			)
+		}
+
+		current, found, nestedErr := unstructured.NestedBool(object.Object, "spec", "paused")
+		if nestedErr != nil {
+			return domain.WrapError(
+				domain.ErrorPrecondition,
+				"resume KubeBlocks",
+				"read InstanceSet paused state",
+				nestedErr,
+			)
+		}
+
+		if !found {
+			current = false
+		}
+
+		owner := object.GetAnnotations()[pauseSessionAnnotation]
+		if owner != "" && owner != session.ID {
+			return domain.NewError(
+				domain.ErrorConflict,
+				"resume KubeBlocks",
+				fmt.Sprintf(
+					"InstanceSet %s/%s pause is owned by session %s",
+					object.GetNamespace(),
+					object.GetName(),
+					owner,
+				),
+			)
+		}
+
+		return validateInstanceSetPauseState(workload.Controller, kb, false, current, found, owner)
+	}
+
+	if kb.ClusterUID == "" || kb.OriginalStops == nil {
+		return domain.NewError(
+			domain.ErrorInternal,
+			"resume KubeBlocks",
+			"session lacks Cluster identity or original component stop state",
+		)
+	}
+
+	gvr, err := kube.ParseGroupVersionResource(kubeBlocksClusterAPIVersion, clusterResource)
+	if err != nil {
+		return err
+	}
+
+	cluster, err := m.dynamic.Resource(gvr).Namespace(workload.Pod.Namespace).
+		Get(ctx, kb.Cluster, metav1.GetOptions{})
+	if err != nil {
+		return domain.WrapError(domain.ErrorKubernetes, "resume KubeBlocks", "read Cluster", err)
+	}
+
+	if cluster.GetUID() != kb.ClusterUID {
+		return domain.NewError(
+			domain.ErrorConflict,
+			"resume KubeBlocks",
+			fmt.Sprintf("Cluster %s/%s UID changed", cluster.GetNamespace(), cluster.GetName()),
+		)
+	}
+
+	components, ok, nestedErr := unstructured.NestedSlice(cluster.Object, "spec", "componentSpecs")
+	if nestedErr != nil {
+		return domain.WrapError(
+			domain.ErrorPrecondition,
+			"resume KubeBlocks",
+			"read componentSpecs",
+			nestedErr,
+		)
+	}
+
+	if !ok || len(components) == 0 {
+		return domain.NewError(
+			domain.ErrorPrecondition,
+			"resume KubeBlocks",
+			"Cluster has no componentSpecs",
+		)
+	}
+
+	owner := cluster.GetAnnotations()[pauseSessionAnnotation]
+	if owner != "" && owner != session.ID {
+		return domain.NewError(
+			domain.ErrorConflict,
+			"resume KubeBlocks",
+			fmt.Sprintf(
+				"Cluster %s/%s pause is owned by session %s",
+				cluster.GetNamespace(),
+				cluster.GetName(),
+				owner,
+			),
+		)
+	}
+
+	_, err = updateKubeBlocksComponent(components, kb, session.ID, false, owner)
+
+	return err
+}
+
+func (m *Manager) currentKubeBlocksRollbackPods(
+	ctx context.Context,
+	session *domain.Session,
+) ([]domain.ObjectReference, error) {
+	const operation = validateRollbackConsumers
+
+	workload := session.Spec.Workload()
+	if workload.KubeBlocks == nil {
+		return nil, domain.NewError(
+			domain.ErrorInternal,
+			operation,
+			"session lacks KubeBlocks state",
+		)
+	}
+
+	pod, err := m.typed.CoreV1().Pods(workload.Pod.Namespace).
+		Get(ctx, workload.Pod.Name, metav1.GetOptions{})
+	if apierrors.IsNotFound(err) {
+		return nil, nil
+	}
+
+	if err != nil {
+		return nil, domain.WrapError(domain.ErrorKubernetes, operation, "read KubeBlocks Pod", err)
+	}
+
+	if err := validatePodController(pod, workload.Controller, operation); err != nil {
+		return nil, err
+	}
+
+	return []domain.ObjectReference{podReference(pod)}, nil
 }
 
 func (m *Manager) setKubeBlocksPaused(

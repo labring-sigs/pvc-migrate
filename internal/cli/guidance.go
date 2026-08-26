@@ -1103,7 +1103,7 @@ func writePlanFailureGuidance(w io.Writer, plan *domain.MigrationPlan) error {
 		case check.Name == "pvc-consumers":
 			advice = "PVC action: stop or select every consumer with --pod, then verify that the PVC has no unmanaged Pod references before rerunning the plan."
 		case check.Name == "controller-adapter":
-			advice = "Workload action: use the controller's native maintenance or pause procedure, then rerun the plan; migrate-pod mutates only workloads with a verified adapter."
+			advice = "Workload action: use a supported workload adapter or the controller's native maintenance procedure, then rerun the plan; ordinary Deployments require no operator owner, and directly scaled Deployments and StatefulSets require no HorizontalPodAutoscaler."
 		case check.Name == "target-node":
 			advice = "Node action: choose a Ready, schedulable target with --target-node, or correct the target node condition before rerunning the plan."
 		case check.Name == "storage-topology" || check.Name == "storage-capacity":

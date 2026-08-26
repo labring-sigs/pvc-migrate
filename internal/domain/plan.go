@@ -71,19 +71,20 @@ type ResourceEstimate struct {
 }
 
 type PlannedVolume struct {
-	SourcePVC        ObjectReference                     `json:"sourcePVC"                  yaml:"sourcePVC"`
-	SourcePV         ObjectReference                     `json:"sourcePV"                   yaml:"sourcePV"`
-	DestinationPVC   ObjectReference                     `json:"destinationPVC"             yaml:"destinationPVC"`
-	Capacity         string                              `json:"capacity"                   yaml:"capacity"`
-	SourceCapacity   string                              `json:"sourceCapacity"             yaml:"sourceCapacity"`
-	SourceUsedBytes  int64                               `json:"sourceUsedBytes,omitempty"  yaml:"sourceUsedBytes,omitempty"`
-	SourceUsageKnown bool                                `json:"sourceUsageKnown,omitempty" yaml:"sourceUsageKnown,omitempty"`
-	AccessModes      []corev1.PersistentVolumeAccessMode `json:"accessModes"                yaml:"accessModes"`
-	VolumeMode       corev1.PersistentVolumeMode         `json:"volumeMode"                 yaml:"volumeMode"`
-	StorageClass     string                              `json:"storageClass"               yaml:"storageClass"`
-	BindingMode      storagev1.VolumeBindingMode         `json:"bindingMode"                yaml:"bindingMode"`
-	CSIProvisioner   string                              `json:"csiProvisioner"             yaml:"csiProvisioner"`
-	TransferScope    *TransferScope                      `json:"transferScope,omitempty"    yaml:"transferScope,omitempty"`
+	SourcePVC           ObjectReference                     `json:"sourcePVC"                     yaml:"sourcePVC"`
+	SourcePV            ObjectReference                     `json:"sourcePV"                      yaml:"sourcePV"`
+	DestinationPVC      ObjectReference                     `json:"destinationPVC"                yaml:"destinationPVC"`
+	Capacity            string                              `json:"capacity"                      yaml:"capacity"`
+	SourceCapacity      string                              `json:"sourceCapacity"                yaml:"sourceCapacity"`
+	SourceUsedBytes     int64                               `json:"sourceUsedBytes,omitempty"     yaml:"sourceUsedBytes,omitempty"`
+	SourceUsageKnown    bool                                `json:"sourceUsageKnown,omitempty"    yaml:"sourceUsageKnown,omitempty"`
+	AccessModes         []corev1.PersistentVolumeAccessMode `json:"accessModes"                   yaml:"accessModes"`
+	VolumeMode          corev1.PersistentVolumeMode         `json:"volumeMode"                    yaml:"volumeMode"`
+	StorageClass        string                              `json:"storageClass"                  yaml:"storageClass"`
+	BindingMode         storagev1.VolumeBindingMode         `json:"bindingMode"                   yaml:"bindingMode"`
+	CSIProvisioner      string                              `json:"csiProvisioner"                yaml:"csiProvisioner"`
+	ConcurrentConsumers int                                 `json:"concurrentConsumers,omitempty" yaml:"concurrentConsumers,omitempty"`
+	TransferScope       *TransferScope                      `json:"transferScope,omitempty"       yaml:"transferScope,omitempty"`
 }
 
 type StorageCapacityReport struct {
@@ -139,16 +140,18 @@ type OrphanCleanupPlan struct {
 }
 
 type OrphanPreActivationCleanup struct {
-	SourcePVC      ObjectReference `json:"sourcePVC"                yaml:"sourcePVC"`
-	SourcePV       ObjectReference `json:"sourcePV"                 yaml:"sourcePV"`
-	DestinationPVC ObjectReference `json:"destinationPVC,omitempty" yaml:"destinationPVC,omitempty"`
-	DestinationPV  ObjectReference `json:"destinationPV,omitempty"  yaml:"destinationPV,omitempty"`
+	SourcePVC         ObjectReference                      `json:"sourcePVC"                   yaml:"sourcePVC"`
+	SourcePV          ObjectReference                      `json:"sourcePV"                    yaml:"sourcePV"`
+	DestinationPVC    ObjectReference                      `json:"destinationPVC,omitempty"    yaml:"destinationPVC,omitempty"`
+	DestinationPV     ObjectReference                      `json:"destinationPV,omitempty"     yaml:"destinationPV,omitempty"`
+	DestinationPolicy corev1.PersistentVolumeReclaimPolicy `json:"destinationPolicy,omitempty" yaml:"destinationPolicy,omitempty"`
 }
 
 type OrphanPostActivationCleanup struct {
-	SourcePVC  ObjectReference `json:"sourcePVC"  yaml:"sourcePVC"`
-	ActivePV   ObjectReference `json:"activePV"   yaml:"activePV"`
-	RollbackPV ObjectReference `json:"rollbackPV" yaml:"rollbackPV"`
+	SourcePVC      ObjectReference                      `json:"sourcePVC"      yaml:"sourcePVC"`
+	ActivePV       ObjectReference                      `json:"activePV"       yaml:"activePV"`
+	RollbackPV     ObjectReference                      `json:"rollbackPV"     yaml:"rollbackPV"`
+	RollbackPolicy corev1.PersistentVolumeReclaimPolicy `json:"rollbackPolicy" yaml:"rollbackPolicy"`
 }
 
 func (p *OrphanCleanupPlan) AddCheck(check Check) {

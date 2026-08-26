@@ -150,13 +150,20 @@ func (p *Planner) checkRBAC(
 		add("", "local.openebs.io", "lvmvolumes", "patch")
 	}
 
-	if workload.Adapter == domain.WorkloadStatefulSet ||
-		workload.Adapter == domain.WorkloadVMCluster {
+	switch workload.Adapter {
+	case domain.WorkloadStatefulSet, domain.WorkloadVictoriaLogs, domain.WorkloadVMCluster:
 		add(workload.Controller.Namespace, "apps", "statefulsets", "get", "update")
+	case domain.WorkloadDeployment, domain.WorkloadGrafana:
+		add(workload.Controller.Namespace, "apps", "deployments", "get", "update")
 	}
 
-	if workload.Adapter == domain.WorkloadGrafana {
-		add(workload.Controller.Namespace, "apps", "deployments", "get", "update")
+	switch workload.Adapter {
+	case domain.WorkloadDeployment,
+		domain.WorkloadGrafana,
+		domain.WorkloadStatefulSet,
+		domain.WorkloadVictoriaLogs,
+		domain.WorkloadVMCluster:
+		add(workload.Controller.Namespace, "autoscaling", "horizontalpodautoscalers", "list")
 	}
 
 	if workload.KubeBlocks != nil {

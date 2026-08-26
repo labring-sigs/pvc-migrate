@@ -355,6 +355,10 @@ func (s *Service) planPostActivationOrphan(
 		return plan, nil
 	default:
 		resources.RollbackPV = kube.PVReference(rollback)
+
+		resources.RollbackPolicy = corev1.PersistentVolumeReclaimPolicy(
+			rollback.Annotations[kube.OriginalPolicyAnnotation],
+		)
 		if rollback.Labels[kube.SessionKey] != options.SessionID ||
 			rollback.Labels[kube.ResourceRoleLabel] != kube.ResourceRoleRollback {
 			plan.AddCheck(
@@ -396,12 +400,25 @@ func (s *Service) planPostActivationOrphan(
 			)
 		}
 
-		if rollback.Spec.PersistentVolumeReclaimPolicy != corev1.PersistentVolumeReclaimRetain {
+		if !validReclaimPolicy(resources.RollbackPolicy) {
 			plan.AddCheck(
 				orphanFailed(
 					"rollback-policy",
 					fmt.Sprintf(
-						"rollback PV %s reclaim policy must be Retain before deletion",
+						"rollback PV %s has no valid original reclaim policy",
+						rollback.Name,
+					),
+				),
+			)
+		}
+
+		if rollback.Spec.PersistentVolumeReclaimPolicy != corev1.PersistentVolumeReclaimRetain &&
+			rollback.Spec.PersistentVolumeReclaimPolicy != resources.RollbackPolicy {
+			plan.AddCheck(
+				orphanFailed(
+					"rollback-policy",
+					fmt.Sprintf(
+						"rollback PV %s reclaim policy must be Retain or its recorded original policy before deletion",
 						rollback.Name,
 					),
 				),
@@ -734,6 +751,10 @@ func validatePreActivationDestinationPV(
 	resources *domain.OrphanPreActivationCleanup,
 	destinationPV *corev1.PersistentVolume,
 ) {
+	resources.DestinationPolicy = corev1.PersistentVolumeReclaimPolicy(
+		destinationPV.Annotations[kube.OriginalPolicyAnnotation],
+	)
+
 	if destinationPV.Labels[kube.ManagedByLabel] != kube.ManagedByValue ||
 		destinationPV.Labels[kube.SessionKey] != options.SessionID ||
 		destinationPV.Labels[kube.ResourceRoleLabel] != kube.ResourceRoleDestination {
@@ -743,11 +764,22 @@ func validatePreActivationDestinationPV(
 		))
 	}
 
-	if destinationPV.Spec.PersistentVolumeReclaimPolicy != corev1.PersistentVolumeReclaimRetain {
+	if !validReclaimPolicy(resources.DestinationPolicy) {
 		plan.AddCheck(orphanFailed(
 			"destination-policy",
 			fmt.Sprintf(
-				"destination PV %s reclaim policy must be Retain before deletion",
+				"destination PV %s has no valid original reclaim policy",
+				destinationPV.Name,
+			),
+		))
+	}
+
+	if destinationPV.Spec.PersistentVolumeReclaimPolicy != corev1.PersistentVolumeReclaimRetain &&
+		destinationPV.Spec.PersistentVolumeReclaimPolicy != resources.DestinationPolicy {
+		plan.AddCheck(orphanFailed(
+			"destination-policy",
+			fmt.Sprintf(
+				"destination PV %s reclaim policy must be Retain or its recorded original policy before deletion",
 				destinationPV.Name,
 			),
 		))
@@ -928,7 +960,12 @@ func (s *Service) cleanupPostActivationOrphan(
 		)
 	}
 
-	if err := s.deleteOrphanRollbackPV(ctx, sessionID, resources.RollbackPV); err != nil {
+	if err := s.deleteOrphanRollbackPV(
+		ctx,
+		sessionID,
+		resources.RollbackPV,
+		resources.RollbackPolicy,
+	); err != nil {
 		return err
 	}
 
@@ -985,6 +1022,7 @@ func (s *Service) cleanupPreActivationOrphan(
 			sessionID,
 			resources.DestinationPV,
 			kube.ResourceRoleDestination,
+			resources.DestinationPolicy,
 			nil,
 		); err != nil {
 			return err
@@ -1129,6 +1167,7 @@ func (s *Service) deleteOrphanRollbackPV(
 	ctx context.Context,
 	sessionID string,
 	ref domain.ObjectReference,
+	policy corev1.PersistentVolumeReclaimPolicy,
 ) error {
 	pv, err := s.client.CoreV1().PersistentVolumes().Get(ctx, ref.Name, metav1.GetOptions{})
 	if apierrors.IsNotFound(err) {
@@ -1155,15 +1194,36 @@ func (s *Service) deleteOrphanRollbackPV(
 		)
 	}
 
-	if pv.Spec.PersistentVolumeReclaimPolicy != corev1.PersistentVolumeReclaimRetain {
+	if !validReclaimPolicy(policy) ||
+		pv.Annotations[kube.OriginalPolicyAnnotation] != string(policy) ||
+		(pv.Spec.PersistentVolumeReclaimPolicy != corev1.PersistentVolumeReclaimRetain &&
+			pv.Spec.PersistentVolumeReclaimPolicy != policy) {
 		return domain.NewError(
-			domain.ErrorPrecondition,
+			domain.ErrorConflict,
 			"cleanup orphan",
 			fmt.Sprintf(
-				"rollback PV %s reclaim policy must remain Retain before deletion",
+				"rollback PV %s original reclaim policy changed",
 				ref.Name,
 			),
 		)
+	}
+
+	if pv.Spec.PersistentVolumeReclaimPolicy != policy {
+		pv.Spec.PersistentVolumeReclaimPolicy = policy
+
+		pv, err = s.client.CoreV1().PersistentVolumes().Update(
+			ctx,
+			pv,
+			metav1.UpdateOptions{},
+		)
+		if err != nil {
+			return domain.WrapError(
+				domain.ErrorKubernetes,
+				"cleanup orphan",
+				"restore reclaim policy for rollback PV "+ref.Name,
+				err,
+			)
+		}
 	}
 
 	uid, resourceVersion := pv.UID, pv.ResourceVersion
@@ -1179,7 +1239,7 @@ func (s *Service) deleteOrphanRollbackPV(
 		)
 	}
 
-	return nil
+	return s.waitForRollbackPVDeletion(ctx, ref)
 }
 
 func (s *Service) finalizeOrphanPVC(

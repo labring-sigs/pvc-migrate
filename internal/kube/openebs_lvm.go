@@ -30,6 +30,10 @@ const (
 type OpenEBSLVMSharedVolumeManager interface {
 	Shared(ctx context.Context, pvc, pv domain.ObjectReference, sessionID string) (bool, error)
 	PrepareShared(ctx context.Context, pv domain.ObjectReference) (OpenEBSLVMSharedResult, error)
+	EnsureShared(
+		ctx context.Context,
+		pvc, pv domain.ObjectReference,
+	) (OpenEBSLVMSharedResult, error)
 	EnableShared(ctx context.Context, sessionID string, mount domain.OpenEBSLVMSharedMount) error
 	ValidateRestoreShared(
 		ctx context.Context,
@@ -79,7 +83,7 @@ func (m *openEBSLVMSharedVolumeManager) Shared(
 	sourcePV, expectedLVMVolume domain.ObjectReference,
 	sessionID string,
 ) (bool, error) {
-	volume, err := m.volume(ctx, sourcePV, expectedLVMVolume)
+	volume, err := m.volume(ctx, domain.ObjectReference{}, sourcePV, expectedLVMVolume)
 	if err != nil {
 		return false, err
 	}
@@ -139,11 +143,51 @@ func (m *openEBSLVMSharedVolumeManager) PrepareShared(
 	ctx context.Context,
 	sourcePV domain.ObjectReference,
 ) (OpenEBSLVMSharedResult, error) {
-	volume, err := m.volume(ctx, sourcePV, domain.ObjectReference{})
+	volume, err := m.volume(
+		ctx,
+		domain.ObjectReference{},
+		sourcePV,
+		domain.ObjectReference{},
+	)
 	if err != nil {
 		return OpenEBSLVMSharedResult{}, err
 	}
 
+	return prepareOpenEBSLVMShared(volume)
+}
+
+func (m *openEBSLVMSharedVolumeManager) EnsureShared(
+	ctx context.Context,
+	pvc, pv domain.ObjectReference,
+) (OpenEBSLVMSharedResult, error) {
+	if pvc.Namespace == "" || pvc.Name == "" || pvc.UID == "" {
+		return OpenEBSLVMSharedResult{}, domain.NewError(
+			domain.ErrorValidation,
+			"OpenEBS LVM shared mount",
+			"PVC namespace, name, and UID are required",
+		)
+	}
+
+	volume, err := m.volume(ctx, pvc, pv, domain.ObjectReference{})
+	if err != nil {
+		return OpenEBSLVMSharedResult{}, err
+	}
+
+	result, err := prepareOpenEBSLVMShared(volume)
+	if err != nil || !result.NeedsChange {
+		return result, err
+	}
+
+	if err := m.patchShared(ctx, volume, "yes", nil); err != nil {
+		return result, err
+	}
+
+	return result, nil
+}
+
+func prepareOpenEBSLVMShared(
+	volume openEBSLVMVolume,
+) (OpenEBSLVMSharedResult, error) {
 	result := OpenEBSLVMSharedResult{
 		Reference:         volume.reference(),
 		LVMVolume:         lvmVolumeReference(volume),
@@ -200,7 +244,12 @@ func (m *openEBSLVMSharedVolumeManager) EnableShared(
 		)
 	}
 
-	volume, err := m.volume(ctx, state.SourcePV, state.LVMVolume)
+	volume, err := m.volume(
+		ctx,
+		domain.ObjectReference{},
+		state.SourcePV,
+		state.LVMVolume,
+	)
 	if err != nil {
 		return err
 	}
@@ -222,7 +271,12 @@ func (m *openEBSLVMSharedVolumeManager) RestoreShared(
 	sessionID string,
 	state domain.OpenEBSLVMSharedMount,
 ) error {
-	volume, err := m.volume(ctx, state.SourcePV, state.LVMVolume)
+	volume, err := m.volume(
+		ctx,
+		domain.ObjectReference{},
+		state.SourcePV,
+		state.LVMVolume,
+	)
 	if err != nil {
 		return err
 	}
@@ -254,7 +308,12 @@ func (m *openEBSLVMSharedVolumeManager) ValidateRestoreShared(
 	sessionID string,
 	state domain.OpenEBSLVMSharedMount,
 ) error {
-	volume, err := m.volume(ctx, state.SourcePV, state.LVMVolume)
+	volume, err := m.volume(
+		ctx,
+		domain.ObjectReference{},
+		state.SourcePV,
+		state.LVMVolume,
+	)
 	if err != nil {
 		return err
 	}
@@ -379,7 +438,7 @@ func (m *openEBSLVMSharedVolumeManager) patchShared(
 
 func (m *openEBSLVMSharedVolumeManager) volume(
 	ctx context.Context,
-	sourcePV, expectedLVMVolume domain.ObjectReference,
+	expectedPVC, sourcePV, expectedLVMVolume domain.ObjectReference,
 ) (openEBSLVMVolume, error) {
 	if m == nil || m.typed == nil || m.dynamic == nil {
 		return openEBSLVMVolume{}, domain.NewError(
@@ -423,6 +482,32 @@ func (m *openEBSLVMSharedVolumeManager) volume(
 			"OpenEBS LVM shared mount",
 			fmt.Sprintf("source PV %s UID changed", sourcePVName),
 		)
+	}
+
+	if expectedPVC.Name != "" {
+		if expectedPVC.Namespace == "" || expectedPVC.UID == "" {
+			return openEBSLVMVolume{}, domain.NewError(
+				domain.ErrorValidation,
+				"OpenEBS LVM shared mount",
+				"expected PVC namespace, name, and UID are required",
+			)
+		}
+
+		if pv.Spec.ClaimRef == nil ||
+			pv.Spec.ClaimRef.Namespace != expectedPVC.Namespace ||
+			pv.Spec.ClaimRef.Name != expectedPVC.Name ||
+			pv.Spec.ClaimRef.UID != expectedPVC.UID {
+			return openEBSLVMVolume{}, domain.NewError(
+				domain.ErrorConflict,
+				"OpenEBS LVM shared mount",
+				fmt.Sprintf(
+					"PV %s claimRef no longer matches PVC %s/%s",
+					sourcePVName,
+					expectedPVC.Namespace,
+					expectedPVC.Name,
+				),
+			)
+		}
 	}
 
 	wantedName := strings.ToLower(strings.TrimSpace(pv.Spec.CSI.VolumeHandle))

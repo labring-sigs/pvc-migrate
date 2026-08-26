@@ -131,7 +131,7 @@ pvc-migrate --kubeconfig /path/to/kubeconfig \
   --delete-rollback-pv --finalize --delete-session
 ```
 
-`--delete-rollback-pv` deletes the retained PV object. Its `Retain` policy preserves the backend volume for storage-provider cleanup.
+`--delete-rollback-pv` restores the rollback PV's recorded reclaim policy before deleting the PV. A recorded `Delete` policy lets Kubernetes and the CSI driver delete the backend volume. A recorded `Retain` policy preserves the backend volume.
 
 If a PVC or PV still has session ownership after its session ConfigMap was lost, validate the reconstructed resource relationship and then clear it:
 
@@ -161,12 +161,13 @@ The destination PVCs are provisioned before downtime. Warm-copy passes run while
 | Workload | Cutover behavior | Result |
 | --- | --- | --- |
 | Standalone Pod | Delete and recreate the recorded Pod on the target node | Supported with a Pod restart window |
-| Native StatefulSet | Scale from `N` replicas to the selected ordinal `k`, then restore `N` | Supported when PVC retention and ordinal ownership checks pass |
+| Ordinary Deployment | Scale the complete Deployment to zero, switch all selected PVCs, then restore the original replica count | Supported when fully Ready, without an operator owner or HorizontalPodAutoscaler |
+| Native StatefulSet | Scale from `N` replicas to the selected ordinal `k`, then restore `N` | Supported when PVC retention and ordinal ownership checks pass, without a HorizontalPodAutoscaler |
 | KubeBlocks InstanceSet | Optionally switch the primary, pause InstanceSet reconciliation, delete the selected Pod, then restore the original pause state | Supported with selected-instance downtime; sibling Pods remain running |
 | KubeBlocks legacy StatefulSet | Optionally switch the primary, stop the selected Cluster component, then restore its original state | Supported with selected-component downtime |
-| VMCluster component | Pause the component and reduce its replica count to ordinal `k`, then restore it | Supported for managed VMCluster StatefulSets |
-| Grafana | Pause the Grafana deployment and scale it to zero, then restore it | Supported when recreation scheduling checks pass |
-| Victoria Logs `vlstorage` | Scale the complete `vlstorage` StatefulSet to zero under a session-owned pause lock | Supported with a shared `vlstorage` pause window |
+| VMCluster component | Pause the component and reduce its replica count to ordinal `k`, then restore it | Supported for managed VMCluster StatefulSets without a HorizontalPodAutoscaler |
+| Grafana | Pause the Grafana deployment and scale it to zero, then restore it | Supported without a HorizontalPodAutoscaler when recreation scheduling checks pass |
+| Victoria Logs `vlstorage` | Scale the complete `vlstorage` StatefulSet to zero under a session-owned pause lock | Supported without a HorizontalPodAutoscaler and with a shared `vlstorage` pause window |
 | RWX or multiple consumers | Run a file-level pass after consumer validation | Application quiescence defines transactional consistency |
 | MinIO Tenant | Use MinIO drive or pool maintenance | Rejected during planning |
 | CockroachDB | Use drain, decommission, and CockroachDB recovery procedures | Rejected during planning |
@@ -194,7 +195,8 @@ Controller ownership outside the supported adapters causes the plan to fail. PVC
 - `migrate-pod` stops with an already-satisfied check when the Pod uses the requested target node and every PVC keeps its current StorageClass. Use `--force-reprovision` for an intentional backing-PV replacement on the same node and StorageClass.
 - Tool Pod logs stream to stderr by default and remain available in the command output after short-lived Pods are removed. Use `--stream-tool-logs=false` for quiet automation.
 - Each tool-backed stage runs a short-lived probe Pod on every selected source and target node before starting the stage. Image pull, scheduling, security-context, shell, rsync, SSHD, and rclone failures retain the session record and surface before data transfer or workload mutation; backup and restore probes run while their operation lock is held.
-- For an active OpenEBS LVM LocalPV, a warm-copy plan reads the existing source PV's `LVMVolume.spec.shared` value instead of relying on the StorageClass default. If the current volume is not shared, the plan offers `--precopy-passes 0` for an offline final sync. `--openebs-lvm-enable-shared` is an explicit alternative: it temporarily patches that LVMVolume to `shared=yes`, then verifies a same-node second-Pod read-write mount without writing data. The StorageClass is never modified, and the original LVMVolume field value is restored after every warm-copy pass, including probe and copy failures. This does not provide cross-node RWX storage.
+- For any active OpenEBS LVM LocalPV, warm copy reads the actual source PV and its `LVMVolume.spec.shared`; the workload adapter and StorageClass defaults do not determine this state. If the volume is unshared, use an offline final sync with `--precopy-passes 0`, or explicitly pass `--openebs-lvm-enable-shared` to temporarily set `shared=yes` and verify a same-node second-Pod read-write mount. The original source setting is restored after every warm-copy attempt, including failures.
+- The planner separately counts each destination PVC's consumers inside the selected migration unit. When multiple Pods will mount one RWO PVC and the destination StorageClass predicts OpenEBS LVM, `--openebs-lvm-enable-shared` authorizes the operation. Execution verifies the provisioned destination PV and matching LVMVolume, then keeps `spec.shared=yes` for the resumed application. This behavior is independent of the workload adapter and provides same-node multi-mount capability, not cross-node RWX storage. The plan rejects matching required Pod anti-affinity and `DoNotSchedule` topology-spread rules when they prevent every consumer from running on that node.
 - Session state is stored in `pvc-migrate-session-<id>` ConfigMaps.
 - Session ConfigMaps carry a protection finalizer and are deleted through validated session cleanup.
 - Every mutating session command uses a renewable Kubernetes Lease for exclusive ownership.

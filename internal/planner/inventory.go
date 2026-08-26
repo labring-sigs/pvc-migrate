@@ -6,6 +6,7 @@ import (
 	"sort"
 	"sync"
 
+	"github.com/labring-sigs/pvc-migrate/internal/domain"
 	"github.com/labring-sigs/pvc-migrate/internal/parallel"
 	corev1 "k8s.io/api/core/v1"
 	storagev1 "k8s.io/api/storage/v1"
@@ -29,21 +30,23 @@ type storageClassReadResult struct {
 }
 
 type planInventory struct {
-	pvcs              []pvcReadResult
-	pvs               []pvReadResult
-	storageClasses    map[string]*storagev1.StorageClass
-	storageClassError map[string]error
-	namespacePods     []corev1.Pod
-	namespacePodsErr  error
-	targetNode        *corev1.Node
-	targetNodeErr     error
-	sourceNode        *corev1.Node
-	sourceNodeErr     error
-	nodes             []corev1.Node
-	nodesErr          error
-	csiNode           *storagev1.CSINode
-	csiNodeErr        error
-	capacity          *storageCapacityInventory
+	pvcs               []pvcReadResult
+	pvs                []pvReadResult
+	storageClasses     map[string]*storagev1.StorageClass
+	storageClassError  map[string]error
+	namespacePods      []corev1.Pod
+	namespacePodsErr   error
+	sourceNamespace    *corev1.Namespace
+	sourceNamespaceErr error
+	targetNode         *corev1.Node
+	targetNodeErr      error
+	sourceNode         *corev1.Node
+	sourceNodeErr      error
+	nodes              []corev1.Node
+	nodesErr           error
+	csiNode            *storagev1.CSINode
+	csiNodeErr         error
+	capacity           *storageCapacityInventory
 }
 
 // loadPlanInventory reads independent Kubernetes objects in parallel, then
@@ -129,7 +132,15 @@ func (p *Planner) loadPlanInventory(
 		})
 	}
 
-	if autoTargetNode && len(pvcNames) > 0 {
+	if options.Operation == domain.OperationMigratePod && len(pvcNames) > 0 {
+		wg.Go(func() {
+			inventory.sourceNamespace, inventory.sourceNamespaceErr = p.client.CoreV1().
+				Namespaces().
+				Get(ctx, options.SourceNamespace, metav1.GetOptions{})
+		})
+	}
+
+	if (autoTargetNode || options.Operation == domain.OperationMigratePod) && len(pvcNames) > 0 {
 		wg.Go(func() {
 			nodes, err := p.client.CoreV1().Nodes().List(ctx, metav1.ListOptions{})
 			if nodes != nil {

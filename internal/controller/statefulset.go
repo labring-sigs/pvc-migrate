@@ -41,6 +41,16 @@ func (m *Manager) verifyStatefulSetPaused(
 		)
 	}
 
+	if err := m.rejectHorizontalPodAutoscaler(
+		ctx,
+		sts.Namespace,
+		domain.KindStatefulSet,
+		sts.Name,
+		"verify paused",
+	); err != nil {
+		return err
+	}
+
 	if replicas := statefulSetReplicas(sts); replicas != *workload.Ordinal {
 		return domain.NewError(
 			domain.ErrorPrecondition,
@@ -91,6 +101,16 @@ func (m *Manager) verifyVictoriaLogsPaused(
 		)
 	}
 
+	if err := m.rejectHorizontalPodAutoscaler(
+		ctx,
+		sts.Namespace,
+		domain.KindStatefulSet,
+		sts.Name,
+		"verify paused",
+	); err != nil {
+		return err
+	}
+
 	if sts.Annotations[pauseSessionAnnotation] != session.ID {
 		return domain.NewError(
 			domain.ErrorConflict,
@@ -125,6 +145,16 @@ func (m *Manager) statefulSetWorkload(
 	sts *appsv1.StatefulSet,
 	options DiscoverOptions,
 ) (domain.WorkloadSpec, error) {
+	if err := m.rejectHorizontalPodAutoscaler(
+		ctx,
+		sts.Namespace,
+		domain.KindStatefulSet,
+		sts.Name,
+		"discover StatefulSet",
+	); err != nil {
+		return domain.WorkloadSpec{}, err
+	}
+
 	replicas := int32(1)
 	if sts.Spec.Replicas != nil {
 		replicas = *sts.Spec.Replicas
@@ -231,6 +261,16 @@ func (m *Manager) victoriaLogsWorkload(
 	pod *corev1.Pod,
 	sts *appsv1.StatefulSet,
 ) (domain.WorkloadSpec, error) {
+	if err := m.rejectHorizontalPodAutoscaler(
+		ctx,
+		sts.Namespace,
+		domain.KindStatefulSet,
+		sts.Name,
+		"discover Victoria Logs",
+	); err != nil {
+		return domain.WorkloadSpec{}, err
+	}
+
 	replicas := statefulSetReplicas(sts)
 	if policy := sts.Spec.PersistentVolumeClaimRetentionPolicy; policy != nil &&
 		policy.WhenScaled != appsv1.RetainPersistentVolumeClaimRetentionPolicyType {
@@ -360,6 +400,61 @@ func (m *Manager) patchStatefulSetReplicas(
 	})
 }
 
+func (m *Manager) validateStatefulSetResumed(
+	ctx context.Context,
+	workload domain.WorkloadSpec,
+	operation string,
+) error {
+	if workload.OriginalReplicas == nil {
+		return domain.NewError(
+			domain.ErrorInternal,
+			operation,
+			"session lacks StatefulSet replica state",
+		)
+	}
+
+	sts, err := m.typed.AppsV1().
+		StatefulSets(workload.Controller.Namespace).
+		Get(ctx, workload.Controller.Name, metav1.GetOptions{})
+	if err != nil {
+		return domain.WrapError(domain.ErrorKubernetes, operation, "read StatefulSet", err)
+	}
+
+	if sts.UID != workload.Controller.UID {
+		return domain.NewError(
+			domain.ErrorConflict,
+			operation,
+			fmt.Sprintf("StatefulSet %s/%s UID changed", sts.Namespace, sts.Name),
+		)
+	}
+
+	if err := m.rejectHorizontalPodAutoscaler(
+		ctx,
+		sts.Namespace,
+		domain.KindStatefulSet,
+		sts.Name,
+		operation,
+	); err != nil {
+		return err
+	}
+
+	if replicas := statefulSetReplicas(sts); replicas != *workload.OriginalReplicas {
+		return domain.NewError(
+			domain.ErrorConflict,
+			operation,
+			fmt.Sprintf(
+				"StatefulSet %s/%s replicas changed to %d while restoring %d replicas",
+				sts.Namespace,
+				sts.Name,
+				replicas,
+				*workload.OriginalReplicas,
+			),
+		)
+	}
+
+	return nil
+}
+
 func (m *Manager) pauseStatefulSet(ctx context.Context, session *domain.Session) error {
 	workload := session.Spec.Workload()
 	if workload.Ordinal == nil || workload.OriginalReplicas == nil {
@@ -368,6 +463,16 @@ func (m *Manager) pauseStatefulSet(ctx context.Context, session *domain.Session)
 			"pause StatefulSet",
 			"session lacks replica state",
 		)
+	}
+
+	if err := m.rejectHorizontalPodAutoscaler(
+		ctx,
+		workload.Controller.Namespace,
+		domain.KindStatefulSet,
+		workload.Controller.Name,
+		"pause StatefulSet",
+	); err != nil {
+		return err
 	}
 
 	if err := m.patchStatefulSetReplicas(
@@ -401,6 +506,16 @@ func (m *Manager) pauseVictoriaLogs(ctx context.Context, session *domain.Session
 		)
 	}
 
+	if err := m.rejectHorizontalPodAutoscaler(
+		ctx,
+		workload.Controller.Namespace,
+		domain.KindStatefulSet,
+		workload.Controller.Name,
+		"pause Victoria Logs",
+	); err != nil {
+		return err
+	}
+
 	if err := m.patchVictoriaLogsReplicas(ctx, session, 0, false); err != nil {
 		return err
 	}
@@ -422,6 +537,16 @@ func (m *Manager) resumeStatefulSet(ctx context.Context, session *domain.Session
 			"resume StatefulSet",
 			"session lacks replica state",
 		)
+	}
+
+	if err := m.rejectHorizontalPodAutoscaler(
+		ctx,
+		workload.Controller.Namespace,
+		domain.KindStatefulSet,
+		workload.Controller.Name,
+		"resume StatefulSet",
+	); err != nil {
+		return err
 	}
 
 	if err := m.patchStatefulSetReplicas(
@@ -454,7 +579,150 @@ func (m *Manager) resumeStatefulSet(ctx context.Context, session *domain.Session
 		}
 	}
 
-	return nil
+	return m.validateStatefulSetResumed(ctx, workload, "resume StatefulSet")
+}
+
+func (m *Manager) validateStatefulSetResume(
+	ctx context.Context,
+	session *domain.Session,
+) error {
+	return m.validateStatefulSetTransitionReplicas(ctx, session, "resume StatefulSet")
+}
+
+func (m *Manager) validateVictoriaLogsResume(
+	ctx context.Context,
+	session *domain.Session,
+) error {
+	workload := session.Spec.Workload()
+	if workload.Controller.Kind != domain.KindStatefulSet || workload.OriginalReplicas == nil {
+		return domain.NewError(
+			domain.ErrorInternal,
+			"resume Victoria Logs",
+			"session lacks StatefulSet replica state",
+		)
+	}
+
+	sts, err := m.typed.AppsV1().StatefulSets(workload.Controller.Namespace).
+		Get(ctx, workload.Controller.Name, metav1.GetOptions{})
+	if err != nil {
+		return domain.WrapError(
+			domain.ErrorKubernetes,
+			"resume Victoria Logs",
+			"read StatefulSet",
+			err,
+		)
+	}
+
+	if sts.UID != workload.Controller.UID {
+		return domain.NewError(
+			domain.ErrorConflict,
+			"resume Victoria Logs",
+			fmt.Sprintf("StatefulSet %s/%s UID changed", sts.Namespace, sts.Name),
+		)
+	}
+
+	if err := m.rejectHorizontalPodAutoscaler(
+		ctx,
+		sts.Namespace,
+		domain.KindStatefulSet,
+		sts.Name,
+		"resume Victoria Logs",
+	); err != nil {
+		return err
+	}
+
+	if sts.Annotations[pauseSessionAnnotation] != session.ID {
+		return domain.NewError(
+			domain.ErrorConflict,
+			"resume Victoria Logs",
+			fmt.Sprintf("StatefulSet %s/%s pause ownership changed", sts.Namespace, sts.Name),
+		)
+	}
+
+	return validateResumeReplicas(
+		sts.Namespace,
+		sts.Name,
+		statefulSetReplicas(sts),
+		*workload.OriginalReplicas,
+		0,
+		"resume Victoria Logs",
+		domain.KindStatefulSet,
+	)
+}
+
+func (m *Manager) validateStatefulSetTransitionReplicas(
+	ctx context.Context,
+	session *domain.Session,
+	operation string,
+) error {
+	workload := session.Spec.Workload()
+	if workload.OriginalReplicas == nil || workload.Ordinal == nil {
+		return domain.NewError(
+			domain.ErrorInternal,
+			operation,
+			"session lacks replica state",
+		)
+	}
+
+	sts, err := m.typed.AppsV1().
+		StatefulSets(workload.Controller.Namespace).
+		Get(ctx, workload.Controller.Name, metav1.GetOptions{})
+	if err != nil {
+		return domain.WrapError(
+			domain.ErrorKubernetes,
+			operation,
+			"read StatefulSet",
+			err,
+		)
+	}
+
+	if sts.UID != workload.Controller.UID {
+		return domain.NewError(
+			domain.ErrorConflict,
+			operation,
+			fmt.Sprintf("StatefulSet %s/%s UID changed", sts.Namespace, sts.Name),
+		)
+	}
+
+	if err := m.rejectHorizontalPodAutoscaler(
+		ctx,
+		sts.Namespace,
+		domain.KindStatefulSet,
+		sts.Name,
+		operation,
+	); err != nil {
+		return err
+	}
+
+	return validateResumeReplicas(
+		sts.Namespace,
+		sts.Name,
+		statefulSetReplicas(sts),
+		*workload.OriginalReplicas,
+		*workload.Ordinal,
+		operation,
+		domain.KindStatefulSet,
+	)
+}
+
+func (m *Manager) currentStatefulSetRollbackPods(
+	ctx context.Context,
+	session *domain.Session,
+) ([]domain.ObjectReference, error) {
+	const operation = validateRollbackConsumers
+
+	if err := m.validateStatefulSetTransitionReplicas(ctx, session, operation); err != nil {
+		return nil, err
+	}
+
+	workload := session.Spec.Workload()
+
+	references := workload.AffectedPods
+	if len(references) == 0 {
+		references = []domain.ObjectReference{workload.Pod}
+	}
+
+	return m.currentControllerPods(ctx, references, workload.Controller, operation)
 }
 
 func (m *Manager) resumeVictoriaLogs(ctx context.Context, session *domain.Session) error {
@@ -465,6 +733,16 @@ func (m *Manager) resumeVictoriaLogs(ctx context.Context, session *domain.Sessio
 			"resume Victoria Logs",
 			"session lacks StatefulSet replica state",
 		)
+	}
+
+	if err := m.rejectHorizontalPodAutoscaler(
+		ctx,
+		workload.Controller.Namespace,
+		domain.KindStatefulSet,
+		workload.Controller.Name,
+		"resume Victoria Logs",
+	); err != nil {
+		return err
 	}
 
 	if err := m.patchVictoriaLogsReplicas(
@@ -486,6 +764,10 @@ func (m *Manager) resumeVictoriaLogs(ctx context.Context, session *domain.Sessio
 		); err != nil {
 			return err
 		}
+	}
+
+	if err := m.validateStatefulSetResumed(ctx, workload, "resume Victoria Logs"); err != nil {
+		return err
 	}
 
 	return m.clearVictoriaLogsPauseOwner(ctx, session)

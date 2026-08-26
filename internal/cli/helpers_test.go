@@ -961,7 +961,7 @@ func TestReadinessHelpers(t *testing.T) {
 		!strings.Contains(printed.String(), "mig") ||
 		!strings.Contains(
 			guidance.String(),
-			"use the controller's native maintenance or pause procedure",
+			"use a supported workload adapter or the controller's native maintenance procedure",
 		) {
 		t.Fatalf("error=%v output=%q guidance=%q", err, printed.String(), guidance.String())
 	}
@@ -1007,7 +1007,8 @@ func TestPlanFailureGuidanceSuggestsActionForControllerAndStorageChecks(t *testi
 
 	text := output.String()
 	for _, want := range []string{
-		"use the controller's native maintenance or pause procedure",
+		"use a supported workload adapter or the controller's native maintenance procedure",
+		"require no HorizontalPodAutoscaler",
 		"choose a compatible StorageClass or target node",
 	} {
 		if !strings.Contains(text, want) {

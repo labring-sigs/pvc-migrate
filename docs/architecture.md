@@ -37,6 +37,7 @@ The ConfigMap contains:
 - source and destination PVC/PV names, UIDs, and resource versions;
 - original PVC specification and preserved user metadata;
 - original PV reclaim policies;
+- each volume's planned concurrent application consumer count;
 - workload adapter, Pod identity, controller identity, replica state, and affected Pods;
 - warm and final sync completion times, retry count, checksum state, and last error;
 - per-volume activation checkpoints and the active PVC UID;
@@ -68,6 +69,8 @@ The session preserves business labels, annotations, and owner references for the
 
 Multi-PVC Pod migration reserves and warm-copies every volume, pauses once, final-syncs every volume, activates every volume, and resumes once. A partial activation keeps the workload paused while resume completes the remaining volumes.
 
+OpenEBS LVM shared-mount handling is a volume concern. A warm-copy operation inspects the actual source PV and LVMVolume and can temporarily enable `spec.shared=yes` while an application consumer and tool Pod mount the same RWO volume. A destination with multiple recorded consumers is checked again after provisioning through its actual PV and LVMVolume; its shared setting persists because the resumed workload still needs concurrent same-node mounts. Workload adapters supply the controlled Pod identities, but do not select the storage behavior.
+
 Each planned volume can carry an optional transfer scope with normalized source and destination paths. No scope means both PVC roots. The scope is immutable session state and is applied to every copy attempt, warm pass, final sync, checksum pass, and resume. Execution validates source paths and prepares destination paths through short-lived PVC-mounted tool probes before invoking the copy engine.
 
 ## Consistency Boundary
@@ -94,9 +97,15 @@ Tool containers set CPU and memory requests/limits to `0` and ephemeral-storage 
 
 Discovery serializes the complete Pod. Pause deletes the Pod with a UID precondition. Resume removes server-assigned metadata, preserves its functional specification, adds session ownership, and selects the target node. Rollback selects the recorded source node.
 
+### Deployment
+
+Discovery follows the selected Pod's ReplicaSet ownership chain to an ordinary native Deployment. The Deployment must have a completed rollout, a positive replica count, no controller owner, and no HorizontalPodAutoscaler. Every owned Running and Ready Pod is recorded by name and UID as one migration unit. Grafana-managed Deployments use their operator adapter, but apply the same HorizontalPodAutoscaler exclusion before direct replica changes.
+
+Pause changes the complete Deployment replica count to zero and waits for every recorded Pod to be deleted. Final-sync verification checks the Deployment UID, confirms that replicas remain zero, and rejects any newly reconciled owned Pod. Resume restores the original replica count, waits for the rollout and every replica to become Ready, and records the replacement Pod identities. Replica or UID changes outside the recorded transition cause a conflict.
+
 ### StatefulSet
 
-For ordinal `k` and original replicas `N`, pause changes replicas to `k`. Pods `k..N-1` form the affected set and must all be Ready during planning. Resume restores `N` and waits for every affected Pod. Replica values outside the recorded pair cause a conflict.
+For ordinal `k` and original replicas `N`, pause changes replicas to `k`. Pods `k..N-1` form the affected set and must all be Ready during planning. StatefulSet-backed adapters that directly change replicas, including native StatefulSet, VMCluster, and Victoria Logs, reject a HorizontalPodAutoscaler during discovery and revalidate before scale changes and final sync. Resume restores `N` and waits for every affected Pod. Replica values outside the recorded pair cause a conflict.
 
 ### KubeBlocks
 
@@ -106,7 +115,7 @@ Discovery supports served `apps.kubeblocks.io/v1alpha1` and `operations.kubebloc
 
 The source namespace owns the application PVC identity. The temporary namespace holds staged PVCs and copy tools. The destination namespace defaults to the source namespace for activation. The session namespace holds ConfigMaps and defaults to `pvc-migrate-system`. `rename` rebinds a name within one namespace; `move` rebinds the same retained PV across namespaces.
 
-`plan` issues SelfSubjectAccessReviews for source, staging, session, cluster-scoped PV/node/storage resources, Helm tool objects, controller operations, and KubeBlocks OpsRequests. It also verifies Pod-referenced Secrets, ConfigMaps, and ServiceAccounts. Existing NetworkPolicies generate a warning because the real copy Job provides the definitive connectivity result.
+`plan` issues SelfSubjectAccessReviews for source, staging, session, cluster-scoped PV/node/storage resources, Helm tool objects, controller operations, Deployment HorizontalPodAutoscaler discovery, and KubeBlocks OpsRequests. It also verifies Pod-referenced Secrets, ConfigMaps, and ServiceAccounts. Existing NetworkPolicies generate a warning because the real copy Job provides the definitive connectivity result.
 
 ## Finalize And Rollback
 

@@ -135,6 +135,14 @@ func (m *recordingBackupOpenEBSManager) PrepareShared(
 	return m.prepared, nil
 }
 
+func (m *recordingBackupOpenEBSManager) EnsureShared(
+	context.Context,
+	domain.ObjectReference,
+	domain.ObjectReference,
+) (kube.OpenEBSLVMSharedResult, error) {
+	return kube.OpenEBSLVMSharedResult{}, nil
+}
+
 func (m *recordingBackupOpenEBSManager) EnableShared(
 	_ context.Context,
 	_ string,

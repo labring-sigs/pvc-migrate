@@ -598,6 +598,10 @@ func (s *Service) validateWorkloadResume(ctx context.Context, session *domain.Se
 		return err
 	}
 
+	if err := s.controllers.ValidateResume(ctx, session); err != nil {
+		return err
+	}
+
 	options := session.Spec.WorkflowOptions()
 	// TargetNode is the exact placement contract only for the standalone
 	// adapter. Controller-managed workloads keep their own scheduling policy;

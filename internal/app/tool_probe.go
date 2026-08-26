@@ -365,6 +365,105 @@ func (s *Service) openEBSLVMSource(ctx context.Context, volume *domain.VolumeSpe
 	return pv.Spec.CSI != nil && pv.Spec.CSI.Driver == kube.OpenEBSLVMCSIDriver, nil
 }
 
+func (s *Service) ensureConcurrentDestinationMount(
+	ctx context.Context,
+	session *domain.Session,
+	volumeIndex int,
+) error {
+	if session == nil || !session.Spec.Orchestrated() {
+		return nil
+	}
+
+	if volumeIndex < 0 || volumeIndex >= len(session.Spec.Volumes) ||
+		volumeIndex >= len(session.Status.Volumes) {
+		return domain.NewError(
+			domain.ErrorInternal,
+			"destination shared mount",
+			"session volume spec and status are not aligned",
+		)
+	}
+
+	volume := &session.Spec.Volumes[volumeIndex]
+	if !volume.RequiresConcurrentRWOMount() {
+		return nil
+	}
+
+	expectedPVC := volume.DestinationPVC
+
+	activePVC := session.Status.Volumes[volumeIndex].Activation.ActivePVC
+	if activePVC.Namespace != "" || activePVC.Name != "" || activePVC.UID != "" {
+		expectedPVC = activePVC
+	}
+
+	pv, err := s.client.CoreV1().PersistentVolumes().Get(
+		ctx,
+		volume.DestinationPV.Name,
+		metav1.GetOptions{},
+	)
+	if err != nil {
+		return domain.WrapError(
+			domain.ErrorKubernetes,
+			"destination shared mount",
+			"read destination PV "+volume.DestinationPV.Name,
+			err,
+		)
+	}
+
+	if pv.UID != volume.DestinationPV.UID {
+		return domain.NewError(
+			domain.ErrorConflict,
+			"destination shared mount",
+			fmt.Sprintf("destination PV %s UID changed", volume.DestinationPV.Name),
+		)
+	}
+
+	if pv.Spec.CSI == nil || pv.Spec.CSI.Driver != kube.OpenEBSLVMCSIDriver {
+		return nil
+	}
+
+	manager := s.config.OpenEBSLVMSharedVolumeManager
+	if manager == nil {
+		return domain.NewError(
+			domain.ErrorInternal,
+			"destination shared mount",
+			"OpenEBS LVMVolume manager is required for a multi-consumer RWO destination",
+		)
+	}
+
+	if !session.Spec.WorkflowOptions().OpenEBSLVMEnableShared {
+		return domain.NewError(
+			domain.ErrorPrecondition,
+			"destination shared mount",
+			fmt.Sprintf(
+				"destination PV %s is OpenEBS LVM and requires spec.shared=yes for %d concurrent consumers; rerun the migration plan with --openebs-lvm-enable-shared",
+				pv.Name,
+				volume.ConcurrentConsumers,
+			),
+		)
+	}
+
+	result, err := manager.EnsureShared(
+		ctx,
+		expectedPVC,
+		volume.DestinationPV,
+	)
+	if err != nil {
+		return err
+	}
+
+	if result.NeedsChange {
+		s.logInfo(
+			"OpenEBS LVM destination shared mount configured",
+			"destinationPV",
+			volume.DestinationPV.Name,
+			"resource",
+			result.Reference,
+		)
+	}
+
+	return nil
+}
+
 func (s *Service) enableOpenEBSLVMSharedMounts(
 	ctx context.Context,
 	session *domain.Session,

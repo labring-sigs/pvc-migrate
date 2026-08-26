@@ -188,9 +188,11 @@ func (f *fakeReserver) ReserveVolume(
 }
 
 type fakeController struct {
-	paused        int
-	resumed       int
-	pauseMutation bool
+	paused         int
+	resumed        int
+	pauseMutation  bool
+	resumeMutation bool
+	resumeErr      error
 }
 
 func (f *fakeController) Pause(_ context.Context, session *domain.Session) error {
@@ -202,12 +204,25 @@ func (f *fakeController) Pause(_ context.Context, session *domain.Session) error
 	return nil
 }
 
-func (f *fakeController) Resume(context.Context, *domain.Session) error {
+func (f *fakeController) Resume(_ context.Context, session *domain.Session) error {
 	f.resumed++
-	return nil
+	if f.resumeMutation {
+		session.Spec.WorkloadPtr().Pod.ResourceVersion = "resume-resource-version"
+	}
+
+	return f.resumeErr
 }
 
+func (f *fakeController) ValidateResume(context.Context, *domain.Session) error { return nil }
+
 func (f *fakeController) VerifyPaused(context.Context, *domain.Session) error { return nil }
+
+func (f *fakeController) CurrentRollbackPods(
+	context.Context,
+	*domain.Session,
+) ([]domain.ObjectReference, error) {
+	return nil, nil
+}
 
 type fakeCopier struct {
 	modes     []copyengine.Mode
@@ -344,6 +359,7 @@ func appTestSession() *domain.Session {
 						Name: "pv-source",
 						UID:  types.UID("source-pv-uid"),
 					},
+					SourceReclaimPolicy: corev1.PersistentVolumeReclaimDelete,
 					SourcePVCSpec: corev1.PersistentVolumeClaimSpec{
 						StorageClassName: &storageClass,
 						VolumeMode:       &mode,
@@ -785,6 +801,30 @@ func TestPausePersistsControllerRecoveryState(t *testing.T) {
 
 	if store.updates != 3 {
 		t.Fatalf("session updates=%d want 3 (begin, recovery state, finish)", store.updates)
+	}
+}
+
+func TestResumeFailurePersistsControllerRecoveryState(t *testing.T) {
+	service, session, controllers, store := appTestService(t, &fakeCopier{})
+	controllers.resumeMutation = true
+	controllers.resumeErr = errors.New("replacement Pods did not become Ready")
+
+	err := service.Migrate(context.Background(), session)
+	if !errors.Is(err, controllers.resumeErr) {
+		t.Fatalf("Migrate() error=%v want=%v", err, controllers.resumeErr)
+	}
+
+	if session.Status.Phase != domain.PhaseFailed ||
+		session.Status.ResumeFrom != domain.PhaseResuming {
+		t.Fatalf("phase=%s resumeFrom=%s", session.Status.Phase, session.Status.ResumeFrom)
+	}
+
+	if session.Spec.Workload().Pod.ResourceVersion != "resume-resource-version" {
+		t.Fatalf("resume mutation=%q", session.Spec.Workload().Pod.ResourceVersion)
+	}
+
+	if store.updates == 0 {
+		t.Fatal("resume failure did not persist the session")
 	}
 }
 

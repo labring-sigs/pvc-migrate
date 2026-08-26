@@ -96,17 +96,25 @@ func (r *scriptedReserver) ReserveVolume(
 }
 
 type scriptedController struct {
-	pauses     int
-	resumes    int
-	verifies   int
-	pauseErr   error
-	resumeErr  error
-	verifyErr  error
-	resumeHook func(context.Context, *domain.Session) error
+	pauses              int
+	resumes             int
+	verifies            int
+	pauseErr            error
+	resumeErr           error
+	validateResumeErr   error
+	verifyErr           error
+	currentRollbackPods []domain.ObjectReference
+	rollbackPodsErr     error
+	pauseHook           func(*domain.Session) error
+	resumeHook          func(context.Context, *domain.Session) error
 }
 
-func (c *scriptedController) Pause(context.Context, *domain.Session) error {
+func (c *scriptedController) Pause(_ context.Context, session *domain.Session) error {
 	c.pauses++
+	if c.pauseHook != nil {
+		return c.pauseHook(session)
+	}
+
 	return c.pauseErr
 }
 
@@ -119,9 +127,20 @@ func (c *scriptedController) Resume(ctx context.Context, session *domain.Session
 	return c.resumeErr
 }
 
+func (c *scriptedController) ValidateResume(context.Context, *domain.Session) error {
+	return c.validateResumeErr
+}
+
 func (c *scriptedController) VerifyPaused(context.Context, *domain.Session) error {
 	c.verifies++
 	return c.verifyErr
+}
+
+func (c *scriptedController) CurrentRollbackPods(
+	context.Context,
+	*domain.Session,
+) ([]domain.ObjectReference, error) {
+	return slices.Clone(c.currentRollbackPods), c.rollbackPodsErr
 }
 
 type scriptedCopier struct {
@@ -1820,6 +1839,113 @@ func TestRollbackRejectsSourceIdentityDriftBeforeResumingWorkload(t *testing.T) 
 	}
 }
 
+func TestRollbackCheckpointsCurrentControllerPodsBeforePause(t *testing.T) {
+	fixture := newRecoveryFixture(t)
+	session := appTestSession()
+	session.Status.Phase = domain.PhaseCompleted
+	createActiveDestinationStorage(t, fixture, session)
+
+	replicas, ordinal := int32(1), int32(0)
+	oldRef := domain.ObjectReference{
+		Namespace: "app",
+		Name:      "database-0",
+		UID:       types.UID("old-pod-uid"),
+	}
+
+	currentRef := domain.ObjectReference{
+		Namespace:       "app",
+		Name:            "database-0",
+		UID:             types.UID("current-pod-uid"),
+		ResourceVersion: "99",
+	}
+
+	if err := session.Spec.SetWorkload(domain.WorkloadSpec{
+		Adapter: domain.WorkloadStatefulSet,
+		Pod:     oldRef,
+		Controller: domain.ObjectReference{
+			APIVersion: domain.AppsAPIVersion,
+			Kind:       domain.KindStatefulSet,
+			Namespace:  "app",
+			Name:       "database",
+			UID:        types.UID("statefulset-uid"),
+		},
+		OriginalReplicas: &replicas,
+		Ordinal:          &ordinal,
+		AffectedPods:     []domain.ObjectReference{oldRef},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	fixture.controller.currentRollbackPods = []domain.ObjectReference{currentRef}
+	fixture.controller.pauseHook = func(current *domain.Session) error {
+		t.Helper()
+
+		workload := current.Spec.Workload()
+		if workload.Pod != currentRef || len(workload.AffectedPods) != 1 ||
+			workload.AffectedPods[0] != currentRef {
+			t.Fatalf("pause saw stale workload Pods: %+v", workload)
+		}
+
+		if len(fixture.store.podUIDUpdates) == 0 ||
+			fixture.store.podUIDUpdates[len(fixture.store.podUIDUpdates)-1] != currentRef.UID {
+			t.Fatal("current Pod identity was not checkpointed before pause")
+		}
+
+		return nil
+	}
+
+	if err := fixture.service.Rollback(context.Background(), session); err != nil {
+		t.Fatal(err)
+	}
+
+	if session.Status.Phase != domain.PhaseRolledBack {
+		t.Fatalf("phase=%s", session.Status.Phase)
+	}
+}
+
+func TestRefreshRollbackPodReferencesPreservesStableNames(t *testing.T) {
+	oldPrimary := domain.ObjectReference{Namespace: "app", Name: "database-0", UID: "old-0"}
+	oldReplica := domain.ObjectReference{Namespace: "app", Name: "database-1", UID: "old-1"}
+	currentPrimary := domain.ObjectReference{
+		Namespace: "app", Name: "database-0", UID: "current-0",
+	}
+	workload := domain.WorkloadSpec{
+		Adapter:      domain.WorkloadStatefulSet,
+		Pod:          oldPrimary,
+		AffectedPods: []domain.ObjectReference{oldPrimary, oldReplica},
+	}
+
+	if !refreshRollbackPodReferences(&workload, []domain.ObjectReference{currentPrimary}) {
+		t.Fatal("replacement Pod was not detected")
+	}
+
+	if workload.Pod != currentPrimary || workload.AffectedPods[0] != currentPrimary ||
+		workload.AffectedPods[1] != oldReplica {
+		t.Fatalf("stable Pod references=%+v", workload)
+	}
+}
+
+func TestRefreshRollbackPodReferencesReplacesGeneratedNames(t *testing.T) {
+	oldRef := domain.ObjectReference{Namespace: "app", Name: "web-old", UID: "old"}
+	current := []domain.ObjectReference{
+		{Namespace: "app", Name: "web-new-a", UID: "new-a"},
+		{Namespace: "app", Name: "web-old", UID: "replacement"},
+	}
+	workload := domain.WorkloadSpec{
+		Adapter:      domain.WorkloadDeployment,
+		Pod:          oldRef,
+		AffectedPods: []domain.ObjectReference{oldRef},
+	}
+
+	if !refreshRollbackPodReferences(&workload, current) {
+		t.Fatal("replacement Deployment Pods were not detected")
+	}
+
+	if workload.Pod != current[0] || !slices.Equal(workload.AffectedPods, current) {
+		t.Fatalf("generated Pod references=%+v", workload)
+	}
+}
+
 func TestRollbackRejectsRunningStateConflictsBeforePausingWorkload(t *testing.T) {
 	tests := []struct {
 		name      string
@@ -2575,6 +2701,33 @@ func TestValidateResumeUsesOperationSpecificChecks(t *testing.T) {
 			domain.CategoryOf(err),
 			fixture.switcher.offlineCalls,
 			err,
+		)
+	}
+}
+
+func TestValidateResumePropagatesWorkloadReplicaConflict(t *testing.T) {
+	fixture := newRecoveryFixture(t)
+	session := appTestSession()
+	session.Status.Phase = domain.PhaseFailed
+	session.Status.ResumeFrom = domain.PhaseResuming
+	createActiveDestinationStorage(t, fixture, session)
+	fixture.controller.validateResumeErr = domain.NewError(
+		domain.ErrorConflict,
+		"resume Deployment",
+		"Deployment app/web replicas changed to 2 while restoring 1 replicas",
+	)
+
+	err := fixture.service.ValidateResume(context.Background(), session)
+	if domain.CategoryOf(err) != domain.ErrorConflict ||
+		!strings.Contains(err.Error(), "replicas changed to 2 while restoring 1") {
+		t.Fatalf("category=%s error=%v", domain.CategoryOf(err), err)
+	}
+
+	if fixture.controller.resumes != 0 || fixture.store.updates != 0 {
+		t.Fatalf(
+			"dry-run mutated state: resumes=%d updates=%d",
+			fixture.controller.resumes,
+			fixture.store.updates,
 		)
 	}
 }
@@ -4098,12 +4251,16 @@ func TestBackupSessionAbortUsesBackupMessage(t *testing.T) {
 }
 
 func TestDryRunRollbackChecksConsumersOutsideTheWorkloadPauseScope(t *testing.T) {
+	originalDeploymentReplicas := int32(1)
+
 	tests := []struct {
-		name     string
-		workload domain.WorkloadSpec
-		consumer string
-		phase    corev1.PodPhase
-		want     domain.ErrorCategory
+		name                string
+		workload            domain.WorkloadSpec
+		consumer            string
+		consumerUID         types.UID
+		phase               corev1.PodPhase
+		currentRollbackPods []domain.ObjectReference
+		want                domain.ErrorCategory
 	}{
 		{
 			name:     "plain migrate rejects an active consumer",
@@ -4124,6 +4281,75 @@ func TestDryRunRollbackChecksConsumersOutsideTheWorkloadPauseScope(t *testing.T)
 			},
 			consumer: "application",
 			phase:    corev1.PodRunning,
+		},
+		{
+			name: "migrate-pod rejects a same-name replacement consumer",
+			workload: domain.WorkloadSpec{
+				Adapter: domain.WorkloadStandalone,
+				Pod: domain.ObjectReference{
+					Namespace: "app",
+					Name:      "application",
+					UID:       "application-uid",
+				},
+			},
+			consumer:    "application",
+			consumerUID: "replacement-uid",
+			phase:       corev1.PodRunning,
+			want:        domain.ErrorConflict,
+		},
+		{
+			name: "migrate-pod allows a replacement Deployment consumer",
+			workload: domain.WorkloadSpec{
+				Adapter: domain.WorkloadDeployment,
+				Pod: domain.ObjectReference{
+					Namespace: "app",
+					Name:      "web-old",
+					UID:       types.UID("web-old-uid"),
+				},
+				Controller: domain.ObjectReference{
+					APIVersion: domain.AppsAPIVersion,
+					Kind:       domain.KindDeployment,
+					Namespace:  "app",
+					Name:       "web",
+					UID:        types.UID("web-uid"),
+				},
+				OriginalReplicas: &originalDeploymentReplicas,
+				AffectedPods: []domain.ObjectReference{
+					{Namespace: "app", Name: "web-old", UID: types.UID("web-old-uid")},
+				},
+			},
+			consumer: "web-new",
+			phase:    corev1.PodRunning,
+			currentRollbackPods: []domain.ObjectReference{
+				{Namespace: "app", Name: "web-new", UID: types.UID("web-new-uid")},
+			},
+		},
+		{
+			name: "migrate-pod allows a replacement StatefulSet consumer",
+			workload: domain.WorkloadSpec{
+				Adapter: domain.WorkloadStatefulSet,
+				Pod: domain.ObjectReference{
+					Namespace: "app",
+					Name:      "db-0",
+					UID:       types.UID("db-0-old-uid"),
+				},
+				Controller: domain.ObjectReference{
+					APIVersion: domain.AppsAPIVersion,
+					Kind:       domain.KindStatefulSet,
+					Namespace:  "app",
+					Name:       "db",
+					UID:        types.UID("db-controller-uid"),
+				},
+				AffectedPods: []domain.ObjectReference{
+					{Namespace: "app", Name: "db-0", UID: types.UID("db-0-old-uid")},
+				},
+			},
+			consumer:    "db-0",
+			consumerUID: "db-0-new-uid",
+			phase:       corev1.PodRunning,
+			currentRollbackPods: []domain.ObjectReference{
+				{Namespace: "app", Name: "db-0", UID: types.UID("db-0-new-uid")},
+			},
 		},
 		{
 			name: "migrate-pod rejects a terminal external consumer like execution",
@@ -4151,6 +4377,7 @@ func TestDryRunRollbackChecksConsumersOutsideTheWorkloadPauseScope(t *testing.T)
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			fixture := newRecoveryFixture(t)
+			fixture.controller.currentRollbackPods = slices.Clone(test.currentRollbackPods)
 			session := appTestSession()
 			session.Status.Phase = domain.PhaseCompleted
 
@@ -4204,11 +4431,14 @@ func TestDryRunRollbackChecksConsumersOutsideTheWorkloadPauseScope(t *testing.T)
 				t.Fatal(err)
 			}
 
-			podUID := types.UID(test.consumer + "-uid")
+			podUID := test.consumerUID
+			if podUID == "" {
+				podUID = types.UID(test.consumer + "-uid")
+			}
 
 			annotations := map[string]string{}
 			if test.workload.Adapter == domain.WorkloadStandalone &&
-				test.consumer == test.workload.Pod.Name {
+				test.consumer == test.workload.Pod.Name && test.consumerUID == "" {
 				podUID = test.workload.Pod.UID
 				annotations[kube.SessionKey] = session.ID
 			}

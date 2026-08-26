@@ -360,12 +360,17 @@ func TestSessionSerializationRoundTripOmitsStoreVersion(t *testing.T) {
 
 func TestSessionRejectsIncompleteWorkloadIdentity(t *testing.T) {
 	ref := ObjectReference{Namespace: "app", Name: "workload", UID: "workload-uid"}
+	replicas := int32(1)
+
 	for _, test := range []struct {
 		name     string
 		workload WorkloadSpec
 		mutate   func(*WorkloadSpec)
 	}{
 		{name: "standalone Pod", workload: WorkloadSpec{Adapter: WorkloadStandalone, Pod: ref}, mutate: func(workload *WorkloadSpec) { workload.Pod.UID = "" }},
+		{name: "Deployment replicas", workload: WorkloadSpec{Adapter: WorkloadDeployment, Pod: ref, Controller: ref, OriginalReplicas: &replicas, AffectedPods: []ObjectReference{ref}}, mutate: func(workload *WorkloadSpec) { workload.OriginalReplicas = nil }},
+		{name: "Deployment affected Pods", workload: WorkloadSpec{Adapter: WorkloadDeployment, Pod: ref, Controller: ref, OriginalReplicas: &replicas, AffectedPods: []ObjectReference{ref}}, mutate: func(workload *WorkloadSpec) { workload.AffectedPods = nil }},
+		{name: "Deployment selected Pod", workload: WorkloadSpec{Adapter: WorkloadDeployment, Pod: ref, Controller: ref, OriginalReplicas: &replicas, AffectedPods: []ObjectReference{ref}}, mutate: func(workload *WorkloadSpec) { workload.Pod.UID = "different-uid" }},
 		{name: "StatefulSet controller", workload: WorkloadSpec{Adapter: WorkloadStatefulSet, Pod: ref, Controller: ref}, mutate: func(workload *WorkloadSpec) { workload.Controller.UID = "" }},
 		{name: "affected Pod", workload: WorkloadSpec{Adapter: WorkloadVictoriaLogs, Pod: ref, Controller: ref, AffectedPods: []ObjectReference{ref}}, mutate: func(workload *WorkloadSpec) { workload.AffectedPods[0].UID = "" }},
 		{name: "KubeBlocks Cluster", workload: WorkloadSpec{Adapter: WorkloadKubeBlocks, Pod: ref, Controller: ref, KubeBlocks: &KubeBlocksSpec{Cluster: "cluster", ClusterUID: "cluster-uid"}}, mutate: func(workload *WorkloadSpec) { workload.KubeBlocks.ClusterUID = "" }},
@@ -389,6 +394,26 @@ func TestSessionRejectsIncompleteWorkloadIdentity(t *testing.T) {
 				t.Fatalf("category=%s error=%v", CategoryOf(err), err)
 			}
 		})
+	}
+}
+
+func TestSessionAllowsPartialDeploymentPodSetDuringRecovery(t *testing.T) {
+	selected := ObjectReference{Namespace: "app", Name: "web-new-1", UID: "web-new-1-uid"}
+	replicas := int32(3)
+
+	session := testSession(t)
+	if err := session.Spec.SetWorkload(WorkloadSpec{
+		Adapter:          WorkloadDeployment,
+		Pod:              selected,
+		Controller:       ObjectReference{Namespace: "app", Name: "web", UID: "web-uid"},
+		OriginalReplicas: &replicas,
+		AffectedPods:     []ObjectReference{selected},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := session.Validate(); err != nil {
+		t.Fatalf("partial replacement Pod set rejected: %v", err)
 	}
 }
 

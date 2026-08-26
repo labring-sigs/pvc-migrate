@@ -1303,6 +1303,7 @@ func TestValidateCleanupAccountsForTemporaryPVCDeletionBeforePVDeletion(t *testi
 		Name: "pv-destination",
 		UID:  types.UID("destination-pv-uid"),
 	}
+	session.Spec.Volumes[0].DestinationPolicy = corev1.PersistentVolumeReclaimDelete
 	pv := managedPV(
 		"pv-destination",
 		"destination-pv-uid",
@@ -1494,6 +1495,7 @@ func TestCleanupWaitsForBoundPVAfterClaimDeletion(t *testing.T) {
 		"session-123",
 		domain.ObjectReference{Name: pv.Name, UID: pv.UID},
 		"destination",
+		corev1.PersistentVolumeReclaimDelete,
 		nil,
 	)
 	if err != nil {
@@ -1510,6 +1512,123 @@ func TestCleanupWaitsForBoundPVAfterClaimDeletion(t *testing.T) {
 		err,
 	) {
 		t.Fatalf("rollback PV still exists: %v", err)
+	}
+}
+
+func TestDeleteRollbackPVRestoresDeletePolicyBeforeDeletion(t *testing.T) {
+	pv := managedPV(
+		"pv-rollback",
+		"rollback-pv-uid",
+		"session-123",
+		kube.ResourceRoleRollback,
+		corev1.VolumeReleased,
+	)
+	client := fake.NewClientset(pv)
+	policyRestored := false
+	client.PrependReactor(
+		"update",
+		"persistentvolumes",
+		func(action clienttesting.Action) (bool, runtime.Object, error) {
+			updated := testutil.MustActionObject[*corev1.PersistentVolume](t, action)
+			if updated.Name == pv.Name {
+				if updated.Spec.PersistentVolumeReclaimPolicy != corev1.PersistentVolumeReclaimDelete {
+					t.Fatalf("reclaim policy=%s", updated.Spec.PersistentVolumeReclaimPolicy)
+				}
+
+				policyRestored = true
+			}
+
+			return false, nil, nil
+		},
+	)
+	client.PrependReactor(
+		"delete",
+		"persistentvolumes",
+		func(action clienttesting.Action) (bool, runtime.Object, error) {
+			deleted := testutil.MustType[clienttesting.DeleteAction](t, action)
+			if deleted.GetName() == pv.Name && !policyRestored {
+				t.Fatal("rollback PV was deleted before its reclaim policy was restored")
+			}
+
+			return false, nil, nil
+		},
+	)
+	service := &Service{client: client, store: &memoryStore{}}
+
+	if err := service.deleteRollbackPV(
+		context.Background(),
+		"session-123",
+		kube.PVReference(pv),
+		kube.ResourceRoleRollback,
+		corev1.PersistentVolumeReclaimDelete,
+		nil,
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	if !policyRestored {
+		t.Fatal("rollback PV reclaim policy was not restored")
+	}
+}
+
+func TestDeleteRollbackPVRejectsChangeAfterPolicyRestore(t *testing.T) {
+	pv := managedPV(
+		"pv-rollback",
+		"rollback-pv-uid",
+		"session-123",
+		kube.ResourceRoleRollback,
+		corev1.VolumeReleased,
+	)
+	pv.ResourceVersion = "1"
+	client := fake.NewClientset(pv)
+	client.PrependReactor(
+		"delete",
+		"persistentvolumes",
+		func(action clienttesting.Action) (bool, runtime.Object, error) {
+			deleted := testutil.MustType[clienttesting.DeleteAction](t, action)
+
+			preconditions := deleted.GetDeleteOptions().Preconditions
+			if preconditions == nil || preconditions.ResourceVersion == nil {
+				return false, nil, nil
+			}
+
+			resource := corev1.SchemeGroupVersion.WithResource("persistentvolumes")
+
+			stored, err := client.Tracker().Get(resource, "", pv.Name)
+			if err != nil {
+				return true, nil, err
+			}
+
+			changed := testutil.MustType[*corev1.PersistentVolume](t, stored).DeepCopy()
+
+			changed.ResourceVersion = "2"
+			if err := client.Tracker().Update(resource, changed, ""); err != nil {
+				return true, nil, err
+			}
+
+			return true, nil, errors.New("simulated concurrent PV update")
+		},
+	)
+	service := &Service{client: client, store: &memoryStore{}}
+
+	err := service.deleteRollbackPV(
+		context.Background(),
+		"session-123",
+		kube.PVReference(pv),
+		kube.ResourceRoleRollback,
+		corev1.PersistentVolumeReclaimDelete,
+		nil,
+	)
+	if err == nil {
+		t.Fatal("delete succeeded after the validated PV changed")
+	}
+
+	if _, err := client.CoreV1().PersistentVolumes().Get(
+		context.Background(),
+		pv.Name,
+		metav1.GetOptions{},
+	); err != nil {
+		t.Fatalf("rollback PV was deleted after a concurrent change: %v", err)
 	}
 }
 
