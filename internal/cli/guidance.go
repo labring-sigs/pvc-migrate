@@ -1100,8 +1100,25 @@ func writePlanFailureGuidance(w io.Writer, plan *domain.MigrationPlan) error {
 			advice = "StatefulSet action: set persistentVolumeClaimRetentionPolicy.whenScaled=Retain and verify the StatefulSet before rerunning the plan."
 		case strings.Contains(check.Message, "scale-down affects"):
 			advice = "StatefulSet action: complete an application switchover, or explicitly acknowledge the restart with --allow-leader-downtime when the workload can tolerate it."
+		case strings.Contains(
+			check.Message,
+			"--kubeblocks-candidate applies only when the selected InstanceSet Pod has a leader role",
+		):
+			advice = "KubeBlocks action: remove --kubeblocks-candidate when migrating a non-leader InstanceSet Pod, then rerun the plan."
+		case strings.Contains(
+			check.Message,
+			"--kubeblocks-candidate is supported only for InstanceSet-backed KubeBlocks components",
+		):
+			advice = "KubeBlocks action: remove --kubeblocks-candidate for a legacy KubeBlocks component; its Stop/Start OpsRequest already pauses the affected Cluster or component."
+		case strings.Contains(
+			check.Message,
+			"KubeBlocks Redis addon does not provide a Switchover action",
+		):
+			advice = "KubeBlocks Redis action: remove --kubeblocks-candidate and rerun with --allow-leader-downtime."
 		case check.Name == "pvc-consumers":
 			advice = "PVC action: stop or select every consumer with --pod, then verify that the PVC has no unmanaged Pod references before rerunning the plan."
+		case check.Name == "controller-adapter" && strings.Contains(check.Message, "discover KubeBlocks"):
+			continue
 		case check.Name == "controller-adapter":
 			advice = "Workload action: use a supported workload adapter or the controller's native maintenance procedure, then rerun the plan; ordinary Deployments require no operator owner, and directly scaled Deployments and StatefulSets require no HorizontalPodAutoscaler."
 		case check.Name == "target-node":

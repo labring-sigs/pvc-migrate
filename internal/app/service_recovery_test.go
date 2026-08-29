@@ -1619,6 +1619,35 @@ func TestActivateIsIdempotentAfterCutover(t *testing.T) {
 	}
 }
 
+func TestValidateResumeRecognizesActivePVCBeforeCheckpointPersistence(t *testing.T) {
+	fixture := newRecoveryFixture(t)
+	session := appTestSession()
+	createActiveDestinationStorage(t, fixture, session)
+
+	completed := metav1.Now()
+	session.Status.Phase = domain.PhaseFailed
+	session.Status.ResumeFrom = domain.PhaseActivating
+	session.Status.Volumes[0].Sync.FinalCompletedAt = &completed
+	session.Status.Volumes[0].Activation.TemporaryPVCDeleted = true
+	session.Status.Volumes[0].Activation.SourcePVCDeleted = true
+	session.Status.Volumes[0].Activation.DestinationReserved = true
+	session.Status.Volumes[0].Activation.ActivePVC = domain.ObjectReference{}
+	session.Status.Volumes[0].Activation.ActivatedAt = nil
+
+	if err := fixture.service.ValidateResume(context.Background(), session); err != nil {
+		t.Fatal(err)
+	}
+
+	if session.Status.Volumes[0].Activation.ActivePVC.Name != "" ||
+		session.Status.Volumes[0].Activation.ActivatedAt != nil {
+		t.Fatalf("dry-run mutated activation state: %#v", session.Status.Volumes[0].Activation)
+	}
+
+	if want := []string{"data"}; !slices.Equal(fixture.switcher.offlineCalls, want) {
+		t.Fatalf("offline checks=%v want=%v", fixture.switcher.offlineCalls, want)
+	}
+}
+
 func TestResumeWorkloadPersistsRecreatedStandalonePodUID(t *testing.T) {
 	fixture := newRecoveryFixture(t)
 	session := appTestSession()
@@ -1801,6 +1830,49 @@ func TestRollbackMultiVolumeRunsInReverseAndRecoversFailure(t *testing.T) {
 
 	if len(fixture.switcher.rollbackCalls) != before {
 		t.Fatalf("rolled-back session repeated switch calls=%v", fixture.switcher.rollbackCalls)
+	}
+}
+
+func TestRollbackPreservesRunningOriginAcrossRepeatedFailures(t *testing.T) {
+	fixture := newRecoveryFixture(t)
+	session := appTestSession()
+	createActiveDestinationStorage(t, fixture, session)
+	session.Status.Phase = domain.PhaseCompleted
+	session.Status.History = append(
+		session.Status.History,
+		domain.HistoryEntry{Phase: domain.PhaseCompleted, Time: metav1.Now()},
+	)
+	fixture.switcher.rollbackErr["data"] = 1
+
+	if err := fixture.service.Rollback(context.Background(), session); err == nil {
+		t.Fatal("first rollback unexpectedly succeeded")
+	}
+
+	fixture.controller.pauseHook = func(*domain.Session) error {
+		if fixture.controller.pauses == 2 {
+			return domain.NewError(
+				domain.ErrorPrecondition,
+				"pause workload",
+				"injected second pause failure",
+			)
+		}
+
+		return nil
+	}
+	if err := fixture.service.Rollback(context.Background(), session); err == nil {
+		t.Fatal("second rollback unexpectedly succeeded")
+	}
+
+	if err := fixture.service.Rollback(context.Background(), session); err != nil {
+		t.Fatal(err)
+	}
+
+	if session.Status.Phase != domain.PhaseRolledBack || fixture.controller.pauses != 3 {
+		t.Fatalf(
+			"phase=%s pause calls=%d",
+			session.Status.Phase,
+			fixture.controller.pauses,
+		)
 	}
 }
 

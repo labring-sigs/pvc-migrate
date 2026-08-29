@@ -3,9 +3,12 @@ package app
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
+	"net/http"
+	"net/http/httptest"
 	"strconv"
 	"strings"
 	"testing"
@@ -15,10 +18,12 @@ import (
 	"github.com/labring-sigs/pvc-migrate/internal/domain"
 	"github.com/labring-sigs/pvc-migrate/internal/kube"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/kubernetes/fake"
+	"k8s.io/client-go/rest"
 )
 
 type memoryStore struct {
@@ -878,6 +883,225 @@ func TestPVMigrateToolIdentificationIsScopedToClaims(t *testing.T) {
 	tool.Labels["app.kubernetes.io/instance"] = "application"
 	if isPVMigrateToolForClaims(tool, map[string]struct{}{"data": {}}) {
 		t.Fatal("application Pod matched a pv-migrate tool")
+	}
+}
+
+func TestDeleteCopyToolPodsScopesOperationAndUsesUIDPreconditions(t *testing.T) {
+	toolPod := func(name, instance string, uid types.UID, claim string) *corev1.Pod {
+		return &corev1.Pod{
+			ObjectMeta: metav1.ObjectMeta{
+				Namespace: "app",
+				Name:      name,
+				UID:       uid,
+				Labels: map[string]string{
+					kube.AppInstanceLabel:  instance,
+					kube.AppComponentLabel: kube.ToolComponentSSHD,
+				},
+			},
+			Spec: corev1.PodSpec{
+				Volumes: []corev1.Volume{
+					{
+						Name: "volume",
+						VolumeSource: corev1.VolumeSource{
+							PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
+								ClaimName: claim,
+							},
+						},
+					},
+				},
+			},
+		}
+	}
+
+	client := fake.NewClientset(
+		toolPod("current", "pv-migrate-pm-current-clusterip", "current-uid", "data"),
+		toolPod("foreign", "pv-migrate-pm-foreign-clusterip", "foreign-uid", "data"),
+	)
+	service := &Service{client: client}
+	volume := &domain.VolumeSpec{
+		SourcePVC:      domain.ObjectReference{Namespace: "app", Name: "data"},
+		DestinationPVC: domain.ObjectReference{Namespace: "app", Name: "destination"},
+	}
+
+	if err := service.deleteCopyToolPods(context.Background(), volume, "pm-current"); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := client.CoreV1().Pods("app").Get(
+		context.Background(),
+		"current",
+		metav1.GetOptions{},
+	); !apierrors.IsNotFound(err) {
+		t.Fatalf("current tool Pod error=%v, want NotFound", err)
+	}
+
+	if _, err := client.CoreV1().Pods("app").Get(
+		context.Background(),
+		"foreign",
+		metav1.GetOptions{},
+	); err != nil {
+		t.Fatalf("foreign tool Pod was deleted: %v", err)
+	}
+
+	for _, action := range client.Actions() {
+		if action.GetVerb() != "delete" || action.GetResource().Resource != "pods" {
+			continue
+		}
+
+		options, ok := action.(interface {
+			GetDeleteOptions() metav1.DeleteOptions
+		})
+		if !ok || options.GetDeleteOptions().Preconditions == nil ||
+			options.GetDeleteOptions().Preconditions.UID == nil ||
+			*options.GetDeleteOptions().Preconditions.UID != "current-uid" {
+			t.Fatalf("delete action lacks current UID precondition: %#v", action)
+		}
+	}
+}
+
+func TestDeleteCopyToolPodsRunsAfterOperationCancellation(t *testing.T) {
+	const (
+		podName = "copy-tool"
+		podUID  = types.UID("copy-tool-uid")
+	)
+
+	deleted := false
+	postDeleteLists := 0
+	handler := http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		writer.Header().Set("Content-Type", "application/json")
+
+		switch {
+		case request.Method == http.MethodGet && request.URL.Path == "/api/v1/namespaces/app/pods":
+			pods := &corev1.PodList{}
+			if deleted {
+				postDeleteLists++
+			} else {
+				pods.Items = []corev1.Pod{{
+					ObjectMeta: metav1.ObjectMeta{
+						Namespace: "app",
+						Name:      podName,
+						UID:       podUID,
+						Labels: map[string]string{
+							kube.AppInstanceLabel:  "pv-migrate-pm-current-clusterip",
+							kube.AppComponentLabel: kube.ToolComponentSSHD,
+						},
+					},
+					Spec: corev1.PodSpec{Volumes: []corev1.Volume{{
+						VolumeSource: corev1.VolumeSource{
+							PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
+								ClaimName: "data",
+							},
+						},
+					}}},
+				}}
+			}
+
+			if err := json.NewEncoder(writer).Encode(pods); err != nil {
+				t.Errorf("encode Pod list: %v", err)
+			}
+		case request.Method == http.MethodDelete &&
+			request.URL.Path == "/api/v1/namespaces/app/pods/"+podName:
+			var options metav1.DeleteOptions
+			if err := json.NewDecoder(request.Body).Decode(&options); err != nil {
+				t.Errorf("decode delete options: %v", err)
+			}
+
+			if options.Preconditions == nil || options.Preconditions.UID == nil ||
+				*options.Preconditions.UID != podUID {
+				t.Errorf("delete UID precondition=%#v", options.Preconditions)
+			}
+
+			deleted = true
+
+			writer.WriteHeader(http.StatusOK)
+
+			status := &metav1.Status{Status: metav1.StatusSuccess}
+			if err := json.NewEncoder(writer).Encode(status); err != nil {
+				t.Errorf("encode delete response: %v", err)
+			}
+		default:
+			http.NotFound(writer, request)
+		}
+	})
+
+	server := httptest.NewServer(handler)
+	defer server.Close()
+
+	client, err := kubernetes.NewForConfig(&rest.Config{
+		Host: server.URL,
+		ContentConfig: rest.ContentConfig{
+			ContentType: "application/json",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	service := &Service{client: client}
+	volume := &domain.VolumeSpec{
+		SourcePVC:      domain.ObjectReference{Namespace: "app", Name: "data"},
+		DestinationPVC: domain.ObjectReference{Namespace: "app", Name: "destination"},
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	if err := service.cleanupCopyToolPods(ctx, volume, "pm-current"); err != nil {
+		t.Fatal(err)
+	}
+
+	if !deleted {
+		t.Fatal("canceled operation did not issue copy tool Pod deletion")
+	}
+
+	if postDeleteLists == 0 {
+		t.Fatal("cleanup did not wait for the deleted copy tool Pod to release the PVC")
+	}
+}
+
+func TestWaitForCopyToolReleaseAllowsAsynchronousGarbageCollection(t *testing.T) {
+	tool := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: "app",
+			Name:      "copy-tool",
+			Labels: map[string]string{
+				kube.AppInstanceLabel:  "pv-migrate-pm-gc-clusterip",
+				kube.AppComponentLabel: kube.ToolComponentSSHD,
+			},
+		},
+		Spec: corev1.PodSpec{Volumes: []corev1.Volume{
+			{
+				Name: "volume",
+				VolumeSource: corev1.VolumeSource{
+					PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
+						ClaimName: "data",
+					},
+				},
+			},
+		}},
+	}
+	client := fake.NewClientset(tool)
+	service := &Service{client: client}
+	volume := &domain.VolumeSpec{
+		SourcePVC:      domain.ObjectReference{Namespace: "app", Name: "data"},
+		DestinationPVC: domain.ObjectReference{Namespace: "app", Name: "destination"},
+	}
+
+	go func() {
+		time.Sleep(50 * time.Millisecond)
+
+		_ = client.CoreV1().Pods("app").Delete(
+			context.Background(),
+			tool.Name,
+			metav1.DeleteOptions{},
+		)
+	}()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+
+	if err := service.waitForCopyToolRelease(ctx, volume); err != nil {
+		t.Fatalf("waitForCopyToolRelease() error=%v", err)
 	}
 }
 

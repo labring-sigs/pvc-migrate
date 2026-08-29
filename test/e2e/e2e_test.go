@@ -1585,6 +1585,17 @@ func chooseTargetNode(
 		if _, controlPlane := node.Labels["node-role.kubernetes.io/control-plane"]; controlPlane {
 			continue
 		}
+		blocked := false
+		for _, taint := range node.Spec.Taints {
+			if taint.Effect == corev1.TaintEffectNoSchedule ||
+				taint.Effect == corev1.TaintEffectNoExecute {
+				blocked = true
+				break
+			}
+		}
+		if blocked {
+			continue
+		}
 		for _, condition := range node.Status.Conditions {
 			if condition.Type == corev1.NodeReady && condition.Status == corev1.ConditionTrue {
 				return node.Name

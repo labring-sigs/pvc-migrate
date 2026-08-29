@@ -494,7 +494,13 @@ func TestKubeBlocksUsesDiscoveredCurrentOpsAPI(t *testing.T) {
 			"uid":       "cluster-uid",
 		},
 		"spec": map[string]any{
-			"componentSpecs": []any{map[string]any{"name": "postgresql", "stop": false}},
+			"componentSpecs": []any{map[string]any{"name": "postgresql", "replicas": int64(1)}},
+		},
+		"status": map[string]any{
+			"phase": "Running",
+			"components": map[string]any{
+				"postgresql": map[string]any{"phase": "Running"},
+			},
 		},
 	}}
 	instanceSet := &unstructured.Unstructured{Object: map[string]any{
@@ -591,7 +597,7 @@ func TestKubeBlocksUsesDiscoveredCurrentOpsAPI(t *testing.T) {
 	}
 
 	if workload.KubeBlocks.ClusterUID != "cluster-uid" ||
-		workload.KubeBlocks.OriginalStops["postgresql"] {
+		workload.KubeBlocks.LegacyOriginalReplicas != 1 {
 		t.Fatalf("KubeBlocks recovery state: %#v", workload.KubeBlocks)
 	}
 

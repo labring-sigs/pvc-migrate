@@ -243,11 +243,11 @@ type KubeBlocksSpec struct {
 	Instance                 string                       `json:"instance"                           yaml:"instance"`
 	Role                     string                       `json:"role,omitempty"                     yaml:"role,omitempty"`
 	SwitchoverCandidate      string                       `json:"switchoverCandidate,omitempty"      yaml:"switchoverCandidate,omitempty"`
-	SwitchoverStrategy       KubeBlocksSwitchoverStrategy `json:"switchoverStrategy"                 yaml:"switchoverStrategy"`
+	SwitchoverStrategy       KubeBlocksSwitchoverStrategy `json:"switchoverStrategy,omitempty"       yaml:"switchoverStrategy,omitempty"`
 	SwitchoverContainer      string                       `json:"switchoverContainer,omitempty"      yaml:"switchoverContainer,omitempty"`
 	OpsAPIVersion            string                       `json:"opsAPIVersion"                      yaml:"opsAPIVersion"`
 	ClusterUID               types.UID                    `json:"clusterUID"                         yaml:"clusterUID"`
-	OriginalStops            map[string]bool              `json:"originalStops"                      yaml:"originalStops"`
+	LegacyOriginalReplicas   int32                        `json:"legacyOriginalReplicas"             yaml:"legacyOriginalReplicas"`
 	OriginalPaused           bool                         `json:"originalPaused,omitempty"           yaml:"originalPaused,omitempty"`
 	OriginalPausedConfigured bool                         `json:"originalPausedConfigured,omitempty" yaml:"originalPausedConfigured,omitempty"`
 }
@@ -1101,6 +1101,7 @@ func validateWorkloadIdentity(workload WorkloadSpec) error {
 				"KubeBlocks workload Cluster name and UID are required",
 			)
 		}
+
 	case WorkloadVMCluster:
 		if workload.VMCluster == nil || workload.VMCluster.Name == "" ||
 			workload.VMCluster.UID == "" {

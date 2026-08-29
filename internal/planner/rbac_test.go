@@ -178,9 +178,14 @@ func TestDeploymentClusterRoleCoversPlannerAccessReviews(t *testing.T) {
 		},
 		{
 			Adapter: domain.WorkloadKubeBlocks,
+			Controller: domain.ObjectReference{
+				APIVersion: "workloads.kubeblocks.io/v1alpha1",
+				Kind:       domain.KindInstanceSet,
+			},
 			KubeBlocks: &domain.KubeBlocksSpec{
-				OpsAPIVersion:      "operations.kubeblocks.io/v1alpha1",
-				SwitchoverStrategy: domain.KubeBlocksSwitchoverMongoDBNative,
+				OpsAPIVersion:       "operations.kubeblocks.io/v1alpha1",
+				SwitchoverCandidate: "cluster-db-1",
+				SwitchoverStrategy:  domain.KubeBlocksSwitchoverMongoDBNative,
 			},
 		},
 		{
@@ -321,6 +326,12 @@ func TestCheckRBACIncludesControllerSpecificPermissions(t *testing.T) {
 			exclude: []authorizationv1.ResourceAttributes{
 				{
 					Namespace: "app",
+					Verb:      "create",
+					Group:     "operations.kubeblocks.io",
+					Resource:  "opsrequests",
+				},
+				{
+					Namespace: "app",
 					Verb:      "update",
 					Group:     "apps.kubeblocks.io",
 					Resource:  "clusters",
@@ -337,12 +348,62 @@ func TestCheckRBACIncludesControllerSpecificPermissions(t *testing.T) {
 			name: "KubeBlocks MongoDB native switchover",
 			workload: domain.WorkloadSpec{
 				Adapter: domain.WorkloadKubeBlocks,
+				Controller: domain.ObjectReference{
+					APIVersion: "workloads.kubeblocks.io/v1alpha1",
+					Kind:       domain.KindInstanceSet,
+				},
+				KubeBlocks: &domain.KubeBlocksSpec{
+					OpsAPIVersion:       "apps.kubeblocks.io/v1alpha1",
+					SwitchoverCandidate: "cluster-db-1",
+					SwitchoverStrategy:  domain.KubeBlocksSwitchoverMongoDBNative,
+				},
+			},
+			want: []authorizationv1.ResourceAttributes{
+				{Namespace: "app", Verb: "create", Resource: "pods/exec"},
+			},
+			exclude: []authorizationv1.ResourceAttributes{
+				{
+					Namespace: "app",
+					Verb:      "create",
+					Group:     "apps.kubeblocks.io",
+					Resource:  "opsrequests",
+				},
+			},
+		},
+		{
+			name: "KubeBlocks InstanceSet OpsRequest switchover",
+			workload: domain.WorkloadSpec{
+				Adapter: domain.WorkloadKubeBlocks,
+				Controller: domain.ObjectReference{
+					APIVersion: "workloads.kubeblocks.io/v1alpha1",
+					Kind:       domain.KindInstanceSet,
+				},
+				KubeBlocks: &domain.KubeBlocksSpec{
+					OpsAPIVersion:       "operations.kubeblocks.io/v1alpha1",
+					SwitchoverCandidate: "cluster-db-1",
+					SwitchoverStrategy:  domain.KubeBlocksSwitchoverOpsRequest,
+				},
+			},
+			want: []authorizationv1.ResourceAttributes{
+				{
+					Namespace: "app",
+					Verb:      "create",
+					Group:     "operations.kubeblocks.io",
+					Resource:  "opsrequests",
+				},
+			},
+		},
+		{
+			name: "legacy KubeBlocks ignores stale native switchover",
+			workload: domain.WorkloadSpec{
+				Adapter:    domain.WorkloadKubeBlocks,
+				Controller: domain.ObjectReference{Kind: domain.KindStatefulSet},
 				KubeBlocks: &domain.KubeBlocksSpec{
 					OpsAPIVersion:      "apps.kubeblocks.io/v1alpha1",
 					SwitchoverStrategy: domain.KubeBlocksSwitchoverMongoDBNative,
 				},
 			},
-			want: []authorizationv1.ResourceAttributes{
+			exclude: []authorizationv1.ResourceAttributes{
 				{Namespace: "app", Verb: "create", Resource: "pods/exec"},
 			},
 		},

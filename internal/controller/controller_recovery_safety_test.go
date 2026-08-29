@@ -9,11 +9,9 @@ import (
 	"github.com/labring-sigs/pvc-migrate/internal/domain"
 	"github.com/labring-sigs/pvc-migrate/internal/testutil"
 	appsv1 "k8s.io/api/apps/v1"
-	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
-	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	dynamicfake "k8s.io/client-go/dynamic/fake"
 	"k8s.io/client-go/kubernetes/fake"
@@ -722,87 +720,6 @@ func TestGrafanaResumeUsesCompleteDeploymentSelector(t *testing.T) {
 	}
 }
 
-func TestKubeBlocksStopDriftReturnsConflict(t *testing.T) {
-	t.Run("missing persisted original state", func(t *testing.T) {
-		cluster := kubeBlocksClusterObject(false)
-		dynamicClient := dynamicfake.NewSimpleDynamicClient(runtime.NewScheme(), cluster)
-		manager := NewManager(fake.NewClientset(), dynamicClient, nil)
-		session := kubeBlocksRecoverySession()
-
-		session.Spec.Workload().KubeBlocks.OriginalStops = map[string]bool{}
-		if err := manager.setKubeBlocksPaused(
-			context.Background(),
-			session,
-			true,
-		); domain.CategoryOf(
-			err,
-		) != domain.ErrorConflict {
-			t.Fatalf("category=%s error=%v", domain.CategoryOf(err), err)
-		}
-
-		if len(session.Spec.Workload().KubeBlocks.OriginalStops) != 0 {
-			t.Fatalf(
-				"missing original state was captured during execution: %v",
-				session.Spec.Workload().KubeBlocks.OriginalStops,
-			)
-		}
-	})
-
-	t.Run("before pause", func(t *testing.T) {
-		cluster := kubeBlocksClusterObject(true)
-		dynamicClient := dynamicfake.NewSimpleDynamicClient(runtime.NewScheme(), cluster)
-		manager := NewManager(fake.NewClientset(), dynamicClient, nil)
-
-		session := kubeBlocksRecoverySession()
-		if err := manager.setKubeBlocksPaused(
-			context.Background(),
-			session,
-			true,
-		); domain.CategoryOf(
-			err,
-		) != domain.ErrorConflict {
-			t.Fatalf("category=%s error=%v", domain.CategoryOf(err), err)
-		}
-	})
-
-	t.Run("after pause", func(t *testing.T) {
-		ctx := context.Background()
-		cluster := kubeBlocksClusterObject(false)
-		dynamicClient := dynamicfake.NewSimpleDynamicClient(runtime.NewScheme(), cluster)
-		manager := NewManager(fake.NewClientset(), dynamicClient, nil)
-
-		session := kubeBlocksRecoverySession()
-		if err := manager.setKubeBlocksPaused(ctx, session, true); err != nil {
-			t.Fatal(err)
-		}
-
-		resource := dynamicClient.Resource(mustGVR(kubeBlocksClusterAPIVersion, clusterResource)).
-			Namespace("db")
-		current, _ := resource.Get(ctx, "cluster", metav1.GetOptions{})
-		components, _, _ := unstructured.NestedSlice(current.Object, "spec", "componentSpecs")
-
-		component := testutil.MustType[map[string]any](t, components[0])
-		if err := unstructured.SetNestedField(component, false, "stop"); err != nil {
-			t.Fatal(err)
-		}
-
-		_ = unstructured.SetNestedField(current.Object, components, "spec", "componentSpecs")
-		if _, err := resource.Update(ctx, current, metav1.UpdateOptions{}); err != nil {
-			t.Fatal(err)
-		}
-
-		if err := manager.setKubeBlocksPaused(
-			ctx,
-			session,
-			false,
-		); domain.CategoryOf(
-			err,
-		) != domain.ErrorConflict {
-			t.Fatalf("category=%s error=%v", domain.CategoryOf(err), err)
-		}
-	})
-}
-
 func TestVMClusterReplicaDriftIsNotOverwritten(t *testing.T) {
 	vm := vmClusterObject("vm-uid", true)
 	vm.SetAnnotations(map[string]string{pauseSessionAnnotation: "session"})
@@ -1017,45 +934,6 @@ func TestClearVictoriaLogsPauseOwnerRejectsReplicaDrift(t *testing.T) {
 	}
 }
 
-func TestKubeBlocksPauseRetriesAPIServerConflictWithDriftCheck(t *testing.T) {
-	cluster := kubeBlocksClusterObject(false)
-	dynamicClient := dynamicfake.NewSimpleDynamicClient(runtime.NewScheme(), cluster)
-	updates := 0
-	dynamicClient.PrependReactor(
-		"update",
-		"clusters",
-		func(clienttesting.Action) (bool, runtime.Object, error) {
-			updates++
-			if updates == 1 {
-				return true, nil, apierrors.NewConflict(
-					schema.GroupResource{Group: "apps.kubeblocks.io", Resource: "clusters"},
-					"cluster",
-					nil,
-				)
-			}
-
-			return false, nil, nil
-		},
-	)
-	manager := NewManager(fake.NewClientset(), dynamicClient, nil)
-
-	session := kubeBlocksRecoverySession()
-	if err := manager.setKubeBlocksPaused(context.Background(), session, true); err != nil {
-		t.Fatal(err)
-	}
-
-	if updates != 2 {
-		t.Fatalf("updates=%d want=2", updates)
-	}
-
-	current, _ := dynamicClient.Resource(mustGVR(kubeBlocksClusterAPIVersion, clusterResource)).
-		Namespace("db").
-		Get(context.Background(), "cluster", metav1.GetOptions{})
-	if current.GetAnnotations()[pauseSessionAnnotation] != session.ID {
-		t.Fatalf("annotations=%v", current.GetAnnotations())
-	}
-}
-
 func vmClusterObject(uid types.UID, paused bool) *unstructured.Unstructured {
 	return &unstructured.Unstructured{Object: map[string]any{
 		"apiVersion": vmClusterAPIVersion,
@@ -1072,26 +950,4 @@ func grafanaObject(uid types.UID, suspended bool) *unstructured.Unstructured {
 		"metadata":   map[string]any{"name": "grafana", "namespace": "vm", "uid": string(uid)},
 		"spec":       map[string]any{"suspend": suspended},
 	}}
-}
-
-func kubeBlocksClusterObject(stopped bool) *unstructured.Unstructured {
-	return &unstructured.Unstructured{Object: map[string]any{
-		"apiVersion": kubeBlocksClusterAPIVersion,
-		"kind":       "Cluster",
-		"metadata":   map[string]any{"name": "cluster", "namespace": "db", "uid": "cluster-uid"},
-		"spec": map[string]any{"componentSpecs": []any{
-			map[string]any{"name": "postgresql", "stop": stopped},
-		}},
-	}}
-}
-
-func kubeBlocksRecoverySession() *domain.Session {
-	session := kubeBlocksSession()
-	session.Spec.Workload().KubeBlocks.Component = "postgresql"
-	session.Spec.Workload().KubeBlocks.ClusterUID = "cluster-uid"
-	session.Spec.Workload().KubeBlocks.OriginalStops = map[string]bool{
-		"postgresql": false,
-	}
-
-	return session
 }

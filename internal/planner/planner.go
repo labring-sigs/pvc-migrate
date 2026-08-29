@@ -376,14 +376,21 @@ func (p *Planner) discoverPlanWorkload(ctx context.Context, state *planState) er
 				fmt.Sprintf("%s provides pause and resume semantics", discovered.Adapter),
 			))
 
-			if discovered.KubeBlocks != nil && isRiskRole(discovered.KubeBlocks.Role) {
+			if message := kubeBlocksRoleWarning(discovered); message != "" {
 				state.plan.AddCheck(
-					warned("database-role", kubeBlocksRoleWarning(discovered.KubeBlocks)),
+					warned("database-role", message),
 				)
 			}
 
 			if discovered.KubeBlocks != nil {
-				message := "KubeBlocks migration stops the selected Cluster component through componentSpecs[].stop; that component shares the downtime window and source PVCs remain retained"
+				message := "KubeBlocks migration uses a Stop/Start OpsRequest for the legacy Cluster; its components share the downtime window and source PVCs remain retained"
+				if strings.HasPrefix(
+					discovered.KubeBlocks.OpsAPIVersion,
+					"operations.kubeblocks.io/",
+				) {
+					message = "KubeBlocks migration uses a component-scoped Stop/Start OpsRequest for the legacy component; the component shares the downtime window and source PVCs remain retained"
+				}
+
 				if discovered.Controller.Kind == domain.KindInstanceSet {
 					message = "KubeBlocks migration pauses InstanceSet reconciliation and stops only the selected Pod; sibling instances remain running while InstanceSet self-healing is suspended"
 				}
@@ -1189,7 +1196,23 @@ func (p *Planner) checkPlanVolumeConsumers(
 	}
 
 	planned := state.plannedVolumes[plannedIndex]
+
 	volume := state.volumeSpecs[volumeIndex]
+	if state.workload.Adapter == domain.WorkloadKubeBlocks &&
+		state.workload.Controller.Kind != domain.KindInstanceSet &&
+		state.workload.KubeBlocks != nil &&
+		!planQuantitiesEqual(planned.SourceCapacity, planned.Capacity) &&
+		state.workload.KubeBlocks.LegacyOriginalReplicas != 1 {
+		state.plan.AddCheck(failed(
+			"destination-capacity",
+			fmt.Sprintf(
+				"legacy KubeBlocks component %s has %d replicas; destination capacity %s cannot be applied to one PVC because its shared claim template would affect sibling instances",
+				state.workload.KubeBlocks.Component,
+				state.workload.KubeBlocks.LegacyOriginalReplicas,
+				planned.Capacity,
+			),
+		))
+	}
 
 	orchestratedMigration := state.options.Operation == domain.OperationMigrate ||
 		state.options.Operation == domain.OperationMigratePod
@@ -1248,6 +1271,13 @@ func (p *Planner) checkPlanVolumeConsumers(
 			}
 		}
 	}
+}
+
+func planQuantitiesEqual(left, right string) bool {
+	leftQuantity, leftErr := resource.ParseQuantity(left)
+	rightQuantity, rightErr := resource.ParseQuantity(right)
+
+	return leftErr == nil && rightErr == nil && leftQuantity.Cmp(rightQuantity) == 0
 }
 
 func (p *Planner) checkPlanVolumeShrink(
@@ -2671,7 +2701,12 @@ func isRiskRole(role string) bool {
 	}
 }
 
-func kubeBlocksRoleWarning(spec *domain.KubeBlocksSpec) string {
+func kubeBlocksRoleWarning(workload domain.WorkloadSpec) string {
+	spec := workload.KubeBlocks
+	if spec == nil || workload.Controller.Kind != domain.KindInstanceSet || !isRiskRole(spec.Role) {
+		return ""
+	}
+
 	if spec.Role == "unknown" && spec.SwitchoverCandidate == "" {
 		return "selected KubeBlocks instance role is unknown; possible leader downtime was explicitly acknowledged"
 	}

@@ -1039,6 +1039,54 @@ func TestPlanFailureGuidancePrioritizesStatefulSetAction(t *testing.T) {
 	}
 }
 
+func TestPlanFailureGuidanceExplainsKubeBlocksCandidateScope(t *testing.T) {
+	tests := []struct {
+		name    string
+		message string
+		want    string
+	}{
+		{
+			name: "InstanceSet secondary",
+			message: "discover KubeBlocks: --kubeblocks-candidate applies only when " +
+				"the selected InstanceSet Pod has a leader role; Pod db/cluster-db-1 has role secondary",
+			want: "remove --kubeblocks-candidate when migrating a non-leader InstanceSet Pod",
+		},
+		{
+			name: "legacy component",
+			message: "discover KubeBlocks: --kubeblocks-candidate is supported only for " +
+				"InstanceSet-backed KubeBlocks components",
+			want: "remove --kubeblocks-candidate for a legacy KubeBlocks component",
+		},
+		{
+			name: "Redis primary",
+			message: "discover KubeBlocks: automatic switchover for selected instance redis-0 " +
+				"is unavailable: the KubeBlocks Redis addon does not provide a Switchover action",
+			want: "remove --kubeblocks-candidate and rerun with --allow-leader-downtime",
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			var output bytes.Buffer
+
+			plan := &domain.MigrationPlan{Checks: []domain.Check{{
+				Name:     "controller-adapter",
+				Severity: domain.SeverityError,
+				Message:  test.message,
+			}}}
+
+			if err := writePlanFailureGuidance(&output, plan); err != nil {
+				t.Fatal(err)
+			}
+
+			if text := output.String(); !strings.Contains(text, test.want) ||
+				strings.Contains(text, "use a supported workload adapter") {
+				t.Fatalf("guidance=%q", text)
+			}
+		})
+	}
+}
+
 func TestBucketFlagValidationMatrix(t *testing.T) {
 	cases := []struct {
 		name    string

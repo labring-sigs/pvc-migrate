@@ -36,7 +36,7 @@ kubectl apply -f deploy/session-namespace.yaml
 kubectl apply -f deploy/rbac.yaml
 ```
 
-The default ClusterRole excludes Pod exec. KubeBlocks MongoDB native switchover needs it for the source namespace only:
+The default ClusterRole excludes Pod exec. InstanceSet-backed KubeBlocks MongoDB native switchover needs it for the source namespace only:
 
 ```bash
 SOURCE_NAMESPACE=app
@@ -163,8 +163,8 @@ The destination PVCs are provisioned before downtime. Warm-copy passes run while
 | Standalone Pod | Delete and recreate the recorded Pod on the target node | Supported with a Pod restart window |
 | Ordinary Deployment | Scale the complete Deployment to zero, switch all selected PVCs, then restore the original replica count | Supported when fully Ready, without an operator owner or HorizontalPodAutoscaler |
 | Native StatefulSet | Scale from `N` replicas to the selected ordinal `k`, then restore `N` | Supported when PVC retention and ordinal ownership checks pass, without a HorizontalPodAutoscaler |
-| KubeBlocks InstanceSet | Optionally switch the primary, pause InstanceSet reconciliation, delete the selected Pod, then restore the original pause state | Supported with selected-instance downtime; sibling Pods remain running |
-| KubeBlocks legacy StatefulSet | Optionally switch the primary, stop the selected Cluster component, then restore its original state | Supported with selected-component downtime |
+| KubeBlocks InstanceSet | Switch a supported primary or acknowledge downtime, pause InstanceSet reconciliation, delete the selected Pod, then restore the original pause state | Supported with selected-instance downtime; sibling Pods remain running |
+| KubeBlocks legacy StatefulSet | Submit a Stop/Start OpsRequest, then restore the recorded replica state | Supported with Cluster or component downtime |
 | VMCluster component | Pause the component and reduce its replica count to ordinal `k`, then restore it | Supported for managed VMCluster StatefulSets without a HorizontalPodAutoscaler |
 | Grafana | Pause the Grafana deployment and scale it to zero, then restore it | Supported without a HorizontalPodAutoscaler when recreation scheduling checks pass |
 | Victoria Logs `vlstorage` | Scale the complete `vlstorage` StatefulSet to zero under a session-owned pause lock | Supported without a HorizontalPodAutoscaler and with a shared `vlstorage` pause window |
@@ -173,18 +173,15 @@ The destination PVCs are provisioned before downtime. Warm-copy passes run while
 | CockroachDB | Use drain, decommission, and CockroachDB recovery procedures | Rejected during planning |
 | Backup archive-WAL workload | Use the owning backup controller workflow | Rejected during planning |
 
-For a KubeBlocks primary, `--kubeblocks-candidate` requests an automated switchover. The plan also prints `kbcli cluster promote` guidance and a matching OpsRequest YAML when the installed KubeBlocks API accepts that operation. For MongoDB components whose OpsRequest admission reports that switchover is unsupported, pvc-migrate validates and runs the KubeBlocks MongoDB native candidate script; choose a Ready, caught-up secondary as the candidate. Failure guidance includes the fully resolved equivalent command. The native command has this form:
+For an InstanceSet-backed KubeBlocks primary, `--kubeblocks-candidate` requests an automated switchover. The plan prints `kbcli cluster promote` guidance and a matching OpsRequest YAML for components whose served KubeBlocks definition provides a Switchover action. MongoDB components do not provide that action in KubeBlocks 0.8 or 0.9, so pvc-migrate validates the MongoDB client and credential environment, resolves the candidate from the live replica-set configuration, temporarily freezes other electable secondaries, and immediately steps down the current primary. Choose a Ready, caught-up secondary as the candidate. Failure guidance includes a fully resolved equivalent `kubectl exec` command without credential values.
 
-```sh
-kubectl --namespace <namespace> exec <current-primary-pod> -c mongodb -- env \
-  KB_CONSENSUS_LEADER_POD_FQDN=<current-primary-pod>.<cluster>-<component>-headless \
-  KB_SWITCHOVER_CANDIDATE_FQDN=<ready-secondary-pod>.<cluster>-<component>-headless \
-  /scripts/switchover-with-candidate.sh
-```
+The validated KubeBlocks 0.9 Redis addon does not provide a Switchover action, including its Redis Sentinel topology. Redis primary migration rejects `--kubeblocks-candidate` without probing OpsRequest admission and requires `--allow-leader-downtime`. Sentinel may elect a replacement during the restart, but that behavior does not provide a deterministic candidate switchover contract to pvc-migrate.
 
-`--allow-leader-downtime` acknowledges a direct primary restart when the application can tolerate it.
+For an InstanceSet-backed KubeBlocks primary, `--allow-leader-downtime` acknowledges a direct restart when the application can tolerate it.
 
-InstanceSet-backed components use the served `spec.paused` field to suspend InstanceSet reconciliation while the selected Pod is migrated. The adapter deletes that Pod with a UID precondition and verifies the InstanceSet pause owner before final sync. Legacy StatefulSet-backed components use the selected Cluster component's `spec.componentSpecs[].stop` field. The `kubeblocks.io/reconcile` annotation triggers reconciliation and has no pause semantics.
+Legacy non-InstanceSet KubeBlocks components do not perform a switchover because their Stop OpsRequest pauses every instance in the affected Cluster or component. These migrations reject `--kubeblocks-candidate`; `--allow-leader-downtime` has no effect.
+
+InstanceSet-backed components use the served `spec.paused` field to suspend InstanceSet reconciliation while the selected Pod is migrated. The adapter deletes that Pod with a UID precondition and verifies the InstanceSet pause owner before final sync. Legacy StatefulSet-backed components use Stop/Start OpsRequests; the apps API pauses the Cluster, while the operations API can target the selected component. The `kubeblocks.io/reconcile` annotation triggers reconciliation and has no pause semantics.
 
 Controller ownership outside the supported adapters causes the plan to fail. PVCs that are already offline can use `migrate`, `copy`, `rename`, or `move` directly.
 

@@ -267,6 +267,26 @@ func TestSessionPersistsValidTransferScopeAndOmitsFullVolumeDefault(t *testing.T
 	}
 }
 
+func TestKubeBlocksSpecOmitsUnusedSwitchoverStrategy(t *testing.T) {
+	raw, err := json.Marshal(KubeBlocksSpec{})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if strings.Contains(string(raw), "switchoverStrategy") {
+		t.Fatalf("KubeBlocks spec contains unused switchover strategy: %s", raw)
+	}
+
+	var legacy KubeBlocksSpec
+	if err := json.Unmarshal([]byte(`{"switchoverStrategy":"opsrequest"}`), &legacy); err != nil {
+		t.Fatal(err)
+	}
+
+	if legacy.SwitchoverStrategy != KubeBlocksSwitchoverOpsRequest {
+		t.Fatalf("legacy switchover strategy=%q", legacy.SwitchoverStrategy)
+	}
+}
+
 func TestSessionRejectsTransferScopeForIdentityOnlyOperations(t *testing.T) {
 	session := testSession(t)
 	session.Spec = NewSessionSpec(

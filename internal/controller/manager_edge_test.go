@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"log/slog"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -16,6 +17,7 @@ import (
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -447,6 +449,174 @@ func TestDiscoverKubeBlocksValidatesIdentityAPIAndCandidate(t *testing.T) {
 	}
 }
 
+func TestValidateKubeBlocksSwitchoverCandidateScopesToInstanceSet(t *testing.T) {
+	tests := []struct {
+		name      string
+		kind      string
+		candidate string
+		want      string
+	}{
+		{
+			name: "legacy pause needs no acknowledgement",
+			kind: domain.KindStatefulSet,
+		},
+		{
+			name:      "legacy candidate is rejected",
+			kind:      domain.KindStatefulSet,
+			candidate: "cluster-db-1",
+			want:      "supported only for InstanceSet",
+		},
+		{
+			name:      "InstanceSet keeps switchover candidate",
+			kind:      domain.KindInstanceSet,
+			candidate: "cluster-db-1",
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			err := validateKubeBlocksSwitchoverCandidate(
+				&metav1.OwnerReference{Kind: test.kind},
+				test.candidate,
+			)
+			if test.want == "" {
+				if err != nil {
+					t.Fatal(err)
+				}
+
+				return
+			}
+
+			if domain.CategoryOf(err) != domain.ErrorPrecondition ||
+				!strings.Contains(err.Error(), test.want) {
+				t.Fatalf("category=%s error=%v", domain.CategoryOf(err), err)
+			}
+		})
+	}
+}
+
+func TestDiscoverKubeBlocksSecondaryRejectsSwitchoverCandidate(t *testing.T) {
+	selected := readyPod("db", "cluster-db-0", "node-a")
+	selected.OwnerReferences = []metav1.OwnerReference{{
+		APIVersion: "workloads.kubeblocks.io/v1alpha1",
+		Kind:       domain.KindInstanceSet,
+		Name:       "cluster-db",
+		UID:        "instanceset-uid",
+		Controller: new(true),
+	}}
+	selected.Labels = map[string]string{
+		kube.AppInstanceLabel:    "cluster",
+		kubeBlocksComponentLabel: "db",
+		kubeBlocksRoleLabel:      "secondary",
+	}
+	candidate := readyPod("db", "cluster-db-1", "node-b")
+	candidate.OwnerReferences = selected.OwnerReferences
+	candidate.Labels = map[string]string{
+		kube.AppInstanceLabel:    "cluster",
+		kubeBlocksComponentLabel: "db",
+		kubeBlocksRoleLabel:      "secondary",
+	}
+
+	typed := kubernetesfake.NewClientset(selected, candidate)
+	discovery := testutil.MustType[*fake.FakeDiscovery](t, typed.Discovery())
+	discovery.Resources = []*metav1.APIResourceList{{
+		GroupVersion: kubeBlocksClusterAPIVersion,
+		APIResources: []metav1.APIResource{{Name: "opsrequests"}},
+	}}
+	instanceSet := kubeBlocksInstanceSetObject(
+		"workloads.kubeblocks.io/v1alpha1",
+		new(false),
+	)
+	cluster := &unstructured.Unstructured{Object: map[string]any{
+		"apiVersion": kubeBlocksClusterAPIVersion,
+		"kind":       "Cluster",
+		"metadata": map[string]any{
+			"name": "cluster", "namespace": "db", "uid": "cluster-uid",
+		},
+		"spec": map[string]any{"componentSpecs": []any{
+			map[string]any{"name": "db", "replicas": int64(2)},
+		}},
+	}}
+	dynamicClient := dynamicfake.NewSimpleDynamicClient(runtime.NewScheme(), instanceSet, cluster)
+	manager := NewManager(
+		typed,
+		dynamicClient,
+		discovery,
+	)
+
+	_, err := manager.Discover(context.Background(), DiscoverOptions{
+		Namespace:           "db",
+		PodName:             selected.Name,
+		SwitchoverCandidate: candidate.Name,
+	})
+
+	want := "applies only when the selected InstanceSet Pod has a leader role"
+	if domain.CategoryOf(err) != domain.ErrorPrecondition || !strings.Contains(err.Error(), want) ||
+		!strings.Contains(err.Error(), "role secondary") {
+		t.Fatalf("category=%s error=%v", domain.CategoryOf(err), err)
+	}
+
+	if got := countDynamicActions(dynamicClient.Actions(), "create", "opsrequests"); got != 0 {
+		t.Fatalf("created %d switchover probe(s) for a secondary", got)
+	}
+}
+
+func TestDiscoverLegacyKubeBlocksPrimaryIgnoresDowntimeOption(t *testing.T) {
+	selected := readyPod("db", "cluster-db-0", "node-a")
+	owner := &metav1.OwnerReference{
+		APIVersion: domain.AppsAPIVersion,
+		Kind:       domain.KindStatefulSet,
+		Name:       "cluster-db",
+		UID:        "statefulset-uid",
+		Controller: new(true),
+	}
+	selected.OwnerReferences = []metav1.OwnerReference{*owner}
+	selected.Labels = map[string]string{
+		kube.AppInstanceLabel:    "cluster",
+		kubeBlocksComponentLabel: "db",
+		kubeBlocksRoleLabel:      "primary",
+	}
+	cluster := &unstructured.Unstructured{Object: map[string]any{
+		"apiVersion": kubeBlocksClusterAPIVersion,
+		"kind":       "Cluster",
+		"metadata": map[string]any{
+			"name":      "cluster",
+			"namespace": "db",
+			"uid":       "cluster-uid",
+		},
+		"spec": map[string]any{"componentSpecs": []any{
+			map[string]any{"name": "db", "replicas": int64(1)},
+		}},
+	}}
+	typed := kubernetesfake.NewClientset(selected)
+	discovery := testutil.MustType[*fake.FakeDiscovery](t, typed.Discovery())
+	discovery.Resources = []*metav1.APIResourceList{{
+		GroupVersion: kubeBlocksClusterAPIVersion,
+		APIResources: []metav1.APIResource{{Name: "opsrequests"}},
+	}}
+	manager := NewManager(
+		typed,
+		dynamicfake.NewSimpleDynamicClient(runtime.NewScheme(), cluster),
+		discovery,
+	)
+
+	workload, err := manager.kubeBlocksWorkload(
+		context.Background(),
+		selected,
+		owner,
+		DiscoverOptions{AllowLeaderDowntime: true},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if workload.Controller.Kind != domain.KindStatefulSet || workload.KubeBlocks == nil ||
+		workload.KubeBlocks.Role != "primary" || workload.KubeBlocks.SwitchoverCandidate != "" ||
+		workload.KubeBlocks.SwitchoverStrategy != "" {
+		t.Fatalf("legacy KubeBlocks workload=%#v", workload)
+	}
+}
+
 func TestDiscoverKubeBlocksMissingCandidateSuggestsReadySibling(t *testing.T) {
 	selected := readyPod("db", "cluster-db-0", "node-a")
 	selected.OwnerReferences = []metav1.OwnerReference{
@@ -532,9 +702,13 @@ func TestDiscoverRejectsKubeBlocksMinIOAndCockroachComponents(t *testing.T) {
 					"namespace": "db",
 					"uid":       "cluster-uid",
 				},
-				"spec": map[string]any{"componentSpecs": []any{map[string]any{
-					"name": test.component, "componentDefRef": test.definition, "stop": false,
-				}}},
+				"spec": map[string]any{"componentSpecs": []any{
+					map[string]any{
+						"name":            test.component,
+						"componentDefRef": test.definition,
+						"replicas":        int64(1),
+					},
+				}},
 			}}
 			client := kubernetesfake.NewClientset(selected)
 			discovery := testutil.MustType[*fake.FakeDiscovery](t, client.Discovery())
@@ -598,7 +772,7 @@ func TestDiscoverRejectsKubeBlocksSwitchoverRejectedByAdmission(t *testing.T) {
 		"kind":       "Cluster",
 		"metadata":   map[string]any{"name": "cluster", "namespace": "db", "uid": "cluster-uid"},
 		"spec": map[string]any{
-			"componentSpecs": []any{map[string]any{"name": "db", "stop": false}},
+			"componentSpecs": []any{map[string]any{"name": "db", "replicas": int64(1)}},
 		},
 	}}
 	instanceSet := kubeBlocksInstanceSetObject("workloads.kubeblocks.io/v1alpha1", new(false))
@@ -639,7 +813,7 @@ func TestDiscoverRejectsKubeBlocksSwitchoverRejectedByAdmission(t *testing.T) {
 	}
 }
 
-func TestDiscoverKubeBlocksMongoDBFallsBackToNativeSwitchover(t *testing.T) {
+func TestDiscoverKubeBlocksMongoDBUsesNativeSwitchover(t *testing.T) {
 	var logs bytes.Buffer
 
 	selected := readyPod("db", "cluster-mongodb-0", "node-a")
@@ -680,7 +854,7 @@ func TestDiscoverKubeBlocksMongoDBFallsBackToNativeSwitchover(t *testing.T) {
 		"kind":       domain.KindCluster,
 		"metadata":   map[string]any{"name": "cluster", "namespace": "db", "uid": "cluster-uid"},
 		"spec": map[string]any{
-			"componentSpecs": []any{map[string]any{"name": "mongodb", "stop": false}},
+			"componentSpecs": []any{map[string]any{"name": "mongodb", "replicas": int64(1)}},
 		},
 	}}
 	instanceSet := kubeBlocksInstanceSetObject("workloads.kubeblocks.io/v1alpha1", new(false))
@@ -694,14 +868,17 @@ func TestDiscoverKubeBlocksMongoDBFallsBackToNativeSwitchover(t *testing.T) {
 		map[string]any{"podName": candidate.Name, "role": map[string]any{"name": "secondary"}},
 	}, "status", "membersStatus")
 	dynamicClient := dynamicfake.NewSimpleDynamicClient(runtime.NewScheme(), cluster, instanceSet)
+	opsRequestCreates := 0
 	dynamicClient.PrependReactor(
 		"create",
 		"opsrequests",
 		func(clienttesting.Action) (bool, runtime.Object, error) {
+			opsRequestCreates++
+
 			return true, nil, apierrors.NewForbidden(
 				schema.GroupResource{Group: domain.KubeBlocksAppsGroup, Resource: "opsrequests"},
 				"preflight",
-				errors.New("this cluster component mongodb does not support switchover"),
+				errors.New("component mongodb does not support switchover"),
 			)
 		},
 	)
@@ -740,17 +917,112 @@ func TestDiscoverKubeBlocksMongoDBFallsBackToNativeSwitchover(t *testing.T) {
 
 	if command.Namespace != "db" || command.Pod != selected.Name ||
 		command.Container != "mongodb" ||
-		strings.Join(
-			command.Command,
-			" ",
-		) != "sh -c test -x /scripts/switchover-with-candidate.sh" {
-		t.Fatalf("native script preflight=%#v", command)
+		!slices.Equal(command.Command, []string{"sh", "-ceu", mongoDBNativeSwitchoverPreflight}) {
+		t.Fatalf("native switchover preflight=%#v", command)
+	}
+
+	if opsRequestCreates != 0 {
+		t.Fatalf("MongoDB discovery created %d OpsRequest probes", opsRequestCreates)
 	}
 
 	output := logs.String()
-	if !strings.Contains(output, "checking KubeBlocks automatic switchover") ||
-		!strings.Contains(output, "checking MongoDB native switchover script") {
+	if !strings.Contains(output, "checking MongoDB native switchover prerequisites") {
 		t.Fatalf("logs=%q", output)
+	}
+}
+
+func TestKubeBlocksMongoDBUsesNativeSwitchoverWithoutOpsRequestProbe(t *testing.T) {
+	selected := readyPod("db", "cluster-mongodb-0", "node-a")
+	selected.Labels = map[string]string{kube.AppNameLabel: "mongodb"}
+	selected.Spec.Containers = []corev1.Container{{Name: "mongodb"}}
+
+	manager := NewManager(
+		kubernetesfake.NewClientset(selected),
+		dynamicfake.NewSimpleDynamicClient(runtime.NewScheme()),
+		nil,
+	)
+	manager.commandExecutor = podCommandExecutorFunc(
+		func(context.Context, podCommandRequest) (podCommandResult, error) {
+			return podCommandResult{}, nil
+		},
+	)
+
+	strategy, container, err := manager.kubeBlocksSwitchoverStrategy(
+		context.Background(),
+		selected,
+		"cluster",
+		"mongodb",
+		"cluster-mongodb-1",
+		kubeBlocksClusterAPIVersion,
+	)
+	if err != nil {
+		t.Fatalf("kubeBlocksSwitchoverStrategy() error=%v", err)
+	}
+
+	if strategy != domain.KubeBlocksSwitchoverMongoDBNative || container != "mongodb" {
+		t.Fatalf("strategy=%q container=%q", strategy, container)
+	}
+}
+
+func TestKubeBlocksRedisRequiresLeaderDowntimeWithoutOpsRequestProbe(t *testing.T) {
+	selected := readyPod("db", "cluster-redis-0", "node-a")
+	selected.Labels = map[string]string{
+		kube.AppNameLabel:        "redis",
+		kubeBlocksComponentLabel: "redis",
+		kubeBlocksRoleLabel:      "primary",
+	}
+	candidate := readyPod("db", "cluster-redis-1", "node-b")
+	candidate.Labels = map[string]string{kubeBlocksRoleLabel: "secondary"}
+	dynamicClient := dynamicfake.NewSimpleDynamicClient(runtime.NewScheme())
+	opsRequestCreates := 0
+	dynamicClient.PrependReactor(
+		"create",
+		"opsrequests",
+		func(clienttesting.Action) (bool, runtime.Object, error) {
+			opsRequestCreates++
+			return false, nil, nil
+		},
+	)
+	manager := NewManager(kubernetesfake.NewClientset(selected), dynamicClient, nil)
+
+	_, _, err := manager.resolveKubeBlocksSwitchover(
+		context.Background(),
+		selected,
+		&metav1.OwnerReference{Name: "cluster-redis"},
+		kubeBlocksDiscoveryState{
+			cluster:             "cluster",
+			component:           "redis",
+			opsAPIVersion:       kubeBlocksClusterAPIVersion,
+			switchoverCandidate: candidate,
+		},
+		kubeBlocksInstanceSetState{
+			HasLeaderRole: true,
+			LeaderRoles:   map[string]bool{"primary": true, "secondary": false},
+		},
+		true,
+	)
+	if err == nil ||
+		!strings.Contains(err.Error(), "does not provide a Switchover action") ||
+		!strings.Contains(err.Error(), "omit --kubeblocks-candidate") ||
+		!strings.Contains(err.Error(), "use --allow-leader-downtime") {
+		t.Fatalf("error=%v", err)
+	}
+
+	guidance := manager.kubeBlocksLeaderGuidance(
+		context.Background(),
+		selected,
+		"cluster",
+		"redis",
+		"primary",
+		kubeBlocksClusterAPIVersion,
+	)
+	if !strings.Contains(guidance, "Rerun without --kubeblocks-candidate") ||
+		!strings.Contains(guidance, "--allow-leader-downtime") {
+		t.Fatalf("guidance=%q", guidance)
+	}
+
+	if opsRequestCreates != 0 {
+		t.Fatalf("Redis discovery created %d OpsRequest probes", opsRequestCreates)
 	}
 }
 
@@ -836,7 +1108,7 @@ func TestKubeBlocksMongoDBPreflightFailureProvidesRecoveryGuidance(t *testing.T)
 	manager := NewManager(kubernetesfake.NewClientset(selected), dynamicClient, nil)
 	manager.commandExecutor = podCommandExecutorFunc(
 		func(context.Context, podCommandRequest) (podCommandResult, error) {
-			return podCommandResult{}, errors.New("script unavailable")
+			return podCommandResult{}, errors.New("MongoDB client unavailable")
 		},
 	)
 
@@ -851,7 +1123,11 @@ func TestKubeBlocksMongoDBPreflightFailureProvidesRecoveryGuidance(t *testing.T)
 	if err == nil ||
 		!strings.Contains(
 			err.Error(),
-			"verify /scripts/switchover-with-candidate.sh is executable in the mongodb container",
+			"MongoDB has no KubeBlocks Switchover OpsRequest handler; native switchover preflight failed",
+		) ||
+		!strings.Contains(
+			err.Error(),
+			"MongoDB client unavailable",
 		) ||
 		strings.Contains(err.Error(), "kubectl --namespace") {
 		t.Fatalf("error=%v", err)
@@ -934,12 +1210,10 @@ func TestRunMongoDBNativeSwitchoverExecutesScriptAndWaitsForRoleLabels(t *testin
 		t.Fatal(err)
 	}
 
-	want := []string{
-		"env",
-		"KB_CONSENSUS_LEADER_POD_FQDN=cluster-mongodb-0.cluster-mongodb-headless",
-		"KB_SWITCHOVER_CANDIDATE_FQDN=cluster-mongodb-1.cluster-mongodb-headless",
-		"/scripts/switchover-with-candidate.sh",
-	}
+	want := mongoDBNativeSwitchoverArgs(
+		"127.0.0.1",
+		"cluster-mongodb-1",
+	)
 	if command.Namespace != "db" || command.Pod != selected.Name ||
 		command.Container != "mongodb" ||
 		strings.Join(command.Command, "|") != strings.Join(want, "|") {
@@ -954,6 +1228,79 @@ func TestRunMongoDBNativeSwitchoverExecutesScriptAndWaitsForRoleLabels(t *testin
 			"KubeBlocks MongoDB switchover from "+selected.Name+" to "+candidate.Name,
 		) {
 		t.Fatalf("logs=%q", output)
+	}
+}
+
+func TestRunMongoDBNativeSwitchoverAcceptsDisconnectAfterStepDown(t *testing.T) {
+	selected := readyPod("db", "cluster-mongodb-0", "node-a")
+	owner := []metav1.OwnerReference{{
+		APIVersion: "workloads.kubeblocks.io/v1alpha1",
+		Kind:       domain.KindInstanceSet,
+		Name:       "cluster-mongodb",
+		UID:        "instanceset-uid",
+		Controller: new(true),
+	}}
+	selected.OwnerReferences = owner
+	selected.Labels = map[string]string{kubeBlocksRoleLabel: "primary"}
+	candidate := readyPod("db", "cluster-mongodb-1", "node-b")
+	candidate.OwnerReferences = owner
+	candidate.Labels = map[string]string{kubeBlocksRoleLabel: "secondary"}
+	typed := kubernetesfake.NewClientset(selected, candidate)
+	manager := NewManager(
+		typed,
+		dynamicfake.NewSimpleDynamicClient(runtime.NewScheme()),
+		nil,
+	)
+	manager.poll = time.Millisecond
+	manager.commandExecutor = podCommandExecutorFunc(
+		func(ctx context.Context, _ podCommandRequest) (podCommandResult, error) {
+			current, err := typed.CoreV1().Pods("db").Get(ctx, selected.Name, metav1.GetOptions{})
+			if err != nil {
+				return podCommandResult{}, err
+			}
+
+			current.Labels[kubeBlocksRoleLabel] = "secondary"
+			if _, err := typed.CoreV1().
+				Pods("db").
+				Update(ctx, current, metav1.UpdateOptions{}); err != nil {
+				return podCommandResult{}, err
+			}
+
+			current, err = typed.CoreV1().Pods("db").Get(ctx, candidate.Name, metav1.GetOptions{})
+			if err != nil {
+				return podCommandResult{}, err
+			}
+
+			current.Labels[kubeBlocksRoleLabel] = "primary"
+			if _, err := typed.CoreV1().
+				Pods("db").
+				Update(ctx, current, metav1.UpdateOptions{}); err != nil {
+				return podCommandResult{}, err
+			}
+
+			return podCommandResult{Stdout: mongoDBNativeSwitchoverStepdownMarker},
+				errors.New("connection closed during step-down")
+		},
+	)
+	session := kubeBlocksSession()
+	session.Spec.WorkloadPtr().Controller = objectReference(
+		owner[0].APIVersion,
+		owner[0].Kind,
+		"db",
+		owner[0].Name,
+		owner[0].UID,
+		"",
+	)
+	session.Spec.WorkloadPtr().Pod.UID = selected.UID
+	kb := session.Spec.Workload().KubeBlocks
+	kb.Component = "mongodb"
+	kb.Instance = selected.Name
+	kb.SwitchoverCandidate = candidate.Name
+	kb.SwitchoverStrategy = domain.KubeBlocksSwitchoverMongoDBNative
+	kb.SwitchoverContainer = "mongodb"
+
+	if err := manager.runMongoDBNativeSwitchover(context.Background(), session); err != nil {
+		t.Fatal(err)
 	}
 }
 
@@ -1091,7 +1438,9 @@ func TestKubeBlocksSwitchoverCommandMatchesServedAPI(t *testing.T) {
 		"apps.kubeblocks.io/v1alpha1",
 	)
 	if !strings.Contains(appsCommand, "instanceName: cluster-postgresql-1") ||
-		strings.Contains(appsCommand, "candidateName:") {
+		strings.Contains(appsCommand, "candidateName:") ||
+		!strings.Contains(appsCommand, "clusterRef: cluster") ||
+		strings.Contains(appsCommand, "clusterName:") {
 		t.Fatalf("apps OpsRequest command=%q", appsCommand)
 	}
 
@@ -1104,7 +1453,9 @@ func TestKubeBlocksSwitchoverCommandMatchesServedAPI(t *testing.T) {
 		"operations.kubeblocks.io/v1alpha1",
 	)
 	if !strings.Contains(operationsCommand, "instanceName: cluster-postgresql-0") ||
-		!strings.Contains(operationsCommand, "candidateName: cluster-postgresql-1") {
+		!strings.Contains(operationsCommand, "candidateName: cluster-postgresql-1") ||
+		!strings.Contains(operationsCommand, "clusterName: cluster") ||
+		strings.Contains(operationsCommand, "clusterRef:") {
 		t.Fatalf("operations OpsRequest command=%q", operationsCommand)
 	}
 }
@@ -1118,14 +1469,76 @@ func TestKubeBlocksMongoDBNativeSwitchoverCommand(t *testing.T) {
 		"cluster-mongodb-1",
 	)
 	for _, fragment := range []string{
-		"kubectl --namespace db exec cluster-mongodb-0 -c mongodb -- env",
-		"KB_CONSENSUS_LEADER_POD_FQDN=cluster-mongodb-0.cluster-mongodb-headless",
-		"KB_SWITCHOVER_CANDIDATE_FQDN=cluster-mongodb-1.cluster-mongodb-headless",
-		"/scripts/switchover-with-candidate.sh",
+		"kubectl --namespace 'db' exec 'cluster-mongodb-0' -c mongodb -- 'sh' '-ceu'",
+		`case "$leader" in`,
+		`case "$candidate" in`,
+		"127.0.0.1",
+		"cluster-mongodb-1",
+		"replSetFreeze",
+		mongoDBNativeSwitchoverStepdownMarker,
+		"replSetStepDown",
 	} {
 		if !strings.Contains(command, fragment) {
 			t.Fatalf("command=%q does not contain %q", command, fragment)
 		}
+	}
+
+	if strings.Contains(command, `case "$leader:$candidate" in`) {
+		t.Fatalf("command=%q validates its own separator as part of the Pod names", command)
+	}
+
+	if strings.Contains(command, "rs.reconfig") {
+		t.Fatalf("command=%q mutates the durable replica-set configuration", command)
+	}
+}
+
+func TestLegacyKubeBlocksRecoveryCapacitySelection(t *testing.T) {
+	rolledBackAt := metav1.Now()
+	tests := []struct {
+		name    string
+		phase   domain.Phase
+		volumes []domain.VolumeStatus
+		want    bool
+	}{
+		{name: "pausing uses source capacity", phase: domain.PhasePausing},
+		{
+			name:    "rollback before volume restoration uses destination capacity",
+			phase:   domain.PhaseRollingBack,
+			volumes: []domain.VolumeStatus{{}},
+			want:    true,
+		},
+		{
+			name:  "rollback after every volume restoration uses source capacity",
+			phase: domain.PhaseRollingBack,
+			volumes: []domain.VolumeStatus{{
+				Activation: domain.ActivationState{RolledBackAt: &rolledBackAt},
+			}},
+		},
+		{
+			name:  "partial rollback uses destination capacity",
+			phase: domain.PhaseRollingBack,
+			volumes: []domain.VolumeStatus{
+				{Activation: domain.ActivationState{RolledBackAt: &rolledBackAt}},
+				{},
+			},
+			want: true,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			session := &domain.Session{Status: domain.SessionStatus{
+				Phase:   test.phase,
+				Volumes: test.volumes,
+			}}
+			if got := legacyKubeBlocksRecoveryUsesDestinationCapacity(session); got != test.want {
+				t.Fatalf(
+					"legacyKubeBlocksRecoveryUsesDestinationCapacity()=%t, want %t",
+					got,
+					test.want,
+				)
+			}
+		})
 	}
 }
 
@@ -1949,7 +2362,7 @@ func TestCreateAndWaitOpsReusesSucceededAndRetriesFailedRequests(t *testing.T) {
 		Version:  "v1alpha1",
 		Resource: "opsrequests",
 	}
-	succeeded := opsRequest("session-offline", "Succeed")
+	succeeded := opsRequest("session-pause", "Succeed")
 	dynamicClient := dynamicfake.NewSimpleDynamicClient(runtime.NewScheme(), succeeded)
 	manager := NewManager(kubernetesfake.NewClientset(), dynamicClient, nil)
 	manager.poll = time.Millisecond
@@ -1958,8 +2371,8 @@ func TestCreateAndWaitOpsReusesSucceededAndRetriesFailedRequests(t *testing.T) {
 	if err := manager.createAndWaitOps(
 		context.Background(),
 		session,
-		"offline",
-		map[string]any{"type": "HorizontalScaling"},
+		"pause",
+		kubeBlocksPauseSpec(kubeBlocksSession().Spec.Workload().KubeBlocks, true),
 	); err != nil {
 		t.Fatal(err)
 	}
@@ -1968,7 +2381,7 @@ func TestCreateAndWaitOpsReusesSucceededAndRetriesFailedRequests(t *testing.T) {
 		t.Fatal("succeeded request should be reused")
 	}
 
-	failed := opsRequest("session-online", "Failed")
+	failed := opsRequest("session-resume", "Failed")
 	dynamicClient = dynamicfake.NewSimpleDynamicClient(runtime.NewScheme(), failed)
 	dynamicClient.PrependReactor(
 		"create",
@@ -1986,8 +2399,8 @@ func TestCreateAndWaitOpsReusesSucceededAndRetriesFailedRequests(t *testing.T) {
 	if err := manager.createAndWaitOps(
 		context.Background(),
 		session,
-		"online",
-		map[string]any{"type": "HorizontalScaling"},
+		"resume",
+		kubeBlocksPauseSpec(kubeBlocksSession().Spec.Workload().KubeBlocks, false),
 	); err != nil {
 		t.Fatal(err)
 	}
@@ -2016,8 +2429,8 @@ func TestCreateAndWaitOpsReturnsTerminalFailure(t *testing.T) {
 	err := manager.createAndWaitOps(
 		context.Background(),
 		kubeBlocksSession(),
-		"offline",
-		map[string]any{"type": "HorizontalScaling"},
+		"pause",
+		kubeBlocksPauseSpec(kubeBlocksSession().Spec.Workload().KubeBlocks, true),
 	)
 	if domain.CategoryOf(err) != domain.ErrorPrecondition ||
 		!strings.Contains(err.Error(), "Cancelled") {
@@ -2032,8 +2445,8 @@ func TestCreateAndWaitOpsRejectsMissingCreatedUID(t *testing.T) {
 	err := manager.createAndWaitOps(
 		context.Background(),
 		kubeBlocksSession(),
-		"offline",
-		map[string]any{"type": "HorizontalScaling"},
+		"pause",
+		kubeBlocksPauseSpec(kubeBlocksSession().Spec.Workload().KubeBlocks, true),
 	)
 	if domain.CategoryOf(err) != domain.ErrorKubernetes {
 		t.Fatalf("category=%s error=%v", domain.CategoryOf(err), err)
@@ -2041,7 +2454,7 @@ func TestCreateAndWaitOpsRejectsMissingCreatedUID(t *testing.T) {
 }
 
 func TestCreateAndWaitOpsRejectsForeignExistingRequest(t *testing.T) {
-	foreign := opsRequest("session-offline", "Failed")
+	foreign := opsRequest("session-pause", "Failed")
 	labels := foreign.GetLabels()
 	labels[kube.SessionKey] = "foreign-session"
 	foreign.SetLabels(labels)
@@ -2055,8 +2468,8 @@ func TestCreateAndWaitOpsRejectsForeignExistingRequest(t *testing.T) {
 	err := manager.createAndWaitOps(
 		ctx,
 		kubeBlocksSession(),
-		"offline",
-		map[string]any{"type": "HorizontalScaling"},
+		"pause",
+		kubeBlocksPauseSpec(kubeBlocksSession().Spec.Workload().KubeBlocks, true),
 	)
 	if domain.CategoryOf(err) != domain.ErrorConflict {
 		t.Fatalf("category=%s error=%v", domain.CategoryOf(err), err)
@@ -2068,7 +2481,7 @@ func TestCreateAndWaitOpsRejectsForeignExistingRequest(t *testing.T) {
 }
 
 func TestCreateAndWaitOpsRejectsReplacementWhileWaiting(t *testing.T) {
-	original := opsRequest("session-offline", "Running")
+	original := opsRequest("session-pause", "Running")
 	replacement := original.DeepCopy()
 	replacement.SetUID("replacement-uid")
 	_ = unstructured.SetNestedField(replacement.Object, "Succeed", "status", "phase")
@@ -2092,12 +2505,290 @@ func TestCreateAndWaitOpsRejectsReplacementWhileWaiting(t *testing.T) {
 	err := manager.createAndWaitOps(
 		context.Background(),
 		kubeBlocksSession(),
-		"offline",
-		map[string]any{"type": "HorizontalScaling"},
+		"pause",
+		kubeBlocksPauseSpec(kubeBlocksSession().Spec.Workload().KubeBlocks, true),
 	)
 	if domain.CategoryOf(err) != domain.ErrorConflict ||
 		!strings.Contains(err.Error(), "replaced while waiting") {
 		t.Fatalf("category=%s error=%v", domain.CategoryOf(err), err)
+	}
+}
+
+func TestCreateAndWaitOpsValidatesConcurrentAlreadyExists(t *testing.T) {
+	gvr := mustGVR(kubeBlocksClusterAPIVersion, "opsrequests")
+	existing := opsRequest("session-pause", "Succeed")
+	dynamicClient := dynamicfake.NewSimpleDynamicClient(runtime.NewScheme(), existing)
+	reads := 0
+	dynamicClient.PrependReactor(
+		"get",
+		"opsrequests",
+		func(action clienttesting.Action) (bool, runtime.Object, error) {
+			reads++
+			if reads == 1 {
+				return true, nil, apierrors.NewNotFound(
+					gvr.GroupResource(),
+					"pvc-migrate-session-pause",
+				)
+			}
+
+			return false, nil, nil
+		},
+	)
+	dynamicClient.PrependReactor(
+		"create",
+		"opsrequests",
+		func(clienttesting.Action) (bool, runtime.Object, error) {
+			return true, nil, apierrors.NewAlreadyExists(
+				gvr.GroupResource(),
+				"pvc-migrate-session-pause",
+			)
+		},
+	)
+	manager := NewManager(kubernetesfake.NewClientset(), dynamicClient, nil)
+	manager.poll = time.Millisecond
+
+	if err := manager.createAndWaitOps(
+		context.Background(),
+		kubeBlocksSession(),
+		"pause",
+		kubeBlocksPauseSpec(kubeBlocksSession().Spec.Workload().KubeBlocks, true),
+	); err != nil {
+		t.Fatalf("createAndWaitOps() error=%v", err)
+	}
+}
+
+func TestKubeBlocksPauseSpecsMatchServedAPIVersions(t *testing.T) {
+	apps := &domain.KubeBlocksSpec{
+		Cluster:                "database",
+		Component:              "postgresql",
+		OpsAPIVersion:          "apps.kubeblocks.io/v1alpha1",
+		LegacyOriginalReplicas: 3,
+	}
+
+	paused := kubeBlocksPauseSpec(apps, true)
+	if _, found, _ := unstructured.NestedString(paused, "clusterRef"); !found {
+		t.Fatalf("apps pause spec must use clusterRef: %#v", paused)
+	}
+
+	if _, found, _ := unstructured.NestedString(paused, "clusterName"); found {
+		t.Fatalf("apps pause spec must not use clusterName: %#v", paused)
+	}
+
+	if got, _, _ := unstructured.NestedString(paused, "type"); got != "Stop" {
+		t.Fatalf("apps pause type=%q", got)
+	}
+
+	if _, found, err := unstructured.NestedSlice(paused, "stop"); err != nil || found {
+		t.Fatalf("apps pause must omit unsupported stop list: %#v", paused)
+	}
+
+	resumed := kubeBlocksPauseSpec(apps, false)
+	if got, _, _ := unstructured.NestedString(resumed, "type"); got != "Start" {
+		t.Fatalf("apps resume type=%q", got)
+	}
+
+	if _, found, err := unstructured.NestedSlice(resumed, "start"); err != nil || found {
+		t.Fatalf("apps resume must omit unsupported start list: %#v", resumed)
+	}
+
+	operations := *apps
+	operations.OpsAPIVersion = "operations.kubeblocks.io/v1alpha1"
+
+	paused = kubeBlocksPauseSpec(&operations, true)
+	if got, _, _ := unstructured.NestedString(paused, "clusterName"); got != "database" {
+		t.Fatalf("operations clusterName=%q", got)
+	}
+
+	if got, _, _ := unstructured.NestedString(paused, "type"); got != "Stop" {
+		t.Fatalf("operations pause type=%q", got)
+	}
+
+	stop, _, _ := unstructured.NestedSlice(paused, "stop")
+	if len(stop) != 1 {
+		t.Fatalf("operations stop=%#v", stop)
+	}
+
+	resumed = kubeBlocksPauseSpec(&operations, false)
+	if got, _, _ := unstructured.NestedString(resumed, "type"); got != "Start" {
+		t.Fatalf("operations resume type=%q", got)
+	}
+}
+
+func TestLegacyKubeBlocksAbortSkipsResumeWhenPauseNeverStarted(t *testing.T) {
+	pod := readyPod("db", "cluster-mongodb-0", "node-a")
+	pod.UID = "pod-uid"
+	pod.OwnerReferences = []metav1.OwnerReference{{
+		APIVersion: domain.AppsAPIVersion,
+		Kind:       domain.KindStatefulSet,
+		Name:       "cluster-mongodb",
+		UID:        "statefulset-uid",
+		Controller: new(true),
+	}}
+	cluster := &unstructured.Unstructured{Object: map[string]any{
+		"apiVersion": kubeBlocksClusterAPIVersion,
+		"kind":       domain.KindCluster,
+		"metadata": map[string]any{
+			"name": "cluster", "namespace": "db", "uid": "cluster-uid",
+		},
+		"spec": map[string]any{"componentSpecs": []any{
+			map[string]any{"name": "mongodb", "replicas": int64(2)},
+		}},
+		"status": map[string]any{"phase": "Running"},
+	}}
+	typed := kubernetesfake.NewClientset(pod)
+	dynamicClient := dynamicfake.NewSimpleDynamicClient(runtime.NewScheme(), cluster)
+	manager := NewManager(typed, dynamicClient, typed.Discovery())
+	session := controllerSession(domain.WorkloadSpec{
+		Adapter: domain.WorkloadKubeBlocks,
+		Pod: domain.ObjectReference{
+			APIVersion: domain.CoreAPIVersion,
+			Kind:       domain.KindPod,
+			Namespace:  pod.Namespace,
+			Name:       pod.Name,
+			UID:        pod.UID,
+		},
+		Controller: domain.ObjectReference{
+			APIVersion: domain.AppsAPIVersion,
+			Kind:       domain.KindStatefulSet,
+			Namespace:  pod.Namespace,
+			Name:       "cluster-mongodb",
+			UID:        "statefulset-uid",
+		},
+		KubeBlocks: &domain.KubeBlocksSpec{
+			Cluster:                  "cluster",
+			Component:                "mongodb",
+			Instance:                 pod.Name,
+			SwitchoverStrategy:       domain.KubeBlocksSwitchoverMongoDBNative,
+			OpsAPIVersion:            kubeBlocksClusterAPIVersion,
+			ClusterUID:               cluster.GetUID(),
+			LegacyOriginalReplicas:   2,
+			OriginalPausedConfigured: false,
+		},
+	})
+	session.Status.Phase = domain.PhaseAborting
+	session.Status.ResumeFrom = domain.PhasePausing
+	session.Status.History = append(session.Status.History,
+		domain.HistoryEntry{Phase: domain.PhasePausing, Time: metav1.Now()},
+		domain.HistoryEntry{Phase: domain.PhaseFailed, Time: metav1.Now()},
+		domain.HistoryEntry{Phase: domain.PhaseAborting, Time: metav1.Now()},
+	)
+
+	if err := manager.Resume(context.Background(), session); err != nil {
+		t.Fatalf("Resume() error=%v", err)
+	}
+
+	if countDynamicActions(dynamicClient.Actions(), "create", "opsrequests") != 0 {
+		t.Fatal("abort created a Start OpsRequest before pause began")
+	}
+}
+
+func TestVerifyKubeBlocksPausedUsesSucceededOpsRequestAndClusterStatus(t *testing.T) {
+	cluster := &unstructured.Unstructured{Object: map[string]any{
+		"apiVersion": kubeBlocksClusterAPIVersion,
+		"kind":       "Cluster",
+		"metadata": map[string]any{
+			"name": "cluster", "namespace": "db", "uid": "cluster-uid",
+			"annotations": map[string]any{pauseSessionAnnotation: "session"},
+		},
+		"spec": map[string]any{"componentSpecs": []any{
+			map[string]any{"name": "db", "replicas": int64(3)},
+		}},
+		"status": map[string]any{"phase": "Stopped"},
+	}}
+
+	request := opsRequest("session-pause", "Succeed")
+	if err := unstructured.SetNestedField(
+		request.Object,
+		"cluster",
+		"spec",
+		"clusterName",
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := unstructured.SetNestedField(
+		request.Object,
+		false,
+		"spec",
+		"enqueueOnForce",
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := unstructured.SetNestedField(
+		request.Object,
+		int64(0),
+		"spec",
+		"preConditionDeadlineSeconds",
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := unstructured.SetNestedField(
+		request.Object,
+		int64(0),
+		"spec",
+		"ttlSecondsBeforeAbort",
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	dynamicClient := dynamicfake.NewSimpleDynamicClient(runtime.NewScheme(), cluster, request)
+	manager := NewManager(kubernetesfake.NewClientset(), dynamicClient, nil)
+
+	session := kubeBlocksSession()
+	if err := manager.VerifyPaused(context.Background(), session); err != nil {
+		t.Fatalf("VerifyPaused() error=%v", err)
+	}
+
+	current, err := dynamicClient.Resource(mustGVR(kubeBlocksClusterAPIVersion, clusterResource)).
+		Namespace("db").Get(context.Background(), "cluster", metav1.GetOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	_ = unstructured.SetNestedField(current.Object, "Running", "status", "phase")
+	if _, err := dynamicClient.Resource(mustGVR(kubeBlocksClusterAPIVersion, clusterResource)).
+		Namespace("db").Update(context.Background(), current, metav1.UpdateOptions{}); err != nil {
+		t.Fatal(err)
+	}
+
+	if domain.CategoryOf(
+		manager.VerifyPaused(context.Background(), session),
+	) != domain.ErrorPrecondition {
+		t.Fatalf("VerifyPaused() should reject a resumed Cluster")
+	}
+}
+
+func TestVerifyKubeBlocksPausedUsesStoppedComponentForOperationsAPI(t *testing.T) {
+	cluster := &unstructured.Unstructured{Object: map[string]any{
+		"apiVersion": kubeBlocksClusterAPIVersion,
+		"kind":       "Cluster",
+		"metadata": map[string]any{
+			"name": "cluster", "namespace": "db", "uid": "cluster-uid",
+			"annotations": map[string]any{pauseSessionAnnotation: "session"},
+		},
+		"spec": map[string]any{"componentSpecs": []any{
+			map[string]any{"name": "db", "replicas": int64(2)},
+		}},
+		"status": map[string]any{"components": map[string]any{
+			"db": map[string]any{"phase": "Stopped"},
+		}},
+	}}
+	request := opsRequest("session-pause", "Succeed")
+	request.Object["apiVersion"] = "operations.kubeblocks.io/v1alpha1"
+	request.Object["spec"] = map[string]any{
+		"clusterName": "cluster",
+		"type":        "Stop",
+		"stop":        []any{map[string]any{"componentName": "db"}},
+	}
+	dynamicClient := dynamicfake.NewSimpleDynamicClient(runtime.NewScheme(), cluster, request)
+	manager := NewManager(kubernetesfake.NewClientset(), dynamicClient, nil)
+	session := kubeBlocksSession()
+	session.Spec.Workload().KubeBlocks.OpsAPIVersion = kubeBlocksOpsAPIVersion
+
+	if err := manager.VerifyPaused(context.Background(), session); err != nil {
+		t.Fatalf("VerifyPaused() error=%v", err)
 	}
 }
 
@@ -2140,6 +2831,9 @@ func TestOperationNameIsStableAndDNSLengthBounded(t *testing.T) {
 }
 
 func opsRequest(action, phase string) *unstructured.Unstructured {
+	paused := !strings.HasSuffix(action, "-resume")
+	requestSession := kubeBlocksSession()
+
 	return &unstructured.Unstructured{Object: map[string]any{
 		"apiVersion": "apps.kubeblocks.io/v1alpha1",
 		"kind":       "OpsRequest",
@@ -2152,6 +2846,7 @@ func opsRequest(action, phase string) *unstructured.Unstructured {
 				kube.SessionKey:     "session",
 			},
 		},
+		"spec":   kubeBlocksPauseSpec(requestSession.Spec.Workload().KubeBlocks, paused),
 		"status": map[string]any{"phase": phase},
 	}}
 }
@@ -2162,10 +2857,9 @@ func kubeBlocksSession() *domain.Session {
 		Pod:     domain.ObjectReference{Namespace: "db", Name: "cluster-db-0"},
 		KubeBlocks: &domain.KubeBlocksSpec{
 			Cluster: "cluster", Component: "db", Instance: "cluster-db-0",
-			SwitchoverStrategy: domain.KubeBlocksSwitchoverOpsRequest,
-			OpsAPIVersion:      "apps.kubeblocks.io/v1alpha1",
-			ClusterUID:         "cluster-uid",
-			OriginalStops:      map[string]bool{"db": false},
+			OpsAPIVersion:          "apps.kubeblocks.io/v1alpha1",
+			ClusterUID:             "cluster-uid",
+			LegacyOriginalReplicas: 1,
 		},
 	})
 
@@ -2341,7 +3035,7 @@ func TestDiscoverKubeBlocksUsesInstanceSetRoleStatus(t *testing.T) {
 					"uid":       "cluster-uid",
 				},
 				"spec": map[string]any{
-					"componentSpecs": []any{map[string]any{"name": "db", "stop": false}},
+					"componentSpecs": []any{map[string]any{"name": "db", "replicas": int64(1)}},
 				},
 			}}
 			instanceSet := kubeBlocksInstanceSetObject(apiVersion, new(false))
@@ -2428,7 +3122,7 @@ func TestDiscoverKubeBlocksInstanceSetRejectsInitiallyPausedState(t *testing.T) 
 		"kind":       domain.KindCluster,
 		"metadata":   map[string]any{"name": "cluster", "namespace": "db", "uid": "cluster-uid"},
 		"spec": map[string]any{
-			"componentSpecs": []any{map[string]any{"name": "db", "stop": false}},
+			"componentSpecs": []any{map[string]any{"name": "db", "replicas": int64(1)}},
 		},
 	}}
 	originalPaused := true
@@ -2597,7 +3291,128 @@ func TestPauseKubeBlocksReturnsPodReadErrorsBeforeOffline(t *testing.T) {
 	}
 }
 
-func TestKubeBlocksPauseOnlyStopsSelectedComponent(t *testing.T) {
+func TestLegacyKubeBlocksPauseIgnoresPersistedSwitchover(t *testing.T) {
+	for _, strategy := range []domain.KubeBlocksSwitchoverStrategy{
+		domain.KubeBlocksSwitchoverOpsRequest,
+		domain.KubeBlocksSwitchoverMongoDBNative,
+	} {
+		t.Run(string(strategy), func(t *testing.T) {
+			cluster := &unstructured.Unstructured{Object: map[string]any{
+				"apiVersion": kubeBlocksClusterAPIVersion,
+				"kind":       domain.KindCluster,
+				"metadata": map[string]any{
+					"name": "cluster", "namespace": "db", "uid": "cluster-uid",
+				},
+				"spec": map[string]any{"componentSpecs": []any{
+					map[string]any{"name": "db", "replicas": int64(1)},
+				}},
+				"status": map[string]any{
+					"phase": "Running",
+					"components": map[string]any{
+						"db": map[string]any{"phase": "Running"},
+					},
+				},
+			}}
+			controller := domain.ObjectReference{
+				APIVersion: domain.AppsAPIVersion,
+				Kind:       domain.KindStatefulSet,
+				Namespace:  "db",
+				Name:       "cluster-db",
+				UID:        "statefulset-uid",
+			}
+			pod := readyPod("db", "cluster-db-0", "node-a")
+			pod.UID = "pod-uid"
+			pod.Labels = map[string]string{kubeBlocksRoleLabel: "primary"}
+			pod.OwnerReferences = []metav1.OwnerReference{{
+				APIVersion: controller.APIVersion,
+				Kind:       controller.Kind,
+				Name:       controller.Name,
+				UID:        controller.UID,
+				Controller: new(true),
+			}}
+
+			typed := kubernetesfake.NewClientset(pod)
+			dynamicClient := dynamicfake.NewSimpleDynamicClient(runtime.NewScheme(), cluster)
+			operationTypes := make([]string, 0, 1)
+			dynamicClient.PrependReactor(
+				"create",
+				"opsrequests",
+				func(action clienttesting.Action) (bool, runtime.Object, error) {
+					request := testutil.MustActionObject[*unstructured.Unstructured](t, action)
+					typeName, _, _ := unstructured.NestedString(request.Object, "spec", "type")
+					operationTypes = append(operationTypes, typeName)
+
+					if typeName != "Stop" {
+						return true, nil, errors.New(
+							"unexpected legacy OpsRequest type " + typeName,
+						)
+					}
+
+					request.SetUID("pause-request-uid")
+					_ = unstructured.SetNestedField(request.Object, "Succeed", "status", "phase")
+
+					current, err := dynamicClient.Tracker().Get(
+						mustGVR(kubeBlocksClusterAPIVersion, clusterResource),
+						"db",
+						"cluster",
+					)
+					if err != nil {
+						return true, nil, err
+					}
+
+					updated := testutil.MustType[*unstructured.Unstructured](t, current).DeepCopy()
+					_ = unstructured.SetNestedField(updated.Object, "Stopped", "status", "phase")
+
+					_ = unstructured.SetNestedField(
+						updated.Object,
+						"Stopped",
+						"status", "components", "db", "phase",
+					)
+					if err := dynamicClient.Tracker().Update(
+						mustGVR(kubeBlocksClusterAPIVersion, clusterResource),
+						updated,
+						"db",
+					); err != nil {
+						return true, nil, err
+					}
+
+					return false, nil, nil
+				},
+			)
+
+			commandCalls := 0
+			manager := NewManager(typed, dynamicClient, nil)
+			manager.poll = time.Millisecond
+			manager.commandExecutor = podCommandExecutorFunc(
+				func(context.Context, podCommandRequest) (podCommandResult, error) {
+					commandCalls++
+
+					return podCommandResult{}, errors.New("unexpected native switchover")
+				},
+			)
+			session := kubeBlocksSession()
+			session.Status.Phase = domain.PhasePausing
+			session.Spec.WorkloadPtr().Controller = controller
+			session.Spec.WorkloadPtr().Pod.UID = pod.UID
+			session.Spec.Workload().KubeBlocks.SwitchoverCandidate = "cluster-db-1"
+			session.Spec.Workload().KubeBlocks.SwitchoverStrategy = strategy
+
+			if err := manager.Pause(context.Background(), session); err != nil {
+				t.Fatal(err)
+			}
+
+			if len(operationTypes) != 1 || operationTypes[0] != "Stop" {
+				t.Fatalf("OpsRequest types=%v want=[Stop]", operationTypes)
+			}
+
+			if commandCalls != 0 {
+				t.Fatalf("native switchover calls=%d want=0", commandCalls)
+			}
+		})
+	}
+}
+
+func TestKubeBlocksPauseUsesComponentScopedOpsRequest(t *testing.T) {
 	ctx := context.Background()
 	cluster := &unstructured.Unstructured{Object: map[string]any{
 		"apiVersion": "apps.kubeblocks.io/v1alpha1",
@@ -2608,64 +3423,447 @@ func TestKubeBlocksPauseOnlyStopsSelectedComponent(t *testing.T) {
 			"uid":       "cluster-uid",
 		},
 		"spec": map[string]any{"componentSpecs": []any{
-			map[string]any{"name": "postgresql", "stop": false},
-			map[string]any{"name": "etcd", "stop": false},
+			map[string]any{"name": "postgresql", "replicas": int64(1)},
+			map[string]any{"name": "etcd", "replicas": int64(1)},
 		}},
 	}}
 	dynamicClient := dynamicfake.NewSimpleDynamicClient(runtime.NewScheme(), cluster)
+	dynamicClient.PrependReactor(
+		"create",
+		"opsrequests",
+		func(action clienttesting.Action) (bool, runtime.Object, error) {
+			object := testutil.MustActionObject[*unstructured.Unstructured](t, action)
+			object.SetUID("pause-request-uid")
+			_ = unstructured.SetNestedField(object.Object, "Succeed", "status", "phase")
+			return false, nil, nil
+		},
+	)
 	manager := NewManager(kubernetesfake.NewClientset(), dynamicClient, nil)
 	session := kubeBlocksSession()
 	session.Spec.Workload().KubeBlocks.Component = "postgresql"
 
-	session.Spec.Workload().KubeBlocks.OriginalStops = map[string]bool{"postgresql": false}
 	if err := manager.setKubeBlocksPaused(ctx, session, true); err != nil {
 		t.Fatal(err)
-	}
-
-	paused, err := dynamicClient.Resource(mustGVR(kubeBlocksClusterAPIVersion, clusterResource)).
-		Namespace("db").
-		Get(ctx, "cluster", metav1.GetOptions{})
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	components, _, _ := unstructured.NestedSlice(paused.Object, "spec", "componentSpecs")
-	for index, expected := range []bool{true, false} {
-		component := testutil.MustType[map[string]any](t, components[index])
-
-		stopped, _, err := unstructured.NestedBool(component, "stop")
-		if err != nil {
-			t.Fatal(err)
-		}
-
-		if stopped != expected {
-			t.Fatalf("pause component[%d] stop=%v want=%v", index, stopped, expected)
-		}
 	}
 
 	if err := manager.setKubeBlocksPaused(ctx, session, false); err != nil {
 		t.Fatal(err)
 	}
 
-	resumed, err := dynamicClient.Resource(mustGVR(kubeBlocksClusterAPIVersion, clusterResource)).
-		Namespace("db").
-		Get(ctx, "cluster", metav1.GetOptions{})
+	creates := countDynamicActions(dynamicClient.Actions(), "create", "opsrequests")
+	if creates != 2 {
+		t.Fatalf("OpsRequest creates=%d want=2", creates)
+	}
+
+	updated, err := dynamicClient.Resource(mustGVR(kubeBlocksClusterAPIVersion, clusterResource)).
+		Namespace("db").Get(ctx, "cluster", metav1.GetOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	components, _, _ = unstructured.NestedSlice(resumed.Object, "spec", "componentSpecs")
-	for index, expected := range []bool{false, false} {
-		component := testutil.MustType[map[string]any](t, components[index])
+	if updated.GetAnnotations()[pauseSessionAnnotation] != session.ID {
+		t.Fatalf("Cluster pause annotation=%v", updated.GetAnnotations())
+	}
+}
 
-		stopped, _, err := unstructured.NestedBool(component, "stop")
-		if err != nil {
-			t.Fatal(err)
-		}
+func TestKubeBlocksRollbackPauseReusesSuccessfulInitialStop(t *testing.T) {
+	cluster := &unstructured.Unstructured{Object: map[string]any{
+		"apiVersion": kubeBlocksClusterAPIVersion,
+		"kind":       "Cluster",
+		"metadata": map[string]any{
+			"name": "cluster", "namespace": "db", "uid": "cluster-uid",
+			"annotations": map[string]any{pauseSessionAnnotation: "session"},
+		},
+		"spec": map[string]any{"componentSpecs": []any{
+			map[string]any{"name": "db", "replicas": int64(1)},
+		}},
+		"status": map[string]any{
+			"phase": "Stopped",
+			"components": map[string]any{
+				"db": map[string]any{"phase": "Stopped"},
+			},
+		},
+	}}
+	dynamicClient := dynamicfake.NewSimpleDynamicClient(
+		runtime.NewScheme(),
+		cluster,
+		opsRequest("session-pause", "Succeed"),
+		opsRequest("session-rollback-pause", "Failed"),
+	)
+	manager := NewManager(kubernetesfake.NewClientset(), dynamicClient, nil)
+	session := kubeBlocksSession()
+	session.Status.Phase = domain.PhaseRollingBack
 
-		if stopped != expected {
-			t.Fatalf("resume component[%d] stop=%v want=%v", index, stopped, expected)
-		}
+	if err := manager.setKubeBlocksPaused(context.Background(), session, true); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := manager.VerifyPaused(context.Background(), session); err != nil {
+		t.Fatal(err)
+	}
+
+	if creates := countDynamicActions(
+		dynamicClient.Actions(),
+		"create",
+		"opsrequests",
+	); creates != 0 {
+		t.Fatalf("OpsRequest creates=%d want=0", creates)
+	}
+}
+
+func TestSyncLegacyKubeBlocksVolumeClaimTemplateCapacity(t *testing.T) {
+	for _, test := range []struct {
+		name     string
+		phase    domain.Phase
+		current  string
+		expected string
+	}{
+		{name: "resume uses destination capacity", phase: domain.PhaseResuming, current: "1Gi", expected: "2Gi"},
+		{name: "rollback restores source capacity", phase: domain.PhaseRollingBack, current: "2Gi", expected: "1Gi"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			cluster := &unstructured.Unstructured{Object: map[string]any{
+				"apiVersion": kubeBlocksClusterAPIVersion,
+				"kind":       "Cluster",
+				"metadata": map[string]any{
+					"name": "cluster", "namespace": "db", "uid": "cluster-uid",
+					"annotations": map[string]any{pauseSessionAnnotation: "session"},
+				},
+				"spec": map[string]any{"componentSpecs": []any{
+					map[string]any{
+						"name": "db", "replicas": int64(1),
+						"volumeClaimTemplates": []any{map[string]any{
+							"name": "data",
+							"spec": map[string]any{"resources": map[string]any{
+								"requests": map[string]any{"storage": test.current},
+							}},
+						}},
+					},
+				}},
+			}}
+			dynamicClient := dynamicfake.NewSimpleDynamicClient(runtime.NewScheme(), cluster)
+			manager := NewManager(kubernetesfake.NewClientset(), dynamicClient, nil)
+			session := kubeBlocksSession()
+			session.Status.Phase = test.phase
+			session.Spec.Volumes = []domain.VolumeSpec{{
+				SourcePVC: domain.ObjectReference{Namespace: "db", Name: "data-cluster-db-0"},
+				SourcePVCSpec: corev1.PersistentVolumeClaimSpec{
+					Resources: corev1.VolumeResourceRequirements{Requests: corev1.ResourceList{
+						corev1.ResourceStorage: resource.MustParse("1Gi"),
+					}},
+				},
+				SourcePVCMetadata: domain.PVCMetadata{Labels: map[string]string{
+					kubeBlocksVCTNameLabel: "data",
+				}},
+				Capacity: "2Gi",
+			}}
+
+			if err := manager.syncLegacyKubeBlocksVolumeClaimTemplates(
+				context.Background(),
+				session,
+				test.phase == domain.PhaseResuming,
+			); err != nil {
+				t.Fatal(err)
+			}
+
+			updated, err := dynamicClient.Resource(
+				mustGVR(kubeBlocksClusterAPIVersion, clusterResource),
+			).Namespace("db").Get(context.Background(), "cluster", metav1.GetOptions{})
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			components, _, _ := unstructured.NestedSlice(updated.Object, "spec", "componentSpecs")
+			component := testutil.MustType[map[string]any](t, components[0])
+			templates, _, _ := unstructured.NestedSlice(component, "volumeClaimTemplates")
+			template := testutil.MustType[map[string]any](t, templates[0])
+
+			capacity, _, _ := unstructured.NestedString(
+				template,
+				"spec", "resources", "requests", "storage",
+			)
+			if capacity != test.expected {
+				t.Fatalf("capacity=%q want=%q", capacity, test.expected)
+			}
+		})
+	}
+}
+
+func TestKubeBlocksPauseRecoversStoppedClusterWithLivePod(t *testing.T) {
+	cluster := &unstructured.Unstructured{Object: map[string]any{
+		"apiVersion": kubeBlocksClusterAPIVersion,
+		"kind":       "Cluster",
+		"metadata": map[string]any{
+			"name": "cluster", "namespace": "db", "uid": "cluster-uid",
+			"annotations": map[string]any{pauseSessionAnnotation: "session"},
+		},
+		"spec": map[string]any{"componentSpecs": []any{
+			map[string]any{
+				"name": "db", "replicas": int64(1),
+				"volumeClaimTemplates": []any{map[string]any{
+					"name": "data",
+					"spec": map[string]any{"resources": map[string]any{
+						"requests": map[string]any{"storage": "1Gi"},
+					}},
+				}},
+			},
+		}},
+		"status": map[string]any{
+			"phase": "Stopped",
+			"components": map[string]any{
+				"db": map[string]any{"phase": "Stopped"},
+			},
+		},
+	}}
+	controller := domain.ObjectReference{
+		APIVersion: domain.AppsAPIVersion,
+		Kind:       domain.KindStatefulSet,
+		Namespace:  "db",
+		Name:       "cluster-db",
+		UID:        "statefulset-uid",
+	}
+	pod := readyPod("db", "cluster-db-0", "node-a")
+	pod.OwnerReferences = []metav1.OwnerReference{{
+		APIVersion: controller.APIVersion,
+		Kind:       controller.Kind,
+		Name:       controller.Name,
+		UID:        controller.UID,
+		Controller: new(true),
+	}}
+	typed := kubernetesfake.NewClientset(pod)
+	deletes := 0
+	typed.PrependReactor(
+		"delete",
+		"pods",
+		func(action clienttesting.Action) (bool, runtime.Object, error) {
+			deletes++
+			if deletes != 1 {
+				return false, nil, nil
+			}
+
+			if err := typed.Tracker().Delete(
+				corev1.SchemeGroupVersion.WithResource("pods"),
+				"db",
+				pod.Name,
+			); err != nil {
+				return true, nil, err
+			}
+
+			replacement := pod.DeepCopy()
+
+			replacement.UID = "replacement-pod-uid"
+			if err := typed.Tracker().Create(
+				corev1.SchemeGroupVersion.WithResource("pods"),
+				replacement,
+				"db",
+			); err != nil {
+				return true, nil, err
+			}
+
+			return true, nil, nil
+		},
+	)
+
+	dynamicClient := dynamicfake.NewSimpleDynamicClient(
+		runtime.NewScheme(),
+		cluster,
+		opsRequest("session-pause", "Succeed"),
+	)
+	dynamicClient.PrependReactor(
+		"create",
+		"opsrequests",
+		func(action clienttesting.Action) (bool, runtime.Object, error) {
+			request := testutil.MustActionObject[*unstructured.Unstructured](t, action)
+			request.SetUID(types.UID(request.GetName() + "-uid"))
+			_ = unstructured.SetNestedField(request.Object, "Succeed", "status", "phase")
+			typeName, _, _ := unstructured.NestedString(request.Object, "spec", "type")
+
+			current, err := dynamicClient.Tracker().Get(
+				mustGVR(kubeBlocksClusterAPIVersion, clusterResource),
+				"db",
+				"cluster",
+			)
+			if err != nil {
+				return true, nil, err
+			}
+
+			updated := testutil.MustType[*unstructured.Unstructured](t, current).DeepCopy()
+
+			phase := "Running"
+			if typeName == "Stop" {
+				phase = "Stopped"
+			}
+
+			_ = unstructured.SetNestedField(updated.Object, phase, "status", "phase")
+
+			_ = unstructured.SetNestedField(
+				updated.Object,
+				phase,
+				"status", "components", "db", "phase",
+			)
+			if err := dynamicClient.Tracker().Update(
+				mustGVR(kubeBlocksClusterAPIVersion, clusterResource),
+				updated,
+				"db",
+			); err != nil {
+				return true, nil, err
+			}
+
+			return false, nil, nil
+		},
+	)
+	manager := NewManager(typed, dynamicClient, nil)
+	manager.poll = time.Millisecond
+	session := kubeBlocksSession()
+	session.Status.Phase = domain.PhaseRollingBack
+	session.Spec.WorkloadPtr().Controller = controller
+	session.Spec.WorkloadPtr().Pod.UID = pod.UID
+	session.Spec.Volumes = []domain.VolumeSpec{{
+		SourcePVC: domain.ObjectReference{Namespace: "db", Name: "data-cluster-db-0"},
+		SourcePVCSpec: corev1.PersistentVolumeClaimSpec{
+			Resources: corev1.VolumeResourceRequirements{Requests: corev1.ResourceList{
+				corev1.ResourceStorage: resource.MustParse("1Gi"),
+			}},
+		},
+		SourcePVCMetadata: domain.PVCMetadata{Labels: map[string]string{
+			kubeBlocksVCTNameLabel: "data",
+		}},
+		Capacity: "2Gi",
+	}}
+
+	if err := manager.Pause(context.Background(), session); err != nil {
+		t.Fatal(err)
+	}
+
+	if creates := countDynamicActions(
+		dynamicClient.Actions(),
+		"create",
+		"opsrequests",
+	); creates != 2 {
+		t.Fatalf("OpsRequest creates=%d want=2", creates)
+	}
+
+	if _, err := typed.CoreV1().Pods("db").Get(
+		context.Background(),
+		pod.Name,
+		metav1.GetOptions{},
+	); !apierrors.IsNotFound(err) {
+		t.Fatalf("Pod still exists: %v", err)
+	}
+}
+
+func TestKubeBlocksResumeReleasesOwnerAfterClusterConverges(t *testing.T) {
+	cluster := &unstructured.Unstructured{Object: map[string]any{
+		"apiVersion": kubeBlocksClusterAPIVersion,
+		"kind":       "Cluster",
+		"metadata": map[string]any{
+			"name": "cluster", "namespace": "db", "uid": "cluster-uid",
+			"annotations": map[string]any{pauseSessionAnnotation: "session"},
+		},
+		"spec": map[string]any{"componentSpecs": []any{
+			map[string]any{"name": "db", "replicas": int64(1)},
+		}},
+		"status": map[string]any{
+			"phase": "Stopped",
+			"components": map[string]any{
+				"db": map[string]any{"phase": "Stopped"},
+			},
+		},
+	}}
+	controller := domain.ObjectReference{
+		APIVersion: kubeBlocksClusterAPIVersion,
+		Kind:       domain.KindComponent,
+		Namespace:  "db",
+		Name:       "cluster-db",
+		UID:        "component-uid",
+	}
+	pod := readyPod("db", "cluster-db-0", "node-a")
+	pod.OwnerReferences = []metav1.OwnerReference{{
+		APIVersion: controller.APIVersion,
+		Kind:       controller.Kind,
+		Name:       controller.Name,
+		UID:        controller.UID,
+		Controller: new(true),
+	}}
+	typed := kubernetesfake.NewClientset(pod)
+	dynamicClient := dynamicfake.NewSimpleDynamicClient(
+		runtime.NewScheme(),
+		cluster,
+		opsRequest("session-pause", "Succeed"),
+	)
+	dynamicClient.PrependReactor(
+		"create",
+		"opsrequests",
+		func(action clienttesting.Action) (bool, runtime.Object, error) {
+			request := testutil.MustActionObject[*unstructured.Unstructured](t, action)
+			request.SetUID("resume-request-uid")
+			_ = unstructured.SetNestedField(request.Object, "Succeed", "status", "phase")
+
+			running := cluster.DeepCopy()
+			_ = unstructured.SetNestedField(running.Object, "Running", "status", "phase")
+
+			_ = unstructured.SetNestedField(
+				running.Object,
+				"Running",
+				"status", "components", "db", "phase",
+			)
+			if err := dynamicClient.Tracker().Update(
+				mustGVR(kubeBlocksClusterAPIVersion, clusterResource),
+				running,
+				"db",
+			); err != nil {
+				return true, nil, err
+			}
+
+			return false, nil, nil
+		},
+	)
+	manager := NewManager(typed, dynamicClient, nil)
+	manager.poll = time.Millisecond
+	session := kubeBlocksSession()
+	session.Spec.WorkloadPtr().Controller = controller
+	session.Spec.WorkloadPtr().Pod.UID = "paused-pod-uid"
+	session.Status.Phase = domain.PhaseResuming
+
+	if err := manager.Resume(context.Background(), session); err != nil {
+		t.Fatal(err)
+	}
+
+	updated, err := dynamicClient.Resource(
+		mustGVR(kubeBlocksClusterAPIVersion, clusterResource),
+	).Namespace("db").Get(context.Background(), "cluster", metav1.GetOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if updated.GetAnnotations()[pauseSessionAnnotation] != "" {
+		t.Fatalf("Cluster pause annotation=%v", updated.GetAnnotations())
+	}
+}
+
+func TestKubeBlocksPauseRejectsForeignClusterOwner(t *testing.T) {
+	cluster := &unstructured.Unstructured{Object: map[string]any{
+		"apiVersion": kubeBlocksClusterAPIVersion,
+		"kind":       "Cluster",
+		"metadata": map[string]any{
+			"name": "cluster", "namespace": "db", "uid": "cluster-uid",
+			"annotations": map[string]any{pauseSessionAnnotation: "other-session"},
+		},
+		"spec": map[string]any{"componentSpecs": []any{
+			map[string]any{"name": "db", "replicas": int64(1)},
+		}},
+	}}
+	dynamicClient := dynamicfake.NewSimpleDynamicClient(runtime.NewScheme(), cluster)
+	manager := NewManager(kubernetesfake.NewClientset(), dynamicClient, nil)
+
+	err := manager.setKubeBlocksPaused(context.Background(), kubeBlocksSession(), true)
+	if domain.CategoryOf(err) != domain.ErrorConflict ||
+		!strings.Contains(err.Error(), "other-session") {
+		t.Fatalf("category=%s error=%v", domain.CategoryOf(err), err)
+	}
+
+	if countDynamicActions(dynamicClient.Actions(), "create", "opsrequests") != 0 {
+		t.Fatal("created an OpsRequest while another session owned the Cluster")
 	}
 }
 
@@ -2675,7 +3873,7 @@ func TestKubeBlocksPauseRejectsClusterUIDChange(t *testing.T) {
 		"kind":       "Cluster",
 		"metadata":   map[string]any{"name": "cluster", "namespace": "db", "uid": "new-uid"},
 		"spec": map[string]any{
-			"componentSpecs": []any{map[string]any{"name": "postgresql", "stop": false}},
+			"componentSpecs": []any{map[string]any{"name": "postgresql", "replicas": int64(1)}},
 		},
 	}}
 	dynamicClient := dynamicfake.NewSimpleDynamicClient(runtime.NewScheme(), cluster)

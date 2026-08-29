@@ -520,10 +520,21 @@ func phaseAfter(current, reference domain.Phase) bool {
 }
 
 func phaseBefore(session *domain.Session, target domain.Phase) domain.Phase {
-	for index := len(session.Status.History) - 1; index > 0; index-- {
-		if session.Status.History[index].Phase == target {
-			return session.Status.History[index-1].Phase
+	for index, entry := range session.Status.History {
+		if entry.Phase != target {
+			continue
 		}
+
+		for previous := index - 1; previous >= 0; previous-- {
+			phase := session.Status.History[previous].Phase
+			if phase == domain.PhaseFailed || phase == target {
+				continue
+			}
+
+			return phase
+		}
+
+		return ""
 	}
 
 	return ""

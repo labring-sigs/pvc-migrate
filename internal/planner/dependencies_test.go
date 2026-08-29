@@ -211,10 +211,11 @@ func TestRiskRolesAreCaseInsensitive(t *testing.T) {
 
 func TestKubeBlocksRoleWarningDescribesTheSelectedSafetyPath(t *testing.T) {
 	tests := []struct {
-		name      string
-		spec      domain.KubeBlocksSpec
-		want      string
-		forbidden string
+		name           string
+		controllerKind string
+		spec           domain.KubeBlocksSpec
+		want           string
+		forbidden      string
 	}{
 		{
 			name:      "unknown role with accepted downtime",
@@ -242,10 +243,35 @@ func TestKubeBlocksRoleWarningDescribesTheSelectedSafetyPath(t *testing.T) {
 			},
 			want: "native candidate switchover targets=db-1",
 		},
+		{
+			name:           "legacy primary",
+			controllerKind: domain.KindStatefulSet,
+			spec:           domain.KubeBlocksSpec{Role: "primary"},
+		},
+		{
+			name: "InstanceSet secondary",
+			spec: domain.KubeBlocksSpec{Role: "secondary"},
+		},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			message := kubeBlocksRoleWarning(&test.spec)
+			controllerKind := test.controllerKind
+			if controllerKind == "" {
+				controllerKind = domain.KindInstanceSet
+			}
+
+			message := kubeBlocksRoleWarning(domain.WorkloadSpec{
+				Controller: domain.ObjectReference{Kind: controllerKind},
+				KubeBlocks: &test.spec,
+			})
+			if test.want == "" {
+				if message != "" {
+					t.Fatalf("message=%q want empty", message)
+				}
+
+				return
+			}
+
 			if !strings.Contains(message, test.want) ||
 				(test.forbidden != "" && strings.Contains(message, test.forbidden)) {
 				t.Fatalf("message=%q want=%q forbidden=%q", message, test.want, test.forbidden)

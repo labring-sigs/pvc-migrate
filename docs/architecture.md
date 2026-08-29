@@ -109,7 +109,7 @@ For ordinal `k` and original replicas `N`, pause changes replicas to `k`. Pods `
 
 ### KubeBlocks
 
-Discovery supports served `apps.kubeblocks.io/v1alpha1` and `operations.kubeblocks.io/v1alpha1` OpsRequest resources. Leader, primary, and master roles require a candidate or explicit downtime acknowledgement. InstanceSet-backed Pods use the InstanceSet's served `spec.paused` field to suspend reconciliation, delete only the selected Pod, and restore the original pause representation after activation. Legacy StatefulSet-backed Pods set and restore `componentSpecs[].stop` for the selected Cluster component. The `kubeblocks.io/reconcile` annotation is a reconcile trigger, not a pause control.
+Discovery supports served `apps.kubeblocks.io/v1alpha1` and `operations.kubeblocks.io/v1alpha1` OpsRequest resources. InstanceSet-backed Pods use the InstanceSet's served `spec.paused` field to suspend reconciliation, delete only the selected Pod, and restore the original pause representation after activation; leader, primary, and master instances require a supported candidate strategy or `--allow-leader-downtime`. The validated Redis addon has no Switchover action, so Redis leaders reject candidates without an OpsRequest probe and require the downtime acknowledgement. Legacy StatefulSet-backed Pods use Stop/Start OpsRequests and reject switchover candidates because every instance in the affected Cluster or component is paused; `--allow-leader-downtime` has no effect on this path. Apps API requests use `clusterRef` and pause the Cluster; operations API requests use `clusterName` and can target the selected component. The `kubeblocks.io/reconcile` annotation is a reconcile trigger, not a pause control.
 
 ## Namespace And RBAC Model
 

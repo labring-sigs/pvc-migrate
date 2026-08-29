@@ -178,13 +178,13 @@ func (f *migrationFlags) bind(
 			&f.switchoverCandidate,
 			"kubeblocks-candidate",
 			"",
-			"KubeBlocks switchover target when the selected instance is primary",
+			"Switchover target for a supported InstanceSet-backed KubeBlocks primary",
 		)
 		flags.BoolVar(
 			&f.allowLeaderDowntime,
 			"allow-leader-downtime",
 			false,
-			"Acknowledge downtime for a leader, primary, or master instance",
+			"Acknowledge selected leader downtime for InstanceSet-backed KubeBlocks or native StatefulSet scale-down",
 		)
 	}
 }

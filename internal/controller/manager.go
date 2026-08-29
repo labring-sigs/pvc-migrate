@@ -37,6 +37,7 @@ const (
 	grafanaResource             = "grafanas"
 	pauseSessionAnnotation      = kube.PauseSessionAnnotation
 	kubeBlocksComponentLabel    = "apps.kubeblocks.io/component-name"
+	kubeBlocksVCTNameLabel      = "apps.kubeblocks.io/vct-name"
 	kubeBlocksRoleLabel         = "kubeblocks.io/role"
 	kubeBlocksAppsRoleLabel     = "apps.kubeblocks.io/role"
 	genericRoleLabel            = "role"
