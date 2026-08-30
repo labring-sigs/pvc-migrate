@@ -58,7 +58,7 @@ func TestCleanupDeletesReservationPodsAcrossDestinationNamespaces(t *testing.T) 
 	)
 	service := &Service{client: client, store: &memoryStore{}}
 
-	if err := service.Cleanup(ctx, session, CleanupOptions{}); err != nil {
+	if err := service.cleanupWorkflowForTest(ctx, session, CleanupOptions{}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -155,7 +155,7 @@ func TestCleanupRejectsActiveSessionsAndOpenRollbackWindow(t *testing.T) {
 		session.Status.Phase = domain.PhasePaused
 		service := &Service{client: fake.NewClientset(), store: &memoryStore{}}
 
-		err := service.Cleanup(
+		err := service.cleanupWorkflowForTest(
 			context.Background(),
 			session,
 			CleanupOptions{DeleteRollback: true, Finalize: true, DeleteSession: true},
@@ -170,7 +170,7 @@ func TestCleanupRejectsActiveSessionsAndOpenRollbackWindow(t *testing.T) {
 		session.Status.Phase = domain.PhaseCompleted
 		service := &Service{client: fake.NewClientset(), store: &memoryStore{}}
 
-		err := service.Cleanup(
+		err := service.cleanupWorkflowForTest(
 			context.Background(),
 			session,
 			CleanupOptions{Finalize: true, DeleteSession: true},
@@ -202,7 +202,7 @@ func TestCleanupTemporaryPVCRequiresRecordedIdentityAndOwnership(t *testing.T) {
 			}})
 			service := &Service{client: client, store: &memoryStore{}}
 
-			err := service.Cleanup(ctx, session, CleanupOptions{DeleteTemporary: true})
+			err := service.cleanupWorkflowForTest(ctx, session, CleanupOptions{DeleteTemporary: true})
 			if domain.CategoryOf(err) != domain.ErrorConflict {
 				t.Fatalf("category=%s error=%v", domain.CategoryOf(err), err)
 			}
@@ -245,7 +245,7 @@ func TestCleanupDeletesOnlyOwnedTemporaryPVCs(t *testing.T) {
 	)
 	service := &Service{client: client, store: &memoryStore{}}
 
-	if err := service.Cleanup(ctx, session, CleanupOptions{DeleteTemporary: true}); err != nil {
+	if err := service.cleanupWorkflowForTest(ctx, session, CleanupOptions{DeleteTemporary: true}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -285,7 +285,7 @@ func TestCleanupValidatesEveryTemporaryPVCBeforeDeletion(t *testing.T) {
 	)
 	service := &Service{client: client, store: &memoryStore{}}
 
-	err := service.Cleanup(ctx, session, CleanupOptions{DeleteTemporary: true})
+	err := service.cleanupWorkflowForTest(ctx, session, CleanupOptions{DeleteTemporary: true})
 	if domain.CategoryOf(err) != domain.ErrorConflict {
 		t.Fatalf("category=%s error=%v", domain.CategoryOf(err), err)
 	}
@@ -332,7 +332,7 @@ func TestCleanupValidationAccountsForOwnedReservationPod(t *testing.T) {
 	client := fake.NewClientset(pvc, pod)
 	service := &Service{client: client, store: &memoryStore{}}
 
-	if err := service.ValidateCleanup(
+	if err := service.validateCleanupWorkflowForTest(
 		ctx,
 		session,
 		CleanupOptions{DeleteTemporary: true},
@@ -340,7 +340,7 @@ func TestCleanupValidationAccountsForOwnedReservationPod(t *testing.T) {
 		t.Fatalf("cleanup dry-run blocked by owned reservation Pod: %v", err)
 	}
 
-	if err := service.Cleanup(ctx, session, CleanupOptions{DeleteTemporary: true}); err != nil {
+	if err := service.cleanupWorkflowForTest(ctx, session, CleanupOptions{DeleteTemporary: true}); err != nil {
 		t.Fatalf("cleanup: %v", err)
 	}
 
@@ -396,7 +396,7 @@ func TestCleanupRecoversDestinationRefsAfterCheckpointLoss(t *testing.T) {
 	client := fake.NewClientset(pvc, pv)
 	service := &Service{client: client, store: &memoryStore{}}
 
-	if err := service.Cleanup(
+	if err := service.cleanupWorkflowForTest(
 		ctx,
 		session,
 		CleanupOptions{DeleteTemporary: true, DeleteRollback: true},
@@ -481,11 +481,11 @@ func TestCleanupRecoversUncheckpointedProvisionedDestinationPV(t *testing.T) {
 		DeleteSession:   true,
 	}
 
-	if err := service.ValidateCleanup(ctx, session, options); err != nil {
+	if err := service.validateCleanupWorkflowForTest(ctx, session, options); err != nil {
 		t.Fatalf("validate cleanup: %v", err)
 	}
 
-	if err := service.Cleanup(ctx, session, options); err != nil {
+	if err := service.cleanupWorkflowForTest(ctx, session, options); err != nil {
 		t.Fatalf("cleanup: %v", err)
 	}
 
@@ -574,7 +574,7 @@ func TestCleanupPersistsRecoveredRefsBeforeRetryableDeletion(t *testing.T) {
 	store := &cleanupCheckpointStore{}
 	service := &Service{client: client, store: store}
 
-	if err := service.Cleanup(
+	if err := service.cleanupWorkflowForTest(
 		ctx,
 		session,
 		CleanupOptions{DeleteTemporary: true, DeleteRollback: true},
@@ -600,7 +600,7 @@ func TestCleanupPersistsRecoveredRefsBeforeRetryableDeletion(t *testing.T) {
 	reloaded := *store.snapshot
 
 	service = &Service{client: client, store: store}
-	if err := service.Cleanup(
+	if err := service.cleanupWorkflowForTest(
 		ctx,
 		&reloaded,
 		CleanupOptions{DeleteTemporary: true, DeleteRollback: true},
@@ -663,7 +663,7 @@ func TestCleanupStopsWhenRecoveredRefsCheckpointFails(t *testing.T) {
 	}
 	service := &Service{client: fake.NewClientset(pvc, pv), store: store}
 
-	if err := service.Cleanup(
+	if err := service.cleanupWorkflowForTest(
 		ctx,
 		session,
 		CleanupOptions{DeleteTemporary: true, DeleteRollback: true},
@@ -697,7 +697,7 @@ func TestCleanupStopsWhenRecoveredRefsCheckpointFails(t *testing.T) {
 		t.Fatalf("destination PV changed after checkpoint failure: %v", err)
 	}
 
-	if err := service.Cleanup(
+	if err := service.cleanupWorkflowForTest(
 		ctx,
 		session,
 		CleanupOptions{DeleteTemporary: true, DeleteRollback: true},
@@ -773,7 +773,7 @@ func TestCleanupRejectsUncheckpointedDestinationPVWithUnsafeIdentity(t *testing.
 			test.mutate(pv)
 			service := &Service{client: fake.NewClientset(pvc, pv), store: &memoryStore{}}
 
-			err := service.Cleanup(
+			err := service.cleanupWorkflowForTest(
 				context.Background(),
 				session,
 				CleanupOptions{DeleteTemporary: true, DeleteRollback: true},
@@ -824,7 +824,7 @@ func TestCleanupSessionDeletionRequiresDiscoveredRollbackPV(t *testing.T) {
 	}
 	service := &Service{client: fake.NewClientset(pvc, pv), store: &memoryStore{}}
 
-	err := service.Cleanup(ctx, session, CleanupOptions{Finalize: true, DeleteSession: true})
+	err := service.cleanupWorkflowForTest(ctx, session, CleanupOptions{Finalize: true, DeleteSession: true})
 	if domain.CategoryOf(err) != domain.ErrorPrecondition {
 		t.Fatalf("category=%s error=%v", domain.CategoryOf(err), err)
 	}
@@ -853,7 +853,7 @@ func TestCleanupOrphanRecoveryProtectsForeignDestinationPVC(t *testing.T) {
 	client := fake.NewClientset(pvc)
 	service := &Service{client: client, store: &memoryStore{}}
 
-	err := service.Cleanup(ctx, session, CleanupOptions{DeleteTemporary: true})
+	err := service.cleanupWorkflowForTest(ctx, session, CleanupOptions{DeleteTemporary: true})
 	if domain.CategoryOf(err) != domain.ErrorConflict {
 		t.Fatalf("category=%s error=%v", domain.CategoryOf(err), err)
 	}
@@ -894,7 +894,7 @@ func TestCleanupBlocksTerminalPVCConsumers(t *testing.T) {
 			service := &Service{client: client, store: &memoryStore{}}
 
 			options := CleanupOptions{DeleteTemporary: true}
-			if err := service.ValidateCleanup(
+			if err := service.validateCleanupWorkflowForTest(
 				ctx,
 				session,
 				options,
@@ -903,7 +903,7 @@ func TestCleanupBlocksTerminalPVCConsumers(t *testing.T) {
 				t.Fatalf("validate category=%s error=%v", domain.CategoryOf(err), err)
 			}
 
-			if err := service.Cleanup(
+			if err := service.cleanupWorkflowForTest(
 				ctx,
 				session,
 				options,
@@ -1162,7 +1162,7 @@ func TestCleanupIgnoresUnscheduledTerminalPVCConsumers(t *testing.T) {
 	client := fake.NewClientset(pvc, pod)
 
 	service := &Service{client: client, store: &memoryStore{}}
-	if err := service.ValidateCleanup(
+	if err := service.validateCleanupWorkflowForTest(
 		ctx,
 		session,
 		CleanupOptions{DeleteTemporary: true},
@@ -1192,7 +1192,7 @@ func TestCleanupBlocksRunningPVCConsumer(t *testing.T) {
 	client := fake.NewClientset(pvc, pod)
 	service := &Service{client: client, store: &memoryStore{}}
 
-	err := service.Cleanup(ctx, session, CleanupOptions{DeleteTemporary: true})
+	err := service.cleanupWorkflowForTest(ctx, session, CleanupOptions{DeleteTemporary: true})
 	if domain.CategoryOf(err) != domain.ErrorPrecondition {
 		t.Fatalf("cleanup category=%s error=%v", domain.CategoryOf(err), err)
 	}
@@ -1227,7 +1227,7 @@ func TestCleanupBlocksAttachedDestinationPV(t *testing.T) {
 	client := fake.NewClientset(pvc, attachment)
 	service := &Service{client: client, store: &memoryStore{}}
 
-	err := service.Cleanup(ctx, session, CleanupOptions{DeleteTemporary: true})
+	err := service.cleanupWorkflowForTest(ctx, session, CleanupOptions{DeleteTemporary: true})
 	if domain.CategoryOf(err) != domain.ErrorPrecondition {
 		t.Fatalf("cleanup category=%s error=%v", domain.CategoryOf(err), err)
 	}
@@ -1273,7 +1273,7 @@ func TestValidateCleanupDiscoversDestinationRefsWithoutMutation(t *testing.T) {
 	client := fake.NewClientset(pvc, pv)
 	service := &Service{client: client, store: &memoryStore{}}
 
-	if err := service.ValidateCleanup(
+	if err := service.validateCleanupWorkflowForTest(
 		ctx,
 		session,
 		CleanupOptions{DeleteTemporary: true, DeleteRollback: true},
@@ -1328,7 +1328,7 @@ func TestValidateCleanupAccountsForTemporaryPVCDeletionBeforePVDeletion(t *testi
 	service := &Service{client: fake.NewClientset(pvc, pv), store: &memoryStore{}}
 
 	options := CleanupOptions{DeleteTemporary: true, DeleteRollback: true}
-	if err := service.ValidateCleanup(ctx, session, options); err != nil {
+	if err := service.validateCleanupWorkflowForTest(ctx, session, options); err != nil {
 		t.Fatal(err)
 	}
 
@@ -1341,7 +1341,7 @@ func TestValidateCleanupAccountsForTemporaryPVCDeletionBeforePVDeletion(t *testi
 	pv.Spec.ClaimRef.UID = types.UID("replacement-pvc-uid")
 
 	service = &Service{client: fake.NewClientset(pvc, pv), store: &memoryStore{}}
-	if err := service.ValidateCleanup(
+	if err := service.validateCleanupWorkflowForTest(
 		ctx,
 		session,
 		options,
@@ -1403,7 +1403,7 @@ func TestCleanupRollbackPVRequiresOwnershipRoleAndReleasedState(t *testing.T) {
 			)
 			service := &Service{client: client, store: &memoryStore{}}
 
-			err := service.Cleanup(
+			err := service.cleanupWorkflowForTest(
 				context.Background(),
 				session,
 				CleanupOptions{DeleteRollback: true},
@@ -1437,7 +1437,7 @@ func TestValidateCleanupChecksActivePVWhenRollbackPVIsMissing(t *testing.T) {
 	)
 	service := &Service{client: fake.NewClientset(active), store: &memoryStore{}}
 
-	err := service.ValidateCleanup(
+	err := service.validateCleanupWorkflowForTest(
 		context.Background(),
 		session,
 		CleanupOptions{DeleteRollback: true, Finalize: true},
@@ -1642,7 +1642,7 @@ func TestCleanupFinalizeRequiresRecordedPolicyAndOwnedActivePV(t *testing.T) {
 		}
 		service := &Service{client: fake.NewClientset(), store: &memoryStore{}}
 
-		err := service.Cleanup(context.Background(), session, CleanupOptions{Finalize: true})
+		err := service.cleanupWorkflowForTest(context.Background(), session, CleanupOptions{Finalize: true})
 		if domain.CategoryOf(err) != domain.ErrorPrecondition {
 			t.Fatalf("category=%s error=%v", domain.CategoryOf(err), err)
 		}
@@ -1667,7 +1667,7 @@ func TestCleanupFinalizeRequiresRecordedPolicyAndOwnedActivePV(t *testing.T) {
 		)
 		service := &Service{client: client, store: &memoryStore{}}
 
-		err := service.Cleanup(context.Background(), session, CleanupOptions{Finalize: true})
+		err := service.cleanupWorkflowForTest(context.Background(), session, CleanupOptions{Finalize: true})
 		if domain.CategoryOf(err) != domain.ErrorConflict {
 			t.Fatalf("category=%s error=%v", domain.CategoryOf(err), err)
 		}
@@ -1680,10 +1680,10 @@ func TestCleanupRenameFinalizesSourcePVWithoutRollbackDeletion(t *testing.T) {
 	session.Spec = domain.NewSessionSpec(
 		domain.OperationRename,
 		session.Spec.SessionCommon,
-		session.Spec.Workload(),
+
 		false,
-		domain.SessionWorkflowOptions{},
-	)
+		domain.SessionWorkflowOptions{})
+
 	session.Status.Phase = domain.PhaseCompleted
 	session.Spec.Volumes[0].SourceReclaimPolicy = corev1.PersistentVolumeReclaimDelete
 	session.Status.Volumes[0].Activation.ActivePVC = domain.ObjectReference{
@@ -1699,7 +1699,7 @@ func TestCleanupRenameFinalizesSourcePVWithoutRollbackDeletion(t *testing.T) {
 	store := &memoryStore{}
 	service := &Service{client: client, store: store}
 
-	if err := service.Cleanup(
+	if err := service.cleanupWorkflowForTest(
 		ctx,
 		session,
 		CleanupOptions{Finalize: true, DeleteSession: true},
@@ -1763,7 +1763,7 @@ func TestCleanupFinalizeReleasesPVOnlyAfterPVCCheckpoint(t *testing.T) {
 	)
 	service := &Service{client: client, store: &memoryStore{}}
 
-	if err := service.Cleanup(
+	if err := service.cleanupWorkflowForTest(
 		ctx,
 		session,
 		CleanupOptions{Finalize: true},
@@ -1782,7 +1782,7 @@ func TestCleanupFinalizeReleasesPVOnlyAfterPVCCheckpoint(t *testing.T) {
 		t.Fatalf("PV ownership cleared before PVC checkpoint: labels=%v", pv.Labels)
 	}
 
-	if err := service.Cleanup(ctx, session, CleanupOptions{Finalize: true}); err != nil {
+	if err := service.cleanupWorkflowForTest(ctx, session, CleanupOptions{Finalize: true}); err != nil {
 		t.Fatal(err)
 	}
 

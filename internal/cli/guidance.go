@@ -93,12 +93,13 @@ func buildSessionGuidanceCommands(
 	prefixes guidancePrefixes,
 ) sessionGuidanceCommands {
 	prefix := prefixes.pvcMigrate
+	workflow := workflowCommandName(session)
 
 	return sessionGuidanceCommands{
 		prefix:      prefix,
-		status:      fmt.Sprintf("%s session status %s", prefix, session.ID),
-		resumePlan:  fmt.Sprintf("%s session resume %s --dry-run", prefix, session.ID),
-		resume:      fmt.Sprintf("%s --yes session resume %s --dry-run=false", prefix, session.ID),
+		status:      fmt.Sprintf("%s %s status %s", prefix, workflow, session.ID),
+		resumePlan:  fmt.Sprintf("%s %s resume %s --dry-run", prefix, workflow, session.ID),
+		resume:      fmt.Sprintf("%s --yes %s resume %s --dry-run=false", prefix, workflow, session.ID),
 		cleanupPlan: fmt.Sprintf("%s %s --dry-run", prefix, cleanupCommandArgs(session)),
 		cleanup: fmt.Sprintf(
 			"%s --yes %s --dry-run=false",
@@ -106,25 +107,81 @@ func buildSessionGuidanceCommands(
 			cleanupCommandArgs(session),
 		),
 		keepCopyPlan: fmt.Sprintf(
-			"%s session cleanup %s --finalize --delete-session --dry-run",
+			"%s %s cleanup %s --finalize --delete-session --dry-run",
 			prefix,
+			workflow,
 			session.ID,
 		),
 		keepCopy: fmt.Sprintf(
-			"%s --yes session cleanup %s --finalize --delete-session --dry-run=false",
+			"%s --yes %s cleanup %s --finalize --delete-session --dry-run=false",
 			prefix,
+			workflow,
 			session.ID,
 		),
 		copyPlan:     fmt.Sprintf("%s copy --session %s --dry-run", prefix, session.ID),
 		copyCommand:  fmt.Sprintf("%s copy --session %s --dry-run=false", prefix, session.ID),
-		rollbackPlan: fmt.Sprintf("%s session rollback %s --dry-run", prefix, session.ID),
+		rollbackPlan: fmt.Sprintf("%s %s rollback %s --dry-run", prefix, workflow, session.ID),
 		rollback: fmt.Sprintf(
-			"%s --yes session rollback %s --dry-run=false",
+			"%s --yes %s rollback %s --dry-run=false",
 			prefix,
+			workflow,
 			session.ID,
 		),
-		abortPlan: fmt.Sprintf("%s session abort %s --dry-run", prefix, session.ID),
-		abort:     fmt.Sprintf("%s --yes session abort %s --dry-run=false", prefix, session.ID),
+		abortPlan: fmt.Sprintf("%s %s abort %s --dry-run", prefix, workflow, session.ID),
+		abort:     fmt.Sprintf("%s --yes %s abort %s --dry-run=false", prefix, workflow, session.ID),
+	}
+}
+
+func workflowCommandName(session *domain.Session) string {
+	if session == nil {
+		return "migrate"
+	}
+	switch session.Spec.Type {
+	case domain.SessionTypeMigrate:
+		return "migrate"
+	case domain.SessionTypeMigratePod:
+		return "migrate-pod"
+	case domain.SessionTypeReserve:
+		return "reserve"
+	case domain.SessionTypeCopy:
+		return "copy"
+	case domain.SessionTypeBackup:
+		if session.Spec.Backup != nil && session.Spec.Backup.Online {
+			return "live-backup"
+		}
+		return "backup"
+	case domain.SessionTypeRename:
+		return "rename"
+	case domain.SessionTypeMove:
+		return "move"
+	default:
+		return "migrate"
+	}
+}
+
+// workflowCommandNameForCommand identifies the local workflow owning a CLI
+// command before a Session has been loaded. This keeps pre-session errors
+// actionable without routing every failure through a global session command.
+func workflowCommandNameForCommand(value any) string {
+	command, ok := value.(*cobra.Command)
+	if !ok || command == nil {
+		return "migrate"
+	}
+
+	root := command.Root()
+	current := command
+	for current != nil && current.Parent() != nil && current.Parent() != root {
+		current = current.Parent()
+	}
+	if current == nil || current == root {
+		return "migrate"
+	}
+
+	switch current.Name() {
+	case "migrate", "migrate-pod", "reserve", "copy", "backup", "live-backup", "rename", "move":
+		return current.Name()
+	default:
+		return "migrate"
 	}
 }
 
@@ -281,6 +338,16 @@ func writeFailedSessionGuidance(
 			}
 		}
 
+		if kubeblocks, ok := session.Spec.KubeBlocksPodMigration(); ok {
+			_, err := fmt.Fprintf(
+				w,
+				"  Update KubeBlocks Cluster %s component %s volumeClaimTemplates storage request, then create a new migrate-pod session after cleanup.\n",
+				kubeblocks.Cluster,
+				kubeblocks.Component,
+			)
+			return err
+		}
+
 		_, err := fmt.Fprintf(
 			w,
 			"  Then rerun the original %s command with a new --session and a larger --destination-capacity.\n",
@@ -405,7 +472,7 @@ func phaseCanAbortBeforeActivation(session *domain.Session) bool {
 }
 
 func cleanupCommandArgs(session *domain.Session) string {
-	args := []string{"session", "cleanup", session.ID}
+	args := []string{workflowCommandName(session), "cleanup", session.ID}
 	if session.Spec.Type != domain.SessionTypeBackup && !session.Spec.Operation().RebindsPVC() {
 		args = append(args, "--delete-temporary", "--delete-rollback-pv")
 	}
@@ -570,11 +637,18 @@ func writeCapacityFailureGuidance(
 	}
 
 	prefix := prefixes.pvcMigrate
+	workflow := workflowCommandName(session)
 
-	if _, err := fmt.Fprintln(
-		w,
-		"\nDestination capacity was exhausted. Keep the workload paused when applicable. Abort and clean up this session, then create a new session with a larger --destination-capacity.",
-	); err != nil {
+	capacitySummary := "\nDestination capacity was exhausted. Keep the workload paused when applicable. Abort and clean up this session, then create a new session with a larger --destination-capacity."
+	if kubeblocks, ok := session.Spec.KubeBlocksPodMigration(); ok {
+		capacitySummary = fmt.Sprintf(
+			"\nDestination capacity was exhausted during KubeBlocks Cluster %s component %s real-time migration. Keep the workload paused when applicable. Update the component volumeClaimTemplates storage request, abort and clean up this session, then create a new migrate-pod session.",
+			kubeblocks.Cluster,
+			kubeblocks.Component,
+		)
+	}
+
+	if _, err := fmt.Fprintln(w, capacitySummary); err != nil {
 		return err
 	}
 
@@ -599,7 +673,7 @@ func writeCapacityFailureGuidance(
 	if _, err := fmt.Fprintln(
 		w,
 		"  Inspect:",
-		fmt.Sprintf("%s session status %s", prefix, session.ID),
+		fmt.Sprintf("%s %s status %s", prefix, workflow, session.ID),
 	); err != nil {
 		return err
 	}
@@ -612,7 +686,7 @@ func writeCapacityFailureGuidance(
 		if _, err := fmt.Fprintln(
 			w,
 			"  Validate rollback:",
-			fmt.Sprintf("%s session rollback %s --dry-run", prefix, session.ID),
+			fmt.Sprintf("%s %s rollback %s --dry-run", prefix, workflow, session.ID),
 		); err != nil {
 			return err
 		}
@@ -620,14 +694,14 @@ func writeCapacityFailureGuidance(
 		_, err := fmt.Fprintln(
 			w,
 			"  Roll back:",
-			fmt.Sprintf("%s --yes session rollback %s --dry-run=false", prefix, session.ID),
+			fmt.Sprintf("%s --yes %s rollback %s --dry-run=false", prefix, workflow, session.ID),
 		)
 
 		return err
 	}
 
-	abortPlan := fmt.Sprintf("%s session abort %s --dry-run", prefix, session.ID)
-	abort := fmt.Sprintf("%s --yes session abort %s --dry-run=false", prefix, session.ID)
+	abortPlan := fmt.Sprintf("%s %s abort %s --dry-run", prefix, workflow, session.ID)
+	abort := fmt.Sprintf("%s --yes %s abort %s --dry-run=false", prefix, workflow, session.ID)
 	cleanupPlan := fmt.Sprintf("%s %s --dry-run", prefix, cleanupCommandArgs(session))
 
 	cleanup := fmt.Sprintf("%s --yes %s --dry-run=false", prefix, cleanupCommandArgs(session))
@@ -643,6 +717,16 @@ func writeCapacityFailureGuidance(
 		if _, err := fmt.Fprintln(w, "  "+step.label, step.command); err != nil {
 			return err
 		}
+	}
+
+	if kubeblocks, ok := session.Spec.KubeBlocksPodMigration(); ok {
+		_, err := fmt.Fprintf(
+			w,
+			"  Update KubeBlocks Cluster %s component %s volumeClaimTemplates storage request, then create a new migrate-pod session after cleanup.\n",
+			kubeblocks.Cluster,
+			kubeblocks.Component,
+		)
+		return err
 	}
 
 	_, err := fmt.Fprintln(
@@ -665,11 +749,13 @@ func reportSessionLookupError(
 ) error {
 	prefixes := guidancePrefixesForCommand(cmd, namespace)
 	prefix := prefixes.pvcMigrate
+	workflow := workflowCommandNameForCommand(cmd)
 
 	_, _ = fmt.Fprintf(
 		cmd.ErrOrStderr(),
-		"\nSession lookup failed. List persisted sessions: %s session status\n",
+		"\nSession lookup failed. List persisted sessions with the workflow status command: %s %s status\n",
 		prefix,
+		workflow,
 	)
 	if id != "" {
 		_, _ = fmt.Fprintf(
@@ -773,10 +859,12 @@ func reportSessionCreationError(
 ) error {
 	prefixes := guidancePrefixesForCommand(cmd, namespace)
 	prefix := prefixes.pvcMigrate
+	workflow := workflowCommandNameForCommand(cmd)
 	_, _ = fmt.Fprintf(
 		cmd.ErrOrStderr(),
-		"\nSession creation did not return a confirmed result. Inspect before retrying: %s session status %s\n",
+		"\nSession creation did not return a confirmed result. Inspect before retrying: %s %s status %s\n",
 		prefix,
+		workflow,
 		id,
 	)
 	_, _ = fmt.Fprintf(
@@ -819,7 +907,7 @@ func reportCleanupError(
 		)
 		_, _ = fmt.Fprintln(
 			cmd.ErrOrStderr(),
-			"Use session status when the ConfigMap remains; use session cleanup-orphan when ownership remains after the ConfigMap is gone.",
+			"Use the owning workflow's status and cleanup commands when the ConfigMap remains; use recovery cleanup-orphan when ownership remains after the ConfigMap is gone.",
 		)
 
 		return err
@@ -829,15 +917,16 @@ func reportCleanupError(
 		prefix := guidancePrefixesForCommand(cmd, session.Spec.SessionNamespace).pvcMigrate
 		_, _ = fmt.Fprintf(
 			cmd.ErrOrStderr(),
-			"\nCleanup stopped before confirmed completion. Inspect current state: %s session status %s\n",
+			"\nCleanup stopped before confirmed completion. Inspect current state: %s %s status %s\n",
 			prefix,
+			workflowCommandName(session),
 			session.ID,
 		)
 		_, _ = fmt.Fprintf(
 			cmd.ErrOrStderr(),
 			"Revalidate cleanup before retrying: %s %s --dry-run\n",
 			prefix,
-			cleanupCommandArgsForOptions(session.ID, options),
+			cleanupCommandArgsForSessionOptions(session, options),
 		)
 
 		return err
@@ -852,8 +941,8 @@ func writeWarmCopyMountGuidance(w io.Writer, command any, session *domain.Sessio
 	}
 
 	prefixes := guidancePrefixesForCommand(command, session.Spec.SessionNamespace)
-	abortArgs := "session abort " + session.ID
-	cleanupArgs := cleanupCommandArgsForOptions(session.ID, app.CleanupOptions{
+	abortArgs := workflowCommandName(session) + " abort " + session.ID
+	cleanupArgs := cleanupCommandArgsForSessionOptions(session, app.CleanupOptions{
 		DeleteTemporary: true,
 		DeleteRollback:  true,
 		Finalize:        true,
@@ -907,9 +996,12 @@ func writeWarmCopyMountGuidance(w io.Writer, command any, session *domain.Sessio
 		return err
 	}
 
-	retry := "Rerun the original migration with --precopy-passes 0 after cleanup completes."
-	if session.Spec.Operation() == domain.OperationCopy {
+	retry := "Rerun the original offline migrate command after cleanup completes and all source PVC consumers have stopped."
+	switch session.Spec.Operation() {
+	case domain.OperationCopy:
 		retry = "Rerun the original copy without --online after cleanup completes and the source PVC has no active Pod consumers."
+	case domain.OperationMigratePod:
+		retry = "Rerun the original migrate-pod command with --precopy-passes 0 after cleanup completes."
 	}
 
 	if _, err := fmt.Fprintln(w, "  "+retry); err != nil {
@@ -1037,8 +1129,18 @@ func errorHasOperation(err error, operations ...string) bool {
 	return false
 }
 
-func cleanupCommandArgsForOptions(id string, options app.CleanupOptions) string {
-	args := []string{"session", "cleanup", id}
+func cleanupCommandArgsForSessionOptions(session *domain.Session, options app.CleanupOptions) string {
+	workflow := "migrate"
+	id := ""
+	if session != nil {
+		workflow = workflowCommandName(session)
+		id = session.ID
+	}
+	return cleanupCommandArgsForWorkflow(workflow, id, options)
+}
+
+func cleanupCommandArgsForWorkflow(workflow, id string, options app.CleanupOptions) string {
+	args := []string{workflow, "cleanup", id}
 	if options.DeleteTemporary {
 		args = append(args, "--delete-temporary")
 	}
@@ -1056,105 +1158,6 @@ func cleanupCommandArgsForOptions(id string, options app.CleanupOptions) string 
 	}
 
 	return strings.Join(args, " ")
-}
-
-func printPlanResult(
-	cmd interface{ ErrOrStderr() io.Writer },
-	runtime *commandRuntime,
-	plan *domain.MigrationPlan,
-) error {
-	if err := runtime.printer.Print(plan); err != nil {
-		return reportPlanningError(cmd, err)
-	}
-
-	message := "\nPlanning completed without cluster mutations. Resolve the failed checks, then rerun the command."
-	if plan.Ready {
-		message = "\nDry-run completed without cluster mutations. Run the write command with the same inputs and --dry-run=false; provide --yes or typed approval when requested."
-	}
-
-	if _, err := fmt.Fprintln(cmd.ErrOrStderr(), message); err != nil {
-		return err
-	}
-
-	if plan.Ready {
-		return nil
-	}
-
-	return writePlanFailureGuidance(cmd.ErrOrStderr(), plan)
-}
-
-func writePlanFailureGuidance(w io.Writer, plan *domain.MigrationPlan) error {
-	if plan == nil {
-		return nil
-	}
-
-	seen := make(map[string]struct{})
-	for _, check := range plan.Checks {
-		if check.Passed || check.Severity != domain.SeverityError {
-			continue
-		}
-
-		var advice string
-		switch {
-		case strings.Contains(check.Message, "PVC retention whenScaled is"):
-			advice = "StatefulSet action: set persistentVolumeClaimRetentionPolicy.whenScaled=Retain and verify the StatefulSet before rerunning the plan."
-		case strings.Contains(check.Message, "scale-down affects"):
-			advice = "StatefulSet action: complete an application switchover, or explicitly acknowledge the restart with --allow-leader-downtime when the workload can tolerate it."
-		case strings.Contains(
-			check.Message,
-			"--kubeblocks-candidate applies only when the selected InstanceSet Pod has a leader role",
-		):
-			advice = "KubeBlocks action: remove --kubeblocks-candidate when migrating a non-leader InstanceSet Pod, then rerun the plan."
-		case strings.Contains(
-			check.Message,
-			"--kubeblocks-candidate is supported only for InstanceSet-backed KubeBlocks components",
-		):
-			advice = "KubeBlocks action: remove --kubeblocks-candidate for a legacy KubeBlocks component; its Stop/Start OpsRequest already pauses the affected Cluster or component."
-		case strings.Contains(
-			check.Message,
-			"KubeBlocks Redis addon does not provide a Switchover action",
-		):
-			advice = "KubeBlocks Redis action: remove --kubeblocks-candidate and rerun with --allow-leader-downtime."
-		case check.Name == "pvc-consumers":
-			advice = "PVC action: stop or select every consumer with --pod, then verify that the PVC has no unmanaged Pod references before rerunning the plan."
-		case check.Name == "controller-adapter" && strings.Contains(check.Message, "discover KubeBlocks"):
-			continue
-		case check.Name == "controller-adapter":
-			advice = "Workload action: use a supported workload adapter or the controller's native maintenance procedure, then rerun the plan; ordinary Deployments require no operator owner, and directly scaled Deployments and StatefulSets require no HorizontalPodAutoscaler."
-		case check.Name == "target-node":
-			advice = "Node action: choose a Ready, schedulable target with --target-node, or correct the target node condition before rerunning the plan."
-		case check.Name == "storage-topology" || check.Name == "storage-capacity":
-			advice = "Storage action: choose a compatible StorageClass or target node, then verify topology and capacity before rerunning the plan."
-		case check.Name == "destination-capacity":
-			advice = "Capacity action: correct --destination-capacity, or add --allow-volume-shrink only after verifying the copied data fits in every smaller destination PVC."
-		case check.Name == "source-usage":
-			advice = "Usage action: use a destination that is at least the source capacity, or independently verify the data size and rerun with --skip-source-usage-check."
-		case check.Name == "migration-needed":
-			advice = "Migration action: the requested node and StorageClass already match; use --force-reprovision only for an intentional backing-PV replacement."
-		case check.Name == "warm-copy-mount" && plan.SessionSpec.Operation() == domain.OperationCopy:
-			advice = "Copy action: stop all active PVC consumers and rerun without --online, or use storage that explicitly supports a second same-node Pod mount."
-		case check.Name == "warm-copy-mount":
-			advice = "Warm-copy action: rerun with --precopy-passes 0 for offline final sync, or use storage that explicitly supports a second same-node Pod mount."
-			if strings.Contains(check.Message, "OpenEBS LVM") {
-				advice = "OpenEBS LVM action: rerun with --precopy-passes 0 for offline final sync, or explicitly pass --openebs-lvm-enable-shared to temporarily patch the matching LVMVolume before the mount probe."
-			}
-		}
-
-		if advice == "" {
-			continue
-		}
-
-		if _, exists := seen[advice]; exists {
-			continue
-		}
-
-		seen[advice] = struct{}{}
-		if _, err := fmt.Fprintln(w, "  "+advice); err != nil {
-			return err
-		}
-	}
-
-	return nil
 }
 
 func sessionCommandPrefix(namespace string) string {
@@ -1262,16 +1265,22 @@ func writeSessionListGuidance(
 	namespace string,
 	sessions []*domain.Session,
 	prefix string,
+	workflow ...string,
 ) error {
 	if len(sessions) == 0 {
 		_, err := fmt.Fprintf(w, "\nNo migration sessions found in %s.\n", namespace)
 		return err
 	}
 
+	name := "migrate"
+	if len(workflow) > 0 && workflow[0] != "" {
+		name = workflow[0]
+	}
 	_, err := fmt.Fprintf(
 		w,
-		"\nInspect a session and its next steps: %s session status SESSION\n",
+		"\nInspect a session and its next steps with the owning workflow status command: %s %s status SESSION\n",
 		prefix,
+		name,
 	)
 
 	return err

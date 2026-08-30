@@ -492,13 +492,27 @@ type recoveryFixture struct {
 func setSessionOperation(session *domain.Session, operation domain.Operation) {
 	common := session.Spec.SessionCommon
 	workload := session.Spec.Workload()
-	session.Spec = domain.NewSessionSpec(
-		operation,
-		common,
-		workload,
-		operation == domain.OperationCopy && session.Spec.Online(),
-		session.Spec.WorkflowOptions(),
-	)
+	options := session.Spec.WorkflowOptions()
+	switch operation {
+	case domain.OperationMigrate:
+		session.Spec = domain.NewOfflineMigrationSessionSpec(common, options)
+	case domain.OperationMigratePod:
+		session.Spec = domain.NewPodMigrationSessionSpec(
+			common,
+			workload,
+			options,
+			session.Spec.PrecopyPasses(),
+			session.Spec.OpenEBSLVMSharedMountEnabled(),
+		)
+	default:
+		session.Spec = domain.NewSessionSpec(
+			operation,
+			common,
+
+			operation == domain.OperationCopy && session.Spec.Online(),
+			options)
+
+	}
 }
 
 func newRecoveryFixture(t *testing.T) *recoveryFixture {
@@ -870,10 +884,10 @@ func TestValidateResumeDoesNotCheckpointInferredCopySourceNode(t *testing.T) {
 	session.Spec = domain.NewSessionSpec(
 		domain.OperationCopy,
 		common,
-		domain.WorkloadSpec{Adapter: domain.WorkloadNone},
+
 		true,
-		options,
-	)
+		options)
+
 	session.Status.Phase = domain.PhaseReserved
 
 	if _, err := fixture.client.CoreV1().
@@ -882,7 +896,7 @@ func TestValidateResumeDoesNotCheckpointInferredCopySourceNode(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := fixture.service.ValidateResume(context.Background(), session); err != nil {
+	if err := fixture.service.validateResumeWorkflowForTest(context.Background(), session); err != nil {
 		t.Fatal(err)
 	}
 
@@ -905,10 +919,10 @@ func TestWarmCopyValidatesEveryConsumerBeforeCheckpointingSourceNode(t *testing.
 	session.Spec = domain.NewSessionSpec(
 		domain.OperationCopy,
 		common,
-		domain.WorkloadSpec{Adapter: domain.WorkloadNone},
+
 		true,
-		options,
-	)
+		options)
+
 	session.Status.Phase = domain.PhaseReserved
 
 	for _, pod := range []*corev1.Pod{
@@ -1285,7 +1299,7 @@ func TestPauseIdempotencyVerifiesWorkloadState(t *testing.T) {
 		domain.PhasePaused,
 	)
 
-	if err := fixture.service.Pause(context.Background(), session); err != nil {
+	if err := fixture.service.PodPause(context.Background(), session); err != nil {
 		t.Fatal(err)
 	}
 
@@ -1302,7 +1316,7 @@ func TestPauseIdempotencyVerifiesWorkloadState(t *testing.T) {
 		"verify",
 		"workload is running",
 	)
-	if err := fixture.service.Pause(
+	if err := fixture.service.PodPause(
 		context.Background(),
 		session,
 	); domain.CategoryOf(
@@ -1348,7 +1362,7 @@ func TestAbortResumesWorkloadsThatReachedOrMayHavePartiallyEnteredPause(t *testi
 				createSourceStorage(t, fixture, session)
 			}
 
-			if err := fixture.service.Abort(context.Background(), session); err != nil {
+			if err := fixture.service.abortWorkflowForTest(context.Background(), session); err != nil {
 				t.Fatal(err)
 			}
 
@@ -1362,7 +1376,7 @@ func TestAbortResumesWorkloadsThatReachedOrMayHavePartiallyEnteredPause(t *testi
 				)
 			}
 
-			if err := fixture.service.Abort(context.Background(), session); err != nil {
+			if err := fixture.service.abortWorkflowForTest(context.Background(), session); err != nil {
 				t.Fatal(err)
 			}
 
@@ -1439,9 +1453,9 @@ func TestAbortRejectsSourceIdentityDriftBeforeResumingWorkload(t *testing.T) {
 
 				var got error
 				if execute {
-					got = fixture.service.Abort(context.Background(), session)
+					got = fixture.service.abortWorkflowForTest(context.Background(), session)
 				} else {
-					got = fixture.service.ValidateAbort(context.Background(), session)
+					got = fixture.service.validateAbortWorkflowForTest(context.Background(), session)
 				}
 
 				if domain.CategoryOf(got) != domain.ErrorConflict {
@@ -1489,7 +1503,7 @@ func TestAbortRejectsCutoverSessions(t *testing.T) {
 			session := appTestSession()
 			session.Status.Phase = phase
 
-			err := fixture.service.Abort(context.Background(), session)
+			err := fixture.service.abortWorkflowForTest(context.Background(), session)
 			if domain.CategoryOf(err) != domain.ErrorPrecondition {
 				t.Fatalf("category=%s error=%v", domain.CategoryOf(err), err)
 			}
@@ -1513,7 +1527,7 @@ func TestAbortRejectsRollbackRecoveryChain(t *testing.T) {
 			session.Status.Phase = test.phase
 			session.Status.ResumeFrom = test.resumeFrom
 
-			err := fixture.service.Abort(context.Background(), session)
+			err := fixture.service.abortWorkflowForTest(context.Background(), session)
 			if domain.CategoryOf(err) != domain.ErrorPrecondition {
 				t.Fatalf("category=%s error=%v", domain.CategoryOf(err), err)
 			}
@@ -1537,7 +1551,7 @@ func TestActivateResumesAtFirstIncompleteVolume(t *testing.T) {
 		session.Status.Volumes[index].Sync.FinalCompletedAt = &completed
 	}
 
-	if err := fixture.service.Activate(context.Background(), session); err != nil {
+	if err := fixture.service.PodActivate(context.Background(), session); err != nil {
 		t.Fatal(err)
 	}
 
@@ -1569,7 +1583,7 @@ func TestActivatePreflightsAllVolumesBeforeSwitchingAnyPVC(t *testing.T) {
 	conflict := domain.NewError(domain.ErrorConflict, "verify PVC offline", "logs binding changed")
 	fixture.switcher.offlineErrs = map[string]error{"logs": conflict}
 
-	err := fixture.service.Activate(context.Background(), session)
+	err := fixture.service.PodActivate(context.Background(), session)
 	if !errors.Is(err, conflict) {
 		t.Fatalf("Activate() error=%v", err)
 	}
@@ -1597,14 +1611,14 @@ func TestActivateIsIdempotentAfterCutover(t *testing.T) {
 			session.Status.Phase = test.phase
 			session.Status.ResumeFrom = test.resumeFrom
 
-			if err := fixture.service.ValidateActivation(
+			if err := fixture.service.ValidatePodActivation(
 				context.Background(),
 				session,
 			); err != nil {
 				t.Fatal(err)
 			}
 
-			if err := fixture.service.Activate(context.Background(), session); err != nil {
+			if err := fixture.service.PodActivate(context.Background(), session); err != nil {
 				t.Fatal(err)
 			}
 
@@ -1634,7 +1648,7 @@ func TestValidateResumeRecognizesActivePVCBeforeCheckpointPersistence(t *testing
 	session.Status.Volumes[0].Activation.ActivePVC = domain.ObjectReference{}
 	session.Status.Volumes[0].Activation.ActivatedAt = nil
 
-	if err := fixture.service.ValidateResume(context.Background(), session); err != nil {
+	if err := fixture.service.validateResumeWorkflowForTest(context.Background(), session); err != nil {
 		t.Fatal(err)
 	}
 
@@ -1648,7 +1662,7 @@ func TestValidateResumeRecognizesActivePVCBeforeCheckpointPersistence(t *testing
 	}
 }
 
-func TestResumeWorkloadPersistsRecreatedStandalonePodUID(t *testing.T) {
+func TestResumePodWorkloadPersistsRecreatedStandalonePodUID(t *testing.T) {
 	fixture := newRecoveryFixture(t)
 	session := appTestSession()
 	session.Status.Phase = domain.PhaseActivated
@@ -1718,7 +1732,7 @@ func TestResumeWorkloadPersistsRecreatedStandalonePodUID(t *testing.T) {
 		return createErr
 	}
 
-	if err := fixture.service.ResumeWorkload(context.Background(), session); err != nil {
+	if err := fixture.service.ResumePodWorkload(context.Background(), session); err != nil {
 		t.Fatal(err)
 	}
 
@@ -1734,7 +1748,7 @@ func TestResumeWorkloadPersistsRecreatedStandalonePodUID(t *testing.T) {
 	}
 }
 
-func TestResumeWorkloadRejectsReplacedStandalonePodAfterControllerResume(t *testing.T) {
+func TestResumePodWorkloadRejectsReplacedStandalonePodAfterControllerResume(t *testing.T) {
 	fixture := newRecoveryFixture(t)
 	session := appTestSession()
 	session.Status.Phase = domain.PhaseActivated
@@ -1758,7 +1772,7 @@ func TestResumeWorkloadRejectsReplacedStandalonePodAfterControllerResume(t *test
 		return err
 	}
 
-	err := fixture.service.ResumeWorkload(context.Background(), session)
+	err := fixture.service.ResumePodWorkload(context.Background(), session)
 	if domain.CategoryOf(err) != domain.ErrorConflict {
 		t.Fatalf("category=%s error=%v", domain.CategoryOf(err), err)
 	}
@@ -1781,7 +1795,7 @@ func TestRollbackMultiVolumeRunsInReverseAndRecoversFailure(t *testing.T) {
 	)
 	fixture.switcher.rollbackErr["data"] = 1
 
-	err := fixture.service.Rollback(context.Background(), session)
+	err := fixture.service.rollbackWorkflowForTest(context.Background(), session)
 	if domain.CategoryOf(err) != domain.ErrorKubernetes {
 		t.Fatalf("category=%s error=%v", domain.CategoryOf(err), err)
 	}
@@ -1791,7 +1805,7 @@ func TestRollbackMultiVolumeRunsInReverseAndRecoversFailure(t *testing.T) {
 		t.Fatalf("phase=%s resumeFrom=%s", session.Status.Phase, session.Status.ResumeFrom)
 	}
 
-	if err := fixture.service.ResumeSession(context.Background(), session); err != nil {
+	if err := fixture.service.resumeWorkflowForTest(context.Background(), session); err != nil {
 		t.Fatal(err)
 	}
 
@@ -1820,11 +1834,11 @@ func TestRollbackMultiVolumeRunsInReverseAndRecoversFailure(t *testing.T) {
 	}
 
 	before := len(fixture.switcher.rollbackCalls)
-	if err := fixture.service.ValidateRollback(context.Background(), session); err != nil {
+	if err := fixture.service.validateRollbackWorkflowForTest(context.Background(), session); err != nil {
 		t.Fatal(err)
 	}
 
-	if err := fixture.service.Rollback(context.Background(), session); err != nil {
+	if err := fixture.service.rollbackWorkflowForTest(context.Background(), session); err != nil {
 		t.Fatal(err)
 	}
 
@@ -1844,7 +1858,7 @@ func TestRollbackPreservesRunningOriginAcrossRepeatedFailures(t *testing.T) {
 	)
 	fixture.switcher.rollbackErr["data"] = 1
 
-	if err := fixture.service.Rollback(context.Background(), session); err == nil {
+	if err := fixture.service.rollbackWorkflowForTest(context.Background(), session); err == nil {
 		t.Fatal("first rollback unexpectedly succeeded")
 	}
 
@@ -1859,11 +1873,11 @@ func TestRollbackPreservesRunningOriginAcrossRepeatedFailures(t *testing.T) {
 
 		return nil
 	}
-	if err := fixture.service.Rollback(context.Background(), session); err == nil {
+	if err := fixture.service.rollbackWorkflowForTest(context.Background(), session); err == nil {
 		t.Fatal("second rollback unexpectedly succeeded")
 	}
 
-	if err := fixture.service.Rollback(context.Background(), session); err != nil {
+	if err := fixture.service.rollbackWorkflowForTest(context.Background(), session); err != nil {
 		t.Fatal(err)
 	}
 
@@ -1895,7 +1909,7 @@ func TestRollbackRejectsSourceIdentityDriftBeforeResumingWorkload(t *testing.T) 
 		return err
 	}
 
-	err := fixture.service.Rollback(context.Background(), session)
+	err := fixture.service.rollbackWorkflowForTest(context.Background(), session)
 	if domain.CategoryOf(err) != domain.ErrorConflict {
 		t.Fatalf("category=%s error=%v", domain.CategoryOf(err), err)
 	}
@@ -1966,7 +1980,7 @@ func TestRollbackCheckpointsCurrentControllerPodsBeforePause(t *testing.T) {
 		return nil
 	}
 
-	if err := fixture.service.Rollback(context.Background(), session); err != nil {
+	if err := fixture.service.rollbackWorkflowForTest(context.Background(), session); err != nil {
 		t.Fatal(err)
 	}
 
@@ -2078,7 +2092,7 @@ func TestRollbackRejectsRunningStateConflictsBeforePausingWorkload(t *testing.T)
 			createActiveDestinationStorage(t, fixture, session)
 			test.configure(t, fixture, session)
 
-			err := fixture.service.Rollback(context.Background(), session)
+			err := fixture.service.rollbackWorkflowForTest(context.Background(), session)
 			if category := domain.CategoryOf(
 				err,
 			); category != domain.ErrorConflict &&
@@ -2120,7 +2134,7 @@ func TestRollbackFromPausedCutoverPreflightsAllVolumesBeforeSwitchingAnyPVC(t *t
 		t.Fatal(err)
 	}
 
-	err = fixture.service.Rollback(context.Background(), session)
+	err = fixture.service.rollbackWorkflowForTest(context.Background(), session)
 	if domain.CategoryOf(err) != domain.ErrorConflict {
 		t.Fatalf("category=%s error=%v", domain.CategoryOf(err), err)
 	}
@@ -2144,7 +2158,7 @@ func TestRollbackRejectsFailuresBeforeCutover(t *testing.T) {
 			session.Status.Phase = domain.PhaseFailed
 			session.Status.ResumeFrom = resumeFrom
 
-			err := fixture.service.Rollback(context.Background(), session)
+			err := fixture.service.rollbackWorkflowForTest(context.Background(), session)
 			if domain.CategoryOf(err) != domain.ErrorPrecondition {
 				t.Fatalf("category=%s error=%v", domain.CategoryOf(err), err)
 			}
@@ -2183,7 +2197,7 @@ func TestRenameAndRollbackPreservePVCIdentityDirection(t *testing.T) {
 		)
 	}
 
-	if err := fixture.service.Rollback(context.Background(), session); err != nil {
+	if err := fixture.service.rollbackWorkflowForTest(context.Background(), session); err != nil {
 		t.Fatal(err)
 	}
 
@@ -2259,7 +2273,7 @@ func TestDryRunRenameRollbackChecksCurrentActivePVC(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := fixture.service.ValidateRollback(context.Background(), session); err != nil {
+	if err := fixture.service.validateRollbackWorkflowForTest(context.Background(), session); err != nil {
 		t.Fatal(err)
 	}
 
@@ -2311,7 +2325,7 @@ func TestDryRunRenameResumeAcceptsOnlyOneValidEndpoint(t *testing.T) {
 			t.Fatal(err)
 		}
 
-		if err := fixture.service.ValidateResume(context.Background(), session); err != nil {
+		if err := fixture.service.validateResumeWorkflowForTest(context.Background(), session); err != nil {
 			t.Fatal(err)
 		}
 
@@ -2344,7 +2358,7 @@ func TestDryRunRenameResumeAcceptsOnlyOneValidEndpoint(t *testing.T) {
 			t.Fatal(err)
 		}
 
-		err := fixture.service.ValidateResume(context.Background(), session)
+		err := fixture.service.validateResumeWorkflowForTest(context.Background(), session)
 		if domain.CategoryOf(err) != domain.ErrorConflict ||
 			len(fixture.switcher.offlineCalls) != 0 {
 			t.Fatalf(
@@ -2364,7 +2378,7 @@ func TestPauseRejectsNonOrchestratedSessionBeforePhaseMutation(t *testing.T) {
 	session.Status.Phase = domain.PhaseWarmCopied
 
 	historyBefore := len(session.Status.History)
-	if err := fixture.service.Pause(
+	if err := fixture.service.PodPause(
 		context.Background(),
 		session,
 	); domain.CategoryOf(
@@ -2391,8 +2405,8 @@ func TestStagePreconditionsPreserveSessionState(t *testing.T) {
 		run  func(*Service, *domain.Session) error
 	}{
 		{name: "negative warm passes", run: func(service *Service, session *domain.Session) error {
-			session.Spec.Migrate.PrecopyPasses = -1
-			return service.Migrate(context.Background(), session)
+			session.Spec.MigratePod.PrecopyPasses = -1
+			return service.MigratePod(context.Background(), session)
 		}},
 		{
 			name: "warm copy from planned",
@@ -2403,20 +2417,20 @@ func TestStagePreconditionsPreserveSessionState(t *testing.T) {
 		{
 			name: "final sync from planned",
 			run: func(service *Service, session *domain.Session) error {
-				return service.FinalSync(context.Background(), session)
+				return service.PodFinalSync(context.Background(), session)
 			},
 		},
 		{name: "activate from planned", run: func(service *Service, session *domain.Session) error {
-			return service.Activate(context.Background(), session)
+			return service.PodActivate(context.Background(), session)
 		}},
 		{
 			name: "resume workload from planned",
 			run: func(service *Service, session *domain.Session) error {
-				return service.ResumeWorkload(context.Background(), session)
+				return service.ResumePodWorkload(context.Background(), session)
 			},
 		},
 		{name: "rollback from planned", run: func(service *Service, session *domain.Session) error {
-			return service.Rollback(context.Background(), session)
+			return service.rollbackWorkflowForTest(context.Background(), session)
 		}},
 	}
 	for _, test := range tests {
@@ -2453,7 +2467,7 @@ func TestResumeSessionCompletesEveryCompositeMigrationStage(t *testing.T) {
 		t.Helper()
 		reserve(t, service, session)
 
-		if err := service.Pause(context.Background(), session); err != nil {
+		if err := service.PodPause(context.Background(), session); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -2461,7 +2475,7 @@ func TestResumeSessionCompletesEveryCompositeMigrationStage(t *testing.T) {
 		t.Helper()
 		pause(t, service, session)
 
-		if err := service.FinalSync(context.Background(), session); err != nil {
+		if err := service.PodFinalSync(context.Background(), session); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -2469,7 +2483,7 @@ func TestResumeSessionCompletesEveryCompositeMigrationStage(t *testing.T) {
 		t.Helper()
 		finalSync(t, service, session)
 
-		if err := service.Activate(context.Background(), session); err != nil {
+		if err := service.PodActivate(context.Background(), session); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -2540,7 +2554,7 @@ func TestResumeSessionCompletesEveryCompositeMigrationStage(t *testing.T) {
 				test.setup(t, service, session)
 			}
 
-			if err := service.ResumeSession(context.Background(), session); err != nil {
+			if err := service.resumeWorkflowForTest(context.Background(), session); err != nil {
 				t.Fatal(err)
 			}
 
@@ -2561,7 +2575,7 @@ func TestResumeFailedCompositePausingContinuesFromPause(t *testing.T) {
 	session.Status.Phase = domain.PhaseFailed
 	session.Status.ResumeFrom = domain.PhasePausing
 
-	if err := service.ResumeSession(context.Background(), session); err != nil {
+	if err := service.resumeWorkflowForTest(context.Background(), session); err != nil {
 		t.Fatal(err)
 	}
 
@@ -2611,7 +2625,7 @@ func TestResumeSessionDispatchesSingleOperationStages(t *testing.T) {
 				createSourceStorage(t, fixture, session)
 			}
 
-			if err := fixture.service.ResumeSession(context.Background(), session); err != nil {
+			if err := fixture.service.resumeWorkflowForTest(context.Background(), session); err != nil {
 				t.Fatal(err)
 			}
 
@@ -2665,7 +2679,7 @@ func TestResumeSessionDispatchesSingleOperationFirstStages(t *testing.T) {
 				createSourceStorage(t, fixture, session)
 			}
 
-			if err := fixture.service.ResumeSession(context.Background(), session); err != nil {
+			if err := fixture.service.resumeWorkflowForTest(context.Background(), session); err != nil {
 				t.Fatal(err)
 			}
 
@@ -2680,7 +2694,7 @@ func TestResumeSessionDispatchesSingleOperationFirstStages(t *testing.T) {
 	setSessionOperation(session, domain.OperationReserve)
 
 	session.Status.Phase = domain.Phase("Unknown")
-	if err := fixture.service.ResumeSession(
+	if err := fixture.service.resumeWorkflowForTest(
 		context.Background(),
 		session,
 	); domain.CategoryOf(
@@ -2694,7 +2708,7 @@ func TestResumeSessionDispatchesSingleOperationFirstStages(t *testing.T) {
 	setSessionOperation(session, domain.OperationRename)
 
 	session.Status.Phase = domain.PhaseReserved
-	if err := fixture.service.ResumeSession(
+	if err := fixture.service.resumeWorkflowForTest(
 		context.Background(),
 		session,
 	); domain.CategoryOf(
@@ -2717,7 +2731,7 @@ func TestValidateResumeUsesOperationSpecificChecks(t *testing.T) {
 			"destination PVC UID changed",
 		),
 	}
-	if err := fixture.service.ValidateResume(
+	if err := fixture.service.validateResumeWorkflowForTest(
 		context.Background(),
 		session,
 	); domain.CategoryOf(
@@ -2743,7 +2757,7 @@ func TestValidateResumeUsesOperationSpecificChecks(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := fixture.service.ValidateResume(
+	if err := fixture.service.validateResumeWorkflowForTest(
 		context.Background(),
 		session,
 	); domain.CategoryOf(
@@ -2763,7 +2777,7 @@ func TestValidateResumeUsesOperationSpecificChecks(t *testing.T) {
 		"verify PVC offline",
 		"source PVC has an active consumer",
 	)
-	if err := fixture.service.ValidateResume(
+	if err := fixture.service.validateResumeWorkflowForTest(
 		context.Background(),
 		session,
 	); domain.CategoryOf(err) != domain.ErrorPrecondition ||
@@ -2789,7 +2803,7 @@ func TestValidateResumePropagatesWorkloadReplicaConflict(t *testing.T) {
 		"Deployment app/web replicas changed to 2 while restoring 1 replicas",
 	)
 
-	err := fixture.service.ValidateResume(context.Background(), session)
+	err := fixture.service.validateResumeWorkflowForTest(context.Background(), session)
 	if domain.CategoryOf(err) != domain.ErrorConflict ||
 		!strings.Contains(err.Error(), "replicas changed to 2 while restoring 1") {
 		t.Fatalf("category=%s error=%v", domain.CategoryOf(err), err)
@@ -2816,7 +2830,7 @@ func TestValidateResumeChecksReservationBeforeContinuingPause(t *testing.T) {
 		),
 	}
 
-	err := fixture.service.ValidateResume(context.Background(), session)
+	err := fixture.service.validateResumeWorkflowForTest(context.Background(), session)
 	if domain.CategoryOf(err) != domain.ErrorConflict {
 		t.Fatalf("category=%s error=%v", domain.CategoryOf(err), err)
 	}
@@ -2826,7 +2840,7 @@ func TestValidateResumeChecksReservationBeforeContinuingPause(t *testing.T) {
 	}
 }
 
-func TestPauseAndFinalSyncChecksReservationBeforePausing(t *testing.T) {
+func TestPodPauseAndFinalSyncChecksReservationBeforePausing(t *testing.T) {
 	fixture := newRecoveryFixture(t)
 	session := appTestSession()
 	session.Status.Phase = domain.PhaseReserved
@@ -2838,7 +2852,7 @@ func TestPauseAndFinalSyncChecksReservationBeforePausing(t *testing.T) {
 		),
 	}
 
-	err := fixture.service.PauseAndFinalSync(context.Background(), session)
+	err := fixture.service.PodPauseAndFinalSync(context.Background(), session)
 	if domain.CategoryOf(err) != domain.ErrorConflict {
 		t.Fatalf("category=%s error=%v", domain.CategoryOf(err), err)
 	}
@@ -2864,7 +2878,7 @@ func TestPauseChecksReservationBeforeWorkloadMutation(t *testing.T) {
 		),
 	}
 
-	err := fixture.service.Pause(context.Background(), session)
+	err := fixture.service.PodPause(context.Background(), session)
 	if domain.CategoryOf(err) != domain.ErrorConflict {
 		t.Fatalf("category=%s error=%v", domain.CategoryOf(err), err)
 	}
@@ -2944,7 +2958,7 @@ func TestRenameRollbackChecksLiveEndpointsBeforeSessionMutation(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	err := fixture.service.Rollback(context.Background(), session)
+	err := fixture.service.rollbackWorkflowForTest(context.Background(), session)
 	if domain.CategoryOf(err) != domain.ErrorConflict {
 		t.Fatalf("category=%s error=%v", domain.CategoryOf(err), err)
 	}
@@ -2987,7 +3001,7 @@ func TestActivateRecoveryValidatesEveryVolumeBeforeMutation(t *testing.T) {
 		),
 	}
 
-	err := fixture.service.Activate(context.Background(), session)
+	err := fixture.service.PodActivate(context.Background(), session)
 	if domain.CategoryOf(err) != domain.ErrorConflict {
 		t.Fatalf("category=%s error=%v", domain.CategoryOf(err), err)
 	}
@@ -3023,7 +3037,7 @@ func TestRollbackRecoveryValidatesEveryVolumeBeforeMutation(t *testing.T) {
 		),
 	}
 
-	err := fixture.service.Rollback(context.Background(), session)
+	err := fixture.service.rollbackWorkflowForTest(context.Background(), session)
 	if domain.CategoryOf(err) != domain.ErrorConflict {
 		t.Fatalf("category=%s error=%v", domain.CategoryOf(err), err)
 	}
@@ -3045,19 +3059,19 @@ func TestResumeSessionContinuesActivatedSingleOperationSession(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := service.Pause(context.Background(), session); err != nil {
+	if err := service.PodPause(context.Background(), session); err != nil {
 		t.Fatal(err)
 	}
 
-	if err := service.FinalSync(context.Background(), session); err != nil {
+	if err := service.PodFinalSync(context.Background(), session); err != nil {
 		t.Fatal(err)
 	}
 
-	if err := service.Activate(context.Background(), session); err != nil {
+	if err := service.PodActivate(context.Background(), session); err != nil {
 		t.Fatal(err)
 	}
 
-	if err := service.Activate(context.Background(), session); err != nil {
+	if err := service.PodActivate(context.Background(), session); err != nil {
 		t.Fatal(err)
 	}
 
@@ -3073,7 +3087,7 @@ func TestResumeSessionHandlesRecoveryAndTerminalPhases(t *testing.T) {
 		session.Status.Phase = domain.PhaseAborting
 
 		session.Status.ResumeFrom = domain.PhaseReserved
-		if err := fixture.service.ResumeSession(context.Background(), session); err != nil {
+		if err := fixture.service.resumeWorkflowForTest(context.Background(), session); err != nil {
 			t.Fatal(err)
 		}
 
@@ -3089,7 +3103,7 @@ func TestResumeSessionHandlesRecoveryAndTerminalPhases(t *testing.T) {
 		session.Status.ResumeFrom = domain.PhaseCompleted
 		createActiveDestinationStorage(t, fixture, session)
 
-		if err := fixture.service.ResumeSession(context.Background(), session); err != nil {
+		if err := fixture.service.resumeWorkflowForTest(context.Background(), session); err != nil {
 			t.Fatal(err)
 		}
 
@@ -3104,7 +3118,7 @@ func TestResumeSessionHandlesRecoveryAndTerminalPhases(t *testing.T) {
 			session := appTestSession()
 
 			session.Status.Phase = phase
-			if err := fixture.service.ResumeSession(context.Background(), session); err != nil {
+			if err := fixture.service.resumeWorkflowForTest(context.Background(), session); err != nil {
 				t.Fatal(err)
 			}
 
@@ -3123,7 +3137,7 @@ func TestResumeSessionHandlesRecoveryAndTerminalPhases(t *testing.T) {
 		session := appTestSession()
 		session.Status.Phase = domain.Phase("Unknown")
 
-		err := fixture.service.ResumeSession(context.Background(), session)
+		err := fixture.service.resumeWorkflowForTest(context.Background(), session)
 		if domain.CategoryOf(err) != domain.ErrorPrecondition {
 			t.Fatalf("category=%s error=%v", domain.CategoryOf(err), err)
 		}
@@ -3145,7 +3159,7 @@ func TestAbortRetryAfterResumeFailureStillResumesPausedWorkload(t *testing.T) {
 		{Phase: domain.PhaseAborting, Time: metav1.Now()},
 		{Phase: domain.PhaseFailed, Time: metav1.Now()},
 	}
-	if err := fixture.service.ResumeSession(context.Background(), session); err != nil {
+	if err := fixture.service.resumeWorkflowForTest(context.Background(), session); err != nil {
 		t.Fatal(err)
 	}
 
@@ -3163,7 +3177,7 @@ func TestFinalSyncResumesPartialVolumeAndRepeatsChecksumPass(t *testing.T) {
 	completed := metav1.NewTime(time.Unix(500, 0))
 	session.Status.Volumes[0].Sync.FinalCompletedAt = &completed
 
-	if err := fixture.service.FinalSync(context.Background(), session); err != nil {
+	if err := fixture.service.PodFinalSync(context.Background(), session); err != nil {
 		t.Fatal(err)
 	}
 
@@ -3171,7 +3185,7 @@ func TestFinalSyncResumesPartialVolumeAndRepeatsChecksumPass(t *testing.T) {
 		t.Fatalf("recovery sources=%v want=%v", requestSources(fixture.copier.requests), want)
 	}
 
-	if err := fixture.service.FinalSync(context.Background(), session); err != nil {
+	if err := fixture.service.PodFinalSync(context.Background(), session); err != nil {
 		t.Fatal(err)
 	}
 
@@ -3387,7 +3401,7 @@ func TestHelmSchedulingValuesLocalLetsPVTopologyPlaceBothSSHDPods(t *testing.T) 
 	}
 }
 
-func TestResumeWorkloadFailsWhenActiveResourcesDoNotMatchPlan(t *testing.T) {
+func TestResumePodWorkloadFailsWhenActiveResourcesDoNotMatchPlan(t *testing.T) {
 	t.Run("PVC points to source", func(t *testing.T) {
 		fixture := newRecoveryFixture(t)
 		session := appTestSession()
@@ -3418,7 +3432,7 @@ func TestResumeWorkloadFailsWhenActiveResourcesDoNotMatchPlan(t *testing.T) {
 			t.Fatal(err)
 		}
 
-		err = fixture.service.ResumeWorkload(context.Background(), session)
+		err = fixture.service.ResumePodWorkload(context.Background(), session)
 		if domain.CategoryOf(err) != domain.ErrorConflict {
 			t.Fatalf("category=%s error=%v", domain.CategoryOf(err), err)
 		}
@@ -3497,7 +3511,7 @@ func TestResumeWorkloadFailsWhenActiveResourcesDoNotMatchPlan(t *testing.T) {
 			return createErr
 		}
 
-		err = fixture.service.ResumeWorkload(context.Background(), session)
+		err = fixture.service.ResumePodWorkload(context.Background(), session)
 		if domain.CategoryOf(err) != domain.ErrorPrecondition {
 			t.Fatalf("category=%s error=%v", domain.CategoryOf(err), err)
 		}
@@ -3574,7 +3588,7 @@ func TestResumeWorkloadFailsWhenActiveResourcesDoNotMatchPlan(t *testing.T) {
 			t.Fatal(err)
 		}
 
-		if err := fixture.service.ResumeWorkload(context.Background(), session); err != nil {
+		if err := fixture.service.ResumePodWorkload(context.Background(), session); err != nil {
 			t.Fatal(err)
 		}
 
@@ -3641,13 +3655,13 @@ func TestResumeWorkloadFailsWhenActiveResourcesDoNotMatchPlan(t *testing.T) {
 			t.Fatal(err)
 		}
 
-		if err := fixture.service.ValidateResume(context.Background(), session); err != nil {
+		if err := fixture.service.validateResumeWorkflowForTest(context.Background(), session); err != nil {
 			t.Fatal(err)
 		}
 	})
 }
 
-func TestResumeWorkloadRejectsActiveIdentityDriftBeforeControllerResume(t *testing.T) {
+func TestResumePodWorkloadRejectsActiveIdentityDriftBeforeControllerResume(t *testing.T) {
 	tests := []struct {
 		name  string
 		setup func(t *testing.T, fixture *recoveryFixture, session *domain.Session)
@@ -3794,7 +3808,7 @@ func TestResumeWorkloadRejectsActiveIdentityDriftBeforeControllerResume(t *testi
 			session.Status.Phase = domain.PhaseActivated
 			test.setup(t, fixture, session)
 
-			err := fixture.service.ResumeWorkload(context.Background(), session)
+			err := fixture.service.ResumePodWorkload(context.Background(), session)
 			if domain.CategoryOf(err) != domain.ErrorConflict {
 				t.Fatalf("category=%s error=%v", domain.CategoryOf(err), err)
 			}
@@ -3902,9 +3916,9 @@ func TestMigrateStopsAtEachFailedStageAndRecordsResumePoint(t *testing.T) {
 			test.configure(fixture)
 
 			session := appTestSession()
-			session.Spec.Migrate.PrecopyPasses = test.warmPasses
+			session.Spec.MigratePod.PrecopyPasses = test.warmPasses
 
-			err := fixture.service.Migrate(context.Background(), session)
+			err := fixture.service.MigratePod(context.Background(), session)
 			if domain.CategoryOf(err) != test.category {
 				t.Fatalf("category=%s want=%s error=%v", domain.CategoryOf(err), test.category, err)
 			}
@@ -3952,7 +3966,6 @@ func TestActivateRecoversAfterSwitcherCheckpointFailure(t *testing.T) {
 	fixture := newRecoveryFixture(t)
 	fixture.store.updateErrAt = 2
 	session := appTestSession()
-	setSessionOperation(session, domain.OperationMigrate)
 	session.Status.Phase = domain.PhaseFinalSynced
 	session.Spec.Volumes[0].DestinationPVC.UID = types.UID("destination-pvc-uid")
 	session.Spec.Volumes[0].DestinationPV = domain.ObjectReference{
@@ -3963,7 +3976,7 @@ func TestActivateRecoversAfterSwitcherCheckpointFailure(t *testing.T) {
 	completed := metav1.Now()
 	session.Status.Volumes[0].Sync.FinalCompletedAt = &completed
 
-	err := fixture.service.Activate(context.Background(), session)
+	err := fixture.service.PodActivate(context.Background(), session)
 	if err == nil || err.Error() != "injected session update failure" {
 		t.Fatalf("error=%v", err)
 	}
@@ -3980,7 +3993,7 @@ func TestActivateRecoversAfterSwitcherCheckpointFailure(t *testing.T) {
 	}
 
 	fixture.store.updateErrAt = 0
-	if err := fixture.service.Activate(context.Background(), session); err != nil {
+	if err := fixture.service.PodActivate(context.Background(), session); err != nil {
 		t.Fatal(err)
 	}
 
@@ -4002,7 +4015,7 @@ func TestDryRunActivationAcceptsCheckpointedActiveStorage(t *testing.T) {
 	session.Status.Volumes[0].Sync.FinalCompletedAt = &completed
 	createActiveDestinationStorage(t, fixture, session)
 
-	if err := fixture.service.ValidateResume(context.Background(), session); err != nil {
+	if err := fixture.service.validateResumeWorkflowForTest(context.Background(), session); err != nil {
 		t.Fatal(err)
 	}
 
@@ -4024,7 +4037,7 @@ func TestDryRunRollbackAcceptsActivatedAndPartiallyRestoredStorage(t *testing.T)
 		session.Status.Phase = domain.PhaseActivated
 		createActiveDestinationStorage(t, fixture, session)
 
-		if err := fixture.service.ValidateRollback(context.Background(), session); err != nil {
+		if err := fixture.service.validateRollbackWorkflowForTest(context.Background(), session); err != nil {
 			t.Fatal(err)
 		}
 
@@ -4064,7 +4077,7 @@ func TestDryRunRollbackAcceptsActivatedAndPartiallyRestoredStorage(t *testing.T)
 			{Phase: domain.PhaseFailed, Time: metav1.Now()},
 		}
 
-		if err := fixture.service.ValidateResume(context.Background(), session); err != nil {
+		if err := fixture.service.validateResumeWorkflowForTest(context.Background(), session); err != nil {
 			t.Fatal(err)
 		}
 
@@ -4085,7 +4098,7 @@ func TestDryRunRecoveryValidationUsesReadOnlyChecks(t *testing.T) {
 	session := appTestSession()
 
 	session.Status.Phase = domain.PhaseReserved
-	if err := fixture.service.ValidateResume(context.Background(), session); err != nil {
+	if err := fixture.service.validateResumeWorkflowForTest(context.Background(), session); err != nil {
 		t.Fatal(err)
 	}
 
@@ -4104,7 +4117,7 @@ func TestDryRunRecoveryValidationUsesReadOnlyChecks(t *testing.T) {
 	session.Status.Phase = domain.PhasePaused
 	createSourceStorage(t, fixture, session)
 
-	if err := fixture.service.ValidateAbort(context.Background(), session); err != nil {
+	if err := fixture.service.validateAbortWorkflowForTest(context.Background(), session); err != nil {
 		t.Fatal(err)
 	}
 
@@ -4120,7 +4133,6 @@ func TestDryRunRecoveryValidationUsesReadOnlyChecks(t *testing.T) {
 func TestDryRunResumeFromActivatedAcceptsPausedStandalonePod(t *testing.T) {
 	fixture := newRecoveryFixture(t)
 	session := appTestSession()
-	setSessionOperation(session, domain.OperationMigrate)
 	session.Status.Phase = domain.PhaseActivated
 	_ = session.Spec.SetWorkload(domain.WorkloadSpec{
 		Adapter: domain.WorkloadStandalone,
@@ -4188,7 +4200,7 @@ func TestDryRunResumeFromActivatedAcceptsPausedStandalonePod(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := fixture.service.ValidateResume(context.Background(), session); err != nil {
+	if err := fixture.service.validateResumeWorkflowForTest(context.Background(), session); err != nil {
 		t.Fatal(err)
 	}
 
@@ -4216,7 +4228,7 @@ func TestDryRunResumeFromActivatedAcceptsPausedStandalonePod(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := fixture.service.ValidateResume(
+	if err := fixture.service.validateResumeWorkflowForTest(
 		context.Background(),
 		session,
 	); domain.CategoryOf(
@@ -4230,7 +4242,7 @@ func TestDryRunRollbackRejectsUnactivatedSession(t *testing.T) {
 	fixture := newRecoveryFixture(t)
 
 	session := appTestSession()
-	if err := fixture.service.ValidateRollback(
+	if err := fixture.service.validateRollbackWorkflowForTest(
 		context.Background(),
 		session,
 	); domain.CategoryOf(
@@ -4255,10 +4267,10 @@ func TestBackupSessionRollbackIsRejected(t *testing.T) {
 	spec := domain.NewSessionSpec(
 		domain.OperationBackup,
 		domain.SessionCommon{SourceNamespace: "app", SessionNamespace: "sessions"},
-		domain.WorkloadSpec{Adapter: domain.WorkloadNone},
+
 		true,
-		domain.SessionWorkflowOptions{},
-	)
+		domain.SessionWorkflowOptions{})
+
 	spec.Backup.SourcePVC = domain.ObjectReference{Namespace: "app", Name: "data", UID: "pvc-uid"}
 	spec.Backup.SourcePV = domain.ObjectReference{Name: "pv-data", UID: "pv-uid"}
 	spec.Backup.Backend = "s3"
@@ -4267,7 +4279,7 @@ func TestBackupSessionRollbackIsRejected(t *testing.T) {
 	session := domain.NewSession("backup-session", spec, time.Now())
 	session.Status.Phase = domain.PhaseCompleted
 
-	if err := fixture.service.ValidateRollback(
+	if err := fixture.service.validateRollbackWorkflowForTest(
 		context.Background(),
 		session,
 	); domain.CategoryOf(
@@ -4276,7 +4288,7 @@ func TestBackupSessionRollbackIsRejected(t *testing.T) {
 		t.Fatalf("dry-run category=%s error=%v", domain.CategoryOf(err), err)
 	}
 
-	if err := fixture.service.Rollback(
+	if err := fixture.service.rollbackWorkflowForTest(
 		context.Background(),
 		session,
 	); domain.CategoryOf(
@@ -4299,10 +4311,10 @@ func TestBackupSessionAbortUsesBackupMessage(t *testing.T) {
 	spec := domain.NewSessionSpec(
 		domain.OperationBackup,
 		domain.SessionCommon{SourceNamespace: "app", SessionNamespace: "sessions"},
-		domain.WorkloadSpec{Adapter: domain.WorkloadNone},
+
 		true,
-		domain.SessionWorkflowOptions{},
-	)
+		domain.SessionWorkflowOptions{})
+
 	spec.Backup.SourcePVC = domain.ObjectReference{Namespace: "app", Name: "data", UID: "pvc-uid"}
 	spec.Backup.SourcePV = domain.ObjectReference{Name: "pv-data", UID: "pv-uid"}
 	spec.Backup.Backend = "s3"
@@ -4312,7 +4324,7 @@ func TestBackupSessionAbortUsesBackupMessage(t *testing.T) {
 	session.Status.Phase = domain.PhaseFailed
 	session.Status.ResumeFrom = domain.PhaseWarmCopied
 
-	if err := fixture.service.Abort(context.Background(), session); err != nil {
+	if err := fixture.service.abortWorkflowForTest(context.Background(), session); err != nil {
 		t.Fatal(err)
 	}
 
@@ -4460,8 +4472,10 @@ func TestDryRunRollbackChecksConsumersOutsideTheWorkloadPauseScope(t *testing.T)
 
 			setSessionOperation(session, operation)
 
-			if err := session.Spec.SetWorkload(test.workload); err != nil {
-				t.Fatal(err)
+			if operation == domain.OperationMigratePod {
+				if err := session.Spec.SetWorkload(test.workload); err != nil {
+					t.Fatal(err)
+				}
 			}
 
 			session.Spec.Volumes[0].DestinationPV = domain.ObjectReference{
@@ -4539,7 +4553,7 @@ func TestDryRunRollbackChecksConsumersOutsideTheWorkloadPauseScope(t *testing.T)
 				t.Fatal(err)
 			}
 
-			err := fixture.service.ValidateRollback(context.Background(), session)
+			err := fixture.service.validateRollbackWorkflowForTest(context.Background(), session)
 			if test.want == "" {
 				if err != nil {
 					t.Fatal(err)
@@ -4558,7 +4572,7 @@ func TestDryRunCleanupEnforcesDestructivePrerequisites(t *testing.T) {
 	fixture := newRecoveryFixture(t)
 
 	session := appTestSession()
-	if err := fixture.service.ValidateCleanup(
+	if err := fixture.service.validateCleanupWorkflowForTest(
 		context.Background(),
 		session,
 		CleanupOptions{},
@@ -4569,7 +4583,7 @@ func TestDryRunCleanupEnforcesDestructivePrerequisites(t *testing.T) {
 	}
 
 	session.Status.Phase = domain.PhaseCompleted
-	if err := fixture.service.ValidateCleanup(
+	if err := fixture.service.validateCleanupWorkflowForTest(
 		context.Background(),
 		session,
 		CleanupOptions{DeleteSession: true},

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -183,6 +184,48 @@ func TestPlanAndCreateSessionKeepClustersSeparate(t *testing.T) {
 			"storage class identity missing: %#v",
 			session.Spec.Volumes[0].Destination.StorageClass,
 		)
+	}
+}
+
+func TestCreateSessionRechecksDestinationAccessModes(t *testing.T) {
+	service, options, _ := crossFixture()
+	plan, err := service.Plan(context.Background(), options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !plan.Ready {
+		t.Fatalf("plan is not ready: %#v", plan.Checks)
+	}
+
+	pvc, err := service.SourceClientForTest().CoreV1().
+		PersistentVolumeClaims(options.SourceNamespace).
+		Get(context.Background(), options.SourcePVCs[0], metav1.GetOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	pvc.Spec.AccessModes = []corev1.PersistentVolumeAccessMode{corev1.ReadWriteMany}
+	if _, err := service.SourceClientForTest().CoreV1().
+		PersistentVolumeClaims(options.SourceNamespace).
+		Update(context.Background(), pvc, metav1.UpdateOptions{}); err != nil {
+		t.Fatal(err)
+	}
+
+	storageClass, err := service.DestinationClientForTest().StorageV1().
+		StorageClasses().
+		Get(context.Background(), options.DestinationStorageClass, metav1.GetOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	storageClass.Provisioner = kube.OpenEBSLocalPVProvisioner
+	if _, err := service.DestinationClientForTest().StorageV1().
+		StorageClasses().
+		Update(context.Background(), storageClass, metav1.UpdateOptions{}); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := service.CreateSession(context.Background(), options, plan); err == nil ||
+		!strings.Contains(err.Error(), "cannot provide source PVC") {
+		t.Fatalf("CreateSession error=%v", err)
 	}
 }
 
@@ -511,6 +554,51 @@ func TestPlanRejectsReadOnlySourcePVC(t *testing.T) {
 	}
 
 	t.Fatalf("plan did not report an access-mode failure: %#v", plan.Checks)
+}
+
+func TestPlanRejectsKnownDestinationAccessModeMismatch(t *testing.T) {
+	service, options, _ := crossFixture()
+
+	pvc, err := service.SourceClientForTest().CoreV1().
+		PersistentVolumeClaims("app").
+		Get(context.Background(), "data", metav1.GetOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	pvc.Spec.AccessModes = []corev1.PersistentVolumeAccessMode{corev1.ReadWriteMany}
+	if _, err := service.SourceClientForTest().CoreV1().
+		PersistentVolumeClaims("app").
+		Update(context.Background(), pvc, metav1.UpdateOptions{}); err != nil {
+		t.Fatal(err)
+	}
+
+	storageClass, err := service.DestinationClientForTest().StorageV1().
+		StorageClasses().
+		Get(context.Background(), options.DestinationStorageClass, metav1.GetOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	storageClass.Provisioner = kube.OpenEBSLocalPVProvisioner
+	if _, err := service.DestinationClientForTest().StorageV1().
+		StorageClasses().
+		Update(context.Background(), storageClass, metav1.UpdateOptions{}); err != nil {
+		t.Fatal(err)
+	}
+
+	plan, err := service.Plan(context.Background(), options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if plan.Ready {
+		t.Fatalf("plan accepted incompatible destination access modes: %#v", plan.Checks)
+	}
+	for _, check := range plan.Checks {
+		if check.Name == "destination-access-modes" && !check.Passed {
+			return
+		}
+	}
+
+	t.Fatalf("plan did not report destination access-mode failure: %#v", plan.Checks)
 }
 
 func TestPlanRejectsTransferPathsThatEscapePVC(t *testing.T) {

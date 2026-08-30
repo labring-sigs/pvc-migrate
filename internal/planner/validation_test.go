@@ -6,12 +6,14 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/labring-sigs/pvc-migrate/internal/controller"
 	"github.com/labring-sigs/pvc-migrate/internal/domain"
 	"github.com/labring-sigs/pvc-migrate/internal/kube"
 	"github.com/labring-sigs/pvc-migrate/internal/testutil"
 	corev1 "k8s.io/api/core/v1"
 	storagev1 "k8s.io/api/storage/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
@@ -20,6 +22,255 @@ import (
 type plannerOpenEBSLVMSharedVolumeManager struct {
 	shared bool
 	err    error
+}
+
+func TestPlanRejectsMixedOfflineAndRealtimeInputs(t *testing.T) {
+	tests := []struct {
+		name    string
+		options planOptions
+		check   string
+	}{
+		{
+			name: "offline pod selection",
+			options: planOptions{
+				Operation:       domain.OperationMigrate,
+				SourceNamespace: "app",
+				PodName:         "db-0",
+			},
+			check: "pod",
+		},
+		{
+			name: "realtime requires pod",
+			options: planOptions{
+				Operation:       domain.OperationMigratePod,
+				SourceNamespace: "app",
+			},
+			check: "pod",
+		},
+		{
+			name: "realtime source pvc selection",
+			options: planOptions{
+				Operation:       domain.OperationMigratePod,
+				SourceNamespace: "app",
+				PodName:         "db-0",
+				SourcePVCs:      []string{"data"},
+			},
+			check: "source-pvc",
+		},
+		{
+			name: "realtime destination pvc selection",
+			options: planOptions{
+				Operation:       domain.OperationMigratePod,
+				SourceNamespace: "app",
+				PodName:         "db-0",
+				DestinationPVCs: []string{"data-migrated"},
+			},
+			check: "destination-pvc",
+		},
+		{
+			name: "realtime namespace switch",
+			options: planOptions{
+				Operation:            domain.OperationMigratePod,
+				SourceNamespace:      "app",
+				DestinationNamespace: "archive",
+				PodName:              "db-0",
+			},
+			check: "destination-namespace",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			state := newPlanState(nil, tt.options)
+			New(nil, nil).validatePlanInputs(state.plan, state.options)
+
+			if !hasFailedCheck(state.plan, tt.check) {
+				t.Fatalf("checks=%#v, missing failed check %q", state.plan.Checks, tt.check)
+			}
+		})
+	}
+}
+
+func TestMigratePodAvailabilityZoneBoundary(t *testing.T) {
+	tests := []struct {
+		name       string
+		operation  domain.Operation
+		sourceZone string
+		targetZone string
+		check      func(*testing.T, *domain.MigrationPlan)
+	}{
+		{
+			name:       "same zone passes",
+			operation:  domain.OperationMigratePod,
+			sourceZone: "zone-a",
+			targetZone: "zone-a",
+			check: func(t *testing.T, plan *domain.MigrationPlan) {
+				if !hasPassedCheck(plan, "availability-zone") {
+					t.Fatalf("checks=%#v", plan.Checks)
+				}
+			},
+		},
+		{
+			name:       "cross zone fails",
+			operation:  domain.OperationMigratePod,
+			sourceZone: "zone-a",
+			targetZone: "zone-b",
+			check: func(t *testing.T, plan *domain.MigrationPlan) {
+				if !hasFailedCheck(plan, "availability-zone") {
+					t.Fatalf("checks=%#v", plan.Checks)
+				}
+				for _, check := range plan.Checks {
+					if check.Name == "availability-zone" && strings.Contains(check.Message, "copy --online") {
+						return
+					}
+				}
+				t.Fatalf("checks=%#v, missing cross-zone guidance", plan.Checks)
+			},
+		},
+		{
+			name:       "missing zone warns",
+			operation:  domain.OperationMigratePod,
+			sourceZone: "",
+			targetZone: "zone-b",
+			check: func(t *testing.T, plan *domain.MigrationPlan) {
+				if !hasWarningCheck(plan, "availability-zone") {
+					t.Fatalf("checks=%#v", plan.Checks)
+				}
+			},
+		},
+		{
+			name:       "offline ignores zone boundary",
+			operation:  domain.OperationMigrate,
+			sourceZone: "zone-a",
+			targetZone: "zone-b",
+			check: func(t *testing.T, plan *domain.MigrationPlan) {
+				if hasFailedCheck(plan, "availability-zone") || hasWarningCheck(plan, "availability-zone") {
+					t.Fatalf("checks=%#v", plan.Checks)
+				}
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			state := &planState{
+				options:    planOptions{Operation: tt.operation, SourceNode: "source-node"},
+				plan:       &domain.MigrationPlan{Ready: true},
+				sourcePod:  &corev1.Pod{},
+				inventory:  planInventory{sourceNode: &corev1.Node{ObjectMeta: metav1.ObjectMeta{Labels: map[string]string{corev1.LabelTopologyZone: tt.sourceZone}}}},
+				targetNode: &corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "target-node", Labels: map[string]string{corev1.LabelTopologyZone: tt.targetZone}}},
+			}
+
+			New(nil, nil).checkMigratePodAvailabilityZone(state)
+			tt.check(t, state.plan)
+		})
+	}
+}
+
+func TestPlanVolumeCapacityHandlesKubeBlocksCapacityChangeByOperation(t *testing.T) {
+	for _, operation := range []domain.Operation{
+		domain.OperationMigrate,
+		domain.OperationMigratePod,
+		domain.OperationReserve,
+		domain.OperationCopy,
+	} {
+		for _, requested := range []string{"1Gi", "3Gi"} {
+			t.Run(string(operation)+"/"+requested, func(t *testing.T) {
+				workloadKind := domain.WorkloadKubeBlocks
+				kubeBlocksDetected := false
+				if operation == domain.OperationCopy {
+					workloadKind = domain.WorkloadNone
+					kubeBlocksDetected = true
+				}
+
+				state := &planState{
+					options: planOptions{
+						Operation:            operation,
+						AllowVolumeShrink:    true,
+						SkipSourceUsageCheck: true,
+					},
+					plan: &domain.MigrationPlan{Ready: true},
+					workload: domain.WorkloadSpec{
+						Adapter: workloadKind,
+					},
+					kubeBlocksDetected:  kubeBlocksDetected,
+					requestedCapacities: []string{requested},
+				}
+
+				input := planVolumeInput{
+					pvc:      &corev1.PersistentVolumeClaim{ObjectMeta: metav1.ObjectMeta{Namespace: "app", Name: "data"}},
+					capacity: resource.MustParse("2Gi"),
+				}
+				capacity, _, _ := New(nil, nil).planVolumeCapacity(
+					context.Background(),
+					state,
+					0,
+					input,
+				)
+
+				wantReject := operation == domain.OperationMigratePod
+				rejected := hasFailedCheck(state.plan, "destination-capacity")
+				if capacity.Cmp(resource.MustParse(requested)) != 0 || rejected != wantReject ||
+					state.plan.Ready == wantReject {
+					t.Fatalf("capacity=%s checks=%#v", capacity.String(), state.plan.Checks)
+				}
+
+			})
+		}
+	}
+}
+
+func TestPlanVolumeCapacityDetectsKubeBlocksSourcePVC(t *testing.T) {
+	for _, labels := range []map[string]string{
+		{kube.ManagedByLabel: "kubeblocks"},
+		{"apps.kubeblocks.io/component-name": "mongodb"},
+	} {
+		state := &planState{
+			options:             planOptions{Operation: domain.OperationMigratePod},
+			plan:                &domain.MigrationPlan{Ready: true},
+			requestedCapacities: []string{"3Gi"},
+		}
+		input := planVolumeInput{
+			pvc:      &corev1.PersistentVolumeClaim{ObjectMeta: metav1.ObjectMeta{Namespace: "app", Name: "data", Labels: labels}},
+			capacity: resource.MustParse("2Gi"),
+		}
+
+		capacity, _, _ := New(nil, nil).planVolumeCapacity(
+			context.Background(),
+			state,
+			0,
+			input,
+		)
+		if capacity.Cmp(resource.MustParse("3Gi")) != 0 || !hasFailedCheck(state.plan, "destination-capacity") {
+			t.Fatalf("labels=%v capacity=%s checks=%#v", labels, capacity.String(), state.plan.Checks)
+		}
+	}
+}
+
+func TestPlanVolumeCapacityDoesNotTreatPvcMigratePVCAsKubeBlocks(t *testing.T) {
+	state := &planState{
+		options:             planOptions{Operation: domain.OperationMigrate},
+		plan:                &domain.MigrationPlan{Ready: true},
+		requestedCapacities: []string{"3Gi"},
+	}
+	input := planVolumeInput{
+		pvc: &corev1.PersistentVolumeClaim{ObjectMeta: metav1.ObjectMeta{
+			Namespace: "app",
+			Name:      "data",
+			Labels:    map[string]string{kube.ManagedByLabel: kube.ManagedByValue},
+		}},
+		capacity: resource.MustParse("2Gi"),
+	}
+
+	capacity, _, _ := New(nil, nil).planVolumeCapacity(
+		context.Background(),
+		state,
+		0,
+		input,
+	)
+	if capacity.Cmp(resource.MustParse("3Gi")) != 0 || hasFailedCheck(state.plan, "destination-capacity") {
+		t.Fatalf("capacity=%s checks=%#v", capacity.String(), state.plan.Checks)
+	}
 }
 
 func (m plannerOpenEBSLVMSharedVolumeManager) Shared(
@@ -251,19 +502,13 @@ func TestCheckWarmCopyMountCompatibility(t *testing.T) {
 			class:     &storagev1.StorageClass{ObjectMeta: metav1.ObjectMeta{Name: "openebs-device"}, Provisioner: "openebs.io/local", Parameters: map[string]string{"storageType": "device"}},
 			consumers: []*corev1.Pod{consumer}, wantReady: true, wantText: "StorageType=device", wantLevel: domain.SeverityWarning, wantChecks: 1,
 		},
-		{
-			name:         "offline OpenEBS source still requires runtime inspection",
-			enableShared: true,
-			class:        &storagev1.StorageClass{ObjectMeta: metav1.ObjectMeta{Name: "openebs-lvmpv"}, Provisioner: "local.csi.openebs.io"},
-			wantReady:    true, wantInspect: true,
-		},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			plan := &domain.MigrationPlan{Ready: true}
 
 			operation := test.operation
 			if operation == "" {
-				operation = domain.OperationMigrate
+				operation = domain.OperationMigratePod
 			}
 
 			pvDriver := test.pvDriver
@@ -317,11 +562,11 @@ func TestCheckWarmCopyMountCompatibility(t *testing.T) {
 }
 
 func TestWarmCopyRequestedUsesPrecopyPasses(t *testing.T) {
-	if warmCopyRequested(Options{Operation: domain.OperationMigratePod, PrecopyPasses: 0}) {
+	if warmCopyRequested(planOptions{Operation: domain.OperationMigratePod, PrecopyPasses: 0}) {
 		t.Fatal("offline migration requested warm copy")
 	}
 
-	if !warmCopyRequested(Options{Operation: domain.OperationMigratePod, PrecopyPasses: 1}) {
+	if !warmCopyRequested(planOptions{Operation: domain.OperationMigratePod, PrecopyPasses: 1}) {
 		t.Fatal("precopy migration did not request warm copy")
 	}
 }
@@ -349,7 +594,7 @@ func TestCheckWarmCopyMountCompatibilityUsesLVMSourcePVWithoutStorageClass(t *te
 	inspect, patch := planner.checkWarmCopyMountCompatibility(
 		context.Background(),
 		plan,
-		domain.OperationMigrate,
+		domain.OperationMigratePod,
 		false,
 		pvc,
 		pv,
@@ -393,25 +638,31 @@ func TestPlanReportsOpenEBSWarmCopyMountCheck(t *testing.T) {
 	}
 	consumer := podWithPVC("database-0")
 	consumer.Status.Phase = corev1.PodRunning
-	objects = append(objects, consumer)
-	options := Options{
+	objects = append(objects, consumer, &corev1.Node{
+		ObjectMeta: metav1.ObjectMeta{Name: "node-a", Labels: map[string]string{
+			corev1.LabelHostname: "node-a", corev1.LabelTopologyZone: "zone-b",
+		}},
+		Status: corev1.NodeStatus{Conditions: []corev1.NodeCondition{{
+			Type: corev1.NodeReady, Status: corev1.ConditionTrue,
+		}}},
+	})
+	options := planOptions{
 		SessionID:          "migration",
-		Operation:          domain.OperationMigrate,
+		Operation:          domain.OperationMigratePod,
 		SourceNamespace:    "app",
 		TemporaryNamespace: "system",
 		StagingNamespace:   "system",
 		SessionNamespace:   "system",
-		SourcePVCs: []string{
-			"data",
-		},
-		TargetNode:       "node-b",
-		DestinationClass: "fast",
-		PrecopyPasses:    1,
+		PodName:            "database-0",
+		TargetNode:         "node-b",
+		DestinationClass:   "fast",
+		PrecopyPasses:      1,
 	}
 
-	plan, err := New(plannerClient(objects...), nil).
+	client := plannerClient(objects...)
+	plan, err := New(client, controller.NewManager(client, nil, nil)).
 		WithOpenEBSLVMSharedVolumeManager(plannerOpenEBSLVMSharedVolumeManager{}).
-		Plan(context.Background(), options)
+		plan(context.Background(), options)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -426,15 +677,15 @@ func TestPlanReportsOpenEBSWarmCopyMountCheck(t *testing.T) {
 
 	options.PrecopyPasses = 0
 
-	offlinePlan, err := New(plannerClient(objects...), nil).
+	cutoverPlan, err := New(client, controller.NewManager(client, nil, nil)).
 		WithOpenEBSLVMSharedVolumeManager(plannerOpenEBSLVMSharedVolumeManager{}).
-		Plan(context.Background(), options)
+		plan(context.Background(), options)
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	if hasFailedCheck(offlinePlan, "warm-copy-mount") {
-		t.Fatalf("offline plan includes warm-copy mount check: %#v", offlinePlan.Checks)
+	if hasFailedCheck(cutoverPlan, "warm-copy-mount") {
+		t.Fatalf("zero-pass Pod migration includes warm-copy mount check: %#v", cutoverPlan.Checks)
 	}
 }
 
@@ -443,7 +694,7 @@ func TestPlanRejectsSourcePVClaimRefDrift(t *testing.T) {
 	pv := testutil.MustType[*corev1.PersistentVolume](t, objects[6])
 	pv.Spec.ClaimRef.Name = "other"
 
-	plan, err := New(plannerClient(objects...), nil).Plan(context.Background(), Options{
+	plan, err := New(plannerClient(objects...), nil).plan(context.Background(), planOptions{
 		SessionID:          "binding-drift",
 		Operation:          domain.OperationMigrate,
 		SourceNamespace:    "app",
@@ -605,7 +856,7 @@ func TestPlanVolumeConsumersModelsConcurrentRWODestinationByVolume(t *testing.T)
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			state := &planState{
-				options: Options{
+				options: planOptions{
 					Operation:              domain.OperationMigratePod,
 					OpenEBSLVMEnableShared: test.enableShared,
 				},
@@ -759,7 +1010,7 @@ func TestCheckSharedRWOSchedulingRejectsHardCollocationConflicts(t *testing.T) {
 			target := sharedSchedulingNode("node-a")
 			other := sharedSchedulingNode("node-b")
 			state := &planState{
-				options: Options{OpenEBSLVMEnableShared: true},
+				options: planOptions{OpenEBSLVMEnableShared: true},
 				plan:    &domain.MigrationPlan{Ready: true},
 				workload: domain.WorkloadSpec{
 					Adapter: domain.WorkloadDeployment,
@@ -840,7 +1091,7 @@ func TestCheckSharedRWOSchedulingIgnoresUnrelatedVolumes(t *testing.T) {
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			state := &planState{
-				options:    Options{OpenEBSLVMEnableShared: true},
+				options:    planOptions{OpenEBSLVMEnableShared: true},
 				plan:       &domain.MigrationPlan{Ready: true},
 				sourcePod:  selected,
 				targetNode: target,
@@ -919,7 +1170,7 @@ func TestPlanRejectsUnschedulableTopologyAndBlockVolumes(t *testing.T) {
 		}
 	}
 
-	plan, err := New(plannerClient(objects...), nil).Plan(context.Background(), Options{
+	plan, err := New(plannerClient(objects...), nil).plan(context.Background(), planOptions{
 		SessionID:          "migration",
 		SourceNamespace:    "app",
 		StagingNamespace:   "system",

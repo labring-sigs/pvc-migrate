@@ -14,7 +14,7 @@ func TestCrossClusterCleanupGuidanceIsExecutable(t *testing.T) {
 		SessionNamespace: "migration-control",
 	}, "cross-test")
 	for _, required := range []string{
-		"pvc-migrate session cleanup cross-cluster cross-test",
+		"pvc-migrate copy cross-cluster cleanup cross-test",
 		"--source-kubeconfig '/tmp/source config'",
 		"--source-context source",
 		"--destination-kubeconfig '/tmp/destination config'",

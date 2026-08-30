@@ -209,6 +209,79 @@ func TestToolLogStreamerDetectsNoSpaceWhenOutputIsDiscarded(t *testing.T) {
 	}
 }
 
+func TestToolLogStreamStopIsBoundedWhenLogStreamIgnoresCancellation(t *testing.T) {
+	previousTimeout := toolLogStopTimeout
+	toolLogStopTimeout = 10 * time.Millisecond
+	t.Cleanup(func() { toolLogStopTimeout = previousTimeout })
+
+	release := make(chan struct{})
+	started := make(chan struct{})
+	source := &blockingToolLogSource{
+		pod:     upstreamToolPod("pm-blocked"),
+		release: release,
+		started: started,
+	}
+	stream := startToolLogStream(t.Context(), source, ToolLogOptions{}, source.pod)
+
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("log stream did not start")
+	}
+
+	start := time.Now()
+	stream.Stop()
+	if elapsed := time.Since(start); elapsed > time.Second {
+		t.Fatalf("Stop took %s", elapsed)
+	}
+
+	close(release)
+	select {
+	case <-stream.done:
+	case <-time.After(time.Second):
+		t.Fatal("log stream did not finish after the blocked reader was released")
+	}
+}
+
+type blockingToolLogSource struct {
+	pod     *corev1.Pod
+	release chan struct{}
+	started chan struct{}
+}
+
+func (s *blockingToolLogSource) listPods(context.Context, string, metav1.ListOptions) (*corev1.PodList, error) {
+	return &corev1.PodList{}, nil
+}
+
+func (s *blockingToolLogSource) watchPods(context.Context, string, metav1.ListOptions) (watch.Interface, error) {
+	return watch.NewRaceFreeFake(), nil
+}
+
+func (s *blockingToolLogSource) getPod(context.Context, string, string) (*corev1.Pod, error) {
+	return s.pod.DeepCopy(), nil
+}
+
+func (s *blockingToolLogSource) streamPodLogs(context.Context, string, string, *corev1.PodLogOptions) (io.ReadCloser, error) {
+	select {
+	case <-s.started:
+	default:
+		close(s.started)
+	}
+
+	return blockingToolLogReader{release: s.release}, nil
+}
+
+type blockingToolLogReader struct {
+	release <-chan struct{}
+}
+
+func (r blockingToolLogReader) Read([]byte) (int, error) {
+	<-r.release
+	return 0, io.EOF
+}
+
+func (r blockingToolLogReader) Close() error { return nil }
+
 func TestToolLogMatcherUsesExactOperationSegmentAndKnownComponents(t *testing.T) {
 	streamer := &toolLogStreamer{options: ToolLogOptions{OperationID: "pm-abc"}}
 	for _, test := range []struct {

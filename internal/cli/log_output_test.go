@@ -109,12 +109,12 @@ func TestColorizeTextLogsByLevelComponentAndTool(t *testing.T) {
 func TestColorizeSessionGuidanceByAction(t *testing.T) {
 	input := "Next steps for session mig-test (phase Completed):\n" +
 		"  Record: ConfigMap pvc-migrate-system/pvc-migrate-session-mig-test\n" +
-		"  Inspect: pvc-migrate session status mig-test\n" +
+		"  Inspect: pvc-migrate migrate-pod status mig-test\n" +
 		"  Verify workload readiness: kubectl --namespace app get pod database-0 -o wide\n" +
 		"  Verify workload and active PVCs before closing the rollback window.\n" +
-		"  Validate rollback: pvc-migrate session rollback mig-test --dry-run\n" +
-		"  Roll back: pvc-migrate --yes session rollback mig-test --dry-run=false\n" +
-		"  Finalize and delete retained resources/session: pvc-migrate --yes session cleanup mig-test --dry-run=false\n" +
+		"  Validate rollback: pvc-migrate migrate-pod rollback mig-test --dry-run\n" +
+		"  Roll back: pvc-migrate --yes migrate-pod rollback mig-test --dry-run=false\n" +
+		"  Finalize and delete retained resources/session: pvc-migrate --yes migrate-pod cleanup mig-test --dry-run=false\n" +
 		"Cleanup action for PVC system/data:\n" +
 		"  Delete terminal Pod object: kubectl --namespace system delete pod copy-tool\n"
 

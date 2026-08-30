@@ -123,7 +123,6 @@ func (m *Manager) kubeBlocksWorkload(
 			SwitchoverContainer:      switchoverContainer,
 			OpsAPIVersion:            state.opsAPIVersion,
 			ClusterUID:               state.clusterObject.GetUID(),
-			LegacyOriginalReplicas:   state.originalReplicas,
 			OriginalPaused:           instanceSet.Paused,
 			OriginalPausedConfigured: instanceSet.PausedConfigured,
 		},
@@ -137,7 +136,6 @@ type kubeBlocksDiscoveryState struct {
 	opsAPIVersion       string
 	switchoverCandidate *corev1.Pod
 	clusterObject       *unstructured.Unstructured
-	originalReplicas    int32
 }
 
 func (m *Manager) prepareKubeBlocksDiscovery(
@@ -170,13 +168,30 @@ func (m *Manager) prepareKubeBlocksDiscovery(
 		return state, err
 	}
 
-	state.opsAPIVersion = servedKubeBlocksOpsAPIVersion(m.discovery)
-	if state.opsAPIVersion == "" {
+	// Redis has no supported switchover action. Reject the candidate before
+	// discovering the OpsRequest API so an unsupported parameter cannot cause
+	// unrelated API probing or mask the actionable Redis guidance.
+	if options.SwitchoverCandidate != "" && isKubeBlocksRedis(pod) {
 		return state, domain.NewError(
 			domain.ErrorPrecondition,
 			"discover KubeBlocks",
-			"no served OpsRequest API was found",
+			"the KubeBlocks Redis addon does not provide a Switchover action; omit --kubeblocks-candidate",
 		)
+	}
+
+	// MongoDB InstanceSet switchover is executed through its native candidate
+	// script and does not depend on the installed KubeBlocks OpsRequest API.
+	// Legacy KubeBlocks pause/resume still uses Stop/Start OpsRequests, so its
+	// served API must be discovered and persisted in the session.
+	if !isKubeBlocksMongoDB(pod) || owner.Kind != domain.KindInstanceSet {
+		state.opsAPIVersion = servedKubeBlocksOpsAPIVersion(m.discovery)
+		if state.opsAPIVersion == "" {
+			return state, domain.NewError(
+				domain.ErrorPrecondition,
+				"discover KubeBlocks",
+				"no served OpsRequest API was found",
+			)
+		}
 	}
 
 	candidate, err := m.discoverKubeBlocksCandidate(ctx, pod, owner, options, state)
@@ -216,12 +231,9 @@ func (m *Manager) prepareKubeBlocksDiscovery(
 
 	state.clusterObject = clusterObject
 
-	replicas, err := parseKubeBlocksReplicas(components, state.component)
-	if err != nil {
+	if err := validateKubeBlocksComponents(components, state.component); err != nil {
 		return state, err
 	}
-
-	state.originalReplicas = replicas
 
 	return state, nil
 }
@@ -396,14 +408,12 @@ func (m *Manager) loadKubeBlocksCluster(
 	return clusterObject, components, nil
 }
 
-func parseKubeBlocksReplicas(components []any, selected string) (int32, error) {
+func validateKubeBlocksComponents(components []any, selected string) error {
 	found := false
-
-	var replicas int32 = 1
 	for index := range components {
 		componentSpec, ok := components[index].(map[string]any)
 		if !ok {
-			return 0, domain.NewError(
+			return domain.NewError(
 				domain.ErrorPrecondition,
 				"discover KubeBlocks",
 				fmt.Sprintf("componentSpecs[%d] is malformed", index),
@@ -412,7 +422,7 @@ func parseKubeBlocksReplicas(components []any, selected string) (int32, error) {
 
 		name, nameOK, err := unstructured.NestedString(componentSpec, "name")
 		if err != nil || !nameOK || name == "" {
-			return 0, domain.NewError(
+			return domain.NewError(
 				domain.ErrorPrecondition,
 				"discover KubeBlocks",
 				fmt.Sprintf("componentSpecs[%d] has no name", index),
@@ -420,7 +430,7 @@ func parseKubeBlocksReplicas(components []any, selected string) (int32, error) {
 		}
 
 		if _, _, err := unstructured.NestedString(componentSpec, "componentDefRef"); err != nil {
-			return 0, domain.WrapError(
+			return domain.WrapError(
 				domain.ErrorPrecondition,
 				"discover KubeBlocks",
 				fmt.Sprintf("read component %s definition", name),
@@ -428,50 +438,20 @@ func parseKubeBlocksReplicas(components []any, selected string) (int32, error) {
 			)
 		}
 
-		value, replicasFound, err := unstructured.NestedInt64(componentSpec, "replicas")
-		if err != nil {
-			return 0, domain.WrapError(
-				domain.ErrorPrecondition,
-				"discover KubeBlocks",
-				fmt.Sprintf("read component %s replicas", name),
-				err,
-			)
-		}
-
 		if name == selected {
-			if replicasFound {
-				if value <= 0 {
-					return 0, domain.NewError(
-						domain.ErrorPrecondition,
-						"discover KubeBlocks",
-						fmt.Sprintf("component %s must have positive replicas", name),
-					)
-				}
-
-				if value > int64(1<<31-1) {
-					return 0, domain.NewError(
-						domain.ErrorPrecondition,
-						"discover KubeBlocks",
-						fmt.Sprintf("component %s replicas exceed int32 range", name),
-					)
-				}
-
-				replicas = int32(value)
-			}
-
 			found = true
 		}
 	}
 
 	if !found {
-		return 0, domain.NewError(
+		return domain.NewError(
 			domain.ErrorPrecondition,
 			"discover KubeBlocks",
 			"Cluster componentSpecs has no component "+selected,
 		)
 	}
 
-	return replicas, nil
+	return nil
 }
 
 func resolveKubeBlocksRole(
@@ -811,6 +791,27 @@ func (m *Manager) kubeBlocksLeaderGuidance(
 	selected *corev1.Pod,
 	cluster, component, role, opsAPIVersion string,
 ) string {
+	if isKubeBlocksMongoDB(selected) {
+		candidate := m.readyKubeBlocksCandidate(ctx, selected, cluster, component)
+		if candidate == "" {
+			candidate = "REPLACE_WITH_READY_SECONDARY_POD"
+		}
+
+		return fmt.Sprintf(
+			"selected MongoDB instance %s has role %s; use --kubeblocks-candidate %s and pvc-migrate will validate and run the native switchover script. Manual MongoDB switchover: %s. The candidate must remain Ready and caught up; --allow-leader-downtime acknowledges a leader outage",
+			selected.Name,
+			role,
+			candidate,
+			kubeBlocksMongoDBNativeSwitchoverCommand(
+				selected.Namespace,
+				cluster,
+				component,
+				selected.Name,
+				candidate,
+			),
+		)
+	}
+
 	if isKubeBlocksRedis(selected) {
 		return fmt.Sprintf(
 			"selected instance %s has role %s; the KubeBlocks Redis addon does not provide a Switchover action. Rerun without --kubeblocks-candidate and use --allow-leader-downtime to acknowledge the leader outage",
@@ -825,38 +826,6 @@ func (m *Manager) kubeBlocksLeaderGuidance(
 	}
 
 	if candidate != "REPLACE_WITH_READY_SECONDARY_POD" {
-		if isKubeBlocksMongoDB(selected) {
-			if _, err := m.preflightMongoDBNativeSwitchover(ctx, selected); err != nil {
-				return fmt.Sprintf(
-					"selected instance %s has role %s; MongoDB has no KubeBlocks Switchover OpsRequest handler and native switchover preflight failed: %v. Use --allow-leader-downtime to acknowledge the leader outage. Manual MongoDB switchover: %s",
-					selected.Name,
-					role,
-					err,
-					kubeBlocksMongoDBNativeSwitchoverCommand(
-						selected.Namespace,
-						cluster,
-						component,
-						selected.Name,
-						candidate,
-					),
-				)
-			}
-
-			return fmt.Sprintf(
-				"selected instance %s has role %s; MongoDB does not support KubeBlocks Switchover OpsRequests. Use --kubeblocks-candidate %s for the validated native replica-set switchover, or use --allow-leader-downtime to acknowledge the leader outage. Manual MongoDB switchover: %s",
-				selected.Name,
-				role,
-				candidate,
-				kubeBlocksMongoDBNativeSwitchoverCommand(
-					selected.Namespace,
-					cluster,
-					component,
-					selected.Name,
-					candidate,
-				),
-			)
-		}
-
 		if err := m.validateKubeBlocksSwitchover(
 			ctx,
 			selected.Namespace,
@@ -1032,7 +1001,7 @@ func (m *Manager) kubeBlocksSwitchoverStrategy(
 		container, err := m.preflightMongoDBNativeSwitchover(ctx, selected)
 		if err != nil {
 			return "", "", fmt.Errorf(
-				"MongoDB has no KubeBlocks Switchover OpsRequest handler; native switchover preflight failed: %w",
+				"MongoDB native switchover script preflight failed: %w; use --allow-leader-downtime to acknowledge the leader outage",
 				err,
 			)
 		}
@@ -1057,100 +1026,6 @@ func (m *Manager) kubeBlocksSwitchoverStrategy(
 		"the served OpsRequest API rejected the request: %w; use the component's native switchover procedure",
 		err,
 	)
-}
-
-func isKubeBlocksMongoDB(pod *corev1.Pod) bool {
-	return isKubeBlocksApplication(pod, "mongodb")
-}
-
-func isKubeBlocksRedis(pod *corev1.Pod) bool {
-	return isKubeBlocksApplication(pod, "redis")
-}
-
-func isKubeBlocksApplication(pod *corev1.Pod, name string) bool {
-	if pod == nil {
-		return false
-	}
-
-	for _, value := range []string{pod.Labels[kube.AppNameLabel], pod.Labels[kube.AppComponentLabel], pod.Labels[kubeBlocksComponentLabel]} {
-		if strings.EqualFold(value, name) {
-			return true
-		}
-	}
-
-	return false
-}
-
-func mongoDBContainer(pod *corev1.Pod) string {
-	if pod == nil {
-		return ""
-	}
-
-	for _, container := range pod.Spec.Containers {
-		if container.Name == "mongodb" {
-			return container.Name
-		}
-	}
-
-	return ""
-}
-
-func (m *Manager) preflightMongoDBNativeSwitchover(
-	ctx context.Context,
-	pod *corev1.Pod,
-) (string, error) {
-	container := mongoDBContainer(pod)
-	if container == "" {
-		return "", fmt.Errorf("MongoDB Pod %s has no mongodb container", pod.Name)
-	}
-
-	if m.commandExecutor == nil {
-		return "", errors.New(
-			"pod exec is unavailable; configure Kubernetes REST access for the MongoDB native switchover",
-		)
-	}
-
-	if m.logger != nil {
-		m.logger.Info(
-			"checking MongoDB native switchover prerequisites",
-			"namespace",
-			pod.Namespace,
-			"pod",
-			pod.Name,
-			"container",
-			container,
-		)
-	}
-
-	result, err := m.commandExecutor.Execute(ctx, podCommandRequest{
-		Namespace: pod.Namespace,
-		Pod:       pod.Name,
-		Container: container,
-		Command:   []string{"sh", "-ceu", mongoDBNativeSwitchoverPreflight},
-	})
-	if err != nil {
-		return "", podCommandError("check MongoDB native switchover prerequisites", result, err)
-	}
-
-	return container, nil
-}
-
-func podCommandError(action string, result podCommandResult, err error) error {
-	output := strings.TrimSpace(result.Stderr)
-	if output == "" {
-		output = strings.TrimSpace(result.Stdout)
-	}
-
-	if output == "" {
-		return fmt.Errorf("%s: %w", action, err)
-	}
-
-	output = strings.Join(strings.Fields(output), " ")
-	if len(output) > 512 {
-		output = output[:512] + "..."
-	}
-
-	return fmt.Errorf("%s: %w (output: %s)", action, err, output)
 }
 
 func kubeBlocksSwitchoverSpec(

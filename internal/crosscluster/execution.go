@@ -99,6 +99,19 @@ func (s *Service) CreateSession(
 			)
 		}
 
+		if err := kube.ValidateDestinationAccessModes(
+			destinationClass.Provisioner,
+			pvc.Spec.AccessModes,
+		); err != nil {
+			return nil, fmt.Errorf(
+				"destination StorageClass %s cannot provide source PVC %s/%s access modes: %w; generate a new cross-cluster plan with a compatible StorageClass",
+				destinationClass.Name,
+				pvc.Namespace,
+				pvc.Name,
+				err,
+			)
+		}
+
 		volumes = append(volumes, VolumeSpec{
 			Source: SourceVolumeSpec{
 				PVC: ClusterResourceRef{

@@ -20,7 +20,7 @@ import (
 func guidanceSession(phase domain.Phase) *domain.Session {
 	session := domain.NewSession(
 		"mig-test",
-		domain.NewSessionSpec(domain.OperationMigratePod, domain.SessionCommon{
+		domain.NewPodMigrationSessionSpec(domain.SessionCommon{
 			SourceNamespace:      "app",
 			TemporaryNamespace:   "pvc-migrate-system",
 			DestinationNamespace: "app",
@@ -46,7 +46,7 @@ func guidanceSession(phase domain.Phase) *domain.Session {
 				Name:      "application",
 				UID:       "application-uid",
 			},
-		}, false, domain.SessionWorkflowOptions{PrecopyPasses: 1}),
+		}, domain.SessionWorkflowOptions{}, 1, false),
 		time.Now(),
 	)
 	session.Status.Phase = phase
@@ -83,7 +83,7 @@ func TestSessionStatusKeepsStructuredOutputSeparateFromGuidance(t *testing.T) {
 			},
 		},
 	)
-	command.SetArgs([]string{"--output", "json", "session", "status", session.ID})
+	command.SetArgs([]string{"--output", "json", "migrate-pod", "status", session.ID})
 
 	if err := command.Execute(); err != nil {
 		t.Fatal(err)
@@ -104,10 +104,10 @@ func TestCompletedBackupGuidanceOmitsRollback(t *testing.T) {
 	spec := domain.NewSessionSpec(
 		domain.OperationBackup,
 		domain.SessionCommon{SourceNamespace: "app", SessionNamespace: "pvc-migrate-system"},
-		domain.WorkloadSpec{Adapter: domain.WorkloadNone},
+
 		true,
-		domain.SessionWorkflowOptions{},
-	)
+		domain.SessionWorkflowOptions{})
+
 	spec.Backup.SourcePVC = domain.ObjectReference{Namespace: "app", Name: "data", UID: "pvc-uid"}
 	spec.Backup.SourcePV = domain.ObjectReference{Name: "pv-data", UID: "pv-uid"}
 	spec.Backup.Backend = "s3"
@@ -126,7 +126,7 @@ func TestCompletedBackupGuidanceOmitsRollback(t *testing.T) {
 	}
 
 	text := output.String()
-	if strings.Contains(text, "session rollback ") ||
+	if strings.Contains(text, "backup rollback ") ||
 		strings.Contains(text, "--delete-rollback-pv") ||
 		!strings.Contains(text, "Validate cleanup:") ||
 		!strings.Contains(text, "published recovery point") {
@@ -138,10 +138,10 @@ func TestAbortedBackupGuidanceUsesBackupTerms(t *testing.T) {
 	spec := domain.NewSessionSpec(
 		domain.OperationBackup,
 		domain.SessionCommon{SourceNamespace: "app", SessionNamespace: "pvc-migrate-system"},
-		domain.WorkloadSpec{Adapter: domain.WorkloadNone},
+
 		true,
-		domain.SessionWorkflowOptions{},
-	)
+		domain.SessionWorkflowOptions{})
+
 	spec.Backup.SourcePVC = domain.ObjectReference{Namespace: "app", Name: "data", UID: "pvc-uid"}
 	spec.Backup.SourcePV = domain.ObjectReference{Name: "pv-data", UID: "pv-uid"}
 	spec.Backup.Backend = "s3"
@@ -202,7 +202,7 @@ func TestSessionGuidancePreservesCommandConnectionSettings(t *testing.T) {
 		"--tool-image", "registry.example/tool:dev",
 		"--log-level", "debug",
 		"--color", "never",
-		"session", "status", session.ID,
+		"migrate-pod", "status", session.ID,
 	})
 
 	if err := command.Execute(); err != nil {
@@ -213,7 +213,7 @@ func TestSessionGuidancePreservesCommandConnectionSettings(t *testing.T) {
 
 	pvcMigratePrefix := "pvc-migrate --kubeconfig '/tmp/config local' --context cluster-a --timeout=45m0s --retries=5 --retry-backoff=3s --helm-timeout=12m0s --stream-tool-logs=false --no-compress=true --session-namespace migration-control"
 	for _, want := range []string{
-		pvcMigratePrefix + " session status " + session.ID,
+		pvcMigratePrefix + " migrate-pod status " + session.ID,
 		"kubectl --kubeconfig '/tmp/config local' --context cluster-a --namespace app get pvc data",
 	} {
 		if !strings.Contains(text, want) {
@@ -257,13 +257,13 @@ func TestCopySessionDryRunGuidanceContinuesWithCopyCommand(t *testing.T) {
 	session.Spec = domain.NewSessionSpec(
 		domain.OperationCopy,
 		session.Spec.SessionCommon,
-		domain.WorkloadSpec{},
+
 		true,
-		domain.SessionWorkflowOptions{SourceNode: "node-a"},
-	)
+		domain.SessionWorkflowOptions{SourceNode: "node-a"})
+
 	runtime := &commandRuntime{printer: output.Printer{Writer: &stdout, Format: output.JSON}}
 
-	flags := &migrationFlags{online: true, sourceNode: "node-a"}
+	flags := &copyFlags{sourceNode: "node-a", online: true}
 	if err := printCopyDryRunResult(command, runtime, session, flags); err != nil {
 		t.Fatal(err)
 	}
@@ -278,7 +278,7 @@ func TestCopySessionDryRunGuidanceContinuesWithCopyCommand(t *testing.T) {
 		t.Fatalf("guidance=%q missing %q", stderr.String(), want)
 	}
 
-	if strings.Contains(stderr.String(), "session resume") {
+	if strings.Contains(stderr.String(), "copy resume") {
 		t.Fatalf("copy dry-run guidance points to generic resume: %q", stderr.String())
 	}
 }
@@ -339,7 +339,7 @@ func TestGuidancePrefixesUsePowerShellQuoting(t *testing.T) {
 		}
 	}
 
-	command, _, err := root.Find([]string{"session", "status"})
+	command, _, err := root.Find([]string{"migrate-pod", "status"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -359,10 +359,10 @@ func TestSessionGuidanceCoversTerminalActions(t *testing.T) {
 		phase domain.Phase
 		want  []string
 	}{
-		{domain.PhaseCompleted, []string{"ConfigMap pvc-migrate-system/pvc-migrate-session-mig-test", "session rollback mig-test --dry-run", "--delete-rollback-pv", "--delete-session"}},
-		{domain.PhaseFailed, []string{"session resume mig-test --dry-run", "session abort mig-test --dry-run"}},
-		{domain.PhaseAborted, []string{"session cleanup mig-test", "--finalize"}},
-		{domain.PhaseRolledBack, []string{"session cleanup mig-test", "--delete-session"}},
+		{domain.PhaseCompleted, []string{"ConfigMap pvc-migrate-system/pvc-migrate-session-mig-test", "migrate-pod rollback mig-test --dry-run", "--delete-rollback-pv", "--delete-session"}},
+		{domain.PhaseFailed, []string{"migrate-pod resume mig-test --dry-run", "migrate-pod abort mig-test --dry-run"}},
+		{domain.PhaseAborted, []string{"migrate-pod cleanup mig-test", "--finalize"}},
+		{domain.PhaseRolledBack, []string{"migrate-pod cleanup mig-test", "--delete-session"}},
 	} {
 		t.Run(string(test.phase), func(t *testing.T) {
 			var output bytes.Buffer
@@ -401,8 +401,8 @@ func TestDestinationCapacityFailureGuidanceRequiresNewSession(t *testing.T) {
 	text := output.String()
 	for _, want := range []string{
 		"cannot resume because its destination capacity is immutable",
-		"session abort mig-test --dry-run",
-		"session cleanup mig-test --delete-temporary --delete-rollback-pv --finalize --delete-session --dry-run",
+		"migrate-pod abort mig-test --dry-run",
+		"migrate-pod cleanup mig-test --delete-temporary --delete-rollback-pv --finalize --delete-session --dry-run",
 		"new --session and a larger --destination-capacity",
 	} {
 		if !strings.Contains(text, want) {
@@ -410,7 +410,7 @@ func TestDestinationCapacityFailureGuidanceRequiresNewSession(t *testing.T) {
 		}
 	}
 
-	if strings.Contains(text, "session resume") {
+	if strings.Contains(text, "migrate-pod resume") {
 		t.Fatalf("guidance offers an ineffective resume: %q", text)
 	}
 }
@@ -452,8 +452,8 @@ func TestSessionGuidanceAbortIncludesValidationAndApproval(t *testing.T) {
 
 			text := output.String()
 			for _, want := range []string{
-				"session abort mig-test --dry-run",
-				"--yes session abort mig-test --dry-run=false",
+				"migrate-pod abort mig-test --dry-run",
+				"--yes migrate-pod abort mig-test --dry-run=false",
 			} {
 				if !strings.Contains(text, want) {
 					t.Fatalf("guidance=%q missing %q", text, want)
@@ -466,10 +466,9 @@ func TestSessionGuidanceAbortIncludesValidationAndApproval(t *testing.T) {
 	copySession.Spec = domain.NewSessionSpec(
 		domain.OperationCopy,
 		copySession.Spec.SessionCommon,
-		domain.WorkloadSpec{},
+
 		false,
-		domain.SessionWorkflowOptions{},
-	)
+		domain.SessionWorkflowOptions{})
 
 	var output bytes.Buffer
 	if err := writeSessionGuidance(
@@ -480,7 +479,7 @@ func TestSessionGuidanceAbortIncludesValidationAndApproval(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if strings.Contains(output.String(), "session abort") {
+	if strings.Contains(output.String(), "copy abort") {
 		t.Fatalf("completed copy guidance contains redundant abort action: %q", output.String())
 	}
 }
@@ -529,10 +528,9 @@ func TestSessionGuidanceUsesOperationSpecificCompletionPaths(t *testing.T) {
 	reserve.Spec = domain.NewSessionSpec(
 		domain.OperationReserve,
 		reserve.Spec.SessionCommon,
-		domain.WorkloadSpec{},
+
 		false,
-		domain.SessionWorkflowOptions{},
-	)
+		domain.SessionWorkflowOptions{})
 
 	var reserveOutput bytes.Buffer
 	if err := writeSessionGuidance(
@@ -551,10 +549,9 @@ func TestSessionGuidanceUsesOperationSpecificCompletionPaths(t *testing.T) {
 	copySession.Spec = domain.NewSessionSpec(
 		domain.OperationCopy,
 		copySession.Spec.SessionCommon,
-		domain.WorkloadSpec{},
+
 		false,
-		domain.SessionWorkflowOptions{},
-	)
+		domain.SessionWorkflowOptions{})
 
 	var copyOutput bytes.Buffer
 	if err := writeSessionGuidance(
@@ -596,10 +593,9 @@ func TestSessionGuidanceKeepsPVCIdentityCleanupFreeOfPVDeletion(t *testing.T) {
 			session.Spec = domain.NewSessionSpec(
 				operation,
 				session.Spec.SessionCommon,
-				domain.WorkloadSpec{},
+
 				false,
-				domain.SessionWorkflowOptions{},
-			)
+				domain.SessionWorkflowOptions{})
 
 			var output bytes.Buffer
 			if err := writeSessionGuidance(
@@ -611,7 +607,11 @@ func TestSessionGuidanceKeepsPVCIdentityCleanupFreeOfPVDeletion(t *testing.T) {
 			}
 
 			text := output.String()
-			if !strings.Contains(text, "session cleanup mig-test --finalize --delete-session") {
+			workflow := "rename"
+			if operation == domain.OperationMove {
+				workflow = "move"
+			}
+			if !strings.Contains(text, workflow+" cleanup mig-test --finalize --delete-session") {
 				t.Fatalf("guidance=%q", text)
 			}
 
@@ -630,6 +630,7 @@ func TestSessionListGuidancePointsToStatusCommand(t *testing.T) {
 		"migration-control",
 		[]*domain.Session{guidanceSession(domain.PhaseFailed)},
 		sessionCommandPrefix("migration-control"),
+		"migrate-pod",
 	); err != nil {
 		t.Fatal(err)
 	}
@@ -637,7 +638,7 @@ func TestSessionListGuidancePointsToStatusCommand(t *testing.T) {
 	text := output.String()
 	if !strings.Contains(
 		text,
-		"pvc-migrate --session-namespace migration-control session status SESSION",
+		"pvc-migrate --session-namespace migration-control migrate-pod status SESSION",
 	) {
 		t.Fatalf("guidance=%q", text)
 	}
@@ -664,9 +665,9 @@ func TestCapacityFailureGuidanceDoesNotRecommendResume(t *testing.T) {
 	text := command.stderr.String()
 	for _, want := range []string{
 		"Destination capacity was exhausted",
-		"session abort mig-test --dry-run",
-		"--yes session abort mig-test --dry-run=false",
-		"session cleanup mig-test --delete-temporary --delete-rollback-pv --finalize --delete-session --dry-run",
+		"migrate-pod abort mig-test --dry-run",
+		"--yes migrate-pod abort mig-test --dry-run=false",
+		"migrate-pod cleanup mig-test --delete-temporary --delete-rollback-pv --finalize --delete-session --dry-run",
 		"larger --destination-capacity",
 	} {
 		if !strings.Contains(text, want) {
@@ -674,7 +675,7 @@ func TestCapacityFailureGuidanceDoesNotRecommendResume(t *testing.T) {
 		}
 	}
 
-	if strings.Contains(text, "session resume") {
+	if strings.Contains(text, "migrate-pod resume") {
 		t.Fatalf("capacity guidance recommends retrying an undersized destination: %q", text)
 	}
 }
@@ -695,8 +696,8 @@ func TestPersistedCapacityFailureStatusKeepsSpecializedGuidance(t *testing.T) {
 
 	text := output.String()
 	if !strings.Contains(text, "Destination capacity was exhausted") ||
-		!strings.Contains(text, "session abort mig-test") ||
-		strings.Contains(text, "session resume") {
+		!strings.Contains(text, "migrate-pod abort mig-test") ||
+		strings.Contains(text, "migrate-pod resume mig-test") {
 		t.Fatalf("persisted capacity guidance=%q", text)
 	}
 }
@@ -714,12 +715,36 @@ func TestErrorGuidanceIncludesRecoveryInspection(t *testing.T) {
 
 	text := command.stderr.String()
 	for _, want := range []string{
-		"session status",
+		"migrate status",
 		"configmap pvc-migrate-session-mig-test",
 	} {
 		if !strings.Contains(text, want) {
 			t.Fatalf("guidance=%q missing %q", text, want)
 		}
+	}
+}
+
+func TestSessionLookupGuidanceUsesOwningWorkflow(t *testing.T) {
+	root := NewRoot(Options{Version: "test", In: strings.NewReader(""), Out: io.Discard, ErrOut: io.Discard})
+	command, _, err := root.Find([]string{"copy", "resume"})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var stderr bytes.Buffer
+	command.SetErr(&stderr)
+	if err := reportSessionLookupError(
+		command,
+		"sessions",
+		"copy-test",
+		domain.NewError(domain.ErrorValidation, "get session", "missing"),
+	); err == nil {
+		t.Fatal("expected original lookup error")
+	}
+
+	text := stderr.String()
+	if !strings.Contains(text, "copy status") || strings.Contains(text, "migrate status") {
+		t.Fatalf("workflow-specific guidance=%q", text)
 	}
 }
 
@@ -744,7 +769,7 @@ func TestSessionCreationErrorGuidanceInspectsPotentialRecord(t *testing.T) {
 	}
 
 	text := command.stderr.String()
-	for _, want := range []string{"session status mig-test", "get configmap pvc-migrate-session-mig-test"} {
+	for _, want := range []string{"migrate status mig-test", "get configmap pvc-migrate-session-mig-test"} {
 		if !strings.Contains(text, want) {
 			t.Fatalf("guidance=%q missing %q", text, want)
 		}
@@ -900,8 +925,8 @@ func TestCleanupLockErrorGuidanceDescribesRetryableCleanup(t *testing.T) {
 	text := command.stderr.String()
 	for _, want := range []string{
 		"Cleanup stopped before confirmed completion",
-		"session status " + session.ID,
-		"session cleanup " + session.ID + " --delete-temporary --delete-rollback-pv --finalize --delete-session --dry-run",
+		"migrate-pod status " + session.ID,
+		"migrate-pod cleanup " + session.ID + " --delete-temporary --delete-rollback-pv --finalize --delete-session --dry-run",
 	} {
 		if !strings.Contains(text, want) {
 			t.Fatalf("guidance=%q missing %q", text, want)
@@ -932,7 +957,7 @@ func TestCleanupPodBlockerGuidanceNamesOwnerAndPreservesConnection(t *testing.T)
 				}
 			}
 
-			command, _, err := root.Find([]string{"session", "cleanup"})
+			command, _, err := root.Find([]string{"migrate-pod", "cleanup"})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -1012,10 +1037,10 @@ func TestWarmCopyMountGuidanceIncludesAbortCleanupAndOfflineRetry(t *testing.T) 
 				session.Spec = domain.NewSessionSpec(
 					domain.OperationCopy,
 					session.Spec.SessionCommon,
-					domain.WorkloadSpec{},
+
 					true,
-					session.Spec.WorkflowOptions(),
-				)
+					session.Spec.WorkflowOptions())
+
 			}
 
 			if err := writeWarmCopyMountGuidance(
@@ -1027,9 +1052,13 @@ func TestWarmCopyMountGuidanceIncludesAbortCleanupAndOfflineRetry(t *testing.T) 
 			}
 
 			text := output.String()
+			workflow := "migrate-pod"
+			if test.operation == domain.OperationCopy {
+				workflow = "copy"
+			}
 			for _, want := range []string{
-				"session abort mig-test --dry-run",
-				"session cleanup mig-test --delete-temporary --delete-rollback-pv --finalize --delete-session --dry-run",
+				workflow + " abort mig-test --dry-run",
+				workflow + " cleanup mig-test --delete-temporary --delete-rollback-pv --finalize --delete-session --dry-run",
 				test.want,
 			} {
 				if !strings.Contains(text, want) {
@@ -1051,10 +1080,10 @@ func TestCopyPlanFailureGuidanceDoesNotSuggestPrecopyPasses(t *testing.T) {
 		SessionSpec: domain.NewSessionSpec(
 			domain.OperationCopy,
 			domain.SessionCommon{},
-			domain.WorkloadSpec{},
+
 			true,
-			domain.SessionWorkflowOptions{},
-		),
+			domain.SessionWorkflowOptions{}),
+
 		Checks: []domain.Check{{Name: "warm-copy-mount", Severity: domain.SeverityError}},
 	}
 	if err := writePlanFailureGuidance(&output, plan); err != nil {
@@ -1067,24 +1096,22 @@ func TestCopyPlanFailureGuidanceDoesNotSuggestPrecopyPasses(t *testing.T) {
 	}
 }
 
-func TestOpenEBSLVMPlanFailureGuidanceOffersBothRecoveryPaths(t *testing.T) {
+func TestRealtimeOpenEBSLVMPlanFailureGuidanceOffersWarmCopyRecovery(t *testing.T) {
 	var output bytes.Buffer
 
 	plan := &domain.MigrationPlan{
-		SessionSpec: domain.NewSessionSpec(
-			domain.OperationMigrate,
+		SessionSpec: domain.NewPodMigrationSessionSpec(
 			domain.SessionCommon{},
 			domain.WorkloadSpec{},
-			false,
 			domain.SessionWorkflowOptions{},
+			1,
+			false,
 		),
-		Checks: []domain.Check{
-			{
-				Name:     "warm-copy-mount",
-				Severity: domain.SeverityError,
-				Message:  "OpenEBS LVMVolume does not support a second mount",
-			},
-		},
+		Checks: []domain.Check{{
+			Name:     "warm-copy-mount",
+			Severity: domain.SeverityError,
+			Message:  "OpenEBS LVMVolume does not support a second mount",
+		}},
 	}
 	if err := writePlanFailureGuidance(&output, plan); err != nil {
 		t.Fatal(err)
@@ -1093,8 +1120,128 @@ func TestOpenEBSLVMPlanFailureGuidanceOffersBothRecoveryPaths(t *testing.T) {
 	text := output.String()
 	for _, want := range []string{"--precopy-passes 0", "--openebs-lvm-enable-shared"} {
 		if !strings.Contains(text, want) {
-			t.Fatalf("OpenEBS plan guidance=%q missing %q", text, want)
+			t.Fatalf("realtime OpenEBS plan guidance=%q missing %q", text, want)
 		}
+	}
+}
+
+func TestKubeBlocksDestinationCapacityGuidanceUsesClusterCapacity(t *testing.T) {
+	var output bytes.Buffer
+
+	plan := &domain.MigrationPlan{
+		SessionSpec: domain.NewPodMigrationSessionSpec(
+			domain.SessionCommon{},
+			domain.WorkloadSpec{
+				Adapter: domain.WorkloadKubeBlocks,
+				KubeBlocks: &domain.KubeBlocksSpec{
+					Cluster:   "mongo-cluster",
+					Component: "mongo",
+				},
+			},
+			domain.SessionWorkflowOptions{},
+			0,
+			false,
+		),
+		Checks: []domain.Check{{
+			Name:     "destination-capacity",
+			Severity: domain.SeverityError,
+			Message:  "destination capacity 4Gi is below source capacity 8Gi for PVC app/data",
+		}},
+	}
+	if err := writePlanFailureGuidance(&output, plan); err != nil {
+		t.Fatal(err)
+	}
+
+	text := output.String()
+	if !strings.Contains(text, "update Cluster mongo-cluster component mongo volumeClaimTemplates storage request") ||
+		!strings.Contains(text, "rerun migrate-pod") ||
+		strings.Contains(text, "--destination-capacity") {
+		t.Fatalf("KubeBlocks capacity guidance=%q", text)
+	}
+}
+
+func TestOfflineConsumerGuidanceDoesNotSuggestMigratePodFlags(t *testing.T) {
+	var output bytes.Buffer
+	plan := &domain.MigrationPlan{
+		SessionSpec: domain.NewOfflineMigrationSessionSpec(
+			domain.SessionCommon{},
+			domain.SessionWorkflowOptions{},
+		),
+		Checks: []domain.Check{{
+			Name:     "pvc-consumers",
+			Severity: domain.SeverityError,
+			Message:  "offline migrate found active Pod consumer",
+		}},
+	}
+	if err := writePlanFailureGuidance(&output, plan); err != nil {
+		t.Fatal(err)
+	}
+	text := output.String()
+	if !strings.Contains(text, "stop every consumer") || strings.Contains(text, "--pod") {
+		t.Fatalf("offline consumer guidance=%q", text)
+	}
+}
+
+func TestPodConsumerGuidanceRejectsMultipleWorkloadAssumption(t *testing.T) {
+	var output bytes.Buffer
+	plan := &domain.MigrationPlan{
+		SessionSpec: domain.NewPodMigrationSessionSpec(
+			domain.SessionCommon{},
+			domain.WorkloadSpec{Adapter: domain.WorkloadStandalone},
+			domain.SessionWorkflowOptions{},
+			0,
+			false,
+		),
+		Checks: []domain.Check{{
+			Name:     "pvc-consumers",
+			Severity: domain.SeverityError,
+			Message:  "PVC app/data is shared with Pod(s): other-workload; migrate-pod coordinates one selected workload only",
+		}},
+	}
+	if err := writePlanFailureGuidance(&output, plan); err != nil {
+		t.Fatal(err)
+	}
+
+	text := output.String()
+	if !strings.Contains(text, "stop every consumer outside the selected workload") ||
+		!strings.Contains(text, "cannot cut over multiple independent workloads") ||
+		strings.Contains(text, "select the owning workload with --pod") {
+		t.Fatalf("Pod consumer guidance=%q", text)
+	}
+}
+
+func TestKubeBlocksStorageCapacityPlanGuidanceUsesClusterCapacity(t *testing.T) {
+	var output bytes.Buffer
+
+	plan := &domain.MigrationPlan{
+		SessionSpec: domain.NewPodMigrationSessionSpec(
+			domain.SessionCommon{},
+			domain.WorkloadSpec{
+				Adapter: domain.WorkloadKubeBlocks,
+				KubeBlocks: &domain.KubeBlocksSpec{
+					Cluster:   "redis-cluster",
+					Component: "redis",
+				},
+			},
+			domain.SessionWorkflowOptions{},
+			0,
+			false,
+		),
+		Checks: []domain.Check{{
+			Name:     "storage-capacity",
+			Severity: domain.SeverityError,
+			Message:  "StorageClass fast has insufficient capacity on target node",
+		}},
+	}
+
+	if err := writePlanFailureGuidance(&output, plan); err != nil {
+		t.Fatal(err)
+	}
+
+	text := output.String()
+	if !strings.Contains(text, "update Cluster redis-cluster component redis volumeClaimTemplates storage request") ||
+		strings.Contains(text, "correct --destination-capacity") {
+		t.Fatalf("KubeBlocks storage capacity guidance=%q", text)
 	}
 }
 

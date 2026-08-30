@@ -54,7 +54,7 @@ type planInventory struct {
 // their input indexes so callers can preserve deterministic checks and plans.
 func (p *Planner) loadPlanInventory(
 	ctx context.Context,
-	options Options,
+	options planOptions,
 	pvcNames []string,
 	autoTargetNode bool,
 ) planInventory {

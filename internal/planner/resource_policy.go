@@ -147,7 +147,7 @@ func migrationChartResourceEstimate(
 }
 
 func migrationProbePodPeaks(
-	options Options,
+	options planOptions,
 	volumes []domain.PlannedVolume,
 ) map[string]int {
 	peaks := map[string]int{}
@@ -200,13 +200,17 @@ func migrationProbePodPeaks(
 	switch options.Operation {
 	case domain.OperationCopy:
 		addCopyStage(true)
-	case domain.OperationMigrate, domain.OperationMigratePod:
+	case domain.OperationMigrate:
+		addCopyStage(false)
+	case domain.OperationMigratePod:
 		if options.PrecopyPasses > 0 {
 			addCopyStage(true)
 		}
 
 		addCopyStage(false)
+	}
 
+	if options.Operation == domain.OperationMigrate || options.Operation == domain.OperationMigratePod {
 		sourcePathStage := map[string]int{}
 		for _, volume := range volumes {
 			if domain.SourceTransferPath(volume.TransferScope) != domain.VolumeRootPath {

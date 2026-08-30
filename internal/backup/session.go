@@ -55,9 +55,8 @@ func buildBackupSession(
 	}
 
 	options := domain.SessionWorkflowOptions{
-		ToolImage:              req.ToolImage,
-		DeleteExtraneous:       req.DeleteExtraneousFiles,
-		OpenEBSLVMEnableShared: req.OpenEBSLVMEnableShared,
+		ToolImage:        req.ToolImage,
+		DeleteExtraneous: req.DeleteExtraneousFiles,
 	}
 	spec := domain.NewSessionSpec(
 		domain.OperationBackup,
@@ -67,10 +66,11 @@ func buildBackupSession(
 			Volumes:          nil,
 			CreatedBy:        "pvc-migrate",
 		},
-		domain.WorkloadSpec{Adapter: domain.WorkloadNone},
+
 		req.Online,
-		options,
-	)
+		options)
+
+	spec.Backup.OpenEBSLVMEnableShared = req.OpenEBSLVMEnableShared
 	spec.Backup.SourcePVC = domain.ObjectReference{
 		APIVersion: "v1",
 		Kind:       "PersistentVolumeClaim",

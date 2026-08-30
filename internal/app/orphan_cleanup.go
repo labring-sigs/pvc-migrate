@@ -72,7 +72,7 @@ func (s *Service) PlanOrphanCleanup(
 			orphanFailed(
 				"session-configmap",
 				fmt.Sprintf(
-					"session ConfigMap %s/%s still exists; use `session cleanup` after reading its status",
+					"session ConfigMap %s/%s still exists; use the owning workflow `cleanup` command after reading its status",
 					options.SessionNamespace,
 					kube.SessionConfigMapName(options.SessionID),
 				),
@@ -996,7 +996,7 @@ func (s *Service) cleanupPreActivationOrphan(
 				TemporaryNamespace: resources.DestinationPVC.Namespace,
 				SessionNamespace:   resources.DestinationPVC.Namespace,
 				Volumes:            []domain.VolumeSpec{{DestinationPVC: resources.DestinationPVC}},
-			}, domain.WorkloadSpec{Adapter: domain.WorkloadNone}, false, domain.SessionWorkflowOptions{}),
+			}, false, domain.SessionWorkflowOptions{}),
 		}
 		if err := s.deleteReservationPods(ctx, session); err != nil {
 			return err

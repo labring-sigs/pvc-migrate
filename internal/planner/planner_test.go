@@ -65,7 +65,7 @@ func plannerClient(objects ...runtime.Object) *kubernetesfake.Clientset {
 
 func TestDestinationPVCNameTrimsTruncatedDNSBoundaries(t *testing.T) {
 	name := destinationPVCNameFor(
-		Options{SessionID: "pod-full-v2-20260807"},
+		planOptions{SessionID: "pod-full-v2-20260807"},
 		nil,
 		"pod-data-a",
 		0,
@@ -79,7 +79,7 @@ func TestDestinationPVCNameTrimsTruncatedDNSBoundaries(t *testing.T) {
 	}
 
 	long := destinationPVCNameFor(
-		Options{SessionID: "migration-20260807"},
+		planOptions{SessionID: "migration-20260807"},
 		nil,
 		strings.Repeat("a", 250),
 		0,
@@ -100,7 +100,7 @@ func TestPlanLogsLongRunningChecksBeforeTheyRun(t *testing.T) {
 		nil,
 	).WithLogger(slog.New(slog.NewTextHandler(&logs, nil)))
 
-	plan, err := planner.Plan(context.Background(), Options{
+	plan, err := planner.plan(context.Background(), planOptions{
 		SessionID:          "migration",
 		SourceNamespace:    "app",
 		TemporaryNamespace: "system",
@@ -132,10 +132,56 @@ func TestPlanLogsLongRunningChecksBeforeTheyRun(t *testing.T) {
 	}
 }
 
+func TestPlanOfflineMigrationBypassesWorkloadDiscoveryAndAllowsKubeBlocksCapacityChange(
+	t *testing.T,
+) {
+	objects := plannerObjects("2Gi")
+	for _, object := range objects {
+		pvc, ok := object.(*corev1.PersistentVolumeClaim)
+		if !ok {
+			continue
+		}
+		pvc.Labels = map[string]string{kube.ManagedByLabel: "kubeblocks"}
+	}
+
+	plan, err := New(plannerClient(objects...), nil).PlanOfflineMigration(
+		context.Background(),
+		OfflineMigrationOptions{
+			SessionID:             "offline-migration",
+			SourceNamespace:       "app",
+			TemporaryNamespace:    "system",
+			DestinationNamespace:  "app",
+			SessionNamespace:      "system",
+			StagingNamespace:      "system",
+			SourcePVCs:            []string{"data"},
+			DestinationCapacities: []string{"3Gi"},
+			TargetNode:            "node-b",
+			DestinationClass:      "fast",
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !plan.Ready {
+		t.Fatalf("offline checks=%#v", plan.Checks)
+	}
+	if plan.SessionSpec.Type != domain.SessionTypeMigrate || plan.SessionSpec.Migrate == nil ||
+		plan.SessionSpec.MigratePod != nil ||
+		plan.SessionSpec.Workload().Adapter != domain.WorkloadNone {
+		t.Fatalf("offline session spec=%#v", plan.SessionSpec)
+	}
+	if got := plan.SessionSpec.Volumes[0].Capacity; got != "3Gi" {
+		t.Fatalf("offline KubeBlocks-labeled capacity=%s want=3Gi", got)
+	}
+	if hasFailedCheck(plan, "destination-capacity") {
+		t.Fatalf("offline capacity was restricted by KubeBlocks ownership: %#v", plan.Checks)
+	}
+}
+
 func TestPlanRejectsUnsupportedStrategiesAndDestinationCount(t *testing.T) {
 	client := plannerClient(plannerObjects("2Gi")...)
 
-	plan, err := New(client, nil).Plan(context.Background(), Options{
+	plan, err := New(client, nil).plan(context.Background(), planOptions{
 		SessionID:          "migration",
 		SourceNamespace:    "app",
 		TemporaryNamespace: "system",
@@ -156,11 +202,44 @@ func TestPlanRejectsUnsupportedStrategiesAndDestinationCount(t *testing.T) {
 	}
 }
 
+func TestPlanRejectsKnownLocalProvisionerAccessModeMismatch(t *testing.T) {
+	objects := plannerObjects("2Gi")
+	storageClass := testutil.MustType[*storagev1.StorageClass](t, objects[3])
+	storageClass.Provisioner = kube.OpenEBSLocalPVProvisioner
+	pvc := testutil.MustType[*corev1.PersistentVolumeClaim](t, objects[5])
+	pvc.Spec.AccessModes = []corev1.PersistentVolumeAccessMode{corev1.ReadWriteMany}
+
+	plan, err := New(plannerClient(objects...), nil).PlanReserve(
+		context.Background(),
+		ReserveOptions{
+			SessionID:          "reserve-access-mode",
+			SourceNamespace:    "app",
+			TemporaryNamespace: "system",
+			SessionNamespace:   "system",
+			StagingNamespace:   "system",
+			SourcePVCs:         []string{"data"},
+			TargetNode:         "node-b",
+			DestinationClass:   "fast",
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if plan.Ready || !hasFailedCheck(plan, "destination-access-modes") ||
+		!hasFailedCheckContaining(plan, "destination-access-modes", "ReadWriteMany") {
+		t.Fatalf("local provisioner access-mode mismatch was accepted: %#v", plan.Checks)
+	}
+	if hasFailedCheck(plan, "target-node") {
+		t.Fatalf("access-mode failure added unrelated target-node guidance: %#v", plan.Checks)
+	}
+}
+
 func TestPlanRejectsNegativePrecopyPasses(t *testing.T) {
 	plan, err := New(
 		plannerClient(plannerObjects("2Gi")...),
 		nil,
-	).Plan(context.Background(), Options{
+	).plan(context.Background(), planOptions{
 		SessionID:          "migration",
 		Operation:          domain.OperationMigrate,
 		SourceNamespace:    "app",
@@ -192,13 +271,20 @@ func TestPlanChecksOnlyRequiredOpenEBSLVMRBACForWarmCopy(t *testing.T) {
 		deniedVerb     string
 		wantDenied     bool
 	}{
-		{name: "inspect", deniedVerb: "list", wantDenied: true},
+		{name: "inspect", activeConsumer: true, deniedVerb: "list", wantDenied: true},
 		{name: "enable shared for active unshared volume", enableShared: true, activeConsumer: true, deniedVerb: "patch", wantDenied: true},
 		{name: "enable shared for already shared volume", enableShared: true, shared: true, activeConsumer: true, deniedVerb: "patch"},
-		{name: "enable shared with no active consumer", enableShared: true, deniedVerb: "patch"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			objects := plannerObjects("2Gi")
+			objects = append(objects, &corev1.Node{
+				ObjectMeta: metav1.ObjectMeta{Name: "node-a", Labels: map[string]string{
+					corev1.LabelHostname: "node-a", corev1.LabelTopologyZone: "zone-b",
+				}},
+				Status: corev1.NodeStatus{Conditions: []corev1.NodeCondition{{
+					Type: corev1.NodeReady, Status: corev1.ConditionTrue,
+				}}},
+			})
 			storageClass := testutil.MustType[*storagev1.StorageClass](t, objects[3])
 			storageClass.Provisioner = "local.csi.openebs.io"
 
@@ -230,18 +316,16 @@ func TestPlanChecksOnlyRequiredOpenEBSLVMRBACForWarmCopy(t *testing.T) {
 
 			plan, err := New(
 				client,
-				nil,
+				controller.NewManager(client, nil, nil),
 			).WithOpenEBSLVMSharedVolumeManager(plannerOpenEBSLVMSharedVolumeManager{shared: test.shared}).
-				Plan(context.Background(), Options{
-					SessionID:          "migration",
-					Operation:          domain.OperationMigrate,
-					SourceNamespace:    "app",
-					TemporaryNamespace: "system",
-					StagingNamespace:   "system",
-					SessionNamespace:   "system",
-					SourcePVCs: []string{
-						"data",
-					},
+				plan(context.Background(), planOptions{
+					SessionID:              "migration",
+					Operation:              domain.OperationMigratePod,
+					SourceNamespace:        "app",
+					TemporaryNamespace:     "system",
+					StagingNamespace:       "system",
+					SessionNamespace:       "system",
+					PodName:                "database-0",
 					TargetNode:             "node-b",
 					DestinationClass:       "fast",
 					PrecopyPasses:          1,
@@ -281,7 +365,7 @@ func TestPlanPreservesExplicitPVCMappingAndRejectsDuplicateDestinations(t *testi
 	logsPV.Spec.ClaimRef = &corev1.ObjectReference{Namespace: "app", Name: "logs", UID: logsPVC.UID}
 	objects = append(objects, logsPVC, logsPV)
 
-	base := Options{
+	base := planOptions{
 		SessionID:          "migration",
 		SourceNamespace:    "app",
 		TemporaryNamespace: "system",
@@ -293,7 +377,7 @@ func TestPlanPreservesExplicitPVCMappingAndRejectsDuplicateDestinations(t *testi
 		DestinationClass:   "fast",
 	}
 
-	plan, err := New(plannerClient(objects...), nil).Plan(context.Background(), base)
+	plan, err := New(plannerClient(objects...), nil).plan(context.Background(), base)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -311,7 +395,7 @@ func TestPlanPreservesExplicitPVCMappingAndRejectsDuplicateDestinations(t *testi
 
 	base.DestinationPVCs = []string{"logs=shared", "data=shared"}
 
-	duplicate, err := New(plannerClient(objects...), nil).Plan(context.Background(), base)
+	duplicate, err := New(plannerClient(objects...), nil).plan(context.Background(), base)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -355,7 +439,7 @@ func TestCopySupportsOfflineAndOnlineModesAcrossNamespaces(t *testing.T) {
 		},
 		&corev1.ServiceAccount{ObjectMeta: metav1.ObjectMeta{Namespace: "app", Name: "default"}},
 	)
-	base := Options{
+	base := planOptions{
 		Operation:            domain.OperationCopy,
 		SessionID:            "copy",
 		SourceNamespace:      "app",
@@ -368,7 +452,7 @@ func TestCopySupportsOfflineAndOnlineModesAcrossNamespaces(t *testing.T) {
 		DestinationClass:     "fast",
 	}
 
-	offline, err := New(plannerClient(objects...), nil).Plan(context.Background(), base)
+	offline, err := New(plannerClient(objects...), nil).plan(context.Background(), base)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -379,7 +463,7 @@ func TestCopySupportsOfflineAndOnlineModesAcrossNamespaces(t *testing.T) {
 
 	base.Online = true
 
-	online, err := New(plannerClient(objects...), nil).Plan(context.Background(), base)
+	online, err := New(plannerClient(objects...), nil).plan(context.Background(), base)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -400,7 +484,7 @@ func TestCopySupportsOfflineAndOnlineModesAcrossNamespaces(t *testing.T) {
 	withPod.PodName = "writer"
 	withPod.SourceNode = ""
 
-	selectedPod, err := New(plannerClient(objects...), nil).Plan(context.Background(), withPod)
+	selectedPod, err := New(plannerClient(objects...), nil).plan(context.Background(), withPod)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -437,7 +521,7 @@ func TestPlanUsesPVCProtectionBoundaryForTerminalConsumers(t *testing.T) {
 				Status: corev1.PodStatus{Phase: corev1.PodSucceeded},
 			})
 
-			plan, err := New(plannerClient(objects...), nil).Plan(context.Background(), Options{
+			plan, err := New(plannerClient(objects...), nil).plan(context.Background(), planOptions{
 				Operation:          test.operation,
 				SessionID:          "terminal-consumer",
 				SourceNamespace:    "app",
@@ -475,7 +559,7 @@ func TestOnlineCopyRejectsUnscheduledRWOConsumer(t *testing.T) {
 		Status: corev1.PodStatus{Phase: corev1.PodPending},
 	})
 
-	plan, err := New(plannerClient(objects...), nil).Plan(context.Background(), Options{
+	plan, err := New(plannerClient(objects...), nil).plan(context.Background(), planOptions{
 		Operation:            domain.OperationCopy,
 		SessionID:            "copy-pending",
 		SourceNamespace:      "app",
@@ -529,7 +613,7 @@ func TestPlanPodReadsTheSourcePodOnce(t *testing.T) {
 		},
 	)
 
-	_, err := New(client, nil).Plan(context.Background(), Options{
+	_, err := New(client, nil).plan(context.Background(), planOptions{
 		Operation:            domain.OperationCopy,
 		SessionID:            "copy-pod",
 		SourceNamespace:      "app",
@@ -551,11 +635,249 @@ func TestPlanPodReadsTheSourcePodOnce(t *testing.T) {
 	}
 }
 
+func TestPlanPodMigrationDerivesMultiplePVCsAsOneUnit(t *testing.T) {
+	objects := plannerObjectsWithTwoPVCs(t)
+	objects = append(objects,
+		&corev1.Node{
+			ObjectMeta: metav1.ObjectMeta{
+				Name: "node-a",
+				Labels: map[string]string{
+					corev1.LabelHostname:     "node-a",
+					corev1.LabelTopologyZone: "zone-b",
+				},
+			},
+			Status: corev1.NodeStatus{Conditions: []corev1.NodeCondition{{
+				Type: corev1.NodeReady, Status: corev1.ConditionTrue,
+			}}},
+		},
+		&corev1.Pod{
+			ObjectMeta: metav1.ObjectMeta{
+				Namespace: "app",
+				Name:      "application",
+				UID:       types.UID("application-uid"),
+			},
+			Spec: corev1.PodSpec{
+				NodeName: "node-a",
+				Volumes: []corev1.Volume{
+					{
+						Name: "data",
+						VolumeSource: corev1.VolumeSource{PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
+							ClaimName: "data",
+						}},
+					},
+					{
+						Name: "logs",
+						VolumeSource: corev1.VolumeSource{PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
+							ClaimName: "logs",
+						}},
+					},
+				},
+			},
+			Status: corev1.PodStatus{
+				Phase: corev1.PodRunning,
+				Conditions: []corev1.PodCondition{{
+					Type: corev1.PodReady, Status: corev1.ConditionTrue,
+				}},
+			},
+		},
+	)
+
+	client := plannerClient(objects...)
+	plan, err := New(client, controller.NewManager(client, nil, nil)).PlanPodMigration(
+		context.Background(),
+		PodMigrationOptions{
+			SessionID:          "multi-pvc-pod",
+			SourceNamespace:    "app",
+			TemporaryNamespace: "system",
+			StagingNamespace:   "system",
+			SessionNamespace:   "system",
+			PodName:            "application",
+			TargetNode:         "node-b",
+			DestinationClass:   "fast",
+			PrecopyPasses:      1,
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if !plan.Ready || len(plan.Volumes) != 2 || len(plan.SessionSpec.Volumes) != 2 {
+		t.Fatalf("multi-PVC Pod plan ready=%t checks=%#v volumes=%#v", plan.Ready, plan.Checks, plan.Volumes)
+	}
+
+	got := map[string]bool{}
+	for _, volume := range plan.Volumes {
+		got[volume.SourcePVC.Name] = true
+	}
+	if !got["data"] || !got["logs"] {
+		t.Fatalf("Pod PVC set=%v, want data and logs", got)
+	}
+}
+
+func TestPlanPodMigrationRejectsExternalPVCConsumer(t *testing.T) {
+	objects := plannerObjectsWithTwoPVCs(t)
+	objects = append(objects,
+		&corev1.Node{
+			ObjectMeta: metav1.ObjectMeta{
+				Name: "node-a",
+				Labels: map[string]string{
+					corev1.LabelHostname:     "node-a",
+					corev1.LabelTopologyZone: "zone-b",
+				},
+			},
+			Status: corev1.NodeStatus{Conditions: []corev1.NodeCondition{{
+				Type: corev1.NodeReady, Status: corev1.ConditionTrue,
+			}}},
+		},
+		&corev1.Pod{
+			ObjectMeta: metav1.ObjectMeta{
+				Namespace: "app",
+				Name:      "application",
+				UID:       types.UID("application-uid"),
+			},
+			Spec: corev1.PodSpec{
+				NodeName: "node-a",
+				Volumes: []corev1.Volume{{
+					Name: "data",
+					VolumeSource: corev1.VolumeSource{PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
+						ClaimName: "data",
+					}},
+				}},
+			},
+			Status: corev1.PodStatus{
+				Phase: corev1.PodRunning,
+				Conditions: []corev1.PodCondition{{
+					Type: corev1.PodReady, Status: corev1.ConditionTrue,
+				}},
+			},
+		},
+		&corev1.Pod{
+			ObjectMeta: metav1.ObjectMeta{Namespace: "app", Name: "other-workload", UID: types.UID("other-uid")},
+			Spec: corev1.PodSpec{
+				NodeName: "node-a",
+				Volumes: []corev1.Volume{{
+					Name: "data",
+					VolumeSource: corev1.VolumeSource{PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
+						ClaimName: "data",
+					}},
+				}},
+			},
+			Status: corev1.PodStatus{Phase: corev1.PodRunning},
+		},
+	)
+
+	client := plannerClient(objects...)
+	plan, err := New(client, controller.NewManager(client, nil, nil)).PlanPodMigration(
+		context.Background(),
+		PodMigrationOptions{
+			SessionID:          "external-consumer",
+			SourceNamespace:    "app",
+			TemporaryNamespace: "system",
+			StagingNamespace:   "system",
+			SessionNamespace:   "system",
+			PodName:            "application",
+			TargetNode:         "node-b",
+			DestinationClass:   "fast",
+			PrecopyPasses:      0,
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if plan.Ready || !hasFailedCheckContaining(plan, "pvc-consumers", "other-workload") ||
+		!hasFailedCheckContaining(plan, "pvc-consumers", "migrate-pod coordinates one selected workload only") {
+		t.Fatalf("external consumer plan ready=%t checks=%#v", plan.Ready, plan.Checks)
+	}
+}
+
+func TestSelectedMigrationUnitAllowsMultipleConsumersInSameWorkload(t *testing.T) {
+	selected := podWithPVC("web-0")
+	peer := podWithPVC("web-1")
+	workload := domain.WorkloadSpec{
+		Adapter: domain.WorkloadDeployment,
+		Pod: domain.ObjectReference{
+			APIVersion: "v1",
+			Kind:       domain.KindPod,
+			Namespace:  selected.Namespace,
+			Name:       selected.Name,
+			UID:        selected.UID,
+		},
+		AffectedPods: []domain.ObjectReference{
+			{
+				APIVersion: "v1",
+				Kind:       domain.KindPod,
+				Namespace:  selected.Namespace,
+				Name:       selected.Name,
+				UID:        selected.UID,
+			},
+			{
+				APIVersion: "v1",
+				Kind:       domain.KindPod,
+				Namespace:  peer.Namespace,
+				Name:       peer.Name,
+				UID:        peer.UID,
+			},
+		},
+	}
+	pvc := &corev1.PersistentVolumeClaim{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "app", Name: "data"},
+		Spec: corev1.PersistentVolumeClaimSpec{
+			AccessModes: []corev1.PersistentVolumeAccessMode{corev1.ReadWriteMany},
+		},
+	}
+	plan := &domain.MigrationPlan{Ready: true}
+	consumers := []*corev1.Pod{selected, peer}
+
+	checkSelectedMigrationUnitConsumers(
+		plan,
+		pvc,
+		selected,
+		workload,
+		domain.OperationMigratePod,
+		false,
+		consumers,
+	)
+
+	if !plan.Ready || hasFailedCheck(plan, "pvc-consumers") {
+		t.Fatalf("same-workload consumers should be allowed: checks=%#v", plan.Checks)
+	}
+	if got := migrationUnitConsumerCount(workload, selected, consumers); got != 2 {
+		t.Fatalf("same-workload consumer count=%d, want 2", got)
+	}
+}
+
+func TestOfflineMigrationPlansMultiplePVCsInOneSession(t *testing.T) {
+	objects := plannerObjectsWithTwoPVCs(t)
+	plan, err := New(plannerClient(objects...), nil).PlanOfflineMigration(
+		context.Background(),
+		OfflineMigrationOptions{
+			SessionID:             "multi-pvc-offline",
+			SourceNamespace:       "app",
+			TemporaryNamespace:    "system",
+			DestinationNamespace:  "app",
+			StagingNamespace:      "system",
+			SessionNamespace:      "system",
+			SourcePVCs:            []string{"data", "logs"},
+			DestinationCapacities: []string{"data=2Gi", "logs=2Gi"},
+			TargetNode:            "node-b",
+			DestinationClass:      "fast",
+			Strategies:            []string{"clusterip"},
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !plan.Ready || len(plan.Volumes) != 2 || len(plan.SessionSpec.Volumes) != 2 {
+		t.Fatalf("offline multi-PVC plan ready=%t checks=%#v volumes=%#v", plan.Ready, plan.Checks, plan.Volumes)
+	}
+}
+
 func TestPlanReportsMissingSelectedPodWithFlagGuidance(t *testing.T) {
 	plan, err := New(
 		plannerClient(plannerObjects("2Gi")...),
 		nil,
-	).Plan(context.Background(), Options{
+	).plan(context.Background(), planOptions{
 		Operation:            domain.OperationCopy,
 		SessionID:            "copy-pod",
 		SourceNamespace:      "app",
@@ -608,7 +930,7 @@ func TestPlanHandlesEmptyInventoryObjects(t *testing.T) {
 				},
 			)
 
-			plan, err := New(client, nil).Plan(context.Background(), Options{
+			plan, err := New(client, nil).plan(context.Background(), planOptions{
 				SessionID:            "empty-object",
 				SourceNamespace:      "app",
 				TemporaryNamespace:   "system",
@@ -646,23 +968,25 @@ func TestMigrateWithoutPodRejectsActiveConsumers(t *testing.T) {
 		},
 	)
 
-	plan, err := New(plannerClient(objects...), nil).Plan(context.Background(), Options{
-		Operation:          domain.OperationMigrate,
-		SessionID:          "migration",
-		SourceNamespace:    "app",
-		TemporaryNamespace: "system",
-		StagingNamespace:   "system",
-		SessionNamespace:   "system",
-		SourcePVCs:         []string{"data"},
-		TargetNode:         "node-b",
-		DestinationClass:   "fast",
-		Strategies:         []string{"mount"},
-	})
+	plan, err := New(plannerClient(objects...), nil).PlanOfflineMigration(
+		context.Background(),
+		OfflineMigrationOptions{
+			SessionID:          "migration",
+			SourceNamespace:    "app",
+			TemporaryNamespace: "system",
+			StagingNamespace:   "system",
+			SessionNamespace:   "system",
+			SourcePVCs:         []string{"data"},
+			TargetNode:         "node-b",
+			DestinationClass:   "fast",
+			Strategies:         []string{"mount"},
+		},
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	if plan.Ready || !hasFailedCheck(plan, "controller-adapter") {
+	if plan.Ready || !hasFailedCheck(plan, "pvc-consumers") {
 		t.Fatalf("active PVC-only migration should fail: %#v", plan.Checks)
 	}
 
@@ -685,7 +1009,7 @@ func TestMigrateWithoutPodRejectsActiveConsumers(t *testing.T) {
 
 	offline := objects[:len(objects)-1]
 
-	plan, err = New(plannerClient(offline...), nil).Plan(context.Background(), Options{
+	plan, err = New(plannerClient(offline...), nil).plan(context.Background(), planOptions{
 		Operation:          domain.OperationMigrate,
 		SessionID:          "offline-migration",
 		SourceNamespace:    "app",
@@ -710,7 +1034,7 @@ func TestPlanFiltersImpossibleMountStrategyAcrossNamespaces(t *testing.T) {
 	objects := plannerObjects("2Gi")
 	objects = append(objects, &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "archive"}})
 
-	plan, err := New(plannerClient(objects...), nil).Plan(context.Background(), Options{
+	plan, err := New(plannerClient(objects...), nil).plan(context.Background(), planOptions{
 		Operation:            domain.OperationCopy,
 		SessionID:            "cross-namespace-copy",
 		SourceNamespace:      "app",
@@ -742,7 +1066,7 @@ func TestPlanFiltersImpossibleMountStrategyAcrossNamespaces(t *testing.T) {
 		)
 	}
 
-	plan, err = New(plannerClient(objects...), nil).Plan(context.Background(), Options{
+	plan, err = New(plannerClient(objects...), nil).plan(context.Background(), planOptions{
 		Operation:            domain.OperationCopy,
 		SessionID:            "cross-namespace-mount-only",
 		SourceNamespace:      "app",
@@ -781,7 +1105,7 @@ func TestPlanFiltersMountWhenSourcePVExcludesTargetNode(t *testing.T) {
 		}
 	}
 
-	plan, err := New(plannerClient(objects...), nil).Plan(context.Background(), Options{
+	plan, err := New(plannerClient(objects...), nil).plan(context.Background(), planOptions{
 		Operation:          domain.OperationCopy,
 		SessionID:          "topology-copy",
 		SourceNamespace:    "app",
@@ -813,7 +1137,7 @@ func TestPlanFiltersMountWhenSourcePVExcludesTargetNode(t *testing.T) {
 		t.Fatalf("visible strategies=%q checks=%#v", got, plan.Checks)
 	}
 
-	plan, err = New(plannerClient(objects...), nil).Plan(context.Background(), Options{
+	plan, err = New(plannerClient(objects...), nil).plan(context.Background(), planOptions{
 		Operation:          domain.OperationCopy,
 		SessionID:          "topology-mount-only",
 		SourceNamespace:    "app",
@@ -883,7 +1207,7 @@ func TestPlanAllowsStandalonePodHostnameSelectorToMove(t *testing.T) {
 	plan, err := New(
 		client,
 		controller.NewManager(client, nil, nil),
-	).Plan(context.Background(), Options{
+	).plan(context.Background(), planOptions{
 		Operation:          domain.OperationMigratePod,
 		SessionID:          "repeat-migration",
 		SourceNamespace:    "app",
@@ -943,7 +1267,7 @@ func TestMigratePodRequiresForceForSameNodeAndStorageClass(t *testing.T) {
 		},
 	)
 	client := plannerClient(objects...)
-	base := Options{
+	base := planOptions{
 		Operation:          domain.OperationMigratePod,
 		SessionID:          "same-destination",
 		SourceNamespace:    "app",
@@ -957,7 +1281,7 @@ func TestMigratePodRequiresForceForSameNodeAndStorageClass(t *testing.T) {
 	plan, err := New(
 		client,
 		controller.NewManager(client, nil, nil),
-	).Plan(context.Background(), base)
+	).plan(context.Background(), base)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -971,7 +1295,7 @@ func TestMigratePodRequiresForceForSameNodeAndStorageClass(t *testing.T) {
 	forced, err := New(
 		client,
 		controller.NewManager(client, nil, nil),
-	).Plan(context.Background(), base)
+	).plan(context.Background(), base)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -986,7 +1310,7 @@ func TestMigratePodRequiresForceForSameNodeAndStorageClass(t *testing.T) {
 	changedClass, err := New(
 		client,
 		controller.NewManager(client, nil, nil),
-	).Plan(context.Background(), base)
+	).plan(context.Background(), base)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1005,7 +1329,7 @@ func TestMigratePodRequiresForceForSameNodeAndStorageClass(t *testing.T) {
 	automatic, err := New(
 		client,
 		controller.NewManager(client, nil, nil),
-	).Plan(context.Background(), base)
+	).plan(context.Background(), base)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1026,7 +1350,7 @@ func TestMigratePodRequiresForceForSameNodeAndStorageClass(t *testing.T) {
 	incorrectSource, err := New(
 		client,
 		controller.NewManager(client, nil, nil),
-	).Plan(context.Background(), base)
+	).plan(context.Background(), base)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1051,7 +1375,7 @@ func TestPlanRejectsMixedAutoStrategyList(t *testing.T) {
 	plan, err := New(
 		plannerClient(plannerObjects("2Gi")...),
 		nil,
-	).Plan(context.Background(), Options{
+	).plan(context.Background(), planOptions{
 		Operation:          domain.OperationCopy,
 		SessionID:          "mixed-auto",
 		SourceNamespace:    "app",
@@ -1157,10 +1481,36 @@ func plannerObjects(capacity string) []runtime.Object {
 	}
 }
 
+func plannerObjectsWithTwoPVCs(t *testing.T) []runtime.Object {
+	t.Helper()
+	objects := plannerObjects("2Gi")
+	dataPVC := testutil.MustType[*corev1.PersistentVolumeClaim](t, objects[5])
+	dataPV := testutil.MustType[*corev1.PersistentVolume](t, objects[6])
+
+	logsPVC := dataPVC.DeepCopy()
+	logsPVC.Name = "logs"
+	logsPVC.UID = types.UID("logs-pvc-uid")
+	logsPVC.Spec.VolumeName = "pv-logs"
+	logsPV := dataPV.DeepCopy()
+	logsPV.Name = "pv-logs"
+	logsPV.UID = types.UID("logs-pv-uid")
+	logsPV.Spec.ClaimRef = &corev1.ObjectReference{
+		Namespace: "app",
+		Name:      "logs",
+		UID:       logsPVC.UID,
+	}
+
+	return append(objects,
+		logsPVC,
+		logsPV,
+		&corev1.ServiceAccount{ObjectMeta: metav1.ObjectMeta{Namespace: "app", Name: "default"}},
+	)
+}
+
 func TestPlanModelsTopologyQuotaAndSessionIdentity(t *testing.T) {
 	client := plannerClient(plannerObjects("2Gi")...)
 
-	plan, err := New(client, nil).Plan(context.Background(), Options{
+	plan, err := New(client, nil).plan(context.Background(), planOptions{
 		SessionID:          "migration",
 		SourceNamespace:    "app",
 		TemporaryNamespace: "system",
@@ -1246,7 +1596,7 @@ func TestPlanChecksApplicationPVCQuotaForOrchestratedActivation(t *testing.T) {
 		},
 	})
 
-	plan, err := New(plannerClient(objects...), nil).Plan(context.Background(), Options{
+	plan, err := New(plannerClient(objects...), nil).plan(context.Background(), planOptions{
 		SessionID:            "migration",
 		Operation:            domain.OperationMigrate,
 		SourceNamespace:      "app",
@@ -1311,7 +1661,7 @@ func TestPlanAutoSelectsTopologyCompatibleTargetNode(t *testing.T) {
 		},
 	)
 
-	plan, err := New(plannerClient(objects...), nil).Plan(context.Background(), Options{
+	plan, err := New(plannerClient(objects...), nil).plan(context.Background(), planOptions{
 		SessionID:          "auto-target",
 		SourceNamespace:    "app",
 		TemporaryNamespace: "system",
@@ -1354,7 +1704,7 @@ func TestPlanAutoTargetRejectsWhenNoTopologyCompatibleNodeExists(t *testing.T) {
 		}
 	}
 
-	plan, err := New(plannerClient(objects...), nil).Plan(context.Background(), Options{
+	plan, err := New(plannerClient(objects...), nil).plan(context.Background(), planOptions{
 		SessionID:          "auto-target-fail",
 		SourceNamespace:    "app",
 		TemporaryNamespace: "system",
@@ -1390,7 +1740,7 @@ func TestPlanChecksSourceAndSessionNamespaceToolQuotas(t *testing.T) {
 		&corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "audit"}},
 	)
 
-	plan, err := New(plannerClient(objects...), nil).Plan(context.Background(), Options{
+	plan, err := New(plannerClient(objects...), nil).plan(context.Background(), planOptions{
 		SessionID:          "migration",
 		SourceNamespace:    "app",
 		TemporaryNamespace: "system",
@@ -1456,7 +1806,7 @@ func TestPlanRejectsUnavailableSourceNode(t *testing.T) {
 			})
 			test.mutate(testutil.MustType[*corev1.Node](t, objects[len(objects)-1]))
 
-			plan, err := New(plannerClient(objects...), nil).Plan(context.Background(), Options{
+			plan, err := New(plannerClient(objects...), nil).plan(context.Background(), planOptions{
 				SessionID:          "migration",
 				SourceNamespace:    "app",
 				TemporaryNamespace: "system",
@@ -1533,7 +1883,7 @@ func TestPlanEvaluatesEveryQuotaAndLimitRangeWithQuantities(t *testing.T) {
 	)
 	client := plannerClient(objects...)
 
-	plan, err := New(client, nil).Plan(context.Background(), Options{
+	plan, err := New(client, nil).plan(context.Background(), planOptions{
 		SessionID:          "migration",
 		SourceNamespace:    "app",
 		TemporaryNamespace: "system",

@@ -348,7 +348,7 @@ func appTestSession() *domain.Session {
 	mode := corev1.PersistentVolumeFilesystem
 	session := domain.NewSession(
 		"session-123",
-		domain.NewSessionSpec(domain.OperationMigrate, domain.SessionCommon{
+		domain.NewPodMigrationSessionSpec(domain.SessionCommon{
 			SourceNamespace:      "app",
 			TemporaryNamespace:   "system",
 			DestinationNamespace: "app",
@@ -379,18 +379,75 @@ func appTestSession() *domain.Session {
 					VolumeMode:   mode,
 				},
 			},
-		}, domain.WorkloadSpec{Adapter: domain.WorkloadNone}, false, domain.SessionWorkflowOptions{
+		}, domain.WorkloadSpec{
+			Adapter: domain.WorkloadStatefulSet,
+			Pod: domain.ObjectReference{
+				Namespace: "app", Name: "database-0", UID: "database-0-uid",
+			},
+			Controller: domain.ObjectReference{
+				Namespace: "app", Name: "database", UID: "database-controller-uid",
+			},
+		}, domain.SessionWorkflowOptions{
 			SourceNode:       "source-node",
 			TargetNode:       "target-node",
 			Strategies:       []string{"mount"},
 			DeleteExtraneous: true,
-			PrecopyPasses:    1,
-		}),
+		}, 1, false),
 		time.Unix(100, 0),
 	)
 	session.ResourceVersion = "1"
 
 	return session
+}
+
+func TestPhaseBeforeUsesMostRecentRecoveryStage(t *testing.T) {
+	tests := []struct {
+		name    string
+		target  domain.Phase
+		history []domain.Phase
+		want    domain.Phase
+	}{
+		{
+			name:   "repeated rollback skips failed and earlier rollback",
+			target: domain.PhaseRollingBack,
+			history: []domain.Phase{
+				domain.PhasePlanned,
+				domain.PhaseCompleted,
+				domain.PhaseRollingBack,
+				domain.PhaseFailed,
+				domain.PhasePaused,
+				domain.PhaseRollingBack,
+			},
+			want: domain.PhasePaused,
+		},
+		{
+			name:   "repeated abort skips failed and earlier abort",
+			target: domain.PhaseAborting,
+			history: []domain.Phase{
+				domain.PhasePlanned,
+				domain.PhasePausing,
+				domain.PhaseAborting,
+				domain.PhaseFailed,
+				domain.PhasePaused,
+				domain.PhaseAborting,
+			},
+			want: domain.PhasePaused,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			session := appTestSession()
+			session.Status.History = make([]domain.HistoryEntry, 0, len(test.history))
+			for _, phase := range test.history {
+				session.Status.History = append(session.Status.History, domain.HistoryEntry{Phase: phase})
+			}
+
+			if got := phaseBefore(session, test.target); got != test.want {
+				t.Fatalf("phaseBefore(%s)=%s, want %s", test.target, got, test.want)
+			}
+		})
+	}
 }
 
 func appTestService(
@@ -468,7 +525,7 @@ func TestMigrateRunsAllStagesAndPersistsProgress(t *testing.T) {
 	copier := &fakeCopier{}
 
 	service, session, controllers, store := appTestService(t, copier)
-	if err := service.Migrate(context.Background(), session); err != nil {
+	if err := service.MigratePod(context.Background(), session); err != nil {
 		t.Fatal(err)
 	}
 
@@ -489,6 +546,57 @@ func TestMigrateRunsAllStagesAndPersistsProgress(t *testing.T) {
 	}
 }
 
+func TestOfflineMigrateDoesNotOrchestrateWorkload(t *testing.T) {
+	copier := &fakeCopier{}
+	service, session, controllers, _ := appTestService(t, copier)
+	setSessionOperation(session, domain.OperationMigrate)
+
+	if err := service.OfflineMigrate(context.Background(), session); err != nil {
+		t.Fatal(err)
+	}
+
+	if session.Status.Phase != domain.PhaseCompleted {
+		t.Fatalf("phase=%s want=%s", session.Status.Phase, domain.PhaseCompleted)
+	}
+	if got := fmt.Sprint(copier.modes); got != "[final]" {
+		t.Fatalf("copy modes=%s want=[final]", got)
+	}
+	if controllers.paused != 0 || controllers.resumed != 0 {
+		t.Fatalf("offline migration orchestrated workload: pauses=%d resumes=%d", controllers.paused, controllers.resumed)
+	}
+}
+
+func TestOfflineAbortValidationDoesNotRequireWorkloadController(t *testing.T) {
+	service, session, _, _ := appTestService(t, &fakeCopier{})
+	setSessionOperation(session, domain.OperationMigrate)
+	session.Status.Phase = domain.PhaseFinalSynced
+	service.controllers = nil
+
+	if err := service.ValidateOfflineMigrationAbort(context.Background(), session); err != nil {
+		t.Fatalf("offline abort validation returned %v", err)
+	}
+}
+
+func TestOfflineRollbackValidationDoesNotRequireWorkloadController(t *testing.T) {
+	service, session, _, _ := appTestService(t, &fakeCopier{})
+	setSessionOperation(session, domain.OperationMigrate)
+	session.Status.Phase = domain.PhaseFinalSynced
+	markTestSessionReserved(session)
+	service.controllers = nil
+
+	if err := service.ValidateOfflineMigrationRollback(context.Background(), session); err != nil {
+		t.Fatalf("offline rollback validation returned %v", err)
+	}
+}
+
+func TestMigratePodRejectsOfflineSession(t *testing.T) {
+	service, session, _, _ := appTestService(t, &fakeCopier{})
+	setSessionOperation(session, domain.OperationMigrate)
+	if err := service.MigratePod(context.Background(), session); domain.CategoryOf(err) != domain.ErrorPrecondition {
+		t.Fatalf("category=%s error=%v", domain.CategoryOf(err), err)
+	}
+}
+
 func TestResumeSessionUsesPersistedPrecopyPasses(t *testing.T) {
 	for _, test := range []struct {
 		name   string
@@ -504,8 +612,8 @@ func TestResumeSessionUsesPersistedPrecopyPasses(t *testing.T) {
 			session.Status.Phase = domain.PhaseReserved
 			markTestSessionReserved(session)
 
-			session.Spec.Migrate.PrecopyPasses = test.passes
-			if err := service.ResumeSession(context.Background(), session); err != nil {
+			session.Spec.MigratePod.PrecopyPasses = test.passes
+			if err := service.resumeWorkflowForTest(context.Background(), session); err != nil {
 				t.Fatal(err)
 			}
 
@@ -532,10 +640,10 @@ func TestResumeSessionCompletesRemainingPrecopyPasses(t *testing.T) {
 			service, session, _, _ := appTestService(t, copier)
 			session.Status.Phase = test.phase
 			markTestSessionReserved(session)
-			session.Spec.Migrate.PrecopyPasses = test.passes
+			session.Spec.MigratePod.PrecopyPasses = test.passes
 
 			session.Status.WarmPassesCompleted = test.completed
-			if err := service.ResumeSession(context.Background(), session); err != nil {
+			if err := service.resumeWorkflowForTest(context.Background(), session); err != nil {
 				t.Fatal(err)
 			}
 
@@ -557,7 +665,7 @@ func TestMigrateLogsLongRunningStageBoundaries(t *testing.T) {
 	service, session, _, _ := appTestService(t, copier)
 
 	service.config.Logger = slog.New(slog.NewTextHandler(&logs, nil))
-	if err := service.Migrate(context.Background(), session); err != nil {
+	if err := service.MigratePod(context.Background(), session); err != nil {
 		t.Fatal(err)
 	}
 
@@ -658,10 +766,9 @@ func TestCopyConsumerPreflightSupportsOfflineAndOnlineBoundaries(t *testing.T) {
 	session.Spec = domain.NewSessionSpec(
 		domain.OperationCopy,
 		session.Spec.SessionCommon,
-		domain.WorkloadSpec{Adapter: domain.WorkloadNone},
+
 		false,
-		domain.SessionWorkflowOptions{},
-	)
+		domain.SessionWorkflowOptions{})
 
 	_, err := service.client.CoreV1().Pods("app").Create(context.Background(), &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{Namespace: "app", Name: "writer"},
@@ -763,8 +870,8 @@ func TestFinalSyncFailureKeepsWorkloadPausedAndResumes(t *testing.T) {
 	copier := &fakeCopier{failFinal: 1}
 	service, session, controllers, _ := appTestService(t, copier)
 
-	session.Spec.Migrate.PrecopyPasses = 0
-	if err := service.Migrate(
+	session.Spec.MigratePod.PrecopyPasses = 0
+	if err := service.MigratePod(
 		context.Background(),
 		session,
 	); domain.CategoryOf(
@@ -782,7 +889,7 @@ func TestFinalSyncFailureKeepsWorkloadPausedAndResumes(t *testing.T) {
 		t.Fatalf("controller calls pause=%d resume=%d", controllers.paused, controllers.resumed)
 	}
 
-	if err := service.ResumeSession(context.Background(), session); err != nil {
+	if err := service.resumeWorkflowForTest(context.Background(), session); err != nil {
 		t.Fatal(err)
 	}
 
@@ -796,7 +903,7 @@ func TestPausePersistsControllerRecoveryState(t *testing.T) {
 	controllers.pauseMutation = true
 
 	session.Status.Phase = domain.PhaseReserved
-	if err := service.Pause(context.Background(), session); err != nil {
+	if err := service.PodPause(context.Background(), session); err != nil {
 		t.Fatal(err)
 	}
 
@@ -814,7 +921,7 @@ func TestResumeFailurePersistsControllerRecoveryState(t *testing.T) {
 	controllers.resumeMutation = true
 	controllers.resumeErr = errors.New("replacement Pods did not become Ready")
 
-	err := service.Migrate(context.Background(), session)
+	err := service.MigratePod(context.Background(), session)
 	if !errors.Is(err, controllers.resumeErr) {
 		t.Fatalf("Migrate() error=%v want=%v", err, controllers.resumeErr)
 	}
@@ -837,12 +944,12 @@ func TestRollbackRestoresSourceBindingAndResumes(t *testing.T) {
 	copier := &fakeCopier{}
 	service, session, controllers, _ := appTestService(t, copier)
 
-	session.Spec.Migrate.PrecopyPasses = 0
-	if err := service.Migrate(context.Background(), session); err != nil {
+	session.Spec.MigratePod.PrecopyPasses = 0
+	if err := service.MigratePod(context.Background(), session); err != nil {
 		t.Fatal(err)
 	}
 
-	if err := service.Rollback(context.Background(), session); err != nil {
+	if err := service.rollbackWorkflowForTest(context.Background(), session); err != nil {
 		t.Fatal(err)
 	}
 
@@ -1177,8 +1284,8 @@ func TestDestinationCapacityFailureCannotResume(t *testing.T) {
 
 	for _, validate := range []func(context.Context, *domain.Session) error{
 		service.ValidateWarmCopy,
-		service.ValidateResume,
-		service.ResumeSession,
+		service.validateResumeWorkflowForTest,
+		service.resumeWorkflowForTest,
 	} {
 		err := validate(context.Background(), session)
 		if domain.CategoryOf(err) != domain.ErrorConflict ||

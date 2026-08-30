@@ -156,26 +156,54 @@ func TestVersionDoesNotInitializeKubernetes(t *testing.T) {
 }
 
 func TestMigratePodRequiresPodBeforeClusterAccess(t *testing.T) {
-	_, err := executeCLI(t, "migrate-pod", "--source-pvc", "data", "--target-node", "node-b")
+	_, err := executeCLI(t, "migrate-pod", "--target-node", "node-b")
 	if domain.CategoryOf(err) != domain.ErrorValidation || !strings.Contains(err.Error(), "--pod") {
 		t.Fatalf("category=%s error=%v", domain.CategoryOf(err), err)
 	}
 }
 
-func TestMigratePodRejectsSourcePVCOverride(t *testing.T) {
+func TestMigratePodDoesNotExposeDestinationIdentityFlags(t *testing.T) {
 	_, err := executeCLI(
 		t,
 		"migrate-pod",
 		"--pod",
 		"db-0",
-		"--source-pvc",
-		"data",
+		"--destination-namespace",
+		"other",
 		"--target-node",
 		"node-b",
 	)
-	if domain.CategoryOf(err) != domain.ErrorValidation ||
-		!strings.Contains(err.Error(), "cannot be combined") {
-		t.Fatalf("category=%s error=%v", domain.CategoryOf(err), err)
+	if err == nil || !strings.Contains(err.Error(), "unknown flag: --destination-namespace") {
+		t.Fatalf("error=%v", err)
+	}
+}
+
+func TestMigrationModesRejectEachOthersFlags(t *testing.T) {
+	tests := []struct {
+		name string
+		args []string
+		flag string
+	}{
+		{name: "offline pod", args: []string{"migrate", "--pod", "db-0"}, flag: "--pod"},
+		{name: "offline plan pod", args: []string{"migrate", "plan", "--pod", "db-0"}, flag: "--pod"},
+		{name: "offline precopy", args: []string{"migrate", "--precopy-passes", "1"}, flag: "--precopy-passes"},
+		{name: "offline shared mount", args: []string{"migrate", "--openebs-lvm-enable-shared"}, flag: "--openebs-lvm-enable-shared"},
+		{name: "offline KubeBlocks candidate", args: []string{"migrate", "--kubeblocks-candidate", "db-1"}, flag: "--kubeblocks-candidate"},
+		{name: "pod source PVC", args: []string{"migrate-pod", "--pod", "db-0", "--source-pvc", "data"}, flag: "--source-pvc"},
+		{name: "pod plan source PVC", args: []string{"migrate-pod", "plan", "--pod", "db-0", "--source-pvc", "data"}, flag: "--source-pvc"},
+		{name: "pod destination namespace", args: []string{"migrate-pod", "--pod", "db-0", "--destination-namespace", "other"}, flag: "--destination-namespace"},
+		{name: "pod destination PVC", args: []string{"migrate-pod", "--pod", "db-0", "--destination-pvc", "data-copy"}, flag: "--destination-pvc"},
+		{name: "pod online", args: []string{"migrate-pod", "--pod", "db-0", "--online"}, flag: "--online"},
+		{name: "pod plan online", args: []string{"migrate-pod", "plan", "--pod", "db-0", "--online"}, flag: "--online"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := executeCLI(t, tt.args...)
+			if err == nil || !strings.Contains(err.Error(), "unknown flag: "+tt.flag) {
+				t.Fatalf("error=%v, want unknown flag %s", err, tt.flag)
+			}
+		})
 	}
 }
 

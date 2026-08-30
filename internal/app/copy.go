@@ -416,14 +416,25 @@ func (s *Service) copyWithRetry(
 		}
 
 		if isDestinationNoSpaceError(last) {
+			message := fmt.Sprintf(
+				"destination PVC %s/%s ran out of space; abort and clean up this session, then create a new session with a larger --destination-capacity",
+				volume.DestinationPVC.Namespace,
+				volume.DestinationPVC.Name,
+			)
+			if kubeblocks, ok := session.Spec.KubeBlocksPodMigration(); ok {
+				message = fmt.Sprintf(
+					"destination PVC %s/%s ran out of space during KubeBlocks Cluster %s component %s real-time migration; update the component volumeClaimTemplates storage request, abort and clean up this session, then create a new migrate-pod session",
+					volume.DestinationPVC.Namespace,
+					volume.DestinationPVC.Name,
+					kubeblocks.Cluster,
+					kubeblocks.Component,
+				)
+			}
+
 			return domain.WrapError(
 				domain.ErrorConflict,
 				"copy capacity",
-				fmt.Sprintf(
-					"destination PVC %s/%s ran out of space; abort and clean up this session, then create a new session with a larger --destination-capacity",
-					volume.DestinationPVC.Namespace,
-					volume.DestinationPVC.Name,
-				),
+				message,
 				last,
 			)
 		}

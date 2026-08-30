@@ -14,15 +14,22 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 )
 
-type crossClusterFlags struct {
+// crossClusterConnectionFlags contains only two-cluster client settings.
+// Workflow modules embed it so copy and reserve keep independent business
+// flags and option conversion.
+type crossClusterConnectionFlags struct {
+	sourceKubeconfig      string
+	sourceContext         string
+	destinationKubeconfig string
+	destinationContext    string
+	sessionNamespace      string
+}
+
+type crossClusterCopyFlags struct {
+	crossClusterConnectionFlags
 	sessionID               string
-	sourceKubeconfig        string
-	sourceContext           string
-	destinationKubeconfig   string
-	destinationContext      string
 	sourceNamespace         string
 	destinationNamespace    string
-	sessionNamespace        string
 	sourcePVCs              []string
 	destinationPVCs         []string
 	destinationCapacities   []string
@@ -45,28 +52,78 @@ func (r *rootState) newCrossClusterCopyCommand() *cobra.Command {
 	command := r.newCrossClusterCopyRunCommand()
 	command.Use = "cross-cluster"
 	command.Short = "Copy PVC data between two Kubernetes clusters"
-	command.AddCommand(r.newCrossClusterCopyPlanCommand())
+	command.AddCommand(
+		r.newCrossClusterCopyPlanCommand(),
+		r.newCrossClusterCopyStatusCommand(),
+		r.newCrossClusterCopyResumeCommand(),
+		r.newCrossClusterCopyCleanupCommand(),
+	)
 
 	return command
 }
 
-func (r *rootState) newCrossClusterReserveCommand() *cobra.Command {
-	command := r.newCrossClusterReserveRunCommand()
-	command.Use = "cross-cluster"
-	command.Short = "Reserve destination PVCs in another Kubernetes cluster"
-	command.AddCommand(r.newCrossClusterReservePlanCommand())
+func (r *rootState) newCrossClusterCopyStatusCommand() *cobra.Command {
+	flags := &crossClusterCopyFlags{}
+	command := &cobra.Command{
+		Use: "status SESSION", Short: "Show a cross-cluster copy session", Args: cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			flags.sessionID = args[0]
+			service, err := r.crossClusterService(&flags.crossClusterConnectionFlags)
+			if err != nil {
+				return err
+			}
+			ctx, cancel := r.context(cmd.Context())
+			defer cancel()
+			session, err := service.Get(ctx, flags.sessionNamespace, args[0])
+			if err != nil {
+				return err
+			}
+			return r.crossPrinter().Print(session)
+		},
+	}
+	flags.bindConnections(command, r)
+	return command
+}
 
+func (r *rootState) newCrossClusterCopyResumeCommand() *cobra.Command {
+	flags := &crossClusterCopyFlags{}
+	var dryRun bool
+	command := &cobra.Command{
+		Use: "resume SESSION", Short: "Resume a cross-cluster copy session", Args: cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			flags.sessionID = args[0]
+			service, err := r.crossClusterService(&flags.crossClusterConnectionFlags)
+			if err != nil {
+				return err
+			}
+			ctx, cancel := r.context(cmd.Context())
+			defer cancel()
+			session, err := service.Get(ctx, flags.sessionNamespace, args[0])
+			if err != nil {
+				return err
+			}
+			if dryRun {
+				return r.crossPrinter().Print(session)
+			}
+			if err := service.Copy(ctx, session, r.global.retries, r.global.noCompress); err != nil {
+				return err
+			}
+			return r.crossPrinter().Print(session)
+		},
+	}
+	flags.bindConnections(command, r)
+	bindDryRun(command, &dryRun)
 	return command
 }
 
 func (r *rootState) newCrossClusterCopyPlanCommand() *cobra.Command {
-	flags := &crossClusterFlags{}
+	flags := &crossClusterCopyFlags{}
 	command := &cobra.Command{
 		Use:   "plan",
 		Short: "Validate a cross-cluster copy without mutations",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			service, err := r.crossClusterService(flags)
+			service, err := r.crossClusterService(&flags.crossClusterConnectionFlags)
 			if err != nil {
 				return err
 			}
@@ -110,7 +167,7 @@ func (r *rootState) newCrossClusterCopyPlanCommand() *cobra.Command {
 }
 
 func (r *rootState) newCrossClusterCopyRunCommand() *cobra.Command {
-	flags := &crossClusterFlags{}
+	flags := &crossClusterCopyFlags{}
 
 	var dryRun bool
 
@@ -119,7 +176,7 @@ func (r *rootState) newCrossClusterCopyRunCommand() *cobra.Command {
 		Short: "Reserve and copy PVC data between clusters",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			service, err := r.crossClusterService(flags)
+			service, err := r.crossClusterService(&flags.crossClusterConnectionFlags)
 			if err != nil {
 				return err
 			}
@@ -189,7 +246,7 @@ func (r *rootState) newCrossClusterCopyRunCommand() *cobra.Command {
 			_, err = fmt.Fprintf(
 				cmd.ErrOrStderr(),
 				"\nCross-cluster copy completed. Verify destination data before deleting the session-owned destination PVC.\nCleanup when ready with: %s\n",
-				crossClusterCleanupCommand(flags, session.ID),
+				crossClusterCopyCleanupCommand(flags, session.ID),
 			)
 
 			return err
@@ -201,151 +258,19 @@ func (r *rootState) newCrossClusterCopyRunCommand() *cobra.Command {
 	return command
 }
 
-func (r *rootState) newCrossClusterReservePlanCommand() *cobra.Command {
-	flags := &crossClusterFlags{}
-	command := &cobra.Command{
-		Use:   "plan",
-		Short: "Validate destination reservation without mutations",
-		Args:  cobra.NoArgs,
-		RunE: func(cmd *cobra.Command, _ []string) error {
-			service, err := r.crossClusterService(flags)
-			if err != nil {
-				return err
-			}
-
-			ctx, cancel := r.context(cmd.Context())
-			defer cancel()
-
-			options, err := flags.options(r)
-			if err != nil {
-				return err
-			}
-
-			plan, err := service.Plan(ctx, options)
-			if err != nil {
-				return err
-			}
-
-			if err := r.crossPrinter().Print(plan); err != nil {
-				return err
-			}
-
-			if !plan.Ready {
-				return domain.NewError(
-					domain.ErrorPrecondition,
-					"reserve cross-cluster plan",
-					"plan contains failed checks",
-				)
-			}
-
-			return nil
-		},
-	}
-	flags.bind(command, r)
-
-	return command
-}
-
-func (r *rootState) newCrossClusterReserveRunCommand() *cobra.Command {
-	flags := &crossClusterFlags{}
+func (r *rootState) newCrossClusterCopyCleanupCommand() *cobra.Command {
+	flags := &crossClusterCopyFlags{}
 
 	var dryRun bool
 
 	command := &cobra.Command{
-		Use:   "run",
-		Short: "Create and reserve destination PVCs in another cluster",
-		Args:  cobra.NoArgs,
-		RunE: func(cmd *cobra.Command, _ []string) error {
-			service, err := r.crossClusterService(flags)
-			if err != nil {
-				return err
-			}
-
-			ctx, cancel := r.context(cmd.Context())
-			defer cancel()
-
-			options, err := flags.options(r)
-			if err != nil {
-				return err
-			}
-
-			var session *crosscluster.Session
-			if flags.sessionID != "" {
-				session, err = service.Get(ctx, options.SessionNamespace, flags.sessionID)
-				if apierrors.IsNotFound(err) {
-					session, err = nil, nil
-				}
-			}
-
-			if session == nil && err == nil {
-				plan, planErr := service.Plan(ctx, options)
-				if planErr != nil {
-					return planErr
-				}
-
-				if printErr := r.crossPrinter().Print(plan); printErr != nil {
-					return printErr
-				}
-
-				if !plan.Ready {
-					return domain.NewError(
-						domain.ErrorPrecondition,
-						"reserve cross-cluster",
-						"plan contains failed checks",
-					)
-				}
-
-				if dryRun {
-					return nil
-				}
-
-				session, err = service.CreateSession(ctx, options, plan)
-			}
-
-			if err != nil {
-				return err
-			}
-
-			if dryRun {
-				return r.crossPrinter().Print(session)
-			}
-
-			if err := service.Reserve(ctx, session); err != nil {
-				return err
-			}
-
-			if err := r.crossPrinter().Print(session); err != nil {
-				return err
-			}
-
-			_, err = fmt.Fprintf(
-				cmd.ErrOrStderr(),
-				"\nDestination PVC reservation completed. Continue with: pvc-migrate copy cross-cluster --session %s --dry-run=false (reuse the same source/destination connection flags).\n",
-				session.ID,
-			)
-
-			return err
-		},
-	}
-	flags.bind(command, r)
-	bindDryRun(command, &dryRun)
-
-	return command
-}
-
-func (r *rootState) newCrossClusterCleanupCommand() *cobra.Command {
-	flags := &crossClusterFlags{}
-
-	var dryRun bool
-
-	command := &cobra.Command{
-		Use:   "cross-cluster SESSION",
+		Use:   "cleanup SESSION",
 		Short: "Clean up a cross-cluster copy session",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			flags.sessionID = args[0]
 
-			service, err := r.crossClusterService(flags)
+			service, err := r.crossClusterService(&flags.crossClusterConnectionFlags)
 			if err != nil {
 				return err
 			}
@@ -353,12 +278,7 @@ func (r *rootState) newCrossClusterCleanupCommand() *cobra.Command {
 			ctx, cancel := r.context(cmd.Context())
 			defer cancel()
 
-			options, err := flags.options(r)
-			if err != nil {
-				return err
-			}
-
-			session, err := service.Get(ctx, options.SessionNamespace, args[0])
+			session, err := service.Get(ctx, flags.sessionNamespace, args[0])
 			if err != nil {
 				return err
 			}
@@ -370,7 +290,7 @@ func (r *rootState) newCrossClusterCleanupCommand() *cobra.Command {
 			if !r.global.assumeYes {
 				return domain.NewError(
 					domain.ErrorPrecondition,
-					"cleanup cross-cluster",
+					"copy cross-cluster cleanup",
 					"re-run with --yes after reviewing the session",
 				)
 			}
@@ -403,9 +323,11 @@ func (r *rootState) newCrossClusterCleanupCommand() *cobra.Command {
 	return command
 }
 
-func (f *crossClusterFlags) bind(command *cobra.Command, r *rootState) {
+func (f *crossClusterCopyFlags) bind(command *cobra.Command, r *rootState) {
 	f.bindConnections(command, r)
 	flags := command.Flags()
+	flags.StringVarP(&f.sourceNamespace, "source-namespace", "n", "default", "Source PVC namespace")
+	flags.StringVar(&f.destinationNamespace, "destination-namespace", "", "Destination PVC namespace; defaults to source namespace")
 	flags.StringVar(&f.sessionID, "session", "", "Cross-cluster session ID")
 	flags.StringSliceVar(
 		&f.sourcePVCs,
@@ -483,7 +405,7 @@ func (f *crossClusterFlags) bind(command *cobra.Command, r *rootState) {
 	)
 }
 
-func (f *crossClusterFlags) bindConnections(command *cobra.Command, r *rootState) {
+func (f *crossClusterConnectionFlags) bindConnections(command *cobra.Command, r *rootState) {
 	flags := command.Flags()
 	flags.StringVar(
 		&f.sourceKubeconfig,
@@ -509,13 +431,6 @@ func (f *crossClusterFlags) bindConnections(command *cobra.Command, r *rootState
 		"",
 		"Destination Kubernetes context",
 	)
-	flags.StringVarP(&f.sourceNamespace, "source-namespace", "n", "default", "Source PVC namespace")
-	flags.StringVar(
-		&f.destinationNamespace,
-		"destination-namespace",
-		"",
-		"Destination PVC namespace; defaults to source namespace",
-	)
 	flags.StringVar(
 		&f.sessionNamespace,
 		"session-namespace",
@@ -524,7 +439,7 @@ func (f *crossClusterFlags) bindConnections(command *cobra.Command, r *rootState
 	)
 }
 
-func (f *crossClusterFlags) options(r *rootState) (crosscluster.Options, error) {
+func (f *crossClusterCopyFlags) options(r *rootState) (crosscluster.Options, error) {
 	if f.destinationKubeconfig == "" {
 		return crosscluster.Options{}, domain.NewError(
 			domain.ErrorValidation,
@@ -594,7 +509,7 @@ func (f *crossClusterFlags) options(r *rootState) (crosscluster.Options, error) 
 	}, nil
 }
 
-func (r *rootState) crossClusterService(flags *crossClusterFlags) (*crosscluster.Service, error) {
+func (r *rootState) crossClusterService(flags *crossClusterConnectionFlags) (*crosscluster.Service, error) {
 	if err := r.validateGlobalFlags(); err != nil {
 		return nil, err
 	}
@@ -658,8 +573,8 @@ func (r *rootState) crossPrinter() output.Printer {
 	return output.Printer{Writer: r.options.Out, Format: output.Format(r.global.output)}
 }
 
-func crossClusterCleanupCommand(flags *crossClusterFlags, sessionID string) string {
-	args := []string{"pvc-migrate", "session", "cleanup", "cross-cluster", shellQuote(sessionID)}
+func crossClusterCopyCleanupCommand(flags *crossClusterCopyFlags, sessionID string) string {
+	args := []string{"pvc-migrate", "copy", "cross-cluster", "cleanup", shellQuote(sessionID)}
 	for _, connection := range []struct {
 		name  string
 		value string

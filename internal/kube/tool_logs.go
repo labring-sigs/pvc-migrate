@@ -25,6 +25,11 @@ const (
 	toolLogMaxLine    = 1024 * 1024
 )
 
+// Kubernetes Pod log streams are expected to close when their context is
+// cancelled. A broken or stalled API proxy can leave a stream blocked, though;
+// never let that prevent the workflow from deleting the tool Pods.
+var toolLogStopTimeout = 5 * time.Second
+
 // ErrToolPodNoSpace records destination exhaustion reported by a data-mover
 // Pod when upstream pv-migrate omits the Pod log tail from its returned error.
 var ErrToolPodNoSpace = errors.New("tool Pod reported no space left on device")
@@ -44,19 +49,35 @@ type ToolLogOptions struct {
 type ToolLogStream struct {
 	cancel context.CancelFunc
 	done   chan struct{}
+	logger *slog.Logger
 
 	mu            sync.Mutex
 	observedError error
 }
 
-// Stop closes active watches and log streams and waits for their goroutines.
+// Stop closes active watches and log streams. The bounded wait keeps a stalled
+// Kubernetes log endpoint from blocking the migration's resource cleanup.
 func (s *ToolLogStream) Stop() {
 	if s == nil {
 		return
 	}
 
 	s.cancel()
-	<-s.done
+
+	timer := time.NewTimer(toolLogStopTimeout)
+	defer timer.Stop()
+
+	select {
+	case <-s.done:
+	case <-timer.C:
+		if s.logger != nil {
+			s.logger.Warn(
+				"tool Pod log stream did not stop before timeout; continuing cleanup",
+				"timeout",
+				toolLogStopTimeout,
+			)
+		}
+	}
 }
 
 // ObservedError returns a terminal storage error seen in the tool Pod logs.
@@ -192,7 +213,11 @@ func startToolLogStream(
 	}
 
 	ctx, cancel := context.WithCancel(parent)
-	stream := &ToolLogStream{cancel: cancel, done: make(chan struct{})}
+	stream := &ToolLogStream{
+		cancel: cancel,
+		done:   make(chan struct{}),
+		logger: options.Logger,
+	}
 
 	streamer := &toolLogStreamer{
 		source:  source,

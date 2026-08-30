@@ -7,7 +7,6 @@ import (
 	"time"
 
 	"github.com/labring-sigs/pvc-migrate/internal/domain"
-	"github.com/labring-sigs/pvc-migrate/internal/kube"
 	appsv1 "k8s.io/api/apps/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -107,57 +106,6 @@ func TestValidateResumeRejectsOperatorControlDriftWithoutUpdates(t *testing.T) {
 				},
 			},
 			wantDetail: "paused externally",
-		},
-		{
-			name: "KubeBlocks component replicas",
-			dynamic: []runtime.Object{&unstructured.Unstructured{Object: map[string]any{
-				"apiVersion": kubeBlocksClusterAPIVersion,
-				"kind":       "Cluster",
-				"metadata": map[string]any{
-					"name": "database", "namespace": "database", "uid": "cluster-uid",
-					"annotations": map[string]any{pauseSessionAnnotation: "session"},
-				},
-				"spec": map[string]any{"componentSpecs": []any{
-					map[string]any{"name": "postgresql", "replicas": int64(2)},
-				}},
-				"status": map[string]any{"phase": "Stopped"},
-			}}, &unstructured.Unstructured{Object: map[string]any{
-				"apiVersion": kubeBlocksClusterAPIVersion,
-				"kind":       "OpsRequest",
-				"metadata": map[string]any{
-					"name":      "pvc-migrate-session-pause",
-					"namespace": "database",
-					"uid":       "opsrequest-uid",
-					"labels": map[string]any{
-						kube.ManagedByLabel: kube.ManagedByValue,
-						kube.SessionKey:     "session",
-					},
-				},
-				"spec":   map[string]any{"clusterRef": "database", "type": "Stop"},
-				"status": map[string]any{"phase": "Succeed"},
-			}}},
-			workload: domain.WorkloadSpec{
-				Adapter: domain.WorkloadKubeBlocks,
-				Pod: domain.ObjectReference{
-					Namespace: "database",
-					Name:      "database-postgresql-0",
-				},
-				Controller: domain.ObjectReference{
-					APIVersion: "apps.kubeblocks.io/v1alpha1",
-					Kind:       domain.KindComponent,
-					Namespace:  "database",
-					Name:       "database-postgresql",
-					UID:        "component-uid",
-				},
-				KubeBlocks: &domain.KubeBlocksSpec{
-					Cluster:                "database",
-					ClusterUID:             "cluster-uid",
-					Component:              "postgresql",
-					OpsAPIVersion:          kubeBlocksClusterAPIVersion,
-					LegacyOriginalReplicas: 1,
-				},
-			},
-			wantDetail: "replicas changed",
 		},
 		{
 			name: "KubeBlocks InstanceSet pause",
@@ -270,7 +218,12 @@ func TestValidateKubeBlocksLegacyResumeAcceptsConvergedFailedStart(t *testing.T)
 		"spec": map[string]any{"componentSpecs": []any{
 			map[string]any{"name": "db", "replicas": int64(1)},
 		}},
-		"status": map[string]any{"phase": "Running"},
+		"status": map[string]any{
+			"phase": "Running",
+			"components": map[string]any{
+				"db": map[string]any{"phase": "Running"},
+			},
+		},
 	}}
 
 	dynamicClient := dynamicfake.NewSimpleDynamicClient(runtime.NewScheme(), cluster)
@@ -287,6 +240,53 @@ func TestValidateKubeBlocksLegacyResumeAcceptsConvergedFailedStart(t *testing.T)
 
 	if got := countDynamicActions(dynamicClient.Actions(), "create", "opsrequests"); got != 0 {
 		t.Fatalf("created %d redundant Start OpsRequest(s)", got)
+	}
+}
+
+func TestKubeBlocksLegacyResumeConvergenceChecksOperationsComponent(t *testing.T) {
+	cluster := &unstructured.Unstructured{Object: map[string]any{
+		"apiVersion": kubeBlocksClusterAPIVersion,
+		"kind":       "Cluster",
+		"metadata": map[string]any{
+			"name": "cluster", "namespace": "db", "uid": "cluster-uid",
+		},
+		"spec": map[string]any{"componentSpecs": []any{
+			map[string]any{"name": "db", "replicas": int64(1)},
+		}},
+		"status": map[string]any{
+			"phase": "Running",
+			"components": map[string]any{
+				"db": map[string]any{"phase": "Stopped"},
+			},
+		},
+	}}
+	kb := &domain.KubeBlocksSpec{
+		Component:     "db",
+		OpsAPIVersion: kubeBlocksOpsAPIVersion,
+	}
+
+	converged, err := kubeBlocksLegacyResumeConverged(cluster, kb)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if converged {
+		t.Fatal("reported convergence while the operations component was Stopped")
+	}
+
+	if err := unstructured.SetNestedField(
+		cluster.Object,
+		"Running",
+		"status", "components", "db", "phase",
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	converged, err = kubeBlocksLegacyResumeConverged(cluster, kb)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !converged {
+		t.Fatal("did not report convergence after the operations component became Running")
 	}
 }
 

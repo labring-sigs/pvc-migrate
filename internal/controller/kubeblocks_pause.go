@@ -12,7 +12,6 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	apiequality "k8s.io/apimachinery/pkg/api/equality"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
-	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
@@ -783,11 +782,6 @@ func (m *Manager) legacyKubeBlocksPauseNotStarted(
 			continue
 		}
 
-		replicas, replicasFound, replicasErr := unstructured.NestedInt64(component, "replicas")
-		if replicasErr != nil || !replicasFound || replicas != int64(kb.LegacyOriginalReplicas) {
-			return false, nil
-		}
-
 		componentFound = true
 
 		break
@@ -1027,11 +1021,11 @@ func (m *Manager) validateKubeBlocksLegacyResume(
 	workload domain.WorkloadSpec,
 	kb *domain.KubeBlocksSpec,
 ) error {
-	if kb.ClusterUID == "" || kb.Component == "" || kb.LegacyOriginalReplicas <= 0 {
+	if kb.ClusterUID == "" || kb.Component == "" {
 		return domain.NewError(
 			domain.ErrorInternal,
 			"resume KubeBlocks",
-			"session lacks Cluster identity or original component replicas",
+			"session lacks Cluster identity",
 		)
 	}
 
@@ -1121,27 +1115,6 @@ func (m *Manager) validateKubeBlocksLegacyResume(
 			continue
 		}
 
-		replicas, replicasFound, replicasErr := unstructured.NestedInt64(component, "replicas")
-		if replicasErr != nil {
-			return domain.WrapError(
-				domain.ErrorPrecondition,
-				"resume KubeBlocks",
-				"read component replicas",
-				replicasErr,
-			)
-		}
-
-		// Stop OpsRequest sets legacy Cluster component replicas to zero while
-		// paused. Preserve the original count as the only non-zero value that
-		// can be resumed safely.
-		if replicasFound && replicas != 0 && replicas != int64(kb.LegacyOriginalReplicas) {
-			return domain.NewError(
-				domain.ErrorConflict,
-				"resume KubeBlocks",
-				fmt.Sprintf("component %s replicas changed to %d while paused", name, replicas),
-			)
-		}
-
 		return nil
 	}
 
@@ -1189,11 +1162,8 @@ func (m *Manager) setKubeBlocksPaused(
 	session *domain.Session,
 	paused bool,
 ) error {
-	if session.Spec.Workload().Controller.Kind == domain.KindInstanceSet {
-		return m.setKubeBlocksInstanceSetPaused(ctx, session, paused)
-	}
-
-	kb := session.Spec.Workload().KubeBlocks
+	workload := session.Spec.Workload()
+	kb := workload.KubeBlocks
 	if kb == nil {
 		return domain.NewError(
 			domain.ErrorInternal,
@@ -1202,11 +1172,15 @@ func (m *Manager) setKubeBlocksPaused(
 		)
 	}
 
-	if kb.ClusterUID == "" || kb.Component == "" || kb.LegacyOriginalReplicas <= 0 {
+	if workload.Controller.Kind == domain.KindInstanceSet {
+		return m.setKubeBlocksInstanceSetPaused(ctx, session, paused)
+	}
+
+	if kb.ClusterUID == "" || kb.Component == "" {
 		return domain.NewError(
 			domain.ErrorInternal,
 			"KubeBlocks pause",
-			"session lacks Cluster identity or original component replicas",
+			"session lacks Cluster identity",
 		)
 	}
 
@@ -1226,7 +1200,7 @@ func (m *Manager) setKubeBlocksPaused(
 		)
 	}
 
-	cluster, err := m.validateKubeBlocksClusterForPause(ctx, session, paused)
+	cluster, err := m.validateKubeBlocksClusterForPause(ctx, session)
 	if err != nil {
 		return err
 	}
@@ -1270,17 +1244,6 @@ func (m *Manager) setKubeBlocksPaused(
 		if err := m.updateKubeBlocksPauseOwner(ctx, session, true); err != nil {
 			return err
 		}
-	} else {
-		// Legacy KubeBlocks Stop/Start OpsRequests own the database lifecycle.
-		// Patroni DCS is cluster-global state and remains managed by KubeBlocks;
-		// PVC migration must not rewrite its leader or timeline metadata.
-		if err := m.syncLegacyKubeBlocksVolumeClaimTemplates(
-			ctx,
-			session,
-			session.Status.Phase == domain.PhaseResuming,
-		); err != nil {
-			return err
-		}
 	}
 
 	if err := m.createAndWaitOps(
@@ -1321,60 +1284,27 @@ func kubeBlocksLegacyResumeConverged(
 		return false, nil
 	}
 
-	components, found, err := unstructured.NestedSlice(cluster.Object, "spec", "componentSpecs")
-	if err != nil {
+	componentPhase, componentFound, componentErr := unstructured.NestedString(
+		cluster.Object,
+		"status",
+		"components",
+		kb.Component,
+		"phase",
+	)
+	if componentErr != nil {
 		return false, domain.WrapError(
 			domain.ErrorPrecondition,
 			"resume KubeBlocks",
-			"read componentSpecs",
-			err,
+			"read KubeBlocks component phase",
+			componentErr,
 		)
 	}
 
-	if !found {
-		return false, domain.NewError(
-			domain.ErrorPrecondition,
-			"resume KubeBlocks",
-			"Cluster has no componentSpecs",
-		)
+	if !componentFound || componentPhase != "Running" {
+		return false, nil
 	}
 
-	for index := range components {
-		component, ok := components[index].(map[string]any)
-		if !ok {
-			return false, domain.NewError(
-				domain.ErrorPrecondition,
-				"resume KubeBlocks",
-				fmt.Sprintf("componentSpecs[%d] is malformed", index),
-			)
-		}
-
-		name, _, _ := unstructured.NestedString(component, "name")
-		if name != kb.Component {
-			continue
-		}
-
-		replicas, replicasFound, replicasErr := unstructured.NestedInt64(
-			component,
-			"replicas",
-		)
-		if replicasErr != nil {
-			return false, domain.WrapError(
-				domain.ErrorPrecondition,
-				"resume KubeBlocks",
-				"read component replicas",
-				replicasErr,
-			)
-		}
-
-		return replicasFound && replicas == int64(kb.LegacyOriginalReplicas), nil
-	}
-
-	return false, domain.NewError(
-		domain.ErrorConflict,
-		"resume KubeBlocks",
-		"Cluster component "+kb.Component+" was removed after discovery",
-	)
+	return true, nil
 }
 
 func (m *Manager) recoverLegacyKubeBlocksStoppedWithPod(
@@ -1383,7 +1313,7 @@ func (m *Manager) recoverLegacyKubeBlocksStoppedWithPod(
 ) error {
 	kb := session.Spec.Workload().KubeBlocks
 
-	cluster, err := m.validateKubeBlocksClusterForPause(ctx, session, true)
+	cluster, err := m.validateKubeBlocksClusterForPause(ctx, session)
 	if err != nil {
 		return err
 	}
@@ -1418,18 +1348,6 @@ func (m *Manager) recoverLegacyKubeBlocksStoppedWithPod(
 		)
 	}
 
-	// A legacy Start may report success before the Cluster reaches Running.
-	// When that attempt leaves a live Pod behind a Stopped status, reconcile
-	// the current active capacity first, then return to Running before issuing
-	// a new Stop OpsRequest.
-	if err := m.syncLegacyKubeBlocksVolumeClaimTemplates(
-		ctx,
-		session,
-		legacyKubeBlocksRecoveryUsesDestinationCapacity(session),
-	); err != nil {
-		return err
-	}
-
 	if err := m.createAndWaitOps(
 		ctx,
 		session,
@@ -1444,24 +1362,6 @@ func (m *Manager) recoverLegacyKubeBlocksStoppedWithPod(
 	}
 
 	return m.waitForKubeBlocksRunning(ctx, session)
-}
-
-func legacyKubeBlocksRecoveryUsesDestinationCapacity(session *domain.Session) bool {
-	if session == nil || session.Status.Phase != domain.PhaseRollingBack {
-		return false
-	}
-
-	if len(session.Status.Volumes) == 0 {
-		return true
-	}
-
-	for index := range session.Status.Volumes {
-		if session.Status.Volumes[index].Activation.RolledBackAt == nil {
-			return true
-		}
-	}
-
-	return false
 }
 
 func (m *Manager) replaceLegacyKubeBlocksPod(
@@ -1583,338 +1483,6 @@ func (m *Manager) replaceLegacyKubeBlocksPod(
 	return nil
 }
 
-func (m *Manager) syncLegacyKubeBlocksVolumeClaimTemplates(
-	ctx context.Context,
-	session *domain.Session,
-	useDestinationCapacity bool,
-) error {
-	workload := session.Spec.Workload()
-
-	kb := workload.KubeBlocks
-	if kb == nil || workload.Controller.Kind == domain.KindInstanceSet {
-		return nil
-	}
-
-	changes := make([]legacyKubeBlocksCapacityChange, 0, len(session.Spec.Volumes))
-	for index := range session.Spec.Volumes {
-		volume := &session.Spec.Volumes[index]
-		original := volume.SourcePVCSpec.Resources.Requests.Storage().String()
-
-		destination := volume.Capacity
-		if destination == "" || quantitiesEqual(original, destination) {
-			continue
-		}
-
-		claimTemplate := volume.SourcePVCMetadata.Labels[kubeBlocksVCTNameLabel]
-		if claimTemplate == "" {
-			return domain.NewError(
-				domain.ErrorPrecondition,
-				"resume KubeBlocks",
-				fmt.Sprintf(
-					"PVC %s/%s lacks KubeBlocks claim template identity required to change capacity from %s to %s",
-					volume.SourcePVC.Namespace,
-					volume.SourcePVC.Name,
-					original,
-					destination,
-				),
-			)
-		}
-
-		desired := original
-		if useDestinationCapacity {
-			desired = destination
-		}
-
-		if kb.LegacyOriginalReplicas != 1 {
-			return domain.NewError(
-				domain.ErrorPrecondition,
-				"resume KubeBlocks",
-				fmt.Sprintf(
-					"legacy component %s has %d replicas; changing claim template %s capacity from %s to %s would also affect sibling instances",
-					kb.Component,
-					kb.LegacyOriginalReplicas,
-					claimTemplate,
-					original,
-					desired,
-				),
-			)
-		}
-
-		changes = append(changes, legacyKubeBlocksCapacityChange{
-			claimTemplate: claimTemplate,
-			original:      original,
-			destination:   destination,
-			desired:       desired,
-		})
-	}
-
-	if len(changes) == 0 {
-		return nil
-	}
-
-	gvr, err := kube.ParseGroupVersionResource(kubeBlocksClusterAPIVersion, clusterResource)
-	if err != nil {
-		return err
-	}
-
-	resource := m.dynamic.Resource(gvr).Namespace(workload.Pod.Namespace)
-
-	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
-		cluster, err := resource.Get(ctx, kb.Cluster, metav1.GetOptions{})
-		if err != nil {
-			return domain.WrapError(
-				domain.ErrorKubernetes,
-				"resume KubeBlocks",
-				"read Cluster volume claim templates",
-				err,
-			)
-		}
-
-		if cluster.GetUID() != kb.ClusterUID {
-			return domain.NewError(
-				domain.ErrorConflict,
-				"resume KubeBlocks",
-				fmt.Sprintf("Cluster %s/%s UID changed", cluster.GetNamespace(), cluster.GetName()),
-			)
-		}
-
-		if cluster.GetAnnotations()[pauseSessionAnnotation] != session.ID {
-			return domain.NewError(
-				domain.ErrorConflict,
-				"resume KubeBlocks",
-				fmt.Sprintf(
-					"Cluster %s/%s pause ownership changed",
-					cluster.GetNamespace(),
-					cluster.GetName(),
-				),
-			)
-		}
-
-		components, found, nestedErr := unstructured.NestedSlice(
-			cluster.Object,
-			"spec",
-			"componentSpecs",
-		)
-		if nestedErr != nil || !found {
-			return domain.NewError(
-				domain.ErrorPrecondition,
-				"resume KubeBlocks",
-				"Cluster has no componentSpecs",
-			)
-		}
-
-		changed, updateErr := updateLegacyKubeBlocksClaimTemplateCapacities(
-			components,
-			kb.Component,
-			changes,
-		)
-		if updateErr != nil {
-			return updateErr
-		}
-
-		if !changed {
-			return nil
-		}
-
-		if err := unstructured.SetNestedSlice(
-			cluster.Object,
-			components,
-			"spec",
-			"componentSpecs",
-		); err != nil {
-			return domain.WrapError(
-				domain.ErrorInternal,
-				"resume KubeBlocks",
-				"update Cluster componentSpecs",
-				err,
-			)
-		}
-
-		_, err = resource.Update(ctx, cluster, metav1.UpdateOptions{})
-		if apierrors.IsConflict(err) {
-			return err
-		}
-
-		if err != nil {
-			return domain.WrapError(
-				domain.ErrorKubernetes,
-				"resume KubeBlocks",
-				"update Cluster volume claim templates",
-				err,
-			)
-		}
-
-		return nil
-	})
-}
-
-type legacyKubeBlocksCapacityChange struct {
-	claimTemplate string
-	original      string
-	destination   string
-	desired       string
-}
-
-func updateLegacyKubeBlocksClaimTemplateCapacities(
-	components []any,
-	componentName string,
-	changes []legacyKubeBlocksCapacityChange,
-) (bool, error) {
-	for componentIndex := range components {
-		component, ok := components[componentIndex].(map[string]any)
-		if !ok {
-			return false, domain.NewError(
-				domain.ErrorPrecondition,
-				"resume KubeBlocks",
-				fmt.Sprintf("componentSpecs[%d] is malformed", componentIndex),
-			)
-		}
-
-		name, found, nameErr := unstructured.NestedString(component, "name")
-		if nameErr != nil || !found || name == "" {
-			return false, domain.NewError(
-				domain.ErrorPrecondition,
-				"resume KubeBlocks",
-				fmt.Sprintf("componentSpecs[%d] has no name", componentIndex),
-			)
-		}
-
-		if name != componentName {
-			continue
-		}
-
-		templates, templatesFound, templatesErr := unstructured.NestedSlice(
-			component,
-			"volumeClaimTemplates",
-		)
-		if templatesErr != nil || !templatesFound {
-			return false, domain.NewError(
-				domain.ErrorPrecondition,
-				"resume KubeBlocks",
-				"legacy component "+componentName+" has no volumeClaimTemplates",
-			)
-		}
-
-		changed := false
-
-		matched := make(map[string]bool, len(changes))
-		for templateIndex := range templates {
-			template, ok := templates[templateIndex].(map[string]any)
-			if !ok {
-				return false, domain.NewError(
-					domain.ErrorPrecondition,
-					"resume KubeBlocks",
-					fmt.Sprintf("volumeClaimTemplates[%d] is malformed", templateIndex),
-				)
-			}
-
-			templateName, _, _ := unstructured.NestedString(template, "name")
-			for _, change := range changes {
-				if templateName != change.claimTemplate {
-					continue
-				}
-
-				matched[templateName] = true
-
-				current, currentFound, currentErr := unstructured.NestedString(
-					template,
-					"spec",
-					"resources",
-					"requests",
-					"storage",
-				)
-				if currentErr != nil || !currentFound {
-					return false, domain.NewError(
-						domain.ErrorPrecondition,
-						"resume KubeBlocks",
-						"claim template "+templateName+" has no storage request",
-					)
-				}
-
-				if !quantitiesEqual(current, change.original) &&
-					!quantitiesEqual(current, change.destination) {
-					return false, domain.NewError(
-						domain.ErrorConflict,
-						"resume KubeBlocks",
-						fmt.Sprintf(
-							"claim template %s capacity changed to %s; expected %s or %s",
-							templateName,
-							current,
-							change.original,
-							change.destination,
-						),
-					)
-				}
-
-				if quantitiesEqual(current, change.desired) {
-					continue
-				}
-
-				if setErr := unstructured.SetNestedField(
-					template,
-					change.desired,
-					"spec",
-					"resources",
-					"requests",
-					"storage",
-				); setErr != nil {
-					return false, domain.WrapError(
-						domain.ErrorInternal,
-						"resume KubeBlocks",
-						"update claim template capacity",
-						setErr,
-					)
-				}
-
-				templates[templateIndex] = template
-				changed = true
-			}
-		}
-
-		for _, change := range changes {
-			if !matched[change.claimTemplate] {
-				return false, domain.NewError(
-					domain.ErrorConflict,
-					"resume KubeBlocks",
-					"legacy component "+componentName+" has no claim template "+change.claimTemplate,
-				)
-			}
-		}
-
-		if changed {
-			if err := unstructured.SetNestedSlice(
-				component,
-				templates,
-				"volumeClaimTemplates",
-			); err != nil {
-				return false, domain.WrapError(
-					domain.ErrorInternal,
-					"resume KubeBlocks",
-					"update component volumeClaimTemplates",
-					err,
-				)
-			}
-
-			components[componentIndex] = component
-		}
-
-		return changed, nil
-	}
-
-	return false, domain.NewError(
-		domain.ErrorConflict,
-		"resume KubeBlocks",
-		"Cluster component "+componentName+" was removed after discovery",
-	)
-}
-
-func quantitiesEqual(left, right string) bool {
-	leftQuantity, leftErr := resource.ParseQuantity(left)
-	rightQuantity, rightErr := resource.ParseQuantity(right)
-
-	return leftErr == nil && rightErr == nil && leftQuantity.Cmp(rightQuantity) == 0
-}
-
 func (m *Manager) updateKubeBlocksPauseOwner(
 	ctx context.Context,
 	session *domain.Session,
@@ -2010,7 +1578,6 @@ func (m *Manager) updateKubeBlocksPauseOwner(
 func (m *Manager) validateKubeBlocksClusterForPause(
 	ctx context.Context,
 	session *domain.Session,
-	paused bool,
 ) (*unstructured.Unstructured, error) {
 	kb := session.Spec.Workload().KubeBlocks
 
@@ -2073,39 +1640,6 @@ func (m *Manager) validateKubeBlocksClusterForPause(
 
 		if name != kb.Component {
 			continue
-		}
-
-		if !paused {
-			return cluster, nil
-		}
-
-		replicas, replicasFound, replicasErr := unstructured.NestedInt64(component, "replicas")
-		if replicasErr != nil {
-			return nil, domain.WrapError(
-				domain.ErrorPrecondition,
-				"KubeBlocks pause",
-				"read component replicas",
-				replicasErr,
-			)
-		}
-
-		// A successful Stop OpsRequest in KubeBlocks 0.8.x persists the
-		// stopped state by changing the Cluster component replicas to zero.
-		// Accept that state only when this session already owns the pause lock;
-		// a new session must still observe the discovered replica count.
-		pauseOwner := cluster.GetAnnotations()[pauseSessionAnnotation]
-		if replicasFound && replicas != int64(kb.LegacyOriginalReplicas) &&
-			(!paused || replicas != 0 || pauseOwner != session.ID) {
-			return nil, domain.NewError(
-				domain.ErrorConflict,
-				"KubeBlocks pause",
-				fmt.Sprintf(
-					"component %s replicas changed from expected %d to %d",
-					name,
-					kb.LegacyOriginalReplicas,
-					replicas,
-				),
-			)
 		}
 
 		return cluster, nil

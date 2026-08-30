@@ -23,8 +23,6 @@ const (
 	OperationMigratePod Operation = "MigratePod"
 	OperationReserve    Operation = "Reserve"
 	OperationCopy       Operation = "Copy"
-	OperationFinalSync  Operation = "FinalSync"
-	OperationActivate   Operation = "Activate"
 	OperationRename     Operation = "Rename"
 	OperationMove       Operation = "Move"
 	OperationBackup     Operation = "Backup"
@@ -71,7 +69,7 @@ var allowedTransitions = map[Phase][]Phase{
 	PhaseRenaming:    {PhaseCompleted, PhaseAborting, PhaseFailed},
 	PhaseMoving:      {PhaseCompleted, PhaseAborting, PhaseFailed},
 	PhaseReserving:   {PhaseReserved, PhaseAborting, PhaseFailed},
-	PhaseReserved:    {PhaseWarmCopying, PhasePausing, PhaseAborting, PhaseFailed},
+	PhaseReserved:    {PhaseWarmCopying, PhasePausing, PhaseFinalSyncing, PhaseAborting, PhaseFailed},
 	PhaseWarmCopying: {PhaseWarmCopied, PhaseAborting, PhaseFailed},
 	PhaseWarmCopied:  {PhaseWarmCopying, PhasePausing, PhaseAborting, PhaseFailed},
 	PhasePausing:     {PhasePaused, PhaseAborting, PhaseFailed},
@@ -91,7 +89,7 @@ var allowedTransitions = map[Phase][]Phase{
 		PhaseFailed,
 	},
 	PhaseActivating: {PhaseActivated, PhaseRollingBack, PhaseFailed},
-	PhaseActivated:  {PhaseResuming, PhaseRollingBack, PhaseFailed},
+	PhaseActivated:  {PhaseCompleted, PhaseResuming, PhaseRollingBack, PhaseFailed},
 	PhaseResuming:   {PhaseCompleted, PhaseRolledBack, PhaseFailed},
 	PhaseCompleted:  {PhaseRollingBack},
 	PhaseAborting:   {PhaseAborted, PhaseFailed},
@@ -171,15 +169,13 @@ type SessionCommon struct {
 }
 
 type SessionWorkflowOptions struct {
-	SourceNode             string   `json:"sourceNode,omitempty"             yaml:"sourceNode,omitempty"`
-	TargetNode             string   `json:"targetNode,omitempty"             yaml:"targetNode,omitempty"`
-	ToolImage              string   `json:"toolImage,omitempty"              yaml:"toolImage,omitempty"`
-	Strategies             []string `json:"strategies,omitempty"             yaml:"strategies,omitempty"`
-	VerifyChecksum         bool     `json:"verifyChecksum,omitempty"         yaml:"verifyChecksum,omitempty"`
-	DeleteExtraneous       bool     `json:"deleteExtraneous"                 yaml:"deleteExtraneous"`
-	PrecopyPasses          int      `json:"-"                                yaml:"-"`
-	OpenEBSLVMEnableShared bool     `json:"openebsLvmEnableShared,omitempty" yaml:"openebsLvmEnableShared,omitempty"`
-	SkipSourceUsageCheck   bool     `json:"skipSourceUsageCheck,omitempty"   yaml:"skipSourceUsageCheck,omitempty"`
+	SourceNode           string   `json:"sourceNode,omitempty"           yaml:"sourceNode,omitempty"`
+	TargetNode           string   `json:"targetNode,omitempty"           yaml:"targetNode,omitempty"`
+	ToolImage            string   `json:"toolImage,omitempty"            yaml:"toolImage,omitempty"`
+	Strategies           []string `json:"strategies,omitempty"           yaml:"strategies,omitempty"`
+	VerifyChecksum       bool     `json:"verifyChecksum,omitempty"       yaml:"verifyChecksum,omitempty"`
+	DeleteExtraneous     bool     `json:"deleteExtraneous"               yaml:"deleteExtraneous"`
+	SkipSourceUsageCheck bool     `json:"skipSourceUsageCheck,omitempty" yaml:"skipSourceUsageCheck,omitempty"`
 }
 
 const (
@@ -192,9 +188,7 @@ const (
 )
 
 type MigrateSessionSpec struct {
-	SessionWorkflowOptions `             json:",inline"       yaml:",inline"`
-	Workload               WorkloadSpec `json:"workload"      yaml:"workload"`
-	PrecopyPasses          int          `json:"precopyPasses" yaml:"precopyPasses"`
+	SessionWorkflowOptions `json:",inline" yaml:",inline"`
 }
 
 type ReserveSessionSpec struct {
@@ -202,9 +196,10 @@ type ReserveSessionSpec struct {
 }
 
 type MigratePodSessionSpec struct {
-	SessionWorkflowOptions `             json:",inline"       yaml:",inline"`
-	Workload               WorkloadSpec `json:"workload"      yaml:"workload"`
-	PrecopyPasses          int          `json:"precopyPasses" yaml:"precopyPasses"`
+	SessionWorkflowOptions `             json:",inline"                         yaml:",inline"`
+	Workload               WorkloadSpec `json:"workload"                        yaml:"workload"`
+	PrecopyPasses          int          `json:"precopyPasses"                   yaml:"precopyPasses"`
+	OpenEBSLVMEnableShared bool         `json:"openebsLvmEnableShared,omitempty" yaml:"openebsLvmEnableShared,omitempty"`
 }
 
 type CopySessionSpec struct {
@@ -231,6 +226,7 @@ type BackupSessionSpec struct {
 	ServerSideEncryption   string          `json:"serverSideEncryption,omitempty"  yaml:"serverSideEncryption,omitempty"`
 	SSEKMSKeyID            string          `json:"sseKmsKeyID,omitempty"           yaml:"sseKmsKeyID,omitempty"`
 	CredentialsSecret      ObjectReference `json:"credentialsSecret,omitempty"     yaml:"credentialsSecret,omitempty"`
+	OpenEBSLVMEnableShared bool            `json:"openebsLvmEnableShared,omitempty" yaml:"openebsLvmEnableShared,omitempty"`
 }
 
 type RenameSessionSpec struct{}
@@ -247,7 +243,6 @@ type KubeBlocksSpec struct {
 	SwitchoverContainer      string                       `json:"switchoverContainer,omitempty"      yaml:"switchoverContainer,omitempty"`
 	OpsAPIVersion            string                       `json:"opsAPIVersion"                      yaml:"opsAPIVersion"`
 	ClusterUID               types.UID                    `json:"clusterUID"                         yaml:"clusterUID"`
-	LegacyOriginalReplicas   int32                        `json:"legacyOriginalReplicas"             yaml:"legacyOriginalReplicas"`
 	OriginalPaused           bool                         `json:"originalPaused,omitempty"           yaml:"originalPaused,omitempty"`
 	OriginalPausedConfigured bool                         `json:"originalPausedConfigured,omitempty" yaml:"originalPausedConfigured,omitempty"`
 }
@@ -410,12 +405,10 @@ type Session struct {
 	Status          SessionStatus `json:"status"     yaml:"status"`
 }
 
-func SessionTypeForOperation(operation Operation) SessionType {
+func sessionTypeForOperation(operation Operation) SessionType {
 	switch operation {
 	case OperationReserve:
 		return SessionTypeReserve
-	case OperationMigratePod:
-		return SessionTypeMigratePod
 	case OperationCopy:
 		return SessionTypeCopy
 	case OperationBackup:
@@ -425,35 +418,22 @@ func SessionTypeForOperation(operation Operation) SessionType {
 	case OperationMove:
 		return SessionTypeMove
 	default:
-		return SessionTypeMigrate
+		return ""
 	}
 }
 
 func NewSessionSpec(
 	operation Operation,
 	common SessionCommon,
-	workload WorkloadSpec,
 	online bool,
 	options SessionWorkflowOptions,
 ) SessionSpec {
 	options.Strategies = slices.Clone(options.Strategies)
 
-	spec := SessionSpec{SessionCommon: common, Type: SessionTypeForOperation(operation)}
+	spec := SessionSpec{SessionCommon: common, Type: sessionTypeForOperation(operation)}
 	switch spec.Type {
 	case SessionTypeReserve:
 		spec.Reserve = &ReserveSessionSpec{SessionWorkflowOptions: options}
-	case SessionTypeMigrate:
-		spec.Migrate = &MigrateSessionSpec{
-			SessionWorkflowOptions: options,
-			Workload:               workload,
-			PrecopyPasses:          options.PrecopyPasses,
-		}
-	case SessionTypeMigratePod:
-		spec.MigratePod = &MigratePodSessionSpec{
-			SessionWorkflowOptions: options,
-			Workload:               workload,
-			PrecopyPasses:          options.PrecopyPasses,
-		}
 	case SessionTypeCopy:
 		spec.Copy = &CopySessionSpec{SessionWorkflowOptions: options, Online: online}
 	case SessionTypeBackup:
@@ -467,11 +447,42 @@ func NewSessionSpec(
 	return spec
 }
 
+func NewOfflineMigrationSessionSpec(
+	common SessionCommon,
+	options SessionWorkflowOptions,
+) SessionSpec {
+	options.Strategies = slices.Clone(options.Strategies)
+	return SessionSpec{
+		SessionCommon: common,
+		Type:          SessionTypeMigrate,
+		Migrate:       &MigrateSessionSpec{SessionWorkflowOptions: options},
+	}
+}
+
+func NewPodMigrationSessionSpec(
+	common SessionCommon,
+	workload WorkloadSpec,
+	options SessionWorkflowOptions,
+	precopyPasses int,
+	openEBSLVMEnableShared bool,
+) SessionSpec {
+	options.Strategies = slices.Clone(options.Strategies)
+	return SessionSpec{
+		SessionCommon: common,
+		Type:          SessionTypeMigratePod,
+		MigratePod: &MigratePodSessionSpec{
+			SessionWorkflowOptions: options,
+			Workload:               workload,
+			PrecopyPasses:          precopyPasses,
+			OpenEBSLVMEnableShared: openEBSLVMEnableShared,
+		},
+	}
+}
+
 func (s SessionSpec) WorkflowOptions() SessionWorkflowOptions {
 	if options := s.WorkflowOptionsPtr(); options != nil {
 		cloned := *options
 		cloned.Strategies = slices.Clone(options.Strategies)
-		cloned.PrecopyPasses = s.PrecopyPasses()
 		return cloned
 	}
 
@@ -479,18 +490,22 @@ func (s SessionSpec) WorkflowOptions() SessionWorkflowOptions {
 }
 
 func (s SessionSpec) PrecopyPasses() int {
-	switch s.Type {
-	case SessionTypeMigrate:
-		if s.Migrate != nil {
-			return s.Migrate.PrecopyPasses
-		}
-	case SessionTypeMigratePod:
-		if s.MigratePod != nil {
-			return s.MigratePod.PrecopyPasses
-		}
+	if s.Type == SessionTypeMigratePod && s.MigratePod != nil {
+		return s.MigratePod.PrecopyPasses
 	}
 
 	return 0
+}
+
+func (s SessionSpec) OpenEBSLVMSharedMountEnabled() bool {
+	switch s.Type {
+	case SessionTypeMigratePod:
+		return s.MigratePod != nil && s.MigratePod.OpenEBSLVMEnableShared
+	case SessionTypeBackup:
+		return s.Backup != nil && s.Backup.OpenEBSLVMEnableShared
+	default:
+		return false
+	}
 }
 
 func (s *Session) CompleteWarmPass() {
@@ -549,10 +564,6 @@ func (s SessionSpec) Operation() Operation {
 
 func (s SessionSpec) Workload() WorkloadSpec {
 	switch s.Type {
-	case SessionTypeMigrate:
-		if s.Migrate != nil {
-			return s.Migrate.Workload
-		}
 	case SessionTypeMigratePod:
 		if s.MigratePod != nil {
 			return s.MigratePod.Workload
@@ -562,12 +573,24 @@ func (s SessionSpec) Workload() WorkloadSpec {
 	return WorkloadSpec{Adapter: WorkloadNone}
 }
 
+// KubeBlocksPodMigration reports whether this session is the real-time Pod
+// workflow for a discovered KubeBlocks workload. Offline migrate sessions do
+// not use this classification even when legacy workload data is present.
+func (s SessionSpec) KubeBlocksPodMigration() (*KubeBlocksSpec, bool) {
+	if s.Operation() != OperationMigratePod {
+		return nil, false
+	}
+
+	workload := s.Workload()
+	if workload.Adapter != WorkloadKubeBlocks || workload.KubeBlocks == nil {
+		return nil, false
+	}
+
+	return workload.KubeBlocks, true
+}
+
 func (s *SessionSpec) WorkloadPtr() *WorkloadSpec {
 	switch s.Type {
-	case SessionTypeMigrate:
-		if s.Migrate != nil {
-			return &s.Migrate.Workload
-		}
 	case SessionTypeMigratePod:
 		if s.MigratePod != nil {
 			return &s.MigratePod.Workload
@@ -582,18 +605,8 @@ func (s SessionSpec) Online() bool {
 		(s.Type == SessionTypeBackup && s.Backup != nil && s.Backup.Online)
 }
 
-func (s SessionSpec) Orchestrated() bool {
-	return s.Type == SessionTypeMigrate || s.Type == SessionTypeMigratePod
-}
-
 func (s *SessionSpec) SetWorkload(workload WorkloadSpec) error {
 	switch s.Type {
-	case SessionTypeMigrate:
-		if s.Migrate == nil {
-			s.Migrate = &MigrateSessionSpec{}
-		}
-
-		s.Migrate.Workload = workload
 	case SessionTypeMigratePod:
 		if s.MigratePod == nil {
 			s.MigratePod = &MigratePodSessionSpec{}
@@ -727,7 +740,7 @@ func (s *Session) Validate() error {
 		return err
 	}
 
-	if s.Spec.Orchestrated() {
+	if s.Spec.Type == SessionTypeMigratePod {
 		if err := validateWorkloadIdentity(s.Spec.Workload()); err != nil {
 			return err
 		}
@@ -806,7 +819,7 @@ func validateSessionHeader(s *Session) error {
 
 func validateSessionMode(s *Session) error {
 	if s.Spec.Online() && s.Spec.Type != SessionTypeCopy && s.Spec.Type != SessionTypeBackup {
-		return NewError(ErrorValidation, "session", "online mode is only valid for copy sessions")
+		return NewError(ErrorValidation, "session", "online mode is only valid for copy or backup sessions")
 	}
 
 	if s.Spec.Type == SessionTypeRename && s.Spec.SourceNamespace != s.Spec.DestinationNamespace {

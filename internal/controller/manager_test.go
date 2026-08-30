@@ -256,7 +256,7 @@ func TestPauseStatefulSetRejectsExternalReplicaChange(t *testing.T) {
 	ordinal := int32(1)
 	session := domain.NewSession(
 		"session",
-		domain.NewSessionSpec(domain.OperationMigrate, domain.SessionCommon{
+		domain.NewPodMigrationSessionSpec(domain.SessionCommon{
 			SourceNamespace:    "app",
 			TemporaryNamespace: "system",
 			SessionNamespace:   "system",
@@ -272,7 +272,7 @@ func TestPauseStatefulSetRejectsExternalReplicaChange(t *testing.T) {
 			},
 			OriginalReplicas: &original,
 			Ordinal:          &ordinal,
-		}, false, domain.SessionWorkflowOptions{}),
+		}, domain.SessionWorkflowOptions{}, 0, false),
 		time.Now(),
 	)
 
@@ -325,14 +325,14 @@ func TestStandalonePauseResumeRebuildsPodOnTargetNode(t *testing.T) {
 
 	session := domain.NewSession(
 		"session",
-		domain.NewSessionSpec(domain.OperationMigrate, domain.SessionCommon{
+		domain.NewPodMigrationSessionSpec(domain.SessionCommon{
 			SourceNamespace:    "app",
 			TemporaryNamespace: "system",
 			SessionNamespace:   "system",
 			Volumes: []domain.VolumeSpec{
 				{SourcePVC: domain.ObjectReference{Name: "data"}},
 			},
-		}, workload, false, domain.SessionWorkflowOptions{TargetNode: "target"}),
+		}, workload, domain.SessionWorkflowOptions{TargetNode: "target"}, 0, false),
 		time.Now(),
 	)
 	if err := manager.Pause(ctx, session); err != nil {
@@ -419,14 +419,14 @@ func TestStandaloneRollbackRebuildsPodOnSourceNode(t *testing.T) {
 
 	session := domain.NewSession(
 		"session",
-		domain.NewSessionSpec(domain.OperationMigrate, domain.SessionCommon{
+		domain.NewPodMigrationSessionSpec(domain.SessionCommon{
 			SourceNamespace:    "app",
 			TemporaryNamespace: "system",
 			SessionNamespace:   "system",
 			Volumes: []domain.VolumeSpec{
 				{SourcePVC: domain.ObjectReference{Name: "data"}},
 			},
-		}, workload, false, domain.SessionWorkflowOptions{SourceNode: "source", TargetNode: "target"}),
+		}, workload, domain.SessionWorkflowOptions{SourceNode: "source", TargetNode: "target"}, 0, false),
 		time.Now(),
 	)
 
@@ -596,21 +596,20 @@ func TestKubeBlocksUsesDiscoveredCurrentOpsAPI(t *testing.T) {
 		t.Fatalf("KubeBlocks discovery: %#v", workload.KubeBlocks)
 	}
 
-	if workload.KubeBlocks.ClusterUID != "cluster-uid" ||
-		workload.KubeBlocks.LegacyOriginalReplicas != 1 {
+	if workload.KubeBlocks.ClusterUID != "cluster-uid" {
 		t.Fatalf("KubeBlocks recovery state: %#v", workload.KubeBlocks)
 	}
 
 	session := domain.NewSession(
 		"session",
-		domain.NewSessionSpec(domain.OperationMigrate, domain.SessionCommon{
+		domain.NewPodMigrationSessionSpec(domain.SessionCommon{
 			SourceNamespace:    "db",
 			TemporaryNamespace: "system",
 			SessionNamespace:   "system",
 			Volumes: []domain.VolumeSpec{
 				{SourcePVC: domain.ObjectReference{Name: "data"}},
 			},
-		}, workload, false, domain.SessionWorkflowOptions{}),
+		}, workload, domain.SessionWorkflowOptions{}, 0, false),
 		time.Now(),
 	)
 

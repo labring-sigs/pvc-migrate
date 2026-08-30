@@ -167,16 +167,14 @@ func NewRoot(options Options) *cobra.Command {
 	command.AddCommand(
 		state.newReserveCommand(),
 		state.newCopyCommand(),
-		state.newFinalSyncCommand(),
-		state.newActivateCommand(),
-		state.newMigrateCommand(false),
-		state.newMigrateCommand(true),
+		state.newMigrateCommand(),
+		state.newMigratePodCommand(),
 		state.newRenameCommand(),
 		state.newMoveCommand(),
 		state.newBackupCommand(),
 		state.newLiveBackupCommand(),
 		state.newRestoreCommand(),
-		state.newSessionCommand(),
+		state.newRecoveryCommand(),
 		newVersionCommand(options.Version),
 	)
 	// Cross-cluster workflows have an independent session and resource model.

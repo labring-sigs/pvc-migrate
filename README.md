@@ -1,11 +1,12 @@
 # pvc-migrate
 
-`pvc-migrate` is a resumable Kubernetes CLI for moving filesystem PVC data between storage classes, namespaces, and nodes. It supports warm copies before downtime, a final offline sync, workload-aware cutover, rollback, and S3-compatible backup and restore.
+`pvc-migrate` is a resumable Kubernetes CLI for moving filesystem PVC data between storage classes, namespaces, and nodes. It provides separate offline PVC migration and real-time Pod migration workflows, plus copy/backup/restore operations.
 
 ## Highlights
 
-- Migrate every PVC attached to a supported Pod as one consistency unit.
-- Reduce downtime with configurable warm-copy passes followed by a final offline sync.
+- `migrate` performs an offline PVC migration and accepts explicit PVC and destination identities.
+- `migrate-pod` performs a real-time migration of every PVC attached to one supported Pod.
+- Reduce downtime with configurable warm-copy passes followed by a final offline sync in `migrate-pod`.
 - Validate topology, scheduling, quota, RBAC, dependencies, consumers, and controller ownership before execution.
 - Resume interrupted sessions from their persisted phase.
 - Follow generated reservation, rsync, SSHD, and rclone Pod logs in the active CLI.
@@ -36,7 +37,7 @@ kubectl apply -f deploy/session-namespace.yaml
 kubectl apply -f deploy/rbac.yaml
 ```
 
-The default ClusterRole excludes Pod exec. InstanceSet-backed KubeBlocks MongoDB native switchover needs it for the source namespace only:
+The default ClusterRole excludes Pod exec. KubeBlocks MongoDB native switchover needs it for the source namespace only:
 
 ```bash
 SOURCE_NAMESPACE=app
@@ -79,9 +80,20 @@ pvc-migrate \
   --destination-storage-class fast-local
 ```
 
+For an offline PVC migration, use `migrate plan` with `--source-pvc`. It does not
+accept `--pod` and does not inspect workload ownership or KubeBlocks metadata:
+
+```bash
+pvc-migrate migrate plan \
+  --source-namespace application \
+  --source-pvc database-data \
+  --destination-namespace archive \
+  --destination-pvc database-data
+```
+
 ### 2. Migrate
 
-Run one warm-copy pass, pause the workload, perform the final sync, activate the destination PVs, and resume the workload:
+Run the complete real-time migration. Warm copy, pause, final sync, activation, and workload resume are one idempotent workflow:
 
 ```bash
 pvc-migrate \
@@ -105,11 +117,11 @@ pvc-migrate \
 ```bash
 pvc-migrate --kubeconfig /path/to/kubeconfig \
   --session-namespace pvc-migrate-system \
-  session status database-20260809
+  migrate-pod status database-20260809
 
 pvc-migrate --kubeconfig /path/to/kubeconfig \
   --session-namespace pvc-migrate-system \
-  --yes session resume database-20260809 --dry-run=false
+  --yes migrate-pod resume database-20260809 --dry-run=false
 ```
 
 ### 4. Roll Back or Finalize
@@ -119,7 +131,7 @@ Restore the original PVs during the rollback window:
 ```bash
 pvc-migrate --kubeconfig /path/to/kubeconfig \
   --session-namespace pvc-migrate-system \
-  --yes session rollback database-20260809 --dry-run=false
+  --yes migrate-pod rollback database-20260809 --dry-run=false
 ```
 
 Close the rollback window after validating the application:
@@ -127,7 +139,7 @@ Close the rollback window after validating the application:
 ```bash
 pvc-migrate --kubeconfig /path/to/kubeconfig \
   --session-namespace pvc-migrate-system \
-  --yes session cleanup database-20260809 --dry-run=false \
+  --yes migrate-pod cleanup database-20260809 --dry-run=false \
   --delete-rollback-pv --finalize --delete-session
 ```
 
@@ -138,12 +150,12 @@ If a PVC or PV still has session ownership after its session ConfigMap was lost,
 ```bash
 pvc-migrate --kubeconfig /path/to/kubeconfig \
   --session-namespace pvc-migrate-system \
-  session cleanup-orphan database-20260809 \
+  recovery cleanup-orphan database-20260809 \
   --source-namespace application --source-pvc data-database-1
 
 pvc-migrate --kubeconfig /path/to/kubeconfig \
   --session-namespace pvc-migrate-system \
-  --yes session cleanup-orphan database-20260809 \
+  --yes recovery cleanup-orphan database-20260809 \
   --source-namespace application --source-pvc data-database-1 \
   --dry-run=false
 ```
@@ -151,8 +163,23 @@ pvc-migrate --kubeconfig /path/to/kubeconfig \
 ## Migration Workflow
 
 ```text
-plan -> reserve -> warm copy -> pause -> final sync -> activate -> resume
+Offline migrate:
+plan -> reserve -> final sync -> activate -> completed (one command)
+
+Real-time Pod migrate:
+plan -> reserve -> warm copy -> pause -> final sync -> activate -> resume (one command)
 ```
+
+`migrate` is caller-quiesced: it accepts PVC identities and namespace/PVC
+destination overrides, never discovers or pauses a workload, and never runs a
+warm-copy pass. `migrate-pod` is the real-time Pod workflow: it derives the
+complete PVC set from `--pod`, keeps the application PVC identities in the
+source namespace, and owns workload pause/resume and cutover. Its workload
+controls are limited to supported same-zone Pod migration; use `copy --online`
+for cross-zone replication. It coordinates one selected workload. Consumers
+from another workload make the plan fail; stop them or use offline `migrate`
+after quiescing every consumer instead of implicitly grouping independent
+workloads.
 
 The destination PVCs are provisioned before downtime. Warm-copy passes run while the workload remains available. The final sync begins after the selected workload adapter confirms that PVC consumers have stopped, and it establishes the cutover consistency point. The source PV remains retained until rollback or final cleanup.
 
@@ -163,8 +190,8 @@ The destination PVCs are provisioned before downtime. Warm-copy passes run while
 | Standalone Pod | Delete and recreate the recorded Pod on the target node | Supported with a Pod restart window |
 | Ordinary Deployment | Scale the complete Deployment to zero, switch all selected PVCs, then restore the original replica count | Supported when fully Ready, without an operator owner or HorizontalPodAutoscaler |
 | Native StatefulSet | Scale from `N` replicas to the selected ordinal `k`, then restore `N` | Supported when PVC retention and ordinal ownership checks pass, without a HorizontalPodAutoscaler |
-| KubeBlocks InstanceSet | Switch a supported primary or acknowledge downtime, pause InstanceSet reconciliation, delete the selected Pod, then restore the original pause state | Supported with selected-instance downtime; sibling Pods remain running |
-| KubeBlocks legacy StatefulSet | Submit a Stop/Start OpsRequest, then restore the recorded replica state | Supported with Cluster or component downtime |
+| KubeBlocks InstanceSet | Optionally switch the primary, pause InstanceSet reconciliation, delete the selected Pod, then restore the original pause state | Supported with selected-instance downtime; sibling Pods remain running |
+| KubeBlocks legacy StatefulSet | Stop the affected Cluster or component through a Stop/Start OpsRequest, then restore it | Supported with Cluster- or component-wide downtime |
 | VMCluster component | Pause the component and reduce its replica count to ordinal `k`, then restore it | Supported for managed VMCluster StatefulSets without a HorizontalPodAutoscaler |
 | Grafana | Pause the Grafana deployment and scale it to zero, then restore it | Supported without a HorizontalPodAutoscaler when recreation scheduling checks pass |
 | Victoria Logs `vlstorage` | Scale the complete `vlstorage` StatefulSet to zero under a session-owned pause lock | Supported without a HorizontalPodAutoscaler and with a shared `vlstorage` pause window |
@@ -173,26 +200,29 @@ The destination PVCs are provisioned before downtime. Warm-copy passes run while
 | CockroachDB | Use drain, decommission, and CockroachDB recovery procedures | Rejected during planning |
 | Backup archive-WAL workload | Use the owning backup controller workflow | Rejected during planning |
 
-For an InstanceSet-backed KubeBlocks primary, `--kubeblocks-candidate` requests an automated switchover. The plan prints `kbcli cluster promote` guidance and a matching OpsRequest YAML for components whose served KubeBlocks definition provides a Switchover action. MongoDB components do not provide that action in KubeBlocks 0.8 or 0.9, so pvc-migrate validates the MongoDB client and credential environment, resolves the candidate from the live replica-set configuration, temporarily freezes other electable secondaries, and immediately steps down the current primary. Choose a Ready, caught-up secondary as the candidate. Failure guidance includes a fully resolved equivalent `kubectl exec` command without credential values.
+For a KubeBlocks primary, `--kubeblocks-candidate` requests an automated switchover. Non-MongoDB components use the served KubeBlocks Switchover action and receive matching `kbcli` and OpsRequest guidance. MongoDB InstanceSet migrations validate and call the native candidate script directly without probing an OpsRequest API; choose a Ready, caught-up secondary as the candidate. Failure guidance includes the fully resolved equivalent command. The native command has this form:
 
-The validated KubeBlocks 0.9 Redis addon does not provide a Switchover action, including its Redis Sentinel topology. Redis primary migration rejects `--kubeblocks-candidate` without probing OpsRequest admission and requires `--allow-leader-downtime`. Sentinel may elect a replacement during the restart, but that behavior does not provide a deterministic candidate switchover contract to pvc-migrate.
+```sh
+kubectl --namespace <namespace> exec <current-primary-pod> -c mongodb -- env \
+  KB_CONSENSUS_LEADER_POD_FQDN=<current-primary-pod>.<cluster>-<component>-headless \
+  KB_SWITCHOVER_CANDIDATE_FQDN=<ready-secondary-pod>.<cluster>-<component>-headless \
+  /scripts/switchover-with-candidate.sh
+```
 
-For an InstanceSet-backed KubeBlocks primary, `--allow-leader-downtime` acknowledges a direct restart when the application can tolerate it.
+`--allow-leader-downtime` acknowledges a direct primary restart when the application can tolerate it.
 
-Legacy non-InstanceSet KubeBlocks components do not perform a switchover because their Stop OpsRequest pauses every instance in the affected Cluster or component. These migrations reject `--kubeblocks-candidate`; `--allow-leader-downtime` has no effect.
-
-InstanceSet-backed components use the served `spec.paused` field to suspend InstanceSet reconciliation while the selected Pod is migrated. The adapter deletes that Pod with a UID precondition and verifies the InstanceSet pause owner before final sync. Legacy StatefulSet-backed components use Stop/Start OpsRequests; the apps API pauses the Cluster, while the operations API can target the selected component. The `kubeblocks.io/reconcile` annotation triggers reconciliation and has no pause semantics.
+InstanceSet-backed components use the served `spec.paused` field to suspend InstanceSet reconciliation while the selected Pod is migrated. The adapter deletes that Pod with a UID precondition and verifies the InstanceSet pause owner before final sync. Legacy StatefulSet-backed components use Stop/Start OpsRequests: the apps API pauses the complete Cluster, while the operations API can target the selected component. Legacy workloads reject `--kubeblocks-candidate` because the pause operation affects every instance in its scope. The `kubeblocks.io/reconcile` annotation triggers reconciliation and has no pause semantics.
 
 Controller ownership outside the supported adapters causes the plan to fail. PVCs that are already offline can use `migrate`, `copy`, `rename`, or `move` directly.
 
 ## Safety and Recovery
 
-- Session commands print phase-aware next steps, verification commands, and validated dry-run/execute pairs on stderr. Suggested `pvc-migrate` and `kubectl` commands preserve the active kubeconfig, context, session namespace, and explicitly changed execution settings they need. Argument quoting follows POSIX shell syntax by default, PowerShell syntax in detected PowerShell environments and native Windows, and POSIX syntax in Windows MSYS shells. JSON and YAML results remain a single structured document on stdout. With `--log-format=json`, stderr is JSON Lines for progress events, guidance, and failures.
+- Workflow commands print phase-aware next steps, verification commands, and validated dry-run/execute pairs on stderr. Suggested commands use the owning workflow (`migrate`, `migrate-pod`, `copy`, `backup`, `rename`, or `move`) and preserve the active kubeconfig, context, session namespace, and explicitly changed execution settings they need. JSON and YAML results remain a single structured document on stdout. With `--log-format=json`, stderr is JSON Lines for progress events, guidance, and failures.
 - Text logs support `--color=auto|always|never`. `auto` colors interactive terminal output, `always` forces ANSI colors for terminal multiplexers, and `never` keeps stderr plain for text collectors. Levels use severity colors, component and tool prefixes use stable per-value colors, and guidance uses semantic colors for phases and actions while keeping command bodies plain. JSON logs remain ANSI-free.
 - `migrate-pod` stops with an already-satisfied check when the Pod uses the requested target node and every PVC keeps its current StorageClass. Use `--force-reprovision` for an intentional backing-PV replacement on the same node and StorageClass.
 - Tool Pod logs stream to stderr by default and remain available in the command output after short-lived Pods are removed. Use `--stream-tool-logs=false` for quiet automation.
 - Each tool-backed stage runs a short-lived probe Pod on every selected source and target node before starting the stage. Image pull, scheduling, security-context, shell, rsync, SSHD, and rclone failures retain the session record and surface before data transfer or workload mutation; backup and restore probes run while their operation lock is held.
-- For any active OpenEBS LVM LocalPV, warm copy reads the actual source PV and its `LVMVolume.spec.shared`; the workload adapter and StorageClass defaults do not determine this state. If the volume is unshared, use an offline final sync with `--precopy-passes 0`, or explicitly pass `--openebs-lvm-enable-shared` to temporarily set `shared=yes` and verify a same-node second-Pod read-write mount. The original source setting is restored after every warm-copy attempt, including failures.
+- For any active OpenEBS LVM LocalPV, warm copy reads the actual source PV and its `LVMVolume.spec.shared`; the workload adapter and StorageClass defaults do not determine this state. If the volume is unshared, use `migrate-pod --precopy-passes 0` to skip warm copy and proceed directly to controlled cutover and final sync, or explicitly pass `--openebs-lvm-enable-shared` to temporarily set `shared=yes` and verify a same-node second-Pod read-write mount. The original source setting is restored after every warm-copy attempt, including failures.
 - The planner separately counts each destination PVC's consumers inside the selected migration unit. When multiple Pods will mount one RWO PVC and the destination StorageClass predicts OpenEBS LVM, `--openebs-lvm-enable-shared` authorizes the operation. Execution verifies the provisioned destination PV and matching LVMVolume, then keeps `spec.shared=yes` for the resumed application. This behavior is independent of the workload adapter and provides same-node multi-mount capability, not cross-node RWX storage. The plan rejects matching required Pod anti-affinity and `DoNotSchedule` topology-spread rules when they prevent every consumer from running on that node.
 - Session state is stored in `pvc-migrate-session-<id>` ConfigMaps.
 - Session ConfigMaps carry a protection finalizer and are deleted through validated session cleanup.
@@ -202,11 +232,9 @@ Controller ownership outside the supported adapters causes the plan to fail. PVC
 - Replacement PVCs receive API-server dry-run validation before activation.
 - Recreated PVC workflows reject unknown custom finalizers during planning; Kubernetes PVC protection remains controller-managed, stale CSI binding metadata is omitted, and the external resizer writes its annotation when a later expansion begins.
 - A failure after workload pause preserves the paused workload and its resumable session.
-- `session abort` restores a paused workload before activation and retains staged storage for cleanup.
-- `session rollback` restores application PVC identities to the retained source PVs.
-- `session cleanup --finalize` restores the active PV reclaim policy and releases session ownership.
-
-See [Architecture](docs/architecture.md) for consistency boundaries and [Runbook](docs/runbook.md) for recovery procedures.
+- `<workflow> abort` restores a paused workload before activation and retains staged storage for cleanup.
+- `<workflow> rollback` restores application PVC identities to the retained source PVs when that workflow changes PVC identity.
+- `<workflow> cleanup --finalize` restores the active PV reclaim policy and releases session ownership.
 
 ## Command Reference
 
@@ -217,21 +245,17 @@ See [Architecture](docs/architecture.md) for consistency boundaries and [Runbook
 | `copy` | Run a resumable offline copy or one online warm-copy pass without cutover |
 | `copy cross-cluster` | Copy PVC data between two Kubernetes clusters with separate source and destination connections |
 | `reserve cross-cluster` | Provision destination PVCs in another cluster and persist a cross-cluster session |
-| `final-sync` | Pause the recorded workload and run the final offline sync |
-| `activate` | Bind staged PVs to application PVC identities |
-| `migrate` | Run reserve, copy, pause, final sync, activation, and resume |
-| `migrate-pod` | Migrate every PVC of one supported Pod as a unit |
+| `migrate` | Run an offline reserve, final sync, activation, and completion |
+| `migrate-pod` | Run real-time warm copy, workload pause, cutover, and resume for one Pod |
 | `rename` | Rename one offline PVC while retaining its PV |
-| `move`, `mv` | Move one offline PVC identity to another namespace |
+| `move` | Move one offline PVC identity to another namespace |
 | `backup`, `live-backup` | Copy PVC files to S3-compatible object storage |
 | `restore` | Restore a published recovery point into a PVC |
-| `session status` | Show one session or list sessions |
-| `session resume` | Continue from the persisted phase |
-| `session abort` | Restore a paused workload before activation |
-| `session rollback` | Restore retained source PVs and resume the workload |
-| `session cleanup` | Delete staged resources or close the rollback window |
-| `session status/resume/cleanup cross-cluster` | Inspect, continue, or clean up a cross-cluster session |
-| `session cleanup-orphan` | Validate and clear ownership after a session ConfigMap was lost |
+| `migrate status/resume/abort/rollback/cleanup` | Manage an offline migration session |
+| `migrate-pod status/resume/abort/rollback/cleanup` | Manage a real-time Pod migration session |
+| `reserve/copy/backup/live-backup/rename/move status/resume/abort/cleanup` | Manage the lifecycle actions supported by each workflow |
+| `copy cross-cluster` / `reserve cross-cluster` lifecycle commands | Inspect, continue, or clean up a cross-cluster session |
+| `recovery cleanup-orphan` | Validate and clear ownership after a session record was lost |
 | `completion` | Generate shell completion |
 | `version` | Print version information |
 
@@ -313,15 +337,25 @@ pvc-migrate copy cross-cluster \
   --dry-run=false
 ```
 
-Use `reserve cross-cluster` to provision and inspect destination PVCs before copying. `session status cross-cluster`, `session resume cross-cluster`, and `session cleanup cross-cluster` require both connections so resource identities can be verified on each cluster. Multiple PVCs use explicit `source=destination`, `source=capacity`, and `source=path` mappings. Cross-cluster shrink keeps the same safety defaults as local copy: `--allow-volume-shrink` and an explicit `--skip-source-usage-check` are required when no trusted usage reader exists.
+Use `reserve cross-cluster` to provision and inspect destination PVCs before copying. `reserve cross-cluster status/resume/cleanup` and `copy cross-cluster status/resume/cleanup` require both connections so resource identities can be verified on each cluster. Multiple PVCs use explicit `source=destination`, `source=capacity`, and `source=path` mappings. Cross-cluster shrink keeps the same safety defaults as local copy: `--allow-volume-shrink` and an explicit `--skip-source-usage-check` are required when no trusted usage reader exists.
 
 ### Destination Capacity
 
-`reserve`, `copy`, `migrate`, and `migrate-pod` accept `--destination-capacity` because they create destination PVCs. Omit it to keep each source PV capacity. Pass one value to apply it to every source PVC, or use explicit `source-pvc-name=capacity` entries for multiple PVCs. Plans and session status show both source and destination capacities.
+`reserve`, `copy`, `migrate`, and `migrate-pod` accept `--destination-capacity` because they create destination PVCs. Omit it to keep each source PV capacity. Pass one value to apply it to every source PVC, or use explicit `source-pvc-name=capacity` entries for multiple PVCs. Plans and workflow-specific `status` commands show both source and destination capacities.
 
 The planner rejects a destination smaller than its source PV by default. Add `--allow-volume-shrink` only after confirming that the copied data fits in every smaller PVC. pvc-migrate never mounts a source volume to measure usage during planning or execution. It accepts usage only from a trusted adapter for a known storage-backend CRD; provisioned capacity is not treated as used bytes. When no trusted adapter is available, the plan is blocked unless `--skip-source-usage-check` explicitly accepts the risk. The current release has no trusted usage adapter for OpenEBS LVM, OpenEBS HostPath, or S3 CSI because their CRDs do not expose per-volume filesystem usage. These flags apply only to a new session and cannot change an existing session. `rename` and `move` preserve PVC identity and do not expose capacity flags.
 
-For an orchestrated migration, the recreated application PVC uses the requested destination capacity after activation. Rollback recreates it with the original source PVC request.
+Destination PVCs retain the source access modes. Plans enforce the known
+OpenEBS LocalPV contracts: `openebs.io/local` accepts `ReadWriteOnce`, while
+`local.csi.openebs.io` accepts `ReadWriteOnce` and `ReadWriteOncePod`. Choose a
+StorageClass whose driver supports the source modes. Capabilities of unknown
+CSI provisioners are validated by their own admission path.
+
+`copy`, `reserve`, and offline `migrate` can use a different destination capacity. Real-time
+`migrate-pod` keeps the Pod PVC identities in the source namespace and rejects destination
+namespace/PVC overrides. For a KubeBlocks `migrate-pod`, capacity is controlled by the Cluster
+component template; update that template and create a new session after cleanup when the
+destination is too small. Other real-time workloads use the requested destination capacity.
 
 ```bash
 pvc-migrate copy --dry-run=false \
@@ -346,7 +380,7 @@ pvc-migrate copy --dry-run=false \
 
 ## Backup and Restore
 
-`backup` requires an offline source by default. `backup --online` and `live-backup` perform one best-effort file-level pass while consumers remain active. Each completed backup publishes an immutable recovery point under a unique `--name`.
+`backup` requires an offline source. `live-backup` is the separate best-effort file-level operation for active consumers. Each completed backup publishes an immutable recovery point under a unique `--name`.
 
 The completion manifest records the source PVC identity, capacity, VolumeMode, path, consistency boundary, object count, total bytes, and inventory digest. Restore validates the manifest and inventory before and after synchronization. The requested `--path` must match the published path.
 
@@ -391,6 +425,7 @@ Offline backup and restore require the workload owner to remain quiesced for the
 
 - Filesystem PVCs define the persistent-data boundary.
 - Pod `emptyDir` volumes follow their Kubernetes ephemeral lifecycle.
-- The workflow uses finite warm-copy passes followed by a final offline sync.
+- Offline `migrate` uses one terminal sync after the caller stops PVC consumers.
+- `migrate-pod` uses finite warm-copy passes followed by a workload-controlled final sync.
 - Database-native CDC, WAL tailing, and continuous file watching remain application responsibilities.
 - Storage backend cleanup follows the active reclaim policy and CSI implementation.
