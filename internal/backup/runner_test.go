@@ -1207,6 +1207,23 @@ func TestBackupConsistencyRecordsOnlineBoundary(t *testing.T) {
 	}
 }
 
+func TestBackupPlanLabelsOnlineModeUnderBackupOperation(t *testing.T) {
+	client, request := preflightFixture(t, &preflightObjectStore{})
+	request.Online = true
+
+	plan, err := Preflight(context.Background(), client, request, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if plan.Operation != "backup" {
+		t.Fatalf("online plan operation=%q, want backup", plan.Operation)
+	}
+	if plan.Mode != ModeOnline {
+		t.Fatalf("online plan mode=%q, want %q", plan.Mode, ModeOnline)
+	}
+}
+
 func TestPVMigrateBackupAndRestoreHonorMountedPolicy(t *testing.T) {
 	client := &preflightObjectStore{}
 

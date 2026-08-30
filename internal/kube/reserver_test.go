@@ -183,7 +183,8 @@ func TestReserveVolumeProvisionsOnTargetAndRetainsBothPVs(t *testing.T) {
 					VolumeMode:   mode,
 				},
 			},
-		}, domain.WorkloadSpec{Adapter: domain.WorkloadNone}, false, domain.SessionWorkflowOptions{TargetNode: "node-b"}),
+		}, false, domain.SessionWorkflowOptions{TargetNode: "node-b"}),
+
 		time.Now(),
 	)
 	reserver := NewReserver(client)
@@ -293,7 +294,8 @@ func TestReserveVolumeRejectsDestinationOwnedByAnotherSession(t *testing.T) {
 					VolumeMode:   mode,
 				},
 			},
-		}, domain.WorkloadSpec{Adapter: domain.WorkloadNone}, false, domain.SessionWorkflowOptions{}),
+		}, false, domain.SessionWorkflowOptions{}),
+
 		time.Now(),
 	)
 

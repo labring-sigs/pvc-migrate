@@ -456,10 +456,19 @@ func failureReason(err error) domain.SessionFailureReason {
 func validateRetryableSessionFailure(session *domain.Session) error {
 	if session != nil && session.Status.Phase == domain.PhaseFailed &&
 		session.Status.FailureReason == domain.FailureDestinationCapacityExhausted {
+		message := "destination capacity was exhausted and cannot be changed in this session; abort and clean up this session, then create a new session with a larger --destination-capacity"
+		if kubeblocks, ok := session.Spec.KubeBlocksPodMigration(); ok {
+			message = fmt.Sprintf(
+				"destination capacity was exhausted for KubeBlocks Cluster %s component %s; update the component volumeClaimTemplates storage request, abort and clean up this session, then create a new migrate-pod session",
+				kubeblocks.Cluster,
+				kubeblocks.Component,
+			)
+		}
+
 		return domain.NewError(
 			domain.ErrorConflict,
 			"resume session",
-			"destination capacity was exhausted and cannot be changed in this session; abort and clean up this session, then create a new session with a larger --destination-capacity",
+			message,
 		)
 	}
 
@@ -520,16 +529,31 @@ func phaseAfter(current, reference domain.Phase) bool {
 }
 
 func phaseBefore(session *domain.Session, target domain.Phase) domain.Phase {
-	for index := len(session.Status.History) - 1; index > 0; index-- {
-		if session.Status.History[index].Phase == target {
-			return session.Status.History[index-1].Phase
+	for index, entry := range slices.Backward(session.Status.History) {
+		if entry.Phase != target {
+			continue
 		}
+
+		for previous := index - 1; previous >= 0; previous-- {
+			phase := session.Status.History[previous].Phase
+			if phase == domain.PhaseFailed || phase == target {
+				continue
+			}
+
+			return phase
+		}
+
+		return ""
 	}
 
 	return ""
 }
 
 func abortRequiresWorkloadResume(session *domain.Session) bool {
+	if session == nil || session.Spec.Operation() != domain.OperationMigratePod {
+		return false
+	}
+
 	previous := session.Status.Phase
 	if previous == domain.PhaseFailed || previous == domain.PhaseAborting {
 		previous = session.Status.ResumeFrom

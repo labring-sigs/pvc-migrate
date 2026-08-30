@@ -17,7 +17,7 @@ func TestMigrationNamespaceResourceEstimatesUseSerializedChartAndConcurrentProbe
 
 	scope := &domain.TransferScope{SourcePath: "source", DestinationPath: "destination"}
 	state := &planState{
-		options: Options{
+		options: planOptions{
 			Operation:        domain.OperationCopy,
 			SourceNamespace:  "application",
 			StagingNamespace: "application",
@@ -78,7 +78,7 @@ func TestMigrationProbePodPeaksTrackNamespacesAndWorkflowStages(t *testing.T) {
 		},
 	}
 
-	copyPeaks := migrationProbePodPeaks(Options{
+	copyPeaks := migrationProbePodPeaks(planOptions{
 		Operation:  domain.OperationCopy,
 		TargetNode: "worker",
 		Strategies: []string{domain.StrategyClusterIP},
@@ -87,7 +87,7 @@ func TestMigrationProbePodPeaksTrackNamespacesAndWorkflowStages(t *testing.T) {
 		t.Fatalf("copy probe peaks=%v, want source/stage=2/3", copyPeaks)
 	}
 
-	localPeaks := migrationProbePodPeaks(Options{
+	localPeaks := migrationProbePodPeaks(planOptions{
 		Operation:  domain.OperationCopy,
 		TargetNode: "worker",
 		Strategies: []string{domain.StrategyLocal},
@@ -103,7 +103,7 @@ func TestMigrationProbePodPeaksTrackNamespacesAndWorkflowStages(t *testing.T) {
 		localSameNamespace[index].DestinationPVC.Namespace = "application"
 	}
 
-	localSameNamespacePeaks := migrationProbePodPeaks(Options{
+	localSameNamespacePeaks := migrationProbePodPeaks(planOptions{
 		Operation:  domain.OperationCopy,
 		TargetNode: "worker",
 		Strategies: []string{domain.StrategyLocal},
@@ -115,7 +115,7 @@ func TestMigrationProbePodPeaksTrackNamespacesAndWorkflowStages(t *testing.T) {
 		)
 	}
 
-	offlineMountPeaks := migrationProbePodPeaks(Options{
+	offlineMountPeaks := migrationProbePodPeaks(planOptions{
 		Operation:  domain.OperationMigrate,
 		TargetNode: "worker",
 		Strategies: []string{domain.StrategyMount},
@@ -131,8 +131,8 @@ func TestMigrationProbePodPeaksTrackNamespacesAndWorkflowStages(t *testing.T) {
 		warmSameNamespace[index].DestinationPVC.Namespace = "application"
 	}
 
-	warmPeaks := migrationProbePodPeaks(Options{
-		Operation:     domain.OperationMigrate,
+	warmPeaks := migrationProbePodPeaks(planOptions{
+		Operation:     domain.OperationMigratePod,
 		TargetNode:    "worker",
 		Strategies:    []string{domain.StrategyMount},
 		PrecopyPasses: 1,
@@ -144,7 +144,7 @@ func TestMigrationProbePodPeaksTrackNamespacesAndWorkflowStages(t *testing.T) {
 
 func TestReserveResourceEstimateExcludesCopyChart(t *testing.T) {
 	state := &planState{
-		options: Options{
+		options: planOptions{
 			Operation:        domain.OperationReserve,
 			SourceNamespace:  "application",
 			StagingNamespace: "staging",
@@ -194,7 +194,7 @@ func TestPlanFiltersStrategiesBeforeQuotaEstimation(t *testing.T) {
 		}},
 	})
 
-	plan, err := New(plannerClient(objects...), nil).Plan(context.Background(), Options{
+	plan, err := New(plannerClient(objects...), nil).plan(context.Background(), planOptions{
 		Operation:          domain.OperationCopy,
 		SessionID:          "filtered-quota",
 		SourceNamespace:    "app",

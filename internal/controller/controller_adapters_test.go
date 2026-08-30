@@ -941,7 +941,7 @@ func TestDiscoverRejectsUnsafeKubeBlocksInstanceSetComponents(t *testing.T) {
 				"spec": map[string]any{"componentSpecs": []any{map[string]any{
 					"name":            tt.component,
 					"componentDefRef": tt.definition,
-					"stop":            false,
+					"replicas":        int64(1),
 				}}},
 			}}
 			dynamicClient := dynamicfake.NewSimpleDynamicClient(runtime.NewScheme(), cluster)

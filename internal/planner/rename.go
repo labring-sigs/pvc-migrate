@@ -15,7 +15,10 @@ import (
 	"k8s.io/apimachinery/pkg/util/validation"
 )
 
-type RenameOptions struct {
+// pvcIdentityPlanOptions is the shared planning kernel for the independent
+// rename and move entry points. It is private so callers cannot accidentally
+// build a mixed identity operation by selecting an Operation field.
+type pvcIdentityPlanOptions struct {
 	Operation            domain.Operation
 	SessionID            string
 	SourceNamespace      string
@@ -25,9 +28,46 @@ type RenameOptions struct {
 	SessionNamespace     string
 }
 
-func (p *Planner) PlanRename(
+// RenamePlanOptions is the dedicated same-namespace PVC rename contract.
+type RenamePlanOptions struct {
+	SessionID        string
+	SourceNamespace  string
+	SourcePVC        string
+	DestinationPVC   string
+	SessionNamespace string
+}
+
+// MovePlanOptions is the dedicated cross-namespace PVC move contract.
+type MovePlanOptions struct {
+	SessionID            string
+	SourceNamespace      string
+	SourcePVC            string
+	DestinationNamespace string
+	DestinationPVC       string
+	SessionNamespace     string
+}
+
+func (p *Planner) PlanRenamePVC(ctx context.Context, options RenamePlanOptions) (*domain.MigrationPlan, error) {
+	return p.planPVCIdentity(ctx, pvcIdentityPlanOptions{
+		Operation: domain.OperationRename, SessionID: options.SessionID,
+		SourceNamespace: options.SourceNamespace, SourcePVC: options.SourcePVC,
+		DestinationNamespace: options.SourceNamespace, DestinationPVC: options.DestinationPVC,
+		SessionNamespace: options.SessionNamespace,
+	})
+}
+
+func (p *Planner) PlanMovePVC(ctx context.Context, options MovePlanOptions) (*domain.MigrationPlan, error) {
+	return p.planPVCIdentity(ctx, pvcIdentityPlanOptions{
+		Operation: domain.OperationMove, SessionID: options.SessionID,
+		SourceNamespace: options.SourceNamespace, SourcePVC: options.SourcePVC,
+		DestinationNamespace: options.DestinationNamespace, DestinationPVC: options.DestinationPVC,
+		SessionNamespace: options.SessionNamespace,
+	})
+}
+
+func (p *Planner) planPVCIdentity(
 	ctx context.Context,
-	options RenameOptions,
+	options pvcIdentityPlanOptions,
 ) (*domain.MigrationPlan, error) {
 	options, destinationNamespaceProvided := normalizeRenameOptions(options)
 
@@ -273,7 +313,8 @@ func (p *Planner) PlanRename(
 		DestinationNamespace: options.DestinationNamespace,
 		SessionNamespace:     options.SessionNamespace,
 		Volumes:              []domain.VolumeSpec{volume},
-	}, domain.WorkloadSpec{Adapter: domain.WorkloadNone}, false, domain.SessionWorkflowOptions{})
+	}, false, domain.SessionWorkflowOptions{})
+
 	p.logInfo(
 		"validating PVC identity cluster policies",
 		"session",
@@ -329,7 +370,7 @@ func (p *Planner) PlanRename(
 
 func (p *Planner) validateRenameInventory(
 	plan *domain.MigrationPlan,
-	options RenameOptions,
+	options pvcIdentityPlanOptions,
 	destinationNamespaceErr error,
 	pvc *corev1.PersistentVolumeClaim,
 	pvcErr error,
@@ -457,7 +498,7 @@ func (p *Planner) validateRenameInventory(
 	return true
 }
 
-func normalizeRenameOptions(options RenameOptions) (RenameOptions, bool) {
+func normalizeRenameOptions(options pvcIdentityPlanOptions) (pvcIdentityPlanOptions, bool) {
 	destinationProvided := options.DestinationNamespace != ""
 	if options.Operation == "" {
 		options.Operation = domain.OperationRename
@@ -484,7 +525,7 @@ func normalizeRenameOptions(options RenameOptions) (RenameOptions, bool) {
 
 func validateRenameInputs(
 	plan *domain.MigrationPlan,
-	options RenameOptions,
+	options pvcIdentityPlanOptions,
 	destinationProvided bool,
 ) bool {
 	if !options.Operation.RebindsPVC() {

@@ -10,6 +10,7 @@ import (
 	"github.com/labring-sigs/pvc-migrate/internal/kube"
 	"github.com/labring-sigs/pvc-migrate/internal/parallel"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
@@ -161,10 +162,85 @@ func (s *Service) validateActivationStorage(ctx context.Context, session *domain
 			continue
 		}
 
+		active, _, err := s.unrecordedActivePVC(ctx, session, index)
+		if err != nil {
+			return err
+		}
+
+		if active != nil {
+			if err := s.verifyActiveStorageVolumeWithRef(ctx, session, index, *active); err != nil {
+				return err
+			}
+
+			volume := session.Spec.Volumes[index]
+			volume.SourcePVC = *active
+			volume.SourcePV = volume.DestinationPV
+			volume.DestinationPVC = *active
+
+			if err := s.verifyVolumesOffline(
+				ctx,
+				session,
+				[]*domain.VolumeSpec{&volume},
+			); err != nil {
+				return err
+			}
+
+			continue
+		}
+
 		offline = append(offline, &session.Spec.Volumes[index])
 	}
 
 	return s.verifyVolumesOffline(ctx, session, offline)
+}
+
+func (s *Service) unrecordedActivePVC(
+	ctx context.Context,
+	session *domain.Session,
+	index int,
+) (*domain.ObjectReference, bool, error) {
+	volume := &session.Spec.Volumes[index]
+
+	pvc, err := s.client.CoreV1().
+		PersistentVolumeClaims(volume.SourcePVC.Namespace).
+		Get(ctx, volume.SourcePVC.Name, metav1.GetOptions{})
+	if apierrors.IsNotFound(err) {
+		return nil, false, nil
+	}
+
+	if err != nil {
+		return nil, false, domain.WrapError(
+			domain.ErrorKubernetes,
+			verifyMigrationPhase,
+			fmt.Sprintf("read PVC %s/%s", volume.SourcePVC.Namespace, volume.SourcePVC.Name),
+			err,
+		)
+	}
+
+	if pvc == nil || pvc.Name == "" {
+		return nil, false, domain.NewError(
+			domain.ErrorKubernetes,
+			verifyMigrationPhase,
+			fmt.Sprintf(
+				"read PVC %s/%s returned an empty object",
+				volume.SourcePVC.Namespace,
+				volume.SourcePVC.Name,
+			),
+		)
+	}
+
+	if pvc.UID == volume.SourcePVC.UID && pvc.Spec.VolumeName == volume.SourcePV.Name {
+		return nil, true, nil
+	}
+
+	return &domain.ObjectReference{
+		APIVersion:      domain.CoreAPIVersion,
+		Kind:            domain.KindPersistentVolumeClaim,
+		Namespace:       pvc.Namespace,
+		Name:            pvc.Name,
+		UID:             pvc.UID,
+		ResourceVersion: pvc.ResourceVersion,
+	}, true, nil
 }
 
 func (s *Service) validateActivationPVCPolicies(
@@ -194,6 +270,17 @@ func (s *Service) validateActivationPVCPolicies(
 			)
 		}
 
+		active, found, err := s.unrecordedActivePVC(ctx, session, index)
+		if err != nil {
+			return err
+		}
+		if active != nil && active.UID != volume.SourcePVC.UID {
+			// The replacement is already present. Storage validation below
+			// verifies its identity and session ownership; it must not be
+			// projected as another admission request.
+			continue
+		}
+
 		existing := volume.SourcePVCSpec.Resources.Requests[corev1.ResourceStorage]
 
 		sourceClass := ""
@@ -210,7 +297,7 @@ func (s *Service) validateActivationPVCPolicies(
 				Name:                                volume.SourcePVC.Name,
 				RequestedStorage:                    requested,
 				RequestedStorageClass:               volume.StorageClass,
-				Existing:                            !status.Activation.SourcePVCDeleted,
+				Existing:                            found && !status.Activation.SourcePVCDeleted,
 				ExistingUID:                         volume.SourcePVC.UID,
 				ExistingStorage:                     existing,
 				ExistingStorageClass:                sourceClass,
@@ -468,9 +555,21 @@ func (s *Service) verifyActiveStorageVolume(
 	session *domain.Session,
 	index int,
 ) error {
-	volume := &session.Spec.Volumes[index]
+	return s.verifyActiveStorageVolumeWithRef(
+		ctx,
+		session,
+		index,
+		session.Status.Volumes[index].Activation.ActivePVC,
+	)
+}
 
-	active := session.Status.Volumes[index].Activation.ActivePVC
+func (s *Service) verifyActiveStorageVolumeWithRef(
+	ctx context.Context,
+	session *domain.Session,
+	index int,
+	active domain.ObjectReference,
+) error {
+	volume := &session.Spec.Volumes[index]
 	if active.Namespace == "" || active.Name == "" || active.UID == "" {
 		return domain.NewError(
 			domain.ErrorPrecondition,

@@ -13,7 +13,7 @@ import (
 func testSession(t *testing.T) *Session {
 	t.Helper()
 
-	return NewSession("test-123", NewSessionSpec(OperationMigrate, SessionCommon{
+	return NewSession("test-123", NewPodMigrationSessionSpec(SessionCommon{
 		SourceNamespace:      "app",
 		TemporaryNamespace:   "pvc-migrate-system",
 		DestinationNamespace: "app",
@@ -24,7 +24,9 @@ func testSession(t *testing.T) *Session {
 			SourcePVCSpec:  corev1.PersistentVolumeClaimSpec{},
 			DestinationPVC: ObjectReference{Name: "target", Namespace: "pvc-migrate-system"},
 		}},
-	}, WorkloadSpec{Adapter: WorkloadNone}, false, SessionWorkflowOptions{PrecopyPasses: 1}), time.Unix(100, 0))
+	}, WorkloadSpec{Adapter: WorkloadStandalone, Pod: ObjectReference{
+		Namespace: "app", Name: "database-0", UID: "database-0-uid",
+	}}, SessionWorkflowOptions{}, 1, false), time.Unix(100, 0))
 }
 
 func TestSessionSpecUsesConcretePayload(t *testing.T) {
@@ -41,10 +43,10 @@ func TestSessionSpecUsesConcretePayload(t *testing.T) {
 	spec := NewSessionSpec(
 		OperationCopy,
 		common,
-		WorkloadSpec{Adapter: WorkloadNone},
+
 		true,
-		SessionWorkflowOptions{},
-	)
+		SessionWorkflowOptions{})
+
 	if spec.Type != SessionTypeCopy || spec.Copy == nil || !spec.Copy.Online ||
 		spec.Migrate != nil ||
 		spec.Rename != nil ||
@@ -81,33 +83,37 @@ func TestSessionWorkflowOptionsArePersistedInsideConcretePayload(t *testing.T) {
 		},
 	}
 
-	spec := NewSessionSpec(
-		OperationMigrate,
+	spec := NewPodMigrationSessionSpec(
 		common,
-		WorkloadSpec{Adapter: WorkloadNone},
-		false,
+		WorkloadSpec{Adapter: WorkloadStandalone, Pod: ObjectReference{
+			Namespace: "app", Name: "database-0", UID: "database-0-uid",
+		}},
 		SessionWorkflowOptions{
-			SourceNode:             "source-node",
-			TargetNode:             "target-node",
-			ToolImage:              "registry.example/pvc-migrate:aio",
-			Strategies:             []string{"mount", "clusterip"},
-			VerifyChecksum:         true,
-			DeleteExtraneous:       true,
-			PrecopyPasses:          2,
-			OpenEBSLVMEnableShared: true,
+			SourceNode:       "source-node",
+			TargetNode:       "target-node",
+			ToolImage:        "registry.example/pvc-migrate:aio",
+			Strategies:       []string{"mount", "clusterip"},
+			VerifyChecksum:   true,
+			DeleteExtraneous: true,
 		},
+		2,
+		true,
 	)
 	if got := spec.WorkflowOptions(); got.SourceNode != "source-node" ||
 		got.TargetNode != "target-node" ||
 		got.ToolImage != "registry.example/pvc-migrate:aio" ||
 		!got.VerifyChecksum ||
 		!got.DeleteExtraneous ||
-		got.PrecopyPasses != 2 ||
-		!got.OpenEBSLVMEnableShared ||
 		len(got.Strategies) != 2 ||
 		got.Strategies[0] != "mount" ||
 		got.Strategies[1] != "clusterip" {
 		t.Fatalf("workflow options = %#v", got)
+	}
+	if spec.PrecopyPasses() != 2 {
+		t.Fatalf("precopy passes = %d", spec.PrecopyPasses())
+	}
+	if !spec.OpenEBSLVMSharedMountEnabled() {
+		t.Fatal("real-time shared-mount authorization was not persisted")
 	}
 
 	raw, err := json.Marshal(spec)
@@ -125,7 +131,7 @@ func TestSessionWorkflowOptionsArePersistedInsideConcretePayload(t *testing.T) {
 	}
 
 	var payload map[string]json.RawMessage
-	if err := json.Unmarshal(document["migrate"], &payload); err != nil {
+	if err := json.Unmarshal(document["migratePod"], &payload); err != nil {
 		t.Fatal(err)
 	}
 
@@ -136,14 +142,27 @@ func TestSessionWorkflowOptionsArePersistedInsideConcretePayload(t *testing.T) {
 	}
 }
 
+func TestOfflineMigrationPayloadExcludesRealtimeState(t *testing.T) {
+	spec := NewOfflineMigrationSessionSpec(
+		SessionCommon{SourceNamespace: "app", DestinationNamespace: "app"},
+		SessionWorkflowOptions{TargetNode: "node-b"},
+	)
+	raw, err := json.Marshal(spec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, forbidden := range []string{"workload", "precopyPasses", "openebsLvmEnableShared", "offline"} {
+		if strings.Contains(string(raw), forbidden) {
+			t.Fatalf("offline payload contains %s: %s", forbidden, raw)
+		}
+	}
+}
+
 func TestSessionWorkflowOptionsCloneStrategies(t *testing.T) {
 	common := SessionCommon{Volumes: []VolumeSpec{{SourcePVC: ObjectReference{Name: "data"}}}}
 	strategies := []string{"mount", "clusterip"}
-	spec := NewSessionSpec(
-		OperationMigrate,
+	spec := NewOfflineMigrationSessionSpec(
 		common,
-		WorkloadSpec{},
-		false,
 		SessionWorkflowOptions{Strategies: strategies},
 	)
 	strategies[0] = "mutated"
@@ -267,15 +286,34 @@ func TestSessionPersistsValidTransferScopeAndOmitsFullVolumeDefault(t *testing.T
 	}
 }
 
+func TestKubeBlocksSpecOmitsUnusedSwitchoverStrategy(t *testing.T) {
+	raw, err := json.Marshal(KubeBlocksSpec{})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if strings.Contains(string(raw), "switchoverStrategy") {
+		t.Fatalf("KubeBlocks spec contains unused switchover strategy: %s", raw)
+	}
+
+	var legacy KubeBlocksSpec
+	if err := json.Unmarshal([]byte(`{"switchoverStrategy":"opsrequest"}`), &legacy); err != nil {
+		t.Fatal(err)
+	}
+
+	if legacy.SwitchoverStrategy != KubeBlocksSwitchoverOpsRequest {
+		t.Fatalf("legacy switchover strategy=%q", legacy.SwitchoverStrategy)
+	}
+}
+
 func TestSessionRejectsTransferScopeForIdentityOnlyOperations(t *testing.T) {
 	session := testSession(t)
 	session.Spec = NewSessionSpec(
 		OperationRename,
 		session.Spec.SessionCommon,
-		WorkloadSpec{},
+
 		false,
-		SessionWorkflowOptions{},
-	)
+		SessionWorkflowOptions{})
 
 	session.Spec.Volumes[0].TransferScope = &TransferScope{SourcePath: "data", DestinationPath: "."}
 	if err := session.Validate(); CategoryOf(err) != ErrorValidation {
@@ -323,10 +361,10 @@ func TestMoveSessionUsesDedicatedRebindPhase(t *testing.T) {
 	session.Spec = NewSessionSpec(
 		OperationMove,
 		session.Spec.SessionCommon,
-		WorkloadSpec{Adapter: WorkloadNone},
+
 		false,
-		SessionWorkflowOptions{},
-	)
+		SessionWorkflowOptions{})
+
 	session.Spec.SourceNamespace = "app"
 
 	session.Spec.DestinationNamespace = "archive"

@@ -44,7 +44,7 @@ func TestNewSessionInitializesDeterministicState(t *testing.T) {
 	}
 
 	if len(session.Status.History) != 1 || session.Status.History[0].Phase != PhasePlanned ||
-		session.Status.History[0].Message != "Migrate session planned" {
+		session.Status.History[0].Message != "MigratePod session planned" {
 		t.Fatalf("initial history = %#v", session.Status.History)
 	}
 

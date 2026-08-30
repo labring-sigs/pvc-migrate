@@ -24,7 +24,7 @@ import (
 	"sigs.k8s.io/yaml"
 )
 
-type Options struct {
+type planOptions struct {
 	SessionID              string
 	Operation              domain.Operation
 	SourceNamespace        string
@@ -65,11 +65,12 @@ type Planner struct {
 }
 
 type planState struct {
-	options               Options
+	options               planOptions
 	autoStrategyRequested bool
 	autoTargetNode        bool
 	plan                  *domain.MigrationPlan
 	workload              domain.WorkloadSpec
+	kubeBlocksDetected    bool
 	pvcNames              []string
 	sourcePod             *corev1.Pod
 	inventory             planInventory
@@ -125,7 +126,7 @@ func (p *Planner) logInfo(message string, args ...any) {
 	}
 }
 
-func (p *Planner) Plan(ctx context.Context, options Options) (*domain.MigrationPlan, error) {
+func (p *Planner) plan(ctx context.Context, options planOptions) (*domain.MigrationPlan, error) {
 	state := newPlanState(p, options)
 	p.validatePlanInputs(state.plan, state.options)
 
@@ -133,15 +134,18 @@ func (p *Planner) Plan(ctx context.Context, options Options) (*domain.MigrationP
 		return nil, err
 	}
 
-	p.loadPlanContext(ctx, &state)
-
-	p.planVolumes(ctx, &state)
-	p.finalizePlan(ctx, &state)
-
-	return state.plan, nil
+	return p.completePlan(ctx, &state), nil
 }
 
-func newPlanState(p *Planner, input Options) planState {
+func (p *Planner) completePlan(ctx context.Context, state *planState) *domain.MigrationPlan {
+	p.loadPlanContext(ctx, state)
+	p.planVolumes(ctx, state)
+	p.finalizePlan(ctx, state)
+
+	return state.plan
+}
+
+func newPlanState(p *Planner, input planOptions) planState {
 	autoStrategyRequested := len(input.Strategies) == 0 ||
 		(len(input.Strategies) == 1 && containsStrategy(input.Strategies, domain.StrategyAuto))
 	autoTargetNode := isAutoNode(input.TargetNode)
@@ -199,7 +203,19 @@ func newPlanState(p *Planner, input Options) planState {
 	}
 }
 
-func (p *Planner) validatePlanInputs(plan *domain.MigrationPlan, options Options) {
+func (p *Planner) validatePlanInputs(plan *domain.MigrationPlan, options planOptions) {
+	p.validateCommonPlanInputs(plan, options)
+	switch options.Operation {
+	case domain.OperationReserve, domain.OperationCopy:
+		p.validateTransferPlanInputs(plan, options)
+	case domain.OperationMigrate:
+		p.validateOfflineMigrationInputs(plan, options)
+	case domain.OperationMigratePod:
+		p.validatePodMigrationInputs(plan, options)
+	}
+}
+
+func (p *Planner) validateCommonPlanInputs(plan *domain.MigrationPlan, options planOptions) {
 	if _, err := kube.NormalizeToolImage(options.ToolImage); err != nil {
 		plan.AddCheck(failed("tool-image", err.Error()))
 	}
@@ -217,56 +233,14 @@ func (p *Planner) validatePlanInputs(plan *domain.MigrationPlan, options Options
 		if strategy == domain.StrategyAuto {
 			message = "strategy auto selects the full fallback order and cannot be combined with explicit strategies"
 		}
-
 		plan.AddCheck(failed("strategy", message))
 	}
 
 	if !validCapacityAwareness(options.CapacityAwareness) {
 		plan.AddCheck(failed(
 			"capacity-awareness",
-			fmt.Sprintf(
-				"unsupported capacity awareness mode %q; use auto, require, or off",
-				options.CapacityAwareness,
-			),
+			fmt.Sprintf("unsupported capacity awareness mode %q; use auto, require, or off", options.CapacityAwareness),
 		))
-	}
-
-	if options.PrecopyPasses < 0 {
-		plan.AddCheck(failed("precopy-passes", "warm-copy passes cannot be negative"))
-	}
-
-	if len(options.DestinationCapacities) > 0 && !supportsDestinationCapacity(options.Operation) {
-		plan.AddCheck(failed(
-			"destination-capacity",
-			fmt.Sprintf(
-				"--destination-capacity is not supported for %s; this operation does not create a destination PVC",
-				options.Operation,
-			),
-		))
-	}
-
-	if options.AllowVolumeShrink && len(options.DestinationCapacities) == 0 {
-		plan.AddCheck(
-			failed("destination-capacity", "--allow-volume-shrink requires --destination-capacity"),
-		)
-	}
-
-	if options.SkipSourceUsageCheck && !options.AllowVolumeShrink {
-		plan.AddCheck(
-			failed(
-				"destination-capacity",
-				"--skip-source-usage-check requires --allow-volume-shrink",
-			),
-		)
-	}
-
-	for _, value := range options.DestinationCapacities {
-		if err := validateDestinationCapacityValue(value); err != nil {
-			plan.AddCheck(failed(
-				"destination-capacity",
-				fmt.Sprintf("destination capacity %q is invalid: %v", value, err),
-			))
-		}
 	}
 
 	for _, field := range []struct {
@@ -277,39 +251,127 @@ func (p *Planner) validatePlanInputs(plan *domain.MigrationPlan, options Options
 		{name: "staging namespace", value: options.StagingNamespace},
 		{name: "session namespace", value: options.SessionNamespace},
 	} {
-		if problems := validation.IsDNS1123Label(field.value); len(problems) == 0 {
+		problems := validation.IsDNS1123Label(field.value)
+		if len(problems) == 0 {
 			continue
 		}
-
-		problems := validation.IsDNS1123Label(field.value)
 		plan.AddCheck(failed(
 			"namespace",
-			fmt.Sprintf(
-				"%s %q is invalid: %s",
-				field.name,
-				field.value,
-				strings.Join(problems, "; "),
-			),
+			fmt.Sprintf("%s %q is invalid: %s", field.name, field.value, strings.Join(problems, "; ")),
 		))
 	}
+}
 
+func (p *Planner) validateTransferPlanInputs(plan *domain.MigrationPlan, options planOptions) {
+	if len(options.DestinationCapacities) > 0 && !supportsDestinationCapacity(options.Operation) {
+		plan.AddCheck(failed(
+			"destination-capacity",
+			fmt.Sprintf("--destination-capacity is not supported for %s; this operation does not create a destination PVC", options.Operation),
+		))
+	}
+	validateDestinationCapacityInputs(plan, options)
 	if options.Operation != domain.OperationCopy {
 		return
 	}
-
 	if options.Online {
 		plan.AddCheck(warned(
 			"copy-mode",
 			"online copy performs one finite warm pass with file-level consistency while source Pods may keep writing",
 		))
-
 		return
 	}
-
 	plan.AddCheck(passed(
 		"copy-mode",
 		"offline copy requires every source PVC to have zero active Pod consumers",
 	))
+}
+
+func (p *Planner) validateOfflineMigrationInputs(plan *domain.MigrationPlan, options planOptions) {
+	validateDestinationCapacityInputs(plan, options)
+	if options.PodName != "" {
+		plan.AddCheck(failed(
+			"pod",
+			"offline migrate does not support --pod; use migrate-pod for real-time Pod migration",
+		))
+	}
+	if options.PrecopyPasses != 0 {
+		plan.AddCheck(failed(
+			"precopy-passes",
+			"offline migrate does not support warm-copy passes; use migrate-pod for real-time migration",
+		))
+	}
+	if options.OpenEBSLVMEnableShared {
+		plan.AddCheck(failed(
+			"openebs-lvm-enable-shared",
+			"offline migrate does not support OpenEBS LVM shared-mount warm-copy settings",
+		))
+	}
+	if options.Online {
+		plan.AddCheck(failed(
+			"online",
+			"offline migrate does not support online or warm-copy mode; use migrate-pod for real-time migration",
+		))
+	}
+	if options.SwitchoverCandidate != "" {
+		plan.AddCheck(failed("kubeblocks-candidate", "offline migrate does not support KubeBlocks switchover candidates"))
+	}
+	if options.AllowLeaderDowntime {
+		plan.AddCheck(failed("allow-leader-downtime", "offline migrate does not manage workload leadership or downtime acknowledgements"))
+	}
+	if options.ForceReprovision {
+		plan.AddCheck(failed(
+			"force-reprovision",
+			"offline migrate does not support Pod reprovisioning; use migrate-pod for real-time migration",
+		))
+	}
+}
+
+func (p *Planner) validatePodMigrationInputs(plan *domain.MigrationPlan, options planOptions) {
+	validateDestinationCapacityInputs(plan, options)
+	if options.PodName == "" {
+		plan.AddCheck(failed("pod", "real-time Pod migration requires a Pod name"))
+	}
+	if len(options.SourcePVCs) > 0 {
+		plan.AddCheck(failed(
+			"source-pvc",
+			"real-time Pod migration derives its PVC set from --pod; source PVC selection is unsupported",
+		))
+	}
+	if len(options.DestinationPVCs) > 0 {
+		plan.AddCheck(failed(
+			"destination-pvc",
+			"real-time Pod migration keeps destination PVC identities with the selected Pod; destination PVC renaming is unsupported",
+		))
+	}
+	if options.DestinationNamespace != "" && options.DestinationNamespace != options.SourceNamespace {
+		plan.AddCheck(failed(
+			"destination-namespace",
+			"real-time Pod migration keeps application PVCs in the source namespace; destination namespace switching is unsupported",
+		))
+	}
+	if options.PrecopyPasses < 0 {
+		plan.AddCheck(failed("precopy-passes", "warm-copy passes cannot be negative"))
+	}
+	if options.Online {
+		plan.AddCheck(failed("online", "migrate-pod is already the real-time workflow; --online is only valid for copy"))
+	}
+}
+
+func validateDestinationCapacityInputs(plan *domain.MigrationPlan, options planOptions) {
+	if options.AllowVolumeShrink && len(options.DestinationCapacities) == 0 {
+		plan.AddCheck(failed("destination-capacity", "--allow-volume-shrink requires --destination-capacity"))
+	}
+	if options.SkipSourceUsageCheck && !options.AllowVolumeShrink {
+		plan.AddCheck(failed("destination-capacity", "--skip-source-usage-check requires --allow-volume-shrink"))
+	}
+	for _, value := range options.DestinationCapacities {
+		if err := validateDestinationCapacityValue(value); err != nil {
+			plan.AddCheck(failed(
+				"destination-capacity",
+				fmt.Sprintf("destination capacity %q is invalid: %v", value, err),
+			))
+		}
+	}
 }
 
 func (p *Planner) discoverPlanWorkload(ctx context.Context, state *planState) error {
@@ -317,6 +379,13 @@ func (p *Planner) discoverPlanWorkload(ctx context.Context, state *planState) er
 	state.workload = domain.WorkloadSpec{Adapter: domain.WorkloadNone}
 
 	state.pvcNames = uniqueInOrder(options.SourcePVCs)
+	// Offline migration is deliberately caller-quiesced and never discovers or
+	// orchestrates a workload. Keep the invalid Pod combination a plan error,
+	// while still avoiding controller/KubeBlocks API calls at this layer.
+	if options.Operation == domain.OperationMigrate && options.PodName != "" {
+		state.plan.Workload = state.workload
+		return nil
+	}
 	if options.PodName == "" {
 		if len(state.pvcNames) == 0 {
 			state.plan.AddCheck(failed("source-pvc", "at least one source PVC is required"))
@@ -352,6 +421,9 @@ func (p *Planner) discoverPlanWorkload(ctx context.Context, state *planState) er
 	}
 
 	readMessage := sourcePodReadMessage(options.SourceNamespace, options.PodName, err)
+	if err == nil && options.Operation == domain.OperationMigratePod {
+		state.kubeBlocksDetected = isKubeBlocksPod(pod)
+	}
 	switch {
 	case options.Operation == domain.OperationCopy:
 		state.plan.AddCheck(
@@ -376,14 +448,21 @@ func (p *Planner) discoverPlanWorkload(ctx context.Context, state *planState) er
 				fmt.Sprintf("%s provides pause and resume semantics", discovered.Adapter),
 			))
 
-			if discovered.KubeBlocks != nil && isRiskRole(discovered.KubeBlocks.Role) {
+			if message := kubeBlocksRoleWarning(discovered); message != "" {
 				state.plan.AddCheck(
-					warned("database-role", kubeBlocksRoleWarning(discovered.KubeBlocks)),
+					warned("database-role", message),
 				)
 			}
 
 			if discovered.KubeBlocks != nil {
-				message := "KubeBlocks migration stops the selected Cluster component through componentSpecs[].stop; that component shares the downtime window and source PVCs remain retained"
+				message := "KubeBlocks migration uses a Stop/Start OpsRequest for the legacy Cluster; its components share the downtime window and source PVCs remain retained"
+				if strings.HasPrefix(
+					discovered.KubeBlocks.OpsAPIVersion,
+					"operations.kubeblocks.io/",
+				) {
+					message = "KubeBlocks migration uses a component-scoped Stop/Start OpsRequest for the legacy component; the component shares the downtime window and source PVCs remain retained"
+				}
+
 				if discovered.Controller.Kind == domain.KindInstanceSet {
 					message = "KubeBlocks migration pauses InstanceSet reconciliation and stops only the selected Pod; sibling instances remain running while InstanceSet self-healing is suspended"
 				}
@@ -426,6 +505,15 @@ func (p *Planner) discoverPlanWorkload(ctx context.Context, state *planState) er
 	state.plan.Workload = state.workload
 
 	return nil
+}
+
+func (p *Planner) prepareOfflineMigration(state *planState) {
+	state.workload = domain.WorkloadSpec{Adapter: domain.WorkloadNone}
+	state.pvcNames = uniqueInOrder(state.options.SourcePVCs)
+	if len(state.pvcNames) == 0 {
+		state.plan.AddCheck(failed("source-pvc", "at least one source PVC is required"))
+	}
+	state.plan.Workload = state.workload
 }
 
 func (p *Planner) loadPlanContext(ctx context.Context, state *planState) {
@@ -549,9 +637,9 @@ func (p *Planner) planVolumes(ctx context.Context, state *planState) {
 		names := slices.Collect(maps.Keys(state.unmanagedConsumers))
 		sort.Strings(names)
 		state.plan.AddCheck(failed(
-			"controller-adapter",
+			"pvc-consumers",
 			fmt.Sprintf(
-				"PVC-only migration has active Pod consumer(s) %s; use --pod to select a workload that pvc-migrate can pause before final sync",
+				"offline migrate found active Pod consumer(s) %s; stop them before offline migration, or use the separate migrate-pod command to select a workload that pvc-migrate can pause before final sync",
 				strings.Join(names, ","),
 			),
 		))
@@ -594,8 +682,12 @@ func (p *Planner) finalizePlanTarget(
 	state *planState,
 	capacityInventory *storageCapacityInventory,
 ) {
-	if state.autoTargetNode {
-		state.targetNode = p.selectTargetNodeFromNodes(
+	if state.autoTargetNode && len(state.plannedVolumes) > 0 {
+		sourceZone := ""
+		if state.options.Operation == domain.OperationMigratePod {
+			sourceZone = availabilityZone(state.inventory.sourceNode)
+		}
+		state.targetNode = p.selectTargetNodeFromNodesWithZone(
 			state.plan,
 			state.workload,
 			state.sourcePod,
@@ -606,6 +698,7 @@ func (p *Planner) finalizePlanTarget(
 			capacityInventory,
 			state.inventory.nodes,
 			state.inventory.nodesErr,
+			sourceZone,
 		)
 		if state.targetNode != nil {
 			state.options.TargetNode = state.targetNode.Name
@@ -618,6 +711,8 @@ func (p *Planner) finalizePlanTarget(
 			)
 		}
 	}
+
+	p.checkMigratePodAvailabilityZone(state)
 
 	p.checkSharedRWOScheduling(state)
 
@@ -759,29 +854,42 @@ func (p *Planner) finalizePlanSession(state *planState) {
 	state.plan.SourceNode = options.SourceNode
 	state.plan.Strategies = slices.Clone(options.Strategies)
 
-	state.plan.SessionSpec = domain.NewSessionSpec(
-		options.Operation,
-		domain.SessionCommon{
-			SourceNamespace:      options.SourceNamespace,
-			TemporaryNamespace:   options.TemporaryNamespace,
-			DestinationNamespace: options.DestinationNamespace,
-			SessionNamespace:     options.SessionNamespace,
-			Volumes:              state.volumeSpecs,
-		},
-		state.workload,
-		options.Online,
-		domain.SessionWorkflowOptions{
-			SourceNode:             options.SourceNode,
-			TargetNode:             options.TargetNode,
-			Strategies:             append([]string(nil), options.Strategies...),
-			VerifyChecksum:         options.VerifyChecksum,
-			DeleteExtraneous:       options.DeleteExtraneous,
-			PrecopyPasses:          options.PrecopyPasses,
-			OpenEBSLVMEnableShared: options.OpenEBSLVMEnableShared,
-			SkipSourceUsageCheck:   options.SkipSourceUsageCheck,
-			ToolImage:              options.ToolImage,
-		},
-	)
+	common := domain.SessionCommon{
+		SourceNamespace:      options.SourceNamespace,
+		TemporaryNamespace:   options.TemporaryNamespace,
+		DestinationNamespace: options.DestinationNamespace,
+		SessionNamespace:     options.SessionNamespace,
+		Volumes:              state.volumeSpecs,
+	}
+	workflow := domain.SessionWorkflowOptions{
+		SourceNode:           options.SourceNode,
+		TargetNode:           options.TargetNode,
+		Strategies:           append([]string(nil), options.Strategies...),
+		VerifyChecksum:       options.VerifyChecksum,
+		DeleteExtraneous:     options.DeleteExtraneous,
+		SkipSourceUsageCheck: options.SkipSourceUsageCheck,
+		ToolImage:            options.ToolImage,
+	}
+	switch options.Operation {
+	case domain.OperationMigrate:
+		state.plan.SessionSpec = domain.NewOfflineMigrationSessionSpec(common, workflow)
+	case domain.OperationMigratePod:
+		state.plan.SessionSpec = domain.NewPodMigrationSessionSpec(
+			common,
+			state.workload,
+			workflow,
+			options.PrecopyPasses,
+			options.OpenEBSLVMEnableShared,
+		)
+	default:
+		state.plan.SessionSpec = domain.NewSessionSpec(
+			options.Operation,
+			common,
+
+			options.Online,
+			workflow)
+
+	}
 	if len(state.volumeSpecs) != len(state.pvcNames) {
 		state.plan.Ready = false
 	}
@@ -912,6 +1020,7 @@ func (p *Planner) planVolumeCapacity(
 	input planVolumeInput,
 ) (resource.Quantity, int64, bool) {
 	destinationCapacity := input.capacity
+	orchestratedMigration := state.options.Operation == domain.OperationMigratePod
 
 	var (
 		sourceUsed int64
@@ -927,6 +1036,32 @@ func (p *Planner) planVolumeCapacity(
 	}
 
 	destinationCapacity = parsed
+	if input.pvc != nil && orchestratedMigration &&
+		(state.workload.Adapter == domain.WorkloadKubeBlocks ||
+			state.kubeBlocksDetected || isKubeBlocksPVC(input.pvc)) &&
+		destinationCapacity.Cmp(input.capacity) != 0 {
+		message := fmt.Sprintf(
+			"KubeBlocks real-time migration cannot override destination capacity for PVC %s/%s; update the KubeBlocks Cluster component volumeClaimTemplates storage request",
+			input.pvc.Namespace,
+			input.pvc.Name,
+		)
+		if kubeblocks := state.workload.KubeBlocks; kubeblocks != nil &&
+			kubeblocks.Cluster != "" && kubeblocks.Component != "" {
+			message = fmt.Sprintf(
+				"KubeBlocks real-time migration cannot override destination capacity for PVC %s/%s; update Cluster %s component %s volumeClaimTemplates storage request",
+				input.pvc.Namespace,
+				input.pvc.Name,
+				kubeblocks.Cluster,
+				kubeblocks.Component,
+			)
+		}
+
+		state.plan.AddCheck(failed(
+			"destination-capacity",
+			message,
+		))
+		return destinationCapacity, sourceUsed, usageKnown
+	}
 
 	comparison := destinationCapacity.Cmp(input.capacity)
 	switch {
@@ -957,6 +1092,28 @@ func (p *Planner) planVolumeCapacity(
 	}
 
 	return destinationCapacity, sourceUsed, usageKnown
+}
+
+func isKubeBlocksPod(pod *corev1.Pod) bool {
+	if pod == nil {
+		return false
+	}
+
+	labels := pod.GetLabels()
+	return strings.EqualFold(labels[kube.ManagedByLabel], "kubeblocks") ||
+		labels["apps.kubeblocks.io/component-name"] != "" ||
+		labels["kubeblocks.io/role"] != "" ||
+		labels["apps.kubeblocks.io/role"] != ""
+}
+
+func isKubeBlocksPVC(pvc *corev1.PersistentVolumeClaim) bool {
+	if pvc == nil {
+		return false
+	}
+
+	labels := pvc.GetLabels()
+	return strings.EqualFold(labels[kube.ManagedByLabel], "kubeblocks") ||
+		labels["apps.kubeblocks.io/component-name"] != ""
 }
 
 func (p *Planner) updatePlanStorageTotals(
@@ -1094,6 +1251,23 @@ func (p *Planner) appendPlanVolume(
 		}
 	}
 
+	if err := kube.ValidateDestinationAccessModes(
+		storageClass.Provisioner,
+		input.pvc.Spec.AccessModes,
+	); err != nil {
+		state.plan.AddCheck(failed(
+			"destination-access-modes",
+			fmt.Sprintf(
+				"destination StorageClass %s cannot provide PVC %s/%s access modes: %v; choose a StorageClass with matching access-mode support",
+				storageClass.Name,
+				input.pvc.Namespace,
+				input.pvc.Name,
+				err,
+			),
+		))
+		return false
+	}
+
 	destinationRef := domain.ObjectReference{
 		APIVersion: domain.CoreAPIVersion,
 		Kind:       domain.KindPersistentVolumeClaim,
@@ -1189,11 +1363,10 @@ func (p *Planner) checkPlanVolumeConsumers(
 	}
 
 	planned := state.plannedVolumes[plannedIndex]
-	volume := state.volumeSpecs[volumeIndex]
 
-	orchestratedMigration := state.options.Operation == domain.OperationMigrate ||
-		state.options.Operation == domain.OperationMigratePod
-	if orchestratedMigration && volume.RequiresConcurrentRWOMount() &&
+	volume := state.volumeSpecs[volumeIndex]
+	if state.options.Operation == domain.OperationMigratePod &&
+		volume.RequiresConcurrentRWOMount() &&
 		planned.CSIProvisioner == kube.OpenEBSLVMCSIDriver {
 		state.inspectOpenEBSShared = true
 		if state.options.OpenEBSLVMEnableShared {
@@ -1407,7 +1580,7 @@ func sourceBindingMatches(pvc *corev1.PersistentVolumeClaim, pv *corev1.Persiste
 		pv.Spec.ClaimRef.UID == pvc.UID
 }
 
-func applyDefaults(options Options) Options {
+func applyDefaults(options planOptions) planOptions {
 	if options.Operation == "" {
 		options.Operation = domain.OperationMigrate
 	}
@@ -1593,6 +1766,34 @@ func (p *Planner) selectTargetNodeFromNodes(
 	nodes []corev1.Node,
 	err error,
 ) *corev1.Node {
+	return p.selectTargetNodeFromNodesWithZone(
+		plan,
+		workload,
+		sourcePod,
+		sourceNode,
+		volumes,
+		sourcePVs,
+		storageClasses,
+		capacityInventory,
+		nodes,
+		err,
+		"",
+	)
+}
+
+func (p *Planner) selectTargetNodeFromNodesWithZone(
+	plan *domain.MigrationPlan,
+	workload domain.WorkloadSpec,
+	sourcePod *corev1.Pod,
+	sourceNode string,
+	volumes []domain.PlannedVolume,
+	sourcePVs map[string]*corev1.PersistentVolume,
+	storageClasses map[string]*storagev1.StorageClass,
+	capacityInventory *storageCapacityInventory,
+	nodes []corev1.Node,
+	err error,
+	sourceZone string,
+) *corev1.Node {
 	if len(volumes) == 0 {
 		plan.AddCheck(
 			failed(
@@ -1612,74 +1813,20 @@ func (p *Planner) selectTargetNodeFromNodes(
 	candidates := make([]targetNodeCandidate, 0, len(nodes))
 	for i := range nodes {
 		node := &nodes[i]
-		if !kube.NodeReadyAndSchedulable(node) {
-			continue
-		}
-
-		if sourcePod != nil && len(schedulingIssuesForTarget(sourcePod, workload, node)) > 0 {
-			continue
-		}
-
-		resourceUnknown := 0
-		if sourcePod != nil && workload.Adapter == domain.WorkloadStandalone {
-			spec := *sourcePod.Spec.DeepCopy()
-			spec.NodeName = ""
-
-			resourceIssues, known := resourceFitIssues(spec, node)
-			if len(resourceIssues) > 0 {
-				continue
-			}
-
-			if !known {
-				resourceUnknown = 1
-			}
-		}
-
-		if sourcePod != nil && len(podMigrationIssues(sourcePod.Spec, sourceNode, node.Name)) > 0 {
-			continue
-		}
-
-		compatible := true
-
-		sourcePVMatches := 0
-		for _, volume := range volumes {
-			if sc := storageClasses[volume.StorageClass]; sc != nil &&
-				!kube.StorageClassAllowsNode(sc, node) {
-				compatible = false
-				break
-			}
-
-			if pv := sourcePVs[volume.SourcePV.Name]; pv != nil && kube.PVSupportsNode(pv, node) {
-				sourcePVMatches++
-			}
-		}
-
-		if !compatible {
-			continue
-		}
-
-		capacityKnown, capacityUnknown, capacitySurplus, capacityCompatible := capacityScore(
-			capacityInventory,
+		candidate, ok := targetNodeCandidateFor(
 			node,
+			workload,
+			sourcePod,
+			sourceNode,
+			sourceZone,
 			volumes,
+			sourcePVs,
+			storageClasses,
+			capacityInventory,
 		)
-		if !capacityCompatible {
-			continue
+		if ok {
+			candidates = append(candidates, candidate)
 		}
-
-		candidates = append(
-			candidates,
-			targetNodeCandidate{
-				node:            node,
-				distinctFromSrc: sourceNode == "" || node.Name != sourceNode,
-				taintPenalty:    hardTaintCount(node),
-				sourcePVMatches: sourcePVMatches,
-				capacityKnown:   capacityKnown,
-				capacityUnknown: capacityUnknown,
-				capacitySurplus: capacitySurplus,
-				resourceUnknown: resourceUnknown,
-			},
-		)
 	}
 
 	if len(candidates) == 0 {
@@ -1729,6 +1876,75 @@ func (p *Planner) selectTargetNodeFromNodes(
 	)
 
 	return selected.node
+}
+
+func targetNodeCandidateFor(
+	node *corev1.Node,
+	workload domain.WorkloadSpec,
+	sourcePod *corev1.Pod,
+	sourceNode, sourceZone string,
+	volumes []domain.PlannedVolume,
+	sourcePVs map[string]*corev1.PersistentVolume,
+	storageClasses map[string]*storagev1.StorageClass,
+	capacityInventory *storageCapacityInventory,
+) (targetNodeCandidate, bool) {
+	if !kube.NodeReadyAndSchedulable(node) ||
+		(sourceZone != "" && availabilityZone(node) != sourceZone) {
+		return targetNodeCandidate{}, false
+	}
+
+	if sourcePod != nil && len(schedulingIssuesForTarget(sourcePod, workload, node)) > 0 {
+		return targetNodeCandidate{}, false
+	}
+
+	resourceUnknown := 0
+	if sourcePod != nil && workload.Adapter == domain.WorkloadStandalone {
+		spec := *sourcePod.Spec.DeepCopy()
+		spec.NodeName = ""
+
+		resourceIssues, known := resourceFitIssues(spec, node)
+		if len(resourceIssues) > 0 {
+			return targetNodeCandidate{}, false
+		}
+		if !known {
+			resourceUnknown = 1
+		}
+	}
+
+	if sourcePod != nil && len(podMigrationIssues(sourcePod.Spec, sourceNode, node.Name)) > 0 {
+		return targetNodeCandidate{}, false
+	}
+
+	sourcePVMatches := 0
+	for _, volume := range volumes {
+		if sc := storageClasses[volume.StorageClass]; sc != nil &&
+			!kube.StorageClassAllowsNode(sc, node) {
+			return targetNodeCandidate{}, false
+		}
+		if pv := sourcePVs[volume.SourcePV.Name]; pv != nil && kube.PVSupportsNode(pv, node) {
+			sourcePVMatches++
+		}
+	}
+
+	capacityKnown, capacityUnknown, capacitySurplus, compatible := capacityScore(
+		capacityInventory,
+		node,
+		volumes,
+	)
+	if !compatible {
+		return targetNodeCandidate{}, false
+	}
+
+	return targetNodeCandidate{
+		node:            node,
+		distinctFromSrc: sourceNode == "" || node.Name != sourceNode,
+		taintPenalty:    hardTaintCount(node),
+		sourcePVMatches: sourcePVMatches,
+		capacityKnown:   capacityKnown,
+		capacityUnknown: capacityUnknown,
+		capacitySurplus: capacitySurplus,
+		resourceUnknown: resourceUnknown,
+	}, true
 }
 
 func compareTargetNodeCandidates(a, b targetNodeCandidate) int {
@@ -1822,6 +2038,54 @@ func containsStrategy(strategies []string, wanted string) bool {
 	return slices.Contains(strategies, wanted)
 }
 
+func availabilityZone(node *corev1.Node) string {
+	if node == nil {
+		return ""
+	}
+
+	if zone := strings.TrimSpace(node.Labels[corev1.LabelTopologyZone]); zone != "" {
+		return zone
+	}
+
+	return strings.TrimSpace(node.Labels[corev1.LabelFailureDomainBetaZone])
+}
+
+func (p *Planner) checkMigratePodAvailabilityZone(state *planState) {
+	if state.options.Operation != domain.OperationMigratePod ||
+		state.sourcePod == nil || state.targetNode == nil {
+		return
+	}
+
+	sourceZone := availabilityZone(state.inventory.sourceNode)
+	targetZone := availabilityZone(state.targetNode)
+	if sourceZone == "" || targetZone == "" {
+		state.plan.AddCheck(warned(
+			"availability-zone",
+			"source or target node has no availability-zone label; cross-zone Pod migration could not be verified",
+		))
+		return
+	}
+
+	if sourceZone != targetZone {
+		state.plan.AddCheck(failed(
+			"availability-zone",
+			fmt.Sprintf(
+				"real-time Pod migration cannot cross availability zones: source node %s is in %s, target node %s is in %s; use copy --online for cross-zone replication",
+				state.options.SourceNode,
+				sourceZone,
+				state.targetNode.Name,
+				targetZone,
+			),
+		))
+		return
+	}
+
+	state.plan.AddCheck(passed(
+		"availability-zone",
+		"real-time Pod migration stays in availability zone "+sourceZone,
+	))
+}
+
 func autoStrategies(sourceNamespace, destinationNamespace string) []string {
 	if sourceNamespace == destinationNamespace {
 		return []string{domain.StrategyMount, domain.StrategyClusterIP}
@@ -1829,11 +2093,11 @@ func autoStrategies(sourceNamespace, destinationNamespace string) []string {
 	return []string{domain.StrategyClusterIP, domain.StrategyLocal}
 }
 
-func warmCopyRequested(options Options) bool {
+func warmCopyRequested(options planOptions) bool {
 	switch options.Operation {
 	case domain.OperationCopy:
 		return options.Online
-	case domain.OperationMigrate, domain.OperationMigratePod:
+	case domain.OperationMigratePod:
 		return options.PrecopyPasses > 0
 	default:
 		return false
@@ -1915,8 +2179,7 @@ func (p *Planner) checkWarmCopyMountCompatibility(
 		}
 
 		if !shared {
-			if enableOpenEBSLVMShared &&
-				(operation == domain.OperationMigrate || operation == domain.OperationMigratePod) {
+			if enableOpenEBSLVMShared && operation == domain.OperationMigratePod {
 				plan.AddCheck(
 					passed(
 						"warm-copy-mount",
@@ -1941,7 +2204,7 @@ func (p *Planner) checkWarmCopyMountCompatibility(
 				consumerList,
 				warmCopyMountFallback(operation),
 			)
-			if operation == domain.OperationMigrate || operation == domain.OperationMigratePod {
+			if operation == domain.OperationMigratePod {
 				message += "; alternatively, rerun with --openebs-lvm-enable-shared to patch the existing matching OpenEBS LVMVolume spec.shared to \"yes\" before the read-write mount probe"
 			}
 
@@ -1998,7 +2261,7 @@ func (p *Planner) checkWarmCopyMountCompatibility(
 		return false, false
 	}
 
-	if storageClass.Provisioner == "openebs.io/local" {
+	if storageClass.Provisioner == kube.OpenEBSLocalPVProvisioner {
 		storageType := openEBSLocalStorageType(storageClass)
 		if strings.EqualFold(storageType, "hostpath") {
 			plan.AddCheck(
@@ -2079,7 +2342,7 @@ func sourcePodReadMessage(namespace, name string, err error) string {
 }
 
 func openEBSLocalStorageType(storageClass *storagev1.StorageClass) string {
-	if storageClass == nil || storageClass.Provisioner != "openebs.io/local" {
+	if storageClass == nil || storageClass.Provisioner != kube.OpenEBSLocalPVProvisioner {
 		return ""
 	}
 
@@ -2116,7 +2379,7 @@ func openEBSLocalStorageType(storageClass *storagev1.StorageClass) string {
 // strategy remains valid when one earlier strategy cannot handle the topology.
 func filterStrategies(
 	plan *domain.MigrationPlan,
-	options Options,
+	options planOptions,
 	mountTopologyConflict string,
 ) []string {
 	filtered := make([]string, 0, len(options.Strategies))
@@ -2163,7 +2426,7 @@ func supportedStrategy(strategy string) bool {
 	}
 }
 
-func destinationPVCNameFor(options Options, mapped []string, source string, index int) string {
+func destinationPVCNameFor(options planOptions, mapped []string, source string, index int) string {
 	if index < len(mapped) && mapped[index] != "" {
 		return mapped[index]
 	}
@@ -2443,7 +2706,7 @@ func checkSelectedMigrationUnitConsumers(
 			failed(
 				"pvc-consumers",
 				fmt.Sprintf(
-					"PVC %s/%s is shared with Pod(s): %s",
+					"PVC %s/%s is shared with Pod(s): %s; migrate-pod coordinates one selected workload only, so stop these external consumers or use offline migrate after quiescing every consumer",
 					pvc.Namespace,
 					pvc.Name,
 					strings.Join(others, ","),
@@ -2671,7 +2934,12 @@ func isRiskRole(role string) bool {
 	}
 }
 
-func kubeBlocksRoleWarning(spec *domain.KubeBlocksSpec) string {
+func kubeBlocksRoleWarning(workload domain.WorkloadSpec) string {
+	spec := workload.KubeBlocks
+	if spec == nil || workload.Controller.Kind != domain.KindInstanceSet || !isRiskRole(spec.Role) {
+		return ""
+	}
+
 	if spec.Role == "unknown" && spec.SwitchoverCandidate == "" {
 		return "selected KubeBlocks instance role is unknown; possible leader downtime was explicitly acknowledged"
 	}

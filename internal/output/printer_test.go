@@ -242,7 +242,7 @@ func TestTableSessionRendersSyncAndActivationState(t *testing.T) {
 	activated := metav1.NewTime(time.Date(2026, time.August, 7, 2, 0, 0, 0, time.UTC))
 	session := &domain.Session{
 		ID: "mig-1",
-		Spec: domain.NewSessionSpec(domain.OperationMigrate, domain.SessionCommon{
+		Spec: domain.NewOfflineMigrationSessionSpec(domain.SessionCommon{
 			Volumes: []domain.VolumeSpec{
 				{
 					SourcePVC:      domain.ObjectReference{Name: "data"},
@@ -259,7 +259,7 @@ func TestTableSessionRendersSyncAndActivationState(t *testing.T) {
 					DestinationPV: domain.ObjectReference{Name: "pv-logs"},
 				},
 			},
-		}, domain.WorkloadSpec{Adapter: domain.WorkloadNone}, false, domain.SessionWorkflowOptions{}),
+		}, domain.SessionWorkflowOptions{}),
 		Status: domain.SessionStatus{
 			Phase:     domain.PhaseActivated,
 			UpdatedAt: warm,
@@ -295,10 +295,10 @@ func TestTableBackupSessionRendersBackupDetails(t *testing.T) {
 	spec := domain.NewSessionSpec(
 		domain.OperationBackup,
 		domain.SessionCommon{SourceNamespace: "app", SessionNamespace: "sessions"},
-		domain.WorkloadSpec{Adapter: domain.WorkloadNone},
+
 		true,
-		domain.SessionWorkflowOptions{},
-	)
+		domain.SessionWorkflowOptions{})
+
 	spec.Backup.SourcePVC = domain.ObjectReference{Namespace: "app", Name: "data"}
 	spec.Backup.SourcePV = domain.ObjectReference{Name: "pv-data"}
 	spec.Backup.Bucket = "backups"
@@ -343,8 +343,7 @@ func TestTableSessionShowsSourcePVAfterRollback(t *testing.T) {
 	now := metav1.NewTime(time.Date(2026, time.August, 7, 2, 0, 0, 0, time.UTC))
 	session := &domain.Session{
 		ID: "mig-rollback",
-		Spec: domain.NewSessionSpec(
-			domain.OperationMigrate,
+		Spec: domain.NewOfflineMigrationSessionSpec(
 			domain.SessionCommon{Volumes: []domain.VolumeSpec{
 				{
 					SourcePV: domain.ObjectReference{
@@ -353,8 +352,6 @@ func TestTableSessionShowsSourcePVAfterRollback(t *testing.T) {
 					DestinationPV: domain.ObjectReference{Name: "pv-destination"},
 				},
 			}},
-			domain.WorkloadSpec{Adapter: domain.WorkloadNone},
-			false,
 			domain.SessionWorkflowOptions{},
 		),
 		Status: domain.SessionStatus{
@@ -388,10 +385,10 @@ func TestTableRenameShowsReboundSourcePV(t *testing.T) {
 			domain.SessionCommon{Volumes: []domain.VolumeSpec{{
 				SourcePV: domain.ObjectReference{Name: "pv-rebound"},
 			}}},
-			domain.WorkloadSpec{Adapter: domain.WorkloadNone},
+
 			false,
-			domain.SessionWorkflowOptions{},
-		),
+			domain.SessionWorkflowOptions{}),
+
 		Status: domain.SessionStatus{
 			Phase:     domain.PhaseCompleted,
 			UpdatedAt: now,
@@ -421,10 +418,10 @@ func TestTableSessionListAndGenericFallback(t *testing.T) {
 			Spec: domain.NewSessionSpec(
 				domain.OperationRename,
 				domain.SessionCommon{SourceNamespace: "app"},
-				domain.WorkloadSpec{Adapter: domain.WorkloadNone},
+
 				false,
-				domain.SessionWorkflowOptions{},
-			),
+				domain.SessionWorkflowOptions{}),
+
 			Status: domain.SessionStatus{Phase: domain.PhaseCompleted, UpdatedAt: updated},
 		},
 	}

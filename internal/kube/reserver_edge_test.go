@@ -99,7 +99,8 @@ func reserveTestSession() *domain.Session {
 					VolumeMode:   mode,
 				},
 			},
-		}, domain.WorkloadSpec{Adapter: domain.WorkloadNone}, false, domain.SessionWorkflowOptions{TargetNode: "node-b"}),
+		}, false, domain.SessionWorkflowOptions{TargetNode: "node-b"}),
+
 		time.Unix(100, 0),
 	)
 }

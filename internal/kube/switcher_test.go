@@ -260,13 +260,13 @@ func switcherFixture(
 	}
 	session := domain.NewSession(
 		"session",
-		domain.NewSessionSpec(domain.OperationMigrate, domain.SessionCommon{
+		domain.NewOfflineMigrationSessionSpec(domain.SessionCommon{
 			SourceNamespace:      "app",
 			TemporaryNamespace:   "system",
 			DestinationNamespace: "app",
 			SessionNamespace:     "system",
 			Volumes:              []domain.VolumeSpec{volume},
-		}, domain.WorkloadSpec{Adapter: domain.WorkloadNone}, false, domain.SessionWorkflowOptions{}),
+		}, domain.SessionWorkflowOptions{}),
 		time.Now(),
 	)
 	completed := metav1.Now()

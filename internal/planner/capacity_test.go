@@ -845,7 +845,7 @@ func TestPlanAutoTargetPrefersGreaterReportedCapacity(t *testing.T) {
 		),
 	)
 
-	plan, err := New(plannerClient(objects...), nil).Plan(context.Background(), Options{
+	plan, err := New(plannerClient(objects...), nil).plan(context.Background(), planOptions{
 		SessionID:          "capacity-target",
 		SourceNamespace:    "app",
 		TemporaryNamespace: "system",
@@ -871,7 +871,7 @@ func TestPlanAutoTargetPrefersGreaterReportedCapacity(t *testing.T) {
 }
 
 func TestPlanCapacityAwarenessPolicies(t *testing.T) {
-	base := Options{
+	base := planOptions{
 		SessionID:          "capacity-policy",
 		SourceNamespace:    "app",
 		TemporaryNamespace: "system",
@@ -942,7 +942,7 @@ func TestPlanCapacityAwarenessPolicies(t *testing.T) {
 			options := base
 			options.CapacityAwareness = tt.mode
 
-			plan, err := New(plannerClient(objects...), nil).Plan(context.Background(), options)
+			plan, err := New(plannerClient(objects...), nil).plan(context.Background(), options)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -1028,7 +1028,7 @@ func TestCapacityAwarenessModes(t *testing.T) {
 		t.Fatal("unsupported mode accepted")
 	}
 
-	options := Options{
+	options := planOptions{
 		SessionID:          "invalid-capacity-mode",
 		SourceNamespace:    "app",
 		TemporaryNamespace: "system",
@@ -1045,7 +1045,7 @@ func TestCapacityAwarenessModes(t *testing.T) {
 	plan, err := New(
 		plannerClient(plannerObjects("1Gi")...),
 		nil,
-	).Plan(context.Background(), options)
+	).plan(context.Background(), options)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -20,7 +20,7 @@ import (
 func storeTestSession() *domain.Session {
 	return domain.NewSession(
 		"alpha",
-		domain.NewSessionSpec(domain.OperationMigrate, domain.SessionCommon{
+		domain.NewOfflineMigrationSessionSpec(domain.SessionCommon{
 			SourceNamespace:      "app",
 			TemporaryNamespace:   "system",
 			DestinationNamespace: "app",
@@ -37,7 +37,7 @@ func storeTestSession() *domain.Session {
 					DestinationPVC: domain.ObjectReference{Name: "dest", Namespace: "system"},
 				},
 			},
-		}, domain.WorkloadSpec{Adapter: domain.WorkloadNone}, false, domain.SessionWorkflowOptions{}),
+		}, domain.SessionWorkflowOptions{}),
 		time.Unix(100, 0),
 	)
 }

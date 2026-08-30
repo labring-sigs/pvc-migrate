@@ -16,175 +16,150 @@ import (
 )
 
 type bucketFlags struct {
-	id                     string
-	namespace              string
-	pvc                    string
-	backend                string
-	bucket                 string
-	name                   string
-	prefix                 string
-	path                   string
-	s3Provider             string
-	endpoint               string
-	region                 string
-	accessKey              string
-	secretKey              string
-	sessionToken           string
-	credentialsSecret      string
-	accessKeyKey           string
-	secretKeyKey           string
-	sessionTokenKey        string
-	accessKeyExplicit      bool
-	secretKeyExplicit      bool
-	sessionTokenExplicit   bool
-	allowInsecure          bool
-	serverEncryption       string
-	sseKMSKeyID            string
+	id                   string
+	namespace            string
+	pvc                  string
+	backend              string
+	bucket               string
+	name                 string
+	prefix               string
+	path                 string
+	s3Provider           string
+	endpoint             string
+	region               string
+	accessKey            string
+	secretKey            string
+	sessionToken         string
+	credentialsSecret    string
+	accessKeyKey         string
+	secretKeyKey         string
+	sessionTokenKey      string
+	accessKeyExplicit    bool
+	secretKeyExplicit    bool
+	sessionTokenExplicit bool
+	allowInsecure        bool
+	serverEncryption     string
+	sseKMSKeyID          string
+}
+
+type backupFlags struct {
+	bucketFlags
 	online                 bool
 	openEBSLVMEnableShared bool
-	restore                restoreBucketFlags
+}
+
+type restoreFlags struct {
+	bucketFlags
+	restore restoreBucketFlags
 }
 
 func (r *rootState) newBackupCommand() *cobra.Command {
-	return r.newObjectTransferCommand(false, false)
-}
-
-func (r *rootState) newLiveBackupCommand() *cobra.Command {
-	return r.newObjectTransferCommand(false, true)
-}
-
-func (r *rootState) newObjectTransferCommand(restore, forceOnline bool) *cobra.Command {
-	flags := &bucketFlags{}
-
+	flags := &backupFlags{}
 	var dryRun bool
-
-	use := "backup"
-	short := "Back up PVC data to object storage"
-
-	pvcFlag := "source-pvc"
-	if forceOnline {
-		use = "live-backup"
-		short = "Back up PVC data while source consumers remain active"
-	} else if restore {
-		use = "restore"
-		short = "Restore object-storage backup data into a PVC"
-		pvcFlag = "destination-pvc"
-	}
-
 	command := &cobra.Command{
-		Use:   use,
-		Short: short,
+		Use:   "backup",
+		Short: "Back up PVC data to object storage; use --online for active consumers",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			if err := validateBucketFlags(flags, pvcFlag); err != nil {
-				return reportPreSessionError(cmd, err)
-			}
-
-			if !restore && flags.id != "" {
-				if err := domain.ValidateSessionID(flags.id); err != nil {
-					return reportPreSessionError(cmd, err)
-				}
-			}
-
-			online := !restore && (forceOnline || flags.online)
-
-			runtime, err := r.runtime()
-			if err != nil {
-				return reportRuntimeError(cmd, err)
-			}
-
-			ctx, cancel := r.context(cmd.Context())
-			defer cancel()
-
-			flags.accessKeyExplicit = cmd.Flags().Changed("access-key")
-			flags.secretKeyExplicit = cmd.Flags().Changed("secret-key")
-
-			flags.sessionTokenExplicit = cmd.Flags().Changed("session-token")
-			if err := loadS3Credentials(ctx, runtime.clients.Kubernetes, flags); err != nil {
-				return reportTransferError(cmd, use, flags.namespace, flags.pvc, err)
-			}
-
-			store, err := r.newObjectStore(ctx, flags)
-			if err != nil {
-				return reportTransferError(cmd, use, flags.namespace, flags.pvc, err)
-			}
-
-			if !restore && !dryRun && flags.id == "" {
-				flags.id, err = domain.NewSessionID(time.Now())
-				if err != nil {
-					return reportTransferError(cmd, use, flags.namespace, flags.pvc, err)
-				}
-			}
-
-			request := r.objectTransferRequest(runtime, flags, store, online)
-
-			request.ToolImageProber = kube.NewToolImageProber(runtime.clients.Kubernetes)
-			if restore {
-				applyRestoreRequest(&request, flags.restore)
-			}
-
-			plan, err := backup.Preflight(ctx, runtime.clients.Kubernetes, request, restore)
-			if err != nil {
-				return reportTransferError(cmd, use, flags.namespace, flags.pvc, err)
-			}
-
-			if dryRun {
-				if err := printerFor(r).Print(plan); err != nil {
-					return reportTransferError(cmd, use, flags.namespace, flags.pvc, err)
-				}
-
-				return writeTransferDryRunGuidance(
-					cmd.ErrOrStderr(),
-					use,
-					flags.namespace,
-					flags.pvc,
-					kubectlCommandPrefixForCommand(cmd),
-				)
-			}
-
-			if err := r.confirm(ctx, cmd, flags.name); err != nil {
-				return reportApprovalError(cmd, err)
-			}
-
-			err = backup.Run(ctx, runtime.clients.Kubernetes, request, restore)
-			if err != nil {
-				if !restore {
-					lookupCtx, lookupCancel := context.WithTimeout(
-						context.Background(),
-						5*time.Second,
-					)
-					session, lookupErr := runtime.store.Get(
-						lookupCtx,
-						r.global.sessionNamespace,
-						flags.id,
-					)
-
-					lookupCancel()
-
-					if lookupErr == nil {
-						return reportSessionError(cmd, session, err)
-					}
-				}
-
-				return reportTransferError(cmd, use, flags.namespace, flags.pvc, err)
-			}
-
-			return r.printObjectTransferResult(
-				cmd,
-				runtime,
-				flags,
-				use,
-				restore,
-				online,
-				plan,
-				store,
-			)
+			return r.runBackupCommand(cmd, flags, dryRun)
 		},
 	}
-	bindBucketFlags(command, flags, restore, !restore && !forceOnline)
+	bindBackupFlags(command, flags)
 	bindDryRun(command, &dryRun)
-	command.AddCommand(r.newBackupPlanCommand(restore, forceOnline))
+	command.AddCommand(r.newBackupPlanCommand(), r.newBackupStatusCommand(), r.newBackupResumeCommand(), r.newBackupAbortCommand(), r.newBackupCleanupCommand())
+	return command
+}
 
+func (r *rootState) runBackupCommand(cmd *cobra.Command, flags *backupFlags, dryRun bool) error {
+	if err := validateBackupMode(flags.online, flags.openEBSLVMEnableShared); err != nil {
+		return reportPreSessionError(cmd, err)
+	}
+	return r.runBackupTransfer(cmd, &flags.bucketFlags, flags.online, flags.openEBSLVMEnableShared, dryRun)
+}
+
+func (r *rootState) runBackupTransfer(cmd *cobra.Command, flags *bucketFlags, online, openEBSLVMEnableShared, dryRun bool) error {
+	if err := validateBucketFlags(flags, "source-pvc"); err != nil {
+		return reportPreSessionError(cmd, err)
+	}
+	if flags.id != "" {
+		if err := domain.ValidateSessionID(flags.id); err != nil {
+			return reportPreSessionError(cmd, err)
+		}
+	}
+	runtime, err := r.runtime()
+	if err != nil {
+		return reportRuntimeError(cmd, err)
+	}
+	ctx, cancel := r.context(cmd.Context())
+	defer cancel()
+	flags.accessKeyExplicit = cmd.Flags().Changed("access-key")
+	flags.secretKeyExplicit = cmd.Flags().Changed("secret-key")
+	flags.sessionTokenExplicit = cmd.Flags().Changed("session-token")
+	if err := loadS3Credentials(ctx, runtime.clients.Kubernetes, flags); err != nil {
+		return reportTransferError(cmd, "backup", flags.namespace, flags.pvc, err)
+	}
+	store, err := r.newObjectStore(ctx, flags)
+	if err != nil {
+		return reportTransferError(cmd, "backup", flags.namespace, flags.pvc, err)
+	}
+	if !dryRun && flags.id == "" {
+		flags.id, err = domain.NewSessionID(time.Now())
+		if err != nil {
+			return reportTransferError(cmd, "backup", flags.namespace, flags.pvc, err)
+		}
+	}
+	request := r.objectTransferRequest(runtime, flags, store, online, openEBSLVMEnableShared)
+	request.ToolImageProber = kube.NewToolImageProber(runtime.clients.Kubernetes)
+	plan, err := backup.Preflight(ctx, runtime.clients.Kubernetes, request, false)
+	if err != nil {
+		return reportTransferError(cmd, "backup", flags.namespace, flags.pvc, err)
+	}
+	if dryRun {
+		if err := printerFor(r).Print(plan); err != nil {
+			return reportTransferError(cmd, "backup", flags.namespace, flags.pvc, err)
+		}
+		return writeTransferDryRunGuidance(cmd.ErrOrStderr(), "backup", flags.namespace, flags.pvc, kubectlCommandPrefixForCommand(cmd))
+	}
+	if err := r.confirm(ctx, cmd, flags.name); err != nil {
+		return reportApprovalError(cmd, err)
+	}
+	if err := backup.Run(ctx, runtime.clients.Kubernetes, request, false); err != nil {
+		lookupCtx, lookupCancel := context.WithTimeout(context.Background(), 5*time.Second)
+		session, lookupErr := runtime.store.Get(lookupCtx, r.global.sessionNamespace, flags.id)
+		lookupCancel()
+		if lookupErr == nil {
+			return reportSessionError(cmd, session, err)
+		}
+		return reportTransferError(cmd, "backup", flags.namespace, flags.pvc, err)
+	}
+	return r.printObjectTransferResult(cmd, runtime, flags, "backup", false, online, plan, store)
+}
+
+func (r *rootState) backupResumeRequest(runtime *commandRuntime) backup.Request {
+	return backup.Request{
+		HelmTimeout:        r.global.helmTimeout,
+		KubeconfigPath:     r.global.kubeconfig,
+		KubeContext:        r.global.kubeContext,
+		StreamToolLogs:     r.global.streamToolLogs,
+		StructuredLogs:     r.global.logFormat == "json",
+		Writer:             r.errWriter(),
+		Logger:             runtime.logger,
+		ToolImageProber:    kube.NewToolImageProber(runtime.clients.Kubernetes),
+		SessionStore:       runtime.store,
+		SessionNamespace:   r.global.sessionNamespace,
+		OpenEBSLVMManager:  runtime.openEBSLVMSharedVolumeManager,
+		ObjectStoreFactory: r.options.objectStoreFactory,
+	}
+}
+
+func (r *rootState) newBackupPlanCommand() *cobra.Command {
+	flags := &backupFlags{}
+	command := r.newObjectTransferPlanCommand("backup plan", "source-pvc", false, false, &flags.bucketFlags, func(request *backup.Request) error {
+		request.Online = flags.online
+		request.OpenEBSLVMEnableShared = flags.openEBSLVMEnableShared
+		return validateBackupMode(flags.online, flags.openEBSLVMEnableShared)
+	})
+	bindBackupFlags(command, flags)
 	return command
 }
 
@@ -298,29 +273,22 @@ func (r *rootState) printObjectTransferResult(
 	)
 }
 
-func (r *rootState) newBackupPlanCommand(restore, forceOnline bool) *cobra.Command {
-	flags := &bucketFlags{}
-	use := "plan"
-	pvcFlag := "source-pvc"
-
-	operation := "backup plan"
-	if forceOnline {
-		operation = "live-backup plan"
-	} else if restore {
-		pvcFlag = "destination-pvc"
-		operation = "restore plan"
-	}
-
+// newObjectTransferPlanCommand contains the common object-store preflight
+// mechanics; each workflow binds its own flags and request-specific options.
+func (r *rootState) newObjectTransferPlanCommand(
+	operation, pvcFlag string,
+	online, restore bool,
+	flags *bucketFlags,
+	prepare func(*backup.Request) error,
+) *cobra.Command {
 	command := &cobra.Command{
-		Use:   use,
+		Use:   "plan",
 		Short: "Validate object-storage access and PVC state without mutations",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			if err := validateBucketFlags(flags, pvcFlag); err != nil {
 				return reportPreSessionError(cmd, err)
 			}
-
-			online := !restore && (forceOnline || flags.online)
 
 			runtime, err := r.runtime()
 			if err != nil {
@@ -343,9 +311,11 @@ func (r *rootState) newBackupPlanCommand(restore, forceOnline bool) *cobra.Comma
 				return reportTransferError(cmd, operation, flags.namespace, flags.pvc, err)
 			}
 
-			request := r.objectTransferRequest(runtime, flags, store, online)
-			if restore {
-				applyRestoreRequest(&request, flags.restore)
+			request := r.objectTransferRequest(runtime, flags, store, online, false)
+			if prepare != nil {
+				if err := prepare(&request); err != nil {
+					return reportPreSessionError(cmd, err)
+				}
 			}
 
 			plan, err := backup.Preflight(ctx, runtime.clients.Kubernetes, request, restore)
@@ -366,8 +336,6 @@ func (r *rootState) newBackupPlanCommand(restore, forceOnline bool) *cobra.Comma
 			)
 		},
 	}
-	bindBucketFlags(command, flags, restore, !restore && !forceOnline)
-
 	return command
 }
 
@@ -376,6 +344,7 @@ func (r *rootState) objectTransferRequest(
 	flags *bucketFlags,
 	store *objectstore.Store,
 	online bool,
+	openEBSLVMEnableShared bool,
 ) backup.Request {
 	return backup.Request{
 		ID:                     flags.id,
@@ -394,22 +363,12 @@ func (r *rootState) objectTransferRequest(
 		Logger:                 runtime.logger,
 		SessionStore:           runtime.store,
 		SessionNamespace:       r.global.sessionNamespace,
-		OpenEBSLVMEnableShared: flags.openEBSLVMEnableShared,
+		OpenEBSLVMEnableShared: openEBSLVMEnableShared,
 		OpenEBSLVMManager:      runtime.openEBSLVMSharedVolumeManager,
 	}
 }
 
-func bindBucketFlags(command *cobra.Command, flags *bucketFlags, restore, includeOnline bool) {
-	pvcFlag := "source-pvc"
-	if restore {
-		pvcFlag = "destination-pvc"
-	}
-
-	idHelp := "Backup Session ID; generated when omitted during execution"
-	if restore {
-		idHelp = "Restore attempt ID used for logs and temporary tool resources; no Session is created"
-	}
-
+func bindObjectStoreFlags(command *cobra.Command, flags *bucketFlags, pvcFlag, idHelp string) {
 	command.Flags().StringVar(&flags.id, "id", "", idHelp)
 	command.Flags().StringVarP(&flags.namespace, "namespace", "n", "default", "PVC namespace")
 	command.Flags().StringVar(&flags.pvc, pvcFlag, "", "PVC name")
@@ -441,20 +400,28 @@ func bindBucketFlags(command *cobra.Command, flags *bucketFlags, restore, includ
 		StringVar(&flags.serverEncryption, "s3-server-side-encryption", "", "S3 server-side encryption: AES256 or aws:kms")
 	command.Flags().
 		StringVar(&flags.sseKMSKeyID, "s3-sse-kms-key-id", "", "S3 KMS key ID when using aws:kms")
+}
 
-	if includeOnline {
-		command.Flags().
-			BoolVar(&flags.online, "online", false, "Run a best-effort online backup while Pods keep using the source PVC")
-	}
+func bindBackupFlags(command *cobra.Command, flags *backupFlags) {
+	bindObjectStoreFlags(command, &flags.bucketFlags, "source-pvc", "Backup Session ID; generated when omitted during execution")
+	command.Flags().BoolVar(&flags.online, "online", false, "Copy from an active source without pausing consumers")
+	command.Flags().BoolVar(&flags.openEBSLVMEnableShared, "openebs-lvm-enable-shared", false, "Temporarily enable OpenEBS LVM shared mounts for an active source PVC")
+}
 
-	if !restore {
-		command.Flags().
-			BoolVar(&flags.openEBSLVMEnableShared, "openebs-lvm-enable-shared", false, "Temporarily enable OpenEBS LVM shared mounts for an active source PVC")
+func validateBackupMode(online, openEBSLVMEnableShared bool) error {
+	if openEBSLVMEnableShared && !online {
+		return domain.NewError(
+			domain.ErrorValidation,
+			"backup flags",
+			"--openebs-lvm-enable-shared requires --online",
+		)
 	}
+	return nil
+}
 
-	if restore {
-		bindRestoreBucketFlags(command, &flags.restore)
-	}
+func bindRestoreFlags(command *cobra.Command, flags *restoreFlags) {
+	bindObjectStoreFlags(command, &flags.bucketFlags, "destination-pvc", "Restore attempt ID used for logs and temporary tool resources; no Session is created")
+	bindRestoreBucketFlags(command, &flags.restore)
 }
 
 func transferResultIdentity(restore bool, id string) (string, string) {

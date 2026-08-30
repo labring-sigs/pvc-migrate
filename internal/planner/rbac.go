@@ -167,12 +167,19 @@ func (p *Planner) checkRBAC(
 	}
 
 	if workload.KubeBlocks != nil {
-		if workload.KubeBlocks.SwitchoverStrategy == domain.KubeBlocksSwitchoverMongoDBNative {
+		instanceSetSwitchover := workload.Controller.Kind == domain.KindInstanceSet &&
+			workload.KubeBlocks.SwitchoverCandidate != ""
+		if instanceSetSwitchover &&
+			workload.KubeBlocks.SwitchoverStrategy == domain.KubeBlocksSwitchoverMongoDBNative {
 			add(sourceNamespace, "", "pods/exec", "create")
 		}
 
-		group, _, _ := strings.Cut(workload.KubeBlocks.OpsAPIVersion, "/")
-		add(sourceNamespace, group, "opsrequests", "get", "create", "delete")
+		if workload.Controller.Kind != domain.KindInstanceSet ||
+			(instanceSetSwitchover &&
+				workload.KubeBlocks.SwitchoverStrategy == domain.KubeBlocksSwitchoverOpsRequest) {
+			group, _, _ := strings.Cut(workload.KubeBlocks.OpsAPIVersion, "/")
+			add(sourceNamespace, group, "opsrequests", "get", "create", "delete")
+		}
 
 		clusterGroup := domain.KubeBlocksAppsGroup
 		add(sourceNamespace, clusterGroup, "clusters", "get")

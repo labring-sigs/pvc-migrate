@@ -51,7 +51,7 @@ func TestLoadPlanInventoryKeepsPVCPVAndStorageClassIndexes(t *testing.T) {
 	inventory := New(
 		plannerClient(objects...),
 		nil,
-	).loadPlanInventory(context.Background(), Options{SourceNamespace: "app", TargetNode: "node-b"}, []string{"data", "logs"}, false)
+	).loadPlanInventory(context.Background(), planOptions{SourceNamespace: "app", TargetNode: "node-b"}, []string{"data", "logs"}, false)
 	if len(inventory.pvcs) != 2 || len(inventory.pvs) != 2 {
 		t.Fatalf("inventory lengths: pvcs=%d pvs=%d", len(inventory.pvcs), len(inventory.pvs))
 	}
@@ -93,7 +93,7 @@ func TestLoadPlanInventoryLoadsSourceAndExplicitDestinationClasses(t *testing.T)
 	inventory := New(
 		plannerClient(objects...),
 		nil,
-	).loadPlanInventory(context.Background(), Options{
+	).loadPlanInventory(context.Background(), planOptions{
 		SourceNamespace:  "app",
 		DestinationClass: destinationClass.Name,
 	}, []string{"data"}, false)

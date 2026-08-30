@@ -15,7 +15,7 @@ func TestPlanRejectsPersistedSessionOwnershipBeforeMutation(t *testing.T) {
 	client := plannerClient(plannerObjects("2Gi")...)
 	old := domain.NewSession(
 		"old-session",
-		domain.NewSessionSpec(domain.OperationMigrate, domain.SessionCommon{
+		domain.NewOfflineMigrationSessionSpec(domain.SessionCommon{
 			SourceNamespace:      "app",
 			TemporaryNamespace:   "system",
 			DestinationNamespace: "app",
@@ -34,7 +34,7 @@ func TestPlanRejectsPersistedSessionOwnershipBeforeMutation(t *testing.T) {
 					},
 				},
 			},
-		}, domain.WorkloadSpec{Adapter: domain.WorkloadNone}, false, domain.SessionWorkflowOptions{}),
+		}, domain.SessionWorkflowOptions{}),
 		time.Now(),
 	)
 
@@ -66,7 +66,7 @@ func TestPlanRejectsPersistedSessionOwnershipBeforeMutation(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	plan, err := New(client, nil).Plan(context.Background(), Options{
+	plan, err := New(client, nil).plan(context.Background(), planOptions{
 		SessionID:          "new-session",
 		Operation:          domain.OperationMigrate,
 		SourceNamespace:    "app",
@@ -87,7 +87,7 @@ func TestPlanRejectsPersistedSessionOwnershipBeforeMutation(t *testing.T) {
 
 	for _, check := range plan.Checks {
 		if check.Name == "session-ownership" &&
-			(!strings.Contains(check.Message, old.ID) || !strings.Contains(check.Message, string(domain.PhaseCompleted)) || !strings.Contains(check.Message, "session status") || !strings.Contains(check.Message, "session cleanup") || !strings.Contains(check.Message, "--dry-run=false")) {
+			(!strings.Contains(check.Message, old.ID) || !strings.Contains(check.Message, string(domain.PhaseCompleted)) || !strings.Contains(check.Message, "migrate status") || !strings.Contains(check.Message, "migrate cleanup") || !strings.Contains(check.Message, "--dry-run=false")) {
 			t.Fatalf("ownership guidance=%q", check.Message)
 		}
 	}
@@ -106,7 +106,7 @@ func TestPlanDiagnosesOrphanSessionOwnership(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	plan, err := New(client, nil).Plan(context.Background(), Options{
+	plan, err := New(client, nil).plan(context.Background(), planOptions{
 		SessionID:          "new-session",
 		Operation:          domain.OperationMigrate,
 		SourceNamespace:    "app",
@@ -156,7 +156,7 @@ func TestPlanRejectsConflictingSessionOwnership(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	plan, err := New(client, nil).Plan(context.Background(), Options{
+	plan, err := New(client, nil).plan(context.Background(), planOptions{
 		SessionID:          "new-session",
 		Operation:          domain.OperationMigrate,
 		SourceNamespace:    "app",

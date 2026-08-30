@@ -15,9 +15,12 @@ import (
 	"github.com/labring-sigs/pvc-migrate/internal/kube"
 	"github.com/labring-sigs/pvc-migrate/internal/parallel"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
+
+const copyToolCleanupTimeout = 10 * time.Second
 
 func (s *Service) validateCopyConsumers(
 	ctx context.Context,
@@ -392,7 +395,12 @@ func (s *Service) copyWithRetry(
 			volume.SourcePVC.Name,
 		)
 
-		last = errors.Join(copyErr, s.waitForCopyToolRelease(ctx, volume))
+		operationID := copyengine.OperationID(request)
+
+		last = errors.Join(
+			copyErr,
+			s.cleanupCopyToolPods(ctx, volume, operationID),
+		)
 		if last == nil {
 			return nil
 		}
@@ -408,14 +416,25 @@ func (s *Service) copyWithRetry(
 		}
 
 		if isDestinationNoSpaceError(last) {
+			message := fmt.Sprintf(
+				"destination PVC %s/%s ran out of space; abort and clean up this session, then create a new session with a larger --destination-capacity",
+				volume.DestinationPVC.Namespace,
+				volume.DestinationPVC.Name,
+			)
+			if kubeblocks, ok := session.Spec.KubeBlocksPodMigration(); ok {
+				message = fmt.Sprintf(
+					"destination PVC %s/%s ran out of space during KubeBlocks Cluster %s component %s real-time migration; update the component volumeClaimTemplates storage request, abort and clean up this session, then create a new migrate-pod session",
+					volume.DestinationPVC.Namespace,
+					volume.DestinationPVC.Name,
+					kubeblocks.Cluster,
+					kubeblocks.Component,
+				)
+			}
+
 			return domain.WrapError(
 				domain.ErrorConflict,
 				"copy capacity",
-				fmt.Sprintf(
-					"destination PVC %s/%s ran out of space; abort and clean up this session, then create a new session with a larger --destination-capacity",
-					volume.DestinationPVC.Namespace,
-					volume.DestinationPVC.Name,
-				),
+				message,
 				last,
 			)
 		}
@@ -550,6 +569,91 @@ func (s *Service) waitForCopyToolRelease(ctx context.Context, volume *domain.Vol
 	)
 }
 
+func (s *Service) cleanupCopyToolPods(
+	ctx context.Context,
+	volume *domain.VolumeSpec,
+	operationID string,
+) error {
+	cleanupCtx, cancel := context.WithTimeout(
+		context.WithoutCancel(ctx),
+		copyToolCleanupTimeout,
+	)
+	defer cancel()
+
+	// Helm uninstall only starts asynchronous garbage collection. Delete Pods
+	// from this operation directly, then wait for every tool Pod to release the
+	// claims even when the copy context has already expired.
+	return errors.Join(
+		s.deleteCopyToolPods(cleanupCtx, volume, operationID),
+		s.waitForCopyToolRelease(cleanupCtx, volume),
+	)
+}
+
+func (s *Service) deleteCopyToolPods(
+	ctx context.Context,
+	volume *domain.VolumeSpec,
+	operationID string,
+) error {
+	claims := map[string]map[string]struct{}{}
+	for _, ref := range []domain.ObjectReference{volume.SourcePVC, volume.DestinationPVC} {
+		if claims[ref.Namespace] == nil {
+			claims[ref.Namespace] = map[string]struct{}{}
+		}
+
+		claims[ref.Namespace][ref.Name] = struct{}{}
+	}
+
+	for namespace, namespaceClaims := range claims {
+		pods, err := s.client.CoreV1().Pods(namespace).List(ctx, metav1.ListOptions{})
+		if err != nil {
+			return domain.WrapError(
+				domain.ErrorKubernetes,
+				"copy cleanup",
+				"list copy tool Pods in "+namespace,
+				err,
+			)
+		}
+
+		for index := range pods.Items {
+			pod := &pods.Items[index]
+			if !isPVMigrateToolForClaims(pod, namespaceClaims) ||
+				!isPVMigrateToolForOperation(pod, operationID) {
+				continue
+			}
+
+			if pod.UID == "" {
+				return domain.NewError(
+					domain.ErrorKubernetes,
+					"copy cleanup",
+					fmt.Sprintf("copy tool Pod %s/%s has no UID", namespace, pod.Name),
+				)
+			}
+
+			uid := pod.UID
+
+			deleteErr := s.client.CoreV1().Pods(namespace).Delete(
+				ctx,
+				pod.Name,
+				metav1.DeleteOptions{Preconditions: &metav1.Preconditions{UID: &uid}},
+			)
+			if apierrors.IsNotFound(deleteErr) {
+				continue
+			}
+
+			if deleteErr != nil {
+				return domain.WrapError(
+					domain.ErrorKubernetes,
+					"copy cleanup",
+					"delete copy tool Pod "+namespace+"/"+pod.Name,
+					deleteErr,
+				)
+			}
+		}
+	}
+
+	return nil
+}
+
 func isPVMigrateToolForClaims(pod *corev1.Pod, claims map[string]struct{}) bool {
 	if _, tool := pvmigrateToolInstance(pod); !tool {
 		return false
@@ -584,6 +688,11 @@ func pvmigrateToolInstance(pod *corev1.Pod) (string, bool) {
 	default:
 		return "", false
 	}
+}
+
+func isPVMigrateToolForOperation(pod *corev1.Pod, operationID string) bool {
+	instance, ok := pvmigrateToolInstance(pod)
+	return ok && operationID != "" && strings.HasPrefix(instance, "pv-migrate-"+operationID+"-")
 }
 
 func (s *Service) helmSchedulingValues(

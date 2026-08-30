@@ -303,12 +303,9 @@ func TestConcurrentDestinationMountUsesActualVolumeAndConsumerCount(t *testing.T
 				setSessionOperation(session, test.operation)
 			}
 
-			if session.Spec.Migrate != nil {
-				session.Spec.Migrate.Workload.Adapter = domain.WorkloadStatefulSet
-			}
-
-			if options := session.Spec.WorkflowOptionsPtr(); options != nil {
-				options.OpenEBSLVMEnableShared = test.flag
+			if session.Spec.MigratePod != nil {
+				session.Spec.MigratePod.Workload.Adapter = domain.WorkloadStatefulSet
+				session.Spec.MigratePod.OpenEBSLVMEnableShared = test.flag
 			}
 
 			volume := &session.Spec.Volumes[0]
@@ -347,7 +344,7 @@ func TestReserveRetryRevalidatesConcurrentDestinationMount(t *testing.T) {
 		UID:  "existing-destination-pv-uid",
 	}
 	session.Status.Volumes[0].Reserved = true
-	session.Spec.Migrate.OpenEBSLVMEnableShared = true
+	session.Spec.MigratePod.OpenEBSLVMEnableShared = true
 	manager := &recordingOpenEBSLVMSharedVolumeManager{}
 	fixture.service.config.OpenEBSLVMSharedVolumeManager = manager
 
@@ -403,7 +400,7 @@ func TestResumeRevalidatesConcurrentDestinationMountBeforeController(t *testing.
 	session := appTestSession()
 	session.Status.Phase = domain.PhaseActivated
 	session.Spec.Volumes[0].ConcurrentConsumers = 2
-	session.Spec.Migrate.OpenEBSLVMEnableShared = true
+	session.Spec.MigratePod.OpenEBSLVMEnableShared = true
 	_ = session.Spec.SetWorkload(domain.WorkloadSpec{
 		Adapter: domain.WorkloadStatefulSet,
 		Pod: domain.ObjectReference{
@@ -445,7 +442,7 @@ func TestResumeRevalidatesConcurrentDestinationMountBeforeController(t *testing.
 		return nil
 	}
 
-	if err := fixture.service.ResumeWorkload(context.Background(), session); err != nil {
+	if err := fixture.service.ResumePodWorkload(context.Background(), session); err != nil {
 		t.Fatal(err)
 	}
 
@@ -585,7 +582,26 @@ func TestSessionToolProbeTargetsFollowSelectedStrategies(t *testing.T) {
 			options.Strategies = slices.Clone(test.strategies)
 			common := session.Spec.SessionCommon
 			workload := session.Spec.Workload()
-			session.Spec = domain.NewSessionSpec(test.operation, common, workload, false, options)
+			switch test.operation {
+			case domain.OperationMigrate:
+				session.Spec = domain.NewOfflineMigrationSessionSpec(common, options)
+			case domain.OperationMigratePod:
+				session.Spec = domain.NewPodMigrationSessionSpec(
+					common,
+					workload,
+					options,
+					0,
+					false,
+				)
+			default:
+				session.Spec = domain.NewSessionSpec(
+					test.operation,
+					common,
+
+					false,
+					options)
+
+			}
 
 			var targets []kube.ToolProbeTarget
 			if test.operation == domain.OperationReserve {
@@ -1260,10 +1276,9 @@ func copyToolProbeSession(online bool) *domain.Session {
 	session.Spec = domain.NewSessionSpec(
 		domain.OperationCopy,
 		session.Spec.SessionCommon,
-		session.Spec.Workload(),
+
 		online,
-		options,
-	)
+		options)
 
 	return session
 }
@@ -1401,7 +1416,7 @@ func TestCompletedCopyStagesProbeBeforeResettingCheckpoints(t *testing.T) {
 		prober := &recordingToolImageProber{err: probeErr}
 		fixture.service.config.ToolImageProber = prober
 
-		if err := fixture.service.FinalSync(
+		if err := fixture.service.PodFinalSync(
 			context.Background(),
 			session,
 		); !errors.Is(
@@ -1423,7 +1438,7 @@ func TestCompletedCopyStagesProbeBeforeResettingCheckpoints(t *testing.T) {
 	})
 }
 
-func TestPauseAndFinalSyncProbesBeforeWorkloadPause(t *testing.T) {
+func TestPodPauseAndFinalSyncProbesBeforeWorkloadPause(t *testing.T) {
 	fixture := newRecoveryFixture(t)
 	session := appTestSession()
 	session.Status.Phase = domain.PhaseWarmCopied
@@ -1435,14 +1450,14 @@ func TestPauseAndFinalSyncProbesBeforeWorkloadPause(t *testing.T) {
 	}}
 	fixture.service.config.ToolImageProber = prober
 
-	if err := fixture.service.PauseAndFinalSync(
+	if err := fixture.service.PodPauseAndFinalSync(
 		context.Background(),
 		session,
 	); !errors.Is(
 		err,
 		probeErr,
 	) {
-		t.Fatalf("PauseAndFinalSync() error=%v", err)
+		t.Fatalf("PodPauseAndFinalSync() error=%v", err)
 	}
 
 	if fixture.controller.pauses != 0 || session.Status.Phase != domain.PhaseWarmCopied {
@@ -1450,7 +1465,7 @@ func TestPauseAndFinalSyncProbesBeforeWorkloadPause(t *testing.T) {
 	}
 }
 
-func TestPartialPauseAndFinalSyncCreatesDestinationBeforePauseAndValidatesSourceAfterPause(
+func TestPartialPodPauseAndFinalSyncCreatesDestinationBeforePauseAndValidatesSourceAfterPause(
 	t *testing.T,
 ) {
 	fixture := newRecoveryFixture(t)
@@ -1478,7 +1493,7 @@ func TestPartialPauseAndFinalSyncCreatesDestinationBeforePauseAndValidatesSource
 	}
 	fixture.service.config.ToolImageProber = prober
 
-	if err := fixture.service.PauseAndFinalSync(context.Background(), session); err != nil {
+	if err := fixture.service.PodPauseAndFinalSync(context.Background(), session); err != nil {
 		t.Fatal(err)
 	}
 
@@ -1505,7 +1520,7 @@ func TestPartialPauseAndFinalSyncCreatesDestinationBeforePauseAndValidatesSource
 	}
 }
 
-func TestPauseAndFinalSyncRestoresPendingOpenEBSLVMSharedBeforePausing(t *testing.T) {
+func TestPodPauseAndFinalSyncRestoresPendingOpenEBSLVMSharedBeforePausing(t *testing.T) {
 	fixture := newRecoveryFixture(t)
 	session := appTestSession()
 	session.Status.Phase = domain.PhaseReserved
@@ -1524,7 +1539,7 @@ func TestPauseAndFinalSyncRestoresPendingOpenEBSLVMSharedBeforePausing(t *testin
 	manager := &recordingOpenEBSLVMSharedVolumeManager{shared: true}
 	fixture.service.config.OpenEBSLVMSharedVolumeManager = manager
 
-	if err := fixture.service.PauseAndFinalSync(context.Background(), session); err != nil {
+	if err := fixture.service.PodPauseAndFinalSync(context.Background(), session); err != nil {
 		t.Fatal(err)
 	}
 
@@ -1543,7 +1558,7 @@ func TestPauseAndFinalSyncRestoresPendingOpenEBSLVMSharedBeforePausing(t *testin
 	}
 }
 
-func TestValidateFinalSyncRejectsUnsafePendingOpenEBSLVMRestore(t *testing.T) {
+func TestValidatePodFinalSyncRejectsUnsafePendingOpenEBSLVMRestore(t *testing.T) {
 	fixture := newRecoveryFixture(t)
 	session := appTestSession()
 	session.Status.Phase = domain.PhaseReserved
@@ -1570,9 +1585,9 @@ func TestValidateFinalSyncRejectsUnsafePendingOpenEBSLVMRestore(t *testing.T) {
 	}
 	fixture.service.config.OpenEBSLVMSharedVolumeManager = manager
 
-	err := fixture.service.ValidateFinalSync(context.Background(), session)
+	err := fixture.service.ValidatePodFinalSync(context.Background(), session)
 	if !errors.Is(err, validationErr) {
-		t.Fatalf("ValidateFinalSync() error=%v", err)
+		t.Fatalf("ValidatePodFinalSync() error=%v", err)
 	}
 
 	if fixture.controller.pauses != 0 || len(fixture.reserver.calls) != 0 {
@@ -1600,7 +1615,7 @@ func TestNoOpAndInvalidStagesSkipProbe(t *testing.T) {
 	completed := appTestSession()
 
 	completed.Status.Phase = domain.PhaseCompleted
-	if err := fixture.service.ResumeSession(context.Background(), completed); err != nil {
+	if err := fixture.service.resumeWorkflowForTest(context.Background(), completed); err != nil {
 		t.Fatal(err)
 	}
 
@@ -1770,7 +1785,7 @@ func TestWarmCopyEnablesOpenEBSLVMSharedBeforeProbe(t *testing.T) {
 	fixture := newRecoveryFixture(t)
 	session := appTestSession()
 	session.Status.Phase = domain.PhaseReserved
-	session.Spec.WorkflowOptionsPtr().OpenEBSLVMEnableShared = true
+	session.Spec.MigratePod.OpenEBSLVMEnableShared = true
 
 	storageClass := *session.Spec.Volumes[0].SourcePVCSpec.StorageClassName
 	if _, err := fixture.client.StorageV1().
@@ -1844,6 +1859,7 @@ func TestWarmCopyRejectsActiveUnsharedOpenEBSLVMBeforeProbe(t *testing.T) {
 
 	err := fixture.service.WarmCopy(context.Background(), session)
 	if domain.CategoryOf(err) != domain.ErrorPrecondition ||
+		!strings.Contains(err.Error(), "--precopy-passes 0") ||
 		!strings.Contains(err.Error(), "--openebs-lvm-enable-shared") {
 		t.Fatalf("category=%s error=%v", domain.CategoryOf(err), err)
 	}
@@ -1875,6 +1891,7 @@ func TestValidateWarmCopyRejectsActiveUnsharedOpenEBSLVM(t *testing.T) {
 
 	err := fixture.service.ValidateWarmCopy(context.Background(), session)
 	if domain.CategoryOf(err) != domain.ErrorPrecondition ||
+		!strings.Contains(err.Error(), "--precopy-passes 0") ||
 		!strings.Contains(err.Error(), "--openebs-lvm-enable-shared") {
 		t.Fatalf("category=%s error=%v", domain.CategoryOf(err), err)
 	}
@@ -1892,7 +1909,7 @@ func TestValidateWarmCopyAcceptsRestorableSessionManagedOpenEBSLVM(t *testing.T)
 	fixture := newRecoveryFixture(t)
 	session := appTestSession()
 	session.Status.Phase = domain.PhaseWarmCopying
-	session.Spec.WorkflowOptionsPtr().OpenEBSLVMEnableShared = true
+	session.Spec.MigratePod.OpenEBSLVMEnableShared = true
 	createOpenEBSLVMSourceObjects(t, fixture.client, session)
 
 	if _, err := fixture.client.CoreV1().
@@ -1944,7 +1961,7 @@ func TestWarmCopyPreparesEveryOpenEBSLVMVolumeBeforeEnable(t *testing.T) {
 	session := appTestSession()
 	addSecondVolume(session)
 	session.Status.Phase = domain.PhaseReserved
-	session.Spec.WorkflowOptionsPtr().OpenEBSLVMEnableShared = true
+	session.Spec.MigratePod.OpenEBSLVMEnableShared = true
 	createOpenEBSLVMSourceObjects(t, fixture.client, session)
 
 	for _, volume := range session.Spec.Volumes {
@@ -2048,7 +2065,7 @@ func TestWarmCopyRestoresOpenEBSLVMSharedAfterProbeFailure(t *testing.T) {
 	fixture := newRecoveryFixture(t)
 	session := appTestSession()
 	session.Status.Phase = domain.PhaseReserved
-	session.Spec.WorkflowOptionsPtr().OpenEBSLVMEnableShared = true
+	session.Spec.MigratePod.OpenEBSLVMEnableShared = true
 
 	storageClass := *session.Spec.Volumes[0].SourcePVCSpec.StorageClassName
 	if _, err := fixture.client.StorageV1().
@@ -2090,7 +2107,7 @@ func TestWarmCopyRestoresOpenEBSLVMSharedAfterProbeCancellation(t *testing.T) {
 	fixture := newRecoveryFixture(t)
 	session := appTestSession()
 	session.Status.Phase = domain.PhaseReserved
-	session.Spec.WorkflowOptionsPtr().OpenEBSLVMEnableShared = true
+	session.Spec.MigratePod.OpenEBSLVMEnableShared = true
 
 	storageClass := *session.Spec.Volumes[0].SourcePVCSpec.StorageClassName
 	if _, err := fixture.client.StorageV1().
@@ -2143,7 +2160,7 @@ func TestWarmCopyRestoresOpenEBSLVMSharedWhenContextIsCanceledAfterEnable(t *tes
 	fixture := newRecoveryFixture(t)
 	session := appTestSession()
 	session.Status.Phase = domain.PhaseReserved
-	session.Spec.WorkflowOptionsPtr().OpenEBSLVMEnableShared = true
+	session.Spec.MigratePod.OpenEBSLVMEnableShared = true
 
 	storageClass := *session.Spec.Volumes[0].SourcePVCSpec.StorageClassName
 	if _, err := fixture.client.StorageV1().
@@ -2266,7 +2283,7 @@ func TestAbortRestoresPendingOpenEBSLVMSharedMount(t *testing.T) {
 	manager := &recordingOpenEBSLVMSharedVolumeManager{shared: true}
 	fixture.service.config.OpenEBSLVMSharedVolumeManager = manager
 
-	if err := fixture.service.Abort(context.Background(), session); err != nil {
+	if err := fixture.service.abortWorkflowForTest(context.Background(), session); err != nil {
 		t.Fatal(err)
 	}
 
@@ -2313,7 +2330,7 @@ func TestAbortDryRunRejectsUnsafeOpenEBSLVMSharedRestore(t *testing.T) {
 	}
 	fixture.service.config.OpenEBSLVMSharedVolumeManager = manager
 
-	err := fixture.service.ValidateAbort(context.Background(), session)
+	err := fixture.service.validateAbortWorkflowForTest(context.Background(), session)
 	if !errors.Is(err, validationErr) {
 		t.Fatalf("ValidateAbort() error=%v", err)
 	}

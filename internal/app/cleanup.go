@@ -61,7 +61,7 @@ func (e *CleanupPodBlockerError) Unwrap() error {
 	return e.Cause
 }
 
-func (s *Service) Cleanup(
+func (s *Service) cleanupWorkflow(
 	ctx context.Context,
 	session *domain.Session,
 	options CleanupOptions,
@@ -92,7 +92,7 @@ func (s *Service) cleanup(
 		return err
 	}
 
-	if err := s.ValidateCleanup(ctx, session, options); err != nil {
+	if err := s.validateCleanup(ctx, session, options); err != nil {
 		return err
 	}
 
@@ -169,45 +169,6 @@ func (s *Service) cleanup(
 	s.logInfo("cleanup completed", "session", session.ID)
 
 	return nil
-}
-
-func (s *Service) cleanupBackupCredentials(ctx context.Context, session *domain.Session) error {
-	ref := backupCredentialsCleanupReference(session)
-	if ref.Name == "" {
-		return nil
-	}
-
-	if err := kube.DeleteBackupCredentialsSecret(ctx, s.client, ref, session.ID); err != nil {
-		return err
-	}
-
-	session.Spec.Backup.CredentialsSecret = domain.ObjectReference{}
-	if session.ResourceVersion != "" {
-		return s.persist(ctx, session)
-	}
-
-	return nil
-}
-
-func backupCredentialsCleanupReference(session *domain.Session) domain.ObjectReference {
-	if session == nil || session.Spec.Backup == nil {
-		return domain.ObjectReference{}
-	}
-
-	if session.Spec.Backup.CredentialsSecret.Name != "" {
-		return session.Spec.Backup.CredentialsSecret
-	}
-
-	if session.ID == "" || session.Spec.SessionNamespace == "" {
-		return domain.ObjectReference{}
-	}
-
-	return domain.ObjectReference{
-		APIVersion: "v1",
-		Kind:       "Secret",
-		Namespace:  session.Spec.SessionNamespace,
-		Name:       kube.BackupCredentialsSecretName(session.ID),
-	}
 }
 
 func validateCleanupSessionDeletion(session *domain.Session, options CleanupOptions) error {
@@ -1185,89 +1146,6 @@ func (s *Service) discoverDestinationRefs(
 	}
 
 	return true, nil
-}
-
-func cleanupPVRefs(
-	session *domain.Session,
-	volume *domain.VolumeSpec,
-) (active, rollback domain.ObjectReference, policy corev1.PersistentVolumeReclaimPolicy) {
-	if cleanupKeepsSource(session) {
-		return volume.SourcePV, volume.DestinationPV, volume.SourceReclaimPolicy
-	}
-
-	if session.Spec.Operation().RebindsPVC() {
-		return volume.SourcePV, domain.ObjectReference{}, volume.SourceReclaimPolicy
-	}
-
-	if session.Status.Phase == domain.PhaseRolledBack ||
-		session.Status.Phase == domain.PhaseAborted {
-		return volume.SourcePV, volume.DestinationPV, volume.SourceReclaimPolicy
-	}
-
-	return volume.DestinationPV, volume.SourcePV, volume.DestinationPolicy
-}
-
-func cleanupRollbackReclaimPolicy(
-	session *domain.Session,
-	volume *domain.VolumeSpec,
-) corev1.PersistentVolumeReclaimPolicy {
-	if cleanupKeepsSource(session) || session.Status.Phase == domain.PhaseRolledBack ||
-		session.Status.Phase == domain.PhaseAborted {
-		return volume.DestinationPolicy
-	}
-
-	if session.Spec.Operation().RebindsPVC() {
-		return ""
-	}
-
-	return volume.SourceReclaimPolicy
-}
-
-func cleanupKeepsSource(session *domain.Session) bool {
-	if session == nil {
-		return false
-	}
-
-	switch session.Spec.Operation() {
-	case domain.OperationReserve, domain.OperationCopy:
-		return true
-	default:
-		return false
-	}
-}
-
-func preservesCopyOutput(session *domain.Session, options CleanupOptions) bool {
-	return session != nil && session.Spec.Operation() == domain.OperationCopy &&
-		session.Status.Phase == domain.PhaseWarmCopied &&
-		!options.DeleteTemporary &&
-		!options.DeleteRollback
-}
-
-func cleanupPhaseAllowed(session *domain.Session) bool {
-	if session == nil {
-		return false
-	}
-
-	phase := session.Status.Phase
-	if phase == domain.PhaseAborted {
-		return true
-	}
-
-	switch session.Spec.Operation() {
-	case domain.OperationReserve:
-		return phase == domain.PhaseReserved
-	case domain.OperationCopy:
-		return phase == domain.PhaseWarmCopied
-	default:
-		return phase == domain.PhaseCompleted || phase == domain.PhaseRolledBack
-	}
-}
-
-func cleanupRollbackRole(session *domain.Session) string {
-	if cleanupKeepsSource(session) || session.Status.Phase == domain.PhaseAborted {
-		return kube.ResourceRoleDestination
-	}
-	return kube.ResourceRoleRollback
 }
 
 func (s *Service) deleteReservationPods(ctx context.Context, session *domain.Session) error {

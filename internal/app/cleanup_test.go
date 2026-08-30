@@ -60,7 +60,7 @@ func TestCleanupFinalizesActivePVAndClosesRollbackWindow(t *testing.T) {
 	store := &memoryStore{}
 
 	service := &Service{client: client, store: store}
-	if err := service.Cleanup(
+	if err := service.cleanupWorkflowForTest(
 		ctx,
 		session,
 		CleanupOptions{DeleteRollback: true, Finalize: true, DeleteSession: true},
@@ -154,7 +154,7 @@ func TestCleanupFinalizesBackupCredentialsSecret(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := service.ValidateCleanup(
+	if err := service.validateCleanupWorkflowForTest(
 		ctx,
 		session,
 		CleanupOptions{Finalize: true},
@@ -171,7 +171,7 @@ func TestCleanupFinalizesBackupCredentialsSecret(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := service.Cleanup(ctx, session, CleanupOptions{Finalize: true}); err != nil {
+	if err := service.cleanupWorkflowForTest(ctx, session, CleanupOptions{Finalize: true}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -214,7 +214,7 @@ func TestCleanupFindsCredentialsSecretMissingFromBackupCheckpoint(t *testing.T) 
 	}
 
 	service := &Service{client: client, store: &memoryStore{}}
-	if err := service.ValidateCleanup(
+	if err := service.validateCleanupWorkflowForTest(
 		ctx,
 		session,
 		CleanupOptions{Finalize: true},
@@ -231,7 +231,7 @@ func TestCleanupFindsCredentialsSecretMissingFromBackupCheckpoint(t *testing.T) 
 		t.Fatal(err)
 	}
 
-	if err := service.Cleanup(ctx, session, CleanupOptions{Finalize: true}); err != nil {
+	if err := service.cleanupWorkflowForTest(ctx, session, CleanupOptions{Finalize: true}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -254,10 +254,10 @@ func completedBackupCleanupSession(t *testing.T) *domain.Session {
 			SessionNamespace: "sessions",
 			CreatedBy:        "test",
 		},
-		domain.WorkloadSpec{Adapter: domain.WorkloadNone},
+
 		false,
-		domain.SessionWorkflowOptions{},
-	)
+		domain.SessionWorkflowOptions{})
+
 	spec.Backup.SourcePVC = domain.ObjectReference{
 		Namespace: "app",
 		Name:      "data",
@@ -323,7 +323,7 @@ func TestCleanupAbortedSessionReleasesSourceAndDeletesDestination(t *testing.T) 
 	store := &memoryStore{}
 
 	service := &Service{client: client, store: store}
-	if err := service.Cleanup(
+	if err := service.cleanupWorkflowForTest(
 		ctx,
 		session,
 		CleanupOptions{DeleteRollback: true, Finalize: true, DeleteSession: true},
@@ -522,7 +522,7 @@ func TestCleanupAbortedSessionSkipsReplacedSourceResources(t *testing.T) {
 	store := &memoryStore{}
 
 	service := &Service{client: client, store: store}
-	if err := service.Cleanup(
+	if err := service.cleanupWorkflowForTest(
 		ctx,
 		session,
 		CleanupOptions{DeleteRollback: true, Finalize: true, DeleteSession: true},
@@ -572,7 +572,7 @@ func TestCleanupAbortedCopyBeforeReservePreservesUnownedSourcePV(t *testing.T) {
 	store := &memoryStore{}
 
 	service := &Service{client: client, store: store}
-	if err := service.Cleanup(
+	if err := service.cleanupWorkflowForTest(
 		ctx,
 		session,
 		CleanupOptions{Finalize: true, DeleteSession: true},
@@ -611,7 +611,7 @@ func TestValidateCleanupAbortedCopyChecksUncheckpointedSourceIdentity(t *testing
 	)
 	service := &Service{client: client, store: &memoryStore{}}
 
-	err := service.ValidateCleanup(
+	err := service.validateCleanupWorkflowForTest(
 		context.Background(),
 		session,
 		CleanupOptions{Finalize: true, DeleteSession: true},
@@ -638,7 +638,7 @@ func TestValidateCleanupAbortedCopyPreservesUnownedSourcePolicyChanges(t *testin
 	)
 
 	service := &Service{client: client, store: &memoryStore{}}
-	if err := service.ValidateCleanup(
+	if err := service.validateCleanupWorkflowForTest(
 		context.Background(),
 		session,
 		CleanupOptions{Finalize: true, DeleteSession: true},
@@ -662,7 +662,7 @@ func TestCleanupAbortedCopyReleasesSourceAfterCheckpointLoss(t *testing.T) {
 	)
 
 	service := &Service{client: client, store: &memoryStore{}}
-	if err := service.Cleanup(
+	if err := service.cleanupWorkflowForTest(
 		ctx,
 		session,
 		CleanupOptions{Finalize: true, DeleteSession: true},
@@ -709,11 +709,11 @@ func TestCleanupAbortedMigrationBeforeReservePreservesForeignOwner(t *testing.T)
 	service := &Service{client: client, store: store}
 
 	options := CleanupOptions{Finalize: true, DeleteSession: true}
-	if err := service.ValidateCleanup(ctx, session, options); err != nil {
+	if err := service.validateCleanupWorkflowForTest(ctx, session, options); err != nil {
 		t.Fatal(err)
 	}
 
-	if err := service.Cleanup(ctx, session, options); err != nil {
+	if err := service.cleanupWorkflowForTest(ctx, session, options); err != nil {
 		t.Fatal(err)
 	}
 
@@ -752,7 +752,7 @@ func TestCleanupAbortedMigrationReleasesOwnPreCheckpointSource(t *testing.T) {
 	)
 
 	service := &Service{client: client, store: &memoryStore{}}
-	if err := service.Cleanup(
+	if err := service.cleanupWorkflowForTest(
 		ctx,
 		session,
 		CleanupOptions{Finalize: true, DeleteSession: true},
@@ -781,7 +781,7 @@ func TestCleanupRequiresRollbackClosureBeforeSessionDeletion(t *testing.T) {
 	session.Status.Phase = domain.PhaseCompleted
 	service := &Service{client: fake.NewClientset(), store: &memoryStore{}}
 
-	err := service.Cleanup(context.Background(), session, CleanupOptions{DeleteSession: true})
+	err := service.cleanupWorkflowForTest(context.Background(), session, CleanupOptions{DeleteSession: true})
 	if domain.CategoryOf(err) != domain.ErrorPrecondition {
 		t.Fatalf("category=%s error=%v", domain.CategoryOf(err), err)
 	}
@@ -848,11 +848,11 @@ func TestCleanupSingleStageSessionsRemovesDestinationAndFinalizesSource(t *testi
 				DeleteSession:   true,
 			}
 
-			if err := service.ValidateCleanup(ctx, session, options); err != nil {
+			if err := service.validateCleanupWorkflowForTest(ctx, session, options); err != nil {
 				t.Fatalf("validate cleanup: %v", err)
 			}
 
-			if err := service.Cleanup(ctx, session, options); err != nil {
+			if err := service.cleanupWorkflowForTest(ctx, session, options); err != nil {
 				t.Fatalf("cleanup: %v", err)
 			}
 
@@ -958,11 +958,11 @@ func TestCleanupCompletedCopyCanPreserveOutputAndDeleteSession(t *testing.T) {
 	service := &Service{client: client, store: store}
 	options := CleanupOptions{Finalize: true, DeleteSession: true}
 
-	if err := service.ValidateCleanup(ctx, session, options); err != nil {
+	if err := service.validateCleanupWorkflowForTest(ctx, session, options); err != nil {
 		t.Fatal(err)
 	}
 
-	if err := service.Cleanup(ctx, session, options); err != nil {
+	if err := service.cleanupWorkflowForTest(ctx, session, options); err != nil {
 		t.Fatal(err)
 	}
 
@@ -1010,11 +1010,11 @@ func TestCleanupCompletedCopyCanPreserveOutputAndDeleteSession(t *testing.T) {
 		t.Fatalf("session deletes=%d", store.deletes)
 	}
 
-	if err := service.ValidateCleanup(ctx, session, options); err != nil {
+	if err := service.validateCleanupWorkflowForTest(ctx, session, options); err != nil {
 		t.Fatalf("idempotent validation: %v", err)
 	}
 
-	if err := service.Cleanup(ctx, session, options); err != nil {
+	if err := service.cleanupWorkflowForTest(ctx, session, options); err != nil {
 		t.Fatalf("idempotent cleanup: %v", err)
 	}
 }
@@ -1026,7 +1026,7 @@ func TestCleanupRejectsSingleStageNonTerminalPhase(t *testing.T) {
 		session.Status.Phase = domain.PhaseFailed
 		service := &Service{client: fake.NewClientset(), store: &memoryStore{}}
 
-		err := service.ValidateCleanup(context.Background(), session, CleanupOptions{})
+		err := service.validateCleanupWorkflowForTest(context.Background(), session, CleanupOptions{})
 		if domain.CategoryOf(err) != domain.ErrorPrecondition {
 			t.Fatalf("operation=%s category=%s error=%v", operation, domain.CategoryOf(err), err)
 		}

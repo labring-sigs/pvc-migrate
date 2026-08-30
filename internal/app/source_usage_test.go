@@ -49,10 +49,9 @@ func shrinkUsageSession(skip bool) *domain.Session {
 		Spec: domain.NewSessionSpec(
 			domain.OperationCopy,
 			common,
-			domain.WorkloadSpec{},
+
 			false,
-			domain.SessionWorkflowOptions{SkipSourceUsageCheck: skip},
-		),
+			domain.SessionWorkflowOptions{SkipSourceUsageCheck: skip}),
 	}
 }
 
@@ -128,7 +127,7 @@ func TestVerifyShrinkUsageExplicitSkipBypassesReader(t *testing.T) {
 	}
 }
 
-func TestValidateFinalSyncRechecksShrinkUsageWhenAlreadyPaused(t *testing.T) {
+func TestValidatePodFinalSyncRechecksShrinkUsageWhenAlreadyPaused(t *testing.T) {
 	fixture := newRecoveryFixture(t)
 	session := appTestSession()
 	session.Status.Phase = domain.PhasePaused
@@ -139,7 +138,7 @@ func TestValidateFinalSyncRechecksShrinkUsageWhenAlreadyPaused(t *testing.T) {
 	}
 	fixture.service.config.VolumeUsageReader = reader
 
-	err := fixture.service.ValidateFinalSync(context.Background(), session)
+	err := fixture.service.ValidatePodFinalSync(context.Background(), session)
 	if err == nil || !strings.Contains(err.Error(), "above destination capacity") {
 		t.Fatalf("error=%v", err)
 	}
@@ -149,7 +148,7 @@ func TestValidateFinalSyncRechecksShrinkUsageWhenAlreadyPaused(t *testing.T) {
 	}
 }
 
-func TestPauseAndFinalSyncRechecksShrinkUsageWhenAlreadyPaused(t *testing.T) {
+func TestPodPauseAndFinalSyncRechecksShrinkUsageWhenAlreadyPaused(t *testing.T) {
 	fixture := newRecoveryFixture(t)
 	session := appTestSession()
 	session.Status.Phase = domain.PhasePaused
@@ -159,7 +158,7 @@ func TestPauseAndFinalSyncRechecksShrinkUsageWhenAlreadyPaused(t *testing.T) {
 		result: kube.VolumeUsageReadResult{UsedBytes: 2 << 30, Source: "test storage CRD"},
 	}
 
-	err := fixture.service.PauseAndFinalSync(context.Background(), session)
+	err := fixture.service.PodPauseAndFinalSync(context.Background(), session)
 	if err == nil || !strings.Contains(err.Error(), "above destination capacity") {
 		t.Fatalf("error=%v", err)
 	}
@@ -169,7 +168,7 @@ func TestPauseAndFinalSyncRechecksShrinkUsageWhenAlreadyPaused(t *testing.T) {
 	}
 }
 
-func TestPauseAndFinalSyncRechecksShrinkUsageAfterPause(t *testing.T) {
+func TestPodPauseAndFinalSyncRechecksShrinkUsageAfterPause(t *testing.T) {
 	fixture := newRecoveryFixture(t)
 	session := appTestSession()
 	session.Status.Phase = domain.PhaseReserved
@@ -188,7 +187,7 @@ func TestPauseAndFinalSyncRechecksShrinkUsageAfterPause(t *testing.T) {
 		},
 	)
 
-	err := fixture.service.PauseAndFinalSync(context.Background(), session)
+	err := fixture.service.PodPauseAndFinalSync(context.Background(), session)
 	if err == nil || !strings.Contains(err.Error(), "above destination capacity") {
 		t.Fatalf("error=%v", err)
 	}
@@ -202,7 +201,7 @@ func TestPauseAndFinalSyncRechecksShrinkUsageAfterPause(t *testing.T) {
 	}
 }
 
-func TestValidateActivationRejectsApplicationPVCQuotaBeforeSwitch(t *testing.T) {
+func TestValidatePodActivationRejectsApplicationPVCQuotaBeforeSwitch(t *testing.T) {
 	fixture := newRecoveryFixture(t)
 	session := appTestSession()
 	markTestSessionReserved(session)
@@ -249,7 +248,7 @@ func TestValidateActivationRejectsApplicationPVCQuotaBeforeSwitch(t *testing.T) 
 		t.Fatal(err)
 	}
 
-	err := fixture.service.ValidateActivation(context.Background(), session)
+	err := fixture.service.ValidatePodActivation(context.Background(), session)
 	if err == nil || !strings.Contains(err.Error(), "quota rejected") {
 		t.Fatalf("error=%v", err)
 	}

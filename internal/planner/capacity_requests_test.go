@@ -44,7 +44,7 @@ func planWithDestinationCapacityObjects(
 		plannerClient(objects...),
 		nil,
 	).WithVolumeUsageReader(staticUsageReader{bytes: 1024}).
-		Plan(context.Background(), Options{
+		plan(context.Background(), planOptions{
 			SessionID:             "capacity-test",
 			Operation:             domain.OperationCopy,
 			SourceNamespace:       "app",
@@ -167,7 +167,7 @@ func TestPlanRejectsBackendUsageAboveShrinkTarget(t *testing.T) {
 		plannerClient(plannerObjects("2Gi")...),
 		nil,
 	).WithVolumeUsageReader(staticUsageReader{bytes: 2 << 30}).
-		Plan(context.Background(), Options{
+		plan(context.Background(), planOptions{
 			SessionID:             "capacity-overflow",
 			Operation:             domain.OperationCopy,
 			SourceNamespace:       "app",
@@ -191,7 +191,7 @@ func TestPlanRejectsBackendUsageAboveShrinkTarget(t *testing.T) {
 }
 
 func TestPlanRequiresExplicitSourceUsageSkip(t *testing.T) {
-	base := Options{
+	base := planOptions{
 		SessionID:             "capacity-unknown",
 		Operation:             domain.OperationCopy,
 		SourceNamespace:       "app",
@@ -210,7 +210,7 @@ func TestPlanRequiresExplicitSourceUsageSkip(t *testing.T) {
 		plannerClient(plannerObjects("2Gi")...),
 		nil,
 	).WithVolumeUsageReader(errorUsageReader{}).
-		Plan(context.Background(), base)
+		plan(context.Background(), base)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -225,7 +225,7 @@ func TestPlanRequiresExplicitSourceUsageSkip(t *testing.T) {
 		plannerClient(plannerObjects("2Gi")...),
 		nil,
 	).WithVolumeUsageReader(errorUsageReader{}).
-		Plan(context.Background(), base)
+		plan(context.Background(), base)
 	if err != nil || !plan.Ready {
 		t.Fatalf("expected explicit source-usage skip: err=%v checks=%#v", err, plan.Checks)
 	}
@@ -235,7 +235,7 @@ func TestPlanRequiresTrustedReaderByDefault(t *testing.T) {
 	plan, err := New(
 		plannerClient(plannerObjects("2Gi")...),
 		nil,
-	).Plan(context.Background(), Options{
+	).plan(context.Background(), planOptions{
 		SessionID:             "capacity-no-reader",
 		Operation:             domain.OperationCopy,
 		SourceNamespace:       "app",

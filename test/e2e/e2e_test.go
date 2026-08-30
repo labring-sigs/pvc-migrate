@@ -277,7 +277,7 @@ func TestStandaloneWFFCMigrationAndRollback(t *testing.T) {
 		append(
 			append([]string{}, common...),
 			"--yes",
-			"session",
+			"migrate-pod",
 			"rollback",
 			sessionID,
 			"--dry-run=false",
@@ -309,7 +309,7 @@ func TestStandaloneWFFCMigrationAndRollback(t *testing.T) {
 		append(
 			append([]string{}, common...),
 			"--yes",
-			"session",
+			"migrate-pod",
 			"cleanup",
 			sessionID,
 			"--delete-rollback-pv",
@@ -333,6 +333,245 @@ func TestStandaloneWFFCMigrationAndRollback(t *testing.T) {
 	}
 	if finalPVC.Annotations[sessionLabel] != "" {
 		t.Fatalf("finalized PVC remains session-owned: %v", finalPVC.Annotations)
+	}
+}
+
+func TestOfflineMigrationAndRollback(t *testing.T) {
+	if os.Getenv("PVC_MIGRATE_E2E") != "1" {
+		t.Skip("set PVC_MIGRATE_E2E=1 to run cluster E2E tests")
+	}
+	kubeconfig := os.Getenv("PVC_MIGRATE_E2E_KUBECONFIG")
+	if kubeconfig == "" {
+		kubeconfig = os.Getenv("KUBECONFIG")
+	}
+	if kubeconfig == "" {
+		t.Fatal("PVC_MIGRATE_E2E_KUBECONFIG or KUBECONFIG is required")
+	}
+	config, err := clientcmd.BuildConfigFromFlags("", kubeconfig)
+	if err != nil {
+		t.Fatal(err)
+	}
+	config.UserAgent = "pvc-migrate-e2e-offline"
+	client, err := kubernetes.NewForConfig(config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 25*time.Minute)
+	defer cancel()
+	suffix := strconv.FormatInt(time.Now().UTC().UnixNano(), 36)
+	if len(suffix) > 10 {
+		suffix = suffix[len(suffix)-10:]
+	}
+	namespace := "pvc-migrate-offline-" + suffix
+	sessionID := "offline-" + suffix
+	defer cleanupTestResources(t, client, namespace, sessionID)
+
+	if _, err := client.CoreV1().Namespaces().Create(ctx, &corev1.Namespace{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: namespace,
+			Labels: map[string]string{
+				"app.kubernetes.io/managed-by": "pvc-migrate-e2e",
+				sessionLabel:                   sessionID,
+			},
+		},
+	}, metav1.CreateOptions{}); err != nil {
+		t.Fatal(err)
+	}
+
+	sourceClass := envOrDefault("PVC_MIGRATE_E2E_SOURCE_CLASS", "openebs-hostpath")
+	destinationClass := envOrDefault(
+		"PVC_MIGRATE_E2E_DESTINATION_CLASS",
+		"openebs-backup",
+	)
+	claimName := "data"
+	if _, err := client.CoreV1().PersistentVolumeClaims(namespace).Create(
+		ctx,
+		&corev1.PersistentVolumeClaim{
+			ObjectMeta: metav1.ObjectMeta{Name: claimName, Namespace: namespace},
+			Spec: corev1.PersistentVolumeClaimSpec{
+				AccessModes:      []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce},
+				StorageClassName: &sourceClass,
+				Resources: corev1.VolumeResourceRequirements{Requests: corev1.ResourceList{
+					corev1.ResourceStorage: resource.MustParse("64Mi"),
+				}},
+			},
+		},
+		metav1.CreateOptions{},
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	marker := "offline-e2e-" + suffix
+	initializerName := "initializer"
+	if _, err := client.CoreV1().Pods(namespace).Create(ctx, &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: initializerName, Namespace: namespace},
+		Spec: corev1.PodSpec{
+			RestartPolicy: corev1.RestartPolicyAlways,
+			Containers: []corev1.Container{{
+				Name:  "writer",
+				Image: envOrDefault("PVC_MIGRATE_E2E_HELPER_IMAGE", "busybox:1.36.1"),
+				Command: []string{
+					"sh",
+					"-c",
+					"set -eu; printf '%s\\n' \"$1\" > /data/payload; dd if=/dev/zero bs=1048576 count=8 >> /data/payload 2>/dev/null; sync; touch /data/ready; exec sleep 86400",
+					"initializer",
+					marker,
+				},
+				ReadinessProbe: &corev1.Probe{
+					ProbeHandler: corev1.ProbeHandler{Exec: &corev1.ExecAction{
+						Command: []string{"test", "-f", "/data/ready"},
+					}},
+					PeriodSeconds: 1,
+				},
+				VolumeMounts: []corev1.VolumeMount{{Name: "data", MountPath: "/data"}},
+			}},
+			Volumes: []corev1.Volume{{
+				Name: "data",
+				VolumeSource: corev1.VolumeSource{
+					PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
+						ClaimName: claimName,
+					},
+				},
+			}},
+		},
+	}, metav1.CreateOptions{}); err != nil {
+		t.Fatal(err)
+	}
+
+	initializer := waitForReadyPod(t, ctx, client, namespace, initializerName, "")
+	sourceNode := initializer.Spec.NodeName
+	sourceDigest := podDigest(t, ctx, config, client, namespace, initializerName)
+	uid := initializer.UID
+	if err := client.CoreV1().Pods(namespace).Delete(
+		ctx,
+		initializerName,
+		metav1.DeleteOptions{Preconditions: &metav1.Preconditions{UID: &uid}},
+	); err != nil {
+		t.Fatal(err)
+	}
+	if err := waitForPodDeletion(ctx, client, namespace, initializerName); err != nil {
+		t.Fatal(err)
+	}
+
+	targetNode := os.Getenv("PVC_MIGRATE_E2E_TARGET_NODE")
+	if targetNode == "" || targetNode == sourceNode {
+		targetNode = chooseTargetNode(t, ctx, client, sourceNode)
+	}
+	binary := e2eBinary(t, ctx)
+	common := []string{
+		"--kubeconfig", kubeconfig,
+		"--session-namespace", namespace,
+		"--timeout", "12m",
+		"--output", "json",
+	}
+	if toolImage := os.Getenv("PVC_MIGRATE_E2E_TOOL_IMAGE"); toolImage != "" {
+		common = append(common, "--tool-image", toolImage)
+	}
+	migration := []string{
+		"migrate",
+		"--session", sessionID,
+		"--source-namespace", namespace,
+		"--temporary-namespace", namespace,
+		"--source-pvc", claimName,
+		"--source-node", sourceNode,
+		"--target-node", targetNode,
+		"--destination-storage-class", destinationClass,
+		"--strategy", "clusterip",
+	}
+	runCLI(
+		t,
+		ctx,
+		binary,
+		append(append([]string{}, common...), append(append([]string{}, migration...), "--dry-run")...)...,
+	)
+	if _, err := client.CoreV1().ConfigMaps(namespace).Get(
+		ctx,
+		"pvc-migrate-session-"+sessionID,
+		metav1.GetOptions{},
+	); !apierrors.IsNotFound(err) {
+		t.Fatalf("offline dry-run created a session ConfigMap: %v", err)
+	}
+	executeMigration := append(append([]string{"--yes"}, migration...), "--dry-run=false")
+	runCLI(t, ctx, binary, append(append([]string{}, common...), executeMigration...)...)
+
+	migratedPVC, err := client.CoreV1().PersistentVolumeClaims(namespace).Get(
+		ctx,
+		claimName,
+		metav1.GetOptions{},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if migratedPVC.Status.Phase != corev1.ClaimBound {
+		t.Fatalf("migrated PVC phase=%s", migratedPVC.Status.Phase)
+	}
+	sessionData := readCopySession(t, ctx, client, namespace, sessionID)
+	if len(sessionData.Spec.Volumes) != 1 {
+		t.Fatalf("offline session volumes=%d want=1", len(sessionData.Spec.Volumes))
+	}
+	sourcePV := sessionData.Spec.Volumes[0].SourcePV.Name
+	if migratedPVC.Spec.VolumeName == sourcePV {
+		t.Fatalf("offline migration retained source PV %s as active", sourcePV)
+	}
+	assertSessionPhase(t, ctx, client, namespace, sessionID, "Completed")
+	assertOfflineSessionPayloadShape(t, ctx, client, namespace, sessionID)
+
+	readerName := "migrated-reader"
+	createPVCReader(t, ctx, client, namespace, readerName, targetNode, []string{claimName})
+	waitForReadyPod(t, ctx, client, namespace, readerName, targetNode)
+	if digest := readerDigest(t, ctx, config, client, namespace, readerName); digest != sourceDigest {
+		t.Fatalf("offline migrated digest=%s want=%s", digest, sourceDigest)
+	}
+	deletePod(t, ctx, client, namespace, readerName)
+
+	runCLI(
+		t,
+		ctx,
+		binary,
+		append(
+			append([]string{}, common...),
+			[]string{"--yes", "migrate", "rollback", sessionID, "--dry-run=false"}...,
+		)...,
+	)
+	assertSessionPhase(t, ctx, client, namespace, sessionID, "RolledBack")
+	rolledBackPVC, err := client.CoreV1().PersistentVolumeClaims(namespace).Get(
+		ctx,
+		claimName,
+		metav1.GetOptions{},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rolledBackPVC.Spec.VolumeName != sourcePV {
+		t.Fatalf("rolled-back PVC volume=%s want=%s", rolledBackPVC.Spec.VolumeName, sourcePV)
+	}
+	readerName = "rollback-reader"
+	createPVCReader(t, ctx, client, namespace, readerName, sourceNode, []string{claimName})
+	waitForReadyPod(t, ctx, client, namespace, readerName, sourceNode)
+	if digest := readerDigest(t, ctx, config, client, namespace, readerName); digest != sourceDigest {
+		t.Fatalf("offline rollback digest=%s want=%s", digest, sourceDigest)
+	}
+	deletePod(t, ctx, client, namespace, readerName)
+
+	setRollbackPVsToDelete(t, ctx, client, sessionID)
+	runCLI(
+		t,
+		ctx,
+		binary,
+		append(
+			append([]string{}, common...),
+			[]string{
+				"--yes", "migrate", "cleanup", sessionID,
+				"--delete-rollback-pv", "--finalize", "--delete-session", "--dry-run=false",
+			}...,
+		)...,
+	)
+	if _, err := client.CoreV1().ConfigMaps(namespace).Get(
+		ctx,
+		"pvc-migrate-session-"+sessionID,
+		metav1.GetOptions{},
+	); !apierrors.IsNotFound(err) {
+		t.Fatalf("offline session ConfigMap still exists: %v", err)
 	}
 }
 
@@ -541,7 +780,7 @@ func TestHelmManagedStatefulSetMigrationAndRollback(t *testing.T) {
 		append(
 			append([]string{}, common...),
 			"--yes",
-			"session",
+			"migrate-pod",
 			"rollback",
 			sessionID,
 			"--dry-run=false",
@@ -576,7 +815,7 @@ func TestHelmManagedStatefulSetMigrationAndRollback(t *testing.T) {
 		append(
 			append([]string{}, common...),
 			"--yes",
-			"session",
+			"migrate-pod",
 			"cleanup",
 			sessionID,
 			"--delete-rollback-pv",
@@ -805,7 +1044,7 @@ func TestOnlineCopyMultiVolumeIdempotencyAndCleanup(t *testing.T) {
 			t,
 			ctx,
 			binary,
-			append(append([]string{}, common...), "session", "status", sessionID)...,
+			append(append([]string{}, common...), "copy", "status", sessionID)...,
 		),
 		&statusOutput,
 	); err != nil {
@@ -817,7 +1056,7 @@ func TestOnlineCopyMultiVolumeIdempotencyAndCleanup(t *testing.T) {
 	}
 	var listedSessions []copySessionSnapshot
 	if err := json.Unmarshal(
-		runCLI(t, ctx, binary, append(append([]string{}, common...), "session", "status")...),
+		runCLI(t, ctx, binary, append(append([]string{}, common...), "copy", "status")...),
 		&listedSessions,
 	); err != nil {
 		t.Fatal(err)
@@ -945,25 +1184,7 @@ func TestOnlineCopyMultiVolumeIdempotencyAndCleanup(t *testing.T) {
 		append(
 			append([]string{}, common...),
 			"--yes",
-			"session",
-			"rollback",
-			sessionID,
-			"--dry-run=false",
-		)...,
-	); !strings.Contains(
-		string(output),
-		"phase WarmCopied cannot roll back",
-	) {
-		t.Fatalf("unexpected rollback error: %s", output)
-	}
-	if output := runCLIExpectFailure(
-		t,
-		ctx,
-		binary,
-		append(
-			append([]string{}, common...),
-			"--yes",
-			"session",
+			"copy",
 			"cleanup",
 			sessionID,
 			"--delete-temporary",
@@ -975,43 +1196,6 @@ func TestOnlineCopyMultiVolumeIdempotencyAndCleanup(t *testing.T) {
 	) {
 		t.Fatalf("unexpected mounted cleanup error: %s", output)
 	}
-	if output := runCLIExpectFailure(
-		t,
-		ctx,
-		binary,
-		append(
-			append([]string{}, common...),
-			"--yes",
-			"final-sync",
-			"--session",
-			sessionID,
-			"--dry-run=false",
-		)...,
-	); !strings.Contains(
-		string(output),
-		"final sync requires an orchestrated",
-	) {
-		t.Fatalf("unexpected final-sync error: %s", output)
-	}
-	if output := runCLIExpectFailure(
-		t,
-		ctx,
-		binary,
-		append(
-			append([]string{}, common...),
-			"--yes",
-			"activate",
-			"--session",
-			sessionID,
-			"--dry-run=false",
-		)...,
-	); !strings.Contains(
-		string(output),
-		"activation requires an orchestrated",
-	) {
-		t.Fatalf("unexpected activate error: %s", output)
-	}
-
 	runCLI(
 		t,
 		ctx,
@@ -1019,7 +1203,7 @@ func TestOnlineCopyMultiVolumeIdempotencyAndCleanup(t *testing.T) {
 		append(
 			append([]string{}, common...),
 			"--yes",
-			"session",
+			"copy",
 			"abort",
 			sessionID,
 			"--dry-run=false",
@@ -1033,7 +1217,7 @@ func TestOnlineCopyMultiVolumeIdempotencyAndCleanup(t *testing.T) {
 		append(
 			append([]string{}, common...),
 			"--yes",
-			"session",
+			"copy",
 			"resume",
 			sessionID,
 			"--dry-run=false",
@@ -1047,7 +1231,7 @@ func TestOnlineCopyMultiVolumeIdempotencyAndCleanup(t *testing.T) {
 		append(
 			append([]string{}, common...),
 			"--yes",
-			"session",
+			"copy",
 			"cleanup",
 			sessionID,
 			"--delete-temporary",
@@ -1067,7 +1251,7 @@ func TestOnlineCopyMultiVolumeIdempotencyAndCleanup(t *testing.T) {
 		append(
 			append([]string{}, common...),
 			"--yes",
-			"session",
+			"copy",
 			"cleanup",
 			sessionID,
 			"--delete-temporary",
@@ -1585,6 +1769,17 @@ func chooseTargetNode(
 		if _, controlPlane := node.Labels["node-role.kubernetes.io/control-plane"]; controlPlane {
 			continue
 		}
+		blocked := false
+		for _, taint := range node.Spec.Taints {
+			if taint.Effect == corev1.TaintEffectNoSchedule ||
+				taint.Effect == corev1.TaintEffectNoExecute {
+				blocked = true
+				break
+			}
+		}
+		if blocked {
+			continue
+		}
 		for _, condition := range node.Status.Conditions {
 			if condition.Type == corev1.NodeReady && condition.Status == corev1.ConditionTrue {
 				return node.Name
@@ -1616,6 +1811,31 @@ func podDigest(
 	fields := strings.Fields(output)
 	if len(fields) == 0 {
 		t.Fatalf("empty sha256sum output: %q", output)
+	}
+	return fields[0]
+}
+
+func readerDigest(
+	t *testing.T,
+	ctx context.Context,
+	config *rest.Config,
+	client kubernetes.Interface,
+	namespace, pod string,
+) string {
+	t.Helper()
+	output := execOutput(
+		t,
+		ctx,
+		config,
+		client,
+		namespace,
+		pod,
+		"reader",
+		[]string{"sha256sum", "/data-0/payload"},
+	)
+	fields := strings.Fields(output)
+	if len(fields) == 0 {
+		t.Fatalf("empty reader sha256sum output: %q", output)
 	}
 	return fields[0]
 }
@@ -1722,6 +1942,50 @@ func assertSessionPayloadShape(
 	for _, field := range []string{"sourceNode", "targetNode", "strategies", "verifyChecksum", "deleteExtraneous", "workload"} {
 		if _, exists := fields[field]; !exists {
 			t.Fatalf("migratePod payload field %q missing: %s", field, payload)
+		}
+	}
+}
+
+func assertOfflineSessionPayloadShape(
+	t *testing.T,
+	ctx context.Context,
+	client kubernetes.Interface,
+	namespace, id string,
+) {
+	t.Helper()
+	configMap, err := client.CoreV1().ConfigMaps(namespace).Get(
+		ctx,
+		"pvc-migrate-session-"+id,
+		metav1.GetOptions{},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var document struct {
+		Spec map[string]json.RawMessage `json:"spec"`
+	}
+	if err := json.Unmarshal([]byte(configMap.Data[sessionKey]), &document); err != nil {
+		t.Fatal(err)
+	}
+	var sessionType string
+	if err := json.Unmarshal(document.Spec["type"], &sessionType); err != nil {
+		t.Fatal(err)
+	}
+	if sessionType != "Migrate" {
+		t.Fatalf("session type=%q want Migrate", sessionType)
+	}
+	for _, forbidden := range []string{"migratePod", "workload", "precopyPasses", "openebsLvmEnableShared"} {
+		if _, exists := document.Spec[forbidden]; exists {
+			t.Fatalf("real-time field %q leaked into offline Session spec", forbidden)
+		}
+	}
+	payload, exists := document.Spec["migrate"]
+	if !exists {
+		t.Fatalf("offline migrate payload missing: %s", configMap.Data[sessionKey])
+	}
+	for _, forbidden := range []string{"workload", "precopyPasses", "openebsLvmEnableShared"} {
+		if bytes.Contains(payload, []byte(forbidden)) {
+			t.Fatalf("real-time field %q leaked into offline payload: %s", forbidden, payload)
 		}
 	}
 }

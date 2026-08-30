@@ -6,6 +6,7 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -47,23 +48,65 @@ func TestRootCommandSurfaceAndGlobalDefaults(t *testing.T) {
 	})
 }
 
+func TestOperationCommandSurfacesStayIndependent(t *testing.T) {
+	root := NewRoot(Options{Version: "test"})
+	checks := []struct {
+		path    []string
+		present []string
+		absent  []string
+	}{
+		{path: []string{"reserve"}, absent: []string{"online", "source-node"}},
+		{path: []string{"reserve", "plan"}, absent: []string{"online", "source-node"}},
+		{path: []string{"copy"}, present: []string{"online", "source-node", "pod"}},
+		{path: []string{"copy", "plan"}, present: []string{"online", "source-node", "pod"}},
+		{path: []string{"rename"}, present: []string{"destination-pvc"}, absent: []string{"destination-namespace"}},
+		{path: []string{"rename", "plan"}, present: []string{"destination-pvc"}, absent: []string{"destination-namespace", "online", "source-node", "pod", "destination-capacity", "source-path", "target-node"}},
+		{path: []string{"move"}, present: []string{"destination-pvc", "destination-namespace"}, absent: []string{"online", "source-node", "pod", "destination-capacity", "source-path", "target-node"}},
+		{path: []string{"move", "plan"}, present: []string{"destination-pvc", "destination-namespace"}, absent: []string{"online", "source-node", "pod", "destination-capacity", "source-path", "target-node"}},
+		{path: []string{"backup"}, present: []string{"online", "openebs-lvm-enable-shared"}},
+		{path: []string{"backup", "plan"}, present: []string{"online", "openebs-lvm-enable-shared"}},
+		{path: []string{"reserve", "cross-cluster", "run"}, absent: []string{"online", "verify-checksum", "delete-extraneous"}},
+		{path: []string{"reserve", "cross-cluster", "plan"}, absent: []string{"online", "verify-checksum", "delete-extraneous"}},
+		{path: []string{"reserve", "cross-cluster", "status"}, absent: []string{"online", "verify-checksum", "delete-extraneous", "source-pvc", "destination-pvc"}},
+		{path: []string{"reserve", "cross-cluster", "resume"}, absent: []string{"online", "verify-checksum", "delete-extraneous", "source-pvc", "destination-pvc"}},
+		{path: []string{"reserve", "cross-cluster", "cleanup"}, absent: []string{"online", "verify-checksum", "delete-extraneous", "source-pvc", "destination-pvc"}},
+		{path: []string{"copy", "cross-cluster", "run"}, present: []string{"online", "verify-checksum", "delete-extraneous"}},
+		{path: []string{"copy", "cross-cluster", "status"}, absent: []string{"source-pvc", "destination-pvc", "destination-capacity", "online", "verify-checksum", "delete-extraneous"}},
+		{path: []string{"copy", "cross-cluster", "resume"}, absent: []string{"source-pvc", "destination-pvc", "destination-capacity", "online", "verify-checksum", "delete-extraneous"}},
+		{path: []string{"copy", "cross-cluster", "cleanup"}, absent: []string{"source-pvc", "destination-pvc", "destination-capacity", "online", "verify-checksum", "delete-extraneous"}},
+	}
+	for _, check := range checks {
+		command, _, err := root.Find(check.path)
+		if err != nil {
+			t.Fatalf("Find(%v): %v", check.path, err)
+		}
+		for _, name := range check.present {
+			if command.Flags().Lookup(name) == nil {
+				t.Fatalf("%v missing --%s", check.path, name)
+			}
+		}
+		for _, name := range check.absent {
+			if command.Flags().Lookup(name) != nil {
+				t.Fatalf("%v unexpectedly exposes --%s", check.path, name)
+			}
+		}
+	}
+}
+
 func testRootCommandSurface(t *testing.T, root *cobra.Command) {
 	t.Helper()
 
 	wantCommands := []string{
-		"activate",
 		"backup",
 		"completion",
 		"copy",
-		"final-sync",
-		"live-backup",
 		"migrate",
 		"migrate-pod",
 		"move",
 		"rename",
 		"reserve",
 		"restore",
-		"session",
+		"recovery",
 		"version",
 	}
 	for _, name := range wantCommands {
@@ -76,10 +119,17 @@ func testRootCommandSurface(t *testing.T, root *cobra.Command) {
 	if mv, _, err := root.Find([]string{"mv"}); err == nil && mv != root {
 		t.Fatalf("removed mv alias resolved to command %v", mv)
 	}
+	if session, _, err := root.Find([]string{"session"}); err == nil && session != root {
+		t.Fatalf("removed session command resolved to %v", session)
+	}
+	for _, name := range []string{"final-sync", "activate"} {
+		if command, _, err := root.Find([]string{name}); err == nil && command != root {
+			t.Fatalf("removed top-level %s command resolved to %v", name, command)
+		}
+	}
 
-	liveBackup, _, err := root.Find([]string{"live-backup"})
-	if err != nil || liveBackup.Name() != "live-backup" {
-		t.Fatalf("live-backup alias command=%v error=%v", liveBackup, err)
+	if command, _, err := root.Find([]string{"live-backup"}); err == nil && command != root {
+		t.Fatalf("removed live-backup command resolved to %v", command)
 	}
 
 	for name, want := range map[string]string{
@@ -116,22 +166,40 @@ func testRootDryRunPlacement(t *testing.T, root *cobra.Command) {
 	t.Helper()
 
 	mutationPaths := [][]string{
-		{"activate"},
 		{"backup"},
 		{"copy"},
-		{"final-sync"},
-		{"live-backup"},
 		{"migrate"},
+		{"migrate", "resume"},
+		{"migrate", "abort"},
+		{"migrate", "rollback"},
+		{"migrate", "cleanup"},
 		{"migrate-pod"},
+		{"migrate-pod", "resume"},
+		{"migrate-pod", "abort"},
+		{"migrate-pod", "rollback"},
+		{"migrate-pod", "cleanup"},
 		{"move"},
 		{"rename"},
 		{"reserve"},
 		{"restore"},
-		{"session", "abort"},
-		{"session", "cleanup"},
-		{"session", "resume"},
-		{"session", "rollback"},
-		{"session", "cleanup-orphan"},
+		{"reserve", "resume"},
+		{"reserve", "abort"},
+		{"reserve", "cleanup"},
+		{"copy", "resume"},
+		{"copy", "abort"},
+		{"copy", "cleanup"},
+		{"rename", "resume"},
+		{"rename", "abort"},
+		{"rename", "rollback"},
+		{"rename", "cleanup"},
+		{"move", "resume"},
+		{"move", "abort"},
+		{"move", "rollback"},
+		{"move", "cleanup"},
+		{"backup", "resume"},
+		{"backup", "abort"},
+		{"backup", "cleanup"},
+		{"recovery", "cleanup-orphan"},
 	}
 	for _, path := range mutationPaths {
 		command, _, err := root.Find(path)
@@ -146,21 +214,14 @@ func testRootDryRunPlacement(t *testing.T, root *cobra.Command) {
 	}
 
 	planPaths := [][]string{
-		{"activate", "plan"},
 		{"backup", "plan"},
 		{"copy", "plan"},
-		{"final-sync", "plan"},
-		{"live-backup", "plan"},
 		{"migrate", "plan"},
 		{"migrate-pod", "plan"},
 		{"move", "plan"},
 		{"rename", "plan"},
 		{"reserve", "plan"},
 		{"restore", "plan"},
-		{"session", "abort", "plan"},
-		{"session", "cleanup", "plan"},
-		{"session", "resume", "plan"},
-		{"session", "rollback", "plan"},
 	}
 	for _, path := range planPaths {
 		command, _, err := root.Find(path)
@@ -180,7 +241,41 @@ func testRootOperationFlags(t *testing.T, root *cobra.Command) {
 	testCopyBackupRestoreFlags(t, root)
 	testCapacityAndPathFlagPlacement(t, root)
 	testCutoverFlagPlacement(t, root)
-	testSessionCommandSurface(t, root)
+	testCleanupFlagPlacement(t, root)
+	testWorkflowCommandSurface(t, root)
+}
+
+func testCleanupFlagPlacement(t *testing.T, root *cobra.Command) {
+	t.Helper()
+
+	for _, workflow := range []string{"migrate", "migrate-pod", "reserve", "copy"} {
+		command, _, err := root.Find([]string{workflow, "cleanup"})
+		if err != nil {
+			t.Fatalf("Find(%s cleanup): %v", workflow, err)
+		}
+		for _, name := range []string{"delete-temporary", "delete-rollback-pv", "finalize", "delete-session"} {
+			if command.Flags().Lookup(name) == nil {
+				t.Fatalf("%s cleanup is missing --%s", workflow, name)
+			}
+		}
+	}
+
+	for _, workflow := range []string{"backup", "rename", "move"} {
+		command, _, err := root.Find([]string{workflow, "cleanup"})
+		if err != nil {
+			t.Fatalf("Find(%s cleanup): %v", workflow, err)
+		}
+		for _, name := range []string{"finalize", "delete-session"} {
+			if command.Flags().Lookup(name) == nil {
+				t.Fatalf("%s cleanup is missing --%s", workflow, name)
+			}
+		}
+		for _, name := range []string{"delete-temporary", "delete-rollback-pv"} {
+			if command.Flags().Lookup(name) != nil {
+				t.Fatalf("%s cleanup unexpectedly exposes --%s", workflow, name)
+			}
+		}
+	}
 }
 
 func testCopyBackupRestoreFlags(t *testing.T, root *cobra.Command) {
@@ -258,7 +353,7 @@ func testCopyBackupRestoreFlags(t *testing.T, root *cobra.Command) {
 func testCapacityAndPathFlagPlacement(t *testing.T, root *cobra.Command) {
 	t.Helper()
 
-	for _, path := range [][]string{{"reserve"}, {"reserve", "plan"}, {"copy"}, {"copy", "plan"}, {"migrate"}, {"migrate", "plan"}, {"migrate-pod"}, {"migrate-pod", "plan"}} {
+	for _, path := range [][]string{{"reserve"}, {"reserve", "plan"}, {"copy"}, {"copy", "plan"}, {"migrate"}, {"migrate", "plan"}} {
 		command, _, err := root.Find(path)
 		if err != nil {
 			t.Fatalf("Find(%v): %v", path, err)
@@ -271,7 +366,26 @@ func testCapacityAndPathFlagPlacement(t *testing.T, root *cobra.Command) {
 		}
 	}
 
-	for _, path := range [][]string{{"rename"}, {"rename", "plan"}, {"move"}, {"move", "plan"}, {"backup"}, {"restore"}, {"final-sync"}, {"activate"}} {
+	for _, path := range [][]string{{"migrate-pod"}, {"migrate-pod", "plan"}} {
+		command, _, err := root.Find(path)
+		if err != nil {
+			t.Fatalf("Find(%v): %v", path, err)
+		}
+
+		for _, name := range []string{"destination-capacity", "allow-volume-shrink", "source-path", "destination-path"} {
+			if command.Flags().Lookup(name) == nil {
+				t.Fatalf("%v is missing --%s", path, name)
+			}
+		}
+
+		for _, name := range []string{"source-pvc", "destination-namespace", "destination-pvc"} {
+			if command.Flags().Lookup(name) != nil {
+				t.Fatalf("%v unexpectedly exposes --%s", path, name)
+			}
+		}
+	}
+
+	for _, path := range [][]string{{"rename"}, {"rename", "plan"}, {"move"}, {"move", "plan"}, {"backup"}, {"restore"}} {
 		command, _, err := root.Find(path)
 		if err != nil {
 			t.Fatalf("Find(%v): %v", path, err)
@@ -323,7 +437,7 @@ func testCutoverFlagPlacement(t *testing.T, root *cobra.Command) {
 		t.Fatal("migrate exposes migrate-pod-only --force-reprovision")
 	}
 
-	for _, path := range [][]string{{"migrate"}, {"migrate", "plan"}, {"migrate-pod"}, {"migrate-pod", "plan"}} {
+	for _, path := range [][]string{{"migrate-pod"}, {"migrate-pod", "plan"}} {
 		command, _, err := root.Find(path)
 
 		flag := command.Flags().Lookup("precopy-passes")
@@ -335,6 +449,18 @@ func testCutoverFlagPlacement(t *testing.T, root *cobra.Command) {
 			Lookup("openebs-lvm-enable-shared"); flag == nil ||
 			flag.DefValue != "false" {
 			t.Fatalf("%v openebs-lvm-enable-shared flag=%v", path, flag)
+		}
+	}
+
+	for _, path := range [][]string{{"migrate"}, {"migrate", "plan"}} {
+		command, _, err := root.Find(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, name := range []string{"pod", "precopy-passes", "openebs-lvm-enable-shared", "kubeblocks-candidate", "allow-leader-downtime"} {
+			if command.Flags().Lookup(name) != nil {
+				t.Fatalf("%v unexpectedly exposes --%s", path, name)
+			}
 		}
 	}
 
@@ -351,24 +477,17 @@ func testCutoverFlagPlacement(t *testing.T, root *cobra.Command) {
 	}
 }
 
-func testSessionCommandSurface(t *testing.T, root *cobra.Command) {
+func testWorkflowCommandSurface(t *testing.T, root *cobra.Command) {
 	t.Helper()
 
-	session, _, err := root.Find([]string{"session"})
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	status, _, err := root.Find([]string{"session", "status"})
-	if err != nil || status.Flags().Lookup("dry-run") != nil {
-		t.Fatalf("session status dry-run flag=%v error=%v", status.Flags().Lookup("dry-run"), err)
-	}
-
-	for _, name := range []string{"abort", "cleanup", "cleanup-orphan", "resume", "rollback", "status"} {
-		command, _, err := session.Find([]string{name})
-		if err != nil || command == session || command.Name() != name {
-			t.Fatalf("session Find(%q) command=%v error=%v", name, command, err)
+	for _, workflow := range []string{"migrate", "migrate-pod", "reserve", "copy", "backup", "rename", "move"} {
+		status, _, err := root.Find([]string{workflow, "status"})
+		if err != nil || status.Flags().Lookup("dry-run") != nil {
+			t.Fatalf("%s status dry-run flag=%v error=%v", workflow, status.Flags().Lookup("dry-run"), err)
 		}
+	}
+	if recovery, _, err := root.Find([]string{"recovery", "cleanup-orphan"}); err != nil || recovery.Name() != "cleanup-orphan" {
+		t.Fatalf("recovery cleanup-orphan command=%v error=%v", recovery, err)
 	}
 
 	restore, _, err := root.Find([]string{"restore"})
@@ -384,9 +503,9 @@ func testSessionCommandSurface(t *testing.T, root *cobra.Command) {
 
 func TestMigrationFlagDefaultsAndPlanOptions(t *testing.T) {
 	state := &rootState{global: globals{sessionNamespace: "sessions"}}
-	flags := &migrationFlags{}
+	flags := &podMigrationFlags{}
 	command := &cobra.Command{Use: "test"}
-	flags.bind(command, true, true, true, true)
+	flags.bind(command)
 	flags.bindForceReprovision(command)
 	testMigrationFlagDefaults(t, command)
 
@@ -401,11 +520,11 @@ func TestMigrationFlagDefaultsAndPlanOptions(t *testing.T) {
 func migrationPlanOptions(
 	t *testing.T,
 	state *rootState,
-	flags *migrationFlags,
-) planner.Options {
+	flags *podMigrationFlags,
+) planner.PodMigrationOptions {
 	t.Helper()
 
-	options, err := flags.planOptions(state, domain.OperationMigratePod, true)
+	options, err := flags.planOptions(state, true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -438,12 +557,10 @@ func testMigrationFlagDefaults(t *testing.T, command *cobra.Command) {
 	}
 }
 
-func configureMigrationFlags(flags *migrationFlags) {
+func configureMigrationFlags(flags *podMigrationFlags) {
 	flags.sessionID = "mig-fixed"
 	flags.sourceNamespace = "source"
 	flags.temporaryNamespace = "staging"
-	flags.sourcePVCs = []string{"data", "logs"}
-	flags.destinationPVCs = []string{"data-new", "logs-new"}
 	flags.destinationCapacities = []string{"3Gi", "4Gi"}
 	flags.sourcePaths = []string{"data=data/current", "logs=logs/current"}
 	flags.destinationPaths = []string{"data=.", "logs=restored/logs"}
@@ -462,11 +579,10 @@ func configureMigrationFlags(flags *migrationFlags) {
 	flags.openEBSLVMEnableShared = true
 }
 
-func testMigrationPlanIdentity(t *testing.T, options planner.Options) {
+func testMigrationPlanIdentity(t *testing.T, options planner.PodMigrationOptions) {
 	t.Helper()
 
 	if options.SessionID != "mig-fixed" || options.SourceNamespace != "source" ||
-		options.DestinationNamespace != "source" ||
 		options.TemporaryNamespace != "staging" ||
 		options.StagingNamespace != "staging" ||
 		options.SessionNamespace != "sessions" {
@@ -474,10 +590,10 @@ func testMigrationPlanIdentity(t *testing.T, options planner.Options) {
 	}
 }
 
-func testMigrationPlanBehavior(t *testing.T, options planner.Options) {
+func testMigrationPlanBehavior(t *testing.T, options planner.PodMigrationOptions) {
 	t.Helper()
 
-	if options.Operation != domain.OperationMigratePod || options.PodName != "db-2" ||
+	if options.PodName != "db-2" ||
 		options.SourceNode != "node-a" ||
 		options.TargetNode != "node-b" ||
 		options.DestinationClass != "fast" ||
@@ -496,20 +612,17 @@ func testMigrationPlanBehavior(t *testing.T, options planner.Options) {
 
 func testMigrationPlanSliceOwnership(
 	t *testing.T,
-	flags *migrationFlags,
-	options planner.Options,
+	flags *podMigrationFlags,
+	options planner.PodMigrationOptions,
 ) {
 	t.Helper()
 
-	flags.sourcePVCs[0] = "mutated"
-	flags.destinationPVCs[0] = "mutated"
 	flags.destinationCapacities[0] = "mutated"
 	flags.sourcePaths[0] = "mutated"
 	flags.destinationPaths[0] = "mutated"
 	flags.strategies[0] = "mutated"
 
-	if options.SourcePVCs[0] != "data" || options.DestinationPVCs[0] != "data-new" ||
-		options.DestinationCapacities[0] != "3Gi" ||
+	if options.DestinationCapacities[0] != "3Gi" ||
 		options.SourcePaths[0] != "data=data/current" ||
 		options.DestinationPaths[0] != "data=." ||
 		options.Strategies[0] != "local" {
@@ -519,20 +632,22 @@ func testMigrationPlanSliceOwnership(
 
 func TestTransferPathFlagsRejectUnsafeAndExistingSessionChanges(t *testing.T) {
 	for _, test := range []struct {
-		name     string
-		flags    migrationFlags
-		existing bool
+		name             string
+		sourcePaths      []string
+		destinationPaths []string
+		existing         bool
 	}{
-		{name: "existing session", flags: migrationFlags{sourcePaths: []string{"data=partial"}}, existing: true},
-		{name: "absolute", flags: migrationFlags{sourcePaths: []string{"data=/etc"}}},
-		{name: "traversal", flags: migrationFlags{destinationPaths: []string{"data=../outside"}}},
-		{name: "empty mapping", flags: migrationFlags{sourcePaths: []string{"data="}}},
+		{name: "existing session", sourcePaths: []string{"data=partial"}, existing: true},
+		{name: "absolute", sourcePaths: []string{"data=/etc"}},
+		{name: "traversal", destinationPaths: []string{"data=../outside"}},
+		{name: "empty mapping", sourcePaths: []string{"data="}},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			if err := validateTransferPathFlags(
-				&test.flags,
 				domain.OperationCopy,
 				test.existing,
+				test.sourcePaths,
+				test.destinationPaths,
 			); domain.CategoryOf(
 				err,
 			) != domain.ErrorValidation {
@@ -542,12 +657,10 @@ func TestTransferPathFlagsRejectUnsafeAndExistingSessionChanges(t *testing.T) {
 	}
 
 	if err := validateTransferPathFlags(
-		&migrationFlags{
-			sourcePaths:      []string{"data=tenant/current"},
-			destinationPaths: []string{"data=."},
-		},
 		domain.OperationCopy,
 		false,
+		[]string{"data=tenant/current"},
+		[]string{"data=."},
 	); err != nil {
 		t.Fatal(err)
 	}
@@ -555,13 +668,11 @@ func TestTransferPathFlagsRejectUnsafeAndExistingSessionChanges(t *testing.T) {
 
 func TestPlanOptionsDirectAndGeneratedIdentity(t *testing.T) {
 	state := &rootState{global: globals{sessionNamespace: "sessions"}}
-	flags := &migrationFlags{
-		sourceNamespace:      "app",
-		destinationNamespace: "archive",
-		temporaryNamespace:   "staging",
+	flags := &copyFlags{
+		sourceNamespace: "app", temporaryNamespace: "staging", destinationNamespace: "archive",
 	}
 
-	options, err := flags.planOptions(state, domain.OperationCopy, false)
+	options, err := flags.planOptions(state, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -574,6 +685,29 @@ func TestPlanOptionsDirectAndGeneratedIdentity(t *testing.T) {
 	if options.DestinationNamespace != "archive" || options.StagingNamespace != "archive" ||
 		options.TemporaryNamespace != "archive" {
 		t.Fatalf("direct namespaces = %#v", options)
+	}
+}
+
+func TestOfflinePlanOptionsPreserveSourcePVCSelection(t *testing.T) {
+	state := &rootState{global: globals{sessionNamespace: "sessions"}}
+	flags := &offlineMigrationFlags{
+		sourceNamespace:       "app",
+		temporaryNamespace:    "staging",
+		sourcePVCs:            []string{"data", "logs"},
+		destinationPVCs:       []string{"data-copy", "logs-copy"},
+		destinationCapacities: []string{"3Gi"},
+	}
+
+	options, err := flags.planOptions(state, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if !reflect.DeepEqual(options.SourcePVCs, flags.sourcePVCs) {
+		t.Fatalf("source PVCs = %#v, want %#v", options.SourcePVCs, flags.sourcePVCs)
+	}
+	if !reflect.DeepEqual(options.DestinationPVCs, flags.destinationPVCs) {
+		t.Fatalf("destination PVCs = %#v, want %#v", options.DestinationPVCs, flags.destinationPVCs)
 	}
 }
 
@@ -911,24 +1045,31 @@ func TestResumeApprovalCoversPVCRebindStages(t *testing.T) {
 }
 
 func TestApprovalIdentityPrecedence(t *testing.T) {
-	cases := []struct {
-		flags migrationFlags
+	offlineCases := []struct {
+		flags offlineMigrationFlags
 		want  string
 	}{
-		{
-			flags: migrationFlags{podName: "db-0", sourcePVCs: []string{"data"}, sessionID: "mig"},
-			want:  "db-0",
-		},
-		{
-			flags: migrationFlags{sourcePVCs: []string{"data", "logs"}, sessionID: "mig"},
-			want:  "data",
-		},
-		{flags: migrationFlags{sessionID: "mig"}, want: "mig"},
-		{flags: migrationFlags{}, want: ""},
+		{flags: offlineMigrationFlags{sourcePVCs: []string{"data", "logs"}, sessionID: "mig"}, want: "data"},
+		{flags: offlineMigrationFlags{sessionID: "mig"}, want: "mig"},
+		{flags: offlineMigrationFlags{}, want: ""},
 	}
-	for _, tc := range cases {
-		if got := approvalIdentity(&tc.flags); got != tc.want {
-			t.Fatalf("approvalIdentity(%#v) = %q, want %q", tc.flags, got, tc.want)
+	for _, tc := range offlineCases {
+		if got := offlineApprovalIdentity(&tc.flags); got != tc.want {
+			t.Fatalf("offlineApprovalIdentity(%#v) = %q, want %q", tc.flags, got, tc.want)
+		}
+	}
+
+	podCases := []struct {
+		flags podMigrationFlags
+		want  string
+	}{
+		{flags: podMigrationFlags{podName: "db-0", sessionID: "mig"}, want: "db-0"},
+		{flags: podMigrationFlags{sessionID: "mig"}, want: "mig"},
+		{flags: podMigrationFlags{}, want: ""},
+	}
+	for _, tc := range podCases {
+		if got := podApprovalIdentity(&tc.flags); got != tc.want {
+			t.Fatalf("podApprovalIdentity(%#v) = %q, want %q", tc.flags, got, tc.want)
 		}
 	}
 }
@@ -1039,6 +1180,54 @@ func TestPlanFailureGuidancePrioritizesStatefulSetAction(t *testing.T) {
 	}
 }
 
+func TestPlanFailureGuidanceExplainsKubeBlocksCandidateScope(t *testing.T) {
+	tests := []struct {
+		name    string
+		message string
+		want    string
+	}{
+		{
+			name: "InstanceSet secondary",
+			message: "discover KubeBlocks: --kubeblocks-candidate applies only when " +
+				"the selected InstanceSet Pod has a leader role; Pod db/cluster-db-1 has role secondary",
+			want: "remove --kubeblocks-candidate when migrating a non-leader InstanceSet Pod",
+		},
+		{
+			name: "legacy component",
+			message: "discover KubeBlocks: --kubeblocks-candidate is supported only for " +
+				"InstanceSet-backed KubeBlocks components",
+			want: "remove --kubeblocks-candidate for a legacy KubeBlocks component",
+		},
+		{
+			name: "Redis primary",
+			message: "discover KubeBlocks: automatic switchover for selected instance redis-0 " +
+				"is unavailable: the KubeBlocks Redis addon does not provide a Switchover action",
+			want: "remove --kubeblocks-candidate and rerun with --allow-leader-downtime",
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			var output bytes.Buffer
+
+			plan := &domain.MigrationPlan{Checks: []domain.Check{{
+				Name:     "controller-adapter",
+				Severity: domain.SeverityError,
+				Message:  test.message,
+			}}}
+
+			if err := writePlanFailureGuidance(&output, plan); err != nil {
+				t.Fatal(err)
+			}
+
+			if text := output.String(); !strings.Contains(text, test.want) ||
+				strings.Contains(text, "use a supported workload adapter") {
+				t.Fatalf("guidance=%q", text)
+			}
+		})
+	}
+}
+
 func TestBucketFlagValidationMatrix(t *testing.T) {
 	cases := []struct {
 		name    string
@@ -1107,18 +1296,6 @@ func TestCommandsRejectInvalidInputBeforeClusterAccess(t *testing.T) {
 		text     string
 	}{
 		{
-			name:     "final sync session",
-			args:     []string{"final-sync"},
-			category: domain.ErrorValidation,
-			text:     "--session",
-		},
-		{
-			name:     "activate session",
-			args:     []string{"activate"},
-			category: domain.ErrorValidation,
-			text:     "--session",
-		},
-		{
 			name:     "pod",
 			args:     []string{"migrate-pod"},
 			category: domain.ErrorValidation,
@@ -1143,26 +1320,14 @@ func TestCommandsRejectInvalidInputBeforeClusterAccess(t *testing.T) {
 			text:     "--destination-pvc",
 		},
 		{
-			name: "orchestrated namespace",
-			args: []string{
-				"migrate",
-				"--source-namespace",
-				"app",
-				"--destination-namespace",
-				"other",
-			},
-			category: domain.ErrorPrecondition,
-			text:     "source namespace",
-		},
-		{
 			name:     "negative precopy passes",
-			args:     []string{"migrate", "--precopy-passes", "-1"},
+			args:     []string{"migrate-pod", "--pod", "db-0", "--precopy-passes", "-1"},
 			category: domain.ErrorValidation,
 			text:     "cannot be negative",
 		},
 		{
 			name:     "negative plan precopy passes",
-			args:     []string{"migrate", "plan", "--precopy-passes", "-1"},
+			args:     []string{"migrate-pod", "plan", "--pod", "db-0", "--precopy-passes", "-1"},
 			category: domain.ErrorValidation,
 			text:     "cannot be negative",
 		},
@@ -1325,28 +1490,20 @@ func TestCommandsRejectInvalidInputBeforeClusterAccess(t *testing.T) {
 func TestCommandArgumentContracts(t *testing.T) {
 	cases := [][]string{
 		{"migrate", "plan", "extra"},
-		{"final-sync", "plan", "extra"},
-		{"activate", "plan", "extra"},
 		{"reserve", "extra"},
 		{"copy", "extra"},
-		{"final-sync", "extra"},
-		{"activate", "extra"},
 		{"migrate", "extra"},
 		{"migrate-pod", "extra"},
 		{"rename", "extra"},
 		{"move", "extra"},
 		{"backup", "extra"},
 		{"restore", "extra"},
-		{"session", "status", "one", "two"},
-		{"session", "resume"},
-		{"session", "resume", "one", "two"},
-		{"session", "abort"},
-		{"session", "rollback"},
-		{"session", "cleanup"},
-		{"session", "resume", "plan"},
-		{"session", "abort", "plan"},
-		{"session", "rollback", "plan"},
-		{"session", "cleanup", "plan"},
+		{"migrate", "status", "one", "two"},
+		{"migrate", "resume"},
+		{"migrate", "resume", "one", "two"},
+		{"migrate", "abort"},
+		{"migrate", "rollback"},
+		{"migrate", "cleanup"},
 	}
 	for _, args := range cases {
 		t.Run(strings.Join(args, "_"), func(t *testing.T) {

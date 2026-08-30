@@ -760,8 +760,7 @@ func TestPlanOrphanCleanupRejectsUnsafeStates(t *testing.T) {
 			if test.name == "session exists" {
 				session := domain.NewSession(
 					options.SessionID,
-					domain.NewSessionSpec(
-						domain.OperationMigrate,
+					domain.NewOfflineMigrationSessionSpec(
 						domain.SessionCommon{
 							SourceNamespace:      "app",
 							TemporaryNamespace:   "system",
@@ -785,8 +784,6 @@ func TestPlanOrphanCleanupRejectsUnsafeStates(t *testing.T) {
 								},
 							},
 						},
-						domain.WorkloadSpec{Adapter: domain.WorkloadNone},
-						false,
 						domain.SessionWorkflowOptions{},
 					),
 					time.Now(),

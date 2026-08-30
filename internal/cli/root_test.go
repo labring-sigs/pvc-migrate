@@ -156,26 +156,54 @@ func TestVersionDoesNotInitializeKubernetes(t *testing.T) {
 }
 
 func TestMigratePodRequiresPodBeforeClusterAccess(t *testing.T) {
-	_, err := executeCLI(t, "migrate-pod", "--source-pvc", "data", "--target-node", "node-b")
+	_, err := executeCLI(t, "migrate-pod", "--target-node", "node-b")
 	if domain.CategoryOf(err) != domain.ErrorValidation || !strings.Contains(err.Error(), "--pod") {
 		t.Fatalf("category=%s error=%v", domain.CategoryOf(err), err)
 	}
 }
 
-func TestMigratePodRejectsSourcePVCOverride(t *testing.T) {
+func TestMigratePodDoesNotExposeDestinationIdentityFlags(t *testing.T) {
 	_, err := executeCLI(
 		t,
 		"migrate-pod",
 		"--pod",
 		"db-0",
-		"--source-pvc",
-		"data",
+		"--destination-namespace",
+		"other",
 		"--target-node",
 		"node-b",
 	)
-	if domain.CategoryOf(err) != domain.ErrorValidation ||
-		!strings.Contains(err.Error(), "cannot be combined") {
-		t.Fatalf("category=%s error=%v", domain.CategoryOf(err), err)
+	if err == nil || !strings.Contains(err.Error(), "unknown flag: --destination-namespace") {
+		t.Fatalf("error=%v", err)
+	}
+}
+
+func TestMigrationModesRejectEachOthersFlags(t *testing.T) {
+	tests := []struct {
+		name string
+		args []string
+		flag string
+	}{
+		{name: "offline pod", args: []string{"migrate", "--pod", "db-0"}, flag: "--pod"},
+		{name: "offline plan pod", args: []string{"migrate", "plan", "--pod", "db-0"}, flag: "--pod"},
+		{name: "offline precopy", args: []string{"migrate", "--precopy-passes", "1"}, flag: "--precopy-passes"},
+		{name: "offline shared mount", args: []string{"migrate", "--openebs-lvm-enable-shared"}, flag: "--openebs-lvm-enable-shared"},
+		{name: "offline KubeBlocks candidate", args: []string{"migrate", "--kubeblocks-candidate", "db-1"}, flag: "--kubeblocks-candidate"},
+		{name: "pod source PVC", args: []string{"migrate-pod", "--pod", "db-0", "--source-pvc", "data"}, flag: "--source-pvc"},
+		{name: "pod plan source PVC", args: []string{"migrate-pod", "plan", "--pod", "db-0", "--source-pvc", "data"}, flag: "--source-pvc"},
+		{name: "pod destination namespace", args: []string{"migrate-pod", "--pod", "db-0", "--destination-namespace", "other"}, flag: "--destination-namespace"},
+		{name: "pod destination PVC", args: []string{"migrate-pod", "--pod", "db-0", "--destination-pvc", "data-copy"}, flag: "--destination-pvc"},
+		{name: "pod online", args: []string{"migrate-pod", "--pod", "db-0", "--online"}, flag: "--online"},
+		{name: "pod plan online", args: []string{"migrate-pod", "plan", "--pod", "db-0", "--online"}, flag: "--online"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := executeCLI(t, tt.args...)
+			if err == nil || !strings.Contains(err.Error(), "unknown flag: "+tt.flag) {
+				t.Fatalf("error=%v, want unknown flag %s", err, tt.flag)
+			}
+		})
 	}
 }
 
@@ -260,10 +288,11 @@ func TestBackupDryRunPrintsNormalizedPath(t *testing.T) {
 	}
 }
 
-func TestLiveBackupDryRunAllowsMountedSourceSemantics(t *testing.T) {
+func TestBackupOnlineDryRunAllowsMountedSourceSemantics(t *testing.T) {
 	stdout, _, err := executeBackupCLI(
 		t,
-		"live-backup",
+		"backup",
+		"--online",
 		"--output",
 		"json",
 		"--source-pvc",
@@ -287,6 +316,28 @@ func TestLiveBackupDryRunAllowsMountedSourceSemantics(t *testing.T) {
 	if result["mode"] != "online" ||
 		result["consistency"] != "best-effort crash-consistent file copy" {
 		t.Fatalf("online backup output=%v", result)
+	}
+}
+
+func TestBackupRejectsOnlineOnlyLVMFlagWithoutOnlineMode(t *testing.T) {
+	_, stderr, err := executeBackupCLI(
+		t,
+		"backup",
+		"--openebs-lvm-enable-shared",
+		"--source-pvc",
+		"data",
+		"--backend",
+		"s3",
+		"--bucket",
+		"backups",
+		"--name",
+		"daily",
+	)
+	if err == nil {
+		t.Fatal("expected offline backup to reject --openebs-lvm-enable-shared")
+	}
+	if !strings.Contains(err.Error(), "--openebs-lvm-enable-shared requires --online") {
+		t.Fatalf("error=%v guidance=%q", err, stderr)
 	}
 }
 
@@ -321,8 +372,9 @@ func TestBackupPlanSubcommandIsOperationSpecific(t *testing.T) {
 
 	stdout, _, err = executeBackupCLI(
 		t,
-		"live-backup",
+		"backup",
 		"plan",
+		"--online",
 		"--output",
 		"json",
 		"--source-pvc",
@@ -339,11 +391,11 @@ func TestBackupPlanSubcommandIsOperationSpecific(t *testing.T) {
 	}
 
 	if err := json.Unmarshal([]byte(stdout), &result); err != nil {
-		t.Fatalf("decode live plan: %v\n%s", err, stdout)
+		t.Fatalf("decode online backup plan: %v\n%s", err, stdout)
 	}
 
 	if result["mode"] != "online" {
-		t.Fatalf("live-backup plan output=%v", result)
+		t.Fatalf("online backup plan output=%v", result)
 	}
 }
 

@@ -61,7 +61,7 @@ func TestPlanPersistsTransferScopeAndWarnsForOrchestratedMigration(t *testing.T)
 	plan, err := New(
 		plannerClient(plannerObjects("2Gi")...),
 		nil,
-	).Plan(context.Background(), Options{
+	).plan(context.Background(), planOptions{
 		SessionID:            "partial-path",
 		Operation:            domain.OperationMigrate,
 		SourceNamespace:      "app",
@@ -106,7 +106,7 @@ func TestPlanPersistsTransferScopeAndWarnsForOrchestratedMigration(t *testing.T)
 }
 
 func TestPartialSourceShrinkTreatsWholeVolumeUsageAsInconclusive(t *testing.T) {
-	options := Options{
+	options := planOptions{
 		SessionID:            "partial-shrink",
 		Operation:            domain.OperationCopy,
 		SourceNamespace:      "app",
@@ -128,7 +128,7 @@ func TestPartialSourceShrinkTreatsWholeVolumeUsageAsInconclusive(t *testing.T) {
 		plannerClient(plannerObjects("2Gi")...),
 		nil,
 	).WithVolumeUsageReader(staticUsageReader{bytes: 1536 << 20}).
-		Plan(context.Background(), options)
+		plan(context.Background(), options)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -148,7 +148,7 @@ func TestPartialSourceShrinkTreatsWholeVolumeUsageAsInconclusive(t *testing.T) {
 		plannerClient(plannerObjects("2Gi")...),
 		nil,
 	).WithVolumeUsageReader(staticUsageReader{bytes: 1536 << 20}).
-		Plan(context.Background(), options)
+		plan(context.Background(), options)
 	if err != nil || !plan.Ready {
 		t.Fatalf("explicit skip plan ready=%t error=%v checks=%#v", plan.Ready, err, plan.Checks)
 	}

@@ -19,6 +19,35 @@ import (
 	clienttesting "k8s.io/client-go/testing"
 )
 
+// RenameOptions and PlanRename are test-only adapters retained while the
+// shared identity planning matrix exercises both operations. Production code
+// exposes only PlanRenamePVC and PlanMovePVC, each with a fixed operation.
+type RenameOptions struct {
+	Operation            domain.Operation
+	SessionID            string
+	SourceNamespace      string
+	SourcePVC            string
+	DestinationNamespace string
+	DestinationPVC       string
+	SessionNamespace     string
+}
+
+func (p *Planner) PlanRename(ctx context.Context, options RenameOptions) (*domain.MigrationPlan, error) {
+	if options.Operation == domain.OperationMove {
+		return p.PlanMovePVC(ctx, MovePlanOptions{
+			SessionID: options.SessionID, SourceNamespace: options.SourceNamespace,
+			SourcePVC: options.SourcePVC, DestinationNamespace: options.DestinationNamespace,
+			DestinationPVC: options.DestinationPVC, SessionNamespace: options.SessionNamespace,
+		})
+	}
+	return p.planPVCIdentity(ctx, pvcIdentityPlanOptions{
+		Operation: domain.OperationRename, SessionID: options.SessionID,
+		SourceNamespace: options.SourceNamespace, SourcePVC: options.SourcePVC,
+		DestinationNamespace: options.DestinationNamespace, DestinationPVC: options.DestinationPVC,
+		SessionNamespace: options.SessionNamespace,
+	})
+}
+
 func TestPlanRenameValidatesRequiredAndDistinctIdentities(t *testing.T) {
 	planner := New(plannerClient(), nil)
 

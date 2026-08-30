@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -183,6 +184,48 @@ func TestPlanAndCreateSessionKeepClustersSeparate(t *testing.T) {
 			"storage class identity missing: %#v",
 			session.Spec.Volumes[0].Destination.StorageClass,
 		)
+	}
+}
+
+func TestCreateSessionRechecksDestinationAccessModes(t *testing.T) {
+	service, options, _ := crossFixture()
+	plan, err := service.Plan(context.Background(), options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !plan.Ready {
+		t.Fatalf("plan is not ready: %#v", plan.Checks)
+	}
+
+	pvc, err := service.SourceClientForTest().CoreV1().
+		PersistentVolumeClaims(options.SourceNamespace).
+		Get(context.Background(), options.SourcePVCs[0], metav1.GetOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	pvc.Spec.AccessModes = []corev1.PersistentVolumeAccessMode{corev1.ReadWriteMany}
+	if _, err := service.SourceClientForTest().CoreV1().
+		PersistentVolumeClaims(options.SourceNamespace).
+		Update(context.Background(), pvc, metav1.UpdateOptions{}); err != nil {
+		t.Fatal(err)
+	}
+
+	storageClass, err := service.DestinationClientForTest().StorageV1().
+		StorageClasses().
+		Get(context.Background(), options.DestinationStorageClass, metav1.GetOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	storageClass.Provisioner = kube.OpenEBSLocalPVProvisioner
+	if _, err := service.DestinationClientForTest().StorageV1().
+		StorageClasses().
+		Update(context.Background(), storageClass, metav1.UpdateOptions{}); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := service.CreateSession(context.Background(), options, plan); err == nil ||
+		!strings.Contains(err.Error(), "cannot provide source PVC") {
+		t.Fatalf("CreateSession error=%v", err)
 	}
 }
 
@@ -513,6 +556,51 @@ func TestPlanRejectsReadOnlySourcePVC(t *testing.T) {
 	t.Fatalf("plan did not report an access-mode failure: %#v", plan.Checks)
 }
 
+func TestPlanRejectsKnownDestinationAccessModeMismatch(t *testing.T) {
+	service, options, _ := crossFixture()
+
+	pvc, err := service.SourceClientForTest().CoreV1().
+		PersistentVolumeClaims("app").
+		Get(context.Background(), "data", metav1.GetOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	pvc.Spec.AccessModes = []corev1.PersistentVolumeAccessMode{corev1.ReadWriteMany}
+	if _, err := service.SourceClientForTest().CoreV1().
+		PersistentVolumeClaims("app").
+		Update(context.Background(), pvc, metav1.UpdateOptions{}); err != nil {
+		t.Fatal(err)
+	}
+
+	storageClass, err := service.DestinationClientForTest().StorageV1().
+		StorageClasses().
+		Get(context.Background(), options.DestinationStorageClass, metav1.GetOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	storageClass.Provisioner = kube.OpenEBSLocalPVProvisioner
+	if _, err := service.DestinationClientForTest().StorageV1().
+		StorageClasses().
+		Update(context.Background(), storageClass, metav1.UpdateOptions{}); err != nil {
+		t.Fatal(err)
+	}
+
+	plan, err := service.Plan(context.Background(), options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if plan.Ready {
+		t.Fatalf("plan accepted incompatible destination access modes: %#v", plan.Checks)
+	}
+	for _, check := range plan.Checks {
+		if check.Name == "destination-access-modes" && !check.Passed {
+			return
+		}
+	}
+
+	t.Fatalf("plan did not report destination access-mode failure: %#v", plan.Checks)
+}
+
 func TestPlanRejectsTransferPathsThatEscapePVC(t *testing.T) {
 	service, options, _ := crossFixture()
 	options.SourcePaths = []string{"../outside"}
@@ -604,6 +692,135 @@ func TestCopyUsesBothConnectionsAndPersistsTransferState(t *testing.T) {
 				copier.requests[0].HelmStringValues,
 			)
 		}
+	}
+}
+
+func TestCopyMergesHardTaintsAcrossSourceAndDestinationNodes(t *testing.T) {
+	service, options, copier := crossFixture()
+
+	plan, err := service.Plan(context.Background(), options)
+	if err != nil || !plan.Ready {
+		t.Fatalf("plan ready=%v err=%v checks=%#v", plan.Ready, err, plan.Checks)
+	}
+
+	session, err := service.CreateSession(context.Background(), options, plan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	createBoundDestination(t, service, session)
+
+	destinationNode, err := service.DestinationClientForTest().CoreV1().
+		Nodes().Get(context.Background(), "destination-node", metav1.GetOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	destinationNode.Spec.Taints = []corev1.Taint{{
+		Key: "destination-only", Value: "true", Effect: corev1.TaintEffectNoSchedule,
+	}}
+	if _, err := service.DestinationClientForTest().CoreV1().Nodes().
+		Update(context.Background(), destinationNode, metav1.UpdateOptions{}); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := service.SourceClientForTest().CoreV1().Nodes().Create(
+		context.Background(),
+		&corev1.Node{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:   "source-storage",
+				Labels: map[string]string{corev1.LabelHostname: "source-storage"},
+			},
+			Spec: corev1.NodeSpec{Taints: []corev1.Taint{{
+				Key: "source-only", Value: "true", Effect: corev1.TaintEffectNoSchedule,
+			}}},
+		},
+		metav1.CreateOptions{},
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	pv, err := service.SourceClientForTest().CoreV1().PersistentVolumes().
+		Get(context.Background(), "pv-data", metav1.GetOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	pv.Spec.NodeAffinity = &corev1.VolumeNodeAffinity{
+		Required: &corev1.NodeSelector{NodeSelectorTerms: []corev1.NodeSelectorTerm{{
+			MatchExpressions: []corev1.NodeSelectorRequirement{{
+				Key:      corev1.LabelHostname,
+				Operator: corev1.NodeSelectorOpIn,
+				Values:   []string{"source-storage"},
+			}},
+		}}},
+	}
+	if _, err := service.SourceClientForTest().CoreV1().PersistentVolumes().
+		Update(context.Background(), pv, metav1.UpdateOptions{}); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := service.Copy(context.Background(), session, 1, false); err != nil {
+		t.Fatal(err)
+	}
+
+	values := copier.requests[0].HelmStringValues
+	for _, expected := range []string{
+		"rsync.tolerations[0].key=destination-only",
+		"sshd.tolerations[0].key=destination-only",
+		"sshd.tolerations[1].key=source-only",
+	} {
+		if !slices.Contains(values, expected) {
+			t.Fatalf("missing merged taint value %q in %v", expected, values)
+		}
+	}
+
+	for _, unexpected := range []string{
+		"sshd.tolerations[0].key=source-only",
+		"sshd.tolerations[1].key=destination-only",
+	} {
+		if slices.Contains(values, unexpected) {
+			t.Fatalf("duplicate/overlapping sshd toleration index %q in %v", unexpected, values)
+		}
+	}
+}
+
+func TestCopyPersistsTargetNodeLookupFailure(t *testing.T) {
+	service, options, copier := crossFixture()
+
+	plan, err := service.Plan(context.Background(), options)
+	if err != nil || !plan.Ready {
+		t.Fatalf("plan ready=%v err=%v checks=%#v", plan.Ready, err, plan.Checks)
+	}
+
+	session, err := service.CreateSession(context.Background(), options, plan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	createBoundDestination(t, service, session)
+
+	if err := service.DestinationClientForTest().CoreV1().Nodes().Delete(
+		context.Background(), session.Spec.TargetNode, metav1.DeleteOptions{},
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := service.Copy(context.Background(), session, 1, false); err == nil {
+		t.Fatal("copy unexpectedly proceeded after the planned target node disappeared")
+	}
+
+	if session.Status.Phase != PhaseFailed ||
+		!strings.Contains(session.Status.Message, "read destination target node") {
+		t.Fatalf("target lookup failure was not persisted in memory: %#v", session.Status)
+	}
+
+	persisted, err := service.Get(context.Background(), options.SessionNamespace, session.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if persisted.Status.Phase != PhaseFailed ||
+		!strings.Contains(persisted.Status.Message, "read destination target node") {
+		t.Fatalf("target lookup failure was not persisted: %#v", persisted.Status)
+	}
+	if len(copier.requests) != 0 {
+		t.Fatalf("copy engine was invoked after scheduling lookup failure: %#v", copier.requests)
 	}
 }
 

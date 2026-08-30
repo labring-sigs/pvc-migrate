@@ -4,6 +4,7 @@ import (
 	"context"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/labring-sigs/pvc-migrate/internal/domain"
 	appsv1 "k8s.io/api/apps/v1"
@@ -13,6 +14,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	dynamicfake "k8s.io/client-go/dynamic/fake"
 	kubernetesfake "k8s.io/client-go/kubernetes/fake"
+	clienttesting "k8s.io/client-go/testing"
 )
 
 func TestValidateResumeRejectsOperatorControlDriftWithoutUpdates(t *testing.T) {
@@ -106,41 +108,6 @@ func TestValidateResumeRejectsOperatorControlDriftWithoutUpdates(t *testing.T) {
 			wantDetail: "paused externally",
 		},
 		{
-			name: "KubeBlocks component stop",
-			dynamic: []runtime.Object{&unstructured.Unstructured{Object: map[string]any{
-				"apiVersion": kubeBlocksClusterAPIVersion,
-				"kind":       "Cluster",
-				"metadata": map[string]any{
-					"name": "database", "namespace": "database", "uid": "cluster-uid",
-					"annotations": map[string]any{pauseSessionAnnotation: "session"},
-				},
-				"spec": map[string]any{"componentSpecs": []any{
-					map[string]any{"name": "postgresql", "stop": false},
-				}},
-			}}},
-			workload: domain.WorkloadSpec{
-				Adapter: domain.WorkloadKubeBlocks,
-				Pod: domain.ObjectReference{
-					Namespace: "database",
-					Name:      "database-postgresql-0",
-				},
-				Controller: domain.ObjectReference{
-					APIVersion: "apps.kubeblocks.io/v1alpha1",
-					Kind:       domain.KindComponent,
-					Namespace:  "database",
-					Name:       "database-postgresql",
-					UID:        "component-uid",
-				},
-				KubeBlocks: &domain.KubeBlocksSpec{
-					Cluster:       "database",
-					ClusterUID:    "cluster-uid",
-					Component:     "postgresql",
-					OriginalStops: map[string]bool{"postgresql": false},
-				},
-			},
-			wantDetail: "stop changed",
-		},
-		{
 			name: "KubeBlocks InstanceSet pause",
 			dynamic: []runtime.Object{&unstructured.Unstructured{Object: map[string]any{
 				"apiVersion": "workloads.kubeblocks.io/v1alpha1",
@@ -211,6 +178,184 @@ func TestValidateResumeRejectsOperatorControlDriftWithoutUpdates(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestValidateKubeBlocksLegacyResumeAcceptsStoppedReplicas(t *testing.T) {
+	cluster := &unstructured.Unstructured{Object: map[string]any{
+		"apiVersion": kubeBlocksClusterAPIVersion,
+		"kind":       "Cluster",
+		"metadata": map[string]any{
+			"name": "cluster", "namespace": "db", "uid": "cluster-uid",
+			"annotations": map[string]any{pauseSessionAnnotation: "session"},
+		},
+		"spec": map[string]any{"componentSpecs": []any{
+			map[string]any{"name": "db", "replicas": int64(0)},
+		}},
+		"status": map[string]any{"phase": "Stopped"},
+	}}
+
+	dynamicClient := dynamicfake.NewSimpleDynamicClient(
+		runtime.NewScheme(),
+		cluster,
+		opsRequest("session-pause", "Succeed"),
+	)
+	manager := NewManager(kubernetesfake.NewClientset(), dynamicClient, nil)
+
+	if err := manager.ValidateResume(context.Background(), kubeBlocksSession()); err != nil {
+		t.Fatalf("ValidateResume() error=%v", err)
+	}
+}
+
+func TestValidateKubeBlocksLegacyResumeAcceptsConvergedFailedStart(t *testing.T) {
+	cluster := &unstructured.Unstructured{Object: map[string]any{
+		"apiVersion": kubeBlocksClusterAPIVersion,
+		"kind":       "Cluster",
+		"metadata": map[string]any{
+			"name": "cluster", "namespace": "db", "uid": "cluster-uid",
+			"annotations": map[string]any{pauseSessionAnnotation: "session"},
+		},
+		"spec": map[string]any{"componentSpecs": []any{
+			map[string]any{"name": "db", "replicas": int64(1)},
+		}},
+		"status": map[string]any{
+			"phase": "Running",
+			"components": map[string]any{
+				"db": map[string]any{"phase": "Running"},
+			},
+		},
+	}}
+
+	dynamicClient := dynamicfake.NewSimpleDynamicClient(runtime.NewScheme(), cluster)
+	manager := NewManager(kubernetesfake.NewClientset(), dynamicClient, nil)
+	session := kubeBlocksSession()
+
+	if err := manager.ValidateResume(context.Background(), session); err != nil {
+		t.Fatalf("ValidateResume() error=%v", err)
+	}
+
+	if err := manager.setKubeBlocksPaused(context.Background(), session, false); err != nil {
+		t.Fatalf("setKubeBlocksPaused() error=%v", err)
+	}
+
+	if got := countDynamicActions(dynamicClient.Actions(), "create", "opsrequests"); got != 0 {
+		t.Fatalf("created %d redundant Start OpsRequest(s)", got)
+	}
+}
+
+func TestKubeBlocksLegacyResumeConvergenceChecksOperationsComponent(t *testing.T) {
+	cluster := &unstructured.Unstructured{Object: map[string]any{
+		"apiVersion": kubeBlocksClusterAPIVersion,
+		"kind":       "Cluster",
+		"metadata": map[string]any{
+			"name": "cluster", "namespace": "db", "uid": "cluster-uid",
+		},
+		"spec": map[string]any{"componentSpecs": []any{
+			map[string]any{"name": "db", "replicas": int64(1)},
+		}},
+		"status": map[string]any{
+			"phase": "Running",
+			"components": map[string]any{
+				"db": map[string]any{"phase": "Stopped"},
+			},
+		},
+	}}
+	kb := &domain.KubeBlocksSpec{
+		Component:     "db",
+		OpsAPIVersion: kubeBlocksOpsAPIVersion,
+	}
+
+	converged, err := kubeBlocksLegacyResumeConverged(cluster, kb)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if converged {
+		t.Fatal("reported convergence while the operations component was Stopped")
+	}
+
+	if err := unstructured.SetNestedField(
+		cluster.Object,
+		"Running",
+		"status", "components", "db", "phase",
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	converged, err = kubeBlocksLegacyResumeConverged(cluster, kb)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !converged {
+		t.Fatal("did not report convergence after the operations component became Running")
+	}
+}
+
+func TestKubeBlocksInstanceSetResumeWaitsForClusterRunning(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+
+	apiVersion := "workloads.kubeblocks.io/v1alpha1"
+	instanceSet := kubeBlocksInstanceSetObject(apiVersion, new(true))
+	instanceSet.SetAnnotations(map[string]string{pauseSessionAnnotation: "session"})
+
+	cluster := &unstructured.Unstructured{Object: map[string]any{
+		"apiVersion": kubeBlocksClusterAPIVersion,
+		"kind":       "Cluster",
+		"metadata": map[string]any{
+			"name": "cluster", "namespace": "db", "uid": "cluster-uid",
+		},
+		"status": map[string]any{
+			"phase": "Updating",
+			"components": map[string]any{
+				"db": map[string]any{"phase": "Updating"},
+			},
+		},
+	}}
+
+	session := kubeBlocksInstanceSetSession(apiVersion, false, true)
+	pod := readyPod("db", "cluster-db-0", "node-a")
+	pod.OwnerReferences = []metav1.OwnerReference{{
+		APIVersion: apiVersion,
+		Kind:       domain.KindInstanceSet,
+		Name:       "cluster-db",
+		UID:        "instanceset-uid",
+		Controller: new(true),
+	}}
+	session.Spec.WorkloadPtr().Pod = podReference(pod)
+
+	dynamicClient := dynamicfake.NewSimpleDynamicClient(runtime.NewScheme(), instanceSet, cluster)
+	clusterReads := 0
+	dynamicClient.PrependReactor(
+		"get",
+		clusterResource,
+		func(clienttesting.Action) (bool, runtime.Object, error) {
+			clusterReads++
+
+			current := cluster.DeepCopy()
+			if clusterReads > 1 {
+				_ = unstructured.SetNestedField(current.Object, "Running", "status", "phase")
+				_ = unstructured.SetNestedField(
+					current.Object,
+					"Running",
+					"status",
+					"components",
+					"db",
+					"phase",
+				)
+			}
+
+			return true, current, nil
+		},
+	)
+	manager := NewManager(kubernetesfake.NewClientset(pod), dynamicClient, nil)
+	manager.poll = time.Millisecond
+
+	if err := manager.resumeKubeBlocks(ctx, session); err != nil {
+		t.Fatal(err)
+	}
+
+	if clusterReads < 2 {
+		t.Fatalf("Cluster convergence reads=%d want at least 2", clusterReads)
 	}
 }
 

@@ -403,6 +403,25 @@ func (s *Service) planCrossClusterVolume(
 		return VolumePlan{}, false
 	}
 
+	if err := kube.ValidateDestinationAccessModes(
+		destinationClass.Provisioner,
+		pvc.Spec.AccessModes,
+	); err != nil {
+		plan.AddCheck(
+			"destination-access-modes",
+			false,
+			fmt.Sprintf(
+				"destination StorageClass %s cannot provide source PVC %s/%s access modes: %v; choose a StorageClass with matching access-mode support",
+				destinationClass.Name,
+				pvc.Namespace,
+				pvc.Name,
+				err,
+			),
+		)
+
+		return VolumePlan{}, false
+	}
+
 	pv, err := s.source.Kubernetes.CoreV1().
 		PersistentVolumes().
 		Get(ctx, pvc.Spec.VolumeName, metav1.GetOptions{})

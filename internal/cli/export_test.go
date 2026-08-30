@@ -38,12 +38,14 @@ func LoadS3CredentialsForTest(
 }
 
 func CrossClusterCleanupGuidanceForTest(input CrossClusterFlagsForTest, sessionID string) string {
-	return crossClusterCleanupCommand(&crossClusterFlags{
-		sourceKubeconfig:      input.SourceKubeconfig,
-		sourceContext:         input.SourceContext,
-		destinationKubeconfig: input.DestinationKubeconfig,
-		destinationContext:    input.DestinationContext,
-		sessionNamespace:      input.SessionNamespace,
+	return crossClusterCopyCleanupCommand(&crossClusterCopyFlags{
+		crossClusterConnectionFlags: crossClusterConnectionFlags{
+			sourceKubeconfig:      input.SourceKubeconfig,
+			sourceContext:         input.SourceContext,
+			destinationKubeconfig: input.DestinationKubeconfig,
+			destinationContext:    input.DestinationContext,
+			sessionNamespace:      input.SessionNamespace,
+		},
 	}, sessionID)
 }
 

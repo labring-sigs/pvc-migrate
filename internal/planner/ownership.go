@@ -97,7 +97,7 @@ func (p *Planner) checkSessionOwnership(
 		base := sessionCLIBase(sessionNamespace, false)
 		executeBase := sessionCLIBase(sessionNamespace, true)
 		args := fmt.Sprintf(
-			"session cleanup-orphan %s --source-namespace %s --source-pvc %s",
+			"recovery cleanup-orphan %s --source-namespace %s --source-pvc %s",
 			owner,
 			pvc.Namespace,
 			pvc.Name,
@@ -140,12 +140,14 @@ func (p *Planner) checkSessionOwnership(
 func persistedOwnerGuidance(session *domain.Session) string {
 	base := sessionCLIBase(session.Spec.SessionNamespace, false)
 	executeBase := sessionCLIBase(session.Spec.SessionNamespace, true)
+	workflow := workflowCommand(session)
 
-	status := fmt.Sprintf("inspect with `%s session status %s`", base, session.ID)
+	status := fmt.Sprintf("inspect with `%s %s status %s`", base, workflow, session.ID)
 	switch session.Status.Phase {
 	case domain.PhaseCompleted, domain.PhaseAborted, domain.PhaseRolledBack:
 		args := fmt.Sprintf(
-			"session cleanup %s --delete-temporary --delete-rollback-pv --finalize --delete-session",
+			"%s cleanup %s --delete-temporary --delete-rollback-pv --finalize --delete-session",
+			workflow,
 			session.ID,
 		)
 
@@ -159,7 +161,7 @@ func persistedOwnerGuidance(session *domain.Session) string {
 		)
 	case domain.PhaseWarmCopied:
 		if session.Spec.Operation() == domain.OperationCopy {
-			args := fmt.Sprintf("session cleanup %s --finalize --delete-session", session.ID)
+			args := fmt.Sprintf("%s cleanup %s --finalize --delete-session", workflow, session.ID)
 
 			return fmt.Sprintf(
 				"%s; preserve the copied PVC and validate cleanup with `%s %s`, then execute `%s %s --dry-run=false`",
@@ -173,7 +175,8 @@ func persistedOwnerGuidance(session *domain.Session) string {
 	case domain.PhaseReserved:
 		if session.Spec.Operation() == domain.OperationReserve {
 			args := fmt.Sprintf(
-				"session cleanup %s --delete-temporary --delete-rollback-pv --finalize --delete-session",
+				"%s cleanup %s --delete-temporary --delete-rollback-pv --finalize --delete-session",
+				workflow,
 				session.ID,
 			)
 
@@ -193,33 +196,63 @@ func persistedOwnerGuidance(session *domain.Session) string {
 	case domain.PhaseFailed:
 		if failedSessionCanAbort(session) {
 			return fmt.Sprintf(
-				"%s; validate abort with `%s session abort %s`, then execute `%s session abort %s --dry-run=false` and follow the cleanup guidance",
+				"%s; validate abort with `%s %s abort %s`, then execute `%s %s abort %s --dry-run=false` and follow the cleanup guidance",
 				status,
 				base,
+				workflow,
 				session.ID,
 				executeBase,
+				workflow,
 				session.ID,
 			)
 		}
 
 		return fmt.Sprintf(
-			"%s; validate rollback with `%s session rollback %s`, then execute `%s session rollback %s --dry-run=false`",
+			"%s; validate rollback with `%s %s rollback %s`, then execute `%s %s rollback %s --dry-run=false`",
 			status,
 			base,
+			workflow,
 			session.ID,
 			executeBase,
+			workflow,
 			session.ID,
 		)
 	}
 
 	return fmt.Sprintf(
-		"%s; validate recovery with `%s session resume %s`, then execute `%s session resume %s --dry-run=false`",
+		"%s; validate recovery with `%s %s resume %s`, then execute `%s %s resume %s --dry-run=false`",
 		status,
 		base,
+		workflow,
 		session.ID,
 		executeBase,
+		workflow,
 		session.ID,
 	)
+}
+
+func workflowCommand(session *domain.Session) string {
+	if session == nil {
+		return "migrate"
+	}
+	switch session.Spec.Type {
+	case domain.SessionTypeMigrate:
+		return "migrate"
+	case domain.SessionTypeMigratePod:
+		return "migrate-pod"
+	case domain.SessionTypeReserve:
+		return "reserve"
+	case domain.SessionTypeCopy:
+		return "copy"
+	case domain.SessionTypeBackup:
+		return "backup"
+	case domain.SessionTypeRename:
+		return "rename"
+	case domain.SessionTypeMove:
+		return "move"
+	default:
+		return "migrate"
+	}
 }
 
 func failedSessionCanAbort(session *domain.Session) bool {

@@ -471,10 +471,10 @@ func testBackupSession(t *testing.T, id string) *domain.Session {
 			SessionNamespace: "sessions",
 			CreatedBy:        "test",
 		},
-		domain.WorkloadSpec{Adapter: domain.WorkloadNone},
+
 		false,
-		domain.SessionWorkflowOptions{},
-	)
+		domain.SessionWorkflowOptions{})
+
 	spec.Backup.SourcePVC = domain.ObjectReference{Namespace: "app", Name: "data", UID: "pvc-uid"}
 	spec.Backup.SourcePV = domain.ObjectReference{Name: "pv-data", UID: "pv-uid"}
 	spec.Backup.Backend = "s3"
