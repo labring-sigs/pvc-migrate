@@ -172,7 +172,6 @@ func NewRoot(options Options) *cobra.Command {
 		state.newRenameCommand(),
 		state.newMoveCommand(),
 		state.newBackupCommand(),
-		state.newLiveBackupCommand(),
 		state.newRestoreCommand(),
 		state.newRecoveryCommand(),
 		newVersionCommand(options.Version),

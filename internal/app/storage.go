@@ -162,7 +162,7 @@ func (s *Service) validateActivationStorage(ctx context.Context, session *domain
 			continue
 		}
 
-		active, err := s.unrecordedActivePVC(ctx, session, index)
+		active, _, err := s.unrecordedActivePVC(ctx, session, index)
 		if err != nil {
 			return err
 		}
@@ -198,18 +198,18 @@ func (s *Service) unrecordedActivePVC(
 	ctx context.Context,
 	session *domain.Session,
 	index int,
-) (*domain.ObjectReference, error) {
+) (*domain.ObjectReference, bool, error) {
 	volume := &session.Spec.Volumes[index]
 
 	pvc, err := s.client.CoreV1().
 		PersistentVolumeClaims(volume.SourcePVC.Namespace).
 		Get(ctx, volume.SourcePVC.Name, metav1.GetOptions{})
 	if apierrors.IsNotFound(err) {
-		return nil, nil
+		return nil, false, nil
 	}
 
 	if err != nil {
-		return nil, domain.WrapError(
+		return nil, false, domain.WrapError(
 			domain.ErrorKubernetes,
 			verifyMigrationPhase,
 			fmt.Sprintf("read PVC %s/%s", volume.SourcePVC.Namespace, volume.SourcePVC.Name),
@@ -218,7 +218,7 @@ func (s *Service) unrecordedActivePVC(
 	}
 
 	if pvc == nil || pvc.Name == "" {
-		return nil, domain.NewError(
+		return nil, false, domain.NewError(
 			domain.ErrorKubernetes,
 			verifyMigrationPhase,
 			fmt.Sprintf(
@@ -230,7 +230,7 @@ func (s *Service) unrecordedActivePVC(
 	}
 
 	if pvc.UID == volume.SourcePVC.UID && pvc.Spec.VolumeName == volume.SourcePV.Name {
-		return nil, nil
+		return nil, true, nil
 	}
 
 	return &domain.ObjectReference{
@@ -240,7 +240,7 @@ func (s *Service) unrecordedActivePVC(
 		Name:            pvc.Name,
 		UID:             pvc.UID,
 		ResourceVersion: pvc.ResourceVersion,
-	}, nil
+	}, true, nil
 }
 
 func (s *Service) validateActivationPVCPolicies(
@@ -270,6 +270,17 @@ func (s *Service) validateActivationPVCPolicies(
 			)
 		}
 
+		active, found, err := s.unrecordedActivePVC(ctx, session, index)
+		if err != nil {
+			return err
+		}
+		if active != nil && active.UID != volume.SourcePVC.UID {
+			// The replacement is already present. Storage validation below
+			// verifies its identity and session ownership; it must not be
+			// projected as another admission request.
+			continue
+		}
+
 		existing := volume.SourcePVCSpec.Resources.Requests[corev1.ResourceStorage]
 
 		sourceClass := ""
@@ -286,7 +297,7 @@ func (s *Service) validateActivationPVCPolicies(
 				Name:                                volume.SourcePVC.Name,
 				RequestedStorage:                    requested,
 				RequestedStorageClass:               volume.StorageClass,
-				Existing:                            !status.Activation.SourcePVCDeleted,
+				Existing:                            found && !status.Activation.SourcePVCDeleted,
 				ExistingUID:                         volume.SourcePVC.UID,
 				ExistingStorage:                     existing,
 				ExistingStorageClass:                sourceClass,

@@ -485,7 +485,7 @@ func TestSessionGuidanceAbortIncludesValidationAndApproval(t *testing.T) {
 }
 
 func TestTransferDryRunGuidanceUsesOperationName(t *testing.T) {
-	for _, operation := range []string{"backup plan", "live-backup plan", "restore plan"} {
+	for _, operation := range []string{"backup plan", "restore plan"} {
 		var output bytes.Buffer
 		if err := writeTransferDryRunGuidance(
 			&output,
@@ -803,7 +803,7 @@ func TestTransferPathErrorGuidanceDoesNotClaimPlanMountsPVC(t *testing.T) {
 	)
 	if got := reportTransferError(
 		command,
-		"live-backup",
+		"backup",
 		"app",
 		"data",
 		err,

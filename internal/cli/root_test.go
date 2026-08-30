@@ -288,10 +288,11 @@ func TestBackupDryRunPrintsNormalizedPath(t *testing.T) {
 	}
 }
 
-func TestLiveBackupDryRunAllowsMountedSourceSemantics(t *testing.T) {
+func TestBackupOnlineDryRunAllowsMountedSourceSemantics(t *testing.T) {
 	stdout, _, err := executeBackupCLI(
 		t,
-		"live-backup",
+		"backup",
+		"--online",
 		"--output",
 		"json",
 		"--source-pvc",
@@ -315,6 +316,28 @@ func TestLiveBackupDryRunAllowsMountedSourceSemantics(t *testing.T) {
 	if result["mode"] != "online" ||
 		result["consistency"] != "best-effort crash-consistent file copy" {
 		t.Fatalf("online backup output=%v", result)
+	}
+}
+
+func TestBackupRejectsOnlineOnlyLVMFlagWithoutOnlineMode(t *testing.T) {
+	_, stderr, err := executeBackupCLI(
+		t,
+		"backup",
+		"--openebs-lvm-enable-shared",
+		"--source-pvc",
+		"data",
+		"--backend",
+		"s3",
+		"--bucket",
+		"backups",
+		"--name",
+		"daily",
+	)
+	if err == nil {
+		t.Fatal("expected offline backup to reject --openebs-lvm-enable-shared")
+	}
+	if !strings.Contains(err.Error(), "--openebs-lvm-enable-shared requires --online") {
+		t.Fatalf("error=%v guidance=%q", err, stderr)
 	}
 }
 
@@ -349,8 +372,9 @@ func TestBackupPlanSubcommandIsOperationSpecific(t *testing.T) {
 
 	stdout, _, err = executeBackupCLI(
 		t,
-		"live-backup",
+		"backup",
 		"plan",
+		"--online",
 		"--output",
 		"json",
 		"--source-pvc",
@@ -367,11 +391,11 @@ func TestBackupPlanSubcommandIsOperationSpecific(t *testing.T) {
 	}
 
 	if err := json.Unmarshal([]byte(stdout), &result); err != nil {
-		t.Fatalf("decode live plan: %v\n%s", err, stdout)
+		t.Fatalf("decode online backup plan: %v\n%s", err, stdout)
 	}
 
 	if result["mode"] != "online" {
-		t.Fatalf("live-backup plan output=%v", result)
+		t.Fatalf("online backup plan output=%v", result)
 	}
 }
 

@@ -15,6 +15,7 @@ import (
 	"github.com/labring-sigs/pvc-migrate/internal/testutil"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
@@ -1655,6 +1656,50 @@ func TestValidateResumeRecognizesActivePVCBeforeCheckpointPersistence(t *testing
 	if session.Status.Volumes[0].Activation.ActivePVC.Name != "" ||
 		session.Status.Volumes[0].Activation.ActivatedAt != nil {
 		t.Fatalf("dry-run mutated activation state: %#v", session.Status.Volumes[0].Activation)
+	}
+
+	if want := []string{"data"}; !slices.Equal(fixture.switcher.offlineCalls, want) {
+		t.Fatalf("offline checks=%v want=%v", fixture.switcher.offlineCalls, want)
+	}
+}
+
+func TestValidateResumeRecognizesActivePVCBeforeQuotaProjection(t *testing.T) {
+	fixture := newRecoveryFixture(t)
+	session := appTestSession()
+	createActiveDestinationStorage(t, fixture, session)
+
+	quota := &corev1.ResourceQuota{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "app", Name: "storage"},
+		Spec: corev1.ResourceQuotaSpec{Hard: corev1.ResourceList{
+			corev1.ResourceRequestsStorage: resource.MustParse("1Gi"),
+		}},
+		Status: corev1.ResourceQuotaStatus{
+			Hard: corev1.ResourceList{
+				corev1.ResourceRequestsStorage: resource.MustParse("1Gi"),
+			},
+			Used: corev1.ResourceList{
+				corev1.ResourceRequestsStorage: resource.MustParse("1Gi"),
+			},
+		},
+	}
+	if _, err := fixture.client.CoreV1().ResourceQuotas("app").Create(
+		context.Background(), quota, metav1.CreateOptions{},
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	completed := metav1.Now()
+	session.Status.Phase = domain.PhaseFailed
+	session.Status.ResumeFrom = domain.PhaseActivating
+	session.Status.Volumes[0].Sync.FinalCompletedAt = &completed
+	session.Status.Volumes[0].Activation.TemporaryPVCDeleted = true
+	session.Status.Volumes[0].Activation.SourcePVCDeleted = false
+	session.Status.Volumes[0].Activation.DestinationReserved = true
+	session.Status.Volumes[0].Activation.ActivePVC = domain.ObjectReference{}
+	session.Status.Volumes[0].Activation.ActivatedAt = nil
+
+	if err := fixture.service.validateResumeWorkflowForTest(context.Background(), session); err != nil {
+		t.Fatal(err)
 	}
 
 	if want := []string{"data"}; !slices.Equal(fixture.switcher.offlineCalls, want) {

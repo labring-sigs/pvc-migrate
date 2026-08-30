@@ -63,10 +63,8 @@ func TestOperationCommandSurfacesStayIndependent(t *testing.T) {
 		{path: []string{"rename", "plan"}, present: []string{"destination-pvc"}, absent: []string{"destination-namespace", "online", "source-node", "pod", "destination-capacity", "source-path", "target-node"}},
 		{path: []string{"move"}, present: []string{"destination-pvc", "destination-namespace"}, absent: []string{"online", "source-node", "pod", "destination-capacity", "source-path", "target-node"}},
 		{path: []string{"move", "plan"}, present: []string{"destination-pvc", "destination-namespace"}, absent: []string{"online", "source-node", "pod", "destination-capacity", "source-path", "target-node"}},
-		{path: []string{"backup"}, absent: []string{"online", "openebs-lvm-enable-shared"}},
-		{path: []string{"backup", "plan"}, absent: []string{"online", "openebs-lvm-enable-shared"}},
-		{path: []string{"live-backup"}, absent: []string{"online"}, present: []string{"openebs-lvm-enable-shared"}},
-		{path: []string{"live-backup", "plan"}, absent: []string{"online"}, present: []string{"openebs-lvm-enable-shared"}},
+		{path: []string{"backup"}, present: []string{"online", "openebs-lvm-enable-shared"}},
+		{path: []string{"backup", "plan"}, present: []string{"online", "openebs-lvm-enable-shared"}},
 		{path: []string{"reserve", "cross-cluster", "run"}, absent: []string{"online", "verify-checksum", "delete-extraneous"}},
 		{path: []string{"reserve", "cross-cluster", "plan"}, absent: []string{"online", "verify-checksum", "delete-extraneous"}},
 		{path: []string{"reserve", "cross-cluster", "status"}, absent: []string{"online", "verify-checksum", "delete-extraneous", "source-pvc", "destination-pvc"}},
@@ -102,7 +100,6 @@ func testRootCommandSurface(t *testing.T, root *cobra.Command) {
 		"backup",
 		"completion",
 		"copy",
-		"live-backup",
 		"migrate",
 		"migrate-pod",
 		"move",
@@ -131,9 +128,8 @@ func testRootCommandSurface(t *testing.T, root *cobra.Command) {
 		}
 	}
 
-	liveBackup, _, err := root.Find([]string{"live-backup"})
-	if err != nil || liveBackup.Name() != "live-backup" {
-		t.Fatalf("live-backup alias command=%v error=%v", liveBackup, err)
+	if command, _, err := root.Find([]string{"live-backup"}); err == nil && command != root {
+		t.Fatalf("removed live-backup command resolved to %v", command)
 	}
 
 	for name, want := range map[string]string{
@@ -172,7 +168,6 @@ func testRootDryRunPlacement(t *testing.T, root *cobra.Command) {
 	mutationPaths := [][]string{
 		{"backup"},
 		{"copy"},
-		{"live-backup"},
 		{"migrate"},
 		{"migrate", "resume"},
 		{"migrate", "abort"},
@@ -221,7 +216,6 @@ func testRootDryRunPlacement(t *testing.T, root *cobra.Command) {
 	planPaths := [][]string{
 		{"backup", "plan"},
 		{"copy", "plan"},
-		{"live-backup", "plan"},
 		{"migrate", "plan"},
 		{"migrate-pod", "plan"},
 		{"move", "plan"},
@@ -266,7 +260,7 @@ func testCleanupFlagPlacement(t *testing.T, root *cobra.Command) {
 		}
 	}
 
-	for _, workflow := range []string{"backup", "live-backup", "rename", "move"} {
+	for _, workflow := range []string{"backup", "rename", "move"} {
 		command, _, err := root.Find([]string{workflow, "cleanup"})
 		if err != nil {
 			t.Fatalf("Find(%s cleanup): %v", workflow, err)

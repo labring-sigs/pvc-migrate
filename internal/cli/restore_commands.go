@@ -79,8 +79,9 @@ func (r *rootState) newRestoreTransferCommand() *cobra.Command {
 
 func (r *rootState) newRestorePlanCommand() *cobra.Command {
 	flags := &restoreFlags{}
-	command := r.newObjectTransferPlanCommand("restore plan", "destination-pvc", false, true, &flags.bucketFlags, func(request *backup.Request) {
+	command := r.newObjectTransferPlanCommand("restore plan", "destination-pvc", false, true, &flags.bucketFlags, func(request *backup.Request) error {
 		applyRestoreRequest(request, flags.restore)
+		return nil
 	})
 	bindRestoreFlags(command, flags)
 	return command

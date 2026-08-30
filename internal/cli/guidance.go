@@ -146,9 +146,6 @@ func workflowCommandName(session *domain.Session) string {
 	case domain.SessionTypeCopy:
 		return "copy"
 	case domain.SessionTypeBackup:
-		if session.Spec.Backup != nil && session.Spec.Backup.Online {
-			return "live-backup"
-		}
 		return "backup"
 	case domain.SessionTypeRename:
 		return "rename"
@@ -178,7 +175,7 @@ func workflowCommandNameForCommand(value any) string {
 	}
 
 	switch current.Name() {
-	case "migrate", "migrate-pod", "reserve", "copy", "backup", "live-backup", "rename", "move":
+	case "migrate", "migrate-pod", "reserve", "copy", "backup", "rename", "move":
 		return current.Name()
 	default:
 		return "migrate"

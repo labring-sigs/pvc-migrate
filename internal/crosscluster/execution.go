@@ -4,8 +4,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 
 	"github.com/labring-sigs/pvc-migrate/internal/copyengine"
+	"github.com/labring-sigs/pvc-migrate/internal/domain"
 	"github.com/labring-sigs/pvc-migrate/internal/kube"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
@@ -300,6 +302,16 @@ func (s *Service) copy(ctx context.Context, session *Session, retries int, noCom
 		return errors.New("copy engine is unavailable")
 	}
 
+	schedulingValues, err := s.toolSchedulingValues(ctx, session)
+	if err != nil {
+		session.Status.Phase = PhaseFailed
+		session.Status.Message = err.Error()
+		s.touch(session)
+		_ = s.save(ctx, session, false)
+
+		return err
+	}
+
 	session.Status.Phase = PhaseTransferring
 	session.Status.Message = "copying PVC data"
 	s.touch(session)
@@ -371,14 +383,11 @@ func (s *Service) copy(ctx context.Context, session *Session, retries int, noCom
 					volume.Destination.Capacity,
 					volume.Source.Capacity,
 				),
-				NoCompress:  noCompress,
-				HelmTimeout: s.helmTimeout,
-				HelmStringValues: append(
-					[]string(nil),
-					kube.ZeroResourceHelmValues()...,
-				),
-				Writer: s.writer,
-				Logger: s.logger,
+				NoCompress:       noCompress,
+				HelmTimeout:      s.helmTimeout,
+				HelmStringValues: append([]string(nil), schedulingValues...),
+				Writer:           s.writer,
+				Logger:           s.logger,
 			}
 
 			last = s.copier.Copy(ctx, req, nil)
@@ -413,4 +422,83 @@ func (s *Service) copy(ctx context.Context, session *Session, retries int, noCom
 	s.touch(session)
 
 	return s.save(ctx, session, false)
+}
+
+// toolSchedulingValues carries the node taints that the upstream pv-migrate
+// chart must tolerate. Cross-cluster sessions cannot rely on the source
+// cluster's scheduler defaults, so the values are assembled from both API
+// servers before launching a transfer.
+func (s *Service) toolSchedulingValues(
+	ctx context.Context,
+	session *Session,
+) ([]string, error) {
+	if session == nil {
+		return nil, errors.New("cross-cluster session is required")
+	}
+
+	values := kube.ZeroResourceHelmValues()
+	targetName := session.Spec.TargetNode
+	if targetName == "" || targetName == domain.AutoValue {
+		return nil, errors.New("cross-cluster session has no resolved destination target node")
+	}
+
+	target, err := s.destination.Kubernetes.CoreV1().Nodes().Get(
+		ctx, targetName, metav1.GetOptions{},
+	)
+	if err != nil {
+		return nil, fmt.Errorf("read destination target node %s before copy: %w", targetName, err)
+	}
+
+	values = append(values,
+		kube.ToolComponentTolerationHelmValues(kube.ToolComponentRsync, target)...,
+	)
+
+	// A local PV pins the source SSHD to the node(s) allowed by its PV
+	// topology. Mirror those nodes' hard-taint tolerations so source-side
+	// tools can start even when the source cluster reserves tainted storage
+	// nodes for this workload.
+	sourceNodes, err := s.source.Kubernetes.CoreV1().Nodes().List(
+		ctx, metav1.ListOptions{},
+	)
+	if err != nil {
+		return nil, fmt.Errorf("list source nodes before copy: %w", err)
+	}
+
+	sshdNodes := make([]*corev1.Node, 0, 1)
+	if slices.Contains(session.Spec.Strategies, "local") {
+		sshdNodes = append(sshdNodes, target)
+	}
+
+	for i := range session.Spec.Volumes {
+		pv, getErr := s.source.Kubernetes.CoreV1().PersistentVolumes().Get(
+			ctx,
+			session.Spec.Volumes[i].Source.PV.Name,
+			metav1.GetOptions{},
+		)
+		if getErr != nil {
+			return nil, fmt.Errorf(
+				"read source PV %s before copy scheduling: %w",
+				session.Spec.Volumes[i].Source.PV.Name,
+				getErr,
+			)
+		}
+
+		if pv.Spec.NodeAffinity == nil || pv.Spec.NodeAffinity.Required == nil {
+			continue
+		}
+
+		for nodeIndex := range sourceNodes.Items {
+			if !kube.PVSupportsNode(pv, &sourceNodes.Items[nodeIndex]) {
+				continue
+			}
+
+			sshdNodes = append(sshdNodes, &sourceNodes.Items[nodeIndex])
+		}
+	}
+
+	values = append(values,
+		kube.ToolComponentTolerationHelmValues(kube.ToolComponentSSHD, sshdNodes...)...,
+	)
+
+	return values, nil
 }

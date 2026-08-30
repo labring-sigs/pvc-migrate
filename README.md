@@ -249,11 +249,11 @@ Controller ownership outside the supported adapters causes the plan to fail. PVC
 | `migrate-pod` | Run real-time warm copy, workload pause, cutover, and resume for one Pod |
 | `rename` | Rename one offline PVC while retaining its PV |
 | `move` | Move one offline PVC identity to another namespace |
-| `backup`, `live-backup` | Copy PVC files to S3-compatible object storage |
+| `backup` | Copy PVC files to S3-compatible object storage (`--online` keeps active consumers running) |
 | `restore` | Restore a published recovery point into a PVC |
 | `migrate status/resume/abort/rollback/cleanup` | Manage an offline migration session |
 | `migrate-pod status/resume/abort/rollback/cleanup` | Manage a real-time Pod migration session |
-| `reserve/copy/backup/live-backup/rename/move status/resume/abort/cleanup` | Manage the lifecycle actions supported by each workflow |
+| `reserve/copy/backup/rename/move status/resume/abort/cleanup` | Manage the lifecycle actions supported by each workflow |
 | `copy cross-cluster` / `reserve cross-cluster` lifecycle commands | Inspect, continue, or clean up a cross-cluster session |
 | `recovery cleanup-orphan` | Validate and clear ownership after a session record was lost |
 | `completion` | Generate shell completion |
@@ -380,7 +380,7 @@ pvc-migrate copy --dry-run=false \
 
 ## Backup and Restore
 
-`backup` requires an offline source. `live-backup` is the separate best-effort file-level operation for active consumers. Each completed backup publishes an immutable recovery point under a unique `--name`.
+`backup` performs an offline file-consistent copy by default. Add `--online` for a best-effort crash-consistent file copy while source consumers remain active. Each completed backup publishes an immutable recovery point under a unique `--name`.
 
 The completion manifest records the source PVC identity, capacity, VolumeMode, path, consistency boundary, object count, total bytes, and inventory digest. Restore validates the manifest and inventory before and after synchronization. The requested `--path` must match the published path.
 
@@ -388,7 +388,7 @@ S3-compatible credentials can come from the AWS default credential chain, explic
 
 ```bash
 pvc-migrate --kubeconfig /path/to/kubeconfig \
-  live-backup --dry-run=false \
+  backup --online --dry-run=false \
   --namespace application \
   --source-pvc database-data \
   --backend s3 \
@@ -415,7 +415,7 @@ capacity by default. `--destination-capacity` can increase the capacity and cann
 restore keeps its automatically created PVC for a retry with the same recovery-point parameters.
 Restore rejects a same-named PVC from another restore.
 
-`backup`, `live-backup`, and `restore` use `--path` for one PVC subdirectory. The restore path must match the path recorded in the immutable completion manifest. Omitting `--path` selects the full PVC.
+`backup` and `restore` use `--path` for one PVC subdirectory. The restore path must match the path recorded in the immutable completion manifest. Omitting `--path` selects the full PVC.
 
 Online backup provides a best-effort crash-consistent file copy. Application-consistent database recovery requires quiescence, a filesystem snapshot, or a database-native backup. File contents and paths are preserved; POSIX ownership, permissions, ACLs, extended attributes, hard links, device files, and empty directories remain outside the backup contract.
 
