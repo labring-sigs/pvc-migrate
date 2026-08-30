@@ -2,6 +2,7 @@ package planner
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 
@@ -32,7 +33,10 @@ type RenameOptions struct {
 	SessionNamespace     string
 }
 
-func (p *Planner) PlanRename(ctx context.Context, options RenameOptions) (*domain.MigrationPlan, error) {
+func (p *Planner) PlanRename(
+	ctx context.Context,
+	options RenameOptions,
+) (*domain.MigrationPlan, error) {
 	if options.Operation == domain.OperationMove {
 		return p.PlanMovePVC(ctx, MovePlanOptions{
 			SessionID: options.SessionID, SourceNamespace: options.SourceNamespace,
@@ -40,6 +44,7 @@ func (p *Planner) PlanRename(ctx context.Context, options RenameOptions) (*domai
 			DestinationPVC: options.DestinationPVC, SessionNamespace: options.SessionNamespace,
 		})
 	}
+
 	return p.planPVCIdentity(ctx, pvcIdentityPlanOptions{
 		Operation: domain.OperationRename, SessionID: options.SessionID,
 		SourceNamespace: options.SourceNamespace, SourcePVC: options.SourcePVC,
@@ -141,6 +146,34 @@ func TestPlanRenameSameNamespacePreservesDurableMetadataWithoutQuotaDemand(t *te
 		if _, exists := metadata.Annotations[key]; exists {
 			t.Fatalf("transient annotation %q was preserved", key)
 		}
+	}
+}
+
+func TestPlanRenameFailsWhenSourceStorageClassCannotBeRead(t *testing.T) {
+	client := plannerClient(plannerObjects("2Gi")...)
+	client.PrependReactor(
+		"get",
+		"storageclasses",
+		func(clienttesting.Action) (bool, runtime.Object, error) {
+			return true, nil, errors.New("storage class access denied")
+		},
+	)
+
+	plan, err := New(client, nil).PlanRename(context.Background(), RenameOptions{
+		SessionID:            "rename-storage-class-error",
+		SourceNamespace:      "app",
+		SourcePVC:            "data",
+		DestinationNamespace: "app",
+		DestinationPVC:       "renamed",
+		SessionNamespace:     "system",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if plan.Ready || !hasFailedCheck(plan, "source-storage-class") ||
+		!hasFailedCheckContaining(plan, "source-storage-class", "storage class access denied") {
+		t.Fatalf("plan=%#v", plan)
 	}
 }
 

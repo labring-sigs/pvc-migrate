@@ -246,12 +246,7 @@ func (s *Service) reserve(ctx context.Context, session *Session) error {
 		}
 
 		if err := s.reserveVolume(ctx, session, i); err != nil {
-			session.Status.Phase = PhaseFailed
-			session.Status.Message = err.Error()
-			s.touch(session)
-			_ = s.save(ctx, session, false)
-
-			return err
+			return s.fail(ctx, session, err)
 		}
 
 		session.Status.Volumes[i].Reservation.PV = session.Spec.Volumes[i].Destination.PV
@@ -304,12 +299,7 @@ func (s *Service) copy(ctx context.Context, session *Session, retries int, noCom
 
 	schedulingValues, err := s.toolSchedulingValues(ctx, session)
 	if err != nil {
-		session.Status.Phase = PhaseFailed
-		session.Status.Message = err.Error()
-		s.touch(session)
-		_ = s.save(ctx, session, false)
-
-		return err
+		return s.fail(ctx, session, err)
 	}
 
 	session.Status.Phase = PhaseTransferring
@@ -398,12 +388,7 @@ func (s *Service) copy(ctx context.Context, session *Session, retries int, noCom
 
 		if last != nil {
 			status.Transfer.LastError = last.Error()
-			session.Status.Phase = PhaseFailed
-			session.Status.Message = last.Error()
-			s.touch(session)
-			_ = s.save(ctx, session, false)
-
-			return last
+			return s.fail(ctx, session, last)
 		}
 
 		now := metav1.NewTime(s.now().UTC())
@@ -424,6 +409,20 @@ func (s *Service) copy(ctx context.Context, session *Session, retries int, noCom
 	return s.save(ctx, session, false)
 }
 
+// fail records a recoverable cross-cluster failure and preserves a persistence
+// error when the checkpoint itself cannot be written.
+func (s *Service) fail(ctx context.Context, session *Session, cause error) error {
+	session.Status.Phase = PhaseFailed
+	session.Status.Message = cause.Error()
+	s.touch(session)
+
+	if err := s.save(ctx, session, false); err != nil {
+		return errors.Join(cause, err)
+	}
+
+	return cause
+}
+
 // toolSchedulingValues carries the node taints that the upstream pv-migrate
 // chart must tolerate. Cross-cluster sessions cannot rely on the source
 // cluster's scheduler defaults, so the values are assembled from both API
@@ -437,6 +436,7 @@ func (s *Service) toolSchedulingValues(
 	}
 
 	values := kube.ZeroResourceHelmValues()
+
 	targetName := session.Spec.TargetNode
 	if targetName == "" || targetName == domain.AutoValue {
 		return nil, errors.New("cross-cluster session has no resolved destination target node")

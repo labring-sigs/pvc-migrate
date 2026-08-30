@@ -37,19 +37,69 @@ func (f *crossClusterReserveFlags) bind(command *cobra.Command, r *rootState) {
 	f.bindConnections(command, r)
 	flags := command.Flags()
 	flags.StringVarP(&f.sourceNamespace, "source-namespace", "n", "default", "Source PVC namespace")
-	flags.StringVar(&f.destinationNamespace, "destination-namespace", "", "Destination PVC namespace; defaults to source namespace")
+	flags.StringVar(
+		&f.destinationNamespace,
+		"destination-namespace",
+		"",
+		"Destination PVC namespace; defaults to source namespace",
+	)
 	flags.StringVar(&f.sessionID, "session", "", "Cross-cluster session ID")
-	flags.StringSliceVar(&f.sourcePVCs, "source-pvc", nil, "Source PVC name; repeat for multiple claims")
-	flags.StringSliceVar(&f.destinationPVCs, "destination-pvc", nil, "Destination PVC name; use source=destination for explicit mappings")
-	flags.StringSliceVar(&f.destinationCapacities, "destination-capacity", nil, "Destination capacity; use source=capacity for explicit mappings")
-	flags.StringArrayVar(&f.sourcePaths, "source-path", nil, "Source path; use source=path for explicit mappings")
-	flags.StringArrayVar(&f.destinationPaths, "destination-path", nil, "Destination path; use source=path for explicit mappings")
-	flags.StringVar(&f.destinationStorageClass, "destination-storage-class", "", "Destination StorageClass (required)")
-	flags.BoolVar(&f.allowVolumeShrink, "allow-volume-shrink", false, "Allow destination capacity below source capacity")
-	flags.BoolVar(&f.skipSourceUsageCheck, "skip-source-usage-check", false, "Proceed with shrink after independently verifying source data fits")
+	flags.StringSliceVar(
+		&f.sourcePVCs,
+		"source-pvc",
+		nil,
+		"Source PVC name; repeat for multiple claims",
+	)
+	flags.StringSliceVar(
+		&f.destinationPVCs,
+		"destination-pvc",
+		nil,
+		"Destination PVC name; use source=destination for explicit mappings",
+	)
+	flags.StringSliceVar(
+		&f.destinationCapacities,
+		"destination-capacity",
+		nil,
+		"Destination capacity; use source=capacity for explicit mappings",
+	)
+	flags.StringArrayVar(
+		&f.sourcePaths,
+		"source-path",
+		nil,
+		"Source path; use source=path for explicit mappings",
+	)
+	flags.StringArrayVar(
+		&f.destinationPaths,
+		"destination-path",
+		nil,
+		"Destination path; use source=path for explicit mappings",
+	)
+	flags.StringVar(
+		&f.destinationStorageClass,
+		"destination-storage-class",
+		"",
+		"Destination StorageClass (required)",
+	)
+	flags.BoolVar(
+		&f.allowVolumeShrink,
+		"allow-volume-shrink",
+		false,
+		"Allow destination capacity below source capacity",
+	)
+	flags.BoolVar(
+		&f.skipSourceUsageCheck,
+		"skip-source-usage-check",
+		false,
+		"Proceed with shrink after independently verifying source data fits",
+	)
 	flags.StringVar(&f.targetNode, "target-node", domain.AutoValue, "Destination reservation node")
 	flags.StringVar(&f.toolImage, "tool-image", r.global.toolImage, "Tool image")
-	flags.StringSliceVar(&f.strategies, "strategy", []string{"local"}, "Cross-cluster strategy: local, loadbalancer, or nodeport")
+	flags.StringSliceVar(
+		&f.strategies,
+		"strategy",
+		[]string{"local"},
+		"Cross-cluster strategy: local, loadbalancer, or nodeport",
+	)
 }
 
 func (f *crossClusterReserveFlags) options(r *rootState) (crosscluster.Options, error) {
@@ -64,12 +114,15 @@ func (f *crossClusterReserveFlags) options(r *rootState) (crosscluster.Options, 
 	if f.destinationNamespace == "" {
 		f.destinationNamespace = f.sourceNamespace
 	}
+
 	if f.sessionNamespace == "" {
 		f.sessionNamespace = r.global.sessionNamespace
 	}
+
 	if f.toolImage == "" {
 		f.toolImage = r.global.toolImage
 	}
+
 	if f.sourceNamespace == "" || f.destinationNamespace == "" {
 		return crosscluster.Options{}, domain.NewError(
 			domain.ErrorValidation,
@@ -84,9 +137,11 @@ func (f *crossClusterReserveFlags) options(r *rootState) (crosscluster.Options, 
 		if err != nil {
 			return crosscluster.Options{}, err
 		}
+
 		id = generated
 		f.sessionID = id
 	}
+
 	if err := crosscluster.ValidateSessionID(id); err != nil {
 		return crosscluster.Options{}, domain.NewError(
 			domain.ErrorValidation,
@@ -132,76 +187,101 @@ func (r *rootState) newCrossClusterReserveCommand() *cobra.Command {
 
 func (r *rootState) newCrossClusterReserveResumeCommand() *cobra.Command {
 	flags := &crossClusterReserveFlags{}
+
 	var dryRun bool
+
 	command := &cobra.Command{
-		Use: "resume SESSION", Short: "Resume a cross-cluster reservation session", Args: cobra.ExactArgs(1),
+		Use:   "resume SESSION",
+		Short: "Resume a cross-cluster reservation session",
+		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			flags.sessionID = args[0]
+
 			service, err := r.crossClusterService(&flags.crossClusterConnectionFlags)
 			if err != nil {
 				return err
 			}
+
 			ctx, cancel := r.context(cmd.Context())
 			defer cancel()
+
 			session, err := service.Get(ctx, flags.sessionNamespace, args[0])
 			if err != nil {
 				return err
 			}
+
 			if dryRun {
 				return r.crossPrinter().Print(session)
 			}
+
 			if err := service.Reserve(ctx, session); err != nil {
 				return err
 			}
+
 			return r.crossPrinter().Print(session)
 		},
 	}
 	flags.bindConnections(command, r)
 	bindDryRun(command, &dryRun)
+
 	return command
 }
 
 func (r *rootState) newCrossClusterReserveStatusCommand() *cobra.Command {
 	flags := &crossClusterReserveFlags{}
 	command := &cobra.Command{
-		Use: "status SESSION", Short: "Show a cross-cluster reserve session", Args: cobra.ExactArgs(1),
+		Use:   "status SESSION",
+		Short: "Show a cross-cluster reserve session",
+		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			service, err := r.crossClusterService(&flags.crossClusterConnectionFlags)
 			if err != nil {
 				return err
 			}
+
 			ctx, cancel := r.context(cmd.Context())
 			defer cancel()
+
 			session, err := service.Get(ctx, flags.sessionNamespace, args[0])
 			if err != nil {
 				return err
 			}
+
 			return r.crossPrinter().Print(session)
 		},
 	}
 	flags.bindConnections(command, r)
+
 	return command
 }
 
 func (r *rootState) newCrossClusterReserveCleanupCommand() *cobra.Command {
 	flags := &crossClusterReserveFlags{}
+
 	var dryRun bool
+
 	command := &cobra.Command{
-		Use: "cleanup SESSION", Short: "Clean up a cross-cluster reserve session", Args: cobra.ExactArgs(1),
+		Use:   "cleanup SESSION",
+		Short: "Clean up a cross-cluster reserve session",
+		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			service, err := r.crossClusterService(&flags.crossClusterConnectionFlags)
 			if err != nil {
 				return err
 			}
+
 			ctx, cancel := r.context(cmd.Context())
 			defer cancel()
+
 			session, err := service.Get(ctx, flags.sessionNamespace, args[0])
 			if err != nil {
 				return err
 			}
+
 			if dryRun {
 				return r.crossPrinter().Print(session)
 			}
+
 			if !r.global.assumeYes {
 				return domain.NewError(
 					domain.ErrorPrecondition,
@@ -209,17 +289,32 @@ func (r *rootState) newCrossClusterReserveCleanupCommand() *cobra.Command {
 					"re-run with --yes after reviewing the session",
 				)
 			}
-			if err := service.Cleanup(ctx, session, flags.deleteDestination, flags.deleteSession); err != nil {
+
+			if err := service.Cleanup(
+				ctx,
+				session,
+				flags.deleteDestination,
+				flags.deleteSession,
+			); err != nil {
 				return err
 			}
-			_, err = fmt.Fprintf(cmd.ErrOrStderr(), "cross-cluster reserve session %s cleanup completed\n", args[0])
+
+			_, err = fmt.Fprintf(
+				cmd.ErrOrStderr(),
+				"cross-cluster reserve session %s cleanup completed\n",
+				args[0],
+			)
+
 			return err
 		},
 	}
 	flags.bindConnections(command, r)
-	command.Flags().BoolVar(&flags.deleteDestination, "delete-destination", false, "Delete session-owned destination PVCs and their released PVs")
-	command.Flags().BoolVar(&flags.deleteSession, "delete-session", false, "Delete the source-cluster session record")
+	command.Flags().
+		BoolVar(&flags.deleteDestination, "delete-destination", false, "Delete session-owned destination PVCs and their released PVs")
+	command.Flags().
+		BoolVar(&flags.deleteSession, "delete-session", false, "Delete the source-cluster session record")
 	bindDryRun(command, &dryRun)
+
 	return command
 }
 

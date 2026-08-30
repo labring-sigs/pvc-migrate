@@ -235,6 +235,7 @@ func workflowCommand(session *domain.Session) string {
 	if session == nil {
 		return "migrate"
 	}
+
 	switch session.Spec.Type {
 	case domain.SessionTypeMigrate:
 		return "migrate"

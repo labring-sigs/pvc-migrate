@@ -110,7 +110,11 @@ func (m *Manager) preflightMongoDBNativeSwitchover(
 func (m *Manager) runMongoDBNativeSwitchover(ctx context.Context, session *domain.Session) error {
 	kb := session.Spec.Workload().KubeBlocks
 	if kb == nil {
-		return domain.NewError(domain.ErrorInternal, "pause KubeBlocks", "session lacks KubeBlocks state")
+		return domain.NewError(
+			domain.ErrorInternal,
+			"pause KubeBlocks",
+			"session lacks KubeBlocks state",
+		)
 	}
 
 	if kb.SwitchoverContainer == "" {
@@ -136,9 +140,15 @@ func (m *Manager) runMongoDBNativeSwitchover(ctx context.Context, session *domai
 	}
 
 	namespace := session.Spec.Workload().Pod.Namespace
+
 	selected, err := m.typed.CoreV1().Pods(namespace).Get(ctx, kb.Instance, metav1.GetOptions{})
 	if err != nil {
-		return domain.WrapError(domain.ErrorKubernetes, "pause KubeBlocks", "read MongoDB switchover source Pod", err)
+		return domain.WrapError(
+			domain.ErrorKubernetes,
+			"pause KubeBlocks",
+			"read MongoDB switchover source Pod",
+			err,
+		)
 	}
 
 	if selected.UID != session.Spec.Workload().Pod.UID {
@@ -148,12 +158,18 @@ func (m *Manager) runMongoDBNativeSwitchover(ctx context.Context, session *domai
 			fmt.Sprintf("Pod %s/%s UID changed", selected.Namespace, selected.Name),
 		)
 	}
-	if err := validatePodController(selected, session.Spec.Workload().Controller, "pause KubeBlocks"); err != nil {
+
+	if err := validatePodController(
+		selected,
+		session.Spec.Workload().Controller,
+		"pause KubeBlocks",
+	); err != nil {
 		return err
 	}
 
 	headlessService := fmt.Sprintf("%s-%s-headless", kb.Cluster, kb.Component)
 	leaderFQDN := fmt.Sprintf("%s.%s", kb.Instance, headlessService)
+
 	candidateFQDN := fmt.Sprintf("%s.%s", kb.SwitchoverCandidate, headlessService)
 	if m.logger != nil {
 		m.logger.Info(
@@ -179,13 +195,20 @@ func (m *Manager) runMongoDBNativeSwitchover(ctx context.Context, session *domai
 	})
 	if err != nil {
 		executionErr := podCommandError("run MongoDB native candidate switchover", result, err)
+
 		return domain.WrapError(
 			domain.ErrorPrecondition,
 			"pause KubeBlocks",
 			fmt.Sprintf(
 				"%v; manual MongoDB switchover: %s",
 				executionErr,
-				kubeBlocksMongoDBNativeSwitchoverCommand(namespace, kb.Cluster, kb.Component, kb.Instance, kb.SwitchoverCandidate),
+				kubeBlocksMongoDBNativeSwitchoverCommand(
+					namespace,
+					kb.Cluster,
+					kb.Component,
+					kb.Instance,
+					kb.SwitchoverCandidate,
+				),
 			),
 			executionErr,
 		)
@@ -193,23 +216,42 @@ func (m *Manager) runMongoDBNativeSwitchover(ctx context.Context, session *domai
 
 	return m.waitFor(
 		ctx,
-		fmt.Sprintf("KubeBlocks MongoDB switchover from %s to %s", kb.Instance, kb.SwitchoverCandidate),
+		fmt.Sprintf(
+			"KubeBlocks MongoDB switchover from %s to %s",
+			kb.Instance,
+			kb.SwitchoverCandidate,
+		),
 		func(waitCtx context.Context) (bool, error) {
-			leader, leaderErr := m.typed.CoreV1().Pods(namespace).Get(waitCtx, kb.Instance, metav1.GetOptions{})
+			leader, leaderErr := m.typed.CoreV1().
+				Pods(namespace).
+				Get(waitCtx, kb.Instance, metav1.GetOptions{})
 			if leaderErr != nil {
 				return false, leaderErr
 			}
-			if err := validatePodController(leader, session.Spec.Workload().Controller, "pause KubeBlocks"); err != nil {
+
+			if err := validatePodController(
+				leader,
+				session.Spec.Workload().Controller,
+				"pause KubeBlocks",
+			); err != nil {
 				return false, err
 			}
 
-			candidate, candidateErr := m.typed.CoreV1().Pods(namespace).Get(waitCtx, kb.SwitchoverCandidate, metav1.GetOptions{})
+			candidate, candidateErr := m.typed.CoreV1().
+				Pods(namespace).
+				Get(waitCtx, kb.SwitchoverCandidate, metav1.GetOptions{})
 			if candidateErr != nil {
 				return false, candidateErr
 			}
-			if err := validatePodController(candidate, session.Spec.Workload().Controller, "pause KubeBlocks"); err != nil {
+
+			if err := validatePodController(
+				candidate,
+				session.Spec.Workload().Controller,
+				"pause KubeBlocks",
+			); err != nil {
 				return false, err
 			}
+
 			return !isLeaderRole(podRole(leader)) && isLeaderRole(podRole(candidate)), nil
 		},
 	)

@@ -66,12 +66,16 @@ func planFailureAdvice(plan *domain.MigrationPlan, check domain.Check) (string, 
 	if advice := workloadFailureAdvice(check); advice != "" {
 		return advice, false
 	}
-	if check.Name == "controller-adapter" && strings.Contains(check.Message, "discover KubeBlocks") {
+
+	if check.Name == "controller-adapter" &&
+		strings.Contains(check.Message, "discover KubeBlocks") {
 		return "", true
 	}
+
 	if advice := operationFailureAdvice(plan, check); advice != "" {
 		return advice, false
 	}
+
 	return storageFailureAdvice(plan, check), false
 }
 
@@ -143,12 +147,14 @@ func isKubeBlocksRealtimePlan(plan *domain.MigrationPlan) bool {
 	}
 
 	workload := plan.SessionSpec.Workload()
+
 	return workload.Adapter == domain.WorkloadKubeBlocks && workload.KubeBlocks != nil
 }
 
 func kubeBlocksRealtimeCapacityAdvice(plan *domain.MigrationPlan) string {
 	workload := plan.SessionSpec.Workload()
-	if workload.KubeBlocks == nil || workload.KubeBlocks.Cluster == "" || workload.KubeBlocks.Component == "" {
+	if workload.KubeBlocks == nil || workload.KubeBlocks.Cluster == "" ||
+		workload.KubeBlocks.Component == "" {
 		return "KubeBlocks action: update the Cluster component volumeClaimTemplates storage request, then rerun migrate-pod."
 	}
 

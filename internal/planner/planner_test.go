@@ -141,6 +141,7 @@ func TestPlanOfflineMigrationBypassesWorkloadDiscoveryAndAllowsKubeBlocksCapacit
 		if !ok {
 			continue
 		}
+
 		pvc.Labels = map[string]string{kube.ManagedByLabel: "kubeblocks"}
 	}
 
@@ -162,17 +163,21 @@ func TestPlanOfflineMigrationBypassesWorkloadDiscoveryAndAllowsKubeBlocksCapacit
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	if !plan.Ready {
 		t.Fatalf("offline checks=%#v", plan.Checks)
 	}
+
 	if plan.SessionSpec.Type != domain.SessionTypeMigrate || plan.SessionSpec.Migrate == nil ||
 		plan.SessionSpec.MigratePod != nil ||
 		plan.SessionSpec.Workload().Adapter != domain.WorkloadNone {
 		t.Fatalf("offline session spec=%#v", plan.SessionSpec)
 	}
+
 	if got := plan.SessionSpec.Volumes[0].Capacity; got != "3Gi" {
 		t.Fatalf("offline KubeBlocks-labeled capacity=%s want=3Gi", got)
 	}
+
 	if hasFailedCheck(plan, "destination-capacity") {
 		t.Fatalf("offline capacity was restricted by KubeBlocks ownership: %#v", plan.Checks)
 	}
@@ -230,6 +235,7 @@ func TestPlanRejectsKnownLocalProvisionerAccessModeMismatch(t *testing.T) {
 		!hasFailedCheckContaining(plan, "destination-access-modes", "ReadWriteMany") {
 		t.Fatalf("local provisioner access-mode mismatch was accepted: %#v", plan.Checks)
 	}
+
 	if hasFailedCheck(plan, "target-node") {
 		t.Fatalf("access-mode failure added unrelated target-node guidance: %#v", plan.Checks)
 	}
@@ -661,15 +667,19 @@ func TestPlanPodMigrationDerivesMultiplePVCsAsOneUnit(t *testing.T) {
 				Volumes: []corev1.Volume{
 					{
 						Name: "data",
-						VolumeSource: corev1.VolumeSource{PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
-							ClaimName: "data",
-						}},
+						VolumeSource: corev1.VolumeSource{
+							PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
+								ClaimName: "data",
+							},
+						},
 					},
 					{
 						Name: "logs",
-						VolumeSource: corev1.VolumeSource{PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
-							ClaimName: "logs",
-						}},
+						VolumeSource: corev1.VolumeSource{
+							PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
+								ClaimName: "logs",
+							},
+						},
 					},
 				},
 			},
@@ -683,6 +693,7 @@ func TestPlanPodMigrationDerivesMultiplePVCsAsOneUnit(t *testing.T) {
 	)
 
 	client := plannerClient(objects...)
+
 	plan, err := New(client, controller.NewManager(client, nil, nil)).PlanPodMigration(
 		context.Background(),
 		PodMigrationOptions{
@@ -702,13 +713,19 @@ func TestPlanPodMigrationDerivesMultiplePVCsAsOneUnit(t *testing.T) {
 	}
 
 	if !plan.Ready || len(plan.Volumes) != 2 || len(plan.SessionSpec.Volumes) != 2 {
-		t.Fatalf("multi-PVC Pod plan ready=%t checks=%#v volumes=%#v", plan.Ready, plan.Checks, plan.Volumes)
+		t.Fatalf(
+			"multi-PVC Pod plan ready=%t checks=%#v volumes=%#v",
+			plan.Ready,
+			plan.Checks,
+			plan.Volumes,
+		)
 	}
 
 	got := map[string]bool{}
 	for _, volume := range plan.Volumes {
 		got[volume.SourcePVC.Name] = true
 	}
+
 	if !got["data"] || !got["logs"] {
 		t.Fatalf("Pod PVC set=%v, want data and logs", got)
 	}
@@ -737,12 +754,16 @@ func TestPlanPodMigrationRejectsExternalPVCConsumer(t *testing.T) {
 			},
 			Spec: corev1.PodSpec{
 				NodeName: "node-a",
-				Volumes: []corev1.Volume{{
-					Name: "data",
-					VolumeSource: corev1.VolumeSource{PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
-						ClaimName: "data",
-					}},
-				}},
+				Volumes: []corev1.Volume{
+					{
+						Name: "data",
+						VolumeSource: corev1.VolumeSource{
+							PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
+								ClaimName: "data",
+							},
+						},
+					},
+				},
 			},
 			Status: corev1.PodStatus{
 				Phase: corev1.PodRunning,
@@ -752,21 +773,30 @@ func TestPlanPodMigrationRejectsExternalPVCConsumer(t *testing.T) {
 			},
 		},
 		&corev1.Pod{
-			ObjectMeta: metav1.ObjectMeta{Namespace: "app", Name: "other-workload", UID: types.UID("other-uid")},
+			ObjectMeta: metav1.ObjectMeta{
+				Namespace: "app",
+				Name:      "other-workload",
+				UID:       types.UID("other-uid"),
+			},
 			Spec: corev1.PodSpec{
 				NodeName: "node-a",
-				Volumes: []corev1.Volume{{
-					Name: "data",
-					VolumeSource: corev1.VolumeSource{PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
-						ClaimName: "data",
-					}},
-				}},
+				Volumes: []corev1.Volume{
+					{
+						Name: "data",
+						VolumeSource: corev1.VolumeSource{
+							PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
+								ClaimName: "data",
+							},
+						},
+					},
+				},
 			},
 			Status: corev1.PodStatus{Phase: corev1.PodRunning},
 		},
 	)
 
 	client := plannerClient(objects...)
+
 	plan, err := New(client, controller.NewManager(client, nil, nil)).PlanPodMigration(
 		context.Background(),
 		PodMigrationOptions{
@@ -786,7 +816,11 @@ func TestPlanPodMigrationRejectsExternalPVCConsumer(t *testing.T) {
 	}
 
 	if plan.Ready || !hasFailedCheckContaining(plan, "pvc-consumers", "other-workload") ||
-		!hasFailedCheckContaining(plan, "pvc-consumers", "migrate-pod coordinates one selected workload only") {
+		!hasFailedCheckContaining(
+			plan,
+			"pvc-consumers",
+			"migrate-pod coordinates one selected workload only",
+		) {
 		t.Fatalf("external consumer plan ready=%t checks=%#v", plan.Ready, plan.Checks)
 	}
 }
@@ -842,6 +876,7 @@ func TestSelectedMigrationUnitAllowsMultipleConsumersInSameWorkload(t *testing.T
 	if !plan.Ready || hasFailedCheck(plan, "pvc-consumers") {
 		t.Fatalf("same-workload consumers should be allowed: checks=%#v", plan.Checks)
 	}
+
 	if got := migrationUnitConsumerCount(workload, selected, consumers); got != 2 {
 		t.Fatalf("same-workload consumer count=%d, want 2", got)
 	}
@@ -849,6 +884,7 @@ func TestSelectedMigrationUnitAllowsMultipleConsumersInSameWorkload(t *testing.T
 
 func TestOfflineMigrationPlansMultiplePVCsInOneSession(t *testing.T) {
 	objects := plannerObjectsWithTwoPVCs(t)
+
 	plan, err := New(plannerClient(objects...), nil).PlanOfflineMigration(
 		context.Background(),
 		OfflineMigrationOptions{
@@ -868,8 +904,14 @@ func TestOfflineMigrationPlansMultiplePVCsInOneSession(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	if !plan.Ready || len(plan.Volumes) != 2 || len(plan.SessionSpec.Volumes) != 2 {
-		t.Fatalf("offline multi-PVC plan ready=%t checks=%#v volumes=%#v", plan.Ready, plan.Checks, plan.Volumes)
+		t.Fatalf(
+			"offline multi-PVC plan ready=%t checks=%#v volumes=%#v",
+			plan.Ready,
+			plan.Checks,
+			plan.Volumes,
+		)
 	}
 }
 
@@ -1483,6 +1525,7 @@ func plannerObjects(capacity string) []runtime.Object {
 
 func plannerObjectsWithTwoPVCs(t *testing.T) []runtime.Object {
 	t.Helper()
+
 	objects := plannerObjects("2Gi")
 	dataPVC := testutil.MustType[*corev1.PersistentVolumeClaim](t, objects[5])
 	dataPV := testutil.MustType[*corev1.PersistentVolume](t, objects[6])

@@ -47,7 +47,10 @@ type MovePlanOptions struct {
 	SessionNamespace     string
 }
 
-func (p *Planner) PlanRenamePVC(ctx context.Context, options RenamePlanOptions) (*domain.MigrationPlan, error) {
+func (p *Planner) PlanRenamePVC(
+	ctx context.Context,
+	options RenamePlanOptions,
+) (*domain.MigrationPlan, error) {
 	return p.planPVCIdentity(ctx, pvcIdentityPlanOptions{
 		Operation: domain.OperationRename, SessionID: options.SessionID,
 		SourceNamespace: options.SourceNamespace, SourcePVC: options.SourcePVC,
@@ -56,7 +59,10 @@ func (p *Planner) PlanRenamePVC(ctx context.Context, options RenamePlanOptions) 
 	})
 }
 
-func (p *Planner) PlanMovePVC(ctx context.Context, options MovePlanOptions) (*domain.MigrationPlan, error) {
+func (p *Planner) PlanMovePVC(
+	ctx context.Context,
+	options MovePlanOptions,
+) (*domain.MigrationPlan, error) {
 	return p.planPVCIdentity(ctx, pvcIdentityPlanOptions{
 		Operation: domain.OperationMove, SessionID: options.SessionID,
 		SourceNamespace: options.SourceNamespace, SourcePVC: options.SourcePVC,
@@ -195,6 +201,7 @@ func (p *Planner) planPVCIdentity(
 		pv    *corev1.PersistentVolume
 		pvErr error
 		sc    *storagev1.StorageClass
+		scErr error
 	)
 	parallel.ForLimit(2, 2, func(index int) {
 		if index == 0 {
@@ -205,7 +212,7 @@ func (p *Planner) planPVCIdentity(
 		}
 
 		if storageClass != "" {
-			sc, _ = p.client.StorageV1().
+			sc, scErr = p.client.StorageV1().
 				StorageClasses().
 				Get(ctx, storageClass, metav1.GetOptions{})
 		}
@@ -218,6 +225,15 @@ func (p *Planner) planPVCIdentity(
 
 	if pv == nil || pv.Name == "" {
 		plan.AddCheck(failed("source-pv", "read source PV returned an empty object"))
+		return plan, nil
+	}
+
+	if scErr != nil {
+		plan.AddCheck(failed(
+			"source-storage-class",
+			fmt.Sprintf("read source StorageClass %s: %v", storageClass, scErr),
+		))
+
 		return plan, nil
 	}
 

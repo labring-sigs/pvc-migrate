@@ -230,12 +230,15 @@ func TestToolLogStreamStopIsBoundedWhenLogStreamIgnoresCancellation(t *testing.T
 	}
 
 	start := time.Now()
+
 	stream.Stop()
+
 	if elapsed := time.Since(start); elapsed > time.Second {
 		t.Fatalf("Stop took %s", elapsed)
 	}
 
 	close(release)
+
 	select {
 	case <-stream.done:
 	case <-time.After(time.Second):
@@ -249,11 +252,19 @@ type blockingToolLogSource struct {
 	started chan struct{}
 }
 
-func (s *blockingToolLogSource) listPods(context.Context, string, metav1.ListOptions) (*corev1.PodList, error) {
+func (s *blockingToolLogSource) listPods(
+	context.Context,
+	string,
+	metav1.ListOptions,
+) (*corev1.PodList, error) {
 	return &corev1.PodList{}, nil
 }
 
-func (s *blockingToolLogSource) watchPods(context.Context, string, metav1.ListOptions) (watch.Interface, error) {
+func (s *blockingToolLogSource) watchPods(
+	context.Context,
+	string,
+	metav1.ListOptions,
+) (watch.Interface, error) {
 	return watch.NewRaceFreeFake(), nil
 }
 
@@ -261,7 +272,12 @@ func (s *blockingToolLogSource) getPod(context.Context, string, string) (*corev1
 	return s.pod.DeepCopy(), nil
 }
 
-func (s *blockingToolLogSource) streamPodLogs(context.Context, string, string, *corev1.PodLogOptions) (io.ReadCloser, error) {
+func (s *blockingToolLogSource) streamPodLogs(
+	context.Context,
+	string,
+	string,
+	*corev1.PodLogOptions,
+) (io.ReadCloser, error) {
 	select {
 	case <-s.started:
 	default:

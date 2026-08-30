@@ -24,7 +24,12 @@ func validateDestinationCapacityFlags(
 	sourcePaths []string,
 	destinationPaths []string,
 ) error {
-	if err := validateTransferPathFlags(operation, existingSession, sourcePaths, destinationPaths); err != nil {
+	if err := validateTransferPathFlags(
+		operation,
+		existingSession,
+		sourcePaths,
+		destinationPaths,
+	); err != nil {
 		return err
 	}
 

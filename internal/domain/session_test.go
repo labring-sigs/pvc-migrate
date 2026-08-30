@@ -45,7 +45,8 @@ func TestSessionSpecUsesConcretePayload(t *testing.T) {
 		common,
 
 		true,
-		SessionWorkflowOptions{})
+		SessionWorkflowOptions{},
+	)
 
 	if spec.Type != SessionTypeCopy || spec.Copy == nil || !spec.Copy.Online ||
 		spec.Migrate != nil ||
@@ -109,9 +110,11 @@ func TestSessionWorkflowOptionsArePersistedInsideConcretePayload(t *testing.T) {
 		got.Strategies[1] != "clusterip" {
 		t.Fatalf("workflow options = %#v", got)
 	}
+
 	if spec.PrecopyPasses() != 2 {
 		t.Fatalf("precopy passes = %d", spec.PrecopyPasses())
 	}
+
 	if !spec.OpenEBSLVMSharedMountEnabled() {
 		t.Fatal("real-time shared-mount authorization was not persisted")
 	}
@@ -147,10 +150,12 @@ func TestOfflineMigrationPayloadExcludesRealtimeState(t *testing.T) {
 		SessionCommon{SourceNamespace: "app", DestinationNamespace: "app"},
 		SessionWorkflowOptions{TargetNode: "node-b"},
 	)
+
 	raw, err := json.Marshal(spec)
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	for _, forbidden := range []string{"workload", "precopyPasses", "openebsLvmEnableShared", "offline"} {
 		if strings.Contains(string(raw), forbidden) {
 			t.Fatalf("offline payload contains %s: %s", forbidden, raw)
@@ -313,7 +318,8 @@ func TestSessionRejectsTransferScopeForIdentityOnlyOperations(t *testing.T) {
 		session.Spec.SessionCommon,
 
 		false,
-		SessionWorkflowOptions{})
+		SessionWorkflowOptions{},
+	)
 
 	session.Spec.Volumes[0].TransferScope = &TransferScope{SourcePath: "data", DestinationPath: "."}
 	if err := session.Validate(); CategoryOf(err) != ErrorValidation {
@@ -363,7 +369,8 @@ func TestMoveSessionUsesDedicatedRebindPhase(t *testing.T) {
 		session.Spec.SessionCommon,
 
 		false,
-		SessionWorkflowOptions{})
+		SessionWorkflowOptions{},
+	)
 
 	session.Spec.SourceNamespace = "app"
 

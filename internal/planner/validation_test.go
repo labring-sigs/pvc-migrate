@@ -105,6 +105,8 @@ func TestMigratePodAvailabilityZoneBoundary(t *testing.T) {
 			sourceZone: "zone-a",
 			targetZone: "zone-a",
 			check: func(t *testing.T, plan *domain.MigrationPlan) {
+				t.Helper()
+
 				if !hasPassedCheck(plan, "availability-zone") {
 					t.Fatalf("checks=%#v", plan.Checks)
 				}
@@ -116,14 +118,19 @@ func TestMigratePodAvailabilityZoneBoundary(t *testing.T) {
 			sourceZone: "zone-a",
 			targetZone: "zone-b",
 			check: func(t *testing.T, plan *domain.MigrationPlan) {
+				t.Helper()
+
 				if !hasFailedCheck(plan, "availability-zone") {
 					t.Fatalf("checks=%#v", plan.Checks)
 				}
+
 				for _, check := range plan.Checks {
-					if check.Name == "availability-zone" && strings.Contains(check.Message, "copy --online") {
+					if check.Name == "availability-zone" &&
+						strings.Contains(check.Message, "copy --online") {
 						return
 					}
 				}
+
 				t.Fatalf("checks=%#v, missing cross-zone guidance", plan.Checks)
 			},
 		},
@@ -133,6 +140,8 @@ func TestMigratePodAvailabilityZoneBoundary(t *testing.T) {
 			sourceZone: "",
 			targetZone: "zone-b",
 			check: func(t *testing.T, plan *domain.MigrationPlan) {
+				t.Helper()
+
 				if !hasWarningCheck(plan, "availability-zone") {
 					t.Fatalf("checks=%#v", plan.Checks)
 				}
@@ -144,7 +153,10 @@ func TestMigratePodAvailabilityZoneBoundary(t *testing.T) {
 			sourceZone: "zone-a",
 			targetZone: "zone-b",
 			check: func(t *testing.T, plan *domain.MigrationPlan) {
-				if hasFailedCheck(plan, "availability-zone") || hasWarningCheck(plan, "availability-zone") {
+				t.Helper()
+
+				if hasFailedCheck(plan, "availability-zone") ||
+					hasWarningCheck(plan, "availability-zone") {
 					t.Fatalf("checks=%#v", plan.Checks)
 				}
 			},
@@ -154,11 +166,22 @@ func TestMigratePodAvailabilityZoneBoundary(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			state := &planState{
-				options:    planOptions{Operation: tt.operation, SourceNode: "source-node"},
-				plan:       &domain.MigrationPlan{Ready: true},
-				sourcePod:  &corev1.Pod{},
-				inventory:  planInventory{sourceNode: &corev1.Node{ObjectMeta: metav1.ObjectMeta{Labels: map[string]string{corev1.LabelTopologyZone: tt.sourceZone}}}},
-				targetNode: &corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "target-node", Labels: map[string]string{corev1.LabelTopologyZone: tt.targetZone}}},
+				options:   planOptions{Operation: tt.operation, SourceNode: "source-node"},
+				plan:      &domain.MigrationPlan{Ready: true},
+				sourcePod: &corev1.Pod{},
+				inventory: planInventory{
+					sourceNode: &corev1.Node{
+						ObjectMeta: metav1.ObjectMeta{
+							Labels: map[string]string{corev1.LabelTopologyZone: tt.sourceZone},
+						},
+					},
+				},
+				targetNode: &corev1.Node{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:   "target-node",
+						Labels: map[string]string{corev1.LabelTopologyZone: tt.targetZone},
+					},
+				},
 			}
 
 			New(nil, nil).checkMigratePodAvailabilityZone(state)
@@ -177,6 +200,7 @@ func TestPlanVolumeCapacityHandlesKubeBlocksCapacityChangeByOperation(t *testing
 		for _, requested := range []string{"1Gi", "3Gi"} {
 			t.Run(string(operation)+"/"+requested, func(t *testing.T) {
 				workloadKind := domain.WorkloadKubeBlocks
+
 				kubeBlocksDetected := false
 				if operation == domain.OperationCopy {
 					workloadKind = domain.WorkloadNone
@@ -198,7 +222,9 @@ func TestPlanVolumeCapacityHandlesKubeBlocksCapacityChangeByOperation(t *testing
 				}
 
 				input := planVolumeInput{
-					pvc:      &corev1.PersistentVolumeClaim{ObjectMeta: metav1.ObjectMeta{Namespace: "app", Name: "data"}},
+					pvc: &corev1.PersistentVolumeClaim{
+						ObjectMeta: metav1.ObjectMeta{Namespace: "app", Name: "data"},
+					},
 					capacity: resource.MustParse("2Gi"),
 				}
 				capacity, _, _ := New(nil, nil).planVolumeCapacity(
@@ -209,12 +235,12 @@ func TestPlanVolumeCapacityHandlesKubeBlocksCapacityChangeByOperation(t *testing
 				)
 
 				wantReject := operation == domain.OperationMigratePod
+
 				rejected := hasFailedCheck(state.plan, "destination-capacity")
 				if capacity.Cmp(resource.MustParse(requested)) != 0 || rejected != wantReject ||
 					state.plan.Ready == wantReject {
 					t.Fatalf("capacity=%s checks=%#v", capacity.String(), state.plan.Checks)
 				}
-
 			})
 		}
 	}
@@ -231,7 +257,9 @@ func TestPlanVolumeCapacityDetectsKubeBlocksSourcePVC(t *testing.T) {
 			requestedCapacities: []string{"3Gi"},
 		}
 		input := planVolumeInput{
-			pvc:      &corev1.PersistentVolumeClaim{ObjectMeta: metav1.ObjectMeta{Namespace: "app", Name: "data", Labels: labels}},
+			pvc: &corev1.PersistentVolumeClaim{
+				ObjectMeta: metav1.ObjectMeta{Namespace: "app", Name: "data", Labels: labels},
+			},
 			capacity: resource.MustParse("2Gi"),
 		}
 
@@ -241,8 +269,14 @@ func TestPlanVolumeCapacityDetectsKubeBlocksSourcePVC(t *testing.T) {
 			0,
 			input,
 		)
-		if capacity.Cmp(resource.MustParse("3Gi")) != 0 || !hasFailedCheck(state.plan, "destination-capacity") {
-			t.Fatalf("labels=%v capacity=%s checks=%#v", labels, capacity.String(), state.plan.Checks)
+		if capacity.Cmp(resource.MustParse("3Gi")) != 0 ||
+			!hasFailedCheck(state.plan, "destination-capacity") {
+			t.Fatalf(
+				"labels=%v capacity=%s checks=%#v",
+				labels,
+				capacity.String(),
+				state.plan.Checks,
+			)
 		}
 	}
 }
@@ -268,7 +302,8 @@ func TestPlanVolumeCapacityDoesNotTreatPvcMigratePVCAsKubeBlocks(t *testing.T) {
 		0,
 		input,
 	)
-	if capacity.Cmp(resource.MustParse("3Gi")) != 0 || hasFailedCheck(state.plan, "destination-capacity") {
+	if capacity.Cmp(resource.MustParse("3Gi")) != 0 ||
+		hasFailedCheck(state.plan, "destination-capacity") {
 		t.Fatalf("capacity=%s checks=%#v", capacity.String(), state.plan.Checks)
 	}
 }
@@ -660,6 +695,7 @@ func TestPlanReportsOpenEBSWarmCopyMountCheck(t *testing.T) {
 	}
 
 	client := plannerClient(objects...)
+
 	plan, err := New(client, controller.NewManager(client, nil, nil)).
 		WithOpenEBSLVMSharedVolumeManager(plannerOpenEBSLVMSharedVolumeManager{}).
 		plan(context.Background(), options)

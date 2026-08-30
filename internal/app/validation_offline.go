@@ -71,11 +71,17 @@ func (s *Service) verifyVolumesOffline(
 // workload-controller APIs. Consumers must already be stopped by the caller.
 func (s *Service) ValidateOfflineFinalSync(ctx context.Context, session *domain.Session) error {
 	if session == nil {
-		return domain.NewError(domain.ErrorValidation, "offline final sync dry-run", "session is nil")
+		return domain.NewError(
+			domain.ErrorValidation,
+			"offline final sync dry-run",
+			"session is nil",
+		)
 	}
+
 	if err := session.Validate(); err != nil {
 		return err
 	}
+
 	if session.Spec.Operation() != domain.OperationMigrate {
 		return domain.NewError(
 			domain.ErrorPrecondition,
@@ -83,9 +89,11 @@ func (s *Service) ValidateOfflineFinalSync(ctx context.Context, session *domain.
 			"offline final sync requires an offline migrate session",
 		)
 	}
+
 	if err := validateRetryableSessionFailure(session); err != nil {
 		return err
 	}
+
 	if err := s.validateOpenEBSLVMSharedMountRestore(ctx, session); err != nil {
 		return err
 	}
@@ -94,6 +102,7 @@ func (s *Service) ValidateOfflineFinalSync(ctx context.Context, session *domain.
 	if phase == domain.PhaseFailed {
 		phase = session.Status.ResumeFrom
 	}
+
 	switch phase {
 	case domain.PhaseReserved, domain.PhaseFinalSyncing, domain.PhaseFinalSynced:
 	default:
@@ -107,6 +116,7 @@ func (s *Service) ValidateOfflineFinalSync(ctx context.Context, session *domain.
 	if err := s.verifyShrinkUsage(ctx, session); err != nil {
 		return err
 	}
+
 	return s.validateOfflineVolumes(ctx, session)
 }
 
@@ -114,11 +124,17 @@ func (s *Service) ValidateOfflineFinalSync(ctx context.Context, session *domain.
 // without requiring a paused or discovered workload.
 func (s *Service) ValidateOfflineActivation(ctx context.Context, session *domain.Session) error {
 	if session == nil {
-		return domain.NewError(domain.ErrorValidation, "offline activation dry-run", "session is nil")
+		return domain.NewError(
+			domain.ErrorValidation,
+			"offline activation dry-run",
+			"session is nil",
+		)
 	}
+
 	if err := session.Validate(); err != nil {
 		return err
 	}
+
 	if session.Spec.Operation() != domain.OperationMigrate {
 		return domain.NewError(
 			domain.ErrorPrecondition,
@@ -126,6 +142,7 @@ func (s *Service) ValidateOfflineActivation(ctx context.Context, session *domain
 			"offline activation requires an offline migrate session",
 		)
 	}
+
 	if err := s.validateOpenEBSLVMSharedMountRestore(ctx, session); err != nil {
 		return err
 	}
@@ -134,9 +151,12 @@ func (s *Service) ValidateOfflineActivation(ctx context.Context, session *domain
 	if phase == domain.PhaseFailed {
 		phase = session.Status.ResumeFrom
 	}
-	if phase == domain.PhaseActivated || phase == domain.PhaseCompleted || phase == domain.PhaseResuming {
+
+	if phase == domain.PhaseActivated || phase == domain.PhaseCompleted ||
+		phase == domain.PhaseResuming {
 		return nil
 	}
+
 	if phase != domain.PhaseFinalSynced && phase != domain.PhaseActivating {
 		return domain.NewError(
 			domain.ErrorPrecondition,
@@ -150,15 +170,21 @@ func (s *Service) ValidateOfflineActivation(ctx context.Context, session *domain
 			return domain.NewError(
 				domain.ErrorPrecondition,
 				"offline activation dry-run",
-				fmt.Sprintf("PVC %s has no completed final sync", session.Spec.Volumes[index].SourcePVC.Name),
+				fmt.Sprintf(
+					"PVC %s has no completed final sync",
+					session.Spec.Volumes[index].SourcePVC.Name,
+				),
 			)
 		}
 	}
+
 	if err := s.validateActivationPVCPolicies(ctx, session); err != nil {
 		return err
 	}
+
 	if phase == domain.PhaseActivating || session.Status.Phase == domain.PhaseFailed {
 		return s.validateActivationStorage(ctx, session)
 	}
+
 	return s.validateOfflineVolumes(ctx, session)
 }

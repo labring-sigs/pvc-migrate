@@ -36,7 +36,10 @@ type CopyOptions struct {
 }
 
 // PlanCopy builds a plan for a finite offline or warm copy.
-func (p *Planner) PlanCopy(ctx context.Context, options CopyOptions) (*domain.MigrationPlan, error) {
+func (p *Planner) PlanCopy(
+	ctx context.Context,
+	options CopyOptions,
+) (*domain.MigrationPlan, error) {
 	return p.plan(ctx, planOptions{
 		SessionID:             options.SessionID,
 		Operation:             domain.OperationCopy,

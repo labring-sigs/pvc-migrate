@@ -14,56 +14,88 @@ func (s *Service) MigratePod(ctx context.Context, session *domain.Session) error
 }
 
 func (s *Service) ValidatePodMigrationResume(ctx context.Context, session *domain.Session) error {
-	if err := requireWorkflowSession(session, domain.SessionTypeMigratePod, "resume migrate-pod"); err != nil {
+	if err := requireWorkflowSession(
+		session,
+		domain.SessionTypeMigratePod,
+		"resume migrate-pod",
+	); err != nil {
 		return err
 	}
+
 	phase, err := s.validateResumePrerequisites(ctx, session)
 	if err != nil {
 		return err
 	}
+
 	return s.validatePodMigrationResume(ctx, session, phase)
 }
 
 func (s *Service) ResumePodMigration(ctx context.Context, session *domain.Session) error {
-	if err := requireWorkflowSession(session, domain.SessionTypeMigratePod, "resume migrate-pod"); err != nil {
+	if err := requireWorkflowSession(
+		session,
+		domain.SessionTypeMigratePod,
+		"resume migrate-pod",
+	); err != nil {
 		return err
 	}
+
 	return s.withSessionLock(ctx, session, func(lockedCtx context.Context) error {
 		phase, err := persistedResumePhase(session)
 		if err != nil {
 			return err
 		}
+
 		return s.resumePodMigration(lockedCtx, session, phase)
 	})
 }
 
 func (s *Service) ValidatePodMigrationAbort(ctx context.Context, session *domain.Session) error {
-	if err := requireWorkflowSession(session, domain.SessionTypeMigratePod, "abort migrate-pod"); err != nil {
+	if err := requireWorkflowSession(
+		session,
+		domain.SessionTypeMigratePod,
+		"abort migrate-pod",
+	); err != nil {
 		return err
 	}
+
 	return s.validateAbort(ctx, session)
 }
 
 func (s *Service) AbortPodMigration(ctx context.Context, session *domain.Session) error {
-	if err := requireWorkflowSession(session, domain.SessionTypeMigratePod, "abort migrate-pod"); err != nil {
+	if err := requireWorkflowSession(
+		session,
+		domain.SessionTypeMigratePod,
+		"abort migrate-pod",
+	); err != nil {
 		return err
 	}
+
 	return s.withSessionLock(ctx, session, func(lockedCtx context.Context) error {
 		return s.abort(lockedCtx, session)
 	})
 }
 
 func (s *Service) ValidatePodMigrationRollback(ctx context.Context, session *domain.Session) error {
-	if err := requireWorkflowSession(session, domain.SessionTypeMigratePod, "rollback migrate-pod"); err != nil {
+	if err := requireWorkflowSession(
+		session,
+		domain.SessionTypeMigratePod,
+		"rollback migrate-pod",
+	); err != nil {
 		return err
 	}
+
 	return s.validateRollback(ctx, session)
 }
 
 func (s *Service) RollbackPodMigration(ctx context.Context, session *domain.Session) error {
-	if err := requireWorkflowSession(session, domain.SessionTypeMigratePod, "rollback migrate-pod"); err != nil {
+	if err := requireWorkflowSession(
+		session,
+		domain.SessionTypeMigratePod,
+		"rollback migrate-pod",
+	); err != nil {
 		return err
 	}
+
 	return s.withSessionLock(ctx, session, func(lockedCtx context.Context) error {
 		return s.rollback(lockedCtx, session)
 	})
@@ -74,9 +106,14 @@ func (s *Service) ValidatePodMigrationCleanup(
 	session *domain.Session,
 	options CleanupOptions,
 ) error {
-	if err := requireWorkflowSession(session, domain.SessionTypeMigratePod, "cleanup migrate-pod"); err != nil {
+	if err := requireWorkflowSession(
+		session,
+		domain.SessionTypeMigratePod,
+		"cleanup migrate-pod",
+	); err != nil {
 		return err
 	}
+
 	return s.validateCleanup(ctx, session, options)
 }
 
@@ -85,9 +122,14 @@ func (s *Service) CleanupPodMigration(
 	session *domain.Session,
 	options CleanupOptions,
 ) error {
-	if err := requireWorkflowSession(session, domain.SessionTypeMigratePod, "cleanup migrate-pod"); err != nil {
+	if err := requireWorkflowSession(
+		session,
+		domain.SessionTypeMigratePod,
+		"cleanup migrate-pod",
+	); err != nil {
 		return err
 	}
+
 	return s.cleanupWorkflow(ctx, session, options)
 }
 

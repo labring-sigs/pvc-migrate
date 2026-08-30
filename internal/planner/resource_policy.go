@@ -210,7 +210,8 @@ func migrationProbePodPeaks(
 		addCopyStage(false)
 	}
 
-	if options.Operation == domain.OperationMigrate || options.Operation == domain.OperationMigratePod {
+	if options.Operation == domain.OperationMigrate ||
+		options.Operation == domain.OperationMigratePod {
 		sourcePathStage := map[string]int{}
 		for _, volume := range volumes {
 			if domain.SourceTransferPath(volume.TransferScope) != domain.VolumeRootPath {

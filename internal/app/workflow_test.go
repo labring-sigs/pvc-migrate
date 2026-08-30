@@ -6,7 +6,10 @@ import (
 	"github.com/labring-sigs/pvc-migrate/internal/domain"
 )
 
-func (s *Service) validateResumeWorkflowForTest(ctx context.Context, session *domain.Session) error {
+func (s *Service) validateResumeWorkflowForTest(
+	ctx context.Context,
+	session *domain.Session,
+) error {
 	switch session.Spec.Type {
 	case domain.SessionTypeMigrate:
 		return s.ValidateOfflineMigrationResume(ctx, session)
@@ -21,7 +24,11 @@ func (s *Service) validateResumeWorkflowForTest(ctx context.Context, session *do
 	case domain.SessionTypeMove:
 		return s.ValidateMoveResume(ctx, session)
 	default:
-		return domain.NewError(domain.ErrorPrecondition, "test resume", "workflow has no app resume API")
+		return domain.NewError(
+			domain.ErrorPrecondition,
+			"test resume",
+			"workflow has no app resume API",
+		)
 	}
 }
 
@@ -40,7 +47,11 @@ func (s *Service) resumeWorkflowForTest(ctx context.Context, session *domain.Ses
 	case domain.SessionTypeMove:
 		return s.ResumeMove(ctx, session)
 	default:
-		return domain.NewError(domain.ErrorPrecondition, "test resume", "workflow has no app resume API")
+		return domain.NewError(
+			domain.ErrorPrecondition,
+			"test resume",
+			"workflow has no app resume API",
+		)
 	}
 }
 
@@ -86,7 +97,10 @@ func (s *Service) abortWorkflowForTest(ctx context.Context, session *domain.Sess
 	}
 }
 
-func (s *Service) validateRollbackWorkflowForTest(ctx context.Context, session *domain.Session) error {
+func (s *Service) validateRollbackWorkflowForTest(
+	ctx context.Context,
+	session *domain.Session,
+) error {
 	switch session.Spec.Type {
 	case domain.SessionTypeMigrate:
 		return s.ValidateOfflineMigrationRollback(ctx, session)
@@ -97,7 +111,11 @@ func (s *Service) validateRollbackWorkflowForTest(ctx context.Context, session *
 	case domain.SessionTypeMove:
 		return s.ValidateMoveRollback(ctx, session)
 	default:
-		return domain.NewError(domain.ErrorPrecondition, "test rollback", "workflow has no rollback API")
+		return domain.NewError(
+			domain.ErrorPrecondition,
+			"test rollback",
+			"workflow has no rollback API",
+		)
 	}
 }
 
@@ -112,7 +130,11 @@ func (s *Service) rollbackWorkflowForTest(ctx context.Context, session *domain.S
 	case domain.SessionTypeMove:
 		return s.RollbackMove(ctx, session)
 	default:
-		return domain.NewError(domain.ErrorPrecondition, "test rollback", "workflow has no rollback API")
+		return domain.NewError(
+			domain.ErrorPrecondition,
+			"test rollback",
+			"workflow has no rollback API",
+		)
 	}
 }
 

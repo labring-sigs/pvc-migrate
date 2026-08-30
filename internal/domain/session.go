@@ -65,11 +65,17 @@ const (
 )
 
 var allowedTransitions = map[Phase][]Phase{
-	PhasePlanned:     {PhaseReserving, PhaseRenaming, PhaseMoving, PhaseAborting, PhaseFailed},
-	PhaseRenaming:    {PhaseCompleted, PhaseAborting, PhaseFailed},
-	PhaseMoving:      {PhaseCompleted, PhaseAborting, PhaseFailed},
-	PhaseReserving:   {PhaseReserved, PhaseAborting, PhaseFailed},
-	PhaseReserved:    {PhaseWarmCopying, PhasePausing, PhaseFinalSyncing, PhaseAborting, PhaseFailed},
+	PhasePlanned:   {PhaseReserving, PhaseRenaming, PhaseMoving, PhaseAborting, PhaseFailed},
+	PhaseRenaming:  {PhaseCompleted, PhaseAborting, PhaseFailed},
+	PhaseMoving:    {PhaseCompleted, PhaseAborting, PhaseFailed},
+	PhaseReserving: {PhaseReserved, PhaseAborting, PhaseFailed},
+	PhaseReserved: {
+		PhaseWarmCopying,
+		PhasePausing,
+		PhaseFinalSyncing,
+		PhaseAborting,
+		PhaseFailed,
+	},
 	PhaseWarmCopying: {PhaseWarmCopied, PhaseAborting, PhaseFailed},
 	PhaseWarmCopied:  {PhaseWarmCopying, PhasePausing, PhaseAborting, PhaseFailed},
 	PhasePausing:     {PhasePaused, PhaseAborting, PhaseFailed},
@@ -196,9 +202,9 @@ type ReserveSessionSpec struct {
 }
 
 type MigratePodSessionSpec struct {
-	SessionWorkflowOptions `             json:",inline"                         yaml:",inline"`
-	Workload               WorkloadSpec `json:"workload"                        yaml:"workload"`
-	PrecopyPasses          int          `json:"precopyPasses"                   yaml:"precopyPasses"`
+	SessionWorkflowOptions `             json:",inline"                          yaml:",inline"`
+	Workload               WorkloadSpec `json:"workload"                         yaml:"workload"`
+	PrecopyPasses          int          `json:"precopyPasses"                    yaml:"precopyPasses"`
 	OpenEBSLVMEnableShared bool         `json:"openebsLvmEnableShared,omitempty" yaml:"openebsLvmEnableShared,omitempty"`
 }
 
@@ -210,22 +216,22 @@ type CopySessionSpec struct {
 // BackupSessionSpec is the backup-specific payload carried by the durable
 // Session envelope. Object-store credentials are deliberately excluded.
 type BackupSessionSpec struct {
-	SessionWorkflowOptions `                json:",inline"                         yaml:",inline"`
-	Online                 bool            `json:"online,omitempty"                yaml:"online,omitempty"`
-	SourcePVC              ObjectReference `json:"sourcePVC"                       yaml:"sourcePVC"`
-	SourcePV               ObjectReference `json:"sourcePV"                        yaml:"sourcePV"`
-	Path                   string          `json:"path,omitempty"                  yaml:"path,omitempty"`
-	Backend                string          `json:"backend"                         yaml:"backend"`
-	Bucket                 string          `json:"bucket"                          yaml:"bucket"`
-	Prefix                 string          `json:"prefix,omitempty"                yaml:"prefix,omitempty"`
-	Name                   string          `json:"name"                            yaml:"name"`
-	Provider               string          `json:"provider,omitempty"              yaml:"provider,omitempty"`
-	Endpoint               string          `json:"endpoint,omitempty"              yaml:"endpoint,omitempty"`
-	Region                 string          `json:"region,omitempty"                yaml:"region,omitempty"`
-	AllowInsecureEndpoint  bool            `json:"allowInsecureEndpoint,omitempty" yaml:"allowInsecureEndpoint,omitempty"`
-	ServerSideEncryption   string          `json:"serverSideEncryption,omitempty"  yaml:"serverSideEncryption,omitempty"`
-	SSEKMSKeyID            string          `json:"sseKmsKeyID,omitempty"           yaml:"sseKmsKeyID,omitempty"`
-	CredentialsSecret      ObjectReference `json:"credentialsSecret,omitempty"     yaml:"credentialsSecret,omitempty"`
+	SessionWorkflowOptions `                json:",inline"                          yaml:",inline"`
+	Online                 bool            `json:"online,omitempty"                 yaml:"online,omitempty"`
+	SourcePVC              ObjectReference `json:"sourcePVC"                        yaml:"sourcePVC"`
+	SourcePV               ObjectReference `json:"sourcePV"                         yaml:"sourcePV"`
+	Path                   string          `json:"path,omitempty"                   yaml:"path,omitempty"`
+	Backend                string          `json:"backend"                          yaml:"backend"`
+	Bucket                 string          `json:"bucket"                           yaml:"bucket"`
+	Prefix                 string          `json:"prefix,omitempty"                 yaml:"prefix,omitempty"`
+	Name                   string          `json:"name"                             yaml:"name"`
+	Provider               string          `json:"provider,omitempty"               yaml:"provider,omitempty"`
+	Endpoint               string          `json:"endpoint,omitempty"               yaml:"endpoint,omitempty"`
+	Region                 string          `json:"region,omitempty"                 yaml:"region,omitempty"`
+	AllowInsecureEndpoint  bool            `json:"allowInsecureEndpoint,omitempty"  yaml:"allowInsecureEndpoint,omitempty"`
+	ServerSideEncryption   string          `json:"serverSideEncryption,omitempty"   yaml:"serverSideEncryption,omitempty"`
+	SSEKMSKeyID            string          `json:"sseKmsKeyID,omitempty"            yaml:"sseKmsKeyID,omitempty"`
+	CredentialsSecret      ObjectReference `json:"credentialsSecret,omitempty"      yaml:"credentialsSecret,omitempty"`
 	OpenEBSLVMEnableShared bool            `json:"openebsLvmEnableShared,omitempty" yaml:"openebsLvmEnableShared,omitempty"`
 }
 
@@ -452,6 +458,7 @@ func NewOfflineMigrationSessionSpec(
 	options SessionWorkflowOptions,
 ) SessionSpec {
 	options.Strategies = slices.Clone(options.Strategies)
+
 	return SessionSpec{
 		SessionCommon: common,
 		Type:          SessionTypeMigrate,
@@ -467,6 +474,7 @@ func NewPodMigrationSessionSpec(
 	openEBSLVMEnableShared bool,
 ) SessionSpec {
 	options.Strategies = slices.Clone(options.Strategies)
+
 	return SessionSpec{
 		SessionCommon: common,
 		Type:          SessionTypeMigratePod,
@@ -563,11 +571,8 @@ func (s SessionSpec) Operation() Operation {
 }
 
 func (s SessionSpec) Workload() WorkloadSpec {
-	switch s.Type {
-	case SessionTypeMigratePod:
-		if s.MigratePod != nil {
-			return s.MigratePod.Workload
-		}
+	if s.Type == SessionTypeMigratePod && s.MigratePod != nil {
+		return s.MigratePod.Workload
 	}
 
 	return WorkloadSpec{Adapter: WorkloadNone}
@@ -590,11 +595,8 @@ func (s SessionSpec) KubeBlocksPodMigration() (*KubeBlocksSpec, bool) {
 }
 
 func (s *SessionSpec) WorkloadPtr() *WorkloadSpec {
-	switch s.Type {
-	case SessionTypeMigratePod:
-		if s.MigratePod != nil {
-			return &s.MigratePod.Workload
-		}
+	if s.Type == SessionTypeMigratePod && s.MigratePod != nil {
+		return &s.MigratePod.Workload
 	}
 
 	return nil
@@ -819,7 +821,11 @@ func validateSessionHeader(s *Session) error {
 
 func validateSessionMode(s *Session) error {
 	if s.Spec.Online() && s.Spec.Type != SessionTypeCopy && s.Spec.Type != SessionTypeBackup {
-		return NewError(ErrorValidation, "session", "online mode is only valid for copy or backup sessions")
+		return NewError(
+			ErrorValidation,
+			"session",
+			"online mode is only valid for copy or backup sessions",
+		)
 	}
 
 	if s.Spec.Type == SessionTypeRename && s.Spec.SourceNamespace != s.Spec.DestinationNamespace {

@@ -274,6 +274,7 @@ func (s *Service) validateActivationPVCPolicies(
 		if err != nil {
 			return err
 		}
+
 		if active != nil && active.UID != volume.SourcePVC.UID {
 			// The replacement is already present. Storage validation below
 			// verifies its identity and session ownership; it must not be
