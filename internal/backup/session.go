@@ -68,7 +68,8 @@ func buildBackupSession(
 		},
 
 		req.Online,
-		options)
+		options,
+	)
 
 	spec.Backup.OpenEBSLVMEnableShared = req.OpenEBSLVMEnableShared
 	spec.Backup.SourcePVC = domain.ObjectReference{

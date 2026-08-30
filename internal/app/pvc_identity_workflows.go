@@ -7,15 +7,30 @@ import (
 )
 
 func (s *Service) ValidateRenameResume(ctx context.Context, session *domain.Session) error {
-	return s.validatePVCIdentityWorkflowResume(ctx, session, domain.SessionTypeRename, domain.OperationRename)
+	return s.validatePVCIdentityWorkflowResume(
+		ctx,
+		session,
+		domain.SessionTypeRename,
+		domain.OperationRename,
+	)
 }
 
 func (s *Service) ResumeRename(ctx context.Context, session *domain.Session) error {
-	return s.resumePVCIdentityWorkflow(ctx, session, domain.SessionTypeRename, domain.OperationRename)
+	return s.resumePVCIdentityWorkflow(
+		ctx,
+		session,
+		domain.SessionTypeRename,
+		domain.OperationRename,
+	)
 }
 
 func (s *Service) ValidateRenameAbort(ctx context.Context, session *domain.Session) error {
-	return s.validatePVCIdentityWorkflowAbort(ctx, session, domain.SessionTypeRename, "abort rename")
+	return s.validatePVCIdentityWorkflowAbort(
+		ctx,
+		session,
+		domain.SessionTypeRename,
+		"abort rename",
+	)
 }
 
 func (s *Service) AbortRename(ctx context.Context, session *domain.Session) error {
@@ -23,23 +38,53 @@ func (s *Service) AbortRename(ctx context.Context, session *domain.Session) erro
 }
 
 func (s *Service) ValidateRenameRollback(ctx context.Context, session *domain.Session) error {
-	return s.validatePVCIdentityWorkflowRollback(ctx, session, domain.SessionTypeRename, "rollback rename")
+	return s.validatePVCIdentityWorkflowRollback(
+		ctx,
+		session,
+		domain.SessionTypeRename,
+		"rollback rename",
+	)
 }
 
 func (s *Service) RollbackRename(ctx context.Context, session *domain.Session) error {
 	return s.rollbackPVCIdentityWorkflow(ctx, session, domain.SessionTypeRename, "rollback rename")
 }
 
-func (s *Service) ValidateRenameCleanup(ctx context.Context, session *domain.Session, options CleanupOptions) error {
-	return s.validatePVCIdentityWorkflowCleanup(ctx, session, domain.SessionTypeRename, "cleanup rename", options)
+func (s *Service) ValidateRenameCleanup(
+	ctx context.Context,
+	session *domain.Session,
+	options CleanupOptions,
+) error {
+	return s.validatePVCIdentityWorkflowCleanup(
+		ctx,
+		session,
+		domain.SessionTypeRename,
+		"cleanup rename",
+		options,
+	)
 }
 
-func (s *Service) CleanupRename(ctx context.Context, session *domain.Session, options CleanupOptions) error {
-	return s.cleanupPVCIdentityWorkflow(ctx, session, domain.SessionTypeRename, "cleanup rename", options)
+func (s *Service) CleanupRename(
+	ctx context.Context,
+	session *domain.Session,
+	options CleanupOptions,
+) error {
+	return s.cleanupPVCIdentityWorkflow(
+		ctx,
+		session,
+		domain.SessionTypeRename,
+		"cleanup rename",
+		options,
+	)
 }
 
 func (s *Service) ValidateMoveResume(ctx context.Context, session *domain.Session) error {
-	return s.validatePVCIdentityWorkflowResume(ctx, session, domain.SessionTypeMove, domain.OperationMove)
+	return s.validatePVCIdentityWorkflowResume(
+		ctx,
+		session,
+		domain.SessionTypeMove,
+		domain.OperationMove,
+	)
 }
 
 func (s *Service) ResumeMove(ctx context.Context, session *domain.Session) error {
@@ -55,19 +100,44 @@ func (s *Service) AbortMove(ctx context.Context, session *domain.Session) error 
 }
 
 func (s *Service) ValidateMoveRollback(ctx context.Context, session *domain.Session) error {
-	return s.validatePVCIdentityWorkflowRollback(ctx, session, domain.SessionTypeMove, "rollback move")
+	return s.validatePVCIdentityWorkflowRollback(
+		ctx,
+		session,
+		domain.SessionTypeMove,
+		"rollback move",
+	)
 }
 
 func (s *Service) RollbackMove(ctx context.Context, session *domain.Session) error {
 	return s.rollbackPVCIdentityWorkflow(ctx, session, domain.SessionTypeMove, "rollback move")
 }
 
-func (s *Service) ValidateMoveCleanup(ctx context.Context, session *domain.Session, options CleanupOptions) error {
-	return s.validatePVCIdentityWorkflowCleanup(ctx, session, domain.SessionTypeMove, "cleanup move", options)
+func (s *Service) ValidateMoveCleanup(
+	ctx context.Context,
+	session *domain.Session,
+	options CleanupOptions,
+) error {
+	return s.validatePVCIdentityWorkflowCleanup(
+		ctx,
+		session,
+		domain.SessionTypeMove,
+		"cleanup move",
+		options,
+	)
 }
 
-func (s *Service) CleanupMove(ctx context.Context, session *domain.Session, options CleanupOptions) error {
-	return s.cleanupPVCIdentityWorkflow(ctx, session, domain.SessionTypeMove, "cleanup move", options)
+func (s *Service) CleanupMove(
+	ctx context.Context,
+	session *domain.Session,
+	options CleanupOptions,
+) error {
+	return s.cleanupPVCIdentityWorkflow(
+		ctx,
+		session,
+		domain.SessionTypeMove,
+		"cleanup move",
+		options,
+	)
 }
 
 func (s *Service) validatePVCIdentityWorkflowResume(
@@ -79,10 +149,12 @@ func (s *Service) validatePVCIdentityWorkflowResume(
 	if err := requireWorkflowSession(session, typeName, "resume "+string(operation)); err != nil {
 		return err
 	}
+
 	phase, err := s.validateResumePrerequisites(ctx, session)
 	if err != nil {
 		return err
 	}
+
 	return s.validatePVCIdentityResume(ctx, session, phase, operation)
 }
 
@@ -95,11 +167,13 @@ func (s *Service) resumePVCIdentityWorkflow(
 	if err := requireWorkflowSession(session, typeName, "resume "+string(operation)); err != nil {
 		return err
 	}
+
 	return s.withSessionLock(ctx, session, func(lockedCtx context.Context) error {
 		phase, err := persistedResumePhase(session)
 		if err != nil {
 			return err
 		}
+
 		return s.resumePVCIdentity(lockedCtx, session, phase, operation)
 	})
 }
@@ -125,6 +199,7 @@ func (s *Service) abortPVCIdentityWorkflow(
 	if err := requireWorkflowSession(session, typeName, action); err != nil {
 		return err
 	}
+
 	return s.withSessionLock(ctx, session, func(lockedCtx context.Context) error {
 		return s.abort(lockedCtx, session)
 	})
@@ -151,6 +226,7 @@ func (s *Service) rollbackPVCIdentityWorkflow(
 	if err := requireWorkflowSession(session, typeName, action); err != nil {
 		return err
 	}
+
 	return s.withSessionLock(ctx, session, func(lockedCtx context.Context) error {
 		return s.rollback(lockedCtx, session)
 	})

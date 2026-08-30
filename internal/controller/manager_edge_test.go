@@ -915,7 +915,10 @@ func TestDiscoverKubeBlocksMongoDBUsesNativeSwitchover(t *testing.T) {
 
 	if command.Namespace != "db" || command.Pod != selected.Name ||
 		command.Container != "mongodb" ||
-		strings.Join(command.Command, " ") != "sh -c test -x /scripts/switchover-with-candidate.sh" {
+		strings.Join(
+			command.Command,
+			" ",
+		) != "sh -c test -x /scripts/switchover-with-candidate.sh" {
 		t.Fatalf("native switchover preflight=%#v", command)
 	}
 
@@ -1052,6 +1055,7 @@ func TestKubeBlocksRedisSwitchoverDoesNotProbeOps(t *testing.T) {
 	)
 
 	manager := NewManager(kubernetesfake.NewClientset(selected), dynamicClient, nil)
+
 	_, _, err := manager.kubeBlocksSwitchoverStrategy(
 		context.Background(),
 		selected,
@@ -1060,9 +1064,11 @@ func TestKubeBlocksRedisSwitchoverDoesNotProbeOps(t *testing.T) {
 		"cluster-redis-1",
 		kubeBlocksClusterAPIVersion,
 	)
-	if err == nil || !strings.Contains(err.Error(), "Redis addon does not provide a Switchover action") {
+	if err == nil ||
+		!strings.Contains(err.Error(), "Redis addon does not provide a Switchover action") {
 		t.Fatalf("error=%v", err)
 	}
+
 	if createCalls != 0 {
 		t.Fatalf("OpsRequest probe calls=%d, want 0", createCalls)
 	}
@@ -3467,6 +3473,7 @@ func TestKubeBlocksPauseRecoversStoppedClusterWithLivePod(t *testing.T) {
 	session := kubeBlocksSession()
 	session.Status.Phase = domain.PhaseRollingBack
 	session.Spec.WorkloadPtr().Controller = controller
+
 	session.Spec.WorkloadPtr().Pod.UID = pod.UID
 	if err := manager.Pause(context.Background(), session); err != nil {
 		t.Fatal(err)

@@ -19,6 +19,7 @@ func (s *Service) ValidateWarmCopy(ctx context.Context, session *domain.Session)
 	if err := validateRetryableSessionFailure(session); err != nil {
 		return err
 	}
+
 	if operation := session.Spec.Operation(); operation != domain.OperationCopy &&
 		operation != domain.OperationMigratePod {
 		return domain.NewError(

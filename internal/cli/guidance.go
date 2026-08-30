@@ -96,10 +96,15 @@ func buildSessionGuidanceCommands(
 	workflow := workflowCommandName(session)
 
 	return sessionGuidanceCommands{
-		prefix:      prefix,
-		status:      fmt.Sprintf("%s %s status %s", prefix, workflow, session.ID),
-		resumePlan:  fmt.Sprintf("%s %s resume %s --dry-run", prefix, workflow, session.ID),
-		resume:      fmt.Sprintf("%s --yes %s resume %s --dry-run=false", prefix, workflow, session.ID),
+		prefix:     prefix,
+		status:     fmt.Sprintf("%s %s status %s", prefix, workflow, session.ID),
+		resumePlan: fmt.Sprintf("%s %s resume %s --dry-run", prefix, workflow, session.ID),
+		resume: fmt.Sprintf(
+			"%s --yes %s resume %s --dry-run=false",
+			prefix,
+			workflow,
+			session.ID,
+		),
 		cleanupPlan: fmt.Sprintf("%s %s --dry-run", prefix, cleanupCommandArgs(session)),
 		cleanup: fmt.Sprintf(
 			"%s --yes %s --dry-run=false",
@@ -128,7 +133,12 @@ func buildSessionGuidanceCommands(
 			session.ID,
 		),
 		abortPlan: fmt.Sprintf("%s %s abort %s --dry-run", prefix, workflow, session.ID),
-		abort:     fmt.Sprintf("%s --yes %s abort %s --dry-run=false", prefix, workflow, session.ID),
+		abort: fmt.Sprintf(
+			"%s --yes %s abort %s --dry-run=false",
+			prefix,
+			workflow,
+			session.ID,
+		),
 	}
 }
 
@@ -136,6 +146,7 @@ func workflowCommandName(session *domain.Session) string {
 	if session == nil {
 		return "migrate"
 	}
+
 	switch session.Spec.Type {
 	case domain.SessionTypeMigrate:
 		return "migrate"
@@ -166,10 +177,12 @@ func workflowCommandNameForCommand(value any) string {
 	}
 
 	root := command.Root()
+
 	current := command
 	for current != nil && current.Parent() != nil && current.Parent() != root {
 		current = current.Parent()
 	}
+
 	if current == nil || current == root {
 		return "migrate"
 	}
@@ -342,6 +355,7 @@ func writeFailedSessionGuidance(
 				kubeblocks.Cluster,
 				kubeblocks.Component,
 			)
+
 			return err
 		}
 
@@ -723,6 +737,7 @@ func writeCapacityFailureGuidance(
 			kubeblocks.Cluster,
 			kubeblocks.Component,
 		)
+
 		return err
 	}
 
@@ -1126,13 +1141,18 @@ func errorHasOperation(err error, operations ...string) bool {
 	return false
 }
 
-func cleanupCommandArgsForSessionOptions(session *domain.Session, options app.CleanupOptions) string {
+func cleanupCommandArgsForSessionOptions(
+	session *domain.Session,
+	options app.CleanupOptions,
+) string {
 	workflow := "migrate"
+
 	id := ""
 	if session != nil {
 		workflow = workflowCommandName(session)
 		id = session.ID
 	}
+
 	return cleanupCommandArgsForWorkflow(workflow, id, options)
 }
 
@@ -1273,6 +1293,7 @@ func writeSessionListGuidance(
 	if len(workflow) > 0 && workflow[0] != "" {
 		name = workflow[0]
 	}
+
 	_, err := fmt.Fprintf(
 		w,
 		"\nInspect a session and its next steps with the owning workflow status command: %s %s status SESSION\n",

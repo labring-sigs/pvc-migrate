@@ -1219,6 +1219,7 @@ func TestBackupPlanLabelsOnlineModeUnderBackupOperation(t *testing.T) {
 	if plan.Operation != "backup" {
 		t.Fatalf("online plan operation=%q, want backup", plan.Operation)
 	}
+
 	if plan.Mode != ModeOnline {
 		t.Fatalf("online plan mode=%q, want %q", plan.Mode, ModeOnline)
 	}

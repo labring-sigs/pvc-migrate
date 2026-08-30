@@ -189,10 +189,12 @@ func TestPlanAndCreateSessionKeepClustersSeparate(t *testing.T) {
 
 func TestCreateSessionRechecksDestinationAccessModes(t *testing.T) {
 	service, options, _ := crossFixture()
+
 	plan, err := service.Plan(context.Background(), options)
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	if !plan.Ready {
 		t.Fatalf("plan is not ready: %#v", plan.Checks)
 	}
@@ -203,6 +205,7 @@ func TestCreateSessionRechecksDestinationAccessModes(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	pvc.Spec.AccessModes = []corev1.PersistentVolumeAccessMode{corev1.ReadWriteMany}
 	if _, err := service.SourceClientForTest().CoreV1().
 		PersistentVolumeClaims(options.SourceNamespace).
@@ -216,6 +219,7 @@ func TestCreateSessionRechecksDestinationAccessModes(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	storageClass.Provisioner = kube.OpenEBSLocalPVProvisioner
 	if _, err := service.DestinationClientForTest().StorageV1().
 		StorageClasses().
@@ -565,6 +569,7 @@ func TestPlanRejectsKnownDestinationAccessModeMismatch(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	pvc.Spec.AccessModes = []corev1.PersistentVolumeAccessMode{corev1.ReadWriteMany}
 	if _, err := service.SourceClientForTest().CoreV1().
 		PersistentVolumeClaims("app").
@@ -578,6 +583,7 @@ func TestPlanRejectsKnownDestinationAccessModeMismatch(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	storageClass.Provisioner = kube.OpenEBSLocalPVProvisioner
 	if _, err := service.DestinationClientForTest().StorageV1().
 		StorageClasses().
@@ -589,9 +595,11 @@ func TestPlanRejectsKnownDestinationAccessModeMismatch(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	if plan.Ready {
 		t.Fatalf("plan accepted incompatible destination access modes: %#v", plan.Checks)
 	}
+
 	for _, check := range plan.Checks {
 		if check.Name == "destination-access-modes" && !check.Passed {
 			return
@@ -707,6 +715,7 @@ func TestCopyMergesHardTaintsAcrossSourceAndDestinationNodes(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	createBoundDestination(t, service, session)
 
 	destinationNode, err := service.DestinationClientForTest().CoreV1().
@@ -714,6 +723,7 @@ func TestCopyMergesHardTaintsAcrossSourceAndDestinationNodes(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	destinationNode.Spec.Taints = []corev1.Taint{{
 		Key: "destination-only", Value: "true", Effect: corev1.TaintEffectNoSchedule,
 	}}
@@ -743,6 +753,7 @@ func TestCopyMergesHardTaintsAcrossSourceAndDestinationNodes(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	pv.Spec.NodeAffinity = &corev1.VolumeNodeAffinity{
 		Required: &corev1.NodeSelector{NodeSelectorTerms: []corev1.NodeSelectorTerm{{
 			MatchExpressions: []corev1.NodeSelectorRequirement{{
@@ -794,6 +805,7 @@ func TestCopyPersistsTargetNodeLookupFailure(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	createBoundDestination(t, service, session)
 
 	if err := service.DestinationClientForTest().CoreV1().Nodes().Delete(
@@ -815,12 +827,64 @@ func TestCopyPersistsTargetNodeLookupFailure(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	if persisted.Status.Phase != PhaseFailed ||
 		!strings.Contains(persisted.Status.Message, "read destination target node") {
 		t.Fatalf("target lookup failure was not persisted: %#v", persisted.Status)
 	}
+
 	if len(copier.requests) != 0 {
 		t.Fatalf("copy engine was invoked after scheduling lookup failure: %#v", copier.requests)
+	}
+}
+
+func TestCopyReturnsFailureCheckpointError(t *testing.T) {
+	service, options, _ := crossFixture()
+
+	plan, err := service.Plan(context.Background(), options)
+	if err != nil || !plan.Ready {
+		t.Fatalf("plan ready=%v err=%v checks=%#v", plan.Ready, err, plan.Checks)
+	}
+
+	session, err := service.CreateSession(context.Background(), options, plan)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	createBoundDestination(t, service, session)
+
+	session.Status.Phase = PhaseReserved
+	if err := service.SaveForTest(context.Background(), session, false); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := service.DestinationClientForTest().CoreV1().Nodes().Delete(
+		context.Background(), session.Spec.TargetNode, metav1.DeleteOptions{},
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	sourceClient, ok := service.SourceClientForTest().(*fake.Clientset)
+	if !ok {
+		t.Fatalf("source client type=%T", service.SourceClientForTest())
+	}
+
+	sourceClient.PrependReactor(
+		"update",
+		"configmaps",
+		func(clienttesting.Action) (bool, runtime.Object, error) {
+			return true, nil, errors.New("failure checkpoint unavailable")
+		},
+	)
+
+	err = service.Copy(context.Background(), session, 1, false)
+	if err == nil || !strings.Contains(err.Error(), "read destination target node") ||
+		!strings.Contains(err.Error(), "failure checkpoint unavailable") {
+		t.Fatalf("copy error=%v, want operation and checkpoint failures", err)
+	}
+
+	if session.Status.Phase != PhaseFailed {
+		t.Fatalf("session phase=%s, want Failed", session.Status.Phase)
 	}
 }
 

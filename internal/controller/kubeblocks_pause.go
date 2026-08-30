@@ -1163,6 +1163,7 @@ func (m *Manager) setKubeBlocksPaused(
 	paused bool,
 ) error {
 	workload := session.Spec.Workload()
+
 	kb := workload.KubeBlocks
 	if kb == nil {
 		return domain.NewError(

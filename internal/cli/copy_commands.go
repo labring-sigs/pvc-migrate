@@ -21,16 +21,26 @@ func adoptReservedSessionForCopy(session *domain.Session, flags *copyFlags) erro
 
 	if flags.online {
 		if session.Spec.Type != domain.SessionTypeCopy || session.Spec.Copy == nil {
-			return domain.NewError(domain.ErrorPrecondition, "copy", "--online requires a copy session")
+			return domain.NewError(
+				domain.ErrorPrecondition,
+				"copy",
+				"--online requires a copy session",
+			)
 		}
+
 		session.Spec.Copy.Online = true
 	}
 
 	if flags.sourceNode != "" {
 		options := session.Spec.WorkflowOptionsPtr()
 		if options == nil {
-			return domain.NewError(domain.ErrorValidation, "copy", "session workflow options are missing")
+			return domain.NewError(
+				domain.ErrorValidation,
+				"copy",
+				"session workflow options are missing",
+			)
 		}
+
 		options.SourceNode = flags.sourceNode
 	}
 
@@ -39,6 +49,7 @@ func adoptReservedSessionForCopy(session *domain.Session, flags *copyFlags) erro
 
 func (r *rootState) newCopyCommand() *cobra.Command {
 	flags := &copyFlags{}
+
 	var dryRun bool
 
 	command := &cobra.Command{
@@ -47,48 +58,71 @@ func (r *rootState) newCopyCommand() *cobra.Command {
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			existing := targetsExistingSession(flags.sessionID, flags.sourcePVCs, flags.podName)
-			if err := validateDestinationCapacityFlags(domain.OperationCopy, existing, flags.destinationCapacities, flags.allowVolumeShrink, flags.skipSourceUsageCheck, flags.sourcePaths, flags.destinationPaths); err != nil {
+			if err := validateDestinationCapacityFlags(
+				domain.OperationCopy,
+				existing,
+				flags.destinationCapacities,
+				flags.allowVolumeShrink,
+				flags.skipSourceUsageCheck,
+				flags.sourcePaths,
+				flags.destinationPaths,
+			); err != nil {
 				return reportPreSessionError(cmd, err)
 			}
+
 			if flags.podName != "" && len(flags.sourcePVCs) > 0 {
-				return domain.NewError(domain.ErrorValidation, "copy", "--source-pvc cannot be combined with --pod; the Pod PVC set is copied as one unit")
+				return domain.NewError(
+					domain.ErrorValidation,
+					"copy",
+					"--source-pvc cannot be combined with --pod; the Pod PVC set is copied as one unit",
+				)
 			}
+
 			runtime, err := r.runtime()
 			if err != nil {
 				return err
 			}
+
 			ctx, cancel := r.context(cmd.Context())
 			defer cancel()
 
-			var session *domain.Session
-			var plan *domain.MigrationPlan
+			var (
+				session *domain.Session
+				plan    *domain.MigrationPlan
+			)
 			if existing {
 				session, err = runtime.store.Get(ctx, r.global.sessionNamespace, flags.sessionID)
 				if err == nil {
 					err = adoptReservedSessionForCopy(session, flags)
 				}
+
 				if err == nil {
 					err = requireCLISessionType(session, domain.SessionTypeCopy, "copy")
 				}
 			} else {
 				var options planner.CopyOptions
+
 				options, err = flags.planOptions(r, false)
 				if err == nil {
 					plan, err = runtime.planner.PlanCopy(ctx, options)
 				}
+
 				if err == nil {
 					err = requireReadyWithOutput(runtime, plan, cmd.ErrOrStderr())
 				}
+
 				if err == nil {
 					session, err = runtime.service.CreateSession(ctx, plan, dryRun)
 				}
 			}
+
 			if err != nil {
 				if session != nil {
 					return reportSessionError(cmd, session, err)
 				}
 				return err
 			}
+
 			if dryRun {
 				if existing {
 					if err := runtime.service.ValidateWarmCopy(ctx, session); err != nil {
@@ -96,17 +130,22 @@ func (r *rootState) newCopyCommand() *cobra.Command {
 					}
 					return printCopyDryRunResult(cmd, runtime, session, flags)
 				}
+
 				return printPlanResult(cmd, runtime, plan)
 			}
+
 			if err := runtime.service.ValidateWarmCopy(ctx, session); err != nil {
 				return reportSessionError(cmd, session, err)
 			}
+
 			if err := runtime.service.Reserve(ctx, session); err != nil {
 				return reportSessionError(cmd, session, err)
 			}
+
 			if err := runtime.service.WarmCopy(ctx, session); err != nil {
 				return reportSessionError(cmd, session, err)
 			}
+
 			return printSessionResult(cmd, runtime, session)
 		},
 	}
@@ -114,6 +153,7 @@ func (r *rootState) newCopyCommand() *cobra.Command {
 	bindDryRun(command, &dryRun)
 	command.AddCommand(r.newCopyPlanCommand())
 	r.addCopyLifecycle(command)
+
 	return command
 }
 
@@ -125,48 +165,82 @@ func (r *rootState) newCopyPlanCommand() *cobra.Command {
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			existing := targetsExistingSession(flags.sessionID, flags.sourcePVCs, flags.podName)
-			if err := validateDestinationCapacityFlags(domain.OperationCopy, existing, flags.destinationCapacities, flags.allowVolumeShrink, flags.skipSourceUsageCheck, flags.sourcePaths, flags.destinationPaths); err != nil {
+			if err := validateDestinationCapacityFlags(
+				domain.OperationCopy,
+				existing,
+				flags.destinationCapacities,
+				flags.allowVolumeShrink,
+				flags.skipSourceUsageCheck,
+				flags.sourcePaths,
+				flags.destinationPaths,
+			); err != nil {
 				return err
 			}
+
 			if flags.podName != "" && len(flags.sourcePVCs) > 0 {
-				return domain.NewError(domain.ErrorValidation, "copy plan", "--source-pvc cannot be combined with --pod; the Pod PVC set is copied as one unit")
+				return domain.NewError(
+					domain.ErrorValidation,
+					"copy plan",
+					"--source-pvc cannot be combined with --pod; the Pod PVC set is copied as one unit",
+				)
 			}
+
 			runtime, err := r.runtime()
 			if err != nil {
 				return err
 			}
+
 			ctx, cancel := r.context(cmd.Context())
 			defer cancel()
+
 			if existing {
 				session, err := runtime.store.Get(ctx, r.global.sessionNamespace, flags.sessionID)
 				if err != nil {
-					return reportSessionLookupError(cmd, r.global.sessionNamespace, flags.sessionID, err)
+					return reportSessionLookupError(
+						cmd,
+						r.global.sessionNamespace,
+						flags.sessionID,
+						err,
+					)
 				}
+
 				if err := adoptReservedSessionForCopy(session, flags); err != nil {
 					return reportSessionError(cmd, session, err)
 				}
-				if err := requireCLISessionType(session, domain.SessionTypeCopy, "copy plan"); err != nil {
+
+				if err := requireCLISessionType(
+					session,
+					domain.SessionTypeCopy,
+					"copy plan",
+				); err != nil {
 					return reportSessionError(cmd, session, err)
 				}
+
 				if err := runtime.service.ValidateWarmCopy(ctx, session); err != nil {
 					return reportSessionError(cmd, session, err)
 				}
+
 				return printSessionResult(cmd, runtime, session)
 			}
+
 			options, err := flags.planOptions(r, false)
 			if err != nil {
 				return err
 			}
+
 			plan, err := runtime.planner.PlanCopy(ctx, options)
 			if err != nil {
 				return reportPlanningError(cmd, err)
 			}
+
 			if err := printPlanResult(cmd, runtime, plan); err != nil {
 				return err
 			}
+
 			return requireReady(plan)
 		},
 	}
 	flags.bind(command)
+
 	return command
 }

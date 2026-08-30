@@ -68,51 +68,72 @@ func (r *rootState) newCrossClusterCopyStatusCommand() *cobra.Command {
 		Use: "status SESSION", Short: "Show a cross-cluster copy session", Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			flags.sessionID = args[0]
+
 			service, err := r.crossClusterService(&flags.crossClusterConnectionFlags)
 			if err != nil {
 				return err
 			}
+
 			ctx, cancel := r.context(cmd.Context())
 			defer cancel()
+
 			session, err := service.Get(ctx, flags.sessionNamespace, args[0])
 			if err != nil {
 				return err
 			}
+
 			return r.crossPrinter().Print(session)
 		},
 	}
 	flags.bindConnections(command, r)
+
 	return command
 }
 
 func (r *rootState) newCrossClusterCopyResumeCommand() *cobra.Command {
 	flags := &crossClusterCopyFlags{}
+
 	var dryRun bool
+
 	command := &cobra.Command{
-		Use: "resume SESSION", Short: "Resume a cross-cluster copy session", Args: cobra.ExactArgs(1),
+		Use:   "resume SESSION",
+		Short: "Resume a cross-cluster copy session",
+		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			flags.sessionID = args[0]
+
 			service, err := r.crossClusterService(&flags.crossClusterConnectionFlags)
 			if err != nil {
 				return err
 			}
+
 			ctx, cancel := r.context(cmd.Context())
 			defer cancel()
+
 			session, err := service.Get(ctx, flags.sessionNamespace, args[0])
 			if err != nil {
 				return err
 			}
+
 			if dryRun {
 				return r.crossPrinter().Print(session)
 			}
-			if err := service.Copy(ctx, session, r.global.retries, r.global.noCompress); err != nil {
+
+			if err := service.Copy(
+				ctx,
+				session,
+				r.global.retries,
+				r.global.noCompress,
+			); err != nil {
 				return err
 			}
+
 			return r.crossPrinter().Print(session)
 		},
 	}
 	flags.bindConnections(command, r)
 	bindDryRun(command, &dryRun)
+
 	return command
 }
 
@@ -327,7 +348,12 @@ func (f *crossClusterCopyFlags) bind(command *cobra.Command, r *rootState) {
 	f.bindConnections(command, r)
 	flags := command.Flags()
 	flags.StringVarP(&f.sourceNamespace, "source-namespace", "n", "default", "Source PVC namespace")
-	flags.StringVar(&f.destinationNamespace, "destination-namespace", "", "Destination PVC namespace; defaults to source namespace")
+	flags.StringVar(
+		&f.destinationNamespace,
+		"destination-namespace",
+		"",
+		"Destination PVC namespace; defaults to source namespace",
+	)
 	flags.StringVar(&f.sessionID, "session", "", "Cross-cluster session ID")
 	flags.StringSliceVar(
 		&f.sourcePVCs,
@@ -509,7 +535,9 @@ func (f *crossClusterCopyFlags) options(r *rootState) (crosscluster.Options, err
 	}, nil
 }
 
-func (r *rootState) crossClusterService(flags *crossClusterConnectionFlags) (*crosscluster.Service, error) {
+func (r *rootState) crossClusterService(
+	flags *crossClusterConnectionFlags,
+) (*crosscluster.Service, error) {
 	if err := r.validateGlobalFlags(); err != nil {
 		return nil, err
 	}

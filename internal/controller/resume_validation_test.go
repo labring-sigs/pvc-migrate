@@ -269,6 +269,7 @@ func TestKubeBlocksLegacyResumeConvergenceChecksOperationsComponent(t *testing.T
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	if converged {
 		t.Fatal("reported convergence while the operations component was Stopped")
 	}
@@ -285,6 +286,7 @@ func TestKubeBlocksLegacyResumeConvergenceChecksOperationsComponent(t *testing.T
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	if !converged {
 		t.Fatal("did not report convergence after the operations component became Running")
 	}

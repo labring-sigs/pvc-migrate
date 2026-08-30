@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -173,7 +174,10 @@ func (s *Service) withLock(
 
 	cancelOperation()
 
-	releaseErr := lock.Release(context.Background())
+	releaseCtx, cancelRelease := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancelRelease()
+
+	releaseErr := lock.Release(releaseCtx)
 
 	return errors.Join(operationErr, lock.Err(), releaseErr)
 }

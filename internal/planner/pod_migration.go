@@ -67,6 +67,7 @@ func (p *Planner) PlanPodMigration(
 		OpenEBSLVMEnableShared: options.OpenEBSLVMEnableShared,
 	})
 	p.validatePlanInputs(state.plan, state.options)
+
 	if err := p.discoverPlanWorkload(ctx, &state); err != nil {
 		return nil, err
 	}

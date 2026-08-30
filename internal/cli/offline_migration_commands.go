@@ -33,45 +33,138 @@ func (f *offlineMigrationFlags) bind(command *cobra.Command) {
 	flags := command.Flags()
 	flags.StringVar(&f.sessionID, "session", "", "Migration session ID")
 	flags.StringVarP(&f.sourceNamespace, "source-namespace", "n", "default", "Source PVC namespace")
-	flags.StringVar(&f.temporaryNamespace, "temporary-namespace", "pvc-migrate-system", "Namespace for staged destination PVCs")
-	flags.StringVar(&f.destinationNamespace, "destination-namespace", "", "Destination namespace; defaults to source namespace")
-	flags.StringSliceVar(&f.sourcePVCs, "source-pvc", nil, "Source PVC name; repeat for multiple claims")
-	flags.StringSliceVar(&f.destinationPVCs, "destination-pvc", nil, "Destination PVC name; for multiple PVCs use source-pvc-name=destination-pvc-name")
-	flags.StringSliceVar(&f.destinationCapacities, "destination-capacity", nil, "Destination PVC storage capacity; one value applies to all PVCs, or use source-pvc-name=capacity for explicit mappings")
-	flags.StringArrayVar(&f.sourcePaths, "source-path", nil, "Source directory inside a PVC; repeat and use source-pvc-name=relative-path for multiple PVCs")
-	flags.StringArrayVar(&f.destinationPaths, "destination-path", nil, "Destination directory inside a PVC; repeat and use source-pvc-name=relative-path for multiple PVCs")
-	flags.BoolVar(&f.allowVolumeShrink, "allow-volume-shrink", false, "Allow destination capacity below the source PV capacity; only use when copied data is known to fit")
-	flags.BoolVar(&f.skipSourceUsageCheck, "skip-source-usage-check", false, "Skip the storage-backend CRD usage check for a smaller destination")
-	flags.StringVar(&f.sourceNode, "source-node", "", "Source tool node; inferred from active consumers when possible")
-	flags.StringVar(&f.targetNode, "target-node", domain.AutoValue, "Target node for provisioning and copy tools; auto selects a compatible Ready node")
-	flags.StringVar(&f.destinationClass, "destination-storage-class", "", "Destination StorageClass; defaults to each source class")
-	flags.StringVar(&f.capacityAwareness, "capacity-awareness", string(domain.CapacityAwarenessAuto), "CSIStorageCapacity policy: auto, require, or off")
-	flags.StringSliceVar(&f.strategies, "strategy", []string{domain.StrategyAuto}, "pv-migrate strategy order; auto selects a topology-compatible order")
-	flags.BoolVar(&f.verifyChecksum, "verify-checksum", true, "Use rsync checksum comparison during final sync")
-	flags.BoolVar(&f.deleteExtraneous, "delete-extraneous", true, "Delete destination files absent from the source")
+	flags.StringVar(
+		&f.temporaryNamespace,
+		"temporary-namespace",
+		"pvc-migrate-system",
+		"Namespace for staged destination PVCs",
+	)
+	flags.StringVar(
+		&f.destinationNamespace,
+		"destination-namespace",
+		"",
+		"Destination namespace; defaults to source namespace",
+	)
+	flags.StringSliceVar(
+		&f.sourcePVCs,
+		"source-pvc",
+		nil,
+		"Source PVC name; repeat for multiple claims",
+	)
+	flags.StringSliceVar(
+		&f.destinationPVCs,
+		"destination-pvc",
+		nil,
+		"Destination PVC name; for multiple PVCs use source-pvc-name=destination-pvc-name",
+	)
+	flags.StringSliceVar(
+		&f.destinationCapacities,
+		"destination-capacity",
+		nil,
+		"Destination PVC storage capacity; one value applies to all PVCs, or use source-pvc-name=capacity for explicit mappings",
+	)
+	flags.StringArrayVar(
+		&f.sourcePaths,
+		"source-path",
+		nil,
+		"Source directory inside a PVC; repeat and use source-pvc-name=relative-path for multiple PVCs",
+	)
+	flags.StringArrayVar(
+		&f.destinationPaths,
+		"destination-path",
+		nil,
+		"Destination directory inside a PVC; repeat and use source-pvc-name=relative-path for multiple PVCs",
+	)
+	flags.BoolVar(
+		&f.allowVolumeShrink,
+		"allow-volume-shrink",
+		false,
+		"Allow destination capacity below the source PV capacity; only use when copied data is known to fit",
+	)
+	flags.BoolVar(
+		&f.skipSourceUsageCheck,
+		"skip-source-usage-check",
+		false,
+		"Skip the storage-backend CRD usage check for a smaller destination",
+	)
+	flags.StringVar(
+		&f.sourceNode,
+		"source-node",
+		"",
+		"Source tool node; inferred from active consumers when possible",
+	)
+	flags.StringVar(
+		&f.targetNode,
+		"target-node",
+		domain.AutoValue,
+		"Target node for provisioning and copy tools; auto selects a compatible Ready node",
+	)
+	flags.StringVar(
+		&f.destinationClass,
+		"destination-storage-class",
+		"",
+		"Destination StorageClass; defaults to each source class",
+	)
+	flags.StringVar(
+		&f.capacityAwareness,
+		"capacity-awareness",
+		string(domain.CapacityAwarenessAuto),
+		"CSIStorageCapacity policy: auto, require, or off",
+	)
+	flags.StringSliceVar(
+		&f.strategies,
+		"strategy",
+		[]string{domain.StrategyAuto},
+		"pv-migrate strategy order; auto selects a topology-compatible order",
+	)
+	flags.BoolVar(
+		&f.verifyChecksum,
+		"verify-checksum",
+		true,
+		"Use rsync checksum comparison during final sync",
+	)
+	flags.BoolVar(
+		&f.deleteExtraneous,
+		"delete-extraneous",
+		true,
+		"Delete destination files absent from the source",
+	)
 }
 
 func (f *offlineMigrationFlags) planOptions(
 	state *rootState,
 	useTemporary bool,
 ) (planner.OfflineMigrationOptions, error) {
-	if err := validateDestinationCapacityFlags(domain.OperationMigrate, false, f.destinationCapacities, f.allowVolumeShrink, f.skipSourceUsageCheck, f.sourcePaths, f.destinationPaths); err != nil {
+	if err := validateDestinationCapacityFlags(
+		domain.OperationMigrate,
+		false,
+		f.destinationCapacities,
+		f.allowVolumeShrink,
+		f.skipSourceUsageCheck,
+		f.sourcePaths,
+		f.destinationPaths,
+	); err != nil {
 		return planner.OfflineMigrationOptions{}, err
 	}
+
 	id := f.sessionID
 	if id == "" {
 		generated, err := domain.NewSessionID(time.Now())
 		if err != nil {
 			return planner.OfflineMigrationOptions{}, err
 		}
+
 		id = generated
 		f.sessionID = id
 	}
+
 	destinationNamespace := f.destinationNamespace
 	if destinationNamespace == "" {
 		destinationNamespace = f.sourceNamespace
 	}
+
 	stagingNamespace := destinationNamespace
+
 	temporaryNamespace := destinationNamespace
 	if useTemporary {
 		stagingNamespace = f.temporaryNamespace
@@ -105,6 +198,7 @@ func (f *offlineMigrationFlags) planOptions(
 
 func (r *rootState) newMigrateCommand() *cobra.Command {
 	flags := &offlineMigrationFlags{}
+
 	var dryRun bool
 
 	command := &cobra.Command{
@@ -112,9 +206,18 @@ func (r *rootState) newMigrateCommand() *cobra.Command {
 		Short: "Run a complete offline PVC migration",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			if err := validateDestinationCapacityFlags(domain.OperationMigrate, false, flags.destinationCapacities, flags.allowVolumeShrink, flags.skipSourceUsageCheck, flags.sourcePaths, flags.destinationPaths); err != nil {
+			if err := validateDestinationCapacityFlags(
+				domain.OperationMigrate,
+				false,
+				flags.destinationCapacities,
+				flags.allowVolumeShrink,
+				flags.skipSourceUsageCheck,
+				flags.sourcePaths,
+				flags.destinationPaths,
+			); err != nil {
 				return reportPreSessionError(cmd, err)
 			}
+
 			return r.runOfflineMigrateCommand(cmd, flags, dryRun)
 		},
 	}
@@ -128,6 +231,7 @@ func (r *rootState) newMigrateCommand() *cobra.Command {
 		r.newOfflineMigrationRollbackCommand(),
 		r.newOfflineMigrationCleanupCommand(),
 	)
+
 	return command
 }
 
@@ -139,27 +243,53 @@ func (r *rootState) newOfflineMigrationPlanCommand() *cobra.Command {
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			existing := flags.sessionID != "" && len(flags.sourcePVCs) == 0
-			if err := validateDestinationCapacityFlags(domain.OperationMigrate, existing, flags.destinationCapacities, flags.allowVolumeShrink, flags.skipSourceUsageCheck, flags.sourcePaths, flags.destinationPaths); err != nil {
+			if err := validateDestinationCapacityFlags(
+				domain.OperationMigrate,
+				existing,
+				flags.destinationCapacities,
+				flags.allowVolumeShrink,
+				flags.skipSourceUsageCheck,
+				flags.sourcePaths,
+				flags.destinationPaths,
+			); err != nil {
 				return err
 			}
+
 			runtime, err := r.runtime()
 			if err != nil {
 				return err
 			}
+
 			ctx, cancel := r.context(cmd.Context())
 			defer cancel()
 
 			if existing {
 				session, err := runtime.store.Get(ctx, r.global.sessionNamespace, flags.sessionID)
 				if err != nil {
-					return reportSessionLookupError(cmd, r.global.sessionNamespace, flags.sessionID, err)
+					return reportSessionLookupError(
+						cmd,
+						r.global.sessionNamespace,
+						flags.sessionID,
+						err,
+					)
 				}
+
 				if session.Spec.Operation() != domain.OperationMigrate {
-					return reportSessionError(cmd, session, domain.NewError(domain.ErrorPrecondition, "migrate plan", "offline migrate plan requires an offline Migrate session"))
+					return reportSessionError(
+						cmd,
+						session,
+						domain.NewError(
+							domain.ErrorPrecondition,
+							"migrate plan",
+							"offline migrate plan requires an offline Migrate session",
+						),
+					)
 				}
+
 				if err := runtime.service.ValidateReservation(ctx, session); err != nil {
 					return reportSessionError(cmd, session, err)
 				}
+
 				return printSessionResult(cmd, runtime, session)
 			}
 
@@ -167,17 +297,21 @@ func (r *rootState) newOfflineMigrationPlanCommand() *cobra.Command {
 			if err != nil {
 				return err
 			}
+
 			plan, err := runtime.planner.PlanOfflineMigration(ctx, options)
 			if err != nil {
 				return reportPlanningError(cmd, err)
 			}
+
 			if err := printPlanResult(cmd, runtime, plan); err != nil {
 				return err
 			}
+
 			return requireReady(plan)
 		},
 	}
 	flags.bind(command)
+
 	return command
 }
 
@@ -190,32 +324,41 @@ func (r *rootState) runOfflineMigrateCommand(
 	if err != nil {
 		return err
 	}
+
 	ctx, cancel := r.context(cmd.Context())
 	defer cancel()
+
 	options, err := flags.planOptions(r, true)
 	if err != nil {
 		return err
 	}
+
 	plan, err := runtime.planner.PlanOfflineMigration(ctx, options)
 	if err != nil {
 		return reportPlanningError(cmd, err)
 	}
+
 	if err := requireReadyWithOutput(runtime, plan, cmd.ErrOrStderr()); err != nil {
 		return err
 	}
+
 	if dryRun {
 		return printPlanResult(cmd, runtime, plan)
 	}
+
 	if err := r.confirm(ctx, cmd, offlineApprovalIdentity(flags)); err != nil {
 		return reportApprovalError(cmd, err)
 	}
+
 	session, err := runtime.service.CreateSession(ctx, plan, false)
 	if err != nil {
 		return reportSessionCreationError(cmd, plan.SessionNamespace, plan.SessionID, err)
 	}
+
 	if err := runtime.service.OfflineMigrate(ctx, session); err != nil {
 		return reportSessionError(cmd, session, err)
 	}
+
 	return printSessionResult(cmd, runtime, session)
 }
 

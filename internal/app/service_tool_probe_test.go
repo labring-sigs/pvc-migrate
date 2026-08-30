@@ -581,6 +581,7 @@ func TestSessionToolProbeTargetsFollowSelectedStrategies(t *testing.T) {
 			options := session.Spec.WorkflowOptions()
 			options.Strategies = slices.Clone(test.strategies)
 			common := session.Spec.SessionCommon
+
 			workload := session.Spec.Workload()
 			switch test.operation {
 			case domain.OperationMigrate:
@@ -599,8 +600,8 @@ func TestSessionToolProbeTargetsFollowSelectedStrategies(t *testing.T) {
 					common,
 
 					false,
-					options)
-
+					options,
+				)
 			}
 
 			var targets []kube.ToolProbeTarget
@@ -1278,7 +1279,8 @@ func copyToolProbeSession(online bool) *domain.Session {
 		session.Spec.SessionCommon,
 
 		online,
-		options)
+		options,
+	)
 
 	return session
 }

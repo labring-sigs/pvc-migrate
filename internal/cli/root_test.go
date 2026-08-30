@@ -185,16 +185,56 @@ func TestMigrationModesRejectEachOthersFlags(t *testing.T) {
 		flag string
 	}{
 		{name: "offline pod", args: []string{"migrate", "--pod", "db-0"}, flag: "--pod"},
-		{name: "offline plan pod", args: []string{"migrate", "plan", "--pod", "db-0"}, flag: "--pod"},
-		{name: "offline precopy", args: []string{"migrate", "--precopy-passes", "1"}, flag: "--precopy-passes"},
-		{name: "offline shared mount", args: []string{"migrate", "--openebs-lvm-enable-shared"}, flag: "--openebs-lvm-enable-shared"},
-		{name: "offline KubeBlocks candidate", args: []string{"migrate", "--kubeblocks-candidate", "db-1"}, flag: "--kubeblocks-candidate"},
-		{name: "pod source PVC", args: []string{"migrate-pod", "--pod", "db-0", "--source-pvc", "data"}, flag: "--source-pvc"},
-		{name: "pod plan source PVC", args: []string{"migrate-pod", "plan", "--pod", "db-0", "--source-pvc", "data"}, flag: "--source-pvc"},
-		{name: "pod destination namespace", args: []string{"migrate-pod", "--pod", "db-0", "--destination-namespace", "other"}, flag: "--destination-namespace"},
-		{name: "pod destination PVC", args: []string{"migrate-pod", "--pod", "db-0", "--destination-pvc", "data-copy"}, flag: "--destination-pvc"},
-		{name: "pod online", args: []string{"migrate-pod", "--pod", "db-0", "--online"}, flag: "--online"},
-		{name: "pod plan online", args: []string{"migrate-pod", "plan", "--pod", "db-0", "--online"}, flag: "--online"},
+		{
+			name: "offline plan pod",
+			args: []string{"migrate", "plan", "--pod", "db-0"},
+			flag: "--pod",
+		},
+		{
+			name: "offline precopy",
+			args: []string{"migrate", "--precopy-passes", "1"},
+			flag: "--precopy-passes",
+		},
+		{
+			name: "offline shared mount",
+			args: []string{"migrate", "--openebs-lvm-enable-shared"},
+			flag: "--openebs-lvm-enable-shared",
+		},
+		{
+			name: "offline KubeBlocks candidate",
+			args: []string{"migrate", "--kubeblocks-candidate", "db-1"},
+			flag: "--kubeblocks-candidate",
+		},
+		{
+			name: "pod source PVC",
+			args: []string{"migrate-pod", "--pod", "db-0", "--source-pvc", "data"},
+			flag: "--source-pvc",
+		},
+		{
+			name: "pod plan source PVC",
+			args: []string{"migrate-pod", "plan", "--pod", "db-0", "--source-pvc", "data"},
+			flag: "--source-pvc",
+		},
+		{
+			name: "pod destination namespace",
+			args: []string{"migrate-pod", "--pod", "db-0", "--destination-namespace", "other"},
+			flag: "--destination-namespace",
+		},
+		{
+			name: "pod destination PVC",
+			args: []string{"migrate-pod", "--pod", "db-0", "--destination-pvc", "data-copy"},
+			flag: "--destination-pvc",
+		},
+		{
+			name: "pod online",
+			args: []string{"migrate-pod", "--pod", "db-0", "--online"},
+			flag: "--online",
+		},
+		{
+			name: "pod plan online",
+			args: []string{"migrate-pod", "plan", "--pod", "db-0", "--online"},
+			flag: "--online",
+		},
 	}
 
 	for _, tt := range tests {
@@ -336,6 +376,7 @@ func TestBackupRejectsOnlineOnlyLVMFlagWithoutOnlineMode(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected offline backup to reject --openebs-lvm-enable-shared")
 	}
+
 	if !strings.Contains(err.Error(), "--openebs-lvm-enable-shared requires --online") {
 		t.Fatalf("error=%v guidance=%q", err, stderr)
 	}

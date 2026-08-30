@@ -171,7 +171,11 @@ func TestCleanupFinalizesBackupCredentialsSecret(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := service.cleanupWorkflowForTest(ctx, session, CleanupOptions{Finalize: true}); err != nil {
+	if err := service.cleanupWorkflowForTest(
+		ctx,
+		session,
+		CleanupOptions{Finalize: true},
+	); err != nil {
 		t.Fatal(err)
 	}
 
@@ -231,7 +235,11 @@ func TestCleanupFindsCredentialsSecretMissingFromBackupCheckpoint(t *testing.T) 
 		t.Fatal(err)
 	}
 
-	if err := service.cleanupWorkflowForTest(ctx, session, CleanupOptions{Finalize: true}); err != nil {
+	if err := service.cleanupWorkflowForTest(
+		ctx,
+		session,
+		CleanupOptions{Finalize: true},
+	); err != nil {
 		t.Fatal(err)
 	}
 
@@ -256,7 +264,8 @@ func completedBackupCleanupSession(t *testing.T) *domain.Session {
 		},
 
 		false,
-		domain.SessionWorkflowOptions{})
+		domain.SessionWorkflowOptions{},
+	)
 
 	spec.Backup.SourcePVC = domain.ObjectReference{
 		Namespace: "app",
@@ -781,7 +790,11 @@ func TestCleanupRequiresRollbackClosureBeforeSessionDeletion(t *testing.T) {
 	session.Status.Phase = domain.PhaseCompleted
 	service := &Service{client: fake.NewClientset(), store: &memoryStore{}}
 
-	err := service.cleanupWorkflowForTest(context.Background(), session, CleanupOptions{DeleteSession: true})
+	err := service.cleanupWorkflowForTest(
+		context.Background(),
+		session,
+		CleanupOptions{DeleteSession: true},
+	)
 	if domain.CategoryOf(err) != domain.ErrorPrecondition {
 		t.Fatalf("category=%s error=%v", domain.CategoryOf(err), err)
 	}
@@ -1026,7 +1039,11 @@ func TestCleanupRejectsSingleStageNonTerminalPhase(t *testing.T) {
 		session.Status.Phase = domain.PhaseFailed
 		service := &Service{client: fake.NewClientset(), store: &memoryStore{}}
 
-		err := service.validateCleanupWorkflowForTest(context.Background(), session, CleanupOptions{})
+		err := service.validateCleanupWorkflowForTest(
+			context.Background(),
+			session,
+			CleanupOptions{},
+		)
 		if domain.CategoryOf(err) != domain.ErrorPrecondition {
 			t.Fatalf("operation=%s category=%s error=%v", operation, domain.CategoryOf(err), err)
 		}

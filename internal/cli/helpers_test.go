@@ -50,6 +50,7 @@ func TestRootCommandSurfaceAndGlobalDefaults(t *testing.T) {
 
 func TestOperationCommandSurfacesStayIndependent(t *testing.T) {
 	root := NewRoot(Options{Version: "test"})
+
 	checks := []struct {
 		path    []string
 		present []string
@@ -59,32 +60,141 @@ func TestOperationCommandSurfacesStayIndependent(t *testing.T) {
 		{path: []string{"reserve", "plan"}, absent: []string{"online", "source-node"}},
 		{path: []string{"copy"}, present: []string{"online", "source-node", "pod"}},
 		{path: []string{"copy", "plan"}, present: []string{"online", "source-node", "pod"}},
-		{path: []string{"rename"}, present: []string{"destination-pvc"}, absent: []string{"destination-namespace"}},
-		{path: []string{"rename", "plan"}, present: []string{"destination-pvc"}, absent: []string{"destination-namespace", "online", "source-node", "pod", "destination-capacity", "source-path", "target-node"}},
-		{path: []string{"move"}, present: []string{"destination-pvc", "destination-namespace"}, absent: []string{"online", "source-node", "pod", "destination-capacity", "source-path", "target-node"}},
-		{path: []string{"move", "plan"}, present: []string{"destination-pvc", "destination-namespace"}, absent: []string{"online", "source-node", "pod", "destination-capacity", "source-path", "target-node"}},
+		{
+			path:    []string{"rename"},
+			present: []string{"destination-pvc"},
+			absent:  []string{"destination-namespace"},
+		},
+		{
+			path:    []string{"rename", "plan"},
+			present: []string{"destination-pvc"},
+			absent: []string{
+				"destination-namespace",
+				"online",
+				"source-node",
+				"pod",
+				"destination-capacity",
+				"source-path",
+				"target-node",
+			},
+		},
+		{
+			path:    []string{"move"},
+			present: []string{"destination-pvc", "destination-namespace"},
+			absent: []string{
+				"online",
+				"source-node",
+				"pod",
+				"destination-capacity",
+				"source-path",
+				"target-node",
+			},
+		},
+		{
+			path:    []string{"move", "plan"},
+			present: []string{"destination-pvc", "destination-namespace"},
+			absent: []string{
+				"online",
+				"source-node",
+				"pod",
+				"destination-capacity",
+				"source-path",
+				"target-node",
+			},
+		},
 		{path: []string{"backup"}, present: []string{"online", "openebs-lvm-enable-shared"}},
-		{path: []string{"backup", "plan"}, present: []string{"online", "openebs-lvm-enable-shared"}},
-		{path: []string{"reserve", "cross-cluster", "run"}, absent: []string{"online", "verify-checksum", "delete-extraneous"}},
-		{path: []string{"reserve", "cross-cluster", "plan"}, absent: []string{"online", "verify-checksum", "delete-extraneous"}},
-		{path: []string{"reserve", "cross-cluster", "status"}, absent: []string{"online", "verify-checksum", "delete-extraneous", "source-pvc", "destination-pvc"}},
-		{path: []string{"reserve", "cross-cluster", "resume"}, absent: []string{"online", "verify-checksum", "delete-extraneous", "source-pvc", "destination-pvc"}},
-		{path: []string{"reserve", "cross-cluster", "cleanup"}, absent: []string{"online", "verify-checksum", "delete-extraneous", "source-pvc", "destination-pvc"}},
-		{path: []string{"copy", "cross-cluster", "run"}, present: []string{"online", "verify-checksum", "delete-extraneous"}},
-		{path: []string{"copy", "cross-cluster", "status"}, absent: []string{"source-pvc", "destination-pvc", "destination-capacity", "online", "verify-checksum", "delete-extraneous"}},
-		{path: []string{"copy", "cross-cluster", "resume"}, absent: []string{"source-pvc", "destination-pvc", "destination-capacity", "online", "verify-checksum", "delete-extraneous"}},
-		{path: []string{"copy", "cross-cluster", "cleanup"}, absent: []string{"source-pvc", "destination-pvc", "destination-capacity", "online", "verify-checksum", "delete-extraneous"}},
+		{
+			path:    []string{"backup", "plan"},
+			present: []string{"online", "openebs-lvm-enable-shared"},
+		},
+		{
+			path:   []string{"reserve", "cross-cluster", "run"},
+			absent: []string{"online", "verify-checksum", "delete-extraneous"},
+		},
+		{
+			path:   []string{"reserve", "cross-cluster", "plan"},
+			absent: []string{"online", "verify-checksum", "delete-extraneous"},
+		},
+		{
+			path: []string{"reserve", "cross-cluster", "status"},
+			absent: []string{
+				"online",
+				"verify-checksum",
+				"delete-extraneous",
+				"source-pvc",
+				"destination-pvc",
+			},
+		},
+		{
+			path: []string{"reserve", "cross-cluster", "resume"},
+			absent: []string{
+				"online",
+				"verify-checksum",
+				"delete-extraneous",
+				"source-pvc",
+				"destination-pvc",
+			},
+		},
+		{
+			path: []string{"reserve", "cross-cluster", "cleanup"},
+			absent: []string{
+				"online",
+				"verify-checksum",
+				"delete-extraneous",
+				"source-pvc",
+				"destination-pvc",
+			},
+		},
+		{
+			path:    []string{"copy", "cross-cluster", "run"},
+			present: []string{"online", "verify-checksum", "delete-extraneous"},
+		},
+		{
+			path: []string{"copy", "cross-cluster", "status"},
+			absent: []string{
+				"source-pvc",
+				"destination-pvc",
+				"destination-capacity",
+				"online",
+				"verify-checksum",
+				"delete-extraneous",
+			},
+		},
+		{
+			path: []string{"copy", "cross-cluster", "resume"},
+			absent: []string{
+				"source-pvc",
+				"destination-pvc",
+				"destination-capacity",
+				"online",
+				"verify-checksum",
+				"delete-extraneous",
+			},
+		},
+		{
+			path: []string{"copy", "cross-cluster", "cleanup"},
+			absent: []string{
+				"source-pvc",
+				"destination-pvc",
+				"destination-capacity",
+				"online",
+				"verify-checksum",
+				"delete-extraneous",
+			},
+		},
 	}
 	for _, check := range checks {
 		command, _, err := root.Find(check.path)
 		if err != nil {
 			t.Fatalf("Find(%v): %v", check.path, err)
 		}
+
 		for _, name := range check.present {
 			if command.Flags().Lookup(name) == nil {
 				t.Fatalf("%v missing --%s", check.path, name)
 			}
 		}
+
 		for _, name := range check.absent {
 			if command.Flags().Lookup(name) != nil {
 				t.Fatalf("%v unexpectedly exposes --%s", check.path, name)
@@ -119,9 +229,11 @@ func testRootCommandSurface(t *testing.T, root *cobra.Command) {
 	if mv, _, err := root.Find([]string{"mv"}); err == nil && mv != root {
 		t.Fatalf("removed mv alias resolved to command %v", mv)
 	}
+
 	if session, _, err := root.Find([]string{"session"}); err == nil && session != root {
 		t.Fatalf("removed session command resolved to %v", session)
 	}
+
 	for _, name := range []string{"final-sync", "activate"} {
 		if command, _, err := root.Find([]string{name}); err == nil && command != root {
 			t.Fatalf("removed top-level %s command resolved to %v", name, command)
@@ -253,6 +365,7 @@ func testCleanupFlagPlacement(t *testing.T, root *cobra.Command) {
 		if err != nil {
 			t.Fatalf("Find(%s cleanup): %v", workflow, err)
 		}
+
 		for _, name := range []string{"delete-temporary", "delete-rollback-pv", "finalize", "delete-session"} {
 			if command.Flags().Lookup(name) == nil {
 				t.Fatalf("%s cleanup is missing --%s", workflow, name)
@@ -265,11 +378,13 @@ func testCleanupFlagPlacement(t *testing.T, root *cobra.Command) {
 		if err != nil {
 			t.Fatalf("Find(%s cleanup): %v", workflow, err)
 		}
+
 		for _, name := range []string{"finalize", "delete-session"} {
 			if command.Flags().Lookup(name) == nil {
 				t.Fatalf("%s cleanup is missing --%s", workflow, name)
 			}
 		}
+
 		for _, name := range []string{"delete-temporary", "delete-rollback-pv"} {
 			if command.Flags().Lookup(name) != nil {
 				t.Fatalf("%s cleanup unexpectedly exposes --%s", workflow, name)
@@ -457,6 +572,7 @@ func testCutoverFlagPlacement(t *testing.T, root *cobra.Command) {
 		if err != nil {
 			t.Fatal(err)
 		}
+
 		for _, name := range []string{"pod", "precopy-passes", "openebs-lvm-enable-shared", "kubeblocks-candidate", "allow-leader-downtime"} {
 			if command.Flags().Lookup(name) != nil {
 				t.Fatalf("%v unexpectedly exposes --%s", path, name)
@@ -483,10 +599,19 @@ func testWorkflowCommandSurface(t *testing.T, root *cobra.Command) {
 	for _, workflow := range []string{"migrate", "migrate-pod", "reserve", "copy", "backup", "rename", "move"} {
 		status, _, err := root.Find([]string{workflow, "status"})
 		if err != nil || status.Flags().Lookup("dry-run") != nil {
-			t.Fatalf("%s status dry-run flag=%v error=%v", workflow, status.Flags().Lookup("dry-run"), err)
+			t.Fatalf(
+				"%s status dry-run flag=%v error=%v",
+				workflow,
+				status.Flags().Lookup("dry-run"),
+				err,
+			)
 		}
 	}
-	if recovery, _, err := root.Find([]string{"recovery", "cleanup-orphan"}); err != nil || recovery.Name() != "cleanup-orphan" {
+
+	if recovery, _, err := root.Find(
+		[]string{"recovery", "cleanup-orphan"},
+	); err != nil ||
+		recovery.Name() != "cleanup-orphan" {
 		t.Fatalf("recovery cleanup-orphan command=%v error=%v", recovery, err)
 	}
 
@@ -706,6 +831,7 @@ func TestOfflinePlanOptionsPreserveSourcePVCSelection(t *testing.T) {
 	if !reflect.DeepEqual(options.SourcePVCs, flags.sourcePVCs) {
 		t.Fatalf("source PVCs = %#v, want %#v", options.SourcePVCs, flags.sourcePVCs)
 	}
+
 	if !reflect.DeepEqual(options.DestinationPVCs, flags.destinationPVCs) {
 		t.Fatalf("destination PVCs = %#v, want %#v", options.DestinationPVCs, flags.destinationPVCs)
 	}
@@ -1049,7 +1175,10 @@ func TestApprovalIdentityPrecedence(t *testing.T) {
 		flags offlineMigrationFlags
 		want  string
 	}{
-		{flags: offlineMigrationFlags{sourcePVCs: []string{"data", "logs"}, sessionID: "mig"}, want: "data"},
+		{
+			flags: offlineMigrationFlags{sourcePVCs: []string{"data", "logs"}, sessionID: "mig"},
+			want:  "data",
+		},
 		{flags: offlineMigrationFlags{sessionID: "mig"}, want: "mig"},
 		{flags: offlineMigrationFlags{}, want: ""},
 	}

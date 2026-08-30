@@ -358,6 +358,7 @@ func (s *Service) migratePod(ctx context.Context, session *domain.Session) error
 			"warm passes must be non-negative",
 		)
 	}
+
 	if session.Spec.WorkflowOptionsPtr() == nil {
 		return domain.NewError(
 			domain.ErrorValidation,
@@ -371,12 +372,15 @@ func (s *Service) migratePod(ctx context.Context, session *domain.Session) error
 			return err
 		}
 	}
+
 	if err := s.Reserve(ctx, session); err != nil {
 		return err
 	}
+
 	if err := s.runRemainingWarmCopies(ctx, session, warmPasses); err != nil {
 		return err
 	}
+
 	return s.migrateAfterWarmCopy(ctx, session)
 }
 
@@ -435,24 +439,33 @@ func (s *Service) resumePodMigration(
 		if err := s.WarmCopy(ctx, session); err != nil {
 			return err
 		}
+
 		if err := s.runRemainingWarmCopies(ctx, session, session.Spec.PrecopyPasses()); err != nil {
 			return err
 		}
+
 		return s.migrateAfterWarmCopy(ctx, session)
 	case domain.PhaseWarmCopied, domain.PhasePausing:
 		if phase == domain.PhaseWarmCopied {
-			if err := s.runRemainingWarmCopies(ctx, session, session.Spec.PrecopyPasses()); err != nil {
+			if err := s.runRemainingWarmCopies(
+				ctx,
+				session,
+				session.Spec.PrecopyPasses(),
+			); err != nil {
 				return err
 			}
 		}
+
 		return s.migrateAfterWarmCopy(ctx, session)
 	case domain.PhasePaused, domain.PhaseFinalSyncing:
 		if err := s.PodFinalSync(ctx, session); err != nil {
 			return err
 		}
+
 		if err := s.PodActivate(ctx, session); err != nil {
 			return err
 		}
+
 		return s.ResumePodWorkload(ctx, session)
 	case domain.PhaseFinalSynced, domain.PhaseActivating:
 		if err := s.PodActivate(ctx, session); err != nil {

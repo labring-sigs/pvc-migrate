@@ -22,7 +22,9 @@ func (r *rootState) newRestoreCommand() *cobra.Command {
 
 func (r *rootState) newRestoreTransferCommand() *cobra.Command {
 	flags := &restoreFlags{}
+
 	var dryRun bool
+
 	command := &cobra.Command{
 		Use:   "restore",
 		Short: "Restore object-storage backup data into a PVC",
@@ -31,43 +33,74 @@ func (r *rootState) newRestoreTransferCommand() *cobra.Command {
 			if err := validateBucketFlags(&flags.bucketFlags, "destination-pvc"); err != nil {
 				return reportPreSessionError(cmd, err)
 			}
+
 			runtime, err := r.runtime()
 			if err != nil {
 				return reportRuntimeError(cmd, err)
 			}
+
 			ctx, cancel := r.context(cmd.Context())
 			defer cancel()
+
 			flags.accessKeyExplicit = cmd.Flags().Changed("access-key")
 			flags.secretKeyExplicit = cmd.Flags().Changed("secret-key")
+
 			flags.sessionTokenExplicit = cmd.Flags().Changed("session-token")
-			if err := loadS3Credentials(ctx, runtime.clients.Kubernetes, &flags.bucketFlags); err != nil {
+			if err := loadS3Credentials(
+				ctx,
+				runtime.clients.Kubernetes,
+				&flags.bucketFlags,
+			); err != nil {
 				return reportTransferError(cmd, "restore", flags.namespace, flags.pvc, err)
 			}
+
 			store, err := r.newObjectStore(ctx, &flags.bucketFlags)
 			if err != nil {
 				return reportTransferError(cmd, "restore", flags.namespace, flags.pvc, err)
 			}
+
 			request := r.objectTransferRequest(runtime, &flags.bucketFlags, store, false, false)
 			request.ToolImageProber = kube.NewToolImageProber(runtime.clients.Kubernetes)
 			applyRestoreRequest(&request, flags.restore)
+
 			plan, err := backup.Preflight(ctx, runtime.clients.Kubernetes, request, true)
 			if err != nil {
 				return reportTransferError(cmd, "restore", flags.namespace, flags.pvc, err)
 			}
+
 			if dryRun {
 				if err := printerFor(r).Print(plan); err != nil {
 					return reportTransferError(cmd, "restore", flags.namespace, flags.pvc, err)
 				}
-				return writeTransferDryRunGuidance(cmd.ErrOrStderr(), "restore", flags.namespace, flags.pvc, kubectlCommandPrefixForCommand(cmd))
+
+				return writeTransferDryRunGuidance(
+					cmd.ErrOrStderr(),
+					"restore",
+					flags.namespace,
+					flags.pvc,
+					kubectlCommandPrefixForCommand(cmd),
+				)
 			}
+
 			if err := r.confirm(ctx, cmd, flags.name); err != nil {
 				return reportApprovalError(cmd, err)
 			}
+
 			err = backup.Run(ctx, runtime.clients.Kubernetes, request, true)
 			if err != nil {
 				return reportTransferError(cmd, "restore", flags.namespace, flags.pvc, err)
 			}
-			return r.printObjectTransferResult(cmd, runtime, &flags.bucketFlags, "restore", true, false, plan, store)
+
+			return r.printObjectTransferResult(
+				cmd,
+				runtime,
+				&flags.bucketFlags,
+				"restore",
+				true,
+				false,
+				plan,
+				store,
+			)
 		},
 	}
 	bindRestoreFlags(command, flags)
@@ -79,11 +112,19 @@ func (r *rootState) newRestoreTransferCommand() *cobra.Command {
 
 func (r *rootState) newRestorePlanCommand() *cobra.Command {
 	flags := &restoreFlags{}
-	command := r.newObjectTransferPlanCommand("restore plan", "destination-pvc", false, true, &flags.bucketFlags, func(request *backup.Request) error {
-		applyRestoreRequest(request, flags.restore)
-		return nil
-	})
+	command := r.newObjectTransferPlanCommand(
+		"restore plan",
+		"destination-pvc",
+		false,
+		true,
+		&flags.bucketFlags,
+		func(request *backup.Request) error {
+			applyRestoreRequest(request, flags.restore)
+			return nil
+		},
+	)
 	bindRestoreFlags(command, flags)
+
 	return command
 }
 

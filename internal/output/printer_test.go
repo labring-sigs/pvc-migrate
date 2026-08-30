@@ -297,7 +297,8 @@ func TestTableBackupSessionRendersBackupDetails(t *testing.T) {
 		domain.SessionCommon{SourceNamespace: "app", SessionNamespace: "sessions"},
 
 		true,
-		domain.SessionWorkflowOptions{})
+		domain.SessionWorkflowOptions{},
+	)
 
 	spec.Backup.SourcePVC = domain.ObjectReference{Namespace: "app", Name: "data"}
 	spec.Backup.SourcePV = domain.ObjectReference{Name: "pv-data"}
@@ -387,7 +388,8 @@ func TestTableRenameShowsReboundSourcePV(t *testing.T) {
 			}}},
 
 			false,
-			domain.SessionWorkflowOptions{}),
+			domain.SessionWorkflowOptions{},
+		),
 
 		Status: domain.SessionStatus{
 			Phase:     domain.PhaseCompleted,
@@ -420,7 +422,8 @@ func TestTableSessionListAndGenericFallback(t *testing.T) {
 				domain.SessionCommon{SourceNamespace: "app"},
 
 				false,
-				domain.SessionWorkflowOptions{}),
+				domain.SessionWorkflowOptions{},
+			),
 
 			Status: domain.SessionStatus{Phase: domain.PhaseCompleted, UpdatedAt: updated},
 		},

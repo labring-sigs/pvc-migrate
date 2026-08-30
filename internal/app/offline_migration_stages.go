@@ -20,6 +20,7 @@ func (s *Service) offlineFinalSync(ctx context.Context, session *domain.Session)
 	if phase == domain.PhaseFailed {
 		phase = session.Status.ResumeFrom
 	}
+
 	switch phase {
 	case domain.PhaseReserved, domain.PhaseFinalSyncing, domain.PhaseFinalSynced:
 	default:
@@ -45,6 +46,7 @@ func (s *Service) offlineFinalSync(ctx context.Context, session *domain.Session)
 	if err := s.verifyShrinkUsage(ctx, session); err != nil {
 		return s.failContext(ctx, session, err)
 	}
+
 	if err := s.validateOfflineVolumes(ctx, session); err != nil {
 		return err
 	}
@@ -53,6 +55,7 @@ func (s *Service) offlineFinalSync(ctx context.Context, session *domain.Session)
 	if err != nil {
 		return err
 	}
+
 	probeResults, err := s.probeToolImage(ctx, session, targets)
 	if err != nil {
 		return err
@@ -73,6 +76,7 @@ func (s *Service) offlineActivate(ctx context.Context, session *domain.Session) 
 	if session.Status.Phase == domain.PhaseCompleted {
 		return s.restoreOpenEBSLVMSharedMounts(ctx, session)
 	}
+
 	if session.Status.Phase == domain.PhaseActivated {
 		return nil
 	}
@@ -81,6 +85,7 @@ func (s *Service) offlineActivate(ctx context.Context, session *domain.Session) 
 	if phase == domain.PhaseFailed {
 		phase = session.Status.ResumeFrom
 	}
+
 	if phase != domain.PhaseFinalSynced && phase != domain.PhaseActivating {
 		return domain.NewError(
 			domain.ErrorPrecondition,
@@ -92,15 +97,23 @@ func (s *Service) offlineActivate(ctx context.Context, session *domain.Session) 
 	if err := s.restoreOpenEBSLVMSharedMounts(ctx, session); err != nil {
 		return err
 	}
+
 	if err := s.ValidateOfflineActivation(ctx, session); err != nil {
 		return err
 	}
-	if err := s.begin(ctx, session, domain.PhaseActivating, "activating offline destination volumes"); err != nil {
+
+	if err := s.begin(
+		ctx,
+		session,
+		domain.PhaseActivating,
+		"activating offline destination volumes",
+	); err != nil {
 		return err
 	}
 
 	for index := range session.Spec.Volumes {
 		volume := &session.Spec.Volumes[index]
+
 		status := &session.Status.Volumes[index]
 		if status.Activation.ActivatedAt != nil {
 			if err := s.verifyActiveStorageVolume(ctx, session, index); err != nil {
@@ -117,6 +130,7 @@ func (s *Service) offlineActivate(ctx context.Context, session *domain.Session) 
 			"destination", volume.DestinationPVC.Namespace+"/"+volume.DestinationPVC.Name,
 			"pv", volume.DestinationPV.Name,
 		)
+
 		if err := s.switcher.ActivateVolume(ctx, session, volume, status, func() error {
 			return s.store.Update(ctx, session)
 		}); err != nil {
@@ -124,7 +138,12 @@ func (s *Service) offlineActivate(ctx context.Context, session *domain.Session) 
 		}
 	}
 
-	return s.finish(ctx, session, domain.PhaseActivated, "all offline destination volumes are active")
+	return s.finish(
+		ctx,
+		session,
+		domain.PhaseActivated,
+		"all offline destination volumes are active",
+	)
 }
 
 func (s *Service) completeOfflineMigration(ctx context.Context, session *domain.Session) error {
@@ -136,6 +155,7 @@ func (s *Service) completeOfflineMigration(ctx context.Context, session *domain.
 	if phase == domain.PhaseFailed {
 		phase = session.Status.ResumeFrom
 	}
+
 	if phase != domain.PhaseActivated && phase != domain.PhaseResuming {
 		return domain.NewError(
 			domain.ErrorPrecondition,
@@ -147,8 +167,14 @@ func (s *Service) completeOfflineMigration(ctx context.Context, session *domain.
 	if err := s.verifyActiveStorage(ctx, session); err != nil {
 		return s.failContext(ctx, session, err)
 	}
+
 	if session.Status.Phase == domain.PhaseFailed {
-		if err := s.begin(ctx, session, domain.PhaseResuming, "verifying offline migration completion"); err != nil {
+		if err := s.begin(
+			ctx,
+			session,
+			domain.PhaseResuming,
+			"verifying offline migration completion",
+		); err != nil {
 			return err
 		}
 	}
@@ -164,10 +190,12 @@ func (s *Service) offlineMigrate(ctx context.Context, session *domain.Session) e
 			"offline migrate requires a Migrate session",
 		)
 	}
+
 	phase := session.Status.Phase
 	if phase == domain.PhaseFailed {
 		phase = session.Status.ResumeFrom
 	}
+
 	switch phase {
 	case domain.PhasePlanned, domain.PhaseReserving:
 		if err := s.Reserve(ctx, session); err != nil {

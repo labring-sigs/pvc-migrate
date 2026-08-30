@@ -51,7 +51,8 @@ func shrinkUsageSession(skip bool) *domain.Session {
 			common,
 
 			false,
-			domain.SessionWorkflowOptions{SkipSourceUsageCheck: skip}),
+			domain.SessionWorkflowOptions{SkipSourceUsageCheck: skip},
+		),
 	}
 }
 

@@ -34,7 +34,10 @@ type ReserveOptions struct {
 }
 
 // PlanReserve builds a plan for retaining staged destination PVCs.
-func (p *Planner) PlanReserve(ctx context.Context, options ReserveOptions) (*domain.MigrationPlan, error) {
+func (p *Planner) PlanReserve(
+	ctx context.Context,
+	options ReserveOptions,
+) (*domain.MigrationPlan, error) {
 	return p.plan(ctx, planOptions{
 		SessionID:             options.SessionID,
 		Operation:             domain.OperationReserve,

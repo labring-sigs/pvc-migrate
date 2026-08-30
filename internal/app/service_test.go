@@ -438,9 +438,13 @@ func TestPhaseBeforeUsesMostRecentRecoveryStage(t *testing.T) {
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			session := appTestSession()
+
 			session.Status.History = make([]domain.HistoryEntry, 0, len(test.history))
 			for _, phase := range test.history {
-				session.Status.History = append(session.Status.History, domain.HistoryEntry{Phase: phase})
+				session.Status.History = append(
+					session.Status.History,
+					domain.HistoryEntry{Phase: phase},
+				)
 			}
 
 			if got := phaseBefore(session, test.target); got != test.want {
@@ -558,11 +562,17 @@ func TestOfflineMigrateDoesNotOrchestrateWorkload(t *testing.T) {
 	if session.Status.Phase != domain.PhaseCompleted {
 		t.Fatalf("phase=%s want=%s", session.Status.Phase, domain.PhaseCompleted)
 	}
+
 	if got := fmt.Sprint(copier.modes); got != "[final]" {
 		t.Fatalf("copy modes=%s want=[final]", got)
 	}
+
 	if controllers.paused != 0 || controllers.resumed != 0 {
-		t.Fatalf("offline migration orchestrated workload: pauses=%d resumes=%d", controllers.paused, controllers.resumed)
+		t.Fatalf(
+			"offline migration orchestrated workload: pauses=%d resumes=%d",
+			controllers.paused,
+			controllers.resumed,
+		)
 	}
 }
 
@@ -582,6 +592,7 @@ func TestOfflineRollbackValidationDoesNotRequireWorkloadController(t *testing.T)
 	setSessionOperation(session, domain.OperationMigrate)
 	session.Status.Phase = domain.PhaseFinalSynced
 	markTestSessionReserved(session)
+
 	service.controllers = nil
 
 	if err := service.ValidateOfflineMigrationRollback(context.Background(), session); err != nil {
@@ -592,7 +603,13 @@ func TestOfflineRollbackValidationDoesNotRequireWorkloadController(t *testing.T)
 func TestMigratePodRejectsOfflineSession(t *testing.T) {
 	service, session, _, _ := appTestService(t, &fakeCopier{})
 	setSessionOperation(session, domain.OperationMigrate)
-	if err := service.MigratePod(context.Background(), session); domain.CategoryOf(err) != domain.ErrorPrecondition {
+
+	if err := service.MigratePod(
+		context.Background(),
+		session,
+	); domain.CategoryOf(
+		err,
+	) != domain.ErrorPrecondition {
 		t.Fatalf("category=%s error=%v", domain.CategoryOf(err), err)
 	}
 }
@@ -768,7 +785,8 @@ func TestCopyConsumerPreflightSupportsOfflineAndOnlineBoundaries(t *testing.T) {
 		session.Spec.SessionCommon,
 
 		false,
-		domain.SessionWorkflowOptions{})
+		domain.SessionWorkflowOptions{},
+	)
 
 	_, err := service.client.CoreV1().Pods("app").Create(context.Background(), &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{Namespace: "app", Name: "writer"},
