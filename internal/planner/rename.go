@@ -124,7 +124,7 @@ func (p *Planner) planPVCIdentity(
 	if !options.Operation.RebindsPVC() {
 		plan.AddCheck(
 			failed(
-				"operation",
+				domain.CheckNameOperation,
 				fmt.Sprintf("unsupported PVC identity operation %q", options.Operation),
 			),
 		)
@@ -219,18 +219,18 @@ func (p *Planner) planPVCIdentity(
 	})
 
 	if pvErr != nil {
-		plan.AddCheck(failed("source-pv", fmt.Sprintf("read source PV: %v", pvErr)))
+		plan.AddCheck(failed(domain.CheckNameSourcePV, fmt.Sprintf("read source PV: %v", pvErr)))
 		return plan, nil
 	}
 
 	if pv == nil || pv.Name == "" {
-		plan.AddCheck(failed("source-pv", "read source PV returned an empty object"))
+		plan.AddCheck(failed(domain.CheckNameSourcePV, "read source PV returned an empty object"))
 		return plan, nil
 	}
 
 	if scErr != nil {
 		plan.AddCheck(failed(
-			"source-storage-class",
+			domain.CheckNameSourceStorageClass,
 			fmt.Sprintf("read source StorageClass %s: %v", storageClass, scErr),
 		))
 
@@ -240,7 +240,7 @@ func (p *Planner) planPVCIdentity(
 	if !sourceBindingMatches(pvc, pv) {
 		plan.AddCheck(
 			failed(
-				"source-binding",
+				domain.CheckNameSourceBinding,
 				fmt.Sprintf(
 					"PV %s claimRef does not match PVC %s/%s UID %s",
 					pv.Name,
@@ -399,7 +399,7 @@ func (p *Planner) validateRenameInventory(
 		if destinationNamespaceErr != nil {
 			plan.AddCheck(
 				failed(
-					"destination-namespace",
+					domain.CheckNameDestinationNamespace,
 					fmt.Sprintf(
 						"read destination namespace %s: %v",
 						options.DestinationNamespace,
@@ -413,24 +413,24 @@ func (p *Planner) validateRenameInventory(
 
 		plan.AddCheck(
 			passed(
-				"destination-namespace",
+				domain.CheckNameDestinationNamespace,
 				fmt.Sprintf("destination namespace %s exists", options.DestinationNamespace),
 			),
 		)
 	}
 
 	if pvcErr != nil {
-		plan.AddCheck(failed("source-pvc", fmt.Sprintf("read source PVC: %v", pvcErr)))
+		plan.AddCheck(failed(domain.CheckNameSourcePVC, fmt.Sprintf("read source PVC: %v", pvcErr)))
 		return false
 	}
 
 	if pvc == nil || pvc.Name == "" {
-		plan.AddCheck(failed("source-pvc", "read source PVC returned an empty object"))
+		plan.AddCheck(failed(domain.CheckNameSourcePVC, "read source PVC returned an empty object"))
 		return false
 	}
 
 	if pvc.Status.Phase != corev1.ClaimBound || pvc.Spec.VolumeName == "" {
-		plan.AddCheck(failed("source-pvc", "source PVC must be Bound"))
+		plan.AddCheck(failed(domain.CheckNameSourcePVC, "source PVC must be Bound"))
 		return false
 	}
 
@@ -438,11 +438,13 @@ func (p *Planner) validateRenameInventory(
 
 	switch {
 	case destinationPVCErr == nil && existing == nil:
-		plan.AddCheck(failed("destination-pvc", "read destination PVC returned an empty object"))
+		plan.AddCheck(
+			failed(domain.CheckNameDestinationPVC, "read destination PVC returned an empty object"),
+		)
 	case destinationPVCErr == nil:
 		plan.AddCheck(
 			failed(
-				"destination-pvc",
+				domain.CheckNameDestinationPVC,
 				fmt.Sprintf(
 					"destination PVC %s/%s already exists with UID %s",
 					existing.Namespace,
@@ -453,12 +455,15 @@ func (p *Planner) validateRenameInventory(
 		)
 	case !apierrors.IsNotFound(destinationPVCErr):
 		plan.AddCheck(
-			failed("destination-pvc", fmt.Sprintf("read destination PVC: %v", destinationPVCErr)),
+			failed(
+				domain.CheckNameDestinationPVC,
+				fmt.Sprintf("read destination PVC: %v", destinationPVCErr),
+			),
 		)
 	default:
 		plan.AddCheck(
 			passed(
-				"destination-pvc",
+				domain.CheckNameDestinationPVC,
 				fmt.Sprintf(
 					"destination identity %s/%s is available",
 					options.DestinationNamespace,
@@ -491,7 +496,7 @@ func (p *Planner) validateRenameInventory(
 	if len(pvc.OwnerReferences) > 0 {
 		plan.AddCheck(
 			failed(
-				"pvc-ownership",
+				domain.CheckNamePVCOwnership,
 				"PVC identity changes require a PVC without ownerReferences because its controller may recreate the source name",
 			),
 		)
@@ -502,7 +507,7 @@ func (p *Planner) validateRenameInventory(
 			plan.Ready = false
 			plan.AddCheck(
 				failed(
-					"rename-offline",
+					domain.CheckNameRenameOffline,
 					"PVC identity changes require the source PVC to have zero active Pod references",
 				),
 			)
@@ -549,12 +554,14 @@ func validateRenameInputs(
 	}
 
 	if options.Operation == domain.OperationMove && !destinationProvided {
-		plan.AddCheck(failed("move", "destination namespace is required"))
+		plan.AddCheck(failed(domain.CheckNameMove, "destination namespace is required"))
 		return false
 	}
 
 	if options.SourcePVC == "" || options.DestinationPVC == "" {
-		plan.AddCheck(failed("identity", "source and destination PVC names are required"))
+		plan.AddCheck(
+			failed(domain.CheckNameIdentity, "source and destination PVC names are required"),
+		)
 		return false
 	}
 
@@ -569,7 +576,7 @@ func validateRenameInputs(
 		if problems := validation.IsDNS1123Subdomain(field.value); len(problems) > 0 {
 			plan.AddCheck(
 				failed(
-					"identity",
+					domain.CheckNameIdentity,
 					fmt.Sprintf("%s %q is invalid: %v", field.name, field.value, problems),
 				),
 			)
@@ -580,7 +587,7 @@ func validateRenameInputs(
 		options.SourceNamespace != options.DestinationNamespace {
 		plan.AddCheck(
 			failed(
-				"rename",
+				domain.CheckNameRename,
 				"rename requires source and destination PVCs in the same namespace; use move for a cross-namespace identity change",
 			),
 		)
@@ -590,7 +597,7 @@ func validateRenameInputs(
 		options.SourceNamespace == options.DestinationNamespace {
 		plan.AddCheck(
 			failed(
-				"move",
+				domain.CheckNameMove,
 				"move requires a destination namespace different from the source namespace; use rename for an in-namespace identity change",
 			),
 		)
@@ -598,7 +605,9 @@ func validateRenameInputs(
 
 	if options.SourceNamespace == options.DestinationNamespace &&
 		options.SourcePVC == options.DestinationPVC {
-		plan.AddCheck(failed("rename", "source and destination PVC identities must differ"))
+		plan.AddCheck(
+			failed(domain.CheckNameRename, "source and destination PVC identities must differ"),
+		)
 	}
 
 	return true

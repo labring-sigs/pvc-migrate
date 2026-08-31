@@ -128,6 +128,8 @@ func NewService(
 		config.Writer = io.Discard
 	}
 
+	config.Writer = kube.NewSynchronizedWriter(config.Writer)
+
 	if config.Logger == nil {
 		config.Logger = slog.New(slog.DiscardHandler)
 	}

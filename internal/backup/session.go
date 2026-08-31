@@ -12,6 +12,7 @@ import (
 	"github.com/labring-sigs/pvc-migrate/internal/kube"
 	"github.com/labring-sigs/pvc-migrate/internal/objectstore"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes"
 )
 
@@ -83,7 +84,7 @@ func buildBackupSession(
 		APIVersion: "v1", Kind: "PersistentVolume", Name: pv.Name, UID: pv.UID,
 	}
 	spec.Backup.Path = req.Path
-	spec.Backup.Backend = "s3"
+	spec.Backup.Backend = domain.ObjectStoreBackendS3
 	spec.Backup.Bucket = req.Store.Config().Bucket
 	spec.Backup.Prefix = req.Store.Config().Prefix
 	spec.Backup.Name = req.Store.Config().Name
@@ -95,6 +96,150 @@ func buildBackupSession(
 	spec.Backup.SSEKMSKeyID = req.Store.Config().SSEKMSKeyID
 
 	return domain.NewSession(id, spec, time.Now()), nil
+}
+
+// Submit creates the durable backup session and persists its object-store
+// credentials in the per-session Secret. The transfer itself is intentionally
+// separate so a controller can acknowledge the CRD and execute asynchronously.
+func Submit(
+	ctx context.Context,
+	client kubernetes.Interface,
+	req Request,
+	expectedPVCUID, expectedPVUID string,
+) (*domain.Session, error) {
+	if req.SessionStore == nil {
+		return nil, domain.NewError(
+			domain.ErrorValidation,
+			"backup session",
+			"session store is required",
+		)
+	}
+
+	session, err := prepareBackupSession(ctx, client, req, expectedPVCUID, expectedPVUID)
+	if err != nil {
+		return nil, err
+	}
+
+	err = withBackupSessionLock(ctx, req, session, func(lockedCtx context.Context) error {
+		if err := req.SessionStore.Create(lockedCtx, session); err != nil {
+			return err
+		}
+		return persistBackupCredentials(lockedCtx, client, req, session)
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	return session, nil
+}
+
+func prepareBackupSession(
+	ctx context.Context,
+	client kubernetes.Interface,
+	req Request,
+	expectedPVCUID, expectedPVUID string,
+) (*domain.Session, error) {
+	pvc, pv, err := verifyPVCIdentity(
+		ctx,
+		client,
+		req.Namespace,
+		req.PVCName,
+		expectedPVCUID,
+		expectedPVUID,
+	)
+	if err != nil {
+		return nil, err
+	}
+
+	return buildBackupSession(req, pvc, pv)
+}
+
+// SubmitRestore creates a durable restore workflow and stores its object-store
+// credentials in a Secret. The controller can then execute the transfer with
+// the same request contract as the synchronous CLI.
+func SubmitRestore(
+	ctx context.Context,
+	client kubernetes.Interface,
+	req Request,
+	plan Plan,
+) (*domain.Session, error) {
+	if req.SessionStore == nil || req.Store == nil {
+		return nil, domain.NewError(
+			domain.ErrorValidation,
+			"restore session",
+			"session store and object store are required",
+		)
+	}
+
+	id := req.ID
+	if id == "" {
+		generated, err := domain.NewSessionID(time.Now())
+		if err != nil {
+			return nil, err
+		}
+
+		id = generated
+	}
+
+	if err := domain.ValidateSessionID(id); err != nil {
+		return nil, err
+	}
+
+	cfg := req.Store.Config()
+	spec := domain.NewSessionSpec(
+		domain.OperationRestore,
+		domain.SessionCommon{
+			SourceNamespace:      req.Namespace,
+			DestinationNamespace: req.Namespace,
+			SessionNamespace:     req.SessionNamespace,
+			CreatedBy:            "pvc-migrate",
+		},
+		false,
+		domain.SessionWorkflowOptions{
+			ToolImage:        req.ToolImage,
+			DeleteExtraneous: req.DeleteExtraneousFiles,
+		},
+	)
+	spec.Restore.DestinationPVC = domain.ObjectReference{
+		APIVersion: "v1",
+		Kind:       "PersistentVolumeClaim",
+		Namespace:  req.Namespace,
+		Name:       req.PVCName,
+		UID:        types.UID(plan.PVCUID),
+	}
+	spec.Restore.Path = req.Path
+
+	spec.Restore.Backend = domain.ObjectStoreBackendS3
+
+	spec.Restore.Bucket = cfg.Bucket
+	spec.Restore.Prefix = cfg.Prefix
+	spec.Restore.Name = cfg.Name
+	spec.Restore.Provider = cfg.Provider
+	spec.Restore.Endpoint = cfg.Endpoint
+	spec.Restore.Region = cfg.Region
+	spec.Restore.AllowInsecureEndpoint = cfg.AllowInsecureEndpoint
+	spec.Restore.ServerSideEncryption = cfg.ServerSideEncryption
+	spec.Restore.SSEKMSKeyID = cfg.SSEKMSKeyID
+	spec.Restore.CreatePVC = req.CreatePVC
+	spec.Restore.DestinationStorageClass = req.DestinationStorageClass
+	spec.Restore.DestinationAccessMode = req.DestinationAccessMode
+	spec.Restore.DestinationCapacity = req.DestinationCapacity
+	spec.Restore.TargetNode = req.TargetNode
+	spec.Restore.AllowMounted = req.AllowMounted
+	spec.Restore.DeleteExtraneous = req.DeleteExtraneousFiles
+	session := domain.NewSession(id, spec, time.Now())
+
+	err := withBackupSessionLock(ctx, req, session, func(lockedCtx context.Context) error {
+		if err := req.SessionStore.Create(lockedCtx, session); err != nil {
+			return err
+		}
+		return persistRestoreCredentials(lockedCtx, client, req, session)
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	return session, nil
 }
 
 func persistBackupCredentials(
@@ -142,6 +287,48 @@ func persistBackupCredentials(
 	}
 
 	return nil
+}
+
+func persistRestoreCredentials(
+	ctx context.Context,
+	client kubernetes.Interface,
+	req Request,
+	session *domain.Session,
+) error {
+	if session == nil || session.Spec.Restore == nil || req.Store == nil {
+		return domain.NewError(
+			domain.ErrorInternal,
+			"restore credentials",
+			"restore session and object store are required",
+		)
+	}
+
+	credentials := req.Store.Credentials()
+
+	secret, err := kube.CreateBackupCredentialsSecret(
+		ctx,
+		client,
+		session.Spec.SessionNamespace,
+		session.ID,
+		map[string][]byte{
+			kube.BackupAccessKeyDataKey:    []byte(credentials.AccessKey),
+			kube.BackupSecretKeyDataKey:    []byte(credentials.SecretKey),
+			kube.BackupSessionTokenDataKey: []byte(credentials.SessionToken),
+		},
+	)
+	if err != nil {
+		return err
+	}
+
+	session.Spec.Restore.CredentialsSecret = domain.ObjectReference{
+		APIVersion: "v1",
+		Kind:       "Secret",
+		Namespace:  secret.Namespace,
+		Name:       secret.Name,
+		UID:        secret.UID,
+	}
+
+	return req.SessionStore.Update(ctx, session)
 }
 
 func loadBackupCredentials(
@@ -786,6 +973,87 @@ func Resume(
 		}
 
 		return runBackupSession(runCtx, client, lockedReq, session)
+	})
+}
+
+// ResumeRestore advances a controller-backed restore while holding the
+// per-session Lease for the entire status and transfer sequence. Keeping the
+// checkpoint writes inside the same lock prevents duplicate reconciles from
+// overwriting a newer phase after the restore tool has started.
+func ResumeRestore(
+	ctx context.Context,
+	client kubernetes.Interface,
+	req Request,
+	session *domain.Session,
+) error {
+	if session == nil {
+		return domain.NewError(
+			domain.ErrorValidation,
+			"restore resume",
+			"restore session is required",
+		)
+	}
+
+	if req.SessionStore == nil {
+		return domain.NewError(
+			domain.ErrorValidation,
+			"restore resume",
+			"session store is required",
+		)
+	}
+
+	if session.Status.Phase == domain.PhaseCompleted {
+		return session.Validate()
+	}
+
+	return withBackupSessionLock(ctx, req, session, func(runCtx context.Context) error {
+		if session.Status.Phase == domain.PhaseCompleted {
+			return nil
+		}
+
+		if session.Status.Phase == domain.PhasePlanned ||
+			session.Status.Phase == domain.PhaseFailed {
+			if err := updateBackupSession(
+				runCtx,
+				req,
+				session,
+				domain.PhaseWarmCopying,
+				"restore started",
+			); err != nil {
+				return err
+			}
+		}
+
+		if err := Run(runCtx, client, req, true); err != nil {
+			failureErr := err
+			if transitionErr := session.Transition(
+				domain.PhaseFailed,
+				err.Error(),
+				time.Now(),
+			); transitionErr == nil {
+				failureErr = errors.Join(err, req.SessionStore.Update(runCtx, session))
+			}
+
+			return failureErr
+		}
+
+		if err := updateBackupSession(
+			runCtx,
+			req,
+			session,
+			domain.PhaseWarmCopied,
+			"restore transfer completed",
+		); err != nil {
+			return err
+		}
+
+		return updateBackupSession(
+			runCtx,
+			req,
+			session,
+			domain.PhaseCompleted,
+			"restore completed",
+		)
 	})
 }
 

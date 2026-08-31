@@ -7,6 +7,7 @@ import (
 
 	"github.com/labring-sigs/pvc-migrate/internal/domain"
 	"github.com/labring-sigs/pvc-migrate/internal/kube"
+	"github.com/labring-sigs/pvc-migrate/internal/parallel"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -85,8 +86,13 @@ func (s *Service) validateCleanup(
 		)
 	}
 
-	for index := range session.Spec.Volumes {
-		if err := s.validateCleanupVolume(ctx, session, options, index); err != nil {
+	errors := make([]error, len(session.Spec.Volumes))
+	parallel.For(len(session.Spec.Volumes), func(index int) {
+		errors[index] = s.validateCleanupVolume(ctx, session, options, index)
+	})
+
+	for _, err := range errors {
+		if err != nil {
 			return err
 		}
 	}

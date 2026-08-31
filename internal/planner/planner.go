@@ -218,11 +218,11 @@ func (p *Planner) validatePlanInputs(plan *domain.MigrationPlan, options planOpt
 
 func (p *Planner) validateCommonPlanInputs(plan *domain.MigrationPlan, options planOptions) {
 	if _, err := kube.NormalizeToolImage(options.ToolImage); err != nil {
-		plan.AddCheck(failed("tool-image", err.Error()))
+		plan.AddCheck(failed(domain.CheckNameToolImage, err.Error()))
 	}
 
 	if problems := validation.IsDNS1123Label(options.SessionID); len(problems) > 0 {
-		plan.AddCheck(failed("session-id", strings.Join(problems, "; ")))
+		plan.AddCheck(failed(domain.CheckNameSessionID, strings.Join(problems, "; ")))
 	}
 
 	for _, strategy := range options.Strategies {
@@ -235,12 +235,12 @@ func (p *Planner) validateCommonPlanInputs(plan *domain.MigrationPlan, options p
 			message = "strategy auto selects the full fallback order and cannot be combined with explicit strategies"
 		}
 
-		plan.AddCheck(failed("strategy", message))
+		plan.AddCheck(failed(domain.CheckNameStrategy, message))
 	}
 
 	if !validCapacityAwareness(options.CapacityAwareness) {
 		plan.AddCheck(failed(
-			"capacity-awareness",
+			domain.CheckNameCapacityAwareness,
 			fmt.Sprintf(
 				"unsupported capacity awareness mode %q; use auto, require, or off",
 				options.CapacityAwareness,
@@ -262,7 +262,7 @@ func (p *Planner) validateCommonPlanInputs(plan *domain.MigrationPlan, options p
 		}
 
 		plan.AddCheck(failed(
-			"namespace",
+			domain.CheckNameNamespace,
 			fmt.Sprintf(
 				"%s %q is invalid: %s",
 				field.name,
@@ -276,7 +276,7 @@ func (p *Planner) validateCommonPlanInputs(plan *domain.MigrationPlan, options p
 func (p *Planner) validateTransferPlanInputs(plan *domain.MigrationPlan, options planOptions) {
 	if len(options.DestinationCapacities) > 0 && !supportsDestinationCapacity(options.Operation) {
 		plan.AddCheck(failed(
-			"destination-capacity",
+			domain.CheckNameDestinationCapacity,
 			fmt.Sprintf(
 				"--destination-capacity is not supported for %s; this operation does not create a destination PVC",
 				options.Operation,
@@ -292,7 +292,7 @@ func (p *Planner) validateTransferPlanInputs(plan *domain.MigrationPlan, options
 
 	if options.Online {
 		plan.AddCheck(warned(
-			"copy-mode",
+			domain.CheckNameCopyMode,
 			"online copy performs one finite warm pass with file-level consistency while source Pods may keep writing",
 		))
 
@@ -300,7 +300,7 @@ func (p *Planner) validateTransferPlanInputs(plan *domain.MigrationPlan, options
 	}
 
 	plan.AddCheck(passed(
-		"copy-mode",
+		domain.CheckNameCopyMode,
 		"offline copy requires every source PVC to have zero active Pod consumers",
 	))
 }
@@ -310,28 +310,28 @@ func (p *Planner) validateOfflineMigrationInputs(plan *domain.MigrationPlan, opt
 
 	if options.PodName != "" {
 		plan.AddCheck(failed(
-			"pod",
+			domain.CheckNamePod,
 			"offline migrate does not support --pod; use migrate-pod for real-time Pod migration",
 		))
 	}
 
 	if options.PrecopyPasses != 0 {
 		plan.AddCheck(failed(
-			"precopy-passes",
+			domain.CheckNamePrecopyPasses,
 			"offline migrate does not support warm-copy passes; use migrate-pod for real-time migration",
 		))
 	}
 
 	if options.OpenEBSLVMEnableShared {
 		plan.AddCheck(failed(
-			"openebs-lvm-enable-shared",
+			domain.CheckNameOpenEBSLVMEnableShared,
 			"offline migrate does not support OpenEBS LVM shared-mount warm-copy settings",
 		))
 	}
 
 	if options.Online {
 		plan.AddCheck(failed(
-			"online",
+			domain.CheckNameOnline,
 			"offline migrate does not support online or warm-copy mode; use migrate-pod for real-time migration",
 		))
 	}
@@ -339,7 +339,7 @@ func (p *Planner) validateOfflineMigrationInputs(plan *domain.MigrationPlan, opt
 	if options.SwitchoverCandidate != "" {
 		plan.AddCheck(
 			failed(
-				"kubeblocks-candidate",
+				domain.CheckNameKubeBlocksCandidate,
 				"offline migrate does not support KubeBlocks switchover candidates",
 			),
 		)
@@ -348,7 +348,7 @@ func (p *Planner) validateOfflineMigrationInputs(plan *domain.MigrationPlan, opt
 	if options.AllowLeaderDowntime {
 		plan.AddCheck(
 			failed(
-				"allow-leader-downtime",
+				domain.CheckNameAllowLeaderDowntime,
 				"offline migrate does not manage workload leadership or downtime acknowledgements",
 			),
 		)
@@ -356,7 +356,7 @@ func (p *Planner) validateOfflineMigrationInputs(plan *domain.MigrationPlan, opt
 
 	if options.ForceReprovision {
 		plan.AddCheck(failed(
-			"force-reprovision",
+			domain.CheckNameForceReprovision,
 			"offline migrate does not support Pod reprovisioning; use migrate-pod for real-time migration",
 		))
 	}
@@ -366,19 +366,19 @@ func (p *Planner) validatePodMigrationInputs(plan *domain.MigrationPlan, options
 	validateDestinationCapacityInputs(plan, options)
 
 	if options.PodName == "" {
-		plan.AddCheck(failed("pod", "real-time Pod migration requires a Pod name"))
+		plan.AddCheck(failed(domain.CheckNamePod, "real-time Pod migration requires a Pod name"))
 	}
 
 	if len(options.SourcePVCs) > 0 {
 		plan.AddCheck(failed(
-			"source-pvc",
+			domain.CheckNameSourcePVC,
 			"real-time Pod migration derives its PVC set from --pod; source PVC selection is unsupported",
 		))
 	}
 
 	if len(options.DestinationPVCs) > 0 {
 		plan.AddCheck(failed(
-			"destination-pvc",
+			domain.CheckNameDestinationPVC,
 			"real-time Pod migration keeps destination PVC identities with the selected Pod; destination PVC renaming is unsupported",
 		))
 	}
@@ -386,19 +386,19 @@ func (p *Planner) validatePodMigrationInputs(plan *domain.MigrationPlan, options
 	if options.DestinationNamespace != "" &&
 		options.DestinationNamespace != options.SourceNamespace {
 		plan.AddCheck(failed(
-			"destination-namespace",
+			domain.CheckNameDestinationNamespace,
 			"real-time Pod migration keeps application PVCs in the source namespace; destination namespace switching is unsupported",
 		))
 	}
 
 	if options.PrecopyPasses < 0 {
-		plan.AddCheck(failed("precopy-passes", "warm-copy passes cannot be negative"))
+		plan.AddCheck(failed(domain.CheckNamePrecopyPasses, "warm-copy passes cannot be negative"))
 	}
 
 	if options.Online {
 		plan.AddCheck(
 			failed(
-				"online",
+				domain.CheckNameOnline,
 				"migrate-pod is already the real-time workflow; --online is only valid for copy",
 			),
 		)
@@ -408,14 +408,17 @@ func (p *Planner) validatePodMigrationInputs(plan *domain.MigrationPlan, options
 func validateDestinationCapacityInputs(plan *domain.MigrationPlan, options planOptions) {
 	if options.AllowVolumeShrink && len(options.DestinationCapacities) == 0 {
 		plan.AddCheck(
-			failed("destination-capacity", "--allow-volume-shrink requires --destination-capacity"),
+			failed(
+				domain.CheckNameDestinationCapacity,
+				"--allow-volume-shrink requires --destination-capacity",
+			),
 		)
 	}
 
 	if options.SkipSourceUsageCheck && !options.AllowVolumeShrink {
 		plan.AddCheck(
 			failed(
-				"destination-capacity",
+				domain.CheckNameDestinationCapacity,
 				"--skip-source-usage-check requires --allow-volume-shrink",
 			),
 		)
@@ -424,7 +427,7 @@ func validateDestinationCapacityInputs(plan *domain.MigrationPlan, options planO
 	for _, value := range options.DestinationCapacities {
 		if err := validateDestinationCapacityValue(value); err != nil {
 			plan.AddCheck(failed(
-				"destination-capacity",
+				domain.CheckNameDestinationCapacity,
 				fmt.Sprintf("destination capacity %q is invalid: %v", value, err),
 			))
 		}
@@ -446,7 +449,9 @@ func (p *Planner) discoverPlanWorkload(ctx context.Context, state *planState) er
 
 	if options.PodName == "" {
 		if len(state.pvcNames) == 0 {
-			state.plan.AddCheck(failed("source-pvc", "at least one source PVC is required"))
+			state.plan.AddCheck(
+				failed(domain.CheckNameSourcePVC, "at least one source PVC is required"),
+			)
 		}
 
 		state.plan.Workload = state.workload
@@ -456,7 +461,7 @@ func (p *Planner) discoverPlanWorkload(ctx context.Context, state *planState) er
 
 	if len(options.SourcePVCs) > 0 {
 		state.plan.AddCheck(failed(
-			"source-pvc",
+			domain.CheckNameSourcePVC,
 			"--source-pvc cannot be combined with --pod; the Pod PVC set is migrated as one unit",
 		))
 	}
@@ -486,11 +491,14 @@ func (p *Planner) discoverPlanWorkload(ctx context.Context, state *planState) er
 	switch {
 	case options.Operation == domain.OperationCopy:
 		state.plan.AddCheck(
-			passed("controller-adapter", "copy does not mutate or pause the selected workload"),
+			passed(
+				domain.CheckNameControllerAdapter,
+				"copy does not mutate or pause the selected workload",
+			),
 		)
 	case err != nil:
 		wrapped := domain.WrapError(domain.ErrorKubernetes, "discover workload", readMessage, err)
-		state.plan.AddCheck(failed("controller-adapter", wrapped.Error()))
+		state.plan.AddCheck(failed(domain.CheckNameControllerAdapter, wrapped.Error()))
 	default:
 		discovered, discoverErr := p.controllers.DiscoverPod(ctx, pod, controller.DiscoverOptions{
 			Namespace:           options.SourceNamespace,
@@ -499,17 +507,17 @@ func (p *Planner) discoverPlanWorkload(ctx context.Context, state *planState) er
 			AllowLeaderDowntime: options.AllowLeaderDowntime,
 		})
 		if discoverErr != nil {
-			state.plan.AddCheck(failed("controller-adapter", discoverErr.Error()))
+			state.plan.AddCheck(failed(domain.CheckNameControllerAdapter, discoverErr.Error()))
 		} else {
 			state.workload = discovered
 			state.plan.AddCheck(passed(
-				"controller-adapter",
+				domain.CheckNameControllerAdapter,
 				fmt.Sprintf("%s provides pause and resume semantics", discovered.Adapter),
 			))
 
 			if message := kubeBlocksRoleWarning(discovered); message != "" {
 				state.plan.AddCheck(
-					warned("database-role", message),
+					warned(domain.CheckNameDatabaseRole, message),
 				)
 			}
 
@@ -526,13 +534,13 @@ func (p *Planner) discoverPlanWorkload(ctx context.Context, state *planState) er
 					message = "KubeBlocks migration pauses InstanceSet reconciliation and stops only the selected Pod; sibling instances remain running while InstanceSet self-healing is suspended"
 				}
 
-				state.plan.AddCheck(warned("database-pause-scope", message))
+				state.plan.AddCheck(warned(domain.CheckNameDatabasePauseScope, message))
 			}
 		}
 	}
 
 	if err != nil {
-		state.plan.AddCheck(failed("source-pod", readMessage))
+		state.plan.AddCheck(failed(domain.CheckNameSourcePod, readMessage))
 		state.plan.Workload = state.workload
 		return nil
 	}
@@ -544,7 +552,7 @@ func (p *Planner) discoverPlanWorkload(ctx context.Context, state *planState) er
 
 	if state.options.SourceNode != pod.Spec.NodeName {
 		state.plan.AddCheck(failed(
-			"source-node",
+			domain.CheckNameSourceNode,
 			fmt.Sprintf(
 				"Pod %s/%s runs on %s, requested source node is %s",
 				pod.Namespace, pod.Name, pod.Spec.NodeName, state.options.SourceNode,
@@ -554,10 +562,13 @@ func (p *Planner) discoverPlanWorkload(ctx context.Context, state *planState) er
 
 	state.pvcNames = podPVCNames(pod)
 	if len(state.pvcNames) == 0 {
-		state.plan.AddCheck(failed("source-pod", "Pod has no PVC volumes"))
+		state.plan.AddCheck(failed(domain.CheckNameSourcePod, "Pod has no PVC volumes"))
 	} else {
 		state.plan.AddCheck(
-			passed("source-pod", fmt.Sprintf("Pod references %d PVC(s)", len(state.pvcNames))),
+			passed(
+				domain.CheckNameSourcePod,
+				fmt.Sprintf("Pod references %d PVC(s)", len(state.pvcNames)),
+			),
 		)
 	}
 
@@ -571,7 +582,9 @@ func (p *Planner) prepareOfflineMigration(state *planState) {
 
 	state.pvcNames = uniqueInOrder(state.options.SourcePVCs)
 	if len(state.pvcNames) == 0 {
-		state.plan.AddCheck(failed("source-pvc", "at least one source PVC is required"))
+		state.plan.AddCheck(
+			failed(domain.CheckNameSourcePVC, "at least one source PVC is required"),
+		)
 	}
 
 	state.plan.Workload = state.workload
@@ -594,22 +607,26 @@ func (p *Planner) loadPlanContext(ctx context.Context, state *planState) {
 		node, err := state.inventory.targetNode, state.inventory.targetNodeErr
 		switch {
 		case err != nil:
-			state.plan.AddCheck(failed("target-node", fmt.Sprintf("read target node: %v", err)))
+			state.plan.AddCheck(
+				failed(domain.CheckNameTargetNode, fmt.Sprintf("read target node: %v", err)),
+			)
 		case node == nil || node.Name == "":
-			state.plan.AddCheck(failed("target-node", "read target node returned an empty object"))
+			state.plan.AddCheck(
+				failed(domain.CheckNameTargetNode, "read target node returned an empty object"),
+			)
 		default:
 			state.targetNode = node
 			if !kube.NodeReadyAndSchedulable(node) {
 				state.plan.AddCheck(
 					failed(
-						"target-node",
+						domain.CheckNameTargetNode,
 						fmt.Sprintf("node %s must be Ready and schedulable", node.Name),
 					),
 				)
 			} else {
 				state.plan.AddCheck(
 					passed(
-						"target-node",
+						domain.CheckNameTargetNode,
 						fmt.Sprintf("node %s is Ready and schedulable", node.Name),
 					),
 				)
@@ -624,7 +641,7 @@ func (p *Planner) loadPlanContext(ctx context.Context, state *planState) {
 		options.DestinationPVCs,
 		state.pvcNames,
 	); err != nil {
-		state.plan.AddCheck(failed("destination-pvc", err.Error()))
+		state.plan.AddCheck(failed(domain.CheckNameDestinationPVC, err.Error()))
 	}
 
 	if state.transferScopes, err = resolveTransferScopes(
@@ -632,7 +649,7 @@ func (p *Planner) loadPlanContext(ctx context.Context, state *planState) {
 		options.DestinationPaths,
 		state.pvcNames,
 	); err != nil {
-		state.plan.AddCheck(failed("transfer-path", err.Error()))
+		state.plan.AddCheck(failed(domain.CheckNameTransferPath, err.Error()))
 		state.transferScopes = make([]*domain.TransferScope, len(state.pvcNames))
 	}
 
@@ -640,7 +657,7 @@ func (p *Planner) loadPlanContext(ctx context.Context, state *planState) {
 		options.DestinationCapacities,
 		state.pvcNames,
 	); err != nil {
-		state.plan.AddCheck(failed("destination-capacity", err.Error()))
+		state.plan.AddCheck(failed(domain.CheckNameDestinationCapacity, err.Error()))
 		state.requestedCapacities = make([]string, len(state.pvcNames))
 	}
 }
@@ -698,7 +715,7 @@ func (p *Planner) planVolumes(ctx context.Context, state *planState) {
 		names := slices.Collect(maps.Keys(state.unmanagedConsumers))
 		sort.Strings(names)
 		state.plan.AddCheck(failed(
-			"pvc-consumers",
+			domain.CheckNamePVCConsumers,
 			fmt.Sprintf(
 				"offline migrate found active Pod consumer(s) %s; stop them before offline migration, or use the separate migrate-pod command to select a workload that pvc-migrate can pause before final sync",
 				strings.Join(names, ","),
@@ -794,14 +811,14 @@ func (p *Planner) finalizePlanTarget(
 		if state.options.ForceReprovision {
 			state.plan.AddCheck(
 				warned(
-					"force-reprovision",
+					domain.CheckNameForceReprovision,
 					message+"; --force-reprovision will replace the backing PVs",
 				),
 			)
 		} else {
 			state.plan.AddCheck(
 				failed(
-					"migration-needed",
+					domain.CheckNameMigrationNeeded,
 					message+"; use --force-reprovision to intentionally replace the backing PVs",
 				),
 			)
@@ -867,7 +884,7 @@ func (p *Planner) checkPlanTargetTopology(
 
 		if !kube.StorageClassAllowsNode(sc, state.targetNode) {
 			state.plan.AddCheck(failed(
-				"storage-topology",
+				domain.CheckNameStorageTopology,
 				fmt.Sprintf(
 					"node %s does not satisfy StorageClass %s allowedTopologies",
 					state.targetNode.Name, sc.Name,
@@ -875,7 +892,7 @@ func (p *Planner) checkPlanTargetTopology(
 			))
 		} else {
 			state.plan.AddCheck(passed(
-				"storage-topology",
+				domain.CheckNameStorageTopology,
 				fmt.Sprintf(
 					"StorageClass %s bindingMode=%s topology is compatible",
 					sc.Name, volume.BindingMode,
@@ -895,17 +912,24 @@ func (p *Planner) checkPlanSourceNode(state *planState) {
 	node, err := state.inventory.sourceNode, state.inventory.sourceNodeErr
 	switch {
 	case err != nil:
-		state.plan.AddCheck(failed("source-node", fmt.Sprintf("read source node: %v", err)))
+		state.plan.AddCheck(
+			failed(domain.CheckNameSourceNode, fmt.Sprintf("read source node: %v", err)),
+		)
 	case node == nil || node.Name == "":
-		state.plan.AddCheck(failed("source-node", "read source node returned an empty object"))
+		state.plan.AddCheck(
+			failed(domain.CheckNameSourceNode, "read source node returned an empty object"),
+		)
 	case !kube.NodeReadyAndSchedulable(node):
 		state.plan.AddCheck(failed(
-			"source-node",
+			domain.CheckNameSourceNode,
 			fmt.Sprintf("node %s must be Ready and schedulable for the source tool", node.Name),
 		))
 	default:
 		state.plan.AddCheck(
-			passed("source-node", fmt.Sprintf("node %s is Ready and schedulable", node.Name)),
+			passed(
+				domain.CheckNameSourceNode,
+				fmt.Sprintf("node %s is Ready and schedulable", node.Name),
+			),
 		)
 	}
 }
@@ -979,7 +1003,7 @@ func (p *Planner) loadPlanVolumeInput(
 
 		state.plan.AddCheck(
 			failed(
-				"source-pvc",
+				domain.CheckNameSourcePVC,
 				fmt.Sprintf("read PVC %s/%s: %v", options.SourceNamespace, name, err),
 			),
 		)
@@ -989,8 +1013,12 @@ func (p *Planner) loadPlanVolumeInput(
 
 	if pvc.Status.Phase != corev1.ClaimBound || pvc.Spec.VolumeName == "" {
 		state.plan.AddCheck(
-			failed("source-pvc", fmt.Sprintf("PVC %s/%s must be Bound", pvc.Namespace, pvc.Name)),
+			failed(
+				domain.CheckNameSourcePVC,
+				fmt.Sprintf("PVC %s/%s must be Bound", pvc.Namespace, pvc.Name),
+			),
 		)
+
 		return planVolumeInput{}, false
 	}
 
@@ -1003,7 +1031,7 @@ func (p *Planner) loadPlanVolumeInput(
 
 	if mode != corev1.PersistentVolumeFilesystem {
 		state.plan.AddCheck(failed(
-			"volume-mode",
+			domain.CheckNameVolumeMode,
 			fmt.Sprintf(
 				"PVC %s/%s uses %s; the embedded pv-migrate engine supports Filesystem",
 				pvc.Namespace,
@@ -1015,7 +1043,7 @@ func (p *Planner) loadPlanVolumeInput(
 
 	if !kube.HasWritableAccessMode(pvc.Spec.AccessModes) {
 		state.plan.AddCheck(failed(
-			"access-mode",
+			domain.CheckNameAccessMode,
 			fmt.Sprintf(
 				"PVC %s/%s has no writable access mode for the destination copy",
 				pvc.Namespace,
@@ -1031,7 +1059,10 @@ func (p *Planner) loadPlanVolumeInput(
 		}
 
 		state.plan.AddCheck(
-			failed("source-pv", fmt.Sprintf("read PV %s: %v", pvc.Spec.VolumeName, err)),
+			failed(
+				domain.CheckNameSourcePV,
+				fmt.Sprintf("read PV %s: %v", pvc.Spec.VolumeName, err),
+			),
 		)
 
 		return planVolumeInput{}, false
@@ -1039,7 +1070,7 @@ func (p *Planner) loadPlanVolumeInput(
 
 	if !sourceBindingMatches(pvc, pv) {
 		state.plan.AddCheck(failed(
-			"source-binding",
+			domain.CheckNameSourceBinding,
 			fmt.Sprintf(
 				"PV %s claimRef does not match PVC %s/%s UID %s",
 				pv.Name,
@@ -1056,8 +1087,18 @@ func (p *Planner) loadPlanVolumeInput(
 	capacity, ok := pv.Spec.Capacity[corev1.ResourceStorage]
 	if !ok || capacity.Sign() <= 0 {
 		state.plan.AddCheck(
-			failed("capacity", fmt.Sprintf("PV %s has no positive storage capacity", pv.Name)),
+			failed(
+				domain.CheckNameCapacity,
+				fmt.Sprintf("PV %s has no positive storage capacity", pv.Name),
+			),
 		)
+
+		return planVolumeInput{}, false
+	}
+
+	if err := kube.ValidateBoundVolumeCapacity(pvc, pv, nil); err != nil {
+		state.plan.AddCheck(failed(domain.CheckNameCapacity, err.Error()))
+
 		return planVolumeInput{}, false
 	}
 
@@ -1121,7 +1162,7 @@ func (p *Planner) planVolumeCapacity(
 		}
 
 		state.plan.AddCheck(failed(
-			"destination-capacity",
+			domain.CheckNameDestinationCapacity,
 			message,
 		))
 
@@ -1132,7 +1173,7 @@ func (p *Planner) planVolumeCapacity(
 	switch {
 	case comparison > 0:
 		state.plan.AddCheck(passed(
-			"destination-capacity",
+			domain.CheckNameDestinationCapacity,
 			fmt.Sprintf(
 				"PVC %s/%s destination capacity expands from %s to %s",
 				input.pvc.Namespace,
@@ -1212,7 +1253,7 @@ func (p *Planner) resolvePlanStorageClass(
 
 	if destinationClass == "" {
 		state.plan.AddCheck(failed(
-			"storage-class",
+			domain.CheckNameStorageClass,
 			fmt.Sprintf(
 				"PVC %s/%s has no storageClassName and no destination class was supplied",
 				input.pvc.Namespace, input.pvc.Name,
@@ -1238,7 +1279,7 @@ func (p *Planner) resolvePlanStorageClass(
 
 	if storageClassErr != nil {
 		state.plan.AddCheck(failed(
-			"storage-class",
+			domain.CheckNameStorageClass,
 			fmt.Sprintf("read StorageClass %s: %v", destinationClass, storageClassErr),
 		))
 
@@ -1276,7 +1317,7 @@ func (p *Planner) appendPlanVolume(
 	)
 	if problems := validation.IsDNS1123Subdomain(destinationName); len(problems) > 0 {
 		state.plan.AddCheck(failed(
-			"destination-pvc",
+			domain.CheckNameDestinationPVC,
 			fmt.Sprintf(
 				"generated PVC name %q is invalid: %s",
 				destinationName,
@@ -1290,7 +1331,7 @@ func (p *Planner) appendPlanVolume(
 	destinationKey := state.options.StagingNamespace + "/" + destinationName
 	if previousSource, exists := state.destinationSources[destinationKey]; exists {
 		state.plan.AddCheck(failed(
-			"destination-pvc",
+			domain.CheckNameDestinationPVC,
 			fmt.Sprintf(
 				"source PVCs %s/%s and %s/%s map to the same destination PVC %s",
 				state.options.SourceNamespace,
@@ -1312,9 +1353,9 @@ func (p *Planner) appendPlanVolume(
 	if transferScope != nil {
 		message := transferScopePlanMessage(input.pvc.Namespace, input.pvc.Name, transferScope)
 		if state.options.Operation == domain.OperationCopy {
-			state.plan.AddCheck(passed("transfer-scope", message))
+			state.plan.AddCheck(passed(domain.CheckNameTransferScope, message))
 		} else {
-			state.plan.AddCheck(warned("transfer-scope", message))
+			state.plan.AddCheck(warned(domain.CheckNameTransferScope, message))
 		}
 	}
 
@@ -1323,7 +1364,7 @@ func (p *Planner) appendPlanVolume(
 		input.pvc.Spec.AccessModes,
 	); err != nil {
 		state.plan.AddCheck(failed(
-			"destination-access-modes",
+			domain.CheckNameDestinationAccessModes,
 			fmt.Sprintf(
 				"destination StorageClass %s cannot provide PVC %s/%s access modes: %v; choose a StorageClass with matching access-mode support",
 				storageClass.Name,
@@ -1440,7 +1481,7 @@ func (p *Planner) checkPlanVolumeConsumers(
 		if state.options.OpenEBSLVMEnableShared {
 			state.patchOpenEBSShared = true
 			state.plan.AddCheck(passed(
-				"destination-shared-mount",
+				domain.CheckNameDestinationSharedMount,
 				fmt.Sprintf(
 					"execution will verify the provisioned destination PV and set its OpenEBS LVMVolume spec.shared=yes so %d consumers can mount RWO PVC %s/%s on one node",
 					concurrentConsumers,
@@ -1450,7 +1491,7 @@ func (p *Planner) checkPlanVolumeConsumers(
 			))
 		} else {
 			state.plan.AddCheck(failed(
-				"destination-shared-mount",
+				domain.CheckNameDestinationSharedMount,
 				fmt.Sprintf(
 					"destination OpenEBS LVM volume for RWO PVC %s/%s must support %d concurrent consumers; rerun with --openebs-lvm-enable-shared to authorize spec.shared=yes after provisioning",
 					input.pvc.Namespace,
@@ -1480,7 +1521,7 @@ func (p *Planner) checkPlanVolumeConsumers(
 		for _, owner := range input.pvc.OwnerReferences {
 			if owner.Kind == domain.KindPod {
 				state.plan.AddCheck(failed(
-					"pvc-ownership",
+					domain.CheckNamePVCOwnership,
 					fmt.Sprintf(
 						"standalone Pod migration cannot preserve Pod-owned PVC %s/%s",
 						input.pvc.Namespace, input.pvc.Name,
@@ -1509,15 +1550,15 @@ func (p *Planner) checkPlanVolumeShrink(
 		input.capacity.String(),
 	)
 	if state.options.AllowVolumeShrink {
-		state.plan.AddCheck(warned("destination-capacity", message))
+		state.plan.AddCheck(warned(domain.CheckNameDestinationCapacity, message))
 	} else {
-		state.plan.AddCheck(failed("destination-capacity", message))
+		state.plan.AddCheck(failed(domain.CheckNameDestinationCapacity, message))
 		return
 	}
 
 	if state.options.SkipSourceUsageCheck {
 		state.plan.AddCheck(warned(
-			"source-usage",
+			domain.CheckNameSourceUsage,
 			fmt.Sprintf(
 				"PVC %s/%s source usage check was explicitly skipped; independently verify that its data fits destination capacity %s",
 				input.pvc.Namespace,
@@ -1540,7 +1581,7 @@ func (p *Planner) checkPlanVolumeShrink(
 		}
 
 		state.plan.AddCheck(failed(
-			"source-usage",
+			domain.CheckNameSourceUsage,
 			fmt.Sprintf(
 				"PVC %s/%s uses StorageClass backend %s, which has no trusted CRD usage reader; pass --skip-source-usage-check only after independently verifying that the data fits",
 				input.pvc.Namespace,
@@ -1558,7 +1599,7 @@ func (p *Planner) checkPlanVolumeShrink(
 	})
 	if err != nil {
 		state.plan.AddCheck(failed(
-			"source-usage",
+			domain.CheckNameSourceUsage,
 			fmt.Sprintf(
 				"PVC %s/%s usage could not be read from its storage backend CRD: %v; pass --skip-source-usage-check only after independently verifying that the data fits",
 				input.pvc.Namespace,
@@ -1572,7 +1613,7 @@ func (p *Planner) checkPlanVolumeShrink(
 
 	if usage.UsedBytes < 0 {
 		state.plan.AddCheck(failed(
-			"source-usage",
+			domain.CheckNameSourceUsage,
 			fmt.Sprintf(
 				"PVC %s/%s storage backend returned invalid used bytes %d",
 				input.pvc.Namespace,
@@ -1595,7 +1636,7 @@ func (p *Planner) checkPlanVolumeShrink(
 	if usage.UsedBytes > destinationCapacity.Value() {
 		if partialSource {
 			state.plan.AddCheck(failed(
-				"source-usage",
+				domain.CheckNameSourceUsage,
 				fmt.Sprintf(
 					"PVC %s/%s whole-volume usage is %d bytes according to %s, above destination capacity %s; this cannot prove that selected source directory %q fits; pass --skip-source-usage-check only after independently measuring the selected data",
 					input.pvc.Namespace,
@@ -1608,7 +1649,7 @@ func (p *Planner) checkPlanVolumeShrink(
 			))
 		} else {
 			state.plan.AddCheck(failed(
-				"source-usage",
+				domain.CheckNameSourceUsage,
 				fmt.Sprintf(
 					"PVC %s/%s uses %d bytes according to %s, above destination capacity %s; shrink is unsafe",
 					input.pvc.Namespace,
@@ -1624,7 +1665,7 @@ func (p *Planner) checkPlanVolumeShrink(
 	}
 
 	state.plan.AddCheck(passed(
-		"source-usage",
+		domain.CheckNameSourceUsage,
 		fmt.Sprintf(
 			"PVC %s/%s usage is %d bytes according to %s and fits destination capacity %s",
 			input.pvc.Namespace,
@@ -1714,7 +1755,7 @@ func (p *Planner) checkPodTargetScheduling(
 			delete(schedulingSpec.NodeSelector, corev1.LabelHostname)
 			plan.AddCheck(
 				warned(
-					"pod-scheduling",
+					domain.CheckNamePodScheduling,
 					fmt.Sprintf(
 						"standalone Pod hostname selector %s will be replaced with target hostname %s",
 						hostname,
@@ -1727,11 +1768,11 @@ func (p *Planner) checkPodTargetScheduling(
 
 	issues := schedulingIssues(schedulingSpec, node)
 	if len(issues) > 0 {
-		plan.AddCheck(failed("pod-scheduling", strings.Join(issues, "; ")))
+		plan.AddCheck(failed(domain.CheckNamePodScheduling, strings.Join(issues, "; ")))
 	} else {
 		plan.AddCheck(
 			passed(
-				"pod-scheduling",
+				domain.CheckNamePodScheduling,
 				"target node satisfies nodeSelector, required nodeAffinity, and taints",
 			),
 		)
@@ -1740,11 +1781,11 @@ func (p *Planner) checkPodTargetScheduling(
 	if workload.Adapter == domain.WorkloadStandalone {
 		resourceIssues, known := resourceFitIssues(schedulingSpec, node)
 		if len(resourceIssues) > 0 {
-			plan.AddCheck(failed("pod-resources", strings.Join(resourceIssues, "; ")))
+			plan.AddCheck(failed(domain.CheckNamePodResources, strings.Join(resourceIssues, "; ")))
 		} else if !known {
 			plan.AddCheck(
 				warned(
-					"pod-resources",
+					domain.CheckNamePodResources,
 					fmt.Sprintf(
 						"target node %s does not publish all allocatable resources needed to verify standalone Pod placement",
 						node.Name,
@@ -1865,7 +1906,7 @@ func (p *Planner) selectTargetNodeFromNodesWithZone(
 	if len(volumes) == 0 {
 		plan.AddCheck(
 			failed(
-				"target-node",
+				domain.CheckNameTargetNode,
 				"target node auto-selection requires at least one valid source PVC",
 			),
 		)
@@ -1874,7 +1915,13 @@ func (p *Planner) selectTargetNodeFromNodesWithZone(
 	}
 
 	if err != nil {
-		plan.AddCheck(failed("target-node", fmt.Sprintf("list nodes for auto-selection: %v", err)))
+		plan.AddCheck(
+			failed(
+				domain.CheckNameTargetNode,
+				fmt.Sprintf("list nodes for auto-selection: %v", err),
+			),
+		)
+
 		return nil
 	}
 
@@ -1905,7 +1952,7 @@ func (p *Planner) selectTargetNodeFromNodesWithZone(
 			message += " with sufficient CSI-reported capacity"
 		}
 
-		plan.AddCheck(failed("target-node", message))
+		plan.AddCheck(failed(domain.CheckNameTargetNode, message))
 
 		return nil
 	}
@@ -1935,7 +1982,7 @@ func (p *Planner) selectTargetNodeFromNodesWithZone(
 
 	plan.AddCheck(
 		passed(
-			"target-node-selection",
+			domain.CheckNameTargetNodeSelection,
 			fmt.Sprintf(
 				"auto selected target node %s (%s)",
 				selected.node.Name,
@@ -2132,7 +2179,7 @@ func (p *Planner) checkMigratePodAvailabilityZone(state *planState) {
 	targetZone := availabilityZone(state.targetNode)
 	if sourceZone == "" || targetZone == "" {
 		state.plan.AddCheck(warned(
-			"availability-zone",
+			domain.CheckNameAvailabilityZone,
 			"source or target node has no availability-zone label; cross-zone Pod migration could not be verified",
 		))
 
@@ -2141,7 +2188,7 @@ func (p *Planner) checkMigratePodAvailabilityZone(state *planState) {
 
 	if sourceZone != targetZone {
 		state.plan.AddCheck(failed(
-			"availability-zone",
+			domain.CheckNameAvailabilityZone,
 			fmt.Sprintf(
 				"real-time Pod migration cannot cross availability zones: source node %s is in %s, target node %s is in %s; use copy --online for cross-zone replication",
 				state.options.SourceNode,
@@ -2155,7 +2202,7 @@ func (p *Planner) checkMigratePodAvailabilityZone(state *planState) {
 	}
 
 	state.plan.AddCheck(passed(
-		"availability-zone",
+		domain.CheckNameAvailabilityZone,
 		"real-time Pod migration stays in availability zone "+sourceZone,
 	))
 }
@@ -2216,7 +2263,7 @@ func (p *Planner) checkWarmCopyMountCompatibility(
 		if p == nil || p.openEBSLVMSharedVolumeManager == nil {
 			plan.AddCheck(
 				failed(
-					"warm-copy-mount",
+					domain.CheckNameWarmCopyMount,
 					fmt.Sprintf(
 						"PVC %s/%s uses OpenEBS LVM source PV %s, but the planner cannot inspect the current LVMVolume.spec.shared value",
 						pvc.Namespace,
@@ -2238,7 +2285,7 @@ func (p *Planner) checkWarmCopyMountCompatibility(
 		if err != nil {
 			plan.AddCheck(
 				failed(
-					"warm-copy-mount",
+					domain.CheckNameWarmCopyMount,
 					fmt.Sprintf(
 						"read current OpenEBS LVMVolume.spec.shared for source PV %s used by PVC %s/%s: %v",
 						pv.Name,
@@ -2256,7 +2303,7 @@ func (p *Planner) checkWarmCopyMountCompatibility(
 			if enableOpenEBSLVMShared && operation == domain.OperationMigratePod {
 				plan.AddCheck(
 					passed(
-						"warm-copy-mount",
+						domain.CheckNameWarmCopyMount,
 						fmt.Sprintf(
 							"OpenEBS LVMVolume for source PV %s does not currently have spec.shared=yes; execution will temporarily set it to yes, then restore its original value after the warm-copy pass. It verifies a second-Pod read-write mount without writing data for active PVC %s/%s on %s. This enables same-node concurrent mounts only; coordinate application writes during warm copy",
 							pv.Name,
@@ -2282,14 +2329,14 @@ func (p *Planner) checkWarmCopyMountCompatibility(
 				message += "; alternatively, rerun with --openebs-lvm-enable-shared to patch the existing matching OpenEBS LVMVolume spec.shared to \"yes\" before the read-write mount probe"
 			}
 
-			plan.AddCheck(failed("warm-copy-mount", message))
+			plan.AddCheck(failed(domain.CheckNameWarmCopyMount, message))
 
 			return true, false
 		}
 
 		plan.AddCheck(
 			passed(
-				"warm-copy-mount",
+				domain.CheckNameWarmCopyMount,
 				fmt.Sprintf(
 					"OpenEBS LVMVolume for source PV %s currently has spec.shared=yes for PVC %s/%s; execution will verify a second-Pod read-write mount without writing data before warm copy",
 					pv.Name,
@@ -2305,7 +2352,7 @@ func (p *Planner) checkWarmCopyMountCompatibility(
 	if storageClassName == "" {
 		plan.AddCheck(
 			warned(
-				"warm-copy-mount",
+				domain.CheckNameWarmCopyMount,
 				fmt.Sprintf(
 					"PVC %s/%s is active on %s and has no StorageClass; execution will verify a read-only second-Pod mount before warm copy",
 					pvc.Namespace,
@@ -2321,7 +2368,7 @@ func (p *Planner) checkWarmCopyMountCompatibility(
 	if storageClassErr != nil || storageClass == nil || storageClass.Name == "" {
 		plan.AddCheck(
 			warned(
-				"warm-copy-mount",
+				domain.CheckNameWarmCopyMount,
 				fmt.Sprintf(
 					"PVC %s/%s is active on %s; concurrent mount support for StorageClass %s is unknown because it could not be read, so execution will run a read-only mount probe before warm copy",
 					pvc.Namespace,
@@ -2340,7 +2387,7 @@ func (p *Planner) checkWarmCopyMountCompatibility(
 		if strings.EqualFold(storageType, "hostpath") {
 			plan.AddCheck(
 				passed(
-					"warm-copy-mount",
+					domain.CheckNameWarmCopyMount,
 					fmt.Sprintf(
 						"StorageClass %s uses OpenEBS Local PV Hostpath; same-node second-Pod mounts are supported for PVC %s/%s and execution will verify the read-only mount",
 						storageClass.Name,
@@ -2360,7 +2407,7 @@ func (p *Planner) checkWarmCopyMountCompatibility(
 
 		plan.AddCheck(
 			warned(
-				"warm-copy-mount",
+				domain.CheckNameWarmCopyMount,
 				fmt.Sprintf(
 					"StorageClass %s uses the OpenEBS local provisioner and %s; only StorageType=hostpath has built-in concurrent same-node mount support, so execution will run a read-only mount probe for PVC %s/%s",
 					storageClass.Name,
@@ -2376,7 +2423,7 @@ func (p *Planner) checkWarmCopyMountCompatibility(
 
 	plan.AddCheck(
 		warned(
-			"warm-copy-mount",
+			domain.CheckNameWarmCopyMount,
 			fmt.Sprintf(
 				"StorageClass %s uses %s and PVC %s/%s is active on %s; concurrent mount support is driver-specific, so execution will run a read-only mount probe before warm copy; if the mount is rejected, %s",
 				storageClass.Name,
@@ -2463,7 +2510,7 @@ func filterStrategies(
 			case options.SourceNamespace != options.StagingNamespace:
 				plan.AddCheck(
 					warned(
-						"strategy",
+						domain.CheckNameStrategy,
 						"mount skipped: source and destination PVCs are in different namespaces; use clusterip or local",
 					),
 				)
@@ -2472,7 +2519,7 @@ func filterStrategies(
 			case mountTopologyConflict != "":
 				plan.AddCheck(
 					warned(
-						"strategy",
+						domain.CheckNameStrategy,
 						"mount skipped: "+mountTopologyConflict+"; use clusterip, nodeport, loadbalancer, or local",
 					),
 				)
@@ -2528,11 +2575,11 @@ func destinationPVCNameFor(options planOptions, mapped []string, source string, 
 	return source + "-migrated-" + suffix
 }
 
-func passed(name, message string) domain.Check {
+func passed(name domain.CheckName, message string) domain.Check {
 	return domain.Check{Name: name, Severity: domain.SeverityInfo, Passed: true, Message: message}
 }
 
-func warned(name, message string) domain.Check {
+func warned(name domain.CheckName, message string) domain.Check {
 	return domain.Check{
 		Name:     name,
 		Severity: domain.SeverityWarning,
@@ -2541,7 +2588,7 @@ func warned(name, message string) domain.Check {
 	}
 }
 
-func failed(name, message string) domain.Check {
+func failed(name domain.CheckName, message string) domain.Check {
 	return domain.Check{Name: name, Severity: domain.SeverityError, Passed: false, Message: message}
 }
 
@@ -2553,14 +2600,20 @@ func (p *Planner) checkCSINodeFromObject(
 	err error,
 ) {
 	if node == nil || sc == nil {
-		plan.AddCheck(failed("csi-node", "node or StorageClass inventory returned an empty object"))
+		plan.AddCheck(
+			failed(
+				domain.CheckNameCSINode,
+				"node or StorageClass inventory returned an empty object",
+			),
+		)
+
 		return
 	}
 
 	if apierrors.IsNotFound(err) {
 		plan.AddCheck(
 			warned(
-				"csi-node",
+				domain.CheckNameCSINode,
 				fmt.Sprintf(
 					"node %s has no CSINode object; provisioner %s must validate node support during reservation",
 					node.Name,
@@ -2573,14 +2626,20 @@ func (p *Planner) checkCSINodeFromObject(
 	}
 
 	if err != nil {
-		plan.AddCheck(failed("csi-node", fmt.Sprintf("read CSINode %s: %v", node.Name, err)))
+		plan.AddCheck(
+			failed(domain.CheckNameCSINode, fmt.Sprintf("read CSINode %s: %v", node.Name, err)),
+		)
 		return
 	}
 
 	if csiNode == nil || csiNode.Name == "" {
 		plan.AddCheck(
-			failed("csi-node", fmt.Sprintf("read CSINode %s returned an empty object", node.Name)),
+			failed(
+				domain.CheckNameCSINode,
+				fmt.Sprintf("read CSINode %s returned an empty object", node.Name),
+			),
 		)
+
 		return
 	}
 
@@ -2588,7 +2647,7 @@ func (p *Planner) checkCSINodeFromObject(
 		if driver.Name == sc.Provisioner {
 			plan.AddCheck(
 				passed(
-					"csi-node",
+					domain.CheckNameCSINode,
 					fmt.Sprintf("CSI driver %s is registered on %s", sc.Provisioner, node.Name),
 				),
 			)
@@ -2599,7 +2658,7 @@ func (p *Planner) checkCSINodeFromObject(
 
 	plan.AddCheck(
 		warned(
-			"csi-node",
+			domain.CheckNameCSINode,
 			fmt.Sprintf(
 				"provisioner %s is absent from CSINode %s; an in-tree or external provisioner may still support it",
 				sc.Provisioner,
@@ -2622,7 +2681,7 @@ func (p *Planner) checkPVCReferencesFromPods(
 	if listErr != nil {
 		plan.AddCheck(
 			failed(
-				"pvc-consumers",
+				domain.CheckNamePVCConsumers,
 				fmt.Sprintf("list Pods for PVC %s/%s: %v", pvc.Namespace, pvc.Name, listErr),
 			),
 		)
@@ -2655,7 +2714,7 @@ func (p *Planner) checkPVCReferencesFromPods(
 	if operation == domain.OperationCopy && !online && len(consumers) > 0 {
 		plan.AddCheck(
 			failed(
-				"pvc-consumers",
+				domain.CheckNamePVCConsumers,
 				fmt.Sprintf(
 					"offline copy requires PVC %s/%s to have zero active Pod consumers; found %s; use --online for a finite warm copy",
 					pvc.Namespace,
@@ -2681,7 +2740,7 @@ func (p *Planner) checkPVCReferencesFromPods(
 			sort.Strings(unscheduled)
 			plan.AddCheck(
 				failed(
-					"source-node",
+					domain.CheckNameSourceNode,
 					fmt.Sprintf(
 						"RWO PVC %s/%s has unscheduled active consumer(s) %s; wait for every consumer to receive a node before online copy",
 						pvc.Namespace,
@@ -2711,8 +2770,12 @@ func (p *Planner) checkPVCReferencesFromPods(
 
 	if len(consumers) == 0 {
 		plan.AddCheck(
-			passed("pvc-consumers", fmt.Sprintf("PVC %s/%s is offline", pvc.Namespace, pvc.Name)),
+			passed(
+				domain.CheckNamePVCConsumers,
+				fmt.Sprintf("PVC %s/%s is offline", pvc.Namespace, pvc.Name),
+			),
 		)
+
 		return consumers
 	}
 
@@ -2723,7 +2786,7 @@ func (p *Planner) checkPVCReferencesFromPods(
 	if operation == domain.OperationReserve {
 		plan.AddCheck(
 			warned(
-				"pvc-consumers",
+				domain.CheckNamePVCConsumers,
 				fmt.Sprintf(
 					"PVC %s/%s is active on Pod(s) %s; reservation keeps the source PVC mounted and provisions destination storage",
 					pvc.Namespace,
@@ -2739,7 +2802,7 @@ func (p *Planner) checkPVCReferencesFromPods(
 	if kube.HasAccessMode(pvc.Spec.AccessModes, corev1.ReadWriteOncePod) {
 		plan.AddCheck(
 			failed(
-				"pvc-consumers",
+				domain.CheckNamePVCConsumers,
 				fmt.Sprintf("active RWOP PVC %s/%s cannot be warm-copied", pvc.Namespace, pvc.Name),
 			),
 		)
@@ -2749,7 +2812,7 @@ func (p *Planner) checkPVCReferencesFromPods(
 
 	plan.AddCheck(
 		warned(
-			"pvc-consumers",
+			domain.CheckNamePVCConsumers,
 			fmt.Sprintf(
 				"PVC %s/%s is active on Pod(s) %s; warm copy has file-level consistency until final sync",
 				pvc.Namespace,
@@ -2778,7 +2841,7 @@ func checkSelectedMigrationUnitConsumers(
 	case len(others) > 0:
 		plan.AddCheck(
 			failed(
-				"pvc-consumers",
+				domain.CheckNamePVCConsumers,
 				fmt.Sprintf(
 					"PVC %s/%s is shared with Pod(s): %s; migrate-pod coordinates one selected workload only, so stop these external consumers or use offline migrate after quiescing every consumer",
 					pvc.Namespace,
@@ -2793,7 +2856,7 @@ func checkSelectedMigrationUnitConsumers(
 	):
 		plan.AddCheck(
 			failed(
-				"pvc-consumers",
+				domain.CheckNamePVCConsumers,
 				fmt.Sprintf(
 					"active RWOP PVC %s/%s cannot be warm-copied",
 					pvc.Namespace,
@@ -2804,7 +2867,7 @@ func checkSelectedMigrationUnitConsumers(
 	case operation == domain.OperationCopy && online:
 		plan.AddCheck(
 			warned(
-				"pvc-consumers",
+				domain.CheckNamePVCConsumers,
 				fmt.Sprintf(
 					"PVC %s/%s is active on selected Pod %s; online copy has file-level consistency",
 					pvc.Namespace,
@@ -2816,7 +2879,7 @@ func checkSelectedMigrationUnitConsumers(
 	default:
 		plan.AddCheck(
 			passed(
-				"pvc-consumers",
+				domain.CheckNamePVCConsumers,
 				fmt.Sprintf(
 					"PVC %s/%s belongs to the selected migration unit",
 					pvc.Namespace,
@@ -2910,7 +2973,7 @@ func inferOnlineCopySourceNode(
 	if len(nodes) > 1 {
 		plan.AddCheck(
 			failed(
-				"source-node",
+				domain.CheckNameSourceNode,
 				fmt.Sprintf(
 					"online copy consumers run on multiple nodes (%s); copy each node group in a separate session",
 					strings.Join(nodes, ","),
@@ -2924,7 +2987,7 @@ func inferOnlineCopySourceNode(
 	if requested != "" && requested != nodes[0] {
 		plan.AddCheck(
 			failed(
-				"source-node",
+				domain.CheckNameSourceNode,
 				fmt.Sprintf(
 					"online copy consumer runs on %s, requested source node is %s",
 					nodes[0],
@@ -2939,7 +3002,7 @@ func inferOnlineCopySourceNode(
 	if requested == "" {
 		plan.AddCheck(
 			passed(
-				"source-node-inference",
+				domain.CheckNameSourceNodeInference,
 				fmt.Sprintf("inferred source tool node %s from active PVC consumers", nodes[0]),
 			),
 		)
@@ -3056,7 +3119,7 @@ func (p *Planner) checkPVCFinalizers(
 
 	plan.AddCheck(
 		failed(
-			"pvc-finalizers",
+			domain.CheckNamePVCFinalizers,
 			fmt.Sprintf(
 				"PVC %s/%s has custom finalizer(s) %s; remove them or complete their controller cleanup before an operation that recreates the PVC",
 				pvc.Namespace,

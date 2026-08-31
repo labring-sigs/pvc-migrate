@@ -383,6 +383,10 @@ func (s *Switcher) verifyBinding(
 		)
 	}
 
+	if err := ValidateBoundVolumeCapacity(pvc, pv, nil); err != nil {
+		return domain.NewError(domain.ErrorConflict, "verify binding", err.Error())
+	}
+
 	return nil
 }
 

@@ -2,6 +2,7 @@ package cli
 
 import (
 	"github.com/labring-sigs/pvc-migrate/internal/domain"
+	"github.com/labring-sigs/pvc-migrate/internal/kube"
 	"github.com/labring-sigs/pvc-migrate/internal/planner"
 	"github.com/spf13/cobra"
 )
@@ -11,11 +12,17 @@ import (
 // reserve and copy do not share a mixed command/flag implementation.
 func adoptReservedSessionForCopy(session *domain.Session, flags *copyFlags) error {
 	if session.Spec.Type == domain.SessionTypeReserve {
+		options := session.Spec.WorkflowOptions()
+		options.SourceNode = flags.sourceNode
+		options.Strategies = append([]string(nil), flags.strategies...)
+		options.VerifyChecksum = flags.verifyChecksum
+		options.DeleteExtraneous = flags.deleteExtraneous
+
 		session.Spec = domain.NewSessionSpec(
 			domain.OperationCopy,
 			session.Spec.SessionCommon,
 			flags.online,
-			session.Spec.WorkflowOptions(),
+			options,
 		)
 	}
 
@@ -132,6 +139,17 @@ func (r *rootState) newCopyCommand() *cobra.Command {
 				}
 
 				return printPlanResult(cmd, runtime, plan)
+			}
+
+			if existing && runtime.mode == executionModeController &&
+				session.Backend == kube.SessionBackendCRD {
+				if err := runtime.store.Update(ctx, session); err != nil {
+					return reportSessionError(cmd, session, err)
+				}
+			}
+
+			if deferred, err := deferControllerExecution(ctx, cmd, runtime, session); deferred {
+				return err
 			}
 
 			if err := runtime.service.ValidateWarmCopy(ctx, session); err != nil {

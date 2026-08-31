@@ -19,12 +19,12 @@ func (p *Planner) finalizePlanStrategies(state *planState) {
 
 	if len(filtered) == 0 {
 		state.plan.AddCheck(failed(
-			"strategy",
+			domain.CheckNameStrategy,
 			"no selected pv-migrate strategy can handle the requested source and destination",
 		))
 	} else if state.autoStrategyRequested {
 		state.plan.AddCheck(passed(
-			"strategy-selection",
+			domain.CheckNameStrategySelection,
 			"auto selected strategy order: "+strings.Join(filtered, ","),
 		))
 	}
@@ -327,7 +327,7 @@ func (p *Planner) runPlanPolicyChecks(
 			options.SourceNode,
 			options.TargetNode,
 		) {
-			state.plan.AddCheck(failed("pod-scheduling", issue))
+			state.plan.AddCheck(failed(domain.CheckNamePodScheduling, issue))
 		}
 	}
 }

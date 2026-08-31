@@ -1,0 +1,292 @@
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.19.0
+  name: restores.migrate.sealos.io
+spec:
+  group: migrate.sealos.io
+  names:
+    kind: Restore
+    listKind: RestoreList
+    plural: restores
+    shortNames:
+    - rest
+    singular: restore
+  scope: Namespaced
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .status.phase
+      name: Phase
+      type: string
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            properties:
+              allowInsecureEndpoint:
+                type: boolean
+              allowMounted:
+                type: boolean
+              backend:
+                enum:
+                - s3
+                type: string
+              bucket:
+                type: string
+              createPVC:
+                type: boolean
+              createdBy:
+                type: string
+              credentialsSecret:
+                description: ObjectReference identifies a Kubernetes object involved
+                  in a workflow.
+                properties:
+                  apiVersion:
+                    type: string
+                  kind:
+                    type: string
+                  name:
+                    type: string
+                  namespace:
+                    type: string
+                  resourceVersion:
+                    type: string
+                  uid:
+                    description: |-
+                      UID is a type that holds unique ID values, including UUIDs.  Because we
+                      don't ONLY use UUIDs, this is an alias to string.  Being a type captures
+                      intent and helps make sure that UIDs and names do not get conflated.
+                    type: string
+                required:
+                - name
+                type: object
+              deleteExtraneous:
+                type: boolean
+              destinationAccessMode:
+                type: string
+              destinationCapacity:
+                type: string
+              destinationNamespace:
+                type: string
+              destinationPVC:
+                description: ObjectReference identifies a Kubernetes object involved
+                  in a workflow.
+                properties:
+                  apiVersion:
+                    type: string
+                  kind:
+                    type: string
+                  name:
+                    type: string
+                  namespace:
+                    type: string
+                  resourceVersion:
+                    type: string
+                  uid:
+                    description: |-
+                      UID is a type that holds unique ID values, including UUIDs.  Because we
+                      don't ONLY use UUIDs, this is an alias to string.  Being a type captures
+                      intent and helps make sure that UIDs and names do not get conflated.
+                    type: string
+                required:
+                - name
+                type: object
+              destinationStorageClass:
+                type: string
+              endpoint:
+                type: string
+              name:
+                type: string
+              path:
+                type: string
+              prefix:
+                type: string
+              provider:
+                type: string
+              region:
+                type: string
+              serverSideEncryption:
+                type: string
+              sessionNamespace:
+                type: string
+              sseKmsKeyID:
+                type: string
+              targetNode:
+                type: string
+              toolImage:
+                type: string
+            required:
+            - backend
+            - bucket
+            - destinationNamespace
+            - destinationPVC
+            - name
+            - sessionNamespace
+            type: object
+          status:
+            properties:
+              completedAt:
+                format: date-time
+                type: string
+              conditions:
+                items:
+                  properties:
+                    lastTransitionTime:
+                      format: date-time
+                      type: string
+                    message:
+                      type: string
+                    reason:
+                      type: string
+                    status:
+                      type: string
+                    type:
+                      type: string
+                  required:
+                  - lastTransitionTime
+                  - status
+                  - type
+                  type: object
+                type: array
+              failureReason:
+                type: string
+              history:
+                items:
+                  properties:
+                    message:
+                      type: string
+                    phase:
+                      description: |-
+                        API status types are intentionally distinct per Kind. WorkflowStatus holds
+                        lifecycle fields only; transfer/workload details belong to the operation
+                        that owns them.
+                      enum:
+                      - Planned
+                      - Reserving
+                      - Reserved
+                      - WarmCopying
+                      - WarmCopied
+                      - Pausing
+                      - Paused
+                      - FinalSyncing
+                      - FinalSynced
+                      - Activating
+                      - Activated
+                      - Resuming
+                      - Completed
+                      - Aborting
+                      - Aborted
+                      - RollingBack
+                      - RolledBack
+                      - Renaming
+                      - Moving
+                      - Failed
+                      type: string
+                    time:
+                      format: date-time
+                      type: string
+                  required:
+                  - phase
+                  - time
+                  type: object
+                type: array
+              message:
+                type: string
+              observedGeneration:
+                format: int64
+                type: integer
+              phase:
+                description: |-
+                  API status types are intentionally distinct per Kind. WorkflowStatus holds
+                  lifecycle fields only; transfer/workload details belong to the operation
+                  that owns them.
+                enum:
+                - Planned
+                - Reserving
+                - Reserved
+                - WarmCopying
+                - WarmCopied
+                - Pausing
+                - Paused
+                - FinalSyncing
+                - FinalSynced
+                - Activating
+                - Activated
+                - Resuming
+                - Completed
+                - Aborting
+                - Aborted
+                - RollingBack
+                - RolledBack
+                - Renaming
+                - Moving
+                - Failed
+                type: string
+              resumeFrom:
+                description: |-
+                  API status types are intentionally distinct per Kind. WorkflowStatus holds
+                  lifecycle fields only; transfer/workload details belong to the operation
+                  that owns them.
+                enum:
+                - Planned
+                - Reserving
+                - Reserved
+                - WarmCopying
+                - WarmCopied
+                - Pausing
+                - Paused
+                - FinalSyncing
+                - FinalSynced
+                - Activating
+                - Activated
+                - Resuming
+                - Completed
+                - Aborting
+                - Aborted
+                - RollingBack
+                - RolledBack
+                - Renaming
+                - Moving
+                - Failed
+                type: string
+              startedAt:
+                format: date-time
+                type: string
+              updatedAt:
+                format: date-time
+                type: string
+            required:
+            - phase
+            - startedAt
+            - updatedAt
+            type: object
+        required:
+        - spec
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}

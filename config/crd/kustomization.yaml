@@ -1,0 +1,9 @@
+resources:
+- bases/migrate.sealos.io_backups.yaml
+- bases/migrate.sealos.io_copies.yaml
+- bases/migrate.sealos.io_migrations.yaml
+- bases/migrate.sealos.io_moves.yaml
+- bases/migrate.sealos.io_podmigrations.yaml
+- bases/migrate.sealos.io_renames.yaml
+- bases/migrate.sealos.io_reservations.yaml
+- bases/migrate.sealos.io_restores.yaml

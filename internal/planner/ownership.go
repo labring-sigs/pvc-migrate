@@ -56,7 +56,7 @@ func (p *Planner) checkSessionOwnership(
 
 		plan.AddCheck(
 			failed(
-				"session-ownership",
+				domain.CheckNameSessionOwnership,
 				fmt.Sprintf(
 					"PVC %s/%s and PV %s have conflicting pvc-migrate session owners: %s; inspect each owner before retrying",
 					pvc.Namespace,
@@ -77,7 +77,7 @@ func (p *Planner) checkSessionOwnership(
 	if err == nil {
 		plan.AddCheck(
 			failed(
-				"session-ownership",
+				domain.CheckNameSessionOwnership,
 				fmt.Sprintf(
 					"PVC %s/%s or PV %s belongs to session %s (phase %s); %s",
 					pvc.Namespace,
@@ -104,7 +104,7 @@ func (p *Planner) checkSessionOwnership(
 		)
 		plan.AddCheck(
 			failed(
-				"session-ownership",
+				domain.CheckNameSessionOwnership,
 				fmt.Sprintf(
 					"PVC %s/%s or PV %s has orphan ownership from session %s; validate with `%s %s`, then execute `%s %s --dry-run=false`",
 					pvc.Namespace,
@@ -124,7 +124,7 @@ func (p *Planner) checkSessionOwnership(
 
 	plan.AddCheck(
 		failed(
-			"session-ownership",
+			domain.CheckNameSessionOwnership,
 			fmt.Sprintf(
 				"PVC %s/%s or PV %s refers to session %s, but its session ConfigMap cannot be read: %v",
 				pvc.Namespace,

@@ -78,6 +78,43 @@ type lockingBackupSessionStore struct {
 	updateWhileBound bool
 }
 
+func TestResumeRestoreKeepsFailureCheckpointInsideSessionLease(t *testing.T) {
+	lock := &recordingBackupSessionLock{}
+	store := &lockingBackupSessionStore{lock: lock}
+	session := domain.NewSession(
+		"restore-session",
+		domain.NewSessionSpec(
+			domain.OperationRestore,
+			domain.SessionCommon{SessionNamespace: "sessions", DestinationNamespace: "default"},
+			false,
+			domain.SessionWorkflowOptions{},
+		),
+		time.Now(),
+	)
+
+	err := ResumeRestore(
+		context.Background(),
+		nil,
+		Request{SessionStore: store},
+		session,
+	)
+	if err == nil {
+		t.Fatal("ResumeRestore() succeeded without a Kubernetes client")
+	}
+
+	if !lock.bound || !lock.released {
+		t.Fatalf("session lease lifecycle bound=%t released=%t", lock.bound, lock.released)
+	}
+
+	if !store.updateWhileBound {
+		t.Fatal("restore status checkpoint was written outside the session lease")
+	}
+
+	if session.Status.Phase != domain.PhaseFailed {
+		t.Fatalf("phase=%s, want %s", session.Status.Phase, domain.PhaseFailed)
+	}
+}
+
 func (s *lockingBackupSessionStore) Create(ctx context.Context, session *domain.Session) error {
 	s.createWhileBound = s.lock != nil && s.lock.bound && !s.lock.released
 	return s.recordingBackupSessionStore.Create(ctx, session)
@@ -187,6 +224,49 @@ func testBackupObjectStore(t *testing.T) *objectstore.Store {
 	}
 
 	return store
+}
+
+func TestSubmitRestoreSeparatesBackendFromS3Provider(t *testing.T) {
+	objectStore, err := objectstore.NewWithClient(
+		&preflightObjectStore{},
+		objectstore.Config{
+			Bucket:   "backups",
+			Prefix:   "pv-migrate",
+			Name:     "daily",
+			Provider: "Minio",
+		},
+		objectstore.Credentials{AccessKey: "key", SecretKey: "secret"},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	sessions := &recordingBackupSessionStore{}
+
+	session, err := SubmitRestore(
+		context.Background(),
+		fake.NewSimpleClientset(),
+		Request{
+			ID:               "restore-test",
+			Namespace:        "app",
+			PVCName:          "data",
+			SessionNamespace: "pvc-migrate-system",
+			Store:            objectStore,
+			SessionStore:     sessions,
+		},
+		Plan{PVCUID: "pvc-uid"},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if session.Spec.Restore.Backend != domain.ObjectStoreBackendS3 {
+		t.Fatalf("restore backend=%q", session.Spec.Restore.Backend)
+	}
+
+	if session.Spec.Restore.Provider != "Minio" {
+		t.Fatalf("restore provider=%q", session.Spec.Restore.Provider)
+	}
 }
 
 func TestBuildBackupSessionIncludesMetadataWithoutCredentials(t *testing.T) {

@@ -97,7 +97,7 @@ func (f *crossClusterReserveFlags) bind(command *cobra.Command, r *rootState) {
 	flags.StringSliceVar(
 		&f.strategies,
 		"strategy",
-		[]string{"local"},
+		[]string{domain.StrategyLocal},
 		"Cross-cluster strategy: local, loadbalancer, or nodeport",
 	)
 }

@@ -165,10 +165,19 @@ func restorePVCCreationFixture(
 	}
 
 	bindingMode := storagev1.VolumeBindingWaitForFirstConsumer
-	allObjects := make([]runtime.Object, 0, 1)
+	allObjects := make([]runtime.Object, 0, 2)
 	allObjects = append(allObjects, &storagev1.StorageClass{
 		ObjectMeta:        metav1.ObjectMeta{Name: "restore-sc"},
 		VolumeBindingMode: &bindingMode,
+	})
+	allObjects = append(allObjects, &corev1.Node{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:   "worker-a",
+			Labels: map[string]string{corev1.LabelHostname: "worker-a"},
+		},
+		Status: corev1.NodeStatus{Conditions: []corev1.NodeCondition{{
+			Type: corev1.NodeReady, Status: corev1.ConditionTrue,
+		}}},
 	})
 
 	return fake.NewClientset(allObjects...), Request{
@@ -549,6 +558,30 @@ func TestPreflightRejectsOfflineMountedAndOnlineRWOP(t *testing.T) {
 	); domain.CategoryOf(err) != domain.ErrorPrecondition ||
 		!strings.Contains(err.Error(), "ReadWriteOncePod") {
 		t.Fatalf("mounted restore RWOP category=%s error=%v", domain.CategoryOf(err), err)
+	}
+}
+
+func TestBackupPreflightRejectsIncompleteVolumeExpansion(t *testing.T) {
+	client, request := preflightFixture(t, &preflightObjectStore{})
+
+	pvc, err := client.CoreV1().PersistentVolumeClaims(request.Namespace).
+		Get(t.Context(), request.PVCName, metav1.GetOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	pvc.Spec.Resources.Requests = corev1.ResourceList{
+		corev1.ResourceStorage: resource.MustParse("2Gi"),
+	}
+	if _, err := client.CoreV1().PersistentVolumeClaims(request.Namespace).
+		Update(t.Context(), pvc, metav1.UpdateOptions{}); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err = Preflight(t.Context(), client, request, false)
+	if domain.CategoryOf(err) != domain.ErrorPrecondition ||
+		!strings.Contains(err.Error(), "volume expansion is incomplete") {
+		t.Fatalf("category=%s error=%v", domain.CategoryOf(err), err)
 	}
 }
 

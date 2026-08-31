@@ -433,7 +433,7 @@ func (s *Service) copyWithRetry(
 
 			return domain.WrapError(
 				domain.ErrorConflict,
-				"copy capacity",
+				domain.ErrorOperationCopyCapacity,
 				message,
 				last,
 			)

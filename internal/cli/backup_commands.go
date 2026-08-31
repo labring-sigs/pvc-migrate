@@ -10,6 +10,7 @@ import (
 	"github.com/labring-sigs/pvc-migrate/internal/domain"
 	"github.com/labring-sigs/pvc-migrate/internal/kube"
 	"github.com/labring-sigs/pvc-migrate/internal/objectstore"
+	"github.com/labring-sigs/pvc-migrate/internal/output"
 	"github.com/spf13/cobra"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
@@ -162,17 +163,48 @@ func (r *rootState) runBackupTransfer(
 		return reportApprovalError(cmd, err)
 	}
 
-	if err := backup.Run(ctx, runtime.clients.Kubernetes, request, false); err != nil {
-		lookupCtx, lookupCancel := context.WithTimeout(context.Background(), 5*time.Second)
-		session, lookupErr := runtime.store.Get(lookupCtx, r.global.sessionNamespace, flags.id)
+	var session *domain.Session
 
-		lookupCancel()
+	if err := requireControllerWorkflow(runtime, domain.SessionTypeBackup); err != nil {
+		return reportTransferError(cmd, "backup", flags.namespace, flags.pvc, err)
+	}
 
-		if lookupErr == nil {
-			return reportSessionError(cmd, session, err)
+	if controllerWorkflowAvailable(runtime, domain.SessionTypeBackup) {
+		var submitErr error
+
+		session, submitErr = backup.Submit(
+			ctx,
+			runtime.clients.Kubernetes,
+			request,
+			plan.PVCUID,
+			plan.PVUID,
+		)
+		if submitErr != nil {
+			return reportTransferError(cmd, "backup", flags.namespace, flags.pvc, submitErr)
 		}
 
-		return reportTransferError(cmd, "backup", flags.namespace, flags.pvc, err)
+		if deferred, deferErr := deferControllerExecution(ctx, cmd, runtime, session); deferred {
+			return deferErr
+		}
+	}
+
+	if session == nil || session.Backend != kube.SessionBackendCRD {
+		if err := backup.Run(ctx, runtime.clients.Kubernetes, request, false); err != nil {
+			lookupCtx, lookupCancel := context.WithTimeout(context.Background(), 5*time.Second)
+			session, lookupErr := runtime.store.Get(lookupCtx, r.global.sessionNamespace, flags.id)
+
+			lookupCancel()
+
+			if lookupErr == nil {
+				return reportSessionError(cmd, session, err)
+			}
+
+			return reportTransferError(cmd, "backup", flags.namespace, flags.pvc, err)
+		}
+	}
+
+	if session != nil && session.Backend == kube.SessionBackendCRD {
+		return nil
 	}
 
 	return r.printObjectTransferResult(cmd, runtime, flags, "backup", false, online, plan, store)
@@ -184,7 +216,7 @@ func (r *rootState) backupResumeRequest(runtime *commandRuntime) backup.Request 
 		KubeconfigPath:     r.global.kubeconfig,
 		KubeContext:        r.global.kubeContext,
 		StreamToolLogs:     r.global.streamToolLogs,
-		StructuredLogs:     r.global.logFormat == "json",
+		StructuredLogs:     r.global.logFormat == string(logFormatJSON),
 		Writer:             r.errWriter(),
 		Logger:             runtime.logger,
 		ToolImageProber:    kube.NewToolImageProber(runtime.clients.Kubernetes),
@@ -242,7 +274,7 @@ func (r *rootState) printObjectTransferResult(
 		}
 	}
 
-	if r.global.output != "table" {
+	if output.Format(r.global.output) != output.Table {
 		mode := backup.ModeOffline
 		if online {
 			mode = backup.ModeOnline
@@ -409,7 +441,7 @@ func (r *rootState) objectTransferRequest(
 		KubeconfigPath:         r.global.kubeconfig,
 		KubeContext:            r.global.kubeContext,
 		StreamToolLogs:         r.global.streamToolLogs,
-		StructuredLogs:         r.global.logFormat == "json",
+		StructuredLogs:         r.global.logFormat == string(logFormatJSON),
 		Store:                  store,
 		Writer:                 r.errWriter(),
 		Logger:                 runtime.logger,
@@ -424,7 +456,12 @@ func bindObjectStoreFlags(command *cobra.Command, flags *bucketFlags, pvcFlag, i
 	command.Flags().StringVar(&flags.id, "id", "", idHelp)
 	command.Flags().StringVarP(&flags.namespace, "namespace", "n", "default", "PVC namespace")
 	command.Flags().StringVar(&flags.pvc, pvcFlag, "", "PVC name")
-	command.Flags().StringVar(&flags.backend, "backend", "s3", "S3-compatible object backend")
+	command.Flags().StringVar(
+		&flags.backend,
+		"backend",
+		string(domain.ObjectStoreBackendS3),
+		"S3-compatible object backend",
+	)
 	command.Flags().StringVar(&flags.bucket, "bucket", "", "Bucket or container name")
 	command.Flags().StringVar(&flags.name, "name", "", "Backup identity inside the bucket")
 	command.Flags().StringVar(&flags.prefix, "prefix", "pv-migrate", "Global bucket prefix")
@@ -484,7 +521,7 @@ func bindRestoreFlags(command *cobra.Command, flags *restoreFlags) {
 		command,
 		&flags.bucketFlags,
 		"destination-pvc",
-		"Restore attempt ID used for logs and temporary tool resources; no Session is created",
+		"Restore session ID; generated when omitted during execution",
 	)
 	bindRestoreBucketFlags(command, &flags.restore)
 }
@@ -523,7 +560,7 @@ func validateBucketFlags(flags *bucketFlags, pvcFlag string) error {
 		)
 	}
 
-	if flags.backend != "s3" {
+	if flags.backend != string(domain.ObjectStoreBackendS3) {
 		return domain.NewError(
 			domain.ErrorValidation,
 			"backup/restore",

@@ -91,6 +91,31 @@ func TestDecodeSessionRejectsMissingInvalidAndUnsupportedData(t *testing.T) {
 	}
 }
 
+func TestDecodeSessionRejectsPreviousAPIVersion(t *testing.T) {
+	session := storeTestSession()
+	session.APIVersion = "pvc-migrate.io/v1alpha1"
+
+	data, err := json.Marshal(session)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	_, err = decodeSession(&corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: session.Spec.SessionNamespace,
+			Name:      SessionConfigMapName(session.ID),
+			Labels: map[string]string{
+				ManagedByLabel: ManagedByValue,
+				SessionKey:     session.ID,
+			},
+		},
+		Data: map[string]string{SessionDataKey: string(data)},
+	})
+	if domain.CategoryOf(err) != domain.ErrorValidation {
+		t.Fatalf("previous API version category=%s error=%v", domain.CategoryOf(err), err)
+	}
+}
+
 func TestConfigMapSessionStoreCreateGetAndUpdateConflicts(t *testing.T) {
 	ctx := context.Background()
 	client := fake.NewClientset()

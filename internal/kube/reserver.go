@@ -31,6 +31,8 @@ func NewReserver(client kubernetes.Interface) *Reserver {
 
 // WithToolLogs enables log streaming for reservation consumer Pods.
 func (r *Reserver) WithToolLogs(options ToolLogOptions) *Reserver {
+	options.Namespaces = slices.Clone(options.Namespaces)
+	options.Writer = NewSynchronizedWriter(options.Writer)
 	r.toolLogs = &options
 	return r
 }
@@ -107,6 +109,12 @@ func (r *Reserver) ReserveVolume(
 	}
 
 	if !dryRun {
+		if err := r.validateDestinationPlacement(ctx, session, volume); err != nil {
+			return err
+		}
+	}
+
+	if !dryRun {
 		if err := AcquirePVC(ctx, r.client, volume.SourcePVC, session.ID); err != nil {
 			return err
 		}
@@ -133,6 +141,70 @@ func (r *Reserver) ReserveVolume(
 	}
 
 	return r.reserveVolumeLive(ctx, session, volume, status, pvc, capacity)
+}
+
+func (r *Reserver) validateDestinationPlacement(
+	ctx context.Context,
+	session *domain.Session,
+	volume *domain.VolumeSpec,
+) error {
+	existing, err := r.client.CoreV1().
+		PersistentVolumeClaims(volume.DestinationPVC.Namespace).
+		Get(ctx, volume.DestinationPVC.Name, metav1.GetOptions{})
+	if err != nil && !apierrors.IsNotFound(err) {
+		return domain.WrapError(
+			domain.ErrorKubernetes,
+			"reserve volume",
+			fmt.Sprintf(
+				"read destination PVC %s/%s before placement validation",
+				volume.DestinationPVC.Namespace,
+				volume.DestinationPVC.Name,
+			),
+			err,
+		)
+	}
+
+	if err == nil && existing.Status.Phase == corev1.ClaimBound && existing.Spec.VolumeName != "" {
+		pv, getErr := r.client.CoreV1().PersistentVolumes().Get(
+			ctx,
+			existing.Spec.VolumeName,
+			metav1.GetOptions{},
+		)
+		if getErr != nil {
+			return domain.WrapError(
+				domain.ErrorKubernetes,
+				"reserve volume",
+				"read existing destination PV before capacity validation",
+				getErr,
+			)
+		}
+
+		required, parseErr := resource.ParseQuantity(volume.Capacity)
+		if parseErr != nil || required.Sign() <= 0 {
+			return domain.NewError(
+				domain.ErrorValidation,
+				"reserve volume",
+				fmt.Sprintf("destination capacity %q is invalid", volume.Capacity),
+			)
+		}
+
+		if capacityErr := ValidateBoundVolumeCapacity(existing, pv, &required); capacityErr != nil {
+			return domain.NewError(
+				domain.ErrorPrecondition,
+				"reserve volume",
+				capacityErr.Error(),
+			)
+		}
+
+		return nil
+	}
+
+	return ValidateStorageClassPlacement(
+		ctx,
+		r.client,
+		volume.StorageClass,
+		session.Spec.WorkflowOptions().TargetNode,
+	)
 }
 
 func validReservationIdentities(volume *domain.VolumeSpec) bool {
@@ -376,6 +448,10 @@ func (r *Reserver) reserveVolumeLive(
 		}
 	}
 
+	if err := ValidateBoundVolumeCapacity(bound, pv, &capacity); err != nil {
+		return domain.NewError(domain.ErrorPrecondition, "reserve volume", err.Error())
+	}
+
 	if err := r.retainPV(ctx, pv.Name, pv.UID, session.ID, ResourceRoleDestination); err != nil {
 		return err
 	}
@@ -459,6 +535,26 @@ func (r *Reserver) verifySourceIdentity(
 			"reserve volume",
 			fmt.Sprintf("source PV %s identity or claimRef changed", pv.Name),
 		)
+	}
+
+	if err := ValidateBoundVolumeCapacity(pvc, pv, nil); err != nil {
+		return domain.NewError(domain.ErrorConflict, "reserve volume", err.Error())
+	}
+
+	if volume.SourceCapacity != "" {
+		planned, parseErr := resource.ParseQuantity(volume.SourceCapacity)
+
+		actual, hasActual := pv.Spec.Capacity[corev1.ResourceStorage]
+		if parseErr != nil || !hasActual || actual.Cmp(planned) != 0 {
+			return domain.NewError(
+				domain.ErrorConflict,
+				"reserve volume",
+				fmt.Sprintf(
+					"source PV %s capacity changed after planning; generate a new plan",
+					pv.Name,
+				),
+			)
+		}
 	}
 
 	if err := validateReservationPVOwnership(pv, sessionID, ResourceRoleSource, false); err != nil {

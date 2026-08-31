@@ -261,7 +261,7 @@ func (p *Planner) checkAccessReviews(
 	}
 
 	if len(checks) == 0 {
-		plan.AddCheck(passed("rbac", "no Kubernetes permissions are required"))
+		plan.AddCheck(passed(domain.CheckNameRBAC, "no Kubernetes permissions are required"))
 		return
 	}
 	// Keep the existing fast-fail behavior for an unavailable authorization
@@ -270,8 +270,12 @@ func (p *Planner) checkAccessReviews(
 
 	if results[0].err != nil {
 		plan.AddCheck(
-			failed("rbac", fmt.Sprintf("SelfSubjectAccessReview failed: %v", results[0].err)),
+			failed(
+				domain.CheckNameRBAC,
+				fmt.Sprintf("SelfSubjectAccessReview failed: %v", results[0].err),
+			),
 		)
+
 		return
 	}
 
@@ -283,12 +287,20 @@ func (p *Planner) checkAccessReviews(
 	for index, check := range checks {
 		review := results[index].review
 		if err := results[index].err; err != nil {
-			plan.AddCheck(failed("rbac", fmt.Sprintf("SelfSubjectAccessReview failed: %v", err)))
+			plan.AddCheck(
+				failed(
+					domain.CheckNameRBAC,
+					fmt.Sprintf("SelfSubjectAccessReview failed: %v", err),
+				),
+			)
+
 			return
 		}
 
 		if review == nil {
-			plan.AddCheck(failed("rbac", "SelfSubjectAccessReview returned an empty object"))
+			plan.AddCheck(
+				failed(domain.CheckNameRBAC, "SelfSubjectAccessReview returned an empty object"),
+			)
 			return
 		}
 
@@ -308,11 +320,14 @@ func (p *Planner) checkAccessReviews(
 	}
 
 	if len(denied) > 0 {
-		plan.AddCheck(failed("rbac", strings.Join(denied, "; ")))
+		plan.AddCheck(failed(domain.CheckNameRBAC, strings.Join(denied, "; ")))
 		return
 	}
 
 	plan.AddCheck(
-		passed("rbac", fmt.Sprintf("%d required Kubernetes permissions are allowed", len(checks))),
+		passed(
+			domain.CheckNameRBAC,
+			fmt.Sprintf("%d required Kubernetes permissions are allowed", len(checks)),
+		),
 	)
 }

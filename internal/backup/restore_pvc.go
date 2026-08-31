@@ -84,17 +84,18 @@ func preflightRestorePVCCreation(
 		return nil, err
 	}
 
-	if _, err := client.StorageV1().StorageClasses().Get(
-		ctx,
-		req.DestinationStorageClass,
-		metav1.GetOptions{},
-	); err != nil {
-		return nil, domain.WrapError(
-			domain.ErrorPrecondition,
-			restorePreflightPhase,
-			"read destination StorageClass "+req.DestinationStorageClass,
-			err,
-		)
+	requiresPlacementValidation := existing == nil ||
+		existing.Status.Phase != corev1.ClaimBound ||
+		existing.Spec.VolumeName == ""
+	if requiresPlacementValidation {
+		if err := kube.ValidateStorageClassPlacement(
+			ctx,
+			client,
+			req.DestinationStorageClass,
+			req.TargetNode,
+		); err != nil {
+			return nil, err
+		}
 	}
 
 	if existing == nil {
@@ -448,6 +449,15 @@ func createRestorePVC(
 	req Request,
 	manifest objectstore.Manifest,
 ) error {
+	if err := kube.ValidateStorageClassPlacement(
+		ctx,
+		client,
+		req.DestinationStorageClass,
+		req.TargetNode,
+	); err != nil {
+		return err
+	}
+
 	capacity, err := restoreDestinationCapacity(manifest, req.DestinationCapacity)
 	if err != nil {
 		return err

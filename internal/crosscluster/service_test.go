@@ -6,11 +6,13 @@ import (
 	"errors"
 	"slices"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/labring-sigs/pvc-migrate/internal/copyengine"
 	. "github.com/labring-sigs/pvc-migrate/internal/crosscluster"
+	"github.com/labring-sigs/pvc-migrate/internal/domain"
 	"github.com/labring-sigs/pvc-migrate/internal/kube"
 	"github.com/labring-sigs/pvc-migrate/internal/testutil"
 	coordinationv1 "k8s.io/api/coordination/v1"
@@ -59,6 +61,9 @@ func crossFixture() (*Service, Options, *fakeCopier) {
 			Spec: corev1.PersistentVolumeClaimSpec{
 				VolumeName:  "pv-data",
 				AccessModes: []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce},
+				Resources: corev1.VolumeResourceRequirements{Requests: corev1.ResourceList{
+					corev1.ResourceStorage: resource.MustParse("2Gi"),
+				}},
 			},
 			Status: corev1.PersistentVolumeClaimStatus{Phase: corev1.ClaimBound},
 		},
@@ -123,8 +128,9 @@ func crossFixture() (*Service, Options, *fakeCopier) {
 			},
 		},
 		&storagev1.StorageClass{
-			ObjectMeta:        metav1.ObjectMeta{Name: "fast", UID: "destination-sc"},
-			VolumeBindingMode: new(storagev1.VolumeBindingImmediate),
+			ObjectMeta:           metav1.ObjectMeta{Name: "fast", UID: "destination-sc"},
+			VolumeBindingMode:    new(storagev1.VolumeBindingImmediate),
+			AllowVolumeExpansion: new(false),
 		},
 	)
 	clientsSource := &kube.Clients{
@@ -184,6 +190,128 @@ func TestPlanAndCreateSessionKeepClustersSeparate(t *testing.T) {
 			"storage class identity missing: %#v",
 			session.Spec.Volumes[0].Destination.StorageClass,
 		)
+	}
+}
+
+func TestCreateSessionReadsDestinationStorageClassOnceForMultipleVolumes(t *testing.T) {
+	service, options, _ := crossFixture()
+	source := service.SourceClientForTest()
+
+	if _, err := source.CoreV1().PersistentVolumeClaims("app").Create(
+		context.Background(),
+		&corev1.PersistentVolumeClaim{
+			ObjectMeta: metav1.ObjectMeta{Name: "logs", Namespace: "app", UID: "source-logs-pvc"},
+			Spec: corev1.PersistentVolumeClaimSpec{
+				VolumeName:  "pv-logs",
+				AccessModes: []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce},
+				Resources: corev1.VolumeResourceRequirements{Requests: corev1.ResourceList{
+					corev1.ResourceStorage: resource.MustParse("2Gi"),
+				}},
+			},
+			Status: corev1.PersistentVolumeClaimStatus{Phase: corev1.ClaimBound},
+		},
+		metav1.CreateOptions{},
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := source.CoreV1().PersistentVolumes().Create(
+		context.Background(),
+		&corev1.PersistentVolume{
+			ObjectMeta: metav1.ObjectMeta{Name: "pv-logs", UID: "source-logs-pv"},
+			Spec: corev1.PersistentVolumeSpec{
+				Capacity: corev1.ResourceList{corev1.ResourceStorage: resource.MustParse("2Gi")},
+				ClaimRef: &corev1.ObjectReference{
+					Namespace: "app",
+					Name:      "logs",
+					UID:       "source-logs-pvc",
+				},
+			},
+		},
+		metav1.CreateOptions{},
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	options.SourcePVCs = []string{"data", "logs"}
+	options.DestinationPVCs = []string{"data=data-copy", "logs=logs-copy"}
+
+	var storageClassGets atomic.Int32
+
+	//nolint:errcheck // fake.Clientset embeds testing.Fake; PrependReactor has no result.
+	service.DestinationClientForTest().(*fake.Clientset).PrependReactor(
+		"get",
+		"storageclasses",
+		func(clienttesting.Action) (bool, runtime.Object, error) {
+			storageClassGets.Add(1)
+			return false, nil, nil
+		},
+	)
+
+	plan, err := service.Plan(context.Background(), options)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if !plan.Ready || len(plan.Volumes) != 2 {
+		t.Fatalf("plan is not ready for both volumes: %#v", plan)
+	}
+
+	beforeCreate := storageClassGets.Load()
+
+	if _, err := service.CreateSession(context.Background(), options, plan); err != nil {
+		t.Fatal(err)
+	}
+
+	if got := storageClassGets.Load() - beforeCreate; got != 1 {
+		t.Fatalf("CreateSession StorageClass reads=%d, want exactly one", got)
+	}
+}
+
+func TestCrossClusterPlanInitialLargerDestinationDoesNotRequireExpansion(t *testing.T) {
+	service, options, _ := crossFixture()
+	options.DestinationCapacities = []string{"3Gi"}
+
+	plan, err := service.Plan(context.Background(), options)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if !plan.Ready || len(plan.Volumes) != 1 || plan.Volumes[0].Capacity != "3Gi" {
+		t.Fatalf("initial provisioning was treated as expansion: %#v", plan)
+	}
+}
+
+func TestCrossClusterPlanRejectsIncompleteSourceExpansion(t *testing.T) {
+	service, options, _ := crossFixture()
+
+	pvc, err := service.SourceClientForTest().CoreV1().PersistentVolumeClaims("app").
+		Get(context.Background(), "data", metav1.GetOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	pvc.Spec.Resources.Requests[corev1.ResourceStorage] = resource.MustParse("3Gi")
+	if _, err := service.SourceClientForTest().CoreV1().PersistentVolumeClaims("app").
+		Update(context.Background(), pvc, metav1.UpdateOptions{}); err != nil {
+		t.Fatal(err)
+	}
+
+	plan, err := service.Plan(context.Background(), options)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	failed := false
+	for _, check := range plan.Checks {
+		if check.Name == domain.CheckNameCapacity && !check.Passed &&
+			strings.Contains(check.Message, "volume expansion is incomplete") {
+			failed = true
+		}
+	}
+
+	if plan.Ready || !failed {
+		t.Fatalf("incomplete source expansion plan=%#v", plan)
 	}
 }
 
@@ -466,7 +594,7 @@ func TestPlanDoesNotTurnLimitRangeDefaultRequestIntoLimit(t *testing.T) {
 	}
 }
 
-func hasCrossClusterFailedCheck(plan *Plan, name string) bool {
+func hasCrossClusterFailedCheck(plan *Plan, name domain.CheckName) bool {
 	for _, check := range plan.Checks {
 		if check.Name == name && !check.Passed {
 			return true

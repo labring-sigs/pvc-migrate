@@ -103,6 +103,10 @@ func (r *rootState) newOfflineMigrationResumeCommand() *cobra.Command {
 				}
 			}
 
+			if deferred, err := deferControllerExecution(ctx, cmd, runtime, session); deferred {
+				return err
+			}
+
 			if err := runtime.service.ResumeOfflineMigration(ctx, session); err != nil {
 				return reportSessionError(cmd, session, err)
 			}
@@ -280,7 +284,7 @@ func (r *rootState) newOfflineMigrationCleanupCommand() *cobra.Command {
 			}
 
 			if options.DeleteSession {
-				return printDeletedSession(cmd, args[0])
+				return printDeletedSession(cmd, session)
 			}
 
 			return printSessionResult(cmd, runtime, session)

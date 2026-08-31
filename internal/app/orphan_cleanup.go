@@ -47,13 +47,13 @@ func (s *Service) PlanOrphanCleanup(
 		Ready:            true,
 	}
 	if problems := validation.IsDNS1123Label(options.SessionID); len(problems) > 0 {
-		plan.AddCheck(orphanFailed("session-id", strings.Join(problems, "; ")))
+		plan.AddCheck(orphanFailed(domain.CheckNameSessionID, strings.Join(problems, "; ")))
 	}
 
 	if options.SessionNamespace == "" || options.SourceNamespace == "" || options.SourcePVC == "" {
 		plan.AddCheck(
 			orphanFailed(
-				"identity",
+				domain.CheckNameIdentity,
 				"session namespace, source namespace, and source PVC are required",
 			),
 		)
@@ -70,7 +70,7 @@ func (s *Service) PlanOrphanCleanup(
 	case err == nil:
 		plan.AddCheck(
 			orphanFailed(
-				"session-configmap",
+				domain.CheckNameSessionConfigMap,
 				fmt.Sprintf(
 					"session ConfigMap %s/%s still exists; use the owning workflow `cleanup` command after reading its status",
 					options.SessionNamespace,
@@ -80,12 +80,15 @@ func (s *Service) PlanOrphanCleanup(
 		)
 	case !apierrors.IsNotFound(err):
 		plan.AddCheck(
-			orphanFailed("session-configmap", fmt.Sprintf("read session ConfigMap: %v", err)),
+			orphanFailed(
+				domain.CheckNameSessionConfigMap,
+				fmt.Sprintf("read session ConfigMap: %v", err),
+			),
 		)
 	default:
 		plan.AddCheck(
 			orphanPassed(
-				"session-configmap",
+				domain.CheckNameSessionConfigMap,
 				"session ConfigMap is absent; orphan ownership recovery is required",
 			),
 		)
@@ -97,7 +100,7 @@ func (s *Service) PlanOrphanCleanup(
 	if apierrors.IsNotFound(err) {
 		plan.AddCheck(
 			orphanFailed(
-				"source-pvc",
+				domain.CheckNameSourcePVC,
 				fmt.Sprintf(
 					"source PVC %s/%s does not exist",
 					options.SourceNamespace,
@@ -110,7 +113,9 @@ func (s *Service) PlanOrphanCleanup(
 	}
 
 	if err != nil {
-		plan.AddCheck(orphanFailed("source-pvc", fmt.Sprintf("read source PVC: %v", err)))
+		plan.AddCheck(
+			orphanFailed(domain.CheckNameSourcePVC, fmt.Sprintf("read source PVC: %v", err)),
+		)
 		return plan, nil
 	}
 
@@ -130,7 +135,7 @@ func (s *Service) PlanOrphanCleanup(
 		if owner.value != "" {
 			plan.AddCheck(
 				orphanFailed(
-					"source-ownership",
+					domain.CheckNameSourceOwnership,
 					fmt.Sprintf(
 						"source PVC %s/%s %s belongs to session %s",
 						pvc.Namespace,
@@ -146,7 +151,7 @@ func (s *Service) PlanOrphanCleanup(
 	if ownershipMarkers > 0 && pvc.Labels[kube.SessionKey] == "" {
 		plan.AddCheck(
 			orphanWarning(
-				"source-ownership",
+				domain.CheckNameSourceOwnership,
 				fmt.Sprintf(
 					"source PVC %s/%s has annotation ownership for session %s; its session label is absent",
 					pvc.Namespace,
@@ -160,7 +165,7 @@ func (s *Service) PlanOrphanCleanup(
 	if pvc.Status.Phase != corev1.ClaimBound || pvc.Spec.VolumeName == "" {
 		plan.AddCheck(
 			orphanFailed(
-				"source-pvc",
+				domain.CheckNameSourcePVC,
 				fmt.Sprintf(
 					"source PVC %s/%s must be Bound with a volumeName",
 					pvc.Namespace,
@@ -178,7 +183,7 @@ func (s *Service) PlanOrphanCleanup(
 	if err != nil {
 		plan.AddCheck(
 			orphanFailed(
-				"current-pv",
+				domain.CheckNameCurrentPV,
 				fmt.Sprintf("read current PV %s: %v", pvc.Spec.VolumeName, err),
 			),
 		)
@@ -189,7 +194,7 @@ func (s *Service) PlanOrphanCleanup(
 	if current.Labels[kube.SessionKey] != options.SessionID {
 		plan.AddCheck(
 			orphanFailed(
-				"current-ownership",
+				domain.CheckNameCurrentOwnership,
 				fmt.Sprintf("current PV %s must carry session=%s", current.Name, options.SessionID),
 			),
 		)
@@ -204,7 +209,7 @@ func (s *Service) PlanOrphanCleanup(
 		current.Spec.ClaimRef.UID != pvc.UID {
 		plan.AddCheck(
 			orphanFailed(
-				"current-claim",
+				domain.CheckNameCurrentClaim,
 				fmt.Sprintf(
 					"current PV %s claimRef does not match PVC %s/%s UID %s",
 					current.Name,
@@ -222,7 +227,7 @@ func (s *Service) PlanOrphanCleanup(
 	if !validReclaimPolicy(originalPolicy) {
 		plan.AddCheck(
 			orphanFailed(
-				"current-policy",
+				domain.CheckNameCurrentPolicy,
 				fmt.Sprintf(
 					"current PV %s has no valid %s annotation",
 					current.Name,
@@ -235,7 +240,7 @@ func (s *Service) PlanOrphanCleanup(
 	if current.Spec.PersistentVolumeReclaimPolicy != corev1.PersistentVolumeReclaimRetain {
 		plan.AddCheck(
 			orphanFailed(
-				"current-policy",
+				domain.CheckNameCurrentPolicy,
 				fmt.Sprintf(
 					"current PV %s reclaim policy must be Retain during orphan cleanup",
 					current.Name,
@@ -247,7 +252,7 @@ func (s *Service) PlanOrphanCleanup(
 	if ownershipMarkers == 0 {
 		plan.AddCheck(
 			orphanWarning(
-				"source-ownership",
+				domain.CheckNameSourceOwnership,
 				fmt.Sprintf(
 					"source PVC %s/%s metadata is already finalized; current PV ownership still proves session %s",
 					pvc.Namespace,
@@ -266,7 +271,7 @@ func (s *Service) PlanOrphanCleanup(
 	default:
 		plan.AddCheck(
 			orphanFailed(
-				"current-ownership",
+				domain.CheckNameCurrentOwnership,
 				fmt.Sprintf(
 					"current PV %s has unsupported orphan role %q",
 					current.Name,
@@ -300,7 +305,7 @@ func (s *Service) planPostActivationOrphan(
 		if rollbackName == "" {
 			plan.AddCheck(
 				orphanFailed(
-					"rollback-pv",
+					domain.CheckNameRollbackPV,
 					"source PVC and active PV have no rollback PV reference",
 				),
 			)
@@ -310,7 +315,7 @@ func (s *Service) planPostActivationOrphan(
 
 		plan.AddCheck(
 			orphanWarning(
-				"rollback-pv",
+				domain.CheckNameRollbackPV,
 				"source PVC metadata is already finalized; active PV records rollback PV "+rollbackName,
 			),
 		)
@@ -319,7 +324,7 @@ func (s *Service) planPostActivationOrphan(
 	if active.Annotations[kube.PairedPVAnnotation] != rollbackName {
 		plan.AddCheck(
 			orphanFailed(
-				"pv-pair",
+				domain.CheckNamePVPair,
 				fmt.Sprintf(
 					"active PV %s does not point to rollback PV %s",
 					active.Name,
@@ -341,7 +346,7 @@ func (s *Service) planPostActivationOrphan(
 		}
 		plan.AddCheck(
 			orphanWarning(
-				"rollback-pv",
+				domain.CheckNameRollbackPV,
 				fmt.Sprintf(
 					"rollback PV %s is already absent; deletion will remain idempotent",
 					rollbackName,
@@ -350,8 +355,12 @@ func (s *Service) planPostActivationOrphan(
 		)
 	case err != nil:
 		plan.AddCheck(
-			orphanFailed("rollback-pv", fmt.Sprintf("read rollback PV %s: %v", rollbackName, err)),
+			orphanFailed(
+				domain.CheckNameRollbackPV,
+				fmt.Sprintf("read rollback PV %s: %v", rollbackName, err),
+			),
 		)
+
 		return plan, nil
 	default:
 		resources.RollbackPV = kube.PVReference(rollback)
@@ -363,7 +372,7 @@ func (s *Service) planPostActivationOrphan(
 			rollback.Labels[kube.ResourceRoleLabel] != kube.ResourceRoleRollback {
 			plan.AddCheck(
 				orphanFailed(
-					"rollback-ownership",
+					domain.CheckNameRollbackOwnership,
 					fmt.Sprintf(
 						"rollback PV %s must carry session=%s and role=rollback",
 						rollback.Name,
@@ -376,7 +385,7 @@ func (s *Service) planPostActivationOrphan(
 		if rollback.Annotations[kube.PairedPVAnnotation] != active.Name {
 			plan.AddCheck(
 				orphanFailed(
-					"pv-pair",
+					domain.CheckNamePVPair,
 					fmt.Sprintf(
 						"rollback PV %s does not point back to active PV %s",
 						rollback.Name,
@@ -390,7 +399,7 @@ func (s *Service) planPostActivationOrphan(
 			rollback.Status.Phase != corev1.VolumeAvailable {
 			plan.AddCheck(
 				orphanFailed(
-					"rollback-state",
+					domain.CheckNameRollbackState,
 					fmt.Sprintf(
 						"rollback PV %s phase %s must be Released or Available",
 						rollback.Name,
@@ -403,7 +412,7 @@ func (s *Service) planPostActivationOrphan(
 		if !validReclaimPolicy(resources.RollbackPolicy) {
 			plan.AddCheck(
 				orphanFailed(
-					"rollback-policy",
+					domain.CheckNameRollbackPolicy,
 					fmt.Sprintf(
 						"rollback PV %s has no valid original reclaim policy",
 						rollback.Name,
@@ -416,7 +425,7 @@ func (s *Service) planPostActivationOrphan(
 			rollback.Spec.PersistentVolumeReclaimPolicy != resources.RollbackPolicy {
 			plan.AddCheck(
 				orphanFailed(
-					"rollback-policy",
+					domain.CheckNameRollbackPolicy,
 					fmt.Sprintf(
 						"rollback PV %s reclaim policy must be Retain or its recorded original policy before deletion",
 						rollback.Name,
@@ -433,7 +442,7 @@ func (s *Service) planPostActivationOrphan(
 		} else {
 			plan.AddCheck(
 				orphanFailed(
-					"source-ownership",
+					domain.CheckNameSourceOwnership,
 					fmt.Sprintf(
 						"source PVC %s/%s has no ownership marker for orphan session %s",
 						pvc.Namespace,
@@ -448,7 +457,7 @@ func (s *Service) planPostActivationOrphan(
 	if plan.Ready {
 		plan.AddCheck(
 			orphanPassed(
-				"resources",
+				domain.CheckNameResources,
 				fmt.Sprintf(
 					"validated active PVC %s/%s, active PV %s, and rollback PV %s",
 					pvc.Namespace,
@@ -480,7 +489,7 @@ func (s *Service) planPreActivationOrphan(
 	if pvc.Annotations[kube.RollbackPVAnnotation] != "" ||
 		sourcePV.Annotations[kube.PairedPVAnnotation] != "" {
 		plan.AddCheck(orphanFailed(
-			"activation-state",
+			domain.CheckNameActivationState,
 			"source-role resources contain rollback pairing metadata; activation state is ambiguous",
 		))
 
@@ -499,7 +508,7 @@ func (s *Service) planPreActivationOrphan(
 	)
 	if len(matchingPVCs) > 1 {
 		plan.AddCheck(orphanFailed(
-			"destination-pvc",
+			domain.CheckNameDestinationPVC,
 			fmt.Sprintf(
 				"found %d destination PVCs for source PVC UID %s",
 				len(matchingPVCs),
@@ -518,7 +527,13 @@ func (s *Service) planPreActivationOrphan(
 		PersistentVolumes().
 		List(ctx, metav1.ListOptions{LabelSelector: preActivationDestinationSelector(options.SessionID)})
 	if err != nil {
-		plan.AddCheck(orphanFailed("destination-pv", fmt.Sprintf("list destination PVs: %v", err)))
+		plan.AddCheck(
+			orphanFailed(
+				domain.CheckNameDestinationPV,
+				fmt.Sprintf("list destination PVs: %v", err),
+			),
+		)
+
 		return plan, nil
 	}
 
@@ -538,7 +553,7 @@ func (s *Service) planPreActivationOrphan(
 
 	if resources.DestinationPVC.Name != "" {
 		if err := s.ensurePVCUnused(ctx, resources.DestinationPVC, options.SessionID); err != nil {
-			plan.AddCheck(orphanFailed("destination-consumers", err.Error()))
+			plan.AddCheck(orphanFailed(domain.CheckNameDestinationConsumers, err.Error()))
 		}
 	}
 
@@ -581,7 +596,10 @@ func (s *Service) loadPreActivationOrphanResources(
 		metav1.ListOptions{LabelSelector: preActivationSourceSelector(options.SessionID)},
 	)
 	if err != nil {
-		plan.AddCheck(orphanFailed("source-pv", fmt.Sprintf("list source PVs: %v", err)))
+		plan.AddCheck(
+			orphanFailed(domain.CheckNameSourcePV, fmt.Sprintf("list source PVs: %v", err)),
+		)
+
 		return nil, nil, false
 	}
 
@@ -591,8 +609,12 @@ func (s *Service) loadPreActivationOrphanResources(
 	)
 	if err != nil {
 		plan.AddCheck(
-			orphanFailed("destination-pvc", fmt.Sprintf("list destination PVCs: %v", err)),
+			orphanFailed(
+				domain.CheckNameDestinationPVC,
+				fmt.Sprintf("list destination PVCs: %v", err),
+			),
 		)
+
 		return nil, nil, false
 	}
 
@@ -635,7 +657,7 @@ func validatePreActivationDestinationPVC(
 	}
 
 	plan.AddCheck(orphanFailed(
-		"destination-ownership",
+		domain.CheckNameDestinationOwnership,
 		fmt.Sprintf(
 			"destination PVC %s/%s ownership or UID is incomplete",
 			destination.Namespace,
@@ -678,14 +700,14 @@ func (s *Service) resolvePreActivationDestinationPV(
 		}
 
 		plan.AddCheck(orphanWarning(
-			"destination-pvc",
+			domain.CheckNameDestinationPVC,
 			"destination PVC is already absent; its retained PV will be removed",
 		))
 
 		return destinationPV
 	case len(orphanPVs) > 0:
 		plan.AddCheck(orphanFailed(
-			"destination-pv",
+			domain.CheckNameDestinationPV,
 			fmt.Sprintf(
 				"%d unclaimed destination PVs cannot be mapped safely to source PVC %s/%s",
 				len(orphanPVs),
@@ -716,7 +738,7 @@ func (s *Service) destinationPVForPVC(
 		)
 		if apierrors.IsNotFound(getErr) {
 			plan.AddCheck(orphanWarning(
-				"destination-pv",
+				domain.CheckNameDestinationPV,
 				fmt.Sprintf("destination PV %s is already absent", claim.Spec.VolumeName),
 			))
 
@@ -725,7 +747,7 @@ func (s *Service) destinationPVForPVC(
 
 		if getErr != nil {
 			plan.AddCheck(orphanFailed(
-				"destination-pv",
+				domain.CheckNameDestinationPV,
 				fmt.Sprintf("read destination PV %s: %v", claim.Spec.VolumeName, getErr),
 			))
 
@@ -737,7 +759,7 @@ func (s *Service) destinationPVForPVC(
 
 	if err != nil && !apierrors.IsNotFound(err) {
 		plan.AddCheck(orphanFailed(
-			"destination-pvc",
+			domain.CheckNameDestinationPVC,
 			fmt.Sprintf("read destination PVC %s/%s: %v", pvc.Namespace, pvc.Name, err),
 		))
 	}
@@ -759,14 +781,14 @@ func validatePreActivationDestinationPV(
 		destinationPV.Labels[kube.SessionKey] != options.SessionID ||
 		destinationPV.Labels[kube.ResourceRoleLabel] != kube.ResourceRoleDestination {
 		plan.AddCheck(orphanFailed(
-			"destination-ownership",
+			domain.CheckNameDestinationOwnership,
 			fmt.Sprintf("destination PV %s ownership changed", destinationPV.Name),
 		))
 	}
 
 	if !validReclaimPolicy(resources.DestinationPolicy) {
 		plan.AddCheck(orphanFailed(
-			"destination-policy",
+			domain.CheckNameDestinationPolicy,
 			fmt.Sprintf(
 				"destination PV %s has no valid original reclaim policy",
 				destinationPV.Name,
@@ -777,7 +799,7 @@ func validatePreActivationDestinationPV(
 	if destinationPV.Spec.PersistentVolumeReclaimPolicy != corev1.PersistentVolumeReclaimRetain &&
 		destinationPV.Spec.PersistentVolumeReclaimPolicy != resources.DestinationPolicy {
 		plan.AddCheck(orphanFailed(
-			"destination-policy",
+			domain.CheckNameDestinationPolicy,
 			fmt.Sprintf(
 				"destination PV %s reclaim policy must be Retain or its recorded original policy before deletion",
 				destinationPV.Name,
@@ -790,7 +812,7 @@ func validatePreActivationDestinationPV(
 		(claimRef == nil || claimRef.Namespace != resources.DestinationPVC.Namespace ||
 			claimRef.Name != resources.DestinationPVC.Name || claimRef.UID != resources.DestinationPVC.UID) {
 		plan.AddCheck(orphanFailed(
-			"destination-claim",
+			domain.CheckNameDestinationClaim,
 			fmt.Sprintf(
 				"destination PV %s claimRef does not match destination PVC identity",
 				destinationPV.Name,
@@ -814,12 +836,12 @@ func addPreActivationResourceChecks(
 
 	if len(sourcePVs) == 1 {
 		plan.AddCheck(orphanFailed(
-			"other-resources",
+			domain.CheckNameOtherResources,
 			"single-volume orphan ownership includes an unrelated destination PVC",
 		))
 	} else {
 		plan.AddCheck(orphanWarning(
-			"other-resources",
+			domain.CheckNameOtherResources,
 			"the orphan session owns additional destination PVCs; clean each source PVC before the final Lease is removed",
 		))
 	}
@@ -837,7 +859,7 @@ func addPreActivationReadyCheck(
 	}
 
 	plan.AddCheck(orphanPassed(
-		"resources",
+		domain.CheckNameResources,
 		fmt.Sprintf(
 			"validated pre-activation source PVC %s/%s, source PV %s, destination PVC %s/%s, and destination PV %s",
 			pvc.Namespace,
@@ -1140,15 +1162,15 @@ func (s *Service) hasOrphanSessionResources(ctx context.Context, sessionID strin
 	return len(pods.Items) > 0, nil
 }
 
-func orphanPassed(name, message string) domain.Check {
+func orphanPassed(name domain.CheckName, message string) domain.Check {
 	return domain.Check{Name: name, Severity: domain.SeverityInfo, Passed: true, Message: message}
 }
 
-func orphanFailed(name, message string) domain.Check {
+func orphanFailed(name domain.CheckName, message string) domain.Check {
 	return domain.Check{Name: name, Severity: domain.SeverityError, Passed: false, Message: message}
 }
 
-func orphanWarning(name, message string) domain.Check {
+func orphanWarning(name domain.CheckName, message string) domain.Check {
 	return domain.Check{
 		Name:     name,
 		Severity: domain.SeverityWarning,

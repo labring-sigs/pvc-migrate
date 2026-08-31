@@ -35,7 +35,7 @@ const (
 	toolProbePoll             = 250 * time.Millisecond
 	toolProbeEventPoll        = time.Second
 	toolProbeCleanupTTL       = 10 * time.Second
-	transferPathFailureMarker = "pvc-migrate: transfer path preflight:"
+	transferPathFailureMarker = "pvc-migrate: " + domain.ErrorOperationTransferPathPreflight + ":"
 )
 
 // ToolProbeTarget describes one node and namespace where a real tool Pod will
@@ -241,7 +241,9 @@ func (p *KubernetesToolImageProber) probeTarget(
 			poll,
 		); cleanupErr != nil {
 			if retErr != nil && errors.Is(retErr, context.Canceled) {
+				p.outputMu.Lock()
 				logProbeCleanupWarning(options, target.Namespace, created.Name, cleanupErr)
+				p.outputMu.Unlock()
 				return
 			}
 
@@ -1116,7 +1118,7 @@ func toolProbePodFailureWithMessage(
 		strings.Join(target.Components, ","),
 	)
 	if target.RequiredPath != "" && reportedTransferPathProbeFailure(pod) {
-		operation = "transfer path preflight"
+		operation = domain.ErrorOperationTransferPathPreflight
 
 		action := "validate"
 		if target.CreatePath {

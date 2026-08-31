@@ -82,6 +82,10 @@ func (r *rootState) newMoveCommand() *cobra.Command {
 				return reportSessionCreationError(cmd, plan.SessionNamespace, plan.SessionID, err)
 			}
 
+			if deferred, err := deferControllerExecution(ctx, cmd, runtime, session); deferred {
+				return err
+			}
+
 			if err := runtime.service.Move(ctx, session); err != nil {
 				return reportSessionError(cmd, session, err)
 			}

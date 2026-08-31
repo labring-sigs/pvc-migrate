@@ -14,6 +14,8 @@ import (
 	"k8s.io/client-go/util/retry"
 )
 
+const grafanaFieldSuspend = "suspend"
+
 func (m *Manager) verifyGrafanaPaused(
 	ctx context.Context,
 	session *domain.Session,
@@ -64,7 +66,7 @@ func (m *Manager) verifyGrafanaPaused(
 		)
 	}
 
-	suspended, _, _ := unstructured.NestedBool(object.Object, "spec", "suspend")
+	suspended, _, _ := unstructured.NestedBool(object.Object, "spec", grafanaFieldSuspend)
 	if !suspended {
 		return domain.NewError(
 			domain.ErrorPrecondition,
@@ -170,7 +172,7 @@ func (m *Manager) grafanaWorkload(
 	suspended, suspendConfigured, nestedErr := unstructured.NestedBool(
 		grafana.Object,
 		"spec",
-		"suspend",
+		grafanaFieldSuspend,
 	)
 	if nestedErr != nil {
 		return domain.WorkloadSpec{}, domain.WrapError(
@@ -472,7 +474,7 @@ func (m *Manager) validateGrafanaSuspendState(
 		)
 	}
 
-	suspended, _, nestedErr := unstructured.NestedBool(object.Object, "spec", "suspend")
+	suspended, _, nestedErr := unstructured.NestedBool(object.Object, "spec", grafanaFieldSuspend)
 	if nestedErr != nil {
 		return domain.WrapError(
 			domain.ErrorPrecondition,
@@ -638,7 +640,7 @@ func (m *Manager) restoreGrafanaPause(ctx context.Context, session *domain.Sessi
 			)
 		}
 
-		current, _, nestedErr := unstructured.NestedBool(object.Object, "spec", "suspend")
+		current, _, nestedErr := unstructured.NestedBool(object.Object, "spec", grafanaFieldSuspend)
 		if nestedErr != nil {
 			return domain.WrapError(
 				domain.ErrorPrecondition,
@@ -694,12 +696,12 @@ func (m *Manager) restoreGrafanaPause(ctx context.Context, session *domain.Sessi
 					object.Object,
 					grafana.OriginalSuspend,
 					"spec",
-					"suspend",
+					grafanaFieldSuspend,
 				); err != nil {
 					return err
 				}
 			} else {
-				unstructured.RemoveNestedField(object.Object, "spec", "suspend")
+				unstructured.RemoveNestedField(object.Object, "spec", grafanaFieldSuspend)
 			}
 		}
 
@@ -763,7 +765,7 @@ func (m *Manager) setGrafanaPaused(
 			)
 		}
 
-		current, _, nestedErr := unstructured.NestedBool(object.Object, "spec", "suspend")
+		current, _, nestedErr := unstructured.NestedBool(object.Object, "spec", grafanaFieldSuspend)
 		if nestedErr != nil {
 			return domain.WrapError(
 				domain.ErrorPrecondition,
@@ -817,7 +819,7 @@ func (m *Manager) setGrafanaPaused(
 			object.Object,
 			true,
 			"spec",
-			"suspend",
+			grafanaFieldSuspend,
 		); err != nil {
 			return err
 		}

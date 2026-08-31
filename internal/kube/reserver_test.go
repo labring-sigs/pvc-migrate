@@ -11,6 +11,7 @@ import (
 	"github.com/labring-sigs/pvc-migrate/internal/domain"
 	"github.com/labring-sigs/pvc-migrate/internal/testutil"
 	corev1 "k8s.io/api/core/v1"
+	storagev1 "k8s.io/api/storage/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -50,6 +51,7 @@ func TestReserveVolumeProvisionsOnTargetAndRetainsBothPVs(t *testing.T) {
 	sourcePVCUID := types.UID("source-pvc-uid")
 	sourcePVUID := types.UID("source-pv-uid")
 	client := fake.NewClientset(
+		&storagev1.StorageClass{ObjectMeta: metav1.ObjectMeta{Name: storageClass}},
 		&corev1.PersistentVolumeClaim{
 			ObjectMeta: metav1.ObjectMeta{Namespace: "app", Name: "data", UID: sourcePVCUID},
 			Spec: corev1.PersistentVolumeClaimSpec{
@@ -84,6 +86,9 @@ func TestReserveVolumeProvisionsOnTargetAndRetainsBothPVs(t *testing.T) {
 					{Key: "storage", Value: "local", Effect: corev1.TaintEffectNoSchedule},
 				},
 			},
+			Status: corev1.NodeStatus{Conditions: []corev1.NodeCondition{{
+				Type: corev1.NodeReady, Status: corev1.ConditionTrue,
+			}}},
 		},
 	)
 

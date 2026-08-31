@@ -1011,6 +1011,14 @@ func validateInspectedPV(
 		)
 	}
 
+	if err := kube.ValidateBoundVolumeCapacity(pvc, pv, nil); err != nil {
+		return resource.Quantity{}, domain.NewError(
+			domain.ErrorPrecondition,
+			phase,
+			err.Error(),
+		)
+	}
+
 	return capacity, nil
 }
 

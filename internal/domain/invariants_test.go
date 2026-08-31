@@ -452,3 +452,122 @@ func TestNewSessionIDUsesUTCAndDNSCompatibleShape(t *testing.T) {
 		t.Fatalf("session ID = %q", id)
 	}
 }
+
+func TestControllerWorkflowRegistryCoversEveryLocalWorkflow(t *testing.T) {
+	workflows := ControllerWorkflows()
+	if len(workflows) != 8 {
+		t.Fatalf("controller workflow count=%d, want 8", len(workflows))
+	}
+
+	seenTypes := make(map[SessionType]struct{}, len(workflows))
+	seenKinds := make(map[ControllerKind]struct{}, len(workflows))
+
+	seenResources := make(map[string]struct{}, len(workflows))
+
+	for _, workflow := range workflows {
+		if workflow.Type == "" || workflow.Kind == "" || workflow.Resource == "" ||
+			workflow.Singular == "" {
+			t.Fatalf("incomplete controller workflow descriptor=%#v", workflow)
+		}
+
+		if _, exists := seenTypes[workflow.Type]; exists {
+			t.Fatalf("duplicate controller workflow type=%q", workflow.Type)
+		}
+
+		if _, exists := seenKinds[workflow.Kind]; exists {
+			t.Fatalf("duplicate controller workflow kind=%q", workflow.Kind)
+		}
+
+		if _, exists := seenResources[workflow.Resource]; exists {
+			t.Fatalf("duplicate controller workflow resource=%q", workflow.Resource)
+		}
+
+		seenTypes[workflow.Type] = struct{}{}
+		seenKinds[workflow.Kind] = struct{}{}
+		seenResources[workflow.Resource] = struct{}{}
+
+		byType, ok := ControllerWorkflowForType(workflow.Type)
+		if !ok || byType.Kind != workflow.Kind {
+			t.Fatalf("type lookup for %q returned %#v, found=%t", workflow.Type, byType, ok)
+		}
+
+		byKind, ok := ControllerWorkflowForKind(workflow.Kind)
+		if !ok || byKind.Type != workflow.Type {
+			t.Fatalf("kind lookup for %q returned %#v, found=%t", workflow.Kind, byKind, ok)
+		}
+	}
+
+	resources := ControllerWorkflowResources()
+	if len(resources) != len(workflows) {
+		t.Fatalf(
+			"controller resources=%v, want one resource per workflow",
+			resources,
+		)
+	}
+
+	originalKind := workflows[0].Kind
+	workflows[0].Kind = ControllerKind("mutated")
+
+	fresh, ok := ControllerWorkflowForType(workflows[0].Type)
+	if !ok || fresh.Kind != originalKind {
+		t.Fatalf("controller workflow registry was exposed for mutation: %#v, found=%t", fresh, ok)
+	}
+
+	resources[0] = "mutated"
+
+	if ControllerWorkflowResources()[0] == "mutated" {
+		t.Fatal("controller workflow resource registry was exposed for mutation")
+	}
+}
+
+func TestObjectStoreSessionsRejectUnsupportedBackend(t *testing.T) {
+	tests := []struct {
+		name string
+		spec SessionSpec
+	}{
+		{
+			name: "backup",
+			spec: NewSessionSpec(OperationBackup, SessionCommon{
+				SourceNamespace: "app", SessionNamespace: "system",
+			}, false, SessionWorkflowOptions{}),
+		},
+		{
+			name: "restore",
+			spec: NewSessionSpec(OperationRestore, SessionCommon{
+				SourceNamespace: "app", DestinationNamespace: "app", SessionNamespace: "system",
+			}, false, SessionWorkflowOptions{}),
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			spec := test.spec
+			if spec.Backup != nil {
+				spec.Backup.SourcePVC = ObjectReference{
+					Namespace: "app",
+					Name:      "data",
+					UID:       "pvc-uid",
+				}
+				spec.Backup.SourcePV = ObjectReference{Name: "pv-data", UID: "pv-uid"}
+				spec.Backup.Backend = "gcs"
+				spec.Backup.Bucket = "backups"
+				spec.Backup.Name = "daily"
+			} else {
+				spec.Restore.DestinationPVC = ObjectReference{Namespace: "app", Name: "data"}
+				spec.Restore.Backend = "gcs"
+				spec.Restore.Bucket = "backups"
+				spec.Restore.Name = "daily"
+			}
+
+			if err := NewSession(
+				"backend-test",
+				spec,
+				time.Now(),
+			).Validate(); CategoryOf(
+				err,
+			) != ErrorValidation {
+				t.Fatalf("unsupported backend error=%v category=%q", err, CategoryOf(err))
+			}
+		})
+	}
+}

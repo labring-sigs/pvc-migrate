@@ -7,7 +7,7 @@ import (
 	"github.com/labring-sigs/pvc-migrate/internal/kube"
 )
 
-// cleanupBackupCredentials owns backup-only credential lifecycle. Migration
+// cleanupBackupCredentials owns object-store credential lifecycle. Migration
 // cleanup has no Secret to delete and never enters this file.
 func (s *Service) cleanupBackupCredentials(ctx context.Context, session *domain.Session) error {
 	ref := backupCredentialsCleanupReference(session)
@@ -19,7 +19,14 @@ func (s *Service) cleanupBackupCredentials(ctx context.Context, session *domain.
 		return err
 	}
 
-	session.Spec.Backup.CredentialsSecret = domain.ObjectReference{}
+	if session.Spec.Backup != nil {
+		session.Spec.Backup.CredentialsSecret = domain.ObjectReference{}
+	}
+
+	if session.Spec.Restore != nil {
+		session.Spec.Restore.CredentialsSecret = domain.ObjectReference{}
+	}
+
 	if session.ResourceVersion != "" {
 		return s.persist(ctx, session)
 	}
@@ -28,12 +35,16 @@ func (s *Service) cleanupBackupCredentials(ctx context.Context, session *domain.
 }
 
 func backupCredentialsCleanupReference(session *domain.Session) domain.ObjectReference {
-	if session == nil || session.Spec.Backup == nil {
+	if session == nil || (session.Spec.Backup == nil && session.Spec.Restore == nil) {
 		return domain.ObjectReference{}
 	}
 
-	if session.Spec.Backup.CredentialsSecret.Name != "" {
+	if session.Spec.Backup != nil && session.Spec.Backup.CredentialsSecret.Name != "" {
 		return session.Spec.Backup.CredentialsSecret
+	}
+
+	if session.Spec.Restore != nil && session.Spec.Restore.CredentialsSecret.Name != "" {
+		return session.Spec.Restore.CredentialsSecret
 	}
 
 	if session.ID == "" || session.Spec.SessionNamespace == "" {

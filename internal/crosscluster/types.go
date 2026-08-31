@@ -16,7 +16,7 @@ import (
 )
 
 const (
-	APIVersion     = "pvc-migrate.io/v1alpha1"
+	APIVersion     = domain.SessionAPIVersion
 	Kind           = "CrossClusterCopySession"
 	ManagedByLabel = "pvc-migrate.io/managed-by"
 	ManagedBy      = "pvc-migrate-cross-cluster"
@@ -143,9 +143,9 @@ type VolumePlan struct {
 }
 
 type Check struct {
-	Name    string `json:"name"    yaml:"name"`
-	Passed  bool   `json:"passed"  yaml:"passed"`
-	Message string `json:"message" yaml:"message"`
+	Name    domain.CheckName `json:"name"    yaml:"name"`
+	Passed  bool             `json:"passed"  yaml:"passed"`
+	Message string           `json:"message" yaml:"message"`
 }
 
 type Plan struct {
@@ -163,7 +163,7 @@ type Plan struct {
 	Ready                bool                 `json:"ready"                yaml:"ready"`
 }
 
-func (p *Plan) AddCheck(name string, passed bool, message string) {
+func (p *Plan) AddCheck(name domain.CheckName, passed bool, message string) {
 	p.Checks = append(p.Checks, Check{Name: name, Passed: passed, Message: message})
 	if !passed {
 		p.Ready = false

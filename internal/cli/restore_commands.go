@@ -2,6 +2,7 @@ package cli
 
 import (
 	"github.com/labring-sigs/pvc-migrate/internal/backup"
+	"github.com/labring-sigs/pvc-migrate/internal/domain"
 	"github.com/labring-sigs/pvc-migrate/internal/kube"
 	"github.com/spf13/cobra"
 )
@@ -86,6 +87,38 @@ func (r *rootState) newRestoreTransferCommand() *cobra.Command {
 				return reportApprovalError(cmd, err)
 			}
 
+			if err := requireControllerWorkflow(runtime, domain.SessionTypeRestore); err != nil {
+				return reportTransferError(cmd, "restore", flags.namespace, flags.pvc, err)
+			}
+
+			if controllerWorkflowAvailable(runtime, domain.SessionTypeRestore) {
+				session, submitErr := backup.SubmitRestore(
+					ctx,
+					runtime.clients.Kubernetes,
+					request,
+					*plan,
+				)
+				if submitErr != nil {
+					return reportTransferError(
+						cmd,
+						"restore",
+						flags.namespace,
+						flags.pvc,
+						submitErr,
+					)
+				}
+
+				if deferred, deferErr := deferControllerExecution(
+					ctx, cmd, runtime, session,
+				); deferred {
+					return deferErr
+				}
+
+				if session.Backend == kube.SessionBackendCRD {
+					return nil
+				}
+			}
+
 			err = backup.Run(ctx, runtime.clients.Kubernetes, request, true)
 			if err != nil {
 				return reportTransferError(cmd, "restore", flags.namespace, flags.pvc, err)
@@ -105,7 +138,13 @@ func (r *rootState) newRestoreTransferCommand() *cobra.Command {
 	}
 	bindRestoreFlags(command, flags)
 	bindDryRun(command, &dryRun)
-	command.AddCommand(r.newRestorePlanCommand())
+	command.AddCommand(
+		r.newRestorePlanCommand(),
+		r.newRestoreStatusCommand(),
+		r.newRestoreResumeCommand(),
+		r.newRestoreAbortCommand(),
+		r.newRestoreCleanupCommand(),
+	)
 
 	return command
 }

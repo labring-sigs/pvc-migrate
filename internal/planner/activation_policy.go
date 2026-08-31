@@ -23,7 +23,7 @@ func (p *Planner) checkActivationPVCPolicies(
 		if err != nil || requested.Sign() <= 0 {
 			plan.AddCheck(
 				failed(
-					"activation-policy",
+					domain.CheckNameActivationPolicy,
 					fmt.Sprintf(
 						"PVC %s/%s has invalid destination capacity %q",
 						volume.SourcePVC.Namespace,
@@ -74,7 +74,7 @@ func (p *Planner) checkActivationPVCPolicies(
 		if err != nil {
 			plan.AddCheck(
 				failed(
-					"activation-policy",
+					domain.CheckNameActivationPolicy,
 					fmt.Sprintf("check application PVC admission in %s: %v", namespace, err),
 				),
 			)
@@ -85,7 +85,7 @@ func (p *Planner) checkActivationPVCPolicies(
 		if len(report.QuotaViolations) > 0 {
 			plan.AddCheck(
 				failed(
-					"resource-quota",
+					domain.CheckNameResourceQuota,
 					"activation PVC: "+strings.Join(report.QuotaViolations, "; "),
 				),
 			)
@@ -94,7 +94,7 @@ func (p *Planner) checkActivationPVCPolicies(
 		if len(report.LimitRangeViolations) > 0 {
 			plan.AddCheck(
 				failed(
-					"limit-range",
+					domain.CheckNameLimitRange,
 					"activation PVC: "+strings.Join(report.LimitRangeViolations, "; "),
 				),
 			)

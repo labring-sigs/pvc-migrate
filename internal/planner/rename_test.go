@@ -583,7 +583,7 @@ func TestPlanRenameChecksMutationRBAC(t *testing.T) {
 	}
 }
 
-func hasFailedCheck(plan *domain.MigrationPlan, name string) bool {
+func hasFailedCheck(plan *domain.MigrationPlan, name domain.CheckName) bool {
 	for _, check := range plan.Checks {
 		if check.Name == name && !check.Passed {
 			return true

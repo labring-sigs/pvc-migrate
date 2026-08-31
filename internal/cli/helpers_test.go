@@ -255,6 +255,7 @@ func testRootCommandSurface(t *testing.T, root *cobra.Command) {
 		"log-level":         "info",
 		"color":             "auto",
 		"stream-tool-logs":  "true",
+		"wait":              "true",
 		"no-compress":       "false",
 		"yes":               "false",
 		"tool-image":        "ghcr.io/labring-sigs/pvc-migrate:test",
@@ -434,7 +435,7 @@ func testCopyBackupRestoreFlags(t *testing.T, root *cobra.Command) {
 		t.Fatalf("backup --id usage=%v", backupID)
 	}
 
-	if restoreID == nil || !strings.Contains(restoreID.Usage, "no Session is created") {
+	if restoreID == nil || !strings.Contains(restoreID.Usage, "Restore session ID") {
 		t.Fatalf("restore --id usage=%v", restoreID)
 	}
 
@@ -871,6 +872,31 @@ func TestParseColorMode(t *testing.T) {
 
 	if _, err := parseColorMode("rainbow"); domain.CategoryOf(err) != domain.ErrorValidation {
 		t.Fatalf("invalid color mode error=%v category=%q", err, domain.CategoryOf(err))
+	}
+}
+
+func TestParseExecutionMode(t *testing.T) {
+	tests := []struct {
+		input string
+		want  executionMode
+	}{
+		{input: "auto", want: executionModeAuto},
+		{input: " SESSION ", want: executionModeSession},
+		{input: "Controller", want: executionModeController},
+	}
+	for _, test := range tests {
+		got, err := parseExecutionMode(test.input)
+		if err != nil {
+			t.Fatalf("parseExecutionMode(%q): %v", test.input, err)
+		}
+
+		if got != test.want {
+			t.Fatalf("parseExecutionMode(%q)=%q, want %q", test.input, got, test.want)
+		}
+	}
+
+	if _, err := parseExecutionMode("direct"); domain.CategoryOf(err) != domain.ErrorValidation {
+		t.Fatalf("invalid execution mode error=%v category=%q", err, domain.CategoryOf(err))
 	}
 }
 

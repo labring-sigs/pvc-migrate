@@ -396,7 +396,7 @@ func (p *Planner) checkStorageCapacity(
 
 		plan.AddCheck(
 			domain.Check{
-				Name:     "storage-capacity",
+				Name:     domain.CheckNameStorageCapacity,
 				Severity: severity,
 				Passed:   passedResult,
 				Message:  err.Error(),
@@ -418,7 +418,7 @@ func (p *Planner) checkStorageCapacity(
 		plan.StorageCapacity = append(plan.StorageCapacity, evaluation.report)
 
 		check := domain.Check{
-			Name:     "storage-capacity",
+			Name:     domain.CheckNameStorageCapacity,
 			Severity: domain.SeverityInfo,
 			Passed:   true,
 			Message:  evaluation.report.Message,

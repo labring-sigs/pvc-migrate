@@ -109,6 +109,10 @@ func (r *rootState) newBackupResumeCommand() *cobra.Command {
 				}
 			}
 
+			if deferred, err := deferControllerExecution(ctx, cmd, runtime, session); deferred {
+				return err
+			}
+
 			if err := backup.Resume(ctx, runtime.clients.Kubernetes, request, session); err != nil {
 				return reportSessionError(cmd, session, err)
 			}
@@ -223,7 +227,7 @@ func (r *rootState) newBackupCleanupCommand() *cobra.Command {
 			}
 
 			if options.DeleteSession {
-				return printDeletedSession(cmd, args[0])
+				return printDeletedSession(cmd, session)
 			}
 
 			return printSessionResult(cmd, runtime, session)

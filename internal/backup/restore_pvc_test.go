@@ -290,6 +290,74 @@ func TestRestorePVCCreationRejectsForeignExistingPVC(t *testing.T) {
 	}
 }
 
+func TestRestorePVCCreationRejectsIncompatibleAllowedTopologies(t *testing.T) {
+	client, request := restorePVCCreationFixture(t, nil)
+	request.TargetNode = "worker-a"
+
+	storageClass, err := client.StorageV1().StorageClasses().Get(
+		t.Context(),
+		request.DestinationStorageClass,
+		metav1.GetOptions{},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	storageClass.AllowedTopologies = []corev1.TopologySelectorTerm{{
+		MatchLabelExpressions: []corev1.TopologySelectorLabelRequirement{{
+			Key: corev1.LabelHostname, Values: []string{"worker-b"},
+		}},
+	}}
+	if _, err := client.StorageV1().StorageClasses().Update(
+		t.Context(),
+		storageClass,
+		metav1.UpdateOptions{},
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err = Preflight(t.Context(), client, request, true)
+	if domain.CategoryOf(err) != domain.ErrorPrecondition ||
+		!strings.Contains(err.Error(), "allowedTopologies") {
+		t.Fatalf("category=%s error=%v", domain.CategoryOf(err), err)
+	}
+
+	if _, getErr := client.CoreV1().PersistentVolumeClaims(request.Namespace).
+		Get(t.Context(), request.PVCName, metav1.GetOptions{}); !apierrors.IsNotFound(getErr) {
+		t.Fatalf("incompatible topology created PVC: %v", getErr)
+	}
+}
+
+func TestRestorePVCCreationBoundPVCDoesNotDependOnStorageClass(t *testing.T) {
+	client, request := restorePVCCreationFixture(t, nil)
+	pvc := ownedRestorePVC(request, corev1.ClaimBound)
+
+	pvc.Spec.VolumeName = "restore-pv"
+	if _, err := client.CoreV1().PersistentVolumeClaims(request.Namespace).
+		Create(t.Context(), pvc, metav1.CreateOptions{}); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := client.StorageV1().StorageClasses().Delete(
+		t.Context(),
+		request.DestinationStorageClass,
+		metav1.DeleteOptions{},
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	plan, err := preflightRestorePVCCreation(
+		t.Context(),
+		client,
+		request,
+		request.ToolImage,
+		pvc,
+	)
+	if err != nil || plan != nil {
+		t.Fatalf("bound PVC creation preflight plan=%#v error=%v", plan, err)
+	}
+}
+
 func TestRestorePVCCreationRetriesOwnedPendingPVC(t *testing.T) {
 	storeAPI := &preflightObjectStore{manifest: emptyBackupManifestForPath()}
 	client, request := restorePVCCreationFixture(t, storeAPI)

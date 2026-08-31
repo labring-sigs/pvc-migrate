@@ -510,6 +510,10 @@ func (p Printer) printSession(session *domain.Session) error {
 		return printBackupSessionDetails(w, session.Spec.Backup)
 	}
 
+	if session.Spec.Type == domain.SessionTypeRestore && session.Spec.Restore != nil {
+		return printRestoreSessionDetails(w, session.Spec.Restore)
+	}
+
 	if _, err := fmt.Fprintln(
 		w,
 		"\nPVC\tTRANSFER SCOPE\tRESERVED\tWARM SYNC\tFINAL SYNC\tSOURCE CAPACITY\tSOURCE USED\tDESTINATION CAPACITY\tACTIVE PV",
@@ -598,6 +602,52 @@ func printBackupSessionDetails(w *tabwriter.Writer, payload *domain.BackupSessio
 		mode,
 		transferPath,
 		strings.Join(destinationParts, "/"),
+		credentials,
+	); err != nil {
+		return err
+	}
+
+	return w.Flush()
+}
+
+func printRestoreSessionDetails(w *tabwriter.Writer, payload *domain.RestoreSessionSpec) error {
+	transferPath := payload.Path
+	if transferPath == "" {
+		transferPath = "."
+	}
+
+	sourceParts := []string{payload.Bucket}
+	if payload.Prefix != "" {
+		sourceParts = append(sourceParts, payload.Prefix)
+	}
+
+	sourceParts = append(sourceParts, payload.Name)
+
+	credentials := "-"
+	if payload.CredentialsSecret.Name != "" {
+		credentials = payload.CredentialsSecret.Namespace + "/" + payload.CredentialsSecret.Name
+	}
+
+	createPVC := "no"
+	if payload.CreatePVC {
+		createPVC = "yes"
+	}
+
+	if _, err := fmt.Fprintln(
+		w,
+		"\nDESTINATION PVC\tPATH\tSOURCE\tCREATE PVC\tCREDENTIALS SECRET",
+	); err != nil {
+		return err
+	}
+
+	if _, err := fmt.Fprintf(
+		w,
+		"%s/%s\t%s\ts3://%s/\t%s\t%s\n",
+		payload.DestinationPVC.Namespace,
+		payload.DestinationPVC.Name,
+		transferPath,
+		strings.Join(sourceParts, "/"),
+		createPVC,
 		credentials,
 	); err != nil {
 		return err

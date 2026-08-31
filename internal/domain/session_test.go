@@ -73,6 +73,75 @@ func TestSessionSpecUsesConcretePayload(t *testing.T) {
 	}
 }
 
+func TestSessionConstructorsOwnMutableInputs(t *testing.T) {
+	storageClass := "fast"
+	replicas := int32(3)
+	ordinal := int32(1)
+	common := SessionCommon{
+		SourceNamespace: "app", DestinationNamespace: "app", SessionNamespace: "system",
+		Volumes: []VolumeSpec{{
+			SourcePVCSpec: corev1.PersistentVolumeClaimSpec{
+				StorageClassName: &storageClass,
+				AccessModes:      []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce},
+			},
+			SourcePVCMetadata: PVCMetadata{Labels: map[string]string{"owner": "source"}},
+			AccessModes:       []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce},
+			TransferScope:     &TransferScope{SourcePath: "/source"},
+		}},
+	}
+	workload := WorkloadSpec{
+		Adapter:          WorkloadStatefulSet,
+		OriginalReplicas: &replicas,
+		Ordinal:          &ordinal,
+		AffectedPods:     []ObjectReference{{Name: "db-1"}},
+		OriginalObject:   json.RawMessage("invalid but durable"),
+	}
+	spec := NewPodMigrationSessionSpec(
+		common,
+		workload,
+		SessionWorkflowOptions{Strategies: []string{"mount"}},
+		1,
+		false,
+	)
+
+	storageClass = "slow"
+	common.Volumes[0].SourcePVCSpec.AccessModes[0] = corev1.ReadWriteMany
+	common.Volumes[0].SourcePVCMetadata.Labels["owner"] = "changed"
+	common.Volumes[0].TransferScope.SourcePath = "/changed"
+	workload.OriginalReplicas = new(int32(9))
+	workload.AffectedPods[0].Name = "changed"
+	workload.OriginalObject[0] = 'X'
+
+	if *spec.Volumes[0].SourcePVCSpec.StorageClassName != "fast" ||
+		spec.Volumes[0].SourcePVCSpec.AccessModes[0] != corev1.ReadWriteOnce ||
+		spec.Volumes[0].SourcePVCMetadata.Labels["owner"] != "source" ||
+		spec.Volumes[0].TransferScope.SourcePath != "/source" ||
+		*spec.Workload().OriginalReplicas != 3 ||
+		spec.Workload().AffectedPods[0].Name != "db-1" ||
+		string(spec.Workload().OriginalObject) != "invalid but durable" {
+		t.Fatalf("constructor retained mutable input state: %#v", spec)
+	}
+
+	clonedSpec := spec.DeepCopy()
+	*clonedSpec.WorkloadPtr().OriginalReplicas = 7
+	clonedSpec.WorkloadPtr().AffectedPods[0].Name = "copy"
+	clonedSpec.WorkloadPtr().OriginalObject[0] = 'Y'
+
+	clonedSpec.Volumes[0].SourcePVCMetadata.Labels["owner"] = "copy"
+	if *spec.Workload().OriginalReplicas != 3 || spec.Workload().AffectedPods[0].Name != "db-1" ||
+		string(spec.Workload().OriginalObject) != "invalid but durable" ||
+		spec.Volumes[0].SourcePVCMetadata.Labels["owner"] != "source" {
+		t.Fatal("DeepCopy shared mutable session state")
+	}
+
+	session := NewSession("owned", spec, time.Unix(200, 0))
+
+	spec.Volumes[0].SourcePVCMetadata.Labels["owner"] = "after session"
+	if session.Spec.Volumes[0].SourcePVCMetadata.Labels["owner"] != "source" {
+		t.Fatal("NewSession shared spec ownership with its caller")
+	}
+}
+
 func TestSessionWorkflowOptionsArePersistedInsideConcretePayload(t *testing.T) {
 	common := SessionCommon{
 		SourceNamespace:      "app",

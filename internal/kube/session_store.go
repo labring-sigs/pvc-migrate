@@ -7,6 +7,7 @@ import (
 	"slices"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/labring-sigs/pvc-migrate/internal/domain"
 	corev1 "k8s.io/api/core/v1"
@@ -51,11 +52,51 @@ type SessionLock interface {
 }
 
 type ConfigMapSessionStore struct {
-	client kubernetes.Interface
+	client          kubernetes.Interface
+	leaseDuration   time.Duration
+	leaseRenewEvery time.Duration
 }
 
 func NewConfigMapSessionStore(client kubernetes.Interface) *ConfigMapSessionStore {
-	return &ConfigMapSessionStore{client: client}
+	return &ConfigMapSessionStore{
+		client:          client,
+		leaseDuration:   defaultSessionLeaseDuration,
+		leaseRenewEvery: defaultSessionLeaseRenewEvery,
+	}
+}
+
+// WithLeaseTiming configures the per-store Lease timing. Keeping timing on
+// the store isolates independent clients and prevents one workflow or test
+// from changing the renewal behavior of locks already held by another.
+func (s *ConfigMapSessionStore) WithLeaseTiming(
+	duration, renewEvery time.Duration,
+) *ConfigMapSessionStore {
+	if s == nil {
+		return s
+	}
+
+	if duration > 0 {
+		s.leaseDuration = duration
+	}
+
+	if renewEvery > 0 {
+		s.leaseRenewEvery = renewEvery
+	}
+
+	return s
+}
+
+func (s *ConfigMapSessionStore) leaseTiming() (time.Duration, time.Duration) {
+	duration, renewEvery := s.leaseDuration, s.leaseRenewEvery
+	if duration <= 0 {
+		duration = defaultSessionLeaseDuration
+	}
+
+	if renewEvery <= 0 {
+		renewEvery = defaultSessionLeaseRenewEvery
+	}
+
+	return duration, renewEvery
 }
 
 func SessionConfigMapName(id string) string {
@@ -102,6 +143,7 @@ func (s *ConfigMapSessionStore) Create(ctx context.Context, session *domain.Sess
 	}
 
 	session.ResourceVersion = created.ResourceVersion
+	session.Backend = SessionBackendConfigMap
 
 	return nil
 }
@@ -126,7 +168,12 @@ func (s *ConfigMapSessionStore) Get(
 		return nil, domain.WrapError(domain.ErrorKubernetes, "get session", "read ConfigMap", err)
 	}
 
-	return decodeSession(cm)
+	session, decodeErr := decodeSession(cm)
+	if decodeErr == nil {
+		session.Backend = SessionBackendConfigMap
+	}
+
+	return session, decodeErr
 }
 
 func (s *ConfigMapSessionStore) Update(ctx context.Context, session *domain.Session) error {
@@ -223,6 +270,7 @@ func (s *ConfigMapSessionStore) Update(ctx context.Context, session *domain.Sess
 	}
 
 	session.ResourceVersion = updated.ResourceVersion
+	session.Backend = SessionBackendConfigMap
 
 	return nil
 }
@@ -253,6 +301,13 @@ func (s *ConfigMapSessionStore) List(
 
 		session, decodeErr := decodeSession(&items.Items[i])
 		if decodeErr != nil {
+			// Schema upgrades intentionally do not provide reverse decoding. A
+			// stale ConfigMap must not prevent inventory of current sessions or
+			// CRD-backed workflows; an explicit Get still reports the validation
+			// error so operators cannot mutate an unknown record accidentally.
+			if strings.Contains(strings.ToLower(decodeErr.Error()), "unsupported session schema") {
+				continue
+			}
 			return nil, decodeErr
 		}
 
@@ -390,6 +445,8 @@ func decodeSession(cm *corev1.ConfigMap) (*domain.Session, error) {
 	}
 
 	session.ResourceVersion = cm.ResourceVersion
+
+	session.Backend = SessionBackendConfigMap
 	if err := session.Validate(); err != nil {
 		return nil, err
 	}

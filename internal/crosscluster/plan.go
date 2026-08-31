@@ -5,9 +5,11 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync"
 
 	"github.com/labring-sigs/pvc-migrate/internal/domain"
 	"github.com/labring-sigs/pvc-migrate/internal/kube"
+	"github.com/labring-sigs/pvc-migrate/internal/parallel"
 	corev1 "k8s.io/api/core/v1"
 	storagev1 "k8s.io/api/storage/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -27,12 +29,7 @@ func (s *Service) Plan(ctx context.Context, options Options) (*Plan, error) {
 		)
 	}
 
-	sourceID, err := kube.Identity(ctx, s.source)
-	if err != nil {
-		return nil, err
-	}
-
-	destID, err := kube.Identity(ctx, s.destination)
+	sourceID, destID, err := s.clusterIdentities(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -85,36 +82,55 @@ func (s *Service) planCrossClusterEnvironment(
 	options Options,
 ) *storagev1.StorageClass {
 	if err := ValidateSessionID(options.SessionID); err != nil {
-		plan.AddCheck("session-id", false, err.Error())
+		plan.AddCheck(domain.CheckNameSessionID, false, err.Error())
 	}
 
 	if plan.SourceCluster.ID == plan.DestinationCluster.ID {
 		plan.AddCheck(
-			"clusters",
+			domain.CheckNameClusters,
 			false,
 			"source and destination resolve to the same Kubernetes API endpoint; use single-cluster copy",
 		)
 	}
 
 	if _, err := kube.NormalizeToolImage(options.ToolImage); err != nil {
-		plan.AddCheck("tool-image", false, err.Error())
+		plan.AddCheck(domain.CheckNameToolImage, false, err.Error())
 	}
 
-	_, err := s.destination.Kubernetes.CoreV1().Namespaces().Get(
-		ctx,
-		options.DestinationNamespace,
-		metav1.GetOptions{},
+	var (
+		namespaceErr     error
+		destinationClass *storagev1.StorageClass
+		storageClassErr  error
+		environmentReads sync.WaitGroup
 	)
+	environmentReads.Go(func() {
+		_, namespaceErr = s.destination.Kubernetes.CoreV1().Namespaces().Get(
+			ctx,
+			options.DestinationNamespace,
+			metav1.GetOptions{},
+		)
+	})
+
+	if options.DestinationStorageClass != "" {
+		environmentReads.Go(func() {
+			destinationClass, storageClassErr = s.destination.Kubernetes.StorageV1().
+				StorageClasses().Get(ctx, options.DestinationStorageClass, metav1.GetOptions{})
+		})
+	}
+
+	environmentReads.Wait()
+
+	err := namespaceErr
 	switch {
 	case err != nil && !apierrors.IsNotFound(err):
 		plan.AddCheck(
-			"destination-namespace",
+			domain.CheckNameDestinationNamespace,
 			false,
 			fmt.Sprintf("read destination namespace %s: %v", options.DestinationNamespace, err),
 		)
 	case apierrors.IsNotFound(err):
 		plan.AddCheck(
-			"destination-namespace",
+			domain.CheckNameDestinationNamespace,
 			true,
 			fmt.Sprintf(
 				"destination namespace %s will be created by reserve",
@@ -123,38 +139,32 @@ func (s *Service) planCrossClusterEnvironment(
 		)
 	default:
 		plan.AddCheck(
-			"destination-namespace",
+			domain.CheckNameDestinationNamespace,
 			true,
 			fmt.Sprintf("destination namespace %s exists", options.DestinationNamespace),
 		)
 	}
 
-	var destinationClass *storagev1.StorageClass
-	if options.DestinationStorageClass == "" {
+	switch {
+	case options.DestinationStorageClass == "":
 		plan.AddCheck(
-			"destination-storage-class",
+			domain.CheckNameDestinationStorageClass,
 			false,
 			"--destination-storage-class is required for cross-cluster copy",
 		)
-	} else if storageClass, getErr := s.destination.Kubernetes.StorageV1().StorageClasses().Get(
-		ctx,
-		options.DestinationStorageClass,
-		metav1.GetOptions{},
-	); getErr != nil {
+	case storageClassErr != nil:
 		plan.AddCheck(
-			"destination-storage-class",
+			domain.CheckNameDestinationStorageClass,
 			false,
 			fmt.Sprintf(
 				"read destination StorageClass %s: %v",
 				options.DestinationStorageClass,
-				getErr,
+				storageClassErr,
 			),
 		)
-	} else {
-		destinationClass = storageClass
-
+	default:
 		plan.AddCheck(
-			"destination-storage-class",
+			domain.CheckNameDestinationStorageClass,
 			true,
 			fmt.Sprintf(
 				"destination StorageClass %s is available",
@@ -166,11 +176,11 @@ func (s *Service) planCrossClusterEnvironment(
 	if destinationClass != nil {
 		node, selectErr := s.selectTargetNode(ctx, options.TargetNode, destinationClass)
 		if selectErr != nil {
-			plan.AddCheck("target-node", false, selectErr.Error())
+			plan.AddCheck(domain.CheckNameTargetNode, false, selectErr.Error())
 		} else {
 			plan.TargetNode = node.Name
 			plan.AddCheck(
-				"target-node",
+				domain.CheckNameTargetNode,
 				true,
 				fmt.Sprintf(
 					"destination node %s is Ready, schedulable, and topology-compatible",
@@ -181,10 +191,10 @@ func (s *Service) planCrossClusterEnvironment(
 	}
 
 	if err := validateStrategies(plan.Strategies); err != nil {
-		plan.AddCheck("strategy", false, err.Error())
+		plan.AddCheck(domain.CheckNameStrategy, false, err.Error())
 	} else {
 		plan.AddCheck(
-			"strategy",
+			domain.CheckNameStrategy,
 			true,
 			"cross-cluster transfer uses "+strings.Join(plan.Strategies, ", "),
 		)
@@ -195,20 +205,20 @@ func (s *Service) planCrossClusterEnvironment(
 
 func resolveCrossClusterInputs(plan *Plan, options Options) (crossClusterPlanInputs, bool) {
 	if len(options.SourcePVCs) == 0 {
-		plan.AddCheck("source-pvc", false, "at least one --source-pvc is required")
+		plan.AddCheck(domain.CheckNameSourcePVC, false, "at least one --source-pvc is required")
 		return crossClusterPlanInputs{}, false
 	}
 
 	seen := make(map[string]struct{}, len(options.SourcePVCs))
 	for _, source := range options.SourcePVCs {
 		if source == "" {
-			plan.AddCheck("source-pvc", false, "source PVC names must not be empty")
+			plan.AddCheck(domain.CheckNameSourcePVC, false, "source PVC names must not be empty")
 			return crossClusterPlanInputs{}, false
 		}
 
 		if _, exists := seen[source]; exists {
 			plan.AddCheck(
-				"source-pvc",
+				domain.CheckNameSourcePVC,
 				false,
 				fmt.Sprintf(
 					"source PVC %s was specified more than once; use one explicit mapping per PVC",
@@ -225,7 +235,7 @@ func resolveCrossClusterInputs(plan *Plan, options Options) (crossClusterPlanInp
 	if len(options.SourcePVCs) > 1 && len(options.DestinationPVCs) == 1 &&
 		!strings.Contains(options.DestinationPVCs[0], "=") {
 		plan.AddCheck(
-			"destination-pvc",
+			domain.CheckNameDestinationPVC,
 			false,
 			"multiple source PVCs require explicit source=destination mappings",
 		)
@@ -240,7 +250,7 @@ func resolveCrossClusterInputs(plan *Plan, options Options) (crossClusterPlanInp
 		options.DestinationPVCs,
 		options.SourcePVCs,
 	); err != nil {
-		plan.AddCheck("destination-pvc", false, err.Error())
+		plan.AddCheck(domain.CheckNameDestinationPVC, false, err.Error())
 		return crossClusterPlanInputs{}, false
 	}
 
@@ -248,12 +258,12 @@ func resolveCrossClusterInputs(plan *Plan, options Options) (crossClusterPlanInp
 		options.DestinationCapacities,
 		options.SourcePVCs,
 	); err != nil {
-		plan.AddCheck("destination-capacity", false, err.Error())
+		plan.AddCheck(domain.CheckNameDestinationCapacity, false, err.Error())
 		return crossClusterPlanInputs{}, false
 	}
 
 	if inputs.sourcePaths, err = resolvePaths(options.SourcePaths, options.SourcePVCs); err != nil {
-		plan.AddCheck("source-path", false, err.Error())
+		plan.AddCheck(domain.CheckNameSourcePath, false, err.Error())
 		return crossClusterPlanInputs{}, false
 	}
 
@@ -261,7 +271,7 @@ func resolveCrossClusterInputs(plan *Plan, options Options) (crossClusterPlanInp
 		options.DestinationPaths,
 		options.SourcePVCs,
 	); err != nil {
-		plan.AddCheck("destination-path", false, err.Error())
+		plan.AddCheck(domain.CheckNameDestinationPath, false, err.Error())
 		return crossClusterPlanInputs{}, false
 	}
 
@@ -275,23 +285,46 @@ func (s *Service) planCrossClusterVolumes(
 	destinationClass *storagev1.StorageClass,
 	inputs crossClusterPlanInputs,
 ) {
-	for index, name := range options.SourcePVCs {
-		if volume, ok := s.planCrossClusterVolume(
+	type result struct {
+		volume VolumePlan
+		checks []Check
+		ok     bool
+	}
+
+	results := make([]result, len(options.SourcePVCs))
+	parallel.For(len(options.SourcePVCs), func(index int) {
+		// planCrossClusterVolume records validation details through AddCheck.
+		// Isolate those writes per volume so independent source/target reads can
+		// run concurrently, then merge them below in input order.
+		volumePlan := *plan
+		volumePlan.Checks = nil
+		volumePlan.Ready = true
+
+		volume, ok := s.planCrossClusterVolume(
 			ctx,
-			plan,
+			&volumePlan,
 			options,
 			destinationClass,
 			inputs,
 			index,
-			name,
-		); ok {
-			plan.Volumes = append(plan.Volumes, volume)
+			options.SourcePVCs[index],
+		)
+		results[index] = result{volume: volume, checks: volumePlan.Checks, ok: ok}
+	})
+
+	for _, item := range results {
+		plan.Checks = append(plan.Checks, item.checks...)
+		if !item.ok {
+			plan.Ready = false
+			continue
 		}
+
+		plan.Volumes = append(plan.Volumes, item.volume)
 	}
 
 	if len(plan.Volumes) == len(options.SourcePVCs) {
 		plan.AddCheck(
-			"source-pvcs",
+			domain.CheckNameSourcePVCs,
 			true,
 			fmt.Sprintf("validated %d source PVC(s)", len(plan.Volumes)),
 		)
@@ -310,7 +343,7 @@ func (s *Service) planCrossClusterVolume(
 	sourcePath, err := domain.NormalizeTransferPath(inputs.sourcePaths[index])
 	if err != nil {
 		plan.AddCheck(
-			"source-path",
+			domain.CheckNameSourcePath,
 			false,
 			fmt.Sprintf("source path for %s is invalid: %v", name, err),
 		)
@@ -321,7 +354,7 @@ func (s *Service) planCrossClusterVolume(
 	destinationPath, err := domain.NormalizeTransferPath(inputs.destPaths[index])
 	if err != nil {
 		plan.AddCheck(
-			"destination-path",
+			domain.CheckNameDestinationPath,
 			false,
 			fmt.Sprintf("destination path for %s is invalid: %v", name, err),
 		)
@@ -338,7 +371,7 @@ func (s *Service) planCrossClusterVolume(
 		)
 	if err == nil {
 		plan.AddCheck(
-			"destination-pvc",
+			domain.CheckNameDestinationPVC,
 			false,
 			fmt.Sprintf(
 				"destination PVC %s/%s already exists with UID %s",
@@ -353,7 +386,7 @@ func (s *Service) planCrossClusterVolume(
 
 	if !apierrors.IsNotFound(err) {
 		plan.AddCheck(
-			"destination-pvc",
+			domain.CheckNameDestinationPVC,
 			false,
 			fmt.Sprintf(
 				"read destination PVC %s/%s: %v",
@@ -371,7 +404,7 @@ func (s *Service) planCrossClusterVolume(
 		Get(ctx, name, metav1.GetOptions{})
 	if err != nil {
 		plan.AddCheck(
-			"source-pvc",
+			domain.CheckNameSourcePVC,
 			false,
 			fmt.Sprintf("read source PVC %s/%s: %v", options.SourceNamespace, name, err),
 		)
@@ -381,7 +414,7 @@ func (s *Service) planCrossClusterVolume(
 
 	if pvc.Status.Phase != corev1.ClaimBound || pvc.Spec.VolumeName == "" {
 		plan.AddCheck(
-			"source-pvc",
+			domain.CheckNameSourcePVC,
 			false,
 			fmt.Sprintf("source PVC %s/%s must be Bound", pvc.Namespace, pvc.Name),
 		)
@@ -391,7 +424,7 @@ func (s *Service) planCrossClusterVolume(
 
 	if !kube.HasWritableAccessMode(pvc.Spec.AccessModes) {
 		plan.AddCheck(
-			"access-mode",
+			domain.CheckNameAccessMode,
 			false,
 			fmt.Sprintf(
 				"source PVC %s/%s has no writable access mode for the destination copy",
@@ -408,7 +441,7 @@ func (s *Service) planCrossClusterVolume(
 		pvc.Spec.AccessModes,
 	); err != nil {
 		plan.AddCheck(
-			"destination-access-modes",
+			domain.CheckNameDestinationAccessModes,
 			false,
 			fmt.Sprintf(
 				"destination StorageClass %s cannot provide source PVC %s/%s access modes: %v; choose a StorageClass with matching access-mode support",
@@ -427,7 +460,7 @@ func (s *Service) planCrossClusterVolume(
 		Get(ctx, pvc.Spec.VolumeName, metav1.GetOptions{})
 	if err != nil {
 		plan.AddCheck(
-			"source-pv",
+			domain.CheckNameSourcePV,
 			false,
 			fmt.Sprintf("read source PV %s: %v", pvc.Spec.VolumeName, err),
 		)
@@ -441,7 +474,7 @@ func (s *Service) planCrossClusterVolume(
 		pv.Spec.ClaimRef.Name != pvc.Name ||
 		pv.Spec.ClaimRef.UID != pvc.UID {
 		plan.AddCheck(
-			"source-binding",
+			domain.CheckNameSourceBinding,
 			false,
 			fmt.Sprintf(
 				"source PV %s claimRef does not match PVC %s/%s UID %s",
@@ -458,10 +491,16 @@ func (s *Service) planCrossClusterVolume(
 	capacity := pv.Spec.Capacity[corev1.ResourceStorage]
 	if capacity.Sign() <= 0 {
 		plan.AddCheck(
-			"capacity",
+			domain.CheckNameCapacity,
 			false,
 			fmt.Sprintf("source PV %s has no positive storage capacity", pv.Name),
 		)
+
+		return VolumePlan{}, false
+	}
+
+	if err := kube.ValidateBoundVolumeCapacity(pvc, pv, nil); err != nil {
+		plan.AddCheck(domain.CheckNameCapacity, false, err.Error())
 
 		return VolumePlan{}, false
 	}
@@ -481,7 +520,7 @@ func (s *Service) planCrossClusterVolume(
 
 	if pvc.Spec.VolumeMode != nil && *pvc.Spec.VolumeMode != corev1.PersistentVolumeFilesystem {
 		plan.AddCheck(
-			"volume-mode",
+			domain.CheckNameVolumeMode,
 			false,
 			fmt.Sprintf("source PVC %s/%s is not a filesystem volume", pvc.Namespace, pvc.Name),
 		)
@@ -520,7 +559,7 @@ func resolveCrossClusterCapacity(
 	parsed, err := resource.ParseQuantity(requested)
 	if err != nil || parsed.Sign() <= 0 {
 		plan.AddCheck(
-			"destination-capacity",
+			domain.CheckNameDestinationCapacity,
 			false,
 			fmt.Sprintf("destination capacity for %s is invalid", name),
 		)
@@ -532,7 +571,7 @@ func resolveCrossClusterCapacity(
 		switch {
 		case !options.AllowVolumeShrink:
 			plan.AddCheck(
-				"destination-capacity",
+				domain.CheckNameDestinationCapacity,
 				false,
 				fmt.Sprintf(
 					"destination capacity for %s is smaller than source; pass --allow-volume-shrink",
@@ -541,7 +580,7 @@ func resolveCrossClusterCapacity(
 			)
 		case !options.SkipSourceUsageCheck:
 			plan.AddCheck(
-				"source-usage",
+				domain.CheckNameSourceUsage,
 				false,
 				fmt.Sprintf(
 					"cross-cluster shrink for %s has no trusted storage-backend usage reader; independently verify the selected data fits, then pass --skip-source-usage-check",
@@ -550,7 +589,7 @@ func resolveCrossClusterCapacity(
 			)
 		default:
 			plan.AddCheck(
-				"source-usage",
+				domain.CheckNameSourceUsage,
 				true,
 				fmt.Sprintf("source usage check for %s was explicitly skipped", name),
 			)
@@ -569,10 +608,10 @@ func (s *Service) checkCrossClusterConsumers(
 	consumers, err := activeConsumers(ctx, s.source.Kubernetes, pvc.Namespace, pvc.Name)
 	switch {
 	case err != nil:
-		plan.AddCheck("source-consumers", false, err.Error())
+		plan.AddCheck(domain.CheckNameSourceConsumers, false, err.Error())
 	case !options.Online && len(consumers) > 0:
 		plan.AddCheck(
-			"source-consumers",
+			domain.CheckNameSourceConsumers,
 			false,
 			fmt.Sprintf(
 				"source PVC %s/%s has active consumers: %s",
@@ -583,7 +622,7 @@ func (s *Service) checkCrossClusterConsumers(
 		)
 	case options.Online && len(consumers) > 0 && !hasSharedAccessMode(pvc.Spec.AccessModes):
 		plan.AddCheck(
-			"source-consumers",
+			domain.CheckNameSourceConsumers,
 			false,
 			fmt.Sprintf(
 				"online cross-cluster copy requires RWX/ROX while PVC %s/%s has active consumers; a second source tool Pod cannot safely mount this access mode",
@@ -593,7 +632,7 @@ func (s *Service) checkCrossClusterConsumers(
 		)
 	case options.Online:
 		plan.AddCheck(
-			"source-consumers",
+			domain.CheckNameSourceConsumers,
 			true,
 			fmt.Sprintf(
 				"online copy source PVC %s/%s has a compatible shared access mode",

@@ -210,10 +210,6 @@ func TestToolLogStreamerDetectsNoSpaceWhenOutputIsDiscarded(t *testing.T) {
 }
 
 func TestToolLogStreamStopIsBoundedWhenLogStreamIgnoresCancellation(t *testing.T) {
-	previousTimeout := toolLogStopTimeout
-	toolLogStopTimeout = 10 * time.Millisecond
-	t.Cleanup(func() { toolLogStopTimeout = previousTimeout })
-
 	release := make(chan struct{})
 	started := make(chan struct{})
 	source := &blockingToolLogSource{
@@ -221,7 +217,9 @@ func TestToolLogStreamStopIsBoundedWhenLogStreamIgnoresCancellation(t *testing.T
 		release: release,
 		started: started,
 	}
-	stream := startToolLogStream(t.Context(), source, ToolLogOptions{}, source.pod)
+	stream := startToolLogStream(t.Context(), source, ToolLogOptions{
+		StopTimeout: 10 * time.Millisecond,
+	}, source.pod)
 
 	select {
 	case <-started:

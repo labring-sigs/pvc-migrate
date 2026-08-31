@@ -340,6 +340,56 @@ func TestTableBackupSessionRendersBackupDetails(t *testing.T) {
 	}
 }
 
+func TestTableRestoreSessionRendersRestoreDetails(t *testing.T) {
+	now := metav1.NewTime(time.Date(2026, time.August, 21, 1, 2, 3, 0, time.UTC))
+	spec := domain.NewSessionSpec(
+		domain.OperationRestore,
+		domain.SessionCommon{
+			SourceNamespace:      "app",
+			DestinationNamespace: "app",
+			SessionNamespace:     "sessions",
+		},
+		false,
+		domain.SessionWorkflowOptions{},
+	)
+	spec.Restore.DestinationPVC = domain.ObjectReference{Namespace: "app", Name: "data"}
+	spec.Restore.Bucket = "backups"
+	spec.Restore.Prefix = "daily"
+	spec.Restore.Name = "point"
+	spec.Restore.CreatePVC = true
+	spec.Restore.CredentialsSecret = domain.ObjectReference{
+		Namespace: "sessions",
+		Name:      "restore-credentials",
+	}
+	session := &domain.Session{
+		ID:   "restore-test",
+		Spec: spec,
+		Status: domain.SessionStatus{
+			Phase: domain.PhaseCompleted, UpdatedAt: now, Message: "restore completed",
+		},
+	}
+
+	var output bytes.Buffer
+	if err := (printeroutput.Printer{Writer: &output, Format: printeroutput.Table}).Print(
+		session,
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, want := range []string{
+		"DESTINATION PVC", "app/data", "SOURCE", "s3://backups/daily/point/", "yes",
+		"sessions/restore-credentials",
+	} {
+		if !strings.Contains(output.String(), want) {
+			t.Fatalf("restore table missing %q:\n%s", want, output.String())
+		}
+	}
+
+	if strings.Contains(output.String(), "WARM SYNC") {
+		t.Fatalf("restore table contains migration columns:\n%s", output.String())
+	}
+}
+
 func TestTableSessionShowsSourcePVAfterRollback(t *testing.T) {
 	now := metav1.NewTime(time.Date(2026, time.August, 7, 2, 0, 0, 0, time.UTC))
 	session := &domain.Session{

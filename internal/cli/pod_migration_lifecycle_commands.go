@@ -102,6 +102,10 @@ func (r *rootState) newPodMigrationResumeCommand() *cobra.Command {
 				}
 			}
 
+			if deferred, err := deferControllerExecution(ctx, cmd, runtime, session); deferred {
+				return err
+			}
+
 			if err := runtime.service.ResumePodMigration(ctx, session); err != nil {
 				return reportSessionError(cmd, session, err)
 			}
@@ -275,7 +279,7 @@ func (r *rootState) newPodMigrationCleanupCommand() *cobra.Command {
 			}
 
 			if options.DeleteSession {
-				return printDeletedSession(cmd, args[0])
+				return printDeletedSession(cmd, session)
 			}
 
 			return printSessionResult(cmd, runtime, session)

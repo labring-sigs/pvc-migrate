@@ -355,6 +355,10 @@ func (r *rootState) runOfflineMigrateCommand(
 		return reportSessionCreationError(cmd, plan.SessionNamespace, plan.SessionID, err)
 	}
 
+	if deferred, err := deferControllerExecution(ctx, cmd, runtime, session); deferred {
+		return err
+	}
+
 	if err := runtime.service.OfflineMigrate(ctx, session); err != nil {
 		return reportSessionError(cmd, session, err)
 	}

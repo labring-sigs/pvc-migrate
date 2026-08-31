@@ -9,7 +9,9 @@ import (
 	"github.com/labring-sigs/pvc-migrate/internal/copyengine"
 	"github.com/labring-sigs/pvc-migrate/internal/domain"
 	"github.com/labring-sigs/pvc-migrate/internal/kube"
+	"github.com/labring-sigs/pvc-migrate/internal/parallel"
 	corev1 "k8s.io/api/core/v1"
+	storagev1 "k8s.io/api/storage/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
@@ -23,12 +25,7 @@ func (s *Service) CreateSession(
 		return nil, errors.New("cross-cluster plan contains failed checks")
 	}
 
-	sourceID, err := kube.Identity(ctx, s.source)
-	if err != nil {
-		return nil, err
-	}
-
-	destID, err := kube.Identity(ctx, s.destination)
+	sourceID, destID, err := s.clusterIdentities(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -39,124 +36,38 @@ func (s *Service) CreateSession(
 		)
 	}
 
-	volumes := make([]VolumeSpec, 0, len(plan.Volumes))
-	for _, p := range plan.Volumes {
-		pvc, err := s.source.Kubernetes.CoreV1().
-			PersistentVolumeClaims(p.SourceNamespace).
-			Get(ctx, p.SourcePVC, metav1.GetOptions{})
-		if err != nil {
-			return nil, err
+	destinationClass, err := s.destination.Kubernetes.StorageV1().StorageClasses().Get(
+		ctx,
+		options.DestinationStorageClass,
+		metav1.GetOptions{},
+	)
+	if err != nil {
+		return nil, err
+	}
+
+	type volumeResult struct {
+		volume VolumeSpec
+		err    error
+	}
+
+	results := make([]volumeResult, len(plan.Volumes))
+	parallel.For(len(plan.Volumes), func(index int) {
+		results[index].volume, results[index].err = s.buildSessionVolume(
+			ctx,
+			plan.Volumes[index],
+			sourceID,
+			destID,
+			destinationClass,
+		)
+	})
+
+	volumes := make([]VolumeSpec, 0, len(results))
+	for _, result := range results {
+		if result.err != nil {
+			return nil, result.err
 		}
 
-		pv, err := s.source.Kubernetes.CoreV1().
-			PersistentVolumes().
-			Get(ctx, pvc.Spec.VolumeName, metav1.GetOptions{})
-		if err != nil {
-			return nil, err
-		}
-
-		if pvc.UID != p.SourcePVCUID || pv.UID != p.SourcePVUID {
-			return nil, fmt.Errorf(
-				"source PVC/PV identity changed after planning for %s/%s; generate a new cross-cluster plan",
-				p.SourceNamespace,
-				p.SourcePVC,
-			)
-		}
-
-		expectedSourceCapacity, parseErr := resource.ParseQuantity(p.SourceCapacity)
-		if parseErr != nil {
-			return nil, fmt.Errorf(
-				"planned source capacity for %s is invalid: %w",
-				p.SourcePVC,
-				parseErr,
-			)
-		}
-
-		if current := pv.Spec.Capacity[corev1.ResourceStorage]; current.Cmp(
-			expectedSourceCapacity,
-		) != 0 {
-			return nil, fmt.Errorf(
-				"source PV capacity changed after planning for %s; generate a new cross-cluster plan",
-				p.SourcePVC,
-			)
-		}
-
-		mode := corev1.PersistentVolumeFilesystem
-		if pvc.Spec.VolumeMode != nil {
-			mode = *pvc.Spec.VolumeMode
-		}
-
-		storageClass := options.DestinationStorageClass
-
-		destinationClass, err := s.destination.Kubernetes.StorageV1().
-			StorageClasses().
-			Get(ctx, storageClass, metav1.GetOptions{})
-		if err != nil {
-			return nil, err
-		}
-
-		if destinationClass.UID != p.StorageClassUID {
-			return nil, errors.New(
-				"destination StorageClass changed after planning; generate a new cross-cluster plan",
-			)
-		}
-
-		if err := kube.ValidateDestinationAccessModes(
-			destinationClass.Provisioner,
-			pvc.Spec.AccessModes,
-		); err != nil {
-			return nil, fmt.Errorf(
-				"destination StorageClass %s cannot provide source PVC %s/%s access modes: %w; generate a new cross-cluster plan with a compatible StorageClass",
-				destinationClass.Name,
-				pvc.Namespace,
-				pvc.Name,
-				err,
-			)
-		}
-
-		volumes = append(volumes, VolumeSpec{
-			Source: SourceVolumeSpec{
-				PVC: ClusterResourceRef{
-					ClusterID:  sourceID.ID,
-					APIVersion: "v1",
-					Kind:       "PersistentVolumeClaim",
-					Namespace:  pvc.Namespace,
-					Name:       pvc.Name,
-					UID:        pvc.UID,
-				},
-				PV: ClusterResourceRef{
-					ClusterID:  sourceID.ID,
-					APIVersion: "v1",
-					Kind:       "PersistentVolume",
-					Name:       pv.Name,
-					UID:        pv.UID,
-				},
-				Capacity: p.SourceCapacity,
-			},
-			Destination: DestinationVolumeSpec{
-				PVC: ClusterResourceRef{
-					ClusterID:  destID.ID,
-					APIVersion: "v1",
-					Kind:       "PersistentVolumeClaim",
-					Namespace:  p.DestinationNamespace,
-					Name:       p.DestinationPVC,
-				},
-				Capacity: p.Capacity,
-				StorageClass: ClusterResourceRef{
-					ClusterID:  destID.ID,
-					APIVersion: "storage.k8s.io/v1",
-					Kind:       "StorageClass",
-					Name:       destinationClass.Name,
-					UID:        destinationClass.UID,
-				},
-				AccessModes: append(
-					[]corev1.PersistentVolumeAccessMode(nil),
-					pvc.Spec.AccessModes...,
-				),
-				VolumeMode: mode,
-			},
-			Transfer: TransferSpec{SourcePath: p.SourcePath, DestinationPath: p.DestinationPath},
-		})
+		volumes = append(volumes, result.volume)
 	}
 
 	session := NewSession(
@@ -198,6 +109,118 @@ func (s *Service) CreateSession(
 	}
 
 	return session, nil
+}
+
+func (s *Service) buildSessionVolume(
+	ctx context.Context,
+	p VolumePlan,
+	sourceID, destinationID kube.ClusterIdentity,
+	destinationClass *storagev1.StorageClass,
+) (VolumeSpec, error) {
+	pvc, err := s.source.Kubernetes.CoreV1().
+		PersistentVolumeClaims(p.SourceNamespace).
+		Get(ctx, p.SourcePVC, metav1.GetOptions{})
+	if err != nil {
+		return VolumeSpec{}, err
+	}
+
+	pv, err := s.source.Kubernetes.CoreV1().PersistentVolumes().Get(
+		ctx, pvc.Spec.VolumeName, metav1.GetOptions{},
+	)
+	if err != nil {
+		return VolumeSpec{}, err
+	}
+
+	if pvc.UID != p.SourcePVCUID || pv.UID != p.SourcePVUID {
+		return VolumeSpec{}, fmt.Errorf(
+			"source PVC/PV identity changed after planning for %s/%s; generate a new cross-cluster plan",
+			p.SourceNamespace,
+			p.SourcePVC,
+		)
+	}
+
+	expectedSourceCapacity, parseErr := resource.ParseQuantity(p.SourceCapacity)
+	if parseErr != nil {
+		return VolumeSpec{}, fmt.Errorf(
+			"planned source capacity for %s is invalid: %w",
+			p.SourcePVC,
+			parseErr,
+		)
+	}
+
+	if current := pv.Spec.Capacity[corev1.ResourceStorage]; current.Cmp(
+		expectedSourceCapacity,
+	) != 0 {
+		return VolumeSpec{}, fmt.Errorf(
+			"source PV capacity changed after planning for %s; generate a new cross-cluster plan",
+			p.SourcePVC,
+		)
+	}
+
+	if destinationClass.UID != p.StorageClassUID {
+		return VolumeSpec{}, errors.New(
+			"destination StorageClass changed after planning; generate a new cross-cluster plan",
+		)
+	}
+
+	if err := kube.ValidateDestinationAccessModes(
+		destinationClass.Provisioner,
+		pvc.Spec.AccessModes,
+	); err != nil {
+		return VolumeSpec{}, fmt.Errorf(
+			"destination StorageClass %s cannot provide source PVC %s/%s access modes: %w; generate a new cross-cluster plan with a compatible StorageClass",
+			destinationClass.Name,
+			pvc.Namespace,
+			pvc.Name,
+			err,
+		)
+	}
+
+	mode := corev1.PersistentVolumeFilesystem
+	if pvc.Spec.VolumeMode != nil {
+		mode = *pvc.Spec.VolumeMode
+	}
+
+	return VolumeSpec{
+		Source: SourceVolumeSpec{
+			PVC: ClusterResourceRef{
+				ClusterID:  sourceID.ID,
+				APIVersion: "v1",
+				Kind:       "PersistentVolumeClaim",
+				Namespace:  pvc.Namespace,
+				Name:       pvc.Name,
+				UID:        pvc.UID,
+			},
+			PV: ClusterResourceRef{
+				ClusterID:  sourceID.ID,
+				APIVersion: "v1",
+				Kind:       "PersistentVolume",
+				Name:       pv.Name,
+				UID:        pv.UID,
+			},
+			Capacity: p.SourceCapacity,
+		},
+		Destination: DestinationVolumeSpec{
+			PVC: ClusterResourceRef{
+				ClusterID:  destinationID.ID,
+				APIVersion: "v1",
+				Kind:       "PersistentVolumeClaim",
+				Namespace:  p.DestinationNamespace,
+				Name:       p.DestinationPVC,
+			},
+			Capacity: p.Capacity,
+			StorageClass: ClusterResourceRef{
+				ClusterID:  destinationID.ID,
+				APIVersion: "storage.k8s.io/v1",
+				Kind:       "StorageClass",
+				Name:       destinationClass.Name,
+				UID:        destinationClass.UID,
+			},
+			AccessModes: append([]corev1.PersistentVolumeAccessMode(nil), pvc.Spec.AccessModes...),
+			VolumeMode:  mode,
+		},
+		Transfer: TransferSpec{SourcePath: p.SourcePath, DestinationPath: p.DestinationPath},
+	}, nil
 }
 
 func (s *Service) Reserve(ctx context.Context, session *Session) error {
@@ -465,25 +488,41 @@ func (s *Service) toolSchedulingValues(
 	}
 
 	sshdNodes := make([]*corev1.Node, 0, 1)
-	if slices.Contains(session.Spec.Strategies, "local") {
+	if slices.Contains(session.Spec.Strategies, domain.StrategyLocal) {
 		sshdNodes = append(sshdNodes, target)
 	}
 
-	for i := range session.Spec.Volumes {
+	pvs := make([]*corev1.PersistentVolume, len(session.Spec.Volumes))
+	errors := make([]error, len(session.Spec.Volumes))
+	parallel.For(len(session.Spec.Volumes), func(index int) {
+		volume := &session.Spec.Volumes[index]
+
 		pv, getErr := s.source.Kubernetes.CoreV1().PersistentVolumes().Get(
 			ctx,
-			session.Spec.Volumes[i].Source.PV.Name,
+			volume.Source.PV.Name,
 			metav1.GetOptions{},
 		)
 		if getErr != nil {
-			return nil, fmt.Errorf(
+			errors[index] = fmt.Errorf(
 				"read source PV %s before copy scheduling: %w",
-				session.Spec.Volumes[i].Source.PV.Name,
+				volume.Source.PV.Name,
 				getErr,
 			)
+
+			return
 		}
 
-		if pv.Spec.NodeAffinity == nil || pv.Spec.NodeAffinity.Required == nil {
+		pvs[index] = pv
+	})
+
+	for _, err := range errors {
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	for _, pv := range pvs {
+		if pv == nil || pv.Spec.NodeAffinity == nil || pv.Spec.NodeAffinity.Required == nil {
 			continue
 		}
 

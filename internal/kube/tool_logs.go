@@ -21,15 +21,14 @@ import (
 )
 
 const (
-	toolLogRetryDelay = 250 * time.Millisecond
-	toolLogMaxLine    = 1024 * 1024
+	toolLogRetryDelay         = 250 * time.Millisecond
+	toolLogMaxLine            = 1024 * 1024
+	defaultToolLogStopTimeout = 5 * time.Second
 )
 
 // Kubernetes Pod log streams are expected to close when their context is
 // cancelled. A broken or stalled API proxy can leave a stream blocked, though;
 // never let that prevent the workflow from deleting the tool Pods.
-var toolLogStopTimeout = 5 * time.Second
-
 // ErrToolPodNoSpace records destination exhaustion reported by a data-mover
 // Pod when upstream pv-migrate omits the Pod log tail from its returned error.
 var ErrToolPodNoSpace = errors.New("tool Pod reported no space left on device")
@@ -42,14 +41,16 @@ type ToolLogOptions struct {
 	Writer      io.Writer
 	Logger      *slog.Logger
 	Structured  bool
+	StopTimeout time.Duration
 }
 
 // ToolLogStream owns the background watches and Pod log requests for one
 // tool operation.
 type ToolLogStream struct {
-	cancel context.CancelFunc
-	done   chan struct{}
-	logger *slog.Logger
+	cancel      context.CancelFunc
+	done        chan struct{}
+	logger      *slog.Logger
+	stopTimeout time.Duration
 
 	mu            sync.Mutex
 	observedError error
@@ -64,7 +65,12 @@ func (s *ToolLogStream) Stop() {
 
 	s.cancel()
 
-	timer := time.NewTimer(toolLogStopTimeout)
+	timeout := s.stopTimeout
+	if timeout <= 0 {
+		timeout = defaultToolLogStopTimeout
+	}
+
+	timer := time.NewTimer(timeout)
 	defer timer.Stop()
 
 	select {
@@ -74,7 +80,7 @@ func (s *ToolLogStream) Stop() {
 			s.logger.Warn(
 				"tool Pod log stream did not stop before timeout; continuing cleanup",
 				"timeout",
-				toolLogStopTimeout,
+				timeout,
 			)
 		}
 	}
@@ -212,11 +218,16 @@ func startToolLogStream(
 		options.Logger = slog.New(slog.DiscardHandler)
 	}
 
+	if options.StopTimeout <= 0 {
+		options.StopTimeout = defaultToolLogStopTimeout
+	}
+
 	ctx, cancel := context.WithCancel(parent)
 	stream := &ToolLogStream{
-		cancel: cancel,
-		done:   make(chan struct{}),
-		logger: options.Logger,
+		cancel:      cancel,
+		done:        make(chan struct{}),
+		logger:      options.Logger,
+		stopTimeout: options.StopTimeout,
 	}
 
 	streamer := &toolLogStreamer{
@@ -576,6 +587,7 @@ func (s *toolLogStreamer) logWatchError(ctx context.Context, namespace, action s
 
 func waitToolLogRetry(ctx context.Context) bool {
 	timer := time.NewTimer(toolLogRetryDelay)
+
 	defer timer.Stop()
 
 	select {

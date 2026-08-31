@@ -29,19 +29,7 @@ func runBackupWithSession(
 		return runBackup(ctx, client, req, expectedPVCUID, expectedPVUID)
 	}
 
-	pvc, pv, err := verifyPVCIdentity(
-		ctx,
-		client,
-		req.Namespace,
-		req.PVCName,
-		expectedPVCUID,
-		expectedPVUID,
-	)
-	if err != nil {
-		return err
-	}
-
-	session, err := buildBackupSession(req, pvc, pv)
+	session, err := prepareBackupSession(ctx, client, req, expectedPVCUID, expectedPVUID)
 	if err != nil {
 		return err
 	}
@@ -232,7 +220,7 @@ func pvmigrateBackupRequest(
 			Namespace:      req.Namespace,
 			Name:           req.PVCName,
 		},
-		Backend:          "s3",
+		Backend:          string(domain.ObjectStoreBackendS3),
 		Bucket:           req.Store.Config().Bucket,
 		Name:             req.Store.Config().Name,
 		Path:             req.Path,

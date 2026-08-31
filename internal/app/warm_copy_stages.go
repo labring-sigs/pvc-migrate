@@ -174,7 +174,7 @@ func warmCopyProbeError(
 
 	return domain.WrapError(
 		domain.ErrorPrecondition,
-		"warm-copy mount probe",
+		domain.ErrorOperationWarmCopyMountProbe,
 		fmt.Sprintf(
 			"second-Pod mount failed for source PVC(s) %s while the source workload is active: %v; abort this pre-cutover session, clean its retained resources, and %s",
 			strings.Join(pvcs, ","),

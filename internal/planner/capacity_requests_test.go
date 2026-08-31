@@ -11,6 +11,7 @@ import (
 	"github.com/labring-sigs/pvc-migrate/internal/testutil"
 	corev1 "k8s.io/api/core/v1"
 	storagev1 "k8s.io/api/storage/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
@@ -98,6 +99,53 @@ func TestPlanUsesRequestedDestinationCapacity(t *testing.T) {
 	if plan.RollbackRetention.StorageRequests != "2Gi" ||
 		plan.RollbackRetention.ByStorageClass["fast"] != "2Gi" {
 		t.Fatalf("rollback retention=%#v", plan.RollbackRetention)
+	}
+}
+
+func TestPlanInitialLargerDestinationDoesNotRequireVolumeExpansion(t *testing.T) {
+	objects := plannerObjects("2Gi")
+	for _, object := range objects {
+		if storageClass, ok := object.(*storagev1.StorageClass); ok {
+			storageClass.AllowVolumeExpansion = new(false)
+		}
+	}
+
+	plan := planWithDestinationCapacityObjects(
+		t,
+		objects,
+		[]string{"data"},
+		[]string{"3Gi"},
+		false,
+	)
+	if !plan.Ready || len(plan.Volumes) != 1 || plan.Volumes[0].Capacity != "3Gi" {
+		t.Fatalf("initial provisioning was treated as expansion: %#v", plan)
+	}
+}
+
+func TestPlanRejectsIncompleteSourceVolumeExpansion(t *testing.T) {
+	objects := plannerObjects("2Gi")
+	for _, object := range objects {
+		switch typed := object.(type) {
+		case *corev1.PersistentVolumeClaim:
+			typed.Spec.Resources.Requests[corev1.ResourceStorage] = resource.MustParse("3Gi")
+		case *storagev1.StorageClass:
+			typed.AllowVolumeExpansion = new(true)
+		}
+	}
+
+	plan := planWithDestinationCapacityObjects(
+		t,
+		objects,
+		[]string{"data"},
+		nil,
+		false,
+	)
+	if plan.Ready || !hasFailedCheckContaining(
+		plan,
+		domain.CheckNameCapacity,
+		"volume expansion is incomplete",
+	) {
+		t.Fatalf("incomplete source expansion plan=%#v", plan)
 	}
 }
 
@@ -385,7 +433,7 @@ func TestResolveDestinationPVCsRequiresCompleteExplicitMappings(t *testing.T) {
 	}
 }
 
-func planCheckMessage(plan *domain.MigrationPlan, name string) string {
+func planCheckMessage(plan *domain.MigrationPlan, name domain.CheckName) string {
 	for _, check := range plan.Checks {
 		if check.Name == name {
 			return check.Message

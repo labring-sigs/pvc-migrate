@@ -59,6 +59,91 @@ docker run --rm pvc-migrate:0.1.0 version
 
 Use `--tool-image registry.example/pvc-migrate:0.1.0` when cluster nodes pull the image from an internal registry. New migration sessions persist this image reference and reuse it during resume.
 
+## Execution Modes
+
+The CLI supports two durable execution backends:
+
+- `--mode=session` always stores sessions in ConfigMaps and executes the workflow in the invoking process.
+- `--mode=controller` stores local sessions as operation-specific `migrate.sealos.io/v1alpha1` CRs (`Migration`, `PodMigration`, `Reservation`, `Copy`, `Backup`, `Restore`, `Rename`, or `Move`) and submits them to the controller-runtime based controller. The controller uses leader election, watches every installed workflow kind, and reuses the same resumable app.Service state machine. The CLI watches that CR and waits for completion by default; use `--wait=false` for detached submission. A command fails clearly when its matching CRD is absent.
+- `--mode=auto` (the default) discovers workflow CRDs independently. Each eligible single-cluster operation uses its matching CRD when that CRD is served; operations whose CRD is not installed, plus cross-cluster workflows, use ConfigMap sessions. This supports staged CRD rollouts without silently dropping an operation.
+
+Install the controller backend with:
+
+```bash
+kubectl apply -f deploy/crd.yaml
+kubectl apply -f deploy/session-namespace.yaml
+kubectl apply -f deploy/rbac.yaml
+kubectl apply -f deploy/controller.yaml
+```
+
+The repository also exposes the standard Kubebuilder/kustomize entrypoint:
+
+```bash
+kubectl apply -k config/default
+```
+
+Run `make manifests` after changing API markers. It regenerates the typed
+deep-copy code and the CRD under `config/crd/bases`, then synchronizes the
+installation-compatible `deploy/crd.yaml` file.
+
+The resource boundary and unsupported-workflow decisions are documented in
+[`docs/controller-design.md`](docs/controller-design.md).
+
+Workflow CRDs are intentionally namespaced in `--session-namespace`. The
+controller watches every installed local kind (all eight in a complete
+installation). Migration, pod migration, reservation, copy, rename, and move
+carry explicit source, temporary, and destination namespace references where
+their workflow needs them; backup and restore use operation-specific source or
+destination namespace fields plus PVC and Secret references. The ClusterRole
+grants access to the referenced namespaces because the existing service creates
+and switches PVC/PV resources there. Cross-cluster commands remain
+ConfigMap/session workflows because they require explicit credentials for a
+second API server.
+
+Submit a supported migration and wait for its CR status to reach completion:
+
+```bash
+pvc-migrate --mode=auto --yes migrate \
+  --source-namespace application --source-pvc data \
+  --destination-pvc data --dry-run=false
+kubectl -n pvc-migrate-system get migrations
+```
+
+Controller progress is read from the CR's durable status and written to
+stderr; the final table, JSON, or YAML document is written once to stdout.
+`--timeout` bounds planning, submission, and waiting. A failed or deleted CR
+returns a nonzero exit code. Use `--wait=false` when another process owns
+observation. Tool Pod logs are emitted by the controller process, so inspect
+the controller Deployment logs when transfer-level output is needed.
+
+The controller image defaults to `ghcr.io/labring-sigs/pvc-migrate:dev`; set the image explicitly in `deploy/controller.yaml` for a released build.
+
+### Real-cluster E2E
+
+The E2E suite defaults to the synchronous ConfigMap backend. It creates an
+isolated namespace per test, writes real PVC data, verifies migration and
+rollback digests, and removes its workflow records, Leases, PVCs, and PVs:
+
+```bash
+PVC_MIGRATE_E2E_KUBECONFIG=/path/to/kubeconfig \
+PVC_MIGRATE_E2E_TOOL_IMAGE=registry.example/pvc-migrate:0.1.0 \
+make e2e
+```
+
+Run the same suite through operation-specific CRDs with:
+
+```bash
+PVC_MIGRATE_E2E_KUBECONFIG=/path/to/kubeconfig \
+PVC_MIGRATE_E2E_TOOL_IMAGE=registry.example/pvc-migrate:0.1.0 \
+make e2e PVC_MIGRATE_E2E_MODE=controller
+```
+
+Controller-mode tests start a real controller-runtime manager in the test
+namespace, wait for its leader-election Lease, submit the workflow CR, and
+verify the operation-specific terminal status. Both source and
+destination StorageClasses must be available; override them with
+`PVC_MIGRATE_E2E_SOURCE_CLASS` and `PVC_MIGRATE_E2E_DESTINATION_CLASS`.
+
 ## Quick Start
 
 Every mutating command defaults to `--dry-run=true`. Execution requires an explicit `--dry-run=false`; workload pause and storage identity changes also require `--yes` or interactive approval.
@@ -256,6 +341,7 @@ Controller ownership outside the supported adapters causes the plan to fail. PVC
 | `reserve/copy/backup/rename/move status/resume/abort/cleanup` | Manage the lifecycle actions supported by each workflow |
 | `copy cross-cluster` / `reserve cross-cluster` lifecycle commands | Inspect, continue, or clean up a cross-cluster session |
 | `recovery cleanup-orphan` | Validate and clear ownership after a session record was lost |
+| `controller` | Run the controller-runtime reconciliation loop for the installed local workflow CRDs |
 | `completion` | Generate shell completion |
 | `version` | Print version information |
 

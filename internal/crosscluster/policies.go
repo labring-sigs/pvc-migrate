@@ -20,7 +20,7 @@ func (s *Service) planCrossClusterPolicies(
 	options Options,
 	destinationClass *storagev1.StorageClass,
 ) {
-	const pvcPolicyCheckName = "destination-pvc-policy"
+	const pvcPolicyCheckName = domain.CheckNameDestinationPVCPolicy
 
 	if len(plan.Volumes) == 0 {
 		return
@@ -152,7 +152,7 @@ func addCrossClusterPolicyChecks(
 	estimate domain.ResourceEstimate,
 	checkToolLimitRanges bool,
 ) {
-	quotaCheckName := name + "-resource-quota"
+	quotaCheckName := domain.CheckName(name + "-resource-quota")
 
 	policies := kube.ReadNamespaceResourcePolicies(
 		ctx,
@@ -261,7 +261,7 @@ func addCrossClusterLimitRangeCheck(
 	name string,
 	policies kube.NamespaceResourcePolicies,
 ) {
-	checkName := name + "-limit-range"
+	checkName := domain.CheckName(name + "-limit-range")
 	switch {
 	case apierrors.IsNotFound(policies.LimitRangeErr):
 		plan.AddCheck(

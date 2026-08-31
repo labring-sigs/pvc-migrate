@@ -319,7 +319,7 @@ func (p *Planner) checkNetworkPolicies(
 		if err != nil {
 			plan.AddCheck(
 				failed(
-					"network-policy",
+					domain.CheckNameNetworkPolicy,
 					fmt.Sprintf("list NetworkPolicies in %s: %v", namespace, err),
 				),
 			)
@@ -330,7 +330,7 @@ func (p *Planner) checkNetworkPolicies(
 		if result.empty {
 			plan.AddCheck(
 				failed(
-					"network-policy",
+					domain.CheckNameNetworkPolicy,
 					fmt.Sprintf("list NetworkPolicies in %s returned an empty object", namespace),
 				),
 			)
@@ -341,7 +341,7 @@ func (p *Planner) checkNetworkPolicies(
 		if result.count > 0 {
 			plan.AddCheck(
 				warned(
-					"network-policy",
+					domain.CheckNameNetworkPolicy,
 					fmt.Sprintf(
 						"namespace %s has %d NetworkPolicy object(s); clusterip copy connectivity will be validated by the real copy job",
 						namespace,
@@ -352,7 +352,7 @@ func (p *Planner) checkNetworkPolicies(
 		} else {
 			plan.AddCheck(
 				passed(
-					"network-policy",
+					domain.CheckNameNetworkPolicy,
 					fmt.Sprintf("namespace %s has no NetworkPolicy objects", namespace),
 				),
 			)

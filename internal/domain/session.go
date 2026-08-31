@@ -3,6 +3,7 @@ package domain
 import (
 	"encoding/json"
 	"fmt"
+	"maps"
 	"slices"
 	"time"
 
@@ -12,8 +13,21 @@ import (
 )
 
 const (
-	SessionAPIVersion = "pvc-migrate.io/v1alpha1"
+	SessionAPIGroup   = "migrate.sealos.io"
+	SessionAPIVersion = SessionAPIGroup + "/v1alpha1"
 	SessionKind       = "MigrationSession"
+	// Workflow resources are namespaced custom resources used by the
+	// controller-backed execution mode. Their API specs and statuses are owned
+	// by api/v1alpha1; these names are only the internal routing registry.
+	MigrationResource    = "migrations"
+	PodMigrationResource = "podmigrations"
+	ReservationResource  = "reservations"
+	CopyResource         = "copies"
+	BackupResource       = "backups"
+	RestoreResource      = "restores"
+	RenameResource       = "renames"
+	MoveResource         = "moves"
+	MigrationCRDName     = MigrationResource + "." + SessionAPIGroup
 )
 
 type Operation string
@@ -64,55 +78,60 @@ const (
 	PhaseFailed       Phase = "Failed"
 )
 
-var allowedTransitions = map[Phase][]Phase{
-	PhasePlanned:   {PhaseReserving, PhaseRenaming, PhaseMoving, PhaseAborting, PhaseFailed},
-	PhaseRenaming:  {PhaseCompleted, PhaseAborting, PhaseFailed},
-	PhaseMoving:    {PhaseCompleted, PhaseAborting, PhaseFailed},
-	PhaseReserving: {PhaseReserved, PhaseAborting, PhaseFailed},
-	PhaseReserved: {
-		PhaseWarmCopying,
-		PhasePausing,
-		PhaseFinalSyncing,
-		PhaseAborting,
-		PhaseFailed,
-	},
-	PhaseWarmCopying: {PhaseWarmCopied, PhaseAborting, PhaseFailed},
-	PhaseWarmCopied:  {PhaseWarmCopying, PhasePausing, PhaseAborting, PhaseFailed},
-	PhasePausing:     {PhasePaused, PhaseAborting, PhaseFailed},
-	PhasePaused: {
-		PhaseFinalSyncing,
-		PhaseResuming,
-		PhaseRollingBack,
-		PhaseAborting,
-		PhaseFailed,
-	},
-	PhaseFinalSyncing: {PhaseFinalSynced, PhaseAborting, PhaseFailed},
-	PhaseFinalSynced: {
-		PhaseFinalSyncing,
-		PhaseActivating,
-		PhaseRollingBack,
-		PhaseAborting,
-		PhaseFailed,
-	},
-	PhaseActivating: {PhaseActivated, PhaseRollingBack, PhaseFailed},
-	PhaseActivated:  {PhaseCompleted, PhaseResuming, PhaseRollingBack, PhaseFailed},
-	PhaseResuming:   {PhaseCompleted, PhaseRolledBack, PhaseFailed},
-	PhaseCompleted:  {PhaseRollingBack},
-	PhaseAborting:   {PhaseAborted, PhaseFailed},
-	PhaseFailed: {
-		PhaseReserving,
-		PhaseWarmCopying,
-		PhasePausing,
-		PhaseFinalSyncing,
-		PhaseActivating,
-		PhaseResuming,
-		PhaseRollingBack,
-		PhaseAborting,
-		PhaseRenaming,
-		PhaseMoving,
-	},
-	PhaseRollingBack: {PhaseRolledBack, PhaseFailed},
-	PhaseRolledBack:  {PhaseResuming, PhaseCompleted},
+// allowedTransitions constructs a fresh table for callers that need to
+// inspect the state machine. Returning a new map keeps the policy isolated
+// from mutable process-wide state.
+func allowedTransitions() map[Phase][]Phase {
+	return map[Phase][]Phase{
+		PhasePlanned:   {PhaseReserving, PhaseRenaming, PhaseMoving, PhaseAborting, PhaseFailed},
+		PhaseRenaming:  {PhaseCompleted, PhaseAborting, PhaseFailed},
+		PhaseMoving:    {PhaseCompleted, PhaseAborting, PhaseFailed},
+		PhaseReserving: {PhaseReserved, PhaseAborting, PhaseFailed},
+		PhaseReserved: {
+			PhaseWarmCopying,
+			PhasePausing,
+			PhaseFinalSyncing,
+			PhaseAborting,
+			PhaseFailed,
+		},
+		PhaseWarmCopying: {PhaseWarmCopied, PhaseAborting, PhaseFailed},
+		PhaseWarmCopied:  {PhaseWarmCopying, PhasePausing, PhaseAborting, PhaseFailed},
+		PhasePausing:     {PhasePaused, PhaseAborting, PhaseFailed},
+		PhasePaused: {
+			PhaseFinalSyncing,
+			PhaseResuming,
+			PhaseRollingBack,
+			PhaseAborting,
+			PhaseFailed,
+		},
+		PhaseFinalSyncing: {PhaseFinalSynced, PhaseAborting, PhaseFailed},
+		PhaseFinalSynced: {
+			PhaseFinalSyncing,
+			PhaseActivating,
+			PhaseRollingBack,
+			PhaseAborting,
+			PhaseFailed,
+		},
+		PhaseActivating: {PhaseActivated, PhaseRollingBack, PhaseFailed},
+		PhaseActivated:  {PhaseCompleted, PhaseResuming, PhaseRollingBack, PhaseFailed},
+		PhaseResuming:   {PhaseCompleted, PhaseRolledBack, PhaseFailed},
+		PhaseCompleted:  {PhaseRollingBack},
+		PhaseAborting:   {PhaseAborted, PhaseFailed},
+		PhaseFailed: {
+			PhaseReserving,
+			PhaseWarmCopying,
+			PhasePausing,
+			PhaseFinalSyncing,
+			PhaseActivating,
+			PhaseResuming,
+			PhaseRollingBack,
+			PhaseAborting,
+			PhaseRenaming,
+			PhaseMoving,
+		},
+		PhaseRollingBack: {PhaseRolledBack, PhaseFailed},
+		PhaseRolledBack:  {PhaseResuming, PhaseCompleted},
+	}
 }
 
 type ObjectReference struct {
@@ -122,6 +141,18 @@ type ObjectReference struct {
 	Name            string    `json:"name"                      yaml:"name"`
 	UID             types.UID `json:"uid,omitempty"             yaml:"uid,omitempty"`
 	ResourceVersion string    `json:"resourceVersion,omitempty" yaml:"resourceVersion,omitempty"`
+}
+
+// DeepCopyInto lets controller-gen deep-copy API objects that use the small
+// reference value without exposing the domain session envelope in their
+// Kubernetes schema.
+//
+//nolint:wsl_v5 // generated deepcopy helpers intentionally stay compact.
+func (in *ObjectReference) DeepCopyInto(out *ObjectReference) {
+	if in == nil || out == nil {
+		return
+	}
+	*out = *in
 }
 
 type WorkloadKind string
@@ -163,7 +194,117 @@ const (
 	SessionTypeBackup     SessionType = "Backup"
 	SessionTypeRename     SessionType = "Rename"
 	SessionTypeMove       SessionType = "Move"
+	SessionTypeRestore    SessionType = "Restore"
 )
+
+// ControllerKind identifies an operation-specific workflow CRD. Keep these
+// values in the domain registry so discovery, storage, watches, and controller
+// setup cannot drift onto different Kind spellings.
+type ControllerKind string
+
+const (
+	ControllerKindMigration    ControllerKind = "Migration"
+	ControllerKindPodMigration ControllerKind = "PodMigration"
+	ControllerKindReservation  ControllerKind = "Reservation"
+	ControllerKindCopy         ControllerKind = "Copy"
+	ControllerKindBackup       ControllerKind = "Backup"
+	ControllerKindRestore      ControllerKind = "Restore"
+	ControllerKindRename       ControllerKind = "Rename"
+	ControllerKindMove         ControllerKind = "Move"
+)
+
+// ControllerWorkflow identifies one operation-specific controller API. This
+// registry is the authoritative mapping used by API discovery, CRD storage,
+// controller dispatch, and CLI diagnostics.
+type ControllerWorkflow struct {
+	Type     SessionType
+	Kind     ControllerKind
+	Resource string
+	Singular string
+}
+
+// controllerWorkflowRegistry constructs a fresh registry for each caller so
+// the routing metadata cannot be mutated across concurrent sessions.
+func controllerWorkflowRegistry() []ControllerWorkflow {
+	return []ControllerWorkflow{
+		{
+			Type:     SessionTypeMigrate,
+			Kind:     ControllerKindMigration,
+			Resource: MigrationResource,
+			Singular: "migration",
+		},
+		{
+			Type:     SessionTypeMigratePod,
+			Kind:     ControllerKindPodMigration,
+			Resource: PodMigrationResource,
+			Singular: "podmigration",
+		},
+		{
+			Type:     SessionTypeReserve,
+			Kind:     ControllerKindReservation,
+			Resource: ReservationResource,
+			Singular: "reservation",
+		},
+		{Type: SessionTypeCopy, Kind: ControllerKindCopy, Resource: CopyResource, Singular: "copy"},
+		{
+			Type:     SessionTypeBackup,
+			Kind:     ControllerKindBackup,
+			Resource: BackupResource,
+			Singular: "backup",
+		},
+		{
+			Type:     SessionTypeRestore,
+			Kind:     ControllerKindRestore,
+			Resource: RestoreResource,
+			Singular: "restore",
+		},
+		{
+			Type:     SessionTypeRename,
+			Kind:     ControllerKindRename,
+			Resource: RenameResource,
+			Singular: "rename",
+		},
+		{Type: SessionTypeMove, Kind: ControllerKindMove, Resource: MoveResource, Singular: "move"},
+	}
+}
+
+// ControllerWorkflowResources returns the resource names served by the
+// operation-specific workflow CRDs. Return a fresh slice so callers cannot
+// mutate the process-wide workflow registry.
+func ControllerWorkflowResources() []string {
+	workflows := controllerWorkflowRegistry()
+
+	resources := make([]string, 0, len(workflows))
+	for _, workflow := range workflows {
+		resources = append(resources, workflow.Resource)
+	}
+
+	return resources
+}
+
+func ControllerWorkflows() []ControllerWorkflow {
+	return controllerWorkflowRegistry()
+}
+
+func ControllerWorkflowForType(sessionType SessionType) (ControllerWorkflow, bool) {
+	for _, workflow := range controllerWorkflowRegistry() {
+		if workflow.Type == sessionType {
+			return workflow, true
+		}
+	}
+
+	return ControllerWorkflow{}, false
+}
+
+func ControllerWorkflowForKind(kind ControllerKind) (ControllerWorkflow, bool) {
+	for _, workflow := range controllerWorkflowRegistry() {
+		if workflow.Kind == kind {
+			return workflow, true
+		}
+	}
+
+	return ControllerWorkflow{}, false
+}
 
 type SessionCommon struct {
 	SourceNamespace      string       `json:"sourceNamespace"      yaml:"sourceNamespace"`
@@ -171,17 +312,18 @@ type SessionCommon struct {
 	DestinationNamespace string       `json:"destinationNamespace" yaml:"destinationNamespace"`
 	SessionNamespace     string       `json:"sessionNamespace"     yaml:"sessionNamespace"`
 	CreatedBy            string       `json:"createdBy,omitempty"  yaml:"createdBy,omitempty"`
-	Volumes              []VolumeSpec `json:"volumes"              yaml:"volumes"`
+	Volumes              []VolumeSpec `json:"volumes,omitempty"    yaml:"volumes,omitempty"`
 }
 
 type SessionWorkflowOptions struct {
-	SourceNode           string   `json:"sourceNode,omitempty"           yaml:"sourceNode,omitempty"`
-	TargetNode           string   `json:"targetNode,omitempty"           yaml:"targetNode,omitempty"`
-	ToolImage            string   `json:"toolImage,omitempty"            yaml:"toolImage,omitempty"`
-	Strategies           []string `json:"strategies,omitempty"           yaml:"strategies,omitempty"`
-	VerifyChecksum       bool     `json:"verifyChecksum,omitempty"       yaml:"verifyChecksum,omitempty"`
-	DeleteExtraneous     bool     `json:"deleteExtraneous"               yaml:"deleteExtraneous"`
-	SkipSourceUsageCheck bool     `json:"skipSourceUsageCheck,omitempty" yaml:"skipSourceUsageCheck,omitempty"`
+	SourceNode     string   `json:"sourceNode,omitempty"     yaml:"sourceNode,omitempty"`
+	TargetNode     string   `json:"targetNode,omitempty"     yaml:"targetNode,omitempty"`
+	ToolImage      string   `json:"toolImage,omitempty"      yaml:"toolImage,omitempty"`
+	Strategies     []string `json:"strategies,omitempty"     yaml:"strategies,omitempty"`
+	VerifyChecksum bool     `json:"verifyChecksum,omitempty" yaml:"verifyChecksum,omitempty"`
+	// +optional
+	DeleteExtraneous     bool `json:"deleteExtraneous"               yaml:"deleteExtraneous"`
+	SkipSourceUsageCheck bool `json:"skipSourceUsageCheck,omitempty" yaml:"skipSourceUsageCheck,omitempty"`
 }
 
 const (
@@ -213,26 +355,56 @@ type CopySessionSpec struct {
 	Online                 bool `json:"online,omitempty" yaml:"online,omitempty"`
 }
 
+// ObjectStoreBackend is the transport protocol used by backup and restore.
+// Provider remains a separate rclone/S3 vendor setting such as AWS or Minio.
+type ObjectStoreBackend string
+
+const ObjectStoreBackendS3 ObjectStoreBackend = "s3"
+
 // BackupSessionSpec is the backup-specific payload carried by the durable
 // Session envelope. Object-store credentials are deliberately excluded.
 type BackupSessionSpec struct {
-	SessionWorkflowOptions `                json:",inline"                          yaml:",inline"`
-	Online                 bool            `json:"online,omitempty"                 yaml:"online,omitempty"`
-	SourcePVC              ObjectReference `json:"sourcePVC"                        yaml:"sourcePVC"`
-	SourcePV               ObjectReference `json:"sourcePV"                         yaml:"sourcePV"`
-	Path                   string          `json:"path,omitempty"                   yaml:"path,omitempty"`
-	Backend                string          `json:"backend"                          yaml:"backend"`
-	Bucket                 string          `json:"bucket"                           yaml:"bucket"`
-	Prefix                 string          `json:"prefix,omitempty"                 yaml:"prefix,omitempty"`
-	Name                   string          `json:"name"                             yaml:"name"`
-	Provider               string          `json:"provider,omitempty"               yaml:"provider,omitempty"`
-	Endpoint               string          `json:"endpoint,omitempty"               yaml:"endpoint,omitempty"`
-	Region                 string          `json:"region,omitempty"                 yaml:"region,omitempty"`
-	AllowInsecureEndpoint  bool            `json:"allowInsecureEndpoint,omitempty"  yaml:"allowInsecureEndpoint,omitempty"`
-	ServerSideEncryption   string          `json:"serverSideEncryption,omitempty"   yaml:"serverSideEncryption,omitempty"`
-	SSEKMSKeyID            string          `json:"sseKmsKeyID,omitempty"            yaml:"sseKmsKeyID,omitempty"`
-	CredentialsSecret      ObjectReference `json:"credentialsSecret,omitempty"      yaml:"credentialsSecret,omitempty"`
-	OpenEBSLVMEnableShared bool            `json:"openebsLvmEnableShared,omitempty" yaml:"openebsLvmEnableShared,omitempty"`
+	SessionWorkflowOptions `                   json:",inline"                          yaml:",inline"`
+	Online                 bool               `json:"online,omitempty"                 yaml:"online,omitempty"`
+	SourcePVC              ObjectReference    `json:"sourcePVC"                        yaml:"sourcePVC"`
+	SourcePV               ObjectReference    `json:"sourcePV"                         yaml:"sourcePV"`
+	Path                   string             `json:"path,omitempty"                   yaml:"path,omitempty"`
+	Backend                ObjectStoreBackend `json:"backend"                          yaml:"backend"`
+	Bucket                 string             `json:"bucket"                           yaml:"bucket"`
+	Prefix                 string             `json:"prefix,omitempty"                 yaml:"prefix,omitempty"`
+	Name                   string             `json:"name"                             yaml:"name"`
+	Provider               string             `json:"provider,omitempty"               yaml:"provider,omitempty"`
+	Endpoint               string             `json:"endpoint,omitempty"               yaml:"endpoint,omitempty"`
+	Region                 string             `json:"region,omitempty"                 yaml:"region,omitempty"`
+	AllowInsecureEndpoint  bool               `json:"allowInsecureEndpoint,omitempty"  yaml:"allowInsecureEndpoint,omitempty"`
+	ServerSideEncryption   string             `json:"serverSideEncryption,omitempty"   yaml:"serverSideEncryption,omitempty"`
+	SSEKMSKeyID            string             `json:"sseKmsKeyID,omitempty"            yaml:"sseKmsKeyID,omitempty"`
+	CredentialsSecret      ObjectReference    `json:"credentialsSecret,omitempty"      yaml:"credentialsSecret,omitempty"`
+	OpenEBSLVMEnableShared bool               `json:"openebsLvmEnableShared,omitempty" yaml:"openebsLvmEnableShared,omitempty"`
+}
+
+// RestoreSessionSpec is the durable payload for object-store restore. The
+// credentials are referenced by Secret and never embedded in this resource.
+type RestoreSessionSpec struct {
+	SessionWorkflowOptions  `                   json:",inline"                           yaml:",inline"`
+	DestinationPVC          ObjectReference    `json:"destinationPVC"                    yaml:"destinationPVC"`
+	Path                    string             `json:"path,omitempty"                    yaml:"path,omitempty"`
+	Backend                 ObjectStoreBackend `json:"backend"                           yaml:"backend"`
+	Bucket                  string             `json:"bucket"                            yaml:"bucket"`
+	Prefix                  string             `json:"prefix,omitempty"                  yaml:"prefix,omitempty"`
+	Name                    string             `json:"name"                              yaml:"name"`
+	Provider                string             `json:"provider,omitempty"                yaml:"provider,omitempty"`
+	Endpoint                string             `json:"endpoint,omitempty"                yaml:"endpoint,omitempty"`
+	Region                  string             `json:"region,omitempty"                  yaml:"region,omitempty"`
+	AllowInsecureEndpoint   bool               `json:"allowInsecureEndpoint,omitempty"   yaml:"allowInsecureEndpoint,omitempty"`
+	ServerSideEncryption    string             `json:"serverSideEncryption,omitempty"    yaml:"serverSideEncryption,omitempty"`
+	SSEKMSKeyID             string             `json:"sseKmsKeyID,omitempty"             yaml:"sseKmsKeyID,omitempty"`
+	CredentialsSecret       ObjectReference    `json:"credentialsSecret,omitempty"       yaml:"credentialsSecret,omitempty"`
+	CreatePVC               bool               `json:"createPVC,omitempty"               yaml:"createPVC,omitempty"`
+	DestinationStorageClass string             `json:"destinationStorageClass,omitempty" yaml:"destinationStorageClass,omitempty"`
+	DestinationAccessMode   string             `json:"destinationAccessMode,omitempty"   yaml:"destinationAccessMode,omitempty"`
+	DestinationCapacity     string             `json:"destinationCapacity,omitempty"     yaml:"destinationCapacity,omitempty"`
+	AllowMounted            bool               `json:"allowMounted,omitempty"            yaml:"allowMounted,omitempty"`
 }
 
 type RenameSessionSpec struct{}
@@ -284,15 +456,222 @@ type GrafanaSpec struct {
 }
 
 type SessionSpec struct {
-	SessionCommon `                       json:",inline"              yaml:",inline"`
-	Type          SessionType            `json:"type"                 yaml:"type"`
-	Reserve       *ReserveSessionSpec    `json:"reserve,omitempty"    yaml:"reserve,omitempty"`
-	Migrate       *MigrateSessionSpec    `json:"migrate,omitempty"    yaml:"migrate,omitempty"`
-	MigratePod    *MigratePodSessionSpec `json:"migratePod,omitempty" yaml:"migratePod,omitempty"`
-	Copy          *CopySessionSpec       `json:"copy,omitempty"       yaml:"copy,omitempty"`
-	Backup        *BackupSessionSpec     `json:"backup,omitempty"     yaml:"backup,omitempty"`
-	Rename        *RenameSessionSpec     `json:"rename,omitempty"     yaml:"rename,omitempty"`
-	Move          *MoveSessionSpec       `json:"move,omitempty"       yaml:"move,omitempty"`
+	SessionCommon `json:",inline" yaml:",inline"`
+	// +kubebuilder:validation:Enum=Reserve;Migrate;MigratePod;Copy;Backup;Restore;Rename;Move
+	Type       SessionType            `json:"type"                 yaml:"type"`
+	Reserve    *ReserveSessionSpec    `json:"reserve,omitempty"    yaml:"reserve,omitempty"`
+	Migrate    *MigrateSessionSpec    `json:"migrate,omitempty"    yaml:"migrate,omitempty"`
+	MigratePod *MigratePodSessionSpec `json:"migratePod,omitempty" yaml:"migratePod,omitempty"`
+	Copy       *CopySessionSpec       `json:"copy,omitempty"       yaml:"copy,omitempty"`
+	Backup     *BackupSessionSpec     `json:"backup,omitempty"     yaml:"backup,omitempty"`
+	Restore    *RestoreSessionSpec    `json:"restore,omitempty"    yaml:"restore,omitempty"`
+	Rename     *RenameSessionSpec     `json:"rename,omitempty"     yaml:"rename,omitempty"`
+	Move       *MoveSessionSpec       `json:"move,omitempty"       yaml:"move,omitempty"`
+}
+
+// DeepCopyInto copies every mutable member of a session spec. The domain
+// object is passed between the planner, persistence adapters, controller
+// cache, and service stages, so a shallow copy would let one request mutate
+// another request's state through shared slices or pointers.
+func (in *SessionSpec) DeepCopyInto(out *SessionSpec) {
+	if in == nil || out == nil {
+		return
+	}
+
+	*out = *in
+
+	out.SessionCommon = deepCopySessionCommon(in.SessionCommon)
+	if in.Reserve != nil {
+		out.Reserve = &ReserveSessionSpec{
+			SessionWorkflowOptions: deepCopyWorkflowOptions(in.Reserve.SessionWorkflowOptions),
+		}
+	}
+
+	if in.Migrate != nil {
+		out.Migrate = &MigrateSessionSpec{
+			SessionWorkflowOptions: deepCopyWorkflowOptions(in.Migrate.SessionWorkflowOptions),
+		}
+	}
+
+	if in.MigratePod != nil {
+		out.MigratePod = &MigratePodSessionSpec{
+			SessionWorkflowOptions: deepCopyWorkflowOptions(in.MigratePod.SessionWorkflowOptions),
+			Workload:               deepCopyWorkloadSpec(in.MigratePod.Workload),
+			PrecopyPasses:          in.MigratePod.PrecopyPasses,
+			OpenEBSLVMEnableShared: in.MigratePod.OpenEBSLVMEnableShared,
+		}
+	}
+
+	if in.Copy != nil {
+		out.Copy = &CopySessionSpec{
+			SessionWorkflowOptions: deepCopyWorkflowOptions(in.Copy.SessionWorkflowOptions),
+			Online:                 in.Copy.Online,
+		}
+	}
+
+	if in.Backup != nil {
+		backup := *in.Backup
+		backup.SessionWorkflowOptions = deepCopyWorkflowOptions(in.Backup.SessionWorkflowOptions)
+		out.Backup = &backup
+	}
+
+	if in.Restore != nil {
+		restore := *in.Restore
+		restore.SessionWorkflowOptions = deepCopyWorkflowOptions(in.Restore.SessionWorkflowOptions)
+		out.Restore = &restore
+	}
+
+	if in.Rename != nil {
+		out.Rename = &RenameSessionSpec{}
+	}
+
+	if in.Move != nil {
+		out.Move = &MoveSessionSpec{}
+	}
+}
+
+func (in *SessionSpec) DeepCopy() *SessionSpec {
+	if in == nil {
+		return nil
+	}
+
+	out := new(SessionSpec)
+	in.DeepCopyInto(out)
+
+	return out
+}
+
+func (in *SessionStatus) DeepCopyInto(out *SessionStatus) {
+	if in == nil || out == nil {
+		return
+	}
+
+	*out = *in
+	if in.CompletedAt != nil {
+		out.CompletedAt = in.CompletedAt.DeepCopy()
+	}
+
+	if in.Conditions != nil {
+		out.Conditions = slices.Clone(in.Conditions)
+	}
+
+	if in.Volumes != nil {
+		out.Volumes = make([]VolumeStatus, len(in.Volumes))
+		for i := range in.Volumes {
+			out.Volumes[i] = deepCopyVolumeStatus(in.Volumes[i])
+		}
+	}
+
+	if in.History != nil {
+		out.History = slices.Clone(in.History)
+	}
+
+	if in.OpenEBSLVMSharedMounts != nil {
+		out.OpenEBSLVMSharedMounts = slices.Clone(in.OpenEBSLVMSharedMounts)
+	}
+}
+
+func (in *SessionStatus) DeepCopy() *SessionStatus {
+	if in == nil {
+		return nil
+	}
+
+	out := new(SessionStatus)
+	in.DeepCopyInto(out)
+
+	return out
+}
+
+func deepCopyWorkflowOptions(in SessionWorkflowOptions) SessionWorkflowOptions {
+	out := in
+	out.Strategies = slices.Clone(in.Strategies)
+	return out
+}
+
+func deepCopySessionCommon(in SessionCommon) SessionCommon {
+	out := in
+	if in.Volumes != nil {
+		out.Volumes = make([]VolumeSpec, len(in.Volumes))
+		for i := range in.Volumes {
+			out.Volumes[i] = deepCopyVolumeSpec(in.Volumes[i])
+		}
+	}
+
+	return out
+}
+
+func deepCopyWorkloadSpec(in WorkloadSpec) WorkloadSpec {
+	out := in
+	out.OriginalReplicas = cloneInt32(in.OriginalReplicas)
+	out.Ordinal = cloneInt32(in.Ordinal)
+	out.AffectedPods = slices.Clone(in.AffectedPods)
+
+	out.OriginalObject = slices.Clone(in.OriginalObject)
+	if in.KubeBlocks != nil {
+		kubeBlocks := *in.KubeBlocks
+		out.KubeBlocks = &kubeBlocks
+	}
+
+	if in.VMCluster != nil {
+		vmCluster := *in.VMCluster
+		out.VMCluster = &vmCluster
+	}
+
+	if in.Grafana != nil {
+		grafana := *in.Grafana
+		out.Grafana = &grafana
+	}
+
+	return out
+}
+
+func deepCopyVolumeSpec(in VolumeSpec) VolumeSpec {
+	out := in
+	out.SourcePVCSpec = *in.SourcePVCSpec.DeepCopy()
+	out.SourcePVCMetadata = PVCMetadata{
+		Labels:          maps.Clone(in.SourcePVCMetadata.Labels),
+		Annotations:     maps.Clone(in.SourcePVCMetadata.Annotations),
+		OwnerReferences: slices.Clone(in.SourcePVCMetadata.OwnerReferences),
+	}
+
+	out.AccessModes = slices.Clone(in.AccessModes)
+	if in.TransferScope != nil {
+		transferScope := *in.TransferScope
+		out.TransferScope = &transferScope
+	}
+
+	return out
+}
+
+func deepCopyVolumeStatus(in VolumeStatus) VolumeStatus {
+	out := in
+	if in.Sync.WarmCompletedAt != nil {
+		out.Sync.WarmCompletedAt = in.Sync.WarmCompletedAt.DeepCopy()
+	}
+
+	if in.Sync.FinalCompletedAt != nil {
+		out.Sync.FinalCompletedAt = in.Sync.FinalCompletedAt.DeepCopy()
+	}
+
+	if in.Activation.ActivatedAt != nil {
+		out.Activation.ActivatedAt = in.Activation.ActivatedAt.DeepCopy()
+	}
+
+	if in.Activation.RolledBackAt != nil {
+		out.Activation.RolledBackAt = in.Activation.RolledBackAt.DeepCopy()
+	}
+
+	return out
+}
+
+func cloneInt32(in *int32) *int32 {
+	if in == nil {
+		return nil
+	}
+
+	out := *in
+
+	return &out
 }
 
 type PVCMetadata struct {
@@ -304,9 +683,9 @@ type PVCMetadata struct {
 type VolumeSpec struct {
 	SourcePVC           ObjectReference                      `json:"sourcePVC"                          yaml:"sourcePVC"`
 	SourcePV            ObjectReference                      `json:"sourcePV"                           yaml:"sourcePV"`
-	SourceReclaimPolicy corev1.PersistentVolumeReclaimPolicy `json:"sourceReclaimPolicy"                yaml:"sourceReclaimPolicy"`
-	SourcePVCSpec       corev1.PersistentVolumeClaimSpec     `json:"sourcePVCSpec"                      yaml:"sourcePVCSpec"`
-	SourcePVCMetadata   PVCMetadata                          `json:"sourcePVCMetadata"                  yaml:"sourcePVCMetadata"`
+	SourceReclaimPolicy corev1.PersistentVolumeReclaimPolicy `json:"sourceReclaimPolicy,omitempty"      yaml:"sourceReclaimPolicy,omitempty"`
+	SourcePVCSpec       corev1.PersistentVolumeClaimSpec     `json:"sourcePVCSpec,omitempty"            yaml:"sourcePVCSpec,omitempty"`
+	SourcePVCMetadata   PVCMetadata                          `json:"sourcePVCMetadata,omitempty"        yaml:"sourcePVCMetadata,omitempty"`
 	DestinationPVC      ObjectReference                      `json:"destinationPVC"                     yaml:"destinationPVC"`
 	DestinationPV       ObjectReference                      `json:"destinationPV,omitempty"            yaml:"destinationPV,omitempty"`
 	DestinationPolicy   corev1.PersistentVolumeReclaimPolicy `json:"destinationReclaimPolicy,omitempty" yaml:"destinationReclaimPolicy,omitempty"`
@@ -402,13 +781,19 @@ type SessionStatus struct {
 }
 
 type Session struct {
-	APIVersion      string        `json:"apiVersion" yaml:"apiVersion"`
-	Kind            string        `json:"kind"       yaml:"kind"`
-	ID              string        `json:"id"         yaml:"id"`
-	Generation      int64         `json:"generation" yaml:"generation"`
-	ResourceVersion string        `json:"-"          yaml:"-"`
-	Spec            SessionSpec   `json:"spec"       yaml:"spec"`
-	Status          SessionStatus `json:"status"     yaml:"status"`
+	APIVersion      string `json:"apiVersion" yaml:"apiVersion"`
+	Kind            string `json:"kind"       yaml:"kind"`
+	ID              string `json:"id"         yaml:"id"`
+	Generation      int64  `json:"generation" yaml:"generation"`
+	ResourceVersion string `json:"-"          yaml:"-"`
+	// Backend is populated by the persistence adapter and is intentionally not
+	// serialized. It lets a routing store send updates to the same backend.
+	Backend string `json:"-" yaml:"-"`
+	// BackendResource identifies the operation-specific CRD kind when Backend
+	// is SessionBackendCRD. It is intentionally not serialized.
+	BackendResource ControllerKind `json:"-"      yaml:"-"`
+	Spec            SessionSpec    `json:"spec"   yaml:"spec"`
+	Status          SessionStatus  `json:"status" yaml:"status"`
 }
 
 func sessionTypeForOperation(operation Operation) SessionType {
@@ -419,6 +804,8 @@ func sessionTypeForOperation(operation Operation) SessionType {
 		return SessionTypeCopy
 	case OperationBackup:
 		return SessionTypeBackup
+	case OperationRestore:
+		return SessionTypeRestore
 	case OperationRename:
 		return SessionTypeRename
 	case OperationMove:
@@ -434,6 +821,7 @@ func NewSessionSpec(
 	online bool,
 	options SessionWorkflowOptions,
 ) SessionSpec {
+	common = deepCopySessionCommon(common)
 	options.Strategies = slices.Clone(options.Strategies)
 
 	spec := SessionSpec{SessionCommon: common, Type: sessionTypeForOperation(operation)}
@@ -444,6 +832,8 @@ func NewSessionSpec(
 		spec.Copy = &CopySessionSpec{SessionWorkflowOptions: options, Online: online}
 	case SessionTypeBackup:
 		spec.Backup = &BackupSessionSpec{SessionWorkflowOptions: options, Online: online}
+	case SessionTypeRestore:
+		spec.Restore = &RestoreSessionSpec{SessionWorkflowOptions: options}
 	case SessionTypeRename:
 		spec.Rename = &RenameSessionSpec{}
 	case SessionTypeMove:
@@ -457,6 +847,7 @@ func NewOfflineMigrationSessionSpec(
 	common SessionCommon,
 	options SessionWorkflowOptions,
 ) SessionSpec {
+	common = deepCopySessionCommon(common)
 	options.Strategies = slices.Clone(options.Strategies)
 
 	return SessionSpec{
@@ -473,6 +864,7 @@ func NewPodMigrationSessionSpec(
 	precopyPasses int,
 	openEBSLVMEnableShared bool,
 ) SessionSpec {
+	common = deepCopySessionCommon(common)
 	options.Strategies = slices.Clone(options.Strategies)
 
 	return SessionSpec{
@@ -480,7 +872,7 @@ func NewPodMigrationSessionSpec(
 		Type:          SessionTypeMigratePod,
 		MigratePod: &MigratePodSessionSpec{
 			SessionWorkflowOptions: options,
-			Workload:               workload,
+			Workload:               deepCopyWorkloadSpec(workload),
 			PrecopyPasses:          precopyPasses,
 			OpenEBSLVMEnableShared: openEBSLVMEnableShared,
 		},
@@ -546,6 +938,10 @@ func (s *SessionSpec) WorkflowOptionsPtr() *SessionWorkflowOptions {
 		if s.Backup != nil {
 			return &s.Backup.SessionWorkflowOptions
 		}
+	case SessionTypeRestore:
+		if s.Restore != nil {
+			return &s.Restore.SessionWorkflowOptions
+		}
 	}
 
 	return nil
@@ -561,6 +957,8 @@ func (s SessionSpec) Operation() Operation {
 		return OperationCopy
 	case SessionTypeBackup:
 		return OperationBackup
+	case SessionTypeRestore:
+		return OperationRestore
 	case SessionTypeRename:
 		return OperationRename
 	case SessionTypeMove:
@@ -614,7 +1012,7 @@ func (s *SessionSpec) SetWorkload(workload WorkloadSpec) error {
 			s.MigratePod = &MigratePodSessionSpec{}
 		}
 
-		s.MigratePod.Workload = workload
+		s.MigratePod.Workload = deepCopyWorkloadSpec(workload)
 	default:
 		return NewError(
 			ErrorValidation,
@@ -627,10 +1025,13 @@ func (s *SessionSpec) SetWorkload(workload WorkloadSpec) error {
 }
 
 func NewSession(id string, spec SessionSpec, now time.Time) *Session {
+	ownedSpec := SessionSpec{}
+	spec.DeepCopyInto(&ownedSpec)
+
 	t := metav1.NewTime(now.UTC())
 
-	volumeStatus := make([]VolumeStatus, 0, len(spec.Volumes))
-	for _, volume := range spec.Volumes {
+	volumeStatus := make([]VolumeStatus, 0, len(ownedSpec.Volumes))
+	for _, volume := range ownedSpec.Volumes {
 		volumeStatus = append(volumeStatus, VolumeStatus{SourcePVCName: volume.SourcePVC.Name})
 	}
 
@@ -639,7 +1040,7 @@ func NewSession(id string, spec SessionSpec, now time.Time) *Session {
 		Kind:       SessionKind,
 		ID:         id,
 		Generation: 1,
-		Spec:       spec,
+		Spec:       ownedSpec,
 		Status: SessionStatus{
 			Phase:     PhasePlanned,
 			StartedAt: t,
@@ -649,7 +1050,7 @@ func NewSession(id string, spec SessionSpec, now time.Time) *Session {
 				{
 					Phase:   PhasePlanned,
 					Time:    t,
-					Message: fmt.Sprintf("%s session planned", spec.Operation()),
+					Message: fmt.Sprintf("%s session planned", ownedSpec.Operation()),
 				},
 			},
 		},
@@ -661,10 +1062,10 @@ func (s *Session) Transition(next Phase, message string, now time.Time) error {
 		return nil
 	}
 
-	backupTransition := s.Spec.Type == SessionTypeBackup &&
+	backupTransition := (s.Spec.Type == SessionTypeBackup || s.Spec.Type == SessionTypeRestore) &&
 		((s.Status.Phase == PhasePlanned && next == PhaseWarmCopying) ||
 			(s.Status.Phase == PhaseWarmCopied && next == PhaseCompleted))
-	if !backupTransition && !slices.Contains(allowedTransitions[s.Status.Phase], next) {
+	if !backupTransition && !slices.Contains(allowedTransitions()[s.Status.Phase], next) {
 		return NewError(
 			ErrorConflict,
 			"transition",
@@ -738,6 +1139,10 @@ func (s *Session) Validate() error {
 		if err := validateBackupSession(s); err != nil {
 			return err
 		}
+	} else if s.Spec.Type == SessionTypeRestore {
+		if err := validateRestoreSession(s); err != nil {
+			return err
+		}
 	} else if err := validateSessionVolumes(s); err != nil {
 		return err
 	}
@@ -764,36 +1169,7 @@ func validateSessionHeader(s *Session) error {
 		return NewError(ErrorValidation, "session", "session type is required")
 	}
 
-	payloads := 0
-	if s.Spec.Reserve != nil {
-		payloads++
-	}
-
-	if s.Spec.Migrate != nil {
-		payloads++
-	}
-
-	if s.Spec.MigratePod != nil {
-		payloads++
-	}
-
-	if s.Spec.Copy != nil {
-		payloads++
-	}
-
-	if s.Spec.Rename != nil {
-		payloads++
-	}
-
-	if s.Spec.Move != nil {
-		payloads++
-	}
-
-	if s.Spec.Backup != nil {
-		payloads++
-	}
-
-	if payloads != 1 {
+	if concreteSessionPayloadCount(s.Spec) != 1 {
 		return NewError(
 			ErrorValidation,
 			"session",
@@ -801,14 +1177,7 @@ func validateSessionHeader(s *Session) error {
 		)
 	}
 
-	validPayload := (s.Spec.Type == SessionTypeReserve && s.Spec.Reserve != nil) ||
-		(s.Spec.Type == SessionTypeMigrate && s.Spec.Migrate != nil) ||
-		(s.Spec.Type == SessionTypeMigratePod && s.Spec.MigratePod != nil) ||
-		(s.Spec.Type == SessionTypeCopy && s.Spec.Copy != nil) ||
-		(s.Spec.Type == SessionTypeBackup && s.Spec.Backup != nil) ||
-		(s.Spec.Type == SessionTypeRename && s.Spec.Rename != nil) ||
-		(s.Spec.Type == SessionTypeMove && s.Spec.Move != nil)
-	if !validPayload {
+	if !sessionPayloadMatchesType(s.Spec) {
 		return NewError(
 			ErrorValidation,
 			"session",
@@ -817,6 +1186,51 @@ func validateSessionHeader(s *Session) error {
 	}
 
 	return nil
+}
+
+func concreteSessionPayloadCount(spec SessionSpec) int {
+	payloads := []bool{
+		spec.Reserve != nil,
+		spec.Migrate != nil,
+		spec.MigratePod != nil,
+		spec.Copy != nil,
+		spec.Backup != nil,
+		spec.Restore != nil,
+		spec.Rename != nil,
+		spec.Move != nil,
+	}
+
+	count := 0
+	for _, present := range payloads {
+		if present {
+			count++
+		}
+	}
+
+	return count
+}
+
+func sessionPayloadMatchesType(spec SessionSpec) bool {
+	switch spec.Type {
+	case SessionTypeReserve:
+		return spec.Reserve != nil
+	case SessionTypeMigrate:
+		return spec.Migrate != nil
+	case SessionTypeMigratePod:
+		return spec.MigratePod != nil
+	case SessionTypeCopy:
+		return spec.Copy != nil
+	case SessionTypeBackup:
+		return spec.Backup != nil
+	case SessionTypeRestore:
+		return spec.Restore != nil
+	case SessionTypeRename:
+		return spec.Rename != nil
+	case SessionTypeMove:
+		return spec.Move != nil
+	default:
+		return false
+	}
 }
 
 func validateSessionMode(s *Session) error {
@@ -848,7 +1262,8 @@ func validateSessionMode(s *Session) error {
 }
 
 func validateSessionStatus(s *Session) error {
-	if s.Spec.Type != SessionTypeBackup && len(s.Spec.Volumes) == 0 {
+	if s.Spec.Type != SessionTypeBackup && s.Spec.Type != SessionTypeRestore &&
+		len(s.Spec.Volumes) == 0 {
 		return NewError(ErrorValidation, "session", "session contains no volumes")
 	}
 
@@ -856,7 +1271,7 @@ func validateSessionStatus(s *Session) error {
 		return NewError(ErrorValidation, "session", "volume specification and status counts differ")
 	}
 
-	if _, known := allowedTransitions[s.Status.Phase]; !known && s.Status.Phase != PhaseAborted {
+	if _, known := allowedTransitions()[s.Status.Phase]; !known && s.Status.Phase != PhaseAborted {
 		return NewError(
 			ErrorValidation,
 			"session",
@@ -904,11 +1319,11 @@ func validateBackupSession(s *Session) error {
 		return NewError(ErrorValidation, "backup session", "source PV name and UID are required")
 	}
 
-	if payload.Backend == "" || payload.Bucket == "" || payload.Name == "" {
+	if payload.Backend != ObjectStoreBackendS3 || payload.Bucket == "" || payload.Name == "" {
 		return NewError(
 			ErrorValidation,
 			"backup session",
-			"object-store backend, bucket, and name are required",
+			"object-store backend must be s3 and bucket and name are required",
 		)
 	}
 
@@ -926,6 +1341,48 @@ func validateBackupSession(s *Session) error {
 			ErrorValidation,
 			"backup session",
 			"backup sessions cannot contain migration volumes",
+		)
+	}
+
+	return nil
+}
+
+func validateRestoreSession(s *Session) error {
+	payload := s.Spec.Restore
+	if payload == nil {
+		return NewError(ErrorValidation, "restore session", "restore payload is required")
+	}
+
+	if payload.DestinationPVC.Namespace == "" || payload.DestinationPVC.Name == "" {
+		return NewError(
+			ErrorValidation,
+			"restore session",
+			"destination PVC namespace and name are required",
+		)
+	}
+
+	if payload.Backend != ObjectStoreBackendS3 || payload.Bucket == "" || payload.Name == "" {
+		return NewError(
+			ErrorValidation,
+			"restore session",
+			"object-store backend must be s3 and bucket and name are required",
+		)
+	}
+
+	if payload.CredentialsSecret.Name != "" &&
+		payload.CredentialsSecret.Namespace != s.Spec.SessionNamespace {
+		return NewError(
+			ErrorValidation,
+			"restore session",
+			"credentials Secret must be in the session namespace",
+		)
+	}
+
+	if len(s.Spec.Volumes) != 0 || len(s.Status.Volumes) != 0 {
+		return NewError(
+			ErrorValidation,
+			"restore session",
+			"restore sessions cannot contain migration volumes",
 		)
 	}
 

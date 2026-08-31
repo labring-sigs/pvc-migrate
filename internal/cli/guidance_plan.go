@@ -67,7 +67,7 @@ func planFailureAdvice(plan *domain.MigrationPlan, check domain.Check) (string, 
 		return advice, false
 	}
 
-	if check.Name == "controller-adapter" &&
+	if check.Name == domain.CheckNameControllerAdapter &&
 		strings.Contains(check.Message, "discover KubeBlocks") {
 		return "", true
 	}
@@ -98,15 +98,15 @@ func workloadFailureAdvice(check domain.Check) string {
 
 func operationFailureAdvice(plan *domain.MigrationPlan, check domain.Check) string {
 	switch {
-	case check.Name == "pvc-consumers" && isOfflineMigrationPlan(plan):
+	case check.Name == domain.CheckNamePVCConsumers && isOfflineMigrationPlan(plan):
 		return "Offline PVC action: stop every consumer of the source PVC, then rerun migrate plan after the PVC has no active Pod references."
-	case check.Name == "pvc-consumers" && plan != nil && plan.SessionSpec.Operation() == domain.OperationMigratePod:
+	case check.Name == domain.CheckNamePVCConsumers && plan != nil && plan.SessionSpec.Operation() == domain.OperationMigratePod:
 		return "Real-time Pod action: stop every consumer outside the selected workload, then rerun migrate-pod plan; migrate-pod coordinates one workload and cannot cut over multiple independent workloads in one session."
-	case check.Name == "pvc-consumers":
+	case check.Name == domain.CheckNamePVCConsumers:
 		return "PVC action: stop unmanaged consumers, or select the owning workload with --pod, then verify that every PVC consumer belongs to the migration unit before rerunning the plan."
-	case check.Name == "controller-adapter":
+	case check.Name == domain.CheckNameControllerAdapter:
 		return "Workload action: use a supported workload adapter or the controller's native maintenance procedure, then rerun the plan; ordinary Deployments require no operator owner, and directly scaled Deployments and StatefulSets require no HorizontalPodAutoscaler."
-	case check.Name == "target-node":
+	case check.Name == domain.CheckNameTargetNode:
 		return "Node action: choose a Ready, schedulable target with --target-node, or correct the target node condition before rerunning the plan."
 	default:
 		return ""
@@ -115,19 +115,22 @@ func operationFailureAdvice(plan *domain.MigrationPlan, check domain.Check) stri
 
 func storageFailureAdvice(plan *domain.MigrationPlan, check domain.Check) string {
 	switch {
-	case isKubeBlocksRealtimePlan(plan) && (check.Name == "storage-capacity" || check.Name == "destination-capacity"):
+	case isKubeBlocksRealtimePlan(plan) &&
+		(check.Name == domain.CheckNameStorageCapacity ||
+			check.Name == domain.CheckNameDestinationCapacity):
 		return kubeBlocksRealtimeCapacityAdvice(plan)
-	case check.Name == "storage-topology" || check.Name == "storage-capacity":
+	case check.Name == domain.CheckNameStorageTopology ||
+		check.Name == domain.CheckNameStorageCapacity:
 		return "Storage action: choose a compatible StorageClass or target node, then verify topology and capacity before rerunning the plan."
-	case check.Name == "destination-capacity":
+	case check.Name == domain.CheckNameDestinationCapacity:
 		return "Capacity action: correct --destination-capacity, or add --allow-volume-shrink only after verifying the copied data fits in every smaller destination PVC."
-	case check.Name == "source-usage":
+	case check.Name == domain.CheckNameSourceUsage:
 		return "Usage action: use a destination that is at least the source capacity, or independently verify the data size and rerun with --skip-source-usage-check."
-	case check.Name == "migration-needed":
+	case check.Name == domain.CheckNameMigrationNeeded:
 		return "Migration action: the requested node and StorageClass already match; use --force-reprovision only for an intentional backing-PV replacement."
-	case check.Name == "warm-copy-mount" && plan.SessionSpec.Operation() == domain.OperationCopy:
+	case check.Name == domain.CheckNameWarmCopyMount && plan.SessionSpec.Operation() == domain.OperationCopy:
 		return "Copy action: stop all active PVC consumers and rerun without --online, or use storage that explicitly supports a second same-node Pod mount."
-	case check.Name == "warm-copy-mount":
+	case check.Name == domain.CheckNameWarmCopyMount:
 		if strings.Contains(check.Message, "OpenEBS LVM") {
 			return "OpenEBS LVM action: rerun migrate-pod with --precopy-passes 0 to skip warm copy and proceed directly to controlled cutover and final sync, or explicitly pass --openebs-lvm-enable-shared to temporarily patch the matching LVMVolume before the mount probe."
 		}

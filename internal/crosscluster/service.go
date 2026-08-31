@@ -1,8 +1,10 @@
 package crosscluster
 
 import (
+	"context"
 	"io"
 	"log/slog"
+	"sync"
 	"time"
 
 	"github.com/labring-sigs/pvc-migrate/internal/copyengine"
@@ -52,7 +54,7 @@ func NewService(source, destination *kube.Clients, copier copyengine.Engine) *Se
 		now:         time.Now,
 		interval:    time.Second,
 		helmTimeout: 10 * time.Minute,
-		writer:      io.Discard,
+		writer:      kube.NewSynchronizedWriter(io.Discard),
 		logger:      slog.Default(),
 	}
 	if source != nil {
@@ -68,7 +70,7 @@ func (s *Service) WithRuntime(
 	helmTimeout time.Duration,
 ) *Service {
 	if writer != nil {
-		s.writer = writer
+		s.writer = kube.NewSynchronizedWriter(writer)
 	}
 
 	if logger != nil {
@@ -88,4 +90,35 @@ func (s *Service) WithConnections(
 	s.sourceKubeconfig, s.sourceContext = sourceKubeconfig, sourceContext
 	s.destinationKubeconfig, s.destinationContext = destinationKubeconfig, destinationContext
 	return s
+}
+
+// clusterIdentities reads both API endpoints concurrently. The two reads are
+// independent, while returning source errors first preserves the historical
+// error precedence for callers and diagnostics.
+func (s *Service) clusterIdentities(
+	ctx context.Context,
+) (source, destination kube.ClusterIdentity, err error) {
+	var (
+		sourceErr      error
+		destinationErr error
+		wg             sync.WaitGroup
+	)
+
+	wg.Go(func() {
+		source, sourceErr = kube.Identity(ctx, s.source)
+	})
+	wg.Go(func() {
+		destination, destinationErr = kube.Identity(ctx, s.destination)
+	})
+	wg.Wait()
+
+	if sourceErr != nil {
+		return kube.ClusterIdentity{}, kube.ClusterIdentity{}, sourceErr
+	}
+
+	if destinationErr != nil {
+		return kube.ClusterIdentity{}, kube.ClusterIdentity{}, destinationErr
+	}
+
+	return source, destination, nil
 }
