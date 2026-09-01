@@ -2872,7 +2872,7 @@ func readCopySession(
 			t.Fatal(err)
 		}
 		// Namespaced workflow specs intentionally use local references. Rebuild
-		// the execution-model namespace in this compatibility snapshot so the
+		// the execution-model namespace in this test snapshot so the
 		// assertions can compare identities with the live PVCs.
 		if resourceName == "copies" {
 			for index := range snapshot.Spec.Volumes {

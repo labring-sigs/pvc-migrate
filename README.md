@@ -93,7 +93,7 @@ kubectl apply -k config/default
 
 Run `make manifests` after changing API markers. It regenerates the typed
 deep-copy code and the CRD under `config/crd/bases`, then synchronizes the
-installation-compatible `deploy/crd.yaml` file.
+single-installation `deploy/crd.yaml` file.
 
 The resource boundary and unsupported-workflow decisions are documented in
 [`docs/controller-design.md`](docs/controller-design.md).

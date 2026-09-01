@@ -65,7 +65,7 @@ func (r *rootState) newControllerCommand() *cobra.Command {
 					WithClusterIdentity(cluster.ID).
 					WithTrustedToolImage(r.global.toolImage).
 					WithOpenEBSLVMSharedVolumeManager(runtime.openEBSLVMSharedVolumeManager).
-					WithLogger(runtime.logger.With("component", "migration-controller")).
+					WithLogger(runtime.logger.With("component", "workflow-controller")).
 					ReconcileOnce(ctx)
 			}
 

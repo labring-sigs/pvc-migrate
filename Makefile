@@ -9,7 +9,7 @@ CONTROLLER_GEN_VERSION ?= v0.19.0
 PVC_MIGRATE_E2E_MODE ?= session
 E2E_TIMEOUT ?= 90m
 
-.PHONY: all build test test-race vet lint check e2e manifests generate-manifests clean
+.PHONY: all build test test-race vet lint check e2e manifests clean
 
 all: check build
 
@@ -34,9 +34,6 @@ manifests: $(CONTROLLER_GEN)
 	$(CONTROLLER_GEN) object paths=./api/... output:dir=api/v1alpha1
 	$(CONTROLLER_GEN) crd paths=./api/... output:crd:artifacts:config=config/crd/bases
 	$(CONTROLLER_GEN) crd paths=./api/... output:stdout > deploy/crd.yaml
-
-# Keep the historical target as a compatibility alias for local automation.
-generate-manifests: manifests
 
 $(LOCALBIN)/controller-gen:
 	GOBIN=$(LOCALBIN) go install sigs.k8s.io/controller-tools/cmd/controller-gen@$(CONTROLLER_GEN_VERSION)

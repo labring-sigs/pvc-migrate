@@ -121,7 +121,7 @@ func TestKubeBlocksProtocolMappings(t *testing.T) {
 	if got := kubeBlocksClusterField(
 		"apps.kubeblocks.io/v1alpha1",
 	); got != kubeBlocksFieldClusterRef {
-		t.Fatalf("legacy cluster field=%q", got)
+		t.Fatalf("cluster field=%q", got)
 	}
 
 	if got := kubeBlocksClusterField(kubeBlocksOpsAPIVersion); got != kubeBlocksFieldClusterName {

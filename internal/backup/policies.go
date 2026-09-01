@@ -76,8 +76,8 @@ func checkObjectTransferQuota(
 		)
 	})
 
-	// Preserve the historical source-namespace error precedence when both
-	// independent policy reads fail in the same preflight.
+	// Return the source-namespace error first for deterministic diagnostics when
+	// both independent policy reads fail in the same preflight.
 	if checks[0].err != nil {
 		return checks[0].err
 	}

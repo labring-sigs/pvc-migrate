@@ -15,8 +15,6 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
-	clientfake "k8s.io/client-go/kubernetes/fake"
-	clienttesting "k8s.io/client-go/testing"
 	crclient "sigs.k8s.io/controller-runtime/pkg/client"
 	crfake "sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
@@ -338,15 +336,25 @@ func TestCRDSessionStoreCreateReportsAPIServerCause(t *testing.T) {
 	}
 }
 
-func TestDecodeMigrationInitializesDeclarativeResource(t *testing.T) {
+func TestDecodeWorkflowInitializesDeclarativeResource(t *testing.T) {
 	session := storeTestSession()
-	object := sessionObject(session)
+
+	objectValue := sessionObjectFor(session)
+	if objectValue == nil {
+		t.Fatal("failed to build workflow object")
+	}
+
+	object, ok := objectValue.(*v1alpha1.Migration)
+	if !ok {
+		t.Fatalf("workflow object type=%T", objectValue)
+	}
+
 	object.Labels = nil
 	object.Status = v1alpha1.MigrationStatus{}
 	object.ResourceVersion = "17"
 	object.Generation = 3
 
-	decoded, err := DecodeMigration(object)
+	decoded, err := DecodeWorkflow(object)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -370,7 +378,17 @@ func TestCRDSessionStoreAddsProtectionToDeclarativeWorkflow(t *testing.T) {
 	client := newCRDTestClient()
 	store := NewCRDSessionStore(client)
 	session := storeTestSession()
-	object := sessionObject(session)
+
+	objectValue := sessionObjectFor(session)
+	if objectValue == nil {
+		t.Fatal("failed to build workflow object")
+	}
+
+	object, ok := objectValue.(*v1alpha1.Migration)
+	if !ok {
+		t.Fatalf("workflow object type=%T", objectValue)
+	}
+
 	object.SetFinalizers(nil)
 	object.SetLabels(nil)
 
@@ -413,35 +431,6 @@ func TestCRDSessionStoreAddsProtectionToDeclarativeWorkflow(t *testing.T) {
 	}
 }
 
-func TestRoutingSessionStoreUsesClusterMoveWorkflow(t *testing.T) {
-	ctx := context.Background()
-	configMap := NewConfigMapSessionStore(clientfake.NewClientset())
-	crd := NewCRDSessionStore(newCRDTestClient())
-	router := NewSessionStoreRouter(configMap, crd)
-	session := storeTestSession()
-	session.Spec = domain.NewSessionSpec(domain.OperationMove, domain.SessionCommon{
-		SourceNamespace:      "app",
-		TemporaryNamespace:   "system",
-		DestinationNamespace: "archive",
-		SessionNamespace:     "system",
-		Volumes:              session.Spec.Volumes,
-	}, false, domain.SessionWorkflowOptions{})
-	session.Status = domain.NewSession(session.ID, session.Spec, time.Now()).Status
-
-	if err := router.Create(ctx, session); err != nil {
-		t.Fatal(err)
-	}
-
-	if session.Backend != SessionBackendCRD ||
-		session.BackendResource != domain.ControllerKindClusterMove {
-		t.Fatalf("move workflow backend=%q resource=%q", session.Backend, session.BackendResource)
-	}
-
-	if _, err := crd.Get(ctx, "system", session.ID); err != nil {
-		t.Fatal(err)
-	}
-}
-
 func TestCRDSessionStoreGetFiltersClusterWorkflowBySessionNamespace(t *testing.T) {
 	ctx := context.Background()
 	store := NewCRDSessionStore(newCRDTestClient())
@@ -468,160 +457,6 @@ func TestCRDSessionStoreGetFiltersClusterWorkflowBySessionNamespace(t *testing.T
 
 	if loaded.BackendResource != domain.ControllerKindClusterMigration {
 		t.Fatalf("cluster workflow resource=%q", loaded.BackendResource)
-	}
-}
-
-func TestRoutingSessionStoreFallsBackForCrossNamespaceBackupRepository(t *testing.T) {
-	ctx := context.Background()
-	router := NewSessionStoreRouter(
-		NewConfigMapSessionStore(clientfake.NewClientset()),
-		NewCRDSessionStore(newCRDTestClient()),
-	)
-	spec := domain.NewSessionSpec(domain.OperationBackup, domain.SessionCommon{
-		SourceNamespace: "tenant", SessionNamespace: "tenant",
-	}, false, domain.SessionWorkflowOptions{})
-	spec.Backup.SourcePVC = domain.ObjectReference{
-		Namespace: "tenant",
-		Name:      "data",
-		UID:       "pvc-uid",
-	}
-	spec.Backup.SourcePV = domain.ObjectReference{Name: "pv-data", UID: "pv-uid"}
-	spec.Backup.Name = "daily"
-	spec.Backup.BackupRepository = "archive"
-	spec.Backup.BackupRepositoryNamespace = "backup-config"
-	session := domain.NewSession("cluster-backup", spec, time.Now())
-
-	if err := router.Create(ctx, session); err != nil {
-		t.Fatal(err)
-	}
-
-	if session.Backend != SessionBackendConfigMap || session.BackendResource != "" {
-		t.Fatalf("backup backend=%q resource=%q", session.Backend, session.BackendResource)
-	}
-
-	loaded, err := router.Get(ctx, "tenant", session.ID)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	if loaded.Spec.Backup == nil ||
-		loaded.Spec.Backup.BackupRepositoryNamespace != "backup-config" {
-		t.Fatalf("loaded backup fallback=%#v", loaded.Spec.Backup)
-	}
-}
-
-func TestRoutingSessionStoreFallsBackPerOperationWhenCRDIsMissing(t *testing.T) {
-	ctx := context.Background()
-	configMap := NewConfigMapSessionStore(clientfake.NewClientset())
-	crd := NewCRDSessionStore(newCRDTestClient()).
-		WithSupportedKinds([]domain.ControllerKind{domain.ControllerKindMigration})
-	router := NewSessionStoreRouter(configMap, crd).
-		WithControllerKinds([]domain.ControllerKind{domain.ControllerKindMigration})
-
-	migration := storeTestSession()
-	if err := router.Create(ctx, migration); err != nil {
-		t.Fatal(err)
-	}
-
-	if migration.Backend != SessionBackendCRD || migration.BackendResource != "Migration" {
-		t.Fatalf("migration backend=%q resource=%q", migration.Backend, migration.BackendResource)
-	}
-
-	copySession := storeTestSession()
-	copySession.ID = "copy-fallback"
-	copySession.Spec = domain.NewSessionSpec(domain.OperationCopy, domain.SessionCommon{
-		SourceNamespace: "system", TemporaryNamespace: "system", DestinationNamespace: "system",
-		SessionNamespace: "system", Volumes: migration.Spec.Volumes,
-	}, false, domain.SessionWorkflowOptions{})
-
-	copySession.Status = domain.NewSession(copySession.ID, copySession.Spec, time.Now()).Status
-	if err := crd.Create(ctx, copySession); domain.CategoryOf(err) != domain.ErrorPrecondition {
-		t.Fatalf("missing Copy CRD category=%s error=%v", domain.CategoryOf(err), err)
-	}
-
-	if err := router.Create(ctx, copySession); err != nil {
-		t.Fatal(err)
-	}
-
-	if copySession.Backend != SessionBackendConfigMap {
-		t.Fatalf("copy fallback backend=%q", copySession.Backend)
-	}
-
-	loaded, err := router.Get(ctx, "system", copySession.ID)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	if loaded.Backend != SessionBackendConfigMap || loaded.Spec.Type != domain.SessionTypeCopy {
-		t.Fatalf("loaded fallback backend=%q type=%q", loaded.Backend, loaded.Spec.Type)
-	}
-}
-
-func TestRoutingSessionStoreGetReturnsCRDWithoutWaitingForConfigMap(t *testing.T) {
-	configMapClient := clientfake.NewClientset()
-	configMapStarted := make(chan struct{})
-	configMapRelease := make(chan struct{})
-	configMapDone := make(chan struct{})
-	configMapClient.PrependReactor(
-		"get",
-		"configmaps",
-		func(action clienttesting.Action) (bool, runtime.Object, error) {
-			close(configMapStarted)
-			<-configMapRelease
-			close(configMapDone)
-
-			return true, nil, apierrors.NewNotFound(
-				schema.GroupResource{Resource: "configmaps"},
-				SessionConfigMapName("alpha"),
-			)
-		},
-	)
-
-	crd := NewCRDSessionStore(newCRDTestClient())
-
-	session := storeTestSession()
-	if err := crd.Create(context.Background(), session); err != nil {
-		t.Fatal(err)
-	}
-
-	router := NewSessionStoreRouter(NewConfigMapSessionStore(configMapClient), crd)
-
-	type getResponse struct {
-		session *domain.Session
-		err     error
-	}
-
-	response := make(chan getResponse, 1)
-	go func() {
-		loaded, err := router.Get(context.Background(), "system", session.ID)
-		response <- getResponse{session: loaded, err: err}
-	}()
-
-	select {
-	case <-configMapStarted:
-	case <-time.After(time.Second):
-		t.Fatal("ConfigMap fallback read did not start")
-	}
-
-	select {
-	case result := <-response:
-		if result.err != nil {
-			t.Fatal(result.err)
-		}
-
-		if result.session == nil || result.session.Backend != SessionBackendCRD {
-			t.Fatalf("router returned %#v, want CRD session", result.session)
-		}
-	case <-time.After(time.Second):
-		t.Fatal("CRD hit waited for blocked ConfigMap fallback")
-	}
-
-	close(configMapRelease)
-
-	select {
-	case <-configMapDone:
-	case <-time.After(time.Second):
-		t.Fatal("blocked ConfigMap fallback did not finish after release")
 	}
 }
 
@@ -1087,33 +922,6 @@ func TestCRDSessionStoreRebindRollbackRemovesTargetFinalizer(t *testing.T) {
 	}
 }
 
-func TestRoutingSessionStoreListPrefersCRDForDuplicateID(t *testing.T) {
-	ctx := context.Background()
-	configMapClient := clientfake.NewClientset()
-	configMapStore := NewConfigMapSessionStore(configMapClient)
-	crdStore := NewCRDSessionStore(newCRDTestClient())
-	router := NewSessionStoreRouter(configMapStore, crdStore)
-
-	configSession := storeTestSession()
-	if err := configMapStore.Create(ctx, configSession); err != nil {
-		t.Fatal(err)
-	}
-
-	crdSession := storeTestSession()
-	if err := crdStore.Create(ctx, crdSession); err != nil {
-		t.Fatal(err)
-	}
-
-	listed, err := router.List(ctx, "system")
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	if len(listed) != 1 || listed[0].Backend != SessionBackendCRD {
-		t.Fatalf("router list=%#v", listed)
-	}
-}
-
 func newCRDTestClient() crclient.Client {
 	scheme := runtime.NewScheme()
 	if err := v1alpha1.AddToScheme(scheme); err != nil {
@@ -1335,9 +1143,14 @@ func TestControllerSessionSupportedRejectsCrossNamespaceBackup(t *testing.T) {
 }
 
 func TestDecodeWorkflowDerivesTenantBoundaryFromMetadataNamespace(t *testing.T) {
-	object := sessionObject(storeTestSession())
-	if object == nil {
+	objectValue := sessionObjectFor(storeTestSession())
+	if objectValue == nil {
 		t.Fatal("failed to build workflow object")
+	}
+
+	object, ok := objectValue.(*v1alpha1.Migration)
+	if !ok {
+		t.Fatalf("workflow object type=%T", objectValue)
 	}
 
 	object.SetNamespace("other")
@@ -1611,29 +1424,5 @@ func TestCRDSessionStoreRequiresLeaseClient(t *testing.T) {
 		"session",
 	); domain.CategoryOf(err) != domain.ErrorKubernetes {
 		t.Fatalf("delete without lease client category=%s error=%v", domain.CategoryOf(err), err)
-	}
-}
-
-func TestRoutingSessionStoreForwardsSessionLease(t *testing.T) {
-	store := NewSessionStoreRouter(
-		NewConfigMapSessionStore(newSessionLeaseTestClient()),
-		NewCRDSessionStore(newCRDTestClient()),
-	)
-
-	lock, err := store.AcquireSessionLock(context.Background(), "system", "router-lock")
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	if lock == nil {
-		t.Fatal("router returned a nil session lock")
-	}
-
-	if err := lock.Release(context.Background()); err != nil {
-		t.Fatal(err)
-	}
-
-	if err := store.DeleteSessionLease(context.Background(), "system", "router-lock"); err != nil {
-		t.Fatal(err)
 	}
 }

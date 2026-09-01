@@ -478,7 +478,7 @@ func TestOperationStatusesExposeOnlyConcernedCheckpoints(t *testing.T) {
 	}
 }
 
-func TestStatusConversionBoundsLegacyControllerState(t *testing.T) {
+func TestStatusConversionBoundsControllerState(t *testing.T) {
 	status := domain.SessionStatus{
 		Message:    strings.Repeat("x", domain.MaxWorkflowMessageBytes+1),
 		Conditions: make([]domain.Condition, domain.MaxWorkflowConditions+3),

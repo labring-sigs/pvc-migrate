@@ -308,13 +308,6 @@ func (s *ConfigMapSessionStore) List(
 
 		session, decodeErr := decodeSession(&items.Items[i])
 		if decodeErr != nil {
-			// Schema upgrades intentionally do not provide reverse decoding. A
-			// stale ConfigMap must not prevent inventory of current sessions or
-			// CRD-backed workflows; an explicit Get still reports the validation
-			// error so operators cannot mutate an unknown record accidentally.
-			if strings.Contains(strings.ToLower(decodeErr.Error()), "unsupported session schema") {
-				continue
-			}
 			return nil, decodeErr
 		}
 

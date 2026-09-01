@@ -288,9 +288,9 @@ func ValidateConfig(cfg Config) error {
 		}
 	}
 
-	// S3 limits object keys, including the profile prefix, recovery-point
+	// S3 limits object keys, including the repository prefix, recovery-point
 	// name, and controller-owned completion suffix, to 1024 bytes. Validate
-	// the complete manifest key here so profile-backed workflows fail before
+	// the complete manifest key here so repository-backed workflows fail before
 	// Helm or a transfer Pod is started.
 	if len(path.Join(cfg.Prefix, cfg.Name+".complete.json")) > maxObjectKeyLength {
 		return domain.NewError(

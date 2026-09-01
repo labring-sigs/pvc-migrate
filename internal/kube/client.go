@@ -222,8 +222,8 @@ func HasAPIResources(
 }
 
 // AvailableControllerWorkflowKinds returns the workflow CRD Kinds served by
-// the target cluster. Discovery is intentionally best-effort: an unavailable
-// API group yields an empty set and callers can fall back to ConfigMaps.
+// the target cluster. Discovery is best-effort: an unavailable API group
+// yields an empty set and explicit controller mode reports that requirement.
 func AvailableControllerWorkflowKinds(
 	discoveryClient discovery.DiscoveryInterface,
 ) []domain.ControllerKind {

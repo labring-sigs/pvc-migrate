@@ -117,7 +117,7 @@ func TestBuildResumeRequestReusesControllerProvidedStore(t *testing.T) {
 func TestPinBackupRepositoryCapturesAndRejectsRevisionDrift(t *testing.T) {
 	store := &recordingBackupSessionStore{}
 	session := domain.NewSession(
-		"backup-profile",
+		"backup-repository",
 		domain.NewSessionSpec(
 			domain.OperationBackup,
 			domain.SessionCommon{SourceNamespace: "app", SessionNamespace: "app"},
@@ -507,7 +507,7 @@ func TestSubmitRestoreSeparatesBackendFromS3Provider(t *testing.T) {
 
 func TestSubmitRestoreRepositoryOmitsControllerOwnedConnection(t *testing.T) {
 	objectStore, err := objectstore.NewConfigOnly(
-		objectstore.Config{Bucket: "profile", Name: "daily"},
+		objectstore.Config{Bucket: "repository", Name: "daily"},
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -606,7 +606,7 @@ func TestBuildBackupSessionIncludesMetadataWithoutCredentials(t *testing.T) {
 func TestBuildBackupSessionRepositoryOmitsControllerOwnedConnection(t *testing.T) {
 	store := &recordingBackupSessionStore{}
 	req := Request{
-		ID:               "profile-backup",
+		ID:               "repository-backup",
 		Namespace:        "app",
 		SessionNamespace: "app",
 		BackupRepository: "tenant-s3",

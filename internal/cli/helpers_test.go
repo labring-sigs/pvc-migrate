@@ -842,11 +842,10 @@ func TestOfflinePlanOptionsPreserveSourcePVCSelection(t *testing.T) {
 
 func TestParseLogLevel(t *testing.T) {
 	cases := map[string]slog.Level{
-		"debug":   slog.LevelDebug,
-		"INFO":    slog.LevelInfo,
-		"warn":    slog.LevelWarn,
-		"warning": slog.LevelWarn,
-		"error":   slog.LevelError,
+		"debug": slog.LevelDebug,
+		"INFO":  slog.LevelInfo,
+		"warn":  slog.LevelWarn,
+		"error": slog.LevelError,
 	}
 	for input, want := range cases {
 		got, err := parseLogLevel(input)
@@ -855,8 +854,15 @@ func TestParseLogLevel(t *testing.T) {
 		}
 	}
 
-	if _, err := parseLogLevel("trace"); domain.CategoryOf(err) != domain.ErrorValidation {
-		t.Fatalf("invalid log level error=%v category=%q", err, domain.CategoryOf(err))
+	for _, input := range []string{"trace", "warning"} {
+		if _, err := parseLogLevel(input); domain.CategoryOf(err) != domain.ErrorValidation {
+			t.Fatalf(
+				"invalid log level %q error=%v category=%q",
+				input,
+				err,
+				domain.CategoryOf(err),
+			)
+		}
 	}
 }
 

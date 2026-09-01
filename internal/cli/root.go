@@ -503,7 +503,7 @@ func parseLogLevel(value string) (slog.Level, error) {
 		return slog.LevelDebug, nil
 	case "info":
 		return slog.LevelInfo, nil
-	case "warn", "warning":
+	case "warn":
 		return slog.LevelWarn, nil
 	case "error":
 		return slog.LevelError, nil

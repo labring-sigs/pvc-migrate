@@ -27,9 +27,7 @@ import (
 )
 
 // WorkflowReconciler bridges every operation-specific workflow Kind to the
-// existing service state machine. The historical MigrationReconciler alias is
-// retained for source compatibility; reconciliation is intentionally not
-// limited to Migration resources.
+// existing service state machine.
 type WorkflowReconciler struct {
 	store            kube.SessionStore
 	service          *app.Service
@@ -43,16 +41,8 @@ type WorkflowReconciler struct {
 	supportedKinds   map[domain.ControllerKind]struct{}
 }
 
-// MigrationReconciler is kept as an alias for callers that used the original
-// controller name before operation-specific workflow Kinds were added.
-type MigrationReconciler = WorkflowReconciler
-
 func NewWorkflowReconciler(service *app.Service, store kube.SessionStore) *WorkflowReconciler {
 	return &WorkflowReconciler{service: service, store: store, requeueAfter: 5 * time.Second}
-}
-
-func NewMigrationReconciler(service *app.Service, store kube.SessionStore) *WorkflowReconciler {
-	return NewWorkflowReconciler(service, store)
 }
 
 // WithNamespace optionally limits reconciliation to one durable session
@@ -111,8 +101,8 @@ func (r *WorkflowReconciler) WithControllerClient(client crclient.Reader) *Workf
 }
 
 // WithClusterIdentity scopes controller-backed object-store paths to the
-// cluster serving this manager. StartManager populates it from kube-system's
-// stable namespace UID.
+// cluster serving this manager. StartManagerWithKinds populates it from
+// kube-system's stable namespace UID.
 func (r *WorkflowReconciler) WithClusterIdentity(identity string) *WorkflowReconciler {
 	if r != nil {
 		r.clusterIdentity = strings.TrimSpace(identity)
@@ -153,7 +143,7 @@ func (r *WorkflowReconciler) Reconcile(
 	request reconcile.Request,
 ) (reconcile.Result, error) {
 	if r == nil || r.store == nil || r.service == nil {
-		return reconcile.Result{}, errors.New("migration reconciler is not configured")
+		return reconcile.Result{}, errors.New("workflow reconciler is not configured")
 	}
 
 	if r.namespace != "" && request.Namespace != r.namespace {
@@ -336,25 +326,6 @@ func (r *WorkflowReconciler) SetupWithManager(manager ctrl.Manager) error {
 	}
 
 	return controllerBuilder.Complete(r)
-}
-
-// StartManager creates the production controller-runtime manager. Leader
-// election is enabled so multiple replicas can be deployed safely; the app
-// service's per-session Lease still fences individual CLI/controller calls.
-func StartManager(
-	ctx context.Context,
-	config *rest.Config,
-	service *app.Service,
-	store kube.SessionStore,
-	namespace string,
-	kubeClient kubernetes.Interface,
-	openEBSManager kube.OpenEBSLVMSharedVolumeManager,
-	trustedToolImage ...string,
-) error {
-	return StartManagerWithKinds(
-		ctx, config, service, store, namespace, kubeClient, openEBSManager, nil,
-		trustedToolImage...,
-	)
 }
 
 // StartManagerWithKinds creates a manager that watches only the discovered

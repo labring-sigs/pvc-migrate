@@ -43,8 +43,7 @@ func controllerWorkflowAvailable(runtime *commandRuntime, sessionType domain.Ses
 
 // workflowNamespaceForCommand resolves the namespace used by lifecycle and
 // status commands. Controller-backed workflows are namespaced tenant
-// resources, so callers must opt into a tenant namespace explicitly; session
-// mode keeps the historical global --session-namespace default.
+// resources, while session mode uses the configured session namespace.
 func workflowNamespaceForCommand(r *rootState, cmd *cobra.Command) string {
 	if cmd != nil {
 		if flag := cmd.Flags().Lookup("namespace"); flag != nil {

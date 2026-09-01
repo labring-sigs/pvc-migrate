@@ -32,7 +32,6 @@ const (
 	ClusterCopyResource         = "clustercopies"
 	ClusterMoveResource         = "clustermoves"
 	BackupRepositoryResource    = "backuprepositories"
-	MigrationCRDName            = MigrationResource + "." + SessionAPIGroup
 	// Workflow status is user-visible and persisted in the API server. Keep
 	// controller-generated history and messages bounded even when a lower
 	// layer returns an unexpectedly large error string.
@@ -1205,7 +1204,7 @@ func (s SessionSpec) Workload() WorkloadSpec {
 
 // KubeBlocksPodMigration reports whether this session is the real-time Pod
 // workflow for a discovered KubeBlocks workload. Offline migrate sessions do
-// not use this classification even when legacy workload data is present.
+// not use this classification even when workload metadata is present.
 func (s SessionSpec) KubeBlocksPodMigration() (*KubeBlocksSpec, bool) {
 	if s.Operation() != OperationMigratePod {
 		return nil, false

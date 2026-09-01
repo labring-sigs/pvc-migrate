@@ -160,7 +160,7 @@ func (r *rootState) newRestoreTransferCommand() *cobra.Command {
 				return reportTransferError(cmd, "restore", flags.namespace, flags.pvc, err)
 			}
 
-			// Profile-backed restores are submitted as CRs. Static-credential
+			// Repository-backed restores are submitted as CRs. Static-credential
 			// restores keep the synchronous session path; creating a ConfigMap
 			// session and then executing directly would leave an orphaned record.
 			if controllerWorkflowAvailable(runtime, domain.SessionTypeRestore) &&

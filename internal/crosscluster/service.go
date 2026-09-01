@@ -93,8 +93,7 @@ func (s *Service) WithConnections(
 }
 
 // clusterIdentities reads both API endpoints concurrently. The two reads are
-// independent, while returning source errors first preserves the historical
-// error precedence for callers and diagnostics.
+// independent; source errors are returned first for deterministic diagnostics.
 func (s *Service) clusterIdentities(
 	ctx context.Context,
 ) (source, destination kube.ClusterIdentity, err error) {

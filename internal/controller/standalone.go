@@ -127,7 +127,7 @@ func (m *Manager) resumeStandalone(ctx context.Context, session *domain.Session)
 	}
 
 	// The snapshot is controller-validated before this path runs. Reassert the
-	// live workflow identity here as defense in depth so a malformed or legacy
+	// live workflow identity here as defense in depth so a stale or malformed
 	// snapshot can never redirect Pod creation to another namespace or name.
 	pod.Namespace = workload.Pod.Namespace
 	pod.Name = workload.Pod.Name

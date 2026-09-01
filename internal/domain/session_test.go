@@ -370,13 +370,13 @@ func TestKubeBlocksSpecOmitsUnusedSwitchoverStrategy(t *testing.T) {
 		t.Fatalf("KubeBlocks spec contains unused switchover strategy: %s", raw)
 	}
 
-	var legacy KubeBlocksSpec
-	if err := json.Unmarshal([]byte(`{"switchoverStrategy":"opsrequest"}`), &legacy); err != nil {
+	var decoded KubeBlocksSpec
+	if err := json.Unmarshal([]byte(`{"switchoverStrategy":"opsrequest"}`), &decoded); err != nil {
 		t.Fatal(err)
 	}
 
-	if legacy.SwitchoverStrategy != KubeBlocksSwitchoverOpsRequest {
-		t.Fatalf("legacy switchover strategy=%q", legacy.SwitchoverStrategy)
+	if decoded.SwitchoverStrategy != KubeBlocksSwitchoverOpsRequest {
+		t.Fatalf("switchover strategy=%q", decoded.SwitchoverStrategy)
 	}
 }
 

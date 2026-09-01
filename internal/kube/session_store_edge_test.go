@@ -116,6 +116,17 @@ func TestDecodeSessionRejectsPreviousAPIVersion(t *testing.T) {
 	}
 }
 
+func TestConfigMapSessionStoreListRejectsUnsupportedSchema(t *testing.T) {
+	session := storeTestSession()
+	session.APIVersion = "pvc-migrate.io/v1alpha1"
+	client := fake.NewClientset(sessionConfigMap(t, session, true))
+
+	_, err := NewConfigMapSessionStore(client).List(context.Background(), "system")
+	if domain.CategoryOf(err) != domain.ErrorValidation {
+		t.Fatalf("unsupported schema list category=%s error=%v", domain.CategoryOf(err), err)
+	}
+}
+
 func TestConfigMapSessionStoreCreateGetAndUpdateConflicts(t *testing.T) {
 	ctx := context.Background()
 	client := fake.NewClientset()

@@ -12,20 +12,10 @@ import (
 	apiequality "k8s.io/apimachinery/pkg/api/equality"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/util/retry"
 	crclient "sigs.k8s.io/controller-runtime/pkg/client"
 )
-
-// MigrationGVR is the stable GVR for the controller-backed migration API. It
-// remains exported for discovery and integration tests; CRUD operations use
-// the generated typed API for the operation-specific Kind.
-var MigrationGVR = schema.GroupVersionResource{
-	Group:    v1alpha1.GroupVersion.Group,
-	Version:  v1alpha1.GroupVersion.Version,
-	Resource: domain.MigrationResource,
-}
 
 type crdResource struct {
 	kind    domain.ControllerKind
@@ -1407,12 +1397,6 @@ func (s *CRDSessionStore) Delete(ctx context.Context, session *domain.Session) e
 	return nil
 }
 
-// DecodeMigration converts the generated Migration API object into the domain
-// session envelope. It remains exported for callers that use the primary kind.
-func DecodeMigration(object *v1alpha1.Migration) (*domain.Session, error) {
-	return DecodeWorkflow(object)
-}
-
 // DecodeWorkflow converts any operation-specific API object into the shared
 // domain session envelope. The resource Kind is the operation discriminator;
 // the API specs intentionally have no redundant type field.
@@ -1480,13 +1464,6 @@ func DecodeWorkflow(object crclient.Object) (*domain.Session, error) {
 	return session, nil
 }
 
-// ValidateMigrationMetadata protects the identity boundary for the primary
-// Migration kind. ValidateWorkflowMetadata applies the same checks to all
-// operation-specific kinds.
-func ValidateMigrationMetadata(object *v1alpha1.Migration, id, namespace string) error {
-	return ValidateWorkflowMetadata(object, id, namespace)
-}
-
 func ValidateWorkflowMetadata(object crclient.Object, id, namespace string) error {
 	if object == nil || object.GetName() != id || object.GetNamespace() != namespace {
 		return domain.NewError(
@@ -1539,12 +1516,6 @@ func ValidateWorkflowMetadata(object crclient.Object, id, namespace string) erro
 
 func sessionLabels(id string) map[string]string {
 	return map[string]string{ManagedByLabel: ManagedByValue, SessionKey: id}
-}
-
-func sessionObject(session *domain.Session) *v1alpha1.Migration {
-	object, _ := sessionObjectForKind(session, domain.ControllerKindMigration)
-	migration, _ := object.(*v1alpha1.Migration)
-	return migration
 }
 
 func sessionObjectFor(session *domain.Session) crclient.Object {
