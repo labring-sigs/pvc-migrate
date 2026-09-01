@@ -280,10 +280,8 @@ type MoveSpec struct {
 	PVCIdentityFields    `       json:",inline"              yaml:",inline"`
 }
 
-// API status types are intentionally distinct per Kind. WorkflowStatus holds
-// lifecycle fields only; transfer/workload details belong to the operation
-// that owns them.
 // +kubebuilder:validation:Enum=Planned;Reserving;Reserved;WarmCopying;WarmCopied;Pausing;Paused;FinalSyncing;FinalSynced;Activating;Activated;Resuming;Completed;Aborting;Aborted;RollingBack;RolledBack;Renaming;Moving;Failed
+// WorkflowPhase identifies one durable workflow state.
 type WorkflowPhase string
 
 type WorkflowCondition struct {
@@ -1698,7 +1696,9 @@ func (s PodMigrationStatus) ApplyToDomainSpec(spec *domain.SessionSpec) {
 	if s.Workload.Pod.Name != "" {
 		workload.Pod = refToDomain(s.Workload.Pod)
 	}
-	workload.AffectedPods = refsToDomain(s.Workload.AffectedPods)
+	if len(s.Workload.AffectedPods) > 0 {
+		workload.AffectedPods = refsToDomain(s.Workload.AffectedPods)
+	}
 }
 
 func (s ReservationStatus) Domain() domain.SessionStatus {

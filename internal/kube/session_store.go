@@ -352,7 +352,7 @@ func (s *ConfigMapSessionStore) Delete(ctx context.Context, session *domain.Sess
 
 	if containsString(cm.Finalizers, SessionFinalizer) {
 		updated := cm.DeepCopy()
-		updated.Finalizers = removeString(updated.Finalizers, SessionFinalizer)
+		updated.Finalizers = removeSessionFinalizer(updated.Finalizers)
 
 		latest, err := s.client.CoreV1().
 			ConfigMaps(cm.Namespace).
@@ -413,10 +413,10 @@ func containsString(values []string, value string) bool {
 	return slices.Contains(values, value)
 }
 
-func removeString(values []string, value string) []string {
+func removeSessionFinalizer(values []string) []string {
 	result := values[:0]
 	for _, item := range values {
-		if item != value {
+		if item != SessionFinalizer {
 			result = append(result, item)
 		}
 	}

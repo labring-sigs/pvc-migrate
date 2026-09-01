@@ -21,6 +21,12 @@ spec:
         app.kubernetes.io/managed-by: pvc-migrate
     spec:
       serviceAccountName: pvc-migrate
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10000
+        runAsGroup: 10000
+        seccompProfile:
+          type: RuntimeDefault
       containers:
         - name: controller
           image: ghcr.io/labring-sigs/pvc-migrate:dev
@@ -30,6 +36,18 @@ spec:
             - --mode=controller
             - --session-namespace=pvc-migrate-system
             - --log-level=info
+          ports:
+            - name: health
+              containerPort: 8081
+              protocol: TCP
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: health
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: health
           securityContext:
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: true

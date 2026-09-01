@@ -104,6 +104,12 @@ func deferControllerExecution(
 		return false, nil
 	}
 
+	if session.Status.Phase == domain.PhaseFailed {
+		// Failed resources are quiescent in the controller. An explicit lifecycle
+		// command owns the retry and moves the durable state back to ResumeFrom.
+		return false, nil
+	}
+
 	// Completed operation-specific checkpoints have no controller work left.
 	// Let the command execute its explicit retry or lifecycle action directly;
 	// the controller intentionally ignores these resources until their state is

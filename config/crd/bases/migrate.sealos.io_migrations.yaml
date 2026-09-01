@@ -494,10 +494,7 @@ spec:
                     message:
                       type: string
                     phase:
-                      description: |-
-                        API status types are intentionally distinct per Kind. WorkflowStatus holds
-                        lifecycle fields only; transfer/workload details belong to the operation
-                        that owns them.
+                      description: WorkflowPhase identifies one durable workflow state.
                       enum:
                       - Planned
                       - Reserving
@@ -534,10 +531,7 @@ spec:
                 format: int64
                 type: integer
               phase:
-                description: |-
-                  API status types are intentionally distinct per Kind. WorkflowStatus holds
-                  lifecycle fields only; transfer/workload details belong to the operation
-                  that owns them.
+                description: WorkflowPhase identifies one durable workflow state.
                 enum:
                 - Planned
                 - Reserving
@@ -561,10 +555,7 @@ spec:
                 - Failed
                 type: string
               resumeFrom:
-                description: |-
-                  API status types are intentionally distinct per Kind. WorkflowStatus holds
-                  lifecycle fields only; transfer/workload details belong to the operation
-                  that owns them.
+                description: WorkflowPhase identifies one durable workflow state.
                 enum:
                 - Planned
                 - Reserving

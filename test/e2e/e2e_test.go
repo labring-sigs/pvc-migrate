@@ -2063,7 +2063,6 @@ func startE2EController(
 		"--timeout", "0",
 		"--log-level", "info",
 		"controller",
-		"--poll-interval", controllerPoll.String(),
 	)
 	process.command.Stdout = &process.stdout
 	process.command.Stderr = &process.stderr

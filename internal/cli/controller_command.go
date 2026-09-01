@@ -3,7 +3,6 @@ package cli
 import (
 	"context"
 	"errors"
-	"time"
 
 	"github.com/labring-sigs/pvc-migrate/internal/controller"
 	"github.com/labring-sigs/pvc-migrate/internal/domain"
@@ -11,10 +10,7 @@ import (
 )
 
 func (r *rootState) newControllerCommand() *cobra.Command {
-	var (
-		once         bool
-		pollInterval time.Duration
-	)
+	var once bool
 
 	command := &cobra.Command{
 		Use:   "controller",
@@ -49,7 +45,6 @@ func (r *rootState) newControllerCommand() *cobra.Command {
 				return controller.NewRunner(runtime.service, runtime.controllerStore, r.global.sessionNamespace).
 					WithKubernetesClient(runtime.clients.Kubernetes).
 					WithOpenEBSLVMSharedVolumeManager(runtime.openEBSLVMSharedVolumeManager).
-					WithPollInterval(pollInterval).
 					WithLogger(runtime.logger.With("component", "migration-controller")).
 					ReconcileOnce(ctx)
 			}
@@ -72,8 +67,6 @@ func (r *rootState) newControllerCommand() *cobra.Command {
 		},
 	}
 	command.Flags().BoolVar(&once, "once", false, "Run one reconciliation pass and exit")
-	command.Flags().
-		DurationVar(&pollInterval, "poll-interval", 5*time.Second, "Interval between reconciliation passes")
 
 	return command
 }

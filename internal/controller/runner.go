@@ -387,7 +387,7 @@ func terminalSession(session *domain.Session) bool {
 	}
 
 	switch session.Status.Phase {
-	case domain.PhaseCompleted, domain.PhaseAborted, domain.PhaseRolledBack:
+	case domain.PhaseCompleted, domain.PhaseAborted, domain.PhaseRolledBack, domain.PhaseFailed:
 		return true
 	}
 

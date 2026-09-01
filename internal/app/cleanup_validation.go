@@ -40,7 +40,8 @@ func (s *Service) validateCleanup(
 		return err
 	}
 
-	if session.Spec.Type == domain.SessionTypeBackup &&
+	if (session.Spec.Type == domain.SessionTypeBackup ||
+		session.Spec.Type == domain.SessionTypeRestore) &&
 		(options.Finalize || options.DeleteSession) {
 		if err := kube.ValidateBackupCredentialsSecretCleanup(
 			ctx,

@@ -335,6 +335,10 @@ func TestTerminalSessionUsesOperationSpecificCompletionPhase(t *testing.T) {
 			phase: domain.PhaseAborted, want: true,
 		},
 		{
+			name: "failed copy", typeName: domain.SessionTypeCopy,
+			phase: domain.PhaseFailed, want: true,
+		},
+		{
 			name: "rolled back move", typeName: domain.SessionTypeMove,
 			phase: domain.PhaseRolledBack, want: true,
 		},

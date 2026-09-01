@@ -19,6 +19,7 @@ import (
 	clienttesting "k8s.io/client-go/testing"
 	crclient "sigs.k8s.io/controller-runtime/pkg/client"
 	crfake "sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 )
 
 type createErrorClient struct {
@@ -769,6 +770,19 @@ func TestCRDSessionStoreRebindsReservationToCopy(t *testing.T) {
 		)
 	}
 
+	copyObject := &v1alpha1.Copy{}
+	if err := client.Get(
+		ctx,
+		crclient.ObjectKey{Namespace: "system", Name: session.ID},
+		copyObject,
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	if !containsString(copyObject.Finalizers, SessionFinalizer) {
+		t.Fatalf("rebound Copy lost session protection: %v", copyObject.Finalizers)
+	}
+
 	if err := client.Get(
 		ctx,
 		crclient.ObjectKey{Namespace: "system", Name: session.ID},
@@ -777,6 +791,92 @@ func TestCRDSessionStoreRebindsReservationToCopy(t *testing.T) {
 		err,
 	) {
 		t.Fatalf("old Reservation still exists, error=%v", err)
+	}
+}
+
+func TestCRDSessionStoreRebindRollbackRemovesTargetFinalizer(t *testing.T) {
+	ctx := context.Background()
+	base := newCRDTestClient()
+
+	baseWithWatch, ok := base.(crclient.WithWatch)
+	if !ok {
+		t.Fatal("fake CRD client does not support Watch")
+	}
+
+	client := interceptor.NewClient(baseWithWatch, interceptor.Funcs{
+		SubResourceUpdate: func(
+			ctx context.Context,
+			underlying crclient.Client,
+			subResource string,
+			object crclient.Object,
+			options ...crclient.SubResourceUpdateOption,
+		) error {
+			if subResource == "status" {
+				if _, isCopy := object.(*v1alpha1.Copy); isCopy {
+					return errors.New("injected target status failure")
+				}
+			}
+
+			return underlying.SubResource(subResource).Update(ctx, object, options...)
+		},
+	})
+
+	store := NewCRDSessionStore(client)
+	session := storeTestSession()
+
+	session.Spec = domain.NewSessionSpec(domain.OperationReserve, domain.SessionCommon{
+		SourceNamespace: "app", TemporaryNamespace: "system", DestinationNamespace: "app",
+		SessionNamespace: "system", Volumes: session.Spec.Volumes,
+	}, false, domain.SessionWorkflowOptions{})
+
+	if err := store.Create(ctx, session); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := session.Transition(domain.PhaseReserving, "reserving", time.Now()); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := session.Transition(domain.PhaseReserved, "reserved", time.Now()); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := store.Update(ctx, session); err != nil {
+		t.Fatal(err)
+	}
+
+	session.Spec = domain.NewSessionSpec(domain.OperationCopy, domain.SessionCommon{
+		SourceNamespace: "app", TemporaryNamespace: "system", DestinationNamespace: "app",
+		SessionNamespace: "system", Volumes: session.Spec.Volumes,
+	}, false, domain.SessionWorkflowOptions{})
+
+	err := store.Update(ctx, session)
+	if err == nil || !strings.Contains(err.Error(), "initialize Copy status") {
+		t.Fatalf("rebind error=%v", err)
+	}
+
+	target := &v1alpha1.Copy{}
+
+	if err := client.Get(
+		ctx,
+		crclient.ObjectKey{Namespace: "system", Name: session.ID},
+		target,
+	); !apierrors.IsNotFound(err) {
+		t.Fatalf("rollback target still exists, error=%v finalizers=%v", err, target.Finalizers)
+	}
+
+	old := &v1alpha1.Reservation{}
+
+	if err := client.Get(
+		ctx,
+		crclient.ObjectKey{Namespace: "system", Name: session.ID},
+		old,
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	if !containsString(old.Finalizers, SessionFinalizer) {
+		t.Fatalf("rollback removed source protection: %v", old.Finalizers)
 	}
 }
 

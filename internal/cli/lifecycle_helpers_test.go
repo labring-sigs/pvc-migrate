@@ -145,6 +145,13 @@ func TestDeferControllerExecutionSkipsTerminalSessions(t *testing.T) {
 			stderr.String(),
 		)
 	}
+
+	session.Status.Phase = domain.PhaseFailed
+
+	deferred, err = deferControllerExecution(context.Background(), command, runtime, session)
+	if err != nil || deferred {
+		t.Fatalf("failed deferred=%t error=%v, want explicit CLI recovery", deferred, err)
+	}
 }
 
 func TestDeferControllerExecutionWaitsAndPrintsOnlyFinalSession(t *testing.T) {

@@ -2,6 +2,7 @@ package kube
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
@@ -13,6 +14,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/util/retry"
 	crclient "sigs.k8s.io/controller-runtime/pkg/client"
 )
 
@@ -685,7 +687,6 @@ func (s *CRDSessionStore) rebindWorkflowResource(
 	}
 
 	target.SetAnnotations(previous.GetAnnotations())
-	target.SetFinalizers(ensureSessionFinalizer(previous.GetFinalizers()))
 	target.SetLabels(sessionLabels(session.ID))
 
 	if err := s.client.Create(ctx, target); err != nil {
@@ -701,24 +702,37 @@ func (s *CRDSessionStore) rebindWorkflowResource(
 
 	status := session.Status
 	if !setWorkflowStatus(target, session.Spec, status) {
-		_ = s.client.Delete(ctx, target)
-
-		return domain.NewError(
+		failure := domain.NewError(
 			domain.ErrorInternal,
 			"rebind session",
 			"unsupported workflow resource",
 		)
+
+		return errors.Join(failure, s.rollbackRebindTarget(ctx, target))
 	}
 
 	if err := s.client.Status().Update(ctx, target); err != nil {
-		_ = s.client.Delete(ctx, target)
-
-		return domain.WrapError(
+		failure := domain.WrapError(
 			domain.ErrorKubernetes,
 			"rebind session",
 			"initialize "+string(desiredKind)+" status",
 			err,
 		)
+
+		return errors.Join(failure, s.rollbackRebindTarget(ctx, target))
+	}
+
+	target.SetFinalizers(ensureSessionFinalizer(target.GetFinalizers()))
+
+	if err := s.client.Update(ctx, target); err != nil {
+		failure := domain.WrapError(
+			domain.ErrorKubernetes,
+			"rebind session",
+			"protect "+string(desiredKind),
+			err,
+		)
+
+		return errors.Join(failure, s.rollbackRebindTarget(ctx, target))
 	}
 
 	// The old operation-specific object carries the session protection
@@ -727,28 +741,28 @@ func (s *CRDSessionStore) rebindWorkflowResource(
 	if containsString(previous.GetFinalizers(), SessionFinalizer) {
 		withoutProtection, ok := previous.DeepCopyObject().(crclient.Object)
 		if !ok {
-			_ = s.client.Delete(ctx, target)
-
-			return domain.NewError(
+			failure := domain.NewError(
 				domain.ErrorInternal,
 				"rebind session",
 				"workflow deep copy does not implement client.Object",
 			)
+
+			return errors.Join(failure, s.rollbackRebindTarget(ctx, target))
 		}
 
 		withoutProtection.SetFinalizers(
-			removeString(withoutProtection.GetFinalizers(), SessionFinalizer),
+			removeSessionFinalizer(withoutProtection.GetFinalizers()),
 		)
 
 		if err := s.client.Update(ctx, withoutProtection); err != nil {
-			_ = s.client.Delete(ctx, target)
-
-			return domain.WrapError(
+			failure := domain.WrapError(
 				domain.ErrorKubernetes,
 				"rebind session",
 				"remove old workflow protection",
 				err,
 			)
+
+			return errors.Join(failure, s.rollbackRebindTarget(ctx, target))
 		}
 
 		previous = withoutProtection
@@ -762,31 +776,167 @@ func (s *CRDSessionStore) rebindWorkflowResource(
 		previous,
 		crclient.Preconditions{UID: &uid, ResourceVersion: &rv},
 	); err != nil {
-		_ = s.client.Delete(ctx, target)
+		if apierrors.IsNotFound(err) {
+			return s.finishRebindSession(session, target, desiredKind)
+		}
 
+		var failure error
 		if apierrors.IsConflict(err) {
-			return domain.NewError(
+			failure = domain.NewError(
 				domain.ErrorConflict,
 				"rebind session",
 				"old workflow changed while rebinding",
 			)
+		} else {
+			failure = domain.WrapError(
+				domain.ErrorKubernetes,
+				"rebind session",
+				"delete "+string(workflowKind(previous)),
+				err,
+			)
 		}
 
+		sourceExists, protectionErr := s.restoreRebindSourceProtection(ctx, previous)
+		if !sourceExists && protectionErr == nil {
+			return s.finishRebindSession(session, target, desiredKind)
+		}
+
+		return errors.Join(
+			failure,
+			protectionErr,
+			s.rollbackRebindTarget(ctx, target),
+		)
+	}
+
+	return s.finishRebindSession(session, target, desiredKind)
+}
+
+func (s *CRDSessionStore) finishRebindSession(
+	session *domain.Session,
+	target crclient.Object,
+	desiredKind domain.ControllerKind,
+) error {
+	session.ResourceVersion = target.GetResourceVersion()
+	session.Generation = target.GetGeneration()
+	session.Backend = SessionBackendCRD
+	session.BackendResource = desiredKind
+
+	return nil
+}
+
+func (s *CRDSessionStore) rollbackRebindTarget(
+	ctx context.Context,
+	target crclient.Object,
+) error {
+	if target == nil {
+		return nil
+	}
+
+	key := crclient.ObjectKeyFromObject(target)
+
+	var current crclient.Object
+
+	err := retry.RetryOnConflict(retry.DefaultBackoff, func() error {
+		candidate, ok := target.DeepCopyObject().(crclient.Object)
+		if !ok {
+			return domain.NewError(
+				domain.ErrorInternal,
+				"rollback rebind target",
+				"workflow deep copy does not implement client.Object",
+			)
+		}
+
+		if getErr := s.client.Get(ctx, key, candidate); apierrors.IsNotFound(getErr) {
+			current = nil
+			return nil
+		} else if getErr != nil {
+			return getErr
+		}
+
+		current = candidate
+		if !containsString(candidate.GetFinalizers(), SessionFinalizer) {
+			return nil
+		}
+
+		candidate.SetFinalizers(removeSessionFinalizer(candidate.GetFinalizers()))
+
+		if updateErr := s.client.Update(ctx, candidate); updateErr != nil {
+			return updateErr
+		}
+
+		current = candidate
+
+		return nil
+	})
+	if err != nil {
 		return domain.WrapError(
 			domain.ErrorKubernetes,
-			"rebind session",
-			"delete "+string(workflowKind(previous)),
+			"rollback rebind target",
+			"remove workflow protection",
 			err,
 		)
 	}
 
-	session.ResourceVersion = target.GetResourceVersion()
-	session.Generation = target.GetGeneration()
-	session.Backend = SessionBackendCRD
+	if current == nil {
+		return nil
+	}
 
-	session.BackendResource = desiredKind
+	if err := s.client.Delete(ctx, current); err != nil && !apierrors.IsNotFound(err) {
+		return domain.WrapError(
+			domain.ErrorKubernetes,
+			"rollback rebind target",
+			"delete "+string(workflowKind(current)),
+			err,
+		)
+	}
 
 	return nil
+}
+
+func (s *CRDSessionStore) restoreRebindSourceProtection(
+	ctx context.Context,
+	previous crclient.Object,
+) (bool, error) {
+	key := crclient.ObjectKeyFromObject(previous)
+	exists := false
+
+	err := retry.RetryOnConflict(retry.DefaultBackoff, func() error {
+		current, ok := previous.DeepCopyObject().(crclient.Object)
+		if !ok {
+			return domain.NewError(
+				domain.ErrorInternal,
+				"restore rebind source",
+				"workflow deep copy does not implement client.Object",
+			)
+		}
+
+		if getErr := s.client.Get(ctx, key, current); apierrors.IsNotFound(getErr) {
+			exists = false
+			return nil
+		} else if getErr != nil {
+			return getErr
+		}
+
+		exists = true
+
+		if containsString(current.GetFinalizers(), SessionFinalizer) {
+			return nil
+		}
+
+		current.SetFinalizers(ensureSessionFinalizer(current.GetFinalizers()))
+
+		return s.client.Update(ctx, current)
+	})
+	if err != nil {
+		return exists, domain.WrapError(
+			domain.ErrorKubernetes,
+			"restore rebind source",
+			"restore workflow protection",
+			err,
+		)
+	}
+
+	return exists, nil
 }
 
 func (s *CRDSessionStore) List(ctx context.Context, namespace string) ([]*domain.Session, error) {
@@ -921,7 +1071,7 @@ func (s *CRDSessionStore) Delete(ctx context.Context, session *domain.Session) e
 			)
 		}
 
-		updated.SetFinalizers(removeString(updated.GetFinalizers(), SessionFinalizer))
+		updated.SetFinalizers(removeSessionFinalizer(updated.GetFinalizers()))
 
 		if err := s.client.Update(ctx, updated); apierrors.IsConflict(err) {
 			return domain.NewError(

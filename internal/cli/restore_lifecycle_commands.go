@@ -226,7 +226,7 @@ func (r *rootState) newRestoreCleanupCommand() *cobra.Command {
 			}
 
 			if err := runtime.service.CleanupRestore(ctx, session, options); err != nil {
-				return reportSessionError(cmd, session, err)
+				return reportCleanupError(cmd, session, options, err)
 			}
 
 			if options.DeleteSession {

@@ -315,6 +315,50 @@ func TestCrossClusterPlanRejectsIncompleteSourceExpansion(t *testing.T) {
 	}
 }
 
+func TestCrossClusterPlanPropagatesPerVolumeConsumerFailure(t *testing.T) {
+	service, options, _ := crossFixture()
+	if _, err := service.SourceClientForTest().CoreV1().Pods("app").Create(
+		context.Background(),
+		&corev1.Pod{
+			ObjectMeta: metav1.ObjectMeta{Name: "consumer", Namespace: "app"},
+			Spec: corev1.PodSpec{
+				Volumes: []corev1.Volume{{
+					Name: "data",
+					VolumeSource: corev1.VolumeSource{
+						PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
+							ClaimName: "data",
+						},
+					},
+				}},
+			},
+		},
+		metav1.CreateOptions{},
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	plan, err := service.Plan(context.Background(), options)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if plan.Ready {
+		t.Fatalf("plan accepted active source consumer: %#v", plan)
+	}
+
+	found := false
+	for _, check := range plan.Checks {
+		if check.Name == domain.CheckNameSourceConsumers && !check.Passed {
+			found = true
+			break
+		}
+	}
+
+	if !found {
+		t.Fatalf("plan omitted failed source consumer check: %#v", plan.Checks)
+	}
+}
+
 func TestCreateSessionRechecksDestinationAccessModes(t *testing.T) {
 	service, options, _ := crossFixture()
 

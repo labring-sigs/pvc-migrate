@@ -288,6 +288,7 @@ func (s *Service) planCrossClusterVolumes(
 	type result struct {
 		volume VolumePlan
 		checks []Check
+		ready  bool
 		ok     bool
 	}
 
@@ -309,13 +310,21 @@ func (s *Service) planCrossClusterVolumes(
 			index,
 			options.SourcePVCs[index],
 		)
-		results[index] = result{volume: volume, checks: volumePlan.Checks, ok: ok}
+		results[index] = result{
+			volume: volume,
+			checks: volumePlan.Checks,
+			ready:  volumePlan.Ready,
+			ok:     ok,
+		}
 	})
 
 	for _, item := range results {
 		plan.Checks = append(plan.Checks, item.checks...)
-		if !item.ok {
+		if !item.ready {
 			plan.Ready = false
+		}
+
+		if !item.ok {
 			continue
 		}
 

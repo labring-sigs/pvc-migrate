@@ -493,6 +493,43 @@ func TestPodMigrationCurrentPodIdentityIsStatusOwned(t *testing.T) {
 	}
 }
 
+func TestPodMigrationStatusDoesNotClearImmutableAffectedPodsSnapshot(t *testing.T) {
+	common := domain.SessionCommon{
+		SourceNamespace: "app", TemporaryNamespace: "system",
+		DestinationNamespace: "app", SessionNamespace: "system",
+	}
+	originalWorkload := domain.WorkloadSpec{
+		Adapter: domain.WorkloadStandalone,
+		Pod:     domain.ObjectReference{Name: "writer", Namespace: "app", UID: "pod-uid"},
+		AffectedPods: []domain.ObjectReference{{
+			Name: "writer", Namespace: "app", UID: "pod-uid",
+		}},
+	}
+	spec := domain.NewPodMigrationSessionSpec(
+		common,
+		originalWorkload,
+		domain.SessionWorkflowOptions{},
+		1,
+		false,
+	)
+	apiSpec := v1alpha1.PodMigrationSpecFromDomain(spec)
+	status := v1alpha1.PodMigrationStatus{Workload: &v1alpha1.PodMigrationWorkloadStatus{
+		Pod: v1alpha1.ObjectReference{Name: "writer", Namespace: "app", UID: "resumed-uid"},
+	}}
+	restored := apiSpec.Domain()
+	status.ApplyToDomainSpec(&restored)
+
+	workload := restored.WorkloadPtr()
+
+	if len(workload.AffectedPods) != 1 || workload.AffectedPods[0].UID != "pod-uid" {
+		t.Fatalf("partial workload status cleared recovery snapshot: %#v", workload.AffectedPods)
+	}
+
+	if workload.Pod.UID != "resumed-uid" {
+		t.Fatalf("current Pod identity was not overlaid: %#v", workload.Pod)
+	}
+}
+
 func TestBackupStatusPreservesOpenEBSRecoveryCheckpoint(t *testing.T) {
 	status := domain.SessionStatus{
 		OpenEBSLVMSharedMounts: []domain.OpenEBSLVMSharedMount{{

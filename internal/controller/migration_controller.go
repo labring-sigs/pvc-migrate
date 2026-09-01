@@ -18,6 +18,7 @@ import (
 	crclient "sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/event"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
+	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
@@ -30,7 +31,6 @@ import (
 type WorkflowReconciler struct {
 	store          kube.SessionStore
 	service        *app.Service
-	client         crclient.Client
 	kubeClient     kubernetes.Interface
 	openEBS        kube.OpenEBSLVMSharedVolumeManager
 	namespace      string
@@ -85,18 +85,6 @@ func (r *WorkflowReconciler) supportsKind(kind domain.ControllerKind) bool {
 	_, ok := r.supportedKinds[kind]
 
 	return ok
-}
-
-// WithClient lets the reconciler use the manager's cached typed client for
-// reads. The session store remains responsible for optimistic writes and
-// status persistence, so the same reconciler can still be unit-tested with a
-// store-only fixture.
-func (r *WorkflowReconciler) WithClient(client crclient.Client) *WorkflowReconciler {
-	if r != nil {
-		r.client = client
-	}
-
-	return r
 }
 
 func (r *WorkflowReconciler) WithKubernetesClient(
@@ -258,14 +246,22 @@ func StartManagerWithKinds(
 		LeaderElection:          true,
 		LeaderElectionID:        "pvc-migrate-controller",
 		LeaderElectionNamespace: namespace,
+		HealthProbeBindAddress:  ":8081",
 		Metrics:                 metricsserver.Options{BindAddress: "0"},
 	})
 	if err != nil {
 		return err
 	}
 
+	if err := manager.AddHealthzCheck("healthz", healthz.Ping); err != nil {
+		return err
+	}
+
+	if err := manager.AddReadyzCheck("readyz", healthz.Ping); err != nil {
+		return err
+	}
+
 	reconciler := NewWorkflowReconciler(service, store).
-		WithClient(manager.GetClient()).
 		WithNamespace(namespace).
 		WithSupportedKinds(supportedKinds)
 	reconciler.WithKubernetesClient(kubeClient).
