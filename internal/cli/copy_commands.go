@@ -99,6 +99,7 @@ func (r *rootState) newCopyCommand() *cobra.Command {
 			)
 			if existing {
 				namespace := workflowNamespaceForCommand(r, cmd)
+
 				session, err = runtime.store.Get(ctx, namespace, flags.sessionID)
 				if err == nil {
 					err = adoptReservedSessionForCopy(session, flags)
@@ -121,6 +122,7 @@ func (r *rootState) newCopyCommand() *cobra.Command {
 						false,
 					)
 				}
+
 				if err == nil {
 					plan, err = runtime.planner.PlanCopy(ctx, options)
 				}
@@ -224,6 +226,7 @@ func (r *rootState) newCopyPlanCommand() *cobra.Command {
 
 			if existing {
 				namespace := workflowNamespaceForCommand(r, cmd)
+
 				session, err := runtime.store.Get(ctx, namespace, flags.sessionID)
 				if err != nil {
 					return reportSessionLookupError(
@@ -257,6 +260,7 @@ func (r *rootState) newCopyPlanCommand() *cobra.Command {
 			if err != nil {
 				return err
 			}
+
 			options.SessionNamespace, options.TemporaryNamespace = r.controllerPlanNamespaces(
 				runtime,
 				domain.SessionTypeCopy,

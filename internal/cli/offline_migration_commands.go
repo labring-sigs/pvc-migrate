@@ -265,6 +265,7 @@ func (r *rootState) newOfflineMigrationPlanCommand() *cobra.Command {
 
 			if existing {
 				namespace := workflowNamespaceForCommand(r, cmd)
+
 				session, err := runtime.store.Get(ctx, namespace, flags.sessionID)
 				if err != nil {
 					return reportSessionLookupError(
@@ -298,6 +299,7 @@ func (r *rootState) newOfflineMigrationPlanCommand() *cobra.Command {
 			if err != nil {
 				return err
 			}
+
 			options.SessionNamespace, options.TemporaryNamespace = r.controllerPlanNamespaces(
 				runtime,
 				domain.SessionTypeMigrate,
@@ -342,6 +344,7 @@ func (r *rootState) runOfflineMigrateCommand(
 	if err != nil {
 		return err
 	}
+
 	options.SessionNamespace, options.TemporaryNamespace = r.controllerPlanNamespaces(
 		runtime,
 		domain.SessionTypeMigrate,

@@ -54,9 +54,6 @@ The bundled ClusterRole is a high-privilege controller identity. Bind it only
 to the controller ServiceAccount; tenant users should receive narrowly scoped
 namespaced permissions to submit and observe the workflow CRs they own.
 The role reads Secrets by exact name and intentionally omits Secret `list`.
-For workload identity, prevent tenants from modifying the administrator-bound
-ServiceAccount's IAM annotations, labels, or `automountServiceAccountToken`
-with RBAC and admission policy.
 
 Build the tool image. It runs the CLI by default and also supplies PVC reservation, rsync, SSHD, and rclone roles inside the cluster:
 
@@ -72,8 +69,8 @@ Use `--tool-image registry.example/pvc-migrate:0.1.0` when cluster nodes pull th
 The CLI supports two durable execution backends:
 
 - `--mode=session` always stores sessions in ConfigMaps and executes the workflow in the invoking process.
-- `--mode=controller` stores eligible local sessions as operation-specific `migrate.sealos.io/v1alpha1` CRs (`Migration`, `PodMigration`, `Reservation`, `Copy`, `Backup`, `Restore`, or `Rename`) and submits them to the controller-runtime based controller. Cross-namespace `Move` and cross-cluster workflows remain on the ConfigMap/session backend. The controller uses leader election, watches every installed workflow kind, and reuses the same resumable app.Service state machine. The CLI watches that CR and waits for completion by default; use `--wait=false` for detached submission. A command fails clearly when its matching CRD is absent.
-- `--mode=auto` (the default) discovers workflow CRDs independently. Each eligible single-cluster operation uses its matching CRD when that CRD is served; operations whose CRD is not installed, plus cross-cluster workflows, use ConfigMap sessions. This supports staged CRD rollouts without silently dropping an operation.
+- `--mode=controller` stores local sessions as operation-specific `migrate.sealos.io/v1alpha1` CRs. Same-namespace work uses `Migration`, `PodMigration`, `Reservation`, `Copy`, `Backup`, `Restore`, `Rename`, or `Move`; cross-namespace work uses the matching `Cluster*` kind. Cross-cluster workflows remain on the ConfigMap/session backend. The controller uses leader election, watches every installed workflow kind, and reuses the same resumable app.Service state machine. The CLI watches that CR and waits for completion by default; use `--wait=false` for detached submission. A command fails clearly when its matching CRD is absent.
+- `--mode=auto` (the default) discovers workflow CRDs independently. Each eligible single-cluster operation uses its matching namespaced or cluster-scoped CRD when served; missing kinds and cross-cluster workflows use ConfigMap sessions. This supports staged CRD rollouts without silently dropping an operation.
 
 Install the controller backend with:
 
@@ -102,34 +99,24 @@ source/destination/temporary object namespace must equal the CR metadata
 namespace; the controller rejects violations before touching resources.
 Kubernetes 1.28 CRD CEL cannot inspect the root object's namespace, so clusters
 that require admission-time rejection should add a separate admission policy.
-Backup and restore use an administrator-managed
-cluster-scoped `ObjectStoreProfile` for endpoint, bucket/prefix scope, and
-explicit access policy. Static profiles use an administrator-owned controller
-Secret for S3 coordination and the transfer Pod; workload-identity profiles bind
-transfer Pods to pre-provisioned ServiceAccounts and may use the controller's
-ambient cloud identity for coordination. Static profiles are single-tenant and require explicit
-`allowStaticCredentialsInTenantNamespace: true`; static profile credentials
-remain in the controller installation namespace, while the transfer chart
-creates a short-lived rclone Secret in the PVC namespace because the tool Pod
-must mount the PVC there. Workload-identity profiles use explicit
-`serviceAccountRefs` entries containing namespace, name, UID, and an
-administrator-recorded identity fingerprint, so a tenant cannot pre-create or
-mutate a same-named account before the first reconcile. Profile,
-Secret, and workload-identity ServiceAccount UIDs plus identity fingerprints
-are pinned in Backup/Restore status; in-place Secret data rotation is
-supported, while delete-and-recreate or identity metadata changes require a
-new workflow. Controller object paths also include a hash of the local
-`kube-system` namespace UID, preventing identical profiles from colliding
-across clusters. Use `serviceAccountRefs` with administrator-provisioned
-cloud-identity ServiceAccounts to avoid copying static credentials into tenant
-namespaces. Cross-namespace and cross-cluster commands remain ConfigMap/session
-workflows because they require
-explicit broader authorization or a second API server identity.
+Backup and restore use a namespaced `BackupRepository` for a user-selected
+location. `spec.type` selects a structured backend configuration. `s3` is
+currently executable and reads its credentials from a Secret in the repository
+namespace. The API also defines a `pvc` backend for a future data-plane
+adapter; the current controller rejects it explicitly instead of treating it
+as S3. Creating a repository configures a location and does not grant access
+to other namespaces. Namespaced workflows use a name-only `repositoryRef`;
+cluster-scoped `ClusterBackup` and `ClusterRestore` use an explicit
+name-and-namespace reference. The controller scopes object keys by cluster and
+workload namespace and pins repository UID/generation in workflow status, so
+replacing a repository requires a new workflow while in-place Secret rotation
+remains possible. Cross-cluster commands remain ConfigMap/session workflows
+because they require a second API server identity.
 
 The bundled ClusterRole is controller-only. Tenant bindings should grant
 namespaced workflow create/get/list/watch permissions and `/status` read only;
-`/status` update/patch, ObjectStoreProfile access, and Secret access stay
-with the controller/operator identity. The current lifecycle commands that
+`/status` update/patch, repository reads, and Secret access stay with the
+controller/operator identity. The current lifecycle commands that
 perform abort, rollback, cleanup, or failed-workflow reactivation therefore
 require that operator identity in controller mode.
 
@@ -508,10 +495,11 @@ The completion manifest records the source PVC identity, capacity, VolumeMode, p
 
 Session-mode S3-compatible credentials can come from the AWS default credential
 chain, explicit credential flags, or a Kubernetes Secret selected with
-`--credentials-secret`. Controller-mode Backup and Restore require an
-administrator-created `ObjectStoreProfile`; endpoint, provider, region, bucket,
-prefix, and credentials are taken from that profile and cannot be overridden by
-the workflow.
+`--credentials-secret`. Controller-mode Backup and Restore require a
+namespaced `BackupRepository`; the selected backend configuration, endpoint,
+provider, region, bucket, prefix, and credentials are taken from that repository
+and cannot be overridden by the workflow. The current controller executes only
+the `s3` backend; `pvc` is reserved for a future data-plane adapter.
 
 ```bash
 pvc-migrate --kubeconfig /path/to/kubeconfig \

@@ -40,5 +40,6 @@ func ServiceAccountIdentityFingerprint(account *corev1.ServiceAccount) string {
 	}
 
 	digest := sha256.Sum256(raw)
+
 	return hex.EncodeToString(digest[:])
 }

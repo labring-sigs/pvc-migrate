@@ -44,7 +44,11 @@ func (r *WorkflowReconciler) validateDeclarativeSourceVolumes(
 			return domain.NewError(
 				domain.ErrorPrecondition,
 				"controller volume snapshot",
-				fmt.Sprintf("source PVC %s/%s is outside the workflow namespace", volume.SourcePVC.Namespace, volume.SourcePVC.Name),
+				fmt.Sprintf(
+					"source PVC %s/%s is outside the workflow namespace",
+					volume.SourcePVC.Namespace,
+					volume.SourcePVC.Name,
+				),
 			)
 		}
 
@@ -54,14 +58,23 @@ func (r *WorkflowReconciler) validateDeclarativeSourceVolumes(
 			return domain.NewError(
 				domain.ErrorPrecondition,
 				"controller volume snapshot",
-				fmt.Sprintf("source PVC %s/%s no longer exists before execution", volume.SourcePVC.Namespace, volume.SourcePVC.Name),
+				fmt.Sprintf(
+					"source PVC %s/%s no longer exists before execution",
+					volume.SourcePVC.Namespace,
+					volume.SourcePVC.Name,
+				),
 			)
 		}
+
 		if err != nil {
 			return domain.WrapError(
 				domain.ErrorKubernetes,
 				"controller volume snapshot",
-				fmt.Sprintf("read source PVC %s/%s", volume.SourcePVC.Namespace, volume.SourcePVC.Name),
+				fmt.Sprintf(
+					"read source PVC %s/%s",
+					volume.SourcePVC.Namespace,
+					volume.SourcePVC.Name,
+				),
 				err,
 			)
 		}
@@ -83,6 +96,7 @@ func (r *WorkflowReconciler) validateDeclarativeSourceVolumes(
 				fmt.Sprintf("source PV %s no longer exists before execution", volume.SourcePV.Name),
 			)
 		}
+
 		if err != nil {
 			return domain.WrapError(
 				domain.ErrorKubernetes,
@@ -95,6 +109,7 @@ func (r *WorkflowReconciler) validateDeclarativeSourceVolumes(
 		if err := validateSourcePVIdentity(volume, pvc, pv); err != nil {
 			return fmt.Errorf("volume %d: %w", index, err)
 		}
+
 		if err := validateSourcePVCSnapshot(volume, pvc, pv); err != nil {
 			return fmt.Errorf("volume %d: %w", index, err)
 		}
@@ -120,16 +135,28 @@ func validateSourcePVIdentity(
 		return domain.NewError(
 			domain.ErrorConflict,
 			"controller volume snapshot",
-			fmt.Sprintf("source PVC %s/%s is bound to PV %s, expected %s", pvc.Namespace, pvc.Name, pvc.Spec.VolumeName, pv.Name),
+			fmt.Sprintf(
+				"source PVC %s/%s is bound to PV %s, expected %s",
+				pvc.Namespace,
+				pvc.Name,
+				pvc.Spec.VolumeName,
+				pv.Name,
+			),
 		)
 	}
 
 	claim := pv.Spec.ClaimRef
-	if claim == nil || claim.Namespace != pvc.Namespace || claim.Name != pvc.Name || claim.UID != pvc.UID {
+	if claim == nil || claim.Namespace != pvc.Namespace || claim.Name != pvc.Name ||
+		claim.UID != pvc.UID {
 		return domain.NewError(
 			domain.ErrorConflict,
 			"controller volume snapshot",
-			fmt.Sprintf("source PV %s claimRef does not identify PVC %s/%s", pv.Name, pvc.Namespace, pvc.Name),
+			fmt.Sprintf(
+				"source PV %s claimRef does not identify PVC %s/%s",
+				pv.Name,
+				pvc.Namespace,
+				pvc.Name,
+			),
 		)
 	}
 
@@ -150,12 +177,22 @@ func validateSourcePVCSnapshot(
 	}
 
 	if !maps.Equal(volume.SourcePVCMetadata.Labels, pvc.Labels) ||
-		!maps.Equal(volume.SourcePVCMetadata.Annotations, kube.PVCAnnotationsForRecreation(pvc.Annotations)) ||
-		!apiequality.Semantic.DeepEqual(volume.SourcePVCMetadata.OwnerReferences, pvc.OwnerReferences) {
+		!maps.Equal(
+			volume.SourcePVCMetadata.Annotations,
+			kube.PVCAnnotationsForRecreation(pvc.Annotations),
+		) ||
+		!apiequality.Semantic.DeepEqual(
+			volume.SourcePVCMetadata.OwnerReferences,
+			pvc.OwnerReferences,
+		) {
 		return domain.NewError(
 			domain.ErrorConflict,
 			"controller volume snapshot",
-			fmt.Sprintf("source PVC %s/%s metadata changed since planning", pvc.Namespace, pvc.Name),
+			fmt.Sprintf(
+				"source PVC %s/%s metadata changed since planning",
+				pvc.Namespace,
+				pvc.Name,
+			),
 		)
 	}
 
@@ -180,7 +217,11 @@ func validateSourcePVCSnapshot(
 		return domain.NewError(
 			domain.ErrorValidation,
 			"controller volume snapshot",
-			fmt.Sprintf("source PV %s capacity snapshot %q is invalid", pv.Name, volume.SourceCapacity),
+			fmt.Sprintf(
+				"source PV %s capacity snapshot %q is invalid",
+				pv.Name,
+				volume.SourceCapacity,
+			),
 		)
 	}
 
@@ -197,12 +238,17 @@ func validateSourcePVCSnapshot(
 	if pvc.Spec.VolumeMode != nil {
 		pvcVolumeMode = *pvc.Spec.VolumeMode
 	}
+
 	if !slices.Equal(volume.AccessModes, pvc.Spec.AccessModes) ||
 		volume.VolumeMode != pvcVolumeMode {
 		return domain.NewError(
 			domain.ErrorConflict,
 			"controller volume snapshot",
-			fmt.Sprintf("source PVC %s/%s access mode or volume mode changed since planning", pvc.Namespace, pvc.Name),
+			fmt.Sprintf(
+				"source PVC %s/%s access mode or volume mode changed since planning",
+				pvc.Namespace,
+				pvc.Name,
+			),
 		)
 	}
 

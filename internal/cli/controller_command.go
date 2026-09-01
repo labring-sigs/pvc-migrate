@@ -46,9 +46,15 @@ func (r *rootState) newControllerCommand() *cobra.Command {
 				if err := controller.ValidateTrustedToolImage(r.global.toolImage); err != nil {
 					return err
 				}
+
 				cluster, err := kube.Identity(ctx, runtime.clients)
 				if err != nil {
-					return domain.WrapError(domain.ErrorPrecondition, "controller", "resolve cluster identity", err)
+					return domain.WrapError(
+						domain.ErrorPrecondition,
+						"controller",
+						"resolve cluster identity",
+						err,
+					)
 				}
 				// A one-shot controller pass is an operator operation and must
 				// inspect every tenant namespace. The normal manager path receives
@@ -56,7 +62,6 @@ func (r *rootState) newControllerCommand() *cobra.Command {
 				return controller.NewRunner(runtime.service, runtime.controllerStore, "").
 					WithKubernetesClient(runtime.clients.Kubernetes).
 					WithControllerClient(runtime.clients.Runtime).
-					WithControllerNamespace(r.global.controllerNamespace).
 					WithClusterIdentity(cluster.ID).
 					WithTrustedToolImage(r.global.toolImage).
 					WithOpenEBSLVMSharedVolumeManager(runtime.openEBSLVMSharedVolumeManager).

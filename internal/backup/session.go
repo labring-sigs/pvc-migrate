@@ -85,10 +85,16 @@ func buildBackupSession(
 		APIVersion: "v1", Kind: "PersistentVolume", Name: pv.Name, UID: pv.UID,
 	}
 	spec.Backup.Path = req.Path
-	spec.Backup.Backend = domain.ObjectStoreBackendS3
 	spec.Backup.Name = req.Store.Config().Name
-	spec.Backup.ObjectStoreProfile = strings.TrimSpace(req.ObjectStoreProfile)
-	if spec.Backup.ObjectStoreProfile == "" {
+	spec.Backup.BackupRepository = strings.TrimSpace(req.BackupRepository)
+
+	spec.Backup.BackupRepositoryNamespace = strings.TrimSpace(req.BackupRepositoryNamespace)
+	if spec.Backup.BackupRepository != "" && spec.Backup.BackupRepositoryNamespace == "" {
+		spec.Backup.BackupRepositoryNamespace = req.Namespace
+	}
+
+	if spec.Backup.BackupRepository == "" {
+		spec.Backup.Backend = domain.BackupBackendS3
 		cfg := req.Store.Config()
 		spec.Backup.Bucket = cfg.Bucket
 		spec.Backup.Prefix = cfg.Prefix
@@ -129,19 +135,21 @@ func Submit(
 		if err := req.SessionStore.Create(lockedCtx, session); err != nil {
 			return err
 		}
-		if strings.TrimSpace(req.ObjectStoreProfile) != "" {
-			// Controller mode resolves credentials from the administrator-owned
-			// ObjectStoreProfile. Never materialize those credentials in a
-			// tenant namespace Secret.
+
+		if strings.TrimSpace(req.BackupRepository) != "" {
+			// Controller mode resolves credentials from the referenced repository.
+			// Never materialize repository credentials in a workflow-owned Secret.
 			if session.Backend != kube.SessionBackendCRD {
 				return domain.NewError(
 					domain.ErrorPrecondition,
 					"backup credentials",
-					"object-store profiles require a controller-backed workflow",
+					"BackupRepository requires a controller-backed workflow",
 				)
 			}
+
 			return nil
 		}
+
 		return persistBackupCredentials(lockedCtx, client, req, session)
 	})
 	if err != nil {
@@ -227,10 +235,16 @@ func SubmitRestore(
 	}
 	spec.Restore.Path = req.Path
 
-	spec.Restore.Backend = domain.ObjectStoreBackendS3
 	spec.Restore.Name = cfg.Name
-	spec.Restore.ObjectStoreProfile = strings.TrimSpace(req.ObjectStoreProfile)
-	if spec.Restore.ObjectStoreProfile == "" {
+	spec.Restore.BackupRepository = strings.TrimSpace(req.BackupRepository)
+
+	spec.Restore.BackupRepositoryNamespace = strings.TrimSpace(req.BackupRepositoryNamespace)
+	if spec.Restore.BackupRepository != "" && spec.Restore.BackupRepositoryNamespace == "" {
+		spec.Restore.BackupRepositoryNamespace = req.Namespace
+	}
+
+	if spec.Restore.BackupRepository == "" {
+		spec.Restore.Backend = domain.BackupBackendS3
 		spec.Restore.Bucket = cfg.Bucket
 		spec.Restore.Prefix = cfg.Prefix
 		spec.Restore.Provider = cfg.Provider
@@ -240,6 +254,7 @@ func SubmitRestore(
 		spec.Restore.ServerSideEncryption = cfg.ServerSideEncryption
 		spec.Restore.SSEKMSKeyID = cfg.SSEKMSKeyID
 	}
+
 	spec.Restore.CreatePVC = req.CreatePVC
 	spec.Restore.DestinationStorageClass = req.DestinationStorageClass
 	spec.Restore.DestinationAccessMode = req.DestinationAccessMode
@@ -253,16 +268,19 @@ func SubmitRestore(
 		if err := req.SessionStore.Create(lockedCtx, session); err != nil {
 			return err
 		}
-		if strings.TrimSpace(req.ObjectStoreProfile) != "" {
+
+		if strings.TrimSpace(req.BackupRepository) != "" {
 			if session.Backend != kube.SessionBackendCRD {
 				return domain.NewError(
 					domain.ErrorPrecondition,
 					"restore credentials",
-					"object-store profiles require a controller-backed workflow",
+					"BackupRepository requires a controller-backed workflow",
 				)
 			}
+
 			return nil
 		}
+
 		return persistRestoreCredentials(lockedCtx, client, req, session)
 	})
 	if err != nil {
@@ -370,6 +388,7 @@ func backupCredentialsOwner(session *domain.Session) []metav1.OwnerReference {
 
 	controller := true
 	blockOwnerDeletion := true
+
 	return []metav1.OwnerReference{{
 		APIVersion:         domain.SessionAPIVersion,
 		Kind:               string(session.BackendResource),
@@ -777,6 +796,7 @@ func buildResumeRequest(
 		if err != nil {
 			return nil, err
 		}
+
 		req.Store = store
 	}
 
@@ -788,102 +808,144 @@ func buildResumeRequest(
 	req.ToolImage = payload.ToolImage
 	req.OpenEBSLVMEnableShared = payload.OpenEBSLVMEnableShared
 	req.SessionNamespace = session.Spec.SessionNamespace
+
 	req.BackupSession = session
-	if err := pinObjectStoreProfile(ctx, req, session); err != nil {
+	if err := pinBackupRepository(ctx, req, session); err != nil {
 		return nil, err
 	}
 
 	return &req, nil
 }
 
-// pinObjectStoreProfile records the non-secret identity of the administrator
-// profile and its identity-bearing references while the caller holds the
-// session Lease. This keeps a running workflow on one immutable profile and
-// reference identity while still allowing Secret data to be rotated in place.
-func pinObjectStoreProfile(
-	ctx context.Context,
-	req Request,
-	session *domain.Session,
-) error {
-	if session == nil || strings.TrimSpace(req.ObjectStoreProfile) == "" ||
-		(req.ObjectStoreProfileUID == "" && req.ObjectStoreProfileGeneration == 0 &&
-			req.ObjectStoreCredentialsSecretUID == "" && req.ObjectStoreServiceAccountUID == "" &&
-			req.ObjectStoreServiceAccountFingerprint == "") {
+// pinBackupRepository records the repository object identity for the lifetime
+// of a running workflow. Location changes take effect only for a new workflow;
+// Secret data may rotate in place; replacing the referenced Secret changes its
+// identity and requires a new workflow.
+func pinBackupRepository(ctx context.Context, req Request, session *domain.Session) error {
+	if session == nil || strings.TrimSpace(req.BackupRepository) == "" || req.SessionStore == nil {
 		return nil
 	}
 
-	if session.Status.ObjectStoreProfileUID != "" &&
-		req.ObjectStoreProfileUID != "" &&
-		session.Status.ObjectStoreProfileUID != req.ObjectStoreProfileUID {
+	requested := req.BackupRepositoryBinding
+	if requested == nil || requested.Type == "" || requested.UID == "" ||
+		requested.Generation <= 0 {
 		return domain.NewError(
-			domain.ErrorConflict,
-			"object-store profile",
-			"ObjectStoreProfile was replaced while the workflow was running; create a new workflow",
-		)
-	}
-	if session.Status.ObjectStoreProfileGeneration > 0 &&
-		req.ObjectStoreProfileGeneration > 0 &&
-		session.Status.ObjectStoreProfileGeneration != req.ObjectStoreProfileGeneration {
-		return domain.NewError(
-			domain.ErrorConflict,
-			"object-store profile",
-			"ObjectStoreProfile changed while the workflow was running; create a new workflow",
-		)
-	}
-	if session.Status.ObjectStoreCredentialsSecretUID != "" &&
-		req.ObjectStoreCredentialsSecretUID != "" &&
-		session.Status.ObjectStoreCredentialsSecretUID != req.ObjectStoreCredentialsSecretUID {
-		return domain.NewError(
-			domain.ErrorConflict,
-			"object-store profile",
-			"ObjectStoreProfile credentials Secret was replaced while the workflow was running; create a new workflow",
-		)
-	}
-	if session.Status.ObjectStoreServiceAccountUID != "" &&
-		req.ObjectStoreServiceAccountUID != "" &&
-		session.Status.ObjectStoreServiceAccountUID != req.ObjectStoreServiceAccountUID {
-		return domain.NewError(
-			domain.ErrorConflict,
-			"object-store profile",
-			"ObjectStoreProfile ServiceAccount was replaced while the workflow was running; create a new workflow",
-		)
-	}
-	if session.Status.ObjectStoreServiceAccountFingerprint != "" &&
-		req.ObjectStoreServiceAccountFingerprint != "" &&
-		session.Status.ObjectStoreServiceAccountFingerprint != req.ObjectStoreServiceAccountFingerprint {
-		return domain.NewError(
-			domain.ErrorConflict,
-			"object-store profile",
-			"ObjectStoreProfile ServiceAccount identity changed while the workflow was running; create a new workflow",
+			domain.ErrorPrecondition,
+			"backup repository",
+			"resolved BackupRepository type, UID, and generation are required",
 		)
 	}
 
-	changed := false
-	if session.Status.ObjectStoreProfileUID == "" && req.ObjectStoreProfileUID != "" {
-		session.Status.ObjectStoreProfileUID = req.ObjectStoreProfileUID
-		changed = true
+	if err := validateRepositoryBinding(requested); err != nil {
+		return err
 	}
-	if session.Status.ObjectStoreProfileGeneration == 0 && req.ObjectStoreProfileGeneration > 0 {
-		session.Status.ObjectStoreProfileGeneration = req.ObjectStoreProfileGeneration
-		changed = true
+
+	if session.Status.BackupRepository == nil {
+		session.Status.BackupRepository = copyRepositoryBinding(requested)
+		return req.SessionStore.Update(ctx, session)
 	}
-	if session.Status.ObjectStoreCredentialsSecretUID == "" && req.ObjectStoreCredentialsSecretUID != "" {
-		session.Status.ObjectStoreCredentialsSecretUID = req.ObjectStoreCredentialsSecretUID
-		changed = true
+
+	current := session.Status.BackupRepository
+	if current.Type != requested.Type {
+		return repositoryBindingConflict(
+			"BackupRepository backend changed while the workflow was running",
+		)
 	}
-	if session.Status.ObjectStoreServiceAccountUID == "" && req.ObjectStoreServiceAccountUID != "" {
-		session.Status.ObjectStoreServiceAccountUID = req.ObjectStoreServiceAccountUID
-		changed = true
+
+	if current.UID != requested.UID {
+		return repositoryBindingConflict(
+			"BackupRepository was replaced while the workflow was running",
+		)
 	}
-	if session.Status.ObjectStoreServiceAccountFingerprint == "" && req.ObjectStoreServiceAccountFingerprint != "" {
-		session.Status.ObjectStoreServiceAccountFingerprint = req.ObjectStoreServiceAccountFingerprint
-		changed = true
+
+	if current.Generation != requested.Generation {
+		return repositoryBindingConflict("BackupRepository changed while the workflow was running")
 	}
-	if !changed || req.SessionStore == nil {
+
+	switch requested.Type {
+	case domain.BackupRepositoryTypeS3:
+		if current.S3 == nil ||
+			current.S3.CredentialsSecretUID != requested.S3.CredentialsSecretUID {
+			return repositoryBindingConflict(
+				"BackupRepository credentials Secret was replaced while the workflow was running",
+			)
+		}
+	case domain.BackupRepositoryTypePVC:
+		if current.PVC == nil ||
+			current.PVC.ClaimUID != requested.PVC.ClaimUID {
+			return repositoryBindingConflict(
+				"BackupRepository PVC was replaced while the workflow was running",
+			)
+		}
+	}
+
+	return nil
+}
+
+func validateRepositoryBinding(binding *domain.BackupRepositoryBindingStatus) error {
+	if binding == nil {
+		return domain.NewError(
+			domain.ErrorPrecondition,
+			"backup repository",
+			"resolved repository binding is required",
+		)
+	}
+
+	switch binding.Type {
+	case domain.BackupRepositoryTypeS3:
+		if binding.S3 == nil || binding.PVC != nil || binding.S3.CredentialsSecretUID == "" {
+			return domain.NewError(
+				domain.ErrorPrecondition,
+				"backup repository",
+				"resolved S3 repository requires a credentials Secret UID",
+			)
+		}
+	case domain.BackupRepositoryTypePVC:
+		if binding.PVC == nil || binding.S3 != nil || binding.PVC.ClaimUID == "" {
+			return domain.NewError(
+				domain.ErrorPrecondition,
+				"backup repository",
+				"resolved PVC repository requires a claim UID",
+			)
+		}
+	default:
+		return domain.NewError(
+			domain.ErrorPrecondition,
+			"backup repository",
+			fmt.Sprintf("resolved repository backend %q is unsupported", binding.Type),
+		)
+	}
+
+	return nil
+}
+
+func copyRepositoryBinding(
+	binding *domain.BackupRepositoryBindingStatus,
+) *domain.BackupRepositoryBindingStatus {
+	if binding == nil {
 		return nil
 	}
 
-	return req.SessionStore.Update(ctx, session)
+	out := *binding
+	if binding.S3 != nil {
+		s3 := *binding.S3
+		out.S3 = &s3
+	}
+
+	if binding.PVC != nil {
+		pvc := *binding.PVC
+		out.PVC = &pvc
+	}
+
+	return &out
+}
+
+func repositoryBindingConflict(message string) error {
+	return domain.NewError(
+		domain.ErrorConflict,
+		"backup repository",
+		message+"; create a new workflow",
+	)
 }
 
 func validateBackupResumePhase(session *domain.Session) error {
@@ -1155,7 +1217,7 @@ func ResumeRestore(
 			return nil
 		}
 
-		if err := pinObjectStoreProfile(runCtx, req, session); err != nil {
+		if err := pinBackupRepository(runCtx, req, session); err != nil {
 			return err
 		}
 

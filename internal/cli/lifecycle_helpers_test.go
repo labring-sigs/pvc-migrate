@@ -369,7 +369,11 @@ func TestControllerPlanNamespacesRespectTenantBoundary(t *testing.T) {
 		false,
 	)
 	if sessionNamespace != "application" || temporaryNamespace != "application" {
-		t.Fatalf("controller defaults = %q/%q, want application/application", sessionNamespace, temporaryNamespace)
+		t.Fatalf(
+			"controller defaults = %q/%q, want application/application",
+			sessionNamespace,
+			temporaryNamespace,
+		)
 	}
 
 	sessionNamespace, temporaryNamespace = r.controllerPlanNamespaces(
@@ -381,7 +385,11 @@ func TestControllerPlanNamespacesRespectTenantBoundary(t *testing.T) {
 		true,
 	)
 	if sessionNamespace != "pvc-migrate-system" || temporaryNamespace != "pvc-migrate-system" {
-		t.Fatalf("explicit temporary namespace = %q/%q, want global/system", sessionNamespace, temporaryNamespace)
+		t.Fatalf(
+			"explicit temporary namespace = %q/%q, want global/system",
+			sessionNamespace,
+			temporaryNamespace,
+		)
 	}
 
 	sessionNamespace, temporaryNamespace = r.controllerPlanNamespaces(
@@ -393,10 +401,15 @@ func TestControllerPlanNamespacesRespectTenantBoundary(t *testing.T) {
 		false,
 	)
 	if sessionNamespace != "pvc-migrate-system" || temporaryNamespace != "pvc-migrate-system" {
-		t.Fatalf("cross namespace = %q/%q, want global/system", sessionNamespace, temporaryNamespace)
+		t.Fatalf(
+			"cross namespace = %q/%q, want global/system",
+			sessionNamespace,
+			temporaryNamespace,
+		)
 	}
 
 	runtime.controllerKinds = []domain.ControllerKind{domain.ControllerKindBackup}
+
 	sessionNamespace, temporaryNamespace = r.controllerPlanNamespaces(
 		runtime,
 		domain.SessionTypeMigrate,
@@ -411,12 +424,16 @@ func TestControllerPlanNamespacesRespectTenantBoundary(t *testing.T) {
 }
 
 func TestWorkflowNamespaceForCommandHonorsExplicitTenantFlag(t *testing.T) {
-	r := &rootState{global: globals{sessionNamespace: "pvc-migrate-system", workflowNamespace: "global-tenant"}}
+	r := &rootState{
+		global: globals{sessionNamespace: "pvc-migrate-system", workflowNamespace: "global-tenant"},
+	}
 	command := &cobra.Command{}
 	command.Flags().String("namespace", "", "")
+
 	if err := command.Flags().Set("namespace", "application"); err != nil {
 		t.Fatal(err)
 	}
+
 	if got := workflowNamespaceForCommand(r, command); got != "application" {
 		t.Fatalf("explicit namespace=%q, want application", got)
 	}

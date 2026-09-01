@@ -21,7 +21,14 @@ func (r *rootState) newOfflineMigrationStatusCommand() *cobra.Command {
 			defer cancel()
 
 			if len(args) == 1 {
-				session, err := r.workflowSession(ctx, runtime, cmd, args[0], domain.SessionTypeMigrate, "migrate status")
+				session, err := r.workflowSession(
+					ctx,
+					runtime,
+					cmd,
+					args[0],
+					domain.SessionTypeMigrate,
+					"migrate status",
+				)
 				if err != nil {
 					return err
 				}
@@ -50,7 +57,14 @@ func (r *rootState) newOfflineMigrationResumeCommand() *cobra.Command {
 			ctx, cancel := r.context(cmd.Context())
 			defer cancel()
 
-			session, err := r.workflowSession(ctx, runtime, cmd, args[0], domain.SessionTypeMigrate, "migrate resume")
+			session, err := r.workflowSession(
+				ctx,
+				runtime,
+				cmd,
+				args[0],
+				domain.SessionTypeMigrate,
+				"migrate resume",
+			)
 			if err != nil {
 				return err
 			}
@@ -103,7 +117,14 @@ func (r *rootState) newOfflineMigrationAbortCommand() *cobra.Command {
 			ctx, cancel := r.context(cmd.Context())
 			defer cancel()
 
-			session, err := r.workflowSession(ctx, runtime, cmd, args[0], domain.SessionTypeMigrate, "migrate abort")
+			session, err := r.workflowSession(
+				ctx,
+				runtime,
+				cmd,
+				args[0],
+				domain.SessionTypeMigrate,
+				"migrate abort",
+			)
 			if err != nil {
 				return err
 			}
@@ -148,7 +169,14 @@ func (r *rootState) newOfflineMigrationRollbackCommand() *cobra.Command {
 			ctx, cancel := r.context(cmd.Context())
 			defer cancel()
 
-			session, err := r.workflowSession(ctx, runtime, cmd, args[0], domain.SessionTypeMigrate, "migrate rollback")
+			session, err := r.workflowSession(
+				ctx,
+				runtime,
+				cmd,
+				args[0],
+				domain.SessionTypeMigrate,
+				"migrate rollback",
+			)
 			if err != nil {
 				return err
 			}
@@ -199,7 +227,14 @@ func (r *rootState) newOfflineMigrationCleanupCommand() *cobra.Command {
 			ctx, cancel := r.context(cmd.Context())
 			defer cancel()
 
-			session, err := r.workflowSession(ctx, runtime, cmd, args[0], domain.SessionTypeMigrate, "migrate cleanup")
+			session, err := r.workflowSession(
+				ctx,
+				runtime,
+				cmd,
+				args[0],
+				domain.SessionTypeMigrate,
+				"migrate cleanup",
+			)
 			if err != nil {
 				return err
 			}

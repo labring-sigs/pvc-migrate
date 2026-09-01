@@ -38,6 +38,7 @@ func (r *WorkflowReconciler) ensureStandalonePodSnapshot(
 			"standalone Pod must be in the workflow namespace",
 		)
 	}
+
 	if len(workload.OriginalObject) > domain.MaxOriginalPodSnapshotBytes {
 		return domain.NewError(
 			domain.ErrorPrecondition,
@@ -59,6 +60,7 @@ func (r *WorkflowReconciler) ensureStandalonePodSnapshot(
 				err,
 			)
 		}
+
 		if supplied.Namespace != workload.Pod.Namespace || supplied.Name != workload.Pod.Name ||
 			(supplied.UID != "" && supplied.UID != workload.Pod.UID) {
 			return domain.NewError(
@@ -78,6 +80,7 @@ func (r *WorkflowReconciler) ensureStandalonePodSnapshot(
 				"standalone Pod snapshot does not match the controller-captured digest",
 			)
 		}
+
 		return nil
 	}
 
@@ -98,6 +101,7 @@ func (r *WorkflowReconciler) ensureStandalonePodSnapshot(
 			"referenced standalone Pod is missing before its snapshot was captured",
 		)
 	}
+
 	if err != nil {
 		return domain.WrapError(
 			domain.ErrorKubernetes,
@@ -106,6 +110,7 @@ func (r *WorkflowReconciler) ensureStandalonePodSnapshot(
 			err,
 		)
 	}
+
 	if live.UID != workload.Pod.UID {
 		return domain.NewError(
 			domain.ErrorConflict,
@@ -123,6 +128,7 @@ func (r *WorkflowReconciler) ensureStandalonePodSnapshot(
 			err,
 		)
 	}
+
 	if len(raw) > domain.MaxOriginalPodSnapshotBytes {
 		return domain.NewError(
 			domain.ErrorPrecondition,
@@ -133,7 +139,9 @@ func (r *WorkflowReconciler) ensureStandalonePodSnapshot(
 			),
 		)
 	}
+
 	workload.OriginalObject = raw
+
 	session.Status.OriginalPodSnapshotHash = podSnapshotHash(raw)
 	if err := r.store.Update(ctx, session); err != nil {
 		return domain.WrapError(

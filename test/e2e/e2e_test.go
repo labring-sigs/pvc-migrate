@@ -16,6 +16,7 @@ import (
 	"testing"
 	"time"
 
+	v1alpha1 "github.com/labring-sigs/pvc-migrate/api/v1alpha1"
 	"github.com/labring-sigs/pvc-migrate/internal/domain"
 	"github.com/labring-sigs/pvc-migrate/internal/kube"
 	appsv1 "k8s.io/api/apps/v1"
@@ -47,6 +48,132 @@ const (
 	controllerPoll    = time.Second
 	controllerStartup = 2 * time.Minute
 )
+
+func TestBackupRepositoryAdmission(t *testing.T) {
+	if os.Getenv("PVC_MIGRATE_E2E") != "1" {
+		t.Skip("set PVC_MIGRATE_E2E=1 to run cluster E2E tests")
+	}
+
+	kubeconfig := os.Getenv("PVC_MIGRATE_E2E_KUBECONFIG")
+	if kubeconfig == "" {
+		kubeconfig = os.Getenv("KUBECONFIG")
+	}
+	if kubeconfig == "" {
+		t.Fatal("PVC_MIGRATE_E2E_KUBECONFIG or KUBECONFIG is required")
+	}
+
+	clients, err := kube.NewClients(kubeconfig, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	defer cancel()
+
+	suffix := strconv.FormatInt(time.Now().UTC().UnixNano(), 36)
+	if len(suffix) > 10 {
+		suffix = suffix[len(suffix)-10:]
+	}
+	namespace := "pvc-migrate-repo-" + suffix
+	defer func() {
+		propagation := metav1.DeletePropagationBackground
+		if err := clients.Kubernetes.CoreV1().Namespaces().Delete(
+			context.Background(),
+			namespace,
+			metav1.DeleteOptions{PropagationPolicy: &propagation},
+		); err != nil && !apierrors.IsNotFound(err) {
+			t.Errorf("delete repository admission namespace: %v", err)
+		}
+	}()
+
+	if _, err := clients.Kubernetes.CoreV1().Namespaces().Create(
+		ctx,
+		&corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: namespace}},
+		metav1.CreateOptions{},
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	valid := []*v1alpha1.BackupRepository{
+		{
+			ObjectMeta: metav1.ObjectMeta{Name: "s3", Namespace: namespace},
+			Spec: v1alpha1.BackupRepositorySpec{
+				Type: v1alpha1.BackupRepositoryTypeS3,
+				S3: &v1alpha1.S3BackupRepositorySpec{
+					Bucket: "backups",
+					CredentialsSecret: v1alpha1.BackupRepositorySecretReference{
+						Name: "credentials",
+					},
+				},
+			},
+		},
+		{
+			ObjectMeta: metav1.ObjectMeta{Name: "pvc", Namespace: namespace},
+			Spec: v1alpha1.BackupRepositorySpec{
+				Type: v1alpha1.BackupRepositoryTypePVC,
+				PVC: &v1alpha1.PVCBackupRepositorySpec{
+					ClaimRef: v1alpha1.LocalObjectReference{Name: "archive"},
+					SubPath:  "snapshots",
+				},
+			},
+		},
+	}
+	for _, repository := range valid {
+		if err := clients.Runtime.Create(ctx, repository); err != nil {
+			t.Fatalf("create valid %s repository: %v", repository.Spec.Type, err)
+		}
+	}
+
+	invalid := []*v1alpha1.BackupRepository{
+		{
+			ObjectMeta: metav1.ObjectMeta{Name: "mismatched", Namespace: namespace},
+			Spec: v1alpha1.BackupRepositorySpec{
+				Type: v1alpha1.BackupRepositoryTypeS3,
+				PVC: &v1alpha1.PVCBackupRepositorySpec{
+					ClaimRef: v1alpha1.LocalObjectReference{Name: "archive"},
+				},
+			},
+		},
+		{
+			ObjectMeta: metav1.ObjectMeta{Name: "insecure", Namespace: namespace},
+			Spec: v1alpha1.BackupRepositorySpec{
+				Type: v1alpha1.BackupRepositoryTypeS3,
+				S3: &v1alpha1.S3BackupRepositorySpec{
+					Bucket:   "backups",
+					Endpoint: "http://object-store.example.test",
+					CredentialsSecret: v1alpha1.BackupRepositorySecretReference{
+						Name: "credentials",
+					},
+				},
+			},
+		},
+		{
+			ObjectMeta: metav1.ObjectMeta{Name: "path-traversal", Namespace: namespace},
+			Spec: v1alpha1.BackupRepositorySpec{
+				Type: v1alpha1.BackupRepositoryTypePVC,
+				PVC: &v1alpha1.PVCBackupRepositorySpec{
+					ClaimRef: v1alpha1.LocalObjectReference{Name: "archive"},
+					SubPath:  "snapshots/../private",
+				},
+			},
+		},
+		{
+			ObjectMeta: metav1.ObjectMeta{Name: "path-empty-segment", Namespace: namespace},
+			Spec: v1alpha1.BackupRepositorySpec{
+				Type: v1alpha1.BackupRepositoryTypePVC,
+				PVC: &v1alpha1.PVCBackupRepositorySpec{
+					ClaimRef: v1alpha1.LocalObjectReference{Name: "archive"},
+					SubPath:  "snapshots//daily",
+				},
+			},
+		},
+	}
+	for _, repository := range invalid {
+		if err := clients.Runtime.Create(ctx, repository); !apierrors.IsInvalid(err) {
+			t.Fatalf("invalid repository %s admission error=%v", repository.Name, err)
+		}
+	}
+}
 
 func TestControllerPodMigrationStatusCheckpointRoundTrip(t *testing.T) {
 	if os.Getenv("PVC_MIGRATE_E2E") != "1" {
@@ -152,6 +279,151 @@ func TestControllerPodMigrationStatusCheckpointRoundTrip(t *testing.T) {
 	if loaded.Status.Phase != domain.PhaseFinalSynced ||
 		loaded.Status.Volumes[0].Sync.FinalCompletedAt == nil {
 		t.Fatalf("checkpoint was not persisted: %#v", loaded.Status)
+	}
+}
+
+func TestControllerRepositoryStatusCheckpointRoundTrip(t *testing.T) {
+	if os.Getenv("PVC_MIGRATE_E2E") != "1" {
+		t.Skip("set PVC_MIGRATE_E2E=1 to run cluster E2E tests")
+	}
+
+	kubeconfig := os.Getenv("PVC_MIGRATE_E2E_KUBECONFIG")
+	if kubeconfig == "" {
+		kubeconfig = os.Getenv("KUBECONFIG")
+	}
+	if kubeconfig == "" {
+		t.Fatal("PVC_MIGRATE_E2E_KUBECONFIG or KUBECONFIG is required")
+	}
+
+	config, err := clientcmd.BuildConfigFromFlags("", kubeconfig)
+	if err != nil {
+		t.Fatal(err)
+	}
+	client, err := kubernetes.NewForConfig(config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	clients, err := kube.NewClients(kubeconfig, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	store := kube.NewCRDSessionStore(clients.Runtime)
+
+	tests := []struct {
+		name      string
+		operation domain.Operation
+		binding   *domain.BackupRepositoryBindingStatus
+	}{
+		{
+			name:      "backup-s3",
+			operation: domain.OperationBackup,
+			binding: &domain.BackupRepositoryBindingStatus{
+				Type:       domain.BackupRepositoryTypeS3,
+				UID:        "repository-uid",
+				Generation: 3,
+				S3: &domain.S3BackupRepositoryBindingStatus{
+					CredentialsSecretUID: "secret-uid",
+				},
+			},
+		},
+		{
+			name:      "restore-pvc",
+			operation: domain.OperationRestore,
+			binding: &domain.BackupRepositoryBindingStatus{
+				Type:       domain.BackupRepositoryTypePVC,
+				UID:        "repository-uid",
+				Generation: 5,
+				PVC: &domain.PVCBackupRepositoryBindingStatus{
+					ClaimUID: "claim-uid",
+				},
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+			defer cancel()
+
+			suffix := strconv.FormatInt(time.Now().UTC().UnixNano(), 36)
+			if len(suffix) > 10 {
+				suffix = suffix[len(suffix)-10:]
+			}
+			namespace := "pvc-migrate-repo-status-" + suffix
+			sessionID := tt.name + "-" + suffix
+			defer cleanupTestResources(t, config, client, namespace, sessionID)
+
+			if _, err := client.CoreV1().Namespaces().Create(
+				ctx,
+				&corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: namespace}},
+				metav1.CreateOptions{},
+			); err != nil {
+				t.Fatal(err)
+			}
+
+			spec := domain.NewSessionSpec(
+				tt.operation,
+				domain.SessionCommon{
+					SourceNamespace:      namespace,
+					DestinationNamespace: namespace,
+					SessionNamespace:     namespace,
+				},
+				false,
+				domain.SessionWorkflowOptions{},
+			)
+			switch tt.operation {
+			case domain.OperationBackup:
+				spec.Backup.SourcePVC = domain.ObjectReference{
+					Namespace: namespace,
+					Name:      "source",
+					UID:       "source-pvc-uid",
+				}
+				spec.Backup.SourcePV = domain.ObjectReference{Name: "source-pv", UID: "source-pv-uid"}
+				spec.Backup.Name = "daily"
+				spec.Backup.BackupRepository = "archive"
+			case domain.OperationRestore:
+				spec.Restore.DestinationPVC = domain.ObjectReference{
+					Namespace: namespace,
+					Name:      "destination",
+				}
+				spec.Restore.Name = "daily"
+				spec.Restore.BackupRepository = "archive"
+			}
+
+			session := domain.NewSession(sessionID, spec, time.Now())
+			if err := store.Create(ctx, session); err != nil {
+				t.Fatal(err)
+			}
+			session.Status.BackupRepository = tt.binding
+			if err := store.Update(ctx, session); err != nil {
+				t.Fatal(err)
+			}
+
+			loaded, err := store.Get(ctx, namespace, sessionID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if loaded.Status.BackupRepository == nil ||
+				loaded.Status.BackupRepository.Type != tt.binding.Type ||
+				loaded.Status.BackupRepository.UID != tt.binding.UID ||
+				loaded.Status.BackupRepository.Generation != tt.binding.Generation {
+				t.Fatalf("repository checkpoint was not persisted: %#v", loaded.Status.BackupRepository)
+			}
+
+			switch tt.binding.Type {
+			case domain.BackupRepositoryTypeS3:
+				if loaded.Status.BackupRepository.S3 == nil ||
+					loaded.Status.BackupRepository.S3.CredentialsSecretUID !=
+						tt.binding.S3.CredentialsSecretUID {
+					t.Fatalf("S3 checkpoint was not persisted: %#v", loaded.Status.BackupRepository)
+				}
+			case domain.BackupRepositoryTypePVC:
+				if loaded.Status.BackupRepository.PVC == nil ||
+					loaded.Status.BackupRepository.PVC.ClaimUID != tt.binding.PVC.ClaimUID {
+					t.Fatalf("PVC checkpoint was not persisted: %#v", loaded.Status.BackupRepository)
+				}
+			}
+		})
 	}
 }
 
@@ -292,14 +564,20 @@ func TestStorageClassAllowedTopologiesRejectsBeforeMutation(t *testing.T) {
 			Spec: corev1.PodSpec{
 				RestartPolicy: corev1.RestartPolicyNever,
 				NodeSelector:  map[string]string{corev1.LabelHostname: rejectedHostname},
-				Containers: []corev1.Container{{
-					Name:    "writer",
-					Image:   envOrDefault("PVC_MIGRATE_E2E_HELPER_IMAGE", "busybox:1.36.1"),
-					Command: []string{"sh", "-c", "echo topology > /data/payload; exec sleep 86400"},
-					VolumeMounts: []corev1.VolumeMount{{
-						Name: "data", MountPath: "/data",
-					}},
-				}},
+				Containers: []corev1.Container{
+					{
+						Name:  "writer",
+						Image: envOrDefault("PVC_MIGRATE_E2E_HELPER_IMAGE", "busybox:1.36.1"),
+						Command: []string{
+							"sh",
+							"-c",
+							"echo topology > /data/payload; exec sleep 86400",
+						},
+						VolumeMounts: []corev1.VolumeMount{{
+							Name: "data", MountPath: "/data",
+						}},
+					},
+				},
 				Volumes: []corev1.Volume{{
 					Name: "data",
 					VolumeSource: corev1.VolumeSource{
@@ -496,7 +774,9 @@ func TestIncompleteSourceExpansionRejectsBeforeMutation(t *testing.T) {
 						Type: &directoryOrCreate,
 					},
 				},
-				AccessModes:                   []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce},
+				AccessModes: []corev1.PersistentVolumeAccessMode{
+					corev1.ReadWriteOnce,
+				},
 				PersistentVolumeReclaimPolicy: corev1.PersistentVolumeReclaimRetain,
 				StorageClassName:              storageClassName,
 				VolumeMode:                    &filesystem,
@@ -2091,7 +2371,10 @@ func startE2EController(
 		func(waitCtx context.Context) (bool, error) {
 			select {
 			case <-process.done:
-				return false, fmt.Errorf("controller exited before leader election: %w", process.waitErr)
+				return false, fmt.Errorf(
+					"controller exited before leader election: %w",
+					process.waitErr,
+				)
 			default:
 			}
 
@@ -2364,8 +2647,7 @@ func readCopySession(
 			checkpoint := snapshot.Status.Volumes[index]
 			snapshot.Spec.Volumes[index].DestinationPVC = checkpoint.DestinationPVC
 			snapshot.Spec.Volumes[index].DestinationPV = checkpoint.DestinationPV
-			snapshot.Spec.Volumes[index].DestinationReclaimPolicy =
-				checkpoint.DestinationReclaimPolicy
+			snapshot.Spec.Volumes[index].DestinationReclaimPolicy = checkpoint.DestinationReclaimPolicy
 		}
 
 		return snapshot
@@ -2459,7 +2741,11 @@ func assertCopySession(
 		for index, volume := range volumes {
 			for _, field := range []string{"destinationPV", "destinationReclaimPolicy"} {
 				if _, exists := volume[field]; exists {
-					t.Fatalf("controller-owned field %q leaked into Copy spec volume %d", field, index)
+					t.Fatalf(
+						"controller-owned field %q leaked into Copy spec volume %d",
+						field,
+						index,
+					)
 				}
 			}
 			var destinationPVC map[string]json.RawMessage
@@ -2479,7 +2765,10 @@ func assertCopySession(
 	} else {
 		for _, field := range []string{"sourceNode", "targetNode", "strategies", "verifyChecksum", "deleteExtraneous", "online", "workload", "reserve", "migrate", "migratePod", "rename", "move"} {
 			if _, exists := snapshot.SpecFields[field]; exists {
-				t.Fatalf("field %q leaked into Copy SessionCommon or selected the wrong payload", field)
+				t.Fatalf(
+					"field %q leaked into Copy SessionCommon or selected the wrong payload",
+					field,
+				)
 			}
 		}
 	}

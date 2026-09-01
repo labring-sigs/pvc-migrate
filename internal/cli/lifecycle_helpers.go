@@ -43,14 +43,6 @@ func controllerWorkflowAvailable(runtime *commandRuntime, sessionType domain.Ses
 	return slices.Contains(runtime.controllerKinds, workflow.Kind)
 }
 
-func objectStoreProfileAvailable(runtime *commandRuntime) bool {
-	if runtime == nil || runtime.clients == nil || runtime.clients.Discovery == nil {
-		return false
-	}
-
-	return kube.ObjectStoreProfileAvailable(runtime.clients.Discovery)
-}
-
 // workflowNamespaceForCommand resolves the namespace used by lifecycle and
 // status commands. Controller-backed workflows are namespaced tenant
 // resources, so callers must opt into a tenant namespace explicitly; session
@@ -58,7 +50,9 @@ func objectStoreProfileAvailable(runtime *commandRuntime) bool {
 func workflowNamespaceForCommand(r *rootState, cmd *cobra.Command) string {
 	if cmd != nil {
 		if flag := cmd.Flags().Lookup("namespace"); flag != nil {
-			if value, err := cmd.Flags().GetString("namespace"); err == nil && strings.TrimSpace(value) != "" {
+			if value, err := cmd.Flags().
+				GetString("namespace"); err == nil &&
+				strings.TrimSpace(value) != "" {
 				return strings.TrimSpace(value)
 			}
 		}
@@ -67,6 +61,7 @@ func workflowNamespaceForCommand(r *rootState, cmd *cobra.Command) string {
 	if r == nil {
 		return ""
 	}
+
 	if strings.TrimSpace(r.global.workflowNamespace) != "" {
 		return strings.TrimSpace(r.global.workflowNamespace)
 	}
@@ -160,6 +155,7 @@ func (r *rootState) workflowSession(
 	action string,
 ) (*domain.Session, error) {
 	namespace := workflowNamespaceForCommand(r, cmd)
+
 	session, err := runtime.store.Get(ctx, namespace, id)
 	if err != nil {
 		return nil, reportSessionLookupError(cmd, namespace, id, err)
@@ -193,9 +189,11 @@ func deferControllerExecution(
 		if session.Status.ResumeFrom == "" {
 			return false, nil
 		}
+
 		if err := session.Reactivate("controller resume requested", time.Now()); err != nil {
 			return true, err
 		}
+
 		if err := runtime.store.Update(ctx, session); err != nil {
 			return true, err
 		}
@@ -479,6 +477,7 @@ func (r *rootState) workflowSessionList(
 	name string,
 ) error {
 	namespace := workflowNamespaceForCommand(r, cmd)
+
 	sessions, err := runtime.store.List(ctx, namespace)
 	if err != nil {
 		return reportSessionLookupError(cmd, namespace, "", err)

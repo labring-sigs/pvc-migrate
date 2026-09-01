@@ -77,6 +77,7 @@ func TestValidateDeclarativeSourceVolumesRejectsForgedSnapshot(t *testing.T) {
 			r := NewWorkflowReconciler(nil, nil).WithKubernetesClient(
 				clientfake.NewSimpleClientset(pvc, pv),
 			)
+
 			err := r.validateDeclarativeSourceVolumes(context.Background(), session)
 			if err == nil || !strings.Contains(err.Error(), test.want) {
 				t.Fatalf("error=%v, want substring %q", err, test.want)
@@ -87,6 +88,7 @@ func TestValidateDeclarativeSourceVolumesRejectsForgedSnapshot(t *testing.T) {
 
 func TestValidateDeclarativeSourceVolumesSkipsAfterExecutionStarts(t *testing.T) {
 	_, _, session := declarativeVolumeFixture()
+
 	session.Status.Phase = domain.PhaseReserving
 	if err := NewWorkflowReconciler(nil, nil).
 		validateDeclarativeSourceVolumes(context.Background(), session); err != nil {
@@ -96,6 +98,7 @@ func TestValidateDeclarativeSourceVolumesSkipsAfterExecutionStarts(t *testing.T)
 
 func TestValidateDeclarativeSourceVolumesRequiresClient(t *testing.T) {
 	_, _, session := declarativeVolumeFixture()
+
 	err := NewWorkflowReconciler(nil, nil).
 		validateDeclarativeSourceVolumes(context.Background(), session)
 	if domain.CategoryOf(err) != domain.ErrorKubernetes {
@@ -110,9 +113,15 @@ func declarativeVolumeFixture() (*corev1.PersistentVolumeClaim, *corev1.Persiste
 			Name: "data", Namespace: "tenant", UID: types.UID("pvc-uid"),
 			Labels:      map[string]string{"app": "database"},
 			Annotations: map[string]string{"owner": "team-a"},
-			OwnerReferences: []metav1.OwnerReference{{
-				APIVersion: "apps/v1", Kind: "StatefulSet", Name: "db", UID: types.UID("db-uid"), Controller: &ownerController,
-			}},
+			OwnerReferences: []metav1.OwnerReference{
+				{
+					APIVersion: "apps/v1",
+					Kind:       "StatefulSet",
+					Name:       "db",
+					UID:        types.UID("db-uid"),
+					Controller: &ownerController,
+				},
+			},
 		},
 		Spec: corev1.PersistentVolumeClaimSpec{
 			AccessModes: []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce},
@@ -129,7 +138,9 @@ func declarativeVolumeFixture() (*corev1.PersistentVolumeClaim, *corev1.Persiste
 		ObjectMeta: metav1.ObjectMeta{Name: "pv-data", UID: types.UID("pv-uid")},
 		Spec: corev1.PersistentVolumeSpec{
 			PersistentVolumeReclaimPolicy: corev1.PersistentVolumeReclaimRetain,
-			Capacity:                      corev1.ResourceList{corev1.ResourceStorage: resource.MustParse("1Gi")},
+			Capacity: corev1.ResourceList{
+				corev1.ResourceStorage: resource.MustParse("1Gi"),
+			},
 			ClaimRef: &corev1.ObjectReference{
 				Namespace: pvc.Namespace, Name: pvc.Name, UID: pvc.UID,
 			},
@@ -147,7 +158,11 @@ func declarativeVolumeFixture() (*corev1.PersistentVolumeClaim, *corev1.Persiste
 				SourceReclaimPolicy: pv.Spec.PersistentVolumeReclaimPolicy,
 				SourcePVCSpec:       *pvc.Spec.DeepCopy(),
 				SourcePVCMetadata: domain.PVCMetadata{
-					Labels: maps.Clone(pvc.Labels), Annotations: kube.PVCAnnotationsForRecreation(pvc.Annotations), OwnerReferences: slices.Clone(pvc.OwnerReferences),
+					Labels: maps.Clone(
+						pvc.Labels,
+					),
+					Annotations:     kube.PVCAnnotationsForRecreation(pvc.Annotations),
+					OwnerReferences: slices.Clone(pvc.OwnerReferences),
 				},
 				SourceCapacity: "1Gi", Capacity: "1Gi", StorageClass: "fast",
 				AccessModes: slices.Clone(pvc.Spec.AccessModes), VolumeMode: *pvc.Spec.VolumeMode,

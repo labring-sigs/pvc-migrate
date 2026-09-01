@@ -211,17 +211,21 @@ func TestSetConditionAddsAndReplacesByType(t *testing.T) {
 
 func TestWorkflowStatusFieldsStayBoundedAndUTF8Safe(t *testing.T) {
 	session := testSession(t)
+
 	longMessage := strings.Repeat("状态", MaxWorkflowMessageBytes)
 	if err := session.Transition(PhaseReserving, longMessage, time.Now()); err != nil {
 		t.Fatal(err)
 	}
-	if len(session.Status.Message) > MaxWorkflowMessageBytes || !utf8.ValidString(session.Status.Message) {
+
+	if len(session.Status.Message) > MaxWorkflowMessageBytes ||
+		!utf8.ValidString(session.Status.Message) {
 		t.Fatalf("status message is not bounded UTF-8: bytes=%d", len(session.Status.Message))
 	}
 
 	longType := strings.Repeat("T", MaxWorkflowConditionTypeBytes+20)
 	longReason := strings.Repeat("R", MaxWorkflowReasonBytes+20)
 	session.SetCondition(Condition{Type: longType, Reason: longReason, Message: longMessage})
+
 	condition := session.Status.Conditions[0]
 	if len(condition.Type) != MaxWorkflowConditionTypeBytes ||
 		len(condition.Reason) != MaxWorkflowReasonBytes ||
@@ -234,17 +238,25 @@ func TestWorkflowStatusFieldsStayBoundedAndUTF8Safe(t *testing.T) {
 
 func TestWorkflowHistoryRetainsOnlyRecentEntries(t *testing.T) {
 	session := testSession(t)
+
 	session.Status.History = make([]HistoryEntry, MaxWorkflowHistoryEntries+17)
 	for i := range session.Status.History {
 		session.Status.History[i].Phase = PhasePlanned
 		session.Status.History[i].Message = string(rune(i))
 	}
+
 	if err := session.Transition(PhaseReserving, "latest", time.Now()); err != nil {
 		t.Fatal(err)
 	}
+
 	if len(session.Status.History) != MaxWorkflowHistoryEntries {
-		t.Fatalf("history length=%d, want %d", len(session.Status.History), MaxWorkflowHistoryEntries)
+		t.Fatalf(
+			"history length=%d, want %d",
+			len(session.Status.History),
+			MaxWorkflowHistoryEntries,
+		)
 	}
+
 	if got := session.Status.History[len(session.Status.History)-1].Message; got != "latest" {
 		t.Fatalf("latest history message=%q", got)
 	}
@@ -252,12 +264,18 @@ func TestWorkflowHistoryRetainsOnlyRecentEntries(t *testing.T) {
 
 func TestWorkflowConditionsRetainOnlyRecentTypes(t *testing.T) {
 	session := testSession(t)
-	for i := 0; i < MaxWorkflowConditions+5; i++ {
+	for i := range MaxWorkflowConditions + 5 {
 		session.SetCondition(Condition{Type: fmt.Sprintf("Condition-%d", i)})
 	}
+
 	if len(session.Status.Conditions) != MaxWorkflowConditions {
-		t.Fatalf("condition length=%d, want %d", len(session.Status.Conditions), MaxWorkflowConditions)
+		t.Fatalf(
+			"condition length=%d, want %d",
+			len(session.Status.Conditions),
+			MaxWorkflowConditions,
+		)
 	}
+
 	if got := session.Status.Conditions[0].Type; got != "Condition-5" {
 		t.Fatalf("oldest retained condition=%q, want Condition-5", got)
 	}
@@ -623,6 +641,59 @@ func TestObjectStoreSessionsRejectUnsupportedBackend(t *testing.T) {
 				err,
 			) != ErrorValidation {
 				t.Fatalf("unsupported backend error=%v category=%q", err, CategoryOf(err))
+			}
+		})
+	}
+}
+
+func TestRepositoryBackedSessionsDoNotDeclareADataPlaneBackend(t *testing.T) {
+	tests := []struct {
+		name string
+		spec SessionSpec
+	}{
+		{
+			name: "backup",
+			spec: NewSessionSpec(OperationBackup, SessionCommon{
+				SourceNamespace: "app", SessionNamespace: "app",
+			}, false, SessionWorkflowOptions{}),
+		},
+		{
+			name: "restore",
+			spec: NewSessionSpec(OperationRestore, SessionCommon{
+				SourceNamespace: "app", DestinationNamespace: "app", SessionNamespace: "app",
+			}, false, SessionWorkflowOptions{}),
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			spec := test.spec
+			if spec.Backup != nil {
+				spec.Backup.SourcePVC = ObjectReference{
+					Namespace: "app", Name: "data", UID: "pvc-uid",
+				}
+				spec.Backup.SourcePV = ObjectReference{Name: "pv-data", UID: "pv-uid"}
+				spec.Backup.Name = "daily"
+				spec.Backup.BackupRepository = "archive"
+			} else {
+				spec.Restore.DestinationPVC = ObjectReference{Namespace: "app", Name: "data"}
+				spec.Restore.Name = "daily"
+				spec.Restore.BackupRepository = "archive"
+			}
+
+			session := NewSession("repository-test", spec, time.Now())
+			if err := session.Validate(); err != nil {
+				t.Fatalf("repository-backed session rejected: %v", err)
+			}
+
+			if spec.Backup != nil {
+				session.Spec.Backup.Backend = BackupBackendS3
+			} else {
+				session.Spec.Restore.Backend = BackupBackendS3
+			}
+
+			if err := session.Validate(); CategoryOf(err) != ErrorValidation {
+				t.Fatalf("mixed repository/backend error=%v category=%q", err, CategoryOf(err))
 			}
 		})
 	}

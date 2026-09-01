@@ -22,6 +22,7 @@ func TestIdentityReadsStableKubeSystemUID(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read cluster identity: %v", err)
 	}
+
 	if identity.ID != "cluster-uid" {
 		t.Fatalf("identity=%q, want cluster-uid", identity.ID)
 	}

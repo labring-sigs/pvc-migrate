@@ -4,17 +4,17 @@ kind: CustomResourceDefinition
 metadata:
   annotations:
     controller-gen.kubebuilder.io/version: v0.19.0
-  name: restores.migrate.sealos.io
+  name: clusterbackups.migrate.sealos.io
 spec:
   group: migrate.sealos.io
   names:
-    kind: Restore
-    listKind: RestoreList
-    plural: restores
+    kind: ClusterBackup
+    listKind: ClusterBackupList
+    plural: clusterbackups
     shortNames:
-    - rest
-    singular: restore
-  scope: Namespaced
+    - cback
+    singular: clusterbackup
+  scope: Cluster
   versions:
   - additionalPrinterColumns:
     - jsonPath: .status.phase
@@ -45,25 +45,57 @@ spec:
           metadata:
             type: object
           spec:
+            description: |-
+              ClusterBackupSpec is the cluster-scoped form of BackupSpec. The source and
+              repository namespaces are explicit because metadata.namespace is empty on a
+              cluster resource.
             properties:
-              allowMounted:
-                type: boolean
-              createPVC:
-                type: boolean
               createdBy:
                 type: string
               deleteExtraneous:
                 type: boolean
-              destinationAccessMode:
+              name:
+                maxLength: 253
+                minLength: 1
+                pattern: ^[A-Za-z0-9][A-Za-z0-9._-]*$
                 type: string
-              destinationCapacity:
+              online:
+                type: boolean
+              openebsLvmEnableShared:
+                type: boolean
+              path:
                 type: string
-              destinationNamespace:
+              repositoryRef:
+                description: |-
+                  RepositoryReference identifies a namespaced BackupRepository. It is used by
+                  cluster-scoped workflows; namespaced workflows use LocalObjectReference so
+                  a tenant cannot supply a different namespace.
+                properties:
+                  name:
+                    maxLength: 253
+                    minLength: 1
+                    pattern: ^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$
+                    type: string
+                  namespace:
+                    maxLength: 63
+                    minLength: 1
+                    pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
+                    type: string
+                required:
+                - name
+                - namespace
+                type: object
+              sessionNamespace:
                 maxLength: 63
                 minLength: 1
                 pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
                 type: string
-              destinationPVC:
+              sourceNamespace:
+                maxLength: 63
+                minLength: 1
+                pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
+                type: string
+              sourcePV:
                 description: ObjectReference identifies a Kubernetes object involved
                   in a workflow.
                 properties:
@@ -94,47 +126,47 @@ spec:
                 required:
                 - name
                 type: object
-              destinationStorageClass:
-                type: string
-              name:
-                maxLength: 253
-                minLength: 1
-                pattern: ^[A-Za-z0-9][A-Za-z0-9._-]*$
-                type: string
-              path:
-                type: string
-              repositoryRef:
-                description: |-
-                  RepositoryRef selects a user-owned BackupRepository in this workflow
-                  namespace. The referenced object owns the complete backup location.
+              sourcePVC:
+                description: ObjectReference identifies a Kubernetes object involved
+                  in a workflow.
                 properties:
+                  apiVersion:
+                    maxLength: 253
+                    type: string
+                  kind:
+                    maxLength: 253
+                    type: string
                   name:
                     maxLength: 253
                     minLength: 1
                     pattern: ^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$
                     type: string
+                  namespace:
+                    maxLength: 63
+                    pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
+                    type: string
+                  resourceVersion:
+                    maxLength: 256
+                    type: string
+                  uid:
+                    description: |-
+                      UID is a type that holds unique ID values, including UUIDs.  Because we
+                      don't ONLY use UUIDs, this is an alias to string.  Being a type captures
+                      intent and helps make sure that UIDs and names do not get conflated.
+                    type: string
                 required:
                 - name
                 type: object
-              sessionNamespace:
-                maxLength: 63
-                minLength: 1
-                pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
-                type: string
-              targetNode:
-                type: string
               toolImage:
                 type: string
             required:
-            - destinationNamespace
-            - destinationPVC
             - name
             - repositoryRef
             - sessionNamespace
+            - sourceNamespace
+            - sourcePV
+            - sourcePVC
             type: object
-            x-kubernetes-validations:
-            - message: workflow namespace must match metadata.namespace
-              rule: self.destinationNamespace == self.sessionNamespace
           status:
             properties:
               completedAt:
@@ -212,6 +244,80 @@ spec:
               observedGeneration:
                 format: int64
                 type: integer
+              openebsLvmSharedMounts:
+                items:
+                  properties:
+                    lvmVolume:
+                      description: ObjectReference identifies a Kubernetes object
+                        involved in a workflow.
+                      properties:
+                        apiVersion:
+                          maxLength: 253
+                          type: string
+                        kind:
+                          maxLength: 253
+                          type: string
+                        name:
+                          maxLength: 253
+                          minLength: 1
+                          pattern: ^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$
+                          type: string
+                        namespace:
+                          maxLength: 63
+                          pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
+                          type: string
+                        resourceVersion:
+                          maxLength: 256
+                          type: string
+                        uid:
+                          description: |-
+                            UID is a type that holds unique ID values, including UUIDs.  Because we
+                            don't ONLY use UUIDs, this is an alias to string.  Being a type captures
+                            intent and helps make sure that UIDs and names do not get conflated.
+                          type: string
+                      required:
+                      - name
+                      type: object
+                    previousShared:
+                      type: string
+                    previousSharedSet:
+                      type: boolean
+                    sourcePV:
+                      description: ObjectReference identifies a Kubernetes object
+                        involved in a workflow.
+                      properties:
+                        apiVersion:
+                          maxLength: 253
+                          type: string
+                        kind:
+                          maxLength: 253
+                          type: string
+                        name:
+                          maxLength: 253
+                          minLength: 1
+                          pattern: ^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$
+                          type: string
+                        namespace:
+                          maxLength: 63
+                          pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
+                          type: string
+                        resourceVersion:
+                          maxLength: 256
+                          type: string
+                        uid:
+                          description: |-
+                            UID is a type that holds unique ID values, including UUIDs.  Because we
+                            don't ONLY use UUIDs, this is an alias to string.  Being a type captures
+                            intent and helps make sure that UIDs and names do not get conflated.
+                          type: string
+                      required:
+                      - name
+                      type: object
+                  required:
+                  - lvmVolume
+                  - sourcePV
+                  type: object
+                type: array
               phase:
                 description: WorkflowPhase identifies one durable workflow state.
                 enum:

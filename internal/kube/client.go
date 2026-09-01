@@ -241,25 +241,30 @@ func AvailableControllerWorkflowKinds(
 		served[resource.Name] = struct{}{}
 	}
 
-	available := make([]domain.ControllerKind, 0, len(domain.ControllerWorkflows()))
+	available := make([]domain.ControllerKind, 0, len(domain.ControllerWorkflows())*2)
 	for _, workflow := range domain.ControllerWorkflows() {
 		if _, ok := served[workflow.Resource]; ok {
 			available = append(available, workflow.Kind)
+		}
+
+		if workflow.ClusterResource != "" {
+			if _, ok := served[workflow.ClusterResource]; ok {
+				available = append(available, workflow.ClusterKind)
+			}
 		}
 	}
 
 	return available
 }
 
-// ObjectStoreProfileAvailable reports whether the cluster-scoped profile API
-// required by controller-backed Backup and Restore is served. Keep this
-// separate from workflow discovery because a staged installation can expose
-// operation CRDs before the administrator profile CRD.
-func ObjectStoreProfileAvailable(discoveryClient discovery.DiscoveryInterface) bool {
+// BackupRepositoryAvailable reports whether the namespaced repository API is
+// served. The controller can resolve user-owned locations only when this
+// resource is installed.
+func BackupRepositoryAvailable(discoveryClient discovery.DiscoveryInterface) bool {
 	return HasAPIResource(
 		discoveryClient,
 		domain.SessionAPIVersion,
-		domain.ObjectStoreProfileResource,
+		domain.BackupRepositoryResource,
 	)
 }
 

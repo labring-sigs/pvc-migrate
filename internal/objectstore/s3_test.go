@@ -32,6 +32,54 @@ type fakeS3 struct {
 
 func newFakeS3() *fakeS3 { return &fakeS3{objects: map[string]fakeObject{}} }
 
+func TestConfigOnlyStoreRejectsNetworkOperations(t *testing.T) {
+	store, err := NewConfigOnly(Config{Bucket: "backups", Name: "daily"})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	manifest := Manifest{Version: 2}
+
+	operations := []struct {
+		name string
+		run  func() error
+	}{
+		{
+			name: "manifest",
+			run:  func() error { _, err := store.Manifest(context.Background()); return err },
+		},
+		{
+			name: "put manifest",
+			run:  func() error { return store.PutManifest(context.Background(), manifest) },
+		},
+		{
+			name: "inventory",
+			run:  func() error { _, err := store.Inventory(context.Background()); return err },
+		},
+		{
+			name: "acquire lock",
+			run:  func() error { _, err := store.AcquireLock(context.Background(), "holder", time.Minute); return err },
+		},
+		{
+			name: "release lock",
+			run:  func() error { return store.ReleaseLock(context.Background(), "etag") },
+		},
+		{name: "renew lock", run: func() error {
+			_, err := store.RenewLock(context.Background(), "holder", "etag", time.Minute)
+			return err
+		}},
+	}
+	for _, operation := range operations {
+		t.Run(operation.name, func(t *testing.T) {
+			err := operation.run()
+			if domain.CategoryOf(err) != domain.ErrorPrecondition ||
+				!strings.Contains(err.Error(), "client is not configured") {
+				t.Fatalf("category=%q error=%v", domain.CategoryOf(err), err)
+			}
+		})
+	}
+}
+
 func (f *fakeS3) HeadObject(
 	_ context.Context,
 	in *s3.HeadObjectInput,
@@ -628,6 +676,7 @@ func TestRcloneConfigUsesAmbientCredentialsWithoutSerializingThem(t *testing.T) 
 	if !strings.Contains(config, "env_auth = true\n") {
 		t.Fatalf("ambient rclone config=%q", config)
 	}
+
 	if strings.Contains(config, "resolved-access") || strings.Contains(config, "resolved-secret") {
 		t.Fatalf("ambient credentials were serialized into rclone config: %q", config)
 	}

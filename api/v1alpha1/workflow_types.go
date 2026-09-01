@@ -1,4 +1,4 @@
-//nolint:wsl_v5,golines // API adapters and stable dual-format field names are intentionally explicit.
+//nolint:wsl_v5,golines // Durable API fields keep explicit JSON and YAML tags together.
 package v1alpha1
 
 import (
@@ -14,17 +14,17 @@ import (
 // ObjectReference identifies a Kubernetes object involved in a workflow.
 type ObjectReference struct {
 	// +kubebuilder:validation:MaxLength=253
-	APIVersion string `json:"apiVersion,omitempty"      yaml:"apiVersion,omitempty"`
+	APIVersion string `json:"apiVersion,omitempty" yaml:"apiVersion,omitempty"`
 	// +kubebuilder:validation:MaxLength=253
-	Kind string `json:"kind,omitempty"            yaml:"kind,omitempty"`
+	Kind string `json:"kind,omitempty" yaml:"kind,omitempty"`
 	// +kubebuilder:validation:MaxLength=63
 	// +kubebuilder:validation:Pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`
-	Namespace string `json:"namespace,omitempty"       yaml:"namespace,omitempty"`
+	Namespace string `json:"namespace,omitempty" yaml:"namespace,omitempty"`
 	// +kubebuilder:validation:MinLength=1
 	// +kubebuilder:validation:MaxLength=253
 	// +kubebuilder:validation:Pattern=`^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$`
-	Name string    `json:"name"                      yaml:"name"`
-	UID  types.UID `json:"uid,omitempty"             yaml:"uid,omitempty"`
+	Name string    `json:"name"          yaml:"name"`
+	UID  types.UID `json:"uid,omitempty" yaml:"uid,omitempty"`
 	// +kubebuilder:validation:MaxLength=256
 	ResourceVersion string `json:"resourceVersion,omitempty" yaml:"resourceVersion,omitempty"`
 }
@@ -50,14 +50,9 @@ const (
 	WorkloadGrafana      WorkloadKind = "Grafana"
 )
 
-// +kubebuilder:validation:Enum=s3
-type ObjectStoreBackend string
-
-const ObjectStoreBackendS3 ObjectStoreBackend = "s3"
-
 type TransferScope struct {
 	// +kubebuilder:validation:MaxLength=1024
-	SourcePath string `json:"sourcePath"      yaml:"sourcePath"`
+	SourcePath string `json:"sourcePath" yaml:"sourcePath"`
 	// +kubebuilder:validation:MaxLength=1024
 	DestinationPath string `json:"destinationPath" yaml:"destinationPath"`
 }
@@ -74,18 +69,18 @@ type VolumeSpec struct {
 	SourcePV       ObjectReference `json:"sourcePV"       yaml:"sourcePV"`
 	DestinationPVC ObjectReference `json:"destinationPVC" yaml:"destinationPVC"`
 
-	SourceReclaimPolicy PVReclaimPolicy                     `json:"sourceReclaimPolicy,omitempty"      yaml:"sourceReclaimPolicy,omitempty"`
-	SourcePVCSpec       PVCSpec                             `json:"sourcePVCSpec,omitempty"            yaml:"sourcePVCSpec,omitempty"`
-	SourcePVCMetadata   PVCMetadata                         `json:"sourcePVCMetadata,omitempty"        yaml:"sourcePVCMetadata,omitempty"`
-	Capacity            string                              `json:"capacity"                           yaml:"capacity"`
-	SourceCapacity      string                              `json:"sourceCapacity"                     yaml:"sourceCapacity"`
-	SourceUsedBytes     int64                               `json:"sourceUsedBytes,omitempty"          yaml:"sourceUsedBytes,omitempty"`
-	SourceUsageKnown    bool                                `json:"sourceUsageKnown,omitempty"         yaml:"sourceUsageKnown,omitempty"`
-	StorageClass        string                              `json:"storageClass"                       yaml:"storageClass"`
-	AccessModes         []corev1.PersistentVolumeAccessMode `json:"accessModes"                        yaml:"accessModes"`
-	VolumeMode          corev1.PersistentVolumeMode         `json:"volumeMode"                         yaml:"volumeMode"`
-	ConcurrentConsumers int                                 `json:"concurrentConsumers,omitempty"      yaml:"concurrentConsumers,omitempty"`
-	TransferScope       *TransferScope                      `json:"transferScope,omitempty"            yaml:"transferScope,omitempty"`
+	SourceReclaimPolicy PVReclaimPolicy                     `json:"sourceReclaimPolicy,omitempty" yaml:"sourceReclaimPolicy,omitempty"`
+	SourcePVCSpec       PVCSpec                             `json:"sourcePVCSpec,omitempty"       yaml:"sourcePVCSpec,omitempty"`
+	SourcePVCMetadata   PVCMetadata                         `json:"sourcePVCMetadata,omitempty"   yaml:"sourcePVCMetadata,omitempty"`
+	Capacity            string                              `json:"capacity"                      yaml:"capacity"`
+	SourceCapacity      string                              `json:"sourceCapacity"                yaml:"sourceCapacity"`
+	SourceUsedBytes     int64                               `json:"sourceUsedBytes,omitempty"     yaml:"sourceUsedBytes,omitempty"`
+	SourceUsageKnown    bool                                `json:"sourceUsageKnown,omitempty"    yaml:"sourceUsageKnown,omitempty"`
+	StorageClass        string                              `json:"storageClass"                  yaml:"storageClass"`
+	AccessModes         []corev1.PersistentVolumeAccessMode `json:"accessModes"                   yaml:"accessModes"`
+	VolumeMode          corev1.PersistentVolumeMode         `json:"volumeMode"                    yaml:"volumeMode"`
+	ConcurrentConsumers int                                 `json:"concurrentConsumers,omitempty" yaml:"concurrentConsumers,omitempty"`
+	TransferScope       *TransferScope                      `json:"transferScope,omitempty"       yaml:"transferScope,omitempty"`
 }
 
 type PVCMetadata struct {
@@ -97,19 +92,19 @@ type PVCMetadata struct {
 // WorkloadSpec is specific to PodMigration and records workload ownership
 // and restoration data needed by that operation.
 type WorkloadSpec struct {
-	Adapter          WorkloadKind    `json:"adapter"                    yaml:"adapter"`
-	Pod              ObjectReference `json:"pod,omitempty"              yaml:"pod,omitempty"`
-	Controller       ObjectReference `json:"controller,omitempty"       yaml:"controller,omitempty"`
-	OriginalReplicas *int32          `json:"originalReplicas,omitempty" yaml:"originalReplicas,omitempty"`
-	Ordinal          *int32          `json:"ordinal,omitempty"          yaml:"ordinal,omitempty"`
+	Adapter          WorkloadKind     `json:"adapter"                    yaml:"adapter"`
+	Pod              *ObjectReference `json:"pod,omitempty"              yaml:"pod,omitempty"`
+	Controller       *ObjectReference `json:"controller,omitempty"       yaml:"controller,omitempty"`
+	OriginalReplicas *int32           `json:"originalReplicas,omitempty" yaml:"originalReplicas,omitempty"`
+	Ordinal          *int32           `json:"ordinal,omitempty"          yaml:"ordinal,omitempty"`
 	// +kubebuilder:validation:MaxItems=1024
-	AffectedPods []ObjectReference `json:"affectedPods,omitempty"     yaml:"affectedPods,omitempty"`
+	AffectedPods []ObjectReference `json:"affectedPods,omitempty" yaml:"affectedPods,omitempty"`
 	// The serialized byte-size limit is enforced by the controller/domain
 	// boundary because OpenAPI cannot express a byte limit for opaque JSON.
-	OriginalObject *apiextensionsv1.JSON `json:"originalObject,omitempty"   yaml:"originalObject,omitempty"`
-	KubeBlocks     *KubeBlocksSpec       `json:"kubeBlocks,omitempty"       yaml:"kubeBlocks,omitempty"`
-	VMCluster      *VMClusterSpec        `json:"vmCluster,omitempty"        yaml:"vmCluster,omitempty"`
-	Grafana        *GrafanaSpec          `json:"grafana,omitempty"          yaml:"grafana,omitempty"`
+	OriginalObject *apiextensionsv1.JSON `json:"originalObject,omitempty" yaml:"originalObject,omitempty"`
+	KubeBlocks     *KubeBlocksSpec       `json:"kubeBlocks,omitempty"     yaml:"kubeBlocks,omitempty"`
+	VMCluster      *VMClusterSpec        `json:"vmCluster,omitempty"      yaml:"vmCluster,omitempty"`
+	Grafana        *GrafanaSpec          `json:"grafana,omitempty"        yaml:"grafana,omitempty"`
 }
 
 type KubeBlocksSpec struct {
@@ -154,25 +149,25 @@ type MigrationSpec struct {
 	// +kubebuilder:validation:MinLength=1
 	// +kubebuilder:validation:MaxLength=63
 	// +kubebuilder:validation:Pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`
-	SourceNamespace string `json:"sourceNamespace"                yaml:"sourceNamespace"`
+	SourceNamespace string `json:"sourceNamespace" yaml:"sourceNamespace"`
 	// +kubebuilder:validation:MinLength=1
 	// +kubebuilder:validation:MaxLength=63
 	// +kubebuilder:validation:Pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`
-	TemporaryNamespace string `json:"temporaryNamespace"             yaml:"temporaryNamespace"`
+	TemporaryNamespace string `json:"temporaryNamespace" yaml:"temporaryNamespace"`
 	// +kubebuilder:validation:MinLength=1
 	// +kubebuilder:validation:MaxLength=63
 	// +kubebuilder:validation:Pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`
-	DestinationNamespace string `json:"destinationNamespace"           yaml:"destinationNamespace"`
+	DestinationNamespace string `json:"destinationNamespace" yaml:"destinationNamespace"`
 	// +kubebuilder:validation:MinLength=1
 	// +kubebuilder:validation:MaxLength=63
 	// +kubebuilder:validation:Pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`
-	SessionNamespace string `json:"sessionNamespace"               yaml:"sessionNamespace"`
-	CreatedBy        string `json:"createdBy,omitempty"            yaml:"createdBy,omitempty"`
+	SessionNamespace string `json:"sessionNamespace"    yaml:"sessionNamespace"`
+	CreatedBy        string `json:"createdBy,omitempty" yaml:"createdBy,omitempty"`
 	// +kubebuilder:validation:MaxItems=1024
-	Volumes    []VolumeSpec `json:"volumes,omitempty"              yaml:"volumes,omitempty"`
-	SourceNode string       `json:"sourceNode,omitempty"           yaml:"sourceNode,omitempty"`
-	TargetNode string       `json:"targetNode,omitempty"           yaml:"targetNode,omitempty"`
-	ToolImage  string       `json:"toolImage,omitempty"            yaml:"toolImage,omitempty"`
+	Volumes    []VolumeSpec `json:"volumes,omitempty"    yaml:"volumes,omitempty"`
+	SourceNode string       `json:"sourceNode,omitempty" yaml:"sourceNode,omitempty"`
+	TargetNode string       `json:"targetNode,omitempty" yaml:"targetNode,omitempty"`
+	ToolImage  string       `json:"toolImage,omitempty"  yaml:"toolImage,omitempty"`
 	// +kubebuilder:validation:MaxItems=32
 	Strategies           []string `json:"strategies,omitempty"           yaml:"strategies,omitempty"`
 	VerifyChecksum       bool     `json:"verifyChecksum,omitempty"       yaml:"verifyChecksum,omitempty"`
@@ -188,25 +183,25 @@ type PodMigrationSpec struct {
 	// +kubebuilder:validation:MinLength=1
 	// +kubebuilder:validation:MaxLength=63
 	// +kubebuilder:validation:Pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`
-	SourceNamespace string `json:"sourceNamespace"                  yaml:"sourceNamespace"`
+	SourceNamespace string `json:"sourceNamespace" yaml:"sourceNamespace"`
 	// +kubebuilder:validation:MinLength=1
 	// +kubebuilder:validation:MaxLength=63
 	// +kubebuilder:validation:Pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`
-	TemporaryNamespace string `json:"temporaryNamespace"               yaml:"temporaryNamespace"`
+	TemporaryNamespace string `json:"temporaryNamespace" yaml:"temporaryNamespace"`
 	// +kubebuilder:validation:MinLength=1
 	// +kubebuilder:validation:MaxLength=63
 	// +kubebuilder:validation:Pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`
-	DestinationNamespace string `json:"destinationNamespace"             yaml:"destinationNamespace"`
+	DestinationNamespace string `json:"destinationNamespace" yaml:"destinationNamespace"`
 	// +kubebuilder:validation:MinLength=1
 	// +kubebuilder:validation:MaxLength=63
 	// +kubebuilder:validation:Pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`
-	SessionNamespace string `json:"sessionNamespace"                 yaml:"sessionNamespace"`
-	CreatedBy        string `json:"createdBy,omitempty"              yaml:"createdBy,omitempty"`
+	SessionNamespace string `json:"sessionNamespace"    yaml:"sessionNamespace"`
+	CreatedBy        string `json:"createdBy,omitempty" yaml:"createdBy,omitempty"`
 	// +kubebuilder:validation:MaxItems=1024
-	Volumes    []VolumeSpec `json:"volumes,omitempty"                yaml:"volumes,omitempty"`
-	SourceNode string       `json:"sourceNode,omitempty"             yaml:"sourceNode,omitempty"`
-	TargetNode string       `json:"targetNode,omitempty"             yaml:"targetNode,omitempty"`
-	ToolImage  string       `json:"toolImage,omitempty"              yaml:"toolImage,omitempty"`
+	Volumes    []VolumeSpec `json:"volumes,omitempty"    yaml:"volumes,omitempty"`
+	SourceNode string       `json:"sourceNode,omitempty" yaml:"sourceNode,omitempty"`
+	TargetNode string       `json:"targetNode,omitempty" yaml:"targetNode,omitempty"`
+	ToolImage  string       `json:"toolImage,omitempty"  yaml:"toolImage,omitempty"`
 	// +kubebuilder:validation:MaxItems=32
 	Strategies             []string     `json:"strategies,omitempty"             yaml:"strategies,omitempty"`
 	VerifyChecksum         bool         `json:"verifyChecksum,omitempty"         yaml:"verifyChecksum,omitempty"`
@@ -222,20 +217,20 @@ type ReservationSpec struct {
 	// +kubebuilder:validation:MinLength=1
 	// +kubebuilder:validation:MaxLength=63
 	// +kubebuilder:validation:Pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`
-	SourceNamespace string `json:"sourceNamespace"                yaml:"sourceNamespace"`
+	SourceNamespace string `json:"sourceNamespace" yaml:"sourceNamespace"`
 	// +kubebuilder:validation:MinLength=1
 	// +kubebuilder:validation:MaxLength=63
 	// +kubebuilder:validation:Pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`
-	TemporaryNamespace string `json:"temporaryNamespace"             yaml:"temporaryNamespace"`
+	TemporaryNamespace string `json:"temporaryNamespace" yaml:"temporaryNamespace"`
 	// +kubebuilder:validation:MinLength=1
 	// +kubebuilder:validation:MaxLength=63
 	// +kubebuilder:validation:Pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`
-	DestinationNamespace string `json:"destinationNamespace"           yaml:"destinationNamespace"`
+	DestinationNamespace string `json:"destinationNamespace" yaml:"destinationNamespace"`
 	// +kubebuilder:validation:MinLength=1
 	// +kubebuilder:validation:MaxLength=63
 	// +kubebuilder:validation:Pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`
-	SessionNamespace string `json:"sessionNamespace"               yaml:"sessionNamespace"`
-	CreatedBy        string `json:"createdBy,omitempty"            yaml:"createdBy,omitempty"`
+	SessionNamespace string `json:"sessionNamespace"    yaml:"sessionNamespace"`
+	CreatedBy        string `json:"createdBy,omitempty" yaml:"createdBy,omitempty"`
 	// +kubebuilder:validation:MaxItems=1024
 	Volumes              []VolumeSpec `json:"volumes,omitempty"              yaml:"volumes,omitempty"`
 	TargetNode           string       `json:"targetNode,omitempty"           yaml:"targetNode,omitempty"`
@@ -248,25 +243,25 @@ type CopySpec struct {
 	// +kubebuilder:validation:MinLength=1
 	// +kubebuilder:validation:MaxLength=63
 	// +kubebuilder:validation:Pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`
-	SourceNamespace string `json:"sourceNamespace"                yaml:"sourceNamespace"`
+	SourceNamespace string `json:"sourceNamespace" yaml:"sourceNamespace"`
 	// +kubebuilder:validation:MinLength=1
 	// +kubebuilder:validation:MaxLength=63
 	// +kubebuilder:validation:Pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`
-	TemporaryNamespace string `json:"temporaryNamespace"             yaml:"temporaryNamespace"`
+	TemporaryNamespace string `json:"temporaryNamespace" yaml:"temporaryNamespace"`
 	// +kubebuilder:validation:MinLength=1
 	// +kubebuilder:validation:MaxLength=63
 	// +kubebuilder:validation:Pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`
-	DestinationNamespace string `json:"destinationNamespace"           yaml:"destinationNamespace"`
+	DestinationNamespace string `json:"destinationNamespace" yaml:"destinationNamespace"`
 	// +kubebuilder:validation:MinLength=1
 	// +kubebuilder:validation:MaxLength=63
 	// +kubebuilder:validation:Pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`
-	SessionNamespace string `json:"sessionNamespace"               yaml:"sessionNamespace"`
-	CreatedBy        string `json:"createdBy,omitempty"            yaml:"createdBy,omitempty"`
+	SessionNamespace string `json:"sessionNamespace"    yaml:"sessionNamespace"`
+	CreatedBy        string `json:"createdBy,omitempty" yaml:"createdBy,omitempty"`
 	// +kubebuilder:validation:MaxItems=1024
-	Volumes    []VolumeSpec `json:"volumes,omitempty"              yaml:"volumes,omitempty"`
-	SourceNode string       `json:"sourceNode,omitempty"           yaml:"sourceNode,omitempty"`
-	TargetNode string       `json:"targetNode,omitempty"           yaml:"targetNode,omitempty"`
-	ToolImage  string       `json:"toolImage,omitempty"            yaml:"toolImage,omitempty"`
+	Volumes    []VolumeSpec `json:"volumes,omitempty"    yaml:"volumes,omitempty"`
+	SourceNode string       `json:"sourceNode,omitempty" yaml:"sourceNode,omitempty"`
+	TargetNode string       `json:"targetNode,omitempty" yaml:"targetNode,omitempty"`
+	ToolImage  string       `json:"toolImage,omitempty"  yaml:"toolImage,omitempty"`
 	// +kubebuilder:validation:MaxItems=32
 	Strategies           []string `json:"strategies,omitempty"           yaml:"strategies,omitempty"`
 	DeleteExtraneous     bool     `json:"deleteExtraneous,omitempty"     yaml:"deleteExtraneous,omitempty"`
@@ -279,29 +274,26 @@ type BackupSpec struct {
 	// +kubebuilder:validation:MinLength=1
 	// +kubebuilder:validation:MaxLength=63
 	// +kubebuilder:validation:Pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`
-	SourceNamespace string `json:"sourceNamespace"                  yaml:"sourceNamespace"`
+	SourceNamespace string `json:"sourceNamespace" yaml:"sourceNamespace"`
 	// +kubebuilder:validation:MinLength=1
 	// +kubebuilder:validation:MaxLength=63
 	// +kubebuilder:validation:Pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`
-	SessionNamespace string          `json:"sessionNamespace"                 yaml:"sessionNamespace"`
-	CreatedBy        string          `json:"createdBy,omitempty"              yaml:"createdBy,omitempty"`
-	SourcePVC        ObjectReference `json:"sourcePVC"                        yaml:"sourcePVC"`
-	SourcePV         ObjectReference `json:"sourcePV"                         yaml:"sourcePV"`
-	Path             string          `json:"path,omitempty"                   yaml:"path,omitempty"`
+	SessionNamespace string          `json:"sessionNamespace"    yaml:"sessionNamespace"`
+	CreatedBy        string          `json:"createdBy,omitempty" yaml:"createdBy,omitempty"`
+	SourcePVC        ObjectReference `json:"sourcePVC"           yaml:"sourcePVC"`
+	SourcePV         ObjectReference `json:"sourcePV"            yaml:"sourcePV"`
+	Path             string          `json:"path,omitempty"      yaml:"path,omitempty"`
 	// +kubebuilder:validation:MinLength=1
 	// +kubebuilder:validation:MaxLength=253
 	// +kubebuilder:validation:Pattern=`^[A-Za-z0-9][A-Za-z0-9._-]*$`
-	Name string `json:"name"                             yaml:"name"`
-	// ObjectStoreProfile selects an administrator-owned cluster profile. The
-	// profile supplies endpoint, bucket scope, and credentials.
-	// +kubebuilder:validation:MinLength=1
-	// +kubebuilder:validation:MaxLength=253
-	// +kubebuilder:validation:Pattern=`^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$`
-	ObjectStoreProfile     string `json:"objectStoreProfile"              yaml:"objectStoreProfile"`
-	Online                 bool   `json:"online,omitempty"                 yaml:"online,omitempty"`
-	OpenEBSLVMEnableShared bool   `json:"openebsLvmEnableShared,omitempty" yaml:"openebsLvmEnableShared,omitempty"`
-	ToolImage              string `json:"toolImage,omitempty"              yaml:"toolImage,omitempty"`
-	DeleteExtraneous       bool   `json:"deleteExtraneous,omitempty"       yaml:"deleteExtraneous,omitempty"`
+	Name string `json:"name" yaml:"name"`
+	// RepositoryRef selects a user-owned BackupRepository in this workflow
+	// namespace. The referenced object owns the complete backup location.
+	RepositoryRef          LocalObjectReference `json:"repositoryRef"                    yaml:"repositoryRef"`
+	Online                 bool                 `json:"online,omitempty"                 yaml:"online,omitempty"`
+	OpenEBSLVMEnableShared bool                 `json:"openebsLvmEnableShared,omitempty" yaml:"openebsLvmEnableShared,omitempty"`
+	ToolImage              string               `json:"toolImage,omitempty"              yaml:"toolImage,omitempty"`
+	DeleteExtraneous       bool                 `json:"deleteExtraneous,omitempty"       yaml:"deleteExtraneous,omitempty"`
 }
 
 // +kubebuilder:validation:XValidation:rule="self.destinationNamespace == self.sessionNamespace",message="workflow namespace must match metadata.namespace"
@@ -309,32 +301,29 @@ type RestoreSpec struct {
 	// +kubebuilder:validation:MinLength=1
 	// +kubebuilder:validation:MaxLength=63
 	// +kubebuilder:validation:Pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`
-	DestinationNamespace string `json:"destinationNamespace"              yaml:"destinationNamespace"`
+	DestinationNamespace string `json:"destinationNamespace" yaml:"destinationNamespace"`
 	// +kubebuilder:validation:MinLength=1
 	// +kubebuilder:validation:MaxLength=63
 	// +kubebuilder:validation:Pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`
-	SessionNamespace string          `json:"sessionNamespace"                  yaml:"sessionNamespace"`
-	CreatedBy        string          `json:"createdBy,omitempty"               yaml:"createdBy,omitempty"`
-	DestinationPVC   ObjectReference `json:"destinationPVC"                    yaml:"destinationPVC"`
-	Path             string          `json:"path,omitempty"                    yaml:"path,omitempty"`
+	SessionNamespace string          `json:"sessionNamespace"    yaml:"sessionNamespace"`
+	CreatedBy        string          `json:"createdBy,omitempty" yaml:"createdBy,omitempty"`
+	DestinationPVC   ObjectReference `json:"destinationPVC"      yaml:"destinationPVC"`
+	Path             string          `json:"path,omitempty"      yaml:"path,omitempty"`
 	// +kubebuilder:validation:MinLength=1
 	// +kubebuilder:validation:MaxLength=253
 	// +kubebuilder:validation:Pattern=`^[A-Za-z0-9][A-Za-z0-9._-]*$`
-	Name string `json:"name"                              yaml:"name"`
-	// ObjectStoreProfile selects an administrator-owned cluster profile. The
-	// profile supplies endpoint, bucket scope, and credentials.
-	// +kubebuilder:validation:MinLength=1
-	// +kubebuilder:validation:MaxLength=253
-	// +kubebuilder:validation:Pattern=`^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$`
-	ObjectStoreProfile      string `json:"objectStoreProfile"               yaml:"objectStoreProfile"`
-	CreatePVC               bool   `json:"createPVC,omitempty"               yaml:"createPVC,omitempty"`
-	DestinationStorageClass string `json:"destinationStorageClass,omitempty" yaml:"destinationStorageClass,omitempty"`
-	DestinationAccessMode   string `json:"destinationAccessMode,omitempty"   yaml:"destinationAccessMode,omitempty"`
-	DestinationCapacity     string `json:"destinationCapacity,omitempty"     yaml:"destinationCapacity,omitempty"`
-	AllowMounted            bool   `json:"allowMounted,omitempty"            yaml:"allowMounted,omitempty"`
-	TargetNode              string `json:"targetNode,omitempty"              yaml:"targetNode,omitempty"`
-	ToolImage               string `json:"toolImage,omitempty"               yaml:"toolImage,omitempty"`
-	DeleteExtraneous        bool   `json:"deleteExtraneous,omitempty"        yaml:"deleteExtraneous,omitempty"`
+	Name string `json:"name" yaml:"name"`
+	// RepositoryRef selects a user-owned BackupRepository in this workflow
+	// namespace. The referenced object owns the complete backup location.
+	RepositoryRef           LocalObjectReference `json:"repositoryRef"                     yaml:"repositoryRef"`
+	CreatePVC               bool                 `json:"createPVC,omitempty"               yaml:"createPVC,omitempty"`
+	DestinationStorageClass string               `json:"destinationStorageClass,omitempty" yaml:"destinationStorageClass,omitempty"`
+	DestinationAccessMode   string               `json:"destinationAccessMode,omitempty"   yaml:"destinationAccessMode,omitempty"`
+	DestinationCapacity     string               `json:"destinationCapacity,omitempty"     yaml:"destinationCapacity,omitempty"`
+	AllowMounted            bool                 `json:"allowMounted,omitempty"            yaml:"allowMounted,omitempty"`
+	TargetNode              string               `json:"targetNode,omitempty"              yaml:"targetNode,omitempty"`
+	ToolImage               string               `json:"toolImage,omitempty"               yaml:"toolImage,omitempty"`
+	DeleteExtraneous        bool                 `json:"deleteExtraneous,omitempty"        yaml:"deleteExtraneous,omitempty"`
 }
 
 type PVCSourceTemplate struct {
@@ -355,7 +344,7 @@ type RenameSpec struct {
 	// +kubebuilder:validation:MinLength=1
 	// +kubebuilder:validation:MaxLength=63
 	// +kubebuilder:validation:Pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`
-	SourceNamespace string `json:"sourceNamespace"     yaml:"sourceNamespace"`
+	SourceNamespace string `json:"sourceNamespace" yaml:"sourceNamespace"`
 	// +kubebuilder:validation:MinLength=1
 	// +kubebuilder:validation:MaxLength=63
 	// +kubebuilder:validation:Pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`
@@ -369,7 +358,7 @@ type MoveSpec struct {
 	// +kubebuilder:validation:MinLength=1
 	// +kubebuilder:validation:MaxLength=63
 	// +kubebuilder:validation:Pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`
-	SourceNamespace string `json:"sourceNamespace"      yaml:"sourceNamespace"`
+	SourceNamespace string `json:"sourceNamespace" yaml:"sourceNamespace"`
 	// +kubebuilder:validation:MinLength=1
 	// +kubebuilder:validation:MaxLength=63
 	// +kubebuilder:validation:Pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`
@@ -377,9 +366,9 @@ type MoveSpec struct {
 	// +kubebuilder:validation:MinLength=1
 	// +kubebuilder:validation:MaxLength=63
 	// +kubebuilder:validation:Pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`
-	SessionNamespace  string `json:"sessionNamespace"     yaml:"sessionNamespace"`
-	CreatedBy         string `json:"createdBy,omitempty"  yaml:"createdBy,omitempty"`
-	PVCIdentityFields `       json:",inline"              yaml:",inline"`
+	SessionNamespace  string `json:"sessionNamespace"    yaml:"sessionNamespace"`
+	CreatedBy         string `json:"createdBy,omitempty" yaml:"createdBy,omitempty"`
+	PVCIdentityFields `       json:",inline"             yaml:",inline"`
 }
 
 // +kubebuilder:validation:Enum=Planned;Reserving;Reserved;WarmCopying;WarmCopied;Pausing;Paused;FinalSyncing;FinalSynced;Activating;Activated;Resuming;Completed;Aborting;Aborted;RollingBack;RolledBack;Renaming;Moving;Failed
@@ -388,25 +377,25 @@ type WorkflowPhase string
 
 type WorkflowCondition struct {
 	// +kubebuilder:validation:MaxLength=64
-	Type   string                 `json:"type"               yaml:"type"`
-	Status metav1.ConditionStatus `json:"status"             yaml:"status"`
+	Type   string                 `json:"type"   yaml:"type"`
+	Status metav1.ConditionStatus `json:"status" yaml:"status"`
 	// +kubebuilder:validation:MaxLength=128
-	Reason string `json:"reason,omitempty"   yaml:"reason,omitempty"`
+	Reason string `json:"reason,omitempty" yaml:"reason,omitempty"`
 	// +kubebuilder:validation:MaxLength=8192
 	Message            string      `json:"message,omitempty"  yaml:"message,omitempty"`
 	LastTransitionTime metav1.Time `json:"lastTransitionTime" yaml:"lastTransitionTime"`
 }
 
 type WorkflowHistoryEntry struct {
-	Phase WorkflowPhase `json:"phase"             yaml:"phase"`
-	Time  metav1.Time   `json:"time"              yaml:"time"`
+	Phase WorkflowPhase `json:"phase" yaml:"phase"`
+	Time  metav1.Time   `json:"time"  yaml:"time"`
 	// +kubebuilder:validation:MaxLength=8192
 	Message string `json:"message,omitempty" yaml:"message,omitempty"`
 }
 
 type WorkflowStatus struct {
-	Phase      WorkflowPhase `json:"phase"                        yaml:"phase"`
-	ResumeFrom WorkflowPhase `json:"resumeFrom,omitempty"         yaml:"resumeFrom,omitempty"`
+	Phase      WorkflowPhase `json:"phase"                yaml:"phase"`
+	ResumeFrom WorkflowPhase `json:"resumeFrom,omitempty" yaml:"resumeFrom,omitempty"`
 	// +kubebuilder:validation:MaxLength=8192
 	FailureReason      string       `json:"failureReason,omitempty"      yaml:"failureReason,omitempty"`
 	ObservedGeneration int64        `json:"observedGeneration,omitempty" yaml:"observedGeneration,omitempty"`
@@ -414,11 +403,11 @@ type WorkflowStatus struct {
 	UpdatedAt          metav1.Time  `json:"updatedAt"                    yaml:"updatedAt"`
 	CompletedAt        *metav1.Time `json:"completedAt,omitempty"        yaml:"completedAt,omitempty"`
 	// +kubebuilder:validation:MaxLength=8192
-	Message string `json:"message,omitempty"            yaml:"message,omitempty"`
+	Message string `json:"message,omitempty" yaml:"message,omitempty"`
 	// +kubebuilder:validation:MaxItems=32
-	Conditions []WorkflowCondition `json:"conditions,omitempty"         yaml:"conditions,omitempty"`
+	Conditions []WorkflowCondition `json:"conditions,omitempty" yaml:"conditions,omitempty"`
 	// +kubebuilder:validation:MaxItems=256
-	History []WorkflowHistoryEntry `json:"history,omitempty"            yaml:"history,omitempty"`
+	History []WorkflowHistoryEntry `json:"history,omitempty" yaml:"history,omitempty"`
 }
 
 // MigrationSyncStatus contains final-copy checkpoints. Offline Migration has
@@ -429,7 +418,7 @@ type MigrationSyncStatus struct {
 	BytesCopied      int64        `json:"bytesCopied,omitempty"      yaml:"bytesCopied,omitempty"`
 	ChecksumVerified bool         `json:"checksumVerified,omitempty" yaml:"checksumVerified,omitempty"`
 	// +kubebuilder:validation:MaxLength=8192
-	LastError string `json:"lastError,omitempty"        yaml:"lastError,omitempty"`
+	LastError string `json:"lastError,omitempty" yaml:"lastError,omitempty"`
 }
 
 // PodMigrationSyncStatus tracks both warm-copy and final-copy checkpoints.
@@ -440,7 +429,7 @@ type PodMigrationSyncStatus struct {
 	BytesCopied      int64        `json:"bytesCopied,omitempty"      yaml:"bytesCopied,omitempty"`
 	ChecksumVerified bool         `json:"checksumVerified,omitempty" yaml:"checksumVerified,omitempty"`
 	// +kubebuilder:validation:MaxLength=8192
-	LastError string `json:"lastError,omitempty"        yaml:"lastError,omitempty"`
+	LastError string `json:"lastError,omitempty" yaml:"lastError,omitempty"`
 }
 
 // CopySyncStatus tracks the warm-copy operation owned by Copy.
@@ -449,16 +438,16 @@ type CopySyncStatus struct {
 	Attempts        int          `json:"attempts"                  yaml:"attempts"`
 	BytesCopied     int64        `json:"bytesCopied,omitempty"     yaml:"bytesCopied,omitempty"`
 	// +kubebuilder:validation:MaxLength=8192
-	LastError string `json:"lastError,omitempty"       yaml:"lastError,omitempty"`
+	LastError string `json:"lastError,omitempty" yaml:"lastError,omitempty"`
 }
 
 type VolumeActivationStatus struct {
-	TemporaryPVCDeleted bool            `json:"temporaryPVCDeleted,omitempty" yaml:"temporaryPVCDeleted,omitempty"`
-	SourcePVCDeleted    bool            `json:"sourcePVCDeleted,omitempty"    yaml:"sourcePVCDeleted,omitempty"`
-	DestinationReserved bool            `json:"destinationReserved,omitempty" yaml:"destinationReserved,omitempty"`
-	ActivePVC           ObjectReference `json:"activePVC,omitempty"           yaml:"activePVC,omitempty"`
-	ActivatedAt         *metav1.Time    `json:"activatedAt,omitempty"         yaml:"activatedAt,omitempty"`
-	RolledBackAt        *metav1.Time    `json:"rolledBackAt,omitempty"        yaml:"rolledBackAt,omitempty"`
+	TemporaryPVCDeleted bool             `json:"temporaryPVCDeleted,omitempty" yaml:"temporaryPVCDeleted,omitempty"`
+	SourcePVCDeleted    bool             `json:"sourcePVCDeleted,omitempty"    yaml:"sourcePVCDeleted,omitempty"`
+	DestinationReserved bool             `json:"destinationReserved,omitempty" yaml:"destinationReserved,omitempty"`
+	ActivePVC           *ObjectReference `json:"activePVC,omitempty"           yaml:"activePVC,omitempty"`
+	ActivatedAt         *metav1.Time     `json:"activatedAt,omitempty"         yaml:"activatedAt,omitempty"`
+	RolledBackAt        *metav1.Time     `json:"rolledBackAt,omitempty"        yaml:"rolledBackAt,omitempty"`
 }
 
 type SharedMountStatus struct {
@@ -472,7 +461,7 @@ type SharedMountStatus struct {
 // resuming, or rolling back a workload. The original migration target and
 // recovery snapshot remain immutable in spec.workload.
 type PodMigrationWorkloadStatus struct {
-	Pod          ObjectReference   `json:"pod,omitempty"          yaml:"pod,omitempty"`
+	Pod          *ObjectReference  `json:"pod,omitempty"          yaml:"pod,omitempty"`
 	AffectedPods []ObjectReference `json:"affectedPods,omitempty" yaml:"affectedPods,omitempty"`
 }
 
@@ -480,13 +469,13 @@ type PodMigrationWorkloadStatus struct {
 // volume. It intentionally excludes workload-only progress and OpenEBS
 // shared-mount state.
 type MigrationVolumeStatus struct {
-	SourcePVCName     string                 `json:"sourcePVCName"                          yaml:"sourcePVCName"`
-	DestinationPVC    ObjectReference        `json:"destinationPVC,omitempty"               yaml:"destinationPVC,omitempty"`
-	DestinationPV     ObjectReference        `json:"destinationPV,omitempty"                yaml:"destinationPV,omitempty"`
-	DestinationPolicy PVReclaimPolicy        `json:"destinationReclaimPolicy,omitempty"     yaml:"destinationReclaimPolicy,omitempty"`
-	Reserved          bool                   `json:"reserved,omitempty"                      yaml:"reserved,omitempty"`
-	Sync              MigrationSyncStatus    `json:"sync"                                   yaml:"sync"`
-	Activation        VolumeActivationStatus `json:"activation"                             yaml:"activation"`
+	SourcePVCName     string                 `json:"sourcePVCName"                      yaml:"sourcePVCName"`
+	DestinationPVC    *ObjectReference       `json:"destinationPVC,omitempty"           yaml:"destinationPVC,omitempty"`
+	DestinationPV     *ObjectReference       `json:"destinationPV,omitempty"            yaml:"destinationPV,omitempty"`
+	DestinationPolicy PVReclaimPolicy        `json:"destinationReclaimPolicy,omitempty" yaml:"destinationReclaimPolicy,omitempty"`
+	Reserved          bool                   `json:"reserved,omitempty"                 yaml:"reserved,omitempty"`
+	Sync              MigrationSyncStatus    `json:"sync"                               yaml:"sync"`
+	Activation        VolumeActivationStatus `json:"activation"                         yaml:"activation"`
 }
 
 // PodMigrationVolumeStatus is the durable checkpoint for a workload-aware
@@ -494,33 +483,33 @@ type MigrationVolumeStatus struct {
 // activation fields currently match MigrationVolumeStatus.
 type PodMigrationVolumeStatus struct {
 	SourcePVCName     string                 `json:"sourcePVCName"                      yaml:"sourcePVCName"`
-	DestinationPVC    ObjectReference        `json:"destinationPVC,omitempty"           yaml:"destinationPVC,omitempty"`
-	DestinationPV     ObjectReference        `json:"destinationPV,omitempty"            yaml:"destinationPV,omitempty"`
+	DestinationPVC    *ObjectReference       `json:"destinationPVC,omitempty"           yaml:"destinationPVC,omitempty"`
+	DestinationPV     *ObjectReference       `json:"destinationPV,omitempty"            yaml:"destinationPV,omitempty"`
 	DestinationPolicy PVReclaimPolicy        `json:"destinationReclaimPolicy,omitempty" yaml:"destinationReclaimPolicy,omitempty"`
 	Reserved          bool                   `json:"reserved,omitempty"                 yaml:"reserved,omitempty"`
-	Sync              PodMigrationSyncStatus `json:"sync"                              yaml:"sync"`
-	Activation        VolumeActivationStatus `json:"activation"                        yaml:"activation"`
+	Sync              PodMigrationSyncStatus `json:"sync"                               yaml:"sync"`
+	Activation        VolumeActivationStatus `json:"activation"                         yaml:"activation"`
 }
 
 // ReservationVolumeStatus reports only destination reservation progress.
 // Copying and activation checkpoints are not part of a Reservation contract.
 type ReservationVolumeStatus struct {
-	SourcePVCName     string          `json:"sourcePVCName"                      yaml:"sourcePVCName"`
-	DestinationPVC    ObjectReference `json:"destinationPVC,omitempty"           yaml:"destinationPVC,omitempty"`
-	DestinationPV     ObjectReference `json:"destinationPV,omitempty"            yaml:"destinationPV,omitempty"`
-	DestinationPolicy PVReclaimPolicy `json:"destinationReclaimPolicy,omitempty" yaml:"destinationReclaimPolicy,omitempty"`
-	Reserved          bool            `json:"reserved,omitempty"                 yaml:"reserved,omitempty"`
+	SourcePVCName     string           `json:"sourcePVCName"                      yaml:"sourcePVCName"`
+	DestinationPVC    *ObjectReference `json:"destinationPVC,omitempty"           yaml:"destinationPVC,omitempty"`
+	DestinationPV     *ObjectReference `json:"destinationPV,omitempty"            yaml:"destinationPV,omitempty"`
+	DestinationPolicy PVReclaimPolicy  `json:"destinationReclaimPolicy,omitempty" yaml:"destinationReclaimPolicy,omitempty"`
+	Reserved          bool             `json:"reserved,omitempty"                 yaml:"reserved,omitempty"`
 }
 
 // CopyVolumeStatus reports reservation and copy progress. PVC activation is
 // owned by Migration/PodMigration and is intentionally absent here.
 type CopyVolumeStatus struct {
-	SourcePVCName     string          `json:"sourcePVCName"                      yaml:"sourcePVCName"`
-	DestinationPVC    ObjectReference `json:"destinationPVC,omitempty"           yaml:"destinationPVC,omitempty"`
-	DestinationPV     ObjectReference `json:"destinationPV,omitempty"            yaml:"destinationPV,omitempty"`
-	DestinationPolicy PVReclaimPolicy `json:"destinationReclaimPolicy,omitempty" yaml:"destinationReclaimPolicy,omitempty"`
-	Reserved          bool            `json:"reserved,omitempty"                 yaml:"reserved,omitempty"`
-	Sync              CopySyncStatus  `json:"sync"                              yaml:"sync"`
+	SourcePVCName     string           `json:"sourcePVCName"                      yaml:"sourcePVCName"`
+	DestinationPVC    *ObjectReference `json:"destinationPVC,omitempty"           yaml:"destinationPVC,omitempty"`
+	DestinationPV     *ObjectReference `json:"destinationPV,omitempty"            yaml:"destinationPV,omitempty"`
+	DestinationPolicy PVReclaimPolicy  `json:"destinationReclaimPolicy,omitempty" yaml:"destinationReclaimPolicy,omitempty"`
+	Reserved          bool             `json:"reserved,omitempty"                 yaml:"reserved,omitempty"`
+	Sync              CopySyncStatus   `json:"sync"                               yaml:"sync"`
 }
 
 // PVCIdentityVolumeStatus is the checkpoint for Rename and Move. Those
@@ -534,9 +523,9 @@ type PVCIdentityVolumeStatus struct {
 // Rename or Move. Temporary-volume cleanup fields do not apply to identity
 // operations.
 type PVCIdentityActivationStatus struct {
-	ActivePVC    ObjectReference `json:"activePVC,omitempty"    yaml:"activePVC,omitempty"`
-	ActivatedAt  *metav1.Time    `json:"activatedAt,omitempty"  yaml:"activatedAt,omitempty"`
-	RolledBackAt *metav1.Time    `json:"rolledBackAt,omitempty" yaml:"rolledBackAt,omitempty"`
+	ActivePVC    *ObjectReference `json:"activePVC,omitempty"    yaml:"activePVC,omitempty"`
+	ActivatedAt  *metav1.Time     `json:"activatedAt,omitempty"  yaml:"activatedAt,omitempty"`
+	RolledBackAt *metav1.Time     `json:"rolledBackAt,omitempty" yaml:"rolledBackAt,omitempty"`
 }
 
 type MigrationStatus struct {
@@ -545,14 +534,14 @@ type MigrationStatus struct {
 }
 
 type PodMigrationStatus struct {
-	WorkflowStatus      `                           json:",inline"                          yaml:",inline"`
-	WarmPassesCompleted int `json:"warmPassesCompleted"              yaml:"warmPassesCompleted"`
+	WorkflowStatus      `    json:",inline"             yaml:",inline"`
+	WarmPassesCompleted int `json:"warmPassesCompleted" yaml:"warmPassesCompleted"`
 	// OriginalPodSnapshotHash is controller-owned evidence that the standalone
 	// Pod snapshot was captured from the referenced live Pod before execution.
 	OriginalPodSnapshotHash string                      `json:"originalPodSnapshotHash,omitempty" yaml:"originalPodSnapshotHash,omitempty"`
-	Workload                *PodMigrationWorkloadStatus `json:"workload,omitempty"               yaml:"workload,omitempty"`
-	Volumes                 []PodMigrationVolumeStatus  `json:"volumes"                          yaml:"volumes"`
-	OpenEBSLVMSharedMounts  []SharedMountStatus         `json:"openebsLvmSharedMounts,omitempty" yaml:"openebsLvmSharedMounts,omitempty"`
+	Workload                *PodMigrationWorkloadStatus `json:"workload,omitempty"                yaml:"workload,omitempty"`
+	Volumes                 []PodMigrationVolumeStatus  `json:"volumes"                           yaml:"volumes"`
+	OpenEBSLVMSharedMounts  []SharedMountStatus         `json:"openebsLvmSharedMounts,omitempty"  yaml:"openebsLvmSharedMounts,omitempty"`
 }
 
 type ReservationStatus struct {
@@ -563,22 +552,38 @@ type CopyStatus struct {
 	WorkflowStatus `                   json:",inline" yaml:",inline"`
 	Volumes        []CopyVolumeStatus `json:"volumes" yaml:"volumes"`
 }
+
+// +kubebuilder:validation:XValidation:rule="size(self.credentialsSecretUID) > 0",message="credentialsSecretUID must not be empty"
+type S3BackupRepositoryBindingStatus struct {
+	CredentialsSecretUID types.UID `json:"credentialsSecretUID" yaml:"credentialsSecretUID"`
+}
+
+// +kubebuilder:validation:XValidation:rule="size(self.claimUID) > 0",message="claimUID must not be empty"
+type PVCBackupRepositoryBindingStatus struct {
+	ClaimUID types.UID `json:"claimUID" yaml:"claimUID"`
+}
+
+// +kubebuilder:validation:XValidation:rule="(self.type == 's3' && has(self.s3) && !has(self.pvc)) || (self.type == 'pvc' && has(self.pvc) && !has(self.s3))",message="exactly one backend status must match type"
+// +kubebuilder:validation:XValidation:rule="size(self.uid) > 0",message="uid must not be empty"
+type BackupRepositoryBindingStatus struct {
+	Type BackupRepositoryType `json:"type" yaml:"type"`
+	UID  types.UID            `json:"uid"  yaml:"uid"`
+
+	// +kubebuilder:validation:Minimum=1
+	Generation int64 `json:"generation" yaml:"generation"`
+
+	S3  *S3BackupRepositoryBindingStatus  `json:"s3,omitempty"          yaml:"s3,omitempty"`
+	PVC *PVCBackupRepositoryBindingStatus `json:"pvc,omitempty"         yaml:"pvc,omitempty"`
+}
+
 type BackupStatus struct {
-	WorkflowStatus                       `                    json:",inline"                          yaml:",inline"`
-	ObjectStoreProfileUID                types.UID           `json:"objectStoreProfileUID,omitempty"        yaml:"objectStoreProfileUID,omitempty"`
-	ObjectStoreProfileGeneration         int64               `json:"objectStoreProfileGeneration,omitempty" yaml:"objectStoreProfileGeneration,omitempty"`
-	ObjectStoreCredentialsSecretUID      types.UID           `json:"objectStoreCredentialsSecretUID,omitempty" yaml:"objectStoreCredentialsSecretUID,omitempty"`
-	ObjectStoreServiceAccountUID         types.UID           `json:"objectStoreServiceAccountUID,omitempty"    yaml:"objectStoreServiceAccountUID,omitempty"`
-	ObjectStoreServiceAccountFingerprint string              `json:"objectStoreServiceAccountFingerprint,omitempty" yaml:"objectStoreServiceAccountFingerprint,omitempty"`
-	OpenEBSLVMSharedMounts               []SharedMountStatus `json:"openebsLvmSharedMounts,omitempty" yaml:"openebsLvmSharedMounts,omitempty"`
+	WorkflowStatus         `json:",inline" yaml:",inline"`
+	Repository             *BackupRepositoryBindingStatus `json:"repository,omitempty"              yaml:"repository,omitempty"`
+	OpenEBSLVMSharedMounts []SharedMountStatus            `json:"openebsLvmSharedMounts,omitempty" yaml:"openebsLvmSharedMounts,omitempty"`
 }
 type RestoreStatus struct {
-	WorkflowStatus                       `json:",inline" yaml:",inline"`
-	ObjectStoreProfileUID                types.UID `json:"objectStoreProfileUID,omitempty"        yaml:"objectStoreProfileUID,omitempty"`
-	ObjectStoreProfileGeneration         int64     `json:"objectStoreProfileGeneration,omitempty" yaml:"objectStoreProfileGeneration,omitempty"`
-	ObjectStoreCredentialsSecretUID      types.UID `json:"objectStoreCredentialsSecretUID,omitempty" yaml:"objectStoreCredentialsSecretUID,omitempty"`
-	ObjectStoreServiceAccountUID         types.UID `json:"objectStoreServiceAccountUID,omitempty"    yaml:"objectStoreServiceAccountUID,omitempty"`
-	ObjectStoreServiceAccountFingerprint string    `json:"objectStoreServiceAccountFingerprint,omitempty" yaml:"objectStoreServiceAccountFingerprint,omitempty"`
+	WorkflowStatus `json:",inline" yaml:",inline"`
+	Repository     *BackupRepositoryBindingStatus `json:"repository,omitempty" yaml:"repository,omitempty"`
 }
 type RenameStatus struct {
 	WorkflowStatus `                          json:",inline" yaml:",inline"`
@@ -808,15 +813,15 @@ func (s BackupSpec) Domain() domain.SessionSpec {
 		},
 		Type: domain.SessionTypeBackup,
 		Backup: &domain.BackupSessionSpec{
-			SessionWorkflowOptions: s.workflowOptions(),
-			Online:                 s.Online,
-			SourcePVC:              refToDomain(s.SourcePVC),
-			SourcePV:               refToDomain(s.SourcePV),
-			Path:                   s.Path,
-			Backend:                domain.ObjectStoreBackendS3,
-			Name:                   s.Name,
-			ObjectStoreProfile:     s.ObjectStoreProfile,
-			OpenEBSLVMEnableShared: s.OpenEBSLVMEnableShared,
+			SessionWorkflowOptions:    s.workflowOptions(),
+			Online:                    s.Online,
+			SourcePVC:                 refToDomain(s.SourcePVC),
+			SourcePV:                  refToDomain(s.SourcePV),
+			Path:                      s.Path,
+			Name:                      s.Name,
+			BackupRepository:          repositoryName(s.RepositoryRef),
+			BackupRepositoryNamespace: s.SessionNamespace,
+			OpenEBSLVMEnableShared:    s.OpenEBSLVMEnableShared,
 		},
 	}
 }
@@ -834,19 +839,27 @@ func (s RestoreSpec) Domain() domain.SessionSpec {
 		},
 		Type: domain.SessionTypeRestore,
 		Restore: &domain.RestoreSessionSpec{
-			SessionWorkflowOptions:  s.workflowOptions(),
-			DestinationPVC:          refToDomain(s.DestinationPVC),
-			Path:                    s.Path,
-			Backend:                 domain.ObjectStoreBackendS3,
-			Name:                    s.Name,
-			ObjectStoreProfile:      s.ObjectStoreProfile,
-			CreatePVC:               s.CreatePVC,
-			DestinationStorageClass: s.DestinationStorageClass,
-			DestinationAccessMode:   s.DestinationAccessMode,
-			DestinationCapacity:     s.DestinationCapacity,
-			AllowMounted:            s.AllowMounted,
+			SessionWorkflowOptions:    s.workflowOptions(),
+			DestinationPVC:            refToDomain(s.DestinationPVC),
+			Path:                      s.Path,
+			Name:                      s.Name,
+			BackupRepository:          repositoryName(s.RepositoryRef),
+			BackupRepositoryNamespace: s.SessionNamespace,
+			CreatePVC:                 s.CreatePVC,
+			DestinationStorageClass:   s.DestinationStorageClass,
+			DestinationAccessMode:     s.DestinationAccessMode,
+			DestinationCapacity:       s.DestinationCapacity,
+			AllowMounted:              s.AllowMounted,
 		},
 	}
+}
+
+func repositoryName(ref LocalObjectReference) string {
+	return ref.Name
+}
+
+func repositoryRef(name string) LocalObjectReference {
+	return LocalObjectReference{Name: name}
 }
 
 func (s RenameSpec) Domain() domain.SessionSpec {
@@ -1009,7 +1022,7 @@ func BackupSpecFromDomain(s domain.SessionSpec) BackupSpec {
 		SourcePV:               refFromDomain(p.SourcePV),
 		Path:                   p.Path,
 		Name:                   p.Name,
-		ObjectStoreProfile:     p.ObjectStoreProfile,
+		RepositoryRef:          repositoryRef(p.BackupRepository),
 		Online:                 p.Online,
 		OpenEBSLVMEnableShared: p.OpenEBSLVMEnableShared,
 		ToolImage:              p.ToolImage,
@@ -1029,7 +1042,7 @@ func RestoreSpecFromDomain(s domain.SessionSpec) RestoreSpec {
 		DestinationPVC:          refFromDomain(p.DestinationPVC),
 		Path:                    p.Path,
 		Name:                    p.Name,
-		ObjectStoreProfile:      p.ObjectStoreProfile,
+		RepositoryRef:           repositoryRef(p.BackupRepository),
 		CreatePVC:               p.CreatePVC,
 		DestinationStorageClass: p.DestinationStorageClass,
 		DestinationAccessMode:   p.DestinationAccessMode,
@@ -1129,6 +1142,21 @@ func refToDomain(in ObjectReference) domain.ObjectReference {
 	}
 }
 
+func optionalRefFromDomain(in domain.ObjectReference) *ObjectReference {
+	if in.Name == "" {
+		return nil
+	}
+	out := refFromDomain(in)
+	return &out
+}
+
+func optionalRefToDomain(in *ObjectReference) domain.ObjectReference {
+	if in == nil {
+		return domain.ObjectReference{}
+	}
+	return refToDomain(*in)
+}
+
 func refsFromDomain(in []domain.ObjectReference) []ObjectReference {
 	if in == nil {
 		return nil
@@ -1183,8 +1211,8 @@ func copyTime(in *metav1.Time) *metav1.Time {
 func workloadFromDomain(w domain.WorkloadSpec) WorkloadSpec {
 	out := WorkloadSpec{
 		Adapter:          WorkloadKind(w.Adapter),
-		Pod:              refFromDomain(w.Pod),
-		Controller:       refFromDomain(w.Controller),
+		Pod:              optionalRefFromDomain(w.Pod),
+		Controller:       optionalRefFromDomain(w.Controller),
 		OriginalReplicas: copyInt32(w.OriginalReplicas),
 		Ordinal:          copyInt32(w.Ordinal),
 		AffectedPods:     refsFromDomain(w.AffectedPods),
@@ -1237,8 +1265,8 @@ func workloadFromDomain(w domain.WorkloadSpec) WorkloadSpec {
 func workloadToDomain(w WorkloadSpec) domain.WorkloadSpec {
 	out := domain.WorkloadSpec{
 		Adapter:          domain.WorkloadKind(w.Adapter),
-		Pod:              refToDomain(w.Pod),
-		Controller:       refToDomain(w.Controller),
+		Pod:              optionalRefToDomain(w.Pod),
+		Controller:       optionalRefToDomain(w.Controller),
 		OriginalReplicas: copyInt32(w.OriginalReplicas),
 		Ordinal:          copyInt32(w.Ordinal),
 		AffectedPods:     refsToDomain(w.AffectedPods),
@@ -1376,8 +1404,8 @@ func migrationVolumeStatusFromDomain(
 ) MigrationVolumeStatus {
 	return MigrationVolumeStatus{
 		SourcePVCName:     v.SourcePVCName,
-		DestinationPVC:    refFromDomain(spec.DestinationPVC),
-		DestinationPV:     refFromDomain(spec.DestinationPV),
+		DestinationPVC:    optionalRefFromDomain(spec.DestinationPVC),
+		DestinationPV:     optionalRefFromDomain(spec.DestinationPV),
 		DestinationPolicy: spec.DestinationPolicy,
 		Reserved:          v.Reserved,
 		Sync: MigrationSyncStatus{
@@ -1391,7 +1419,7 @@ func migrationVolumeStatusFromDomain(
 			TemporaryPVCDeleted: v.Activation.TemporaryPVCDeleted,
 			SourcePVCDeleted:    v.Activation.SourcePVCDeleted,
 			DestinationReserved: v.Activation.DestinationReserved,
-			ActivePVC:           refFromDomain(v.Activation.ActivePVC),
+			ActivePVC:           optionalRefFromDomain(v.Activation.ActivePVC),
 			ActivatedAt:         copyTime(v.Activation.ActivatedAt),
 			RolledBackAt:        copyTime(v.Activation.RolledBackAt),
 		},
@@ -1413,7 +1441,7 @@ func migrationVolumeStatusToDomain(v MigrationVolumeStatus) domain.VolumeStatus 
 			TemporaryPVCDeleted: v.Activation.TemporaryPVCDeleted,
 			SourcePVCDeleted:    v.Activation.SourcePVCDeleted,
 			DestinationReserved: v.Activation.DestinationReserved,
-			ActivePVC:           refToDomain(v.Activation.ActivePVC),
+			ActivePVC:           optionalRefToDomain(v.Activation.ActivePVC),
 			ActivatedAt:         copyTime(v.Activation.ActivatedAt),
 			RolledBackAt:        copyTime(v.Activation.RolledBackAt),
 		},
@@ -1426,8 +1454,8 @@ func podMigrationVolumeStatusFromDomain(
 ) PodMigrationVolumeStatus {
 	return PodMigrationVolumeStatus{
 		SourcePVCName:     v.SourcePVCName,
-		DestinationPVC:    refFromDomain(spec.DestinationPVC),
-		DestinationPV:     refFromDomain(spec.DestinationPV),
+		DestinationPVC:    optionalRefFromDomain(spec.DestinationPVC),
+		DestinationPV:     optionalRefFromDomain(spec.DestinationPV),
 		DestinationPolicy: spec.DestinationPolicy,
 		Reserved:          v.Reserved,
 		Sync: PodMigrationSyncStatus{
@@ -1442,7 +1470,7 @@ func podMigrationVolumeStatusFromDomain(
 			TemporaryPVCDeleted: v.Activation.TemporaryPVCDeleted,
 			SourcePVCDeleted:    v.Activation.SourcePVCDeleted,
 			DestinationReserved: v.Activation.DestinationReserved,
-			ActivePVC:           refFromDomain(v.Activation.ActivePVC),
+			ActivePVC:           optionalRefFromDomain(v.Activation.ActivePVC),
 			ActivatedAt:         copyTime(v.Activation.ActivatedAt),
 			RolledBackAt:        copyTime(v.Activation.RolledBackAt),
 		},
@@ -1465,7 +1493,7 @@ func podMigrationVolumeStatusToDomain(v PodMigrationVolumeStatus) domain.VolumeS
 			TemporaryPVCDeleted: v.Activation.TemporaryPVCDeleted,
 			SourcePVCDeleted:    v.Activation.SourcePVCDeleted,
 			DestinationReserved: v.Activation.DestinationReserved,
-			ActivePVC:           refToDomain(v.Activation.ActivePVC),
+			ActivePVC:           optionalRefToDomain(v.Activation.ActivePVC),
 			ActivatedAt:         copyTime(v.Activation.ActivatedAt),
 			RolledBackAt:        copyTime(v.Activation.RolledBackAt),
 		},
@@ -1478,8 +1506,8 @@ func reservationVolumeStatusFromDomain(
 ) ReservationVolumeStatus {
 	return ReservationVolumeStatus{
 		SourcePVCName:     v.SourcePVCName,
-		DestinationPVC:    refFromDomain(spec.DestinationPVC),
-		DestinationPV:     refFromDomain(spec.DestinationPV),
+		DestinationPVC:    optionalRefFromDomain(spec.DestinationPVC),
+		DestinationPV:     optionalRefFromDomain(spec.DestinationPV),
 		DestinationPolicy: spec.DestinationPolicy,
 		Reserved:          v.Reserved,
 	}
@@ -1492,8 +1520,8 @@ func reservationVolumeStatusToDomain(v ReservationVolumeStatus) domain.VolumeSta
 func copyVolumeStatusFromDomain(v domain.VolumeStatus, spec domain.VolumeSpec) CopyVolumeStatus {
 	return CopyVolumeStatus{
 		SourcePVCName:     v.SourcePVCName,
-		DestinationPVC:    refFromDomain(spec.DestinationPVC),
-		DestinationPV:     refFromDomain(spec.DestinationPV),
+		DestinationPVC:    optionalRefFromDomain(spec.DestinationPVC),
+		DestinationPV:     optionalRefFromDomain(spec.DestinationPV),
 		DestinationPolicy: spec.DestinationPolicy,
 		Reserved:          v.Reserved,
 		Sync: CopySyncStatus{
@@ -1528,19 +1556,19 @@ func volumeSpecAt(volumes []domain.VolumeSpec, index int) domain.VolumeSpec {
 
 func applyDestinationCheckpoint(
 	volume *domain.VolumeSpec,
-	destinationPVC ObjectReference,
-	destinationPV ObjectReference,
+	destinationPVC *ObjectReference,
+	destinationPV *ObjectReference,
 	policy PVReclaimPolicy,
 ) {
 	if volume == nil {
 		return
 	}
 
-	if destinationPVC.Name != "" {
-		volume.DestinationPVC = refToDomain(destinationPVC)
+	if destinationPVC != nil {
+		volume.DestinationPVC = refToDomain(*destinationPVC)
 	}
-	if destinationPV.Name != "" {
-		volume.DestinationPV = refToDomain(destinationPV)
+	if destinationPV != nil {
+		volume.DestinationPV = refToDomain(*destinationPV)
 	}
 	if policy != "" {
 		volume.DestinationPolicy = policy
@@ -1551,7 +1579,7 @@ func pvcIdentityVolumeStatusFromDomain(v domain.VolumeStatus) PVCIdentityVolumeS
 	return PVCIdentityVolumeStatus{
 		SourcePVCName: v.SourcePVCName,
 		Activation: PVCIdentityActivationStatus{
-			ActivePVC:    refFromDomain(v.Activation.ActivePVC),
+			ActivePVC:    optionalRefFromDomain(v.Activation.ActivePVC),
 			ActivatedAt:  copyTime(v.Activation.ActivatedAt),
 			RolledBackAt: copyTime(v.Activation.RolledBackAt),
 		},
@@ -1562,7 +1590,7 @@ func pvcIdentityVolumeStatusToDomain(v PVCIdentityVolumeStatus) domain.VolumeSta
 	return domain.VolumeStatus{
 		SourcePVCName: v.SourcePVCName,
 		Activation: domain.ActivationState{
-			ActivePVC:    refToDomain(v.Activation.ActivePVC),
+			ActivePVC:    optionalRefToDomain(v.Activation.ActivePVC),
 			ActivatedAt:  copyTime(v.Activation.ActivatedAt),
 			RolledBackAt: copyTime(v.Activation.RolledBackAt),
 		},
@@ -1595,7 +1623,7 @@ func podMigrationWorkloadStatusFromDomain(spec domain.SessionSpec) *PodMigration
 	workload := spec.MigratePod.Workload
 
 	return &PodMigrationWorkloadStatus{
-		Pod:          refFromDomain(workload.Pod),
+		Pod:          optionalRefFromDomain(workload.Pod),
 		AffectedPods: refsFromDomain(workload.AffectedPods),
 	}
 }
@@ -1794,8 +1822,8 @@ func (s PodMigrationStatus) ApplyToDomainSpec(spec *domain.SessionSpec) {
 	if workload == nil || s.Workload == nil {
 		return
 	}
-	if s.Workload.Pod.Name != "" {
-		workload.Pod = refToDomain(s.Workload.Pod)
+	if s.Workload.Pod != nil {
+		workload.Pod = refToDomain(*s.Workload.Pod)
 	}
 	if len(s.Workload.AffectedPods) > 0 {
 		workload.AffectedPods = refsToDomain(s.Workload.AffectedPods)
@@ -1846,22 +1874,14 @@ func (s CopyStatus) ApplyToDomainSpec(spec *domain.SessionSpec) {
 
 func (s BackupStatus) Domain() domain.SessionStatus {
 	out := workflowStatusToDomain(s.WorkflowStatus)
-	out.ObjectStoreProfileUID = s.ObjectStoreProfileUID
-	out.ObjectStoreProfileGeneration = s.ObjectStoreProfileGeneration
-	out.ObjectStoreCredentialsSecretUID = s.ObjectStoreCredentialsSecretUID
-	out.ObjectStoreServiceAccountUID = s.ObjectStoreServiceAccountUID
-	out.ObjectStoreServiceAccountFingerprint = s.ObjectStoreServiceAccountFingerprint
+	out.BackupRepository = repositoryBindingStatusToDomain(s.Repository)
 	out.OpenEBSLVMSharedMounts = sharedMountsToDomain(s.OpenEBSLVMSharedMounts)
 	return out
 }
 
 func (s RestoreStatus) Domain() domain.SessionStatus {
 	out := workflowStatusToDomain(s.WorkflowStatus)
-	out.ObjectStoreProfileUID = s.ObjectStoreProfileUID
-	out.ObjectStoreProfileGeneration = s.ObjectStoreProfileGeneration
-	out.ObjectStoreCredentialsSecretUID = s.ObjectStoreCredentialsSecretUID
-	out.ObjectStoreServiceAccountUID = s.ObjectStoreServiceAccountUID
-	out.ObjectStoreServiceAccountFingerprint = s.ObjectStoreServiceAccountFingerprint
+	out.BackupRepository = repositoryBindingStatusToDomain(s.Repository)
 	return out
 }
 
@@ -1877,7 +1897,10 @@ func (s MoveStatus) Domain() domain.SessionStatus {
 	return out
 }
 
-func MigrationStatusFromDomain(s domain.SessionStatus, volumes []domain.VolumeSpec) MigrationStatus {
+func MigrationStatusFromDomain(
+	s domain.SessionStatus,
+	volumes []domain.VolumeSpec,
+) MigrationStatus {
 	return MigrationStatus{
 		WorkflowStatus: workflowStatusFromDomain(s),
 		Volumes:        migrationVolumeStatusesFromDomain(s.Volumes, volumes),
@@ -1917,25 +1940,65 @@ func CopyStatusFromDomain(s domain.SessionStatus, volumes []domain.VolumeSpec) C
 
 func BackupStatusFromDomain(s domain.SessionStatus) BackupStatus {
 	return BackupStatus{
-		WorkflowStatus:                       workflowStatusFromDomain(s),
-		ObjectStoreProfileUID:                s.ObjectStoreProfileUID,
-		ObjectStoreProfileGeneration:         s.ObjectStoreProfileGeneration,
-		ObjectStoreCredentialsSecretUID:      s.ObjectStoreCredentialsSecretUID,
-		ObjectStoreServiceAccountUID:         s.ObjectStoreServiceAccountUID,
-		ObjectStoreServiceAccountFingerprint: s.ObjectStoreServiceAccountFingerprint,
-		OpenEBSLVMSharedMounts:               sharedMountsFromDomain(s.OpenEBSLVMSharedMounts),
+		WorkflowStatus:         workflowStatusFromDomain(s),
+		Repository:             repositoryBindingStatusFromDomain(s.BackupRepository),
+		OpenEBSLVMSharedMounts: sharedMountsFromDomain(s.OpenEBSLVMSharedMounts),
 	}
 }
 
 func RestoreStatusFromDomain(s domain.SessionStatus) RestoreStatus {
 	return RestoreStatus{
-		WorkflowStatus:                       workflowStatusFromDomain(s),
-		ObjectStoreProfileUID:                s.ObjectStoreProfileUID,
-		ObjectStoreProfileGeneration:         s.ObjectStoreProfileGeneration,
-		ObjectStoreCredentialsSecretUID:      s.ObjectStoreCredentialsSecretUID,
-		ObjectStoreServiceAccountUID:         s.ObjectStoreServiceAccountUID,
-		ObjectStoreServiceAccountFingerprint: s.ObjectStoreServiceAccountFingerprint,
+		WorkflowStatus: workflowStatusFromDomain(s),
+		Repository:     repositoryBindingStatusFromDomain(s.BackupRepository),
 	}
+}
+
+func repositoryBindingStatusToDomain(
+	binding *BackupRepositoryBindingStatus,
+) *domain.BackupRepositoryBindingStatus {
+	if binding == nil {
+		return nil
+	}
+
+	out := &domain.BackupRepositoryBindingStatus{
+		Type:       domain.BackupRepositoryType(binding.Type),
+		UID:        binding.UID,
+		Generation: binding.Generation,
+	}
+	if binding.S3 != nil {
+		out.S3 = &domain.S3BackupRepositoryBindingStatus{
+			CredentialsSecretUID: binding.S3.CredentialsSecretUID,
+		}
+	}
+	if binding.PVC != nil {
+		out.PVC = &domain.PVCBackupRepositoryBindingStatus{ClaimUID: binding.PVC.ClaimUID}
+	}
+
+	return out
+}
+
+func repositoryBindingStatusFromDomain(
+	binding *domain.BackupRepositoryBindingStatus,
+) *BackupRepositoryBindingStatus {
+	if binding == nil {
+		return nil
+	}
+
+	out := &BackupRepositoryBindingStatus{
+		Type:       BackupRepositoryType(binding.Type),
+		UID:        binding.UID,
+		Generation: binding.Generation,
+	}
+	if binding.S3 != nil {
+		out.S3 = &S3BackupRepositoryBindingStatus{
+			CredentialsSecretUID: binding.S3.CredentialsSecretUID,
+		}
+	}
+	if binding.PVC != nil {
+		out.PVC = &PVCBackupRepositoryBindingStatus{ClaimUID: binding.PVC.ClaimUID}
+	}
+
+	return out
 }
 
 func RenameStatusFromDomain(s domain.SessionStatus) RenameStatus {

@@ -15,10 +15,10 @@ import (
 )
 
 func TestEnsureStandalonePodSnapshotCapturesLivePod(t *testing.T) {
-	live := trustedSnapshotPod("tenant-a", "worker", "worker-uid")
+	live := trustedSnapshotPod("tenant-a")
 	client := kubernetesfake.NewClientset(live)
 	store := &runnerSessionStore{}
-	session := standaloneSnapshotSession("tenant-a", "worker", "worker-uid", nil)
+	session := standaloneSnapshotSession(nil)
 
 	reconciler := &WorkflowReconciler{kubeClient: client, store: store}
 	if err := reconciler.ensureStandalonePodSnapshot(context.Background(), session); err != nil {
@@ -28,26 +28,32 @@ func TestEnsureStandalonePodSnapshotCapturesLivePod(t *testing.T) {
 	if session.Status.OriginalPodSnapshotHash == "" {
 		t.Fatal("controller did not persist a snapshot hash")
 	}
+
 	var captured corev1.Pod
 	if err := json.Unmarshal(session.Spec.Workload().OriginalObject, &captured); err != nil {
 		t.Fatal(err)
 	}
-	if captured.Namespace != live.Namespace || captured.Name != live.Name || captured.UID != live.UID {
+
+	if captured.Namespace != live.Namespace || captured.Name != live.Name ||
+		captured.UID != live.UID {
 		t.Fatalf("captured identity=%s/%s uid=%s", captured.Namespace, captured.Name, captured.UID)
 	}
+
 	if len(store.updates) != 1 || store.updates[0].Status.OriginalPodSnapshotHash == "" {
 		t.Fatalf("snapshot persistence updates=%d", len(store.updates))
 	}
 }
 
 func TestEnsureStandalonePodSnapshotRejectsInjectedIdentity(t *testing.T) {
-	live := trustedSnapshotPod("tenant-a", "worker", "worker-uid")
-	foreign := trustedSnapshotPod("tenant-b", "worker", "worker-uid")
+	live := trustedSnapshotPod("tenant-a")
+	foreign := trustedSnapshotPod("tenant-b")
+
 	raw, err := json.Marshal(foreign)
 	if err != nil {
 		t.Fatal(err)
 	}
-	session := standaloneSnapshotSession("tenant-a", "worker", "worker-uid", raw)
+
+	session := standaloneSnapshotSession(raw)
 	reconciler := &WorkflowReconciler{
 		kubeClient: kubernetesfake.NewClientset(live),
 		store:      &runnerSessionStore{},
@@ -60,7 +66,7 @@ func TestEnsureStandalonePodSnapshotRejectsInjectedIdentity(t *testing.T) {
 }
 
 func TestEnsureStandalonePodSnapshotRequiresCaptureBeforePodDisappears(t *testing.T) {
-	session := standaloneSnapshotSession("tenant-a", "worker", "worker-uid", nil)
+	session := standaloneSnapshotSession(nil)
 	reconciler := &WorkflowReconciler{
 		kubeClient: kubernetesfake.NewClientset(),
 		store:      &runnerSessionStore{},
@@ -73,14 +79,18 @@ func TestEnsureStandalonePodSnapshotRequiresCaptureBeforePodDisappears(t *testin
 }
 
 func TestEnsureStandalonePodSnapshotRejectsDigestDrift(t *testing.T) {
-	live := trustedSnapshotPod("tenant-a", "worker", "worker-uid")
+	live := trustedSnapshotPod("tenant-a")
+
 	raw, err := json.Marshal(live)
 	if err != nil {
 		t.Fatal(err)
 	}
-	session := standaloneSnapshotSession("tenant-a", "worker", "worker-uid", raw)
+
+	session := standaloneSnapshotSession(raw)
 	session.Status.OriginalPodSnapshotHash = podSnapshotHash(raw)
-	session.Spec.WorkloadPtr().OriginalObject = []byte(`{"metadata":{"name":"worker","namespace":"tenant-a"}}`)
+	session.Spec.WorkloadPtr().OriginalObject = []byte(
+		`{"metadata":{"name":"worker","namespace":"tenant-a"}}`,
+	)
 	reconciler := &WorkflowReconciler{
 		kubeClient: kubernetesfake.NewClientset(live),
 		store:      &runnerSessionStore{},
@@ -93,11 +103,11 @@ func TestEnsureStandalonePodSnapshotRejectsDigestDrift(t *testing.T) {
 }
 
 func TestEnsureStandalonePodSnapshotRejectsOversizedLivePod(t *testing.T) {
-	live := trustedSnapshotPod("tenant-a", "worker", "worker-uid")
+	live := trustedSnapshotPod("tenant-a")
 	live.Annotations = map[string]string{
 		"pvc-migrate.example/large": strings.Repeat("x", domain.MaxOriginalPodSnapshotBytes),
 	}
-	session := standaloneSnapshotSession("tenant-a", "worker", "worker-uid", nil)
+	session := standaloneSnapshotSession(nil)
 	reconciler := &WorkflowReconciler{
 		kubeClient: kubernetesfake.NewClientset(live),
 		store:      &runnerSessionStore{},
@@ -109,12 +119,12 @@ func TestEnsureStandalonePodSnapshotRejectsOversizedLivePod(t *testing.T) {
 	}
 }
 
-func trustedSnapshotPod(namespace, name string, uid types.UID) *corev1.Pod {
+func trustedSnapshotPod(namespace string) *corev1.Pod {
 	return &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
 			Namespace: namespace,
-			Name:      name,
-			UID:       uid,
+			Name:      "worker",
+			UID:       "worker-uid",
 		},
 		Spec: corev1.PodSpec{Containers: []corev1.Container{{
 			Name: "worker", Image: "example.test/worker:latest",
@@ -122,11 +132,14 @@ func trustedSnapshotPod(namespace, name string, uid types.UID) *corev1.Pod {
 	}
 }
 
-func standaloneSnapshotSession(
-	namespace, name string,
-	uid types.UID,
-	raw []byte,
-) *domain.Session {
+func standaloneSnapshotSession(raw []byte) *domain.Session {
+	const (
+		namespace = "tenant-a"
+		name      = "worker"
+	)
+
+	uid := types.UID("worker-uid")
+
 	return domain.NewSession(
 		"snapshot-session",
 		domain.NewPodMigrationSessionSpec(

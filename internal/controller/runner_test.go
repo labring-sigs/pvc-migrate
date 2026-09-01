@@ -128,12 +128,20 @@ func TestRunnerRejectsTenantControlledToolImage(t *testing.T) {
 	}
 
 	session.Spec.Copy.ToolImage = "registry.example/tenant:arbitrary"
-	if err := runner.validateTrustedToolImage(session); domain.CategoryOf(err) != domain.ErrorPrecondition {
+	if err := runner.validateTrustedToolImage(
+		session,
+	); domain.CategoryOf(
+		err,
+	) != domain.ErrorPrecondition {
 		t.Fatalf("mismatched controller image category=%s error=%v", domain.CategoryOf(err), err)
 	}
 
 	session.Spec.Copy.ToolImage = "registry.example/tenant"
-	if err := runner.validateTrustedToolImage(session); domain.CategoryOf(err) != domain.ErrorPrecondition {
+	if err := runner.validateTrustedToolImage(
+		session,
+	); domain.CategoryOf(
+		err,
+	) != domain.ErrorPrecondition {
 		t.Fatalf("untagged controller image category=%s error=%v", domain.CategoryOf(err), err)
 	}
 }
@@ -142,587 +150,153 @@ type recordingWorkflowResumer struct {
 	called string
 }
 
-func TestRunnerObjectStoreProfileScopesTenantAndSecret(t *testing.T) {
+func TestRunnerBackupRepositoryUsesTenantLocationAndLocalSecret(t *testing.T) {
 	scheme := runtime.NewScheme()
 	if err := v1alpha1.AddToScheme(scheme); err != nil {
 		t.Fatal(err)
 	}
-	profile := &v1alpha1.ObjectStoreProfile{
-		ObjectMeta: metav1.ObjectMeta{Name: "tenant-store"},
-		Spec: v1alpha1.ObjectStoreProfileSpec{
-			Backend:              v1alpha1.ObjectStoreBackendS3,
-			Bucket:               "backups",
-			Prefix:               "tenant-a",
-			Endpoint:             "https://s3.example.test",
-			ServerSideEncryption: "aws:kms",
-			SSEKMSKeyID:          "key-id",
-			CredentialsSecret: &v1alpha1.ObjectStoreCredentialsReference{
-				Name: "s3-credentials",
+
+	repository := &v1alpha1.BackupRepository{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:       "custom",
+			Namespace:  "tenant",
+			UID:        types.UID("repo-uid"),
+			Generation: 4,
+		},
+		Spec: v1alpha1.BackupRepositorySpec{
+			Type: v1alpha1.BackupRepositoryTypeS3,
+			S3: &v1alpha1.S3BackupRepositorySpec{
+				Bucket:            "tenant-bucket",
+				Prefix:            "team-a",
+				Endpoint:          "https://s3.example.test",
+				CredentialsSecret: v1alpha1.BackupRepositorySecretReference{Name: "s3"},
 			},
-			AllowedNamespaces:                       []v1alpha1.ObjectStoreNamespace{"tenant-a"},
-			AllowStaticCredentialsInTenantNamespace: true,
 		},
 	}
-	runtimeClient := crfake.NewClientBuilder().WithScheme(scheme).WithObjects(profile).Build()
+	runtimeClient := crfake.NewClientBuilder().WithScheme(scheme).WithObjects(repository).Build()
 	kubeClient := clientfake.NewSimpleClientset(&corev1.Secret{
-		ObjectMeta: metav1.ObjectMeta{Name: "s3-credentials", Namespace: "controller-system"},
-		Data:       map[string][]byte{kube.BackupAccessKeyDataKey: []byte("access"), kube.BackupSecretKeyDataKey: []byte("secret")},
-	})
-	spec := domain.NewSessionSpec(domain.OperationBackup, domain.SessionCommon{
-		SourceNamespace: "tenant-a", SessionNamespace: "tenant-a",
-	}, false, domain.SessionWorkflowOptions{})
-	spec.Backup.ObjectStoreProfile = "tenant-store"
-	spec.Backup.Bucket = "backups"
-	spec.Backup.Prefix = "tenant-a"
-	spec.Backup.Name = "daily"
-	spec.Backup.SourcePVC.Namespace = "tenant-a"
-	runner := NewRunner(&recordingWorkflowResumer{}, nil, "tenant-a").
-		WithKubernetesClient(kubeClient).
-		WithControllerClient(runtimeClient).
-		WithControllerNamespace("controller-system")
-	config, err := runner.objectStoreConfig(context.Background(), domain.NewSession("backup", spec, time.Now()), "backups", "tenant-a", "daily", "", "", "", false, "", "")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if config.Bucket != "backups" || config.Prefix != "tenant-a/namespaces/tenant-a" ||
-		config.AccessKey != "access" || config.ServerSideEncryption != "aws:kms" || config.SSEKMSKeyID != "key-id" {
-		t.Fatalf("profile config=%#v", config)
-	}
-	otherNamespace := cloneRunnerSession(domain.NewSession("other", spec, time.Now()))
-	otherNamespace.Spec.SessionNamespace = "tenant-b"
-	if _, err := runner.objectStoreConfig(context.Background(), otherNamespace, "backups", "tenant-a", "daily", "", "", "", false, "", ""); domain.CategoryOf(err) != domain.ErrorPrecondition {
-		t.Fatalf("static profile allowed an unlisted namespace: category=%s error=%v", domain.CategoryOf(err), err)
-	}
-
-	badBucket := domain.NewSession("backup-bucket", spec, time.Now())
-	if _, err := runner.objectStoreConfig(context.Background(), badBucket, "other", "tenant-a", "daily", "", "", "", false, "", ""); domain.CategoryOf(err) != domain.ErrorPrecondition {
-		t.Fatalf("bucket scope category=%s error=%v", domain.CategoryOf(err), err)
-	}
-	badNamespace := domain.NewSession("backup-namespace", spec, time.Now())
-	badNamespace.Spec.SessionNamespace = "tenant-c"
-	if _, err := runner.objectStoreConfig(context.Background(), badNamespace, "backups", "tenant-a", "daily", "", "", "", false, "", ""); domain.CategoryOf(err) != domain.ErrorPrecondition {
-		t.Fatalf("namespace scope category=%s error=%v", domain.CategoryOf(err), err)
-	}
-}
-
-func TestRunnerObjectStoreProfileScopesClusterIdentity(t *testing.T) {
-	scheme := runtime.NewScheme()
-	if err := v1alpha1.AddToScheme(scheme); err != nil {
-		t.Fatal(err)
-	}
-	profile := &v1alpha1.ObjectStoreProfile{
-		ObjectMeta: metav1.ObjectMeta{Name: "store"},
-		Spec: v1alpha1.ObjectStoreProfileSpec{
-			Backend: v1alpha1.ObjectStoreBackendS3, Bucket: "backups", Prefix: "shared",
-			Endpoint:          "https://s3.example.test",
-			CredentialsSecret: &v1alpha1.ObjectStoreCredentialsReference{Name: "credentials"},
-			AllowedNamespaces: []v1alpha1.ObjectStoreNamespace{"tenant"}, AllowStaticCredentialsInTenantNamespace: true,
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "s3",
+			Namespace: "tenant",
+			UID:       types.UID("secret-uid"),
 		},
-	}
-	runtimeClient := crfake.NewClientBuilder().WithScheme(scheme).WithObjects(profile).Build()
-	kubeClient := clientfake.NewSimpleClientset(&corev1.Secret{
-		ObjectMeta: metav1.ObjectMeta{Name: "credentials", Namespace: "controller-system"},
-		Data:       map[string][]byte{kube.BackupAccessKeyDataKey: []byte("access"), kube.BackupSecretKeyDataKey: []byte("secret")},
-	})
-	spec := domain.NewSessionSpec(domain.OperationBackup, domain.SessionCommon{
-		SourceNamespace: "tenant", SessionNamespace: "tenant",
-	}, false, domain.SessionWorkflowOptions{})
-	spec.Backup.ObjectStoreProfile = "store"
-	spec.Backup.Name = "daily"
-	spec.Backup.SourcePVC.Namespace = "tenant"
-	session := domain.NewSession("backup", spec, time.Now())
-
-	first := NewRunner(&recordingWorkflowResumer{}, nil, "tenant").
-		WithKubernetesClient(kubeClient).WithControllerClient(runtimeClient).
-		WithControllerNamespace("controller-system").WithClusterIdentity("cluster-one")
-	firstConfig, err := first.objectStoreConfig(context.Background(), session, "backups", "", "daily", "", "", "", false, "", "")
-	if err != nil {
-		t.Fatal(err)
-	}
-	wantSegment := clusterScopeSegment("cluster-one")
-	if firstConfig.Prefix != "shared/clusters/"+wantSegment+"/namespaces/tenant" {
-		t.Fatalf("cluster-scoped prefix=%q, want shared/clusters/%s/namespaces/tenant", firstConfig.Prefix, wantSegment)
-	}
-	if strings.Contains(firstConfig.Prefix, "cluster-one") {
-		t.Fatalf("raw cluster identity leaked into prefix: %q", firstConfig.Prefix)
-	}
-
-	second := first.WithClusterIdentity("cluster-two")
-	secondConfig, err := second.objectStoreConfig(context.Background(), session, "backups", "", "daily", "", "", "", false, "", "")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if firstConfig.Prefix == secondConfig.Prefix {
-		t.Fatalf("different cluster identities shared prefix %q", firstConfig.Prefix)
-	}
-}
-
-func TestRunnerObjectStoreProfileRequiresControllerNamespace(t *testing.T) {
-	scheme := runtime.NewScheme()
-	if err := v1alpha1.AddToScheme(scheme); err != nil {
-		t.Fatal(err)
-	}
-	profile := &v1alpha1.ObjectStoreProfile{
-		ObjectMeta: metav1.ObjectMeta{Name: "store"},
-		Spec: v1alpha1.ObjectStoreProfileSpec{
-			Backend:           v1alpha1.ObjectStoreBackendS3,
-			Bucket:            "backups",
-			Endpoint:          "https://s3.example.test",
-			AllowedNamespaces: []v1alpha1.ObjectStoreNamespace{"tenant"},
-			CredentialsSecret: &v1alpha1.ObjectStoreCredentialsReference{
-				Name: "credentials",
-			},
-			AllowStaticCredentialsInTenantNamespace: true,
-		},
-	}
-	runtimeClient := crfake.NewClientBuilder().WithScheme(scheme).WithObjects(profile).Build()
-	kubeClient := clientfake.NewSimpleClientset(&corev1.Secret{
-		ObjectMeta: metav1.ObjectMeta{Name: "credentials", Namespace: "controller-system"},
 		Data: map[string][]byte{
 			kube.BackupAccessKeyDataKey: []byte("access"),
 			kube.BackupSecretKeyDataKey: []byte("secret"),
 		},
 	})
-	spec := domain.NewSessionSpec(domain.OperationBackup, domain.SessionCommon{
-		SourceNamespace: "tenant", SessionNamespace: "tenant",
-	}, false, domain.SessionWorkflowOptions{})
-	spec.Backup.ObjectStoreProfile = "store"
-	spec.Backup.Bucket = "backups"
+	spec := domain.NewSessionSpec(
+		domain.OperationBackup,
+		domain.SessionCommon{SourceNamespace: "tenant", SessionNamespace: "tenant"},
+		false,
+		domain.SessionWorkflowOptions{},
+	)
+	spec.Backup.BackupRepository = "custom"
 	spec.Backup.Name = "daily"
-	spec.Backup.SourcePVC.Namespace = "tenant"
-	session := domain.NewSession("backup", spec, time.Now())
-
-	runner := NewRunner(&recordingWorkflowResumer{}, nil, "tenant").
-		WithKubernetesClient(kubeClient).
+	runner := NewRunner(
+		&recordingWorkflowResumer{},
+		nil,
+		"tenant",
+	).WithKubernetesClient(kubeClient).
 		WithControllerClient(runtimeClient)
-	_, err := runner.objectStoreConfig(
-		context.Background(), session, "backups", "", "daily", "", "", "", false, "", "",
-	)
-	if domain.CategoryOf(err) != domain.ErrorPrecondition {
-		t.Fatalf("category=%s error=%v, want precondition", domain.CategoryOf(err), err)
-	}
-}
 
-func TestRunnerObjectStoreProfileSupportsWorkloadIdentity(t *testing.T) {
-	scheme := runtime.NewScheme()
-	if err := v1alpha1.AddToScheme(scheme); err != nil {
-		t.Fatal(err)
-	}
-	serviceAccount := &corev1.ServiceAccount{ObjectMeta: metav1.ObjectMeta{
-		Name: "s3-transfer", Namespace: "tenant", UID: types.UID("sa-uid"),
-	}}
-	profile := &v1alpha1.ObjectStoreProfile{
-		ObjectMeta: metav1.ObjectMeta{Name: "ambient-store"},
-		Spec: v1alpha1.ObjectStoreProfileSpec{
-			Backend:           v1alpha1.ObjectStoreBackendS3,
-			Bucket:            "backups",
-			Endpoint:          "https://s3.example.test",
-			CredentialsSecret: &v1alpha1.ObjectStoreCredentialsReference{Name: "controller-credentials"},
-			ServiceAccountRefs: []v1alpha1.ObjectStoreServiceAccountReference{{
-				Name: "s3-transfer", Namespace: "tenant", UID: "sa-uid",
-				IdentityFingerprint: kube.ServiceAccountIdentityFingerprint(serviceAccount),
-			}},
-		},
-	}
-	runtimeClient := crfake.NewClientBuilder().WithScheme(scheme).WithObjects(profile).Build()
-	kubeClient := clientfake.NewSimpleClientset(
-		serviceAccount,
-		&corev1.Secret{
-			ObjectMeta: metav1.ObjectMeta{Name: "controller-credentials", Namespace: "controller-system"},
-			Data:       map[string][]byte{kube.BackupAccessKeyDataKey: []byte("access"), kube.BackupSecretKeyDataKey: []byte("secret")},
-		},
+	config, err := runner.objectStoreConfig(
+		context.Background(),
+		domain.NewSession("backup", spec, time.Now()),
+		"",
+		"",
+		"daily",
+		"",
+		"",
+		"",
+		false,
+		"",
+		"",
 	)
-	spec := domain.NewSessionSpec(domain.OperationBackup, domain.SessionCommon{
-		SourceNamespace: "tenant", SessionNamespace: "tenant",
-	}, false, domain.SessionWorkflowOptions{})
-	spec.Backup.ObjectStoreProfile = "ambient-store"
-	spec.Backup.Bucket = "backups"
-	spec.Backup.Name = "daily"
-	spec.Backup.SourcePVC.Namespace = "tenant"
-	runner := NewRunner(&recordingWorkflowResumer{}, nil, "tenant").
-		WithKubernetesClient(kubeClient).
-		WithControllerClient(runtimeClient).
-		WithControllerNamespace("controller-system")
-	config, err := runner.objectStoreConfig(context.Background(), domain.NewSession("backup", spec, time.Now()), "backups", "", "daily", "", "", "", false, "", "")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !config.UseAmbientCredentials || config.AccessKey != "access" || config.SecretKey != "secret" || config.ServiceAccountName != "s3-transfer" || config.ServiceAccountUID != "sa-uid" {
-		t.Fatalf("workload identity config=%#v", config)
+
+	if config.Bucket != "tenant-bucket" || config.AccessKey != "access" ||
+		config.SecretKey != "secret" ||
+		config.Prefix != "team-a/namespaces/tenant" ||
+		config.RepositoryUID != "repo-uid" ||
+		config.RepositoryGeneration != 4 {
+		t.Fatalf("repository config=%#v", config)
 	}
 
-	t.Run("rejects disabled token automount", func(t *testing.T) {
-		automount := false
-		disabledAccount := &corev1.ServiceAccount{
-			ObjectMeta:                   metav1.ObjectMeta{Name: "s3-transfer", Namespace: "tenant", UID: types.UID("sa-uid")},
-			AutomountServiceAccountToken: &automount,
-		}
-		disabledProfile := profile.DeepCopy()
-		disabledProfile.Spec.ServiceAccountRefs[0].IdentityFingerprint = kube.ServiceAccountIdentityFingerprint(disabledAccount)
-		disabledRuntimeClient := crfake.NewClientBuilder().WithScheme(scheme).WithObjects(disabledProfile).Build()
-		client := clientfake.NewSimpleClientset(
-			disabledAccount,
-			&corev1.Secret{
-				ObjectMeta: metav1.ObjectMeta{Name: "controller-credentials", Namespace: "controller-system"},
-				Data:       map[string][]byte{kube.BackupAccessKeyDataKey: []byte("access"), kube.BackupSecretKeyDataKey: []byte("secret")},
-			},
+	other := cloneRunnerSession(domain.NewSession("other", spec, time.Now()))
+
+	other.Spec.SessionNamespace = "other"
+	if _, err := runner.objectStoreConfig(
+		context.Background(),
+		other,
+		"",
+		"",
+		"daily",
+		"",
+		"",
+		"",
+		false,
+		"",
+		"",
+	); domain.CategoryOf(
+		err,
+	) != domain.ErrorPrecondition {
+		t.Fatalf(
+			"cross-namespace repository lookup category=%q error=%v",
+			domain.CategoryOf(err),
+			err,
 		)
-		runner := NewRunner(&recordingWorkflowResumer{}, nil, "tenant").
-			WithKubernetesClient(client).
-			WithControllerClient(disabledRuntimeClient).
-			WithControllerNamespace("controller-system")
-		_, err := runner.objectStoreConfig(context.Background(), domain.NewSession("backup", spec, time.Now()), "backups", "", "daily", "", "", "", false, "", "")
-		if domain.CategoryOf(err) != domain.ErrorPrecondition || !strings.Contains(err.Error(), "automountServiceAccountToken") {
-			t.Fatalf("disabled token automount accepted: category=%s error=%v", domain.CategoryOf(err), err)
-		}
-	})
-
-	t.Run("rejects identity metadata drift", func(t *testing.T) {
-		mutated := &corev1.ServiceAccount{ObjectMeta: metav1.ObjectMeta{
-			Name: "s3-transfer", Namespace: "tenant", UID: types.UID("sa-uid"),
-			Annotations: map[string]string{"iam.example/role": "elevated"},
-		}}
-		client := clientfake.NewSimpleClientset(
-			mutated,
-			&corev1.Secret{
-				ObjectMeta: metav1.ObjectMeta{Name: "controller-credentials", Namespace: "controller-system"},
-				Data:       map[string][]byte{kube.BackupAccessKeyDataKey: []byte("access"), kube.BackupSecretKeyDataKey: []byte("secret")},
-			},
-		)
-		runner := NewRunner(&recordingWorkflowResumer{}, nil, "tenant").
-			WithKubernetesClient(client).
-			WithControllerClient(runtimeClient).
-			WithControllerNamespace("controller-system")
-		_, err := runner.objectStoreConfig(context.Background(), domain.NewSession("backup", spec, time.Now()), "backups", "", "daily", "", "", "", false, "", "")
-		if domain.CategoryOf(err) != domain.ErrorPrecondition || !strings.Contains(err.Error(), "identity fingerprint") {
-			t.Fatalf("identity metadata drift accepted: category=%s error=%v", domain.CategoryOf(err), err)
-		}
-	})
-
-	t.Run("rejects replacement ServiceAccount", func(t *testing.T) {
-		replacement := &v1alpha1.ObjectStoreProfile{
-			ObjectMeta: metav1.ObjectMeta{Name: "ambient-store"},
-			Spec: v1alpha1.ObjectStoreProfileSpec{
-				Backend: v1alpha1.ObjectStoreBackendS3, Bucket: "backups", Endpoint: "https://s3.example.test",
-				CredentialsSecret:  &v1alpha1.ObjectStoreCredentialsReference{Name: "controller-credentials"},
-				ServiceAccountRefs: []v1alpha1.ObjectStoreServiceAccountReference{{Name: "s3-transfer", Namespace: "tenant", UID: "different-uid", IdentityFingerprint: strings.Repeat("a", 64)}},
-			},
-		}
-		runtimeClient := crfake.NewClientBuilder().WithScheme(scheme).WithObjects(replacement).Build()
-		runner := NewRunner(&recordingWorkflowResumer{}, nil, "tenant").WithKubernetesClient(kubeClient).WithControllerClient(runtimeClient).WithControllerNamespace("controller-system")
-		_, err := runner.objectStoreConfig(context.Background(), domain.NewSession("backup", spec, time.Now()), "backups", "", "daily", "", "", "", false, "", "")
-		if domain.CategoryOf(err) != domain.ErrorPrecondition || !strings.Contains(err.Error(), "UID does not match") {
-			t.Fatalf("replacement ServiceAccount accepted: category=%s error=%v", domain.CategoryOf(err), err)
-		}
-	})
-
-	t.Run("rejects unbound namespace", func(t *testing.T) {
-		unbound := domain.NewSession("backup", spec, time.Now())
-		unbound.Spec.SessionNamespace = "other"
-		runner := NewRunner(&recordingWorkflowResumer{}, nil, "tenant").WithKubernetesClient(kubeClient).WithControllerClient(runtimeClient).WithControllerNamespace("controller-system")
-		_, err := runner.objectStoreConfig(context.Background(), unbound, "backups", "", "daily", "", "", "", false, "", "")
-		if domain.CategoryOf(err) != domain.ErrorPrecondition || !strings.Contains(err.Error(), "no ServiceAccount binding") {
-			t.Fatalf("unbound namespace accepted: category=%s error=%v", domain.CategoryOf(err), err)
-		}
-	})
-
-	t.Run("allows ambient controller credentials", func(t *testing.T) {
-		withoutControllerSecret := &v1alpha1.ObjectStoreProfile{
-			ObjectMeta: metav1.ObjectMeta{Name: "ambient-store"},
-			Spec: v1alpha1.ObjectStoreProfileSpec{
-				Backend: v1alpha1.ObjectStoreBackendS3, Bucket: "backups", Endpoint: "https://s3.example.test",
-				ServiceAccountRefs: []v1alpha1.ObjectStoreServiceAccountReference{{Name: "s3-transfer", Namespace: "tenant", UID: "sa-uid", IdentityFingerprint: kube.ServiceAccountIdentityFingerprint(&corev1.ServiceAccount{ObjectMeta: metav1.ObjectMeta{Name: "s3-transfer", Namespace: "tenant", UID: types.UID("sa-uid")}})}},
-			},
-		}
-		runtimeClient := crfake.NewClientBuilder().WithScheme(scheme).WithObjects(withoutControllerSecret).Build()
-		runner := NewRunner(&recordingWorkflowResumer{}, nil, "tenant").WithKubernetesClient(kubeClient).WithControllerClient(runtimeClient)
-		config, err := runner.objectStoreConfig(context.Background(), domain.NewSession("backup", spec, time.Now()), "backups", "", "daily", "", "", "", false, "", "")
-		if err != nil {
-			t.Fatalf("ambient controller credentials rejected: %v", err)
-		}
-		if !config.UseAmbientCredentials || config.AccessKey != "" || config.SecretKey != "" || config.CredentialsSecretUID != "" {
-			t.Fatalf("ambient controller credentials leaked into config: %#v", config)
-		}
-	})
+	}
 }
 
-func TestRunnerObjectStoreProfileRejectsDeletionAndAuthAmbiguity(t *testing.T) {
+func TestRunnerRejectsPVCBackupRepositoryUntilDataPlaneIsAvailable(t *testing.T) {
 	scheme := runtime.NewScheme()
 	if err := v1alpha1.AddToScheme(scheme); err != nil {
 		t.Fatal(err)
 	}
-	now := metav1.Now()
-	base := &v1alpha1.ObjectStoreProfile{
-		ObjectMeta: metav1.ObjectMeta{Name: "store"},
-		Spec: v1alpha1.ObjectStoreProfileSpec{
-			Backend: v1alpha1.ObjectStoreBackendS3,
-			Bucket:  "backups", Endpoint: "https://s3.example.test",
-			AllowedNamespaces:                       []v1alpha1.ObjectStoreNamespace{"tenant"},
-			CredentialsSecret:                       &v1alpha1.ObjectStoreCredentialsReference{Name: "credentials"},
-			AllowStaticCredentialsInTenantNamespace: true,
-		},
-	}
-	kubeClient := clientfake.NewSimpleClientset(&corev1.Secret{
-		ObjectMeta: metav1.ObjectMeta{Name: "credentials", Namespace: "controller-system", UID: types.UID("secret-uid")},
-		Data:       map[string][]byte{kube.BackupAccessKeyDataKey: []byte("access"), kube.BackupSecretKeyDataKey: []byte("secret")},
-	})
-	spec := domain.NewSessionSpec(domain.OperationBackup, domain.SessionCommon{SourceNamespace: "tenant", SessionNamespace: "tenant"}, false, domain.SessionWorkflowOptions{})
-	spec.Backup.ObjectStoreProfile = "store"
-	spec.Backup.Bucket = "backups"
-	spec.Backup.Name = "daily"
-	spec.Backup.SourcePVC.Namespace = "tenant"
-	session := domain.NewSession("backup", spec, time.Now())
 
-	t.Run("deleting profile", func(t *testing.T) {
-		profile := base.DeepCopy()
-		profile.DeletionTimestamp = &now
-		profile.Finalizers = []string{"migrate.sealos.io/test-finalizer"}
-		runtimeClient := crfake.NewClientBuilder().WithScheme(scheme).WithObjects(profile).Build()
-		runner := NewRunner(&recordingWorkflowResumer{}, nil, "tenant").WithKubernetesClient(kubeClient).WithControllerClient(runtimeClient).WithControllerNamespace("controller-system")
-		_, err := runner.objectStoreConfig(context.Background(), session, "backups", "", "daily", "", "", "", false, "", "")
-		if domain.CategoryOf(err) != domain.ErrorPrecondition || !strings.Contains(err.Error(), "being deleted") {
-			t.Fatalf("category=%s error=%v", domain.CategoryOf(err), err)
-		}
-	})
-
-	t.Run("static and workload identity", func(t *testing.T) {
-		profile := base.DeepCopy()
-		profile.Spec.ServiceAccountRefs = []v1alpha1.ObjectStoreServiceAccountReference{{
-			Name: "s3-transfer", Namespace: "tenant", UID: "sa-uid", IdentityFingerprint: strings.Repeat("a", 64),
-		}}
-		runtimeClient := crfake.NewClientBuilder().WithScheme(scheme).WithObjects(profile).Build()
-		runner := NewRunner(&recordingWorkflowResumer{}, nil, "tenant").WithKubernetesClient(kubeClient).WithControllerClient(runtimeClient).WithControllerNamespace("controller-system")
-		_, err := runner.objectStoreConfig(context.Background(), session, "backups", "", "daily", "", "", "", false, "", "")
-		if domain.CategoryOf(err) != domain.ErrorValidation || !strings.Contains(err.Error(), "tenant-namespace projection approval cannot be combined with workload identity") {
-			t.Fatalf("category=%s error=%v", domain.CategoryOf(err), err)
-		}
-	})
-
-	t.Run("static profile requires credentials Secret", func(t *testing.T) {
-		profile := base.DeepCopy()
-		profile.Spec.CredentialsSecret = nil
-		runtimeClient := crfake.NewClientBuilder().WithScheme(scheme).WithObjects(profile).Build()
-		runner := NewRunner(&recordingWorkflowResumer{}, nil, "tenant").
-			WithKubernetesClient(kubeClient).
-			WithControllerClient(runtimeClient).
-			WithControllerNamespace("controller-system")
-		_, err := runner.objectStoreConfig(context.Background(), session, "backups", "", "daily", "", "", "", false, "", "")
-		if domain.CategoryOf(err) != domain.ErrorPrecondition || !strings.Contains(err.Error(), "static credential profiles require credentialsSecret") {
-			t.Fatalf("static profile without credentials Secret accepted: category=%s error=%v", domain.CategoryOf(err), err)
-		}
-	})
-}
-
-func TestRunnerObjectStoreProfileRejectsAmbiguousServiceAccountBindings(t *testing.T) {
-	scheme := runtime.NewScheme()
-	if err := v1alpha1.AddToScheme(scheme); err != nil {
-		t.Fatal(err)
-	}
-	profile := &v1alpha1.ObjectStoreProfile{
-		ObjectMeta: metav1.ObjectMeta{Name: "ambient-store"},
-		Spec: v1alpha1.ObjectStoreProfileSpec{
-			Backend: v1alpha1.ObjectStoreBackendS3, Bucket: "backups", Endpoint: "https://s3.example.test",
-			CredentialsSecret: &v1alpha1.ObjectStoreCredentialsReference{Name: "controller-credentials"},
-			ServiceAccountRefs: []v1alpha1.ObjectStoreServiceAccountReference{
-				{Name: "one", Namespace: "tenant", UID: "uid-one", IdentityFingerprint: strings.Repeat("a", 64)},
-				{Name: "two", Namespace: "tenant", UID: "uid-two", IdentityFingerprint: strings.Repeat("b", 64)},
+	repository := &v1alpha1.BackupRepository{
+		ObjectMeta: metav1.ObjectMeta{Name: "pvc-repo", Namespace: "tenant"},
+		Spec: v1alpha1.BackupRepositorySpec{
+			Type: v1alpha1.BackupRepositoryTypePVC,
+			PVC: &v1alpha1.PVCBackupRepositorySpec{
+				ClaimRef: v1alpha1.LocalObjectReference{Name: "backup-volume"},
 			},
 		},
 	}
-	runtimeClient := crfake.NewClientBuilder().WithScheme(scheme).WithObjects(profile).Build()
-	kubeClient := clientfake.NewSimpleClientset(
-		&corev1.ServiceAccount{ObjectMeta: metav1.ObjectMeta{Name: "one", Namespace: "tenant", UID: types.UID("uid-one")}},
-		&corev1.Secret{
-			ObjectMeta: metav1.ObjectMeta{Name: "controller-credentials", Namespace: "controller-system"},
-			Data:       map[string][]byte{kube.BackupAccessKeyDataKey: []byte("access"), kube.BackupSecretKeyDataKey: []byte("secret")},
-		},
+	runtimeClient := crfake.NewClientBuilder().WithScheme(scheme).WithObjects(repository).Build()
+	spec := domain.NewSessionSpec(
+		domain.OperationBackup,
+		domain.SessionCommon{SourceNamespace: "tenant", SessionNamespace: "tenant"},
+		false,
+		domain.SessionWorkflowOptions{},
 	)
-	spec := domain.NewSessionSpec(domain.OperationBackup, domain.SessionCommon{SourceNamespace: "tenant", SessionNamespace: "tenant"}, false, domain.SessionWorkflowOptions{})
-	spec.Backup.ObjectStoreProfile = "ambient-store"
-	spec.Backup.Bucket = "backups"
+	spec.Backup.BackupRepository = "pvc-repo"
 	spec.Backup.Name = "daily"
-	spec.Backup.SourcePVC.Namespace = "tenant"
-	runner := NewRunner(&recordingWorkflowResumer{}, nil, "tenant").WithKubernetesClient(kubeClient).WithControllerClient(runtimeClient)
-	_, err := runner.objectStoreConfig(context.Background(), domain.NewSession("backup", spec, time.Now()), "backups", "", "daily", "", "", "", false, "", "")
-	if domain.CategoryOf(err) != domain.ErrorValidation || !strings.Contains(err.Error(), "at most one binding") {
-		t.Fatalf("ambiguous bindings category=%s error=%v", domain.CategoryOf(err), err)
-	}
-}
+	runner := NewRunner(
+		&recordingWorkflowResumer{},
+		nil,
+		"tenant",
+	).WithControllerClient(runtimeClient)
 
-func TestRunnerObjectStoreProfileRejectsInvalidScopeConfiguration(t *testing.T) {
-	scheme := runtime.NewScheme()
-	if err := v1alpha1.AddToScheme(scheme); err != nil {
-		t.Fatal(err)
-	}
-	base := &v1alpha1.ObjectStoreProfile{
-		ObjectMeta: metav1.ObjectMeta{Name: "store"},
-		Spec: v1alpha1.ObjectStoreProfileSpec{
-			Backend:  v1alpha1.ObjectStoreBackendS3,
-			Bucket:   "backups",
-			Endpoint: "https://s3.example.test",
-			CredentialsSecret: &v1alpha1.ObjectStoreCredentialsReference{
-				Name: "credentials",
-			},
-			AllowedNamespaces:                       []v1alpha1.ObjectStoreNamespace{"tenant"},
-			AllowStaticCredentialsInTenantNamespace: true,
-		},
-	}
-	kubeClient := clientfake.NewSimpleClientset(&corev1.Secret{
-		ObjectMeta: metav1.ObjectMeta{Name: "credentials", Namespace: "controller-system"},
-		Data: map[string][]byte{
-			kube.BackupAccessKeyDataKey: []byte("access"),
-			kube.BackupSecretKeyDataKey: []byte("secret"),
-		},
-	})
-	spec := domain.NewSessionSpec(domain.OperationBackup, domain.SessionCommon{
-		SourceNamespace: "tenant", SessionNamespace: "tenant",
-	}, false, domain.SessionWorkflowOptions{})
-	spec.Backup.ObjectStoreProfile = "store"
-	spec.Backup.Bucket = "backups"
-	spec.Backup.Name = "daily"
-	spec.Backup.SourcePVC.Namespace = "tenant"
-	session := domain.NewSession("backup", spec, time.Now())
-
-	for name, mutate := range map[string]func(*v1alpha1.ObjectStoreProfileSpec){
-		"path traversal prefix": func(profile *v1alpha1.ObjectStoreProfileSpec) {
-			profile.Prefix = "team/../other"
-		},
-		"invalid namespace allowlist": func(profile *v1alpha1.ObjectStoreProfileSpec) {
-			profile.AllowedNamespaces = []v1alpha1.ObjectStoreNamespace{"Tenant-A"}
-		},
-	} {
-		t.Run(name, func(t *testing.T) {
-			profile := base.DeepCopy()
-			mutate(&profile.Spec)
-			runtimeClient := crfake.NewClientBuilder().WithScheme(scheme).WithObjects(profile).Build()
-			runner := NewRunner(&recordingWorkflowResumer{}, nil, "tenant").
-				WithKubernetesClient(kubeClient).
-				WithControllerClient(runtimeClient).
-				WithControllerNamespace("controller-system")
-			_, err := runner.objectStoreConfig(
-				context.Background(), session, "backups", "", "daily", "", "", "", false, "", "",
-			)
-			if domain.CategoryOf(err) != domain.ErrorValidation {
-				t.Fatalf("category=%s error=%v, want validation", domain.CategoryOf(err), err)
-			}
-		})
-	}
-}
-
-func TestRunnerObjectStoreProfileEnforcesCredentialTrustBoundaries(t *testing.T) {
-	scheme := runtime.NewScheme()
-	if err := v1alpha1.AddToScheme(scheme); err != nil {
-		t.Fatal(err)
-	}
-	base := &v1alpha1.ObjectStoreProfile{
-		ObjectMeta: metav1.ObjectMeta{Name: "store"},
-		Spec: v1alpha1.ObjectStoreProfileSpec{
-			Backend: v1alpha1.ObjectStoreBackendS3, Bucket: "backups", Endpoint: "https://s3.example.test",
-			AllowedNamespaces:                       []v1alpha1.ObjectStoreNamespace{"tenant"},
-			CredentialsSecret:                       &v1alpha1.ObjectStoreCredentialsReference{Name: "credentials"},
-			AllowStaticCredentialsInTenantNamespace: true,
-		},
-	}
-	kubeClient := clientfake.NewSimpleClientset(&corev1.Secret{
-		ObjectMeta: metav1.ObjectMeta{Name: "credentials", Namespace: "controller-system"},
-		Data:       map[string][]byte{kube.BackupAccessKeyDataKey: []byte("access"), kube.BackupSecretKeyDataKey: []byte("secret")},
-	})
-	spec := domain.NewSessionSpec(domain.OperationBackup, domain.SessionCommon{SourceNamespace: "tenant", SessionNamespace: "tenant"}, false, domain.SessionWorkflowOptions{})
-	spec.Backup.ObjectStoreProfile = "store"
-	spec.Backup.Bucket = "backups"
-	spec.Backup.Name = "daily"
-	spec.Backup.SourcePVC.Namespace = "tenant"
-	session := domain.NewSession("backup", spec, time.Now())
-
-	tests := []struct {
-		name     string
-		mutate   func(*v1alpha1.ObjectStoreProfileSpec)
-		category domain.ErrorCategory
-		message  string
-	}{
-		{
-			name: "missing explicit projection approval",
-			mutate: func(spec *v1alpha1.ObjectStoreProfileSpec) {
-				spec.AllowStaticCredentialsInTenantNamespace = false
-			},
-			category: domain.ErrorPrecondition,
-			message:  "explicit tenant-namespace projection approval",
-		},
-		{
-			name: "multiple static namespaces",
-			mutate: func(spec *v1alpha1.ObjectStoreProfileSpec) {
-				spec.AllowedNamespaces = []v1alpha1.ObjectStoreNamespace{"tenant", "other"}
-			},
-			category: domain.ErrorPrecondition,
-			message:  "exactly one tenant namespace",
-		},
-		{
-			name: "workload identity with static approval",
-			mutate: func(spec *v1alpha1.ObjectStoreProfileSpec) {
-				spec.CredentialsSecret = nil
-				spec.AllowedNamespaces = nil
-				spec.ServiceAccountRefs = []v1alpha1.ObjectStoreServiceAccountReference{{Name: "s3-transfer", Namespace: "tenant", UID: "sa-uid", IdentityFingerprint: strings.Repeat("a", 64)}}
-			},
-			category: domain.ErrorValidation,
-			message:  "cannot be combined with workload identity",
-		},
-	}
-	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			profile := base.DeepCopy()
-			test.mutate(&profile.Spec)
-			runtimeClient := crfake.NewClientBuilder().WithScheme(scheme).WithObjects(profile).Build()
-			runner := NewRunner(&recordingWorkflowResumer{}, nil, "tenant").WithKubernetesClient(kubeClient).WithControllerClient(runtimeClient).WithControllerNamespace("controller-system")
-			_, err := runner.objectStoreConfig(context.Background(), session, "backups", "", "daily", "", "", "", false, "", "")
-			if domain.CategoryOf(err) != test.category || !strings.Contains(err.Error(), test.message) {
-				t.Fatalf("category=%s error=%v, want %s containing %q", domain.CategoryOf(err), err, test.category, test.message)
-			}
-		})
-	}
-}
-
-func TestRunnerObjectStoreProfileFailsClosedWithoutNamespaceScope(t *testing.T) {
-	scheme := runtime.NewScheme()
-	if err := v1alpha1.AddToScheme(scheme); err != nil {
-		t.Fatal(err)
-	}
-	profile := &v1alpha1.ObjectStoreProfile{
-		ObjectMeta: metav1.ObjectMeta{Name: "store"},
-		Spec: v1alpha1.ObjectStoreProfileSpec{
-			Backend:  v1alpha1.ObjectStoreBackendS3,
-			Bucket:   "backups",
-			Endpoint: "https://s3.example.test",
-			CredentialsSecret: &v1alpha1.ObjectStoreCredentialsReference{
-				Name: "credentials",
-			},
-			AllowStaticCredentialsInTenantNamespace: true,
-		},
-	}
-	runtimeClient := crfake.NewClientBuilder().WithScheme(scheme).WithObjects(profile).Build()
-	kubeClient := clientfake.NewSimpleClientset(&corev1.Secret{
-		ObjectMeta: metav1.ObjectMeta{Name: "credentials", Namespace: "controller-system"},
-		Data: map[string][]byte{
-			kube.BackupAccessKeyDataKey: []byte("access"),
-			kube.BackupSecretKeyDataKey: []byte("secret"),
-		},
-	})
-	spec := domain.NewSessionSpec(domain.OperationBackup, domain.SessionCommon{
-		SourceNamespace: "tenant", SessionNamespace: "tenant",
-	}, false, domain.SessionWorkflowOptions{})
-	spec.Backup.ObjectStoreProfile = "store"
-	spec.Backup.Bucket = "backups"
-	spec.Backup.Name = "daily"
-	spec.Backup.SourcePVC.Namespace = "tenant"
-	runner := NewRunner(&recordingWorkflowResumer{}, nil, "tenant").
-		WithKubernetesClient(kubeClient).
-		WithControllerClient(runtimeClient).
-		WithControllerNamespace("controller-system")
 	_, err := runner.objectStoreConfig(
-		context.Background(), domain.NewSession("backup", spec, time.Now()), "backups", "", "daily", "", "", "", false, "", "",
+		context.Background(),
+		domain.NewSession("backup-pvc", spec, time.Now()),
+		"",
+		"",
+		"daily",
+		"",
+		"",
+		"",
+		false,
+		"",
+		"",
 	)
 	if domain.CategoryOf(err) != domain.ErrorPrecondition ||
-		!strings.Contains(err.Error(), "exactly one tenant namespace") {
-		t.Fatalf("empty namespace scope accepted: category=%s error=%v", domain.CategoryOf(err), err)
+		!strings.Contains(err.Error(), "backend pvc is not supported") {
+		t.Fatalf("PVC repository error category=%q error=%v", domain.CategoryOf(err), err)
 	}
 }
 
@@ -884,12 +458,14 @@ func TestRunnerDispatchesEveryControllerWorkflow(t *testing.T) {
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			runner := NewRunner(&recordingWorkflowResumer{}, nil, "system")
+
 			session := domain.NewSession(test.name, test.make(), time.Now())
 			if session.Spec.Backup != nil {
-				session.Spec.Backup.ObjectStoreProfile = "default"
+				session.Spec.Backup.BackupRepository = "default"
 			}
+
 			if session.Spec.Restore != nil {
-				session.Spec.Restore.ObjectStoreProfile = "default"
+				session.Spec.Restore.BackupRepository = "default"
 			}
 
 			err := runner.reconcileSession(context.Background(), session)

@@ -44,7 +44,11 @@ func ToolServiceAccountHelmValues(name string) ([]string, error) {
 		return nil, domain.NewError(
 			domain.ErrorValidation,
 			"tool identity",
-			fmt.Sprintf("service account name %q is invalid: %s", name, strings.Join(problems, "; ")),
+			fmt.Sprintf(
+				"service account name %q is invalid: %s",
+				name,
+				strings.Join(problems, "; "),
+			),
 		)
 	}
 

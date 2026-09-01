@@ -204,7 +204,7 @@ func TestValidateRestoreCleanupChecksCredentialsOwnership(t *testing.T) {
 	)
 
 	spec.Restore.DestinationPVC = domain.ObjectReference{Namespace: "app", Name: "data"}
-	spec.Restore.Backend = domain.ObjectStoreBackendS3
+	spec.Restore.Backend = domain.BackupBackendS3
 	spec.Restore.Bucket = "backups"
 	spec.Restore.Name = "daily"
 

@@ -1427,6 +1427,29 @@ func TestBucketFlagValidationMatrix(t *testing.T) {
 			pvcFlag: "source-pvc",
 			want:    "unsupported backend",
 		},
+		{
+			name: "repository namespace without repository",
+			flags: bucketFlags{
+				pvc:                       "data",
+				name:                      "daily",
+				backend:                   "s3",
+				backupRepositoryNamespace: "backups",
+			},
+			pvcFlag: "source-pvc",
+			want:    "requires --backup-repository",
+		},
+		{
+			name: "invalid repository namespace",
+			flags: bucketFlags{
+				pvc:                       "data",
+				name:                      "daily",
+				backend:                   "s3",
+				backupRepository:          "shared",
+				backupRepositoryNamespace: "INVALID_NS",
+			},
+			pvcFlag: "source-pvc",
+			want:    "invalid --backup-repository-namespace",
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -1443,23 +1466,37 @@ func TestBucketFlagValidationMatrix(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	profile := bucketFlags{
-		pvc:                "data",
-		name:               "daily",
-		backend:            "s3",
-		objectStoreProfile: "shared-s3",
+	repository := bucketFlags{
+		pvc:              "data",
+		name:             "daily",
+		backend:          "s3",
+		backupRepository: "shared-s3",
 	}
-	if err := validateBucketFlags(&profile, "source-pvc"); err != nil {
-		t.Fatalf("profile-backed flags should not require bucket: %v", err)
-	}
-	if err := validateControllerProfileFlags(&profile); err != nil {
-		t.Fatalf("profile-backed defaults should be accepted: %v", err)
+	if err := validateBucketFlags(&repository, "source-pvc"); err != nil {
+		t.Fatalf("repository-backed flags should not require bucket: %v", err)
 	}
 
-	profile.prefixExplicit = true
-	if err := validateControllerProfileFlags(&profile); domain.CategoryOf(err) != domain.ErrorPrecondition ||
-		!strings.Contains(err.Error(), "ObjectStoreProfile") {
-		t.Fatalf("explicit profile prefix override error=%v category=%q", err, domain.CategoryOf(err))
+	if err := validateControllerRepositoryFlags(&repository); err != nil {
+		t.Fatalf("repository-backed defaults should be accepted: %v", err)
+	}
+
+	repository.backupRepositoryNamespace = "backups"
+	if err := validateBucketFlags(&repository, "source-pvc"); err != nil {
+		t.Fatalf("cross-namespace repository reference should be accepted: %v", err)
+	}
+
+	repository.prefixExplicit = true
+	if err := validateControllerRepositoryFlags(
+		&repository,
+	); domain.CategoryOf(
+		err,
+	) != domain.ErrorPrecondition ||
+		!strings.Contains(err.Error(), "BackupRepository") {
+		t.Fatalf(
+			"explicit repository prefix override error=%v category=%q",
+			err,
+			domain.CategoryOf(err),
+		)
 	}
 }
 

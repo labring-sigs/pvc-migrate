@@ -228,16 +228,37 @@ func TestOperationSpecsHaveIndependentFieldContracts(t *testing.T) {
 		{
 			name: "backup", spec: v1alpha1.BackupSpec{},
 			fields: []string{
-				"createdBy", "deleteExtraneous", "name", "objectStoreProfile", "online",
-				"openebsLvmEnableShared", "path", "sessionNamespace", "sourceNamespace", "sourcePV", "sourcePVC", "toolImage",
+				"createdBy",
+				"deleteExtraneous",
+				"name",
+				"online",
+				"repositoryRef",
+				"openebsLvmEnableShared",
+				"path",
+				"sessionNamespace",
+				"sourceNamespace",
+				"sourcePV",
+				"sourcePVC",
+				"toolImage",
 			},
 		},
 		{
 			name: "restore", spec: v1alpha1.RestoreSpec{},
 			fields: []string{
-				"allowMounted", "createPVC", "createdBy", "deleteExtraneous", "destinationAccessMode",
-				"destinationCapacity", "destinationNamespace", "destinationPVC",
-				"destinationStorageClass", "name", "objectStoreProfile", "path", "sessionNamespace", "targetNode",
+				"allowMounted",
+				"createPVC",
+				"createdBy",
+				"deleteExtraneous",
+				"destinationAccessMode",
+				"destinationCapacity",
+				"destinationNamespace",
+				"destinationPVC",
+				"destinationStorageClass",
+				"name",
+				"path",
+				"repositoryRef",
+				"sessionNamespace",
+				"targetNode",
 				"toolImage",
 			},
 		},
@@ -272,10 +293,10 @@ func TestOperationSpecsHaveIndependentFieldContracts(t *testing.T) {
 
 func TestOperationStatusesExposeOnlyConcernedCheckpoints(t *testing.T) {
 	activation := v1alpha1.VolumeActivationStatus{
-		ActivePVC: v1alpha1.ObjectReference{Name: "active"},
+		ActivePVC: &v1alpha1.ObjectReference{Name: "active"},
 	}
 	identity := v1alpha1.PVCIdentityActivationStatus{
-		ActivePVC: v1alpha1.ObjectReference{Name: "active"},
+		ActivePVC: &v1alpha1.ObjectReference{Name: "active"},
 	}
 	statuses := []struct {
 		name      string
@@ -302,7 +323,7 @@ func TestOperationStatusesExposeOnlyConcernedCheckpoints(t *testing.T) {
 			status: v1alpha1.PodMigrationStatus{
 				WarmPassesCompleted: 1,
 				Workload: &v1alpha1.PodMigrationWorkloadStatus{
-					Pod: v1alpha1.ObjectReference{Name: "writer", UID: "current-pod-uid"},
+					Pod: &v1alpha1.ObjectReference{Name: "writer", UID: "current-pod-uid"},
 				},
 				Volumes: []v1alpha1.PodMigrationVolumeStatus{
 					{
@@ -538,7 +559,7 @@ func TestPodMigrationStatusDoesNotClearImmutableAffectedPodsSnapshot(t *testing.
 	)
 	apiSpec := v1alpha1.PodMigrationSpecFromDomain(spec)
 	status := v1alpha1.PodMigrationStatus{Workload: &v1alpha1.PodMigrationWorkloadStatus{
-		Pod: v1alpha1.ObjectReference{Name: "writer", Namespace: "app", UID: "resumed-uid"},
+		Pod: &v1alpha1.ObjectReference{Name: "writer", Namespace: "app", UID: "resumed-uid"},
 	}}
 	restored := apiSpec.Domain()
 	status.ApplyToDomainSpec(&restored)
@@ -574,24 +595,45 @@ func TestBackupStatusPreservesOpenEBSRecoveryCheckpoint(t *testing.T) {
 	}
 }
 
-func TestObjectStoreIdentityStatusRoundTrips(t *testing.T) {
+func TestBackupRepositoryIdentityStatusRoundTrips(t *testing.T) {
 	status := domain.SessionStatus{
-		ObjectStoreProfileUID:                "profile-uid",
-		ObjectStoreProfileGeneration:         7,
-		ObjectStoreCredentialsSecretUID:      "secret-uid",
-		ObjectStoreServiceAccountUID:         "sa-uid",
-		ObjectStoreServiceAccountFingerprint: "fingerprint",
+		BackupRepository: &domain.BackupRepositoryBindingStatus{
+			Type:       domain.BackupRepositoryTypeS3,
+			UID:        "repository-uid",
+			Generation: 7,
+			S3: &domain.S3BackupRepositoryBindingStatus{
+				CredentialsSecretUID: "secret-uid",
+			},
+		},
 	}
 	backupStatus := v1alpha1.BackupStatusFromDomain(status).Domain()
+
 	restoreStatus := v1alpha1.RestoreStatusFromDomain(status).Domain()
 	for name, got := range map[string]domain.SessionStatus{"backup": backupStatus, "restore": restoreStatus} {
-		if got.ObjectStoreProfileUID != status.ObjectStoreProfileUID ||
-			got.ObjectStoreProfileGeneration != status.ObjectStoreProfileGeneration ||
-			got.ObjectStoreCredentialsSecretUID != status.ObjectStoreCredentialsSecretUID ||
-			got.ObjectStoreServiceAccountUID != status.ObjectStoreServiceAccountUID ||
-			got.ObjectStoreServiceAccountFingerprint != status.ObjectStoreServiceAccountFingerprint {
-			t.Fatalf("%s object-store identity status = %#v", name, got)
+		if got.BackupRepository == nil || got.BackupRepository.S3 == nil ||
+			got.BackupRepository.Type != status.BackupRepository.Type ||
+			got.BackupRepository.UID != status.BackupRepository.UID ||
+			got.BackupRepository.Generation != status.BackupRepository.Generation ||
+			got.BackupRepository.S3.CredentialsSecretUID !=
+				status.BackupRepository.S3.CredentialsSecretUID {
+			t.Fatalf("%s backup repository identity status = %#v", name, got)
 		}
+	}
+}
+
+func TestPVCBackupRepositoryIdentityStatusRoundTrips(t *testing.T) {
+	status := domain.SessionStatus{
+		BackupRepository: &domain.BackupRepositoryBindingStatus{
+			Type:       domain.BackupRepositoryTypePVC,
+			UID:        "repository-uid",
+			Generation: 2,
+			PVC:        &domain.PVCBackupRepositoryBindingStatus{ClaimUID: "claim-uid"},
+		},
+	}
+
+	got := v1alpha1.BackupStatusFromDomain(status).Domain().BackupRepository
+	if got == nil || got.PVC == nil || got.S3 != nil || got.PVC.ClaimUID != "claim-uid" {
+		t.Fatalf("PVC repository binding status = %#v", got)
 	}
 }
 
@@ -860,6 +902,90 @@ func TestPVCIdentitySpecsRoundTripSourceMetadataWithoutSharing(t *testing.T) {
 
 func containsJSONField(data, field string) bool {
 	return json.Valid([]byte(data)) && strings.Contains(data, field)
+}
+
+func TestClusterWorkflowRepositoryReferenceRoundTrip(t *testing.T) {
+	spec := domain.SessionSpec{
+		SessionCommon: domain.SessionCommon{
+			SourceNamespace:  "tenant-a",
+			SessionNamespace: "operator",
+		},
+		Type: domain.SessionTypeBackup,
+		Backup: &domain.BackupSessionSpec{
+			SourcePVC: domain.ObjectReference{
+				Namespace: "tenant-a",
+				Name:      "data",
+				UID:       "pvc-uid",
+			},
+			SourcePV:                  domain.ObjectReference{Name: "pv-data", UID: "pv-uid"},
+			Name:                      "daily",
+			BackupRepository:          "archive",
+			BackupRepositoryNamespace: "backup-config",
+		},
+	}
+
+	apiSpec := v1alpha1.ClusterBackupSpecFromDomain(spec)
+	if apiSpec.RepositoryRef.Name != "archive" ||
+		apiSpec.RepositoryRef.Namespace != "backup-config" {
+		t.Fatalf("cluster repository reference=%#v", apiSpec.RepositoryRef)
+	}
+
+	decoded := apiSpec.Domain()
+	if decoded.Backup == nil || decoded.Backup.BackupRepository != "archive" ||
+		decoded.Backup.BackupRepositoryNamespace != "backup-config" {
+		t.Fatalf("cluster domain conversion=%#v", decoded.Backup)
+	}
+}
+
+func TestBackupRepositoryUsesTypedBackendUnion(t *testing.T) {
+	repository := v1alpha1.BackupRepositorySpec{
+		Type: v1alpha1.BackupRepositoryTypePVC,
+		PVC: &v1alpha1.PVCBackupRepositorySpec{
+			ClaimRef: v1alpha1.LocalObjectReference{Name: "snapshots"},
+			SubPath:  "daily",
+		},
+	}
+
+	encoded, err := json.Marshal(repository)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if !strings.Contains(string(encoded), `"type":"pvc"`) ||
+		!strings.Contains(string(encoded), `"claimRef"`) ||
+		strings.Contains(string(encoded), `"bucket"`) {
+		t.Fatalf("typed repository encoding=%s", encoded)
+	}
+}
+
+func TestOptionalObjectReferencesAreOmittedWhenUnset(t *testing.T) {
+	object := v1alpha1.PodMigration{
+		Spec: v1alpha1.PodMigrationSpec{
+			Workload: v1alpha1.WorkloadSpec{Adapter: v1alpha1.WorkloadStandalone},
+		},
+		Status: v1alpha1.PodMigrationStatus{
+			Volumes: []v1alpha1.PodMigrationVolumeStatus{{
+				Activation: v1alpha1.VolumeActivationStatus{},
+			}},
+		},
+	}
+
+	encoded, err := json.Marshal(object)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for _, forbidden := range []string{
+		`"pod":{}`,
+		`"controller":{}`,
+		`"destinationPVC":{}`,
+		`"destinationPV":{}`,
+		`"activePVC":{}`,
+	} {
+		if strings.Contains(string(encoded), forbidden) {
+			t.Fatalf("unset optional reference %s was serialized: %s", forbidden, encoded)
+		}
+	}
 }
 
 func operationJSONFields(typ reflect.Type) []string {

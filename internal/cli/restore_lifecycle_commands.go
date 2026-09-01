@@ -22,7 +22,14 @@ func (r *rootState) newRestoreStatusCommand() *cobra.Command {
 			defer cancel()
 
 			if len(args) == 1 {
-				session, getErr := r.workflowSession(ctx, runtime, cmd, args[0], domain.SessionTypeRestore, "restore status")
+				session, getErr := r.workflowSession(
+					ctx,
+					runtime,
+					cmd,
+					args[0],
+					domain.SessionTypeRestore,
+					"restore status",
+				)
 				if getErr != nil {
 					return getErr
 				}
@@ -51,7 +58,14 @@ func (r *rootState) newRestoreResumeCommand() *cobra.Command {
 			ctx, cancel := r.context(cmd.Context())
 			defer cancel()
 
-			session, err := r.workflowSession(ctx, runtime, cmd, args[0], domain.SessionTypeRestore, "restore resume")
+			session, err := r.workflowSession(
+				ctx,
+				runtime,
+				cmd,
+				args[0],
+				domain.SessionTypeRestore,
+				"restore resume",
+			)
 			if err != nil {
 				return err
 			}
@@ -107,7 +121,14 @@ func (r *rootState) newRestoreAbortCommand() *cobra.Command {
 			ctx, cancel := r.context(cmd.Context())
 			defer cancel()
 
-			session, err := r.workflowSession(ctx, runtime, cmd, args[0], domain.SessionTypeRestore, "restore abort")
+			session, err := r.workflowSession(
+				ctx,
+				runtime,
+				cmd,
+				args[0],
+				domain.SessionTypeRestore,
+				"restore abort",
+			)
 			if err != nil {
 				return err
 			}
@@ -154,7 +175,14 @@ func (r *rootState) newRestoreCleanupCommand() *cobra.Command {
 			ctx, cancel := r.context(cmd.Context())
 			defer cancel()
 
-			session, err := r.workflowSession(ctx, runtime, cmd, args[0], domain.SessionTypeRestore, "restore cleanup")
+			session, err := r.workflowSession(
+				ctx,
+				runtime,
+				cmd,
+				args[0],
+				domain.SessionTypeRestore,
+				"restore cleanup",
+			)
 			if err != nil {
 				return err
 			}

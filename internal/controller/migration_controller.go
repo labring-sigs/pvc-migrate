@@ -31,17 +31,16 @@ import (
 // retained for source compatibility; reconciliation is intentionally not
 // limited to Migration resources.
 type WorkflowReconciler struct {
-	store               kube.SessionStore
-	service             *app.Service
-	kubeClient          kubernetes.Interface
-	controllerClient    crclient.Reader
-	openEBS             kube.OpenEBSLVMSharedVolumeManager
-	namespace           string
-	controllerNamespace string
-	clusterIdentity     string
-	trustedToolImage    string
-	requeueAfter        time.Duration
-	supportedKinds      map[domain.ControllerKind]struct{}
+	store            kube.SessionStore
+	service          *app.Service
+	kubeClient       kubernetes.Interface
+	controllerClient crclient.Reader
+	openEBS          kube.OpenEBSLVMSharedVolumeManager
+	namespace        string
+	clusterIdentity  string
+	trustedToolImage string
+	requeueAfter     time.Duration
+	supportedKinds   map[domain.ControllerKind]struct{}
 }
 
 // MigrationReconciler is kept as an alias for callers that used the original
@@ -56,10 +55,9 @@ func NewMigrationReconciler(service *app.Service, store kube.SessionStore) *Work
 	return NewWorkflowReconciler(service, store)
 }
 
-// WithNamespace optionally limits reconciliation to one tenant namespace.
-// Production managers leave it unset so every namespaced workflow is watched;
-// the reconciler still enforces that referenced objects stay in the CR
-// namespace.
+// WithNamespace optionally limits reconciliation to one durable session
+// namespace. Production managers leave it unset so every namespaced workflow
+// and cluster workflow is watched.
 func (r *WorkflowReconciler) WithNamespace(namespace string) *WorkflowReconciler {
 	if r != nil {
 		r.namespace = namespace
@@ -103,18 +101,11 @@ func (r *WorkflowReconciler) WithKubernetesClient(
 	return r
 }
 
-// WithControllerClient supplies the typed client used for cluster-scoped
-// administrator configuration such as ObjectStoreProfile.
+// WithControllerClient supplies the typed client used for repository
+// configuration and other controller-owned resources.
 func (r *WorkflowReconciler) WithControllerClient(client crclient.Reader) *WorkflowReconciler {
 	if r != nil {
 		r.controllerClient = client
-	}
-	return r
-}
-
-func (r *WorkflowReconciler) WithControllerNamespace(namespace string) *WorkflowReconciler {
-	if r != nil {
-		r.controllerNamespace = namespace
 	}
 	return r
 }
@@ -152,7 +143,6 @@ func (r *WorkflowReconciler) runner(namespace string) *Runner {
 	return NewRunner(r.service, r.store, namespace).
 		WithKubernetesClient(r.kubeClient).
 		WithControllerClient(r.controllerClient).
-		WithControllerNamespace(r.controllerNamespace).
 		WithClusterIdentity(r.clusterIdentity).
 		WithTrustedToolImage(r.trustedToolImage).
 		WithOpenEBSLVMSharedVolumeManager(r.openEBS)
@@ -183,14 +173,18 @@ func (r *WorkflowReconciler) Reconcile(
 	// A workflow's spec is the authorization and execution input. Once the
 	// controller has observed a generation, changing that input would let a
 	// tenant retarget an in-flight operation (for example to another recovery
-	// point or object-store profile). CRD status updates do not change
+	// point or backup repository). CRD status updates do not change
 	// generation, so this check does not interfere with normal progress.
 	if err := workflowSpecMutationError(session); err != nil {
 		if !terminalSession(session) {
 			runner := r.runner(request.Namespace)
 			return reconcile.Result{}, runner.checkpointFailure(ctx, session, err)
 		}
-		return reconcile.Result{}, err
+
+		ctrl.LoggerFrom(ctx).
+			Error(err, "terminal workflow spec changed; reconciliation stopped", "workflow", request.NamespacedName)
+
+		return reconcile.Result{}, nil
 	}
 
 	// Declarative CRs do not pass through CRDSessionStore.Create, so they may
@@ -202,6 +196,7 @@ func (r *WorkflowReconciler) Reconcile(
 			return reconcile.Result{}, err
 		}
 	}
+
 	if session.Deleting {
 		// A deletion request must not start or advance a workflow. Existing
 		// finalizers keep cleanup explicit; resources without our finalizer can
@@ -224,16 +219,20 @@ func (r *WorkflowReconciler) Reconcile(
 			// avoid a controller-owned feedback loop.
 			return reconcile.Result{RequeueAfter: r.requeueAfter}, nil
 		}
+
 		return reconcile.Result{}, nil
 	}
+
 	if boundaryErr := kube.ControllerNamespaceBoundaryError(session); boundaryErr != nil {
 		runner := r.runner(request.Namespace)
 		return reconcile.Result{}, runner.checkpointFailure(ctx, session, boundaryErr)
 	}
+
 	if err := r.validateDeclarativeSourceVolumes(ctx, session); err != nil {
 		runner := r.runner(request.Namespace)
 		return reconcile.Result{}, runner.checkpointFailure(ctx, session, err)
 	}
+
 	if err := r.ensureStandalonePodSnapshot(ctx, session); err != nil {
 		runner := r.runner(request.Namespace)
 		return reconcile.Result{}, runner.checkpointFailure(ctx, session, err)
@@ -286,17 +285,50 @@ func (r *WorkflowReconciler) SetupWithManager(manager ctrl.Manager) error {
 	var controllerBuilder *builder.Builder
 
 	objects := []struct {
-		kind   domain.ControllerKind
-		object crclient.Object
+		kind    domain.ControllerKind
+		object  crclient.Object
+		cluster bool
 	}{
 		{kind: domain.ControllerKindMigration, object: &v1alpha1.Migration{}},
+		{
+			kind:    domain.ControllerKindClusterMigration,
+			object:  &v1alpha1.ClusterMigration{},
+			cluster: true,
+		},
 		{kind: domain.ControllerKindPodMigration, object: &v1alpha1.PodMigration{}},
+		{
+			kind:    domain.ControllerKindClusterPodMigration,
+			object:  &v1alpha1.ClusterPodMigration{},
+			cluster: true,
+		},
 		{kind: domain.ControllerKindReservation, object: &v1alpha1.Reservation{}},
+		{
+			kind:    domain.ControllerKindClusterReservation,
+			object:  &v1alpha1.ClusterReservation{},
+			cluster: true,
+		},
 		{kind: domain.ControllerKindCopy, object: &v1alpha1.Copy{}},
+		{kind: domain.ControllerKindClusterCopy, object: &v1alpha1.ClusterCopy{}, cluster: true},
 		{kind: domain.ControllerKindBackup, object: &v1alpha1.Backup{}},
+		{
+			kind:    domain.ControllerKindClusterBackup,
+			object:  &v1alpha1.ClusterBackup{},
+			cluster: true,
+		},
 		{kind: domain.ControllerKindRestore, object: &v1alpha1.Restore{}},
+		{
+			kind:    domain.ControllerKindClusterRestore,
+			object:  &v1alpha1.ClusterRestore{},
+			cluster: true,
+		},
 		{kind: domain.ControllerKindRename, object: &v1alpha1.Rename{}},
+		{
+			kind:    domain.ControllerKindClusterRename,
+			object:  &v1alpha1.ClusterRename{},
+			cluster: true,
+		},
 		{kind: domain.ControllerKindMove, object: &v1alpha1.Move{}},
+		{kind: domain.ControllerKindClusterMove, object: &v1alpha1.ClusterMove{}, cluster: true},
 	}
 	for _, object := range objects {
 		if !r.supportsKind(object.kind) {
@@ -366,6 +398,7 @@ func StartManagerWithKinds(
 	if kubeClient == nil {
 		return errors.New("controller Kubernetes client is required")
 	}
+
 	cluster, err := kube.Identity(ctx, &kube.Clients{Kubernetes: kubeClient})
 	if err != nil {
 		return fmt.Errorf("resolve controller cluster identity: %w", err)
@@ -410,10 +443,9 @@ func StartManagerWithKinds(
 	}
 
 	reconciler := NewWorkflowReconciler(service, store).
-		// Profile reads are authorization inputs. Use the uncached API reader so
-		// deletion, replacement, and allowlist changes fail closed immediately.
+		// Repository reads use the uncached API reader so deletion, replacement,
+		// and credential changes fail closed immediately.
 		WithControllerClient(manager.GetAPIReader()).
-		WithControllerNamespace(namespace).
 		WithClusterIdentity(cluster.ID).
 		WithTrustedToolImage(normalizedTrustedImage).
 		WithSupportedKinds(supportedKinds)

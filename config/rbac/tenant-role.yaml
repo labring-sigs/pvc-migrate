@@ -29,3 +29,6 @@ rules:
       - restores/status
       - renames/status
     verbs: ["get"]
+  - apiGroups: ["migrate.sealos.io"]
+    resources: ["backuprepositories"]
+    verbs: ["create", "get", "list", "watch", "update", "patch", "delete"]

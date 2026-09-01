@@ -4,17 +4,17 @@ kind: CustomResourceDefinition
 metadata:
   annotations:
     controller-gen.kubebuilder.io/version: v0.19.0
-  name: restores.migrate.sealos.io
+  name: clusterrestores.migrate.sealos.io
 spec:
   group: migrate.sealos.io
   names:
-    kind: Restore
-    listKind: RestoreList
-    plural: restores
+    kind: ClusterRestore
+    listKind: ClusterRestoreList
+    plural: clusterrestores
     shortNames:
-    - rest
-    singular: restore
-  scope: Namespaced
+    - crest
+    singular: clusterrestore
+  scope: Cluster
   versions:
   - additionalPrinterColumns:
     - jsonPath: .status.phase
@@ -45,6 +45,10 @@ spec:
           metadata:
             type: object
           spec:
+            description: |-
+              ClusterRestoreSpec is the cluster-scoped form of RestoreSpec. A repository
+              namespace is mandatory and is resolved by the controller using its own
+              cluster-level RBAC.
             properties:
               allowMounted:
                 type: boolean
@@ -105,16 +109,23 @@ spec:
                 type: string
               repositoryRef:
                 description: |-
-                  RepositoryRef selects a user-owned BackupRepository in this workflow
-                  namespace. The referenced object owns the complete backup location.
+                  RepositoryReference identifies a namespaced BackupRepository. It is used by
+                  cluster-scoped workflows; namespaced workflows use LocalObjectReference so
+                  a tenant cannot supply a different namespace.
                 properties:
                   name:
                     maxLength: 253
                     minLength: 1
                     pattern: ^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$
                     type: string
+                  namespace:
+                    maxLength: 63
+                    minLength: 1
+                    pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
+                    type: string
                 required:
                 - name
+                - namespace
                 type: object
               sessionNamespace:
                 maxLength: 63
@@ -132,9 +143,6 @@ spec:
             - repositoryRef
             - sessionNamespace
             type: object
-            x-kubernetes-validations:
-            - message: workflow namespace must match metadata.namespace
-              rule: self.destinationNamespace == self.sessionNamespace
           status:
             properties:
               completedAt:

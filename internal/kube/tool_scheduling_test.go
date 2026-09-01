@@ -82,6 +82,7 @@ func TestToolServiceAccountHelmValues(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	if !slices.Contains(values, "rclone.serviceAccount.create=false") ||
 		!slices.Contains(values, "rclone.serviceAccount.name=s3-workload.identity") {
 		t.Fatalf("service account values=%v", values)
@@ -91,7 +92,11 @@ func TestToolServiceAccountHelmValues(t *testing.T) {
 		t.Fatalf("empty service account values=%v err=%v", values, err)
 	}
 
-	if _, err := ToolServiceAccountHelmValues("Invalid_Name"); domain.CategoryOf(err) != domain.ErrorValidation {
+	if _, err := ToolServiceAccountHelmValues(
+		"Invalid_Name",
+	); domain.CategoryOf(
+		err,
+	) != domain.ErrorValidation {
 		t.Fatalf("invalid service account category=%s error=%v", domain.CategoryOf(err), err)
 	}
 }

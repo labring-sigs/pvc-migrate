@@ -26,6 +26,10 @@ func pvmigrateRestoreRequest(
 	configPath string,
 	helmValues []string,
 ) (pvmigrate.Restore, error) {
+	if err := requireS3RepositoryBackend(req.Store); err != nil {
+		return pvmigrate.Restore{}, err
+	}
+
 	imageValues, err := kube.ToolImageHelmValues(req.ToolImage)
 	if err != nil {
 		return pvmigrate.Restore{}, err
@@ -39,7 +43,7 @@ func pvmigrateRestoreRequest(
 			Namespace:      req.Namespace,
 			Name:           req.PVCName,
 		},
-		Backend:          string(domain.ObjectStoreBackendS3),
+		Backend:          string(domain.BackupBackendS3),
 		Bucket:           req.Store.Config().Bucket,
 		Name:             req.Store.Config().Name,
 		Path:             req.Path,
@@ -220,7 +224,12 @@ func runRestore(
 		return err
 	}
 
-	helmValues, err := transferToolHelmValues(leaseCtx, client, probeResult, req.ToolServiceAccountName)
+	helmValues, err := transferToolHelmValues(
+		leaseCtx,
+		client,
+		probeResult,
+		req.ToolServiceAccountName,
+	)
 	if err != nil {
 		return err
 	}

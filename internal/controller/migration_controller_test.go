@@ -17,7 +17,15 @@ func TestStartManagerRequiresPinnedToolImage(t *testing.T) {
 	} {
 		t.Run(name, func(t *testing.T) {
 			err := StartManagerWithKinds(
-				context.Background(), &rest.Config{}, nil, nil, "controller-system", nil, nil, nil, image,
+				context.Background(),
+				&rest.Config{},
+				nil,
+				nil,
+				"controller-system",
+				nil,
+				nil,
+				nil,
+				image,
 			)
 			if err == nil {
 				t.Fatal("manager accepted an untrusted tool image")
@@ -30,6 +38,7 @@ func TestValidateTrustedToolImageAcceptsOnlyPinnedReferences(t *testing.T) {
 	if err := ValidateTrustedToolImage("registry.example/pvc-migrate:v1"); err != nil {
 		t.Fatalf("valid image rejected: %v", err)
 	}
+
 	for _, image := range []string{"", "   ", "registry.example/pvc-migrate", "registry.example/pvc-migrate@sha256:abc"} {
 		if err := ValidateTrustedToolImage(image); err == nil {
 			t.Fatalf("image %q accepted", image)
@@ -61,6 +70,7 @@ func TestWorkflowSpecMutationError(t *testing.T) {
 
 	session := newRunnerSession("changed")
 	session.Generation = 4
+
 	session.Status.ObservedGeneration = 3
 	if err := workflowSpecMutationError(session); err == nil {
 		t.Fatal("spec generation drift was accepted")
@@ -78,9 +88,11 @@ func TestResetUnobservedTerminalStatus(t *testing.T) {
 	); err != nil {
 		t.Fatal(err)
 	}
+
 	if session.Status.Phase != domain.PhasePlanned {
 		t.Fatalf("phase=%s, want %s", session.Status.Phase, domain.PhasePlanned)
 	}
+
 	if len(store.updates) != 1 {
 		t.Fatalf("updates=%d, want one status checkpoint", len(store.updates))
 	}

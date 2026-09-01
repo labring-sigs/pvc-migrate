@@ -21,7 +21,14 @@ func (r *rootState) newPodMigrationStatusCommand() *cobra.Command {
 			defer cancel()
 
 			if len(args) == 1 {
-				session, err := r.workflowSession(ctx, runtime, cmd, args[0], domain.SessionTypeMigratePod, "migrate-pod status")
+				session, err := r.workflowSession(
+					ctx,
+					runtime,
+					cmd,
+					args[0],
+					domain.SessionTypeMigratePod,
+					"migrate-pod status",
+				)
 				if err != nil {
 					return err
 				}
@@ -29,7 +36,13 @@ func (r *rootState) newPodMigrationStatusCommand() *cobra.Command {
 				return printSessionResult(cmd, runtime, session)
 			}
 
-			return r.workflowSessionList(ctx, runtime, cmd, domain.SessionTypeMigratePod, "migrate-pod")
+			return r.workflowSessionList(
+				ctx,
+				runtime,
+				cmd,
+				domain.SessionTypeMigratePod,
+				"migrate-pod",
+			)
 		},
 	}
 }
@@ -50,7 +63,14 @@ func (r *rootState) newPodMigrationResumeCommand() *cobra.Command {
 			ctx, cancel := r.context(cmd.Context())
 			defer cancel()
 
-			session, err := r.workflowSession(ctx, runtime, cmd, args[0], domain.SessionTypeMigratePod, "migrate-pod resume")
+			session, err := r.workflowSession(
+				ctx,
+				runtime,
+				cmd,
+				args[0],
+				domain.SessionTypeMigratePod,
+				"migrate-pod resume",
+			)
 			if err != nil {
 				return err
 			}
@@ -102,7 +122,14 @@ func (r *rootState) newPodMigrationAbortCommand() *cobra.Command {
 			ctx, cancel := r.context(cmd.Context())
 			defer cancel()
 
-			session, err := r.workflowSession(ctx, runtime, cmd, args[0], domain.SessionTypeMigratePod, "migrate-pod abort")
+			session, err := r.workflowSession(
+				ctx,
+				runtime,
+				cmd,
+				args[0],
+				domain.SessionTypeMigratePod,
+				"migrate-pod abort",
+			)
 			if err != nil {
 				return err
 			}
@@ -147,7 +174,14 @@ func (r *rootState) newPodMigrationRollbackCommand() *cobra.Command {
 			ctx, cancel := r.context(cmd.Context())
 			defer cancel()
 
-			session, err := r.workflowSession(ctx, runtime, cmd, args[0], domain.SessionTypeMigratePod, "migrate-pod rollback")
+			session, err := r.workflowSession(
+				ctx,
+				runtime,
+				cmd,
+				args[0],
+				domain.SessionTypeMigratePod,
+				"migrate-pod rollback",
+			)
 			if err != nil {
 				return err
 			}
@@ -194,7 +228,14 @@ func (r *rootState) newPodMigrationCleanupCommand() *cobra.Command {
 			ctx, cancel := r.context(cmd.Context())
 			defer cancel()
 
-			session, err := r.workflowSession(ctx, runtime, cmd, args[0], domain.SessionTypeMigratePod, "migrate-pod cleanup")
+			session, err := r.workflowSession(
+				ctx,
+				runtime,
+				cmd,
+				args[0],
+				domain.SessionTypeMigratePod,
+				"migrate-pod cleanup",
+			)
 			if err != nil {
 				return err
 			}

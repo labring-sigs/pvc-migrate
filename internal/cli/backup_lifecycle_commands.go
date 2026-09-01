@@ -22,7 +22,14 @@ func (r *rootState) newBackupStatusCommand() *cobra.Command {
 			defer cancel()
 
 			if len(args) == 1 {
-				session, err := r.workflowSession(ctx, runtime, cmd, args[0], domain.SessionTypeBackup, "backup status")
+				session, err := r.workflowSession(
+					ctx,
+					runtime,
+					cmd,
+					args[0],
+					domain.SessionTypeBackup,
+					"backup status",
+				)
 				if err != nil {
 					return err
 				}
@@ -51,7 +58,14 @@ func (r *rootState) newBackupResumeCommand() *cobra.Command {
 			ctx, cancel := r.context(cmd.Context())
 			defer cancel()
 
-			session, err := r.workflowSession(ctx, runtime, cmd, args[0], domain.SessionTypeBackup, "backup resume")
+			session, err := r.workflowSession(
+				ctx,
+				runtime,
+				cmd,
+				args[0],
+				domain.SessionTypeBackup,
+				"backup resume",
+			)
 			if err != nil {
 				return err
 			}
@@ -109,7 +123,14 @@ func (r *rootState) newBackupAbortCommand() *cobra.Command {
 			ctx, cancel := r.context(cmd.Context())
 			defer cancel()
 
-			session, err := r.workflowSession(ctx, runtime, cmd, args[0], domain.SessionTypeBackup, "backup abort")
+			session, err := r.workflowSession(
+				ctx,
+				runtime,
+				cmd,
+				args[0],
+				domain.SessionTypeBackup,
+				"backup abort",
+			)
 			if err != nil {
 				return err
 			}
@@ -156,7 +177,14 @@ func (r *rootState) newBackupCleanupCommand() *cobra.Command {
 			ctx, cancel := r.context(cmd.Context())
 			defer cancel()
 
-			session, err := r.workflowSession(ctx, runtime, cmd, args[0], domain.SessionTypeBackup, "backup cleanup")
+			session, err := r.workflowSession(
+				ctx,
+				runtime,
+				cmd,
+				args[0],
+				domain.SessionTypeBackup,
+				"backup cleanup",
+			)
 			if err != nil {
 				return err
 			}

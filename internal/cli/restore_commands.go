@@ -49,37 +49,60 @@ func (r *rootState) newRestoreTransferCommand() *cobra.Command {
 			flags.secretKeyExplicit = cmd.Flags().Changed("secret-key")
 
 			flags.sessionTokenExplicit = cmd.Flags().Changed("session-token")
+
 			controllerWorkflow := controllerWorkflowAvailable(runtime, domain.SessionTypeRestore)
-			if flags.objectStoreProfile != "" {
+			if flags.backupRepository != "" {
 				if !controllerWorkflow {
-					return reportTransferError(cmd, "restore", flags.namespace, flags.pvc, domain.NewError(
-						domain.ErrorPrecondition,
-						"object-store profile",
-						"--object-store-profile requires the Restore CRD and controller mode",
-					))
+					return reportTransferError(
+						cmd,
+						"restore",
+						flags.namespace,
+						flags.pvc,
+						domain.NewError(
+							domain.ErrorPrecondition,
+							"backup repository",
+							"--backup-repository requires the Restore CRD and controller mode",
+						),
+					)
 				}
-				if !objectStoreProfileAvailable(runtime) {
-					return reportTransferError(cmd, "restore", flags.namespace, flags.pvc, domain.NewError(
-						domain.ErrorPrecondition,
-						"object-store profile",
-						"ObjectStoreProfile CRD is not served by this cluster; install deploy/crd.yaml",
-					))
+
+				if !kube.BackupRepositoryAvailable(runtime.clients.Discovery) {
+					return reportTransferError(
+						cmd,
+						"restore",
+						flags.namespace,
+						flags.pvc,
+						domain.NewError(
+							domain.ErrorPrecondition,
+							"backup repository",
+							"BackupRepository CRD is not served by this cluster; install deploy/crd.yaml",
+						),
+					)
 				}
-				if err := validateControllerProfileFlags(&flags.bucketFlags); err != nil {
+
+				if err := validateControllerRepositoryFlags(&flags.bucketFlags); err != nil {
 					return reportTransferError(cmd, "restore", flags.namespace, flags.pvc, err)
 				}
 			}
-			if runtime.controllerModeExplicit && controllerWorkflow && flags.objectStoreProfile == "" {
-				return reportTransferError(cmd, "restore", flags.namespace, flags.pvc, domain.NewError(
-					domain.ErrorPrecondition,
-					"object-store profile",
-					"controller Restore workflows require --object-store-profile",
-				))
+
+			if runtime.controllerModeExplicit && controllerWorkflow &&
+				flags.backupRepository == "" {
+				return reportTransferError(
+					cmd,
+					"restore",
+					flags.namespace,
+					flags.pvc,
+					domain.NewError(
+						domain.ErrorPrecondition,
+						"backup repository",
+						"controller Restore workflows require --backup-repository",
+					),
+				)
 			}
 
 			var store *objectstore.Store
-			if flags.objectStoreProfile != "" {
-				store, err = newControllerProfileStore(&flags.bucketFlags)
+			if flags.backupRepository != "" {
+				store, err = newControllerRepositoryStore(&flags.bucketFlags)
 			} else {
 				if err := loadS3Credentials(
 					ctx,
@@ -88,14 +111,16 @@ func (r *rootState) newRestoreTransferCommand() *cobra.Command {
 				); err != nil {
 					return reportTransferError(cmd, "restore", flags.namespace, flags.pvc, err)
 				}
+
 				store, err = r.newObjectStore(ctx, &flags.bucketFlags)
 			}
+
 			if err != nil {
 				return reportTransferError(cmd, "restore", flags.namespace, flags.pvc, err)
 			}
 
 			request := r.objectTransferRequest(runtime, &flags.bucketFlags, store, false, false)
-			if flags.objectStoreProfile != "" {
+			if flags.backupRepository != "" {
 				request.SessionNamespace = r.controllerPlanSessionNamespace(
 					runtime,
 					domain.SessionTypeRestore,
@@ -103,7 +128,8 @@ func (r *rootState) newRestoreTransferCommand() *cobra.Command {
 					flags.namespace,
 				)
 			}
-			request.SkipManifestCheck = flags.objectStoreProfile != ""
+
+			request.SkipManifestCheck = flags.backupRepository != ""
 			request.ToolImageProber = kube.NewToolImageProber(runtime.clients.Kubernetes)
 			applyRestoreRequest(&request, flags.restore)
 
@@ -139,7 +165,7 @@ func (r *rootState) newRestoreTransferCommand() *cobra.Command {
 			// creating a ConfigMap session and then executing directly would leave
 			// an orphaned planned record.
 			if controllerWorkflowAvailable(runtime, domain.SessionTypeRestore) &&
-				flags.objectStoreProfile != "" {
+				flags.backupRepository != "" {
 				session, submitErr := backup.SubmitRestore(
 					ctx,
 					runtime.clients.Kubernetes,

@@ -498,16 +498,20 @@ func TestFailedSessionReactivatesOnlyThroughExplicitResume(t *testing.T) {
 	if err := session.Transition(PhaseReserving, "reserve", time.Now()); err != nil {
 		t.Fatal(err)
 	}
+
 	if err := session.Transition(PhaseFailed, "api timeout", time.Now()); err != nil {
 		t.Fatal(err)
 	}
+
 	if err := session.Reactivate("resume requested", time.Unix(123, 0)); err != nil {
 		t.Fatal(err)
 	}
+
 	if session.Status.Phase != PhaseReserving || session.Status.ResumeFrom != PhaseReserving ||
 		session.Status.FailureReason != "" || session.Status.CompletedAt != nil {
 		t.Fatalf("reactivated status=%#v", session.Status)
 	}
+
 	if got := session.Status.History[len(session.Status.History)-1].Message; got != "resume requested" {
 		t.Fatalf("last history message=%q", got)
 	}

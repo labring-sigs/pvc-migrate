@@ -236,7 +236,12 @@ func GetBackupCredentialsSecret(
 	}
 
 	if err := ValidateS3CredentialsData(secret.Data); err != nil {
-		return nil, domain.WrapError(domain.ErrorPrecondition, "backup credentials", "credentials Secret is incomplete", err)
+		return nil, domain.WrapError(
+			domain.ErrorPrecondition,
+			"backup credentials",
+			"credentials Secret is incomplete",
+			err,
+		)
 	}
 
 	return secret, nil
@@ -255,12 +260,18 @@ func ValidateS3CredentialsData(data map[string][]byte) error {
 	}
 
 	for key, value := range data {
-		if key != BackupAccessKeyDataKey && key != BackupSecretKeyDataKey && key != BackupSessionTokenDataKey {
+		if key != BackupAccessKeyDataKey && key != BackupSecretKeyDataKey &&
+			key != BackupSessionTokenDataKey {
 			continue
 		}
+
 		for _, b := range value {
 			if b == '\r' || b == '\n' || b == 0 {
-				return domain.NewError(domain.ErrorValidation, "backup credentials", "Secret data contains unsafe control characters")
+				return domain.NewError(
+					domain.ErrorValidation,
+					"backup credentials",
+					"Secret data contains unsafe control characters",
+				)
 			}
 		}
 	}

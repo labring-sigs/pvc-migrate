@@ -17,38 +17,28 @@ import (
 	"github.com/labring-sigs/pvc-migrate/internal/domain"
 	"github.com/labring-sigs/pvc-migrate/internal/kube"
 	"github.com/labring-sigs/pvc-migrate/internal/objectstore"
+	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
-	"k8s.io/apimachinery/pkg/util/validation"
 	"k8s.io/client-go/kubernetes"
 	crclient "sigs.k8s.io/controller-runtime/pkg/client"
 )
-
-func isSHA256Fingerprint(value string) bool {
-	if len(value) != sha256.Size*2 {
-		return false
-	}
-
-	_, err := hex.DecodeString(value)
-	return err == nil
-}
 
 // Runner reconciles every workflow CR by delegating its stages to app.Service.
 // The service remains the single owner of phase transitions, persistence and
 // resource fencing; this runner only provides event polling and dispatch.
 type Runner struct {
-	service             workflowResumer
-	store               kube.SessionStore
-	client              kubernetes.Interface
-	controllerClient    crclient.Reader
-	namespace           string
-	controllerNamespace string
-	clusterIdentity     string
-	trustedToolImage    string
-	pollInterval        time.Duration
-	logger              *slog.Logger
-	openEBS             kube.OpenEBSLVMSharedVolumeManager
+	service          workflowResumer
+	store            kube.SessionStore
+	client           kubernetes.Interface
+	controllerClient crclient.Reader
+	namespace        string
+	clusterIdentity  string
+	trustedToolImage string
+	pollInterval     time.Duration
+	logger           *slog.Logger
+	openEBS          kube.OpenEBSLVMSharedVolumeManager
 }
 
 // workflowResumer is the controller-facing subset of app.Service. Keeping the
@@ -71,21 +61,11 @@ func (r *Runner) WithKubernetesClient(client kubernetes.Interface) *Runner {
 	return r
 }
 
-// WithControllerClient supplies the typed client used for cluster-scoped
-// administrator configuration such as ObjectStoreProfile.
+// WithControllerClient supplies the typed client used for repository
+// configuration and other controller-owned resources.
 func (r *Runner) WithControllerClient(client crclient.Reader) *Runner {
 	if r != nil {
 		r.controllerClient = client
-	}
-	return r
-}
-
-// WithControllerNamespace limits administrator-owned profile Secrets to the
-// controller's installation namespace. The namespace is optional for unit
-// tests and embedded callers; production manager construction always sets it.
-func (r *Runner) WithControllerNamespace(namespace string) *Runner {
-	if r != nil {
-		r.controllerNamespace = namespace
 	}
 	return r
 }
@@ -386,39 +366,49 @@ func (r *Runner) resumeBackup(ctx context.Context, session *domain.Session) erro
 	}
 
 	payload := session.Spec.Backup
-	config, err := r.objectStoreConfig(ctx, session, payload.Bucket, payload.Prefix, payload.Name, payload.Provider, payload.Endpoint, payload.Region, payload.AllowInsecureEndpoint, payload.ServerSideEncryption, payload.SSEKMSKeyID)
+
+	config, err := r.objectStoreConfig(
+		ctx,
+		session,
+		payload.Bucket,
+		payload.Prefix,
+		payload.Name,
+		payload.Provider,
+		payload.Endpoint,
+		payload.Region,
+		payload.AllowInsecureEndpoint,
+		payload.ServerSideEncryption,
+		payload.SSEKMSKeyID,
+	)
 	if err != nil {
 		return err
 	}
+
 	request := backup.Request{
-		ID:                                   session.ID,
-		ToolImage:                            payload.ToolImage,
-		Namespace:                            payload.SourcePVC.Namespace,
-		PVCName:                              payload.SourcePVC.Name,
-		Path:                                 payload.Path,
-		Online:                               payload.Online,
-		DeleteExtraneousFiles:                payload.DeleteExtraneous,
-		SessionStore:                         r.store,
-		SessionNamespace:                     session.Spec.SessionNamespace,
-		OpenEBSLVMManager:                    r.openEBS,
-		ObjectStoreFactory:                   objectstore.New,
-		Store:                                nil,
-		Writer:                               io.Discard,
-		Logger:                               r.logger,
-		BackupSession:                        session,
-		ObjectStoreProfile:                   payload.ObjectStoreProfile,
-		ObjectStoreProfileUID:                types.UID(config.ProfileUID),
-		ObjectStoreProfileGeneration:         config.ProfileGeneration,
-		ObjectStoreCredentialsSecretUID:      types.UID(config.CredentialsSecretUID),
-		ObjectStoreServiceAccountUID:         types.UID(config.ServiceAccountUID),
-		ObjectStoreServiceAccountFingerprint: config.ServiceAccountFingerprint,
-		ToolServiceAccountName:               config.ServiceAccountName,
+		ID:                      session.ID,
+		ToolImage:               payload.ToolImage,
+		Namespace:               payload.SourcePVC.Namespace,
+		PVCName:                 payload.SourcePVC.Name,
+		Path:                    payload.Path,
+		Online:                  payload.Online,
+		DeleteExtraneousFiles:   payload.DeleteExtraneous,
+		SessionStore:            r.store,
+		SessionNamespace:        session.Spec.SessionNamespace,
+		OpenEBSLVMManager:       r.openEBS,
+		ObjectStoreFactory:      objectstore.New,
+		Store:                   nil,
+		Writer:                  io.Discard,
+		Logger:                  r.logger,
+		BackupSession:           session,
+		BackupRepository:        payload.BackupRepository,
+		BackupRepositoryBinding: s3RepositoryBinding(config),
 	}
 
 	request.Store, err = objectstore.New(ctx, config)
 	if err != nil {
 		return err
 	}
+
 	return backup.Resume(ctx, r.client, request, session)
 }
 
@@ -441,7 +431,19 @@ func (r *Runner) resumeRestore(ctx context.Context, session *domain.Session) err
 
 	payload := session.Spec.Restore
 
-	config, err := r.objectStoreConfig(ctx, session, payload.Bucket, payload.Prefix, payload.Name, payload.Provider, payload.Endpoint, payload.Region, payload.AllowInsecureEndpoint, payload.ServerSideEncryption, payload.SSEKMSKeyID)
+	config, err := r.objectStoreConfig(
+		ctx,
+		session,
+		payload.Bucket,
+		payload.Prefix,
+		payload.Name,
+		payload.Provider,
+		payload.Endpoint,
+		payload.Region,
+		payload.AllowInsecureEndpoint,
+		payload.ServerSideEncryption,
+		payload.SSEKMSKeyID,
+	)
 	if err != nil {
 		return err
 	}
@@ -452,34 +454,40 @@ func (r *Runner) resumeRestore(ctx context.Context, session *domain.Session) err
 	}
 
 	request := backup.Request{
-		ID:                                   session.ID,
-		ToolImage:                            payload.ToolImage,
-		Namespace:                            payload.DestinationPVC.Namespace,
-		PVCName:                              payload.DestinationPVC.Name,
-		CreatePVC:                            payload.CreatePVC,
-		DestinationStorageClass:              payload.DestinationStorageClass,
-		DestinationAccessMode:                payload.DestinationAccessMode,
-		DestinationCapacity:                  payload.DestinationCapacity,
-		TargetNode:                           payload.TargetNode,
-		Path:                                 payload.Path,
-		AllowMounted:                         payload.AllowMounted,
-		DeleteExtraneousFiles:                payload.DeleteExtraneous,
-		SessionStore:                         r.store,
-		SessionNamespace:                     session.Spec.SessionNamespace,
-		Store:                                store,
-		OpenEBSLVMManager:                    r.openEBS,
-		Writer:                               io.Discard,
-		Logger:                               r.logger,
-		ObjectStoreProfile:                   payload.ObjectStoreProfile,
-		ObjectStoreProfileUID:                types.UID(config.ProfileUID),
-		ObjectStoreProfileGeneration:         config.ProfileGeneration,
-		ObjectStoreCredentialsSecretUID:      types.UID(config.CredentialsSecretUID),
-		ObjectStoreServiceAccountUID:         types.UID(config.ServiceAccountUID),
-		ObjectStoreServiceAccountFingerprint: config.ServiceAccountFingerprint,
-		ToolServiceAccountName:               config.ServiceAccountName,
+		ID:                      session.ID,
+		ToolImage:               payload.ToolImage,
+		Namespace:               payload.DestinationPVC.Namespace,
+		PVCName:                 payload.DestinationPVC.Name,
+		CreatePVC:               payload.CreatePVC,
+		DestinationStorageClass: payload.DestinationStorageClass,
+		DestinationAccessMode:   payload.DestinationAccessMode,
+		DestinationCapacity:     payload.DestinationCapacity,
+		TargetNode:              payload.TargetNode,
+		Path:                    payload.Path,
+		AllowMounted:            payload.AllowMounted,
+		DeleteExtraneousFiles:   payload.DeleteExtraneous,
+		SessionStore:            r.store,
+		SessionNamespace:        session.Spec.SessionNamespace,
+		Store:                   store,
+		OpenEBSLVMManager:       r.openEBS,
+		Writer:                  io.Discard,
+		Logger:                  r.logger,
+		BackupRepository:        payload.BackupRepository,
+		BackupRepositoryBinding: s3RepositoryBinding(config),
 	}
 
 	return backup.ResumeRestore(ctx, r.client, request, session)
+}
+
+func s3RepositoryBinding(config objectstore.Config) *domain.BackupRepositoryBindingStatus {
+	return &domain.BackupRepositoryBindingStatus{
+		Type:       domain.BackupRepositoryTypeS3,
+		UID:        types.UID(config.RepositoryUID),
+		Generation: config.RepositoryGeneration,
+		S3: &domain.S3BackupRepositoryBindingStatus{
+			CredentialsSecretUID: types.UID(config.CredentialsSecretUID),
+		},
+	}
 }
 
 func (r *Runner) objectStoreConfig(
@@ -490,251 +498,47 @@ func (r *Runner) objectStoreConfig(
 	serverSideEncryption, kmsKeyID string,
 ) (objectstore.Config, error) {
 	if session == nil {
-		return objectstore.Config{}, domain.NewError(domain.ErrorValidation, "controller object store", "session is required")
+		return objectstore.Config{}, domain.NewError(
+			domain.ErrorValidation,
+			"controller object store",
+			"session is required",
+		)
 	}
 
-	config := objectstore.Config{
-		Bucket: bucket, Prefix: prefix, Name: name, Provider: provider,
-		Endpoint: endpoint, Region: region, AllowInsecureEndpoint: allowInsecure,
-		ForcePathStyle: endpoint != "", ServerSideEncryption: serverSideEncryption,
-		SSEKMSKeyID: kmsKeyID,
-	}
-
-	profileName := ""
+	// BackupRepository is the current API. It represents a user-selected
+	// object-store location, not a tenant authorization lease. Resolve it in
+	// the workflow namespace and keep the credential Secret namespace-local.
+	repositoryName := ""
 	if session.Spec.Backup != nil {
-		profileName = session.Spec.Backup.ObjectStoreProfile
+		repositoryName = session.Spec.Backup.BackupRepository
 	}
+
 	if session.Spec.Restore != nil {
-		profileName = session.Spec.Restore.ObjectStoreProfile
-	}
-	if profileName == "" {
-		return objectstore.Config{}, domain.NewError(domain.ErrorPrecondition, "controller object store", "controller workflows require spec.objectStoreProfile")
-	}
-	if r.controllerClient == nil {
-		return objectstore.Config{}, domain.NewError(domain.ErrorKubernetes, "controller object store", "controller-runtime client is not configured")
+		repositoryName = session.Spec.Restore.BackupRepository
 	}
 
-	profile := &v1alpha1.ObjectStoreProfile{}
-	if err := r.controllerClient.Get(ctx, crclient.ObjectKey{Name: profileName}, profile); err != nil {
-		if apierrors.IsNotFound(err) {
-			return objectstore.Config{}, domain.WrapError(domain.ErrorPrecondition, "controller object store", "ObjectStoreProfile "+profileName+" does not exist", err)
-		}
-		return objectstore.Config{}, domain.WrapError(domain.ErrorKubernetes, "controller object store", "read ObjectStoreProfile "+profileName, err)
-	}
-	if profile.DeletionTimestamp != nil {
-		return objectstore.Config{}, domain.NewError(
-			domain.ErrorPrecondition,
-			"controller object store",
-			"ObjectStoreProfile is being deleted; create a new workflow after deletion completes",
+	if repositoryName != "" {
+		return r.backupRepositoryConfig(
+			ctx,
+			session,
+			repositoryName,
+			name,
+			bucket,
+			prefix,
+			provider,
+			endpoint,
+			region,
+			allowInsecure,
+			serverSideEncryption,
+			kmsKeyID,
 		)
 	}
 
-	if profile.Spec.Backend != v1alpha1.ObjectStoreBackendS3 {
-		return objectstore.Config{}, domain.NewError(domain.ErrorValidation, "controller object store", "ObjectStoreProfile backend must be s3")
-	}
-	usesWorkloadIdentity := len(profile.Spec.ServiceAccountRefs) > 0
-	if !usesWorkloadIdentity && !profile.Spec.AllowStaticCredentialsInTenantNamespace {
-		return objectstore.Config{}, domain.NewError(
-			domain.ErrorPrecondition,
-			"controller object store",
-			"ObjectStoreProfile static credentials require explicit tenant-namespace projection approval",
-		)
-	}
-	if usesWorkloadIdentity && profile.Spec.AllowStaticCredentialsInTenantNamespace {
-		return objectstore.Config{}, domain.NewError(
-			domain.ErrorValidation,
-			"controller object store",
-			"ObjectStoreProfile tenant-namespace projection approval cannot be combined with workload identity",
-		)
-	}
-	if err := objectstore.ValidateConfig(objectstore.Config{
-		Bucket:               profile.Spec.Bucket,
-		Prefix:               profile.Spec.Prefix,
-		Name:                 "profile",
-		Provider:             profile.Spec.Provider,
-		Endpoint:             profile.Spec.Endpoint,
-		Region:               profile.Spec.Region,
-		ForcePathStyle:       profile.Spec.ForcePathStyle,
-		ServerSideEncryption: profile.Spec.ServerSideEncryption,
-		SSEKMSKeyID:          profile.Spec.SSEKMSKeyID,
-	}); err != nil {
-		return objectstore.Config{}, domain.WrapError(
-			domain.ErrorValidation,
-			"controller object store",
-			"validate ObjectStoreProfile location",
-			err,
-		)
-	}
-
-	if bucket != "" && bucket != profile.Spec.Bucket {
-		return objectstore.Config{}, domain.NewError(domain.ErrorPrecondition, "controller object store", "workflow bucket is outside ObjectStoreProfile scope")
-	}
-	if prefix != "" && prefix != profile.Spec.Prefix {
-		return objectstore.Config{}, domain.NewError(domain.ErrorPrecondition, "controller object store", "workflow prefix is outside ObjectStoreProfile scope")
-	}
-	if !usesWorkloadIdentity && len(profile.Spec.AllowedNamespaces) != 1 {
-		return objectstore.Config{}, domain.NewError(
-			domain.ErrorPrecondition,
-			"controller object store",
-			"static-credential ObjectStoreProfiles must allow exactly one tenant namespace",
-		)
-	}
-	for _, namespace := range profile.Spec.AllowedNamespaces {
-		namespaceName := string(namespace)
-		if namespaceName == "" || strings.TrimSpace(namespaceName) != namespaceName || len(validation.IsDNS1123Label(namespaceName)) > 0 {
-			return objectstore.Config{}, domain.NewError(
-				domain.ErrorValidation,
-				"controller object store",
-				"ObjectStoreProfile allowedNamespaces must contain DNS labels",
-			)
-		}
-	}
-	var serviceAccountRef v1alpha1.ObjectStoreServiceAccountReference
-	serviceAccountMatches := 0
-	seenServiceAccountNamespaces := make(map[string]struct{}, len(profile.Spec.ServiceAccountRefs))
-	for _, candidate := range profile.Spec.ServiceAccountRefs {
-		if candidate.Name == "" || strings.TrimSpace(candidate.Name) != candidate.Name || len(validation.IsDNS1123Subdomain(candidate.Name)) > 0 ||
-			candidate.Namespace == "" || strings.TrimSpace(candidate.Namespace) != candidate.Namespace || len(validation.IsDNS1123Label(candidate.Namespace)) > 0 ||
-			strings.TrimSpace(candidate.UID) == "" ||
-			!isSHA256Fingerprint(candidate.IdentityFingerprint) {
-			return objectstore.Config{}, domain.NewError(domain.ErrorValidation, "controller object store", "ObjectStoreProfile serviceAccountRefs must contain valid namespace, name, UID, and identityFingerprint")
-		}
-		if _, duplicate := seenServiceAccountNamespaces[candidate.Namespace]; duplicate {
-			return objectstore.Config{}, domain.NewError(domain.ErrorValidation, "controller object store", "ObjectStoreProfile serviceAccountRefs must contain at most one binding per namespace")
-		}
-		seenServiceAccountNamespaces[candidate.Namespace] = struct{}{}
-		if candidate.Namespace == session.Spec.SessionNamespace {
-			serviceAccountRef = candidate
-			serviceAccountMatches++
-		}
-	}
-
-	if usesWorkloadIdentity && len(profile.Spec.AllowedNamespaces) > 0 {
-		return objectstore.Config{}, domain.NewError(domain.ErrorValidation, "controller object store", "ObjectStoreProfile allowedNamespaces is only valid for static credential profiles")
-	}
-	if serviceAccountMatches > 1 {
-		return objectstore.Config{}, domain.NewError(domain.ErrorValidation, "controller object store", "ObjectStoreProfile has multiple ServiceAccount bindings for workflow namespace")
-	}
-	if !usesWorkloadIdentity {
-		allowed := false
-		for _, candidate := range profile.Spec.AllowedNamespaces {
-			if string(candidate) == session.Spec.SessionNamespace {
-				allowed = true
-				break
-			}
-		}
-		if !allowed {
-			return objectstore.Config{}, domain.NewError(domain.ErrorPrecondition, "controller object store", "workflow namespace is not allowed by ObjectStoreProfile")
-		}
-	}
-	if provider != "" || region != "" || endpoint != "" || allowInsecure ||
-		serverSideEncryption != "" || kmsKeyID != "" {
-		return objectstore.Config{}, domain.NewError(domain.ErrorPrecondition, "controller object store", "workflow connection and encryption overrides are forbidden; configure them in ObjectStoreProfile")
-	}
-	config.Provider = profile.Spec.Provider
-	config.Endpoint = profile.Spec.Endpoint
-	config.Region = profile.Spec.Region
-	config.Bucket = profile.Spec.Bucket
-	basePrefix := profile.Spec.Prefix
-	// Every controller workflow receives a namespace-owned object prefix. A
-	// shared administrator profile therefore cannot be used by one tenant to
-	// address another tenant's recovery points by guessing its name.
-	config.Prefix = path.Join(basePrefix, "namespaces", session.Spec.SessionNamespace)
-	if r.clusterIdentity != "" {
-		// Profiles and buckets may be configured identically in multiple
-		// clusters. Include a stable cluster scope before the tenant scope so
-		// recovery points cannot overwrite or be confused across clusters.
-		config.Prefix = path.Join(basePrefix, "clusters", clusterScopeSegment(r.clusterIdentity), "namespaces", session.Spec.SessionNamespace)
-	}
-	config.AllowInsecureEndpoint = false
-	config.ForcePathStyle = profile.Spec.ForcePathStyle || config.Endpoint != ""
-	config.ServerSideEncryption = profile.Spec.ServerSideEncryption
-	config.SSEKMSKeyID = profile.Spec.SSEKMSKeyID
-
-	hasServiceAccountRef := serviceAccountMatches == 1
-	ref := profile.Spec.CredentialsSecret
-	if ref != nil && strings.TrimSpace(ref.Name) == "" {
-		return objectstore.Config{}, domain.NewError(domain.ErrorValidation, "controller object store", "ObjectStoreProfile credentialsSecret name is required when configured")
-	}
-	if !usesWorkloadIdentity && (ref == nil || ref.Name == "") {
-		return objectstore.Config{}, domain.NewError(
-			domain.ErrorPrecondition,
-			"controller object store",
-			"ObjectStoreProfile static credential profiles require credentialsSecret",
-		)
-	}
-	if ref != nil && ref.Name != "" {
-		controllerNamespace := strings.TrimSpace(r.controllerNamespace)
-		if controllerNamespace == "" {
-			return objectstore.Config{}, domain.NewError(
-				domain.ErrorPrecondition,
-				"controller object store",
-				"controller installation namespace is not configured; refusing to read profile credentials",
-			)
-		}
-		if r.client == nil {
-			return objectstore.Config{}, domain.NewError(domain.ErrorKubernetes, "controller object store", "Kubernetes client is not configured")
-		}
-		secret, err := r.client.CoreV1().Secrets(controllerNamespace).Get(ctx, ref.Name, metav1.GetOptions{})
-		if apierrors.IsNotFound(err) {
-			return objectstore.Config{}, domain.WrapError(domain.ErrorPrecondition, "controller object store", "ObjectStoreProfile credentials Secret does not exist", err)
-		}
-		if err != nil {
-			return objectstore.Config{}, domain.WrapError(domain.ErrorKubernetes, "controller object store", "read ObjectStoreProfile credentials Secret", err)
-		}
-		if err := kube.ValidateS3CredentialsData(secret.Data); err != nil {
-			return objectstore.Config{}, domain.WrapError(domain.ErrorPrecondition, "controller object store", "ObjectStoreProfile credentials Secret is invalid", err)
-		}
-		config.AccessKey = string(secret.Data[kube.BackupAccessKeyDataKey])
-		config.SecretKey = string(secret.Data[kube.BackupSecretKeyDataKey])
-		config.SessionToken = string(secret.Data[kube.BackupSessionTokenDataKey])
-		config.CredentialsSecretUID = string(secret.UID)
-	}
-	if usesWorkloadIdentity {
-		if !hasServiceAccountRef {
-			return objectstore.Config{}, domain.NewError(domain.ErrorPrecondition, "controller object store", "ObjectStoreProfile has no ServiceAccount binding for workflow namespace")
-		}
-		config.UseAmbientCredentials = true
-		if r.client == nil {
-			return objectstore.Config{}, domain.NewError(domain.ErrorKubernetes, "controller object store", "Kubernetes client is not configured")
-		}
-		serviceAccount, err := r.client.CoreV1().ServiceAccounts(serviceAccountRef.Namespace).Get(ctx, serviceAccountRef.Name, metav1.GetOptions{})
-		if apierrors.IsNotFound(err) {
-			return objectstore.Config{}, domain.WrapError(domain.ErrorPrecondition, "controller object store", "ObjectStoreProfile ServiceAccount does not exist in its bound namespace", err)
-		} else if err != nil {
-			return objectstore.Config{}, domain.WrapError(domain.ErrorKubernetes, "controller object store", "read ObjectStoreProfile service account", err)
-		}
-		if string(serviceAccount.UID) != serviceAccountRef.UID {
-			return objectstore.Config{}, domain.NewError(domain.ErrorPrecondition, "controller object store", "ObjectStoreProfile ServiceAccount UID does not match the administrator binding")
-		}
-		if fingerprint := kube.ServiceAccountIdentityFingerprint(serviceAccount); fingerprint != serviceAccountRef.IdentityFingerprint {
-			return objectstore.Config{}, domain.NewError(
-				domain.ErrorPrecondition,
-				"controller object store",
-				"ObjectStoreProfile ServiceAccount identity fingerprint does not match the administrator binding",
-			)
-		}
-		if serviceAccount.AutomountServiceAccountToken != nil && !*serviceAccount.AutomountServiceAccountToken {
-			return objectstore.Config{}, domain.NewError(
-				domain.ErrorPrecondition,
-				"controller object store",
-				"ObjectStoreProfile ServiceAccount must enable automountServiceAccountToken for workload identity",
-			)
-		}
-		config.ServiceAccountName = serviceAccountRef.Name
-		config.ServiceAccountUID = string(serviceAccount.UID)
-		config.ServiceAccountFingerprint = kube.ServiceAccountIdentityFingerprint(serviceAccount)
-		if config.ServiceAccountFingerprint == "" {
-			return objectstore.Config{}, domain.NewError(
-				domain.ErrorInternal,
-				"controller object store",
-				"failed to fingerprint ObjectStoreProfile service account",
-			)
-		}
-	}
-	config.ProfileUID = string(profile.UID)
-	config.ProfileGeneration = profile.Generation
-	return config, nil
+	return objectstore.Config{}, domain.NewError(
+		domain.ErrorPrecondition,
+		"controller object store",
+		"controller workflows require spec.repositoryRef",
+	)
 }
 
 func clusterScopeSegment(identity string) string {
@@ -743,6 +547,293 @@ func clusterScopeSegment(identity string) string {
 	// object store while keeping the generated prefix comfortably within S3
 	// and rclone path limits.
 	return hex.EncodeToString(digest[:16])
+}
+
+func repositoryNamespaceForSession(session *domain.Session) (string, bool, error) {
+	repositoryNamespace := ""
+	if session.Spec.Backup != nil {
+		repositoryNamespace = session.Spec.Backup.BackupRepositoryNamespace
+	}
+
+	if session.Spec.Restore != nil {
+		repositoryNamespace = session.Spec.Restore.BackupRepositoryNamespace
+	}
+
+	clusterWorkflow := domain.IsClusterControllerKind(session.BackendResource) ||
+		session.Spec.SourceNamespace != session.Spec.SessionNamespace ||
+		(session.Spec.DestinationNamespace != "" && session.Spec.DestinationNamespace != session.Spec.SessionNamespace) ||
+		(session.Spec.TemporaryNamespace != "" && session.Spec.TemporaryNamespace != session.Spec.SessionNamespace) ||
+		session.Spec.Type == domain.SessionTypeMove
+	if repositoryNamespace == "" && clusterWorkflow {
+		return "", clusterWorkflow, domain.NewError(
+			domain.ErrorPrecondition,
+			"controller object store",
+			"cluster workflows require an explicit BackupRepository namespace",
+		)
+	}
+
+	if repositoryNamespace == "" {
+		repositoryNamespace = session.Spec.SessionNamespace
+	}
+
+	return repositoryNamespace, clusterWorkflow, nil
+}
+
+func s3RepositorySpec(
+	repository *v1alpha1.BackupRepository,
+) (*v1alpha1.S3BackupRepositorySpec, error) {
+	if repository.Spec.Type == v1alpha1.BackupRepositoryTypePVC {
+		claim := ""
+		if repository.Spec.PVC != nil {
+			claim = repository.Spec.PVC.ClaimRef.Name
+		}
+
+		return nil, domain.NewError(
+			domain.ErrorPrecondition,
+			"controller object store",
+			fmt.Sprintf(
+				"BackupRepository backend pvc is not supported by this controller yet (claim %q)",
+				claim,
+			),
+		)
+	}
+
+	if repository.Spec.Type != v1alpha1.BackupRepositoryTypeS3 || repository.Spec.S3 == nil {
+		return nil, domain.NewError(
+			domain.ErrorValidation,
+			"controller object store",
+			"BackupRepository requires type s3 with an s3 configuration",
+		)
+	}
+
+	return repository.Spec.S3, nil
+}
+
+func controllerObjectStoreOverridesError(
+	bucket, prefix, provider, endpoint, region, serverSideEncryption, kmsKeyID string,
+	allowInsecure bool,
+) error {
+	if bucket == "" && prefix == "" && provider == "" && endpoint == "" && region == "" &&
+		!allowInsecure && serverSideEncryption == "" && kmsKeyID == "" {
+		return nil
+	}
+
+	return domain.NewError(
+		domain.ErrorPrecondition,
+		"controller object store",
+		"workflow object-store settings must be configured in BackupRepository",
+	)
+}
+
+func (r *Runner) backupRepositorySecret(
+	ctx context.Context,
+	namespace, name string,
+) (*corev1.Secret, error) {
+	if r.client == nil {
+		return nil, domain.NewError(
+			domain.ErrorKubernetes,
+			"controller object store",
+			"Kubernetes client is not configured",
+		)
+	}
+
+	secret, err := r.client.CoreV1().Secrets(namespace).Get(ctx, name, metav1.GetOptions{})
+	if apierrors.IsNotFound(err) {
+		return nil, domain.WrapError(
+			domain.ErrorPrecondition,
+			"controller object store",
+			"BackupRepository credentials Secret does not exist",
+			err,
+		)
+	}
+
+	if err != nil {
+		return nil, domain.WrapError(
+			domain.ErrorKubernetes,
+			"controller object store",
+			"read BackupRepository credentials Secret",
+			err,
+		)
+	}
+
+	if err := kube.ValidateS3CredentialsData(secret.Data); err != nil {
+		return nil, domain.WrapError(
+			domain.ErrorPrecondition,
+			"controller object store",
+			"BackupRepository credentials Secret is invalid",
+			err,
+		)
+	}
+
+	return secret, nil
+}
+
+func (r *Runner) backupRepositoryConfig(
+	ctx context.Context,
+	session *domain.Session,
+	repositoryName, name, bucket, prefix, provider, endpoint, region string,
+	allowInsecure bool,
+	serverSideEncryption, kmsKeyID string,
+) (objectstore.Config, error) {
+	if r.controllerClient == nil {
+		return objectstore.Config{}, domain.NewError(
+			domain.ErrorKubernetes,
+			"controller object store",
+			"controller-runtime client is not configured",
+		)
+	}
+
+	if session == nil || session.Spec.SessionNamespace == "" {
+		return objectstore.Config{}, domain.NewError(
+			domain.ErrorValidation,
+			"controller object store",
+			"workflow namespace is required",
+		)
+	}
+
+	config := objectstore.Config{Name: name}
+	repository := &v1alpha1.BackupRepository{}
+
+	repositoryNamespace, clusterWorkflow, err := repositoryNamespaceForSession(session)
+	if err != nil {
+		return objectstore.Config{}, err
+	}
+
+	key := crclient.ObjectKey{Namespace: repositoryNamespace, Name: repositoryName}
+	if err := r.controllerClient.Get(ctx, key, repository); err != nil {
+		if apierrors.IsNotFound(err) {
+			return objectstore.Config{}, domain.WrapError(
+				domain.ErrorPrecondition,
+				"controller object store",
+				"BackupRepository "+repositoryName+" does not exist",
+				err,
+			)
+		}
+
+		return objectstore.Config{}, domain.WrapError(
+			domain.ErrorKubernetes,
+			"controller object store",
+			"read BackupRepository "+repositoryName,
+			err,
+		)
+	}
+
+	if repository.DeletionTimestamp != nil {
+		return objectstore.Config{}, domain.NewError(
+			domain.ErrorPrecondition,
+			"controller object store",
+			"BackupRepository is being deleted; create a new workflow after deletion completes",
+		)
+	}
+
+	if repositoryNamespace != session.Spec.SessionNamespace && !clusterWorkflow {
+		return objectstore.Config{}, domain.NewError(
+			domain.ErrorPrecondition,
+			"controller object store",
+			"namespaced workflows may reference only a BackupRepository in their own namespace",
+		)
+	}
+
+	s3Spec, err := s3RepositorySpec(repository)
+	if err != nil {
+		return objectstore.Config{}, err
+	}
+
+	locationBucket := s3Spec.Bucket
+	locationPrefix := s3Spec.Prefix
+	locationProvider := s3Spec.Provider
+	locationEndpoint := s3Spec.Endpoint
+	locationRegion := s3Spec.Region
+	forcePathStyle := s3Spec.ForcePathStyle
+	locationAllowInsecure := s3Spec.AllowInsecureEndpoint
+	locationEncryption := s3Spec.ServerSideEncryption
+	locationKMSKeyID := s3Spec.SSEKMSKeyID
+	secretNamespace := repositoryNamespace
+
+	secretName := s3Spec.CredentialsSecret.Name
+	if secretName == "" {
+		return objectstore.Config{}, domain.NewError(
+			domain.ErrorPrecondition,
+			"controller object store",
+			"BackupRepository credentialsSecret is required",
+		)
+	}
+
+	if err := controllerObjectStoreOverridesError(
+		bucket,
+		prefix,
+		provider,
+		endpoint,
+		region,
+		serverSideEncryption,
+		kmsKeyID,
+		allowInsecure,
+	); err != nil {
+		return objectstore.Config{}, err
+	}
+
+	if err := objectstore.ValidateConfig(objectstore.Config{
+		Bucket:                locationBucket,
+		Prefix:                locationPrefix,
+		Name:                  name,
+		Provider:              locationProvider,
+		Endpoint:              locationEndpoint,
+		Region:                locationRegion,
+		AllowInsecureEndpoint: locationAllowInsecure,
+		ForcePathStyle:        forcePathStyle,
+		ServerSideEncryption:  locationEncryption,
+		SSEKMSKeyID:           locationKMSKeyID,
+	}); err != nil {
+		return objectstore.Config{}, domain.WrapError(
+			domain.ErrorValidation,
+			"controller object store",
+			"validate BackupRepository location",
+			err,
+		)
+	}
+
+	secret, err := r.backupRepositorySecret(ctx, secretNamespace, secretName)
+	if err != nil {
+		return objectstore.Config{}, err
+	}
+
+	config.Bucket = locationBucket
+	config.Provider = locationProvider
+	config.Endpoint = locationEndpoint
+	config.Region = locationRegion
+	config.AllowInsecureEndpoint = locationAllowInsecure
+	config.ForcePathStyle = forcePathStyle || locationEndpoint != ""
+	config.ServerSideEncryption = locationEncryption
+	config.SSEKMSKeyID = locationKMSKeyID
+
+	dataNamespace := session.Spec.SourceNamespace
+	if session.Spec.Type == domain.SessionTypeRestore {
+		dataNamespace = session.Spec.DestinationNamespace
+	}
+
+	if dataNamespace == "" {
+		dataNamespace = session.Spec.SessionNamespace
+	}
+
+	config.Prefix = path.Join(
+		locationPrefix,
+		"clusters",
+		clusterScopeSegment(r.clusterIdentity),
+		"namespaces",
+		dataNamespace,
+	)
+	if r.clusterIdentity == "" {
+		config.Prefix = path.Join(locationPrefix, "namespaces", dataNamespace)
+	}
+
+	config.AccessKey = string(secret.Data[kube.BackupAccessKeyDataKey])
+	config.SecretKey = string(secret.Data[kube.BackupSecretKeyDataKey])
+	config.SessionToken = string(secret.Data[kube.BackupSessionTokenDataKey])
+	config.CredentialsSecretUID = string(secret.UID)
+	config.RepositoryUID = string(repository.UID)
+	config.RepositoryGeneration = repository.Generation
+
+	return config, nil
 }
 
 func terminalSession(session *domain.Session) bool {

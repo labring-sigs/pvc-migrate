@@ -30,13 +30,16 @@ func runBackupWithSession(
 	}
 
 	session := req.BackupSession
+
 	created := false
 	if session == nil {
 		var err error
+
 		session, err = prepareBackupSession(ctx, client, req, expectedPVCUID, expectedPVUID)
 		if err != nil {
 			return err
 		}
+
 		created = true
 	}
 
@@ -201,6 +204,10 @@ func pvmigrateBackupRequest(
 	configPath string,
 	helmValues []string,
 ) (pvmigrate.Backup, error) {
+	if err := requireS3RepositoryBackend(req.Store); err != nil {
+		return pvmigrate.Backup{}, err
+	}
+
 	imageValues, err := kube.ToolImageHelmValues(req.ToolImage)
 	if err != nil {
 		return pvmigrate.Backup{}, err
@@ -228,7 +235,7 @@ func pvmigrateBackupRequest(
 			Namespace:      req.Namespace,
 			Name:           req.PVCName,
 		},
-		Backend:          string(domain.ObjectStoreBackendS3),
+		Backend:          string(domain.BackupBackendS3),
 		Bucket:           req.Store.Config().Bucket,
 		Name:             req.Store.Config().Name,
 		Path:             req.Path,
@@ -625,9 +632,8 @@ func acquireBackupTargetLock(
 	return boundCtx, lock, cancel, nil
 }
 
-func backupTargetLockID(store *objectstore.Store) string {
-	config := store.Config()
-	digest := sha256.Sum256([]byte(config.Bucket + "\x00" + config.Prefix + "\x00" + config.Name))
+func backupTargetLockID(store RepositoryStore) string {
+	digest := sha256.Sum256([]byte(store.Backend() + "\x00" + store.Destination()))
 	return "backup-target-" + hex.EncodeToString(digest[:])[:32]
 }
 
@@ -675,7 +681,7 @@ func (l *lockLease) current() string {
 
 func (l *lockLease) renewNow(
 	ctx context.Context,
-	store *objectstore.Store,
+	store RepositoryStore,
 	holder string,
 	ttl time.Duration,
 ) error {
@@ -737,7 +743,7 @@ func classifyLeaseError(ctx context.Context, err error) error {
 func renewObjectStoreLock(
 	ctx context.Context,
 	cancel context.CancelFunc,
-	store *objectstore.Store,
+	store RepositoryStore,
 	holder string,
 	ttl time.Duration,
 	lease *lockLease,

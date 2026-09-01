@@ -140,7 +140,7 @@ func NewRoot(options Options) *cobra.Command {
 		&state.global.controllerNamespace,
 		"controller-namespace",
 		"pvc-migrate-system",
-		"Namespace where the controller is installed and its profile credentials are read",
+		"Namespace where the controller is installed",
 	)
 	flags.StringVar(
 		&state.global.workflowNamespace,
@@ -419,6 +419,7 @@ func (r *rootState) validateGlobalFlags() error {
 			),
 		)
 	}
+
 	if problems := validation.IsDNS1123Label(r.global.controllerNamespace); len(problems) > 0 {
 		return domain.NewError(
 			domain.ErrorValidation,
@@ -430,6 +431,7 @@ func (r *rootState) validateGlobalFlags() error {
 			),
 		)
 	}
+
 	if r.global.workflowNamespace != "" {
 		if problems := validation.IsDNS1123Label(r.global.workflowNamespace); len(problems) > 0 {
 			return domain.NewError(

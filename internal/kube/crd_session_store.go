@@ -29,6 +29,7 @@ var MigrationGVR = schema.GroupVersionResource{
 
 type crdResource struct {
 	kind    domain.ControllerKind
+	cluster bool
 	new     func() crclient.Object
 	newList func() crclient.ObjectList
 }
@@ -44,9 +45,21 @@ func workflowCRDResourceRegistry() []crdResource {
 			newList: func() crclient.ObjectList { return &v1alpha1.MigrationList{} },
 		},
 		{
+			kind:    domain.ControllerKindClusterMigration,
+			cluster: true,
+			new:     func() crclient.Object { return &v1alpha1.ClusterMigration{} },
+			newList: func() crclient.ObjectList { return &v1alpha1.ClusterMigrationList{} },
+		},
+		{
 			kind:    domain.ControllerKindPodMigration,
 			new:     func() crclient.Object { return &v1alpha1.PodMigration{} },
 			newList: func() crclient.ObjectList { return &v1alpha1.PodMigrationList{} },
+		},
+		{
+			kind:    domain.ControllerKindClusterPodMigration,
+			cluster: true,
+			new:     func() crclient.Object { return &v1alpha1.ClusterPodMigration{} },
+			newList: func() crclient.ObjectList { return &v1alpha1.ClusterPodMigrationList{} },
 		},
 		{
 			kind:    domain.ControllerKindReservation,
@@ -54,9 +67,21 @@ func workflowCRDResourceRegistry() []crdResource {
 			newList: func() crclient.ObjectList { return &v1alpha1.ReservationList{} },
 		},
 		{
+			kind:    domain.ControllerKindClusterReservation,
+			cluster: true,
+			new:     func() crclient.Object { return &v1alpha1.ClusterReservation{} },
+			newList: func() crclient.ObjectList { return &v1alpha1.ClusterReservationList{} },
+		},
+		{
 			kind:    domain.ControllerKindCopy,
 			new:     func() crclient.Object { return &v1alpha1.Copy{} },
 			newList: func() crclient.ObjectList { return &v1alpha1.CopyList{} },
+		},
+		{
+			kind:    domain.ControllerKindClusterCopy,
+			cluster: true,
+			new:     func() crclient.Object { return &v1alpha1.ClusterCopy{} },
+			newList: func() crclient.ObjectList { return &v1alpha1.ClusterCopyList{} },
 		},
 		{
 			kind:    domain.ControllerKindBackup,
@@ -64,9 +89,21 @@ func workflowCRDResourceRegistry() []crdResource {
 			newList: func() crclient.ObjectList { return &v1alpha1.BackupList{} },
 		},
 		{
+			kind:    domain.ControllerKindClusterBackup,
+			cluster: true,
+			new:     func() crclient.Object { return &v1alpha1.ClusterBackup{} },
+			newList: func() crclient.ObjectList { return &v1alpha1.ClusterBackupList{} },
+		},
+		{
 			kind:    domain.ControllerKindRestore,
 			new:     func() crclient.Object { return &v1alpha1.Restore{} },
 			newList: func() crclient.ObjectList { return &v1alpha1.RestoreList{} },
+		},
+		{
+			kind:    domain.ControllerKindClusterRestore,
+			cluster: true,
+			new:     func() crclient.Object { return &v1alpha1.ClusterRestore{} },
+			newList: func() crclient.ObjectList { return &v1alpha1.ClusterRestoreList{} },
 		},
 		{
 			kind:    domain.ControllerKindRename,
@@ -74,9 +111,21 @@ func workflowCRDResourceRegistry() []crdResource {
 			newList: func() crclient.ObjectList { return &v1alpha1.RenameList{} },
 		},
 		{
+			kind:    domain.ControllerKindClusterRename,
+			cluster: true,
+			new:     func() crclient.Object { return &v1alpha1.ClusterRename{} },
+			newList: func() crclient.ObjectList { return &v1alpha1.ClusterRenameList{} },
+		},
+		{
 			kind:    domain.ControllerKindMove,
 			new:     func() crclient.Object { return &v1alpha1.Move{} },
 			newList: func() crclient.ObjectList { return &v1alpha1.MoveList{} },
+		},
+		{
+			kind:    domain.ControllerKindClusterMove,
+			cluster: true,
+			new:     func() crclient.Object { return &v1alpha1.ClusterMove{} },
+			newList: func() crclient.ObjectList { return &v1alpha1.ClusterMoveList{} },
 		},
 	}
 }
@@ -98,6 +147,53 @@ func workflowCRDKind(sessionType domain.SessionType) domain.ControllerKind {
 	}
 
 	return workflow.Kind
+}
+
+func workflowCRDKindForSession(session *domain.Session) domain.ControllerKind {
+	if session == nil {
+		return ""
+	}
+
+	if domain.IsClusterControllerKind(session.BackendResource) {
+		return session.BackendResource
+	}
+
+	clusterScope := controllerSessionClusterScope(session)
+	kind, _ := domain.ControllerKindForTypeAndScope(session.Spec.Type, clusterScope)
+
+	return kind
+}
+
+func backupRepositoryCrossesNamespace(session *domain.Session) bool {
+	if session == nil {
+		return false
+	}
+
+	if session.Spec.Backup != nil {
+		namespace := session.Spec.Backup.BackupRepositoryNamespace
+		return namespace != "" && namespace != session.Spec.SessionNamespace
+	}
+
+	if session.Spec.Restore != nil {
+		namespace := session.Spec.Restore.BackupRepositoryNamespace
+		return namespace != "" && namespace != session.Spec.SessionNamespace
+	}
+
+	return false
+}
+
+func resourceKey(resource crdResource, namespace, name string) crclient.ObjectKey {
+	if resource.cluster {
+		namespace = ""
+	}
+	return crclient.ObjectKey{Namespace: namespace, Name: name}
+}
+
+func resourceNamespace(resource crdResource, namespace string) string {
+	if resource.cluster {
+		return ""
+	}
+	return namespace
 }
 
 // CRDSessionStore persists the domain session envelope as one of the namespaced
@@ -151,6 +247,25 @@ func (s *CRDSessionStore) SupportsType(sessionType domain.SessionType) bool {
 	}
 
 	kind := workflowCRDKind(sessionType)
+	if kind == "" {
+		return false
+	}
+
+	if len(s.supportedKinds) == 0 {
+		return true
+	}
+
+	_, ok := s.supportedKinds[kind]
+
+	return ok
+}
+
+func (s *CRDSessionStore) supportsSession(session *domain.Session) bool {
+	if s == nil || session == nil {
+		return false
+	}
+
+	kind := workflowCRDKindForSession(session)
 	if kind == "" {
 		return false
 	}
@@ -240,8 +355,9 @@ func (s *CRDSessionStore) EnsureSessionProtection(
 
 	resourceKind := session.BackendResource
 	if resourceKind == "" {
-		resourceKind = workflowCRDKind(session.Spec.Type)
+		resourceKind = workflowCRDKindForSession(session)
 	}
+
 	resource, ok := workflowCRDResource(resourceKind)
 	if !ok {
 		return domain.NewError(
@@ -254,7 +370,7 @@ func (s *CRDSessionStore) EnsureSessionProtection(
 	current := resource.new()
 	if err := s.client.Get(
 		ctx,
-		crclient.ObjectKey{Namespace: session.Spec.SessionNamespace, Name: session.ID},
+		resourceKey(resource, session.Spec.SessionNamespace, session.ID),
 		current,
 	); err != nil {
 		if apierrors.IsNotFound(err) {
@@ -272,7 +388,7 @@ func (s *CRDSessionStore) EnsureSessionProtection(
 	if err := ValidateWorkflowMetadata(
 		current,
 		session.ID,
-		session.Spec.SessionNamespace,
+		resourceNamespace(resource, session.Spec.SessionNamespace),
 	); err != nil {
 		return domain.WrapError(
 			domain.ErrorConflict,
@@ -290,11 +406,13 @@ func (s *CRDSessionStore) EnsureSessionProtection(
 		)
 	}
 
-	if current.GetDeletionTimestamp() != nil || containsString(current.GetFinalizers(), SessionFinalizer) {
+	if current.GetDeletionTimestamp() != nil ||
+		containsString(current.GetFinalizers(), SessionFinalizer) {
 		return nil
 	}
 
 	current.SetFinalizers(ensureSessionFinalizer(current.GetFinalizers()))
+
 	if err := s.client.Update(ctx, current); apierrors.IsConflict(err) {
 		return domain.NewError(
 			domain.ErrorConflict,
@@ -339,27 +457,26 @@ func (s *CRDSessionStore) Create(ctx context.Context, session *domain.Session) e
 	}
 
 	if !ControllerSessionSupported(session) {
-		if session.Spec.Type == domain.SessionTypeMove {
-			return domain.NewError(
-				domain.ErrorPrecondition,
-				"create session",
-				"Move is cross-namespace and requires --mode=session (controller mode cannot authorize the destination namespace)",
-			)
-		}
 		return domain.NewError(
 			domain.ErrorPrecondition,
 			"create session",
-			"this workflow requires an explicit cluster connection or credential resource",
+			"this workflow is not valid for the selected namespaced or cluster controller resource",
 		)
 	}
 
-	if !s.SupportsType(session.Spec.Type) {
+	if !s.supportsSession(session) {
 		workflow, _ := domain.ControllerWorkflowForType(session.Spec.Type)
+
+		kind := workflow.Kind
+		if clusterKind := workflow.ClusterKind; clusterKind != "" &&
+			workflowCRDKindForSession(session) == clusterKind {
+			kind = clusterKind
+		}
 
 		return domain.NewError(
 			domain.ErrorPrecondition,
 			"create session",
-			string(workflow.Kind)+" CRD is not served by this cluster",
+			string(kind)+" CRD is not served by this cluster",
 		)
 	}
 
@@ -384,7 +501,7 @@ func (s *CRDSessionStore) Create(ctx context.Context, session *domain.Session) e
 
 		errors[index] = s.client.Get(
 			ctx,
-			crclient.ObjectKey{Namespace: session.Spec.SessionNamespace, Name: session.ID},
+			resourceKey(candidate, session.Spec.SessionNamespace, session.ID),
 			candidateObject,
 		)
 	})
@@ -513,7 +630,18 @@ func (s *CRDSessionStore) initializeStatus(
 			return nil, err
 		}
 
-		latest := newWorkflowObject(workflowKind(current))
+		latestKind := workflowKind(current)
+
+		latestResource, resourceOK := workflowCRDResource(latestKind)
+		if !resourceOK {
+			return nil, domain.NewError(
+				domain.ErrorInternal,
+				"create session",
+				"unsupported workflow resource",
+			)
+		}
+
+		latest := latestResource.new()
 		if latest == nil {
 			return nil, domain.NewError(
 				domain.ErrorInternal,
@@ -524,7 +652,7 @@ func (s *CRDSessionStore) initializeStatus(
 
 		if err := s.client.Get(
 			ctx,
-			crclient.ObjectKey{Namespace: session.Spec.SessionNamespace, Name: session.ID},
+			resourceKey(latestResource, session.Spec.SessionNamespace, session.ID),
 			latest,
 		); err != nil {
 			return nil, err
@@ -565,7 +693,7 @@ func (s *CRDSessionStore) Get(ctx context.Context, namespace, id string) (*domai
 
 		errors[index] = s.client.Get(
 			ctx,
-			crclient.ObjectKey{Namespace: namespace, Name: id},
+			resourceKey(resource, namespace, id),
 			object,
 		)
 		if errors[index] == nil {
@@ -574,15 +702,19 @@ func (s *CRDSessionStore) Get(ctx context.Context, namespace, id string) (*domai
 	})
 
 	var found *domain.Session
+
+	forbidden := 0
 	for index, resource := range resources {
 		err := errors[index]
 		if apierrors.IsNotFound(err) {
 			continue
 		}
+
 		if apierrors.IsForbidden(err) {
 			// The caller may be bound to a single workflow Kind. Treat
 			// inaccessible sibling Kinds as absent so Get can resolve the
 			// resource the caller is authorized to observe.
+			forbidden++
 			continue
 		}
 
@@ -615,6 +747,17 @@ func (s *CRDSessionStore) Get(ctx context.Context, namespace, id string) (*domai
 		return found, nil
 	}
 
+	if forbidden == len(resources) {
+		return nil, domain.NewError(
+			domain.ErrorPrecondition,
+			"get session",
+			fmt.Sprintf(
+				"no workflow kind in session namespace %s is readable by this identity",
+				namespace,
+			),
+		)
+	}
+
 	return nil, domain.NewError(
 		domain.ErrorValidation,
 		"get session",
@@ -636,23 +779,16 @@ func (s *CRDSessionStore) Update(ctx context.Context, session *domain.Session) e
 	}
 
 	if !ControllerSessionSupported(session) {
-		if session.Spec.Type == domain.SessionTypeMove {
-			return domain.NewError(
-				domain.ErrorPrecondition,
-				"update session",
-				"Move is cross-namespace and requires --mode=session (controller mode cannot authorize the destination namespace)",
-			)
-		}
 		return domain.NewError(
 			domain.ErrorPrecondition,
 			"update session",
-			"this workflow requires CLI/session mode",
+			"this workflow is not valid for the selected namespaced or cluster controller resource",
 		)
 	}
 
 	storedKind := session.BackendResource
 	if storedKind == "" {
-		storedKind = workflowCRDKind(session.Spec.Type)
+		storedKind = workflowCRDKindForSession(session)
 	}
 
 	resource, ok := workflowCRDResource(storedKind)
@@ -667,7 +803,7 @@ func (s *CRDSessionStore) Update(ctx context.Context, session *domain.Session) e
 	existing := resource.new()
 	if err := s.client.Get(
 		ctx,
-		crclient.ObjectKey{Namespace: session.Spec.SessionNamespace, Name: session.ID},
+		resourceKey(resource, session.Spec.SessionNamespace, session.ID),
 		existing,
 	); apierrors.IsNotFound(
 		err,
@@ -689,7 +825,7 @@ func (s *CRDSessionStore) Update(ctx context.Context, session *domain.Session) e
 	if err := ValidateWorkflowMetadata(
 		existing,
 		session.ID,
-		session.Spec.SessionNamespace,
+		resourceNamespace(resource, session.Spec.SessionNamespace),
 	); err != nil {
 		return domain.WrapError(
 			domain.ErrorConflict,
@@ -707,7 +843,7 @@ func (s *CRDSessionStore) Update(ctx context.Context, session *domain.Session) e
 		)
 	}
 
-	desiredKind := workflowCRDKind(session.Spec.Type)
+	desiredKind := workflowCRDKindForSession(session)
 	if desiredKind == "" {
 		return domain.NewError(
 			domain.ErrorValidation,
@@ -1087,7 +1223,14 @@ func (s *CRDSessionStore) List(ctx context.Context, namespace string) ([]*domain
 		items := resource.newList()
 		lists[index] = items
 
-		if err := s.client.List(ctx, items, crclient.InNamespace(namespace)); err != nil {
+		var err error
+		if resource.cluster {
+			err = s.client.List(ctx, items)
+		} else {
+			err = s.client.List(ctx, items, crclient.InNamespace(namespace))
+		}
+
+		if err != nil {
 			if apierrors.IsForbidden(err) {
 				// Namespaced tenant RoleBindings may intentionally omit other
 				// operation Kinds. An empty result for an inaccessible Kind is
@@ -1118,6 +1261,10 @@ func (s *CRDSessionStore) List(ctx context.Context, namespace string) ([]*domain
 			session, decodeErr := DecodeWorkflow(object)
 			if decodeErr != nil {
 				return nil, decodeErr
+			}
+
+			if resource.cluster && namespace != "" && session.Spec.SessionNamespace != namespace {
+				continue
 			}
 
 			if previousKind, exists := seen[session.ID]; exists {
@@ -1152,7 +1299,7 @@ func (s *CRDSessionStore) Delete(ctx context.Context, session *domain.Session) e
 
 	resourceKind := session.BackendResource
 	if resourceKind == "" {
-		resourceKind = workflowCRDKind(session.Spec.Type)
+		resourceKind = workflowCRDKindForSession(session)
 	}
 
 	resource, ok := workflowCRDResource(resourceKind)
@@ -1167,7 +1314,7 @@ func (s *CRDSessionStore) Delete(ctx context.Context, session *domain.Session) e
 	object := resource.new()
 	if err := s.client.Get(
 		ctx,
-		crclient.ObjectKey{Namespace: session.Spec.SessionNamespace, Name: session.ID},
+		resourceKey(resource, session.Spec.SessionNamespace, session.ID),
 		object,
 	); apierrors.IsNotFound(
 		err,
@@ -1185,7 +1332,7 @@ func (s *CRDSessionStore) Delete(ctx context.Context, session *domain.Session) e
 	if err := ValidateWorkflowMetadata(
 		object,
 		session.ID,
-		session.Spec.SessionNamespace,
+		resourceNamespace(resource, session.Spec.SessionNamespace),
 	); err != nil {
 		return domain.WrapError(
 			domain.ErrorConflict,
@@ -1294,10 +1441,18 @@ func DecodeWorkflow(object crclient.Object) (*domain.Session, error) {
 		)
 	}
 
+	kind := workflowKind(object)
+	clusterScope := domain.IsClusterControllerKind(kind)
+
+	metadataNamespace := object.GetNamespace()
+	if clusterScope {
+		metadataNamespace = ""
+	}
+
 	if err := ValidateWorkflowMetadata(
 		object,
 		object.GetName(),
-		object.GetNamespace(),
+		metadataNamespace,
 	); err != nil {
 		return nil, err
 	}
@@ -1309,14 +1464,15 @@ func DecodeWorkflow(object crclient.Object) (*domain.Session, error) {
 	session.ResourceVersion = object.GetResourceVersion()
 	session.Backend = SessionBackendCRD
 
-	session.BackendResource = workflowKind(object)
+	session.BackendResource = kind
 	session.BackendUID = object.GetUID()
+
 	session.Deleting = object.GetDeletionTimestamp() != nil
 	if status.Phase != "" {
 		session.Status = status
 	}
 
-	if session.Spec.SessionNamespace != object.GetNamespace() {
+	if !clusterScope && session.Spec.SessionNamespace != object.GetNamespace() {
 		return nil, domain.NewError(
 			domain.ErrorConflict,
 			"decode session",
@@ -1403,7 +1559,16 @@ func sessionObjectFor(session *domain.Session) crclient.Object {
 		return nil
 	}
 
-	object, ok := sessionObjectForKind(session, workflowCRDKind(session.Spec.Type))
+	kind := workflowCRDKindForSession(session)
+	// Callers constructing an already-CRD-backed session without preserving
+	// BackendResource are interpreted as the operation's namespaced resource;
+	// newly-created cross-namespace sessions have no Backend marker and select
+	// their cluster-scoped kind above.
+	if session.Backend == SessionBackendCRD && session.BackendResource == "" {
+		kind = workflowCRDKind(session.Spec.Type)
+	}
+
+	object, ok := sessionObjectForKind(session, kind)
 	if !ok {
 		return nil
 	}
@@ -1421,9 +1586,11 @@ func sessionObjectForKind(
 
 	meta := metav1.ObjectMeta{
 		Name:       session.ID,
-		Namespace:  session.Spec.SessionNamespace,
 		Labels:     sessionLabels(session.ID),
 		Finalizers: []string{SessionFinalizer},
+	}
+	if resource, found := workflowCRDResource(kind); found && !resource.cluster {
+		meta.Namespace = session.Spec.SessionNamespace
 	}
 
 	typeMeta := metav1.TypeMeta{
@@ -1437,11 +1604,21 @@ func sessionObjectForKind(
 			ObjectMeta: meta,
 			Spec:       v1alpha1.MigrationSpecFromDomain(session.Spec),
 		}, true
+	case domain.ControllerKindClusterMigration:
+		return &v1alpha1.ClusterMigration{
+			TypeMeta: typeMeta, ObjectMeta: meta,
+			Spec: v1alpha1.ClusterMigrationSpecFromDomain(session.Spec),
+		}, true
 	case domain.ControllerKindPodMigration:
 		return &v1alpha1.PodMigration{
 			TypeMeta:   typeMeta,
 			ObjectMeta: meta,
 			Spec:       v1alpha1.PodMigrationSpecFromDomain(session.Spec),
+		}, true
+	case domain.ControllerKindClusterPodMigration:
+		return &v1alpha1.ClusterPodMigration{
+			TypeMeta: typeMeta, ObjectMeta: meta,
+			Spec: v1alpha1.ClusterPodMigrationSpecFromDomain(session.Spec),
 		}, true
 	case domain.ControllerKindReservation:
 		return &v1alpha1.Reservation{
@@ -1449,11 +1626,21 @@ func sessionObjectForKind(
 			ObjectMeta: meta,
 			Spec:       v1alpha1.ReservationSpecFromDomain(session.Spec),
 		}, true
+	case domain.ControllerKindClusterReservation:
+		return &v1alpha1.ClusterReservation{
+			TypeMeta: typeMeta, ObjectMeta: meta,
+			Spec: v1alpha1.ClusterReservationSpecFromDomain(session.Spec),
+		}, true
 	case domain.ControllerKindCopy:
 		return &v1alpha1.Copy{
 			TypeMeta:   typeMeta,
 			ObjectMeta: meta,
 			Spec:       v1alpha1.CopySpecFromDomain(session.Spec),
+		}, true
+	case domain.ControllerKindClusterCopy:
+		return &v1alpha1.ClusterCopy{
+			TypeMeta: typeMeta, ObjectMeta: meta,
+			Spec: v1alpha1.ClusterCopySpecFromDomain(session.Spec),
 		}, true
 	case domain.ControllerKindBackup:
 		return &v1alpha1.Backup{
@@ -1461,11 +1648,21 @@ func sessionObjectForKind(
 			ObjectMeta: meta,
 			Spec:       v1alpha1.BackupSpecFromDomain(session.Spec),
 		}, true
+	case domain.ControllerKindClusterBackup:
+		return &v1alpha1.ClusterBackup{
+			TypeMeta: typeMeta, ObjectMeta: meta,
+			Spec: v1alpha1.ClusterBackupSpecFromDomain(session.Spec),
+		}, true
 	case domain.ControllerKindRestore:
 		return &v1alpha1.Restore{
 			TypeMeta:   typeMeta,
 			ObjectMeta: meta,
 			Spec:       v1alpha1.RestoreSpecFromDomain(session.Spec),
+		}, true
+	case domain.ControllerKindClusterRestore:
+		return &v1alpha1.ClusterRestore{
+			TypeMeta: typeMeta, ObjectMeta: meta,
+			Spec: v1alpha1.ClusterRestoreSpecFromDomain(session.Spec),
 		}, true
 	case domain.ControllerKindRename:
 		return &v1alpha1.Rename{
@@ -1473,11 +1670,21 @@ func sessionObjectForKind(
 			ObjectMeta: meta,
 			Spec:       v1alpha1.RenameSpecFromDomain(session.Spec),
 		}, true
+	case domain.ControllerKindClusterRename:
+		return &v1alpha1.ClusterRename{
+			TypeMeta: typeMeta, ObjectMeta: meta,
+			Spec: v1alpha1.ClusterRenameSpecFromDomain(session.Spec),
+		}, true
 	case domain.ControllerKindMove:
 		return &v1alpha1.Move{
 			TypeMeta:   typeMeta,
 			ObjectMeta: meta,
 			Spec:       v1alpha1.MoveSpecFromDomain(session.Spec),
+		}, true
+	case domain.ControllerKindClusterMove:
+		return &v1alpha1.ClusterMove{
+			TypeMeta: typeMeta, ObjectMeta: meta,
+			Spec: v1alpha1.ClusterMoveSpecFromDomain(session.Spec),
 		}, true
 	default:
 		return nil, false
@@ -1501,20 +1708,36 @@ func workflowKind(object crclient.Object) domain.ControllerKind {
 	switch object.(type) {
 	case *v1alpha1.Migration:
 		return domain.ControllerKindMigration
+	case *v1alpha1.ClusterMigration:
+		return domain.ControllerKindClusterMigration
 	case *v1alpha1.PodMigration:
 		return domain.ControllerKindPodMigration
+	case *v1alpha1.ClusterPodMigration:
+		return domain.ControllerKindClusterPodMigration
 	case *v1alpha1.Reservation:
 		return domain.ControllerKindReservation
+	case *v1alpha1.ClusterReservation:
+		return domain.ControllerKindClusterReservation
 	case *v1alpha1.Copy:
 		return domain.ControllerKindCopy
+	case *v1alpha1.ClusterCopy:
+		return domain.ControllerKindClusterCopy
 	case *v1alpha1.Backup:
 		return domain.ControllerKindBackup
+	case *v1alpha1.ClusterBackup:
+		return domain.ControllerKindClusterBackup
 	case *v1alpha1.Restore:
 		return domain.ControllerKindRestore
+	case *v1alpha1.ClusterRestore:
+		return domain.ControllerKindClusterRestore
 	case *v1alpha1.Rename:
 		return domain.ControllerKindRename
+	case *v1alpha1.ClusterRename:
+		return domain.ControllerKindClusterRename
 	case *v1alpha1.Move:
 		return domain.ControllerKindMove
+	case *v1alpha1.ClusterMove:
+		return domain.ControllerKindClusterMove
 	default:
 		return domain.ControllerKind(object.GetObjectKind().GroupVersionKind().Kind)
 	}
@@ -1530,7 +1753,15 @@ func workflowSpecStatus(object crclient.Object) (domain.SessionSpec, domain.Sess
 		spec := typed.Spec.Domain()
 		typed.Status.ApplyToDomainSpec(&spec)
 		return spec, typed.Status.Domain(), true
+	case *v1alpha1.ClusterMigration:
+		spec := typed.Spec.Domain()
+		typed.Status.ApplyToDomainSpec(&spec)
+		return spec, typed.Status.Domain(), true
 	case *v1alpha1.PodMigration:
+		spec := typed.Spec.Domain()
+		typed.Status.ApplyToDomainSpec(&spec)
+		return spec, typed.Status.Domain(), true
+	case *v1alpha1.ClusterPodMigration:
 		spec := typed.Spec.Domain()
 		typed.Status.ApplyToDomainSpec(&spec)
 		return spec, typed.Status.Domain(), true
@@ -1538,17 +1769,33 @@ func workflowSpecStatus(object crclient.Object) (domain.SessionSpec, domain.Sess
 		spec := typed.Spec.Domain()
 		typed.Status.ApplyToDomainSpec(&spec)
 		return spec, typed.Status.Domain(), true
+	case *v1alpha1.ClusterReservation:
+		spec := typed.Spec.Domain()
+		typed.Status.ApplyToDomainSpec(&spec)
+		return spec, typed.Status.Domain(), true
 	case *v1alpha1.Copy:
+		spec := typed.Spec.Domain()
+		typed.Status.ApplyToDomainSpec(&spec)
+		return spec, typed.Status.Domain(), true
+	case *v1alpha1.ClusterCopy:
 		spec := typed.Spec.Domain()
 		typed.Status.ApplyToDomainSpec(&spec)
 		return spec, typed.Status.Domain(), true
 	case *v1alpha1.Backup:
 		return typed.Spec.Domain(), typed.Status.Domain(), true
+	case *v1alpha1.ClusterBackup:
+		return typed.Spec.Domain(), typed.Status.Domain(), true
 	case *v1alpha1.Restore:
+		return typed.Spec.Domain(), typed.Status.Domain(), true
+	case *v1alpha1.ClusterRestore:
 		return typed.Spec.Domain(), typed.Status.Domain(), true
 	case *v1alpha1.Rename:
 		return typed.Spec.Domain(), typed.Status.Domain(), true
+	case *v1alpha1.ClusterRename:
+		return typed.Spec.Domain(), typed.Status.Domain(), true
 	case *v1alpha1.Move:
+		return typed.Spec.Domain(), typed.Status.Domain(), true
+	case *v1alpha1.ClusterMove:
 		return typed.Spec.Domain(), typed.Status.Domain(), true
 	default:
 		return domain.SessionSpec{}, domain.SessionStatus{}, false
@@ -1563,6 +1810,8 @@ func setWorkflowSpec(object crclient.Object, spec domain.SessionSpec) bool {
 	switch typed := object.(type) {
 	case *v1alpha1.Migration:
 		typed.Spec = v1alpha1.MigrationSpecFromDomain(spec)
+	case *v1alpha1.ClusterMigration:
+		typed.Spec = v1alpha1.ClusterMigrationSpecFromDomain(spec)
 	case *v1alpha1.PodMigration:
 		pod := typed.Spec.Workload.Pod
 		affectedPods := append(
@@ -1572,18 +1821,36 @@ func setWorkflowSpec(object crclient.Object, spec domain.SessionSpec) bool {
 		typed.Spec = v1alpha1.PodMigrationSpecFromDomain(spec)
 		typed.Spec.Workload.Pod = pod
 		typed.Spec.Workload.AffectedPods = affectedPods
+	case *v1alpha1.ClusterPodMigration:
+		pod := typed.Spec.Workload.Pod
+		affectedPods := append([]v1alpha1.ObjectReference(nil), typed.Spec.Workload.AffectedPods...)
+		typed.Spec = v1alpha1.ClusterPodMigrationSpecFromDomain(spec)
+		typed.Spec.Workload.Pod = pod
+		typed.Spec.Workload.AffectedPods = affectedPods
 	case *v1alpha1.Reservation:
 		typed.Spec = v1alpha1.ReservationSpecFromDomain(spec)
+	case *v1alpha1.ClusterReservation:
+		typed.Spec = v1alpha1.ClusterReservationSpecFromDomain(spec)
 	case *v1alpha1.Copy:
 		typed.Spec = v1alpha1.CopySpecFromDomain(spec)
+	case *v1alpha1.ClusterCopy:
+		typed.Spec = v1alpha1.ClusterCopySpecFromDomain(spec)
 	case *v1alpha1.Backup:
 		typed.Spec = v1alpha1.BackupSpecFromDomain(spec)
+	case *v1alpha1.ClusterBackup:
+		typed.Spec = v1alpha1.ClusterBackupSpecFromDomain(spec)
 	case *v1alpha1.Restore:
 		typed.Spec = v1alpha1.RestoreSpecFromDomain(spec)
+	case *v1alpha1.ClusterRestore:
+		typed.Spec = v1alpha1.ClusterRestoreSpecFromDomain(spec)
 	case *v1alpha1.Rename:
 		typed.Spec = v1alpha1.RenameSpecFromDomain(spec)
+	case *v1alpha1.ClusterRename:
+		typed.Spec = v1alpha1.ClusterRenameSpecFromDomain(spec)
 	case *v1alpha1.Move:
 		typed.Spec = v1alpha1.MoveSpecFromDomain(spec)
+	case *v1alpha1.ClusterMove:
+		typed.Spec = v1alpha1.ClusterMoveSpecFromDomain(spec)
 	default:
 		return false
 	}
@@ -1603,20 +1870,36 @@ func setWorkflowStatus(
 	switch typed := object.(type) {
 	case *v1alpha1.Migration:
 		typed.Status = v1alpha1.MigrationStatusFromDomain(status, spec.Volumes)
+	case *v1alpha1.ClusterMigration:
+		typed.Status = v1alpha1.ClusterMigrationStatusFromDomain(status, spec.Volumes)
 	case *v1alpha1.PodMigration:
 		typed.Status = v1alpha1.PodMigrationStatusFromDomain(status, spec)
+	case *v1alpha1.ClusterPodMigration:
+		typed.Status = v1alpha1.ClusterPodMigrationStatusFromDomain(status, spec)
 	case *v1alpha1.Reservation:
 		typed.Status = v1alpha1.ReservationStatusFromDomain(status, spec.Volumes)
+	case *v1alpha1.ClusterReservation:
+		typed.Status = v1alpha1.ClusterReservationStatusFromDomain(status, spec.Volumes)
 	case *v1alpha1.Copy:
 		typed.Status = v1alpha1.CopyStatusFromDomain(status, spec.Volumes)
+	case *v1alpha1.ClusterCopy:
+		typed.Status = v1alpha1.ClusterCopyStatusFromDomain(status, spec.Volumes)
 	case *v1alpha1.Backup:
 		typed.Status = v1alpha1.BackupStatusFromDomain(status)
+	case *v1alpha1.ClusterBackup:
+		typed.Status = v1alpha1.ClusterBackupStatusFromDomain(status)
 	case *v1alpha1.Restore:
 		typed.Status = v1alpha1.RestoreStatusFromDomain(status)
+	case *v1alpha1.ClusterRestore:
+		typed.Status = v1alpha1.ClusterRestoreStatusFromDomain(status)
 	case *v1alpha1.Rename:
 		typed.Status = v1alpha1.RenameStatusFromDomain(status)
+	case *v1alpha1.ClusterRename:
+		typed.Status = v1alpha1.ClusterRenameStatusFromDomain(status)
 	case *v1alpha1.Move:
 		typed.Status = v1alpha1.MoveStatusFromDomain(status)
+	case *v1alpha1.ClusterMove:
+		typed.Status = v1alpha1.ClusterMoveStatusFromDomain(status)
 	default:
 		return false
 	}
@@ -1624,6 +1907,7 @@ func setWorkflowStatus(
 	return true
 }
 
+//nolint:gocyclo // The exhaustive type switch mirrors the generated workflow list types.
 func workflowListItems(list crclient.ObjectList) []crclient.Object {
 	if list == nil {
 		return nil
@@ -1635,7 +1919,15 @@ func workflowListItems(list crclient.ObjectList) []crclient.Object {
 		for i := range typed.Items {
 			items = append(items, &typed.Items[i])
 		}
+	case *v1alpha1.ClusterMigrationList:
+		for i := range typed.Items {
+			items = append(items, &typed.Items[i])
+		}
 	case *v1alpha1.PodMigrationList:
+		for i := range typed.Items {
+			items = append(items, &typed.Items[i])
+		}
+	case *v1alpha1.ClusterPodMigrationList:
 		for i := range typed.Items {
 			items = append(items, &typed.Items[i])
 		}
@@ -1643,7 +1935,15 @@ func workflowListItems(list crclient.ObjectList) []crclient.Object {
 		for i := range typed.Items {
 			items = append(items, &typed.Items[i])
 		}
+	case *v1alpha1.ClusterReservationList:
+		for i := range typed.Items {
+			items = append(items, &typed.Items[i])
+		}
 	case *v1alpha1.CopyList:
+		for i := range typed.Items {
+			items = append(items, &typed.Items[i])
+		}
+	case *v1alpha1.ClusterCopyList:
 		for i := range typed.Items {
 			items = append(items, &typed.Items[i])
 		}
@@ -1651,7 +1951,15 @@ func workflowListItems(list crclient.ObjectList) []crclient.Object {
 		for i := range typed.Items {
 			items = append(items, &typed.Items[i])
 		}
+	case *v1alpha1.ClusterBackupList:
+		for i := range typed.Items {
+			items = append(items, &typed.Items[i])
+		}
 	case *v1alpha1.RestoreList:
+		for i := range typed.Items {
+			items = append(items, &typed.Items[i])
+		}
+	case *v1alpha1.ClusterRestoreList:
 		for i := range typed.Items {
 			items = append(items, &typed.Items[i])
 		}
@@ -1659,7 +1967,15 @@ func workflowListItems(list crclient.ObjectList) []crclient.Object {
 		for i := range typed.Items {
 			items = append(items, &typed.Items[i])
 		}
+	case *v1alpha1.ClusterRenameList:
+		for i := range typed.Items {
+			items = append(items, &typed.Items[i])
+		}
 	case *v1alpha1.MoveList:
+		for i := range typed.Items {
+			items = append(items, &typed.Items[i])
+		}
+	case *v1alpha1.ClusterMoveList:
 		for i := range typed.Items {
 			items = append(items, &typed.Items[i])
 		}
