@@ -46,8 +46,6 @@ spec:
             type: object
           spec:
             properties:
-              createdBy:
-                type: string
               deleteExtraneous:
                 type: boolean
               name:
@@ -620,8 +618,6 @@ spec:
             type: object
           spec:
             properties:
-              createdBy:
-                type: string
               deleteExtraneous:
                 type: boolean
               destinationNamespace:
@@ -1364,8 +1360,6 @@ spec:
             type: object
           spec:
             properties:
-              createdBy:
-                type: string
               deleteExtraneous:
                 type: boolean
               destinationNamespace:
@@ -2161,8 +2155,6 @@ spec:
             type: object
           spec:
             properties:
-              createdBy:
-                type: string
               destinationNamespace:
                 description: |-
                   NamespaceName is a Kubernetes namespace name used by a cluster-scoped
@@ -2798,8 +2790,6 @@ spec:
             type: object
           spec:
             properties:
-              createdBy:
-                type: string
               deleteExtraneous:
                 type: boolean
               destinationNamespace:
@@ -3966,8 +3956,6 @@ spec:
             type: object
           spec:
             properties:
-              createdBy:
-                type: string
               destinationNamespace:
                 description: |-
                   NamespaceName is a Kubernetes namespace name used by a cluster-scoped
@@ -4680,8 +4668,6 @@ spec:
             type: object
           spec:
             properties:
-              createdBy:
-                type: string
               deleteExtraneous:
                 type: boolean
               online:
@@ -5391,8 +5377,6 @@ spec:
             description: MigrationSpec is an offline PVC migration. It has no workload
               controls.
             properties:
-              createdBy:
-                type: string
               deleteExtraneous:
                 type: boolean
               skipSourceUsageCheck:
@@ -6148,8 +6132,6 @@ spec:
               PodMigrationSpec is a workload-aware migration. Workload and precopy
               controls are exclusive to this operation.
             properties:
-              createdBy:
-                type: string
               deleteExtraneous:
                 type: boolean
               openebsLvmEnableShared:
@@ -7278,8 +7260,6 @@ spec:
             type: object
           spec:
             properties:
-              createdBy:
-                type: string
               destinationPVC:
                 description: |-
                   LocalResourceReference identifies a resource whose namespace is established
@@ -7884,8 +7864,6 @@ spec:
             type: object
           spec:
             properties:
-              createdBy:
-                type: string
               skipSourceUsageCheck:
                 type: boolean
               targetNode:
@@ -8563,8 +8541,6 @@ spec:
                 type: boolean
               createPVC:
                 type: boolean
-              createdBy:
-                type: string
               deleteExtraneous:
                 type: boolean
               destinationAccessMode:

@@ -265,14 +265,14 @@ func TestOperationSpecsHaveIndependentFieldContracts(t *testing.T) {
 		{
 			name: "migration", spec: v1alpha1.MigrationSpec{},
 			fields: []string{
-				"createdBy", "deleteExtraneous", "skipSourceUsageCheck", "sourceNode",
+				"deleteExtraneous", "skipSourceUsageCheck", "sourceNode",
 				"strategies", "targetNode", "toolImage", "verifyChecksum", "volumes",
 			},
 		},
 		{
 			name: "pod migration", spec: v1alpha1.PodMigrationSpec{},
 			fields: []string{
-				"createdBy", "deleteExtraneous", "openebsLvmEnableShared", "precopyPasses",
+				"deleteExtraneous", "openebsLvmEnableShared", "precopyPasses",
 				"skipSourceUsageCheck", "sourceNode", "strategies", "targetNode", "toolImage",
 				"verifyChecksum", "volumes", "workload",
 			},
@@ -280,20 +280,19 @@ func TestOperationSpecsHaveIndependentFieldContracts(t *testing.T) {
 		{
 			name: "reservation", spec: v1alpha1.ReservationSpec{},
 			fields: []string{
-				"createdBy", "skipSourceUsageCheck", "targetNode", "toolImage", "volumes",
+				"skipSourceUsageCheck", "targetNode", "toolImage", "volumes",
 			},
 		},
 		{
 			name: "copy", spec: v1alpha1.CopySpec{},
 			fields: []string{
-				"createdBy", "deleteExtraneous", "online", "skipSourceUsageCheck", "sourceNode",
+				"deleteExtraneous", "online", "skipSourceUsageCheck", "sourceNode",
 				"strategies", "targetNode", "toolImage", "volumes",
 			},
 		},
 		{
 			name: "backup", spec: v1alpha1.BackupSpec{},
 			fields: []string{
-				"createdBy",
 				"deleteExtraneous",
 				"name",
 				"online",
@@ -310,7 +309,6 @@ func TestOperationSpecsHaveIndependentFieldContracts(t *testing.T) {
 			fields: []string{
 				"allowMounted",
 				"createPVC",
-				"createdBy",
 				"deleteExtraneous",
 				"destinationAccessMode",
 				"destinationCapacity",
@@ -326,13 +324,13 @@ func TestOperationSpecsHaveIndependentFieldContracts(t *testing.T) {
 		{
 			name: "rename", spec: v1alpha1.RenameSpec{},
 			fields: []string{
-				"createdBy", "destinationPVC", "sourcePV", "sourcePVC", "sourceTemplate",
+				"destinationPVC", "sourcePV", "sourcePVC", "sourceTemplate",
 			},
 		},
 		{
 			name: "cluster move", spec: v1alpha1.ClusterMoveSpec{},
 			fields: []string{
-				"createdBy", "destinationNamespace", "identity", "sessionNamespace",
+				"destinationNamespace", "identity", "sessionNamespace",
 				"sourceNamespace",
 			},
 		},

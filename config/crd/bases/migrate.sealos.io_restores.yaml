@@ -50,8 +50,6 @@ spec:
                 type: boolean
               createPVC:
                 type: boolean
-              createdBy:
-                type: string
               deleteExtraneous:
                 type: boolean
               destinationAccessMode:

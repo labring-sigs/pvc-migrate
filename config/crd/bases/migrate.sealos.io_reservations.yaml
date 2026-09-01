@@ -46,8 +46,6 @@ spec:
             type: object
           spec:
             properties:
-              createdBy:
-                type: string
               skipSourceUsageCheck:
                 type: boolean
               targetNode:

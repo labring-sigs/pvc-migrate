@@ -913,7 +913,6 @@ func testBackupSession(t *testing.T, id string) *domain.Session {
 		domain.SessionCommon{
 			SourceNamespace:  "app",
 			SessionNamespace: "sessions",
-			CreatedBy:        "test",
 		},
 
 		false,

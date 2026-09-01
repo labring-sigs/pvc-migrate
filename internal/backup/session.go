@@ -66,7 +66,6 @@ func buildBackupSession(
 			SourceNamespace:  req.Namespace,
 			SessionNamespace: req.SessionNamespace,
 			Volumes:          nil,
-			CreatedBy:        "pvc-migrate",
 		},
 
 		req.Online,
@@ -218,7 +217,6 @@ func SubmitRestore(
 			SourceNamespace:      req.Namespace,
 			DestinationNamespace: req.Namespace,
 			SessionNamespace:     req.SessionNamespace,
-			CreatedBy:            "pvc-migrate",
 		},
 		false,
 		domain.SessionWorkflowOptions{

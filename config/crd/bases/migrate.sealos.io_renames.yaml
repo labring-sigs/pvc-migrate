@@ -46,8 +46,6 @@ spec:
             type: object
           spec:
             properties:
-              createdBy:
-                type: string
               destinationPVC:
                 description: |-
                   LocalResourceReference identifies a resource whose namespace is established

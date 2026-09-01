@@ -335,7 +335,6 @@ func completedBackupCleanupSession(t *testing.T) *domain.Session {
 		domain.SessionCommon{
 			SourceNamespace:  "app",
 			SessionNamespace: "sessions",
-			CreatedBy:        "test",
 		},
 
 		false,

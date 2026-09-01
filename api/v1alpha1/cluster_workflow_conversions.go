@@ -78,7 +78,6 @@ func clusterVolumesToDomain(
 
 func clusterCommonSession(
 	source, temporary, destination, sessionNamespace NamespaceName,
-	createdBy string,
 	volumes []ClusterVolumeSpec,
 ) domain.SessionCommon {
 	return domain.SessionCommon{
@@ -86,7 +85,6 @@ func clusterCommonSession(
 		TemporaryNamespace:   string(temporary),
 		DestinationNamespace: string(destination),
 		SessionNamespace:     string(sessionNamespace),
-		CreatedBy:            createdBy,
 		Volumes:              clusterVolumesToDomain(volumes, string(source), string(destination)),
 	}
 }
@@ -141,7 +139,6 @@ func (s ClusterMigrationSpec) Domain() domain.SessionSpec {
 			s.TemporaryNamespace,
 			s.DestinationNamespace,
 			s.SessionNamespace,
-			s.CreatedBy,
 			s.Volumes,
 		),
 		Type:    domain.SessionTypeMigrate,
@@ -156,7 +153,6 @@ func (s ClusterPodMigrationSpec) Domain() domain.SessionSpec {
 			s.TemporaryNamespace,
 			s.DestinationNamespace,
 			s.SessionNamespace,
-			s.CreatedBy,
 			s.Volumes,
 		),
 		Type: domain.SessionTypeMigratePod,
@@ -179,7 +175,6 @@ func (s ClusterReservationSpec) Domain() domain.SessionSpec {
 			s.TemporaryNamespace,
 			s.DestinationNamespace,
 			s.SessionNamespace,
-			s.CreatedBy,
 			s.Volumes,
 		),
 		Type:    domain.SessionTypeReserve,
@@ -194,7 +189,6 @@ func (s ClusterCopySpec) Domain() domain.SessionSpec {
 			s.TemporaryNamespace,
 			s.DestinationNamespace,
 			s.SessionNamespace,
-			s.CreatedBy,
 			s.Volumes,
 		),
 		Type: domain.SessionTypeCopy,
@@ -211,7 +205,6 @@ func (s ClusterMoveSpec) Domain() domain.SessionSpec {
 		string(s.SourceNamespace),
 		string(s.DestinationNamespace),
 		string(s.SessionNamespace),
-		s.CreatedBy,
 		s.Identity.SourcePVC,
 		s.Identity.SourcePV,
 		s.Identity.DestinationPVC,
@@ -227,7 +220,6 @@ func ClusterMigrationSpecFromDomain(s domain.SessionSpec) ClusterMigrationSpec {
 		TemporaryNamespace:   NamespaceName(s.TemporaryNamespace),
 		DestinationNamespace: NamespaceName(s.DestinationNamespace),
 		SessionNamespace:     NamespaceName(s.SessionNamespace),
-		CreatedBy:            s.CreatedBy,
 		Volumes:              clusterVolumesFromDomain(s.Volumes),
 		SourceNode:           options.SourceNode,
 		TargetNode:           options.TargetNode,
@@ -247,7 +239,6 @@ func ClusterPodMigrationSpecFromDomain(s domain.SessionSpec) ClusterPodMigration
 		TemporaryNamespace:     NamespaceName(s.TemporaryNamespace),
 		DestinationNamespace:   NamespaceName(s.DestinationNamespace),
 		SessionNamespace:       NamespaceName(s.SessionNamespace),
-		CreatedBy:              s.CreatedBy,
 		Volumes:                clusterVolumesFromDomain(s.Volumes),
 		SourceNode:             options.SourceNode,
 		TargetNode:             options.TargetNode,
@@ -270,7 +261,6 @@ func ClusterReservationSpecFromDomain(s domain.SessionSpec) ClusterReservationSp
 		TemporaryNamespace:   NamespaceName(s.TemporaryNamespace),
 		DestinationNamespace: NamespaceName(s.DestinationNamespace),
 		SessionNamespace:     NamespaceName(s.SessionNamespace),
-		CreatedBy:            s.CreatedBy,
 		Volumes:              clusterVolumesFromDomain(s.Volumes),
 		TargetNode:           options.TargetNode,
 		ToolImage:            options.ToolImage,
@@ -286,7 +276,6 @@ func ClusterCopySpecFromDomain(s domain.SessionSpec) ClusterCopySpec {
 		TemporaryNamespace:   NamespaceName(s.TemporaryNamespace),
 		DestinationNamespace: NamespaceName(s.DestinationNamespace),
 		SessionNamespace:     NamespaceName(s.SessionNamespace),
-		CreatedBy:            s.CreatedBy,
 		Volumes:              clusterVolumesFromDomain(s.Volumes),
 		SourceNode:           options.SourceNode,
 		TargetNode:           options.TargetNode,
@@ -305,7 +294,6 @@ func ClusterMoveSpecFromDomain(s domain.SessionSpec) ClusterMoveSpec {
 		SourceNamespace:      NamespaceName(s.SourceNamespace),
 		DestinationNamespace: NamespaceName(s.DestinationNamespace),
 		SessionNamespace:     NamespaceName(s.SessionNamespace),
-		CreatedBy:            s.CreatedBy,
 		Identity: ClusterPVCIdentityFields{
 			SourcePVC:      localRefFromDomain(volume.SourcePVC),
 			SourcePV:       localRefFromDomain(volume.SourcePV),

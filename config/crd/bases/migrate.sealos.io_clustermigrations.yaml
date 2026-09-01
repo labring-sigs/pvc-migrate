@@ -46,8 +46,6 @@ spec:
             type: object
           spec:
             properties:
-              createdBy:
-                type: string
               deleteExtraneous:
                 type: boolean
               destinationNamespace:

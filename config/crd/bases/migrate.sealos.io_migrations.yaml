@@ -52,8 +52,6 @@ spec:
             description: MigrationSpec is an offline PVC migration. It has no workload
               controls.
             properties:
-              createdBy:
-                type: string
               deleteExtraneous:
                 type: boolean
               skipSourceUsageCheck:

@@ -482,7 +482,6 @@ type SessionCommon struct {
 	TemporaryNamespace   string       `json:"temporaryNamespace"   yaml:"temporaryNamespace"`
 	DestinationNamespace string       `json:"destinationNamespace" yaml:"destinationNamespace"`
 	SessionNamespace     string       `json:"sessionNamespace"     yaml:"sessionNamespace"`
-	CreatedBy            string       `json:"createdBy,omitempty"  yaml:"createdBy,omitempty"`
 	Volumes              []VolumeSpec `json:"volumes,omitempty"    yaml:"volumes,omitempty"`
 }
 

@@ -46,8 +46,6 @@ spec:
             type: object
           spec:
             properties:
-              createdBy:
-                type: string
               destinationNamespace:
                 description: |-
                   NamespaceName is a Kubernetes namespace name used by a cluster-scoped

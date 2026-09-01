@@ -57,7 +57,6 @@ type ClusterMigrationSpec struct {
 	TemporaryNamespace   NamespaceName `json:"temporaryNamespace"   yaml:"temporaryNamespace"`
 	DestinationNamespace NamespaceName `json:"destinationNamespace" yaml:"destinationNamespace"`
 	SessionNamespace     NamespaceName `json:"sessionNamespace"     yaml:"sessionNamespace"`
-	CreatedBy            string        `json:"createdBy,omitempty"  yaml:"createdBy,omitempty"`
 	// +kubebuilder:validation:MaxItems=1024
 	Volumes    []ClusterVolumeSpec `json:"volumes,omitempty"    yaml:"volumes,omitempty"`
 	SourceNode string              `json:"sourceNode,omitempty" yaml:"sourceNode,omitempty"`
@@ -76,7 +75,6 @@ type ClusterPodMigrationSpec struct {
 	TemporaryNamespace   NamespaceName `json:"temporaryNamespace"   yaml:"temporaryNamespace"`
 	DestinationNamespace NamespaceName `json:"destinationNamespace" yaml:"destinationNamespace"`
 	SessionNamespace     NamespaceName `json:"sessionNamespace"     yaml:"sessionNamespace"`
-	CreatedBy            string        `json:"createdBy,omitempty"  yaml:"createdBy,omitempty"`
 	// +kubebuilder:validation:MaxItems=1024
 	Volumes    []ClusterVolumeSpec `json:"volumes,omitempty"    yaml:"volumes,omitempty"`
 	SourceNode string              `json:"sourceNode,omitempty" yaml:"sourceNode,omitempty"`
@@ -97,7 +95,6 @@ type ClusterReservationSpec struct {
 	TemporaryNamespace   NamespaceName `json:"temporaryNamespace"   yaml:"temporaryNamespace"`
 	DestinationNamespace NamespaceName `json:"destinationNamespace" yaml:"destinationNamespace"`
 	SessionNamespace     NamespaceName `json:"sessionNamespace"     yaml:"sessionNamespace"`
-	CreatedBy            string        `json:"createdBy,omitempty"  yaml:"createdBy,omitempty"`
 	// +kubebuilder:validation:MaxItems=1024
 	Volumes              []ClusterVolumeSpec `json:"volumes,omitempty"              yaml:"volumes,omitempty"`
 	TargetNode           string              `json:"targetNode,omitempty"           yaml:"targetNode,omitempty"`
@@ -110,7 +107,6 @@ type ClusterCopySpec struct {
 	TemporaryNamespace   NamespaceName `json:"temporaryNamespace"   yaml:"temporaryNamespace"`
 	DestinationNamespace NamespaceName `json:"destinationNamespace" yaml:"destinationNamespace"`
 	SessionNamespace     NamespaceName `json:"sessionNamespace"     yaml:"sessionNamespace"`
-	CreatedBy            string        `json:"createdBy,omitempty"  yaml:"createdBy,omitempty"`
 	// +kubebuilder:validation:MaxItems=1024
 	Volumes    []ClusterVolumeSpec `json:"volumes,omitempty"    yaml:"volumes,omitempty"`
 	SourceNode string              `json:"sourceNode,omitempty" yaml:"sourceNode,omitempty"`
@@ -135,7 +131,6 @@ type ClusterMoveSpec struct {
 	SourceNamespace      NamespaceName            `json:"sourceNamespace"      yaml:"sourceNamespace"`
 	DestinationNamespace NamespaceName            `json:"destinationNamespace" yaml:"destinationNamespace"`
 	SessionNamespace     NamespaceName            `json:"sessionNamespace"     yaml:"sessionNamespace"`
-	CreatedBy            string                   `json:"createdBy,omitempty"  yaml:"createdBy,omitempty"`
 	Identity             ClusterPVCIdentityFields `json:"identity"             yaml:"identity"`
 }
 

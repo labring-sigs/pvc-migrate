@@ -162,7 +162,6 @@ type GrafanaSpec struct {
 
 // MigrationSpec is an offline PVC migration. It has no workload controls.
 type MigrationSpec struct {
-	CreatedBy string `json:"createdBy,omitempty" yaml:"createdBy,omitempty"`
 	// +kubebuilder:validation:MaxItems=1024
 	Volumes    []VolumeSpec `json:"volumes,omitempty"    yaml:"volumes,omitempty"`
 	SourceNode string       `json:"sourceNode,omitempty" yaml:"sourceNode,omitempty"`
@@ -179,7 +178,6 @@ type MigrationSpec struct {
 // PodMigrationSpec is a workload-aware migration. Workload and precopy
 // controls are exclusive to this operation.
 type PodMigrationSpec struct {
-	CreatedBy string `json:"createdBy,omitempty" yaml:"createdBy,omitempty"`
 	// +kubebuilder:validation:MaxItems=1024
 	Volumes    []VolumeSpec `json:"volumes,omitempty"    yaml:"volumes,omitempty"`
 	SourceNode string       `json:"sourceNode,omitempty" yaml:"sourceNode,omitempty"`
@@ -196,7 +194,6 @@ type PodMigrationSpec struct {
 }
 
 type ReservationSpec struct {
-	CreatedBy string `json:"createdBy,omitempty" yaml:"createdBy,omitempty"`
 	// +kubebuilder:validation:MaxItems=1024
 	Volumes              []VolumeSpec `json:"volumes,omitempty"              yaml:"volumes,omitempty"`
 	TargetNode           string       `json:"targetNode,omitempty"           yaml:"targetNode,omitempty"`
@@ -205,7 +202,6 @@ type ReservationSpec struct {
 }
 
 type CopySpec struct {
-	CreatedBy string `json:"createdBy,omitempty" yaml:"createdBy,omitempty"`
 	// +kubebuilder:validation:MaxItems=1024
 	Volumes    []VolumeSpec `json:"volumes,omitempty"    yaml:"volumes,omitempty"`
 	SourceNode string       `json:"sourceNode,omitempty" yaml:"sourceNode,omitempty"`
@@ -219,7 +215,6 @@ type CopySpec struct {
 }
 
 type BackupSpec struct {
-	CreatedBy string                 `json:"createdBy,omitempty" yaml:"createdBy,omitempty"`
 	SourcePVC LocalResourceReference `json:"sourcePVC"           yaml:"sourcePVC"`
 	SourcePV  LocalResourceReference `json:"sourcePV"            yaml:"sourcePV"`
 	Path      string                 `json:"path,omitempty"      yaml:"path,omitempty"`
@@ -237,7 +232,6 @@ type BackupSpec struct {
 }
 
 type RestoreSpec struct {
-	CreatedBy      string                 `json:"createdBy,omitempty" yaml:"createdBy,omitempty"`
 	DestinationPVC LocalResourceReference `json:"destinationPVC"      yaml:"destinationPVC"`
 	Path           string                 `json:"path,omitempty"      yaml:"path,omitempty"`
 	// +kubebuilder:validation:MinLength=1
@@ -271,7 +265,6 @@ type PVCIdentityFields struct {
 }
 
 type RenameSpec struct {
-	CreatedBy         string `json:"createdBy,omitempty" yaml:"createdBy,omitempty"`
 	PVCIdentityFields `       json:",inline"             yaml:",inline"`
 }
 
@@ -621,7 +614,7 @@ func volumesToDomain(
 }
 
 func namespacedSessionCommon(
-	namespace, createdBy string,
+	namespace string,
 	volumes []VolumeSpec,
 ) domain.SessionCommon {
 	return domain.SessionCommon{
@@ -629,14 +622,13 @@ func namespacedSessionCommon(
 		TemporaryNamespace:   namespace,
 		DestinationNamespace: namespace,
 		SessionNamespace:     namespace,
-		CreatedBy:            createdBy,
 		Volumes:              volumesToDomain(volumes, namespace, namespace),
 	}
 }
 
 func (s MigrationSpec) Domain(namespace string) domain.SessionSpec {
 	return domain.SessionSpec{
-		SessionCommon: namespacedSessionCommon(namespace, s.CreatedBy, s.Volumes),
+		SessionCommon: namespacedSessionCommon(namespace, s.Volumes),
 		Type:          domain.SessionTypeMigrate,
 		Migrate:       &domain.MigrateSessionSpec{SessionWorkflowOptions: s.workflowOptions()},
 	}
@@ -644,7 +636,7 @@ func (s MigrationSpec) Domain(namespace string) domain.SessionSpec {
 
 func (s PodMigrationSpec) Domain(namespace string) domain.SessionSpec {
 	return domain.SessionSpec{
-		SessionCommon: namespacedSessionCommon(namespace, s.CreatedBy, s.Volumes),
+		SessionCommon: namespacedSessionCommon(namespace, s.Volumes),
 		Type:          domain.SessionTypeMigratePod,
 		MigratePod: &domain.MigratePodSessionSpec{
 			SessionWorkflowOptions: s.workflowOptions(),
@@ -657,7 +649,7 @@ func (s PodMigrationSpec) Domain(namespace string) domain.SessionSpec {
 
 func (s ReservationSpec) Domain(namespace string) domain.SessionSpec {
 	return domain.SessionSpec{
-		SessionCommon: namespacedSessionCommon(namespace, s.CreatedBy, s.Volumes),
+		SessionCommon: namespacedSessionCommon(namespace, s.Volumes),
 		Type:          domain.SessionTypeReserve,
 		Reserve:       &domain.ReserveSessionSpec{SessionWorkflowOptions: s.workflowOptions()},
 	}
@@ -665,7 +657,7 @@ func (s ReservationSpec) Domain(namespace string) domain.SessionSpec {
 
 func (s CopySpec) Domain(namespace string) domain.SessionSpec {
 	return domain.SessionSpec{
-		SessionCommon: namespacedSessionCommon(namespace, s.CreatedBy, s.Volumes),
+		SessionCommon: namespacedSessionCommon(namespace, s.Volumes),
 		Type:          domain.SessionTypeCopy,
 		Copy: &domain.CopySessionSpec{
 			SessionWorkflowOptions: s.workflowOptions(),
@@ -679,7 +671,6 @@ func (s BackupSpec) Domain(namespace string) domain.SessionSpec {
 		SessionCommon: domain.SessionCommon{
 			SourceNamespace:  namespace,
 			SessionNamespace: namespace,
-			CreatedBy:        s.CreatedBy,
 		},
 		Type: domain.SessionTypeBackup,
 		Backup: &domain.BackupSessionSpec{
@@ -702,7 +693,6 @@ func (s RestoreSpec) Domain(namespace string) domain.SessionSpec {
 			SourceNamespace:      namespace,
 			DestinationNamespace: namespace,
 			SessionNamespace:     namespace,
-			CreatedBy:            s.CreatedBy,
 		},
 		Type: domain.SessionTypeRestore,
 		Restore: &domain.RestoreSessionSpec{
@@ -735,7 +725,6 @@ func (s RenameSpec) Domain(namespace string) domain.SessionSpec {
 		namespace,
 		namespace,
 		namespace,
-		s.CreatedBy,
 		s.SourcePVC,
 		s.SourcePV,
 		s.DestinationPVC,
@@ -745,7 +734,7 @@ func (s RenameSpec) Domain(namespace string) domain.SessionSpec {
 
 func identitySessionSpec(
 	t domain.SessionType,
-	source, destination, sessionNamespace, createdBy string,
+	source, destination, sessionNamespace string,
 	sourcePVC, sourcePV, destinationPVC LocalResourceReference,
 	template PVCSourceTemplate,
 ) domain.SessionSpec {
@@ -755,7 +744,6 @@ func identitySessionSpec(
 			TemporaryNamespace:   destination,
 			DestinationNamespace: destination,
 			SessionNamespace:     sessionNamespace,
-			CreatedBy:            createdBy,
 			Volumes: []domain.VolumeSpec{
 				{
 					SourcePVC:           localRefToDomain(sourcePVC, source),
@@ -781,7 +769,6 @@ func MigrationSpecFromDomain(s domain.SessionSpec) MigrationSpec {
 	options := s.WorkflowOptions()
 
 	return MigrationSpec{
-		CreatedBy:            s.CreatedBy,
 		Volumes:              volumesFromDomain(s.Volumes),
 		SourceNode:           options.SourceNode,
 		TargetNode:           options.TargetNode,
@@ -797,7 +784,6 @@ func PodMigrationSpecFromDomain(s domain.SessionSpec) PodMigrationSpec {
 	options := s.WorkflowOptions()
 
 	return PodMigrationSpec{
-		CreatedBy:              s.CreatedBy,
 		Volumes:                volumesFromDomain(s.Volumes),
 		SourceNode:             options.SourceNode,
 		TargetNode:             options.TargetNode,
@@ -816,7 +802,6 @@ func ReservationSpecFromDomain(s domain.SessionSpec) ReservationSpec {
 	options := s.WorkflowOptions()
 
 	return ReservationSpec{
-		CreatedBy:            s.CreatedBy,
 		Volumes:              volumesFromDomain(s.Volumes),
 		TargetNode:           options.TargetNode,
 		ToolImage:            options.ToolImage,
@@ -828,7 +813,6 @@ func CopySpecFromDomain(s domain.SessionSpec) CopySpec {
 	options := s.WorkflowOptions()
 
 	return CopySpec{
-		CreatedBy:            s.CreatedBy,
 		Volumes:              volumesFromDomain(s.Volumes),
 		SourceNode:           options.SourceNode,
 		TargetNode:           options.TargetNode,
@@ -846,7 +830,6 @@ func BackupSpecFromDomain(s domain.SessionSpec) BackupSpec {
 		p = &domain.BackupSessionSpec{}
 	}
 	return BackupSpec{
-		CreatedBy:              s.CreatedBy,
 		SourcePVC:              localRefFromDomain(p.SourcePVC),
 		SourcePV:               localRefFromDomain(p.SourcePV),
 		Path:                   p.Path,
@@ -865,7 +848,6 @@ func RestoreSpecFromDomain(s domain.SessionSpec) RestoreSpec {
 		p = &domain.RestoreSessionSpec{}
 	}
 	return RestoreSpec{
-		CreatedBy:               s.CreatedBy,
 		DestinationPVC:          localRefFromDomain(p.DestinationPVC),
 		Path:                    p.Path,
 		Name:                    p.Name,
@@ -883,7 +865,6 @@ func RestoreSpecFromDomain(s domain.SessionSpec) RestoreSpec {
 
 func RenameSpecFromDomain(s domain.SessionSpec) RenameSpec {
 	return RenameSpec{
-		CreatedBy:         s.CreatedBy,
 		PVCIdentityFields: identityFieldsFromVolume(firstVolume(s.Volumes)),
 	}
 }

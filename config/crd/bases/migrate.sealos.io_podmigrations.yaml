@@ -49,8 +49,6 @@ spec:
               PodMigrationSpec is a workload-aware migration. Workload and precopy
               controls are exclusive to this operation.
             properties:
-              createdBy:
-                type: string
               deleteExtraneous:
                 type: boolean
               openebsLvmEnableShared:
