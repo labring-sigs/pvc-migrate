@@ -55,7 +55,7 @@ type Request struct {
 	KubeContext             string
 	StreamToolLogs          bool
 	StructuredLogs          bool
-	Store                   RepositoryStore
+	Store                   S3RepositoryStore
 	// SkipManifestCheck defers remote recovery-point validation to the
 	// controller. The controller is the only component that can resolve a
 	// repository's credentials when the submitting user cannot read its Secret.

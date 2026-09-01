@@ -11,20 +11,11 @@ import (
 
 // RepositoryStore is the data-plane contract used by backup and restore.
 //
-// The original implementation exposed *objectstore.Store throughout the
-// workflow code, which made every future repository backend look like S3.
-// Keeping the contract here lets each BackupRepository type provide its own
-// implementation while the workflow state machine continues to own locking,
-// checkpoints, and PVC safety. Config/RcloneConfig are currently needed by
-// the S3 transfer adapter; non-S3 adapters should return their own transfer
-// contract once their data mover is enabled.
+// Backend-neutral operations stay here so future PVC or snapshot adapters do
+// not have to expose object-store credentials or rclone configuration.
 type RepositoryStore interface {
 	Backend() string
-	Config() objectstore.Config
-	Credentials() objectstore.Credentials
-	RemotePath() string
 	Destination() string
-	RcloneConfig() string
 
 	Manifest(ctx context.Context) (*objectstore.Manifest, error)
 	PutManifest(ctx context.Context, manifest objectstore.Manifest) error
@@ -33,6 +24,18 @@ type RepositoryStore interface {
 	AcquireLock(ctx context.Context, holder string, ttl time.Duration) (string, error)
 	ReleaseLock(ctx context.Context, etag string) error
 	RenewLock(ctx context.Context, holder, etag string, ttl time.Duration) (string, error)
+}
+
+// S3RepositoryStore is the existing object-store adapter used by the rclone
+// transfer path. Other repository types get their own adapter contract and
+// controller dispatch path.
+type S3RepositoryStore interface {
+	RepositoryStore
+
+	Config() objectstore.Config
+	Credentials() objectstore.Credentials
+	RemotePath() string
+	RcloneConfig() string
 }
 
 func requireS3RepositoryBackend(store RepositoryStore) error {
