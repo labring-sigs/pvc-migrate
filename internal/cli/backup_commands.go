@@ -152,7 +152,7 @@ func (r *rootState) runBackupTransfer(
 		}
 	}
 
-	if runtime.controllerModeExplicit && controllerWorkflow && flags.backupRepository == "" {
+	if controllerWorkflow && flags.backupRepository == "" {
 		return reportTransferError(cmd, "backup", flags.namespace, flags.pvc, domain.NewError(
 			domain.ErrorPrecondition,
 			"backup repository",
@@ -244,9 +244,8 @@ func (r *rootState) runBackupTransfer(
 	}
 
 	if session == nil || session.Backend != kube.SessionBackendCRD {
-		// Submit may have selected the ConfigMap backend in auto mode. Pass the
-		// durable record into execution so it is resumed under the same identity
-		// instead of being prepared and persisted a second time.
+		// Keep the durable session identity when execution remains in session
+		// mode, so the record is not prepared and persisted a second time.
 		request.BackupSession = session
 		if err := backup.Run(ctx, runtime.clients.Kubernetes, request, false); err != nil {
 			lookupCtx, lookupCancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -486,7 +485,7 @@ func (r *rootState) newObjectTransferPlanCommand(
 				}
 			}
 
-			if runtime.controllerModeExplicit && controllerWorkflow &&
+			if controllerWorkflow &&
 				flags.backupRepository == "" {
 				return reportTransferError(
 					cmd,

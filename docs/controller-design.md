@@ -49,14 +49,15 @@ destination identity and lifecycle protocol.
 | --- | --- | --- |
 | `session` | ConfigMap session | invoking CLI |
 | `controller` | operation-specific CRD | elected controller |
-| `auto` | CRD when the matching kind is served, otherwise ConfigMap | controller or CLI |
 
-`controller` mode never silently falls back. `auto` discovers each served
-workflow kind independently, chooses a namespaced kind for same-namespace work,
-and chooses a cluster kind when that operation exposes one and namespaces
-differ. Unsupported scope combinations use session mode in `auto`. The CLI creates
-the CR, then watches that exact object by resource version until a terminal
-status. It reconnects after watch closure or expiration and reports CR status
+The CLI defaults to `session`; `controller` is selected explicitly when the
+controller and the required workflow CRDs are installed.
+
+`controller` mode never silently falls back. It discovers each served workflow
+kind independently, chooses a namespaced kind for same-namespace work, and
+chooses a cluster kind when that operation exposes one and namespaces differ.
+The CLI creates the CR, then watches that exact object by resource version until
+a terminal status. It reconnects after watch closure or expiration and reports CR status
 history and conditions while the controller owns tool Pod logs. `--wait=false`
 returns after creation; the default waits for completion.
 

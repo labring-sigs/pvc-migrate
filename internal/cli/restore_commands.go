@@ -85,7 +85,7 @@ func (r *rootState) newRestoreTransferCommand() *cobra.Command {
 				}
 			}
 
-			if runtime.controllerModeExplicit && controllerWorkflow &&
+			if controllerWorkflow &&
 				flags.backupRepository == "" {
 				return reportTransferError(
 					cmd,
@@ -161,9 +161,8 @@ func (r *rootState) newRestoreTransferCommand() *cobra.Command {
 			}
 
 			// Profile-backed restores are submitted as CRs. Static-credential
-			// restores keep the historical synchronous path in auto/session mode;
-			// creating a ConfigMap session and then executing directly would leave
-			// an orphaned planned record.
+			// restores keep the synchronous session path; creating a ConfigMap
+			// session and then executing directly would leave an orphaned record.
 			if controllerWorkflowAvailable(runtime, domain.SessionTypeRestore) &&
 				flags.backupRepository != "" {
 				session, submitErr := backup.SubmitRestore(

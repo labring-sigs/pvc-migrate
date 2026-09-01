@@ -23,9 +23,7 @@ type controllerSessionWaiter interface {
 }
 
 // controllerWorkflowAvailable reports whether one operation can be submitted
-// to its installed CRD. Auto mode may discover only a subset of workflow CRDs;
-// those operations use the ConfigMap/session path while explicit controller
-// mode still rejects missing kinds at the command boundary.
+// to its installed CRD in explicit controller mode.
 func controllerWorkflowAvailable(runtime *commandRuntime, sessionType domain.SessionType) bool {
 	if runtime == nil || runtime.mode != executionModeController || runtime.controllerStore == nil {
 		return false
@@ -122,7 +120,7 @@ func (r *rootState) controllerPlanSessionNamespace(
 }
 
 func requireControllerWorkflow(runtime *commandRuntime, sessionType domain.SessionType) error {
-	if runtime == nil || !runtime.controllerModeExplicit ||
+	if runtime == nil || runtime.mode != executionModeController ||
 		controllerWorkflowAvailable(runtime, sessionType) {
 		return nil
 	}

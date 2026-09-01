@@ -57,7 +57,6 @@ type globals struct {
 type executionMode string
 
 const (
-	executionModeAuto       executionMode = "auto"
 	executionModeSession    executionMode = "session"
 	executionModeController executionMode = "controller"
 )
@@ -87,7 +86,6 @@ type commandRuntime struct {
 	mode                          executionMode
 	controllerStore               kube.SessionStore
 	controllerKinds               []domain.ControllerKind
-	controllerModeExplicit        bool
 	waitForController             bool
 	controllerWaiter              controllerSessionWaiter
 }
@@ -216,8 +214,8 @@ func NewRoot(options Options) *cobra.Command {
 	flags.StringVar(
 		&state.global.mode,
 		"mode",
-		string(executionModeAuto),
-		"Persistence mode: auto selects workflow CRDs when installed, controller uses CRDs, session uses ConfigMaps",
+		string(executionModeSession),
+		"Persistence mode: session uses ConfigMaps, controller uses workflow CRDs",
 	)
 
 	command.AddCommand(
@@ -292,40 +290,29 @@ func (r *rootState) runtime() (*commandRuntime, error) {
 		return nil, err
 	}
 
-	controllerKinds := kube.AvailableControllerWorkflowKinds(clients.Discovery)
-	hasCRDs := len(controllerKinds) > 0
-
-	if requestedMode == executionModeController && !hasCRDs {
-		return nil, domain.NewError(
-			domain.ErrorPrecondition,
-			"controller mode",
-			"controller mode requires at least one migrate.sealos.io/v1alpha1 workflow CRD; install deploy/crd.yaml or use --mode=session",
-		)
-	}
-
 	configMapStore := kube.NewConfigMapSessionStore(clients.Kubernetes)
-	crdStore := kube.NewCRDSessionStore(clients.Runtime).
-		WithLeaseClient(clients.Kubernetes).
-		WithSupportedKinds(controllerKinds)
 
 	var (
 		store           kube.SessionStore = configMapStore
 		controllerStore kube.SessionStore
+		controllerKinds []domain.ControllerKind
 	)
 
-	selectedMode := executionModeSession
-	switch {
-	case requestedMode == executionModeController:
+	if requestedMode == executionModeController {
+		controllerKinds = kube.AvailableControllerWorkflowKinds(clients.Discovery)
+		if len(controllerKinds) == 0 {
+			return nil, domain.NewError(
+				domain.ErrorPrecondition,
+				"controller mode",
+				"controller mode requires at least one migrate.sealos.io/v1alpha1 workflow CRD; install deploy/crd.yaml or use --mode=session",
+			)
+		}
+
+		crdStore := kube.NewCRDSessionStore(clients.Runtime).
+			WithLeaseClient(clients.Kubernetes).
+			WithSupportedKinds(controllerKinds)
 		store = crdStore
 		controllerStore = crdStore
-		selectedMode = executionModeController
-	case requestedMode == executionModeAuto && hasCRDs:
-		// Auto mode routes unsupported operations to the legacy ConfigMap
-		// backend while eligible same-namespace workflows use the CRD.
-		store = kube.NewSessionStoreRouter(configMapStore, crdStore).
-			WithControllerKinds(controllerKinds)
-		controllerStore = crdStore
-		selectedMode = executionModeController
 	}
 
 	reserver := kube.NewReserver(clients.Kubernetes).
@@ -377,10 +364,9 @@ func (r *rootState) runtime() (*commandRuntime, error) {
 		logger:                        logger.With("component", "backup"),
 		controllers:                   controllers,
 		openEBSLVMSharedVolumeManager: openEBSLVMSharedVolumeManager,
-		mode:                          selectedMode,
+		mode:                          requestedMode,
 		controllerStore:               controllerStore,
 		controllerKinds:               slices.Clone(controllerKinds),
-		controllerModeExplicit:        requestedMode == executionModeController,
 		waitForController:             r.global.wait,
 		controllerWaiter:              kube.NewControllerSessionWaiter(clients.Dynamic),
 	}, nil
@@ -452,13 +438,13 @@ func (r *rootState) validateGlobalFlags() error {
 func parseExecutionMode(value string) (executionMode, error) {
 	mode := executionMode(strings.ToLower(strings.TrimSpace(value)))
 	switch mode {
-	case executionModeAuto, executionModeSession, executionModeController:
+	case executionModeSession, executionModeController:
 		return mode, nil
 	default:
 		return "", domain.NewError(
 			domain.ErrorValidation,
 			"flags",
-			"--mode must be auto, session, or controller",
+			"--mode must be session or controller",
 		)
 	}
 }

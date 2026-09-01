@@ -70,9 +70,11 @@ Use `--tool-image registry.example/pvc-migrate:0.1.0` when cluster nodes pull th
 
 The CLI supports two durable execution backends:
 
+The default mode is `session`. Use `--mode=controller` when the controller and
+the required workflow CRDs are installed.
+
 - `--mode=session` always stores sessions in ConfigMaps and executes the workflow in the invoking process.
 - `--mode=controller` stores local sessions as operation-specific `migrate.sealos.io/v1alpha1` CRs. Same-namespace work uses `Migration`, `PodMigration`, `Reservation`, `Copy`, `Backup`, `Restore`, or `Rename`. Cross-namespace migration, pod migration, reservation, and copy use their `Cluster*` kind; PVC identity moves use `ClusterMove`. Backup, restore, and rename intentionally have no cluster-scoped form. Cross-cluster workflows remain on the ConfigMap/session backend. The controller uses leader election, watches every installed workflow kind, and reuses the same resumable app.Service state machine. The CLI watches that CR and waits for completion by default; use `--wait=false` for detached submission. A command fails clearly when its matching CRD is absent.
-- `--mode=auto` (the default) discovers workflow CRDs independently. Each eligible single-cluster operation uses its matching namespaced or cluster-scoped CRD when served; missing kinds and cross-cluster workflows use ConfigMap sessions. This supports staged CRD rollouts without silently dropping an operation.
 
 Install the controller backend with:
 
@@ -128,7 +130,7 @@ require that operator identity in controller mode.
 Submit a supported migration and wait for its CR status to reach completion:
 
 ```bash
-pvc-migrate --mode=auto --yes migrate \
+pvc-migrate --mode=session --yes migrate \
   --source-namespace application --source-pvc data \
   --destination-pvc data --dry-run=false
 kubectl -n application get migrations

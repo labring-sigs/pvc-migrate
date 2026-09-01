@@ -245,6 +245,7 @@ func testRootCommandSurface(t *testing.T, root *cobra.Command) {
 	}
 
 	for name, want := range map[string]string{
+		"mode":                 "session",
 		"session-namespace":    "pvc-migrate-system",
 		"controller-namespace": "pvc-migrate-system",
 		"timeout":              "30m0s",
@@ -881,7 +882,6 @@ func TestParseExecutionMode(t *testing.T) {
 		input string
 		want  executionMode
 	}{
-		{input: "auto", want: executionModeAuto},
 		{input: " SESSION ", want: executionModeSession},
 		{input: "Controller", want: executionModeController},
 	}
@@ -896,8 +896,28 @@ func TestParseExecutionMode(t *testing.T) {
 		}
 	}
 
-	if _, err := parseExecutionMode("direct"); domain.CategoryOf(err) != domain.ErrorValidation {
-		t.Fatalf("invalid execution mode error=%v category=%q", err, domain.CategoryOf(err))
+	for _, input := range []string{"auto", "direct"} {
+		if _, err := parseExecutionMode(input); domain.CategoryOf(err) != domain.ErrorValidation {
+			t.Fatalf(
+				"invalid execution mode %q error=%v category=%q",
+				input,
+				err,
+				domain.CategoryOf(err),
+			)
+		}
+	}
+}
+
+func TestExecutionModeDefaultsToSession(t *testing.T) {
+	command := NewRoot(Options{Version: "test"})
+	flag := command.PersistentFlags().Lookup("mode")
+
+	if flag == nil {
+		t.Fatal("mode flag is not registered")
+	}
+
+	if flag.DefValue != string(executionModeSession) {
+		t.Fatalf("mode default=%q, want %q", flag.DefValue, executionModeSession)
 	}
 }
 

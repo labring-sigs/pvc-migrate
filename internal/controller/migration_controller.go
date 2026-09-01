@@ -358,8 +358,8 @@ func StartManager(
 }
 
 // StartManagerWithKinds creates a manager that watches only the discovered
-// workflow kinds. This allows auto mode to reconcile a partial CRD rollout
-// while keeping ConfigMap fallback for operations not yet installed.
+// workflow kinds, which allows controller mode to run with a partial CRD
+// installation while each unsupported operation reports its missing kind.
 func StartManagerWithKinds(
 	ctx context.Context,
 	config *rest.Config,

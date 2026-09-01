@@ -345,7 +345,6 @@ func TestControllerWorkflowAvailabilityHonorsPartialDiscovery(t *testing.T) {
 			domain.ControllerKindBackup,
 			domain.ControllerKindMigration,
 		},
-		controllerModeExplicit: false,
 	}
 
 	if !controllerWorkflowAvailable(runtime, domain.SessionTypeBackup) {
@@ -356,13 +355,8 @@ func TestControllerWorkflowAvailabilityHonorsPartialDiscovery(t *testing.T) {
 		t.Fatal("restore workflow should fall back when its CRD is absent")
 	}
 
-	if err := requireControllerWorkflow(runtime, domain.SessionTypeRestore); err != nil {
-		t.Fatalf("auto mode should allow session fallback: %v", err)
-	}
-
-	runtime.controllerModeExplicit = true
 	if err := requireControllerWorkflow(runtime, domain.SessionTypeRestore); err == nil {
-		t.Fatal("explicit controller mode should reject an absent Restore CRD")
+		t.Fatal("controller mode should reject an absent Restore CRD")
 	}
 }
 

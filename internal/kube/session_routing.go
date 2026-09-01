@@ -492,9 +492,8 @@ func controllerSessionSupportedForResource(
 	}
 }
 
-// RoutingSessionStore provides auto mode. New eligible sessions go to their
-// operation-specific workflow CRD, while unsupported workflows continue using
-// ConfigMaps.
+// RoutingSessionStore provides dual-backend routing for callers that need to
+// reconcile sessions persisted in either ConfigMaps or workflow CRDs.
 type RoutingSessionStore struct {
 	crd             *CRDSessionStore
 	configMap       *ConfigMapSessionStore
@@ -514,8 +513,7 @@ func NewSessionStoreRouter(
 }
 
 // WithControllerKinds configures the set of operation CRDs discovered on the
-// cluster. Auto mode can then use a newly installed kind immediately while
-// preserving ConfigMap persistence for operations whose CRD is absent.
+// cluster, allowing routing to account for partial CRD installations.
 func (s *RoutingSessionStore) WithControllerKinds(
 	kinds []domain.ControllerKind,
 ) *RoutingSessionStore {
@@ -718,10 +716,10 @@ func (s *RoutingSessionStore) Delete(ctx context.Context, session *domain.Sessio
 	return s.configMap.Delete(ctx, session)
 }
 
-// AcquireSessionLock keeps auto mode's storage routing transparent to the
-// service-level fencing protocol. Both backends use the same Lease name, so
-// selecting the configured Kubernetes client is sufficient even before a
-// session has been persisted and acquired a backend marker.
+// AcquireSessionLock keeps storage routing transparent to the service-level
+// fencing protocol. Both backends use the same Lease name, so selecting the
+// configured Kubernetes client is sufficient even before a session has been
+// persisted and acquired a backend marker.
 func (s *RoutingSessionStore) AcquireSessionLock(
 	ctx context.Context,
 	namespace, id string,

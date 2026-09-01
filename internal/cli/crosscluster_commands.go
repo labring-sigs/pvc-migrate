@@ -551,7 +551,7 @@ func (r *rootState) crossClusterService(
 		return nil, domain.NewError(
 			domain.ErrorPrecondition,
 			"cross-cluster mode",
-			"cross-cluster workflows require two explicit API-server connections and use the session backend; use --mode=auto or --mode=session",
+			"cross-cluster workflows require two explicit API-server connections and use the session backend; use --mode=session",
 		)
 	}
 
