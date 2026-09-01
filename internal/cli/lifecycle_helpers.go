@@ -6,6 +6,7 @@ import (
 	"io"
 	"slices"
 	"strings"
+	"time"
 
 	"github.com/labring-sigs/pvc-migrate/internal/app"
 	"github.com/labring-sigs/pvc-migrate/internal/domain"
@@ -42,6 +43,89 @@ func controllerWorkflowAvailable(runtime *commandRuntime, sessionType domain.Ses
 	return slices.Contains(runtime.controllerKinds, workflow.Kind)
 }
 
+func objectStoreProfileAvailable(runtime *commandRuntime) bool {
+	if runtime == nil || runtime.clients == nil || runtime.clients.Discovery == nil {
+		return false
+	}
+
+	return kube.ObjectStoreProfileAvailable(runtime.clients.Discovery)
+}
+
+// workflowNamespaceForCommand resolves the namespace used by lifecycle and
+// status commands. Controller-backed workflows are namespaced tenant
+// resources, so callers must opt into a tenant namespace explicitly; session
+// mode keeps the historical global --session-namespace default.
+func workflowNamespaceForCommand(r *rootState, cmd *cobra.Command) string {
+	if cmd != nil {
+		if flag := cmd.Flags().Lookup("namespace"); flag != nil {
+			if value, err := cmd.Flags().GetString("namespace"); err == nil && strings.TrimSpace(value) != "" {
+				return strings.TrimSpace(value)
+			}
+		}
+	}
+
+	if r == nil {
+		return ""
+	}
+	if strings.TrimSpace(r.global.workflowNamespace) != "" {
+		return strings.TrimSpace(r.global.workflowNamespace)
+	}
+
+	return r.global.sessionNamespace
+}
+
+// controllerPlanNamespaces returns the durable namespaces that should be
+// passed to a planner before it performs ownership and quota checks. The
+// controller contract is selected only when the matching CRD is served and
+// all namespaced workflow inputs already belong to one tenant.
+func (r *rootState) controllerPlanNamespaces(
+	runtime *commandRuntime,
+	sessionType domain.SessionType,
+	sourceNamespace, destinationNamespace, temporaryNamespace string,
+	temporaryNamespaceExplicit bool,
+) (sessionNamespace, resolvedTemporaryNamespace string) {
+	sessionNamespace = r.global.sessionNamespace
+	resolvedTemporaryNamespace = temporaryNamespace
+
+	if runtime == nil || runtime.mode == executionModeSession ||
+		!controllerWorkflowAvailable(runtime, sessionType) ||
+		sourceNamespace == "" || destinationNamespace != sourceNamespace {
+		return sessionNamespace, resolvedTemporaryNamespace
+	}
+
+	if temporaryNamespaceExplicit && temporaryNamespace != sourceNamespace {
+		return sessionNamespace, resolvedTemporaryNamespace
+	}
+
+	if resolvedTemporaryNamespace == "" ||
+		(!temporaryNamespaceExplicit && resolvedTemporaryNamespace == "pvc-migrate-system") {
+		resolvedTemporaryNamespace = sourceNamespace
+	}
+
+	if resolvedTemporaryNamespace == sourceNamespace {
+		sessionNamespace = sourceNamespace
+	}
+
+	return sessionNamespace, resolvedTemporaryNamespace
+}
+
+func (r *rootState) controllerPlanSessionNamespace(
+	runtime *commandRuntime,
+	sessionType domain.SessionType,
+	sourceNamespace, destinationNamespace string,
+) string {
+	sessionNamespace, _ := r.controllerPlanNamespaces(
+		runtime,
+		sessionType,
+		sourceNamespace,
+		destinationNamespace,
+		sourceNamespace,
+		false,
+	)
+
+	return sessionNamespace
+}
+
 func requireControllerWorkflow(runtime *commandRuntime, sessionType domain.SessionType) error {
 	if runtime == nil || !runtime.controllerModeExplicit ||
 		controllerWorkflowAvailable(runtime, sessionType) {
@@ -75,9 +159,10 @@ func (r *rootState) workflowSession(
 	expected domain.SessionType,
 	action string,
 ) (*domain.Session, error) {
-	session, err := runtime.store.Get(ctx, r.global.sessionNamespace, id)
+	namespace := workflowNamespaceForCommand(r, cmd)
+	session, err := runtime.store.Get(ctx, namespace, id)
 	if err != nil {
-		return nil, reportSessionLookupError(cmd, r.global.sessionNamespace, id, err)
+		return nil, reportSessionLookupError(cmd, namespace, id, err)
 	}
 
 	if err := requireCLISessionType(session, expected, action); err != nil {
@@ -105,9 +190,15 @@ func deferControllerExecution(
 	}
 
 	if session.Status.Phase == domain.PhaseFailed {
-		// Failed resources are quiescent in the controller. An explicit lifecycle
-		// command owns the retry and moves the durable state back to ResumeFrom.
-		return false, nil
+		if session.Status.ResumeFrom == "" {
+			return false, nil
+		}
+		if err := session.Reactivate("controller resume requested", time.Now()); err != nil {
+			return true, err
+		}
+		if err := runtime.store.Update(ctx, session); err != nil {
+			return true, err
+		}
 	}
 
 	// Completed operation-specific checkpoints have no controller work left.
@@ -387,9 +478,10 @@ func (r *rootState) workflowSessionList(
 	typeName domain.SessionType,
 	name string,
 ) error {
-	sessions, err := runtime.store.List(ctx, r.global.sessionNamespace)
+	namespace := workflowNamespaceForCommand(r, cmd)
+	sessions, err := runtime.store.List(ctx, namespace)
 	if err != nil {
-		return reportSessionLookupError(cmd, r.global.sessionNamespace, "", err)
+		return reportSessionLookupError(cmd, namespace, "", err)
 	}
 
 	sessions = filterSessionsByType(sessions, typeName)
@@ -399,9 +491,9 @@ func (r *rootState) workflowSessionList(
 
 	return writeSessionListGuidance(
 		cmd.ErrOrStderr(),
-		r.global.sessionNamespace,
+		namespace,
 		sessions,
-		sessionCommandPrefixForCommand(cmd, r.global.sessionNamespace),
+		sessionCommandPrefixForCommand(cmd, namespace),
 		name,
 	)
 }

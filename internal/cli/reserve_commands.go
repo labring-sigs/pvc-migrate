@@ -37,11 +37,12 @@ func (r *rootState) newReserveCommand() *cobra.Command {
 			defer cancel()
 
 			if existing {
-				session, err := runtime.store.Get(ctx, r.global.sessionNamespace, flags.sessionID)
+				namespace := workflowNamespaceForCommand(r, cmd)
+				session, err := runtime.store.Get(ctx, namespace, flags.sessionID)
 				if err != nil {
 					return reportSessionLookupError(
 						cmd,
-						r.global.sessionNamespace,
+						namespace,
 						flags.sessionID,
 						err,
 					)
@@ -77,6 +78,15 @@ func (r *rootState) newReserveCommand() *cobra.Command {
 			if err != nil {
 				return err
 			}
+			options.SessionNamespace, options.TemporaryNamespace = r.controllerPlanNamespaces(
+				runtime,
+				domain.SessionTypeReserve,
+				options.SourceNamespace,
+				options.DestinationNamespace,
+				options.TemporaryNamespace,
+				cmd.Flags().Changed("temporary-namespace"),
+			)
+			options.StagingNamespace = options.TemporaryNamespace
 
 			plan, err := runtime.planner.PlanReserve(ctx, options)
 			if err != nil {
@@ -144,11 +154,12 @@ func (r *rootState) newReservePlanCommand() *cobra.Command {
 			defer cancel()
 
 			if existing {
-				session, err := runtime.store.Get(ctx, r.global.sessionNamespace, flags.sessionID)
+				namespace := workflowNamespaceForCommand(r, cmd)
+				session, err := runtime.store.Get(ctx, namespace, flags.sessionID)
 				if err != nil {
 					return reportSessionLookupError(
 						cmd,
-						r.global.sessionNamespace,
+						namespace,
 						flags.sessionID,
 						err,
 					)
@@ -173,6 +184,15 @@ func (r *rootState) newReservePlanCommand() *cobra.Command {
 			if err != nil {
 				return err
 			}
+			options.SessionNamespace, options.TemporaryNamespace = r.controllerPlanNamespaces(
+				runtime,
+				domain.SessionTypeReserve,
+				options.SourceNamespace,
+				options.DestinationNamespace,
+				options.TemporaryNamespace,
+				cmd.Flags().Changed("temporary-namespace"),
+			)
+			options.StagingNamespace = options.TemporaryNamespace
 
 			plan, err := runtime.planner.PlanReserve(ctx, options)
 			if err != nil {

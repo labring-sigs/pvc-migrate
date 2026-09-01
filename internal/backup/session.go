@@ -12,6 +12,7 @@ import (
 	"github.com/labring-sigs/pvc-migrate/internal/kube"
 	"github.com/labring-sigs/pvc-migrate/internal/objectstore"
 	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes"
 )
@@ -85,15 +86,19 @@ func buildBackupSession(
 	}
 	spec.Backup.Path = req.Path
 	spec.Backup.Backend = domain.ObjectStoreBackendS3
-	spec.Backup.Bucket = req.Store.Config().Bucket
-	spec.Backup.Prefix = req.Store.Config().Prefix
 	spec.Backup.Name = req.Store.Config().Name
-	spec.Backup.Provider = req.Store.Config().Provider
-	spec.Backup.Endpoint = req.Store.Config().Endpoint
-	spec.Backup.Region = req.Store.Config().Region
-	spec.Backup.AllowInsecureEndpoint = req.Store.Config().AllowInsecureEndpoint
-	spec.Backup.ServerSideEncryption = req.Store.Config().ServerSideEncryption
-	spec.Backup.SSEKMSKeyID = req.Store.Config().SSEKMSKeyID
+	spec.Backup.ObjectStoreProfile = strings.TrimSpace(req.ObjectStoreProfile)
+	if spec.Backup.ObjectStoreProfile == "" {
+		cfg := req.Store.Config()
+		spec.Backup.Bucket = cfg.Bucket
+		spec.Backup.Prefix = cfg.Prefix
+		spec.Backup.Provider = cfg.Provider
+		spec.Backup.Endpoint = cfg.Endpoint
+		spec.Backup.Region = cfg.Region
+		spec.Backup.AllowInsecureEndpoint = cfg.AllowInsecureEndpoint
+		spec.Backup.ServerSideEncryption = cfg.ServerSideEncryption
+		spec.Backup.SSEKMSKeyID = cfg.SSEKMSKeyID
+	}
 
 	return domain.NewSession(id, spec, time.Now()), nil
 }
@@ -123,6 +128,19 @@ func Submit(
 	err = withBackupSessionLock(ctx, req, session, func(lockedCtx context.Context) error {
 		if err := req.SessionStore.Create(lockedCtx, session); err != nil {
 			return err
+		}
+		if strings.TrimSpace(req.ObjectStoreProfile) != "" {
+			// Controller mode resolves credentials from the administrator-owned
+			// ObjectStoreProfile. Never materialize those credentials in a
+			// tenant namespace Secret.
+			if session.Backend != kube.SessionBackendCRD {
+				return domain.NewError(
+					domain.ErrorPrecondition,
+					"backup credentials",
+					"object-store profiles require a controller-backed workflow",
+				)
+			}
+			return nil
 		}
 		return persistBackupCredentials(lockedCtx, client, req, session)
 	})
@@ -210,16 +228,18 @@ func SubmitRestore(
 	spec.Restore.Path = req.Path
 
 	spec.Restore.Backend = domain.ObjectStoreBackendS3
-
-	spec.Restore.Bucket = cfg.Bucket
-	spec.Restore.Prefix = cfg.Prefix
 	spec.Restore.Name = cfg.Name
-	spec.Restore.Provider = cfg.Provider
-	spec.Restore.Endpoint = cfg.Endpoint
-	spec.Restore.Region = cfg.Region
-	spec.Restore.AllowInsecureEndpoint = cfg.AllowInsecureEndpoint
-	spec.Restore.ServerSideEncryption = cfg.ServerSideEncryption
-	spec.Restore.SSEKMSKeyID = cfg.SSEKMSKeyID
+	spec.Restore.ObjectStoreProfile = strings.TrimSpace(req.ObjectStoreProfile)
+	if spec.Restore.ObjectStoreProfile == "" {
+		spec.Restore.Bucket = cfg.Bucket
+		spec.Restore.Prefix = cfg.Prefix
+		spec.Restore.Provider = cfg.Provider
+		spec.Restore.Endpoint = cfg.Endpoint
+		spec.Restore.Region = cfg.Region
+		spec.Restore.AllowInsecureEndpoint = cfg.AllowInsecureEndpoint
+		spec.Restore.ServerSideEncryption = cfg.ServerSideEncryption
+		spec.Restore.SSEKMSKeyID = cfg.SSEKMSKeyID
+	}
 	spec.Restore.CreatePVC = req.CreatePVC
 	spec.Restore.DestinationStorageClass = req.DestinationStorageClass
 	spec.Restore.DestinationAccessMode = req.DestinationAccessMode
@@ -232,6 +252,16 @@ func SubmitRestore(
 	err := withBackupSessionLock(ctx, req, session, func(lockedCtx context.Context) error {
 		if err := req.SessionStore.Create(lockedCtx, session); err != nil {
 			return err
+		}
+		if strings.TrimSpace(req.ObjectStoreProfile) != "" {
+			if session.Backend != kube.SessionBackendCRD {
+				return domain.NewError(
+					domain.ErrorPrecondition,
+					"restore credentials",
+					"object-store profiles require a controller-backed workflow",
+				)
+			}
+			return nil
 		}
 		return persistRestoreCredentials(lockedCtx, client, req, session)
 	})
@@ -268,6 +298,7 @@ func persistBackupCredentials(
 			kube.BackupSecretKeyDataKey:    []byte(credentials.SecretKey),
 			kube.BackupSessionTokenDataKey: []byte(credentials.SessionToken),
 		},
+		backupCredentialsOwner(session)...,
 	)
 	if err != nil {
 		return err
@@ -315,6 +346,7 @@ func persistRestoreCredentials(
 			kube.BackupSecretKeyDataKey:    []byte(credentials.SecretKey),
 			kube.BackupSessionTokenDataKey: []byte(credentials.SessionToken),
 		},
+		backupCredentialsOwner(session)...,
 	)
 	if err != nil {
 		return err
@@ -329,6 +361,23 @@ func persistRestoreCredentials(
 	}
 
 	return req.SessionStore.Update(ctx, session)
+}
+
+func backupCredentialsOwner(session *domain.Session) []metav1.OwnerReference {
+	if session == nil || session.Backend != kube.SessionBackendCRD || session.BackendUID == "" {
+		return nil
+	}
+
+	controller := true
+	blockOwnerDeletion := true
+	return []metav1.OwnerReference{{
+		APIVersion:         domain.SessionAPIVersion,
+		Kind:               string(session.BackendResource),
+		Name:               session.ID,
+		UID:                session.BackendUID,
+		Controller:         &controller,
+		BlockOwnerDeletion: &blockOwnerDeletion,
+	}}
 }
 
 func loadBackupCredentials(
@@ -696,36 +745,39 @@ func buildResumeRequest(
 		return nil, err
 	}
 
-	credentials, err := loadBackupCredentials(ctx, client, session)
-	if err != nil {
-		return nil, err
-	}
-
 	payload := session.Spec.Backup
-	config := objectstore.Config{
-		Bucket:                payload.Bucket,
-		Prefix:                payload.Prefix,
-		Name:                  payload.Name,
-		Provider:              payload.Provider,
-		Endpoint:              payload.Endpoint,
-		Region:                payload.Region,
-		AccessKey:             credentials.AccessKey,
-		SecretKey:             credentials.SecretKey,
-		SessionToken:          credentials.SessionToken,
-		AllowInsecureEndpoint: payload.AllowInsecureEndpoint,
-		ForcePathStyle:        payload.Endpoint != "",
-		ServerSideEncryption:  payload.ServerSideEncryption,
-		SSEKMSKeyID:           payload.SSEKMSKeyID,
-	}
+	if req.Store == nil {
+		credentials, err := loadBackupCredentials(ctx, client, session)
+		if err != nil {
+			return nil, err
+		}
 
-	factory := req.ObjectStoreFactory
-	if factory == nil {
-		factory = objectstore.New
-	}
+		config := objectstore.Config{
+			Bucket:                payload.Bucket,
+			Prefix:                payload.Prefix,
+			Name:                  payload.Name,
+			Provider:              payload.Provider,
+			Endpoint:              payload.Endpoint,
+			Region:                payload.Region,
+			AccessKey:             credentials.AccessKey,
+			SecretKey:             credentials.SecretKey,
+			SessionToken:          credentials.SessionToken,
+			AllowInsecureEndpoint: payload.AllowInsecureEndpoint,
+			ForcePathStyle:        payload.Endpoint != "",
+			ServerSideEncryption:  payload.ServerSideEncryption,
+			SSEKMSKeyID:           payload.SSEKMSKeyID,
+		}
 
-	store, err := factory(ctx, config)
-	if err != nil {
-		return nil, err
+		factory := req.ObjectStoreFactory
+		if factory == nil {
+			factory = objectstore.New
+		}
+
+		store, err := factory(ctx, config)
+		if err != nil {
+			return nil, err
+		}
+		req.Store = store
 	}
 
 	req.ID = session.ID
@@ -735,11 +787,103 @@ func buildResumeRequest(
 	req.Online = payload.Online
 	req.ToolImage = payload.ToolImage
 	req.OpenEBSLVMEnableShared = payload.OpenEBSLVMEnableShared
-	req.Store = store
 	req.SessionNamespace = session.Spec.SessionNamespace
 	req.BackupSession = session
+	if err := pinObjectStoreProfile(ctx, req, session); err != nil {
+		return nil, err
+	}
 
 	return &req, nil
+}
+
+// pinObjectStoreProfile records the non-secret identity of the administrator
+// profile and its identity-bearing references while the caller holds the
+// session Lease. This keeps a running workflow on one immutable profile and
+// reference identity while still allowing Secret data to be rotated in place.
+func pinObjectStoreProfile(
+	ctx context.Context,
+	req Request,
+	session *domain.Session,
+) error {
+	if session == nil || strings.TrimSpace(req.ObjectStoreProfile) == "" ||
+		(req.ObjectStoreProfileUID == "" && req.ObjectStoreProfileGeneration == 0 &&
+			req.ObjectStoreCredentialsSecretUID == "" && req.ObjectStoreServiceAccountUID == "" &&
+			req.ObjectStoreServiceAccountFingerprint == "") {
+		return nil
+	}
+
+	if session.Status.ObjectStoreProfileUID != "" &&
+		req.ObjectStoreProfileUID != "" &&
+		session.Status.ObjectStoreProfileUID != req.ObjectStoreProfileUID {
+		return domain.NewError(
+			domain.ErrorConflict,
+			"object-store profile",
+			"ObjectStoreProfile was replaced while the workflow was running; create a new workflow",
+		)
+	}
+	if session.Status.ObjectStoreProfileGeneration > 0 &&
+		req.ObjectStoreProfileGeneration > 0 &&
+		session.Status.ObjectStoreProfileGeneration != req.ObjectStoreProfileGeneration {
+		return domain.NewError(
+			domain.ErrorConflict,
+			"object-store profile",
+			"ObjectStoreProfile changed while the workflow was running; create a new workflow",
+		)
+	}
+	if session.Status.ObjectStoreCredentialsSecretUID != "" &&
+		req.ObjectStoreCredentialsSecretUID != "" &&
+		session.Status.ObjectStoreCredentialsSecretUID != req.ObjectStoreCredentialsSecretUID {
+		return domain.NewError(
+			domain.ErrorConflict,
+			"object-store profile",
+			"ObjectStoreProfile credentials Secret was replaced while the workflow was running; create a new workflow",
+		)
+	}
+	if session.Status.ObjectStoreServiceAccountUID != "" &&
+		req.ObjectStoreServiceAccountUID != "" &&
+		session.Status.ObjectStoreServiceAccountUID != req.ObjectStoreServiceAccountUID {
+		return domain.NewError(
+			domain.ErrorConflict,
+			"object-store profile",
+			"ObjectStoreProfile ServiceAccount was replaced while the workflow was running; create a new workflow",
+		)
+	}
+	if session.Status.ObjectStoreServiceAccountFingerprint != "" &&
+		req.ObjectStoreServiceAccountFingerprint != "" &&
+		session.Status.ObjectStoreServiceAccountFingerprint != req.ObjectStoreServiceAccountFingerprint {
+		return domain.NewError(
+			domain.ErrorConflict,
+			"object-store profile",
+			"ObjectStoreProfile ServiceAccount identity changed while the workflow was running; create a new workflow",
+		)
+	}
+
+	changed := false
+	if session.Status.ObjectStoreProfileUID == "" && req.ObjectStoreProfileUID != "" {
+		session.Status.ObjectStoreProfileUID = req.ObjectStoreProfileUID
+		changed = true
+	}
+	if session.Status.ObjectStoreProfileGeneration == 0 && req.ObjectStoreProfileGeneration > 0 {
+		session.Status.ObjectStoreProfileGeneration = req.ObjectStoreProfileGeneration
+		changed = true
+	}
+	if session.Status.ObjectStoreCredentialsSecretUID == "" && req.ObjectStoreCredentialsSecretUID != "" {
+		session.Status.ObjectStoreCredentialsSecretUID = req.ObjectStoreCredentialsSecretUID
+		changed = true
+	}
+	if session.Status.ObjectStoreServiceAccountUID == "" && req.ObjectStoreServiceAccountUID != "" {
+		session.Status.ObjectStoreServiceAccountUID = req.ObjectStoreServiceAccountUID
+		changed = true
+	}
+	if session.Status.ObjectStoreServiceAccountFingerprint == "" && req.ObjectStoreServiceAccountFingerprint != "" {
+		session.Status.ObjectStoreServiceAccountFingerprint = req.ObjectStoreServiceAccountFingerprint
+		changed = true
+	}
+	if !changed || req.SessionStore == nil {
+		return nil
+	}
+
+	return req.SessionStore.Update(ctx, session)
 }
 
 func validateBackupResumePhase(session *domain.Session) error {
@@ -1009,6 +1153,10 @@ func ResumeRestore(
 	return withBackupSessionLock(ctx, req, session, func(runCtx context.Context) error {
 		if session.Status.Phase == domain.PhaseCompleted {
 			return nil
+		}
+
+		if err := pinObjectStoreProfile(runCtx, req, session); err != nil {
+			return err
 		}
 
 		if session.Status.Phase == domain.PhasePlanned ||

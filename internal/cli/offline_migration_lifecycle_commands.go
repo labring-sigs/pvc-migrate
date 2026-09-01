@@ -21,39 +21,15 @@ func (r *rootState) newOfflineMigrationStatusCommand() *cobra.Command {
 			defer cancel()
 
 			if len(args) == 1 {
-				session, err := runtime.store.Get(ctx, r.global.sessionNamespace, args[0])
+				session, err := r.workflowSession(ctx, runtime, cmd, args[0], domain.SessionTypeMigrate, "migrate status")
 				if err != nil {
-					return reportSessionLookupError(cmd, r.global.sessionNamespace, args[0], err)
-				}
-
-				if err := requireCLISessionType(
-					session,
-					domain.SessionTypeMigrate,
-					"migrate status",
-				); err != nil {
-					return reportSessionError(cmd, session, err)
+					return err
 				}
 
 				return printSessionResult(cmd, runtime, session)
 			}
 
-			sessions, err := runtime.store.List(ctx, r.global.sessionNamespace)
-			if err != nil {
-				return reportSessionLookupError(cmd, r.global.sessionNamespace, "", err)
-			}
-
-			sessions = filterSessionsByType(sessions, domain.SessionTypeMigrate)
-			if err := runtime.printer.Print(sessions); err != nil {
-				return err
-			}
-
-			return writeSessionListGuidance(
-				cmd.ErrOrStderr(),
-				r.global.sessionNamespace,
-				sessions,
-				sessionCommandPrefixForCommand(cmd, r.global.sessionNamespace),
-				"migrate",
-			)
+			return r.workflowSessionList(ctx, runtime, cmd, domain.SessionTypeMigrate, "migrate")
 		},
 	}
 }
@@ -74,17 +50,9 @@ func (r *rootState) newOfflineMigrationResumeCommand() *cobra.Command {
 			ctx, cancel := r.context(cmd.Context())
 			defer cancel()
 
-			session, err := runtime.store.Get(ctx, r.global.sessionNamespace, args[0])
+			session, err := r.workflowSession(ctx, runtime, cmd, args[0], domain.SessionTypeMigrate, "migrate resume")
 			if err != nil {
-				return reportSessionLookupError(cmd, r.global.sessionNamespace, args[0], err)
-			}
-
-			if err := requireCLISessionType(
-				session,
-				domain.SessionTypeMigrate,
-				"migrate resume",
-			); err != nil {
-				return reportSessionError(cmd, session, err)
+				return err
 			}
 
 			if dryRun {
@@ -135,17 +103,9 @@ func (r *rootState) newOfflineMigrationAbortCommand() *cobra.Command {
 			ctx, cancel := r.context(cmd.Context())
 			defer cancel()
 
-			session, err := runtime.store.Get(ctx, r.global.sessionNamespace, args[0])
+			session, err := r.workflowSession(ctx, runtime, cmd, args[0], domain.SessionTypeMigrate, "migrate abort")
 			if err != nil {
-				return reportSessionLookupError(cmd, r.global.sessionNamespace, args[0], err)
-			}
-
-			if err := requireCLISessionType(
-				session,
-				domain.SessionTypeMigrate,
-				"migrate abort",
-			); err != nil {
-				return reportSessionError(cmd, session, err)
+				return err
 			}
 
 			if dryRun {
@@ -188,17 +148,9 @@ func (r *rootState) newOfflineMigrationRollbackCommand() *cobra.Command {
 			ctx, cancel := r.context(cmd.Context())
 			defer cancel()
 
-			session, err := runtime.store.Get(ctx, r.global.sessionNamespace, args[0])
+			session, err := r.workflowSession(ctx, runtime, cmd, args[0], domain.SessionTypeMigrate, "migrate rollback")
 			if err != nil {
-				return reportSessionLookupError(cmd, r.global.sessionNamespace, args[0], err)
-			}
-
-			if err := requireCLISessionType(
-				session,
-				domain.SessionTypeMigrate,
-				"migrate rollback",
-			); err != nil {
-				return reportSessionError(cmd, session, err)
+				return err
 			}
 
 			if dryRun {
@@ -247,17 +199,9 @@ func (r *rootState) newOfflineMigrationCleanupCommand() *cobra.Command {
 			ctx, cancel := r.context(cmd.Context())
 			defer cancel()
 
-			session, err := runtime.store.Get(ctx, r.global.sessionNamespace, args[0])
+			session, err := r.workflowSession(ctx, runtime, cmd, args[0], domain.SessionTypeMigrate, "migrate cleanup")
 			if err != nil {
-				return reportSessionLookupError(cmd, r.global.sessionNamespace, args[0], err)
-			}
-
-			if err := requireCLISessionType(
-				session,
-				domain.SessionTypeMigrate,
-				"migrate cleanup",
-			); err != nil {
-				return reportSessionError(cmd, session, err)
+				return err
 			}
 
 			if dryRun {

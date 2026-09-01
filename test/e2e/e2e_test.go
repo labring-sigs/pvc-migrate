@@ -118,7 +118,16 @@ func TestControllerPodMigrationStatusCheckpointRoundTrip(t *testing.T) {
 				VolumeMode:     corev1.PersistentVolumeFilesystem,
 			}},
 		},
-		domain.WorkloadSpec{Adapter: domain.WorkloadNone},
+		domain.WorkloadSpec{
+			Adapter: domain.WorkloadStandalone,
+			Pod: domain.ObjectReference{
+				APIVersion: "v1",
+				Kind:       "Pod",
+				Namespace:  namespace,
+				Name:       "writer",
+				UID:        "pod-uid",
+			},
+		},
 		domain.SessionWorkflowOptions{},
 		1,
 		false,

@@ -267,10 +267,12 @@ func TestCRDSessionStorePersistsCurrentPodIdentityOnlyInStatus(t *testing.T) {
 		domain.WorkloadSpec{
 			Adapter: domain.WorkloadStandalone,
 			Pod: domain.ObjectReference{
-				Namespace: "app", Name: "writer", UID: "original-pod-uid",
+				APIVersion: domain.CoreAPIVersion, Kind: domain.KindPod,
+				Namespace: "system", Name: "writer", UID: "original-pod-uid",
 			},
 			AffectedPods: []domain.ObjectReference{{
-				Namespace: "app", Name: "writer", UID: "original-pod-uid",
+				APIVersion: domain.CoreAPIVersion, Kind: domain.KindPod,
+				Namespace: "system", Name: "writer", UID: "original-pod-uid",
 			}},
 		},
 		domain.SessionWorkflowOptions{},
@@ -363,7 +365,37 @@ func TestDecodeMigrationInitializesDeclarativeResource(t *testing.T) {
 	}
 }
 
-func TestRoutingSessionStoreUsesMoveCRDForCrossNamespaceWorkflow(t *testing.T) {
+func TestCRDSessionStoreAddsProtectionToDeclarativeWorkflow(t *testing.T) {
+	ctx := context.Background()
+	client := newCRDTestClient()
+	store := NewCRDSessionStore(client)
+	session := storeTestSession()
+	object := sessionObject(session)
+	object.SetFinalizers(nil)
+	object.SetLabels(nil)
+	object.Status = v1alpha1.MigrationStatus{}
+	if err := client.Create(ctx, object); err != nil {
+		t.Fatal(err)
+	}
+
+	decoded, err := store.Get(ctx, session.Spec.SessionNamespace, session.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.EnsureSessionProtection(ctx, decoded); err != nil {
+		t.Fatal(err)
+	}
+
+	var current v1alpha1.Migration
+	if err := client.Get(ctx, crclient.ObjectKeyFromObject(object), &current); err != nil {
+		t.Fatal(err)
+	}
+	if !containsString(current.GetFinalizers(), SessionFinalizer) {
+		t.Fatalf("declarative workflow did not receive protection finalizer: %v", current.GetFinalizers())
+	}
+}
+
+func TestRoutingSessionStoreKeepsMoveInSessionBackend(t *testing.T) {
 	ctx := context.Background()
 	configMap := NewConfigMapSessionStore(clientfake.NewClientset())
 	crd := NewCRDSessionStore(newCRDTestClient())
@@ -382,11 +414,11 @@ func TestRoutingSessionStoreUsesMoveCRDForCrossNamespaceWorkflow(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if session.Backend != SessionBackendCRD || session.BackendResource != "Move" {
+	if session.Backend != SessionBackendConfigMap || session.BackendResource != "" {
 		t.Fatalf("move workflow backend=%q resource=%q", session.Backend, session.BackendResource)
 	}
 
-	if _, err := crd.Get(ctx, "system", session.ID); err != nil {
+	if _, err := configMap.Get(ctx, "system", session.ID); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -411,7 +443,7 @@ func TestRoutingSessionStoreFallsBackPerOperationWhenCRDIsMissing(t *testing.T) 
 	copySession := storeTestSession()
 	copySession.ID = "copy-fallback"
 	copySession.Spec = domain.NewSessionSpec(domain.OperationCopy, domain.SessionCommon{
-		SourceNamespace: "app", TemporaryNamespace: "system", DestinationNamespace: "app",
+		SourceNamespace: "system", TemporaryNamespace: "system", DestinationNamespace: "system",
 		SessionNamespace: "system", Volumes: migration.Spec.Volumes,
 	}, false, domain.SessionWorkflowOptions{})
 
@@ -515,8 +547,6 @@ func TestCRDSessionStoreRoundTripsEveryWorkflowKind(t *testing.T) {
 	}{
 		{name: "migration", kind: domain.ControllerKindMigration, make: func() *domain.Session {
 			session := storeTestSession()
-			session.Spec.DestinationNamespace = "archive"
-			session.Spec.Volumes[0].DestinationPVC.Namespace = "archive"
 			return session
 		}},
 		{
@@ -525,15 +555,15 @@ func TestCRDSessionStoreRoundTripsEveryWorkflowKind(t *testing.T) {
 			make: func() *domain.Session {
 				session := storeTestSession()
 				session.Spec = domain.NewPodMigrationSessionSpec(domain.SessionCommon{
-					SourceNamespace:      "app",
+					SourceNamespace:      "system",
 					TemporaryNamespace:   "system",
-					DestinationNamespace: "archive",
+					DestinationNamespace: "system",
 					SessionNamespace:     "system",
 					Volumes:              session.Spec.Volumes,
 				}, domain.WorkloadSpec{Adapter: domain.WorkloadStandalone, Pod: domain.ObjectReference{
-					Namespace: "app", Name: "workload", UID: "pod-uid",
+					APIVersion: domain.CoreAPIVersion, Kind: domain.KindPod,
+					Namespace: "system", Name: "workload", UID: "pod-uid",
 				}}, domain.SessionWorkflowOptions{}, 1, false)
-				session.Spec.Volumes[0].DestinationPVC.Namespace = "archive"
 
 				return domain.NewSession(session.ID, session.Spec, time.Now())
 			},
@@ -541,9 +571,9 @@ func TestCRDSessionStoreRoundTripsEveryWorkflowKind(t *testing.T) {
 		{name: "reservation", kind: domain.ControllerKindReservation, make: func() *domain.Session {
 			session := storeTestSession()
 			session.Spec = domain.NewSessionSpec(domain.OperationReserve, domain.SessionCommon{
-				SourceNamespace:      "app",
+				SourceNamespace:      "system",
 				TemporaryNamespace:   "system",
-				DestinationNamespace: "archive",
+				DestinationNamespace: "system",
 				SessionNamespace:     "system",
 				Volumes:              session.Spec.Volumes,
 			}, false, domain.SessionWorkflowOptions{})
@@ -553,9 +583,9 @@ func TestCRDSessionStoreRoundTripsEveryWorkflowKind(t *testing.T) {
 		{name: "copy", kind: domain.ControllerKindCopy, make: func() *domain.Session {
 			session := storeTestSession()
 			session.Spec = domain.NewSessionSpec(domain.OperationCopy, domain.SessionCommon{
-				SourceNamespace:      "app",
+				SourceNamespace:      "system",
 				TemporaryNamespace:   "system",
-				DestinationNamespace: "archive",
+				DestinationNamespace: "system",
 				SessionNamespace:     "system",
 				Volumes:              session.Spec.Volumes,
 			}, false, domain.SessionWorkflowOptions{})
@@ -564,50 +594,39 @@ func TestCRDSessionStoreRoundTripsEveryWorkflowKind(t *testing.T) {
 		}},
 		{name: "backup", kind: domain.ControllerKindBackup, make: func() *domain.Session {
 			spec := domain.NewSessionSpec(domain.OperationBackup, domain.SessionCommon{
-				SourceNamespace: "app", SessionNamespace: "system", DestinationNamespace: "app",
+				SourceNamespace: "system", SessionNamespace: "system", DestinationNamespace: "system",
 			}, false, domain.SessionWorkflowOptions{})
 			spec.Backup.SourcePVC = domain.ObjectReference{
-				Namespace: "app",
+				Namespace: "system",
 				Name:      "data",
 				UID:       "pvc-uid",
 			}
 			spec.Backup.SourcePV = domain.ObjectReference{Name: "pv-data", UID: "pv-uid"}
-			spec.Backup.Backend, spec.Backup.Bucket, spec.Backup.Name = "s3", "backups", "daily"
+			spec.Backup.Backend, spec.Backup.Bucket, spec.Backup.Name = "s3", "", "daily"
+			spec.Backup.ObjectStoreProfile = "default"
 
 			return domain.NewSession("alpha", spec, time.Now())
 		}},
 		{name: "restore", kind: domain.ControllerKindRestore, make: func() *domain.Session {
 			spec := domain.NewSessionSpec(domain.OperationRestore, domain.SessionCommon{
-				SourceNamespace: "app", SessionNamespace: "system", DestinationNamespace: "app",
+				SourceNamespace: "system", SessionNamespace: "system", DestinationNamespace: "system",
 			}, false, domain.SessionWorkflowOptions{})
 			spec.Restore.DestinationPVC = domain.ObjectReference{
-				Namespace: "app",
+				Namespace: "system",
 				Name:      "data",
 				UID:       "pvc-uid",
 			}
-			spec.Restore.Backend, spec.Restore.Bucket, spec.Restore.Name = "s3", "backups", "daily"
+			spec.Restore.Backend, spec.Restore.Bucket, spec.Restore.Name = "s3", "", "daily"
+			spec.Restore.ObjectStoreProfile = "default"
 
 			return domain.NewSession("alpha", spec, time.Now())
 		}},
 		{name: "rename", kind: domain.ControllerKindRename, make: func() *domain.Session {
 			session := storeTestSession()
 			session.Spec = domain.NewSessionSpec(domain.OperationRename, domain.SessionCommon{
-				SourceNamespace: "app", TemporaryNamespace: "app", DestinationNamespace: "app",
+				SourceNamespace: "system", TemporaryNamespace: "system", DestinationNamespace: "system",
 				SessionNamespace: "system", Volumes: session.Spec.Volumes,
 			}, false, domain.SessionWorkflowOptions{})
-
-			return domain.NewSession(session.ID, session.Spec, time.Now())
-		}},
-		{name: "move", kind: domain.ControllerKindMove, make: func() *domain.Session {
-			session := storeTestSession()
-			session.Spec = domain.NewSessionSpec(domain.OperationMove, domain.SessionCommon{
-				SourceNamespace:      "app",
-				TemporaryNamespace:   "archive",
-				DestinationNamespace: "archive",
-				SessionNamespace:     "system",
-				Volumes:              session.Spec.Volumes,
-			}, false, domain.SessionWorkflowOptions{})
-			session.Spec.Volumes[0].DestinationPVC.Namespace = "archive"
 
 			return domain.NewSession(session.ID, session.Spec, time.Now())
 		}},
@@ -669,6 +688,23 @@ func TestDecodeWorkflowDerivesTypeFromKind(t *testing.T) {
 	}
 }
 
+func TestDecodeWorkflowMarksDeletionRequests(t *testing.T) {
+	session := storeTestSession()
+	object, ok := sessionObjectForKind(session, domain.ControllerKindMigration)
+	if !ok {
+		t.Fatal("failed to construct Migration object")
+	}
+	object.SetDeletionTimestamp(&metav1.Time{Time: time.Now()})
+
+	decoded, err := DecodeWorkflow(object)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !decoded.Deleting {
+		t.Fatal("deletion timestamp was not propagated to the controller session")
+	}
+}
+
 func TestCRDSessionStoreRejectsDuplicateNameAcrossKinds(t *testing.T) {
 	ctx := context.Background()
 	store := NewCRDSessionStore(newCRDTestClient())
@@ -681,7 +717,7 @@ func TestCRDSessionStoreRejectsDuplicateNameAcrossKinds(t *testing.T) {
 	second := storeTestSession()
 
 	second.Spec = domain.NewSessionSpec(domain.OperationCopy, domain.SessionCommon{
-		SourceNamespace: "app", TemporaryNamespace: "system", DestinationNamespace: "app",
+		SourceNamespace: "system", TemporaryNamespace: "system", DestinationNamespace: "system",
 		SessionNamespace: "system", Volumes: first.Spec.Volumes,
 	}, false, domain.SessionWorkflowOptions{})
 	if err := store.Create(ctx, second); domain.CategoryOf(err) != domain.ErrorConflict {
@@ -701,7 +737,7 @@ func TestCRDSessionStoreGetRejectsDuplicateNameAcrossKinds(t *testing.T) {
 
 	second := storeTestSession()
 	second.Spec = domain.NewSessionSpec(domain.OperationCopy, domain.SessionCommon{
-		SourceNamespace: "app", TemporaryNamespace: "system", DestinationNamespace: "app",
+		SourceNamespace: "system", TemporaryNamespace: "system", DestinationNamespace: "system",
 		SessionNamespace: "system", Volumes: first.Spec.Volumes,
 	}, false, domain.SessionWorkflowOptions{})
 
@@ -732,7 +768,7 @@ func TestCRDSessionStoreRebindsReservationToCopy(t *testing.T) {
 	session := storeTestSession()
 
 	session.Spec = domain.NewSessionSpec(domain.OperationReserve, domain.SessionCommon{
-		SourceNamespace: "app", TemporaryNamespace: "system", DestinationNamespace: "app",
+		SourceNamespace: "system", TemporaryNamespace: "system", DestinationNamespace: "system",
 		SessionNamespace: "system", Volumes: session.Spec.Volumes,
 	}, false, domain.SessionWorkflowOptions{})
 	if err := store.Create(ctx, session); err != nil {
@@ -740,7 +776,7 @@ func TestCRDSessionStoreRebindsReservationToCopy(t *testing.T) {
 	}
 
 	session.Spec = domain.NewSessionSpec(domain.OperationCopy, domain.SessionCommon{
-		SourceNamespace: "app", TemporaryNamespace: "system", DestinationNamespace: "app",
+		SourceNamespace: "system", TemporaryNamespace: "system", DestinationNamespace: "system",
 		SessionNamespace: "system", Volumes: session.Spec.Volumes,
 	}, false, domain.SessionWorkflowOptions{})
 	if err := session.Transition(domain.PhaseReserving, "reserving", time.Now()); err != nil {
@@ -825,7 +861,7 @@ func TestCRDSessionStoreRebindRollbackRemovesTargetFinalizer(t *testing.T) {
 	session := storeTestSession()
 
 	session.Spec = domain.NewSessionSpec(domain.OperationReserve, domain.SessionCommon{
-		SourceNamespace: "app", TemporaryNamespace: "system", DestinationNamespace: "app",
+		SourceNamespace: "system", TemporaryNamespace: "system", DestinationNamespace: "system",
 		SessionNamespace: "system", Volumes: session.Spec.Volumes,
 	}, false, domain.SessionWorkflowOptions{})
 
@@ -846,7 +882,7 @@ func TestCRDSessionStoreRebindRollbackRemovesTargetFinalizer(t *testing.T) {
 	}
 
 	session.Spec = domain.NewSessionSpec(domain.OperationCopy, domain.SessionCommon{
-		SourceNamespace: "app", TemporaryNamespace: "system", DestinationNamespace: "app",
+		SourceNamespace: "system", TemporaryNamespace: "system", DestinationNamespace: "system",
 		SessionNamespace: "system", Volumes: session.Spec.Volumes,
 	}, false, domain.SessionWorkflowOptions{})
 
@@ -922,6 +958,122 @@ func newCRDTestClient() crclient.Client {
 		Build()
 }
 
+func tenantScopedCRDClient(t *testing.T) crclient.Client {
+	t.Helper()
+
+	base := newCRDTestClient()
+	withWatch, ok := base.(crclient.WithWatch)
+	if !ok {
+		t.Fatal("fake CRD client does not support Watch")
+	}
+
+	forbidden := func(kind string, name string) error {
+		return apierrors.NewForbidden(
+			schema.GroupResource{Group: v1alpha1.GroupVersion.Group, Resource: kind},
+			name,
+			errors.New("tenant RoleBinding does not grant this workflow Kind"),
+		)
+	}
+
+	workflowListKind := func(list crclient.ObjectList) (domain.ControllerKind, bool) {
+		switch list.(type) {
+		case *v1alpha1.MigrationList:
+			return domain.ControllerKindMigration, true
+		case *v1alpha1.PodMigrationList:
+			return domain.ControllerKindPodMigration, true
+		case *v1alpha1.ReservationList:
+			return domain.ControllerKindReservation, true
+		case *v1alpha1.CopyList:
+			return domain.ControllerKindCopy, true
+		case *v1alpha1.BackupList:
+			return domain.ControllerKindBackup, true
+		case *v1alpha1.RestoreList:
+			return domain.ControllerKindRestore, true
+		case *v1alpha1.RenameList:
+			return domain.ControllerKindRename, true
+		case *v1alpha1.MoveList:
+			return domain.ControllerKindMove, true
+		default:
+			return "", false
+		}
+	}
+
+	return interceptor.NewClient(withWatch, interceptor.Funcs{
+		Get: func(
+			ctx context.Context,
+			underlying crclient.WithWatch,
+			key crclient.ObjectKey,
+			object crclient.Object,
+			options ...crclient.GetOption,
+		) error {
+			if kind := workflowKind(object); kind != domain.ControllerKindMigration {
+				return forbidden(strings.ToLower(string(kind)), key.Name)
+			}
+
+			return underlying.Get(ctx, key, object, options...)
+		},
+		List: func(
+			ctx context.Context,
+			underlying crclient.WithWatch,
+			list crclient.ObjectList,
+			options ...crclient.ListOption,
+		) error {
+			kind, ok := workflowListKind(list)
+			if !ok || kind != domain.ControllerKindMigration {
+				return forbidden(strings.ToLower(string(kind)), "")
+			}
+
+			return underlying.List(ctx, list, options...)
+		},
+		SubResourceUpdate: func(
+			ctx context.Context,
+			underlying crclient.Client,
+			subResource string,
+			object crclient.Object,
+			options ...crclient.SubResourceUpdateOption,
+		) error {
+			if subResource == "status" {
+				return forbidden(strings.ToLower(string(workflowKind(object))), object.GetName())
+			}
+
+			return underlying.SubResource(subResource).Update(ctx, object, options...)
+		},
+	})
+}
+
+func TestCRDSessionStoreSupportsLeastPrivilegeTenantAccess(t *testing.T) {
+	ctx := context.Background()
+	store := NewCRDSessionStore(tenantScopedCRDClient(t))
+	session := storeTestSession()
+
+	if err := store.Create(ctx, session); err != nil {
+		t.Fatalf("tenant create failed: %v", err)
+	}
+
+	// The tenant can create the workflow and read its spec, while status is
+	// controller-owned. The store must return a derived Planned checkpoint until
+	// the controller writes the status subresource.
+	if session.Status.Phase != domain.PhasePlanned {
+		t.Fatalf("tenant create phase=%q, want Planned", session.Status.Phase)
+	}
+
+	loaded, err := store.Get(ctx, session.Spec.SessionNamespace, session.ID)
+	if err != nil {
+		t.Fatalf("tenant get failed: %v", err)
+	}
+	if loaded.Status.Phase != domain.PhasePlanned {
+		t.Fatalf("tenant get phase=%q, want Planned", loaded.Status.Phase)
+	}
+
+	listed, err := store.List(ctx, session.Spec.SessionNamespace)
+	if err != nil {
+		t.Fatalf("tenant list failed: %v", err)
+	}
+	if len(listed) != 1 || listed[0].ID != session.ID {
+		t.Fatalf("tenant list=%#v, want one migration", listed)
+	}
+}
+
 func TestControllerSessionSupportedBoundaries(t *testing.T) {
 	session := storeTestSession()
 	if !ControllerSessionSupported(session) {
@@ -931,9 +1083,199 @@ func TestControllerSessionSupportedBoundaries(t *testing.T) {
 	session.Spec.DestinationNamespace = "archive"
 
 	session.Spec.Volumes[0].DestinationPVC.Namespace = "archive"
-	if !ControllerSessionSupported(session) {
-		t.Fatal("cross-namespace migrate should be controller compatible")
+	if ControllerSessionSupported(session) {
+		t.Fatal("cross-namespace migrate must remain on the session backend")
 	}
+}
+
+func TestDecodeWorkflowRejectsSessionNamespaceMismatch(t *testing.T) {
+	object := sessionObject(storeTestSession())
+	if object == nil {
+		t.Fatal("failed to build workflow object")
+	}
+	object.SetNamespace("other")
+
+	_, err := DecodeWorkflow(object)
+	if domain.CategoryOf(err) != domain.ErrorConflict || !strings.Contains(err.Error(), "spec.sessionNamespace must match metadata.namespace") {
+		t.Fatalf("namespace mismatch category=%s error=%v", domain.CategoryOf(err), err)
+	}
+}
+
+func TestControllerNamespaceBoundaryRejectsNamespacedPVReferences(t *testing.T) {
+	session := storeTestSession()
+	session.Spec.Volumes[0].SourcePV.Namespace = "system"
+
+	err := ControllerNamespaceBoundaryError(session)
+	if domain.CategoryOf(err) != domain.ErrorPrecondition || !strings.Contains(err.Error(), "PV references") {
+		t.Fatalf("namespaced source PV error=%v category=%s", err, domain.CategoryOf(err))
+	}
+
+	session = storeTestSession()
+	session.Spec.Volumes[0].DestinationPV = domain.ObjectReference{
+		Name: "pv-destination",
+		UID:  "destination-uid",
+	}
+	session.Spec.Volumes[0].DestinationPV.Namespace = "system"
+	if err := ControllerNamespaceBoundaryError(session); domain.CategoryOf(err) != domain.ErrorPrecondition {
+		t.Fatalf("namespaced destination PV error=%v category=%s", err, domain.CategoryOf(err))
+	}
+}
+
+func TestControllerNamespaceBoundaryAllowsOnlySupportedWorkloadGVKs(t *testing.T) {
+	ref := func(apiVersion, kind string) domain.ObjectReference {
+		return domain.ObjectReference{
+			APIVersion: apiVersion,
+			Kind:       kind,
+			Namespace:  "system",
+			Name:       "source",
+			UID:        "source-uid",
+		}
+	}
+	newSession := func(workload domain.WorkloadSpec) *domain.Session {
+		spec := domain.NewPodMigrationSessionSpec(
+			domain.SessionCommon{
+				SourceNamespace:      "system",
+				TemporaryNamespace:   "system",
+				DestinationNamespace: "system",
+				SessionNamespace:     "system",
+			},
+			workload,
+			domain.SessionWorkflowOptions{},
+			1,
+			false,
+		)
+		return domain.NewSession("workload", spec, time.Unix(100, 0))
+	}
+
+	valid := []struct {
+		name     string
+		workload domain.WorkloadSpec
+	}{
+		{
+			name: "standalone pod",
+			workload: domain.WorkloadSpec{
+				Adapter: domain.WorkloadStandalone,
+				Pod:     ref(domain.CoreAPIVersion, domain.KindPod),
+			},
+		},
+		{
+			name: "deployment",
+			workload: domain.WorkloadSpec{
+				Adapter:    domain.WorkloadDeployment,
+				Pod:        ref(domain.CoreAPIVersion, domain.KindPod),
+				Controller: ref(domain.AppsAPIVersion, domain.KindDeployment),
+			},
+		},
+		{
+			name: "statefulset",
+			workload: domain.WorkloadSpec{
+				Adapter:    domain.WorkloadStatefulSet,
+				Pod:        ref(domain.CoreAPIVersion, domain.KindPod),
+				Controller: ref(domain.AppsAPIVersion, domain.KindStatefulSet),
+			},
+		},
+		{
+			name: "victoria logs",
+			workload: domain.WorkloadSpec{
+				Adapter:    domain.WorkloadVictoriaLogs,
+				Pod:        ref(domain.CoreAPIVersion, domain.KindPod),
+				Controller: ref(domain.AppsAPIVersion, domain.KindStatefulSet),
+			},
+		},
+		{
+			name: "vmcluster",
+			workload: domain.WorkloadSpec{
+				Adapter:    domain.WorkloadVMCluster,
+				Pod:        ref(domain.CoreAPIVersion, domain.KindPod),
+				Controller: ref(domain.AppsAPIVersion, domain.KindStatefulSet),
+				VMCluster:  &domain.VMClusterSpec{APIVersion: "operator.victoriametrics.com/v1beta1", Name: "vm", UID: "vm-uid"},
+			},
+		},
+		{
+			name: "grafana",
+			workload: domain.WorkloadSpec{
+				Adapter:    domain.WorkloadGrafana,
+				Pod:        ref(domain.CoreAPIVersion, domain.KindPod),
+				Controller: ref(domain.AppsAPIVersion, domain.KindDeployment),
+				Grafana:    &domain.GrafanaSpec{APIVersion: "grafana.integreatly.org/v1beta1", Name: "grafana", UID: "grafana-uid"},
+			},
+		},
+		{
+			name: "kubeblocks instanceset",
+			workload: domain.WorkloadSpec{
+				Adapter:    domain.WorkloadKubeBlocks,
+				Pod:        ref(domain.CoreAPIVersion, domain.KindPod),
+				Controller: ref("workloads.kubeblocks.io/v1alpha1", domain.KindInstanceSet),
+				KubeBlocks: &domain.KubeBlocksSpec{Cluster: "cluster", ClusterUID: "cluster-uid", OpsAPIVersion: "operations.kubeblocks.io/v1alpha1"},
+			},
+		},
+		{
+			name: "kubeblocks mongo statefulset",
+			workload: domain.WorkloadSpec{
+				Adapter:    domain.WorkloadKubeBlocks,
+				Pod:        ref(domain.CoreAPIVersion, domain.KindPod),
+				Controller: ref(domain.AppsAPIVersion, domain.KindStatefulSet),
+				KubeBlocks: &domain.KubeBlocksSpec{Cluster: "cluster", ClusterUID: "cluster-uid", OpsAPIVersion: "apps.kubeblocks.io/v1alpha1"},
+			},
+		},
+	}
+	for _, test := range valid {
+		t.Run(test.name, func(t *testing.T) {
+			if err := ControllerNamespaceBoundaryError(newSession(test.workload)); err != nil {
+				t.Fatalf("valid workload rejected: %v", err)
+			}
+		})
+	}
+
+	t.Run("rejects arbitrary controller GVK", func(t *testing.T) {
+		workload := valid[1].workload
+		workload.Controller = ref("v1", "Secret")
+		if err := ControllerNamespaceBoundaryError(newSession(workload)); domain.CategoryOf(err) != domain.ErrorPrecondition {
+			t.Fatalf("arbitrary controller GVK category=%s error=%v", domain.CategoryOf(err), err)
+		}
+	})
+	t.Run("rejects arbitrary pod GVK", func(t *testing.T) {
+		workload := valid[0].workload
+		workload.Pod = ref("apps/v1", "Deployment")
+		if err := ControllerNamespaceBoundaryError(newSession(workload)); domain.CategoryOf(err) != domain.ErrorPrecondition {
+			t.Fatalf("arbitrary pod GVK category=%s error=%v", domain.CategoryOf(err), err)
+		}
+	})
+	t.Run("rejects arbitrary affected Pod GVK", func(t *testing.T) {
+		workload := valid[1].workload
+		workload.AffectedPods = []domain.ObjectReference{ref("v1", "Secret")}
+		if err := ControllerNamespaceBoundaryError(newSession(workload)); domain.CategoryOf(err) != domain.ErrorPrecondition {
+			t.Fatalf("arbitrary affected Pod GVK category=%s error=%v", domain.CategoryOf(err), err)
+		}
+	})
+	t.Run("rejects incomplete workload identity", func(t *testing.T) {
+		workload := valid[0].workload
+		workload.Pod.APIVersion = ""
+		if err := ControllerNamespaceBoundaryError(newSession(workload)); domain.CategoryOf(err) != domain.ErrorPrecondition {
+			t.Fatalf("incomplete workload identity category=%s error=%v", domain.CategoryOf(err), err)
+		}
+	})
+	t.Run("rejects arbitrary KubeBlocks OpsRequest version", func(t *testing.T) {
+		workload := valid[6].workload
+		workload.KubeBlocks.OpsAPIVersion = "operations.kubeblocks.io/v1beta9"
+		if err := ControllerNamespaceBoundaryError(newSession(workload)); domain.CategoryOf(err) != domain.ErrorPrecondition {
+			t.Fatalf("arbitrary KubeBlocks API category=%s error=%v", domain.CategoryOf(err), err)
+		}
+	})
+	t.Run("rejects arbitrary VMCluster version", func(t *testing.T) {
+		workload := valid[4].workload
+		workload.VMCluster.APIVersion = "operator.victoriametrics.com/v1"
+		if err := ControllerNamespaceBoundaryError(newSession(workload)); domain.CategoryOf(err) != domain.ErrorPrecondition {
+			t.Fatalf("arbitrary VMCluster API category=%s error=%v", domain.CategoryOf(err), err)
+		}
+	})
+	t.Run("rejects arbitrary Grafana version", func(t *testing.T) {
+		workload := valid[5].workload
+		workload.Grafana.APIVersion = "grafana.integreatly.org/v1"
+		if err := ControllerNamespaceBoundaryError(newSession(workload)); domain.CategoryOf(err) != domain.ErrorPrecondition {
+			t.Fatalf("arbitrary Grafana API category=%s error=%v", domain.CategoryOf(err), err)
+		}
+	})
 }
 
 func TestCRDSessionStoreRequiresLeaseClient(t *testing.T) {

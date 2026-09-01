@@ -512,6 +512,23 @@ func TestValidateConfigSecurityBoundaries(t *testing.T) {
 	if err := ValidateConfig(valid); err != nil {
 		t.Fatal(err)
 	}
+
+	for name, cfg := range map[string]Config{
+		"bucket length": {Bucket: strings.Repeat("b", 64), Name: "daily"},
+		"name length":   {Bucket: "backups", Name: strings.Repeat("n", 254)},
+		"prefix length": {Bucket: "backups", Name: "daily", Prefix: strings.Repeat("p", 1025)},
+		"complete key length": {
+			Bucket: "backups",
+			Prefix: strings.Repeat("p", 1010),
+			Name:   "daily",
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if err := ValidateConfig(cfg); err == nil {
+				t.Fatalf("accepted oversized config: %#v", cfg)
+			}
+		})
+	}
 }
 
 func TestValidatePathRejectsAbsoluteAndTraversalPaths(t *testing.T) {
@@ -594,5 +611,24 @@ func TestRcloneConfigSelectsProviderForEndpoint(t *testing.T) {
 
 	if !strings.Contains(explicit.RcloneConfig(), "provider = Minio\n") {
 		t.Fatal("explicit S3 provider was overridden")
+	}
+}
+
+func TestRcloneConfigUsesAmbientCredentialsWithoutSerializingThem(t *testing.T) {
+	store, err := NewWithClient(newFakeS3(), Config{
+		Bucket:                "backups",
+		Name:                  "daily",
+		UseAmbientCredentials: true,
+	}, Credentials{AccessKey: "resolved-access", SecretKey: "resolved-secret"})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	config := store.RcloneConfig()
+	if !strings.Contains(config, "env_auth = true\n") {
+		t.Fatalf("ambient rclone config=%q", config)
+	}
+	if strings.Contains(config, "resolved-access") || strings.Contains(config, "resolved-secret") {
+		t.Fatalf("ambient credentials were serialized into rclone config: %q", config)
 	}
 }

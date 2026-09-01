@@ -4,6 +4,7 @@ import (
 	"github.com/labring-sigs/pvc-migrate/internal/backup"
 	"github.com/labring-sigs/pvc-migrate/internal/domain"
 	"github.com/labring-sigs/pvc-migrate/internal/kube"
+	"github.com/labring-sigs/pvc-migrate/internal/objectstore"
 	"github.com/spf13/cobra"
 )
 
@@ -31,6 +32,7 @@ func (r *rootState) newRestoreTransferCommand() *cobra.Command {
 		Short: "Restore object-storage backup data into a PVC",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
+			flags.prefixExplicit = cmd.Flags().Changed("prefix")
 			if err := validateBucketFlags(&flags.bucketFlags, "destination-pvc"); err != nil {
 				return reportPreSessionError(cmd, err)
 			}
@@ -47,20 +49,61 @@ func (r *rootState) newRestoreTransferCommand() *cobra.Command {
 			flags.secretKeyExplicit = cmd.Flags().Changed("secret-key")
 
 			flags.sessionTokenExplicit = cmd.Flags().Changed("session-token")
-			if err := loadS3Credentials(
-				ctx,
-				runtime.clients.Kubernetes,
-				&flags.bucketFlags,
-			); err != nil {
-				return reportTransferError(cmd, "restore", flags.namespace, flags.pvc, err)
+			controllerWorkflow := controllerWorkflowAvailable(runtime, domain.SessionTypeRestore)
+			if flags.objectStoreProfile != "" {
+				if !controllerWorkflow {
+					return reportTransferError(cmd, "restore", flags.namespace, flags.pvc, domain.NewError(
+						domain.ErrorPrecondition,
+						"object-store profile",
+						"--object-store-profile requires the Restore CRD and controller mode",
+					))
+				}
+				if !objectStoreProfileAvailable(runtime) {
+					return reportTransferError(cmd, "restore", flags.namespace, flags.pvc, domain.NewError(
+						domain.ErrorPrecondition,
+						"object-store profile",
+						"ObjectStoreProfile CRD is not served by this cluster; install deploy/crd.yaml",
+					))
+				}
+				if err := validateControllerProfileFlags(&flags.bucketFlags); err != nil {
+					return reportTransferError(cmd, "restore", flags.namespace, flags.pvc, err)
+				}
+			}
+			if runtime.controllerModeExplicit && controllerWorkflow && flags.objectStoreProfile == "" {
+				return reportTransferError(cmd, "restore", flags.namespace, flags.pvc, domain.NewError(
+					domain.ErrorPrecondition,
+					"object-store profile",
+					"controller Restore workflows require --object-store-profile",
+				))
 			}
 
-			store, err := r.newObjectStore(ctx, &flags.bucketFlags)
+			var store *objectstore.Store
+			if flags.objectStoreProfile != "" {
+				store, err = newControllerProfileStore(&flags.bucketFlags)
+			} else {
+				if err := loadS3Credentials(
+					ctx,
+					runtime.clients.Kubernetes,
+					&flags.bucketFlags,
+				); err != nil {
+					return reportTransferError(cmd, "restore", flags.namespace, flags.pvc, err)
+				}
+				store, err = r.newObjectStore(ctx, &flags.bucketFlags)
+			}
 			if err != nil {
 				return reportTransferError(cmd, "restore", flags.namespace, flags.pvc, err)
 			}
 
 			request := r.objectTransferRequest(runtime, &flags.bucketFlags, store, false, false)
+			if flags.objectStoreProfile != "" {
+				request.SessionNamespace = r.controllerPlanSessionNamespace(
+					runtime,
+					domain.SessionTypeRestore,
+					flags.namespace,
+					flags.namespace,
+				)
+			}
+			request.SkipManifestCheck = flags.objectStoreProfile != ""
 			request.ToolImageProber = kube.NewToolImageProber(runtime.clients.Kubernetes)
 			applyRestoreRequest(&request, flags.restore)
 
@@ -91,7 +134,12 @@ func (r *rootState) newRestoreTransferCommand() *cobra.Command {
 				return reportTransferError(cmd, "restore", flags.namespace, flags.pvc, err)
 			}
 
-			if controllerWorkflowAvailable(runtime, domain.SessionTypeRestore) {
+			// Profile-backed restores are submitted as CRs. Static-credential
+			// restores keep the historical synchronous path in auto/session mode;
+			// creating a ConfigMap session and then executing directly would leave
+			// an orphaned planned record.
+			if controllerWorkflowAvailable(runtime, domain.SessionTypeRestore) &&
+				flags.objectStoreProfile != "" {
 				session, submitErr := backup.SubmitRestore(
 					ctx,
 					runtime.clients.Kubernetes,

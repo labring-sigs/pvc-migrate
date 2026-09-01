@@ -1,0 +1,212 @@
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.19.0
+  name: objectstoreprofiles.migrate.sealos.io
+spec:
+  group: migrate.sealos.io
+  names:
+    kind: ObjectStoreProfile
+    listKind: ObjectStoreProfileList
+    plural: objectstoreprofiles
+    shortNames:
+    - osp
+    singular: objectstoreprofile
+  scope: Cluster
+  versions:
+  - name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: |-
+          ObjectStoreProfile is an administrator-managed object-store connection.
+          It is cluster-scoped so tenants cannot create a profile that points the
+          controller at an arbitrary endpoint or Secret.
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: |-
+              ObjectStoreProfileSpec contains administrator-owned connection and access
+              policy shared by controller-backed Backup and Restore workflows. The bucket
+              and optional prefix scope are kept with the credentials so tenant workflows
+              cannot expand the IAM permission boundary.
+            properties:
+              allowStaticCredentialsInTenantNamespace:
+                description: |-
+                  AllowStaticCredentialsInTenantNamespace is an explicit administrator
+                  acknowledgement that the transfer chart will materialize static S3
+                  credentials in the tenant namespace for the duration of a transfer. Keep
+                  static profiles single-tenant; use workload identity for shared profiles.
+                type: boolean
+              allowedNamespaces:
+                description: |-
+                  AllowedNamespaces restricts which tenant namespace may reference a static
+                  credentials profile. Static credentials are deliberately single-tenant.
+                items:
+                  description: |-
+                    ObjectStoreNamespace is a Kubernetes namespace name permitted by an
+                    administrator-managed ObjectStoreProfile. A named scalar gives the CRD
+                    OpenAPI schema an item-level pattern without an expensive CEL loop.
+                  maxLength: 63
+                  pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
+                  type: string
+                maxItems: 256
+                type: array
+              backend:
+                allOf:
+                - enum:
+                  - s3
+                - enum:
+                  - s3
+                type: string
+              bucket:
+                description: Bucket is the only bucket a workflow may access through
+                  this profile.
+                maxLength: 63
+                minLength: 1
+                pattern: ^[A-Za-z0-9][A-Za-z0-9._-]*$
+                type: string
+              credentialsSecret:
+                description: |-
+                  CredentialsSecret is an optional administrator-owned Secret used by the
+                  controller for S3 locks, manifests, and inventory checks. Static
+                  transfer profiles must set it because the transfer Pod needs credentials;
+                  workload identity profiles may omit it when the controller uses its own
+                  ambient cloud identity. It is always read from the controller namespace.
+                properties:
+                  name:
+                    maxLength: 253
+                    minLength: 1
+                    pattern: ^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$
+                    type: string
+                required:
+                - name
+                type: object
+              endpoint:
+                maxLength: 2048
+                type: string
+              forcePathStyle:
+                type: boolean
+              prefix:
+                description: |-
+                  Prefix scopes all workflow object names to this prefix. An empty prefix
+                  permits the profile bucket root. Values are slash-separated safe segments.
+                  The 639-character limit leaves room for the controller-owned cluster and
+                  namespace scope, a 253-character recovery-point name, and the completion
+                  manifest suffix within S3's 1024-byte object-key limit.
+                maxLength: 639
+                pattern: ^$|^[A-Za-z0-9][A-Za-z0-9._-]*(/[A-Za-z0-9][A-Za-z0-9._-]*)*$
+                type: string
+              provider:
+                maxLength: 63
+                type: string
+              region:
+                maxLength: 63
+                type: string
+              serverSideEncryption:
+                enum:
+                - AES256
+                - aws:kms
+                type: string
+              serviceAccountRefs:
+                description: |-
+                  ServiceAccountRefs explicitly binds workload identity to administrator-
+                  provisioned ServiceAccounts. Every workflow namespace must have one
+                  matching entry, including the live ServiceAccount UID.
+                items:
+                  description: |-
+                    ObjectStoreServiceAccountReference binds one tenant namespace to an
+                    administrator-preprovisioned ServiceAccount. The UID and identity
+                    fingerprint prevent a tenant from replacing or mutating the account before
+                    a workflow's first reconcile.
+                  properties:
+                    identityFingerprint:
+                      description: |-
+                        IdentityFingerprint is the administrator-observed hash of the
+                        ServiceAccount metadata that affects workload identity. Requiring the
+                        fingerprint in the profile closes the window where a tenant could mutate
+                        IAM annotations or automount settings before the first workflow reconcile.
+                      pattern: ^[a-f0-9]{64}$
+                      type: string
+                    name:
+                      maxLength: 253
+                      minLength: 1
+                      pattern: ^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$
+                      type: string
+                    namespace:
+                      maxLength: 63
+                      minLength: 1
+                      pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
+                      type: string
+                    uid:
+                      description: |-
+                        The UID is intentionally required. An administrator can update the
+                        profile when rotating an identity by creating a new ServiceAccount.
+                      minLength: 1
+                      type: string
+                  required:
+                  - identityFingerprint
+                  - name
+                  - namespace
+                  - uid
+                  type: object
+                maxItems: 256
+                type: array
+              sseKmsKeyID:
+                description: SSEKMSKeyID is administrator-owned and is only used with
+                  aws:kms.
+                maxLength: 2048
+                type: string
+            required:
+            - backend
+            - bucket
+            type: object
+            x-kubernetes-validations:
+            - message: static credential profiles require credentialsSecret; workload
+                identity profiles may use the controller's ambient credentials
+              rule: (has(self.serviceAccountRefs) && size(self.serviceAccountRefs)
+                > 0) || (has(self.credentialsSecret) && size(self.credentialsSecret.name)
+                > 0)
+            - message: object store endpoints must use HTTPS
+              rule: '!has(self.endpoint) || size(self.endpoint) == 0 || self.endpoint.startsWith(''https://'')'
+            - message: sseKmsKeyID requires serverSideEncryption aws:kms
+              rule: '!has(self.sseKmsKeyID) || size(self.sseKmsKeyID) == 0 || (has(self.serverSideEncryption)
+                && self.serverSideEncryption == ''aws:kms'')'
+            - message: configure workload identity or explicitly approve static credentials
+                in the tenant namespace
+              rule: (has(self.serviceAccountRefs) && size(self.serviceAccountRefs)
+                > 0) || (has(self.allowStaticCredentialsInTenantNamespace) && self.allowStaticCredentialsInTenantNamespace)
+            - message: static credentials profiles must allow exactly one tenant namespace
+              rule: (has(self.serviceAccountRefs) && size(self.serviceAccountRefs)
+                > 0) || (has(self.allowedNamespaces) && size(self.allowedNamespaces)
+                == 1)
+            - message: tenant-namespace projection approval is only valid without
+                workload identity
+              rule: '!(has(self.serviceAccountRefs) && size(self.serviceAccountRefs)
+                > 0) || !has(self.allowStaticCredentialsInTenantNamespace) || !self.allowStaticCredentialsInTenantNamespace'
+            - message: allowedNamespaces is only valid for static credential profiles
+              rule: '!(has(self.serviceAccountRefs) && size(self.serviceAccountRefs)
+                > 0) || !has(self.allowedNamespaces) || size(self.allowedNamespaces)
+                == 0'
+        required:
+        - spec
+        type: object
+    served: true
+    storage: true

@@ -217,6 +217,102 @@ func (s *CRDSessionStore) DeleteSessionLease(
 	return (&ConfigMapSessionStore{client: s.leaseClient}).DeleteSessionLease(ctx, namespace, id)
 }
 
+// EnsureSessionProtection applies the same deletion guard used by
+// CLI-created workflows to declarative CRs. It intentionally updates only
+// metadata, leaving spec and status untouched. A workflow already pending
+// deletion is never re-finalized because Kubernetes may be completing a
+// user-approved cleanup path.
+func (s *CRDSessionStore) EnsureSessionProtection(
+	ctx context.Context,
+	session *domain.Session,
+) error {
+	if session == nil {
+		return domain.NewError(
+			domain.ErrorValidation,
+			"ensure session protection",
+			"session is nil",
+		)
+	}
+
+	if err := s.configured("ensure session protection"); err != nil {
+		return err
+	}
+
+	resourceKind := session.BackendResource
+	if resourceKind == "" {
+		resourceKind = workflowCRDKind(session.Spec.Type)
+	}
+	resource, ok := workflowCRDResource(resourceKind)
+	if !ok {
+		return domain.NewError(
+			domain.ErrorValidation,
+			"ensure session protection",
+			"unsupported workflow resource",
+		)
+	}
+
+	current := resource.new()
+	if err := s.client.Get(
+		ctx,
+		crclient.ObjectKey{Namespace: session.Spec.SessionNamespace, Name: session.ID},
+		current,
+	); err != nil {
+		if apierrors.IsNotFound(err) {
+			return nil
+		}
+
+		return domain.WrapError(
+			domain.ErrorKubernetes,
+			"ensure session protection",
+			"read "+string(resource.kind),
+			err,
+		)
+	}
+
+	if err := ValidateWorkflowMetadata(
+		current,
+		session.ID,
+		session.Spec.SessionNamespace,
+	); err != nil {
+		return domain.WrapError(
+			domain.ErrorConflict,
+			"ensure session protection",
+			string(resource.kind)+" ownership does not match the session",
+			err,
+		)
+	}
+
+	if session.BackendUID != "" && current.GetUID() != session.BackendUID {
+		return domain.NewError(
+			domain.ErrorConflict,
+			"ensure session protection",
+			"workflow identity changed while adding protection",
+		)
+	}
+
+	if current.GetDeletionTimestamp() != nil || containsString(current.GetFinalizers(), SessionFinalizer) {
+		return nil
+	}
+
+	current.SetFinalizers(ensureSessionFinalizer(current.GetFinalizers()))
+	if err := s.client.Update(ctx, current); apierrors.IsConflict(err) {
+		return domain.NewError(
+			domain.ErrorConflict,
+			"ensure session protection",
+			"workflow changed while adding protection",
+		)
+	} else if err != nil {
+		return domain.WrapError(
+			domain.ErrorKubernetes,
+			"ensure session protection",
+			"add session protection finalizer",
+			err,
+		)
+	}
+
+	return nil
+}
+
 func (s *CRDSessionStore) configured(operation string) error {
 	if s == nil || s.client == nil {
 		return domain.NewError(
@@ -243,6 +339,13 @@ func (s *CRDSessionStore) Create(ctx context.Context, session *domain.Session) e
 	}
 
 	if !ControllerSessionSupported(session) {
+		if session.Spec.Type == domain.SessionTypeMove {
+			return domain.NewError(
+				domain.ErrorPrecondition,
+				"create session",
+				"Move is cross-namespace and requires --mode=session (controller mode cannot authorize the destination namespace)",
+			)
+		}
 		return domain.NewError(
 			domain.ErrorPrecondition,
 			"create session",
@@ -294,6 +397,15 @@ func (s *CRDSessionStore) Create(ctx context.Context, session *domain.Session) e
 				"create session",
 				fmt.Sprintf("session %s already exists as %s", session.ID, candidate.kind),
 			)
+		}
+
+		// Tenant RoleBindings commonly grant access to only a subset of
+		// workflow Kinds. Failing a create because the caller cannot probe an
+		// unrelated Kind turns least-privilege RBAC into an unusable API. A
+		// successful create below still provides the authoritative uniqueness
+		// check for the selected Kind.
+		if apierrors.IsForbidden(err) {
+			continue
 		}
 
 		if !apierrors.IsNotFound(err) {
@@ -348,6 +460,7 @@ func (s *CRDSessionStore) Create(ctx context.Context, session *domain.Session) e
 
 	session.ResourceVersion = statusObject.GetResourceVersion()
 	session.Backend = SessionBackendCRD
+	session.BackendUID = statusObject.GetUID()
 
 	return nil
 }
@@ -390,6 +503,13 @@ func (s *CRDSessionStore) initializeStatus(
 		if err := s.client.Status().Update(ctx, current); err == nil {
 			return current, nil
 		} else if !apierrors.IsConflict(err) {
+			// Status is intentionally controller-owned. A tenant may create a
+			// workflow without status update permission; the controller will
+			// initialize Planned on its first reconcile.
+			if apierrors.IsForbidden(err) {
+				return current, nil
+			}
+
 			return nil, err
 		}
 
@@ -459,6 +579,12 @@ func (s *CRDSessionStore) Get(ctx context.Context, namespace, id string) (*domai
 		if apierrors.IsNotFound(err) {
 			continue
 		}
+		if apierrors.IsForbidden(err) {
+			// The caller may be bound to a single workflow Kind. Treat
+			// inaccessible sibling Kinds as absent so Get can resolve the
+			// resource the caller is authorized to observe.
+			continue
+		}
 
 		if err != nil {
 			return nil, domain.WrapError(
@@ -510,6 +636,13 @@ func (s *CRDSessionStore) Update(ctx context.Context, session *domain.Session) e
 	}
 
 	if !ControllerSessionSupported(session) {
+		if session.Spec.Type == domain.SessionTypeMove {
+			return domain.NewError(
+				domain.ErrorPrecondition,
+				"update session",
+				"Move is cross-namespace and requires --mode=session (controller mode cannot authorize the destination namespace)",
+			)
+		}
 		return domain.NewError(
 			domain.ErrorPrecondition,
 			"update session",
@@ -653,6 +786,7 @@ func (s *CRDSessionStore) Update(ctx context.Context, session *domain.Session) e
 	session.ResourceVersion = updated.GetResourceVersion()
 	session.Generation = updated.GetGeneration()
 	session.Backend = SessionBackendCRD
+	session.BackendUID = updated.GetUID()
 
 	session.BackendResource = resource.kind
 
@@ -819,6 +953,7 @@ func (s *CRDSessionStore) finishRebindSession(
 	session.ResourceVersion = target.GetResourceVersion()
 	session.Generation = target.GetGeneration()
 	session.Backend = SessionBackendCRD
+	session.BackendUID = target.GetUID()
 	session.BackendResource = desiredKind
 
 	return nil
@@ -953,6 +1088,13 @@ func (s *CRDSessionStore) List(ctx context.Context, namespace string) ([]*domain
 		lists[index] = items
 
 		if err := s.client.List(ctx, items, crclient.InNamespace(namespace)); err != nil {
+			if apierrors.IsForbidden(err) {
+				// Namespaced tenant RoleBindings may intentionally omit other
+				// operation Kinds. An empty result for an inaccessible Kind is
+				// equivalent to no visible objects for this caller.
+				return
+			}
+
 			errors[index] = domain.WrapError(
 				domain.ErrorKubernetes,
 				"list sessions",
@@ -1168,6 +1310,8 @@ func DecodeWorkflow(object crclient.Object) (*domain.Session, error) {
 	session.Backend = SessionBackendCRD
 
 	session.BackendResource = workflowKind(object)
+	session.BackendUID = object.GetUID()
+	session.Deleting = object.GetDeletionTimestamp() != nil
 	if status.Phase != "" {
 		session.Status = status
 	}

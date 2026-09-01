@@ -3,6 +3,8 @@ package controller
 import (
 	"context"
 	"errors"
+	"fmt"
+	"strings"
 	"time"
 
 	v1alpha1 "github.com/labring-sigs/pvc-migrate/api/v1alpha1"
@@ -29,13 +31,17 @@ import (
 // retained for source compatibility; reconciliation is intentionally not
 // limited to Migration resources.
 type WorkflowReconciler struct {
-	store          kube.SessionStore
-	service        *app.Service
-	kubeClient     kubernetes.Interface
-	openEBS        kube.OpenEBSLVMSharedVolumeManager
-	namespace      string
-	requeueAfter   time.Duration
-	supportedKinds map[domain.ControllerKind]struct{}
+	store               kube.SessionStore
+	service             *app.Service
+	kubeClient          kubernetes.Interface
+	controllerClient    crclient.Reader
+	openEBS             kube.OpenEBSLVMSharedVolumeManager
+	namespace           string
+	controllerNamespace string
+	clusterIdentity     string
+	trustedToolImage    string
+	requeueAfter        time.Duration
+	supportedKinds      map[domain.ControllerKind]struct{}
 }
 
 // MigrationReconciler is kept as an alias for callers that used the original
@@ -50,9 +56,10 @@ func NewMigrationReconciler(service *app.Service, store kube.SessionStore) *Work
 	return NewWorkflowReconciler(service, store)
 }
 
-// WithNamespace limits reconciliation to the control namespace selected by
-// the deployment. The CRD remains namespaced while the controller avoids
-// accidentally adopting resources from unrelated namespaces.
+// WithNamespace optionally limits reconciliation to one tenant namespace.
+// Production managers leave it unset so every namespaced workflow is watched;
+// the reconciler still enforces that referenced objects stay in the CR
+// namespace.
 func (r *WorkflowReconciler) WithNamespace(namespace string) *WorkflowReconciler {
 	if r != nil {
 		r.namespace = namespace
@@ -96,6 +103,42 @@ func (r *WorkflowReconciler) WithKubernetesClient(
 	return r
 }
 
+// WithControllerClient supplies the typed client used for cluster-scoped
+// administrator configuration such as ObjectStoreProfile.
+func (r *WorkflowReconciler) WithControllerClient(client crclient.Reader) *WorkflowReconciler {
+	if r != nil {
+		r.controllerClient = client
+	}
+	return r
+}
+
+func (r *WorkflowReconciler) WithControllerNamespace(namespace string) *WorkflowReconciler {
+	if r != nil {
+		r.controllerNamespace = namespace
+	}
+	return r
+}
+
+// WithClusterIdentity scopes controller-backed object-store paths to the
+// cluster serving this manager. StartManager populates it from kube-system's
+// stable namespace UID.
+func (r *WorkflowReconciler) WithClusterIdentity(identity string) *WorkflowReconciler {
+	if r != nil {
+		r.clusterIdentity = strings.TrimSpace(identity)
+	}
+	return r
+}
+
+// WithTrustedToolImage pins all controller-created data mover Pods to the
+// administrator-selected image. Tenants must not be able to choose code that
+// receives a PVC or object-store identity.
+func (r *WorkflowReconciler) WithTrustedToolImage(image string) *WorkflowReconciler {
+	if r != nil {
+		r.trustedToolImage = image
+	}
+	return r
+}
+
 func (r *WorkflowReconciler) WithOpenEBSLVMSharedVolumeManager(
 	manager kube.OpenEBSLVMSharedVolumeManager,
 ) *WorkflowReconciler {
@@ -103,6 +146,16 @@ func (r *WorkflowReconciler) WithOpenEBSLVMSharedVolumeManager(
 		r.openEBS = manager
 	}
 	return r
+}
+
+func (r *WorkflowReconciler) runner(namespace string) *Runner {
+	return NewRunner(r.service, r.store, namespace).
+		WithKubernetesClient(r.kubeClient).
+		WithControllerClient(r.controllerClient).
+		WithControllerNamespace(r.controllerNamespace).
+		WithClusterIdentity(r.clusterIdentity).
+		WithTrustedToolImage(r.trustedToolImage).
+		WithOpenEBSLVMSharedVolumeManager(r.openEBS)
 }
 
 func (r *WorkflowReconciler) Reconcile(
@@ -127,13 +180,66 @@ func (r *WorkflowReconciler) Reconcile(
 		return reconcile.Result{}, err
 	}
 
-	if terminalSession(session) {
+	// A workflow's spec is the authorization and execution input. Once the
+	// controller has observed a generation, changing that input would let a
+	// tenant retarget an in-flight operation (for example to another recovery
+	// point or object-store profile). CRD status updates do not change
+	// generation, so this check does not interfere with normal progress.
+	if err := workflowSpecMutationError(session); err != nil {
+		if !terminalSession(session) {
+			runner := r.runner(request.Namespace)
+			return reconcile.Result{}, runner.checkpointFailure(ctx, session, err)
+		}
+		return reconcile.Result{}, err
+	}
+
+	// Declarative CRs do not pass through CRDSessionStore.Create, so they may
+	// arrive without the session-protection finalizer. Add it before any
+	// execution or terminal-state handling to preserve the explicit cleanup
+	// contract for every controller-backed workflow.
+	if ensurer, ok := r.store.(kube.SessionProtectionEnsurer); ok {
+		if err := ensurer.EnsureSessionProtection(ctx, session); err != nil {
+			return reconcile.Result{}, err
+		}
+	}
+	if session.Deleting {
+		// A deletion request must not start or advance a workflow. Existing
+		// finalizers keep cleanup explicit; resources without our finalizer can
+		// finish deletion normally.
 		return reconcile.Result{}, nil
 	}
 
-	runner := NewRunner(r.service, r.store, request.Namespace).
-		WithKubernetesClient(r.kubeClient).
-		WithOpenEBSLVMSharedVolumeManager(r.openEBS)
+	// Status is a controller-owned subresource. A declarative create ignores a
+	// user-supplied status, so a terminal status with no observed generation is
+	// stale or forged. Reinitialize it to the durable Planned checkpoint before
+	// deciding whether there is any work left to do.
+	if err := resetUnobservedTerminalStatus(ctx, r.store, session); err != nil {
+		return reconcile.Result{}, err
+	}
+
+	if terminalSession(session) {
+		if session.Status.Phase == domain.PhaseFailed {
+			// Failed workflows are quiescent until an explicit resume changes
+			// the phase. Poll them slowly because status updates are filtered to
+			// avoid a controller-owned feedback loop.
+			return reconcile.Result{RequeueAfter: r.requeueAfter}, nil
+		}
+		return reconcile.Result{}, nil
+	}
+	if boundaryErr := kube.ControllerNamespaceBoundaryError(session); boundaryErr != nil {
+		runner := r.runner(request.Namespace)
+		return reconcile.Result{}, runner.checkpointFailure(ctx, session, boundaryErr)
+	}
+	if err := r.validateDeclarativeSourceVolumes(ctx, session); err != nil {
+		runner := r.runner(request.Namespace)
+		return reconcile.Result{}, runner.checkpointFailure(ctx, session, err)
+	}
+	if err := r.ensureStandalonePodSnapshot(ctx, session); err != nil {
+		runner := r.runner(request.Namespace)
+		return reconcile.Result{}, runner.checkpointFailure(ctx, session, err)
+	}
+
+	runner := r.runner(request.Namespace)
 	if err := runner.reconcileSession(ctx, session); err != nil {
 		err = runner.checkpointFailure(ctx, session, err)
 
@@ -141,6 +247,27 @@ func (r *WorkflowReconciler) Reconcile(
 	}
 
 	return reconcile.Result{RequeueAfter: r.requeueAfter}, nil
+}
+
+func resetUnobservedTerminalStatus(
+	ctx context.Context,
+	store kube.SessionStore,
+	session *domain.Session,
+) error {
+	if session == nil || !terminalSession(session) ||
+		session.Status.ObservedGeneration != 0 || store == nil {
+		return nil
+	}
+
+	planned := domain.NewSession(session.ID, session.Spec, time.Now())
+	planned.Generation = session.Generation
+	planned.ResourceVersion = session.ResourceVersion
+	planned.Backend = session.Backend
+	planned.BackendResource = session.BackendResource
+	planned.BackendUID = session.BackendUID
+	session.Status = planned.Status
+
+	return store.Update(ctx, session)
 }
 
 // SetupWithManager installs namespaced watches for every operation-specific
@@ -206,9 +333,11 @@ func StartManager(
 	namespace string,
 	kubeClient kubernetes.Interface,
 	openEBSManager kube.OpenEBSLVMSharedVolumeManager,
+	trustedToolImage ...string,
 ) error {
 	return StartManagerWithKinds(
 		ctx, config, service, store, namespace, kubeClient, openEBSManager, nil,
+		trustedToolImage...,
 	)
 }
 
@@ -224,6 +353,7 @@ func StartManagerWithKinds(
 	kubeClient kubernetes.Interface,
 	openEBSManager kube.OpenEBSLVMSharedVolumeManager,
 	supportedKinds []domain.ControllerKind,
+	trustedToolImage ...string,
 ) error {
 	if config == nil {
 		return errors.New("kubernetes REST config is required")
@@ -233,6 +363,23 @@ func StartManagerWithKinds(
 		return errors.New("controller namespace is required")
 	}
 
+	if kubeClient == nil {
+		return errors.New("controller Kubernetes client is required")
+	}
+	cluster, err := kube.Identity(ctx, &kube.Clients{Kubernetes: kubeClient})
+	if err != nil {
+		return fmt.Errorf("resolve controller cluster identity: %w", err)
+	}
+
+	// Controller-created transfer Pods may receive PVC mounts, static object
+	// store credentials, or workload identity. Require an administrator-pinned
+	// image before constructing the manager so an embedded caller cannot
+	// accidentally delegate image selection to a tenant workflow.
+	normalizedTrustedImage, err := normalizeTrustedToolImage(firstString(trustedToolImage))
+	if err != nil {
+		return err
+	}
+
 	scheme := runtime.NewScheme()
 	if err := v1alpha1.AddToScheme(scheme); err != nil {
 		return err
@@ -240,9 +387,10 @@ func StartManagerWithKinds(
 
 	manager, err := ctrl.NewManager(config, ctrl.Options{
 		Scheme: scheme,
-		Cache: cache.Options{
-			DefaultNamespaces: map[string]cache.Config{namespace: {}},
-		},
+		// Workflow CRs are tenant-namespaced. The controller watches every
+		// namespace; the reconciler enforces that each referenced object stays
+		// in the CR namespace.
+		Cache:                   cache.Options{},
 		LeaderElection:          true,
 		LeaderElectionID:        "pvc-migrate-controller",
 		LeaderElectionNamespace: namespace,
@@ -262,7 +410,12 @@ func StartManagerWithKinds(
 	}
 
 	reconciler := NewWorkflowReconciler(service, store).
-		WithNamespace(namespace).
+		// Profile reads are authorization inputs. Use the uncached API reader so
+		// deletion, replacement, and allowlist changes fail closed immediately.
+		WithControllerClient(manager.GetAPIReader()).
+		WithControllerNamespace(namespace).
+		WithClusterIdentity(cluster.ID).
+		WithTrustedToolImage(normalizedTrustedImage).
 		WithSupportedKinds(supportedKinds)
 	reconciler.WithKubernetesClient(kubeClient).
 		WithOpenEBSLVMSharedVolumeManager(openEBSManager)
@@ -274,4 +427,46 @@ func StartManagerWithKinds(
 	return manager.Start(ctx)
 }
 
+// ValidateTrustedToolImage checks the administrator-selected image before a
+// controller execution path is started. Controller mode must never silently
+// fall back to the image supplied in a tenant workflow.
+func ValidateTrustedToolImage(image string) error {
+	_, err := normalizeTrustedToolImage(image)
+	return err
+}
+
+func normalizeTrustedToolImage(image string) (string, error) {
+	image = strings.TrimSpace(image)
+	if image == "" {
+		return "", errors.New("trusted tool image is required for controller mode")
+	}
+
+	normalized, err := kube.NormalizeToolImage(image)
+	if err != nil {
+		return "", fmt.Errorf("invalid trusted tool image: %w", err)
+	}
+
+	return normalized, nil
+}
+
+func firstString(values []string) string {
+	if len(values) == 0 {
+		return ""
+	}
+	return values[0]
+}
+
 var _ reconcile.Reconciler = (*WorkflowReconciler)(nil)
+
+func workflowSpecMutationError(session *domain.Session) error {
+	if session == nil || session.Status.ObservedGeneration == 0 ||
+		session.Generation == session.Status.ObservedGeneration {
+		return nil
+	}
+
+	return domain.NewError(
+		domain.ErrorConflict,
+		"controller reconcile",
+		"workflow spec changed after execution started; create a new workflow instead",
+	)
+}

@@ -176,6 +176,24 @@ func TestAvailableControllerWorkflowKindsSupportsPartialInstall(t *testing.T) {
 	}
 }
 
+func TestObjectStoreProfileAvailableIsIndependentFromWorkflowKinds(t *testing.T) {
+	client := fake.NewClientset()
+	discovery := testutil.MustType[*discoveryfake.FakeDiscovery](t, client.Discovery())
+	discovery.Resources = []*metav1.APIResourceList{{
+		GroupVersion: domain.SessionAPIVersion,
+		APIResources: []metav1.APIResource{{Name: domain.ObjectStoreProfileResource}},
+	}}
+
+	if !ObjectStoreProfileAvailable(discovery) {
+		t.Fatal("ObjectStoreProfile resource was not detected")
+	}
+
+	discovery.Resources[0].APIResources = nil
+	if ObjectStoreProfileAvailable(discovery) {
+		t.Fatal("ObjectStoreProfile resource reported after removal")
+	}
+}
+
 func TestWaitForReadyErrorAndTimeout(t *testing.T) {
 	calls := 0
 	if err := WaitFor(

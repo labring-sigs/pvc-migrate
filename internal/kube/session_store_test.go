@@ -21,15 +21,15 @@ func storeTestSession() *domain.Session {
 	return domain.NewSession(
 		"alpha",
 		domain.NewOfflineMigrationSessionSpec(domain.SessionCommon{
-			SourceNamespace:      "app",
+			SourceNamespace:      "system",
 			TemporaryNamespace:   "system",
-			DestinationNamespace: "app",
+			DestinationNamespace: "system",
 			SessionNamespace:     "system",
 			Volumes: []domain.VolumeSpec{
 				{
 					SourcePVC: domain.ObjectReference{
 						Name:      "data",
-						Namespace: "app",
+						Namespace: "system",
 						UID:       "source-pvc-uid",
 					},
 					SourcePV:       domain.ObjectReference{Name: "source-pv", UID: "source-pv-uid"},

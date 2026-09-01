@@ -49,20 +49,31 @@ spec:
               createdBy:
                 type: string
               destinationNamespace:
+                maxLength: 63
+                minLength: 1
+                pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
                 type: string
               destinationPVC:
                 description: ObjectReference identifies a Kubernetes object involved
                   in a workflow.
                 properties:
                   apiVersion:
+                    maxLength: 253
                     type: string
                   kind:
+                    maxLength: 253
                     type: string
                   name:
+                    maxLength: 253
+                    minLength: 1
+                    pattern: ^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$
                     type: string
                   namespace:
+                    maxLength: 63
+                    pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
                     type: string
                   resourceVersion:
+                    maxLength: 256
                     type: string
                   uid:
                     description: |-
@@ -74,22 +85,36 @@ spec:
                 - name
                 type: object
               sessionNamespace:
+                maxLength: 63
+                minLength: 1
+                pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
                 type: string
               sourceNamespace:
+                maxLength: 63
+                minLength: 1
+                pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
                 type: string
               sourcePV:
                 description: ObjectReference identifies a Kubernetes object involved
                   in a workflow.
                 properties:
                   apiVersion:
+                    maxLength: 253
                     type: string
                   kind:
+                    maxLength: 253
                     type: string
                   name:
+                    maxLength: 253
+                    minLength: 1
+                    pattern: ^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$
                     type: string
                   namespace:
+                    maxLength: 63
+                    pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
                     type: string
                   resourceVersion:
+                    maxLength: 256
                     type: string
                   uid:
                     description: |-
@@ -105,14 +130,22 @@ spec:
                   in a workflow.
                 properties:
                   apiVersion:
+                    maxLength: 253
                     type: string
                   kind:
+                    maxLength: 253
                     type: string
                   name:
+                    maxLength: 253
+                    minLength: 1
+                    pattern: ^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$
                     type: string
                   namespace:
+                    maxLength: 63
+                    pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
                     type: string
                   resourceVersion:
+                    maxLength: 256
                     type: string
                   uid:
                     description: |-
@@ -397,6 +430,11 @@ spec:
             - sourcePVC
             - sourceTemplate
             type: object
+            x-kubernetes-validations:
+            - message: Move CRs must stay within one namespace; cross-namespace moves
+                use session mode
+              rule: self.sourceNamespace == self.sessionNamespace && self.destinationNamespace
+                == self.sessionNamespace
           status:
             properties:
               completedAt:
@@ -409,25 +447,31 @@ spec:
                       format: date-time
                       type: string
                     message:
+                      maxLength: 8192
                       type: string
                     reason:
+                      maxLength: 128
                       type: string
                     status:
                       type: string
                     type:
+                      maxLength: 64
                       type: string
                   required:
                   - lastTransitionTime
                   - status
                   - type
                   type: object
+                maxItems: 32
                 type: array
               failureReason:
+                maxLength: 8192
                 type: string
               history:
                 items:
                   properties:
                     message:
+                      maxLength: 8192
                       type: string
                     phase:
                       description: WorkflowPhase identifies one durable workflow state.
@@ -460,8 +504,10 @@ spec:
                   - phase
                   - time
                   type: object
+                maxItems: 256
                 type: array
               message:
+                maxLength: 8192
                 type: string
               observedGeneration:
                 format: int64
@@ -540,14 +586,22 @@ spec:
                             involved in a workflow.
                           properties:
                             apiVersion:
+                              maxLength: 253
                               type: string
                             kind:
+                              maxLength: 253
                               type: string
                             name:
+                              maxLength: 253
+                              minLength: 1
+                              pattern: ^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$
                               type: string
                             namespace:
+                              maxLength: 63
+                              pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
                               type: string
                             resourceVersion:
+                              maxLength: 256
                               type: string
                             uid:
                               description: |-

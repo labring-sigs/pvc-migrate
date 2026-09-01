@@ -251,6 +251,18 @@ func AvailableControllerWorkflowKinds(
 	return available
 }
 
+// ObjectStoreProfileAvailable reports whether the cluster-scoped profile API
+// required by controller-backed Backup and Restore is served. Keep this
+// separate from workflow discovery because a staged installation can expose
+// operation CRDs before the administrator profile CRD.
+func ObjectStoreProfileAvailable(discoveryClient discovery.DiscoveryInterface) bool {
+	return HasAPIResource(
+		discoveryClient,
+		domain.SessionAPIVersion,
+		domain.ObjectStoreProfileResource,
+	)
+}
+
 func WaitFor(
 	ctx context.Context,
 	interval time.Duration,

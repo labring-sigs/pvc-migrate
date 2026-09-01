@@ -25,6 +25,7 @@ func addKnownTypes(scheme *runtime.Scheme) error {
 		&Restore{}, &RestoreList{},
 		&Rename{}, &RenameList{},
 		&Move{}, &MoveList{},
+		&ObjectStoreProfile{}, &ObjectStoreProfileList{},
 	)
 	metav1.AddToGroupVersion(scheme, GroupVersion)
 

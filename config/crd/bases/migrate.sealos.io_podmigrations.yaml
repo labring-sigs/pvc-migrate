@@ -54,26 +54,39 @@ spec:
               deleteExtraneous:
                 type: boolean
               destinationNamespace:
+                maxLength: 63
+                minLength: 1
+                pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
                 type: string
               openebsLvmEnableShared:
                 type: boolean
               precopyPasses:
                 type: integer
               sessionNamespace:
+                maxLength: 63
+                minLength: 1
+                pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
                 type: string
               skipSourceUsageCheck:
                 type: boolean
               sourceNamespace:
+                maxLength: 63
+                minLength: 1
+                pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
                 type: string
               sourceNode:
                 type: string
               strategies:
                 items:
                   type: string
+                maxItems: 32
                 type: array
               targetNode:
                 type: string
               temporaryNamespace:
+                maxLength: 63
+                minLength: 1
+                pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
                 type: string
               toolImage:
                 type: string
@@ -98,14 +111,22 @@ spec:
                         involved in a workflow.
                       properties:
                         apiVersion:
+                          maxLength: 253
                           type: string
                         kind:
+                          maxLength: 253
                           type: string
                         name:
+                          maxLength: 253
+                          minLength: 1
+                          pattern: ^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$
                           type: string
                         namespace:
+                          maxLength: 63
+                          pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
                           type: string
                         resourceVersion:
+                          maxLength: 256
                           type: string
                         uid:
                           description: |-
@@ -123,14 +144,22 @@ spec:
                         involved in a workflow.
                       properties:
                         apiVersion:
+                          maxLength: 253
                           type: string
                         kind:
+                          maxLength: 253
                           type: string
                         name:
+                          maxLength: 253
+                          minLength: 1
+                          pattern: ^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$
                           type: string
                         namespace:
+                          maxLength: 63
+                          pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
                           type: string
                         resourceVersion:
+                          maxLength: 256
                           type: string
                         uid:
                           description: |-
@@ -146,14 +175,22 @@ spec:
                         involved in a workflow.
                       properties:
                         apiVersion:
+                          maxLength: 253
                           type: string
                         kind:
+                          maxLength: 253
                           type: string
                         name:
+                          maxLength: 253
+                          minLength: 1
+                          pattern: ^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$
                           type: string
                         namespace:
+                          maxLength: 63
+                          pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
                           type: string
                         resourceVersion:
+                          maxLength: 256
                           type: string
                         uid:
                           description: |-
@@ -434,8 +471,10 @@ spec:
                     transferScope:
                       properties:
                         destinationPath:
+                          maxLength: 1024
                           type: string
                         sourcePath:
+                          maxLength: 1024
                           type: string
                       required:
                       - destinationPath
@@ -455,6 +494,7 @@ spec:
                   - storageClass
                   - volumeMode
                   type: object
+                maxItems: 1024
                 type: array
               workload:
                 description: |-
@@ -478,14 +518,22 @@ spec:
                         involved in a workflow.
                       properties:
                         apiVersion:
+                          maxLength: 253
                           type: string
                         kind:
+                          maxLength: 253
                           type: string
                         name:
+                          maxLength: 253
+                          minLength: 1
+                          pattern: ^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$
                           type: string
                         namespace:
+                          maxLength: 63
+                          pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
                           type: string
                         resourceVersion:
+                          maxLength: 256
                           type: string
                         uid:
                           description: |-
@@ -496,20 +544,29 @@ spec:
                       required:
                       - name
                       type: object
+                    maxItems: 1024
                     type: array
                   controller:
                     description: ObjectReference identifies a Kubernetes object involved
                       in a workflow.
                     properties:
                       apiVersion:
+                        maxLength: 253
                         type: string
                       kind:
+                        maxLength: 253
                         type: string
                       name:
+                        maxLength: 253
+                        minLength: 1
+                        pattern: ^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$
                         type: string
                       namespace:
+                        maxLength: 63
+                        pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
                         type: string
                       resourceVersion:
+                        maxLength: 256
                         type: string
                       uid:
                         description: |-
@@ -585,6 +642,9 @@ spec:
                     format: int32
                     type: integer
                   originalObject:
+                    description: |-
+                      The serialized byte-size limit is enforced by the controller/domain
+                      boundary because OpenAPI cannot express a byte limit for opaque JSON.
                     x-kubernetes-preserve-unknown-fields: true
                   originalReplicas:
                     format: int32
@@ -594,14 +654,22 @@ spec:
                       in a workflow.
                     properties:
                       apiVersion:
+                        maxLength: 253
                         type: string
                       kind:
+                        maxLength: 253
                         type: string
                       name:
+                        maxLength: 253
+                        minLength: 1
+                        pattern: ^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$
                         type: string
                       namespace:
+                        maxLength: 63
+                        pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
                         type: string
                       resourceVersion:
+                        maxLength: 256
                         type: string
                       uid:
                         description: |-
@@ -661,6 +729,12 @@ spec:
             - temporaryNamespace
             - workload
             type: object
+            x-kubernetes-validations:
+            - message: workflow namespaces must match metadata.namespace
+              rule: self.sourceNamespace == self.sessionNamespace && self.destinationNamespace
+                == self.sessionNamespace && self.temporaryNamespace == self.sessionNamespace
+            - message: PodMigration workload.adapter must identify a supported workload
+              rule: self.workload.adapter != 'None'
           status:
             properties:
               completedAt:
@@ -673,25 +747,31 @@ spec:
                       format: date-time
                       type: string
                     message:
+                      maxLength: 8192
                       type: string
                     reason:
+                      maxLength: 128
                       type: string
                     status:
                       type: string
                     type:
+                      maxLength: 64
                       type: string
                   required:
                   - lastTransitionTime
                   - status
                   - type
                   type: object
+                maxItems: 32
                 type: array
               failureReason:
+                maxLength: 8192
                 type: string
               history:
                 items:
                   properties:
                     message:
+                      maxLength: 8192
                       type: string
                     phase:
                       description: WorkflowPhase identifies one durable workflow state.
@@ -724,8 +804,10 @@ spec:
                   - phase
                   - time
                   type: object
+                maxItems: 256
                 type: array
               message:
+                maxLength: 8192
                 type: string
               observedGeneration:
                 format: int64
@@ -738,14 +820,22 @@ spec:
                         involved in a workflow.
                       properties:
                         apiVersion:
+                          maxLength: 253
                           type: string
                         kind:
+                          maxLength: 253
                           type: string
                         name:
+                          maxLength: 253
+                          minLength: 1
+                          pattern: ^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$
                           type: string
                         namespace:
+                          maxLength: 63
+                          pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
                           type: string
                         resourceVersion:
+                          maxLength: 256
                           type: string
                         uid:
                           description: |-
@@ -765,14 +855,22 @@ spec:
                         involved in a workflow.
                       properties:
                         apiVersion:
+                          maxLength: 253
                           type: string
                         kind:
+                          maxLength: 253
                           type: string
                         name:
+                          maxLength: 253
+                          minLength: 1
+                          pattern: ^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$
                           type: string
                         namespace:
+                          maxLength: 63
+                          pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
                           type: string
                         resourceVersion:
+                          maxLength: 256
                           type: string
                         uid:
                           description: |-
@@ -788,6 +886,11 @@ spec:
                   - sourcePV
                   type: object
                 type: array
+              originalPodSnapshotHash:
+                description: |-
+                  OriginalPodSnapshotHash is controller-owned evidence that the standalone
+                  Pod snapshot was captured from the referenced live Pod before execution.
+                type: string
               phase:
                 description: WorkflowPhase identifies one durable workflow state.
                 enum:
@@ -859,14 +962,22 @@ spec:
                             involved in a workflow.
                           properties:
                             apiVersion:
+                              maxLength: 253
                               type: string
                             kind:
+                              maxLength: 253
                               type: string
                             name:
+                              maxLength: 253
+                              minLength: 1
+                              pattern: ^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$
                               type: string
                             namespace:
+                              maxLength: 63
+                              pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
                               type: string
                             resourceVersion:
+                              maxLength: 256
                               type: string
                             uid:
                               description: |-
@@ -892,14 +1003,22 @@ spec:
                         involved in a workflow.
                       properties:
                         apiVersion:
+                          maxLength: 253
                           type: string
                         kind:
+                          maxLength: 253
                           type: string
                         name:
+                          maxLength: 253
+                          minLength: 1
+                          pattern: ^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$
                           type: string
                         namespace:
+                          maxLength: 63
+                          pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
                           type: string
                         resourceVersion:
+                          maxLength: 256
                           type: string
                         uid:
                           description: |-
@@ -915,14 +1034,22 @@ spec:
                         involved in a workflow.
                       properties:
                         apiVersion:
+                          maxLength: 253
                           type: string
                         kind:
+                          maxLength: 253
                           type: string
                         name:
+                          maxLength: 253
+                          minLength: 1
+                          pattern: ^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$
                           type: string
                         namespace:
+                          maxLength: 63
+                          pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
                           type: string
                         resourceVersion:
+                          maxLength: 256
                           type: string
                         uid:
                           description: |-
@@ -956,6 +1083,7 @@ spec:
                           format: date-time
                           type: string
                         lastError:
+                          maxLength: 8192
                           type: string
                         warmCompletedAt:
                           format: date-time
@@ -983,14 +1111,22 @@ spec:
                         involved in a workflow.
                       properties:
                         apiVersion:
+                          maxLength: 253
                           type: string
                         kind:
+                          maxLength: 253
                           type: string
                         name:
+                          maxLength: 253
+                          minLength: 1
+                          pattern: ^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$
                           type: string
                         namespace:
+                          maxLength: 63
+                          pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
                           type: string
                         resourceVersion:
+                          maxLength: 256
                           type: string
                         uid:
                           description: |-
@@ -1007,14 +1143,22 @@ spec:
                       in a workflow.
                     properties:
                       apiVersion:
+                        maxLength: 253
                         type: string
                       kind:
+                        maxLength: 253
                         type: string
                       name:
+                        maxLength: 253
+                        minLength: 1
+                        pattern: ^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$
                         type: string
                       namespace:
+                        maxLength: 63
+                        pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
                         type: string
                       resourceVersion:
+                        maxLength: 256
                         type: string
                       uid:
                         description: |-

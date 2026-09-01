@@ -43,6 +43,13 @@ type SessionLeaseCleaner interface {
 	DeleteSessionLease(ctx context.Context, namespace, sessionID string) error
 }
 
+// SessionProtectionEnsurer adds the session-protection finalizer to durable
+// records that were authored outside the CLI adapter. Controller-backed
+// declarative resources need the same deletion guard as CLI-created sessions.
+type SessionProtectionEnsurer interface {
+	EnsureSessionProtection(ctx context.Context, session *domain.Session) error
+}
+
 // SessionLock is a renewable, process-owned lock for one session.
 type SessionLock interface {
 	Bind(ctx context.Context) (context.Context, context.CancelFunc)

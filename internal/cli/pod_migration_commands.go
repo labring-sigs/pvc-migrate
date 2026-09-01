@@ -301,11 +301,12 @@ func (r *rootState) newPodMigrationPlanCommand() *cobra.Command {
 			defer cancel()
 
 			if existing {
-				session, err := runtime.store.Get(ctx, r.global.sessionNamespace, flags.sessionID)
+				namespace := workflowNamespaceForCommand(r, cmd)
+				session, err := runtime.store.Get(ctx, namespace, flags.sessionID)
 				if err != nil {
 					return reportSessionLookupError(
 						cmd,
-						r.global.sessionNamespace,
+						namespace,
 						flags.sessionID,
 						err,
 					)
@@ -334,6 +335,15 @@ func (r *rootState) newPodMigrationPlanCommand() *cobra.Command {
 			if err != nil {
 				return err
 			}
+			options.SessionNamespace, options.TemporaryNamespace = r.controllerPlanNamespaces(
+				runtime,
+				domain.SessionTypeMigratePod,
+				options.SourceNamespace,
+				options.SourceNamespace,
+				options.TemporaryNamespace,
+				cmd.Flags().Changed("temporary-namespace"),
+			)
+			options.StagingNamespace = options.TemporaryNamespace
 
 			plan, err := runtime.planner.PlanPodMigration(ctx, options)
 			if err != nil {
@@ -370,6 +380,15 @@ func (r *rootState) runPodMigrateCommand(
 	if err != nil {
 		return err
 	}
+	options.SessionNamespace, options.TemporaryNamespace = r.controllerPlanNamespaces(
+		runtime,
+		domain.SessionTypeMigratePod,
+		options.SourceNamespace,
+		options.SourceNamespace,
+		options.TemporaryNamespace,
+		cmd.Flags().Changed("temporary-namespace"),
+	)
+	options.StagingNamespace = options.TemporaryNamespace
 
 	plan, err := runtime.planner.PlanPodMigration(ctx, options)
 	if err != nil {

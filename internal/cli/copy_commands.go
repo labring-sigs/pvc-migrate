@@ -98,7 +98,8 @@ func (r *rootState) newCopyCommand() *cobra.Command {
 				plan    *domain.MigrationPlan
 			)
 			if existing {
-				session, err = runtime.store.Get(ctx, r.global.sessionNamespace, flags.sessionID)
+				namespace := workflowNamespaceForCommand(r, cmd)
+				session, err = runtime.store.Get(ctx, namespace, flags.sessionID)
 				if err == nil {
 					err = adoptReservedSessionForCopy(session, flags)
 				}
@@ -110,6 +111,16 @@ func (r *rootState) newCopyCommand() *cobra.Command {
 				var options planner.CopyOptions
 
 				options, err = flags.planOptions(r, false)
+				if err == nil {
+					options.SessionNamespace, options.TemporaryNamespace = r.controllerPlanNamespaces(
+						runtime,
+						domain.SessionTypeCopy,
+						options.SourceNamespace,
+						options.DestinationNamespace,
+						options.TemporaryNamespace,
+						false,
+					)
+				}
 				if err == nil {
 					plan, err = runtime.planner.PlanCopy(ctx, options)
 				}
@@ -212,11 +223,12 @@ func (r *rootState) newCopyPlanCommand() *cobra.Command {
 			defer cancel()
 
 			if existing {
-				session, err := runtime.store.Get(ctx, r.global.sessionNamespace, flags.sessionID)
+				namespace := workflowNamespaceForCommand(r, cmd)
+				session, err := runtime.store.Get(ctx, namespace, flags.sessionID)
 				if err != nil {
 					return reportSessionLookupError(
 						cmd,
-						r.global.sessionNamespace,
+						namespace,
 						flags.sessionID,
 						err,
 					)
@@ -245,6 +257,14 @@ func (r *rootState) newCopyPlanCommand() *cobra.Command {
 			if err != nil {
 				return err
 			}
+			options.SessionNamespace, options.TemporaryNamespace = r.controllerPlanNamespaces(
+				runtime,
+				domain.SessionTypeCopy,
+				options.SourceNamespace,
+				options.DestinationNamespace,
+				options.TemporaryNamespace,
+				false,
+			)
 
 			plan, err := runtime.planner.PlanCopy(ctx, options)
 			if err != nil {

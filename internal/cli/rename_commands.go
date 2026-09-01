@@ -53,7 +53,9 @@ func (r *rootState) newRenameCommand() *cobra.Command {
 
 			plan, err := runtime.planner.PlanRenamePVC(ctx, planner.RenamePlanOptions{
 				SessionID: sessionID, SourceNamespace: sourceNamespace, SourcePVC: sourcePVC,
-				DestinationPVC: destinationPVC, SessionNamespace: r.global.sessionNamespace,
+				DestinationPVC: destinationPVC, SessionNamespace: r.controllerPlanSessionNamespace(
+					runtime, domain.SessionTypeRename, sourceNamespace, sourceNamespace,
+				),
 			})
 			if err != nil {
 				return reportPlanningError(cmd, err)
@@ -147,7 +149,9 @@ func (r *rootState) newRenamePlanCommand() *cobra.Command {
 
 			plan, err := runtime.planner.PlanRenamePVC(ctx, planner.RenamePlanOptions{
 				SessionID: sessionID, SourceNamespace: sourceNamespace, SourcePVC: sourcePVC,
-				DestinationPVC: destinationPVC, SessionNamespace: r.global.sessionNamespace,
+				DestinationPVC: destinationPVC, SessionNamespace: r.controllerPlanSessionNamespace(
+					runtime, domain.SessionTypeRename, sourceNamespace, sourceNamespace,
+				),
 			})
 			if err != nil {
 				return reportPlanningError(cmd, err)

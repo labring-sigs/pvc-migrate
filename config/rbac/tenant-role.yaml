@@ -1,0 +1,31 @@
+# Optional tenant-facing permissions. This ClusterRole is intentionally not
+# included in config/default: bind it with a RoleBinding in each approved
+# tenant namespace, never with a ClusterRoleBinding.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: pvc-migrate-tenant
+  labels:
+    app.kubernetes.io/name: pvc-migrate
+    app.kubernetes.io/component: tenant-access
+rules:
+  - apiGroups: ["migrate.sealos.io"]
+    resources:
+      - migrations
+      - podmigrations
+      - reservations
+      - copies
+      - backups
+      - restores
+      - renames
+    verbs: ["create", "get", "list", "watch"]
+  - apiGroups: ["migrate.sealos.io"]
+    resources:
+      - migrations/status
+      - podmigrations/status
+      - reservations/status
+      - copies/status
+      - backups/status
+      - restores/status
+      - renames/status
+    verbs: ["get"]

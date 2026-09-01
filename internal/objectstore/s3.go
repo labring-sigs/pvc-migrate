@@ -28,7 +28,13 @@ import (
 	"k8s.io/apimachinery/pkg/api/resource"
 )
 
-const manifestVersion = 2
+const (
+	manifestVersion       = 2
+	maxBucketLength       = 63
+	maxObjectNameLength   = 253
+	maxObjectPrefixLength = 1024
+	maxObjectKeyLength    = 1024
+)
 
 var safeSegment = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]*$`)
 
@@ -46,6 +52,21 @@ type Config struct {
 	ForcePathStyle        bool
 	ServerSideEncryption  string
 	SSEKMSKeyID           string
+	// UseAmbientCredentials keeps static controller credentials out of the
+	// transfer Pod. The controller's S3 client still uses AccessKey/SecretKey,
+	// while RcloneConfig emits env_auth for the Pod's bound ServiceAccount.
+	UseAmbientCredentials bool
+	// ServiceAccountName selects the pre-provisioned transfer Pod identity for
+	// workload-identity profiles. It is controller metadata, not S3 wire data.
+	ServiceAccountName string
+	// ProfileUID and ProfileGeneration are controller-only provenance. They
+	// pin a running workflow to the administrator profile without exposing
+	// credentials or changing the object-store wire configuration.
+	ProfileUID                string
+	ProfileGeneration         int64
+	CredentialsSecretUID      string
+	ServiceAccountUID         string
+	ServiceAccountFingerprint string
 }
 
 type Credentials struct {
@@ -203,7 +224,26 @@ func NewWithClient(client API, cfg Config, resolved Credentials) (*Store, error)
 	return &Store{client: client, config: cfg, credentials: resolved}, nil
 }
 
+// NewConfigOnly validates object-store routing fields without resolving
+// credentials or constructing a network client. Controller-mode submission
+// uses this form because the controller owns the administrator Secret and the
+// submitting tenant must not receive or persist its contents.
+func NewConfigOnly(cfg Config) (*Store, error) {
+	if err := ValidateConfig(cfg); err != nil {
+		return nil, err
+	}
+
+	return &Store{config: cfg}, nil
+}
+
 func ValidateConfig(cfg Config) error {
+	if len(cfg.Bucket) > maxBucketLength {
+		return domain.NewError(
+			domain.ErrorValidation,
+			"S3 configuration",
+			"bucket exceeds the maximum length of 63 characters",
+		)
+	}
 	if !safeSegment.MatchString(cfg.Bucket) {
 		return domain.NewError(
 			domain.ErrorValidation,
@@ -212,11 +252,27 @@ func ValidateConfig(cfg Config) error {
 		)
 	}
 
+	if len(cfg.Name) > maxObjectNameLength {
+		return domain.NewError(
+			domain.ErrorValidation,
+			"S3 configuration",
+			"name exceeds the maximum length of 253 characters",
+		)
+	}
+
 	if !safeSegment.MatchString(cfg.Name) {
 		return domain.NewError(
 			domain.ErrorValidation,
 			"S3 configuration",
 			"name must contain only alphanumeric characters, dots, underscores, and hyphens",
+		)
+	}
+
+	if len(cfg.Prefix) > maxObjectPrefixLength {
+		return domain.NewError(
+			domain.ErrorValidation,
+			"S3 configuration",
+			"prefix exceeds the maximum length of 1024 characters",
 		)
 	}
 
@@ -230,6 +286,18 @@ func ValidateConfig(cfg Config) error {
 				)
 			}
 		}
+	}
+
+	// S3 limits object keys, including the profile prefix, recovery-point
+	// name, and controller-owned completion suffix, to 1024 bytes. Validate
+	// the complete manifest key here so profile-backed workflows fail before
+	// Helm or a transfer Pod is started.
+	if len(path.Join(cfg.Prefix, cfg.Name+".complete.json")) > maxObjectKeyLength {
+		return domain.NewError(
+			domain.ErrorValidation,
+			"S3 configuration",
+			"prefix and recovery-point name exceed S3's 1024-byte object-key limit",
+		)
 	}
 
 	if (cfg.AccessKey == "") != (cfg.SecretKey == "") {
@@ -262,6 +330,13 @@ func ValidateConfig(cfg Config) error {
 				domain.ErrorValidation,
 				"S3 configuration",
 				"endpoint must be an absolute HTTP or HTTPS URL",
+			)
+		}
+		if parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" || parsed.Path != "" && parsed.Path != "/" {
+			return domain.NewError(
+				domain.ErrorValidation,
+				"S3 configuration",
+				"endpoint must not contain credentials, query parameters, fragments, or a path",
 			)
 		}
 
@@ -356,11 +431,15 @@ func (s *Store) RcloneConfig() string {
 	builder.WriteString("[remote]\n")
 	builder.WriteString("type = s3\n")
 	fmt.Fprintf(&builder, "provider = %s\n", provider)
-	fmt.Fprintf(&builder, "access_key_id = %s\n", s.credentials.AccessKey)
-	fmt.Fprintf(&builder, "secret_access_key = %s\n", s.credentials.SecretKey)
+	if s.config.UseAmbientCredentials {
+		builder.WriteString("env_auth = true\n")
+	} else {
+		fmt.Fprintf(&builder, "access_key_id = %s\n", s.credentials.AccessKey)
+		fmt.Fprintf(&builder, "secret_access_key = %s\n", s.credentials.SecretKey)
 
-	if s.credentials.SessionToken != "" {
-		fmt.Fprintf(&builder, "session_token = %s\n", s.credentials.SessionToken)
+		if s.credentials.SessionToken != "" {
+			fmt.Fprintf(&builder, "session_token = %s\n", s.credentials.SessionToken)
+		}
 	}
 
 	if s.config.Endpoint != "" {
@@ -386,6 +465,14 @@ func (s *Store) RcloneConfig() string {
 }
 
 func (s *Store) Manifest(ctx context.Context) (*Manifest, error) {
+	if s == nil || s.client == nil {
+		return nil, domain.NewError(
+			domain.ErrorPrecondition,
+			"S3 manifest",
+			"object-store client is not configured",
+		)
+	}
+
 	output, err := s.client.GetObject(
 		ctx,
 		&s3.GetObjectInput{Bucket: aws.String(s.config.Bucket), Key: aws.String(s.manifestKey())},

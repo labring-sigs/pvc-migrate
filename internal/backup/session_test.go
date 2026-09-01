@@ -78,6 +78,109 @@ type lockingBackupSessionStore struct {
 	updateWhileBound bool
 }
 
+func TestBuildResumeRequestReusesControllerProvidedStore(t *testing.T) {
+	provided := testBackupObjectStore(t)
+	request := Request{
+		ID:               "backup-resume",
+		Namespace:        "app",
+		SessionNamespace: "app",
+		Store:            provided,
+		SessionStore:     &recordingBackupSessionStore{},
+	}
+	pvc := &corev1.PersistentVolumeClaim{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "app", Name: "data", UID: types.UID("pvc-uid")},
+	}
+	pv := &corev1.PersistentVolume{
+		ObjectMeta: metav1.ObjectMeta{Name: "pv-data", UID: types.UID("pv-uid")},
+	}
+	session, err := buildBackupSession(request, pvc, pv)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	resumed, err := buildResumeRequest(
+		context.Background(),
+		fake.NewSimpleClientset(),
+		request,
+		session,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resumed.Store != provided {
+		t.Fatal("resume rebuilt or replaced the controller-provided object store")
+	}
+}
+
+func TestPinObjectStoreProfileCapturesAndRejectsRevisionDrift(t *testing.T) {
+	store := &recordingBackupSessionStore{}
+	session := domain.NewSession(
+		"backup-profile",
+		domain.NewSessionSpec(
+			domain.OperationBackup,
+			domain.SessionCommon{SourceNamespace: "app", SessionNamespace: "app"},
+			false,
+			domain.SessionWorkflowOptions{},
+		),
+		time.Now(),
+	)
+	req := Request{
+		ObjectStoreProfile:                   "shared-s3",
+		ObjectStoreProfileUID:                types.UID("profile-uid"),
+		ObjectStoreProfileGeneration:         3,
+		ObjectStoreCredentialsSecretUID:      types.UID("secret-uid"),
+		ObjectStoreServiceAccountUID:         types.UID("service-account-uid"),
+		ObjectStoreServiceAccountFingerprint: "fingerprint-one",
+		SessionStore:                         store,
+	}
+
+	if err := pinObjectStoreProfile(context.Background(), req, session); err != nil {
+		t.Fatal(err)
+	}
+	if session.Status.ObjectStoreProfileUID != req.ObjectStoreProfileUID ||
+		session.Status.ObjectStoreProfileGeneration != req.ObjectStoreProfileGeneration ||
+		session.Status.ObjectStoreCredentialsSecretUID != req.ObjectStoreCredentialsSecretUID ||
+		session.Status.ObjectStoreServiceAccountUID != req.ObjectStoreServiceAccountUID ||
+		session.Status.ObjectStoreServiceAccountFingerprint != req.ObjectStoreServiceAccountFingerprint ||
+		len(store.updated) != 1 {
+		t.Fatalf("profile pin=%q/%d updates=%d", session.Status.ObjectStoreProfileUID, session.Status.ObjectStoreProfileGeneration, len(store.updated))
+	}
+
+	if err := pinObjectStoreProfile(context.Background(), req, session); err != nil {
+		t.Fatalf("same profile revision rejected: %v", err)
+	}
+
+	drifted := req
+	drifted.ObjectStoreProfileGeneration++
+	if err := pinObjectStoreProfile(context.Background(), drifted, session); domain.CategoryOf(err) != domain.ErrorConflict {
+		t.Fatalf("generation drift error=%v category=%q", err, domain.CategoryOf(err))
+	}
+
+	drifted = req
+	drifted.ObjectStoreProfileUID = "replacement-uid"
+	if err := pinObjectStoreProfile(context.Background(), drifted, session); domain.CategoryOf(err) != domain.ErrorConflict {
+		t.Fatalf("UID drift error=%v category=%q", err, domain.CategoryOf(err))
+	}
+
+	drifted = req
+	drifted.ObjectStoreCredentialsSecretUID = "replacement-secret-uid"
+	if err := pinObjectStoreProfile(context.Background(), drifted, session); domain.CategoryOf(err) != domain.ErrorConflict {
+		t.Fatalf("Secret UID drift error=%v category=%q", err, domain.CategoryOf(err))
+	}
+
+	drifted = req
+	drifted.ObjectStoreServiceAccountUID = "replacement-service-account-uid"
+	if err := pinObjectStoreProfile(context.Background(), drifted, session); domain.CategoryOf(err) != domain.ErrorConflict {
+		t.Fatalf("ServiceAccount UID drift error=%v category=%q", err, domain.CategoryOf(err))
+	}
+
+	drifted = req
+	drifted.ObjectStoreServiceAccountFingerprint = "fingerprint-two"
+	if err := pinObjectStoreProfile(context.Background(), drifted, session); domain.CategoryOf(err) != domain.ErrorConflict {
+		t.Fatalf("ServiceAccount fingerprint drift error=%v category=%q", err, domain.CategoryOf(err))
+	}
+}
+
 func TestResumeRestoreKeepsFailureCheckpointInsideSessionLease(t *testing.T) {
 	lock := &recordingBackupSessionLock{}
 	store := &lockingBackupSessionStore{lock: lock}
@@ -269,6 +372,43 @@ func TestSubmitRestoreSeparatesBackendFromS3Provider(t *testing.T) {
 	}
 }
 
+func TestSubmitRestoreProfileOmitsControllerOwnedConnection(t *testing.T) {
+	objectStore, err := objectstore.NewConfigOnly(objectstore.Config{Bucket: "profile", Name: "daily"})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	session, err := SubmitRestore(
+		context.Background(),
+		fake.NewSimpleClientset(),
+		Request{
+			ID: "restore-profile", Namespace: "app", PVCName: "data", SessionNamespace: "app",
+			ObjectStoreProfile: "tenant-s3", Store: objectStore, SessionStore: &crdProfileSessionStore{},
+		},
+		Plan{PVCUID: "pvc-uid"},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	payload := session.Spec.Restore
+	if payload.ObjectStoreProfile != "tenant-s3" || payload.Name != "daily" {
+		t.Fatalf("profile metadata = %#v", payload)
+	}
+	if payload.Bucket != "" || payload.Prefix != "" || payload.Provider != "" || payload.Endpoint != "" || payload.Region != "" || payload.ServerSideEncryption != "" || payload.SSEKMSKeyID != "" {
+		t.Fatalf("controller-owned object-store fields leaked into workflow: %#v", payload)
+	}
+}
+
+type crdProfileSessionStore struct{ recordingBackupSessionStore }
+
+func (s *crdProfileSessionStore) Create(_ context.Context, session *domain.Session) error {
+	session.Backend = kube.SessionBackendCRD
+	session.BackendResource = domain.ControllerKindRestore
+	session.BackendUID = types.UID("restore-uid")
+	s.created = session
+	return session.Validate()
+}
+
 func TestBuildBackupSessionIncludesMetadataWithoutCredentials(t *testing.T) {
 	store := &recordingBackupSessionStore{}
 	req := Request{
@@ -313,6 +453,31 @@ func TestBuildBackupSessionIncludesMetadataWithoutCredentials(t *testing.T) {
 
 	if err := session.Validate(); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestBuildBackupSessionProfileOmitsControllerOwnedConnection(t *testing.T) {
+	store := &recordingBackupSessionStore{}
+	req := Request{
+		ID:                 "profile-backup",
+		Namespace:          "app",
+		SessionNamespace:   "app",
+		ObjectStoreProfile: "tenant-s3",
+		Store:              testBackupObjectStore(t),
+		SessionStore:       store,
+	}
+	pvc := &corev1.PersistentVolumeClaim{ObjectMeta: metav1.ObjectMeta{Namespace: "app", Name: "data", UID: types.UID("pvc-uid")}}
+	pv := &corev1.PersistentVolume{ObjectMeta: metav1.ObjectMeta{Name: "pv-data", UID: types.UID("pv-uid")}}
+	session, err := buildBackupSession(req, pvc, pv)
+	if err != nil {
+		t.Fatal(err)
+	}
+	payload := session.Spec.Backup
+	if payload.ObjectStoreProfile != "tenant-s3" || payload.Name != "daily" {
+		t.Fatalf("profile metadata = %#v", payload)
+	}
+	if payload.Bucket != "" || payload.Prefix != "" || payload.Provider != "" || payload.Endpoint != "" || payload.Region != "" || payload.ServerSideEncryption != "" || payload.SSEKMSKeyID != "" {
+		t.Fatalf("controller-owned object-store fields leaked into workflow: %#v", payload)
 	}
 }
 
@@ -497,6 +662,36 @@ func TestInitialBackupHoldsSessionLeaseWhilePersistingCredentials(t *testing.T) 
 
 	if !lock.released {
 		t.Fatal("session Lease was not released after backup setup failed")
+	}
+}
+
+func TestRunBackupWithSessionReusesSubmittedSession(t *testing.T) {
+	store := &recordingBackupSessionStore{}
+	session := testBackupSession(t, "backup-submitted")
+	session.Status.Phase = domain.PhaseCompleted
+	client := fake.NewSimpleClientset()
+	req := Request{
+		Store:         testBackupObjectStore(t),
+		SessionStore:  store,
+		BackupSession: session,
+	}
+
+	if err := runBackupWithSession(context.Background(), client, req, "pvc-uid", "pv-uid"); err != nil {
+		t.Fatalf("runBackupWithSession() error = %v", err)
+	}
+
+	if store.created != nil {
+		t.Fatal("submitted backup session was created a second time")
+	}
+	if len(store.updated) != 0 {
+		t.Fatalf("completed submitted session was unexpectedly updated %d times", len(store.updated))
+	}
+	if _, err := client.CoreV1().Secrets(session.Spec.SessionNamespace).Get(
+		context.Background(),
+		kube.BackupCredentialsSecretName(session.ID),
+		metav1.GetOptions{},
+	); !apierrors.IsNotFound(err) {
+		t.Fatalf("credentials Secret was persisted during session reuse: %v", err)
 	}
 }
 

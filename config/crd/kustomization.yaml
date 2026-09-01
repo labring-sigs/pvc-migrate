@@ -7,3 +7,4 @@ resources:
 - bases/migrate.sealos.io_renames.yaml
 - bases/migrate.sealos.io_reservations.yaml
 - bases/migrate.sealos.io_restores.yaml
+- bases/migrate.sealos.io_objectstoreprofiles.yaml

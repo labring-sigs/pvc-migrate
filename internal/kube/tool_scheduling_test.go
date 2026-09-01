@@ -76,3 +76,22 @@ func TestToolComponentTolerationsDeduplicateAcrossNodes(t *testing.T) {
 		t.Fatalf("values=%v", values)
 	}
 }
+
+func TestToolServiceAccountHelmValues(t *testing.T) {
+	values, err := ToolServiceAccountHelmValues("s3-workload.identity")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Contains(values, "rclone.serviceAccount.create=false") ||
+		!slices.Contains(values, "rclone.serviceAccount.name=s3-workload.identity") {
+		t.Fatalf("service account values=%v", values)
+	}
+
+	if values, err := ToolServiceAccountHelmValues(""); err != nil || values != nil {
+		t.Fatalf("empty service account values=%v err=%v", values, err)
+	}
+
+	if _, err := ToolServiceAccountHelmValues("Invalid_Name"); domain.CategoryOf(err) != domain.ErrorValidation {
+		t.Fatalf("invalid service account category=%s error=%v", domain.CategoryOf(err), err)
+	}
+}

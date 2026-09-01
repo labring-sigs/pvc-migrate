@@ -220,7 +220,7 @@ func runRestore(
 		return err
 	}
 
-	helmValues, err := transferToolHelmValues(leaseCtx, client, probeResult)
+	helmValues, err := transferToolHelmValues(leaseCtx, client, probeResult, req.ToolServiceAccountName)
 	if err != nil {
 		return err
 	}

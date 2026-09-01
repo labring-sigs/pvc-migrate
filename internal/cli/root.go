@@ -33,23 +33,25 @@ type Options struct {
 }
 
 type globals struct {
-	kubeconfig       string
-	kubeContext      string
-	sessionNamespace string
-	timeout          time.Duration
-	retries          int
-	retryBackoff     time.Duration
-	helmTimeout      time.Duration
-	output           string
-	logFormat        string
-	logLevel         string
-	color            string
-	streamToolLogs   bool
-	wait             bool
-	noCompress       bool
-	assumeYes        bool
-	toolImage        string
-	mode             string
+	kubeconfig          string
+	kubeContext         string
+	sessionNamespace    string
+	controllerNamespace string
+	workflowNamespace   string
+	timeout             time.Duration
+	retries             int
+	retryBackoff        time.Duration
+	helmTimeout         time.Duration
+	output              string
+	logFormat           string
+	logLevel            string
+	color               string
+	streamToolLogs      bool
+	wait                bool
+	noCompress          bool
+	assumeYes           bool
+	toolImage           string
+	mode                string
 }
 
 type executionMode string
@@ -133,6 +135,18 @@ func NewRoot(options Options) *cobra.Command {
 		"session-namespace",
 		"pvc-migrate-system",
 		"Namespace for persistent migration sessions",
+	)
+	flags.StringVar(
+		&state.global.controllerNamespace,
+		"controller-namespace",
+		"pvc-migrate-system",
+		"Namespace where the controller is installed and its profile credentials are read",
+	)
+	flags.StringVar(
+		&state.global.workflowNamespace,
+		"workflow-namespace",
+		"",
+		"Tenant namespace containing a controller workflow for lifecycle/status commands",
 	)
 	flags.DurationVar(&state.global.timeout, "timeout", 30*time.Minute, "Operation timeout")
 	flags.IntVar(&state.global.retries, "retries", 3, "Copy retry attempts")
@@ -404,6 +418,30 @@ func (r *rootState) validateGlobalFlags() error {
 				strings.Join(problems, "; "),
 			),
 		)
+	}
+	if problems := validation.IsDNS1123Label(r.global.controllerNamespace); len(problems) > 0 {
+		return domain.NewError(
+			domain.ErrorValidation,
+			"flags",
+			fmt.Sprintf(
+				"--controller-namespace %q is invalid: %s",
+				r.global.controllerNamespace,
+				strings.Join(problems, "; "),
+			),
+		)
+	}
+	if r.global.workflowNamespace != "" {
+		if problems := validation.IsDNS1123Label(r.global.workflowNamespace); len(problems) > 0 {
+			return domain.NewError(
+				domain.ErrorValidation,
+				"flags",
+				fmt.Sprintf(
+					"--workflow-namespace %q is invalid: %s",
+					r.global.workflowNamespace,
+					strings.Join(problems, "; "),
+				),
+			)
+		}
 	}
 
 	return nil

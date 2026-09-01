@@ -352,6 +352,81 @@ func TestControllerWorkflowAvailabilityHonorsPartialDiscovery(t *testing.T) {
 	}
 }
 
+func TestControllerPlanNamespacesRespectTenantBoundary(t *testing.T) {
+	r := &rootState{global: globals{sessionNamespace: "pvc-migrate-system"}}
+	runtime := &commandRuntime{
+		mode:            executionModeController,
+		controllerStore: kube.NewCRDSessionStore(nil),
+		controllerKinds: []domain.ControllerKind{domain.ControllerKindMigration},
+	}
+
+	sessionNamespace, temporaryNamespace := r.controllerPlanNamespaces(
+		runtime,
+		domain.SessionTypeMigrate,
+		"application",
+		"application",
+		"pvc-migrate-system",
+		false,
+	)
+	if sessionNamespace != "application" || temporaryNamespace != "application" {
+		t.Fatalf("controller defaults = %q/%q, want application/application", sessionNamespace, temporaryNamespace)
+	}
+
+	sessionNamespace, temporaryNamespace = r.controllerPlanNamespaces(
+		runtime,
+		domain.SessionTypeMigrate,
+		"application",
+		"application",
+		"pvc-migrate-system",
+		true,
+	)
+	if sessionNamespace != "pvc-migrate-system" || temporaryNamespace != "pvc-migrate-system" {
+		t.Fatalf("explicit temporary namespace = %q/%q, want global/system", sessionNamespace, temporaryNamespace)
+	}
+
+	sessionNamespace, temporaryNamespace = r.controllerPlanNamespaces(
+		runtime,
+		domain.SessionTypeMigrate,
+		"application",
+		"archive",
+		"pvc-migrate-system",
+		false,
+	)
+	if sessionNamespace != "pvc-migrate-system" || temporaryNamespace != "pvc-migrate-system" {
+		t.Fatalf("cross namespace = %q/%q, want global/system", sessionNamespace, temporaryNamespace)
+	}
+
+	runtime.controllerKinds = []domain.ControllerKind{domain.ControllerKindBackup}
+	sessionNamespace, temporaryNamespace = r.controllerPlanNamespaces(
+		runtime,
+		domain.SessionTypeMigrate,
+		"application",
+		"application",
+		"pvc-migrate-system",
+		false,
+	)
+	if sessionNamespace != "pvc-migrate-system" || temporaryNamespace != "pvc-migrate-system" {
+		t.Fatalf("missing CRD = %q/%q, want global/system", sessionNamespace, temporaryNamespace)
+	}
+}
+
+func TestWorkflowNamespaceForCommandHonorsExplicitTenantFlag(t *testing.T) {
+	r := &rootState{global: globals{sessionNamespace: "pvc-migrate-system", workflowNamespace: "global-tenant"}}
+	command := &cobra.Command{}
+	command.Flags().String("namespace", "", "")
+	if err := command.Flags().Set("namespace", "application"); err != nil {
+		t.Fatal(err)
+	}
+	if got := workflowNamespaceForCommand(r, command); got != "application" {
+		t.Fatalf("explicit namespace=%q, want application", got)
+	}
+
+	command = &cobra.Command{}
+	if got := workflowNamespaceForCommand(r, command); got != "global-tenant" {
+		t.Fatalf("global workflow namespace=%q, want global-tenant", got)
+	}
+}
+
 func TestAdoptReservedSessionBuildsCopyOwnedOptions(t *testing.T) {
 	spec := domain.NewSessionSpec(
 		domain.OperationReserve,

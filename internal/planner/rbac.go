@@ -61,7 +61,9 @@ func (p *Planner) checkRBAC(
 			"patch",
 			"delete",
 		)
-		add(namespace, "", "secrets", "get", "list", "watch", "create", "update", "patch", "delete")
+		// Secret dependencies are resolved by exact name. Listing all Secrets is
+		// unnecessary and would widen a controller or CLI identity's exposure.
+		add(namespace, "", "secrets", "get", "create", "update", "delete")
 		add(
 			namespace,
 			"",
@@ -74,7 +76,7 @@ func (p *Planner) checkRBAC(
 			"patch",
 			"delete",
 		)
-		add(namespace, "", "serviceaccounts", "get", "list", "create", "update", "patch", "delete")
+		add(namespace, "", "serviceaccounts", "get", "create", "update", "delete")
 		add(namespace, "", "events", "get", "list")
 		add(
 			namespace,

@@ -2478,7 +2478,7 @@ func TestTransferToolHelmValuesUseObservedNodeTaintsAndPullSecrets(t *testing.T)
 		ImagePullSecrets: []corev1.LocalObjectReference{{Name: "registry-pull"}},
 	}
 
-	values, err := transferToolHelmValues(context.Background(), client, probe)
+	values, err := transferToolHelmValues(context.Background(), client, probe, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2494,6 +2494,53 @@ func TestTransferToolHelmValuesUseObservedNodeTaintsAndPullSecrets(t *testing.T)
 		if !slices.Contains(values, expected) {
 			t.Fatalf("missing %q in %v", expected, values)
 		}
+	}
+}
+
+func TestValidateTransferServiceAccountPinsIdentityAtLaunch(t *testing.T) {
+	automount := true
+	account := &corev1.ServiceAccount{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace:   "tenant-a",
+			Name:        "s3-transfer",
+			UID:         types.UID("sa-uid"),
+			Annotations: map[string]string{"eks.amazonaws.com/role-arn": "arn:aws:iam::1:role/tenant-a"},
+		},
+		AutomountServiceAccountToken: &automount,
+	}
+	fingerprint := kube.ServiceAccountIdentityFingerprint(account)
+	request := Request{
+		Namespace:                            account.Namespace,
+		ToolServiceAccountName:               account.Name,
+		ObjectStoreServiceAccountUID:         account.UID,
+		ObjectStoreServiceAccountFingerprint: fingerprint,
+	}
+
+	client := fake.NewClientset(account)
+	if err := validateTransferServiceAccount(context.Background(), client, request); err != nil {
+		t.Fatalf("matching ServiceAccount rejected: %v", err)
+	}
+
+	changed := account.DeepCopy()
+	changed.Annotations["eks.amazonaws.com/role-arn"] = "arn:aws:iam::1:role/other"
+	if _, err := client.CoreV1().ServiceAccounts(account.Namespace).Update(
+		context.Background(), changed, metav1.UpdateOptions{},
+	); err != nil {
+		t.Fatal(err)
+	}
+	if domain.CategoryOf(validateTransferServiceAccount(context.Background(), client, request)) != domain.ErrorConflict {
+		t.Fatal("ServiceAccount identity metadata drift was not rejected")
+	}
+
+	missingPin := request
+	missingPin.ObjectStoreServiceAccountFingerprint = ""
+	if domain.CategoryOf(validateTransferServiceAccount(context.Background(), client, missingPin)) != domain.ErrorConflict {
+		t.Fatal("missing administrator identity pin was not rejected")
+	}
+
+	staticRequest := Request{Namespace: account.Namespace}
+	if err := validateTransferServiceAccount(context.Background(), nil, staticRequest); err != nil {
+		t.Fatalf("static-credential request unexpectedly required a ServiceAccount: %v", err)
 	}
 }
 

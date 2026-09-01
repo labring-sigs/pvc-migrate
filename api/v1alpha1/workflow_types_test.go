@@ -228,20 +228,16 @@ func TestOperationSpecsHaveIndependentFieldContracts(t *testing.T) {
 		{
 			name: "backup", spec: v1alpha1.BackupSpec{},
 			fields: []string{
-				"allowInsecureEndpoint", "backend", "bucket", "createdBy", "credentialsSecret",
-				"deleteExtraneous", "endpoint", "name", "online", "openebsLvmEnableShared",
-				"path", "prefix", "provider", "region", "serverSideEncryption", "sessionNamespace",
-				"sourceNamespace", "sourcePV", "sourcePVC", "sseKmsKeyID", "toolImage",
+				"createdBy", "deleteExtraneous", "name", "objectStoreProfile", "online",
+				"openebsLvmEnableShared", "path", "sessionNamespace", "sourceNamespace", "sourcePV", "sourcePVC", "toolImage",
 			},
 		},
 		{
 			name: "restore", spec: v1alpha1.RestoreSpec{},
 			fields: []string{
-				"allowInsecureEndpoint", "allowMounted", "backend", "bucket", "createPVC",
-				"createdBy", "credentialsSecret", "deleteExtraneous", "destinationAccessMode",
+				"allowMounted", "createPVC", "createdBy", "deleteExtraneous", "destinationAccessMode",
 				"destinationCapacity", "destinationNamespace", "destinationPVC",
-				"destinationStorageClass", "endpoint", "name", "path", "prefix", "provider",
-				"region", "serverSideEncryption", "sessionNamespace", "sseKmsKeyID", "targetNode",
+				"destinationStorageClass", "name", "objectStoreProfile", "path", "sessionNamespace", "targetNode",
 				"toolImage",
 			},
 		},
@@ -400,6 +396,34 @@ func TestOperationStatusesExposeOnlyConcernedCheckpoints(t *testing.T) {
 	}
 }
 
+func TestStatusConversionBoundsLegacyControllerState(t *testing.T) {
+	status := domain.SessionStatus{
+		Message:    strings.Repeat("x", domain.MaxWorkflowMessageBytes+1),
+		Conditions: make([]domain.Condition, domain.MaxWorkflowConditions+3),
+		History:    make([]domain.HistoryEntry, domain.MaxWorkflowHistoryEntries+7),
+		Volumes: []domain.VolumeStatus{{
+			Sync: domain.SyncState{
+				LastError: strings.Repeat("e", domain.MaxWorkflowMessageBytes+1),
+			},
+		}},
+	}
+	for i := range status.Conditions {
+		status.Conditions[i].Type = "Condition"
+	}
+
+	converted := v1alpha1.MigrationStatusFromDomain(status, []domain.VolumeSpec{{}})
+	if len(converted.Message) != domain.MaxWorkflowMessageBytes ||
+		len(converted.Conditions) != domain.MaxWorkflowConditions ||
+		len(converted.History) != domain.MaxWorkflowHistoryEntries ||
+		len(converted.Volumes[0].Sync.LastError) != domain.MaxWorkflowMessageBytes {
+		t.Fatalf(
+			"bounded status sizes: message=%d conditions=%d history=%d lastError=%d",
+			len(converted.Message), len(converted.Conditions), len(converted.History),
+			len(converted.Volumes[0].Sync.LastError),
+		)
+	}
+}
+
 func TestTransferDestinationIdentityIsStatusOwned(t *testing.T) {
 	spec := domain.NewSessionSpec(
 		domain.OperationCopy,
@@ -550,6 +574,27 @@ func TestBackupStatusPreservesOpenEBSRecoveryCheckpoint(t *testing.T) {
 	}
 }
 
+func TestObjectStoreIdentityStatusRoundTrips(t *testing.T) {
+	status := domain.SessionStatus{
+		ObjectStoreProfileUID:                "profile-uid",
+		ObjectStoreProfileGeneration:         7,
+		ObjectStoreCredentialsSecretUID:      "secret-uid",
+		ObjectStoreServiceAccountUID:         "sa-uid",
+		ObjectStoreServiceAccountFingerprint: "fingerprint",
+	}
+	backupStatus := v1alpha1.BackupStatusFromDomain(status).Domain()
+	restoreStatus := v1alpha1.RestoreStatusFromDomain(status).Domain()
+	for name, got := range map[string]domain.SessionStatus{"backup": backupStatus, "restore": restoreStatus} {
+		if got.ObjectStoreProfileUID != status.ObjectStoreProfileUID ||
+			got.ObjectStoreProfileGeneration != status.ObjectStoreProfileGeneration ||
+			got.ObjectStoreCredentialsSecretUID != status.ObjectStoreCredentialsSecretUID ||
+			got.ObjectStoreServiceAccountUID != status.ObjectStoreServiceAccountUID ||
+			got.ObjectStoreServiceAccountFingerprint != status.ObjectStoreServiceAccountFingerprint {
+			t.Fatalf("%s object-store identity status = %#v", name, got)
+		}
+	}
+}
+
 func TestEveryOperationSpecRoundTripsToItsSessionType(t *testing.T) {
 	common := domain.SessionCommon{
 		SourceNamespace: "app", TemporaryNamespace: "system",
@@ -633,8 +678,6 @@ func TestObjectTransferSpecsUseTheirTopLevelNamespace(t *testing.T) {
 		SessionNamespace: "sessions",
 		SourcePVC:        v1alpha1.ObjectReference{Name: "data"},
 		SourcePV:         v1alpha1.ObjectReference{Name: "pv", UID: "pv-uid"},
-		Backend:          "s3",
-		Bucket:           "bucket",
 		Name:             "backup",
 	}
 
@@ -652,8 +695,6 @@ func TestObjectTransferSpecsUseTheirTopLevelNamespace(t *testing.T) {
 		DestinationNamespace: "destination",
 		SessionNamespace:     "sessions",
 		DestinationPVC:       v1alpha1.ObjectReference{Name: "data"},
-		Backend:              "s3",
-		Bucket:               "bucket",
 		Name:                 "backup",
 	}
 

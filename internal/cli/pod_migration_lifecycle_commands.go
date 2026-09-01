@@ -21,39 +21,15 @@ func (r *rootState) newPodMigrationStatusCommand() *cobra.Command {
 			defer cancel()
 
 			if len(args) == 1 {
-				session, err := runtime.store.Get(ctx, r.global.sessionNamespace, args[0])
+				session, err := r.workflowSession(ctx, runtime, cmd, args[0], domain.SessionTypeMigratePod, "migrate-pod status")
 				if err != nil {
-					return reportSessionLookupError(cmd, r.global.sessionNamespace, args[0], err)
-				}
-
-				if err := requireCLISessionType(
-					session,
-					domain.SessionTypeMigratePod,
-					"migrate-pod status",
-				); err != nil {
-					return reportSessionError(cmd, session, err)
+					return err
 				}
 
 				return printSessionResult(cmd, runtime, session)
 			}
 
-			sessions, err := runtime.store.List(ctx, r.global.sessionNamespace)
-			if err != nil {
-				return reportSessionLookupError(cmd, r.global.sessionNamespace, "", err)
-			}
-
-			sessions = filterSessionsByType(sessions, domain.SessionTypeMigratePod)
-			if err := runtime.printer.Print(sessions); err != nil {
-				return err
-			}
-
-			return writeSessionListGuidance(
-				cmd.ErrOrStderr(),
-				r.global.sessionNamespace,
-				sessions,
-				sessionCommandPrefixForCommand(cmd, r.global.sessionNamespace),
-				"migrate-pod",
-			)
+			return r.workflowSessionList(ctx, runtime, cmd, domain.SessionTypeMigratePod, "migrate-pod")
 		},
 	}
 }
@@ -74,17 +50,9 @@ func (r *rootState) newPodMigrationResumeCommand() *cobra.Command {
 			ctx, cancel := r.context(cmd.Context())
 			defer cancel()
 
-			session, err := runtime.store.Get(ctx, r.global.sessionNamespace, args[0])
+			session, err := r.workflowSession(ctx, runtime, cmd, args[0], domain.SessionTypeMigratePod, "migrate-pod resume")
 			if err != nil {
-				return reportSessionLookupError(cmd, r.global.sessionNamespace, args[0], err)
-			}
-
-			if err := requireCLISessionType(
-				session,
-				domain.SessionTypeMigratePod,
-				"migrate-pod resume",
-			); err != nil {
-				return reportSessionError(cmd, session, err)
+				return err
 			}
 
 			if dryRun {
@@ -134,17 +102,9 @@ func (r *rootState) newPodMigrationAbortCommand() *cobra.Command {
 			ctx, cancel := r.context(cmd.Context())
 			defer cancel()
 
-			session, err := runtime.store.Get(ctx, r.global.sessionNamespace, args[0])
+			session, err := r.workflowSession(ctx, runtime, cmd, args[0], domain.SessionTypeMigratePod, "migrate-pod abort")
 			if err != nil {
-				return reportSessionLookupError(cmd, r.global.sessionNamespace, args[0], err)
-			}
-
-			if err := requireCLISessionType(
-				session,
-				domain.SessionTypeMigratePod,
-				"migrate-pod abort",
-			); err != nil {
-				return reportSessionError(cmd, session, err)
+				return err
 			}
 
 			if dryRun {
@@ -187,17 +147,9 @@ func (r *rootState) newPodMigrationRollbackCommand() *cobra.Command {
 			ctx, cancel := r.context(cmd.Context())
 			defer cancel()
 
-			session, err := runtime.store.Get(ctx, r.global.sessionNamespace, args[0])
+			session, err := r.workflowSession(ctx, runtime, cmd, args[0], domain.SessionTypeMigratePod, "migrate-pod rollback")
 			if err != nil {
-				return reportSessionLookupError(cmd, r.global.sessionNamespace, args[0], err)
-			}
-
-			if err := requireCLISessionType(
-				session,
-				domain.SessionTypeMigratePod,
-				"migrate-pod rollback",
-			); err != nil {
-				return reportSessionError(cmd, session, err)
+				return err
 			}
 
 			if dryRun {
@@ -242,17 +194,9 @@ func (r *rootState) newPodMigrationCleanupCommand() *cobra.Command {
 			ctx, cancel := r.context(cmd.Context())
 			defer cancel()
 
-			session, err := runtime.store.Get(ctx, r.global.sessionNamespace, args[0])
+			session, err := r.workflowSession(ctx, runtime, cmd, args[0], domain.SessionTypeMigratePod, "migrate-pod cleanup")
 			if err != nil {
-				return reportSessionLookupError(cmd, r.global.sessionNamespace, args[0], err)
-			}
-
-			if err := requireCLISessionType(
-				session,
-				domain.SessionTypeMigratePod,
-				"migrate-pod cleanup",
-			); err != nil {
-				return reportSessionError(cmd, session, err)
+				return err
 			}
 
 			if dryRun {

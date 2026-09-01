@@ -29,18 +29,26 @@ func runBackupWithSession(
 		return runBackup(ctx, client, req, expectedPVCUID, expectedPVUID)
 	}
 
-	session, err := prepareBackupSession(ctx, client, req, expectedPVCUID, expectedPVUID)
-	if err != nil {
-		return err
+	session := req.BackupSession
+	created := false
+	if session == nil {
+		var err error
+		session, err = prepareBackupSession(ctx, client, req, expectedPVCUID, expectedPVUID)
+		if err != nil {
+			return err
+		}
+		created = true
 	}
 
 	return withBackupSessionLock(ctx, req, session, func(lockedCtx context.Context) error {
-		if err := req.SessionStore.Create(lockedCtx, session); err != nil {
-			return err
-		}
+		if created {
+			if err := req.SessionStore.Create(lockedCtx, session); err != nil {
+				return err
+			}
 
-		if err := persistBackupCredentials(lockedCtx, client, req, session); err != nil {
-			return err
+			if err := persistBackupCredentials(lockedCtx, client, req, session); err != nil {
+				return err
+			}
 		}
 
 		req.BackupSession = session
@@ -563,7 +571,7 @@ func prepareBackupTransferTool(
 		return kube.ToolImageProbeResult{}, nil, err
 	}
 
-	helmValues, err := transferToolHelmValues(ctx, client, probeResult)
+	helmValues, err := transferToolHelmValues(ctx, client, probeResult, req.ToolServiceAccountName)
 	if err != nil {
 		return kube.ToolImageProbeResult{}, nil, err
 	}

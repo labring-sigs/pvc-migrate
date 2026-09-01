@@ -6,6 +6,7 @@ import (
 
 	"github.com/labring-sigs/pvc-migrate/internal/controller"
 	"github.com/labring-sigs/pvc-migrate/internal/domain"
+	"github.com/labring-sigs/pvc-migrate/internal/kube"
 	"github.com/spf13/cobra"
 )
 
@@ -42,8 +43,22 @@ func (r *rootState) newControllerCommand() *cobra.Command {
 			defer cancel()
 
 			if once {
-				return controller.NewRunner(runtime.service, runtime.controllerStore, r.global.sessionNamespace).
+				if err := controller.ValidateTrustedToolImage(r.global.toolImage); err != nil {
+					return err
+				}
+				cluster, err := kube.Identity(ctx, runtime.clients)
+				if err != nil {
+					return domain.WrapError(domain.ErrorPrecondition, "controller", "resolve cluster identity", err)
+				}
+				// A one-shot controller pass is an operator operation and must
+				// inspect every tenant namespace. The normal manager path receives
+				// namespace/name directly from controller-runtime events.
+				return controller.NewRunner(runtime.service, runtime.controllerStore, "").
 					WithKubernetesClient(runtime.clients.Kubernetes).
+					WithControllerClient(runtime.clients.Runtime).
+					WithControllerNamespace(r.global.controllerNamespace).
+					WithClusterIdentity(cluster.ID).
+					WithTrustedToolImage(r.global.toolImage).
 					WithOpenEBSLVMSharedVolumeManager(runtime.openEBSLVMSharedVolumeManager).
 					WithLogger(runtime.logger.With("component", "migration-controller")).
 					ReconcileOnce(ctx)
@@ -54,10 +69,11 @@ func (r *rootState) newControllerCommand() *cobra.Command {
 				runtime.clients.RESTConfig,
 				runtime.service,
 				runtime.controllerStore,
-				r.global.sessionNamespace,
+				r.global.controllerNamespace,
 				runtime.clients.Kubernetes,
 				runtime.openEBSLVMSharedVolumeManager,
 				runtime.controllerKinds,
+				r.global.toolImage,
 			)
 			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 				return nil

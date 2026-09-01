@@ -245,20 +245,21 @@ func testRootCommandSurface(t *testing.T, root *cobra.Command) {
 	}
 
 	for name, want := range map[string]string{
-		"session-namespace": "pvc-migrate-system",
-		"timeout":           "30m0s",
-		"retries":           "3",
-		"retry-backoff":     "2s",
-		"helm-timeout":      "10m0s",
-		"output":            "table",
-		"log-format":        "text",
-		"log-level":         "info",
-		"color":             "auto",
-		"stream-tool-logs":  "true",
-		"wait":              "true",
-		"no-compress":       "false",
-		"yes":               "false",
-		"tool-image":        "ghcr.io/labring-sigs/pvc-migrate:test",
+		"session-namespace":    "pvc-migrate-system",
+		"controller-namespace": "pvc-migrate-system",
+		"timeout":              "30m0s",
+		"retries":              "3",
+		"retry-backoff":        "2s",
+		"helm-timeout":         "10m0s",
+		"output":               "table",
+		"log-format":           "text",
+		"log-level":            "info",
+		"color":                "auto",
+		"stream-tool-logs":     "true",
+		"wait":                 "true",
+		"no-compress":          "false",
+		"yes":                  "false",
+		"tool-image":           "ghcr.io/labring-sigs/pvc-migrate:test",
 	} {
 		flag := root.PersistentFlags().Lookup(name)
 		if flag == nil || flag.DefValue != want {
@@ -1440,6 +1441,25 @@ func TestBucketFlagValidationMatrix(t *testing.T) {
 	valid := bucketFlags{pvc: "data", name: "daily", backend: "s3", bucket: "backups"}
 	if err := validateBucketFlags(&valid, "source-pvc"); err != nil {
 		t.Fatal(err)
+	}
+
+	profile := bucketFlags{
+		pvc:                "data",
+		name:               "daily",
+		backend:            "s3",
+		objectStoreProfile: "shared-s3",
+	}
+	if err := validateBucketFlags(&profile, "source-pvc"); err != nil {
+		t.Fatalf("profile-backed flags should not require bucket: %v", err)
+	}
+	if err := validateControllerProfileFlags(&profile); err != nil {
+		t.Fatalf("profile-backed defaults should be accepted: %v", err)
+	}
+
+	profile.prefixExplicit = true
+	if err := validateControllerProfileFlags(&profile); domain.CategoryOf(err) != domain.ErrorPrecondition ||
+		!strings.Contains(err.Error(), "ObjectStoreProfile") {
+		t.Fatalf("explicit profile prefix override error=%v category=%q", err, domain.CategoryOf(err))
 	}
 }
 

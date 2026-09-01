@@ -6,6 +6,7 @@ import (
 	"maps"
 	"slices"
 	"time"
+	"unicode/utf8"
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -19,15 +20,29 @@ const (
 	// Workflow resources are namespaced custom resources used by the
 	// controller-backed execution mode. Their API specs and statuses are owned
 	// by api/v1alpha1; these names are only the internal routing registry.
-	MigrationResource    = "migrations"
-	PodMigrationResource = "podmigrations"
-	ReservationResource  = "reservations"
-	CopyResource         = "copies"
-	BackupResource       = "backups"
-	RestoreResource      = "restores"
-	RenameResource       = "renames"
-	MoveResource         = "moves"
-	MigrationCRDName     = MigrationResource + "." + SessionAPIGroup
+	MigrationResource          = "migrations"
+	PodMigrationResource       = "podmigrations"
+	ReservationResource        = "reservations"
+	CopyResource               = "copies"
+	BackupResource             = "backups"
+	RestoreResource            = "restores"
+	RenameResource             = "renames"
+	MoveResource               = "moves"
+	ObjectStoreProfileResource = "objectstoreprofiles"
+	MigrationCRDName           = MigrationResource + "." + SessionAPIGroup
+	// Workflow status is user-visible and persisted in the API server. Keep
+	// controller-generated history and messages bounded even when a lower
+	// layer returns an unexpectedly large error string.
+	MaxWorkflowHistoryEntries     = 256
+	MaxWorkflowConditions         = 32
+	MaxWorkflowConditionTypeBytes = 64
+	MaxWorkflowReasonBytes        = 128
+	MaxWorkflowMessageBytes       = 8192
+	// A standalone Pod snapshot is required for a later workload restore, but
+	// accepting arbitrary-size JSON here would let a tenant inflate CRD/cache
+	// objects. The API uses an opaque JSON field, so this byte limit is enforced
+	// at the domain/controller boundary.
+	MaxOriginalPodSnapshotBytes = 512 * 1024
 )
 
 type Operation string
@@ -379,32 +394,38 @@ type BackupSessionSpec struct {
 	AllowInsecureEndpoint  bool               `json:"allowInsecureEndpoint,omitempty"  yaml:"allowInsecureEndpoint,omitempty"`
 	ServerSideEncryption   string             `json:"serverSideEncryption,omitempty"   yaml:"serverSideEncryption,omitempty"`
 	SSEKMSKeyID            string             `json:"sseKmsKeyID,omitempty"            yaml:"sseKmsKeyID,omitempty"`
-	CredentialsSecret      ObjectReference    `json:"credentialsSecret,omitempty"      yaml:"credentialsSecret,omitempty"`
-	OpenEBSLVMEnableShared bool               `json:"openebsLvmEnableShared,omitempty" yaml:"openebsLvmEnableShared,omitempty"`
+	// ObjectStoreProfile names an administrator-managed cluster profile used by
+	// controller-backed execution. Session/CLI mode may leave it empty.
+	ObjectStoreProfile     string          `json:"objectStoreProfile,omitempty"     yaml:"objectStoreProfile,omitempty"`
+	CredentialsSecret      ObjectReference `json:"credentialsSecret,omitempty"      yaml:"credentialsSecret,omitempty"`
+	OpenEBSLVMEnableShared bool            `json:"openebsLvmEnableShared,omitempty" yaml:"openebsLvmEnableShared,omitempty"`
 }
 
 // RestoreSessionSpec is the durable payload for object-store restore. The
 // credentials are referenced by Secret and never embedded in this resource.
 type RestoreSessionSpec struct {
-	SessionWorkflowOptions  `                   json:",inline"                           yaml:",inline"`
-	DestinationPVC          ObjectReference    `json:"destinationPVC"                    yaml:"destinationPVC"`
-	Path                    string             `json:"path,omitempty"                    yaml:"path,omitempty"`
-	Backend                 ObjectStoreBackend `json:"backend"                           yaml:"backend"`
-	Bucket                  string             `json:"bucket"                            yaml:"bucket"`
-	Prefix                  string             `json:"prefix,omitempty"                  yaml:"prefix,omitempty"`
-	Name                    string             `json:"name"                              yaml:"name"`
-	Provider                string             `json:"provider,omitempty"                yaml:"provider,omitempty"`
-	Endpoint                string             `json:"endpoint,omitempty"                yaml:"endpoint,omitempty"`
-	Region                  string             `json:"region,omitempty"                  yaml:"region,omitempty"`
-	AllowInsecureEndpoint   bool               `json:"allowInsecureEndpoint,omitempty"   yaml:"allowInsecureEndpoint,omitempty"`
-	ServerSideEncryption    string             `json:"serverSideEncryption,omitempty"    yaml:"serverSideEncryption,omitempty"`
-	SSEKMSKeyID             string             `json:"sseKmsKeyID,omitempty"             yaml:"sseKmsKeyID,omitempty"`
-	CredentialsSecret       ObjectReference    `json:"credentialsSecret,omitempty"       yaml:"credentialsSecret,omitempty"`
-	CreatePVC               bool               `json:"createPVC,omitempty"               yaml:"createPVC,omitempty"`
-	DestinationStorageClass string             `json:"destinationStorageClass,omitempty" yaml:"destinationStorageClass,omitempty"`
-	DestinationAccessMode   string             `json:"destinationAccessMode,omitempty"   yaml:"destinationAccessMode,omitempty"`
-	DestinationCapacity     string             `json:"destinationCapacity,omitempty"     yaml:"destinationCapacity,omitempty"`
-	AllowMounted            bool               `json:"allowMounted,omitempty"            yaml:"allowMounted,omitempty"`
+	SessionWorkflowOptions `                   json:",inline"                           yaml:",inline"`
+	DestinationPVC         ObjectReference    `json:"destinationPVC"                    yaml:"destinationPVC"`
+	Path                   string             `json:"path,omitempty"                    yaml:"path,omitempty"`
+	Backend                ObjectStoreBackend `json:"backend"                           yaml:"backend"`
+	Bucket                 string             `json:"bucket"                            yaml:"bucket"`
+	Prefix                 string             `json:"prefix,omitempty"                  yaml:"prefix,omitempty"`
+	Name                   string             `json:"name"                              yaml:"name"`
+	Provider               string             `json:"provider,omitempty"                yaml:"provider,omitempty"`
+	Endpoint               string             `json:"endpoint,omitempty"                yaml:"endpoint,omitempty"`
+	Region                 string             `json:"region,omitempty"                  yaml:"region,omitempty"`
+	AllowInsecureEndpoint  bool               `json:"allowInsecureEndpoint,omitempty"   yaml:"allowInsecureEndpoint,omitempty"`
+	ServerSideEncryption   string             `json:"serverSideEncryption,omitempty"    yaml:"serverSideEncryption,omitempty"`
+	SSEKMSKeyID            string             `json:"sseKmsKeyID,omitempty"             yaml:"sseKmsKeyID,omitempty"`
+	// ObjectStoreProfile names an administrator-managed cluster profile used by
+	// controller-backed execution. Session/CLI mode may leave it empty.
+	ObjectStoreProfile      string          `json:"objectStoreProfile,omitempty"      yaml:"objectStoreProfile,omitempty"`
+	CredentialsSecret       ObjectReference `json:"credentialsSecret,omitempty"       yaml:"credentialsSecret,omitempty"`
+	CreatePVC               bool            `json:"createPVC,omitempty"               yaml:"createPVC,omitempty"`
+	DestinationStorageClass string          `json:"destinationStorageClass,omitempty" yaml:"destinationStorageClass,omitempty"`
+	DestinationAccessMode   string          `json:"destinationAccessMode,omitempty"   yaml:"destinationAccessMode,omitempty"`
+	DestinationCapacity     string          `json:"destinationCapacity,omitempty"     yaml:"destinationCapacity,omitempty"`
+	AllowMounted            bool            `json:"allowMounted,omitempty"            yaml:"allowMounted,omitempty"`
 }
 
 type RenameSessionSpec struct{}
@@ -765,19 +786,32 @@ type OpenEBSLVMSharedMount struct {
 }
 
 type SessionStatus struct {
-	Phase                  Phase                   `json:"phase"                            yaml:"phase"`
-	ResumeFrom             Phase                   `json:"resumeFrom,omitempty"             yaml:"resumeFrom,omitempty"`
-	FailureReason          SessionFailureReason    `json:"failureReason,omitempty"          yaml:"failureReason,omitempty"`
-	WarmPassesCompleted    int                     `json:"warmPassesCompleted"              yaml:"warmPassesCompleted"`
-	ObservedGeneration     int64                   `json:"observedGeneration,omitempty"     yaml:"observedGeneration,omitempty"`
-	StartedAt              metav1.Time             `json:"startedAt"                        yaml:"startedAt"`
-	UpdatedAt              metav1.Time             `json:"updatedAt"                        yaml:"updatedAt"`
-	CompletedAt            *metav1.Time            `json:"completedAt,omitempty"            yaml:"completedAt,omitempty"`
-	Message                string                  `json:"message,omitempty"                yaml:"message,omitempty"`
-	Conditions             []Condition             `json:"conditions,omitempty"             yaml:"conditions,omitempty"`
-	Volumes                []VolumeStatus          `json:"volumes"                          yaml:"volumes"`
-	History                []HistoryEntry          `json:"history,omitempty"                yaml:"history,omitempty"`
-	OpenEBSLVMSharedMounts []OpenEBSLVMSharedMount `json:"openebsLvmSharedMounts,omitempty" yaml:"openebsLvmSharedMounts,omitempty"`
+	Phase               Phase                `json:"phase"                            yaml:"phase"`
+	ResumeFrom          Phase                `json:"resumeFrom,omitempty"             yaml:"resumeFrom,omitempty"`
+	FailureReason       SessionFailureReason `json:"failureReason,omitempty"          yaml:"failureReason,omitempty"`
+	WarmPassesCompleted int                  `json:"warmPassesCompleted"              yaml:"warmPassesCompleted"`
+	// OriginalPodSnapshotHash records the controller-captured standalone Pod
+	// snapshot used for a later workload resume. It is populated only for
+	// controller-backed PodMigration workflows.
+	OriginalPodSnapshotHash string `json:"originalPodSnapshotHash,omitempty" yaml:"originalPodSnapshotHash,omitempty"`
+	// ObjectStoreProfileUID and ObjectStoreProfileGeneration pin controller-
+	// backed object-store workflows to the administrator profile they started
+	// with. Secret data may rotate in place; replacing or retargeting the
+	// profile or its identity-bearing references requires a new workflow.
+	ObjectStoreProfileUID                types.UID               `json:"objectStoreProfileUID,omitempty"           yaml:"objectStoreProfileUID,omitempty"`
+	ObjectStoreProfileGeneration         int64                   `json:"objectStoreProfileGeneration,omitempty"    yaml:"objectStoreProfileGeneration,omitempty"`
+	ObjectStoreCredentialsSecretUID      types.UID               `json:"objectStoreCredentialsSecretUID,omitempty" yaml:"objectStoreCredentialsSecretUID,omitempty"`
+	ObjectStoreServiceAccountUID         types.UID               `json:"objectStoreServiceAccountUID,omitempty"    yaml:"objectStoreServiceAccountUID,omitempty"`
+	ObjectStoreServiceAccountFingerprint string                  `json:"objectStoreServiceAccountFingerprint,omitempty" yaml:"objectStoreServiceAccountFingerprint,omitempty"`
+	ObservedGeneration                   int64                   `json:"observedGeneration,omitempty"     yaml:"observedGeneration,omitempty"`
+	StartedAt                            metav1.Time             `json:"startedAt"                        yaml:"startedAt"`
+	UpdatedAt                            metav1.Time             `json:"updatedAt"                        yaml:"updatedAt"`
+	CompletedAt                          *metav1.Time            `json:"completedAt,omitempty"            yaml:"completedAt,omitempty"`
+	Message                              string                  `json:"message,omitempty"                yaml:"message,omitempty"`
+	Conditions                           []Condition             `json:"conditions,omitempty"             yaml:"conditions,omitempty"`
+	Volumes                              []VolumeStatus          `json:"volumes"                          yaml:"volumes"`
+	History                              []HistoryEntry          `json:"history,omitempty"                yaml:"history,omitempty"`
+	OpenEBSLVMSharedMounts               []OpenEBSLVMSharedMount `json:"openebsLvmSharedMounts,omitempty" yaml:"openebsLvmSharedMounts,omitempty"`
 }
 
 type Session struct {
@@ -792,8 +826,15 @@ type Session struct {
 	// BackendResource identifies the operation-specific CRD kind when Backend
 	// is SessionBackendCRD. It is intentionally not serialized.
 	BackendResource ControllerKind `json:"-"      yaml:"-"`
-	Spec            SessionSpec    `json:"spec"   yaml:"spec"`
-	Status          SessionStatus  `json:"status" yaml:"status"`
+	// BackendUID identifies the operation CR used as an owner for generated
+	// credentials. It is process-local metadata and is never persisted.
+	BackendUID types.UID `json:"-" yaml:"-"`
+	// Deleting is populated by the CRD adapter from metadata.deletionTimestamp
+	// and is intentionally process-local. A controller must never start new
+	// work after a user has requested deletion of the workflow resource.
+	Deleting bool          `json:"-" yaml:"-"`
+	Spec     SessionSpec   `json:"spec"   yaml:"spec"`
+	Status   SessionStatus `json:"status" yaml:"status"`
 }
 
 func sessionTypeForOperation(operation Operation) SessionType {
@@ -1085,6 +1126,7 @@ func (s *Session) Transition(next Phase, message string, now time.Time) error {
 		s.Status.FailureReason = ""
 	}
 
+	message = BoundWorkflowMessage(message)
 	s.Status.Message = message
 	s.Status.UpdatedAt = t
 
@@ -1092,6 +1134,7 @@ func (s *Session) Transition(next Phase, message string, now time.Time) error {
 		s.Status.History,
 		HistoryEntry{Phase: next, Time: t, Message: message},
 	)
+	trimWorkflowHistory(&s.Status)
 	if next == PhaseCompleted || next == PhaseAborted || next == PhaseRolledBack {
 		s.Status.CompletedAt = &t
 	} else {
@@ -1101,15 +1144,94 @@ func (s *Session) Transition(next Phase, message string, now time.Time) error {
 	return nil
 }
 
+// Reactivate moves a failed workflow back to the checkpoint recorded in
+// ResumeFrom. It is intentionally separate from Transition because a failed
+// session is a terminal checkpoint and must only be reopened by an explicit
+// user/controller resume action.
+func (s *Session) Reactivate(message string, now time.Time) error {
+	if s == nil || s.Status.Phase != PhaseFailed {
+		return NewError(ErrorPrecondition, "reactivate", "only failed sessions can be reactivated")
+	}
+	if s.Status.ResumeFrom == "" {
+		return NewError(ErrorPrecondition, "reactivate", "failed session has no resume checkpoint")
+	}
+
+	t := metav1.NewTime(now.UTC())
+	s.Status.Phase = s.Status.ResumeFrom
+	s.Status.FailureReason = ""
+	message = BoundWorkflowMessage(message)
+	s.Status.Message = message
+	s.Status.UpdatedAt = t
+	s.Status.CompletedAt = nil
+	s.Status.History = append(s.Status.History, HistoryEntry{
+		Phase:   s.Status.Phase,
+		Time:    t,
+		Message: message,
+	})
+	trimWorkflowHistory(&s.Status)
+
+	return nil
+}
+
 func (s *Session) SetCondition(condition Condition) {
+	condition.Type = BoundWorkflowConditionType(condition.Type)
+	condition.Reason = BoundWorkflowReason(condition.Reason)
+	condition.Message = BoundWorkflowMessage(condition.Message)
 	for i := range s.Status.Conditions {
 		if s.Status.Conditions[i].Type == condition.Type {
 			s.Status.Conditions[i] = condition
+			trimWorkflowConditions(&s.Status)
 			return
 		}
 	}
 
 	s.Status.Conditions = append(s.Status.Conditions, condition)
+	trimWorkflowConditions(&s.Status)
+}
+
+func trimWorkflowConditions(status *SessionStatus) {
+	if status == nil || len(status.Conditions) <= MaxWorkflowConditions {
+		return
+	}
+
+	status.Conditions = slices.Clone(status.Conditions[len(status.Conditions)-MaxWorkflowConditions:])
+}
+
+func trimWorkflowHistory(status *SessionStatus) {
+	if status == nil || len(status.History) <= MaxWorkflowHistoryEntries {
+		return
+	}
+
+	status.History = slices.Clone(status.History[len(status.History)-MaxWorkflowHistoryEntries:])
+}
+
+// BoundWorkflowMessage keeps controller-generated status text within the CRD
+// schema while preserving valid UTF-8 at the byte boundary.
+func BoundWorkflowMessage(message string) string {
+	return boundWorkflowText(message, MaxWorkflowMessageBytes)
+}
+
+// BoundWorkflowConditionType bounds the stable condition type identifier.
+func BoundWorkflowConditionType(value string) string {
+	return boundWorkflowText(value, MaxWorkflowConditionTypeBytes)
+}
+
+// BoundWorkflowReason bounds the condition reason identifier.
+func BoundWorkflowReason(value string) string {
+	return boundWorkflowText(value, MaxWorkflowReasonBytes)
+}
+
+func boundWorkflowText(value string, maxBytes int) string {
+	if len(value) <= maxBytes {
+		return value
+	}
+
+	bounded := value[:maxBytes]
+	for !utf8.ValidString(bounded) {
+		bounded = bounded[:len(bounded)-1]
+	}
+
+	return bounded
 }
 
 func (s *Session) VolumeStatus(name string) (*VolumeStatus, error) {
@@ -1319,11 +1441,12 @@ func validateBackupSession(s *Session) error {
 		return NewError(ErrorValidation, "backup session", "source PV name and UID are required")
 	}
 
-	if payload.Backend != ObjectStoreBackendS3 || payload.Bucket == "" || payload.Name == "" {
+	if payload.Backend != ObjectStoreBackendS3 || payload.Name == "" ||
+		(payload.Bucket == "" && payload.ObjectStoreProfile == "") {
 		return NewError(
 			ErrorValidation,
 			"backup session",
-			"object-store backend must be s3 and bucket and name are required",
+			"object-store backend must be s3 and name is required; bucket is required without an object-store profile",
 		)
 	}
 
@@ -1361,11 +1484,12 @@ func validateRestoreSession(s *Session) error {
 		)
 	}
 
-	if payload.Backend != ObjectStoreBackendS3 || payload.Bucket == "" || payload.Name == "" {
+	if payload.Backend != ObjectStoreBackendS3 || payload.Name == "" ||
+		(payload.Bucket == "" && payload.ObjectStoreProfile == "") {
 		return NewError(
 			ErrorValidation,
 			"restore session",
-			"object-store backend must be s3 and bucket and name are required",
+			"object-store backend must be s3 and name is required; bucket is required without an object-store profile",
 		)
 	}
 
@@ -1535,6 +1659,17 @@ func validateSharedMounts(mounts []OpenEBSLVMSharedMount) error {
 }
 
 func validateWorkloadIdentity(workload WorkloadSpec) error {
+	if len(workload.OriginalObject) > MaxOriginalPodSnapshotBytes {
+		return NewError(
+			ErrorValidation,
+			"session",
+			fmt.Sprintf(
+				"workload original object exceeds the %d-byte limit",
+				MaxOriginalPodSnapshotBytes,
+			),
+		)
+	}
+
 	if workload.Adapter == WorkloadNone {
 		return nil
 	}

@@ -2,9 +2,11 @@ package kube
 
 import (
 	"fmt"
+	"strings"
 
 	"github.com/labring-sigs/pvc-migrate/internal/domain"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/util/validation"
 )
 
 // ToolComponentNodeHelmValues pins one upstream chart component to a node and
@@ -27,6 +29,29 @@ func ToolComponentNodeHelmValues(component string, node *corev1.Node) ([]string,
 	values[0] = component + ".nodeName=" + node.Name
 
 	return append(values, tolerations...), nil
+}
+
+// ToolServiceAccountHelmValues makes the transfer chart use an administrator
+// provisioned identity. An empty name keeps the chart's existing per-release
+// service-account behavior for static-credential workflows.
+func ToolServiceAccountHelmValues(name string) ([]string, error) {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return nil, nil
+	}
+
+	if problems := validation.IsDNS1123Subdomain(name); len(problems) > 0 {
+		return nil, domain.NewError(
+			domain.ErrorValidation,
+			"tool identity",
+			fmt.Sprintf("service account name %q is invalid: %s", name, strings.Join(problems, "; ")),
+		)
+	}
+
+	return []string{
+		"rclone.serviceAccount.create=false",
+		"rclone.serviceAccount.name=" + name,
+	}, nil
 }
 
 // ToolComponentTolerationHelmValues merges hard-taint tolerations across every

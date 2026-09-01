@@ -20,11 +20,15 @@ import (
 
 func TestCheckRBACIncludesToolAndVolumePermissions(t *testing.T) {
 	seen := collectAllowedAccessReviews(t, domain.WorkloadSpec{}, false, false)
+	if hasAccessReview(seen, authorizationv1.ResourceAttributes{
+		Namespace: "app", Verb: "list", Resource: "secrets",
+	}) {
+		t.Fatal("planner should not require list access to Secrets")
+	}
 
 	want := []authorizationv1.ResourceAttributes{
 		{Namespace: "app", Verb: "create", Resource: "pods/portforward"},
 		{Namespace: "app", Verb: "update", Resource: "serviceaccounts"},
-		{Namespace: "app", Verb: "patch", Resource: "serviceaccounts"},
 		{Namespace: "system", Verb: "get", Group: "coordination.k8s.io", Resource: "leases"},
 		{Namespace: "system", Verb: "create", Group: "coordination.k8s.io", Resource: "leases"},
 		{Namespace: "system", Verb: "update", Group: "coordination.k8s.io", Resource: "leases"},

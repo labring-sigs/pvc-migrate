@@ -46,43 +46,12 @@ spec:
             type: object
           spec:
             properties:
-              allowInsecureEndpoint:
-                type: boolean
               allowMounted:
                 type: boolean
-              backend:
-                enum:
-                - s3
-                type: string
-              bucket:
-                type: string
               createPVC:
                 type: boolean
               createdBy:
                 type: string
-              credentialsSecret:
-                description: ObjectReference identifies a Kubernetes object involved
-                  in a workflow.
-                properties:
-                  apiVersion:
-                    type: string
-                  kind:
-                    type: string
-                  name:
-                    type: string
-                  namespace:
-                    type: string
-                  resourceVersion:
-                    type: string
-                  uid:
-                    description: |-
-                      UID is a type that holds unique ID values, including UUIDs.  Because we
-                      don't ONLY use UUIDs, this is an alias to string.  Being a type captures
-                      intent and helps make sure that UIDs and names do not get conflated.
-                    type: string
-                required:
-                - name
-                type: object
               deleteExtraneous:
                 type: boolean
               destinationAccessMode:
@@ -90,20 +59,31 @@ spec:
               destinationCapacity:
                 type: string
               destinationNamespace:
+                maxLength: 63
+                minLength: 1
+                pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
                 type: string
               destinationPVC:
                 description: ObjectReference identifies a Kubernetes object involved
                   in a workflow.
                 properties:
                   apiVersion:
+                    maxLength: 253
                     type: string
                   kind:
+                    maxLength: 253
                     type: string
                   name:
+                    maxLength: 253
+                    minLength: 1
+                    pattern: ^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$
                     type: string
                   namespace:
+                    maxLength: 63
+                    pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
                     type: string
                   resourceVersion:
+                    maxLength: 256
                     type: string
                   uid:
                     description: |-
@@ -116,36 +96,40 @@ spec:
                 type: object
               destinationStorageClass:
                 type: string
-              endpoint:
-                type: string
               name:
+                maxLength: 253
+                minLength: 1
+                pattern: ^[A-Za-z0-9][A-Za-z0-9._-]*$
+                type: string
+              objectStoreProfile:
+                description: |-
+                  ObjectStoreProfile selects an administrator-owned cluster profile. The
+                  profile supplies endpoint, bucket scope, and credentials.
+                maxLength: 253
+                minLength: 1
+                pattern: ^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$
                 type: string
               path:
                 type: string
-              prefix:
-                type: string
-              provider:
-                type: string
-              region:
-                type: string
-              serverSideEncryption:
-                type: string
               sessionNamespace:
-                type: string
-              sseKmsKeyID:
+                maxLength: 63
+                minLength: 1
+                pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
                 type: string
               targetNode:
                 type: string
               toolImage:
                 type: string
             required:
-            - backend
-            - bucket
             - destinationNamespace
             - destinationPVC
             - name
+            - objectStoreProfile
             - sessionNamespace
             type: object
+            x-kubernetes-validations:
+            - message: workflow namespace must match metadata.namespace
+              rule: self.destinationNamespace == self.sessionNamespace
           status:
             properties:
               completedAt:
@@ -158,25 +142,31 @@ spec:
                       format: date-time
                       type: string
                     message:
+                      maxLength: 8192
                       type: string
                     reason:
+                      maxLength: 128
                       type: string
                     status:
                       type: string
                     type:
+                      maxLength: 64
                       type: string
                   required:
                   - lastTransitionTime
                   - status
                   - type
                   type: object
+                maxItems: 32
                 type: array
               failureReason:
+                maxLength: 8192
                 type: string
               history:
                 items:
                   properties:
                     message:
+                      maxLength: 8192
                       type: string
                     phase:
                       description: WorkflowPhase identifies one durable workflow state.
@@ -209,8 +199,33 @@ spec:
                   - phase
                   - time
                   type: object
+                maxItems: 256
                 type: array
               message:
+                maxLength: 8192
+                type: string
+              objectStoreCredentialsSecretUID:
+                description: |-
+                  UID is a type that holds unique ID values, including UUIDs.  Because we
+                  don't ONLY use UUIDs, this is an alias to string.  Being a type captures
+                  intent and helps make sure that UIDs and names do not get conflated.
+                type: string
+              objectStoreProfileGeneration:
+                format: int64
+                type: integer
+              objectStoreProfileUID:
+                description: |-
+                  UID is a type that holds unique ID values, including UUIDs.  Because we
+                  don't ONLY use UUIDs, this is an alias to string.  Being a type captures
+                  intent and helps make sure that UIDs and names do not get conflated.
+                type: string
+              objectStoreServiceAccountFingerprint:
+                type: string
+              objectStoreServiceAccountUID:
+                description: |-
+                  UID is a type that holds unique ID values, including UUIDs.  Because we
+                  don't ONLY use UUIDs, this is an alias to string.  Being a type captures
+                  intent and helps make sure that UIDs and names do not get conflated.
                 type: string
               observedGeneration:
                 format: int64

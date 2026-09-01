@@ -20,6 +20,7 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes"
 )
 
@@ -56,16 +57,32 @@ type Request struct {
 	StreamToolLogs          bool
 	StructuredLogs          bool
 	Store                   *objectstore.Store
-	Writer                  io.Writer
-	Logger                  *slog.Logger
-	ToolImageProber         kube.ToolImageProber
-	SessionStore            kube.SessionStore
-	SessionNamespace        string
-	OpenEBSLVMEnableShared  bool
-	OpenEBSLVMManager       kube.OpenEBSLVMSharedVolumeManager
-	WritablePVCMount        bool
-	BackupSession           *domain.Session
-	ObjectStoreFactory      func(context.Context, objectstore.Config) (*objectstore.Store, error)
+	// SkipManifestCheck defers remote recovery-point validation to the
+	// controller. This is used for profile-backed submission when the tenant
+	// must not read the administrator-owned object-store Secret.
+	SkipManifestCheck bool
+	// ObjectStoreProfile selects the administrator-managed profile used by a
+	// controller-backed workflow. It is metadata only; credentials stay in the
+	// profile Secret and are never copied into the workflow spec.
+	ObjectStoreProfile                   string
+	ObjectStoreProfileUID                types.UID
+	ObjectStoreProfileGeneration         int64
+	ObjectStoreCredentialsSecretUID      types.UID
+	ObjectStoreServiceAccountUID         types.UID
+	ObjectStoreServiceAccountFingerprint string
+	// ToolServiceAccountName is populated by workload-identity profiles so the
+	// transfer Pod uses the administrator-provisioned cloud identity.
+	ToolServiceAccountName string
+	Writer                 io.Writer
+	Logger                 *slog.Logger
+	ToolImageProber        kube.ToolImageProber
+	SessionStore           kube.SessionStore
+	SessionNamespace       string
+	OpenEBSLVMEnableShared bool
+	OpenEBSLVMManager      kube.OpenEBSLVMSharedVolumeManager
+	WritablePVCMount       bool
+	BackupSession          *domain.Session
+	ObjectStoreFactory     func(context.Context, objectstore.Config) (*objectstore.Store, error)
 }
 
 type Plan struct {
@@ -243,6 +260,10 @@ func preflight(
 		quotaErr = checkObjectTransferQuota(ctx, client, req, operation)
 	})
 	wg.Go(func() {
+		if req.SkipManifestCheck {
+			return
+		}
+
 		logOperation(
 			req,
 			operation+" "+stage+" checking object-store manifest",
@@ -296,6 +317,9 @@ func preflight(
 		ToolNode:         toolNode,
 		DeleteExtraneous: restore && req.DeleteExtraneousFiles,
 		Compression:      "none",
+	}
+	if req.SkipManifestCheck {
+		plan.Warnings = append(plan.Warnings, "object-store manifest check deferred to the controller")
 	}
 	if req.Online {
 		plan.Mode = ModeOnline
@@ -539,6 +563,7 @@ func transferToolHelmValues(
 	ctx context.Context,
 	client kubernetes.Interface,
 	probe kube.ToolImageProbeResult,
+	serviceAccountName string,
 ) ([]string, error) {
 	if probe.NodeName == "" {
 		return nil, nil
@@ -564,7 +589,12 @@ func transferToolHelmValues(
 		return nil, err
 	}
 
-	return append(values, pullSecretValues...), nil
+	identityValues, err := kube.ToolServiceAccountHelmValues(serviceAccountName)
+	if err != nil {
+		return nil, err
+	}
+
+	return append(append(values, pullSecretValues...), identityValues...), nil
 }
 
 func validateTransferToolLaunch(
@@ -575,6 +605,14 @@ func validateTransferToolLaunch(
 	probe kube.ToolImageProbeResult,
 	restore bool,
 ) error {
+	// Workload identity is an authorization input for the transfer Job. The
+	// profile is checked while building the request, but the ServiceAccount can
+	// be changed before Helm creates the Job. Re-read it at the last possible
+	// point and fail closed when its UID or provider identity metadata drifted.
+	if err := validateTransferServiceAccount(ctx, client, req); err != nil {
+		return err
+	}
+
 	info, err := inspectPVC(
 		ctx,
 		client,
@@ -657,6 +695,73 @@ func validateTransferToolLaunch(
 				probe.NodeName,
 				requiredNode,
 			),
+		)
+	}
+
+	return nil
+}
+
+func validateTransferServiceAccount(
+	ctx context.Context,
+	client kubernetes.Interface,
+	req Request,
+) error {
+	name := strings.TrimSpace(req.ToolServiceAccountName)
+	if name == "" {
+		return nil
+	}
+
+	if client == nil || strings.TrimSpace(req.Namespace) == "" {
+		return domain.NewError(
+			domain.ErrorKubernetes,
+			"tool identity",
+			"Kubernetes client and workload namespace are required",
+		)
+	}
+	if strings.TrimSpace(string(req.ObjectStoreServiceAccountUID)) == "" ||
+		strings.TrimSpace(req.ObjectStoreServiceAccountFingerprint) == "" {
+		return domain.NewError(
+			domain.ErrorConflict,
+			"tool identity",
+			"workload identity is missing its administrator-pinned ServiceAccount identity",
+		)
+	}
+
+	account, err := client.CoreV1().ServiceAccounts(req.Namespace).Get(
+		ctx,
+		name,
+		metav1.GetOptions{},
+	)
+	if apierrors.IsNotFound(err) {
+		return domain.WrapError(
+			domain.ErrorPrecondition,
+			"tool identity",
+			"workload-identity ServiceAccount no longer exists",
+			err,
+		)
+	}
+	if err != nil {
+		return domain.WrapError(
+			domain.ErrorKubernetes,
+			"tool identity",
+			"read workload-identity ServiceAccount",
+			err,
+		)
+	}
+
+	if string(account.UID) != string(req.ObjectStoreServiceAccountUID) {
+		return domain.NewError(
+			domain.ErrorConflict,
+			"tool identity",
+			"workload-identity ServiceAccount UID changed; create a new workflow",
+		)
+	}
+
+	if fingerprint := kube.ServiceAccountIdentityFingerprint(account); fingerprint != req.ObjectStoreServiceAccountFingerprint {
+		return domain.NewError(
+			domain.ErrorConflict,
+			"tool identity",
+			"workload-identity ServiceAccount metadata changed; create a new workflow",
 		)
 	}
 

@@ -2,10 +2,12 @@ package domain_test
 
 import (
 	"encoding/json"
+	"fmt"
 	"regexp"
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	. "github.com/labring-sigs/pvc-migrate/internal/domain"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -204,6 +206,60 @@ func TestSetConditionAddsAndReplacesByType(t *testing.T) {
 
 	if session.Status.Conditions[0] != replacement || session.Status.Conditions[1] != second {
 		t.Fatalf("conditions = %#v", session.Status.Conditions)
+	}
+}
+
+func TestWorkflowStatusFieldsStayBoundedAndUTF8Safe(t *testing.T) {
+	session := testSession(t)
+	longMessage := strings.Repeat("状态", MaxWorkflowMessageBytes)
+	if err := session.Transition(PhaseReserving, longMessage, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	if len(session.Status.Message) > MaxWorkflowMessageBytes || !utf8.ValidString(session.Status.Message) {
+		t.Fatalf("status message is not bounded UTF-8: bytes=%d", len(session.Status.Message))
+	}
+
+	longType := strings.Repeat("T", MaxWorkflowConditionTypeBytes+20)
+	longReason := strings.Repeat("R", MaxWorkflowReasonBytes+20)
+	session.SetCondition(Condition{Type: longType, Reason: longReason, Message: longMessage})
+	condition := session.Status.Conditions[0]
+	if len(condition.Type) != MaxWorkflowConditionTypeBytes ||
+		len(condition.Reason) != MaxWorkflowReasonBytes ||
+		len(condition.Message) > MaxWorkflowMessageBytes ||
+		!utf8.ValidString(condition.Message) {
+		t.Fatalf("condition fields are not bounded: type=%d reason=%d message=%d",
+			len(condition.Type), len(condition.Reason), len(condition.Message))
+	}
+}
+
+func TestWorkflowHistoryRetainsOnlyRecentEntries(t *testing.T) {
+	session := testSession(t)
+	session.Status.History = make([]HistoryEntry, MaxWorkflowHistoryEntries+17)
+	for i := range session.Status.History {
+		session.Status.History[i].Phase = PhasePlanned
+		session.Status.History[i].Message = string(rune(i))
+	}
+	if err := session.Transition(PhaseReserving, "latest", time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	if len(session.Status.History) != MaxWorkflowHistoryEntries {
+		t.Fatalf("history length=%d, want %d", len(session.Status.History), MaxWorkflowHistoryEntries)
+	}
+	if got := session.Status.History[len(session.Status.History)-1].Message; got != "latest" {
+		t.Fatalf("latest history message=%q", got)
+	}
+}
+
+func TestWorkflowConditionsRetainOnlyRecentTypes(t *testing.T) {
+	session := testSession(t)
+	for i := 0; i < MaxWorkflowConditions+5; i++ {
+		session.SetCondition(Condition{Type: fmt.Sprintf("Condition-%d", i)})
+	}
+	if len(session.Status.Conditions) != MaxWorkflowConditions {
+		t.Fatalf("condition length=%d, want %d", len(session.Status.Conditions), MaxWorkflowConditions)
+	}
+	if got := session.Status.Conditions[0].Type; got != "Condition-5" {
+		t.Fatalf("oldest retained condition=%q, want Condition-5", got)
 	}
 }
 
