@@ -58,14 +58,11 @@ spec:
                 type: string
               destinationCapacity:
                 type: string
-              destinationNamespace:
-                maxLength: 63
-                minLength: 1
-                pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
-                type: string
               destinationPVC:
-                description: ObjectReference identifies a Kubernetes object involved
-                  in a workflow.
+                description: |-
+                  LocalResourceReference identifies a resource whose namespace is established
+                  by the containing workflow, or a cluster-scoped resource such as a PV.
+                  Namespaced workflow APIs derive their boundary from metadata.namespace.
                 properties:
                   apiVersion:
                     maxLength: 253
@@ -77,10 +74,6 @@ spec:
                     maxLength: 253
                     minLength: 1
                     pattern: ^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$
-                    type: string
-                  namespace:
-                    maxLength: 63
-                    pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
                     type: string
                   resourceVersion:
                     maxLength: 256
@@ -116,25 +109,15 @@ spec:
                 required:
                 - name
                 type: object
-              sessionNamespace:
-                maxLength: 63
-                minLength: 1
-                pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
-                type: string
               targetNode:
                 type: string
               toolImage:
                 type: string
             required:
-            - destinationNamespace
             - destinationPVC
             - name
             - repositoryRef
-            - sessionNamespace
             type: object
-            x-kubernetes-validations:
-            - message: workflow namespace must match metadata.namespace
-              rule: self.destinationNamespace == self.sessionNamespace
           status:
             properties:
               completedAt:

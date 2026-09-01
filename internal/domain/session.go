@@ -1,4 +1,3 @@
-//nolint:golines // Durable API structs keep explicit JSON and YAML tags together.
 package domain
 
 import (
@@ -18,19 +17,22 @@ const (
 	SessionAPIGroup   = "migrate.sealos.io"
 	SessionAPIVersion = SessionAPIGroup + "/v1alpha1"
 	SessionKind       = "MigrationSession"
-	// Workflow resources are namespaced custom resources used by the
-	// controller-backed execution mode. Their API specs and statuses are owned
-	// by api/v1alpha1; these names are only the internal routing registry.
-	MigrationResource        = "migrations"
-	PodMigrationResource     = "podmigrations"
-	ReservationResource      = "reservations"
-	CopyResource             = "copies"
-	BackupResource           = "backups"
-	RestoreResource          = "restores"
-	RenameResource           = "renames"
-	MoveResource             = "moves"
-	BackupRepositoryResource = "backuprepositories"
-	MigrationCRDName         = MigrationResource + "." + SessionAPIGroup
+	// Workflow API specs and statuses are owned by api/v1alpha1; these names
+	// form the shared discovery, storage, watch, and CLI routing contract.
+	MigrationResource           = "migrations"
+	PodMigrationResource        = "podmigrations"
+	ReservationResource         = "reservations"
+	CopyResource                = "copies"
+	BackupResource              = "backups"
+	RestoreResource             = "restores"
+	RenameResource              = "renames"
+	ClusterMigrationResource    = "clustermigrations"
+	ClusterPodMigrationResource = "clusterpodmigrations"
+	ClusterReservationResource  = "clusterreservations"
+	ClusterCopyResource         = "clustercopies"
+	ClusterMoveResource         = "clustermoves"
+	BackupRepositoryResource    = "backuprepositories"
+	MigrationCRDName            = MigrationResource + "." + SessionAPIGroup
 	// Workflow status is user-visible and persisted in the API server. Keep
 	// controller-generated history and messages bounded even when a lower
 	// layer returns an unexpectedly large error string.
@@ -226,14 +228,10 @@ const (
 	ControllerKindBackup              ControllerKind = "Backup"
 	ControllerKindRestore             ControllerKind = "Restore"
 	ControllerKindRename              ControllerKind = "Rename"
-	ControllerKindMove                ControllerKind = "Move"
 	ControllerKindClusterMigration    ControllerKind = "ClusterMigration"
 	ControllerKindClusterPodMigration ControllerKind = "ClusterPodMigration"
 	ControllerKindClusterReservation  ControllerKind = "ClusterReservation"
 	ControllerKindClusterCopy         ControllerKind = "ClusterCopy"
-	ControllerKindClusterBackup       ControllerKind = "ClusterBackup"
-	ControllerKindClusterRestore      ControllerKind = "ClusterRestore"
-	ControllerKindClusterRename       ControllerKind = "ClusterRename"
 	ControllerKindClusterMove         ControllerKind = "ClusterMove"
 )
 
@@ -250,6 +248,16 @@ type ControllerWorkflow struct {
 	ClusterSingular string
 }
 
+// ControllerResource identifies one concrete namespaced or cluster-scoped
+// resource selected from an operation's workflow contract.
+type ControllerResource struct {
+	Type     SessionType
+	Kind     ControllerKind
+	Resource string
+	Singular string
+	Cluster  bool
+}
+
 // controllerWorkflowRegistry constructs a fresh registry for each caller so
 // the routing metadata cannot be mutated across concurrent sessions.
 func controllerWorkflowRegistry() []ControllerWorkflow {
@@ -260,7 +268,7 @@ func controllerWorkflowRegistry() []ControllerWorkflow {
 			Resource:        MigrationResource,
 			Singular:        "migration",
 			ClusterKind:     ControllerKindClusterMigration,
-			ClusterResource: "clustermigrations",
+			ClusterResource: ClusterMigrationResource,
 			ClusterSingular: "clustermigration",
 		},
 		{
@@ -269,7 +277,7 @@ func controllerWorkflowRegistry() []ControllerWorkflow {
 			Resource:        PodMigrationResource,
 			Singular:        "podmigration",
 			ClusterKind:     ControllerKindClusterPodMigration,
-			ClusterResource: "clusterpodmigrations",
+			ClusterResource: ClusterPodMigrationResource,
 			ClusterSingular: "clusterpodmigration",
 		},
 		{
@@ -278,7 +286,7 @@ func controllerWorkflowRegistry() []ControllerWorkflow {
 			Resource:        ReservationResource,
 			Singular:        "reservation",
 			ClusterKind:     ControllerKindClusterReservation,
-			ClusterResource: "clusterreservations",
+			ClusterResource: ClusterReservationResource,
 			ClusterSingular: "clusterreservation",
 		},
 		{
@@ -287,43 +295,31 @@ func controllerWorkflowRegistry() []ControllerWorkflow {
 			Resource:        CopyResource,
 			Singular:        "copy",
 			ClusterKind:     ControllerKindClusterCopy,
-			ClusterResource: "clustercopies",
+			ClusterResource: ClusterCopyResource,
 			ClusterSingular: "clustercopy",
 		},
 		{
-			Type:            SessionTypeBackup,
-			Kind:            ControllerKindBackup,
-			Resource:        BackupResource,
-			Singular:        "backup",
-			ClusterKind:     ControllerKindClusterBackup,
-			ClusterResource: "clusterbackups",
-			ClusterSingular: "clusterbackup",
+			Type:     SessionTypeBackup,
+			Kind:     ControllerKindBackup,
+			Resource: BackupResource,
+			Singular: "backup",
 		},
 		{
-			Type:            SessionTypeRestore,
-			Kind:            ControllerKindRestore,
-			Resource:        RestoreResource,
-			Singular:        "restore",
-			ClusterKind:     ControllerKindClusterRestore,
-			ClusterResource: "clusterrestores",
-			ClusterSingular: "clusterrestore",
+			Type:     SessionTypeRestore,
+			Kind:     ControllerKindRestore,
+			Resource: RestoreResource,
+			Singular: "restore",
 		},
 		{
-			Type:            SessionTypeRename,
-			Kind:            ControllerKindRename,
-			Resource:        RenameResource,
-			Singular:        "rename",
-			ClusterKind:     ControllerKindClusterRename,
-			ClusterResource: "clusterrenames",
-			ClusterSingular: "clusterrename",
+			Type:     SessionTypeRename,
+			Kind:     ControllerKindRename,
+			Resource: RenameResource,
+			Singular: "rename",
 		},
 		{
 			Type:            SessionTypeMove,
-			Kind:            ControllerKindMove,
-			Resource:        MoveResource,
-			Singular:        "move",
 			ClusterKind:     ControllerKindClusterMove,
-			ClusterResource: "clustermoves",
+			ClusterResource: ClusterMoveResource,
 			ClusterSingular: "clustermove",
 		},
 	}
@@ -335,9 +331,15 @@ func controllerWorkflowRegistry() []ControllerWorkflow {
 func ControllerWorkflowResources() []string {
 	workflows := controllerWorkflowRegistry()
 
-	resources := make([]string, 0, len(workflows))
+	resources := make([]string, 0, len(workflows)*2)
 	for _, workflow := range workflows {
-		resources = append(resources, workflow.Resource)
+		if workflow.Resource != "" {
+			resources = append(resources, workflow.Resource)
+		}
+
+		if workflow.ClusterResource != "" {
+			resources = append(resources, workflow.ClusterResource)
+		}
 	}
 
 	return resources
@@ -358,8 +360,13 @@ func ControllerWorkflowForType(sessionType SessionType) (ControllerWorkflow, boo
 }
 
 func ControllerWorkflowForKind(kind ControllerKind) (ControllerWorkflow, bool) {
+	if kind == "" {
+		return ControllerWorkflow{}, false
+	}
+
 	for _, workflow := range controllerWorkflowRegistry() {
-		if workflow.Kind == kind || workflow.ClusterKind == kind {
+		if workflow.Kind != "" && workflow.Kind == kind ||
+			workflow.ClusterKind != "" && workflow.ClusterKind == kind {
 			return workflow, true
 		}
 	}
@@ -375,7 +382,7 @@ func ControllerWorkflowForTypeAndScope(
 	clusterScope bool,
 ) (ControllerWorkflow, bool) {
 	workflow, ok := ControllerWorkflowForType(sessionType)
-	if !ok || clusterScope && workflow.ClusterKind == "" {
+	if !ok || clusterScope && workflow.ClusterKind == "" || !clusterScope && workflow.Kind == "" {
 		return ControllerWorkflow{}, false
 	}
 
@@ -410,6 +417,64 @@ func ControllerKindForTypeAndScope(
 func IsClusterControllerKind(kind ControllerKind) bool {
 	workflow, ok := ControllerWorkflowForKind(kind)
 	return ok && workflow.ClusterKind == kind
+}
+
+func ControllerResourceForKind(kind ControllerKind) (ControllerResource, bool) {
+	workflow, ok := ControllerWorkflowForKind(kind)
+	if !ok {
+		return ControllerResource{}, false
+	}
+
+	if workflow.Kind == kind {
+		return ControllerResource{
+			Type: workflow.Type, Kind: kind,
+			Resource: workflow.Resource, Singular: workflow.Singular,
+		}, true
+	}
+
+	return ControllerResource{
+		Type: workflow.Type, Kind: kind,
+		Resource: workflow.ClusterResource, Singular: workflow.ClusterSingular,
+		Cluster: true,
+	}, true
+}
+
+// ControllerResourceForSession selects the durable API represented by a
+// session. A persisted BackendResource is authoritative; new sessions derive
+// scope from their namespace roles and operation semantics.
+func ControllerResourceForSession(session *Session) (ControllerResource, bool) {
+	if session == nil {
+		return ControllerResource{}, false
+	}
+
+	if session.BackendResource != "" {
+		resource, ok := ControllerResourceForKind(session.BackendResource)
+		if ok && resource.Type == session.Spec.Type {
+			return resource, true
+		}
+
+		return ControllerResource{}, false
+	}
+
+	return ControllerResourceForSpec(session.Spec)
+}
+
+// ControllerResourceForSpec selects the desired API for a new workflow or an
+// explicit operation hand-off. It deliberately ignores persistence metadata.
+func ControllerResourceForSpec(spec SessionSpec) (ControllerResource, bool) {
+	clusterScope := spec.Type == SessionTypeMove ||
+		spec.SourceNamespace != spec.SessionNamespace ||
+		spec.DestinationNamespace != "" &&
+			spec.DestinationNamespace != spec.SessionNamespace ||
+		spec.TemporaryNamespace != "" &&
+			spec.TemporaryNamespace != spec.SessionNamespace
+
+	kind, ok := ControllerKindForTypeAndScope(spec.Type, clusterScope)
+	if !ok {
+		return ControllerResource{}, false
+	}
+
+	return ControllerResourceForKind(kind)
 }
 
 type SessionCommon struct {
@@ -472,7 +537,7 @@ const BackupBackendS3 BackupBackend = "s3"
 // BackupSessionSpec is the backup-specific payload carried by the durable
 // Session envelope. Object-store credentials are deliberately excluded.
 type BackupSessionSpec struct {
-	SessionWorkflowOptions `                   json:",inline"                         yaml:",inline"`
+	SessionWorkflowOptions `                json:",inline"                         yaml:",inline"`
 	Online                 bool            `json:"online,omitempty"                yaml:"online,omitempty"`
 	SourcePVC              ObjectReference `json:"sourcePVC"                       yaml:"sourcePVC"`
 	SourcePV               ObjectReference `json:"sourcePV"                        yaml:"sourcePV"`
@@ -501,27 +566,27 @@ type BackupSessionSpec struct {
 // RestoreSessionSpec is the durable payload for object-store restore. The
 // credentials are referenced by Secret and never embedded in this resource.
 type RestoreSessionSpec struct {
-	SessionWorkflowOptions    `json:",inline" yaml:",inline"`
-	DestinationPVC            ObjectReference `json:"destinationPVC"                       yaml:"destinationPVC"`
-	Path                      string          `json:"path,omitempty"                       yaml:"path,omitempty"`
-	Backend                   BackupBackend   `json:"backend"                              yaml:"backend"`
-	Bucket                    string          `json:"bucket"                               yaml:"bucket"`
-	Prefix                    string          `json:"prefix,omitempty"                     yaml:"prefix,omitempty"`
-	Name                      string          `json:"name"                                 yaml:"name"`
-	Provider                  string          `json:"provider,omitempty"                   yaml:"provider,omitempty"`
-	Endpoint                  string          `json:"endpoint,omitempty"                   yaml:"endpoint,omitempty"`
-	Region                    string          `json:"region,omitempty"                     yaml:"region,omitempty"`
-	AllowInsecureEndpoint     bool            `json:"allowInsecureEndpoint,omitempty"      yaml:"allowInsecureEndpoint,omitempty"`
-	ServerSideEncryption      string          `json:"serverSideEncryption,omitempty"       yaml:"serverSideEncryption,omitempty"`
-	SSEKMSKeyID               string          `json:"sseKmsKeyID,omitempty"                yaml:"sseKmsKeyID,omitempty"`
+	SessionWorkflowOptions    `                json:",inline"                             yaml:",inline"`
+	DestinationPVC            ObjectReference `json:"destinationPVC"                      yaml:"destinationPVC"`
+	Path                      string          `json:"path,omitempty"                      yaml:"path,omitempty"`
+	Backend                   BackupBackend   `json:"backend"                             yaml:"backend"`
+	Bucket                    string          `json:"bucket"                              yaml:"bucket"`
+	Prefix                    string          `json:"prefix,omitempty"                    yaml:"prefix,omitempty"`
+	Name                      string          `json:"name"                                yaml:"name"`
+	Provider                  string          `json:"provider,omitempty"                  yaml:"provider,omitempty"`
+	Endpoint                  string          `json:"endpoint,omitempty"                  yaml:"endpoint,omitempty"`
+	Region                    string          `json:"region,omitempty"                    yaml:"region,omitempty"`
+	AllowInsecureEndpoint     bool            `json:"allowInsecureEndpoint,omitempty"     yaml:"allowInsecureEndpoint,omitempty"`
+	ServerSideEncryption      string          `json:"serverSideEncryption,omitempty"      yaml:"serverSideEncryption,omitempty"`
+	SSEKMSKeyID               string          `json:"sseKmsKeyID,omitempty"               yaml:"sseKmsKeyID,omitempty"`
 	BackupRepository          string          `json:"backupRepository,omitempty"          yaml:"backupRepository,omitempty"`
 	BackupRepositoryNamespace string          `json:"backupRepositoryNamespace,omitempty" yaml:"backupRepositoryNamespace,omitempty"`
 	CredentialsSecret         ObjectReference `json:"credentialsSecret,omitempty"         yaml:"credentialsSecret,omitempty"`
-	CreatePVC                 bool            `json:"createPVC,omitempty"                  yaml:"createPVC,omitempty"`
-	DestinationStorageClass   string          `json:"destinationStorageClass,omitempty"    yaml:"destinationStorageClass,omitempty"`
-	DestinationAccessMode     string          `json:"destinationAccessMode,omitempty"      yaml:"destinationAccessMode,omitempty"`
-	DestinationCapacity       string          `json:"destinationCapacity,omitempty"        yaml:"destinationCapacity,omitempty"`
-	AllowMounted              bool            `json:"allowMounted,omitempty"               yaml:"allowMounted,omitempty"`
+	CreatePVC                 bool            `json:"createPVC,omitempty"                 yaml:"createPVC,omitempty"`
+	DestinationStorageClass   string          `json:"destinationStorageClass,omitempty"   yaml:"destinationStorageClass,omitempty"`
+	DestinationAccessMode     string          `json:"destinationAccessMode,omitempty"     yaml:"destinationAccessMode,omitempty"`
+	DestinationCapacity       string          `json:"destinationCapacity,omitempty"       yaml:"destinationCapacity,omitempty"`
+	AllowMounted              bool            `json:"allowMounted,omitempty"              yaml:"allowMounted,omitempty"`
 }
 
 type RenameSessionSpec struct{}
@@ -908,11 +973,11 @@ type PVCBackupRepositoryBindingStatus struct {
 // BackupRepositoryBindingStatus records the immutable resource identities
 // resolved for one running workflow.
 type BackupRepositoryBindingStatus struct {
-	Type       BackupRepositoryType              `json:"type"                  yaml:"type"`
-	UID        types.UID                         `json:"uid"                   yaml:"uid"`
-	Generation int64                             `json:"generation"            yaml:"generation"`
-	S3         *S3BackupRepositoryBindingStatus  `json:"s3,omitempty"          yaml:"s3,omitempty"`
-	PVC        *PVCBackupRepositoryBindingStatus `json:"pvc,omitempty"         yaml:"pvc,omitempty"`
+	Type       BackupRepositoryType              `json:"type"          yaml:"type"`
+	UID        types.UID                         `json:"uid"           yaml:"uid"`
+	Generation int64                             `json:"generation"    yaml:"generation"`
+	S3         *S3BackupRepositoryBindingStatus  `json:"s3,omitempty"  yaml:"s3,omitempty"`
+	PVC        *PVCBackupRepositoryBindingStatus `json:"pvc,omitempty" yaml:"pvc,omitempty"`
 }
 
 type SessionStatus struct {
@@ -925,15 +990,15 @@ type SessionStatus struct {
 	// controller-backed PodMigration workflows.
 	OriginalPodSnapshotHash string                         `json:"originalPodSnapshotHash,omitempty" yaml:"originalPodSnapshotHash,omitempty"`
 	BackupRepository        *BackupRepositoryBindingStatus `json:"backupRepository,omitempty"        yaml:"backupRepository,omitempty"`
-	ObservedGeneration      int64                          `json:"observedGeneration,omitempty"       yaml:"observedGeneration,omitempty"`
-	StartedAt               metav1.Time                    `json:"startedAt"                                      yaml:"startedAt"`
-	UpdatedAt               metav1.Time                    `json:"updatedAt"                                      yaml:"updatedAt"`
-	CompletedAt             *metav1.Time                   `json:"completedAt,omitempty"                          yaml:"completedAt,omitempty"`
-	Message                 string                         `json:"message,omitempty"                              yaml:"message,omitempty"`
-	Conditions              []Condition                    `json:"conditions,omitempty"                           yaml:"conditions,omitempty"`
-	Volumes                 []VolumeStatus                 `json:"volumes"                                        yaml:"volumes"`
-	History                 []HistoryEntry                 `json:"history,omitempty"                              yaml:"history,omitempty"`
-	OpenEBSLVMSharedMounts  []OpenEBSLVMSharedMount        `json:"openebsLvmSharedMounts,omitempty"               yaml:"openebsLvmSharedMounts,omitempty"`
+	ObservedGeneration      int64                          `json:"observedGeneration,omitempty"      yaml:"observedGeneration,omitempty"`
+	StartedAt               metav1.Time                    `json:"startedAt"                         yaml:"startedAt"`
+	UpdatedAt               metav1.Time                    `json:"updatedAt"                         yaml:"updatedAt"`
+	CompletedAt             *metav1.Time                   `json:"completedAt,omitempty"             yaml:"completedAt,omitempty"`
+	Message                 string                         `json:"message,omitempty"                 yaml:"message,omitempty"`
+	Conditions              []Condition                    `json:"conditions,omitempty"              yaml:"conditions,omitempty"`
+	Volumes                 []VolumeStatus                 `json:"volumes"                           yaml:"volumes"`
+	History                 []HistoryEntry                 `json:"history,omitempty"                 yaml:"history,omitempty"`
+	OpenEBSLVMSharedMounts  []OpenEBSLVMSharedMount        `json:"openebsLvmSharedMounts,omitempty"  yaml:"openebsLvmSharedMounts,omitempty"`
 }
 
 type Session struct {

@@ -44,7 +44,18 @@ func (w *scriptedControllerWaiter) Wait(
 func TestControllerResourceNamesCoverEveryWorkflow(t *testing.T) {
 	for _, workflow := range domain.ControllerWorkflows() {
 		common := domain.SessionCommon{
-			SourceNamespace: "app", DestinationNamespace: "app", SessionNamespace: "system",
+			SourceNamespace: "app", TemporaryNamespace: "app",
+			DestinationNamespace: "app", SessionNamespace: "app",
+		}
+
+		wantKind, wantResource, wantSingular := workflow.Kind, workflow.Resource, workflow.Singular
+		if workflow.Kind == "" {
+			common.TemporaryNamespace = "archive"
+			common.DestinationNamespace = "archive"
+			common.SessionNamespace = "system"
+			wantKind = workflow.ClusterKind
+			wantResource = workflow.ClusterResource
+			wantSingular = workflow.ClusterSingular
 		}
 
 		var spec domain.SessionSpec
@@ -72,22 +83,22 @@ func TestControllerResourceNamesCoverEveryWorkflow(t *testing.T) {
 
 		session := domain.NewSession("workflow-test", spec, time.Now())
 
-		if got := controllerResourceKind(session); got != workflow.Kind {
-			t.Fatalf("type %q kind=%q, want %q", workflow.Type, got, workflow.Kind)
+		if got := controllerResourceKind(session); got != wantKind {
+			t.Fatalf("type %q kind=%q, want %q", workflow.Type, got, wantKind)
 		}
 
-		if got := controllerResourceName(session); got != workflow.Singular {
-			t.Fatalf("type %q resource=%q, want %q", workflow.Type, got, workflow.Singular)
+		if got := controllerResourceName(session); got != wantSingular {
+			t.Fatalf("type %q resource=%q, want %q", workflow.Type, got, wantSingular)
 		}
 
 		if got := controllerResourceForKubectl(
 			session,
-		); got != workflow.Resource+"."+domain.SessionAPIGroup {
+		); got != wantResource+"."+domain.SessionAPIGroup {
 			t.Fatalf(
 				"type %q kubectl resource=%q, want %q",
 				workflow.Type,
 				got,
-				workflow.Resource+"."+domain.SessionAPIGroup,
+				wantResource+"."+domain.SessionAPIGroup,
 			)
 		}
 	}
@@ -108,8 +119,9 @@ func TestDeferControllerExecutionSkipsTerminalSessions(t *testing.T) {
 	spec := domain.NewOfflineMigrationSessionSpec(
 		domain.SessionCommon{
 			SourceNamespace:      "app",
+			TemporaryNamespace:   "app",
 			DestinationNamespace: "app",
-			SessionNamespace:     "system",
+			SessionNamespace:     "app",
 		},
 		domain.SessionWorkflowOptions{},
 	)
@@ -264,13 +276,15 @@ func controllerTestSession(phase domain.Phase, message string) *domain.Session {
 	spec := domain.NewOfflineMigrationSessionSpec(
 		domain.SessionCommon{
 			SourceNamespace:      "app",
+			TemporaryNamespace:   "app",
 			DestinationNamespace: "app",
-			SessionNamespace:     "system",
+			SessionNamespace:     "app",
 		},
 		domain.SessionWorkflowOptions{},
 	)
 	session := domain.NewSession("workflow-test", spec, time.Now())
 	session.Backend = kube.SessionBackendCRD
+	session.BackendResource = domain.ControllerKindMigration
 	session.Status.Phase = phase
 	session.Status.Message = message
 

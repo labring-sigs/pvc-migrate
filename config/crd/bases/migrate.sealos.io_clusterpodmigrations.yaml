@@ -45,15 +45,15 @@ spec:
           metadata:
             type: object
           spec:
-            description: |-
-              PodMigrationSpec is a workload-aware migration. Workload and precopy
-              controls are exclusive to this operation.
             properties:
               createdBy:
                 type: string
               deleteExtraneous:
                 type: boolean
               destinationNamespace:
+                description: |-
+                  NamespaceName is a Kubernetes namespace name used by a cluster-scoped
+                  workflow. Namespaced workflows derive this boundary from metadata.namespace.
                 maxLength: 63
                 minLength: 1
                 pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
@@ -63,6 +63,9 @@ spec:
               precopyPasses:
                 type: integer
               sessionNamespace:
+                description: |-
+                  NamespaceName is a Kubernetes namespace name used by a cluster-scoped
+                  workflow. Namespaced workflows derive this boundary from metadata.namespace.
                 maxLength: 63
                 minLength: 1
                 pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
@@ -70,6 +73,9 @@ spec:
               skipSourceUsageCheck:
                 type: boolean
               sourceNamespace:
+                description: |-
+                  NamespaceName is a Kubernetes namespace name used by a cluster-scoped
+                  workflow. Namespaced workflows derive this boundary from metadata.namespace.
                 maxLength: 63
                 minLength: 1
                 pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
@@ -84,6 +90,9 @@ spec:
               targetNode:
                 type: string
               temporaryNamespace:
+                description: |-
+                  NamespaceName is a Kubernetes namespace name used by a cluster-scoped
+                  workflow. Namespaced workflows derive this boundary from metadata.namespace.
                 maxLength: 63
                 minLength: 1
                 pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
@@ -95,8 +104,9 @@ spec:
               volumes:
                 items:
                   description: |-
-                    VolumeSpec is planning output required to resume a PVC transfer. It is an
-                    API-owned type with only the fields needed by transfer workflows.
+                    ClusterVolumeSpec is the cluster-workflow planning contract. PVC names are
+                    relative to the source/destination namespace declared once on the parent
+                    spec; PV references remain cluster-scoped.
                   properties:
                     accessModes:
                       items:
@@ -107,8 +117,10 @@ spec:
                     concurrentConsumers:
                       type: integer
                     destinationPVC:
-                      description: ObjectReference identifies a Kubernetes object
-                        involved in a workflow.
+                      description: |-
+                        LocalResourceReference identifies a resource whose namespace is established
+                        by the containing workflow, or a cluster-scoped resource such as a PV.
+                        Namespaced workflow APIs derive their boundary from metadata.namespace.
                       properties:
                         apiVersion:
                           maxLength: 253
@@ -120,10 +132,6 @@ spec:
                           maxLength: 253
                           minLength: 1
                           pattern: ^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$
-                          type: string
-                        namespace:
-                          maxLength: 63
-                          pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
                           type: string
                         resourceVersion:
                           maxLength: 256
@@ -140,8 +148,10 @@ spec:
                     sourceCapacity:
                       type: string
                     sourcePV:
-                      description: ObjectReference identifies a Kubernetes object
-                        involved in a workflow.
+                      description: |-
+                        LocalResourceReference identifies a resource whose namespace is established
+                        by the containing workflow, or a cluster-scoped resource such as a PV.
+                        Namespaced workflow APIs derive their boundary from metadata.namespace.
                       properties:
                         apiVersion:
                           maxLength: 253
@@ -153,10 +163,6 @@ spec:
                           maxLength: 253
                           minLength: 1
                           pattern: ^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$
-                          type: string
-                        namespace:
-                          maxLength: 63
-                          pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
                           type: string
                         resourceVersion:
                           maxLength: 256
@@ -171,8 +177,10 @@ spec:
                       - name
                       type: object
                     sourcePVC:
-                      description: ObjectReference identifies a Kubernetes object
-                        involved in a workflow.
+                      description: |-
+                        LocalResourceReference identifies a resource whose namespace is established
+                        by the containing workflow, or a cluster-scoped resource such as a PV.
+                        Namespaced workflow APIs derive their boundary from metadata.namespace.
                       properties:
                         apiVersion:
                           maxLength: 253
@@ -184,10 +192,6 @@ spec:
                           maxLength: 253
                           minLength: 1
                           pattern: ^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$
-                          type: string
-                        namespace:
-                          maxLength: 63
-                          pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
                           type: string
                         resourceVersion:
                           maxLength: 256
@@ -498,8 +502,8 @@ spec:
                 type: array
               workload:
                 description: |-
-                  WorkloadSpec is specific to PodMigration and records workload ownership
-                  and restoration data needed by that operation.
+                  ClusterWorkloadSpec is the workload snapshot owned by ClusterPodMigration.
+                  Workload references are relative to spec.sourceNamespace.
                 properties:
                   adapter:
                     enum:
@@ -514,8 +518,10 @@ spec:
                     type: string
                   affectedPods:
                     items:
-                      description: ObjectReference identifies a Kubernetes object
-                        involved in a workflow.
+                      description: |-
+                        LocalResourceReference identifies a resource whose namespace is established
+                        by the containing workflow, or a cluster-scoped resource such as a PV.
+                        Namespaced workflow APIs derive their boundary from metadata.namespace.
                       properties:
                         apiVersion:
                           maxLength: 253
@@ -527,10 +533,6 @@ spec:
                           maxLength: 253
                           minLength: 1
                           pattern: ^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$
-                          type: string
-                        namespace:
-                          maxLength: 63
-                          pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
                           type: string
                         resourceVersion:
                           maxLength: 256
@@ -547,8 +549,10 @@ spec:
                     maxItems: 1024
                     type: array
                   controller:
-                    description: ObjectReference identifies a Kubernetes object involved
-                      in a workflow.
+                    description: |-
+                      LocalResourceReference identifies a resource whose namespace is established
+                      by the containing workflow, or a cluster-scoped resource such as a PV.
+                      Namespaced workflow APIs derive their boundary from metadata.namespace.
                     properties:
                       apiVersion:
                         maxLength: 253
@@ -560,10 +564,6 @@ spec:
                         maxLength: 253
                         minLength: 1
                         pattern: ^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$
-                        type: string
-                      namespace:
-                        maxLength: 63
-                        pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
                         type: string
                       resourceVersion:
                         maxLength: 256
@@ -642,16 +642,15 @@ spec:
                     format: int32
                     type: integer
                   originalObject:
-                    description: |-
-                      The serialized byte-size limit is enforced by the controller/domain
-                      boundary because OpenAPI cannot express a byte limit for opaque JSON.
                     x-kubernetes-preserve-unknown-fields: true
                   originalReplicas:
                     format: int32
                     type: integer
                   pod:
-                    description: ObjectReference identifies a Kubernetes object involved
-                      in a workflow.
+                    description: |-
+                      LocalResourceReference identifies a resource whose namespace is established
+                      by the containing workflow, or a cluster-scoped resource such as a PV.
+                      Namespaced workflow APIs derive their boundary from metadata.namespace.
                     properties:
                       apiVersion:
                         maxLength: 253
@@ -663,10 +662,6 @@ spec:
                         maxLength: 253
                         minLength: 1
                         pattern: ^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$
-                        type: string
-                      namespace:
-                        maxLength: 63
-                        pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
                         type: string
                       resourceVersion:
                         maxLength: 256
@@ -730,10 +725,8 @@ spec:
             - workload
             type: object
             x-kubernetes-validations:
-            - message: workflow namespaces must match metadata.namespace
-              rule: self.sourceNamespace == self.sessionNamespace && self.destinationNamespace
-                == self.sessionNamespace && self.temporaryNamespace == self.sessionNamespace
-            - message: PodMigration workload.adapter must identify a supported workload
+            - message: ClusterPodMigration workload.adapter must identify a supported
+                workload
               rule: self.workload.adapter != 'None'
           status:
             properties:
@@ -816,8 +809,9 @@ spec:
                 items:
                   properties:
                     lvmVolume:
-                      description: ObjectReference identifies a Kubernetes object
-                        involved in a workflow.
+                      description: |-
+                        LVMVolume is namespaced and must retain its namespace for controller
+                        recovery when a cluster PodMigration spans namespaces.
                       properties:
                         apiVersion:
                           maxLength: 253
@@ -851,8 +845,8 @@ spec:
                     previousSharedSet:
                       type: boolean
                     sourcePV:
-                      description: ObjectReference identifies a Kubernetes object
-                        involved in a workflow.
+                      description: SourcePV is cluster-scoped and therefore normally
+                        has no namespace.
                       properties:
                         apiVersion:
                           maxLength: 253
@@ -864,10 +858,6 @@ spec:
                           maxLength: 253
                           minLength: 1
                           pattern: ^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$
-                          type: string
-                        namespace:
-                          maxLength: 63
-                          pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
                           type: string
                         resourceVersion:
                           maxLength: 256
@@ -887,9 +877,6 @@ spec:
                   type: object
                 type: array
               originalPodSnapshotHash:
-                description: |-
-                  OriginalPodSnapshotHash is controller-owned evidence that the standalone
-                  Pod snapshot was captured from the referenced live Pod before execution.
                 type: string
               phase:
                 description: WorkflowPhase identifies one durable workflow state.
@@ -947,12 +934,11 @@ spec:
                 type: string
               volumes:
                 items:
-                  description: |-
-                    PodMigrationVolumeStatus is the durable checkpoint for a workload-aware
-                    migration volume. It is a distinct API type even though its transfer and
-                    activation fields currently match MigrationVolumeStatus.
                   properties:
                     activation:
+                      description: |-
+                        Cluster status types use fully qualified references. A cluster-scoped
+                        workflow can span namespaces, so checkpoints remain independently auditable.
                       properties:
                         activatedAt:
                           format: date-time
@@ -1100,10 +1086,6 @@ spec:
               warmPassesCompleted:
                 type: integer
               workload:
-                description: |-
-                  PodMigrationWorkloadStatus tracks Pod identities recreated while pausing,
-                  resuming, or rolling back a workload. The original migration target and
-                  recovery snapshot remain immutable in spec.workload.
                 properties:
                   affectedPods:
                     items:

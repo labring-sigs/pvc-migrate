@@ -46,7 +46,7 @@ func TestOperationSpecsExposeOnlyTheirOwnPayload(t *testing.T) {
 		t.Fatalf("PodMigration omitted operation fields: %s", encoded)
 	}
 
-	decoded := object.Spec.Domain()
+	decoded := object.Spec.Domain("app")
 	if decoded.Type != domain.SessionTypeMigratePod || decoded.MigratePod == nil ||
 		decoded.MigratePod.PrecopyPasses != 2 {
 		t.Fatalf("domain conversion=%#v", decoded)
@@ -81,7 +81,7 @@ func TestPodMigrationOriginalObjectUsesKubernetesJSON(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	domainObject := decoded.Domain().MigratePod.Workload.OriginalObject
+	domainObject := decoded.Domain("app").MigratePod.Workload.OriginalObject
 	if !json.Valid(domainObject) || string(domainObject) != string(original) {
 		t.Fatalf("domain originalObject=%s, want %s", domainObject, original)
 	}
@@ -111,7 +111,7 @@ func TestWorkflowConversionsDoNotShareMutablePointers(t *testing.T) {
 		t.Fatalf("domain to API conversion shared pointers: %#v", apiSpec.Workload)
 	}
 
-	decoded := apiSpec.Domain()
+	decoded := apiSpec.Domain("app")
 	*decoded.MigratePod.Workload.OriginalReplicas = 9
 
 	decoded.MigratePod.Workload.AffectedPods[0].Name = "domain-mutated"
@@ -137,7 +137,7 @@ func TestWorkflowConversionsDoNotShareMutablePointers(t *testing.T) {
 		t.Fatal("domain to API status conversion shared time pointers")
 	}
 
-	decodedStatus := apiStatus.Domain()
+	decodedStatus := apiStatus.Domain("app")
 
 	decodedStatus.Volumes[0].Sync.FinalCompletedAt = &completed
 	if apiStatus.Volumes[0].Sync.FinalCompletedAt.Time.Equal(time.Unix(200, 0)) {
@@ -154,7 +154,7 @@ func TestWorkflowAPITypesDoNotExposeSessionEnvelope(t *testing.T) {
 		v1alpha1.BackupSpec{},
 		v1alpha1.RestoreSpec{},
 		v1alpha1.RenameSpec{},
-		v1alpha1.MoveSpec{},
+		v1alpha1.ClusterMoveSpec{},
 	} {
 		data, err := json.Marshal(spec)
 		if err != nil {
@@ -187,6 +187,75 @@ func TestWorkflowAPITypesDoNotExposeSessionEnvelope(t *testing.T) {
 	}
 }
 
+func TestNamespacedWorkflowJSONDoesNotExposeNamespaceSelectors(t *testing.T) {
+	local := v1alpha1.LocalResourceReference{Name: "data"}
+	objects := []any{
+		v1alpha1.MigrationSpec{Volumes: []v1alpha1.VolumeSpec{{
+			SourcePVC: local, SourcePV: local, DestinationPVC: local,
+		}}},
+		v1alpha1.PodMigrationSpec{Workload: v1alpha1.WorkloadSpec{
+			Adapter: v1alpha1.WorkloadStandalone,
+			Pod:     &local,
+		}},
+		v1alpha1.BackupSpec{SourcePVC: local, SourcePV: local, Name: "daily"},
+		v1alpha1.RestoreSpec{DestinationPVC: local, Name: "daily"},
+		v1alpha1.RenameSpec{PVCIdentityFields: v1alpha1.PVCIdentityFields{
+			SourcePVC: local, SourcePV: local, DestinationPVC: local,
+		}},
+		v1alpha1.MigrationStatus{Volumes: []v1alpha1.MigrationVolumeStatus{{
+			DestinationPVC: &local,
+			Activation:     v1alpha1.VolumeActivationStatus{ActivePVC: &local},
+		}}},
+		v1alpha1.PodMigrationStatus{Workload: &v1alpha1.PodMigrationWorkloadStatus{
+			Pod: &local,
+		}},
+		v1alpha1.RenameStatus{Volumes: []v1alpha1.PVCIdentityVolumeStatus{{
+			Activation: v1alpha1.PVCIdentityActivationStatus{ActivePVC: &local},
+		}}},
+	}
+
+	for _, object := range objects {
+		encoded, err := json.Marshal(object)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		if strings.Contains(string(encoded), `"namespace"`) {
+			t.Fatalf("%T exposes a namespace selector: %s", object, encoded)
+		}
+	}
+}
+
+func TestClusterWorkflowUsesIndependentContracts(t *testing.T) {
+	migrationVolumes, ok := reflect.TypeFor[v1alpha1.ClusterMigrationSpec]().
+		FieldByName("Volumes")
+	if !ok || migrationVolumes.Type.Elem() != reflect.TypeFor[v1alpha1.ClusterVolumeSpec]() {
+		t.Fatalf("ClusterMigration volumes type=%v", migrationVolumes.Type)
+	}
+
+	statusVolumes, ok := reflect.TypeFor[v1alpha1.ClusterMigrationStatus]().
+		FieldByName("Volumes")
+	if !ok ||
+		statusVolumes.Type.Elem() != reflect.TypeFor[v1alpha1.ClusterMigrationVolumeStatus]() {
+		t.Fatalf("ClusterMigration status volumes type=%v", statusVolumes.Type)
+	}
+
+	status := v1alpha1.ClusterMoveStatus{Volumes: []v1alpha1.ClusterPVCIdentityVolumeStatus{{
+		Activation: v1alpha1.ClusterPVCIdentityActivationStatus{
+			ActivePVC: &v1alpha1.ObjectReference{Namespace: "destination", Name: "data"},
+		},
+	}}}
+
+	encoded, err := json.Marshal(status)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if !strings.Contains(string(encoded), `"namespace":"destination"`) {
+		t.Fatalf("cluster status lost qualified reference: %s", encoded)
+	}
+}
+
 func TestOperationSpecsHaveIndependentFieldContracts(t *testing.T) {
 	tests := []struct {
 		name   string
@@ -196,33 +265,29 @@ func TestOperationSpecsHaveIndependentFieldContracts(t *testing.T) {
 		{
 			name: "migration", spec: v1alpha1.MigrationSpec{},
 			fields: []string{
-				"createdBy", "deleteExtraneous", "destinationNamespace", "sessionNamespace",
-				"skipSourceUsageCheck", "sourceNamespace", "sourceNode", "strategies",
-				"targetNode", "temporaryNamespace", "toolImage", "verifyChecksum", "volumes",
+				"createdBy", "deleteExtraneous", "skipSourceUsageCheck", "sourceNode",
+				"strategies", "targetNode", "toolImage", "verifyChecksum", "volumes",
 			},
 		},
 		{
 			name: "pod migration", spec: v1alpha1.PodMigrationSpec{},
 			fields: []string{
-				"createdBy", "deleteExtraneous", "destinationNamespace", "openebsLvmEnableShared",
-				"precopyPasses", "sessionNamespace", "skipSourceUsageCheck", "sourceNamespace",
-				"sourceNode", "strategies", "targetNode", "temporaryNamespace", "toolImage",
+				"createdBy", "deleteExtraneous", "openebsLvmEnableShared", "precopyPasses",
+				"skipSourceUsageCheck", "sourceNode", "strategies", "targetNode", "toolImage",
 				"verifyChecksum", "volumes", "workload",
 			},
 		},
 		{
 			name: "reservation", spec: v1alpha1.ReservationSpec{},
 			fields: []string{
-				"createdBy", "destinationNamespace", "sessionNamespace", "skipSourceUsageCheck",
-				"sourceNamespace", "targetNode", "temporaryNamespace", "toolImage", "volumes",
+				"createdBy", "skipSourceUsageCheck", "targetNode", "toolImage", "volumes",
 			},
 		},
 		{
 			name: "copy", spec: v1alpha1.CopySpec{},
 			fields: []string{
-				"createdBy", "deleteExtraneous", "destinationNamespace", "online",
-				"sessionNamespace", "skipSourceUsageCheck", "sourceNamespace", "sourceNode",
-				"strategies", "targetNode", "temporaryNamespace", "toolImage", "volumes",
+				"createdBy", "deleteExtraneous", "online", "skipSourceUsageCheck", "sourceNode",
+				"strategies", "targetNode", "toolImage", "volumes",
 			},
 		},
 		{
@@ -235,8 +300,6 @@ func TestOperationSpecsHaveIndependentFieldContracts(t *testing.T) {
 				"repositoryRef",
 				"openebsLvmEnableShared",
 				"path",
-				"sessionNamespace",
-				"sourceNamespace",
 				"sourcePV",
 				"sourcePVC",
 				"toolImage",
@@ -251,13 +314,11 @@ func TestOperationSpecsHaveIndependentFieldContracts(t *testing.T) {
 				"deleteExtraneous",
 				"destinationAccessMode",
 				"destinationCapacity",
-				"destinationNamespace",
 				"destinationPVC",
 				"destinationStorageClass",
 				"name",
 				"path",
 				"repositoryRef",
-				"sessionNamespace",
 				"targetNode",
 				"toolImage",
 			},
@@ -265,15 +326,14 @@ func TestOperationSpecsHaveIndependentFieldContracts(t *testing.T) {
 		{
 			name: "rename", spec: v1alpha1.RenameSpec{},
 			fields: []string{
-				"createdBy", "destinationPVC", "sessionNamespace", "sourceNamespace", "sourcePV",
-				"sourcePVC", "sourceTemplate",
+				"createdBy", "destinationPVC", "sourcePV", "sourcePVC", "sourceTemplate",
 			},
 		},
 		{
-			name: "move", spec: v1alpha1.MoveSpec{},
+			name: "cluster move", spec: v1alpha1.ClusterMoveSpec{},
 			fields: []string{
-				"createdBy", "destinationNamespace", "destinationPVC", "sessionNamespace",
-				"sourceNamespace", "sourcePV", "sourcePVC", "sourceTemplate",
+				"createdBy", "destinationNamespace", "identity", "sessionNamespace",
+				"sourceNamespace",
 			},
 		},
 	}
@@ -293,10 +353,10 @@ func TestOperationSpecsHaveIndependentFieldContracts(t *testing.T) {
 
 func TestOperationStatusesExposeOnlyConcernedCheckpoints(t *testing.T) {
 	activation := v1alpha1.VolumeActivationStatus{
-		ActivePVC: &v1alpha1.ObjectReference{Name: "active"},
+		ActivePVC: &v1alpha1.LocalResourceReference{Name: "active"},
 	}
 	identity := v1alpha1.PVCIdentityActivationStatus{
-		ActivePVC: &v1alpha1.ObjectReference{Name: "active"},
+		ActivePVC: &v1alpha1.LocalResourceReference{Name: "active"},
 	}
 	statuses := []struct {
 		name      string
@@ -323,7 +383,7 @@ func TestOperationStatusesExposeOnlyConcernedCheckpoints(t *testing.T) {
 			status: v1alpha1.PodMigrationStatus{
 				WarmPassesCompleted: 1,
 				Workload: &v1alpha1.PodMigrationWorkloadStatus{
-					Pod: &v1alpha1.ObjectReference{Name: "writer", UID: "current-pod-uid"},
+					Pod: &v1alpha1.LocalResourceReference{Name: "writer", UID: "current-pod-uid"},
 				},
 				Volumes: []v1alpha1.PodMigrationVolumeStatus{
 					{
@@ -360,7 +420,7 @@ func TestOperationStatusesExposeOnlyConcernedCheckpoints(t *testing.T) {
 		{
 			name: "backup",
 			status: v1alpha1.BackupStatus{OpenEBSLVMSharedMounts: []v1alpha1.SharedMountStatus{{
-				SourcePV: v1alpha1.ObjectReference{Name: "pv"},
+				SourcePV: v1alpha1.LocalResourceReference{Name: "pv"},
 			}}},
 			forbidden: []string{`"volumes":`},
 			required:  []string{`"openebsLvmSharedMounts":`},
@@ -382,9 +442,12 @@ func TestOperationStatusesExposeOnlyConcernedCheckpoints(t *testing.T) {
 			required: []string{`"activation":`},
 		},
 		{
-			name: "move",
-			status: v1alpha1.MoveStatus{Volumes: []v1alpha1.PVCIdentityVolumeStatus{{
-				SourcePVCName: "data", Activation: identity,
+			name: "cluster move",
+			status: v1alpha1.ClusterMoveStatus{Volumes: []v1alpha1.ClusterPVCIdentityVolumeStatus{{
+				SourcePVCName: "data",
+				Activation: v1alpha1.ClusterPVCIdentityActivationStatus{
+					ActivePVC: &v1alpha1.ObjectReference{Namespace: "destination", Name: "active"},
+				},
 			}}},
 			forbidden: []string{
 				`"reserved":`, `"sync":`, `"temporaryPVCDeleted":`,
@@ -489,7 +552,7 @@ func TestTransferDestinationIdentityIsStatusOwned(t *testing.T) {
 	}
 
 	apiStatus := v1alpha1.CopyStatusFromDomain(status, spec.Volumes)
-	restored := apiSpec.Domain()
+	restored := apiSpec.Domain("app")
 	apiStatus.ApplyToDomainSpec(&restored)
 
 	volume := restored.Volumes[0]
@@ -522,7 +585,7 @@ func TestPodMigrationCurrentPodIdentityIsStatusOwned(t *testing.T) {
 	spec.MigratePod.Workload.Pod.UID = "resumed-pod-uid"
 	spec.MigratePod.Workload.AffectedPods[0].UID = "resumed-pod-uid"
 	apiStatus := v1alpha1.PodMigrationStatusFromDomain(domain.SessionStatus{}, spec)
-	restored := apiSpec.Domain()
+	restored := apiSpec.Domain("app")
 	apiStatus.ApplyToDomainSpec(&restored)
 
 	if apiSpec.Workload.Pod.UID != "original-pod-uid" ||
@@ -559,9 +622,9 @@ func TestPodMigrationStatusDoesNotClearImmutableAffectedPodsSnapshot(t *testing.
 	)
 	apiSpec := v1alpha1.PodMigrationSpecFromDomain(spec)
 	status := v1alpha1.PodMigrationStatus{Workload: &v1alpha1.PodMigrationWorkloadStatus{
-		Pod: &v1alpha1.ObjectReference{Name: "writer", Namespace: "app", UID: "resumed-uid"},
+		Pod: &v1alpha1.LocalResourceReference{Name: "writer", UID: "resumed-uid"},
 	}}
-	restored := apiSpec.Domain()
+	restored := apiSpec.Domain("app")
 	status.ApplyToDomainSpec(&restored)
 
 	workload := restored.WorkloadPtr()
@@ -648,44 +711,60 @@ func TestEveryOperationSpecRoundTripsToItsSessionType(t *testing.T) {
 		convert func(domain.SessionSpec) domain.SessionSpec
 	}{
 		{
-			name:    "migration",
-			want:    domain.SessionTypeMigrate,
-			convert: func(s domain.SessionSpec) domain.SessionSpec { return v1alpha1.MigrationSpecFromDomain(s).Domain() },
+			name: "migration",
+			want: domain.SessionTypeMigrate,
+			convert: func(s domain.SessionSpec) domain.SessionSpec {
+				return v1alpha1.MigrationSpecFromDomain(s).Domain("app")
+			},
 		},
 		{
-			name:    "pod migration",
-			want:    domain.SessionTypeMigratePod,
-			convert: func(s domain.SessionSpec) domain.SessionSpec { return v1alpha1.PodMigrationSpecFromDomain(s).Domain() },
+			name: "pod migration",
+			want: domain.SessionTypeMigratePod,
+			convert: func(s domain.SessionSpec) domain.SessionSpec {
+				return v1alpha1.PodMigrationSpecFromDomain(s).Domain("app")
+			},
 		},
 		{
-			name:    "reservation",
-			want:    domain.SessionTypeReserve,
-			convert: func(s domain.SessionSpec) domain.SessionSpec { return v1alpha1.ReservationSpecFromDomain(s).Domain() },
+			name: "reservation",
+			want: domain.SessionTypeReserve,
+			convert: func(s domain.SessionSpec) domain.SessionSpec {
+				return v1alpha1.ReservationSpecFromDomain(s).Domain("app")
+			},
 		},
 		{
-			name:    "copy",
-			want:    domain.SessionTypeCopy,
-			convert: func(s domain.SessionSpec) domain.SessionSpec { return v1alpha1.CopySpecFromDomain(s).Domain() },
+			name: "copy",
+			want: domain.SessionTypeCopy,
+			convert: func(s domain.SessionSpec) domain.SessionSpec {
+				return v1alpha1.CopySpecFromDomain(s).Domain("app")
+			},
 		},
 		{
-			name:    "backup",
-			want:    domain.SessionTypeBackup,
-			convert: func(s domain.SessionSpec) domain.SessionSpec { return v1alpha1.BackupSpecFromDomain(s).Domain() },
+			name: "backup",
+			want: domain.SessionTypeBackup,
+			convert: func(s domain.SessionSpec) domain.SessionSpec {
+				return v1alpha1.BackupSpecFromDomain(s).Domain("app")
+			},
 		},
 		{
-			name:    "restore",
-			want:    domain.SessionTypeRestore,
-			convert: func(s domain.SessionSpec) domain.SessionSpec { return v1alpha1.RestoreSpecFromDomain(s).Domain() },
+			name: "restore",
+			want: domain.SessionTypeRestore,
+			convert: func(s domain.SessionSpec) domain.SessionSpec {
+				return v1alpha1.RestoreSpecFromDomain(s).Domain("app")
+			},
 		},
 		{
-			name:    "rename",
-			want:    domain.SessionTypeRename,
-			convert: func(s domain.SessionSpec) domain.SessionSpec { return v1alpha1.RenameSpecFromDomain(s).Domain() },
+			name: "rename",
+			want: domain.SessionTypeRename,
+			convert: func(s domain.SessionSpec) domain.SessionSpec {
+				return v1alpha1.RenameSpecFromDomain(s).Domain("app")
+			},
 		},
 		{
-			name:    "move",
-			want:    domain.SessionTypeMove,
-			convert: func(s domain.SessionSpec) domain.SessionSpec { return v1alpha1.MoveSpecFromDomain(s).Domain() },
+			name: "move",
+			want: domain.SessionTypeMove,
+			convert: func(s domain.SessionSpec) domain.SessionSpec {
+				return v1alpha1.ClusterMoveSpecFromDomain(s).Domain()
+			},
 		},
 	}
 
@@ -714,16 +793,14 @@ func TestEveryOperationSpecRoundTripsToItsSessionType(t *testing.T) {
 	}
 }
 
-func TestObjectTransferSpecsUseTheirTopLevelNamespace(t *testing.T) {
+func TestObjectTransferSpecsUseWorkflowNamespace(t *testing.T) {
 	backup := v1alpha1.BackupSpec{
-		SourceNamespace:  "source",
-		SessionNamespace: "sessions",
-		SourcePVC:        v1alpha1.ObjectReference{Name: "data"},
-		SourcePV:         v1alpha1.ObjectReference{Name: "pv", UID: "pv-uid"},
-		Name:             "backup",
+		SourcePVC: v1alpha1.LocalResourceReference{Name: "data"},
+		SourcePV:  v1alpha1.LocalResourceReference{Name: "pv", UID: "pv-uid"},
+		Name:      "backup",
 	}
 
-	backupDomain := backup.Domain()
+	backupDomain := backup.Domain("source")
 
 	if got := backupDomain.SourceNamespace; got != "source" {
 		t.Fatalf("backup source namespace=%q", got)
@@ -734,13 +811,11 @@ func TestObjectTransferSpecsUseTheirTopLevelNamespace(t *testing.T) {
 	}
 
 	restore := v1alpha1.RestoreSpec{
-		DestinationNamespace: "destination",
-		SessionNamespace:     "sessions",
-		DestinationPVC:       v1alpha1.ObjectReference{Name: "data"},
-		Name:                 "backup",
+		DestinationPVC: v1alpha1.LocalResourceReference{Name: "data"},
+		Name:           "backup",
 	}
 
-	restoreDomain := restore.Domain()
+	restoreDomain := restore.Domain("destination")
 
 	if got := restoreDomain.DestinationNamespace; got != "destination" {
 		t.Fatalf("restore destination namespace=%q", got)
@@ -762,7 +837,10 @@ func TestObjectTransferSpecsDoNotExposeMigrationNamespaces(t *testing.T) {
 		}
 
 		encoded := string(data)
-		for _, forbidden := range []string{`"temporaryNamespace":`, `"volumes":`} {
+		for _, forbidden := range []string{
+			`"sourceNamespace":`, `"temporaryNamespace":`, `"destinationNamespace":`,
+			`"sessionNamespace":`, `"volumes":`, `"namespace":`,
+		} {
 			if containsJSONField(encoded, forbidden) {
 				t.Fatalf("object-transfer spec contains %s: %s", forbidden, encoded)
 			}
@@ -808,13 +886,13 @@ func TestPVCIdentitySpecsExposeDedicatedEndpoints(t *testing.T) {
 						SessionNamespace: "system", Volumes: []domain.VolumeSpec{volume},
 					},
 					Type: domain.SessionTypeRename,
-				}).Domain()
+				}).Domain("source")
 			},
 		},
 		{
 			name: "move",
 			kind: "Move",
-			data: v1alpha1.MoveSpecFromDomain(domain.SessionSpec{
+			data: v1alpha1.ClusterMoveSpecFromDomain(domain.SessionSpec{
 				SessionCommon: domain.SessionCommon{
 					SourceNamespace: "source", DestinationNamespace: "destination",
 					SessionNamespace: "system", Volumes: []domain.VolumeSpec{volume},
@@ -822,7 +900,7 @@ func TestPVCIdentitySpecsExposeDedicatedEndpoints(t *testing.T) {
 				Type: domain.SessionTypeMove,
 			}),
 			got: func() domain.SessionSpec {
-				return v1alpha1.MoveSpecFromDomain(domain.SessionSpec{
+				return v1alpha1.ClusterMoveSpecFromDomain(domain.SessionSpec{
 					SessionCommon: domain.SessionCommon{
 						SourceNamespace: "source", DestinationNamespace: "destination",
 						SessionNamespace: "system", Volumes: []domain.VolumeSpec{volume},
@@ -890,7 +968,7 @@ func TestPVCIdentitySpecsRoundTripSourceMetadataWithoutSharing(t *testing.T) {
 		t.Fatalf("source labels were shared with API spec: %q", got)
 	}
 
-	decoded := apiSpec.Domain()
+	decoded := apiSpec.Domain("source")
 	metadata := decoded.Volumes[0].SourcePVCMetadata
 
 	if metadata.Labels["app"] != "changed" ||
@@ -900,41 +978,71 @@ func TestPVCIdentitySpecsRoundTripSourceMetadataWithoutSharing(t *testing.T) {
 	}
 }
 
-func containsJSONField(data, field string) bool {
-	return json.Valid([]byte(data)) && strings.Contains(data, field)
-}
-
-func TestClusterWorkflowRepositoryReferenceRoundTrip(t *testing.T) {
+func TestClusterMoveRoundTripsNamespaceRoles(t *testing.T) {
 	spec := domain.SessionSpec{
 		SessionCommon: domain.SessionCommon{
-			SourceNamespace:  "tenant-a",
-			SessionNamespace: "operator",
+			SourceNamespace: "source", TemporaryNamespace: "destination",
+			DestinationNamespace: "destination", SessionNamespace: "control",
+			Volumes: []domain.VolumeSpec{{
+				SourcePVC:      domain.ObjectReference{Namespace: "source", Name: "data"},
+				SourcePV:       domain.ObjectReference{Name: "pv-data"},
+				DestinationPVC: domain.ObjectReference{Namespace: "destination", Name: "renamed"},
+			}},
 		},
-		Type: domain.SessionTypeBackup,
-		Backup: &domain.BackupSessionSpec{
-			SourcePVC: domain.ObjectReference{
-				Namespace: "tenant-a",
-				Name:      "data",
-				UID:       "pvc-uid",
+		Type: domain.SessionTypeMove,
+	}
+
+	apiSpec := v1alpha1.ClusterMoveSpecFromDomain(spec)
+
+	restored := apiSpec.Domain()
+	if restored.SourceNamespace != "source" ||
+		restored.DestinationNamespace != "destination" ||
+		restored.SessionNamespace != "control" ||
+		restored.Volumes[0].SourcePVC.Namespace != "source" ||
+		restored.Volumes[0].DestinationPVC.Namespace != "destination" {
+		t.Fatalf("ClusterMove namespace round trip=%#v", restored)
+	}
+}
+
+func TestClusterSharedMountStatusPreservesLVMVolumeNamespace(t *testing.T) {
+	now := metav1.Now()
+	status := domain.SessionStatus{
+		Phase:     domain.PhaseWarmCopying,
+		StartedAt: now,
+		UpdatedAt: now,
+		OpenEBSLVMSharedMounts: []domain.OpenEBSLVMSharedMount{{
+			SourcePV: domain.ObjectReference{Name: "pv-data", UID: "pv-uid"},
+			LVMVolume: domain.ObjectReference{
+				APIVersion: "openebs.io/v1beta1",
+				Kind:       "LVMVolume",
+				Namespace:  "openebs",
+				Name:       "lvm-data",
+				UID:        "lvm-uid",
 			},
-			SourcePV:                  domain.ObjectReference{Name: "pv-data", UID: "pv-uid"},
-			Name:                      "daily",
-			BackupRepository:          "archive",
-			BackupRepositoryNamespace: "backup-config",
-		},
+			PreviousShared:    "no",
+			PreviousSharedSet: true,
+		}},
 	}
 
-	apiSpec := v1alpha1.ClusterBackupSpecFromDomain(spec)
-	if apiSpec.RepositoryRef.Name != "archive" ||
-		apiSpec.RepositoryRef.Namespace != "backup-config" {
-		t.Fatalf("cluster repository reference=%#v", apiSpec.RepositoryRef)
+	apiStatus := v1alpha1.ClusterPodMigrationStatusFromDomain(status, domain.SessionSpec{})
+	if apiStatus.OpenEBSLVMSharedMounts[0].LVMVolume.Namespace != "openebs" {
+		t.Fatalf(
+			"cluster status lost LVMVolume namespace: %#v",
+			apiStatus.OpenEBSLVMSharedMounts[0],
+		)
 	}
 
-	decoded := apiSpec.Domain()
-	if decoded.Backup == nil || decoded.Backup.BackupRepository != "archive" ||
-		decoded.Backup.BackupRepositoryNamespace != "backup-config" {
-		t.Fatalf("cluster domain conversion=%#v", decoded.Backup)
+	decoded := apiStatus.Domain()
+	if decoded.OpenEBSLVMSharedMounts[0].LVMVolume.Namespace != "openebs" {
+		t.Fatalf(
+			"cluster status round trip lost LVMVolume namespace: %#v",
+			decoded.OpenEBSLVMSharedMounts[0],
+		)
 	}
+}
+
+func containsJSONField(data, field string) bool {
+	return json.Valid([]byte(data)) && strings.Contains(data, field)
 }
 
 func TestBackupRepositoryUsesTypedBackendUnion(t *testing.T) {

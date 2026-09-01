@@ -24,15 +24,11 @@ func addKnownTypes(scheme *runtime.Scheme) error {
 		&Backup{}, &BackupList{},
 		&Restore{}, &RestoreList{},
 		&Rename{}, &RenameList{},
-		&Move{}, &MoveList{},
 		&BackupRepository{}, &BackupRepositoryList{},
 		&ClusterMigration{}, &ClusterMigrationList{},
 		&ClusterPodMigration{}, &ClusterPodMigrationList{},
 		&ClusterReservation{}, &ClusterReservationList{},
 		&ClusterCopy{}, &ClusterCopyList{},
-		&ClusterBackup{}, &ClusterBackupList{},
-		&ClusterRestore{}, &ClusterRestoreList{},
-		&ClusterRename{}, &ClusterRenameList{},
 		&ClusterMove{}, &ClusterMoveList{},
 	)
 	metav1.AddToGroupVersion(scheme, GroupVersion)

@@ -399,6 +399,18 @@ func TestCRDSessionStoreAddsProtectionToDeclarativeWorkflow(t *testing.T) {
 			current.GetFinalizers(),
 		)
 	}
+
+	if decoded.ResourceVersion != current.GetResourceVersion() {
+		t.Fatalf(
+			"session resourceVersion was not refreshed after finalizer update: session=%q object=%q",
+			decoded.ResourceVersion,
+			current.GetResourceVersion(),
+		)
+	}
+
+	if err := store.Update(ctx, decoded); err != nil {
+		t.Fatalf("session update after finalizer protection should not conflict: %v", err)
+	}
 }
 
 func TestRoutingSessionStoreUsesClusterMoveWorkflow(t *testing.T) {
@@ -430,7 +442,36 @@ func TestRoutingSessionStoreUsesClusterMoveWorkflow(t *testing.T) {
 	}
 }
 
-func TestRoutingSessionStoreUsesClusterBackupForCrossNamespaceRepository(t *testing.T) {
+func TestCRDSessionStoreGetFiltersClusterWorkflowBySessionNamespace(t *testing.T) {
+	ctx := context.Background()
+	store := NewCRDSessionStore(newCRDTestClient())
+	session := storeTestSession()
+	session.Spec.SourceNamespace = "source"
+	session.Spec.TemporaryNamespace = "destination"
+	session.Spec.DestinationNamespace = "destination"
+	session.Spec.SessionNamespace = "control-a"
+	session.Spec.Volumes[0].SourcePVC.Namespace = "source"
+	session.Spec.Volumes[0].DestinationPVC.Namespace = "destination"
+
+	if err := store.Create(ctx, session); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := store.Get(ctx, "control-b", session.ID); !IsSessionNotFound(err) {
+		t.Fatalf("cross-namespace cluster lookup error=%v", err)
+	}
+
+	loaded, err := store.Get(ctx, "control-a", session.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if loaded.BackendResource != domain.ControllerKindClusterMigration {
+		t.Fatalf("cluster workflow resource=%q", loaded.BackendResource)
+	}
+}
+
+func TestRoutingSessionStoreFallsBackForCrossNamespaceBackupRepository(t *testing.T) {
 	ctx := context.Background()
 	router := NewSessionStoreRouter(
 		NewConfigMapSessionStore(clientfake.NewClientset()),
@@ -454,8 +495,7 @@ func TestRoutingSessionStoreUsesClusterBackupForCrossNamespaceRepository(t *test
 		t.Fatal(err)
 	}
 
-	if session.Backend != SessionBackendCRD ||
-		session.BackendResource != domain.ControllerKindClusterBackup {
+	if session.Backend != SessionBackendConfigMap || session.BackendResource != "" {
 		t.Fatalf("backup backend=%q resource=%q", session.Backend, session.BackendResource)
 	}
 
@@ -466,7 +506,7 @@ func TestRoutingSessionStoreUsesClusterBackupForCrossNamespaceRepository(t *test
 
 	if loaded.Spec.Backup == nil ||
 		loaded.Spec.Backup.BackupRepositoryNamespace != "backup-config" {
-		t.Fatalf("loaded cluster backup=%#v", loaded.Spec.Backup)
+		t.Fatalf("loaded backup fallback=%#v", loaded.Spec.Backup)
 	}
 }
 
@@ -887,6 +927,80 @@ func TestCRDSessionStoreRebindsReservationToCopy(t *testing.T) {
 	}
 }
 
+func TestCRDSessionStoreRebindsClusterReservationToClusterCopy(t *testing.T) {
+	ctx := context.Background()
+	client := newCRDTestClient()
+	store := NewCRDSessionStore(client)
+	session := storeTestSession()
+	common := domain.SessionCommon{
+		SourceNamespace:      "source",
+		TemporaryNamespace:   "control",
+		DestinationNamespace: "destination",
+		SessionNamespace:     "control",
+		Volumes:              session.Spec.Volumes,
+	}
+	common.Volumes[0].SourcePVC.Namespace = common.SourceNamespace
+	common.Volumes[0].DestinationPVC.Namespace = common.DestinationNamespace
+
+	session.Spec = domain.NewSessionSpec(
+		domain.OperationReserve,
+		common,
+		false,
+		domain.SessionWorkflowOptions{},
+	)
+	if err := store.Create(ctx, session); err != nil {
+		t.Fatal(err)
+	}
+
+	session.Spec = domain.NewSessionSpec(
+		domain.OperationCopy,
+		common,
+		false,
+		domain.SessionWorkflowOptions{},
+	)
+	if err := session.Transition(domain.PhaseReserving, "reserving", time.Now()); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := session.Transition(domain.PhaseReserved, "reserved", time.Now()); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := store.Update(ctx, session); err != nil {
+		t.Fatal(err)
+	}
+
+	loaded, err := store.Get(ctx, common.SessionNamespace, session.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if loaded.BackendResource != domain.ControllerKindClusterCopy ||
+		loaded.Spec.Type != domain.SessionTypeCopy {
+		t.Fatalf(
+			"cluster rebind resource=%q type=%q",
+			loaded.BackendResource,
+			loaded.Spec.Type,
+		)
+	}
+
+	if err := client.Get(
+		ctx,
+		crclient.ObjectKey{Name: session.ID},
+		&v1alpha1.ClusterCopy{},
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := client.Get(
+		ctx,
+		crclient.ObjectKey{Name: session.ID},
+		&v1alpha1.ClusterReservation{},
+	); !apierrors.IsNotFound(err) {
+		t.Fatalf("old ClusterReservation still exists: %v", err)
+	}
+}
+
 func TestCRDSessionStoreRebindRollbackRemovesTargetFinalizer(t *testing.T) {
 	ctx := context.Background()
 	base := newCRDTestClient()
@@ -1010,10 +1124,9 @@ func newCRDTestClient() crclient.Client {
 		WithScheme(scheme).
 		WithStatusSubresource(
 			&v1alpha1.Migration{}, &v1alpha1.PodMigration{}, &v1alpha1.Reservation{},
-			&v1alpha1.Copy{}, &v1alpha1.Backup{}, &v1alpha1.Restore{}, &v1alpha1.Rename{}, &v1alpha1.Move{},
+			&v1alpha1.Copy{}, &v1alpha1.Backup{}, &v1alpha1.Restore{}, &v1alpha1.Rename{},
 			&v1alpha1.ClusterMigration{}, &v1alpha1.ClusterPodMigration{}, &v1alpha1.ClusterReservation{},
-			&v1alpha1.ClusterCopy{}, &v1alpha1.ClusterBackup{}, &v1alpha1.ClusterRestore{},
-			&v1alpha1.ClusterRename{}, &v1alpha1.ClusterMove{},
+			&v1alpha1.ClusterCopy{}, &v1alpha1.ClusterMove{},
 		).
 		Build()
 }
@@ -1052,8 +1165,6 @@ func tenantScopedCRDClient(t *testing.T) crclient.Client {
 			return domain.ControllerKindRestore, true
 		case *v1alpha1.RenameList:
 			return domain.ControllerKindRename, true
-		case *v1alpha1.MoveList:
-			return domain.ControllerKindMove, true
 		default:
 			return "", false
 		}
@@ -1183,9 +1294,47 @@ func TestControllerSessionSupportedBoundaries(t *testing.T) {
 	if !ControllerSessionSupported(session) {
 		t.Fatal("cross-namespace migrate should use the cluster workflow")
 	}
+
+	resource, ok := domain.ControllerResourceForSession(session)
+	if !ok || resource.Kind != domain.ControllerKindClusterMigration || !resource.Cluster {
+		t.Fatalf("cross-namespace resource=%#v, found=%t", resource, ok)
+	}
+
+	session.BackendResource = domain.ControllerKindMigration
+	if ControllerSessionSupported(session) {
+		t.Fatal("persisted namespaced workflow must reject cross-namespace spec mutation")
+	}
+
+	session.BackendResource = domain.ControllerKindClusterMigration
+	if !ControllerSessionSupported(session) {
+		t.Fatal("persisted cluster workflow should accept qualified cross-namespace references")
+	}
 }
 
-func TestDecodeWorkflowRejectsSessionNamespaceMismatch(t *testing.T) {
+func TestControllerSessionSupportedRejectsCrossNamespaceBackup(t *testing.T) {
+	spec := domain.NewSessionSpec(domain.OperationBackup, domain.SessionCommon{
+		SourceNamespace: "tenant", SessionNamespace: "system",
+	}, false, domain.SessionWorkflowOptions{})
+	spec.Backup.SourcePVC = domain.ObjectReference{
+		Namespace: "tenant",
+		Name:      "data",
+		UID:       "pvc-uid",
+	}
+	spec.Backup.SourcePV = domain.ObjectReference{Name: "pv-data", UID: "pv-uid"}
+	spec.Backup.Name = "daily"
+	spec.Backup.BackupRepository = "archive"
+	session := domain.NewSession("cross-namespace-backup", spec, time.Now())
+
+	if ControllerSessionSupported(session) {
+		t.Fatal("cross-namespace backup must fall back because Backup has no cluster-scoped API")
+	}
+
+	if _, ok := domain.ControllerResourceForSession(session); ok {
+		t.Fatal("cross-namespace backup unexpectedly resolved a controller resource")
+	}
+}
+
+func TestDecodeWorkflowDerivesTenantBoundaryFromMetadataNamespace(t *testing.T) {
 	object := sessionObject(storeTestSession())
 	if object == nil {
 		t.Fatal("failed to build workflow object")
@@ -1193,10 +1342,17 @@ func TestDecodeWorkflowRejectsSessionNamespaceMismatch(t *testing.T) {
 
 	object.SetNamespace("other")
 
-	_, err := DecodeWorkflow(object)
-	if domain.CategoryOf(err) != domain.ErrorConflict ||
-		!strings.Contains(err.Error(), "spec.sessionNamespace must match metadata.namespace") {
-		t.Fatalf("namespace mismatch category=%s error=%v", domain.CategoryOf(err), err)
+	decoded, err := DecodeWorkflow(object)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if decoded.Spec.SourceNamespace != "other" ||
+		decoded.Spec.DestinationNamespace != "other" ||
+		decoded.Spec.SessionNamespace != "other" ||
+		decoded.Spec.Volumes[0].SourcePVC.Namespace != "other" ||
+		decoded.Spec.Volumes[0].DestinationPVC.Namespace != "other" {
+		t.Fatalf("metadata namespace was not applied consistently: %#v", decoded.Spec)
 	}
 }
 

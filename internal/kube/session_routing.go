@@ -27,6 +27,34 @@ func ControllerNamespaceBoundaryError(session *domain.Session) error {
 		return domain.NewError(domain.ErrorValidation, "controller namespace", "session is nil")
 	}
 
+	resource, ok := domain.ControllerResourceForSession(session)
+	if !ok {
+		return domain.NewError(
+			domain.ErrorPrecondition,
+			"controller namespace",
+			"no controller workflow API supports this operation and namespace scope",
+		)
+	}
+
+	return controllerNamespaceBoundaryErrorForResource(session, resource)
+}
+
+func controllerNamespaceBoundaryErrorForResource(
+	session *domain.Session,
+	resource domain.ControllerResource,
+) error {
+	if session == nil {
+		return domain.NewError(domain.ErrorValidation, "controller namespace", "session is nil")
+	}
+
+	if resource.Type != session.Spec.Type {
+		return domain.NewError(
+			domain.ErrorPrecondition,
+			"controller namespace",
+			"workflow resource does not match the session operation",
+		)
+	}
+
 	namespace := session.Spec.SessionNamespace
 	if namespace == "" {
 		return domain.NewError(
@@ -36,8 +64,7 @@ func ControllerNamespaceBoundaryError(session *domain.Session) error {
 		)
 	}
 
-	clusterScope := domain.IsClusterControllerKind(session.BackendResource)
-	if clusterScope {
+	if resource.Cluster {
 		return validateClusterWorkflowReferences(session)
 	}
 
@@ -219,50 +246,6 @@ func validateClusterWorkflowReferences(session *domain.Session) error {
 
 	if err := controllerVolumeBoundaryError(session.Spec.Volumes, "", true); err != nil {
 		return err
-	}
-
-	if session.Spec.Type == domain.SessionTypeBackup && session.Spec.Backup != nil {
-		if session.Spec.Backup.BackupRepositoryNamespace == "" {
-			return domain.NewError(
-				domain.ErrorPrecondition,
-				"controller namespace",
-				"cluster backup requires an explicit BackupRepository namespace",
-			)
-		}
-
-		if session.Spec.Backup.SourcePVC.Namespace == "" {
-			return domain.NewError(
-				domain.ErrorPrecondition,
-				"controller namespace",
-				"cluster backup requires a namespace on source PVC",
-			)
-		}
-
-		if session.Spec.Backup.SourcePV.Namespace != "" {
-			return domain.NewError(
-				domain.ErrorPrecondition,
-				"controller namespace",
-				"PV references must be cluster-scoped; omit namespace",
-			)
-		}
-	}
-
-	if session.Spec.Type == domain.SessionTypeRestore && session.Spec.Restore != nil &&
-		session.Spec.Restore.DestinationPVC.Namespace == "" {
-		return domain.NewError(
-			domain.ErrorPrecondition,
-			"controller namespace",
-			"cluster restore requires a namespace on destination PVC",
-		)
-	}
-
-	if session.Spec.Type == domain.SessionTypeRestore && session.Spec.Restore != nil &&
-		session.Spec.Restore.BackupRepositoryNamespace == "" {
-		return domain.NewError(
-			domain.ErrorPrecondition,
-			"controller namespace",
-			"cluster restore requires an explicit BackupRepository namespace",
-		)
 	}
 
 	if session.Spec.Type == domain.SessionTypeMigratePod {
@@ -468,21 +451,25 @@ func allowedKubeBlocksAPIVersion(apiVersion string) bool {
 // controller. Namespaced sessions stay tenant-local; cross-namespace sessions
 // require the matching cluster-scoped workflow CRD.
 func ControllerSessionSupported(session *domain.Session) bool {
-	if session == nil || session.Spec.SourceNamespace == "" || session.Spec.SessionNamespace == "" {
+	resource, ok := domain.ControllerResourceForSession(session)
+	if !ok {
 		return false
 	}
 
-	clusterScope := controllerSessionClusterScope(session)
-	if !clusterScope && ControllerNamespaceBoundaryError(session) != nil {
+	return controllerSessionSupportedForResource(session, resource)
+}
+
+func controllerSessionSupportedForResource(
+	session *domain.Session,
+	resource domain.ControllerResource,
+) bool {
+	if session == nil || session.Spec.SourceNamespace == "" ||
+		session.Spec.SessionNamespace == "" ||
+		resource.Type != session.Spec.Type {
 		return false
 	}
 
-	if clusterScope && domain.IsClusterControllerKind(session.BackendResource) &&
-		ControllerNamespaceBoundaryError(session) != nil {
-		return false
-	}
-
-	if !controllerRepositoryNamespaceSupported(session, clusterScope) {
+	if controllerNamespaceBoundaryErrorForResource(session, resource) != nil {
 		return false
 	}
 
@@ -503,40 +490,6 @@ func ControllerSessionSupported(session *domain.Session) bool {
 	default:
 		return false
 	}
-}
-
-func controllerSessionClusterScope(session *domain.Session) bool {
-	return domain.IsClusterControllerKind(session.BackendResource) ||
-		session.Spec.SourceNamespace != session.Spec.SessionNamespace ||
-		(session.Spec.DestinationNamespace != "" && session.Spec.DestinationNamespace != session.Spec.SessionNamespace) ||
-		(session.Spec.TemporaryNamespace != "" && session.Spec.TemporaryNamespace != session.Spec.SessionNamespace) ||
-		backupRepositoryCrossesNamespace(session) || session.Spec.Type == domain.SessionTypeMove
-}
-
-func controllerRepositoryNamespaceSupported(session *domain.Session, clusterScope bool) bool {
-	repositoryNamespace := ""
-
-	hasRepository := false
-
-	if session.Spec.Backup != nil {
-		hasRepository = true
-		repositoryNamespace = session.Spec.Backup.BackupRepositoryNamespace
-	}
-
-	if session.Spec.Restore != nil {
-		hasRepository = true
-		repositoryNamespace = session.Spec.Restore.BackupRepositoryNamespace
-	}
-
-	if !hasRepository {
-		return true
-	}
-
-	if repositoryNamespace == "" {
-		return !clusterScope
-	}
-
-	return clusterScope || repositoryNamespace == session.Spec.SessionNamespace
 }
 
 // RoutingSessionStore provides auto mode. New eligible sessions go to their

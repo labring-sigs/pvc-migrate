@@ -534,49 +534,77 @@ func TestControllerWorkflowRegistryCoversEveryLocalWorkflow(t *testing.T) {
 	}
 
 	seenTypes := make(map[SessionType]struct{}, len(workflows))
-	seenKinds := make(map[ControllerKind]struct{}, len(workflows))
-
-	seenResources := make(map[string]struct{}, len(workflows))
+	seenKinds := make(map[ControllerKind]struct{}, len(workflows)*2)
+	seenResources := make(map[string]struct{}, len(workflows)*2)
 
 	for _, workflow := range workflows {
-		if workflow.Type == "" || workflow.Kind == "" || workflow.Resource == "" ||
-			workflow.Singular == "" {
+		if workflow.Type == "" || workflow.Kind == "" && workflow.ClusterKind == "" {
 			t.Fatalf("incomplete controller workflow descriptor=%#v", workflow)
+		}
+
+		if workflow.Kind == "" != (workflow.Resource == "") ||
+			workflow.Kind == "" != (workflow.Singular == "") ||
+			workflow.ClusterKind == "" != (workflow.ClusterResource == "") ||
+			workflow.ClusterKind == "" != (workflow.ClusterSingular == "") {
+			t.Fatalf("inconsistent controller workflow scope descriptor=%#v", workflow)
 		}
 
 		if _, exists := seenTypes[workflow.Type]; exists {
 			t.Fatalf("duplicate controller workflow type=%q", workflow.Type)
 		}
 
-		if _, exists := seenKinds[workflow.Kind]; exists {
-			t.Fatalf("duplicate controller workflow kind=%q", workflow.Kind)
-		}
-
-		if _, exists := seenResources[workflow.Resource]; exists {
-			t.Fatalf("duplicate controller workflow resource=%q", workflow.Resource)
-		}
-
 		seenTypes[workflow.Type] = struct{}{}
-		seenKinds[workflow.Kind] = struct{}{}
-		seenResources[workflow.Resource] = struct{}{}
+		for _, kind := range []ControllerKind{workflow.Kind, workflow.ClusterKind} {
+			if kind == "" {
+				continue
+			}
+
+			if _, exists := seenKinds[kind]; exists {
+				t.Fatalf("duplicate controller workflow kind=%q", kind)
+			}
+
+			seenKinds[kind] = struct{}{}
+
+			byKind, ok := ControllerWorkflowForKind(kind)
+			if !ok || byKind.Type != workflow.Type {
+				t.Fatalf("kind lookup for %q returned %#v, found=%t", kind, byKind, ok)
+			}
+		}
+
+		for _, resource := range []string{workflow.Resource, workflow.ClusterResource} {
+			if resource == "" {
+				continue
+			}
+
+			if _, exists := seenResources[resource]; exists {
+				t.Fatalf("duplicate controller workflow resource=%q", resource)
+			}
+
+			seenResources[resource] = struct{}{}
+		}
 
 		byType, ok := ControllerWorkflowForType(workflow.Type)
 		if !ok || byType.Kind != workflow.Kind {
 			t.Fatalf("type lookup for %q returned %#v, found=%t", workflow.Type, byType, ok)
 		}
-
-		byKind, ok := ControllerWorkflowForKind(workflow.Kind)
-		if !ok || byKind.Type != workflow.Type {
-			t.Fatalf("kind lookup for %q returned %#v, found=%t", workflow.Kind, byKind, ok)
-		}
 	}
 
 	resources := ControllerWorkflowResources()
-	if len(resources) != len(workflows) {
+	if len(resources) != 12 {
 		t.Fatalf(
-			"controller resources=%v, want one resource per workflow",
+			"controller resources=%v, want 7 namespaced and 5 cluster resources",
 			resources,
 		)
+	}
+
+	backup, _ := ControllerWorkflowForType(SessionTypeBackup)
+	if backup.ClusterKind != "" {
+		t.Fatalf("Backup unexpectedly exposes cluster API: %#v", backup)
+	}
+
+	move, _ := ControllerWorkflowForType(SessionTypeMove)
+	if move.Kind != "" || move.ClusterKind != ControllerKindClusterMove {
+		t.Fatalf("Move scope contract=%#v", move)
 	}
 
 	originalKind := workflows[0].Kind

@@ -97,17 +97,3 @@ type LocalObjectReference struct {
 	// +kubebuilder:validation:Pattern=`^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$`
 	Name string `json:"name" yaml:"name"`
 }
-
-// RepositoryReference identifies a namespaced BackupRepository. It is used by
-// cluster-scoped workflows; namespaced workflows use LocalObjectReference so
-// a tenant cannot supply a different namespace.
-type RepositoryReference struct {
-	// +kubebuilder:validation:MinLength=1
-	// +kubebuilder:validation:MaxLength=253
-	// +kubebuilder:validation:Pattern=`^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$`
-	Name string `json:"name" yaml:"name"`
-	// +kubebuilder:validation:MinLength=1
-	// +kubebuilder:validation:MaxLength=63
-	// +kubebuilder:validation:Pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`
-	Namespace string `json:"namespace" yaml:"namespace"`
-}

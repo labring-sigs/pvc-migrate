@@ -128,7 +128,7 @@ func (w *ControllerSessionWaiter) resourceFor(
 		)
 	}
 
-	workflow, ok := domain.ControllerWorkflowForType(session.Spec.Type)
+	workflow, ok := domain.ControllerResourceForSession(session)
 	if !ok {
 		return nil, "", domain.NewError(
 			domain.ErrorValidation,
@@ -149,7 +149,12 @@ func (w *ControllerSessionWaiter) resourceFor(
 
 	gvr := groupVersion.WithResource(workflow.Resource)
 
-	return w.client.Resource(gvr).Namespace(session.Spec.SessionNamespace), workflow.Kind, nil
+	resource := w.client.Resource(gvr)
+	if workflow.Cluster {
+		return resource, workflow.Kind, nil
+	}
+
+	return resource.Namespace(session.Spec.SessionNamespace), workflow.Kind, nil
 }
 
 func consumeControllerWatch(

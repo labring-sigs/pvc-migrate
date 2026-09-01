@@ -310,24 +310,8 @@ func (r *WorkflowReconciler) SetupWithManager(manager ctrl.Manager) error {
 		{kind: domain.ControllerKindCopy, object: &v1alpha1.Copy{}},
 		{kind: domain.ControllerKindClusterCopy, object: &v1alpha1.ClusterCopy{}, cluster: true},
 		{kind: domain.ControllerKindBackup, object: &v1alpha1.Backup{}},
-		{
-			kind:    domain.ControllerKindClusterBackup,
-			object:  &v1alpha1.ClusterBackup{},
-			cluster: true,
-		},
 		{kind: domain.ControllerKindRestore, object: &v1alpha1.Restore{}},
-		{
-			kind:    domain.ControllerKindClusterRestore,
-			object:  &v1alpha1.ClusterRestore{},
-			cluster: true,
-		},
 		{kind: domain.ControllerKindRename, object: &v1alpha1.Rename{}},
-		{
-			kind:    domain.ControllerKindClusterRename,
-			object:  &v1alpha1.ClusterRename{},
-			cluster: true,
-		},
-		{kind: domain.ControllerKindMove, object: &v1alpha1.Move{}},
 		{kind: domain.ControllerKindClusterMove, object: &v1alpha1.ClusterMove{}, cluster: true},
 	}
 	for _, object := range objects {

@@ -462,7 +462,7 @@ func TestSessionGuidanceNamesCRDRecord(t *testing.T) {
 
 	if !strings.Contains(
 		text,
-		"Record: PodMigration "+session.Spec.SessionNamespace+"/"+session.ID,
+		"Record: ClusterPodMigration "+session.ID,
 	) {
 		t.Fatalf("guidance=%q", text)
 	}

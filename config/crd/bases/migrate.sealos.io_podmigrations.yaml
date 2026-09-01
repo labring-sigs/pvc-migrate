@@ -53,27 +53,12 @@ spec:
                 type: string
               deleteExtraneous:
                 type: boolean
-              destinationNamespace:
-                maxLength: 63
-                minLength: 1
-                pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
-                type: string
               openebsLvmEnableShared:
                 type: boolean
               precopyPasses:
                 type: integer
-              sessionNamespace:
-                maxLength: 63
-                minLength: 1
-                pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
-                type: string
               skipSourceUsageCheck:
                 type: boolean
-              sourceNamespace:
-                maxLength: 63
-                minLength: 1
-                pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
-                type: string
               sourceNode:
                 type: string
               strategies:
@@ -82,11 +67,6 @@ spec:
                 maxItems: 32
                 type: array
               targetNode:
-                type: string
-              temporaryNamespace:
-                maxLength: 63
-                minLength: 1
-                pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
                 type: string
               toolImage:
                 type: string
@@ -107,8 +87,10 @@ spec:
                     concurrentConsumers:
                       type: integer
                     destinationPVC:
-                      description: ObjectReference identifies a Kubernetes object
-                        involved in a workflow.
+                      description: |-
+                        LocalResourceReference identifies a resource whose namespace is established
+                        by the containing workflow, or a cluster-scoped resource such as a PV.
+                        Namespaced workflow APIs derive their boundary from metadata.namespace.
                       properties:
                         apiVersion:
                           maxLength: 253
@@ -120,10 +102,6 @@ spec:
                           maxLength: 253
                           minLength: 1
                           pattern: ^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$
-                          type: string
-                        namespace:
-                          maxLength: 63
-                          pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
                           type: string
                         resourceVersion:
                           maxLength: 256
@@ -140,8 +118,10 @@ spec:
                     sourceCapacity:
                       type: string
                     sourcePV:
-                      description: ObjectReference identifies a Kubernetes object
-                        involved in a workflow.
+                      description: |-
+                        LocalResourceReference identifies a resource whose namespace is established
+                        by the containing workflow, or a cluster-scoped resource such as a PV.
+                        Namespaced workflow APIs derive their boundary from metadata.namespace.
                       properties:
                         apiVersion:
                           maxLength: 253
@@ -153,10 +133,6 @@ spec:
                           maxLength: 253
                           minLength: 1
                           pattern: ^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$
-                          type: string
-                        namespace:
-                          maxLength: 63
-                          pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
                           type: string
                         resourceVersion:
                           maxLength: 256
@@ -171,8 +147,10 @@ spec:
                       - name
                       type: object
                     sourcePVC:
-                      description: ObjectReference identifies a Kubernetes object
-                        involved in a workflow.
+                      description: |-
+                        LocalResourceReference identifies a resource whose namespace is established
+                        by the containing workflow, or a cluster-scoped resource such as a PV.
+                        Namespaced workflow APIs derive their boundary from metadata.namespace.
                       properties:
                         apiVersion:
                           maxLength: 253
@@ -184,10 +162,6 @@ spec:
                           maxLength: 253
                           minLength: 1
                           pattern: ^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$
-                          type: string
-                        namespace:
-                          maxLength: 63
-                          pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
                           type: string
                         resourceVersion:
                           maxLength: 256
@@ -514,8 +488,10 @@ spec:
                     type: string
                   affectedPods:
                     items:
-                      description: ObjectReference identifies a Kubernetes object
-                        involved in a workflow.
+                      description: |-
+                        LocalResourceReference identifies a resource whose namespace is established
+                        by the containing workflow, or a cluster-scoped resource such as a PV.
+                        Namespaced workflow APIs derive their boundary from metadata.namespace.
                       properties:
                         apiVersion:
                           maxLength: 253
@@ -527,10 +503,6 @@ spec:
                           maxLength: 253
                           minLength: 1
                           pattern: ^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$
-                          type: string
-                        namespace:
-                          maxLength: 63
-                          pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
                           type: string
                         resourceVersion:
                           maxLength: 256
@@ -547,8 +519,10 @@ spec:
                     maxItems: 1024
                     type: array
                   controller:
-                    description: ObjectReference identifies a Kubernetes object involved
-                      in a workflow.
+                    description: |-
+                      LocalResourceReference identifies a resource whose namespace is established
+                      by the containing workflow, or a cluster-scoped resource such as a PV.
+                      Namespaced workflow APIs derive their boundary from metadata.namespace.
                     properties:
                       apiVersion:
                         maxLength: 253
@@ -560,10 +534,6 @@ spec:
                         maxLength: 253
                         minLength: 1
                         pattern: ^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$
-                        type: string
-                      namespace:
-                        maxLength: 63
-                        pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
                         type: string
                       resourceVersion:
                         maxLength: 256
@@ -650,8 +620,10 @@ spec:
                     format: int32
                     type: integer
                   pod:
-                    description: ObjectReference identifies a Kubernetes object involved
-                      in a workflow.
+                    description: |-
+                      LocalResourceReference identifies a resource whose namespace is established
+                      by the containing workflow, or a cluster-scoped resource such as a PV.
+                      Namespaced workflow APIs derive their boundary from metadata.namespace.
                     properties:
                       apiVersion:
                         maxLength: 253
@@ -663,10 +635,6 @@ spec:
                         maxLength: 253
                         minLength: 1
                         pattern: ^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$
-                        type: string
-                      namespace:
-                        maxLength: 63
-                        pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
                         type: string
                       resourceVersion:
                         maxLength: 256
@@ -722,17 +690,10 @@ spec:
                 - adapter
                 type: object
             required:
-            - destinationNamespace
             - precopyPasses
-            - sessionNamespace
-            - sourceNamespace
-            - temporaryNamespace
             - workload
             type: object
             x-kubernetes-validations:
-            - message: workflow namespaces must match metadata.namespace
-              rule: self.sourceNamespace == self.sessionNamespace && self.destinationNamespace
-                == self.sessionNamespace && self.temporaryNamespace == self.sessionNamespace
             - message: PodMigration workload.adapter must identify a supported workload
               rule: self.workload.adapter != 'None'
           status:
@@ -816,8 +777,10 @@ spec:
                 items:
                   properties:
                     lvmVolume:
-                      description: ObjectReference identifies a Kubernetes object
-                        involved in a workflow.
+                      description: |-
+                        LocalResourceReference identifies a resource whose namespace is established
+                        by the containing workflow, or a cluster-scoped resource such as a PV.
+                        Namespaced workflow APIs derive their boundary from metadata.namespace.
                       properties:
                         apiVersion:
                           maxLength: 253
@@ -829,10 +792,6 @@ spec:
                           maxLength: 253
                           minLength: 1
                           pattern: ^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$
-                          type: string
-                        namespace:
-                          maxLength: 63
-                          pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
                           type: string
                         resourceVersion:
                           maxLength: 256
@@ -851,8 +810,10 @@ spec:
                     previousSharedSet:
                       type: boolean
                     sourcePV:
-                      description: ObjectReference identifies a Kubernetes object
-                        involved in a workflow.
+                      description: |-
+                        LocalResourceReference identifies a resource whose namespace is established
+                        by the containing workflow, or a cluster-scoped resource such as a PV.
+                        Namespaced workflow APIs derive their boundary from metadata.namespace.
                       properties:
                         apiVersion:
                           maxLength: 253
@@ -864,10 +825,6 @@ spec:
                           maxLength: 253
                           minLength: 1
                           pattern: ^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$
-                          type: string
-                        namespace:
-                          maxLength: 63
-                          pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
                           type: string
                         resourceVersion:
                           maxLength: 256
@@ -958,8 +915,10 @@ spec:
                           format: date-time
                           type: string
                         activePVC:
-                          description: ObjectReference identifies a Kubernetes object
-                            involved in a workflow.
+                          description: |-
+                            LocalResourceReference identifies a resource whose namespace is established
+                            by the containing workflow, or a cluster-scoped resource such as a PV.
+                            Namespaced workflow APIs derive their boundary from metadata.namespace.
                           properties:
                             apiVersion:
                               maxLength: 253
@@ -971,10 +930,6 @@ spec:
                               maxLength: 253
                               minLength: 1
                               pattern: ^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$
-                              type: string
-                            namespace:
-                              maxLength: 63
-                              pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
                               type: string
                             resourceVersion:
                               maxLength: 256
@@ -999,8 +954,10 @@ spec:
                           type: boolean
                       type: object
                     destinationPV:
-                      description: ObjectReference identifies a Kubernetes object
-                        involved in a workflow.
+                      description: |-
+                        LocalResourceReference identifies a resource whose namespace is established
+                        by the containing workflow, or a cluster-scoped resource such as a PV.
+                        Namespaced workflow APIs derive their boundary from metadata.namespace.
                       properties:
                         apiVersion:
                           maxLength: 253
@@ -1012,10 +969,6 @@ spec:
                           maxLength: 253
                           minLength: 1
                           pattern: ^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$
-                          type: string
-                        namespace:
-                          maxLength: 63
-                          pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
                           type: string
                         resourceVersion:
                           maxLength: 256
@@ -1030,8 +983,10 @@ spec:
                       - name
                       type: object
                     destinationPVC:
-                      description: ObjectReference identifies a Kubernetes object
-                        involved in a workflow.
+                      description: |-
+                        LocalResourceReference identifies a resource whose namespace is established
+                        by the containing workflow, or a cluster-scoped resource such as a PV.
+                        Namespaced workflow APIs derive their boundary from metadata.namespace.
                       properties:
                         apiVersion:
                           maxLength: 253
@@ -1043,10 +998,6 @@ spec:
                           maxLength: 253
                           minLength: 1
                           pattern: ^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$
-                          type: string
-                        namespace:
-                          maxLength: 63
-                          pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
                           type: string
                         resourceVersion:
                           maxLength: 256
@@ -1107,8 +1058,10 @@ spec:
                 properties:
                   affectedPods:
                     items:
-                      description: ObjectReference identifies a Kubernetes object
-                        involved in a workflow.
+                      description: |-
+                        LocalResourceReference identifies a resource whose namespace is established
+                        by the containing workflow, or a cluster-scoped resource such as a PV.
+                        Namespaced workflow APIs derive their boundary from metadata.namespace.
                       properties:
                         apiVersion:
                           maxLength: 253
@@ -1120,10 +1073,6 @@ spec:
                           maxLength: 253
                           minLength: 1
                           pattern: ^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$
-                          type: string
-                        namespace:
-                          maxLength: 63
-                          pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
                           type: string
                         resourceVersion:
                           maxLength: 256
@@ -1139,8 +1088,10 @@ spec:
                       type: object
                     type: array
                   pod:
-                    description: ObjectReference identifies a Kubernetes object involved
-                      in a workflow.
+                    description: |-
+                      LocalResourceReference identifies a resource whose namespace is established
+                      by the containing workflow, or a cluster-scoped resource such as a PV.
+                      Namespaced workflow APIs derive their boundary from metadata.namespace.
                     properties:
                       apiVersion:
                         maxLength: 253
@@ -1152,10 +1103,6 @@ spec:
                         maxLength: 253
                         minLength: 1
                         pattern: ^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$
-                        type: string
-                      namespace:
-                        maxLength: 63
-                        pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
                         type: string
                       resourceVersion:
                         maxLength: 256

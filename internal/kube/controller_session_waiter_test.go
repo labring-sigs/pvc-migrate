@@ -60,6 +60,45 @@ func TestControllerSessionWaiterReturnsTerminalWatchUpdate(t *testing.T) {
 	}
 }
 
+func TestControllerSessionWaiterUsesClusterResourceWithoutNamespace(t *testing.T) {
+	session := newControllerWaitTestSession(domain.PhaseCompleted, "completed")
+	session.Spec.SourceNamespace = "source"
+	session.Spec.TemporaryNamespace = "destination"
+	session.Spec.DestinationNamespace = "destination"
+	session.Spec.SessionNamespace = "control"
+	session.Spec.Volumes[0].SourcePVC.Namespace = "source"
+	session.Spec.Volumes[0].DestinationPVC.Namespace = "destination"
+	session.BackendResource = domain.ControllerKindClusterMigration
+	object := controllerWaitTestObject(t, session)
+	gvr := schema.GroupVersionResource{
+		Group:    domain.SessionAPIGroup,
+		Version:  "v1alpha1",
+		Resource: domain.ClusterMigrationResource,
+	}
+	client := fake.NewSimpleDynamicClientWithCustomListKinds(
+		runtime.NewScheme(),
+		map[schema.GroupVersionResource]string{gvr: "ClusterMigrationList"},
+		object,
+	)
+
+	completed, err := NewControllerSessionWaiter(client).Wait(
+		context.Background(),
+		session,
+		func(update *domain.Session) (bool, error) {
+			return update.Status.Phase == domain.PhaseCompleted, nil
+		},
+	)
+	if err != nil || completed == nil {
+		t.Fatalf("cluster wait session=%#v error=%v", completed, err)
+	}
+
+	actions := client.Actions()
+	if len(actions) == 0 || actions[0].GetResource().Resource != domain.ClusterMigrationResource ||
+		actions[0].GetNamespace() != "" {
+		t.Fatalf("cluster wait action=%#v", actions)
+	}
+}
+
 func TestControllerSessionWaiterReconnectsAfterClosedWatch(t *testing.T) {
 	initial := newControllerWaitTestSession(domain.PhasePlanned, "planned")
 	initialObject := controllerWaitTestObject(t, initial)
@@ -235,9 +274,9 @@ func newControllerWaitTestSession(phase domain.Phase, message string) *domain.Se
 	spec := domain.NewOfflineMigrationSessionSpec(
 		domain.SessionCommon{
 			SourceNamespace:      "app",
-			TemporaryNamespace:   "system",
+			TemporaryNamespace:   "app",
 			DestinationNamespace: "app",
-			SessionNamespace:     "system",
+			SessionNamespace:     "app",
 			Volumes: []domain.VolumeSpec{
 				{
 					SourcePVC: domain.ObjectReference{
@@ -246,7 +285,7 @@ func newControllerWaitTestSession(phase domain.Phase, message string) *domain.Se
 					SourcePV:      domain.ObjectReference{Name: "source-pv", UID: "source-pv-uid"},
 					SourcePVCSpec: corev1.PersistentVolumeClaimSpec{},
 					DestinationPVC: domain.ObjectReference{
-						Name: "destination", Namespace: "system",
+						Name: "destination", Namespace: "app",
 					},
 				},
 			},
@@ -255,6 +294,7 @@ func newControllerWaitTestSession(phase domain.Phase, message string) *domain.Se
 	)
 	session := domain.NewSession("workflow-test", spec, time.Now())
 	session.Backend = SessionBackendCRD
+	session.BackendResource = domain.ControllerKindMigration
 	session.Status.Phase = phase
 	session.Status.Message = message
 
@@ -284,7 +324,7 @@ func controllerWaitTestObject(
 	unstructuredObject := &unstructured.Unstructured{Object: content}
 	if _, err := decodeControllerWatchObject(
 		unstructuredObject,
-		workflowCRDKind(session.Spec.Type),
+		workflowCRDKindForSession(session),
 	); err != nil {
 		t.Fatalf("test workflow object does not decode: %v", err)
 	}

@@ -45,19 +45,23 @@ spec:
           metadata:
             type: object
           spec:
-            description: MigrationSpec is an offline PVC migration. It has no workload
-              controls.
             properties:
               createdBy:
                 type: string
               deleteExtraneous:
                 type: boolean
               destinationNamespace:
+                description: |-
+                  NamespaceName is a Kubernetes namespace name used by a cluster-scoped
+                  workflow. Namespaced workflows derive this boundary from metadata.namespace.
                 maxLength: 63
                 minLength: 1
                 pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
                 type: string
               sessionNamespace:
+                description: |-
+                  NamespaceName is a Kubernetes namespace name used by a cluster-scoped
+                  workflow. Namespaced workflows derive this boundary from metadata.namespace.
                 maxLength: 63
                 minLength: 1
                 pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
@@ -65,6 +69,9 @@ spec:
               skipSourceUsageCheck:
                 type: boolean
               sourceNamespace:
+                description: |-
+                  NamespaceName is a Kubernetes namespace name used by a cluster-scoped
+                  workflow. Namespaced workflows derive this boundary from metadata.namespace.
                 maxLength: 63
                 minLength: 1
                 pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
@@ -79,6 +86,9 @@ spec:
               targetNode:
                 type: string
               temporaryNamespace:
+                description: |-
+                  NamespaceName is a Kubernetes namespace name used by a cluster-scoped
+                  workflow. Namespaced workflows derive this boundary from metadata.namespace.
                 maxLength: 63
                 minLength: 1
                 pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
@@ -90,8 +100,9 @@ spec:
               volumes:
                 items:
                   description: |-
-                    VolumeSpec is planning output required to resume a PVC transfer. It is an
-                    API-owned type with only the fields needed by transfer workflows.
+                    ClusterVolumeSpec is the cluster-workflow planning contract. PVC names are
+                    relative to the source/destination namespace declared once on the parent
+                    spec; PV references remain cluster-scoped.
                   properties:
                     accessModes:
                       items:
@@ -102,8 +113,10 @@ spec:
                     concurrentConsumers:
                       type: integer
                     destinationPVC:
-                      description: ObjectReference identifies a Kubernetes object
-                        involved in a workflow.
+                      description: |-
+                        LocalResourceReference identifies a resource whose namespace is established
+                        by the containing workflow, or a cluster-scoped resource such as a PV.
+                        Namespaced workflow APIs derive their boundary from metadata.namespace.
                       properties:
                         apiVersion:
                           maxLength: 253
@@ -115,10 +128,6 @@ spec:
                           maxLength: 253
                           minLength: 1
                           pattern: ^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$
-                          type: string
-                        namespace:
-                          maxLength: 63
-                          pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
                           type: string
                         resourceVersion:
                           maxLength: 256
@@ -135,8 +144,10 @@ spec:
                     sourceCapacity:
                       type: string
                     sourcePV:
-                      description: ObjectReference identifies a Kubernetes object
-                        involved in a workflow.
+                      description: |-
+                        LocalResourceReference identifies a resource whose namespace is established
+                        by the containing workflow, or a cluster-scoped resource such as a PV.
+                        Namespaced workflow APIs derive their boundary from metadata.namespace.
                       properties:
                         apiVersion:
                           maxLength: 253
@@ -148,10 +159,6 @@ spec:
                           maxLength: 253
                           minLength: 1
                           pattern: ^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$
-                          type: string
-                        namespace:
-                          maxLength: 63
-                          pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
                           type: string
                         resourceVersion:
                           maxLength: 256
@@ -166,8 +173,10 @@ spec:
                       - name
                       type: object
                     sourcePVC:
-                      description: ObjectReference identifies a Kubernetes object
-                        involved in a workflow.
+                      description: |-
+                        LocalResourceReference identifies a resource whose namespace is established
+                        by the containing workflow, or a cluster-scoped resource such as a PV.
+                        Namespaced workflow APIs derive their boundary from metadata.namespace.
                       properties:
                         apiVersion:
                           maxLength: 253
@@ -179,10 +188,6 @@ spec:
                           maxLength: 253
                           minLength: 1
                           pattern: ^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$
-                          type: string
-                        namespace:
-                          maxLength: 63
-                          pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
                           type: string
                         resourceVersion:
                           maxLength: 256
@@ -497,10 +502,6 @@ spec:
             - sourceNamespace
             - temporaryNamespace
             type: object
-            x-kubernetes-validations:
-            - message: workflow namespaces must match metadata.namespace
-              rule: self.sourceNamespace == self.sessionNamespace && self.destinationNamespace
-                == self.sessionNamespace && self.temporaryNamespace == self.sessionNamespace
           status:
             properties:
               completedAt:
@@ -634,12 +635,11 @@ spec:
                 type: string
               volumes:
                 items:
-                  description: |-
-                    MigrationVolumeStatus is the durable checkpoint for an offline migration
-                    volume. It intentionally excludes workload-only progress and OpenEBS
-                    shared-mount state.
                   properties:
                     activation:
+                      description: |-
+                        Cluster status types use fully qualified references. A cluster-scoped
+                        workflow can span namespaces, so checkpoints remain independently auditable.
                       properties:
                         activatedAt:
                           format: date-time

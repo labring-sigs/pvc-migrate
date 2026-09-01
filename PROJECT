@@ -72,9 +72,54 @@ resources:
 - api:
     crdVersion: v1
     namespaced: true
+  controller: false
+  domain: sealos.io
+  group: migrate
+  kind: BackupRepository
+  path: github.com/labring-sigs/pvc-migrate/api/v1alpha1
+  version: v1alpha1
+- api:
+    crdVersion: v1
+    namespaced: false
   controller: true
   domain: sealos.io
   group: migrate
-  kind: Move
+  kind: ClusterMigration
+  path: github.com/labring-sigs/pvc-migrate/api/v1alpha1
+  version: v1alpha1
+- api:
+    crdVersion: v1
+    namespaced: false
+  controller: true
+  domain: sealos.io
+  group: migrate
+  kind: ClusterPodMigration
+  path: github.com/labring-sigs/pvc-migrate/api/v1alpha1
+  version: v1alpha1
+- api:
+    crdVersion: v1
+    namespaced: false
+  controller: true
+  domain: sealos.io
+  group: migrate
+  kind: ClusterReservation
+  path: github.com/labring-sigs/pvc-migrate/api/v1alpha1
+  version: v1alpha1
+- api:
+    crdVersion: v1
+    namespaced: false
+  controller: true
+  domain: sealos.io
+  group: migrate
+  kind: ClusterCopy
+  path: github.com/labring-sigs/pvc-migrate/api/v1alpha1
+  version: v1alpha1
+- api:
+    crdVersion: v1
+    namespaced: false
+  controller: true
+  domain: sealos.io
+  group: migrate
+  kind: ClusterMove
   path: github.com/labring-sigs/pvc-migrate/api/v1alpha1
   version: v1alpha1

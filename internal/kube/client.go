@@ -243,8 +243,10 @@ func AvailableControllerWorkflowKinds(
 
 	available := make([]domain.ControllerKind, 0, len(domain.ControllerWorkflows())*2)
 	for _, workflow := range domain.ControllerWorkflows() {
-		if _, ok := served[workflow.Resource]; ok {
-			available = append(available, workflow.Kind)
+		if workflow.Resource != "" {
+			if _, ok := served[workflow.Resource]; ok {
+				available = append(available, workflow.Kind)
+			}
 		}
 
 		if workflow.ClusterResource != "" {

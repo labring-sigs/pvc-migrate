@@ -2,8 +2,8 @@
 
 ## Resource boundary
 
-The API group is `migrate.sealos.io/v1alpha1`. Each operation has its own
-namespaced and cluster-scoped workflow resource:
+The API group is `migrate.sealos.io/v1alpha1`. Scope follows the operation's
+actual authority boundary:
 
 | Operation | Namespaced | Cluster-scoped |
 | --- | --- | --- |
@@ -11,25 +11,33 @@ namespaced and cluster-scoped workflow resource:
 | pod migration | `PodMigration` | `ClusterPodMigration` |
 | reservation | `Reservation` | `ClusterReservation` |
 | copy | `Copy` | `ClusterCopy` |
-| backup | `Backup` | `ClusterBackup` |
-| restore | `Restore` | `ClusterRestore` |
-| rename | `Rename` | `ClusterRename` |
-| move | `Move` | `ClusterMove` |
+| backup | `Backup` | none |
+| restore | `Restore` | none |
+| rename | `Rename` | none |
+| move | none | `ClusterMove` |
 
 The operation-specific API types own their fields and statuses. The internal
 `domain.SessionSpec` and `domain.SessionStatus` are translation details and do
 not appear in CRD schemas. Kubebuilder/controller-runtime owns API generation,
 deepcopy code, status subresources, watches, leader election, and retries.
 
-Namespaced workflows have a strict tenant boundary. Their metadata namespace,
-`spec.sessionNamespace`, and every namespaced source, destination, temporary,
-workload, and repository reference must identify the same namespace. A
-namespaced `BackupRepository` can read only a Secret in its own namespace.
+Namespaced workflows have a strict tenant boundary. `metadata.namespace` is
+the single namespace authority; namespaced specs and their local resource
+references contain no namespace selectors. Source, temporary, destination,
+session, workload, and repository namespaces are derived from metadata during
+conversion to the internal execution model. A namespaced `BackupRepository`
+can read only a Secret in its own namespace.
 
 Cluster workflows have no metadata namespace. They require explicit namespace
-fields on every namespaced reference and are the only workflow form allowed to
-cross namespaces. PVs remain cluster-scoped and must omit namespace. Cluster
-workflow RBAC is therefore restricted to the controller/operator identity.
+roles at the top level of each spec; nested PVC and workload references are
+relative to those roles. Their status types retain fully qualified references
+for audit and restart recovery. PVs remain cluster-scoped and omit namespace.
+Cluster workflow RBAC is restricted to the controller/operator identity.
+
+Backup and restore remain namespaced because the repository and credential
+Secret are tenant-owned and local. Rename is inherently same-namespace, while
+Move is inherently cross-namespace, so each exposes only the scope that can
+represent its semantics safely.
 
 Cross-cluster operations still use session mode. A controller connected to one
 API server cannot safely act on a second cluster without a separately managed
@@ -45,7 +53,8 @@ destination identity and lifecycle protocol.
 
 `controller` mode never silently falls back. `auto` discovers each served
 workflow kind independently, chooses a namespaced kind for same-namespace work,
-and chooses the matching cluster kind when namespaces differ. The CLI creates
+and chooses a cluster kind when that operation exposes one and namespaces
+differ. Unsupported scope combinations use session mode in `auto`. The CLI creates
 the CR, then watches that exact object by resource version until a terminal
 status. It reconnects after watch closure or expiration and reports CR status
 history and conditions while the controller owns tool Pod logs. `--wait=false`
@@ -97,12 +106,9 @@ backends is additive: each gets a new typed field and controller adapter while
 the union validation prevents mixed configurations.
 
 Namespaced `Backup` and `Restore` use a name-only `repositoryRef`, which is
-resolved in the workflow namespace. `ClusterBackup` and `ClusterRestore` use a
-name-plus-namespace `repositoryRef`, allowing an operator to select an
-existing namespaced repository while keeping the credential Secret boundary
-visible and auditable. A cluster-scoped repository resource is intentionally not
-part of the API; it would make administrator credentials indirectly available
-to tenant workflows.
+resolved in the workflow namespace. No cluster-scoped backup workflow or
+repository resource is part of the API; this prevents a cluster object from
+becoming an indirect path to another namespace's credentials.
 
 ## Status and recovery
 
@@ -123,5 +129,7 @@ controller ClusterRole only to the controller ServiceAccount. Tenant roles
 should grant create/get/list/watch on the namespaced workflow kinds they may
 submit and status read access; status writes, Secret reads, PV access, and
 cross-namespace workflow permissions remain controller/operator privileges.
-The bundled controller role reads named Secrets and does not require Secret
-list permission.
+The bundled controller role reads repository credentials by name and also
+creates, updates, and deletes short-lived Helm release Secrets. It does not
+require Secret list permission. This write access is required by the upstream
+pv-migrate Helm driver and is limited to the controller/operator identity.

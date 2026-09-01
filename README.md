@@ -53,7 +53,9 @@ A locally executed CLI uses the identity from its kubeconfig and requires equiva
 The bundled ClusterRole is a high-privilege controller identity. Bind it only
 to the controller ServiceAccount; tenant users should receive narrowly scoped
 namespaced permissions to submit and observe the workflow CRs they own.
-The role reads Secrets by exact name and intentionally omits Secret `list`.
+The role reads repository credentials by exact name and grants the controller
+the create/update/delete Secret verbs required by Helm's default release
+storage driver. It intentionally omits Secret `list`.
 
 Build the tool image. It runs the CLI by default and also supplies PVC reservation, rsync, SSHD, and rclone roles inside the cluster:
 
@@ -69,7 +71,7 @@ Use `--tool-image registry.example/pvc-migrate:0.1.0` when cluster nodes pull th
 The CLI supports two durable execution backends:
 
 - `--mode=session` always stores sessions in ConfigMaps and executes the workflow in the invoking process.
-- `--mode=controller` stores local sessions as operation-specific `migrate.sealos.io/v1alpha1` CRs. Same-namespace work uses `Migration`, `PodMigration`, `Reservation`, `Copy`, `Backup`, `Restore`, `Rename`, or `Move`; cross-namespace work uses the matching `Cluster*` kind. Cross-cluster workflows remain on the ConfigMap/session backend. The controller uses leader election, watches every installed workflow kind, and reuses the same resumable app.Service state machine. The CLI watches that CR and waits for completion by default; use `--wait=false` for detached submission. A command fails clearly when its matching CRD is absent.
+- `--mode=controller` stores local sessions as operation-specific `migrate.sealos.io/v1alpha1` CRs. Same-namespace work uses `Migration`, `PodMigration`, `Reservation`, `Copy`, `Backup`, `Restore`, or `Rename`. Cross-namespace migration, pod migration, reservation, and copy use their `Cluster*` kind; PVC identity moves use `ClusterMove`. Backup, restore, and rename intentionally have no cluster-scoped form. Cross-cluster workflows remain on the ConfigMap/session backend. The controller uses leader election, watches every installed workflow kind, and reuses the same resumable app.Service state machine. The CLI watches that CR and waits for completion by default; use `--wait=false` for detached submission. A command fails clearly when its matching CRD is absent.
 - `--mode=auto` (the default) discovers workflow CRDs independently. Each eligible single-cluster operation uses its matching namespaced or cluster-scoped CRD when served; missing kinds and cross-cluster workflows use ConfigMap sessions. This supports staged CRD rollouts without silently dropping an operation.
 
 Install the controller backend with:
@@ -94,11 +96,12 @@ installation-compatible `deploy/crd.yaml` file.
 The resource boundary and unsupported-workflow decisions are documented in
 [`docs/controller-design.md`](docs/controller-design.md).
 
-Workflow CRDs are namespaced by tenant. `spec.sessionNamespace` and every
-source/destination/temporary object namespace must equal the CR metadata
-namespace; the controller rejects violations before touching resources.
-Kubernetes 1.28 CRD CEL cannot inspect the root object's namespace, so clusters
-that require admission-time rejection should add a separate admission policy.
+Namespaced workflow CRDs use `metadata.namespace` as their tenant boundary.
+Their specs and local object references expose no namespace fields; conversion
+to the execution model derives source, temporary, destination, session, and
+repository namespaces from metadata. Cluster workflow specs declare each
+operational namespace once at the top level and keep nested references local
+to the relevant source or destination namespace.
 Backup and restore use a namespaced `BackupRepository` for a user-selected
 location. `spec.type` selects a structured backend configuration. `s3` is
 currently executable and reads its credentials from a Secret in the repository
@@ -106,12 +109,14 @@ namespace. The API also defines a `pvc` backend for a future data-plane
 adapter; the current controller rejects it explicitly instead of treating it
 as S3. Creating a repository configures a location and does not grant access
 to other namespaces. Namespaced workflows use a name-only `repositoryRef`;
-cluster-scoped `ClusterBackup` and `ClusterRestore` use an explicit
-name-and-namespace reference. The controller scopes object keys by cluster and
-workload namespace and pins repository UID/generation in workflow status, so
-replacing a repository requires a new workflow while in-place Secret rotation
-remains possible. Cross-cluster commands remain ConfigMap/session workflows
-because they require a second API server identity.
+the repository and its Secret must be in the workflow namespace. Backup and
+restore have no cluster-scoped workflow resource, preventing an operator API
+from becoming an indirect cross-namespace credential path. The controller
+scopes object keys by cluster and workload namespace and pins repository
+UID/generation in workflow status, so replacing a repository requires a new
+workflow while in-place Secret rotation remains possible. Cross-cluster
+commands remain ConfigMap/session workflows because they require a second API
+server identity.
 
 The bundled ClusterRole is controller-only. Tenant bindings should grant
 namespaced workflow create/get/list/watch permissions and `/status` read only;

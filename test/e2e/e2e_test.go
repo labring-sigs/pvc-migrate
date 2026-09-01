@@ -175,6 +175,231 @@ func TestBackupRepositoryAdmission(t *testing.T) {
 	}
 }
 
+func TestWorkflowScopeAdmissionAndStatusMatrix(t *testing.T) {
+	config, client, _ := capacityE2EClients(t)
+	dynamicClient, err := dynamic.NewForConfig(config)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	defer cancel()
+
+	suffix := e2eSuffix()
+	namespace := "pvc-migrate-scope-" + suffix
+	sessionID := "scope-" + suffix
+	defer cleanupTestResources(t, config, client, namespace, sessionID)
+	createE2ENamespace(t, ctx, client, namespace, sessionID)
+
+	type workflowCase struct {
+		resource string
+		kind     string
+		cluster  bool
+		volumes  bool
+		warm     bool
+		spec     map[string]any
+	}
+	localIdentity := func() map[string]any {
+		return map[string]any{
+			"sourcePVC":      map[string]any{"name": "source"},
+			"sourcePV":       map[string]any{"name": "source-pv"},
+			"destinationPVC": map[string]any{"name": "destination"},
+			"sourceTemplate": map[string]any{"spec": map[string]any{}},
+		}
+	}
+	clusterNamespaces := func() map[string]any {
+		return map[string]any{
+			"sourceNamespace":      namespace,
+			"temporaryNamespace":   namespace,
+			"destinationNamespace": namespace + "-destination",
+			"sessionNamespace":     namespace,
+		}
+	}
+	merge := func(base map[string]any, values map[string]any) map[string]any {
+		for key, value := range values {
+			base[key] = value
+		}
+
+		return base
+	}
+
+	tests := []workflowCase{
+		{resource: "migrations", kind: "Migration", volumes: true, spec: map[string]any{
+			"sourceNamespace": "must-be-pruned",
+		}},
+		{
+			resource: "podmigrations", kind: "PodMigration", volumes: true, warm: true,
+			spec: map[string]any{
+				"precopyPasses": int64(0),
+				"workload":      map[string]any{"adapter": "StandalonePod"},
+			},
+		},
+		{resource: "reservations", kind: "Reservation", volumes: true, spec: map[string]any{}},
+		{resource: "copies", kind: "Copy", volumes: true, spec: map[string]any{}},
+		{
+			resource: "backups", kind: "Backup", spec: map[string]any{
+				"sourcePVC":     map[string]any{"name": "source"},
+				"sourcePV":      map[string]any{"name": "source-pv"},
+				"name":          "archive",
+				"repositoryRef": map[string]any{"name": "repository"},
+			},
+		},
+		{
+			resource: "restores", kind: "Restore", spec: map[string]any{
+				"destinationPVC": map[string]any{"name": "destination"},
+				"name":           "archive",
+				"repositoryRef":  map[string]any{"name": "repository"},
+			},
+		},
+		{resource: "renames", kind: "Rename", volumes: true, spec: localIdentity()},
+		{
+			resource: "clustermigrations", kind: "ClusterMigration", cluster: true, volumes: true,
+			spec: clusterNamespaces(),
+		},
+		{
+			resource: "clusterpodmigrations", kind: "ClusterPodMigration", cluster: true,
+			volumes: true, warm: true,
+			spec: merge(clusterNamespaces(), map[string]any{
+				"precopyPasses": int64(0),
+				"workload":      map[string]any{"adapter": "StandalonePod"},
+			}),
+		},
+		{
+			resource: "clusterreservations", kind: "ClusterReservation", cluster: true,
+			volumes: true, spec: clusterNamespaces(),
+		},
+		{
+			resource: "clustercopies", kind: "ClusterCopy", cluster: true,
+			volumes: true, spec: clusterNamespaces(),
+		},
+		{
+			resource: "clustermoves", kind: "ClusterMove", cluster: true, volumes: true,
+			spec: map[string]any{
+				"sourceNamespace":      namespace,
+				"destinationNamespace": namespace + "-destination",
+				"sessionNamespace":     namespace,
+				"identity":             localIdentity(),
+			},
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.kind, func(t *testing.T) {
+			object := &unstructured.Unstructured{Object: map[string]any{
+				"apiVersion": workflowGroup + "/" + workflowVersion,
+				"kind":       test.kind,
+				"metadata": map[string]any{
+					"name":      sessionID,
+					"namespace": namespace,
+					"labels":    map[string]any{sessionLabel: sessionID},
+				},
+				"spec": test.spec,
+			}}
+			var resources dynamic.ResourceInterface
+			if test.cluster {
+				resources = dynamicClient.Resource(workflowGVR(test.resource))
+				object.SetNamespace("")
+			} else {
+				resources = dynamicClient.Resource(workflowGVR(test.resource)).Namespace(namespace)
+			}
+
+			created, err := resources.Create(ctx, object, metav1.CreateOptions{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if test.cluster == (created.GetNamespace() != "") {
+				t.Fatalf("resource namespace=%q cluster=%t", created.GetNamespace(), test.cluster)
+			}
+			if test.kind == "Migration" {
+				if _, found, nestedErr := unstructured.NestedFieldNoCopy(
+					created.Object,
+					"spec",
+					"sourceNamespace",
+				); nestedErr != nil || found {
+					t.Fatalf("namespaced namespace selector was not pruned: found=%t err=%v", found, nestedErr)
+				}
+			}
+
+			now := time.Now().UTC().Format(time.RFC3339)
+			status := map[string]any{
+				"phase":     "Planned",
+				"startedAt": now,
+				"updatedAt": now,
+			}
+			if test.volumes {
+				status["volumes"] = []any{}
+			}
+			if test.warm {
+				status["warmPassesCompleted"] = int64(0)
+			}
+			created.Object["status"] = status
+			updated, err := resources.UpdateStatus(ctx, created, metav1.UpdateOptions{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			phase, found, err := unstructured.NestedString(updated.Object, "status", "phase")
+			if err != nil || !found || phase != "Planned" {
+				t.Fatalf("status phase=%q found=%t err=%v", phase, found, err)
+			}
+		})
+	}
+
+	invalidCluster := []struct {
+		name     string
+		resource string
+		kind     string
+		spec     map[string]any
+	}{
+		{
+			name: "missing namespace", resource: "clustermigrations", kind: "ClusterMigration",
+			spec: map[string]any{
+				"sourceNamespace": namespace, "temporaryNamespace": namespace,
+				"sessionNamespace": namespace,
+			},
+		},
+		{
+			name: "invalid namespace", resource: "clustercopies", kind: "ClusterCopy",
+			spec: merge(clusterNamespaces(), map[string]any{"sourceNamespace": "Invalid_Namespace"}),
+		},
+		{
+			name: "same namespace move", resource: "clustermoves", kind: "ClusterMove",
+			spec: map[string]any{
+				"sourceNamespace": namespace, "destinationNamespace": namespace,
+				"sessionNamespace": namespace, "identity": localIdentity(),
+			},
+		},
+	}
+	for index, test := range invalidCluster {
+		t.Run(test.name, func(t *testing.T) {
+			object := &unstructured.Unstructured{Object: map[string]any{
+				"apiVersion": workflowGroup + "/" + workflowVersion,
+				"kind":       test.kind,
+				"metadata":   map[string]any{"name": fmt.Sprintf("invalid-%d-%s", index, suffix)},
+				"spec":       test.spec,
+			}}
+			_, err := dynamicClient.Resource(workflowGVR(test.resource)).
+				Create(ctx, object, metav1.CreateOptions{})
+			if !apierrors.IsInvalid(err) {
+				t.Fatalf("invalid cluster workflow error=%v", err)
+			}
+		})
+	}
+
+	for _, resource := range []string{
+		"clusterbackups", "clusterrestores", "clusterrenames", "moves",
+	} {
+		resources := dynamicClient.Resource(workflowGVR(resource))
+		if resource == "moves" {
+			_, err = resources.Namespace(namespace).List(ctx, metav1.ListOptions{})
+		} else {
+			_, err = resources.List(ctx, metav1.ListOptions{})
+		}
+		if !apierrors.IsNotFound(err) {
+			t.Fatalf("removed resource %s is still served: %v", resource, err)
+		}
+	}
+}
+
 func TestControllerPodMigrationStatusCheckpointRoundTrip(t *testing.T) {
 	if os.Getenv("PVC_MIGRATE_E2E") != "1" {
 		t.Skip("set PVC_MIGRATE_E2E=1 to run cluster E2E tests")
@@ -2343,16 +2568,19 @@ func startE2EController(
 	}
 
 	process := &e2eControllerProcess{done: make(chan struct{})}
-	process.command = exec.CommandContext(
-		ctx,
-		binary,
+	args := []string{
 		"--kubeconfig", kubeconfig,
 		"--mode", "controller",
 		"--session-namespace", namespace,
+		"--controller-namespace", namespace,
 		"--timeout", "0",
 		"--log-level", "info",
-		"controller",
-	)
+	}
+	if toolImage := os.Getenv("PVC_MIGRATE_E2E_TOOL_IMAGE"); toolImage != "" {
+		args = append(args, "--tool-image", toolImage)
+	}
+	args = append(args, "controller")
+	process.command = exec.CommandContext(ctx, binary, args...)
 	process.command.Stdout = &process.stdout
 	process.command.Stderr = &process.stderr
 	if err := process.command.Start(); err != nil {
@@ -2643,6 +2871,15 @@ func readCopySession(
 		if err := json.Unmarshal(statusJSON, &snapshot.Status); err != nil {
 			t.Fatal(err)
 		}
+		// Namespaced workflow specs intentionally use local references. Rebuild
+		// the execution-model namespace in this compatibility snapshot so the
+		// assertions can compare identities with the live PVCs.
+		if resourceName == "copies" {
+			for index := range snapshot.Spec.Volumes {
+				snapshot.Spec.Volumes[index].SourcePVC.Namespace = namespace
+				snapshot.Spec.Volumes[index].DestinationPVC.Namespace = namespace
+			}
+		}
 		for index := range min(len(snapshot.Spec.Volumes), len(snapshot.Status.Volumes)) {
 			checkpoint := snapshot.Status.Volumes[index]
 			snapshot.Spec.Volumes[index].DestinationPVC = checkpoint.DestinationPVC
@@ -2692,6 +2929,14 @@ func assertCopySession(
 ) {
 	t.Helper()
 	snapshot := readCopySession(t, ctx, config, client, mode, "copies", namespace, id)
+	if mode == "controller" {
+		// Copy specs use local references; the assertion compares them with live
+		// namespaced objects after the status-owned identities are overlaid.
+		for index := range snapshot.Spec.Volumes {
+			snapshot.Spec.Volumes[index].SourcePVC.Namespace = namespace
+			snapshot.Spec.Volumes[index].DestinationPVC.Namespace = namespace
+		}
+	}
 	wantKind := "MigrationSession"
 	if mode == "controller" {
 		wantKind = "Copy"
@@ -2722,13 +2967,18 @@ func assertCopySession(
 			len(sourceClaims),
 		)
 	}
-	if snapshot.Spec.SourceNamespace != namespace ||
+	if mode != "controller" && (snapshot.Spec.SourceNamespace != namespace ||
 		snapshot.Spec.TemporaryNamespace != namespace ||
 		snapshot.Spec.DestinationNamespace != namespace ||
-		snapshot.Spec.SessionNamespace != namespace {
+		snapshot.Spec.SessionNamespace != namespace) {
 		t.Fatalf("copy session namespaces are invalid: %#v", snapshot.Spec)
 	}
 	if mode == "controller" {
+		for _, field := range []string{"sourceNamespace", "temporaryNamespace", "destinationNamespace", "sessionNamespace"} {
+			if _, exists := snapshot.SpecFields[field]; exists {
+				t.Fatalf("field %q leaked into namespaced Copy CRD spec", field)
+			}
+		}
 		for _, field := range []string{"type", "copy", "workload", "precopyPasses", "verifyChecksum", "reserve", "migrate", "migratePod", "rename", "move"} {
 			if _, exists := snapshot.SpecFields[field]; exists {
 				t.Fatalf("field %q leaked into Copy CRD spec", field)
@@ -3772,9 +4022,14 @@ func assertSessionPayloadShape(
 				t.Fatalf("field %q leaked into PodMigration CRD spec", field)
 			}
 		}
-		for _, field := range []string{"workload", "precopyPasses", "volumes", "sourceNamespace", "destinationNamespace"} {
+		for _, field := range []string{"workload", "precopyPasses", "volumes"} {
 			if _, exists := spec[field]; !exists {
 				t.Fatalf("PodMigration CRD spec field %q missing", field)
+			}
+		}
+		for _, field := range []string{"sourceNamespace", "temporaryNamespace", "destinationNamespace", "sessionNamespace"} {
+			if _, exists := spec[field]; exists {
+				t.Fatalf("field %q leaked into namespaced PodMigration CRD spec", field)
 			}
 		}
 
@@ -3841,9 +4096,14 @@ func assertOfflineSessionPayloadShape(
 				t.Fatalf("field %q leaked into Migration CRD spec", forbidden)
 			}
 		}
-		for _, required := range []string{"volumes", "sourceNamespace", "destinationNamespace"} {
+		for _, required := range []string{"volumes"} {
 			if _, exists := spec[required]; !exists {
 				t.Fatalf("Migration CRD spec field %q missing", required)
+			}
+		}
+		for _, field := range []string{"sourceNamespace", "temporaryNamespace", "destinationNamespace", "sessionNamespace"} {
+			if _, exists := spec[field]; exists {
+				t.Fatalf("field %q leaked into namespaced Migration CRD spec", field)
 			}
 		}
 
@@ -4042,37 +4302,66 @@ func cleanupWorkflowResources(
 
 	for _, resourceName := range []string{
 		"migrations", "podmigrations", "reservations", "copies",
-		"backups", "restores", "renames", "moves",
+		"backups", "restores", "renames",
 	} {
-		resources := dynamicClient.Resource(workflowGVR(resourceName)).Namespace(namespace)
-		owned := false
-		err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
-			object, getErr := resources.Get(ctx, sessionID, metav1.GetOptions{})
-			if apierrors.IsNotFound(getErr) {
-				return nil
-			}
-			if getErr != nil {
-				return getErr
-			}
-			if object.GetLabels()[sessionLabel] != sessionID {
-				return nil
-			}
-			owned = true
-			object.SetFinalizers(nil)
-			_, updateErr := resources.Update(ctx, object, metav1.UpdateOptions{})
-			return updateErr
-		})
-		if err != nil {
-			t.Errorf("remove E2E %s finalizer: %v", resourceName, err)
-			continue
+		cleanupWorkflowResource(
+			t,
+			ctx,
+			dynamicClient.Resource(workflowGVR(resourceName)).Namespace(namespace),
+			resourceName,
+			sessionID,
+		)
+	}
+
+	for _, resourceName := range []string{
+		"clustermigrations", "clusterpodmigrations", "clusterreservations",
+		"clustercopies", "clustermoves",
+	} {
+		cleanupWorkflowResource(
+			t,
+			ctx,
+			dynamicClient.Resource(workflowGVR(resourceName)),
+			resourceName,
+			sessionID,
+		)
+	}
+}
+
+func cleanupWorkflowResource(
+	t *testing.T,
+	ctx context.Context,
+	resources dynamic.ResourceInterface,
+	resourceName, sessionID string,
+) {
+	t.Helper()
+
+	owned := false
+	err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		object, getErr := resources.Get(ctx, sessionID, metav1.GetOptions{})
+		if apierrors.IsNotFound(getErr) {
+			return nil
 		}
-		if !owned {
-			continue
+		if getErr != nil {
+			return getErr
 		}
-		if err := resources.Delete(ctx, sessionID, metav1.DeleteOptions{}); err != nil &&
-			!apierrors.IsNotFound(err) {
-			t.Errorf("delete E2E %s resource: %v", resourceName, err)
+		if object.GetLabels()[sessionLabel] != sessionID {
+			return nil
 		}
+		owned = true
+		object.SetFinalizers(nil)
+		_, updateErr := resources.Update(ctx, object, metav1.UpdateOptions{})
+		return updateErr
+	})
+	if err != nil {
+		t.Errorf("remove E2E %s finalizer: %v", resourceName, err)
+		return
+	}
+	if !owned {
+		return
+	}
+	if err := resources.Delete(ctx, sessionID, metav1.DeleteOptions{}); err != nil &&
+		!apierrors.IsNotFound(err) {
+		t.Errorf("delete E2E %s resource: %v", resourceName, err)
 	}
 }
 

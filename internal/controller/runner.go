@@ -549,7 +549,7 @@ func clusterScopeSegment(identity string) string {
 	return hex.EncodeToString(digest[:16])
 }
 
-func repositoryNamespaceForSession(session *domain.Session) (string, bool, error) {
+func repositoryNamespaceForSession(session *domain.Session) (string, error) {
 	repositoryNamespace := ""
 	if session.Spec.Backup != nil {
 		repositoryNamespace = session.Spec.Backup.BackupRepositoryNamespace
@@ -559,24 +559,19 @@ func repositoryNamespaceForSession(session *domain.Session) (string, bool, error
 		repositoryNamespace = session.Spec.Restore.BackupRepositoryNamespace
 	}
 
-	clusterWorkflow := domain.IsClusterControllerKind(session.BackendResource) ||
-		session.Spec.SourceNamespace != session.Spec.SessionNamespace ||
-		(session.Spec.DestinationNamespace != "" && session.Spec.DestinationNamespace != session.Spec.SessionNamespace) ||
-		(session.Spec.TemporaryNamespace != "" && session.Spec.TemporaryNamespace != session.Spec.SessionNamespace) ||
-		session.Spec.Type == domain.SessionTypeMove
-	if repositoryNamespace == "" && clusterWorkflow {
-		return "", clusterWorkflow, domain.NewError(
-			domain.ErrorPrecondition,
-			"controller object store",
-			"cluster workflows require an explicit BackupRepository namespace",
-		)
-	}
-
 	if repositoryNamespace == "" {
 		repositoryNamespace = session.Spec.SessionNamespace
 	}
 
-	return repositoryNamespace, clusterWorkflow, nil
+	if repositoryNamespace != session.Spec.SessionNamespace {
+		return "", domain.NewError(
+			domain.ErrorPrecondition,
+			"controller object store",
+			"BackupRepository must be in the workflow namespace",
+		)
+	}
+
+	return repositoryNamespace, nil
 }
 
 func s3RepositorySpec(
@@ -694,7 +689,7 @@ func (r *Runner) backupRepositoryConfig(
 	config := objectstore.Config{Name: name}
 	repository := &v1alpha1.BackupRepository{}
 
-	repositoryNamespace, clusterWorkflow, err := repositoryNamespaceForSession(session)
+	repositoryNamespace, err := repositoryNamespaceForSession(session)
 	if err != nil {
 		return objectstore.Config{}, err
 	}
@@ -723,14 +718,6 @@ func (r *Runner) backupRepositoryConfig(
 			domain.ErrorPrecondition,
 			"controller object store",
 			"BackupRepository is being deleted; create a new workflow after deletion completes",
-		)
-	}
-
-	if repositoryNamespace != session.Spec.SessionNamespace && !clusterWorkflow {
-		return objectstore.Config{}, domain.NewError(
-			domain.ErrorPrecondition,
-			"controller object store",
-			"namespaced workflows may reference only a BackupRepository in their own namespace",
 		)
 	}
 

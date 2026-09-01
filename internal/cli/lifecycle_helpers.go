@@ -209,16 +209,30 @@ func deferControllerExecution(
 
 	resourceName := controllerResourceName(session)
 	resource := controllerResourceForKubectl(session)
+	controllerResource, _ := domain.ControllerResourceForSession(session)
 
-	_, err := fmt.Fprintf(
-		cmd.ErrOrStderr(),
-		"%s %s was submitted to the controller; inspect it with `kubectl -n %s get %s %s -o yaml`\n",
-		resourceName,
-		session.ID,
-		session.Spec.SessionNamespace,
-		resource,
-		session.ID,
-	)
+	var err error
+	if controllerResource.Cluster {
+		_, err = fmt.Fprintf(
+			cmd.ErrOrStderr(),
+			"%s %s was submitted to the controller; inspect it with `kubectl get %s %s -o yaml`\n",
+			resourceName,
+			session.ID,
+			resource,
+			session.ID,
+		)
+	} else {
+		_, err = fmt.Fprintf(
+			cmd.ErrOrStderr(),
+			"%s %s was submitted to the controller; inspect it with `kubectl -n %s get %s %s -o yaml`\n",
+			resourceName,
+			session.ID,
+			session.Spec.SessionNamespace,
+			resource,
+			session.ID,
+		)
+	}
+
 	if err != nil {
 		return true, err
 	}
@@ -431,11 +445,7 @@ func controllerExecutionFinished(session *domain.Session) bool {
 }
 
 func controllerResourceName(session *domain.Session) string {
-	if session == nil {
-		return "workflow"
-	}
-
-	workflow, ok := domain.ControllerWorkflowForType(session.Spec.Type)
+	workflow, ok := domain.ControllerResourceForSession(session)
 	if !ok {
 		return "workflow"
 	}
@@ -444,11 +454,7 @@ func controllerResourceName(session *domain.Session) string {
 }
 
 func controllerResourceKind(session *domain.Session) domain.ControllerKind {
-	if session == nil {
-		return "Workflow"
-	}
-
-	workflow, ok := domain.ControllerWorkflowForType(session.Spec.Type)
+	workflow, ok := domain.ControllerResourceForSession(session)
 	if !ok {
 		return "Workflow"
 	}
@@ -457,11 +463,7 @@ func controllerResourceKind(session *domain.Session) domain.ControllerKind {
 }
 
 func controllerResourceForKubectl(session *domain.Session) string {
-	if session == nil {
-		return "workflows.migrate.sealos.io"
-	}
-
-	workflow, ok := domain.ControllerWorkflowForType(session.Spec.Type)
+	workflow, ok := domain.ControllerResourceForSession(session)
 	if !ok {
 		return "workflows.migrate.sealos.io"
 	}

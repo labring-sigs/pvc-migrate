@@ -609,6 +609,18 @@ func writeSessionRecord(w io.Writer, session *domain.Session) error {
 	}
 
 	if session.Backend == kube.SessionBackendCRD {
+		resource, _ := domain.ControllerResourceForSession(session)
+		if resource.Cluster {
+			_, err := fmt.Fprintf(
+				w,
+				"  Record: %s %s\n",
+				controllerResourceKind(session),
+				session.ID,
+			)
+
+			return err
+		}
+
 		_, err := fmt.Fprintf(
 			w,
 			"  Record: %s %s/%s\n",

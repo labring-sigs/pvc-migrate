@@ -49,8 +49,10 @@ spec:
               createdBy:
                 type: string
               destinationPVC:
-                description: ObjectReference identifies a Kubernetes object involved
-                  in a workflow.
+                description: |-
+                  LocalResourceReference identifies a resource whose namespace is established
+                  by the containing workflow, or a cluster-scoped resource such as a PV.
+                  Namespaced workflow APIs derive their boundary from metadata.namespace.
                 properties:
                   apiVersion:
                     maxLength: 253
@@ -62,10 +64,6 @@ spec:
                     maxLength: 253
                     minLength: 1
                     pattern: ^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$
-                    type: string
-                  namespace:
-                    maxLength: 63
-                    pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
                     type: string
                   resourceVersion:
                     maxLength: 256
@@ -79,19 +77,11 @@ spec:
                 required:
                 - name
                 type: object
-              sessionNamespace:
-                maxLength: 63
-                minLength: 1
-                pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
-                type: string
-              sourceNamespace:
-                maxLength: 63
-                minLength: 1
-                pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
-                type: string
               sourcePV:
-                description: ObjectReference identifies a Kubernetes object involved
-                  in a workflow.
+                description: |-
+                  LocalResourceReference identifies a resource whose namespace is established
+                  by the containing workflow, or a cluster-scoped resource such as a PV.
+                  Namespaced workflow APIs derive their boundary from metadata.namespace.
                 properties:
                   apiVersion:
                     maxLength: 253
@@ -103,10 +93,6 @@ spec:
                     maxLength: 253
                     minLength: 1
                     pattern: ^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$
-                    type: string
-                  namespace:
-                    maxLength: 63
-                    pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
                     type: string
                   resourceVersion:
                     maxLength: 256
@@ -121,8 +107,10 @@ spec:
                 - name
                 type: object
               sourcePVC:
-                description: ObjectReference identifies a Kubernetes object involved
-                  in a workflow.
+                description: |-
+                  LocalResourceReference identifies a resource whose namespace is established
+                  by the containing workflow, or a cluster-scoped resource such as a PV.
+                  Namespaced workflow APIs derive their boundary from metadata.namespace.
                 properties:
                   apiVersion:
                     maxLength: 253
@@ -134,10 +122,6 @@ spec:
                     maxLength: 253
                     minLength: 1
                     pattern: ^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$
-                    type: string
-                  namespace:
-                    maxLength: 63
-                    pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
                     type: string
                   resourceVersion:
                     maxLength: 256
@@ -418,15 +402,10 @@ spec:
                 type: object
             required:
             - destinationPVC
-            - sessionNamespace
-            - sourceNamespace
             - sourcePV
             - sourcePVC
             - sourceTemplate
             type: object
-            x-kubernetes-validations:
-            - message: workflow namespace must match metadata.namespace
-              rule: self.sourceNamespace == self.sessionNamespace
           status:
             properties:
               completedAt:
@@ -561,21 +540,22 @@ spec:
               volumes:
                 items:
                   description: |-
-                    PVCIdentityVolumeStatus is the checkpoint for Rename and Move. Those
-                    operations change PVC identity and never run a data-copy phase.
+                    PVCIdentityVolumeStatus is the namespaced Rename checkpoint. Rename changes
+                    PVC identity and never runs a data-copy phase.
                   properties:
                     activation:
                       description: |-
-                        PVCIdentityActivationStatus is the checkpoint needed to roll back a
-                        Rename or Move. Temporary-volume cleanup fields do not apply to identity
-                        operations.
+                        PVCIdentityActivationStatus is the checkpoint needed to roll back a Rename.
+                        Temporary-volume cleanup fields do not apply to identity operations.
                       properties:
                         activatedAt:
                           format: date-time
                           type: string
                         activePVC:
-                          description: ObjectReference identifies a Kubernetes object
-                            involved in a workflow.
+                          description: |-
+                            LocalResourceReference identifies a resource whose namespace is established
+                            by the containing workflow, or a cluster-scoped resource such as a PV.
+                            Namespaced workflow APIs derive their boundary from metadata.namespace.
                           properties:
                             apiVersion:
                               maxLength: 253
@@ -587,10 +567,6 @@ spec:
                               maxLength: 253
                               minLength: 1
                               pattern: ^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$
-                              type: string
-                            namespace:
-                              maxLength: 63
-                              pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
                               type: string
                             resourceVersion:
                               maxLength: 256

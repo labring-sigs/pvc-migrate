@@ -4,10 +4,10 @@ metadata:
   name: pvc-migrate
 rules:
   - apiGroups: ["migrate.sealos.io"]
-    resources: ["migrations", "podmigrations", "reservations", "copies", "backups", "restores", "renames", "moves"]
+    resources: ["migrations", "podmigrations", "reservations", "copies", "backups", "restores", "renames", "clustermigrations", "clusterpodmigrations", "clusterreservations", "clustercopies", "clustermoves"]
     verbs: ["get", "list", "watch", "update", "patch"]
   - apiGroups: ["migrate.sealos.io"]
-    resources: ["migrations/status", "podmigrations/status", "reservations/status", "copies/status", "backups/status", "restores/status", "renames/status", "moves/status"]
+    resources: ["migrations/status", "podmigrations/status", "reservations/status", "copies/status", "backups/status", "restores/status", "renames/status", "clustermigrations/status", "clusterpodmigrations/status", "clusterreservations/status", "clustercopies/status", "clustermoves/status"]
     verbs: ["get", "update", "patch"]
   - apiGroups: ["migrate.sealos.io"]
     resources: ["backuprepositories"]
@@ -38,6 +38,9 @@ rules:
     verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
   - apiGroups: [""]
     resources: ["secrets"]
+    # Helm's default storage driver persists release state in Secrets. The
+    # controller must create, update, and delete those short-lived records;
+    # Secret list remains intentionally excluded.
     verbs: ["get", "create", "update", "delete"]
   - apiGroups: [""]
     resources: ["serviceaccounts"]
