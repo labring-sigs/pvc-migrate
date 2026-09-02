@@ -74,7 +74,10 @@ func controllerNamespaceBoundaryErrorForResource(
 		)
 	}
 
-	if session.Spec.DestinationNamespace != "" && session.Spec.DestinationNamespace != namespace {
+	if session.Spec.Type != domain.SessionTypeReserve &&
+		session.Spec.Type != domain.SessionTypeCopy &&
+		session.Spec.DestinationNamespace != "" &&
+		session.Spec.DestinationNamespace != namespace {
 		return domain.NewError(
 			domain.ErrorPrecondition,
 			"controller namespace",
@@ -244,6 +247,24 @@ func validateClusterWorkflowReferences(session *domain.Session) error {
 
 	if err := controllerVolumeBoundaryError(session.Spec.Volumes, "", true); err != nil {
 		return err
+	}
+
+	for _, volume := range session.Spec.Volumes {
+		if volume.SourcePVC.Namespace != session.Spec.SourceNamespace {
+			return domain.NewError(
+				domain.ErrorPrecondition,
+				"controller namespace",
+				"source PVC references must match spec.sourceNamespace",
+			)
+		}
+
+		if volume.DestinationPVC.Namespace != session.Spec.TemporaryNamespace {
+			return domain.NewError(
+				domain.ErrorPrecondition,
+				"controller namespace",
+				"destination PVC references must match the workflow destination-storage namespace",
+			)
+		}
 	}
 
 	if session.Spec.Type == domain.SessionTypeMigratePod {

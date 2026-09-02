@@ -316,6 +316,11 @@ func TestSessionValidateRejectsInvalidPersistentShapes(t *testing.T) {
 			text:   "identity and namespaces",
 		},
 		{
+			name:   "Pod migration destination namespace",
+			mutate: func(s *Session) { s.Spec.DestinationNamespace = "other" },
+			text:   "pod migration must keep workload and PVC identities in the source namespace",
+		},
+		{
 			name:   "volumes",
 			mutate: func(s *Session) { s.Spec.Volumes = nil; s.Status.Volumes = nil },
 			text:   "contains no volumes",
@@ -619,6 +624,40 @@ func TestControllerWorkflowRegistryCoversEveryLocalWorkflow(t *testing.T) {
 
 	if ControllerWorkflowResources()[0] == "mutated" {
 		t.Fatal("controller workflow resource registry was exposed for mutation")
+	}
+}
+
+func TestControllerResourceScopeUsesOperationNamespaceRoles(t *testing.T) {
+	for _, sessionType := range []SessionType{SessionTypeReserve, SessionTypeCopy} {
+		spec := SessionSpec{
+			SessionCommon: SessionCommon{
+				SourceNamespace:      "tenant",
+				TemporaryNamespace:   "tenant",
+				DestinationNamespace: "unused-final-destination",
+				SessionNamespace:     "tenant",
+			},
+			Type: sessionType,
+		}
+
+		resource, ok := ControllerResourceForSpec(spec)
+		if !ok || resource.Cluster {
+			t.Fatalf("%s resource=%#v found=%t, want namespaced", sessionType, resource, ok)
+		}
+	}
+
+	spec := SessionSpec{
+		SessionCommon: SessionCommon{
+			SourceNamespace:      "tenant",
+			TemporaryNamespace:   "system",
+			DestinationNamespace: "tenant",
+			SessionNamespace:     "system",
+		},
+		Type: SessionTypeMigratePod,
+	}
+
+	resource, ok := ControllerResourceForSpec(spec)
+	if !ok || !resource.Cluster || resource.Kind != ControllerKindClusterPodMigration {
+		t.Fatalf("Pod migration resource=%#v found=%t, want ClusterPodMigration", resource, ok)
 	}
 }
 

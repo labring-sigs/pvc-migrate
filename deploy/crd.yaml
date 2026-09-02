@@ -657,22 +657,14 @@ spec:
                 type: array
               targetNode:
                 type: string
-              temporaryNamespace:
-                description: |-
-                  NamespaceName is a Kubernetes namespace name used by a cluster-scoped
-                  workflow. Namespaced workflows derive this boundary from metadata.namespace.
-                maxLength: 63
-                minLength: 1
-                pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
-                type: string
               toolImage:
                 type: string
               volumes:
                 items:
                   description: |-
                     ClusterVolumeSpec is the cluster-workflow planning contract. PVC names are
-                    relative to the source/destination namespace declared once on the parent
-                    spec; PV references remain cluster-scoped.
+                    relative to the source and destination-storage namespace roles declared by
+                    the parent workflow. PV references remain cluster-scoped.
                   properties:
                     accessModes:
                       items:
@@ -1070,7 +1062,6 @@ spec:
             - destinationNamespace
             - sessionNamespace
             - sourceNamespace
-            - temporaryNamespace
             type: object
           status:
             properties:
@@ -1413,8 +1404,8 @@ spec:
                 items:
                   description: |-
                     ClusterVolumeSpec is the cluster-workflow planning contract. PVC names are
-                    relative to the source/destination namespace declared once on the parent
-                    spec; PV references remain cluster-scoped.
+                    relative to the source and destination-storage namespace roles declared by
+                    the parent workflow. PV references remain cluster-scoped.
                   properties:
                     accessModes:
                       items:
@@ -2792,14 +2783,6 @@ spec:
             properties:
               deleteExtraneous:
                 type: boolean
-              destinationNamespace:
-                description: |-
-                  NamespaceName is a Kubernetes namespace name used by a cluster-scoped
-                  workflow. Namespaced workflows derive this boundary from metadata.namespace.
-                maxLength: 63
-                minLength: 1
-                pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
-                type: string
               openebsLvmEnableShared:
                 type: boolean
               precopyPasses:
@@ -2816,8 +2799,8 @@ spec:
                 type: boolean
               sourceNamespace:
                 description: |-
-                  NamespaceName is a Kubernetes namespace name used by a cluster-scoped
-                  workflow. Namespaced workflows derive this boundary from metadata.namespace.
+                  Pod migration preserves workload and PVC identities in SourceNamespace.
+                  TemporaryNamespace and SessionNamespace are the only cross-namespace roles.
                 maxLength: 63
                 minLength: 1
                 pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
@@ -2847,8 +2830,8 @@ spec:
                 items:
                   description: |-
                     ClusterVolumeSpec is the cluster-workflow planning contract. PVC names are
-                    relative to the source/destination namespace declared once on the parent
-                    spec; PV references remain cluster-scoped.
+                    relative to the source and destination-storage namespace roles declared by
+                    the parent workflow. PV references remain cluster-scoped.
                   properties:
                     accessModes:
                       items:
@@ -3459,7 +3442,6 @@ spec:
                 - adapter
                 type: object
             required:
-            - destinationNamespace
             - precopyPasses
             - sessionNamespace
             - sourceNamespace
@@ -3984,22 +3966,14 @@ spec:
                 type: string
               targetNode:
                 type: string
-              temporaryNamespace:
-                description: |-
-                  NamespaceName is a Kubernetes namespace name used by a cluster-scoped
-                  workflow. Namespaced workflows derive this boundary from metadata.namespace.
-                maxLength: 63
-                minLength: 1
-                pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
-                type: string
               toolImage:
                 type: string
               volumes:
                 items:
                   description: |-
                     ClusterVolumeSpec is the cluster-workflow planning contract. PVC names are
-                    relative to the source/destination namespace declared once on the parent
-                    spec; PV references remain cluster-scoped.
+                    relative to the source and destination-storage namespace roles declared by
+                    the parent workflow. PV references remain cluster-scoped.
                   properties:
                     accessModes:
                       items:
@@ -4397,7 +4371,6 @@ spec:
             - destinationNamespace
             - sessionNamespace
             - sourceNamespace
-            - temporaryNamespace
             type: object
           status:
             properties:

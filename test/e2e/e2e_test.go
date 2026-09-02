@@ -215,6 +215,22 @@ func TestWorkflowScopeAdmissionAndStatusMatrix(t *testing.T) {
 			"sessionNamespace":     namespace,
 		}
 	}
+	clusterPodNamespaces := func() map[string]any {
+		return map[string]any{
+			"sourceNamespace":      namespace,
+			"temporaryNamespace":   namespace,
+			"destinationNamespace": "must-be-pruned",
+			"sessionNamespace":     namespace,
+		}
+	}
+	clusterDestinationNamespaces := func() map[string]any {
+		return map[string]any{
+			"sourceNamespace":      namespace,
+			"temporaryNamespace":   "must-be-pruned",
+			"destinationNamespace": namespace + "-destination",
+			"sessionNamespace":     namespace,
+		}
+	}
 	merge := func(base map[string]any, values map[string]any) map[string]any {
 		for key, value := range values {
 			base[key] = value
@@ -259,18 +275,18 @@ func TestWorkflowScopeAdmissionAndStatusMatrix(t *testing.T) {
 		{
 			resource: "clusterpodmigrations", kind: "ClusterPodMigration", cluster: true,
 			volumes: true, warm: true,
-			spec: merge(clusterNamespaces(), map[string]any{
+			spec: merge(clusterPodNamespaces(), map[string]any{
 				"precopyPasses": int64(0),
 				"workload":      map[string]any{"adapter": "StandalonePod"},
 			}),
 		},
 		{
 			resource: "clusterreservations", kind: "ClusterReservation", cluster: true,
-			volumes: true, spec: clusterNamespaces(),
+			volumes: true, spec: clusterDestinationNamespaces(),
 		},
 		{
 			resource: "clustercopies", kind: "ClusterCopy", cluster: true,
-			volumes: true, spec: clusterNamespaces(),
+			volumes: true, spec: clusterDestinationNamespaces(),
 		},
 		{
 			resource: "clustermoves", kind: "ClusterMove", cluster: true, volumes: true,
@@ -317,6 +333,33 @@ func TestWorkflowScopeAdmissionAndStatusMatrix(t *testing.T) {
 					"sourceNamespace",
 				); nestedErr != nil || found {
 					t.Fatalf("namespaced namespace selector was not pruned: found=%t err=%v", found, nestedErr)
+				}
+			}
+			if test.kind == "ClusterPodMigration" {
+				if _, found, nestedErr := unstructured.NestedFieldNoCopy(
+					created.Object,
+					"spec",
+					"destinationNamespace",
+				); nestedErr != nil || found {
+					t.Fatalf(
+						"derived ClusterPodMigration destination namespace was not pruned: found=%t err=%v",
+						found,
+						nestedErr,
+					)
+				}
+			}
+			if test.kind == "ClusterReservation" || test.kind == "ClusterCopy" {
+				if _, found, nestedErr := unstructured.NestedFieldNoCopy(
+					created.Object,
+					"spec",
+					"temporaryNamespace",
+				); nestedErr != nil || found {
+					t.Fatalf(
+						"unused %s temporary namespace was not pruned: found=%t err=%v",
+						test.kind,
+						found,
+						nestedErr,
+					)
 				}
 			}
 

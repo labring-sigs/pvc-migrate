@@ -99,8 +99,8 @@ spec:
                 items:
                   description: |-
                     ClusterVolumeSpec is the cluster-workflow planning contract. PVC names are
-                    relative to the source/destination namespace declared once on the parent
-                    spec; PV references remain cluster-scoped.
+                    relative to the source and destination-storage namespace roles declared by
+                    the parent workflow. PV references remain cluster-scoped.
                   properties:
                     accessModes:
                       items:

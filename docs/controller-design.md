@@ -34,6 +34,19 @@ relative to those roles. Their status types retain fully qualified references
 for audit and restart recovery. PVs remain cluster-scoped and omit namespace.
 Cluster workflow RBAC is restricted to the controller/operator identity.
 
+The namespace roles are operation-specific:
+
+- `ClusterMigration` declares source, temporary, final destination, and session namespaces.
+- `ClusterPodMigration` declares source, temporary, and session namespaces; workload and
+  final PVC identities stay in the source namespace.
+- `ClusterReservation` and `ClusterCopy` declare source, actual destination, and session
+  namespaces; they have no activation stage or separate temporary namespace in their API.
+- `ClusterMove` declares source, destination, and session namespaces.
+
+`volumes[].destinationPVC` is relative to the namespace that owns the actual
+destination storage: `temporaryNamespace` for migration workflows and
+`destinationNamespace` for reservation and copy workflows.
+
 Backup and restore remain namespaced because the repository and credential
 Secret are tenant-owned and local. Rename is inherently same-namespace, while
 Move is inherently cross-namespace, so each exposes only the scope that can

@@ -85,7 +85,7 @@ func clusterCommonSession(
 		TemporaryNamespace:   string(temporary),
 		DestinationNamespace: string(destination),
 		SessionNamespace:     string(sessionNamespace),
-		Volumes:              clusterVolumesToDomain(volumes, string(source), string(destination)),
+		Volumes:              clusterVolumesToDomain(volumes, string(source), string(temporary)),
 	}
 }
 
@@ -151,7 +151,7 @@ func (s ClusterPodMigrationSpec) Domain() domain.SessionSpec {
 		SessionCommon: clusterCommonSession(
 			s.SourceNamespace,
 			s.TemporaryNamespace,
-			s.DestinationNamespace,
+			s.SourceNamespace,
 			s.SessionNamespace,
 			s.Volumes,
 		),
@@ -172,7 +172,7 @@ func (s ClusterReservationSpec) Domain() domain.SessionSpec {
 	return domain.SessionSpec{
 		SessionCommon: clusterCommonSession(
 			s.SourceNamespace,
-			s.TemporaryNamespace,
+			s.DestinationNamespace,
 			s.DestinationNamespace,
 			s.SessionNamespace,
 			s.Volumes,
@@ -186,7 +186,7 @@ func (s ClusterCopySpec) Domain() domain.SessionSpec {
 	return domain.SessionSpec{
 		SessionCommon: clusterCommonSession(
 			s.SourceNamespace,
-			s.TemporaryNamespace,
+			s.DestinationNamespace,
 			s.DestinationNamespace,
 			s.SessionNamespace,
 			s.Volumes,
@@ -237,7 +237,6 @@ func ClusterPodMigrationSpecFromDomain(s domain.SessionSpec) ClusterPodMigration
 	return ClusterPodMigrationSpec{
 		SourceNamespace:        NamespaceName(s.SourceNamespace),
 		TemporaryNamespace:     NamespaceName(s.TemporaryNamespace),
-		DestinationNamespace:   NamespaceName(s.DestinationNamespace),
 		SessionNamespace:       NamespaceName(s.SessionNamespace),
 		Volumes:                clusterVolumesFromDomain(s.Volumes),
 		SourceNode:             options.SourceNode,
@@ -258,8 +257,7 @@ func ClusterReservationSpecFromDomain(s domain.SessionSpec) ClusterReservationSp
 
 	return ClusterReservationSpec{
 		SourceNamespace:      NamespaceName(s.SourceNamespace),
-		TemporaryNamespace:   NamespaceName(s.TemporaryNamespace),
-		DestinationNamespace: NamespaceName(s.DestinationNamespace),
+		DestinationNamespace: NamespaceName(s.TemporaryNamespace),
 		SessionNamespace:     NamespaceName(s.SessionNamespace),
 		Volumes:              clusterVolumesFromDomain(s.Volumes),
 		TargetNode:           options.TargetNode,
@@ -273,8 +271,7 @@ func ClusterCopySpecFromDomain(s domain.SessionSpec) ClusterCopySpec {
 
 	return ClusterCopySpec{
 		SourceNamespace:      NamespaceName(s.SourceNamespace),
-		TemporaryNamespace:   NamespaceName(s.TemporaryNamespace),
-		DestinationNamespace: NamespaceName(s.DestinationNamespace),
+		DestinationNamespace: NamespaceName(s.TemporaryNamespace),
 		SessionNamespace:     NamespaceName(s.SessionNamespace),
 		Volumes:              clusterVolumesFromDomain(s.Volumes),
 		SourceNode:           options.SourceNode,

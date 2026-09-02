@@ -15,8 +15,8 @@ import (
 type NamespaceName string
 
 // ClusterVolumeSpec is the cluster-workflow planning contract. PVC names are
-// relative to the source/destination namespace declared once on the parent
-// spec; PV references remain cluster-scoped.
+// relative to the source and destination-storage namespace roles declared by
+// the parent workflow. PV references remain cluster-scoped.
 type ClusterVolumeSpec struct {
 	SourcePVC      LocalResourceReference `json:"sourcePVC"      yaml:"sourcePVC"`
 	SourcePV       LocalResourceReference `json:"sourcePV"       yaml:"sourcePV"`
@@ -71,10 +71,11 @@ type ClusterMigrationSpec struct {
 
 // +kubebuilder:validation:XValidation:rule="self.workload.adapter != 'None'",message="ClusterPodMigration workload.adapter must identify a supported workload"
 type ClusterPodMigrationSpec struct {
-	SourceNamespace      NamespaceName `json:"sourceNamespace"      yaml:"sourceNamespace"`
-	TemporaryNamespace   NamespaceName `json:"temporaryNamespace"   yaml:"temporaryNamespace"`
-	DestinationNamespace NamespaceName `json:"destinationNamespace" yaml:"destinationNamespace"`
-	SessionNamespace     NamespaceName `json:"sessionNamespace"     yaml:"sessionNamespace"`
+	// Pod migration preserves workload and PVC identities in SourceNamespace.
+	// TemporaryNamespace and SessionNamespace are the only cross-namespace roles.
+	SourceNamespace    NamespaceName `json:"sourceNamespace"    yaml:"sourceNamespace"`
+	TemporaryNamespace NamespaceName `json:"temporaryNamespace" yaml:"temporaryNamespace"`
+	SessionNamespace   NamespaceName `json:"sessionNamespace"   yaml:"sessionNamespace"`
 	// +kubebuilder:validation:MaxItems=1024
 	Volumes    []ClusterVolumeSpec `json:"volumes,omitempty"    yaml:"volumes,omitempty"`
 	SourceNode string              `json:"sourceNode,omitempty" yaml:"sourceNode,omitempty"`
@@ -92,7 +93,6 @@ type ClusterPodMigrationSpec struct {
 
 type ClusterReservationSpec struct {
 	SourceNamespace      NamespaceName `json:"sourceNamespace"      yaml:"sourceNamespace"`
-	TemporaryNamespace   NamespaceName `json:"temporaryNamespace"   yaml:"temporaryNamespace"`
 	DestinationNamespace NamespaceName `json:"destinationNamespace" yaml:"destinationNamespace"`
 	SessionNamespace     NamespaceName `json:"sessionNamespace"     yaml:"sessionNamespace"`
 	// +kubebuilder:validation:MaxItems=1024
@@ -104,7 +104,6 @@ type ClusterReservationSpec struct {
 
 type ClusterCopySpec struct {
 	SourceNamespace      NamespaceName `json:"sourceNamespace"      yaml:"sourceNamespace"`
-	TemporaryNamespace   NamespaceName `json:"temporaryNamespace"   yaml:"temporaryNamespace"`
 	DestinationNamespace NamespaceName `json:"destinationNamespace" yaml:"destinationNamespace"`
 	SessionNamespace     NamespaceName `json:"sessionNamespace"     yaml:"sessionNamespace"`
 	// +kubebuilder:validation:MaxItems=1024

@@ -775,7 +775,7 @@ func TestCRDSessionStoreRebindsClusterReservationToClusterCopy(t *testing.T) {
 		Volumes:              session.Spec.Volumes,
 	}
 	common.Volumes[0].SourcePVC.Namespace = common.SourceNamespace
-	common.Volumes[0].DestinationPVC.Namespace = common.DestinationNamespace
+	common.Volumes[0].DestinationPVC.Namespace = common.TemporaryNamespace
 
 	session.Spec = domain.NewSessionSpec(
 		domain.OperationReserve,
@@ -1097,8 +1097,6 @@ func TestControllerSessionSupportedBoundaries(t *testing.T) {
 	}
 
 	session.Spec.DestinationNamespace = "archive"
-
-	session.Spec.Volumes[0].DestinationPVC.Namespace = "archive"
 	if !ControllerSessionSupported(session) {
 		t.Fatal("cross-namespace migrate should use the cluster workflow")
 	}

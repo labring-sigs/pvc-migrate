@@ -334,6 +334,38 @@ func TestOperationSpecsHaveIndependentFieldContracts(t *testing.T) {
 				"sourceNamespace",
 			},
 		},
+		{
+			name: "cluster migration", spec: v1alpha1.ClusterMigrationSpec{},
+			fields: []string{
+				"deleteExtraneous", "destinationNamespace", "sessionNamespace",
+				"skipSourceUsageCheck", "sourceNamespace", "sourceNode", "strategies",
+				"targetNode", "temporaryNamespace", "toolImage", "verifyChecksum", "volumes",
+			},
+		},
+		{
+			name: "cluster pod migration", spec: v1alpha1.ClusterPodMigrationSpec{},
+			fields: []string{
+				"deleteExtraneous", "openebsLvmEnableShared", "precopyPasses",
+				"sessionNamespace", "skipSourceUsageCheck", "sourceNamespace", "sourceNode",
+				"strategies", "targetNode", "temporaryNamespace", "toolImage",
+				"verifyChecksum", "volumes", "workload",
+			},
+		},
+		{
+			name: "cluster reservation", spec: v1alpha1.ClusterReservationSpec{},
+			fields: []string{
+				"destinationNamespace", "sessionNamespace", "skipSourceUsageCheck",
+				"sourceNamespace", "targetNode", "toolImage", "volumes",
+			},
+		},
+		{
+			name: "cluster copy", spec: v1alpha1.ClusterCopySpec{},
+			fields: []string{
+				"deleteExtraneous", "destinationNamespace", "online", "sessionNamespace",
+				"skipSourceUsageCheck", "sourceNamespace", "sourceNode", "strategies",
+				"targetNode", "toolImage", "volumes",
+			},
+		},
 	}
 
 	for _, test := range tests {
@@ -999,6 +1031,96 @@ func TestClusterMoveRoundTripsNamespaceRoles(t *testing.T) {
 		restored.Volumes[0].SourcePVC.Namespace != "source" ||
 		restored.Volumes[0].DestinationPVC.Namespace != "destination" {
 		t.Fatalf("ClusterMove namespace round trip=%#v", restored)
+	}
+}
+
+func TestClusterPodMigrationDerivesDestinationNamespace(t *testing.T) {
+	spec := v1alpha1.ClusterPodMigrationSpec{
+		SourceNamespace:    "source",
+		TemporaryNamespace: "staging",
+		SessionNamespace:   "control",
+		Volumes: []v1alpha1.ClusterVolumeSpec{{
+			SourcePVC:      v1alpha1.LocalResourceReference{Name: "data"},
+			DestinationPVC: v1alpha1.LocalResourceReference{Name: "data"},
+		}},
+		Workload: v1alpha1.ClusterWorkloadSpec{Adapter: v1alpha1.WorkloadStandalone},
+	}
+
+	domainSpec := spec.Domain()
+	if domainSpec.SourceNamespace != "source" ||
+		domainSpec.DestinationNamespace != "source" ||
+		domainSpec.Volumes[0].DestinationPVC.Namespace != "staging" {
+		t.Fatalf("ClusterPodMigration namespace conversion=%#v", domainSpec)
+	}
+
+	encoded, err := json.Marshal(v1alpha1.ClusterPodMigrationSpecFromDomain(domainSpec))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if strings.Contains(string(encoded), `"destinationNamespace"`) {
+		t.Fatalf("ClusterPodMigration exposes derived destination namespace: %s", encoded)
+	}
+}
+
+func TestClusterTransferSpecsResolveDestinationStorageNamespace(t *testing.T) {
+	volume := v1alpha1.ClusterVolumeSpec{
+		SourcePVC:      v1alpha1.LocalResourceReference{Name: "source"},
+		DestinationPVC: v1alpha1.LocalResourceReference{Name: "staged"},
+	}
+	tests := []struct {
+		name                 string
+		domain               func() domain.SessionSpec
+		wantTemporary        string
+		wantFinalDestination string
+	}{
+		{
+			name:          "migration",
+			wantTemporary: "staging", wantFinalDestination: "destination",
+			domain: func() domain.SessionSpec {
+				return v1alpha1.ClusterMigrationSpec{
+					SourceNamespace: "source", TemporaryNamespace: "staging",
+					DestinationNamespace: "destination", SessionNamespace: "control",
+					Volumes: []v1alpha1.ClusterVolumeSpec{volume},
+				}.Domain()
+			},
+		},
+		{
+			name:          "reservation",
+			wantTemporary: "reserved", wantFinalDestination: "reserved",
+			domain: func() domain.SessionSpec {
+				return v1alpha1.ClusterReservationSpec{
+					SourceNamespace: "source", DestinationNamespace: "reserved",
+					SessionNamespace: "control",
+					Volumes:          []v1alpha1.ClusterVolumeSpec{volume},
+				}.Domain()
+			},
+		},
+		{
+			name:          "copy",
+			wantTemporary: "copied", wantFinalDestination: "copied",
+			domain: func() domain.SessionSpec {
+				return v1alpha1.ClusterCopySpec{
+					SourceNamespace: "source", DestinationNamespace: "copied",
+					SessionNamespace: "control",
+					Volumes:          []v1alpha1.ClusterVolumeSpec{volume},
+				}.Domain()
+			},
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			spec := test.domain()
+			if spec.SourceNamespace != "source" ||
+				spec.TemporaryNamespace != test.wantTemporary ||
+				spec.DestinationNamespace != test.wantFinalDestination ||
+				spec.SessionNamespace != "control" ||
+				spec.Volumes[0].SourcePVC.Namespace != "source" ||
+				spec.Volumes[0].DestinationPVC.Namespace != test.wantTemporary {
+				t.Fatalf("cluster namespace conversion=%#v", spec)
+			}
+		})
 	}
 }
 

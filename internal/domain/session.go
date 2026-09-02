@@ -463,10 +463,12 @@ func ControllerResourceForSession(session *Session) (ControllerResource, bool) {
 func ControllerResourceForSpec(spec SessionSpec) (ControllerResource, bool) {
 	clusterScope := spec.Type == SessionTypeMove ||
 		spec.SourceNamespace != spec.SessionNamespace ||
-		spec.DestinationNamespace != "" &&
-			spec.DestinationNamespace != spec.SessionNamespace ||
 		spec.TemporaryNamespace != "" &&
 			spec.TemporaryNamespace != spec.SessionNamespace
+	if spec.Type != SessionTypeReserve && spec.Type != SessionTypeCopy {
+		clusterScope = clusterScope || spec.DestinationNamespace != "" &&
+			spec.DestinationNamespace != spec.SessionNamespace
+	}
 
 	kind, ok := ControllerKindForTypeAndScope(spec.Type, clusterScope)
 	if !ok {
@@ -1551,6 +1553,15 @@ func validateSessionMode(s *Session) error {
 			ErrorValidation,
 			"session",
 			"online mode is only valid for copy or backup sessions",
+		)
+	}
+
+	if s.Spec.Type == SessionTypeMigratePod &&
+		s.Spec.SourceNamespace != s.Spec.DestinationNamespace {
+		return NewError(
+			ErrorValidation,
+			"session",
+			"pod migration must keep workload and PVC identities in the source namespace",
 		)
 	}
 
