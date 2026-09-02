@@ -69,7 +69,11 @@ func preflightRestorePVCCreation(
 		}
 	}
 
-	if existing == nil {
+	// Repository-backed controller submissions may not be able to resolve the
+	// remote manifest in the CLI. Defer size-based admission checks until the
+	// controller has resolved the authoritative backup capacity.
+	capacityKnown := capacity.Sign() > 0
+	if existing == nil && capacityKnown {
 		report, policyErr := kube.CheckPVCAdmissionPolicies(
 			ctx,
 			client,
@@ -122,7 +126,7 @@ func preflightRestorePVCCreation(
 		return nil, err
 	}
 
-	if existing != nil {
+	if existing != nil && capacityKnown {
 		if err := validateRestoreCreatedPVC(
 			existing,
 			req,
@@ -150,6 +154,11 @@ func preflightRestorePVCCreation(
 		}
 	}
 
+	capacityDisplay := ""
+	if capacityKnown {
+		capacityDisplay = capacity.String()
+	}
+
 	plan := &Plan{
 		Operation:       "restore",
 		ToolImage:       toolImage,
@@ -160,7 +169,7 @@ func preflightRestorePVCCreation(
 		Consistency:     "destination PVC write; application must be quiesced",
 		Destination:     req.Store.Destination(),
 		ManifestPresent: manifest != nil,
-		Capacity:        capacity.String(),
+		Capacity:        capacityDisplay,
 		VolumeMode:      string(corev1.PersistentVolumeFilesystem),
 		CreatePVC:       true,
 		StorageClass:    req.DestinationStorageClass,
@@ -178,7 +187,7 @@ func preflightRestorePVCCreation(
 	} else {
 		plan.Warnings = append(
 			plan.Warnings,
-			"object-store manifest and backup capacity validation are deferred to the controller",
+			"object-store manifest, backup capacity, and PVC admission validation are deferred to the controller",
 		)
 	}
 
@@ -207,16 +216,10 @@ func resolveRestoreManifestAndCapacity(
 	if req.SkipManifestCheck {
 		// A controller-backed submission intentionally has a config-only store:
 		// repository credentials and the recovery-point manifest are resolved by
-		// the controller. Keep the CLI's admission checks useful by requiring an
-		// explicit capacity for the PVC it asks Kubernetes to create; the
-		// controller performs the authoritative manifest capacity and volume-mode
-		// validation before the transfer starts.
+		// the controller. An explicit capacity remains an optional lower bound;
+		// when omitted, all size-based checks are deferred to the controller.
 		if strings.TrimSpace(req.DestinationCapacity) == "" {
-			return nil, resource.Quantity{}, domain.NewError(
-				domain.ErrorPrecondition,
-				restorePreflightPhase,
-				"controller-backed restore with --create-pvc requires --destination-capacity because the backup manifest is resolved by the controller",
-			)
+			return nil, resource.Quantity{}, nil
 		}
 
 		capacity, err := resource.ParseQuantity(req.DestinationCapacity)

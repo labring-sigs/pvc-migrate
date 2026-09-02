@@ -340,6 +340,40 @@ func TestTableBackupSessionRendersBackupDetails(t *testing.T) {
 	}
 }
 
+func TestTableControllerBackupSessionRendersRepositoryReference(t *testing.T) {
+	spec := domain.NewSessionSpec(
+		domain.OperationBackup,
+		domain.SessionCommon{SourceNamespace: "app", SessionNamespace: "app"},
+		false,
+		domain.SessionWorkflowOptions{},
+	)
+	spec.Backup.SourcePVC = domain.ObjectReference{Namespace: "app", Name: "data"}
+	spec.Backup.SourcePV = domain.ObjectReference{Name: "pv-data"}
+	spec.Backup.BackupRepository = "archive"
+	spec.Backup.BackupRepositoryNamespace = "app"
+	spec.Backup.Name = "point"
+
+	session := &domain.Session{
+		ID:   "controller-backup-test",
+		Spec: spec,
+		Status: domain.SessionStatus{
+			Phase: domain.PhaseCompleted,
+		},
+	}
+
+	var output bytes.Buffer
+	if err := (printeroutput.Printer{Writer: &output, Format: printeroutput.Table}).Print(
+		session,
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	if !strings.Contains(output.String(), "repository://app/archive/point") ||
+		strings.Contains(output.String(), "s3:///point") {
+		t.Fatalf("controller backup destination =\n%s", output.String())
+	}
+}
+
 func TestTableRestoreSessionRendersRestoreDetails(t *testing.T) {
 	now := metav1.NewTime(time.Date(2026, time.August, 21, 1, 2, 3, 0, time.UTC))
 	spec := domain.NewSessionSpec(
@@ -387,6 +421,43 @@ func TestTableRestoreSessionRendersRestoreDetails(t *testing.T) {
 
 	if strings.Contains(output.String(), "WARM SYNC") {
 		t.Fatalf("restore table contains migration columns:\n%s", output.String())
+	}
+}
+
+func TestTableControllerRestoreSessionRendersRepositoryReference(t *testing.T) {
+	spec := domain.NewSessionSpec(
+		domain.OperationRestore,
+		domain.SessionCommon{
+			SourceNamespace:      "app",
+			DestinationNamespace: "app",
+			SessionNamespace:     "app",
+		},
+		false,
+		domain.SessionWorkflowOptions{},
+	)
+	spec.Restore.DestinationPVC = domain.ObjectReference{Namespace: "app", Name: "data"}
+	spec.Restore.BackupRepository = "archive"
+	spec.Restore.BackupRepositoryNamespace = "app"
+	spec.Restore.Name = "point"
+
+	session := &domain.Session{
+		ID:   "controller-restore-test",
+		Spec: spec,
+		Status: domain.SessionStatus{
+			Phase: domain.PhaseCompleted,
+		},
+	}
+
+	var output bytes.Buffer
+	if err := (printeroutput.Printer{Writer: &output, Format: printeroutput.Table}).Print(
+		session,
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	if !strings.Contains(output.String(), "repository://app/archive/point") ||
+		strings.Contains(output.String(), "s3:///point") {
+		t.Fatalf("controller restore source =\n%s", output.String())
 	}
 }
 

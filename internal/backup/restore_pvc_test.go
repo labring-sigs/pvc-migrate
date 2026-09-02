@@ -136,13 +136,13 @@ func TestRestorePVCCreationDefersManifestForControllerSubmission(t *testing.T) {
 	if plan.ManifestPresent || plan.Capacity != "1Gi" ||
 		!slices.Contains(
 			plan.Warnings,
-			"object-store manifest and backup capacity validation are deferred to the controller",
+			"object-store manifest, backup capacity, and PVC admission validation are deferred to the controller",
 		) {
 		t.Fatalf("deferred restore plan=%#v", plan)
 	}
 }
 
-func TestRestorePVCCreationRequiresCapacityWhenManifestIsDeferred(t *testing.T) {
+func TestRestorePVCCreationAllowsDeferredCapacityWhenManifestIsDeferred(t *testing.T) {
 	client, request := restorePVCCreationFixture(t, nil)
 
 	store, err := objectstore.NewConfigOnly(objectstore.Config{
@@ -157,10 +157,17 @@ func TestRestorePVCCreationRequiresCapacityWhenManifestIsDeferred(t *testing.T) 
 	request.Store = store
 	request.SkipManifestCheck = true
 
-	_, err = Preflight(t.Context(), client, request, true)
-	if domain.CategoryOf(err) != domain.ErrorPrecondition ||
-		!strings.Contains(err.Error(), "requires --destination-capacity") {
-		t.Fatalf("category=%s error=%v", domain.CategoryOf(err), err)
+	plan, err := Preflight(t.Context(), client, request, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if plan.ManifestPresent || plan.Capacity != "" || !plan.CreatePVC ||
+		!slices.Contains(
+			plan.Warnings,
+			"object-store manifest, backup capacity, and PVC admission validation are deferred to the controller",
+		) {
+		t.Fatalf("deferred capacity restore plan=%#v", plan)
 	}
 }
 

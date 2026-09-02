@@ -6,13 +6,16 @@ import (
 	"os"
 	"time"
 
+	v1alpha1 "github.com/labring-sigs/pvc-migrate/api/v1alpha1"
 	"github.com/labring-sigs/pvc-migrate/internal/backup"
 	"github.com/labring-sigs/pvc-migrate/internal/domain"
 	"github.com/labring-sigs/pvc-migrate/internal/kube"
 	"github.com/labring-sigs/pvc-migrate/internal/objectstore"
 	"github.com/labring-sigs/pvc-migrate/internal/output"
 	"github.com/spf13/cobra"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/validation"
 	"k8s.io/client-go/kubernetes"
 )
@@ -162,7 +165,7 @@ func (r *rootState) runBackupTransfer(
 
 	var store *objectstore.Store
 	if flags.backupRepository != "" {
-		store, err = newControllerRepositoryStore(flags)
+		store, err = r.newControllerRepositoryStore(ctx, runtime, flags)
 	} else {
 		if err := loadS3Credentials(ctx, runtime.clients.Kubernetes, flags); err != nil {
 			return reportTransferError(cmd, "backup", flags.namespace, flags.pvc, err)
@@ -502,7 +505,7 @@ func (r *rootState) newObjectTransferPlanCommand(
 
 			var store *objectstore.Store
 			if flags.backupRepository != "" {
-				store, err = newControllerRepositoryStore(flags)
+				store, err = r.newControllerRepositoryStore(ctx, runtime, flags)
 			} else {
 				if err := loadS3Credentials(ctx, runtime.clients.Kubernetes, flags); err != nil {
 					return reportTransferError(cmd, operation, flags.namespace, flags.pvc, err)
@@ -783,7 +786,11 @@ func (r *rootState) newObjectStore(
 	return objectstore.New(ctx, cfg)
 }
 
-func newControllerRepositoryStore(flags *bucketFlags) (*objectstore.Store, error) {
+func (r *rootState) newControllerRepositoryStore(
+	ctx context.Context,
+	runtime *commandRuntime,
+	flags *bucketFlags,
+) (*objectstore.Store, error) {
 	if flags == nil || flags.backupRepository == "" {
 		return nil, domain.NewError(
 			domain.ErrorValidation,
@@ -792,13 +799,68 @@ func newControllerRepositoryStore(flags *bucketFlags) (*objectstore.Store, error
 		)
 	}
 
+	if runtime == nil || runtime.clients == nil || runtime.clients.Runtime == nil {
+		return nil, domain.NewError(
+			domain.ErrorInternal,
+			"backup repository",
+			"controller runtime client is required",
+		)
+	}
+
+	repositoryNamespace := flags.backupRepositoryNamespace
+	if repositoryNamespace == "" {
+		repositoryNamespace = flags.namespace
+	}
+
+	repository := &v1alpha1.BackupRepository{}
+	if err := runtime.clients.Runtime.Get(
+		ctx,
+		types.NamespacedName{Namespace: repositoryNamespace, Name: flags.backupRepository},
+		repository,
+	); err != nil {
+		if apierrors.IsNotFound(err) {
+			return nil, domain.NewError(
+				domain.ErrorPrecondition,
+				"backup repository",
+				fmt.Sprintf(
+					"BackupRepository %s/%s does not exist",
+					repositoryNamespace,
+					flags.backupRepository,
+				),
+			)
+		}
+
+		return nil, domain.WrapError(
+			domain.ErrorKubernetes,
+			"backup repository",
+			"read BackupRepository",
+			err,
+		)
+	}
+
+	if repository.Spec.Type != v1alpha1.BackupRepositoryTypeS3 || repository.Spec.S3 == nil {
+		return nil, domain.NewError(
+			domain.ErrorPrecondition,
+			"backup repository",
+			"controller currently supports only S3 BackupRepository objects",
+		)
+	}
+
+	s3 := repository.Spec.S3
+
 	return objectstore.NewConfigOnly(objectstore.Config{
-		// Config-only validation still needs syntactically valid placeholders.
-		// The controller replaces these values with the repository's scoped bucket
-		// and namespace prefix before any object-store call is made.
-		Bucket: "repository",
-		Prefix: "",
-		Name:   flags.name,
+		// Keep routing fields visible in plans and completion output without
+		// resolving or persisting the repository's credentials in the CLI.
+		Bucket:                s3.Bucket,
+		Prefix:                s3.Prefix,
+		Name:                  flags.name,
+		Provider:              s3.Provider,
+		Endpoint:              s3.Endpoint,
+		Region:                s3.Region,
+		AllowInsecureEndpoint: s3.AllowInsecureEndpoint,
+		ForcePathStyle:        s3.ForcePathStyle,
+		ServerSideEncryption:  s3.ServerSideEncryption,
+		SSEKMSKeyID:           s3.SSEKMSKeyID,
 	})
 }
 

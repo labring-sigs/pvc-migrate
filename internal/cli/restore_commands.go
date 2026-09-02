@@ -102,7 +102,7 @@ func (r *rootState) newRestoreTransferCommand() *cobra.Command {
 
 			var store *objectstore.Store
 			if flags.backupRepository != "" {
-				store, err = newControllerRepositoryStore(&flags.bucketFlags)
+				store, err = r.newControllerRepositoryStore(ctx, runtime, &flags.bucketFlags)
 			} else {
 				if err := loadS3Credentials(
 					ctx,

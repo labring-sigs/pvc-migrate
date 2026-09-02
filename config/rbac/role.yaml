@@ -44,9 +44,16 @@ rules:
     verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
   - apiGroups: [""]
     resources: ["serviceaccounts"]
-    verbs: ["get", "create", "update", "delete"]
+    # Helm uses server-side apply for transfer chart resources, which needs
+    # patch in addition to the lifecycle verbs.
+    verbs: ["get", "create", "update", "patch", "delete"]
   - apiGroups: [""]
-    resources: ["events", "resourcequotas", "limitranges"]
+    resources: ["events"]
+    # Event reads support planner diagnostics; create/patch are required by
+    # client-go leader election and controller-runtime's event recorder.
+    verbs: ["get", "list", "create", "patch"]
+  - apiGroups: [""]
+    resources: ["resourcequotas", "limitranges"]
     verbs: ["get", "list"]
   - apiGroups: ["apps"]
     resources: ["deployments"]

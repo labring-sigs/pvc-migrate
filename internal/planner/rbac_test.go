@@ -137,6 +137,24 @@ func TestDeploymentClusterRoleCoversPlannerAccessReviews(t *testing.T) {
 		t.Fatal("deployment ClusterRole cannot list CSIStorageCapacity objects")
 	}
 
+	for _, verb := range []string{"get", "list", "create", "patch"} {
+		if !clusterRoleAllows(
+			role.Rules,
+			authorizationv1.ResourceAttributes{Verb: verb, Resource: "events"},
+		) {
+			t.Fatalf("deployment ClusterRole cannot %s Events", verb)
+		}
+	}
+
+	for _, verb := range []string{"get", "create", "update", "patch", "delete"} {
+		if !clusterRoleAllows(
+			role.Rules,
+			authorizationv1.ResourceAttributes{Verb: verb, Resource: "serviceaccounts"},
+		) {
+			t.Fatalf("deployment ClusterRole cannot %s ServiceAccounts", verb)
+		}
+	}
+
 	for _, attributes := range []authorizationv1.ResourceAttributes{
 		{Verb: "list", Group: "local.openebs.io", Resource: "lvmvolumes"},
 		{Verb: "patch", Group: "local.openebs.io", Resource: "lvmvolumes"},
@@ -216,6 +234,27 @@ func TestDeploymentClusterRoleCoversPlannerAccessReviews(t *testing.T) {
 					attributes.Resource,
 				)
 			}
+		}
+	}
+}
+
+func TestConfigAndDeploymentRolesGrantControllerEventWrites(t *testing.T) {
+	for _, path := range []string{"../../config/rbac/role.yaml", "../../deploy/rbac.yaml"} {
+		role := deploymentClusterRole(t, path, "pvc-migrate")
+		for _, verb := range []string{"create", "patch"} {
+			if !clusterRoleAllows(
+				role.Rules,
+				authorizationv1.ResourceAttributes{Verb: verb, Resource: "events"},
+			) {
+				t.Fatalf("%s ClusterRole cannot %s Events", path, verb)
+			}
+		}
+
+		if !clusterRoleAllows(
+			role.Rules,
+			authorizationv1.ResourceAttributes{Verb: "patch", Resource: "serviceaccounts"},
+		) {
+			t.Fatalf("%s ClusterRole cannot patch ServiceAccounts", path)
 		}
 	}
 }

@@ -574,12 +574,14 @@ func printBackupSessionDetails(w *tabwriter.Writer, payload *domain.BackupSessio
 		transferPath = "."
 	}
 
-	destinationParts := []string{payload.Bucket}
-	if payload.Prefix != "" {
-		destinationParts = append(destinationParts, payload.Prefix)
-	}
-
-	destinationParts = append(destinationParts, payload.Name)
+	destination := backupSessionDestination(
+		payload.BackupRepository,
+		payload.BackupRepositoryNamespace,
+		payload.Bucket,
+		payload.Prefix,
+		payload.Name,
+		payload.SourcePVC.Namespace,
+	)
 
 	credentials := "-"
 	if payload.CredentialsSecret.Name != "" {
@@ -595,13 +597,13 @@ func printBackupSessionDetails(w *tabwriter.Writer, payload *domain.BackupSessio
 
 	if _, err := fmt.Fprintf(
 		w,
-		"%s/%s\t%s\t%s\t%s\ts3://%s/\t%s\n",
+		"%s/%s\t%s\t%s\t%s\t%s\t%s\n",
 		payload.SourcePVC.Namespace,
 		payload.SourcePVC.Name,
 		payload.SourcePV.Name,
 		mode,
 		transferPath,
-		strings.Join(destinationParts, "/"),
+		destination,
 		credentials,
 	); err != nil {
 		return err
@@ -616,12 +618,14 @@ func printRestoreSessionDetails(w *tabwriter.Writer, payload *domain.RestoreSess
 		transferPath = "."
 	}
 
-	sourceParts := []string{payload.Bucket}
-	if payload.Prefix != "" {
-		sourceParts = append(sourceParts, payload.Prefix)
-	}
-
-	sourceParts = append(sourceParts, payload.Name)
+	source := backupSessionDestination(
+		payload.BackupRepository,
+		payload.BackupRepositoryNamespace,
+		payload.Bucket,
+		payload.Prefix,
+		payload.Name,
+		payload.DestinationPVC.Namespace,
+	)
 
 	credentials := "-"
 	if payload.CredentialsSecret.Name != "" {
@@ -642,11 +646,11 @@ func printRestoreSessionDetails(w *tabwriter.Writer, payload *domain.RestoreSess
 
 	if _, err := fmt.Fprintf(
 		w,
-		"%s/%s\t%s\ts3://%s/\t%s\t%s\n",
+		"%s/%s\t%s\t%s\t%s\t%s\n",
 		payload.DestinationPVC.Namespace,
 		payload.DestinationPVC.Name,
 		transferPath,
-		strings.Join(sourceParts, "/"),
+		source,
 		createPVC,
 		credentials,
 	); err != nil {
@@ -654,6 +658,32 @@ func printRestoreSessionDetails(w *tabwriter.Writer, payload *domain.RestoreSess
 	}
 
 	return w.Flush()
+}
+
+func backupSessionDestination(
+	repository,
+	repositoryNamespace,
+	bucket,
+	prefix,
+	name,
+	fallbackNamespace string,
+) string {
+	if repository != "" {
+		if repositoryNamespace == "" {
+			repositoryNamespace = fallbackNamespace
+		}
+
+		return fmt.Sprintf("repository://%s/%s/%s", repositoryNamespace, repository, name)
+	}
+
+	parts := []string{bucket}
+	if prefix != "" {
+		parts = append(parts, prefix)
+	}
+
+	parts = append(parts, name)
+
+	return "s3://" + strings.Join(parts, "/") + "/"
 }
 
 func (p Printer) printSessions(sessions []*domain.Session) error {

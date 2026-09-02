@@ -21,10 +21,6 @@ spec:
         app.kubernetes.io/managed-by: pvc-migrate
     spec:
       serviceAccountName: pvc-migrate
-      volumes:
-        - name: tmp
-          emptyDir:
-            medium: Memory
       securityContext:
         runAsNonRoot: true
         runAsUser: 10000
@@ -57,6 +53,3 @@ spec:
             readOnlyRootFilesystem: true
             capabilities:
               drop: [ALL]
-          volumeMounts:
-            - name: tmp
-              mountPath: /tmp
