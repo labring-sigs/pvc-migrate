@@ -18,8 +18,8 @@ const (
 // namespaced workflow CR. A CR's metadata namespace is its tenant identity;
 // every namespaced object touched by the controller must live there. This
 // makes the controller's cluster-wide watch compatible with namespaced RBAC
-// while cluster-scoped workflow kinds provide the privileged cross-namespace
-// path.
+// while cluster-scoped workflow kinds provide the privileged path for
+// cross-namespace and administrator-selected same-namespace operations.
 func ControllerNamespaceBoundaryError(session *domain.Session) error {
 	if session == nil {
 		return domain.NewError(domain.ErrorValidation, "controller namespace", "session is nil")

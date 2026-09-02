@@ -374,8 +374,9 @@ func ControllerWorkflowForKind(kind ControllerKind) (ControllerWorkflow, bool) {
 }
 
 // ControllerWorkflowForTypeAndScope returns the operation workflow for the
-// requested resource scope. Cluster-scoped resources are selected for
-// cross-namespace operations and namespaced resources for tenant-local ones.
+// requested resource scope. The CLI selects cluster-scoped resources for
+// cross-namespace roles by default, while the API also permits equal namespace
+// roles when an administrator explicitly submits a cluster-scoped object.
 func ControllerWorkflowForTypeAndScope(
 	sessionType SessionType,
 	clusterScope bool,

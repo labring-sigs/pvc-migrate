@@ -1096,6 +1096,15 @@ func TestControllerSessionSupportedBoundaries(t *testing.T) {
 		t.Fatal("same-namespace migrate should be controller compatible")
 	}
 
+	// A cluster-scoped CR is valid even when all namespace roles are equal. The
+	// CLI keeps namespaced resources as its tenant-local default, while an
+	// administrator may submit the cluster API explicitly.
+	sameNamespaceCluster := storeTestSession()
+	sameNamespaceCluster.BackendResource = domain.ControllerKindClusterMigration
+	if !ControllerSessionSupported(sameNamespaceCluster) {
+		t.Fatal("same-namespace cluster migration should be controller compatible")
+	}
+
 	session.Spec.DestinationNamespace = "archive"
 	if !ControllerSessionSupported(session) {
 		t.Fatal("cross-namespace migrate should use the cluster workflow")
