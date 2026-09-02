@@ -6,6 +6,7 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"os"
 	"slices"
 	"strings"
 	"testing"
@@ -1281,7 +1282,7 @@ func TestPVMigrateBackupAndRestoreHonorMountedPolicy(t *testing.T) {
 		Online:                true,
 	}
 
-	backupRequest, err := pvmigrateBackupRequest(request, "/tmp/rclone.conf", nil)
+	backupRequest, err := pvmigrateBackupRequest(request, request.Store.RcloneConfig(), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1304,7 +1305,7 @@ func TestPVMigrateBackupAndRestoreHonorMountedPolicy(t *testing.T) {
 		t.Fatal("online backup did not ignore mounted source")
 	}
 
-	restoreRequest, err := pvmigrateRestoreRequest(request, "/tmp/rclone.conf", nil)
+	restoreRequest, err := pvmigrateRestoreRequest(request, request.Store.RcloneConfig(), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1344,12 +1345,12 @@ func TestPVMigrateBackupAndRestoreDeferMountedPolicyToPhaseAwarePreflight(t *tes
 
 	request := Request{Namespace: "default", PVCName: "data", Store: store}
 
-	backupRequest, err := pvmigrateBackupRequest(request, "/tmp/rclone.conf", nil)
+	backupRequest, err := pvmigrateBackupRequest(request, request.Store.RcloneConfig(), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	restoreRequest, err := pvmigrateRestoreRequest(request, "/tmp/rclone.conf", nil)
+	restoreRequest, err := pvmigrateRestoreRequest(request, request.Store.RcloneConfig(), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1391,7 +1392,11 @@ func TestPVMigrateBackupAndRestoreForwardFullRequestContract(t *testing.T) {
 	}
 	customValues := []string{"rclone.nodeName=source-node"}
 
-	backupRequest, err := pvmigrateBackupRequest(request, "/tmp/rclone.conf", customValues)
+	backupRequest, err := pvmigrateBackupRequest(
+		request,
+		request.Store.RcloneConfig(),
+		customValues,
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1400,13 +1405,12 @@ func TestPVMigrateBackupAndRestoreForwardFullRequestContract(t *testing.T) {
 		t,
 		backupRequest,
 		request,
-		store.RemotePath(),
 		writer,
 		logger,
 		customValues[0],
 	)
 
-	restoreRequest, err := pvmigrateRestoreRequest(request, "/tmp/rclone.conf", nil)
+	restoreRequest, err := pvmigrateRestoreRequest(request, request.Store.RcloneConfig(), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1416,7 +1420,6 @@ func TestPVMigrateBackupAndRestoreForwardFullRequestContract(t *testing.T) {
 		restoreRequest,
 		backupRequest,
 		request,
-		store.RemotePath(),
 		writer,
 		logger,
 	)
@@ -1426,12 +1429,16 @@ func assertBackupRequestContract(
 	t *testing.T,
 	got pvmigrate.Backup,
 	request Request,
-	remote string,
 	writer io.Writer,
 	logger *slog.Logger,
 	customValue string,
 ) {
 	t.Helper()
+
+	configValue, err := rcloneConfigHelmValue(request.Store.RcloneConfig())
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	if got.ID != request.ID ||
 		got.PVC != (pvmigrate.PVC{KubeconfigPath: request.KubeconfigPath, Context: request.KubeContext, Namespace: request.Namespace, Name: request.PVCName}) ||
@@ -1440,8 +1447,8 @@ func assertBackupRequestContract(
 		got.Name != "recovery-point" ||
 		got.Prefix != "prefix" ||
 		got.Path != request.Path ||
-		got.RcloneConfigFile != "/tmp/rclone.conf" ||
-		got.Remote != remote {
+		got.RcloneConfigFile != os.DevNull ||
+		got.Remote != request.Store.RemotePath() {
 		t.Fatalf("backup upstream request=%#v", got)
 	}
 
@@ -1450,7 +1457,8 @@ func assertBackupRequestContract(
 		!got.StructuredLogs ||
 		got.Writer != writer ||
 		got.Logger != logger ||
-		got.HelmStringValues[len(got.HelmStringValues)-1] != customValue {
+		!slices.Contains(got.HelmStringValues, customValue) ||
+		!slices.Contains(got.HelmStringValues, configValue) {
 		t.Fatalf("backup execution fields=%#v helmValues=%v", got, got.HelmStringValues)
 	}
 }
@@ -1470,7 +1478,7 @@ func TestPVMigrateBackupRequestUsesWritableMountForSharedOnlinePVC(t *testing.T)
 
 	got, err := pvmigrateBackupRequest(
 		request,
-		"/tmp/rclone.conf",
+		request.Store.RcloneConfig(),
 		[]string{"rclone.nodeName=node-a"},
 	)
 	if err != nil {
@@ -1490,7 +1498,6 @@ func assertRestoreRequestContract(
 	got pvmigrate.Restore,
 	backup pvmigrate.Backup,
 	request Request,
-	remote string,
 	writer io.Writer,
 	logger *slog.Logger,
 ) {
@@ -1501,8 +1508,8 @@ func assertRestoreRequestContract(
 		got.Name != backup.Name ||
 		got.Prefix != backup.Prefix ||
 		got.Path != request.Path ||
-		got.RcloneConfigFile != "/tmp/rclone.conf" ||
-		got.Remote != remote {
+		got.RcloneConfigFile != os.DevNull ||
+		got.Remote != request.Store.RemotePath() {
 		t.Fatalf("restore upstream request=%#v", got)
 	}
 
@@ -1536,7 +1543,7 @@ func TestPVMigrateBackupAndRestoreForwardLogger(t *testing.T) {
 		Logger:    logger,
 	}
 
-	backupRequest, err := pvmigrateBackupRequest(request, "/tmp/rclone.conf", nil)
+	backupRequest, err := pvmigrateBackupRequest(request, request.Store.RcloneConfig(), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1545,7 +1552,7 @@ func TestPVMigrateBackupAndRestoreForwardLogger(t *testing.T) {
 		t.Fatal("backup logger was not forwarded")
 	}
 
-	restoreRequest, err := pvmigrateRestoreRequest(request, "/tmp/rclone.conf", nil)
+	restoreRequest, err := pvmigrateRestoreRequest(request, request.Store.RcloneConfig(), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1567,12 +1574,12 @@ func TestPVMigrateBackupAndRestoreUseZeroToolResources(t *testing.T) {
 
 	request := Request{Namespace: "default", PVCName: "data", Store: store}
 
-	backupRequest, err := pvmigrateBackupRequest(request, "/tmp/rclone.conf", nil)
+	backupRequest, err := pvmigrateBackupRequest(request, request.Store.RcloneConfig(), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	restoreRequest, err := pvmigrateRestoreRequest(request, "/tmp/rclone.conf", nil)
+	restoreRequest, err := pvmigrateRestoreRequest(request, request.Store.RcloneConfig(), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1598,7 +1605,7 @@ func TestPVMigrateBackupAndRestorePinDefaultToolTimeout(t *testing.T) {
 
 	request := Request{Namespace: "default", PVCName: "data", Store: store}
 
-	backupRequest, err := pvmigrateBackupRequest(request, "/tmp/rclone.conf", nil)
+	backupRequest, err := pvmigrateBackupRequest(request, request.Store.RcloneConfig(), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1607,7 +1614,7 @@ func TestPVMigrateBackupAndRestorePinDefaultToolTimeout(t *testing.T) {
 		t.Fatalf("backup default HelmTimeout=%s, want 10m", backupRequest.HelmTimeout)
 	}
 
-	restoreRequest, err := pvmigrateRestoreRequest(request, "/tmp/rclone.conf", nil)
+	restoreRequest, err := pvmigrateRestoreRequest(request, request.Store.RcloneConfig(), nil)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -24,6 +24,8 @@ func TestStartManagerRequiresPinnedToolImage(t *testing.T) {
 				"controller-system",
 				nil,
 				nil,
+				"",
+				"",
 				nil,
 				image,
 			)
@@ -43,6 +45,21 @@ func TestValidateTrustedToolImageAcceptsOnlyPinnedReferences(t *testing.T) {
 		if err := ValidateTrustedToolImage(image); err == nil {
 			t.Fatalf("image %q accepted", image)
 		}
+	}
+}
+
+func TestRunnerWithKubeconfigTrimsAndStoresConnection(t *testing.T) {
+	runner := NewRunner(nil, nil, "system").WithKubeconfig(
+		"  /etc/pvc-migrate/kubeconfig  ",
+		"  tenant-context  ",
+	)
+
+	if runner.kubeconfigPath != "/etc/pvc-migrate/kubeconfig" {
+		t.Fatalf("kubeconfig path=%q", runner.kubeconfigPath)
+	}
+
+	if runner.kubeContext != "tenant-context" {
+		t.Fatalf("kube context=%q", runner.kubeContext)
 	}
 }
 
@@ -77,13 +94,13 @@ func TestWorkflowSpecMutationError(t *testing.T) {
 	}
 }
 
-func TestResetUnobservedTerminalStatus(t *testing.T) {
-	session := newRunnerSession("stale-terminal")
+func TestInitializeUnobservedStatus(t *testing.T) {
+	session := newRunnerSession("unobserved-status")
 	session.Status.Phase = domain.PhaseCompleted
 	session.Status.ObservedGeneration = 0
 	store := &runnerSessionStore{latest: session}
 
-	if err := resetUnobservedTerminalStatus(
+	if err := initializeUnobservedStatus(
 		context.Background(), store, session,
 	); err != nil {
 		t.Fatal(err)

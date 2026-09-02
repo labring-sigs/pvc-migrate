@@ -6,7 +6,6 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
-	"os"
 	"strings"
 	"sync"
 	"time"
@@ -201,12 +200,19 @@ func runBackupSession(
 
 func pvmigrateBackupRequest(
 	req Request,
-	configPath string,
+	rcloneConfig string,
 	helmValues []string,
 ) (pvmigrate.Backup, error) {
 	if err := requireS3RepositoryBackend(req.Store); err != nil {
 		return pvmigrate.Backup{}, err
 	}
+
+	configValue, err := rcloneConfigHelmValue(rcloneConfig)
+	if err != nil {
+		return pvmigrate.Backup{}, err
+	}
+
+	storeConfig := req.Store.Config()
 
 	imageValues, err := kube.ToolImageHelmValues(req.ToolImage)
 	if err != nil {
@@ -236,11 +242,11 @@ func pvmigrateBackupRequest(
 			Name:           req.PVCName,
 		},
 		Backend:          string(domain.BackupBackendS3),
-		Bucket:           req.Store.Config().Bucket,
-		Name:             req.Store.Config().Name,
+		Bucket:           storeConfig.Bucket,
+		Name:             storeConfig.Name,
 		Path:             req.Path,
-		Prefix:           req.Store.Config().Prefix,
-		RcloneConfigFile: configPath,
+		Prefix:           storeConfig.Prefix,
+		RcloneConfigFile: upstreamRawConfigSentinel(),
 		Remote:           req.Store.RemotePath(),
 		RcloneExtraArgs:  rclonePreserveLinksArgs,
 		// Consumer policy is enforced by inspectPVC immediately before launch.
@@ -248,9 +254,14 @@ func pvmigrateBackupRequest(
 		// not override the phase-aware result.
 		IgnoreMounted: true,
 		HelmValues:    kube.ToolSecurityContextHelmValues(),
+		// Keep the generated credential-bearing config last so generic scheduling
+		// overrides cannot replace the store selected for this operation.
 		HelmStringValues: append(
-			append(kube.ZeroResourceHelmValues(), imageValues...),
-			helmValues...,
+			append(
+				append(kube.ZeroResourceHelmValues(), imageValues...),
+				helmValues...,
+			),
+			configValue,
 		),
 		HelmTimeout:    toolHelmTimeout(req.HelmTimeout),
 		Writer:         req.Writer,
@@ -403,32 +414,10 @@ func runBackup(
 		return err
 	}
 
-	configFile, err := os.CreateTemp("", "pvc-migrate-s3-*.conf")
-	if err != nil {
-		return domain.WrapError(domain.ErrorInternal, "backup", "create temporary S3 config", err)
-	}
-
-	configPath := configFile.Name()
-	defer os.Remove(configPath)
-
-	if err := configFile.Chmod(0o600); err != nil {
-		configFile.Close()
-		return domain.WrapError(domain.ErrorInternal, "backup", "protect temporary S3 config", err)
-	}
-
-	if _, err := configFile.WriteString(req.Store.RcloneConfig()); err != nil {
-		configFile.Close()
-		return domain.WrapError(domain.ErrorInternal, "backup", "write temporary S3 config", err)
-	}
-
-	if err := configFile.Close(); err != nil {
-		return domain.WrapError(domain.ErrorInternal, "backup", "close temporary S3 config", err)
-	}
-
 	toolRequest := req
 	toolRequest.ID = toolOperationID(holder)
 
-	backupRequest, err := pvmigrateBackupRequest(toolRequest, configPath, helmValues)
+	backupRequest, err := pvmigrateBackupRequest(toolRequest, req.Store.RcloneConfig(), helmValues)
 	if err != nil {
 		return err
 	}

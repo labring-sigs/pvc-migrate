@@ -64,6 +64,7 @@ func (r *rootState) newControllerCommand() *cobra.Command {
 					WithControllerClient(runtime.clients.Runtime).
 					WithClusterIdentity(cluster.ID).
 					WithTrustedToolImage(r.global.toolImage).
+					WithKubeconfig(r.global.kubeconfig, r.global.kubeContext).
 					WithOpenEBSLVMSharedVolumeManager(runtime.openEBSLVMSharedVolumeManager).
 					WithLogger(runtime.logger.With("component", "workflow-controller")).
 					ReconcileOnce(ctx)
@@ -77,6 +78,8 @@ func (r *rootState) newControllerCommand() *cobra.Command {
 				r.global.controllerNamespace,
 				runtime.clients.Kubernetes,
 				runtime.openEBSLVMSharedVolumeManager,
+				r.global.kubeconfig,
+				r.global.kubeContext,
 				runtime.controllerKinds,
 				r.global.toolImage,
 			)

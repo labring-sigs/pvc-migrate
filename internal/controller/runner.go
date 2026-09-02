@@ -36,6 +36,8 @@ type Runner struct {
 	namespace        string
 	clusterIdentity  string
 	trustedToolImage string
+	kubeconfigPath   string
+	kubeContext      string
 	pollInterval     time.Duration
 	logger           *slog.Logger
 	openEBS          kube.OpenEBSLVMSharedVolumeManager
@@ -88,6 +90,18 @@ func (r *Runner) WithTrustedToolImage(image string) *Runner {
 	if r != nil {
 		r.trustedToolImage = strings.TrimSpace(image)
 	}
+	return r
+}
+
+// WithKubeconfig supplies the connection used by pv-migrate's Helm-backed
+// backup and restore runners. An empty path keeps the in-cluster client
+// behavior used by controller deployments.
+func (r *Runner) WithKubeconfig(path, context string) *Runner {
+	if r != nil {
+		r.kubeconfigPath = strings.TrimSpace(path)
+		r.kubeContext = strings.TrimSpace(context)
+	}
+
 	return r
 }
 
@@ -394,6 +408,8 @@ func (r *Runner) resumeBackup(ctx context.Context, session *domain.Session) erro
 	request := backup.Request{
 		ID:                      session.ID,
 		ToolImage:               payload.ToolImage,
+		KubeconfigPath:          r.kubeconfigPath,
+		KubeContext:             r.kubeContext,
 		Namespace:               payload.SourcePVC.Namespace,
 		PVCName:                 payload.SourcePVC.Name,
 		Path:                    payload.Path,
@@ -403,6 +419,7 @@ func (r *Runner) resumeBackup(ctx context.Context, session *domain.Session) erro
 		SessionNamespace:        session.Spec.SessionNamespace,
 		OpenEBSLVMManager:       r.openEBS,
 		ObjectStoreFactory:      objectstore.New,
+		ToolImageProber:         kube.NewToolImageProber(r.client),
 		Store:                   nil,
 		Writer:                  io.Discard,
 		Logger:                  r.logger,
@@ -463,6 +480,8 @@ func (r *Runner) resumeRestore(ctx context.Context, session *domain.Session) err
 	request := backup.Request{
 		ID:                      session.ID,
 		ToolImage:               payload.ToolImage,
+		KubeconfigPath:          r.kubeconfigPath,
+		KubeContext:             r.kubeContext,
 		Namespace:               payload.DestinationPVC.Namespace,
 		PVCName:                 payload.DestinationPVC.Name,
 		CreatePVC:               payload.CreatePVC,
@@ -477,6 +496,7 @@ func (r *Runner) resumeRestore(ctx context.Context, session *domain.Session) err
 		SessionNamespace:        session.Spec.SessionNamespace,
 		Store:                   store,
 		OpenEBSLVMManager:       r.openEBS,
+		ToolImageProber:         kube.NewToolImageProber(r.client),
 		Writer:                  io.Discard,
 		Logger:                  r.logger,
 		BackupRepository:        payload.BackupRepository,

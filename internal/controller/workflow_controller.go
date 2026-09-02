@@ -39,6 +39,8 @@ type WorkflowReconciler struct {
 	namespace        string
 	clusterIdentity  string
 	trustedToolImage string
+	kubeconfigPath   string
+	kubeContext      string
 	requeueAfter     time.Duration
 	supportedKinds   map[domain.ControllerKind]struct{}
 }
@@ -122,6 +124,18 @@ func (r *WorkflowReconciler) WithTrustedToolImage(image string) *WorkflowReconci
 	return r
 }
 
+// WithKubeconfig supplies the connection used by pv-migrate's Helm-backed
+// backup and restore runners. An empty path keeps the in-cluster client
+// behavior used by controller deployments.
+func (r *WorkflowReconciler) WithKubeconfig(path, context string) *WorkflowReconciler {
+	if r != nil {
+		r.kubeconfigPath = strings.TrimSpace(path)
+		r.kubeContext = strings.TrimSpace(context)
+	}
+
+	return r
+}
+
 func (r *WorkflowReconciler) WithOpenEBSLVMSharedVolumeManager(
 	manager kube.OpenEBSLVMSharedVolumeManager,
 ) *WorkflowReconciler {
@@ -137,6 +151,7 @@ func (r *WorkflowReconciler) runner(namespace string) *Runner {
 		WithControllerClient(r.controllerClient).
 		WithClusterIdentity(r.clusterIdentity).
 		WithTrustedToolImage(r.trustedToolImage).
+		WithKubeconfig(r.kubeconfigPath, r.kubeContext).
 		WithOpenEBSLVMSharedVolumeManager(r.openEBS)
 }
 
@@ -239,11 +254,21 @@ func (r *WorkflowReconciler) reconcile(
 	}
 
 	// Status is a controller-owned subresource. A declarative create ignores a
-	// user-supplied status, so a terminal status with no observed generation is
-	// stale or forged. Reinitialize it to the durable Planned checkpoint before
-	// deciding whether there is any work left to do.
-	if err := resetUnobservedTerminalStatus(ctx, r.store, session); err != nil {
-		return reconcile.Result{}, err
+	// user-supplied status, and the CLI may still be writing its initial status
+	// checkpoint while the create event is delivered. Do not begin business
+	// execution until that checkpoint is observed: executing with the create
+	// resource version would race the status write and self-fail with an
+	// optimistic-lock conflict.
+	if session.Status.ObservedGeneration == 0 {
+		if err := initializeUnobservedStatus(ctx, r.store, session); err != nil {
+			if domain.CategoryOf(err) == domain.ErrorConflict {
+				return reconcile.Result{RequeueAfter: 1 * time.Second}, nil
+			}
+
+			return reconcile.Result{}, err
+		}
+
+		return reconcile.Result{RequeueAfter: r.requeueAfter}, nil
 	}
 
 	if terminalSession(session) {
@@ -282,13 +307,12 @@ func (r *WorkflowReconciler) reconcile(
 	return reconcile.Result{RequeueAfter: r.requeueAfter}, nil
 }
 
-func resetUnobservedTerminalStatus(
+func initializeUnobservedStatus(
 	ctx context.Context,
 	store kube.SessionStore,
 	session *domain.Session,
 ) error {
-	if session == nil || !terminalSession(session) ||
-		session.Status.ObservedGeneration != 0 || store == nil {
+	if session == nil || session.Status.ObservedGeneration != 0 || store == nil {
 		return nil
 	}
 
@@ -389,6 +413,8 @@ func StartManagerWithKinds(
 	namespace string,
 	kubeClient kubernetes.Interface,
 	openEBSManager kube.OpenEBSLVMSharedVolumeManager,
+	kubeconfigPath string,
+	kubeContext string,
 	supportedKinds []domain.ControllerKind,
 	trustedToolImage ...string,
 ) error {
@@ -458,6 +484,7 @@ func StartManagerWithKinds(
 		WithControllerClient(manager.GetAPIReader()).
 		WithClusterIdentity(cluster.ID).
 		WithTrustedToolImage(normalizedTrustedImage).
+		WithKubeconfig(kubeconfigPath, kubeContext).
 		WithSupportedKinds(supportedKinds)
 	reconciler.WithKubernetesClient(kubeClient).
 		WithOpenEBSLVMSharedVolumeManager(openEBSManager)
