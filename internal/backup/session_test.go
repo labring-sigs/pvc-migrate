@@ -545,6 +545,84 @@ func TestSubmitRestoreRepositoryOmitsControllerOwnedConnection(t *testing.T) {
 	}
 }
 
+func TestValidateResumeAllowsRepositoryBackedBackupWithoutTenantCredentials(t *testing.T) {
+	store := testBackupObjectStore(t)
+
+	session, err := buildBackupSession(
+		Request{
+			ID:               "repository-resume",
+			Namespace:        "app",
+			SessionNamespace: "app",
+			BackupRepository: "archive",
+			Store:            store,
+			SessionStore:     &recordingBackupSessionStore{},
+		},
+		&corev1.PersistentVolumeClaim{
+			ObjectMeta: metav1.ObjectMeta{
+				Namespace: "app",
+				Name:      "data",
+				UID:       types.UID("pvc-uid"),
+			},
+		},
+		&corev1.PersistentVolume{
+			ObjectMeta: metav1.ObjectMeta{
+				Name: "pv-data",
+				UID:  types.UID("pv-uid"),
+			},
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	session.Backend = kube.SessionBackendCRD
+
+	if err := ValidateResume(
+		context.Background(),
+		nil,
+		Request{SessionStore: &recordingBackupSessionStore{}},
+		session,
+	); err != nil {
+		t.Fatalf("repository-backed dry-run attempted tenant credentials: %v", err)
+	}
+}
+
+func TestValidateRestoreResumeAllowsRepositoryBackedRestoreWithoutTenantCredentials(t *testing.T) {
+	objectStore, err := objectstore.NewConfigOnly(
+		objectstore.Config{Bucket: "repository", Name: "daily"},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	session, err := SubmitRestore(
+		context.Background(),
+		fake.NewSimpleClientset(),
+		Request{
+			ID:               "repository-restore-resume",
+			Namespace:        "app",
+			PVCName:          "data",
+			SessionNamespace: "app",
+			BackupRepository: "archive",
+			Store:            objectStore,
+			SessionStore:     &crdRepositorySessionStore{},
+		},
+		Plan{PVCUID: "pvc-uid"},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if err := ValidateRestoreResume(
+		context.Background(),
+		nil,
+		Request{SessionStore: &recordingBackupSessionStore{}},
+		session,
+	); err != nil {
+		t.Fatalf("repository-backed restore dry-run attempted tenant credentials: %v", err)
+	}
+}
+
 type crdRepositorySessionStore struct{ recordingBackupSessionStore }
 
 func (s *crdRepositorySessionStore) Create(_ context.Context, session *domain.Session) error {

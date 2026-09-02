@@ -146,6 +146,37 @@ func TestRunnerRejectsTenantControlledToolImage(t *testing.T) {
 	}
 }
 
+func TestRunnerSkipsToolImagePolicyForMetadataOnlyWorkflows(t *testing.T) {
+	runner := NewRunner(&recordingWorkflowResumer{}, nil, "system").
+		WithTrustedToolImage("registry.example/pvc-migrate:0.3.0")
+
+	for _, operation := range []domain.Operation{domain.OperationRename, domain.OperationMove} {
+		destinationNamespace := "destination"
+		if operation == domain.OperationRename {
+			destinationNamespace = "source"
+		}
+
+		session := domain.NewSession(
+			"metadata-only",
+			domain.NewSessionSpec(
+				operation,
+				domain.SessionCommon{
+					SourceNamespace:      "source",
+					DestinationNamespace: destinationNamespace,
+					SessionNamespace:     "system",
+				},
+				false,
+				domain.SessionWorkflowOptions{},
+			),
+			time.Unix(1, 0),
+		)
+
+		if err := runner.validateTrustedToolImage(session); err != nil {
+			t.Fatalf("operation %s rejected without a tool image: %v", operation, err)
+		}
+	}
+}
+
 type recordingWorkflowResumer struct {
 	called string
 }

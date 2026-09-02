@@ -1090,6 +1090,58 @@ func TestCRDSessionStoreSupportsLeastPrivilegeTenantAccess(t *testing.T) {
 	}
 }
 
+func TestCRDSessionStoreGetByKindDisambiguatesSameNameWorkflows(t *testing.T) {
+	ctx := context.Background()
+	client := newCRDTestClient()
+	store := NewCRDSessionStore(client)
+
+	migration := storeTestSession()
+	copySession := storeTestSession()
+	copySession.Spec = domain.NewSessionSpec(
+		domain.OperationCopy,
+		migration.Spec.SessionCommon,
+		false,
+		domain.SessionWorkflowOptions{},
+	)
+	copySession.Spec.Copy.Online = false
+
+	if err := client.Create(ctx, sessionObjectFor(migration)); err != nil {
+		t.Fatalf("create migration: %v", err)
+	}
+
+	if err := client.Create(ctx, sessionObjectFor(copySession)); err != nil {
+		t.Fatalf("create copy: %v", err)
+	}
+
+	loadedMigration, err := store.GetByKind(
+		ctx,
+		migration.Spec.SessionNamespace,
+		migration.ID,
+		domain.ControllerKindMigration,
+	)
+	if err != nil {
+		t.Fatalf("get migration: %v", err)
+	}
+
+	if loadedMigration.Spec.Type != domain.SessionTypeMigrate {
+		t.Fatalf("migration type=%s", loadedMigration.Spec.Type)
+	}
+
+	loadedCopy, err := store.GetByKind(
+		ctx,
+		copySession.Spec.SessionNamespace,
+		copySession.ID,
+		domain.ControllerKindCopy,
+	)
+	if err != nil {
+		t.Fatalf("get copy: %v", err)
+	}
+
+	if loadedCopy.Spec.Type != domain.SessionTypeCopy {
+		t.Fatalf("copy type=%s", loadedCopy.Spec.Type)
+	}
+}
+
 func TestControllerSessionSupportedBoundaries(t *testing.T) {
 	session := storeTestSession()
 	if !ControllerSessionSupported(session) {
@@ -1100,6 +1152,7 @@ func TestControllerSessionSupportedBoundaries(t *testing.T) {
 	// CLI keeps namespaced resources as its tenant-local default, while an
 	// administrator may submit the cluster API explicitly.
 	sameNamespaceCluster := storeTestSession()
+
 	sameNamespaceCluster.BackendResource = domain.ControllerKindClusterMigration
 	if !ControllerSessionSupported(sameNamespaceCluster) {
 		t.Fatal("same-namespace cluster migration should be controller compatible")

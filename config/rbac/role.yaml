@@ -39,9 +39,9 @@ rules:
   - apiGroups: [""]
     resources: ["secrets"]
     # Helm's default storage driver persists release state in Secrets. The
-    # controller must create, update, and delete those short-lived records;
-    # Secret list remains intentionally excluded.
-    verbs: ["get", "create", "update", "delete"]
+    # controller must inspect release history and manage those short-lived
+    # records.
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
   - apiGroups: [""]
     resources: ["serviceaccounts"]
     verbs: ["get", "create", "update", "delete"]

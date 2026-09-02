@@ -20,10 +20,12 @@ import (
 
 func TestCheckRBACIncludesToolAndVolumePermissions(t *testing.T) {
 	seen := collectAllowedAccessReviews(t, domain.WorkloadSpec{}, false, false)
-	if hasAccessReview(seen, authorizationv1.ResourceAttributes{
-		Namespace: "app", Verb: "list", Resource: "secrets",
-	}) {
-		t.Fatal("planner should not require list access to Secrets")
+	for _, verb := range []string{"get", "list", "watch", "create", "update", "patch", "delete"} {
+		if !hasAccessReview(seen, authorizationv1.ResourceAttributes{
+			Namespace: "app", Verb: verb, Resource: "secrets",
+		}) {
+			t.Fatalf("planner should require %s access to Secrets", verb)
+		}
 	}
 
 	want := []authorizationv1.ResourceAttributes{

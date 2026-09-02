@@ -38,9 +38,23 @@ func (r *WorkflowReconciler) validateDeclarativeSourceVolumes(
 		)
 	}
 
+	resource, ok := domain.ControllerResourceForSession(session)
+	if !ok {
+		return domain.NewError(
+			domain.ErrorValidation,
+			"controller volume snapshot",
+			"workflow resource type is not supported",
+		)
+	}
+
+	expectedNamespace := session.Spec.SessionNamespace
+	if resource.Cluster {
+		expectedNamespace = session.Spec.SourceNamespace
+	}
+
 	for index := range session.Spec.Volumes {
 		volume := &session.Spec.Volumes[index]
-		if volume.SourcePVC.Namespace != session.Spec.SessionNamespace {
+		if volume.SourcePVC.Namespace != expectedNamespace {
 			return domain.NewError(
 				domain.ErrorPrecondition,
 				"controller volume snapshot",

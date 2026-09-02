@@ -21,7 +21,6 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/cache"
 	crclient "sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/event"
-	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	crlog "sigs.k8s.io/controller-runtime/pkg/log"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
@@ -145,6 +144,39 @@ func (r *WorkflowReconciler) Reconcile(
 	ctx context.Context,
 	request reconcile.Request,
 ) (reconcile.Result, error) {
+	return r.reconcile(ctx, request, "")
+}
+
+type kindWorkflowReconciler struct {
+	parent *WorkflowReconciler
+	kind   domain.ControllerKind
+}
+
+type kindSessionStore interface {
+	GetByKind(
+		ctx context.Context,
+		namespace string,
+		id string,
+		kind domain.ControllerKind,
+	) (*domain.Session, error)
+}
+
+func (r *kindWorkflowReconciler) Reconcile(
+	ctx context.Context,
+	request reconcile.Request,
+) (reconcile.Result, error) {
+	if r == nil {
+		return reconcile.Result{}, errors.New("workflow reconciler is not configured")
+	}
+
+	return r.parent.reconcile(ctx, request, r.kind)
+}
+
+func (r *WorkflowReconciler) reconcile(
+	ctx context.Context,
+	request reconcile.Request,
+	kind domain.ControllerKind,
+) (reconcile.Result, error) {
 	if r == nil || r.store == nil || r.service == nil {
 		return reconcile.Result{}, errors.New("workflow reconciler is not configured")
 	}
@@ -153,7 +185,16 @@ func (r *WorkflowReconciler) Reconcile(
 		return reconcile.Result{}, nil
 	}
 
-	session, err := r.store.Get(ctx, request.Namespace, request.Name)
+	var session *domain.Session
+
+	var err error
+
+	if kindStore, ok := r.store.(kindSessionStore); ok && kind != "" {
+		session, err = kindStore.GetByKind(ctx, request.Namespace, request.Name, kind)
+	} else {
+		session, err = r.store.Get(ctx, request.Namespace, request.Name)
+	}
+
 	if err != nil {
 		// The SessionStore classifies a missing CRD object as validation; the
 		// controller should treat that as a normal delete event as well.
@@ -262,9 +303,9 @@ func resetUnobservedTerminalStatus(
 	return store.Update(ctx, session)
 }
 
-// SetupWithManager installs namespaced watches for every operation-specific
-// workflow resource. Generation changes enqueue spec changes; status updates
-// are handled by the explicit requeue, preventing a status-write feedback loop.
+// SetupWithManager installs one kind-aware controller for every served
+// operation-specific workflow resource. A separate reconciler per kind keeps
+// same-name resources in different CRDs independent.
 func (r *WorkflowReconciler) SetupWithManager(manager ctrl.Manager) error {
 	predicates := builder.WithPredicates(predicate.Funcs{
 		CreateFunc: func(event.CreateEvent) bool { return true },
@@ -274,8 +315,6 @@ func (r *WorkflowReconciler) SetupWithManager(manager ctrl.Manager) error {
 		DeleteFunc:  func(event.DeleteEvent) bool { return false },
 		GenericFunc: func(event.GenericEvent) bool { return true },
 	})
-
-	var controllerBuilder *builder.Builder
 
 	objects := []struct {
 		kind    domain.ControllerKind
@@ -312,23 +351,31 @@ func (r *WorkflowReconciler) SetupWithManager(manager ctrl.Manager) error {
 			continue
 		}
 
-		if controllerBuilder == nil {
-			controllerBuilder = ctrl.NewControllerManagedBy(manager).For(object.object, predicates)
-			continue
+		name := "workflow-" + strings.ToLower(string(object.kind))
+		if err := ctrl.NewControllerManagedBy(manager).
+			Named(name).
+			For(object.object, predicates).
+			Complete(&kindWorkflowReconciler{parent: r, kind: object.kind}); err != nil {
+			return err
 		}
-
-		controllerBuilder = controllerBuilder.Watches(
-			object.object,
-			&handler.EnqueueRequestForObject{},
-			predicates,
-		)
 	}
 
-	if controllerBuilder == nil {
+	if len(r.supportedKinds) > 0 {
+		served := 0
+		for _, object := range objects {
+			if r.supportsKind(object.kind) {
+				served++
+			}
+		}
+
+		if served == 0 {
+			return errors.New("no workflow CRDs are served by the target cluster")
+		}
+	} else if len(objects) == 0 {
 		return errors.New("no workflow CRDs are served by the target cluster")
 	}
 
-	return controllerBuilder.Complete(r)
+	return nil
 }
 
 // StartManagerWithKinds creates a manager that watches only the discovered

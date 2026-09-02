@@ -27,6 +27,21 @@ func TestValidateDeclarativeSourceVolumesAcceptsPlannerSnapshot(t *testing.T) {
 	}
 }
 
+func TestValidateDeclarativeSourceVolumesUsesSourceNamespaceForClusterWorkflow(t *testing.T) {
+	pvc, pv, session := declarativeVolumeFixture()
+	session.BackendResource = domain.ControllerKindClusterCopy
+	session.Spec.SessionNamespace = "control"
+	session.Spec.SourceNamespace = "tenant"
+	session.Spec.TemporaryNamespace = "tenant"
+	session.Spec.DestinationNamespace = "tenant"
+
+	if err := NewWorkflowReconciler(nil, nil).
+		WithKubernetesClient(clientfake.NewSimpleClientset(pvc, pv)).
+		validateDeclarativeSourceVolumes(context.Background(), session); err != nil {
+		t.Fatalf("valid cluster workflow snapshot rejected: %v", err)
+	}
+}
+
 func TestValidateDeclarativeSourceVolumesRejectsForgedSnapshot(t *testing.T) {
 	tests := []struct {
 		name   string

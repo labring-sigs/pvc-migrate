@@ -44,6 +44,23 @@ func TestEnsureStandalonePodSnapshotCapturesLivePod(t *testing.T) {
 	}
 }
 
+func TestEnsureStandalonePodSnapshotUsesSourceNamespaceForClusterWorkflow(t *testing.T) {
+	live := trustedSnapshotPod("tenant-a")
+	session := standaloneSnapshotSession(nil)
+	session.BackendResource = domain.ControllerKindClusterPodMigration
+	session.Spec.SessionNamespace = "control"
+	session.Spec.SourceNamespace = "tenant-a"
+	session.Spec.WorkloadPtr().Pod.Namespace = "tenant-a"
+
+	reconciler := &WorkflowReconciler{
+		kubeClient: kubernetesfake.NewClientset(live),
+		store:      &runnerSessionStore{},
+	}
+	if err := reconciler.ensureStandalonePodSnapshot(context.Background(), session); err != nil {
+		t.Fatalf("valid cluster standalone Pod rejected: %v", err)
+	}
+}
+
 func TestEnsureStandalonePodSnapshotRejectsInjectedIdentity(t *testing.T) {
 	live := trustedSnapshotPod("tenant-a")
 	foreign := trustedSnapshotPod("tenant-b")

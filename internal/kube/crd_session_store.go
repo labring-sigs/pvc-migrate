@@ -736,6 +736,54 @@ func (s *CRDSessionStore) Get(ctx context.Context, namespace, id string) (*domai
 	)
 }
 
+// GetByKind reads exactly one workflow resource. Controllers use this method
+// because reconcile requests carry only namespace/name; the watched kind is
+// supplied by the controller registration and must never be inferred by
+// scanning unrelated CRDs.
+func (s *CRDSessionStore) GetByKind(
+	ctx context.Context,
+	namespace, id string,
+	kind domain.ControllerKind,
+) (*domain.Session, error) {
+	if err := s.configured("get session"); err != nil {
+		return nil, err
+	}
+
+	resource, ok := workflowCRDResource(kind)
+	if !ok || !s.supportsKind(kind) {
+		return nil, domain.NewError(
+			domain.ErrorValidation,
+			"get session",
+			fmt.Sprintf("unsupported workflow kind %q", kind),
+		)
+	}
+
+	object := resource.new()
+	if err := s.client.Get(ctx, resourceKey(resource, namespace, id), object); err != nil {
+		if apierrors.IsNotFound(err) {
+			return nil, domain.NewError(
+				domain.ErrorValidation,
+				"get session",
+				fmt.Sprintf("session %s/%s does not exist", namespace, id),
+			)
+		}
+
+		return nil, domain.WrapError(
+			domain.ErrorKubernetes,
+			"get session",
+			"read "+string(resource.kind),
+			err,
+		)
+	}
+
+	session, err := DecodeWorkflow(object)
+	if err != nil {
+		return nil, err
+	}
+
+	return session, nil
+}
+
 func (s *CRDSessionStore) Update(ctx context.Context, session *domain.Session) error {
 	if session == nil {
 		return domain.NewError(domain.ErrorConflict, "update session", "session is required")

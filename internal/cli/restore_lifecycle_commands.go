@@ -72,7 +72,7 @@ func (r *rootState) newRestoreResumeCommand() *cobra.Command {
 
 			if dryRun {
 				request := r.backupResumeRequest(runtime)
-				if err := backup.ValidateResume(
+				if err := backup.ValidateRestoreResume(
 					ctx,
 					runtime.clients.Kubernetes,
 					request,
@@ -93,7 +93,12 @@ func (r *rootState) newRestoreResumeCommand() *cobra.Command {
 			}
 
 			request := r.backupResumeRequest(runtime)
-			if err := backup.Resume(ctx, runtime.clients.Kubernetes, request, session); err != nil {
+			if err := backup.ResumeRestore(
+				ctx,
+				runtime.clients.Kubernetes,
+				request,
+				session,
+			); err != nil {
 				return reportSessionError(cmd, session, err)
 			}
 

@@ -31,11 +31,25 @@ func (r *WorkflowReconciler) ensureStandalonePodSnapshot(
 		return nil
 	}
 
-	if workload.Pod.Namespace != session.Spec.SessionNamespace {
+	resource, ok := domain.ControllerResourceForSession(session)
+	if !ok {
+		return domain.NewError(
+			domain.ErrorValidation,
+			"controller workload snapshot",
+			"workflow resource type is not supported",
+		)
+	}
+
+	expectedNamespace := session.Spec.SessionNamespace
+	if resource.Cluster {
+		expectedNamespace = session.Spec.SourceNamespace
+	}
+
+	if workload.Pod.Namespace != expectedNamespace {
 		return domain.NewError(
 			domain.ErrorPrecondition,
 			"controller workload snapshot",
-			"standalone Pod must be in the workflow namespace",
+			"standalone Pod must be in namespace "+expectedNamespace,
 		)
 	}
 

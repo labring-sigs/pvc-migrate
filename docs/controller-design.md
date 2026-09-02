@@ -153,6 +153,7 @@ should grant create/get/list/watch on the namespaced workflow kinds they may
 submit and status read access; status writes, Secret reads, PV access, and
 cross-namespace workflow permissions remain controller/operator privileges.
 The bundled controller role reads repository credentials by name and also
-creates, updates, and deletes short-lived Helm release Secrets. It does not
-require Secret list permission. This write access is required by the upstream
+creates, updates, and deletes short-lived Helm release Secrets. Helm's
+default Secret storage driver lists release history by label; this access is
+required by the upstream
 pv-migrate Helm driver and is limited to the controller/operator identity.

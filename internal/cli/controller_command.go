@@ -39,10 +39,10 @@ func (r *rootState) newControllerCommand() *cobra.Command {
 				)
 			}
 
-			ctx, cancel := r.context(cmd.Context())
-			defer cancel()
-
 			if once {
+				ctx, cancel := r.context(cmd.Context())
+				defer cancel()
+
 				if err := controller.ValidateTrustedToolImage(r.global.toolImage); err != nil {
 					return err
 				}
@@ -70,7 +70,7 @@ func (r *rootState) newControllerCommand() *cobra.Command {
 			}
 
 			err = controller.StartManagerWithKinds(
-				ctx,
+				cmd.Context(),
 				runtime.clients.RESTConfig,
 				runtime.service,
 				runtime.controllerStore,

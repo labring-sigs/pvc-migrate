@@ -61,9 +61,8 @@ func (p *Planner) checkRBAC(
 			"patch",
 			"delete",
 		)
-		// Secret dependencies are resolved by exact name. Listing all Secrets is
-		// unnecessary and would widen a controller or CLI identity's exposure.
-		add(namespace, "", "secrets", "get", "create", "update", "delete")
+		// Helm's default Secret storage driver lists release history by label.
+		add(namespace, "", "secrets", "get", "list", "watch", "create", "update", "patch", "delete")
 		add(
 			namespace,
 			"",
