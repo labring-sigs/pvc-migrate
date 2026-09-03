@@ -154,7 +154,7 @@ func TestWorkflowAPITypesDoNotExposeSessionEnvelope(t *testing.T) {
 		v1alpha1.BackupSpec{},
 		v1alpha1.RestoreSpec{},
 		v1alpha1.RenameSpec{},
-		v1alpha1.ClusterMoveSpec{},
+		v1alpha1.MoveSpec{},
 	} {
 		data, err := json.Marshal(spec)
 		if err != nil {
@@ -240,8 +240,8 @@ func TestClusterWorkflowUsesIndependentContracts(t *testing.T) {
 		t.Fatalf("ClusterMigration status volumes type=%v", statusVolumes.Type)
 	}
 
-	status := v1alpha1.ClusterMoveStatus{Volumes: []v1alpha1.ClusterPVCIdentityVolumeStatus{{
-		Activation: v1alpha1.ClusterPVCIdentityActivationStatus{
+	status := v1alpha1.MoveStatus{Volumes: []v1alpha1.MoveVolumeStatus{{
+		Activation: v1alpha1.MoveActivationStatus{
 			ActivePVC: &v1alpha1.ObjectReference{Namespace: "destination", Name: "data"},
 		},
 	}}}
@@ -329,7 +329,7 @@ func TestOperationSpecsHaveIndependentFieldContracts(t *testing.T) {
 			},
 		},
 		{
-			name: "cluster move", spec: v1alpha1.ClusterMoveSpec{},
+			name: "move", spec: v1alpha1.MoveSpec{},
 			fields: []string{
 				"destinationNamespace", "identity", "sessionNamespace",
 				"sourceNamespace",
@@ -473,10 +473,10 @@ func TestOperationStatusesExposeOnlyConcernedCheckpoints(t *testing.T) {
 			required: []string{`"activation":`},
 		},
 		{
-			name: "cluster move",
-			status: v1alpha1.ClusterMoveStatus{Volumes: []v1alpha1.ClusterPVCIdentityVolumeStatus{{
+			name: "move",
+			status: v1alpha1.MoveStatus{Volumes: []v1alpha1.MoveVolumeStatus{{
 				SourcePVCName: "data",
-				Activation: v1alpha1.ClusterPVCIdentityActivationStatus{
+				Activation: v1alpha1.MoveActivationStatus{
 					ActivePVC: &v1alpha1.ObjectReference{Namespace: "destination", Name: "active"},
 				},
 			}}},
@@ -879,7 +879,7 @@ func TestEveryOperationSpecRoundTripsToItsSessionType(t *testing.T) {
 			name: "move",
 			want: domain.SessionTypeMove,
 			convert: func(s domain.SessionSpec) domain.SessionSpec {
-				return v1alpha1.ClusterMoveSpecFromDomain(s).Domain()
+				return v1alpha1.MoveSpecFromDomain(s).Domain()
 			},
 		},
 	}
@@ -1008,7 +1008,7 @@ func TestPVCIdentitySpecsExposeDedicatedEndpoints(t *testing.T) {
 		{
 			name: "move",
 			kind: "Move",
-			data: v1alpha1.ClusterMoveSpecFromDomain(domain.SessionSpec{
+			data: v1alpha1.MoveSpecFromDomain(domain.SessionSpec{
 				SessionCommon: domain.SessionCommon{
 					SourceNamespace: "source", DestinationNamespace: "destination",
 					SessionNamespace: "system", Volumes: []domain.VolumeSpec{volume},
@@ -1016,7 +1016,7 @@ func TestPVCIdentitySpecsExposeDedicatedEndpoints(t *testing.T) {
 				Type: domain.SessionTypeMove,
 			}),
 			got: func() domain.SessionSpec {
-				return v1alpha1.ClusterMoveSpecFromDomain(domain.SessionSpec{
+				return v1alpha1.MoveSpecFromDomain(domain.SessionSpec{
 					SessionCommon: domain.SessionCommon{
 						SourceNamespace: "source", DestinationNamespace: "destination",
 						SessionNamespace: "system", Volumes: []domain.VolumeSpec{volume},
@@ -1094,7 +1094,7 @@ func TestPVCIdentitySpecsRoundTripSourceMetadataWithoutSharing(t *testing.T) {
 	}
 }
 
-func TestClusterMoveRoundTripsNamespaceRoles(t *testing.T) {
+func TestMoveRoundTripsNamespaceRoles(t *testing.T) {
 	spec := domain.SessionSpec{
 		SessionCommon: domain.SessionCommon{
 			SourceNamespace: "source", TemporaryNamespace: "destination",
@@ -1108,7 +1108,7 @@ func TestClusterMoveRoundTripsNamespaceRoles(t *testing.T) {
 		Type: domain.SessionTypeMove,
 	}
 
-	apiSpec := v1alpha1.ClusterMoveSpecFromDomain(spec)
+	apiSpec := v1alpha1.MoveSpecFromDomain(spec)
 
 	restored := apiSpec.Domain()
 	if restored.SourceNamespace != "source" ||
@@ -1116,7 +1116,7 @@ func TestClusterMoveRoundTripsNamespaceRoles(t *testing.T) {
 		restored.SessionNamespace != "control" ||
 		restored.Volumes[0].SourcePVC.Namespace != "source" ||
 		restored.Volumes[0].DestinationPVC.Namespace != "destination" {
-		t.Fatalf("ClusterMove namespace round trip=%#v", restored)
+		t.Fatalf("Move namespace round trip=%#v", restored)
 	}
 }
 

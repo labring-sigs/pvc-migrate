@@ -120,6 +120,6 @@ resources:
   controller: true
   domain: sealos.io
   group: migrate
-  kind: ClusterMove
+  kind: Move
   path: github.com/labring-sigs/pvc-migrate/api/v1alpha1
   version: v1alpha1

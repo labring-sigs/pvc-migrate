@@ -1055,7 +1055,7 @@ func newCRDTestClient() crclient.Client {
 			&v1alpha1.Migration{}, &v1alpha1.PodMigration{}, &v1alpha1.Reservation{},
 			&v1alpha1.Copy{}, &v1alpha1.Backup{}, &v1alpha1.Restore{}, &v1alpha1.Rename{},
 			&v1alpha1.ClusterMigration{}, &v1alpha1.ClusterPodMigration{}, &v1alpha1.ClusterReservation{},
-			&v1alpha1.ClusterCopy{}, &v1alpha1.ClusterMove{},
+			&v1alpha1.ClusterCopy{}, &v1alpha1.Move{},
 		).
 		Build()
 }
@@ -1302,17 +1302,17 @@ func TestCRDSessionStoreGetByTypeSupportsClusterOnlyWorkflow(t *testing.T) {
 	)
 
 	if err := client.Create(ctx, sessionObjectFor(session)); err != nil {
-		t.Fatalf("create cluster move: %v", err)
+		t.Fatalf("create Move: %v", err)
 	}
 
 	loaded, err := store.GetByType(ctx, "system", session.ID, domain.SessionTypeMove)
 	if err != nil {
-		t.Fatalf("get cluster move by type: %v", err)
+		t.Fatalf("get Move by type: %v", err)
 	}
 
 	if loaded.Spec.Type != domain.SessionTypeMove ||
-		loaded.BackendResource != domain.ControllerKindClusterMove {
-		t.Fatalf("loaded cluster move=%#v", loaded)
+		loaded.BackendResource != domain.ControllerKindMove {
+		t.Fatalf("loaded Move=%#v", loaded)
 	}
 }
 

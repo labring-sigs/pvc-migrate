@@ -30,7 +30,7 @@ const (
 	ClusterPodMigrationResource = "clusterpodmigrations"
 	ClusterReservationResource  = "clusterreservations"
 	ClusterCopyResource         = "clustercopies"
-	ClusterMoveResource         = "clustermoves"
+	MoveResource                = "moves"
 	BackupRepositoryResource    = "backuprepositories"
 	// Workflow status is user-visible and persisted in the API server. Keep
 	// controller-generated history and messages bounded even when a lower
@@ -231,7 +231,7 @@ const (
 	ControllerKindClusterPodMigration ControllerKind = "ClusterPodMigration"
 	ControllerKindClusterReservation  ControllerKind = "ClusterReservation"
 	ControllerKindClusterCopy         ControllerKind = "ClusterCopy"
-	ControllerKindClusterMove         ControllerKind = "ClusterMove"
+	ControllerKindMove                ControllerKind = "Move"
 )
 
 // ControllerWorkflow identifies one operation-specific controller API. This
@@ -317,9 +317,9 @@ func controllerWorkflowRegistry() []ControllerWorkflow {
 		},
 		{
 			Type:            SessionTypeMove,
-			ClusterKind:     ControllerKindClusterMove,
-			ClusterResource: ClusterMoveResource,
-			ClusterSingular: "clustermove",
+			ClusterKind:     ControllerKindMove,
+			ClusterResource: MoveResource,
+			ClusterSingular: "move",
 		},
 	}
 }
@@ -1572,14 +1572,6 @@ func validateSessionMode(s *Session) error {
 			ErrorValidation,
 			"session",
 			"rename sessions must stay within one namespace",
-		)
-	}
-
-	if s.Spec.Type == SessionTypeMove && s.Spec.SourceNamespace == s.Spec.DestinationNamespace {
-		return NewError(
-			ErrorValidation,
-			"session",
-			"move sessions require different source and destination namespaces",
 		)
 	}
 

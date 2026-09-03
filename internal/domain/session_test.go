@@ -469,6 +469,24 @@ func TestMoveSessionUsesDedicatedRebindPhase(t *testing.T) {
 	}
 }
 
+func TestMoveSessionAllowsSameNamespace(t *testing.T) {
+	base := testSession(t)
+	common := base.Spec.SessionCommon
+	common.TemporaryNamespace = common.SourceNamespace
+	common.DestinationNamespace = common.SourceNamespace
+	common.Volumes[0].DestinationPVC.Namespace = common.SourceNamespace
+	common.Volumes[0].DestinationPVC.Name = "renamed"
+
+	session := NewSession(
+		"move-same-namespace",
+		NewSessionSpec(OperationMove, common, false, SessionWorkflowOptions{}),
+		time.Unix(100, 0),
+	)
+	if err := session.Validate(); err != nil {
+		t.Fatalf("same-namespace Move validation failed: %v", err)
+	}
+}
+
 func TestFailedSessionRecordsResumePhase(t *testing.T) {
 	session := testSession(t)
 	if err := session.Transition(PhaseReserving, "reserve", time.Now()); err != nil {

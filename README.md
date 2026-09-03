@@ -74,7 +74,7 @@ The default mode is `session`. Use `--mode=controller` when the controller and
 the required workflow CRDs are installed.
 
 - `--mode=session` always stores sessions in ConfigMaps and executes the workflow in the invoking process.
-- `--mode=controller` stores local sessions as operation-specific `migrate.sealos.io/v1alpha1` CRs. The CLI defaults to namespaced kinds for tenant-local work and selects a `Cluster*` kind when namespace roles differ. Cluster-scoped kinds also accept same-namespace roles, which is useful for an administrator submitting a workflow with cluster-level authority. Pod migration with administrator-selected temporary or session namespaces uses `ClusterPodMigration` while keeping the workload and PVC identities in the source namespace. PVC identity moves use `ClusterMove`. Backup, restore, and rename intentionally have no cluster-scoped form. Cross-cluster workflows remain on the ConfigMap/session backend. The controller uses leader election, watches every installed workflow kind, and reuses the same resumable app.Service state machine. The CLI watches that CR and waits for completion by default; use `--wait=false` for detached submission. A command fails clearly when its matching CRD is absent.
+- `--mode=controller` stores local sessions as operation-specific `migrate.sealos.io/v1alpha1` CRs. The CLI defaults to namespaced kinds for tenant-local work and selects a `Cluster*` kind when namespace roles differ. Cluster-scoped kinds also accept same-namespace roles, which is useful for an administrator submitting a workflow with cluster-level authority. Pod migration with administrator-selected temporary or session namespaces uses `ClusterPodMigration` while keeping the workload and PVC identities in the source namespace. PVC identity moves always use the cluster-scoped `Move`. Backup, restore, and rename intentionally have no cluster-scoped form. Cross-cluster workflows remain on the ConfigMap/session backend. The controller uses leader election, watches every installed workflow kind, and reuses the same resumable app.Service state machine. The CLI watches that CR and waits for completion by default; use `--wait=false` for detached submission. A command fails clearly when its matching CRD is absent.
 
 Install the controller backend with:
 
@@ -363,7 +363,7 @@ Controller ownership outside the supported adapters causes the plan to fail. PVC
 | `migrate` | Run an offline reserve, final sync, activation, and completion |
 | `migrate-pod` | Run real-time warm copy, workload pause, cutover, and resume for one Pod |
 | `rename` | Rename one offline PVC while retaining its PV |
-| `move` | Move one offline PVC identity to another namespace |
+| `move` | Move one offline PVC identity within or across namespaces |
 | `backup` | Copy PVC files to S3-compatible object storage (`--online` keeps active consumers running) |
 | `restore` | Restore a published recovery point into a PVC |
 | `migrate status/resume/abort/rollback/cleanup` | Manage an offline migration session |

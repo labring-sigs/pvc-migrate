@@ -20,7 +20,7 @@ func (r *rootState) newMoveCommand() *cobra.Command {
 
 	command := &cobra.Command{
 		Use:   "move",
-		Short: "Move an offline PVC identity to another namespace",
+		Short: "Move an offline PVC identity within or across namespaces",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			if sourcePVC == "" {

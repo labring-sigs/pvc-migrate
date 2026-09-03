@@ -4,16 +4,16 @@ kind: CustomResourceDefinition
 metadata:
   annotations:
     controller-gen.kubebuilder.io/version: v0.19.0
-  name: clustermoves.migrate.sealos.io
+  name: moves.migrate.sealos.io
 spec:
   group: migrate.sealos.io
   names:
-    kind: ClusterMove
-    listKind: ClusterMoveList
-    plural: clustermoves
+    kind: Move
+    listKind: MoveList
+    plural: moves
     shortNames:
-    - cmove
-    singular: clustermove
+    - move
+    singular: move
   scope: Cluster
   versions:
   - additionalPrinterColumns:
@@ -436,9 +436,6 @@ spec:
             - sessionNamespace
             - sourceNamespace
             type: object
-            x-kubernetes-validations:
-            - message: ClusterMove requires different source and destination namespaces
-              rule: self.sourceNamespace != self.destinationNamespace
           status:
             properties:
               completedAt:

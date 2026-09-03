@@ -97,7 +97,7 @@ func controllerNamespaceBoundaryErrorForResource(
 		return domain.NewError(
 			domain.ErrorPrecondition,
 			"controller namespace",
-			"Move requires the cluster-scoped ClusterMove workflow",
+			"Move requires the cluster-scoped Move workflow",
 		)
 	}
 

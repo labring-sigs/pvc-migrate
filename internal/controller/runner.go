@@ -356,7 +356,7 @@ func (r *Runner) validateTrustedToolImage(session *domain.Session) error {
 		return nil
 	}
 
-	// Rename and ClusterMove operate on PVC/PV metadata only and never create a
+	// Rename and Move operate on PVC/PV metadata only and never create a
 	// data-mover Pod. Their CRDs intentionally do not expose a tool image.
 	if operation := session.Spec.Operation(); operation == domain.OperationRename ||
 		operation == domain.OperationMove {

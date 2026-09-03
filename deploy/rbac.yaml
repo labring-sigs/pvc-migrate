@@ -4,10 +4,10 @@ metadata:
   name: pvc-migrate
 rules:
   - apiGroups: ["migrate.sealos.io"]
-    resources: ["migrations", "podmigrations", "reservations", "copies", "backups", "restores", "renames", "clustermigrations", "clusterpodmigrations", "clusterreservations", "clustercopies", "clustermoves"]
+    resources: ["migrations", "podmigrations", "reservations", "copies", "backups", "restores", "renames", "clustermigrations", "clusterpodmigrations", "clusterreservations", "clustercopies", "moves"]
     verbs: ["get", "list", "watch", "update", "patch"]
   - apiGroups: ["migrate.sealos.io"]
-    resources: ["migrations/status", "podmigrations/status", "reservations/status", "copies/status", "backups/status", "restores/status", "renames/status", "clustermigrations/status", "clusterpodmigrations/status", "clusterreservations/status", "clustercopies/status", "clustermoves/status"]
+    resources: ["migrations/status", "podmigrations/status", "reservations/status", "copies/status", "backups/status", "restores/status", "renames/status", "clustermigrations/status", "clusterpodmigrations/status", "clusterreservations/status", "clustercopies/status", "moves/status"]
     verbs: ["get", "update", "patch"]
   - apiGroups: ["migrate.sealos.io"]
     resources: ["backuprepositories"]

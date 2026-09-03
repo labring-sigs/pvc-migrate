@@ -91,10 +91,10 @@ func workflowCRDResourceRegistry() []crdResource {
 			newList: func() crclient.ObjectList { return &v1alpha1.RenameList{} },
 		},
 		{
-			kind:    domain.ControllerKindClusterMove,
+			kind:    domain.ControllerKindMove,
 			cluster: true,
-			new:     func() crclient.Object { return &v1alpha1.ClusterMove{} },
-			newList: func() crclient.ObjectList { return &v1alpha1.ClusterMoveList{} },
+			new:     func() crclient.Object { return &v1alpha1.Move{} },
+			newList: func() crclient.ObjectList { return &v1alpha1.MoveList{} },
 		},
 	}
 }
@@ -1708,10 +1708,10 @@ func sessionObjectForKind(
 			ObjectMeta: meta,
 			Spec:       v1alpha1.RenameSpecFromDomain(session.Spec),
 		}, true
-	case domain.ControllerKindClusterMove:
-		return &v1alpha1.ClusterMove{
+	case domain.ControllerKindMove:
+		return &v1alpha1.Move{
 			TypeMeta: typeMeta, ObjectMeta: meta,
-			Spec: v1alpha1.ClusterMoveSpecFromDomain(session.Spec),
+			Spec: v1alpha1.MoveSpecFromDomain(session.Spec),
 		}, true
 	default:
 		return nil, false
@@ -1755,8 +1755,8 @@ func workflowKind(object crclient.Object) domain.ControllerKind {
 		return domain.ControllerKindRestore
 	case *v1alpha1.Rename:
 		return domain.ControllerKindRename
-	case *v1alpha1.ClusterMove:
-		return domain.ControllerKindClusterMove
+	case *v1alpha1.Move:
+		return domain.ControllerKindMove
 	default:
 		return domain.ControllerKind(object.GetObjectKind().GroupVersionKind().Kind)
 	}
@@ -1808,7 +1808,7 @@ func workflowSpecStatus(object crclient.Object) (domain.SessionSpec, domain.Sess
 		return spec, typed.Status.Domain(), true
 	case *v1alpha1.Rename:
 		return typed.Spec.Domain(typed.Namespace), typed.Status.Domain(typed.Namespace), true
-	case *v1alpha1.ClusterMove:
+	case *v1alpha1.Move:
 		return typed.Spec.Domain(), typed.Status.Domain(), true
 	default:
 		return domain.SessionSpec{}, domain.SessionStatus{}, false
@@ -1857,8 +1857,8 @@ func setWorkflowSpec(object crclient.Object, spec domain.SessionSpec) bool {
 		typed.Spec = v1alpha1.RestoreSpecFromDomain(spec)
 	case *v1alpha1.Rename:
 		typed.Spec = v1alpha1.RenameSpecFromDomain(spec)
-	case *v1alpha1.ClusterMove:
-		typed.Spec = v1alpha1.ClusterMoveSpecFromDomain(spec)
+	case *v1alpha1.Move:
+		typed.Spec = v1alpha1.MoveSpecFromDomain(spec)
 	default:
 		return false
 	}
@@ -1898,8 +1898,8 @@ func setWorkflowStatus(
 		typed.Status = v1alpha1.RestoreStatusFromDomain(status, spec)
 	case *v1alpha1.Rename:
 		typed.Status = v1alpha1.RenameStatusFromDomain(status)
-	case *v1alpha1.ClusterMove:
-		typed.Status = v1alpha1.ClusterMoveStatusFromDomain(status)
+	case *v1alpha1.Move:
+		typed.Status = v1alpha1.MoveStatusFromDomain(status)
 	default:
 		return false
 	}
@@ -1958,7 +1958,7 @@ func workflowListItems(list crclient.ObjectList) []crclient.Object {
 		for i := range typed.Items {
 			items = append(items, &typed.Items[i])
 		}
-	case *v1alpha1.ClusterMoveList:
+	case *v1alpha1.MoveList:
 		for i := range typed.Items {
 			items = append(items, &typed.Items[i])
 		}

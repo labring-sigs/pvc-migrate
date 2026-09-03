@@ -200,7 +200,7 @@ func (s ClusterCopySpec) Domain() domain.SessionSpec {
 	}
 }
 
-func (s ClusterMoveSpec) Domain() domain.SessionSpec {
+func (s MoveSpec) Domain() domain.SessionSpec {
 	return identitySessionSpec(
 		domain.SessionTypeMove,
 		string(s.SourceNamespace),
@@ -286,14 +286,14 @@ func ClusterCopySpecFromDomain(s domain.SessionSpec) ClusterCopySpec {
 	}
 }
 
-func ClusterMoveSpecFromDomain(s domain.SessionSpec) ClusterMoveSpec {
+func MoveSpecFromDomain(s domain.SessionSpec) MoveSpec {
 	volume := firstVolume(s.Volumes)
 
-	return ClusterMoveSpec{
+	return MoveSpec{
 		SourceNamespace:      NamespaceName(s.SourceNamespace),
 		DestinationNamespace: NamespaceName(s.DestinationNamespace),
 		SessionNamespace:     NamespaceName(s.SessionNamespace),
-		Identity: ClusterPVCIdentityFields{
+		Identity: MoveIdentity{
 			SourcePVC:      localRefFromDomain(volume.SourcePVC),
 			SourcePV:       localRefFromDomain(volume.SourcePV),
 			DestinationPVC: localRefFromDomain(volume.DestinationPVC),
@@ -610,7 +610,7 @@ func (s ClusterCopyStatus) ApplyToDomainSpec(spec *domain.SessionSpec) {
 	}
 }
 
-func (s ClusterMoveStatus) Domain() domain.SessionStatus {
+func (s MoveStatus) Domain() domain.SessionStatus {
 	out := workflowStatusToDomain(s.WorkflowStatus)
 
 	out.Volumes = make([]domain.VolumeStatus, len(s.Volumes))
@@ -722,16 +722,16 @@ func ClusterCopyStatusFromDomain(
 	return out
 }
 
-func ClusterMoveStatusFromDomain(s domain.SessionStatus) ClusterMoveStatus {
-	out := ClusterMoveStatus{
+func MoveStatusFromDomain(s domain.SessionStatus) MoveStatus {
+	out := MoveStatus{
 		WorkflowStatus: workflowStatusFromDomain(s),
-		Volumes:        make([]ClusterPVCIdentityVolumeStatus, len(s.Volumes)),
+		Volumes:        make([]MoveVolumeStatus, len(s.Volumes)),
 	}
 	for i := range s.Volumes {
 		volume := s.Volumes[i]
-		out.Volumes[i] = ClusterPVCIdentityVolumeStatus{
+		out.Volumes[i] = MoveVolumeStatus{
 			SourcePVCName: volume.SourcePVCName,
-			Activation: ClusterPVCIdentityActivationStatus{
+			Activation: MoveActivationStatus{
 				ActivePVC:    optionalRefFromDomain(volume.Activation.ActivePVC),
 				ActivatedAt:  copyTime(volume.Activation.ActivatedAt),
 				RolledBackAt: copyTime(volume.Activation.RolledBackAt),

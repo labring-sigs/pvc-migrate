@@ -37,7 +37,7 @@ type RenamePlanOptions struct {
 	SessionNamespace string
 }
 
-// MovePlanOptions is the dedicated cross-namespace PVC move contract.
+// MovePlanOptions is the dedicated cluster-scoped PVC identity contract.
 type MovePlanOptions struct {
 	SessionID            string
 	SourceNamespace      string
@@ -589,16 +589,6 @@ func validateRenameInputs(
 			failed(
 				domain.CheckNameRename,
 				"rename requires source and destination PVCs in the same namespace; use move for a cross-namespace identity change",
-			),
-		)
-	}
-
-	if options.Operation == domain.OperationMove &&
-		options.SourceNamespace == options.DestinationNamespace {
-		plan.AddCheck(
-			failed(
-				domain.CheckNameMove,
-				"move requires a destination namespace different from the source namespace; use rename for an in-namespace identity change",
 			),
 		)
 	}

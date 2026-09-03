@@ -119,19 +119,18 @@ type ClusterCopySpec struct {
 	Online               bool     `json:"online,omitempty"               yaml:"online,omitempty"`
 }
 
-type ClusterPVCIdentityFields struct {
+type MoveIdentity struct {
 	SourcePVC      LocalResourceReference `json:"sourcePVC"      yaml:"sourcePVC"`
 	SourcePV       LocalResourceReference `json:"sourcePV"       yaml:"sourcePV"`
 	DestinationPVC LocalResourceReference `json:"destinationPVC" yaml:"destinationPVC"`
 	SourceTemplate PVCSourceTemplate      `json:"sourceTemplate" yaml:"sourceTemplate"`
 }
 
-// +kubebuilder:validation:XValidation:rule="self.sourceNamespace != self.destinationNamespace",message="ClusterMove requires different source and destination namespaces"
-type ClusterMoveSpec struct {
-	SourceNamespace      NamespaceName            `json:"sourceNamespace"      yaml:"sourceNamespace"`
-	DestinationNamespace NamespaceName            `json:"destinationNamespace" yaml:"destinationNamespace"`
-	SessionNamespace     NamespaceName            `json:"sessionNamespace"     yaml:"sessionNamespace"`
-	Identity             ClusterPVCIdentityFields `json:"identity"             yaml:"identity"`
+type MoveSpec struct {
+	SourceNamespace      NamespaceName `json:"sourceNamespace"      yaml:"sourceNamespace"`
+	DestinationNamespace NamespaceName `json:"destinationNamespace" yaml:"destinationNamespace"`
+	SessionNamespace     NamespaceName `json:"sessionNamespace"     yaml:"sessionNamespace"`
+	Identity             MoveIdentity  `json:"identity"             yaml:"identity"`
 }
 
 // Cluster status types use fully qualified references. A cluster-scoped
@@ -197,15 +196,15 @@ type ClusterCopyVolumeStatus struct {
 	Sync              CopySyncStatus   `json:"sync"                               yaml:"sync"`
 }
 
-type ClusterPVCIdentityActivationStatus struct {
+type MoveActivationStatus struct {
 	ActivePVC    *ObjectReference `json:"activePVC,omitempty"    yaml:"activePVC,omitempty"`
 	ActivatedAt  *metav1.Time     `json:"activatedAt,omitempty"  yaml:"activatedAt,omitempty"`
 	RolledBackAt *metav1.Time     `json:"rolledBackAt,omitempty" yaml:"rolledBackAt,omitempty"`
 }
 
-type ClusterPVCIdentityVolumeStatus struct {
-	SourcePVCName string                             `json:"sourcePVCName" yaml:"sourcePVCName"`
-	Activation    ClusterPVCIdentityActivationStatus `json:"activation"    yaml:"activation"`
+type MoveVolumeStatus struct {
+	SourcePVCName string               `json:"sourcePVCName" yaml:"sourcePVCName"`
+	Activation    MoveActivationStatus `json:"activation"    yaml:"activation"`
 }
 
 type ClusterMigrationStatus struct {
@@ -232,9 +231,9 @@ type ClusterCopyStatus struct {
 	Volumes        []ClusterCopyVolumeStatus `json:"volumes" yaml:"volumes"`
 }
 
-type ClusterMoveStatus struct {
-	WorkflowStatus `                                 json:",inline" yaml:",inline"`
-	Volumes        []ClusterPVCIdentityVolumeStatus `json:"volumes" yaml:"volumes"`
+type MoveStatus struct {
+	WorkflowStatus `                  json:",inline" yaml:",inline"`
+	Volumes        []MoveVolumeStatus `json:"volumes" yaml:"volumes"`
 }
 
 // +kubebuilder:object:root=true
@@ -314,20 +313,20 @@ type ClusterCopyList struct {
 }
 
 // +kubebuilder:object:root=true
-// +kubebuilder:resource:scope=Cluster,shortName=cmove
+// +kubebuilder:resource:scope=Cluster,shortName=move
 // +kubebuilder:subresource:status
 // +kubebuilder:printcolumn:name="Phase",type="string",JSONPath=".status.phase"
 // +kubebuilder:printcolumn:name="Age",type="date",JSONPath=".metadata.creationTimestamp"
-type ClusterMove struct {
-	metav1.TypeMeta   `                  json:",inline"`
-	metav1.ObjectMeta `                  json:"metadata,omitempty"`
-	Spec              ClusterMoveSpec   `json:"spec"`
-	Status            ClusterMoveStatus `json:"status,omitempty"`
+type Move struct {
+	metav1.TypeMeta   `           json:",inline"`
+	metav1.ObjectMeta `           json:"metadata,omitempty"`
+	Spec              MoveSpec   `json:"spec"`
+	Status            MoveStatus `json:"status,omitempty"`
 }
 
 // +kubebuilder:object:root=true
-type ClusterMoveList struct {
-	metav1.TypeMeta `              json:",inline"`
-	metav1.ListMeta `              json:"metadata,omitempty"`
-	Items           []ClusterMove `json:"items"`
+type MoveList struct {
+	metav1.TypeMeta `        json:",inline"`
+	metav1.ListMeta `        json:"metadata,omitempty"`
+	Items           []Move `json:"items"`
 }

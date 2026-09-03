@@ -14,7 +14,7 @@ actual authority boundary:
 | backup | `Backup` | none |
 | restore | `Restore` | none |
 | rename | `Rename` | none |
-| move | none | `ClusterMove` |
+| move | none | `Move` |
 
 The operation-specific API types own their fields and statuses. The internal
 `domain.SessionSpec` and `domain.SessionStatus` are translation details and do
@@ -41,16 +41,17 @@ The namespace roles are operation-specific:
   final PVC identities stay in the source namespace.
 - `ClusterReservation` and `ClusterCopy` declare source, actual destination, and session
   namespaces; they have no activation stage or separate temporary namespace in their API.
-- `ClusterMove` declares source, destination, and session namespaces.
+- `Move` declares source, destination, and session namespaces.
 
 `volumes[].destinationPVC` is relative to the namespace that owns the actual
 destination storage: `temporaryNamespace` for migration workflows and
 `destinationNamespace` for reservation and copy workflows.
 
 Backup and restore remain namespaced because the repository and credential
-Secret are tenant-owned and local. Rename is inherently same-namespace, while
-Move is inherently cross-namespace, so each exposes only the scope that can
-represent its semantics safely.
+Secret are tenant-owned and local. Rename is the tenant-scoped same-namespace
+identity operation. Move is cluster-scoped because it can cross namespace
+boundaries; it also accepts equal source and destination namespaces for
+administrator workflows and uniform cluster-level automation.
 
 Cross-cluster operations still use session mode. A controller connected to one
 API server cannot safely act on a second cluster without a separately managed

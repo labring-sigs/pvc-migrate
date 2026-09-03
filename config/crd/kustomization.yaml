@@ -4,7 +4,7 @@ resources:
 - bases/migrate.sealos.io_copies.yaml
 - bases/migrate.sealos.io_clustercopies.yaml
 - bases/migrate.sealos.io_clustermigrations.yaml
-- bases/migrate.sealos.io_clustermoves.yaml
+- bases/migrate.sealos.io_moves.yaml
 - bases/migrate.sealos.io_clusterpodmigrations.yaml
 - bases/migrate.sealos.io_clusterreservations.yaml
 - bases/migrate.sealos.io_migrations.yaml

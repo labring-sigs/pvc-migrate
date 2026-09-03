@@ -29,7 +29,7 @@ func addKnownTypes(scheme *runtime.Scheme) error {
 		&ClusterPodMigration{}, &ClusterPodMigrationList{},
 		&ClusterReservation{}, &ClusterReservationList{},
 		&ClusterCopy{}, &ClusterCopyList{},
-		&ClusterMove{}, &ClusterMoveList{},
+		&Move{}, &MoveList{},
 	)
 	metav1.AddToGroupVersion(scheme, GroupVersion)
 

@@ -6,8 +6,8 @@ import (
 	"github.com/spf13/cobra"
 )
 
-// addRenameLifecycle attaches lifecycle commands owned by same-namespace PVC
-// rename. Cross-namespace move has a separate command module.
+// addRenameLifecycle attaches lifecycle commands owned by namespace-scoped PVC
+// rename. Cluster-scoped move has a separate command module.
 func (r *rootState) addRenameLifecycle(parent *cobra.Command) {
 	parent.AddCommand(
 		r.newRenameStatusCommand(),

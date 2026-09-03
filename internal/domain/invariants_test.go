@@ -608,7 +608,8 @@ func TestControllerWorkflowRegistryCoversEveryLocalWorkflow(t *testing.T) {
 	}
 
 	move, _ := ControllerWorkflowForType(SessionTypeMove)
-	if move.Kind != "" || move.ClusterKind != ControllerKindClusterMove {
+	if move.Kind != "" || move.ClusterKind != ControllerKindMove ||
+		move.ClusterResource != MoveResource {
 		t.Fatalf("Move scope contract=%#v", move)
 	}
 
@@ -658,6 +659,26 @@ func TestControllerResourceScopeUsesOperationNamespaceRoles(t *testing.T) {
 	resource, ok := ControllerResourceForSpec(spec)
 	if !ok || !resource.Cluster || resource.Kind != ControllerKindClusterPodMigration {
 		t.Fatalf("Pod migration resource=%#v found=%t, want ClusterPodMigration", resource, ok)
+	}
+
+	for _, destinationNamespace := range []string{"tenant", "archive"} {
+		move := NewSessionSpec(OperationMove, SessionCommon{
+			SourceNamespace:      "tenant",
+			TemporaryNamespace:   destinationNamespace,
+			DestinationNamespace: destinationNamespace,
+			SessionNamespace:     "system",
+		}, false, SessionWorkflowOptions{})
+
+		resource, ok := ControllerResourceForSpec(move)
+		if !ok || !resource.Cluster || resource.Kind != ControllerKindMove ||
+			resource.Resource != MoveResource {
+			t.Fatalf(
+				"Move destination namespace %q resource=%#v found=%t",
+				destinationNamespace,
+				resource,
+				ok,
+			)
+		}
 	}
 }
 

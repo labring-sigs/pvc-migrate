@@ -415,7 +415,7 @@ func (r *WorkflowReconciler) SetupWithManager(manager ctrl.Manager) error {
 		{kind: domain.ControllerKindBackup, object: &v1alpha1.Backup{}},
 		{kind: domain.ControllerKindRestore, object: &v1alpha1.Restore{}},
 		{kind: domain.ControllerKindRename, object: &v1alpha1.Rename{}},
-		{kind: domain.ControllerKindClusterMove, object: &v1alpha1.ClusterMove{}, cluster: true},
+		{kind: domain.ControllerKindMove, object: &v1alpha1.Move{}, cluster: true},
 	}
 	for _, object := range objects {
 		if !r.supportsKind(object.kind) {
