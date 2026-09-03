@@ -5,8 +5,90 @@ import (
 	"testing"
 
 	"github.com/labring-sigs/pvc-migrate/internal/domain"
+	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
+	clientfake "k8s.io/client-go/kubernetes/fake"
 	"k8s.io/client-go/rest"
+	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 )
+
+func TestReconcileDeletingWorkflowReleasesOnlyTerminatingNamespace(t *testing.T) {
+	tests := []struct {
+		name        string
+		namespace   *corev1.Namespace
+		request     reconcile.Request
+		kind        domain.ControllerKind
+		wantDeleted bool
+	}{
+		{
+			name:      "active namespace keeps explicit cleanup protection",
+			namespace: &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "system"}},
+			request: reconcile.Request{NamespacedName: types.NamespacedName{
+				Namespace: "system",
+				Name:      "workflow",
+			}},
+			kind: domain.ControllerKindCopy,
+		},
+		{
+			name: "terminating namespace releases protection",
+			namespace: &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{
+				Name:              "system",
+				DeletionTimestamp: func() *metav1.Time { value := metav1.Now(); return &value }(),
+			}},
+			request: reconcile.Request{NamespacedName: types.NamespacedName{
+				Namespace: "system",
+				Name:      "workflow",
+			}},
+			kind:        domain.ControllerKindCopy,
+			wantDeleted: true,
+		},
+		{
+			name: "missing namespace releases stale protection",
+			request: reconcile.Request{NamespacedName: types.NamespacedName{
+				Namespace: "system",
+				Name:      "workflow",
+			}},
+			kind:        domain.ControllerKindCopy,
+			wantDeleted: true,
+		},
+		{
+			name:    "cluster workflow keeps explicit cleanup protection",
+			request: reconcile.Request{NamespacedName: types.NamespacedName{Name: "workflow"}},
+			kind:    domain.ControllerKindClusterCopy,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			store := &runnerSessionStore{}
+
+			reconciler := NewWorkflowReconciler(nil, store)
+			if test.namespace != nil {
+				reconciler.WithKubernetesClient(clientfake.NewSimpleClientset(test.namespace))
+			} else {
+				reconciler.WithKubernetesClient(clientfake.NewSimpleClientset())
+			}
+
+			session := newRunnerSession("workflow")
+			session.Deleting = true
+
+			session.BackendResource = test.kind
+			if err := reconciler.reconcileDeletingWorkflow(
+				context.Background(),
+				test.request,
+				session,
+				test.kind,
+			); err != nil {
+				t.Fatal(err)
+			}
+
+			if got := len(store.deleted) == 1; got != test.wantDeleted {
+				t.Fatalf("workflow deleted=%t, want %t", got, test.wantDeleted)
+			}
+		})
+	}
+}
 
 func TestStartManagerRequiresPinnedToolImage(t *testing.T) {
 	for name, image := range map[string]string{

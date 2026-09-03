@@ -456,6 +456,12 @@ func Run(ctx context.Context, client kubernetes.Interface, req Request, restore 
 		return err
 	}
 
+	if restore {
+		if err := validateRestoreDestinationIdentity(plan, req.BackupSession); err != nil {
+			return err
+		}
+	}
+
 	if restore && plan.CreatePVC {
 		manifest, manifestErr := req.Store.Manifest(ctx)
 		if manifestErr != nil {
@@ -476,6 +482,16 @@ func Run(ctx context.Context, client kubernetes.Interface, req Request, restore 
 
 		plan, err = preflight(ctx, client, req, restore, "post-create revalidation")
 		if err != nil {
+			return err
+		}
+
+		if err := validateRestoreDestinationIdentity(plan, req.BackupSession); err != nil {
+			return err
+		}
+	}
+
+	if restore {
+		if err := checkpointRestoreDestinationIdentity(ctx, client, req, plan); err != nil {
 			return err
 		}
 	}
@@ -505,6 +521,105 @@ func Run(ctx context.Context, client kubernetes.Interface, req Request, restore 
 	}
 
 	return runBackupWithSession(ctx, client, req, plan.PVCUID, plan.PVUID)
+}
+
+func validateRestoreDestinationIdentity(plan *Plan, session *domain.Session) error {
+	if plan == nil || session == nil || session.Spec.Restore == nil {
+		return nil
+	}
+
+	destination := session.Spec.Restore
+	if destination.DestinationPVC.UID != "" &&
+		string(destination.DestinationPVC.UID) != plan.PVCUID {
+		return domain.NewError(
+			domain.ErrorConflict,
+			"restore destination identity",
+			"destination PVC identity changed since the restore checkpoint",
+		)
+	}
+
+	if destination.DestinationPV.UID != "" &&
+		string(destination.DestinationPV.UID) != plan.PVUID {
+		return domain.NewError(
+			domain.ErrorConflict,
+			"restore destination identity",
+			"destination PV identity changed since the restore checkpoint",
+		)
+	}
+
+	return nil
+}
+
+func checkpointRestoreDestinationIdentity(
+	ctx context.Context,
+	client kubernetes.Interface,
+	req Request,
+	plan *Plan,
+) error {
+	session := req.BackupSession
+	if session == nil || session.Spec.Restore == nil {
+		return nil
+	}
+
+	if req.SessionStore == nil {
+		return domain.NewError(
+			domain.ErrorInternal,
+			"restore destination identity",
+			"session store is required to persist the destination checkpoint",
+		)
+	}
+
+	pvc, pv, err := verifyPVCIdentity(
+		ctx,
+		client,
+		req.Namespace,
+		req.PVCName,
+		plan.PVCUID,
+		plan.PVUID,
+	)
+	if err != nil {
+		return err
+	}
+
+	payload := session.Spec.Restore
+	pvcRef := domain.ObjectReference{
+		APIVersion:      "v1",
+		Kind:            "PersistentVolumeClaim",
+		Namespace:       pvc.Namespace,
+		Name:            pvc.Name,
+		UID:             pvc.UID,
+		ResourceVersion: pvc.ResourceVersion,
+	}
+
+	pvRef := domain.ObjectReference{
+		APIVersion:      "v1",
+		Kind:            "PersistentVolume",
+		Name:            pv.Name,
+		UID:             pv.UID,
+		ResourceVersion: pv.ResourceVersion,
+	}
+	if payload.DestinationPVC == pvcRef && payload.DestinationPV == pvRef {
+		return nil
+	}
+
+	previousPVC := payload.DestinationPVC
+	previousPV := payload.DestinationPV
+	payload.DestinationPVC = pvcRef
+
+	payload.DestinationPV = pvRef
+	if err := req.SessionStore.Update(ctx, session); err != nil {
+		payload.DestinationPVC = previousPVC
+		payload.DestinationPV = previousPV
+
+		return domain.WrapError(
+			domain.ErrorKubernetes,
+			"restore destination identity",
+			"persist destination PVC and PV checkpoint",
+			err,
+		)
+	}
+
+	return nil
 }
 
 func probeTransferToolImage(
@@ -560,15 +675,20 @@ func transferToolHelmValues(
 	ctx context.Context,
 	client kubernetes.Interface,
 	probe kube.ToolImageProbeResult,
+	namespace string,
 	serviceAccountName string,
-) ([]string, error) {
+) (kube.HelmOverrides, error) {
 	if probe.NodeName == "" {
-		return nil, nil
+		return kube.HelmOverrides{}, domain.NewError(
+			domain.ErrorInternal,
+			toolSchedulingPhase,
+			"rclone probe returned no scheduled node",
+		)
 	}
 
 	node, err := client.CoreV1().Nodes().Get(ctx, probe.NodeName, metav1.GetOptions{})
 	if err != nil {
-		return nil, domain.WrapError(
+		return kube.HelmOverrides{}, domain.WrapError(
 			domain.ErrorKubernetes,
 			toolSchedulingPhase,
 			"read node "+probe.NodeName,
@@ -578,20 +698,34 @@ func transferToolHelmValues(
 
 	values, err := kube.ToolComponentNodeHelmValues(kube.ToolComponentRclone, node)
 	if err != nil {
-		return nil, err
+		return kube.HelmOverrides{}, err
 	}
 
 	pullSecretValues, err := kube.ToolImagePullSecretHelmValues([]kube.ToolImageProbeResult{probe})
 	if err != nil {
-		return nil, err
+		return kube.HelmOverrides{}, err
+	}
+
+	if strings.TrimSpace(serviceAccountName) == "" {
+		if err := kube.EnsureTransferServiceAccount(ctx, client, namespace); err != nil {
+			return kube.HelmOverrides{}, err
+		}
+
+		serviceAccountName = kube.TransferServiceAccountName
 	}
 
 	identityValues, err := kube.ToolServiceAccountHelmValues(serviceAccountName)
 	if err != nil {
-		return nil, err
+		return kube.HelmOverrides{}, err
 	}
 
-	return append(append(values, pullSecretValues...), identityValues...), nil
+	return kube.HelmOverrides{
+		Values: identityValues.Values,
+		StringValues: append(
+			append(values, pullSecretValues...),
+			identityValues.StringValues...,
+		),
+	}, nil
 }
 
 func validateTransferToolLaunch(

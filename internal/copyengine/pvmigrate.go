@@ -59,7 +59,7 @@ func (p *PVMigrate) Copy(ctx context.Context, request Request, progress Progress
 		)
 	}
 
-	helmValues := kube.ToolSecurityContextHelmValues()
+	helmValues := append(kube.ToolSecurityContextHelmValues(), request.HelmValues...)
 	if request.IgnoreSizes {
 		// A smaller destination can deterministically exhaust its filesystem.
 		// Let the session-level retry policy handle transient failures so an

@@ -23,6 +23,7 @@ type runnerSessionStore struct {
 	listed     *domain.Session
 	latest     *domain.Session
 	updates    []*domain.Session
+	deleted    []*domain.Session
 	getErr     error
 	acquireErr error
 	lock       *runnerSessionLock
@@ -47,7 +48,10 @@ func (s *runnerSessionStore) List(context.Context, string) ([]*domain.Session, e
 	return []*domain.Session{cloneRunnerSession(s.listed)}, nil
 }
 
-func (s *runnerSessionStore) Delete(context.Context, *domain.Session) error { return nil }
+func (s *runnerSessionStore) Delete(_ context.Context, session *domain.Session) error {
+	s.deleted = append(s.deleted, cloneRunnerSession(session))
+	return nil
+}
 
 func (s *runnerSessionStore) AcquireSessionLock(
 	context.Context,

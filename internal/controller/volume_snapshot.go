@@ -124,7 +124,12 @@ func (r *WorkflowReconciler) validateDeclarativeSourceVolumes(
 			return fmt.Errorf("volume %d: %w", index, err)
 		}
 
-		if err := validateSourcePVCSnapshot(volume, pvc, pv); err != nil {
+		if err := validateSourcePVCSnapshot(
+			volume,
+			pvc,
+			pv,
+			!session.Spec.Operation().RebindsPVC(),
+		); err != nil {
 			return fmt.Errorf("volume %d: %w", index, err)
 		}
 	}
@@ -181,6 +186,7 @@ func validateSourcePVCSnapshot(
 	volume *domain.VolumeSpec,
 	pvc *corev1.PersistentVolumeClaim,
 	pv *corev1.PersistentVolume,
+	requireTransferLayout bool,
 ) error {
 	if !apiequality.Semantic.DeepEqual(volume.SourcePVCSpec, pvc.Spec) {
 		return domain.NewError(
@@ -216,6 +222,10 @@ func validateSourcePVCSnapshot(
 			"controller volume snapshot",
 			fmt.Sprintf("source PV %s reclaim policy changed since planning", pv.Name),
 		)
+	}
+
+	if !requireTransferLayout {
+		return nil
 	}
 
 	if volume.SourceCapacity == "" {

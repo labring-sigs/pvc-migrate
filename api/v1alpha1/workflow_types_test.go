@@ -730,7 +730,7 @@ func TestBackupRepositoryIdentityStatusRoundTrips(t *testing.T) {
 	}
 	backupStatus := v1alpha1.BackupStatusFromDomain(status).Domain()
 
-	restoreStatus := v1alpha1.RestoreStatusFromDomain(status).Domain()
+	restoreStatus := v1alpha1.RestoreStatusFromDomain(status, domain.SessionSpec{}).Domain()
 	for name, got := range map[string]domain.SessionStatus{"backup": backupStatus, "restore": restoreStatus} {
 		if got.BackupRepository == nil || got.BackupRepository.S3 == nil ||
 			got.BackupRepository.Type != status.BackupRepository.Type ||
@@ -740,6 +740,63 @@ func TestBackupRepositoryIdentityStatusRoundTrips(t *testing.T) {
 				status.BackupRepository.S3.CredentialsSecretUID {
 			t.Fatalf("%s backup repository identity status = %#v", name, got)
 		}
+	}
+}
+
+func TestRestoreDestinationIdentityIsStatusOwned(t *testing.T) {
+	spec := domain.NewSessionSpec(
+		domain.OperationRestore,
+		domain.SessionCommon{
+			SourceNamespace:      "app",
+			DestinationNamespace: "app",
+			SessionNamespace:     "app",
+		},
+		false,
+		domain.SessionWorkflowOptions{},
+	)
+	spec.Restore.DestinationPVC = domain.ObjectReference{
+		APIVersion:      "v1",
+		Kind:            "PersistentVolumeClaim",
+		Namespace:       "app",
+		Name:            "data",
+		UID:             "pvc-uid",
+		ResourceVersion: "17",
+	}
+	spec.Restore.DestinationPV = domain.ObjectReference{
+		APIVersion:      "v1",
+		Kind:            "PersistentVolume",
+		Name:            "pv-data",
+		UID:             "pv-uid",
+		ResourceVersion: "19",
+	}
+	spec.Restore.BackupRepository = "archive"
+	spec.Restore.Name = "daily"
+
+	apiSpec := v1alpha1.RestoreSpecFromDomain(spec)
+
+	encoded, err := json.Marshal(apiSpec)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for _, forbidden := range []string{
+		`"destinationPV":`, `"uid":"pvc-uid"`, `"resourceVersion":"17"`,
+	} {
+		if strings.Contains(string(encoded), forbidden) {
+			t.Fatalf("controller checkpoint leaked into Restore spec: %s", encoded)
+		}
+	}
+
+	status := v1alpha1.RestoreStatusFromDomain(domain.SessionStatus{}, spec)
+	restored := apiSpec.Domain("app")
+	status.ApplyToDomainSpec(&restored)
+
+	if restored.Restore.DestinationPVC.UID != "pvc-uid" ||
+		restored.Restore.DestinationPVC.ResourceVersion != "17" ||
+		restored.Restore.DestinationPV.Name != "pv-data" ||
+		restored.Restore.DestinationPV.UID != "pv-uid" ||
+		restored.Restore.DestinationPV.ResourceVersion != "19" {
+		t.Fatalf("restore destination checkpoint was not restored: %#v", restored.Restore)
 	}
 }
 

@@ -569,6 +569,7 @@ type BackupSessionSpec struct {
 type RestoreSessionSpec struct {
 	SessionWorkflowOptions    `                json:",inline"                             yaml:",inline"`
 	DestinationPVC            ObjectReference `json:"destinationPVC"                      yaml:"destinationPVC"`
+	DestinationPV             ObjectReference `json:"destinationPV,omitempty"             yaml:"destinationPV,omitempty"`
 	Path                      string          `json:"path,omitempty"                      yaml:"path,omitempty"`
 	Backend                   BackupBackend   `json:"backend"                             yaml:"backend"`
 	Bucket                    string          `json:"bucket"                              yaml:"bucket"`
@@ -1691,6 +1692,14 @@ func validateRestoreSession(s *Session) error {
 			ErrorValidation,
 			"restore session",
 			"destination PVC namespace and name are required",
+		)
+	}
+
+	if (payload.DestinationPV.Name == "") != (payload.DestinationPV.UID == "") {
+		return NewError(
+			ErrorValidation,
+			"restore session",
+			"destination PV name and UID must be recorded together",
 		)
 	}
 

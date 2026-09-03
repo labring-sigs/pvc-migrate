@@ -145,6 +145,68 @@ spec:
                   type: object
                 maxItems: 32
                 type: array
+              destinationPV:
+                description: ObjectReference identifies a Kubernetes object involved
+                  in a workflow.
+                properties:
+                  apiVersion:
+                    maxLength: 253
+                    type: string
+                  kind:
+                    maxLength: 253
+                    type: string
+                  name:
+                    maxLength: 253
+                    minLength: 1
+                    pattern: ^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$
+                    type: string
+                  namespace:
+                    maxLength: 63
+                    pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
+                    type: string
+                  resourceVersion:
+                    maxLength: 256
+                    type: string
+                  uid:
+                    description: |-
+                      UID is a type that holds unique ID values, including UUIDs.  Because we
+                      don't ONLY use UUIDs, this is an alias to string.  Being a type captures
+                      intent and helps make sure that UIDs and names do not get conflated.
+                    type: string
+                required:
+                - name
+                type: object
+              destinationPVC:
+                description: ObjectReference identifies a Kubernetes object involved
+                  in a workflow.
+                properties:
+                  apiVersion:
+                    maxLength: 253
+                    type: string
+                  kind:
+                    maxLength: 253
+                    type: string
+                  name:
+                    maxLength: 253
+                    minLength: 1
+                    pattern: ^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$
+                    type: string
+                  namespace:
+                    maxLength: 63
+                    pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
+                    type: string
+                  resourceVersion:
+                    maxLength: 256
+                    type: string
+                  uid:
+                    description: |-
+                      UID is a type that holds unique ID values, including UUIDs.  Because we
+                      don't ONLY use UUIDs, this is an alias to string.  Being a type captures
+                      intent and helps make sure that UIDs and names do not get conflated.
+                    type: string
+                required:
+                - name
+                type: object
               failureReason:
                 maxLength: 8192
                 type: string

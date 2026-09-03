@@ -108,9 +108,10 @@ func SessionLockID(session *domain.Session) string {
 	return session.ID
 }
 
-// SessionProtectionEnsurer adds the session-protection finalizer to durable
-// records that were authored outside the CLI adapter. Controller-backed
-// declarative resources need the same deletion guard as CLI-created sessions.
+// SessionProtectionEnsurer adds the session-protection finalizer to
+// controller-backed resources that were authored outside the CLI adapter.
+// ConfigMap sessions deliberately omit finalizers because no always-running
+// reconciler exists to release them during namespace deletion.
 type SessionProtectionEnsurer interface {
 	EnsureSessionProtection(ctx context.Context, session *domain.Session) error
 }
@@ -190,7 +191,6 @@ func (s *ConfigMapSessionStore) Create(ctx context.Context, session *domain.Sess
 				ManagedByLabel: ManagedByValue,
 				SessionKey:     session.ID,
 			},
-			Finalizers: []string{SessionFinalizer},
 		},
 		Data: map[string]string{SessionDataKey: string(data)},
 	}
@@ -310,7 +310,6 @@ func (s *ConfigMapSessionStore) Update(ctx context.Context, session *domain.Sess
 
 	cm.Labels[ManagedByLabel] = ManagedByValue
 	cm.Labels[SessionKey] = session.ID
-	cm.Finalizers = ensureSessionFinalizer(cm.Finalizers)
 	cm.Data = map[string]string{SessionDataKey: string(data)}
 
 	updated, err := s.client.CoreV1().
@@ -410,36 +409,6 @@ func (s *ConfigMapSessionStore) Delete(ctx context.Context, session *domain.Sess
 			"delete session",
 			"session ConfigMap changed after it was loaded",
 		)
-	}
-
-	if containsString(cm.Finalizers, SessionFinalizer) {
-		updated := cm.DeepCopy()
-		updated.Finalizers = removeSessionFinalizer(updated.Finalizers)
-
-		latest, err := s.client.CoreV1().
-			ConfigMaps(cm.Namespace).
-			Update(ctx, updated, metav1.UpdateOptions{})
-		if apierrors.IsConflict(err) {
-			return domain.WrapError(
-				domain.ErrorConflict,
-				"delete session",
-				"session ConfigMap changed while removing protection finalizer",
-				err,
-			)
-		}
-
-		if err != nil && !apierrors.IsNotFound(err) {
-			return domain.WrapError(
-				domain.ErrorKubernetes,
-				"delete session",
-				"remove session protection finalizer",
-				err,
-			)
-		}
-
-		if err == nil {
-			cm = latest
-		}
 	}
 
 	uid, resourceVersion := cm.UID, cm.ResourceVersion

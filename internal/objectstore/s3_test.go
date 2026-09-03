@@ -3,11 +3,16 @@ package objectstore_test
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"fmt"
 	"io"
+	"net"
+	"net/url"
 	"sort"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -252,6 +257,19 @@ func (missingS3Bucket) ListObjectsV2(
 
 type timeoutS3 struct{ API }
 
+type getObjectErrorS3 struct {
+	API
+	err error
+}
+
+func (s getObjectErrorS3) GetObject(
+	context.Context,
+	*s3.GetObjectInput,
+	...func(*s3.Options),
+) (*s3.GetObjectOutput, error) {
+	return nil, s.err
+}
+
 func (timeoutS3) GetObject(
 	context.Context,
 	*s3.GetObjectInput,
@@ -417,6 +435,52 @@ func TestS3OperationsPreserveTimeoutCategory(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			if category := domain.CategoryOf(run()); category != domain.ErrorTimeout {
 				t.Fatalf("category=%s, want timeout", category)
+			}
+		})
+	}
+}
+
+func TestManifestReportsActionableTransportFailures(t *testing.T) {
+	tests := []struct {
+		name string
+		err  error
+		want string
+	}{
+		{
+			name: "DNS",
+			err: &url.Error{Err: &net.DNSError{
+				Err: "no such host", Name: "private.invalid",
+			}},
+			want: "S3 endpoint DNS resolution failed; verify the endpoint hostname and cluster DNS",
+		},
+		{
+			name: "TLS",
+			err: &url.Error{Err: &tls.CertificateVerificationError{
+				Err: x509.UnknownAuthorityError{},
+			}},
+			want: "S3 endpoint TLS verification failed; verify the certificate chain and endpoint hostname",
+		},
+		{
+			name: "connection",
+			err: &url.Error{Err: &net.OpError{
+				Op: "dial", Net: "tcp", Err: syscall.ECONNREFUSED,
+			}},
+			want: "S3 endpoint connection failed; verify the endpoint, port, network policy, and firewall",
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			store := newTestStore(t, getObjectErrorS3{API: newFakeS3(), err: test.err})
+
+			_, err := store.Manifest(context.Background())
+			if domain.CategoryOf(err) != domain.ErrorPrecondition ||
+				!strings.Contains(err.Error(), test.want) {
+				t.Fatalf("category=%s error=%v, want %q", domain.CategoryOf(err), err, test.want)
+			}
+
+			if strings.Contains(err.Error(), "private.invalid") {
+				t.Fatalf("public error exposed endpoint from cause: %v", err)
 			}
 		})
 	}

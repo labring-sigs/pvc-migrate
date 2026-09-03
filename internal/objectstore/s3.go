@@ -4,11 +4,14 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"path"
@@ -1095,7 +1098,7 @@ func wrapS3Error(
 ) error {
 	if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) ||
 		errors.Is(ctx.Err(), context.DeadlineExceeded) ||
-		errors.Is(ctx.Err(), context.Canceled) {
+		errors.Is(ctx.Err(), context.Canceled) || isNetworkTimeout(err) {
 		return domain.WrapError(
 			domain.ErrorTimeout,
 			operation,
@@ -1104,12 +1107,50 @@ func wrapS3Error(
 		)
 	}
 
+	if detail := s3TransportFailureMessage(err); detail != "" {
+		message += ": " + detail
+	}
+
 	var apiErr smithy.APIError
 	if errors.As(err, &apiErr) && apiErr.ErrorCode() != "" {
 		message += fmt.Sprintf(" (S3 code %s)", apiErr.ErrorCode())
 	}
 
 	return domain.WrapError(category, operation, message, err)
+}
+
+func isNetworkTimeout(err error) bool {
+	var timeout interface{ Timeout() bool }
+	return errors.As(err, &timeout) && timeout.Timeout()
+}
+
+func s3TransportFailureMessage(err error) string {
+	if _, ok := errors.AsType[*net.DNSError](err); ok {
+		return "S3 endpoint DNS resolution failed; verify the endpoint hostname and cluster DNS"
+	}
+
+	var (
+		verificationErr     *tls.CertificateVerificationError
+		unknownAuthorityErr x509.UnknownAuthorityError
+		hostnameErr         x509.HostnameError
+		certificateErr      x509.CertificateInvalidError
+	)
+	if errors.As(err, &verificationErr) ||
+		errors.As(err, &unknownAuthorityErr) ||
+		errors.As(err, &hostnameErr) ||
+		errors.As(err, &certificateErr) {
+		return "S3 endpoint TLS verification failed; verify the certificate chain and endpoint hostname"
+	}
+
+	var (
+		operationErr *net.OpError
+		urlErr       *url.Error
+	)
+	if errors.As(err, &operationErr) || errors.As(err, &urlErr) {
+		return "S3 endpoint connection failed; verify the endpoint, port, network policy, and firewall"
+	}
+
+	return ""
 }
 
 func isMissing(err error) bool {

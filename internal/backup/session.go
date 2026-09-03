@@ -1298,11 +1298,12 @@ func ValidateRestoreResume(
 		return err
 	}
 
-	if _, err := preflight(ctx, client, *resumeReq, true, "resume revalidation"); err != nil {
+	plan, err := preflight(ctx, client, *resumeReq, true, "resume revalidation")
+	if err != nil {
 		return err
 	}
 
-	return nil
+	return validateRestoreDestinationIdentity(plan, session)
 }
 
 func Resume(

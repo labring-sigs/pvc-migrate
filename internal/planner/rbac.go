@@ -75,7 +75,7 @@ func (p *Planner) checkRBAC(
 			"patch",
 			"delete",
 		)
-		add(namespace, "", "serviceaccounts", "get", "create", "update", "patch", "delete")
+		add(namespace, "", "serviceaccounts", "get", "create", "update")
 		add(namespace, "", "events", "get", "list")
 		add(
 			namespace,

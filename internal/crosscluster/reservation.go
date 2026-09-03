@@ -280,6 +280,7 @@ func (s *Service) createReservationConsumer(
 	}
 
 	runAs := int64(0)
+	automountServiceAccountToken := false
 	pod := &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      name,
@@ -287,9 +288,10 @@ func (s *Service) createReservationConsumer(
 			Labels:    map[string]string{ManagedByLabel: ManagedBy, SessionKey: session.ID},
 		},
 		Spec: corev1.PodSpec{
-			RestartPolicy: corev1.RestartPolicyNever,
-			NodeSelector:  map[string]string{corev1.LabelHostname: hostname},
-			Tolerations:   nodeTolerations(target),
+			RestartPolicy:                corev1.RestartPolicyNever,
+			AutomountServiceAccountToken: &automountServiceAccountToken,
+			NodeSelector:                 map[string]string{corev1.LabelHostname: hostname},
+			Tolerations:                  nodeTolerations(target),
 			Containers: []corev1.Container{
 				{
 					Name:            "reserve",

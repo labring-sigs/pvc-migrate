@@ -61,6 +61,14 @@ func TestReservationToolPodUsesZeroResourceQuotaFootprint(t *testing.T) {
 		t.Fatal("reservation tool Pod was not created")
 	}
 
+	if created.Spec.AutomountServiceAccountToken == nil ||
+		*created.Spec.AutomountServiceAccountToken {
+		t.Fatalf(
+			"reservation automountServiceAccountToken=%v, want false",
+			created.Spec.AutomountServiceAccountToken,
+		)
+	}
+
 	if len(created.Spec.Containers) != 1 {
 		t.Fatalf("tool containers = %d, want 1", len(created.Spec.Containers))
 	}

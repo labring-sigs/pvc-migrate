@@ -124,14 +124,24 @@ func (p *Planner) checkLimitRanges(
 	}
 
 	if len(violations) > 0 {
-		plan.AddCheck(failed(limitRangeCheckName, strings.Join(violations, "; ")))
+		plan.AddCheck(
+			failed(
+				limitRangeCheckName,
+				fmt.Sprintf("namespace %s: %s", namespace, strings.Join(violations, "; ")),
+			),
+		)
+
 		return
 	}
 
 	plan.AddCheck(
 		passed(
 			limitRangeCheckName,
-			fmt.Sprintf("%d LimitRange object(s) permit all target PVC requests", len(items.Items)),
+			fmt.Sprintf(
+				"namespace %s: %d LimitRange object(s) permit all target PVC requests",
+				namespace,
+				len(items.Items),
+			),
 		),
 	)
 }
@@ -235,7 +245,8 @@ func (p *Planner) checkQuotas(
 		passed(
 			resourceQuotaCheckName,
 			fmt.Sprintf(
-				"%d ResourceQuota object(s), %d bounded resource(s), all have capacity",
+				"namespace %s: %d ResourceQuota object(s), %d bounded resource(s), all have capacity",
+				namespace,
 				len(items.Items),
 				report.Checked,
 			),

@@ -7,6 +7,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -28,6 +29,7 @@ import (
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/kubernetes"
@@ -172,6 +174,248 @@ func TestBackupRepositoryAdmission(t *testing.T) {
 		if err := clients.Runtime.Create(ctx, repository); !apierrors.IsInvalid(err) {
 			t.Fatalf("invalid repository %s admission error=%v", repository.Name, err)
 		}
+	}
+}
+
+func TestControllerS3TransportFailureIsActionableAndRedacted(t *testing.T) {
+	config, adminClient, kubeconfig := capacityE2EClients(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	defer cancel()
+
+	suffix := e2eSuffix()
+	namespace := "pvc-migrate-s3-error-" + suffix
+	sessionID := "s3-error-" + suffix
+	defer cleanupTestResources(t, config, adminClient, namespace, sessionID)
+	createE2ENamespace(t, ctx, adminClient, namespace, sessionID)
+
+	clients, err := kube.NewClients(kubeconfig, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	credentials := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: "credentials", Namespace: namespace},
+		StringData: map[string]string{
+			"accessKey": "e2e-access",
+			"secretKey": "e2e-secret",
+		},
+	}
+	if _, err := adminClient.CoreV1().Secrets(namespace).Create(
+		ctx,
+		credentials,
+		metav1.CreateOptions{},
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	const endpointHost = "s3-controller-probe.invalid"
+	repository := &v1alpha1.BackupRepository{
+		ObjectMeta: metav1.ObjectMeta{Name: "unreachable", Namespace: namespace},
+		Spec: v1alpha1.BackupRepositorySpec{
+			Type: v1alpha1.BackupRepositoryTypeS3,
+			S3: &v1alpha1.S3BackupRepositorySpec{
+				Bucket:         "e2e-backups",
+				Prefix:         "failure-tests",
+				Endpoint:       "https://" + endpointHost,
+				Region:         "us-east-1",
+				ForcePathStyle: true,
+				CredentialsSecret: v1alpha1.BackupRepositorySecretReference{
+					Name: credentials.Name,
+				},
+			},
+		},
+	}
+	if err := clients.Runtime.Create(ctx, repository); err != nil {
+		t.Fatal(err)
+	}
+
+	binary := e2eBinary(t, ctx)
+	controllerProcess := startE2EController(
+		t,
+		ctx,
+		adminClient,
+		binary,
+		kubeconfig,
+		namespace,
+		"controller",
+	)
+	defer controllerProcess.Stop(t)
+
+	storageClass := envOrDefault("PVC_MIGRATE_E2E_SOURCE_CLASS", "openebs-hostpath")
+	output := runCLIExpectExitCode(
+		t,
+		ctx,
+		binary,
+		1,
+		"--kubeconfig", kubeconfig,
+		"--mode", "controller",
+		"--session-namespace", namespace,
+		"--controller-namespace", namespace,
+		"--timeout", "2m",
+		"--output", "json",
+		"--log-format", "json",
+		"--yes",
+		"restore",
+		"--id", sessionID,
+		"--namespace", namespace,
+		"--destination-pvc", "restore-data",
+		"--create-pvc",
+		"--destination-storage-class", storageClass,
+		"--destination-access-mode", string(corev1.ReadWriteOnce),
+		"--destination-capacity", "32Mi",
+		"--backup-repository", repository.Name,
+		"--name", "missing-recovery-point",
+		"--dry-run=false",
+	)
+
+	const expectedMessage = "S3 endpoint DNS resolution failed; verify the endpoint hostname and cluster DNS"
+	outputText := string(output)
+	if !strings.Contains(outputText, expectedMessage) {
+		t.Fatalf("controller CLI output lacks actionable DNS guidance:\n%s", outputText)
+	}
+	for _, secret := range []string{endpointHost, "e2e-access", "e2e-secret"} {
+		if strings.Contains(outputText, secret) {
+			t.Fatalf("controller CLI output exposed repository detail %q", secret)
+		}
+	}
+
+	workflow := &v1alpha1.Restore{}
+	if err := clients.Runtime.Get(
+		ctx,
+		types.NamespacedName{Namespace: namespace, Name: sessionID},
+		workflow,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if workflow.Status.Phase != v1alpha1.WorkflowPhase(domain.PhaseFailed) ||
+		workflow.Status.ObservedGeneration != workflow.Generation ||
+		!strings.Contains(workflow.Status.Message, expectedMessage) {
+		t.Fatalf("restore failure status=%#v", workflow.Status)
+	}
+	if workflow.Status.Repository == nil || workflow.Status.Repository.S3 == nil ||
+		workflow.Status.Repository.UID == "" ||
+		workflow.Status.Repository.S3.CredentialsSecretUID == "" {
+		t.Fatalf("restore repository checkpoint=%#v", workflow.Status.Repository)
+	}
+	statusJSON, err := json.Marshal(workflow.Status)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, secret := range []string{endpointHost, "e2e-access", "e2e-secret"} {
+		if bytes.Contains(statusJSON, []byte(secret)) {
+			t.Fatalf("Restore status exposed repository detail %q", secret)
+		}
+	}
+
+	if _, err := adminClient.CoreV1().PersistentVolumeClaims(namespace).Get(
+		ctx,
+		"restore-data",
+		metav1.GetOptions{},
+	); !apierrors.IsNotFound(err) {
+		t.Fatalf("destination PVC was created before manifest validation: %v", err)
+	}
+}
+
+func TestControllerRBACEnsuresOnlyManagedTransferServiceAccount(t *testing.T) {
+	config, adminClient, _ := capacityE2EClients(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	defer cancel()
+
+	suffix := e2eSuffix()
+	namespace := "pvc-migrate-identity-" + suffix
+	sessionID := "identity-" + suffix
+	defer cleanupTestResources(t, config, adminClient, namespace, sessionID)
+	createE2ENamespace(t, ctx, adminClient, namespace, sessionID)
+
+	controllerConfig := rest.CopyConfig(config)
+	controllerConfig.Impersonate = rest.ImpersonationConfig{
+		UserName: "system:serviceaccount:pvc-migrate-system:pvc-migrate",
+	}
+	controllerClient, err := kubernetes.NewForConfig(controllerConfig)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if err := kube.EnsureTransferServiceAccount(ctx, controllerClient, namespace); err != nil {
+		t.Fatalf("controller creates transfer ServiceAccount: %v", err)
+	}
+
+	account, err := adminClient.CoreV1().
+		ServiceAccounts(namespace).
+		Get(ctx, kube.TransferServiceAccountName, metav1.GetOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if account.AutomountServiceAccountToken == nil || *account.AutomountServiceAccountToken {
+		t.Fatalf("created ServiceAccount automount=%v", account.AutomountServiceAccountToken)
+	}
+
+	broken := account.DeepCopy()
+	broken.AutomountServiceAccountToken = new(true)
+	if _, err := adminClient.CoreV1().
+		ServiceAccounts(namespace).
+		Update(ctx, broken, metav1.UpdateOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	if err := kube.EnsureTransferServiceAccount(ctx, controllerClient, namespace); err != nil {
+		t.Fatalf("controller repairs transfer ServiceAccount: %v", err)
+	}
+
+	repaired, err := adminClient.CoreV1().
+		ServiceAccounts(namespace).
+		Get(ctx, kube.TransferServiceAccountName, metav1.GetOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if repaired.AutomountServiceAccountToken == nil || *repaired.AutomountServiceAccountToken {
+		t.Fatalf("repaired ServiceAccount automount=%v", repaired.AutomountServiceAccountToken)
+	}
+
+	if err := adminClient.CoreV1().ServiceAccounts(namespace).Delete(
+		ctx,
+		kube.TransferServiceAccountName,
+		metav1.DeleteOptions{},
+	); err != nil {
+		t.Fatal(err)
+	}
+	unownedAutomount := true
+	if _, err := adminClient.CoreV1().ServiceAccounts(namespace).Create(
+		ctx,
+		&corev1.ServiceAccount{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      kube.TransferServiceAccountName,
+				Namespace: namespace,
+			},
+			AutomountServiceAccountToken: &unownedAutomount,
+		},
+		metav1.CreateOptions{},
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := kube.EnsureTransferServiceAccount(
+		ctx,
+		controllerClient,
+		namespace,
+	); domain.CategoryOf(err) != domain.ErrorConflict {
+		t.Fatalf("unowned ServiceAccount category=%q error=%v", domain.CategoryOf(err), err)
+	}
+	if err := controllerClient.CoreV1().ServiceAccounts(namespace).Delete(
+		ctx,
+		kube.TransferServiceAccountName,
+		metav1.DeleteOptions{},
+	); !apierrors.IsForbidden(err) {
+		t.Fatalf("controller ServiceAccount delete error=%v, want forbidden", err)
+	}
+
+	unowned, err := adminClient.CoreV1().
+		ServiceAccounts(namespace).
+		Get(ctx, kube.TransferServiceAccountName, metav1.GetOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if unowned.AutomountServiceAccountToken == nil || !*unowned.AutomountServiceAccountToken ||
+		len(unowned.Labels) != 0 {
+		t.Fatalf("unowned ServiceAccount was modified: %#v", unowned)
 	}
 }
 
@@ -663,6 +907,23 @@ func TestControllerRepositoryStatusCheckpointRoundTrip(t *testing.T) {
 				t.Fatal(err)
 			}
 			session.Status.BackupRepository = tt.binding
+			if tt.operation == domain.OperationRestore {
+				session.Spec.Restore.DestinationPVC = domain.ObjectReference{
+					APIVersion:      domain.CoreAPIVersion,
+					Kind:            domain.KindPersistentVolumeClaim,
+					Namespace:       namespace,
+					Name:            "destination",
+					UID:             "destination-pvc-uid",
+					ResourceVersion: "destination-pvc-version",
+				}
+				session.Spec.Restore.DestinationPV = domain.ObjectReference{
+					APIVersion:      domain.CoreAPIVersion,
+					Kind:            domain.KindPersistentVolume,
+					Name:            "destination-pv",
+					UID:             "destination-pv-uid",
+					ResourceVersion: "destination-pv-version",
+				}
+			}
 			if err := store.Update(ctx, session); err != nil {
 				t.Fatal(err)
 			}
@@ -689,6 +950,34 @@ func TestControllerRepositoryStatusCheckpointRoundTrip(t *testing.T) {
 				if loaded.Status.BackupRepository.PVC == nil ||
 					loaded.Status.BackupRepository.PVC.ClaimUID != tt.binding.PVC.ClaimUID {
 					t.Fatalf("PVC checkpoint was not persisted: %#v", loaded.Status.BackupRepository)
+				}
+			}
+
+			if tt.operation == domain.OperationRestore {
+				if loaded.Spec.Restore.DestinationPVC.UID != "destination-pvc-uid" ||
+					loaded.Spec.Restore.DestinationPVC.ResourceVersion != "destination-pvc-version" ||
+					loaded.Spec.Restore.DestinationPV.UID != "destination-pv-uid" ||
+					loaded.Spec.Restore.DestinationPV.ResourceVersion != "destination-pv-version" {
+					t.Fatalf("restore destination checkpoint was not persisted: %#v", loaded.Spec.Restore)
+				}
+
+				workflow := &v1alpha1.Restore{}
+				if err := clients.Runtime.Get(
+					ctx,
+					types.NamespacedName{Namespace: namespace, Name: sessionID},
+					workflow,
+				); err != nil {
+					t.Fatal(err)
+				}
+				if workflow.Spec.DestinationPVC.UID != "" ||
+					workflow.Spec.DestinationPVC.ResourceVersion != "" {
+					t.Fatalf("controller-owned destination identity leaked into restore spec: %#v", workflow.Spec.DestinationPVC)
+				}
+				if workflow.Status.DestinationPVC == nil ||
+					workflow.Status.DestinationPVC.UID != "destination-pvc-uid" ||
+					workflow.Status.DestinationPV == nil ||
+					workflow.Status.DestinationPV.UID != "destination-pv-uid" {
+					t.Fatalf("restore status destination checkpoint=%#v", workflow.Status)
 				}
 			}
 		})
@@ -2659,14 +2948,33 @@ func startE2EController(
 				return false, err
 			}
 
-			return lease.Spec.HolderIdentity != nil && *lease.Spec.HolderIdentity != "", nil
+			if lease.Spec.HolderIdentity == nil || *lease.Spec.HolderIdentity == "" {
+				return false, nil
+			}
+
+			request, requestErr := http.NewRequestWithContext(
+				waitCtx,
+				http.MethodGet,
+				"http://127.0.0.1:8081/readyz",
+				nil,
+			)
+			if requestErr != nil {
+				return false, requestErr
+			}
+			response, requestErr := http.DefaultClient.Do(request)
+			if requestErr != nil {
+				return false, nil
+			}
+			defer response.Body.Close()
+
+			return response.StatusCode == http.StatusOK, nil
 		},
 	)
 	if err != nil {
 		_ = process.command.Process.Kill()
 		<-process.done
 		t.Fatalf(
-			"wait for E2E controller leader election: %v\nstdout:\n%s\nstderr:\n%s",
+			"wait for E2E controller readiness: %v\nstdout:\n%s\nstderr:\n%s",
 			err,
 			process.stdout.String(),
 			process.stderr.String(),

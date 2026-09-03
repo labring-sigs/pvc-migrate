@@ -116,7 +116,6 @@ func pvmigrateSameNamespaceEstimate(
 
 	if remote || local {
 		estimate.Pods = 2
-		estimate.ServiceAccounts = 2
 		estimate.Secrets = 2
 	}
 

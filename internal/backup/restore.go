@@ -23,7 +23,7 @@ const (
 func pvmigrateRestoreRequest(
 	req Request,
 	rcloneConfig string,
-	helmValues []string,
+	helmValues *kube.HelmOverrides,
 ) (pvmigrate.Restore, error) {
 	if err := requireS3RepositoryBackend(req.Store); err != nil {
 		return pvmigrate.Restore{}, err
@@ -32,6 +32,12 @@ func pvmigrateRestoreRequest(
 	configValue, err := rcloneConfigHelmValue(rcloneConfig)
 	if err != nil {
 		return pvmigrate.Restore{}, err
+	}
+
+	overrides := kube.HelmOverrides{}
+	if helmValues != nil {
+		overrides.Values = append([]string(nil), helmValues.Values...)
+		overrides.StringValues = append([]string(nil), helmValues.StringValues...)
 	}
 
 	storeConfig := req.Store.Config()
@@ -61,13 +67,16 @@ func pvmigrateRestoreRequest(
 		// launch and excludes terminal Pods that upstream still counts.
 		IgnoreMounted:         true,
 		DeleteExtraneousFiles: req.DeleteExtraneousFiles,
-		HelmValues:            kube.ToolSecurityContextHelmValues(),
+		HelmValues: append(
+			kube.ToolSecurityContextHelmValues(),
+			overrides.Values...,
+		),
 		// Keep the generated credential-bearing config last so generic scheduling
 		// overrides cannot replace the store selected for this operation.
 		HelmStringValues: append(
 			append(
 				append(kube.ZeroResourceHelmValues(), imageValues...),
-				helmValues...,
+				overrides.StringValues...,
 			),
 			configValue,
 		),
@@ -239,6 +248,7 @@ func runRestore(
 		leaseCtx,
 		client,
 		probeResult,
+		req.Namespace,
 		req.ToolServiceAccountName,
 	)
 	if err != nil {
@@ -251,7 +261,7 @@ func runRestore(
 	restoreRequest, err := pvmigrateRestoreRequest(
 		toolRequest,
 		req.Store.RcloneConfig(),
-		helmValues,
+		&helmValues,
 	)
 	if err != nil {
 		return err

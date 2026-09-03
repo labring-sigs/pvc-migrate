@@ -812,6 +812,32 @@ func TestCreateSessionCreatesSessionNamespaceBeforeLease(t *testing.T) {
 	}
 }
 
+func TestCreateSessionUsesStoreScopedLockID(t *testing.T) {
+	client := fake.NewClientset()
+	store := &scopedSessionLocker{lock: &fakeSessionLock{}}
+	service := NewService(
+		client,
+		store,
+		&scriptedReserver{failures: map[string]error{}},
+		&scriptedCopier{failures: map[string]int{}},
+		&scriptedController{},
+		&scriptedSwitcher{rollbackErr: map[string]int{}},
+		Config{Retries: 1, RetryBackoff: time.Millisecond},
+	)
+
+	session := appTestSession()
+
+	plan := &domain.MigrationPlan{SessionID: session.ID, SessionSpec: session.Spec, Ready: true}
+	if _, err := service.CreateSession(context.Background(), plan, false); err != nil {
+		t.Fatal(err)
+	}
+
+	want := session.ID + "/Copy"
+	if store.acquiredID != want {
+		t.Fatalf("creation lock ID=%q, want %q", store.acquiredID, want)
+	}
+}
+
 func TestCreateSessionDryRunValidatesEveryReservationWithoutPersistingState(t *testing.T) {
 	fixture := newRecoveryFixture(t)
 	session := appTestSession()
@@ -2278,6 +2304,10 @@ func TestRenameAndRollbackPreservePVCIdentityDirection(t *testing.T) {
 		)
 	}
 
+	if session.Status.Message != "PVC name restored" {
+		t.Fatalf("rollback message=%q", session.Status.Message)
+	}
+
 	reverse := fixture.switcher.renameCalls[1]
 	if reverse.SourcePVC.Name != "renamed-data" ||
 		reverse.SourcePVC.UID != types.UID("renamed-pvc-uid") {
@@ -2292,6 +2322,36 @@ func TestRenameAndRollbackPreservePVCIdentityDirection(t *testing.T) {
 	if session.Status.Volumes[0].Activation.RolledBackAt == nil ||
 		session.Status.Volumes[0].Activation.ActivePVC.Name != "data" {
 		t.Fatalf("rollback activation=%+v", session.Status.Volumes[0].Activation)
+	}
+}
+
+func TestMoveRollbackReportsNamespaceAndNameRestoration(t *testing.T) {
+	fixture := newRecoveryFixture(t)
+	session := appTestSession()
+	session.Spec.DestinationNamespace = "archive"
+	setSessionOperation(session, domain.OperationMove)
+	session.Spec.Volumes[0].DestinationPVC = domain.ObjectReference{
+		Namespace: "archive",
+		Name:      "moved-data",
+	}
+	createSourceStorage(t, fixture, session)
+
+	if err := fixture.service.Move(context.Background(), session); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := fixture.service.rollbackWorkflowForTest(context.Background(), session); err != nil {
+		t.Fatal(err)
+	}
+
+	if session.Status.Phase != domain.PhaseRolledBack ||
+		session.Status.Message != "PVC namespace and name restored" {
+		t.Fatalf("phase=%s message=%q", session.Status.Phase, session.Status.Message)
+	}
+
+	active := session.Status.Volumes[0].Activation.ActivePVC
+	if active.Namespace != "app" || active.Name != "data" {
+		t.Fatalf("rollback active PVC=%+v", active)
 	}
 }
 
@@ -4438,6 +4498,42 @@ func TestBackupSessionAbortUsesBackupMessage(t *testing.T) {
 	if session.Status.Phase != domain.PhaseAborted ||
 		session.Status.Message != "backup aborted; no recovery point was published" {
 		t.Fatalf("phase=%s message=%q", session.Status.Phase, session.Status.Message)
+	}
+}
+
+func TestRestoreSessionAbortUsesRestoreMessage(t *testing.T) {
+	fixture := newRecoveryFixture(t)
+	spec := domain.NewSessionSpec(
+		domain.OperationRestore,
+		domain.SessionCommon{
+			SourceNamespace:      "app",
+			DestinationNamespace: "app",
+			SessionNamespace:     "sessions",
+		},
+		false,
+		domain.SessionWorkflowOptions{},
+	)
+	spec.Restore.DestinationPVC = domain.ObjectReference{Namespace: "app", Name: "data"}
+	spec.Restore.Backend = domain.BackupBackendS3
+	spec.Restore.Bucket = "backups"
+	spec.Restore.Name = "daily"
+	session := domain.NewSession("restore-session", spec, time.Now())
+	session.Status.Phase = domain.PhaseFailed
+	session.Status.ResumeFrom = domain.PhaseWarmCopying
+
+	if err := fixture.service.abortWorkflowForTest(context.Background(), session); err != nil {
+		t.Fatal(err)
+	}
+
+	if session.Status.Phase != domain.PhaseAborted ||
+		session.Status.Message !=
+			"restore aborted; destination PVC and session credentials are retained" {
+		t.Fatalf("phase=%s message=%q", session.Status.Phase, session.Status.Message)
+	}
+
+	if len(session.Status.History) < 2 ||
+		session.Status.History[len(session.Status.History)-2].Message != "aborting restore" {
+		t.Fatalf("history=%#v", session.Status.History)
 	}
 }
 

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"maps"
+	"strings"
 	"time"
 
 	v1alpha1 "github.com/labring-sigs/pvc-migrate/api/v1alpha1"
@@ -270,14 +271,37 @@ func (s *CRDSessionStore) AcquireSessionLock(
 		)
 	}
 
-	return (&ConfigMapSessionStore{client: s.leaseClient}).AcquireSessionLock(ctx, namespace, id)
+	labelSessionID := id
+	if sessionID, _, found := strings.Cut(id, "/"); found {
+		labelSessionID = sessionID
+	}
+
+	return (&ConfigMapSessionStore{client: s.leaseClient}).acquireSessionLock(
+		ctx,
+		namespace,
+		id,
+		labelSessionID,
+	)
 }
 
 // SessionLockID scopes CRD fencing by operation kind. Kubernetes allows
 // same-name objects in different CRDs, and each kind has an independent
 // controller/reconcile stream.
 func (s *CRDSessionStore) SessionLockID(session *domain.Session) string {
-	return SessionLockID(session)
+	if session == nil || session.ID == "" {
+		return ""
+	}
+
+	kind := session.BackendResource
+	if kind == "" {
+		kind = workflowCRDKindForSession(session)
+	}
+
+	if kind == "" {
+		return session.ID
+	}
+
+	return session.ID + "/" + string(kind)
 }
 
 // DeleteSessionLease removes the Lease associated with a CRD-backed session
@@ -760,7 +784,11 @@ func (s *CRDSessionStore) GetByType(
 		)
 	}
 
-	kinds := []domain.ControllerKind{workflow.Kind}
+	kinds := make([]domain.ControllerKind, 0, 2)
+	if workflow.Kind != "" {
+		kinds = append(kinds, workflow.Kind)
+	}
+
 	if workflow.ClusterKind != "" {
 		kinds = append(kinds, workflow.ClusterKind)
 	}
@@ -1775,7 +1803,9 @@ func workflowSpecStatus(object crclient.Object) (domain.SessionSpec, domain.Sess
 	case *v1alpha1.Backup:
 		return typed.Spec.Domain(typed.Namespace), typed.Status.Domain(), true
 	case *v1alpha1.Restore:
-		return typed.Spec.Domain(typed.Namespace), typed.Status.Domain(), true
+		spec := typed.Spec.Domain(typed.Namespace)
+		typed.Status.ApplyToDomainSpec(&spec)
+		return spec, typed.Status.Domain(), true
 	case *v1alpha1.Rename:
 		return typed.Spec.Domain(typed.Namespace), typed.Status.Domain(typed.Namespace), true
 	case *v1alpha1.ClusterMove:
@@ -1865,7 +1895,7 @@ func setWorkflowStatus(
 	case *v1alpha1.Backup:
 		typed.Status = v1alpha1.BackupStatusFromDomain(status)
 	case *v1alpha1.Restore:
-		typed.Status = v1alpha1.RestoreStatusFromDomain(status)
+		typed.Status = v1alpha1.RestoreStatusFromDomain(status, spec)
 	case *v1alpha1.Rename:
 		typed.Status = v1alpha1.RenameStatusFromDomain(status)
 	case *v1alpha1.ClusterMove:

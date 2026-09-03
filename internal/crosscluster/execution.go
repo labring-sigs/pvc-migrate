@@ -325,6 +325,36 @@ func (s *Service) copy(ctx context.Context, session *Session, retries int, noCom
 		return s.fail(ctx, session, err)
 	}
 
+	// The upstream transfer chart does not expose PodSpec token automount. Use
+	// a project-managed no-token account on each cluster side for sshd/rsync;
+	// rclone has a separate identity contract for object-store credentials.
+	seen := map[string]struct{}{}
+	for _, target := range []struct {
+		client    *kube.Clients
+		namespace string
+	}{
+		{client: s.source, namespace: session.Spec.SourceNamespace},
+		{client: s.destination, namespace: session.Spec.DestinationNamespace},
+	} {
+		key := fmt.Sprintf("%p/%s", target.client, target.namespace)
+		if _, exists := seen[key]; exists {
+			continue
+		}
+
+		if err := kube.EnsureTransferServiceAccount(
+			ctx,
+			target.client.Kubernetes,
+			target.namespace,
+		); err != nil {
+			return s.fail(ctx, session, err)
+		}
+
+		seen[key] = struct{}{}
+	}
+
+	identityValues := kube.TransferServiceAccountHelmValues()
+	schedulingValues = append(schedulingValues, identityValues.StringValues...)
+
 	session.Status.Phase = PhaseTransferring
 	session.Status.Message = "copying PVC data"
 	s.touch(session)
@@ -398,6 +428,7 @@ func (s *Service) copy(ctx context.Context, session *Session, retries int, noCom
 				),
 				NoCompress:       noCompress,
 				HelmTimeout:      s.helmTimeout,
+				HelmValues:       append([]string(nil), identityValues.Values...),
 				HelmStringValues: append([]string(nil), schedulingValues...),
 				Writer:           s.writer,
 				Logger:           s.logger,

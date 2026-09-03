@@ -30,6 +30,8 @@ func TestCheckRBACIncludesToolAndVolumePermissions(t *testing.T) {
 
 	want := []authorizationv1.ResourceAttributes{
 		{Namespace: "app", Verb: "create", Resource: "pods/portforward"},
+		{Namespace: "app", Verb: "get", Resource: "serviceaccounts"},
+		{Namespace: "app", Verb: "create", Resource: "serviceaccounts"},
 		{Namespace: "app", Verb: "update", Resource: "serviceaccounts"},
 		{Namespace: "system", Verb: "get", Group: "coordination.k8s.io", Resource: "leases"},
 		{Namespace: "system", Verb: "create", Group: "coordination.k8s.io", Resource: "leases"},
@@ -41,6 +43,14 @@ func TestCheckRBACIncludesToolAndVolumePermissions(t *testing.T) {
 	for _, attributes := range want {
 		if !hasAccessReview(seen, attributes) {
 			t.Fatalf("missing access review %#v", attributes)
+		}
+	}
+
+	for _, verb := range []string{"patch", "delete"} {
+		if hasAccessReview(seen, authorizationv1.ResourceAttributes{
+			Namespace: "app", Verb: verb, Resource: "serviceaccounts",
+		}) {
+			t.Fatalf("planner should not require %s access to ServiceAccounts", verb)
 		}
 	}
 }
@@ -146,12 +156,21 @@ func TestDeploymentClusterRoleCoversPlannerAccessReviews(t *testing.T) {
 		}
 	}
 
-	for _, verb := range []string{"get", "create", "update", "patch", "delete"} {
+	for _, verb := range []string{"get", "create", "update"} {
 		if !clusterRoleAllows(
 			role.Rules,
 			authorizationv1.ResourceAttributes{Verb: verb, Resource: "serviceaccounts"},
 		) {
 			t.Fatalf("deployment ClusterRole cannot %s ServiceAccounts", verb)
+		}
+	}
+
+	for _, verb := range []string{"patch", "delete"} {
+		if clusterRoleAllows(
+			role.Rules,
+			authorizationv1.ResourceAttributes{Verb: verb, Resource: "serviceaccounts"},
+		) {
+			t.Fatalf("deployment ClusterRole should not %s ServiceAccounts", verb)
 		}
 	}
 
@@ -238,7 +257,7 @@ func TestDeploymentClusterRoleCoversPlannerAccessReviews(t *testing.T) {
 	}
 }
 
-func TestConfigAndDeploymentRolesGrantControllerEventWrites(t *testing.T) {
+func TestConfigAndDeploymentRolesUseLeastPrivilegeForEventsAndServiceAccounts(t *testing.T) {
 	for _, path := range []string{"../../config/rbac/role.yaml", "../../deploy/rbac.yaml"} {
 		role := deploymentClusterRole(t, path, "pvc-migrate")
 		for _, verb := range []string{"create", "patch"} {
@@ -250,11 +269,22 @@ func TestConfigAndDeploymentRolesGrantControllerEventWrites(t *testing.T) {
 			}
 		}
 
-		if !clusterRoleAllows(
-			role.Rules,
-			authorizationv1.ResourceAttributes{Verb: "patch", Resource: "serviceaccounts"},
-		) {
-			t.Fatalf("%s ClusterRole cannot patch ServiceAccounts", path)
+		for _, verb := range []string{"get", "create", "update"} {
+			if !clusterRoleAllows(
+				role.Rules,
+				authorizationv1.ResourceAttributes{Verb: verb, Resource: "serviceaccounts"},
+			) {
+				t.Fatalf("%s ClusterRole cannot %s ServiceAccounts", path, verb)
+			}
+		}
+
+		for _, verb := range []string{"patch", "delete"} {
+			if clusterRoleAllows(
+				role.Rules,
+				authorizationv1.ResourceAttributes{Verb: verb, Resource: "serviceaccounts"},
+			) {
+				t.Fatalf("%s ClusterRole should not %s ServiceAccounts", path, verb)
+			}
 		}
 	}
 }

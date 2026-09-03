@@ -1286,6 +1286,7 @@ func sessionCommandPrefix(namespace string) string {
 
 func sessionCommandPrefixForCommand(value any, namespace string) string {
 	args := []string{"pvc-migrate"}
+	controllerMode := false
 
 	command, ok := value.(*cobra.Command)
 	if ok {
@@ -1301,10 +1302,21 @@ func sessionCommandPrefixForCommand(value any, namespace string) string {
 				args = append(args, "--"+name+"="+shellQuote(flag.Value.String()))
 			}
 		}
+
+		if flag := rootFlags.Lookup("mode"); flag != nil && flag.Changed {
+			mode := strings.ToLower(strings.TrimSpace(flag.Value.String()))
+			args = append(args, "--mode="+shellQuote(mode))
+			controllerMode = mode == string(executionModeController)
+		}
 	}
 
 	if namespace != "" && namespace != "pvc-migrate-system" {
-		args = append(args, "--session-namespace", shellQuote(namespace))
+		namespaceFlag := "--session-namespace"
+		if controllerMode {
+			namespaceFlag = "--workflow-namespace"
+		}
+
+		args = append(args, namespaceFlag, shellQuote(namespace))
 	}
 
 	return strings.Join(args, " ")

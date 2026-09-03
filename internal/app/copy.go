@@ -290,6 +290,28 @@ func (s *Service) copyWithRetry(
 
 	values = append(values, pullSecretValues...)
 
+	// The upstream transfer chart does not expose PodSpec token automount. Use
+	// a namespace-local, project-managed account whose automount setting is
+	// explicitly disabled for sshd/rsync transfer Pods.
+	seenNamespaces := map[string]struct{}{}
+	for _, namespace := range []string{
+		volume.SourcePVC.Namespace,
+		volume.DestinationPVC.Namespace,
+	} {
+		if _, seen := seenNamespaces[namespace]; seen {
+			continue
+		}
+
+		if err := kube.EnsureTransferServiceAccount(ctx, s.client, namespace); err != nil {
+			return err
+		}
+
+		seenNamespaces[namespace] = struct{}{}
+	}
+
+	identityValues := kube.TransferServiceAccountHelmValues()
+	values = append(values, identityValues.StringValues...)
+
 	var last error
 
 	options := session.Spec.WorkflowOptions()
@@ -331,6 +353,7 @@ func (s *Service) copyWithRetry(
 			IgnoreSizes:           volumeCapacityIsSmaller(volume),
 			NoCompress:            s.config.NoCompress,
 			HelmTimeout:           s.config.HelmTimeout,
+			HelmValues:            identityValues.Values,
 			HelmStringValues:      values,
 			Writer:                s.config.Writer,
 			Logger:                s.config.Logger,

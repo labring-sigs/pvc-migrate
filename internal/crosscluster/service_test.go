@@ -23,6 +23,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/kubernetes/fake"
 	"k8s.io/client-go/rest"
 	clienttesting "k8s.io/client-go/testing"
@@ -873,6 +874,56 @@ func TestCopyUsesBothConnectionsAndPersistsTransferState(t *testing.T) {
 			)
 		}
 	}
+
+	identityValues := kube.TransferServiceAccountHelmValues()
+	for _, expected := range identityValues.Values {
+		if !slices.Contains(copier.requests[0].HelmValues, expected) {
+			t.Fatalf(
+				"copy request lacks typed transfer identity value %q: %v",
+				expected,
+				copier.requests[0].HelmValues,
+			)
+		}
+	}
+
+	for _, expected := range identityValues.StringValues {
+		if !slices.Contains(copier.requests[0].HelmStringValues, expected) {
+			t.Fatalf(
+				"copy request lacks transfer identity value %q: %v",
+				expected,
+				copier.requests[0].HelmStringValues,
+			)
+		}
+	}
+
+	for _, target := range []struct {
+		client    kubernetes.Interface
+		namespace string
+	}{
+		{client: service.SourceClientForTest(), namespace: options.SourceNamespace},
+		{client: service.DestinationClientForTest(), namespace: options.DestinationNamespace},
+	} {
+		account, err := target.client.CoreV1().ServiceAccounts(target.namespace).Get(
+			context.Background(), kube.TransferServiceAccountName, metav1.GetOptions{},
+		)
+		if err != nil {
+			t.Fatalf(
+				"transfer account %s/%s: %v",
+				target.namespace,
+				kube.TransferServiceAccountName,
+				err,
+			)
+		}
+
+		if account.AutomountServiceAccountToken == nil || *account.AutomountServiceAccountToken {
+			t.Fatalf(
+				"transfer account %s/%s automountServiceAccountToken=%v, want false",
+				target.namespace,
+				kube.TransferServiceAccountName,
+				account.AutomountServiceAccountToken,
+			)
+		}
+	}
 }
 
 func TestCopyMergesHardTaintsAcrossSourceAndDestinationNodes(t *testing.T) {
@@ -1114,6 +1165,14 @@ func TestReservationConsumerUsesZeroToolResources(t *testing.T) {
 	)
 	if err != nil || len(pods.Items) != 1 {
 		t.Fatalf("reservation Pods=%d err=%v", len(pods.Items), err)
+	}
+
+	if pods.Items[0].Spec.AutomountServiceAccountToken == nil ||
+		*pods.Items[0].Spec.AutomountServiceAccountToken {
+		t.Fatalf(
+			"reservation automountServiceAccountToken=%v, want false",
+			pods.Items[0].Spec.AutomountServiceAccountToken,
+		)
 	}
 
 	resources := pods.Items[0].Spec.Containers[0].Resources

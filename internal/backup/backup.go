@@ -201,7 +201,7 @@ func runBackupSession(
 func pvmigrateBackupRequest(
 	req Request,
 	rcloneConfig string,
-	helmValues []string,
+	helmValues *kube.HelmOverrides,
 ) (pvmigrate.Backup, error) {
 	if err := requireS3RepositoryBackend(req.Store); err != nil {
 		return pvmigrate.Backup{}, err
@@ -210,6 +210,12 @@ func pvmigrateBackupRequest(
 	configValue, err := rcloneConfigHelmValue(rcloneConfig)
 	if err != nil {
 		return pvmigrate.Backup{}, err
+	}
+
+	overrides := kube.HelmOverrides{}
+	if helmValues != nil {
+		overrides.Values = append([]string(nil), helmValues.Values...)
+		overrides.StringValues = append([]string(nil), helmValues.StringValues...)
 	}
 
 	storeConfig := req.Store.Config()
@@ -226,8 +232,8 @@ func pvmigrateBackupRequest(
 		// the second mount even though shared mode is enabled. Helm's map merge
 		// replaces arrays as a whole, so preserve the base mount fields in one
 		// override instead of replacing the array with only readOnly.
-		helmValues = append(
-			helmValues,
+		overrides.StringValues = append(
+			overrides.StringValues,
 			"rclone.pvcMounts[0].name="+req.PVCName+
 				",rclone.pvcMounts[0].mountPath=/data,rclone.pvcMounts[0].readOnly=false",
 		)
@@ -253,13 +259,16 @@ func pvmigrateBackupRequest(
 		// Upstream also counts terminal Pods, so its broader mounted check must
 		// not override the phase-aware result.
 		IgnoreMounted: true,
-		HelmValues:    kube.ToolSecurityContextHelmValues(),
+		HelmValues: append(
+			kube.ToolSecurityContextHelmValues(),
+			overrides.Values...,
+		),
 		// Keep the generated credential-bearing config last so generic scheduling
 		// overrides cannot replace the store selected for this operation.
 		HelmStringValues: append(
 			append(
 				append(kube.ZeroResourceHelmValues(), imageValues...),
-				helmValues...,
+				overrides.StringValues...,
 			),
 			configValue,
 		),
@@ -417,7 +426,11 @@ func runBackup(
 	toolRequest := req
 	toolRequest.ID = toolOperationID(holder)
 
-	backupRequest, err := pvmigrateBackupRequest(toolRequest, req.Store.RcloneConfig(), helmValues)
+	backupRequest, err := pvmigrateBackupRequest(
+		toolRequest,
+		req.Store.RcloneConfig(),
+		&helmValues,
+	)
 	if err != nil {
 		return err
 	}
@@ -545,31 +558,37 @@ func prepareBackupTransferTool(
 	client kubernetes.Interface,
 	req Request,
 	pv *corev1.PersistentVolume,
-) (kube.ToolImageProbeResult, []string, error) {
+) (kube.ToolImageProbeResult, kube.HelmOverrides, error) {
 	toolNode, err := onlineBackupToolNode(ctx, client, req)
 	if err != nil {
-		return kube.ToolImageProbeResult{}, nil, err
+		return kube.ToolImageProbeResult{}, kube.HelmOverrides{}, err
 	}
 
 	if toolNode == "" {
 		toolNode, err = uniquePVToolNode(ctx, client, pv, backupPreflightPhase)
 		if err != nil {
-			return kube.ToolImageProbeResult{}, nil, err
+			return kube.ToolImageProbeResult{}, kube.HelmOverrides{}, err
 		}
 	}
 
 	if err := validateBackupToolStart(ctx, client, req); err != nil {
-		return kube.ToolImageProbeResult{}, nil, err
+		return kube.ToolImageProbeResult{}, kube.HelmOverrides{}, err
 	}
 
 	probeResult, err := probeTransferToolImage(ctx, req, toolNode, false)
 	if err != nil {
-		return kube.ToolImageProbeResult{}, nil, err
+		return kube.ToolImageProbeResult{}, kube.HelmOverrides{}, err
 	}
 
-	helmValues, err := transferToolHelmValues(ctx, client, probeResult, req.ToolServiceAccountName)
+	helmValues, err := transferToolHelmValues(
+		ctx,
+		client,
+		probeResult,
+		req.Namespace,
+		req.ToolServiceAccountName,
+	)
 	if err != nil {
-		return kube.ToolImageProbeResult{}, nil, err
+		return kube.ToolImageProbeResult{}, kube.HelmOverrides{}, err
 	}
 
 	return probeResult, helmValues, nil

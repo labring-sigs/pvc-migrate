@@ -480,7 +480,9 @@ type BackupStatus struct {
 }
 type RestoreStatus struct {
 	WorkflowStatus `json:",inline" yaml:",inline"`
-	Repository     *BackupRepositoryBindingStatus `json:"repository,omitempty" yaml:"repository,omitempty"`
+	Repository     *BackupRepositoryBindingStatus `json:"repository,omitempty"     yaml:"repository,omitempty"`
+	DestinationPVC *ObjectReference               `json:"destinationPVC,omitempty" yaml:"destinationPVC,omitempty"`
+	DestinationPV  *ObjectReference               `json:"destinationPV,omitempty"  yaml:"destinationPV,omitempty"`
 }
 type RenameStatus struct {
 	WorkflowStatus `                          json:",inline" yaml:",inline"`
@@ -851,7 +853,11 @@ func RestoreSpecFromDomain(s domain.SessionSpec) RestoreSpec {
 		p = &domain.RestoreSessionSpec{}
 	}
 	return RestoreSpec{
-		DestinationPVC:          localRefFromDomain(p.DestinationPVC),
+		DestinationPVC: LocalResourceReference{
+			APIVersion: p.DestinationPVC.APIVersion,
+			Kind:       p.DestinationPVC.Kind,
+			Name:       p.DestinationPVC.Name,
+		},
 		Path:                    p.Path,
 		Name:                    p.Name,
 		RepositoryRef:           repositoryRef(p.BackupRepository),
@@ -1780,6 +1786,26 @@ func (s RestoreStatus) Domain() domain.SessionStatus {
 	return out
 }
 
+// ApplyToDomainSpec restores the controller-owned destination checkpoint while
+// preserving the user-selected PVC name and namespace from spec.
+func (s RestoreStatus) ApplyToDomainSpec(spec *domain.SessionSpec) {
+	if spec == nil || spec.Restore == nil {
+		return
+	}
+
+	if s.DestinationPVC != nil {
+		checkpoint := refToDomain(*s.DestinationPVC)
+		destination := spec.Restore.DestinationPVC
+		if checkpoint.Name == destination.Name && checkpoint.Namespace == destination.Namespace {
+			spec.Restore.DestinationPVC = checkpoint
+		}
+	}
+
+	if s.DestinationPV != nil {
+		spec.Restore.DestinationPV = refToDomain(*s.DestinationPV)
+	}
+}
+
 func (s RenameStatus) Domain(namespace string) domain.SessionStatus {
 	out := workflowStatusToDomain(s.WorkflowStatus)
 	out.Volumes = pvcIdentityVolumeStatusesToDomain(s.Volumes, namespace)
@@ -1835,11 +1861,23 @@ func BackupStatusFromDomain(s domain.SessionStatus) BackupStatus {
 	}
 }
 
-func RestoreStatusFromDomain(s domain.SessionStatus) RestoreStatus {
-	return RestoreStatus{
+func RestoreStatusFromDomain(s domain.SessionStatus, spec domain.SessionSpec) RestoreStatus {
+	status := RestoreStatus{
 		WorkflowStatus: workflowStatusFromDomain(s),
 		Repository:     repositoryBindingStatusFromDomain(s.BackupRepository),
 	}
+	if spec.Restore == nil {
+		return status
+	}
+
+	if spec.Restore.DestinationPVC.UID != "" {
+		status.DestinationPVC = optionalRefFromDomain(spec.Restore.DestinationPVC)
+	}
+	if spec.Restore.DestinationPV.Name != "" && spec.Restore.DestinationPV.UID != "" {
+		status.DestinationPV = optionalRefFromDomain(spec.Restore.DestinationPV)
+	}
+
+	return status
 }
 
 func repositoryBindingStatusToDomain(

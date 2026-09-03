@@ -27,6 +27,39 @@ func TestValidateDeclarativeSourceVolumesAcceptsPlannerSnapshot(t *testing.T) {
 	}
 }
 
+func TestValidateDeclarativeSourceVolumesAcceptsPVCIdentitySnapshot(t *testing.T) {
+	for _, operation := range []domain.Operation{
+		domain.OperationRename,
+		domain.OperationMove,
+	} {
+		t.Run(string(operation), func(t *testing.T) {
+			pvc, pv, session := declarativeVolumeFixture()
+			session.Spec = domain.NewSessionSpec(
+				operation,
+				session.Spec.SessionCommon,
+				false,
+				domain.SessionWorkflowOptions{},
+			)
+			volume := &session.Spec.Volumes[0]
+			volume.Capacity = ""
+			volume.SourceCapacity = ""
+			volume.StorageClass = ""
+			volume.AccessModes = nil
+			volume.VolumeMode = ""
+
+			r := NewWorkflowReconciler(nil, nil).WithKubernetesClient(
+				clientfake.NewSimpleClientset(pvc, pv),
+			)
+			if err := r.validateDeclarativeSourceVolumes(
+				context.Background(),
+				session,
+			); err != nil {
+				t.Fatalf("valid %s identity snapshot rejected: %v", operation, err)
+			}
+		})
+	}
+}
+
 func TestValidateDeclarativeSourceVolumesUsesSourceNamespaceForClusterWorkflow(t *testing.T) {
 	pvc, pv, session := declarativeVolumeFixture()
 	session.BackendResource = domain.ControllerKindClusterCopy

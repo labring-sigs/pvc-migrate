@@ -787,6 +787,7 @@ func (r *Reserver) provisionOnTarget(
 	}
 
 	podName := toolPodName(session.ID, volume.SourcePVC.Name)
+	automountServiceAccountToken := false
 	pod := &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      podName,
@@ -799,6 +800,7 @@ func (r *Reserver) provisionOnTarget(
 		},
 		Spec: corev1.PodSpec{
 			RestartPolicy:                 corev1.RestartPolicyNever,
+			AutomountServiceAccountToken:  &automountServiceAccountToken,
 			TerminationGracePeriodSeconds: new(int64(1)),
 			NodeSelector:                  map[string]string{corev1.LabelHostname: hostname},
 			Tolerations:                   nodeTolerations(node),

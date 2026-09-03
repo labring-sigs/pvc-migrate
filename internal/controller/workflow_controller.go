@@ -5,7 +5,9 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net/http"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/go-logr/logr"
@@ -13,6 +15,8 @@ import (
 	"github.com/labring-sigs/pvc-migrate/internal/app"
 	"github.com/labring-sigs/pvc-migrate/internal/domain"
 	"github.com/labring-sigs/pvc-migrate/internal/kube"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
@@ -23,6 +27,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/event"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	crlog "sigs.k8s.io/controller-runtime/pkg/log"
+	crmanager "sigs.k8s.io/controller-runtime/pkg/manager"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
@@ -219,6 +224,10 @@ func (r *WorkflowReconciler) reconcile(
 		return reconcile.Result{}, err
 	}
 
+	if session.Deleting {
+		return reconcile.Result{}, r.reconcileDeletingWorkflow(ctx, request, session, kind)
+	}
+
 	// A workflow's spec is the authorization and execution input. Once the
 	// controller has observed a generation, changing that input would let a
 	// tenant retarget an in-flight operation (for example to another recovery
@@ -244,13 +253,6 @@ func (r *WorkflowReconciler) reconcile(
 		if err := ensurer.EnsureSessionProtection(ctx, session); err != nil {
 			return reconcile.Result{}, err
 		}
-	}
-
-	if session.Deleting {
-		// A deletion request must not start or advance a workflow. Existing
-		// finalizers keep cleanup explicit; resources without our finalizer can
-		// finish deletion normally.
-		return reconcile.Result{}, nil
 	}
 
 	// Status is a controller-owned subresource. A declarative create ignores a
@@ -305,6 +307,51 @@ func (r *WorkflowReconciler) reconcile(
 	}
 
 	return reconcile.Result{RequeueAfter: r.requeueAfter}, nil
+}
+
+func (r *WorkflowReconciler) reconcileDeletingWorkflow(
+	ctx context.Context,
+	request reconcile.Request,
+	session *domain.Session,
+	kind domain.ControllerKind,
+) error {
+	resourceKind := session.BackendResource
+	if resourceKind == "" {
+		resourceKind = kind
+	}
+
+	// Direct deletion of a workflow keeps the explicit cleanup contract. A
+	// namespaced workflow must not hold its namespace in Terminating forever;
+	// Kubernetes will remove namespaced data-plane resources as part of that
+	// deletion, and orphan recovery remains available for cluster-scoped PVs.
+	if request.Namespace == "" || domain.IsClusterControllerKind(resourceKind) {
+		return nil
+	}
+
+	if r.kubeClient == nil {
+		return errors.New("controller Kubernetes client is required to reconcile workflow deletion")
+	}
+
+	namespace, err := r.kubeClient.CoreV1().Namespaces().Get(
+		ctx,
+		request.Namespace,
+		metav1.GetOptions{},
+	)
+	if err != nil && !apierrors.IsNotFound(err) {
+		return err
+	}
+
+	if err == nil && namespace.DeletionTimestamp == nil {
+		return nil
+	}
+
+	ctrl.LoggerFrom(ctx).Info(
+		"releasing workflow protection for terminating namespace",
+		"workflow",
+		request.NamespacedName,
+	)
+
+	return r.store.Delete(ctx, session)
 }
 
 func initializeUnobservedStatus(
@@ -474,7 +521,28 @@ func StartManagerWithKinds(
 		return err
 	}
 
-	if err := manager.AddReadyzCheck("readyz", healthz.Ping); err != nil {
+	var cacheReady atomic.Bool
+	if err := manager.Add(crmanager.RunnableFunc(func(ctx context.Context) error {
+		// Controller-runtime starts ordinary runnables only after every cache has
+		// synchronized. Publishing readiness here avoids the pre-start behavior
+		// of WaitForCacheSync, which reports success before informers exist.
+		cacheReady.Store(true)
+		defer cacheReady.Store(false)
+
+		<-ctx.Done()
+
+		return nil
+	})); err != nil {
+		return err
+	}
+
+	if err := manager.AddReadyzCheck("cache-sync", func(*http.Request) error {
+		if cacheReady.Load() {
+			return nil
+		}
+
+		return errors.New("controller cache has not synced")
+	}); err != nil {
 		return err
 	}
 

@@ -121,6 +121,38 @@ func TestConfigMapSessionStoreSessionLeaseContendsAndReleases(t *testing.T) {
 	}
 }
 
+func TestCompositeSessionLeaseKeepsQueryableSessionLabel(t *testing.T) {
+	ctx := context.Background()
+	client := newSessionLeaseTestClient()
+	store := NewConfigMapSessionStore(client)
+
+	lockID := "workflow/PodMigration"
+
+	lock, err := store.acquireSessionLock(ctx, "system", lockID, "workflow")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	defer func() {
+		if err := lock.Release(ctx); err != nil {
+			t.Errorf("release lock: %v", err)
+		}
+	}()
+
+	lease, err := client.CoordinationV1().Leases("system").Get(
+		ctx,
+		SessionLockName(lockID),
+		metav1.GetOptions{},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if got := lease.Labels[SessionKey]; got != "workflow" {
+		t.Fatalf("session label=%q, want workflow", got)
+	}
+}
+
 func TestConfigMapSessionStoreDeletesSessionLease(t *testing.T) {
 	ctx := context.Background()
 	store := NewConfigMapSessionStore(newSessionLeaseTestClient())

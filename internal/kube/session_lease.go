@@ -78,11 +78,18 @@ func (s *ConfigMapSessionStore) AcquireSessionLock(
 	ctx context.Context,
 	namespace, id string,
 ) (SessionLock, error) {
-	if namespace == "" || id == "" {
+	return s.acquireSessionLock(ctx, namespace, id, id)
+}
+
+func (s *ConfigMapSessionStore) acquireSessionLock(
+	ctx context.Context,
+	namespace, id, labelSessionID string,
+) (SessionLock, error) {
+	if namespace == "" || id == "" || labelSessionID == "" {
 		return nil, domain.NewError(
 			domain.ErrorValidation,
 			"acquire session lock",
-			"session namespace and ID are required",
+			"session namespace, lock ID, and label session ID are required",
 		)
 	}
 
@@ -95,7 +102,7 @@ func (s *ConfigMapSessionStore) AcquireSessionLock(
 	now := metav1.NewMicroTime(time.Now().UTC())
 	labelsForLease := map[string]string{
 		ManagedByLabel: ManagedByValue,
-		SessionKey:     id,
+		SessionKey:     labelSessionID,
 	}
 
 	for range 2 {
@@ -129,7 +136,15 @@ func (s *ConfigMapSessionStore) AcquireSessionLock(
 				}
 
 				return newSessionLeaseWithTiming(
-					ctx, leases, namespace, name, id, holder, created.UID, duration, renewEvery,
+					ctx,
+					leases,
+					namespace,
+					name,
+					labelSessionID,
+					holder,
+					created.UID,
+					duration,
+					renewEvery,
 				), nil
 			}
 
@@ -162,7 +177,8 @@ func (s *ConfigMapSessionStore) AcquireSessionLock(
 			)
 		}
 
-		if lease.Labels[ManagedByLabel] != ManagedByValue || lease.Labels[SessionKey] != id {
+		if lease.Labels[ManagedByLabel] != ManagedByValue ||
+			lease.Labels[SessionKey] != labelSessionID {
 			return nil, domain.NewError(
 				domain.ErrorConflict,
 				"acquire session lock",
@@ -219,7 +235,15 @@ func (s *ConfigMapSessionStore) AcquireSessionLock(
 		}
 
 		return newSessionLeaseWithTiming(
-			ctx, leases, namespace, name, id, holder, claimed.UID, duration, renewEvery,
+			ctx,
+			leases,
+			namespace,
+			name,
+			labelSessionID,
+			holder,
+			claimed.UID,
+			duration,
+			renewEvery,
 		), nil
 	}
 

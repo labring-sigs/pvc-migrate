@@ -1395,7 +1395,7 @@ func TestPVMigrateBackupAndRestoreForwardFullRequestContract(t *testing.T) {
 	backupRequest, err := pvmigrateBackupRequest(
 		request,
 		request.Store.RcloneConfig(),
-		customValues,
+		&kube.HelmOverrides{StringValues: customValues},
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -1479,7 +1479,7 @@ func TestPVMigrateBackupRequestUsesWritableMountForSharedOnlinePVC(t *testing.T)
 	got, err := pvmigrateBackupRequest(
 		request,
 		request.Store.RcloneConfig(),
-		[]string{"rclone.nodeName=node-a"},
+		&kube.HelmOverrides{StringValues: []string{"rclone.nodeName=node-a"}},
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -2480,12 +2480,21 @@ func TestTransferToolHelmValuesUseObservedNodeTaintsAndPullSecrets(t *testing.T)
 	}
 	client := fake.NewClientset(node)
 	probe := kube.ToolImageProbeResult{
-		Target:           kube.ToolProbeTarget{Components: []string{kube.ToolComponentRclone}},
+		Target: kube.ToolProbeTarget{
+			Namespace:  "default",
+			Components: []string{kube.ToolComponentRclone},
+		},
 		NodeName:         "node-a",
 		ImagePullSecrets: []corev1.LocalObjectReference{{Name: "registry-pull"}},
 	}
 
-	values, err := transferToolHelmValues(context.Background(), client, probe, "")
+	overrides, err := transferToolHelmValues(
+		context.Background(),
+		client,
+		probe,
+		"default",
+		"",
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2497,10 +2506,89 @@ func TestTransferToolHelmValuesUseObservedNodeTaintsAndPullSecrets(t *testing.T)
 		"rclone.tolerations[1].key=draining",
 		"rclone.tolerations[1].operator=Exists",
 		"rclone.imagePullSecrets[0].name=registry-pull",
+		"rclone.serviceAccount.name=" + kube.TransferServiceAccountName,
 	} {
-		if !slices.Contains(values, expected) {
-			t.Fatalf("missing %q in %v", expected, values)
+		if !slices.Contains(overrides.StringValues, expected) {
+			t.Fatalf("missing string value %q in %v", expected, overrides)
 		}
+	}
+
+	if !slices.Contains(overrides.Values, "rclone.serviceAccount.create=false") {
+		t.Fatalf("missing typed create=false in %v", overrides)
+	}
+
+	account, err := client.CoreV1().ServiceAccounts("default").Get(
+		context.Background(),
+		kube.TransferServiceAccountName,
+		metav1.GetOptions{},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if account.AutomountServiceAccountToken == nil || *account.AutomountServiceAccountToken {
+		t.Fatalf(
+			"default rclone account automountServiceAccountToken=%v, want false",
+			account.AutomountServiceAccountToken,
+		)
+	}
+}
+
+func TestTransferToolHelmValuesPreserveExplicitServiceAccount(t *testing.T) {
+	client := fake.NewClientset(&corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "node-a"}})
+	probe := kube.ToolImageProbeResult{NodeName: "node-a"}
+
+	overrides, err := transferToolHelmValues(
+		context.Background(),
+		client,
+		probe,
+		"default",
+		"workload-identity",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if !slices.Contains(overrides.Values, "rclone.serviceAccount.create=false") {
+		t.Fatalf("missing typed create=false in %v", overrides)
+	}
+
+	if !slices.Contains(
+		overrides.StringValues,
+		"rclone.serviceAccount.name=workload-identity",
+	) {
+		t.Fatalf("missing explicit ServiceAccount name in %v", overrides)
+	}
+
+	if _, err := client.CoreV1().ServiceAccounts("default").Get(
+		context.Background(),
+		kube.TransferServiceAccountName,
+		metav1.GetOptions{},
+	); !apierrors.IsNotFound(err) {
+		t.Fatalf("project-managed account created for explicit identity: %v", err)
+	}
+}
+
+func TestTransferToolHelmValuesRejectEmptyProbeNode(t *testing.T) {
+	client := fake.NewClientset()
+
+	_, err := transferToolHelmValues(
+		context.Background(),
+		client,
+		kube.ToolImageProbeResult{},
+		"default",
+		"",
+	)
+	if domain.CategoryOf(err) != domain.ErrorInternal {
+		t.Fatalf("category=%s error=%v, want internal", domain.CategoryOf(err), err)
+	}
+
+	if _, err := client.CoreV1().ServiceAccounts("default").Get(
+		context.Background(),
+		kube.TransferServiceAccountName,
+		metav1.GetOptions{},
+	); !apierrors.IsNotFound(err) {
+		t.Fatalf("account created after invalid probe result: %v", err)
 	}
 }
 
@@ -2700,6 +2788,96 @@ func TestVerifyPVCIdentityRejectsNameReuseAndClaimRefMismatch(t *testing.T) {
 		err,
 	) != domain.ErrorPrecondition {
 		t.Fatalf("missing expected UID category=%s error=%v", domain.CategoryOf(err), err)
+	}
+}
+
+func TestCheckpointRestoreDestinationIdentityPersistsPVCAndPV(t *testing.T) {
+	pvc := &corev1.PersistentVolumeClaim{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace:       "app",
+			Name:            "restored-data",
+			UID:             "pvc-uid",
+			ResourceVersion: "17",
+		},
+		Spec:   corev1.PersistentVolumeClaimSpec{VolumeName: "pv-data"},
+		Status: corev1.PersistentVolumeClaimStatus{Phase: corev1.ClaimBound},
+	}
+	pv := &corev1.PersistentVolume{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:            "pv-data",
+			UID:             "pv-uid",
+			ResourceVersion: "19",
+		},
+		Spec: corev1.PersistentVolumeSpec{ClaimRef: &corev1.ObjectReference{
+			Namespace: "app",
+			Name:      "restored-data",
+			UID:       "pvc-uid",
+		}},
+		Status: corev1.PersistentVolumeStatus{Phase: corev1.VolumeBound},
+	}
+	client := fake.NewSimpleClientset(pvc, pv)
+	store := &recordingBackupSessionStore{}
+	spec := domain.NewSessionSpec(
+		domain.OperationRestore,
+		domain.SessionCommon{DestinationNamespace: "app", SessionNamespace: "app"},
+		false,
+		domain.SessionWorkflowOptions{},
+	)
+	spec.Restore.DestinationPVC = domain.ObjectReference{Namespace: "app", Name: "restored-data"}
+	spec.Restore.Backend = domain.BackupBackendS3
+	spec.Restore.Bucket = "backups"
+	spec.Restore.Name = "daily"
+	session := domain.NewSession("restore-checkpoint", spec, time.Now())
+
+	err := checkpointRestoreDestinationIdentity(
+		context.Background(),
+		client,
+		Request{
+			Namespace:     "app",
+			PVCName:       "restored-data",
+			SessionStore:  store,
+			BackupSession: session,
+		},
+		&Plan{PVCUID: "pvc-uid", PVUID: "pv-uid"},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if len(store.updated) != 1 || session.Spec.Restore.DestinationPVC.UID != "pvc-uid" ||
+		session.Spec.Restore.DestinationPVC.ResourceVersion != "17" ||
+		session.Spec.Restore.DestinationPV.Name != "pv-data" ||
+		session.Spec.Restore.DestinationPV.UID != "pv-uid" ||
+		session.Spec.Restore.DestinationPV.ResourceVersion != "19" {
+		t.Fatalf("restore destination checkpoint = %#v", session.Spec.Restore)
+	}
+}
+
+func TestValidateRestoreDestinationIdentityRejectsRecreatedPVC(t *testing.T) {
+	spec := domain.NewSessionSpec(
+		domain.OperationRestore,
+		domain.SessionCommon{DestinationNamespace: "app", SessionNamespace: "app"},
+		false,
+		domain.SessionWorkflowOptions{},
+	)
+	spec.Restore.DestinationPVC = domain.ObjectReference{
+		Namespace: "app",
+		Name:      "restored-data",
+		UID:       "original-pvc-uid",
+	}
+	spec.Restore.DestinationPV = domain.ObjectReference{Name: "pv-data", UID: "original-pv-uid"}
+	spec.Restore.Backend = domain.BackupBackendS3
+	spec.Restore.Bucket = "backups"
+	spec.Restore.Name = "daily"
+	session := domain.NewSession("restore-checkpoint", spec, time.Now())
+
+	err := validateRestoreDestinationIdentity(
+		&Plan{PVCUID: "replacement-pvc-uid", PVUID: "original-pv-uid"},
+		session,
+	)
+	if domain.CategoryOf(err) != domain.ErrorConflict ||
+		!strings.Contains(err.Error(), "PVC identity changed") {
+		t.Fatalf("error=%v category=%s", err, domain.CategoryOf(err))
 	}
 }
 

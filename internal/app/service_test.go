@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -47,12 +48,31 @@ type fakeSessionLocker struct {
 	lock kube.SessionLock
 }
 
+type scopedSessionLocker struct {
+	memoryStore
+	lock       kube.SessionLock
+	acquiredID string
+}
+
 func (f *fakeSessionLocker) AcquireSessionLock(
 	context.Context,
 	string,
 	string,
 ) (kube.SessionLock, error) {
 	return f.lock, nil
+}
+
+func (s *scopedSessionLocker) AcquireSessionLock(
+	_ context.Context,
+	_ string,
+	id string,
+) (kube.SessionLock, error) {
+	s.acquiredID = id
+	return s.lock, nil
+}
+
+func (*scopedSessionLocker) SessionLockID(session *domain.Session) string {
+	return session.ID + "/Copy"
 }
 
 type fakeSessionLock struct {
@@ -231,6 +251,7 @@ func (f *fakeController) CurrentRollbackPods(
 
 type fakeCopier struct {
 	modes     []copyengine.Mode
+	requests  []copyengine.Request
 	failFinal int
 	err       error
 }
@@ -241,6 +262,9 @@ func (f *fakeCopier) Copy(
 	_ copyengine.ProgressFunc,
 ) error {
 	f.modes = append(f.modes, request.Mode)
+
+	f.requests = append(f.requests, request)
+
 	if request.Mode == copyengine.ModeFinal && f.failFinal > 0 {
 		f.failFinal--
 		return domain.NewError(domain.ErrorCopy, "copy", "injected final-sync failure")
@@ -543,6 +567,43 @@ func TestMigrateRunsAllStagesAndPersistsProgress(t *testing.T) {
 
 	if controllers.paused != 1 || controllers.resumed != 1 {
 		t.Fatalf("controller calls pause=%d resume=%d", controllers.paused, controllers.resumed)
+	}
+
+	for _, request := range copier.requests {
+		identityValues := kube.TransferServiceAccountHelmValues()
+		for _, expected := range identityValues.Values {
+			if !slices.Contains(request.HelmValues, expected) {
+				t.Fatalf(
+					"copy request lacks typed transfer identity value %q: %v",
+					expected,
+					request.HelmValues,
+				)
+			}
+		}
+
+		for _, expected := range identityValues.StringValues {
+			if !slices.Contains(request.HelmStringValues, expected) {
+				t.Fatalf(
+					"copy request lacks transfer identity value %q: %v",
+					expected,
+					request.HelmStringValues,
+				)
+			}
+		}
+	}
+
+	account, err := service.client.CoreV1().ServiceAccounts("app").Get(
+		context.Background(), kube.TransferServiceAccountName, metav1.GetOptions{},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if account.AutomountServiceAccountToken == nil || *account.AutomountServiceAccountToken {
+		t.Fatalf(
+			"transfer account automountServiceAccountToken=%v, want false",
+			account.AutomountServiceAccountToken,
+		)
 	}
 
 	if store.updates < 10 {

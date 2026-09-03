@@ -322,25 +322,24 @@ func (r *rootState) printObjectTransferResult(
 	plan *backup.Plan,
 	store *objectstore.Store,
 ) error {
-	var completedSession *domain.Session
-	if !restore {
-		lookupCtx, lookupCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	sessionType := domain.SessionTypeBackup
+	if restore {
+		sessionType = domain.SessionTypeRestore
+	}
 
-		var err error
+	lookupCtx, lookupCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	completedSession, err := kube.GetSessionByType(
+		lookupCtx,
+		runtime.store,
+		r.global.sessionNamespace,
+		flags.id,
+		sessionType,
+	)
 
-		completedSession, err = kube.GetSessionByType(
-			lookupCtx,
-			runtime.store,
-			r.global.sessionNamespace,
-			flags.id,
-			domain.SessionTypeBackup,
-		)
+	lookupCancel()
 
-		lookupCancel()
-
-		if err != nil {
-			return reportSessionLookupError(cmd, r.global.sessionNamespace, flags.id, err)
-		}
+	if err != nil {
+		return reportSessionLookupError(cmd, r.global.sessionNamespace, flags.id, err)
 	}
 
 	if output.Format(r.global.output) != output.Table {
@@ -394,7 +393,7 @@ func (r *rootState) printObjectTransferResult(
 
 	identityLabel, identity := transferResultIdentity(restore, flags.id)
 
-	_, err := fmt.Fprintf(
+	_, err = fmt.Fprintf(
 		cmd.OutOrStdout(),
 		"%s completed: %s/%s name=%s %s=%s\n",
 		use,

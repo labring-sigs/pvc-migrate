@@ -676,6 +676,12 @@ func TestCRDSessionLockIDIncludesWorkflowKind(t *testing.T) {
 	if got := LockIDForSession(store, migration); got != migrationID {
 		t.Fatalf("store lock ID=%q, want %q", got, migrationID)
 	}
+
+	unpersisted := storeTestSession()
+	if got := LockIDForSession(store, unpersisted); got == unpersisted.ID ||
+		!strings.HasSuffix(got, "/"+string(domain.ControllerKindMigration)) {
+		t.Fatalf("unpersisted CRD lock ID=%q is not kind-scoped", got)
+	}
 }
 
 func TestCRDSessionStoreGetRejectsDuplicateNameAcrossKinds(t *testing.T) {
@@ -1274,6 +1280,39 @@ func TestCRDSessionStoreGetByKindDisambiguatesSameNameWorkflows(t *testing.T) {
 	)
 	if err != nil || byType.Spec.Type != domain.SessionTypeCopy {
 		t.Fatalf("get by type copy=%#v error=%v", byType, err)
+	}
+}
+
+func TestCRDSessionStoreGetByTypeSupportsClusterOnlyWorkflow(t *testing.T) {
+	ctx := context.Background()
+	client := newCRDTestClient()
+	store := NewCRDSessionStore(client)
+	session := storeTestSession()
+	session.Spec = domain.NewSessionSpec(
+		domain.OperationMove,
+		domain.SessionCommon{
+			SourceNamespace:      "source",
+			TemporaryNamespace:   "destination",
+			DestinationNamespace: "destination",
+			SessionNamespace:     "system",
+			Volumes:              session.Spec.Volumes,
+		},
+		false,
+		domain.SessionWorkflowOptions{},
+	)
+
+	if err := client.Create(ctx, sessionObjectFor(session)); err != nil {
+		t.Fatalf("create cluster move: %v", err)
+	}
+
+	loaded, err := store.GetByType(ctx, "system", session.ID, domain.SessionTypeMove)
+	if err != nil {
+		t.Fatalf("get cluster move by type: %v", err)
+	}
+
+	if loaded.Spec.Type != domain.SessionTypeMove ||
+		loaded.BackendResource != domain.ControllerKindClusterMove {
+		t.Fatalf("loaded cluster move=%#v", loaded)
 	}
 }
 

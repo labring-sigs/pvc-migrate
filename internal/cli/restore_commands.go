@@ -160,41 +160,35 @@ func (r *rootState) newRestoreTransferCommand() *cobra.Command {
 				return reportTransferError(cmd, "restore", flags.namespace, flags.pvc, err)
 			}
 
-			// Repository-backed restores are submitted as CRs. Static-credential
-			// restores keep the synchronous session path; creating a ConfigMap
-			// session and then executing directly would leave an orphaned record.
-			if controllerWorkflowAvailable(runtime, domain.SessionTypeRestore) &&
-				flags.backupRepository != "" {
-				session, submitErr := backup.SubmitRestore(
-					ctx,
-					runtime.clients.Kubernetes,
-					request,
-					*plan,
-				)
-				if submitErr != nil {
-					return reportTransferError(
-						cmd,
-						"restore",
-						flags.namespace,
-						flags.pvc,
-						submitErr,
-					)
-				}
-
-				if deferred, deferErr := deferControllerExecution(
-					ctx, cmd, runtime, session,
-				); deferred {
-					return deferErr
-				}
-
-				if session.Backend == kube.SessionBackendCRD {
-					return nil
-				}
-			}
-
-			err = backup.Run(ctx, runtime.clients.Kubernetes, request, true)
+			session, err := backup.SubmitRestore(
+				ctx,
+				runtime.clients.Kubernetes,
+				request,
+				*plan,
+			)
 			if err != nil {
 				return reportTransferError(cmd, "restore", flags.namespace, flags.pvc, err)
+			}
+
+			flags.id = session.ID
+
+			if deferred, deferErr := deferControllerExecution(
+				ctx, cmd, runtime, session,
+			); deferred {
+				return deferErr
+			}
+
+			if session.Backend == kube.SessionBackendCRD {
+				return nil
+			}
+
+			if err := backup.ResumeRestore(
+				ctx,
+				runtime.clients.Kubernetes,
+				request,
+				session,
+			); err != nil {
+				return reportSessionError(cmd, session, err)
 			}
 
 			return r.printObjectTransferResult(

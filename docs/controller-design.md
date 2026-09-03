@@ -138,8 +138,13 @@ becoming an indirect path to another namespace's credentials.
 The controller initializes a missing status to `Planned`, persists every phase
 checkpoint through the status subresource, and resumes idempotently after
 restarts. A failed workflow remains quiescent until an explicit resume. Session
-Leases fence concurrent CLI/controller execution, and finalizers protect
-resources during cleanup. UID and resource-version checks reject replacement or
+Leases fence concurrent execution, and controller-owned CR finalizers protect
+resources during explicit cleanup. A namespaced workflow keeps that protection
+when it alone is deleted, while the controller releases it when the containing
+namespace is terminating so the workflow cannot block namespace deletion.
+ConfigMap sessions intentionally have no finalizer: session mode has no
+always-running reconciler, so a finalizer could otherwise block namespace
+deletion indefinitely. UID and resource-version checks reject replacement or
 stale updates.
 
 ## Deployment and RBAC

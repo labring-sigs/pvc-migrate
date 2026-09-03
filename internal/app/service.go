@@ -298,7 +298,7 @@ func (s *Service) CreateSession(
 	createErr := s.withSessionIDLock(
 		ctx,
 		plan.SessionSpec.SessionNamespace,
-		plan.SessionID,
+		kube.LockIDForSession(s.store, session),
 		func(lockedCtx context.Context) error {
 			if err := s.ensureSessionNamespaces(lockedCtx, plan, false); err != nil {
 				return err
