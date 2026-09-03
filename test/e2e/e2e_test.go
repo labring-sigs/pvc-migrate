@@ -12,6 +12,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -38,6 +39,7 @@ import (
 	"k8s.io/client-go/tools/clientcmd"
 	"k8s.io/client-go/tools/remotecommand"
 	"k8s.io/client-go/util/retry"
+	crclient "sigs.k8s.io/controller-runtime/pkg/client"
 )
 
 const (
@@ -694,6 +696,203 @@ func TestWorkflowScopeAdmissionAndStatusMatrix(t *testing.T) {
 		List(ctx, metav1.ListOptions{})
 	if !apierrors.IsNotFound(err) {
 		t.Fatalf("namespaced Move endpoint is still served: %v", err)
+	}
+}
+
+func TestControllerWorkflowCollisionAndNamespaceDeletion(t *testing.T) {
+	config, adminClient, kubeconfig := capacityE2EClients(t)
+	clients, err := kube.NewClients(kubeconfig, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	defer cancel()
+
+	suffix := e2eSuffix()
+	controlNamespace := "pvc-migrate-safety-control-" + suffix
+	workflowNamespace := "pvc-migrate-safety-workflow-" + suffix
+	sessionID := "safety-" + suffix
+	defer cleanupTestResources(t, config, adminClient, controlNamespace, sessionID)
+	defer cleanupTestResources(t, config, adminClient, workflowNamespace, sessionID)
+	createE2ENamespace(t, ctx, adminClient, controlNamespace, sessionID)
+	createE2ENamespace(t, ctx, adminClient, workflowNamespace, sessionID)
+
+	volume := domain.VolumeSpec{
+		SourcePVC: domain.ObjectReference{
+			APIVersion: "v1", Kind: "PersistentVolumeClaim", Namespace: workflowNamespace,
+			Name: "source", UID: types.UID("source-pvc-uid"),
+		},
+		SourcePV: domain.ObjectReference{
+			APIVersion: "v1", Kind: "PersistentVolume",
+			Name: "source-pv", UID: types.UID("source-pv-uid"),
+		},
+		SourceReclaimPolicy: corev1.PersistentVolumeReclaimRetain,
+		SourcePVCSpec: corev1.PersistentVolumeClaimSpec{
+			AccessModes: []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce},
+			Resources: corev1.VolumeResourceRequirements{Requests: corev1.ResourceList{
+				corev1.ResourceStorage: resource.MustParse("1Gi"),
+			}},
+		},
+		DestinationPVC: domain.ObjectReference{
+			APIVersion: "v1", Kind: "PersistentVolumeClaim", Namespace: workflowNamespace,
+			Name: "destination",
+		},
+		Capacity:    "1Gi",
+		AccessModes: []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce},
+		VolumeMode:  corev1.PersistentVolumeFilesystem,
+	}
+	common := domain.SessionCommon{
+		SourceNamespace:      workflowNamespace,
+		TemporaryNamespace:   workflowNamespace,
+		DestinationNamespace: workflowNamespace,
+		SessionNamespace:     workflowNamespace,
+		Volumes:              []domain.VolumeSpec{volume},
+	}
+	renameSpec := domain.NewSessionSpec(
+		domain.OperationRename,
+		common,
+		false,
+		domain.SessionWorkflowOptions{},
+	)
+	copySpec := domain.NewSessionSpec(
+		domain.OperationCopy,
+		common,
+		false,
+		domain.SessionWorkflowOptions{},
+	)
+	rename := &v1alpha1.Rename{
+		ObjectMeta: metav1.ObjectMeta{Name: sessionID, Namespace: workflowNamespace},
+		Spec:       v1alpha1.RenameSpecFromDomain(renameSpec),
+	}
+	copyWorkflow := &v1alpha1.Copy{
+		ObjectMeta: metav1.ObjectMeta{Name: sessionID, Namespace: workflowNamespace},
+		Spec:       v1alpha1.CopySpecFromDomain(copySpec),
+	}
+	if err := clients.Runtime.Create(ctx, rename); err != nil {
+		t.Fatal(err)
+	}
+	if err := clients.Runtime.Create(ctx, copyWorkflow); err != nil {
+		t.Fatal(err)
+	}
+
+	buildCtx, buildCancel := context.WithTimeout(ctx, 2*time.Minute)
+	defer buildCancel()
+	binary := e2eBinary(t, buildCtx)
+	controllerProcess := startE2EController(
+		t,
+		ctx,
+		adminClient,
+		binary,
+		kubeconfig,
+		controlNamespace,
+		"controller",
+	)
+
+	stableUntil := time.Now().Add(6 * time.Second)
+	for time.Now().Before(stableUntil) {
+		for _, object := range []crclient.Object{rename, copyWorkflow} {
+			if err := clients.Runtime.Get(
+				ctx,
+				crclient.ObjectKeyFromObject(object),
+				object,
+			); err != nil {
+				t.Fatal(err)
+			}
+			if slices.Contains(object.GetFinalizers(), kube.SessionFinalizer) {
+				t.Fatalf("colliding %T unexpectedly received session protection", object)
+			}
+		}
+		if rename.Status.Phase != "" || copyWorkflow.Status.Phase != "" {
+			t.Fatalf(
+				"colliding workflows advanced: rename=%q copy=%q",
+				rename.Status.Phase,
+				copyWorkflow.Status.Phase,
+			)
+		}
+		time.Sleep(250 * time.Millisecond)
+	}
+	controllerProcess.Stop(t)
+
+	if err := clients.Runtime.Delete(ctx, copyWorkflow); err != nil {
+		t.Fatal(err)
+	}
+	if err := wait.PollUntilContextTimeout(
+		ctx,
+		250*time.Millisecond,
+		30*time.Second,
+		true,
+		func(waitCtx context.Context) (bool, error) {
+			current := &v1alpha1.Copy{}
+			err := clients.Runtime.Get(
+				waitCtx,
+				crclient.ObjectKey{Namespace: workflowNamespace, Name: sessionID},
+				current,
+			)
+			return apierrors.IsNotFound(err), nil
+		},
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := clients.Runtime.Get(
+		ctx,
+		crclient.ObjectKey{Namespace: workflowNamespace, Name: sessionID},
+		rename,
+	); err != nil {
+		t.Fatal(err)
+	}
+	rename.Finalizers = []string{kube.SessionFinalizer}
+	if err := clients.Runtime.Update(ctx, rename); err != nil {
+		t.Fatal(err)
+	}
+	completed := domain.NewSession(sessionID, renameSpec, time.Now())
+	completed.Status.Phase = domain.PhaseCompleted
+	completed.Status.ObservedGeneration = rename.Generation
+	completed.Status.Message = "completed E2E fixture"
+	completedAt := metav1.Now()
+	completed.Status.UpdatedAt = completedAt
+	completed.Status.CompletedAt = &completedAt
+	rename.Status = v1alpha1.RenameStatusFromDomain(completed.Status)
+	if err := clients.Runtime.Status().Update(ctx, rename); err != nil {
+		t.Fatal(err)
+	}
+
+	controllerProcess = startE2EController(
+		t,
+		ctx,
+		adminClient,
+		binary,
+		kubeconfig,
+		controlNamespace,
+		"controller",
+	)
+	defer controllerProcess.Stop(t)
+	time.Sleep(2 * controllerPoll)
+
+	propagation := metav1.DeletePropagationBackground
+	if err := adminClient.CoreV1().Namespaces().Delete(
+		ctx,
+		workflowNamespace,
+		metav1.DeleteOptions{PropagationPolicy: &propagation},
+	); err != nil {
+		t.Fatal(err)
+	}
+	if err := wait.PollUntilContextTimeout(
+		ctx,
+		controllerPoll,
+		2*time.Minute,
+		true,
+		func(waitCtx context.Context) (bool, error) {
+			_, err := adminClient.CoreV1().Namespaces().Get(
+				waitCtx,
+				workflowNamespace,
+				metav1.GetOptions{},
+			)
+			return apierrors.IsNotFound(err), nil
+		},
+	); err != nil {
+		t.Fatalf("workflow namespace remained terminating: %v", err)
 	}
 }
 
@@ -3257,7 +3456,7 @@ func startE2EController(
 			request, requestErr := http.NewRequestWithContext(
 				waitCtx,
 				http.MethodGet,
-				"http://127.0.0.1:8081/readyz",
+				"http://[::1]:8081/readyz",
 				nil,
 			)
 			if requestErr != nil {

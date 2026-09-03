@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"maps"
-	"strings"
 	"time"
 
 	v1alpha1 "github.com/labring-sigs/pvc-migrate/api/v1alpha1"
@@ -271,37 +270,12 @@ func (s *CRDSessionStore) AcquireSessionLock(
 		)
 	}
 
-	labelSessionID := id
-	if sessionID, _, found := strings.Cut(id, "/"); found {
-		labelSessionID = sessionID
-	}
-
 	return (&ConfigMapSessionStore{client: s.leaseClient}).acquireSessionLock(
 		ctx,
 		namespace,
 		id,
-		labelSessionID,
+		id,
 	)
-}
-
-// SessionLockID scopes CRD fencing by operation kind. Kubernetes allows
-// same-name objects in different CRDs, and each kind has an independent
-// controller/reconcile stream.
-func (s *CRDSessionStore) SessionLockID(session *domain.Session) string {
-	if session == nil || session.ID == "" {
-		return ""
-	}
-
-	kind := session.BackendResource
-	if kind == "" {
-		kind = workflowCRDKindForSession(session)
-	}
-
-	if kind == "" {
-		return session.ID
-	}
-
-	return session.ID + "/" + string(kind)
 }
 
 // DeleteSessionLease removes the Lease associated with a CRD-backed session
@@ -479,6 +453,14 @@ func (s *CRDSessionStore) Create(ctx context.Context, session *domain.Session) e
 		)
 	}
 
+	// Service.CreateSession holds the shared session-ID Lease while this check
+	// and create run. A tenant that cannot read a sibling Kind may still submit
+	// the CR; the cluster-authorized controller repeats the check before adding
+	// protection or touching data-plane resources.
+	if err := s.checkWorkflowNameCollision(ctx, session, false); err != nil {
+		return err
+	}
+
 	object := sessionObjectFor(session)
 	if object == nil {
 		return domain.NewError(
@@ -533,6 +515,144 @@ func (s *CRDSessionStore) Create(ctx context.Context, session *domain.Session) e
 	session.BackendUID = statusObject.GetUID()
 
 	return nil
+}
+
+// CheckWorkflowNameCollision prevents independently reconciled CRDs from
+// sharing the session ID used by data-plane ownership markers. It is called by
+// the controller before adding a finalizer or executing the workflow.
+func (s *CRDSessionStore) CheckWorkflowNameCollision(
+	ctx context.Context,
+	session *domain.Session,
+) error {
+	return s.checkWorkflowNameCollision(ctx, session, true)
+}
+
+type workflowCollisionLookup struct {
+	resource  crdResource
+	namespace string
+}
+
+func (s *CRDSessionStore) checkWorkflowNameCollision(
+	ctx context.Context,
+	session *domain.Session,
+	failOnForbidden bool,
+) error {
+	if session == nil {
+		return domain.NewError(
+			domain.ErrorValidation,
+			"check workflow name collision",
+			"session is nil",
+		)
+	}
+
+	if err := s.configured("check workflow name collision"); err != nil {
+		return err
+	}
+
+	currentKind := session.BackendResource
+	if currentKind == "" {
+		currentKind = workflowCRDKindForSession(session)
+	}
+
+	namespaces := uniqueWorkflowNamespaces(session.Spec)
+
+	lookups := make([]workflowCollisionLookup, 0, len(s.resources())*len(namespaces))
+	for _, resource := range s.resources() {
+		if resource.kind == currentKind {
+			continue
+		}
+
+		if resource.cluster {
+			lookups = append(lookups, workflowCollisionLookup{resource: resource})
+			continue
+		}
+
+		for _, namespace := range namespaces {
+			lookups = append(lookups, workflowCollisionLookup{
+				resource: resource, namespace: namespace,
+			})
+		}
+	}
+
+	objects := make([]crclient.Object, len(lookups))
+	errors := make([]error, len(lookups))
+	parallel.For(len(lookups), func(index int) {
+		lookup := lookups[index]
+		object := lookup.resource.new()
+
+		errors[index] = s.client.Get(
+			ctx,
+			resourceKey(lookup.resource, lookup.namespace, session.ID),
+			object,
+		)
+		if errors[index] == nil {
+			objects[index] = object
+		}
+	})
+
+	for index, lookup := range lookups {
+		err := errors[index]
+		if apierrors.IsNotFound(err) || apierrors.IsForbidden(err) && !failOnForbidden {
+			continue
+		}
+
+		if err != nil {
+			return domain.WrapError(
+				domain.ErrorKubernetes,
+				"check workflow name collision",
+				"read "+string(lookup.resource.kind),
+				err,
+			)
+		}
+
+		if objects[index] == nil {
+			continue
+		}
+
+		location := lookup.namespace
+		if lookup.resource.cluster {
+			location = "cluster scope"
+		}
+
+		return domain.NewError(
+			domain.ErrorConflict,
+			"check workflow name collision",
+			fmt.Sprintf(
+				"workflow name %q is already used by %s in %s; workflow names must be unique across kinds that share namespace roles",
+				session.ID,
+				lookup.resource.kind,
+				location,
+			),
+		)
+	}
+
+	return nil
+}
+
+func uniqueWorkflowNamespaces(spec domain.SessionSpec) []string {
+	candidates := []string{
+		spec.SourceNamespace,
+		spec.TemporaryNamespace,
+		spec.DestinationNamespace,
+		spec.SessionNamespace,
+	}
+	namespaces := make([]string, 0, len(candidates))
+
+	seen := make(map[string]struct{}, len(candidates))
+	for _, namespace := range candidates {
+		if namespace == "" {
+			continue
+		}
+
+		if _, exists := seen[namespace]; exists {
+			continue
+		}
+
+		seen[namespace] = struct{}{}
+		namespaces = append(namespaces, namespace)
+	}
+
+	return namespaces
 }
 
 // initializeStatus handles the short race between a CR create and the first
@@ -1339,9 +1459,9 @@ func (s *CRDSessionStore) List(ctx context.Context, namespace string) ([]*domain
 		}
 	}
 
-	// Different workflow Kinds are independent Kubernetes resources and may
-	// legitimately share a name. Preserve every object here; type-aware reads
-	// and controllers disambiguate them by Kind.
+	// Direct declarative creates can temporarily produce a cross-Kind name
+	// collision. Preserve every object so callers can report and remove the
+	// conflict; controllers keep every colliding workflow quiescent.
 	result := make([]*domain.Session, 0)
 
 	for index, resource := range resources {

@@ -181,6 +181,10 @@ type kindSessionStore interface {
 	) (*domain.Session, error)
 }
 
+type workflowNameCollisionChecker interface {
+	CheckWorkflowNameCollision(ctx context.Context, session *domain.Session) error
+}
+
 func (r *kindWorkflowReconciler) Reconcile(
 	ctx context.Context,
 	request reconcile.Request,
@@ -226,6 +230,24 @@ func (r *WorkflowReconciler) reconcile(
 
 	if session.Deleting {
 		return reconcile.Result{}, r.reconcileDeletingWorkflow(ctx, request, session, kind)
+	}
+
+	if checker, ok := r.store.(workflowNameCollisionChecker); ok {
+		if err := checker.CheckWorkflowNameCollision(ctx, session); err != nil {
+			if domain.CategoryOf(err) == domain.ErrorConflict {
+				ctrl.LoggerFrom(ctx).Info(
+					"workflow is waiting for a same-name resource conflict to be removed",
+					"workflow",
+					request.NamespacedName,
+					"error",
+					err,
+				)
+
+				return reconcile.Result{RequeueAfter: r.requeueAfter}, nil
+			}
+
+			return reconcile.Result{}, err
+		}
 	}
 
 	// A workflow's spec is the authorization and execution input. Once the
@@ -376,16 +398,10 @@ func initializeUnobservedStatus(
 
 // SetupWithManager installs one kind-aware controller for every served
 // operation-specific workflow resource. A separate reconciler per kind keeps
-// same-name resources in different CRDs independent.
+// dispatch unambiguous; the shared collision guard prevents unsafe concurrent
+// execution when different Kinds use the same data-plane session identity.
 func (r *WorkflowReconciler) SetupWithManager(manager ctrl.Manager) error {
-	predicates := builder.WithPredicates(predicate.Funcs{
-		CreateFunc: func(event.CreateEvent) bool { return true },
-		UpdateFunc: func(e event.UpdateEvent) bool {
-			return e.ObjectNew.GetGeneration() != e.ObjectOld.GetGeneration()
-		},
-		DeleteFunc:  func(event.DeleteEvent) bool { return false },
-		GenericFunc: func(event.GenericEvent) bool { return true },
-	})
+	predicates := builder.WithPredicates(workflowEventPredicate())
 
 	objects := []struct {
 		kind    domain.ControllerKind
@@ -447,6 +463,19 @@ func (r *WorkflowReconciler) SetupWithManager(manager ctrl.Manager) error {
 	}
 
 	return nil
+}
+
+func workflowEventPredicate() predicate.Predicate {
+	return predicate.Funcs{
+		CreateFunc: func(event.CreateEvent) bool { return true },
+		UpdateFunc: func(e event.UpdateEvent) bool {
+			return e.ObjectNew.GetGeneration() != e.ObjectOld.GetGeneration() ||
+				e.ObjectOld.GetDeletionTimestamp() == nil &&
+					e.ObjectNew.GetDeletionTimestamp() != nil
+		},
+		DeleteFunc:  func(event.DeleteEvent) bool { return false },
+		GenericFunc: func(event.GenericEvent) bool { return true },
+	}
 }
 
 // StartManagerWithKinds creates a manager that watches only the discovered

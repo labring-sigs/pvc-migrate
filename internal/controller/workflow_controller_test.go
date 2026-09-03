@@ -4,14 +4,60 @@ import (
 	"context"
 	"testing"
 
+	v1alpha1 "github.com/labring-sigs/pvc-migrate/api/v1alpha1"
 	"github.com/labring-sigs/pvc-migrate/internal/domain"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	clientfake "k8s.io/client-go/kubernetes/fake"
 	"k8s.io/client-go/rest"
+	"sigs.k8s.io/controller-runtime/pkg/event"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 )
+
+func TestWorkflowEventPredicateAllowsDeletionTimestampTransition(t *testing.T) {
+	base := &v1alpha1.Copy{ObjectMeta: metav1.ObjectMeta{
+		Name: "workflow", Namespace: "system", Generation: 1,
+	}}
+
+	tests := []struct {
+		name string
+		old  *v1alpha1.Copy
+		new  *v1alpha1.Copy
+		want bool
+	}{
+		{name: "status only", old: base, new: base.DeepCopy()},
+		{name: "generation", old: base, new: func() *v1alpha1.Copy {
+			updated := base.DeepCopy()
+			updated.Generation++
+			return updated
+		}(), want: true},
+		{name: "deletion starts", old: base, new: func() *v1alpha1.Copy {
+			updated := base.DeepCopy()
+			updated.DeletionTimestamp = &metav1.Time{Time: metav1.Now().Time}
+			return updated
+		}(), want: true},
+		{name: "already deleting", old: func() *v1alpha1.Copy {
+			updated := base.DeepCopy()
+			updated.DeletionTimestamp = &metav1.Time{Time: metav1.Now().Time}
+			return updated
+		}(), new: func() *v1alpha1.Copy {
+			updated := base.DeepCopy()
+			updated.DeletionTimestamp = &metav1.Time{Time: metav1.Now().Time}
+			return updated
+		}()},
+	}
+
+	predicate := workflowEventPredicate()
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			got := predicate.Update(event.UpdateEvent{ObjectOld: test.old, ObjectNew: test.new})
+			if got != test.want {
+				t.Fatalf("update admitted=%t want=%t", got, test.want)
+			}
+		})
+	}
+}
 
 func TestReconcileDeletingWorkflowReleasesOnlyTerminatingNamespace(t *testing.T) {
 	tests := []struct {

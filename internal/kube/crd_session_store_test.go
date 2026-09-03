@@ -638,7 +638,7 @@ func TestDecodeWorkflowMarksDeletionRequests(t *testing.T) {
 	}
 }
 
-func TestCRDSessionStoreAllowsSameNameAcrossKinds(t *testing.T) {
+func TestCRDSessionStoreRejectsSameNameAcrossKinds(t *testing.T) {
 	ctx := context.Background()
 	store := NewCRDSessionStore(newCRDTestClient())
 
@@ -653,12 +653,54 @@ func TestCRDSessionStoreAllowsSameNameAcrossKinds(t *testing.T) {
 		SourceNamespace: "system", TemporaryNamespace: "system", DestinationNamespace: "system",
 		SessionNamespace: "system", Volumes: first.Spec.Volumes,
 	}, false, domain.SessionWorkflowOptions{})
-	if err := store.Create(ctx, second); err != nil {
-		t.Fatalf("same-name different-kind create failed: %v", err)
+	if err := store.Create(ctx, second); domain.CategoryOf(err) != domain.ErrorConflict {
+		t.Fatalf(
+			"same-name different-kind create category=%s error=%v",
+			domain.CategoryOf(err),
+			err,
+		)
 	}
 }
 
-func TestCRDSessionLockIDIncludesWorkflowKind(t *testing.T) {
+func TestCRDSessionStoreDetectsDeclarativeCollisionAcrossNamespaceRoles(t *testing.T) {
+	ctx := context.Background()
+	client := newCRDTestClient()
+	store := NewCRDSessionStore(client)
+
+	namespaced := storeTestSession()
+	namespaced.Spec.SessionNamespace = "source"
+	namespaced.Spec.SourceNamespace = "source"
+	namespaced.Spec.TemporaryNamespace = "source"
+	namespaced.Spec.DestinationNamespace = "source"
+	namespaced.Spec.Volumes[0].SourcePVC.Namespace = "source"
+	namespaced.Spec.Volumes[0].DestinationPVC.Namespace = "source"
+
+	if err := store.Create(ctx, namespaced); err != nil {
+		t.Fatal(err)
+	}
+
+	cluster := storeTestSession()
+	cluster.Spec = domain.NewSessionSpec(domain.OperationMove, domain.SessionCommon{
+		SourceNamespace:      "source",
+		TemporaryNamespace:   "destination",
+		DestinationNamespace: "destination",
+		SessionNamespace:     "system",
+		Volumes:              cluster.Spec.Volumes,
+	}, false, domain.SessionWorkflowOptions{})
+	cluster.Spec.Volumes[0].SourcePVC.Namespace = "source"
+	cluster.Spec.Volumes[0].DestinationPVC.Namespace = "destination"
+
+	err := store.CheckWorkflowNameCollision(ctx, cluster)
+	if domain.CategoryOf(err) != domain.ErrorConflict {
+		t.Fatalf(
+			"cross-boundary collision category=%s error=%v",
+			domain.CategoryOf(err),
+			err,
+		)
+	}
+}
+
+func TestCRDSessionLockIDIsSharedAcrossWorkflowKinds(t *testing.T) {
 	migration := storeTestSession()
 	migration.Backend = SessionBackendCRD
 	migration.BackendResource = domain.ControllerKindMigration
@@ -668,19 +710,18 @@ func TestCRDSessionLockIDIncludesWorkflowKind(t *testing.T) {
 	migrationID := SessionLockID(migration)
 	copyID := SessionLockID(&copySession)
 
-	if migrationID == copyID || migrationID == migration.ID || copyID == copySession.ID {
-		t.Fatalf("CRD lock IDs are not kind-scoped: migration=%q copy=%q", migrationID, copyID)
+	if migrationID != migration.ID || copyID != copySession.ID || migrationID != copyID {
+		t.Fatalf("CRD lock IDs differ: migration=%q copy=%q", migrationID, copyID)
 	}
 
 	store := NewCRDSessionStore(newCRDTestClient())
-	if got := LockIDForSession(store, migration); got != migrationID {
+	if got := LockIDForSession(store, migration); got != migration.ID {
 		t.Fatalf("store lock ID=%q, want %q", got, migrationID)
 	}
 
 	unpersisted := storeTestSession()
-	if got := LockIDForSession(store, unpersisted); got == unpersisted.ID ||
-		!strings.HasSuffix(got, "/"+string(domain.ControllerKindMigration)) {
-		t.Fatalf("unpersisted CRD lock ID=%q is not kind-scoped", got)
+	if got := LockIDForSession(store, unpersisted); got != unpersisted.ID {
+		t.Fatalf("unpersisted CRD lock ID=%q want=%q", got, unpersisted.ID)
 	}
 }
 

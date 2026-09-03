@@ -43,9 +43,8 @@ type SessionLeaseCleaner interface {
 	DeleteSessionLease(ctx context.Context, namespace, sessionID string) error
 }
 
-// SessionLockIDProvider lets a persistence backend scope its fencing identity
-// beyond the user-facing session ID. CRD workflows include their Kind so
-// same-name resources in different workflow APIs remain independent.
+// SessionLockIDProvider lets a persistence backend override the user-facing
+// session ID used for fencing.
 type SessionLockIDProvider interface {
 	SessionLockID(session *domain.Session) string
 }
@@ -89,20 +88,6 @@ func LockIDForSession(store SessionStore, session *domain.Session) string {
 func SessionLockID(session *domain.Session) string {
 	if session == nil || session.ID == "" {
 		return ""
-	}
-
-	if session.Backend == SessionBackendCRD {
-		kind := session.BackendResource
-
-		if kind == "" {
-			if resource, ok := domain.ControllerResourceForSession(session); ok {
-				kind = resource.Kind
-			}
-		}
-
-		if kind != "" {
-			return session.ID + "/" + string(kind)
-		}
 	}
 
 	return session.ID
