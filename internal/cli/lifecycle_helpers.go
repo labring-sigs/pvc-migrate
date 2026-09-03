@@ -153,7 +153,7 @@ func (r *rootState) workflowSession(
 ) (*domain.Session, error) {
 	namespace := workflowNamespaceForCommand(r, cmd)
 
-	session, err := runtime.store.Get(ctx, namespace, id)
+	session, err := kube.GetSessionByType(ctx, runtime.store, namespace, id, expected)
 	if err != nil {
 		return nil, reportSessionLookupError(cmd, namespace, id, err)
 	}

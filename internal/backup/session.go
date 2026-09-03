@@ -1516,7 +1516,11 @@ func withBackupSessionLock(
 		return run(ctx)
 	}
 
-	lock, err := locker.AcquireSessionLock(ctx, session.Spec.SessionNamespace, session.ID)
+	lock, err := locker.AcquireSessionLock(
+		ctx,
+		session.Spec.SessionNamespace,
+		kube.LockIDForSession(req.SessionStore, session),
+	)
 	if err != nil {
 		return err
 	}

@@ -91,9 +91,9 @@ func TestDecodeSessionRejectsMissingInvalidAndUnsupportedData(t *testing.T) {
 	}
 }
 
-func TestDecodeSessionRejectsPreviousAPIVersion(t *testing.T) {
+func TestDecodeSessionRejectsUnsupportedAPIVersion(t *testing.T) {
 	session := storeTestSession()
-	session.APIVersion = "pvc-migrate.io/v1alpha1"
+	session.APIVersion = "legacy.example/v1alpha1"
 
 	data, err := json.Marshal(session)
 	if err != nil {
@@ -112,13 +112,13 @@ func TestDecodeSessionRejectsPreviousAPIVersion(t *testing.T) {
 		Data: map[string]string{SessionDataKey: string(data)},
 	})
 	if domain.CategoryOf(err) != domain.ErrorValidation {
-		t.Fatalf("previous API version category=%s error=%v", domain.CategoryOf(err), err)
+		t.Fatalf("unsupported API version category=%s error=%v", domain.CategoryOf(err), err)
 	}
 }
 
 func TestConfigMapSessionStoreListRejectsUnsupportedSchema(t *testing.T) {
 	session := storeTestSession()
-	session.APIVersion = "pvc-migrate.io/v1alpha1"
+	session.APIVersion = "legacy.example/v1alpha1"
 	client := fake.NewClientset(sessionConfigMap(t, session, true))
 
 	_, err := NewConfigMapSessionStore(client).List(context.Background(), "system")

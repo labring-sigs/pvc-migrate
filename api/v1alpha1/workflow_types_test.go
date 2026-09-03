@@ -288,6 +288,7 @@ func TestOperationSpecsHaveIndependentFieldContracts(t *testing.T) {
 			fields: []string{
 				"deleteExtraneous", "online", "skipSourceUsageCheck", "sourceNode",
 				"strategies", "targetNode", "toolImage", "volumes",
+				"verifyChecksum",
 			},
 		},
 		{
@@ -363,7 +364,7 @@ func TestOperationSpecsHaveIndependentFieldContracts(t *testing.T) {
 			fields: []string{
 				"deleteExtraneous", "destinationNamespace", "online", "sessionNamespace",
 				"skipSourceUsageCheck", "sourceNamespace", "sourceNode", "strategies",
-				"targetNode", "toolImage", "volumes",
+				"targetNode", "toolImage", "verifyChecksum", "volumes",
 			},
 		},
 	}
@@ -558,13 +559,16 @@ func TestTransferDestinationIdentityIsStatusOwned(t *testing.T) {
 			}},
 		},
 		true,
-		domain.SessionWorkflowOptions{},
+		domain.SessionWorkflowOptions{VerifyChecksum: true},
 	)
 	status := domain.SessionStatus{
 		Volumes: []domain.VolumeStatus{{SourcePVCName: "data", Reserved: true}},
 	}
 
 	apiSpec := v1alpha1.CopySpecFromDomain(spec)
+	if !apiSpec.VerifyChecksum {
+		t.Fatal("CopySpec dropped verifyChecksum")
+	}
 
 	data, err := json.Marshal(apiSpec)
 	if err != nil {
@@ -585,6 +589,10 @@ func TestTransferDestinationIdentityIsStatusOwned(t *testing.T) {
 	restored := apiSpec.Domain("app")
 	apiStatus.ApplyToDomainSpec(&restored)
 
+	if !restored.WorkflowOptions().VerifyChecksum {
+		t.Fatal("CopySpec conversion did not restore verifyChecksum")
+	}
+
 	volume := restored.Volumes[0]
 	if volume.DestinationPVC.UID != "destination-pvc-uid" ||
 		volume.DestinationPVC.ResourceVersion != "17" ||
@@ -592,6 +600,27 @@ func TestTransferDestinationIdentityIsStatusOwned(t *testing.T) {
 		volume.DestinationPV.UID != "destination-pv-uid" ||
 		volume.DestinationPolicy != corev1.PersistentVolumeReclaimRetain {
 		t.Fatalf("destination checkpoint was not restored: %#v", volume)
+	}
+}
+
+func TestClusterCopyVerifyChecksumRoundTrip(t *testing.T) {
+	spec := domain.NewSessionSpec(
+		domain.OperationCopy,
+		domain.SessionCommon{
+			SourceNamespace: "source", TemporaryNamespace: "destination",
+			DestinationNamespace: "destination", SessionNamespace: "control",
+		},
+		true,
+		domain.SessionWorkflowOptions{VerifyChecksum: true},
+	)
+
+	apiSpec := v1alpha1.ClusterCopySpecFromDomain(spec)
+	if !apiSpec.VerifyChecksum {
+		t.Fatal("ClusterCopySpec dropped verifyChecksum")
+	}
+
+	if !apiSpec.Domain().WorkflowOptions().VerifyChecksum {
+		t.Fatal("ClusterCopySpec conversion did not restore verifyChecksum")
 	}
 }
 

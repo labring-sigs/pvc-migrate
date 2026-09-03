@@ -19,9 +19,9 @@ import (
 )
 
 const (
-	restoreBucketAnnotation = "pvc-migrate.io/restore-bucket"
-	restorePrefixAnnotation = "pvc-migrate.io/restore-prefix"
-	restoreNameAnnotation   = "pvc-migrate.io/restore-name"
+	restoreBucketAnnotation = kube.MetadataDomain + "/restore-bucket"
+	restorePrefixAnnotation = kube.MetadataDomain + "/restore-prefix"
+	restoreNameAnnotation   = kube.MetadataDomain + "/restore-name"
 )
 
 func preflightRestorePVCCreation(

@@ -235,7 +235,13 @@ func (s *Service) withSessionLock(
 	if session == nil {
 		return domain.NewError(domain.ErrorValidation, "session lock", "session is nil")
 	}
-	return s.withSessionIDLock(ctx, session.Spec.SessionNamespace, session.ID, fn)
+
+	return s.withSessionIDLock(
+		ctx,
+		session.Spec.SessionNamespace,
+		kube.LockIDForSession(s.store, session),
+		fn,
+	)
 }
 
 func (s *Service) CreateSession(

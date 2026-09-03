@@ -15,6 +15,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/apimachinery/pkg/types"
 	crclient "sigs.k8s.io/controller-runtime/pkg/client"
 	crfake "sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
@@ -637,7 +638,7 @@ func TestDecodeWorkflowMarksDeletionRequests(t *testing.T) {
 	}
 }
 
-func TestCRDSessionStoreRejectsDuplicateNameAcrossKinds(t *testing.T) {
+func TestCRDSessionStoreAllowsSameNameAcrossKinds(t *testing.T) {
 	ctx := context.Background()
 	store := NewCRDSessionStore(newCRDTestClient())
 
@@ -652,8 +653,28 @@ func TestCRDSessionStoreRejectsDuplicateNameAcrossKinds(t *testing.T) {
 		SourceNamespace: "system", TemporaryNamespace: "system", DestinationNamespace: "system",
 		SessionNamespace: "system", Volumes: first.Spec.Volumes,
 	}, false, domain.SessionWorkflowOptions{})
-	if err := store.Create(ctx, second); domain.CategoryOf(err) != domain.ErrorConflict {
-		t.Fatalf("duplicate category=%s error=%v", domain.CategoryOf(err), err)
+	if err := store.Create(ctx, second); err != nil {
+		t.Fatalf("same-name different-kind create failed: %v", err)
+	}
+}
+
+func TestCRDSessionLockIDIncludesWorkflowKind(t *testing.T) {
+	migration := storeTestSession()
+	migration.Backend = SessionBackendCRD
+	migration.BackendResource = domain.ControllerKindMigration
+	copySession := *migration
+	copySession.BackendResource = domain.ControllerKindCopy
+
+	migrationID := SessionLockID(migration)
+	copyID := SessionLockID(&copySession)
+
+	if migrationID == copyID || migrationID == migration.ID || copyID == copySession.ID {
+		t.Fatalf("CRD lock IDs are not kind-scoped: migration=%q copy=%q", migrationID, copyID)
+	}
+
+	store := NewCRDSessionStore(newCRDTestClient())
+	if got := LockIDForSession(store, migration); got != migrationID {
+		t.Fatalf("store lock ID=%q, want %q", got, migrationID)
 	}
 }
 
@@ -682,6 +703,11 @@ func TestCRDSessionStoreGetRejectsDuplicateNameAcrossKinds(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	listed, err := store.List(ctx, "system")
+	if err != nil || len(listed) != 2 {
+		t.Fatalf("list same-name workflows=%#v error=%v", listed, err)
+	}
+
 	if _, err := store.Get(
 		ctx,
 		"system",
@@ -690,6 +716,95 @@ func TestCRDSessionStoreGetRejectsDuplicateNameAcrossKinds(t *testing.T) {
 		err,
 	) != domain.ErrorConflict {
 		t.Fatalf("duplicate get category=%s error=%v", domain.CategoryOf(err), err)
+	}
+}
+
+func TestCRDSessionStorePreservesWorkflowMetadata(t *testing.T) {
+	ctx := context.Background()
+	client := newCRDTestClient()
+	store := NewCRDSessionStore(client)
+	session := storeTestSession()
+
+	if err := store.Create(ctx, session); err != nil {
+		t.Fatal(err)
+	}
+
+	workflow := &v1alpha1.Migration{}
+	if err := client.Get(
+		ctx,
+		crclient.ObjectKey{Namespace: "system", Name: session.ID},
+		workflow,
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	workflow.Labels["tenant.example/owner"] = "team-a"
+	workflow.OwnerReferences = []metav1.OwnerReference{{
+		APIVersion: "apps/v1",
+		Kind:       "Deployment",
+		Name:       "owner",
+		UID:        types.UID("owner-uid"),
+	}}
+
+	if err := client.Update(ctx, workflow); err != nil {
+		t.Fatal(err)
+	}
+
+	loaded, err := store.GetByKind(ctx, "system", session.ID, domain.ControllerKindMigration)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if err := loaded.Transition(domain.PhaseReserving, "reserving", time.Now()); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := store.Update(ctx, loaded); err != nil {
+		t.Fatal(err)
+	}
+
+	workflow = &v1alpha1.Migration{}
+	if err := client.Get(
+		ctx,
+		crclient.ObjectKey{Namespace: "system", Name: session.ID},
+		workflow,
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	if workflow.Labels["tenant.example/owner"] != "team-a" || len(workflow.OwnerReferences) != 1 {
+		t.Fatalf(
+			"workflow metadata was replaced: labels=%v owners=%v",
+			workflow.Labels,
+			workflow.OwnerReferences,
+		)
+	}
+
+	loaded.Spec = domain.NewSessionSpec(domain.OperationCopy, domain.SessionCommon{
+		SourceNamespace: "system", TemporaryNamespace: "system", DestinationNamespace: "system",
+		SessionNamespace: "system", Volumes: loaded.Spec.Volumes,
+	}, false, domain.SessionWorkflowOptions{})
+
+	if err := store.Update(ctx, loaded); err != nil {
+		t.Fatal(err)
+	}
+
+	copyWorkflow := &v1alpha1.Copy{}
+	if err := client.Get(
+		ctx,
+		crclient.ObjectKey{Namespace: "system", Name: session.ID},
+		copyWorkflow,
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	if copyWorkflow.Labels["tenant.example/owner"] != "team-a" ||
+		len(copyWorkflow.OwnerReferences) != 1 {
+		t.Fatalf(
+			"rebound metadata was replaced: labels=%v owners=%v",
+			copyWorkflow.Labels,
+			copyWorkflow.OwnerReferences,
+		)
 	}
 }
 
@@ -1080,6 +1195,16 @@ func TestCRDSessionStoreSupportsLeastPrivilegeTenantAccess(t *testing.T) {
 		t.Fatalf("tenant get phase=%q, want Planned", loaded.Status.Phase)
 	}
 
+	loaded, err = store.GetByType(
+		ctx,
+		session.Spec.SessionNamespace,
+		session.ID,
+		domain.SessionTypeMigrate,
+	)
+	if err != nil || loaded.Spec.Type != domain.SessionTypeMigrate {
+		t.Fatalf("tenant get by type=%#v error=%v", loaded, err)
+	}
+
 	listed, err := store.List(ctx, session.Spec.SessionNamespace)
 	if err != nil {
 		t.Fatalf("tenant list failed: %v", err)
@@ -1139,6 +1264,16 @@ func TestCRDSessionStoreGetByKindDisambiguatesSameNameWorkflows(t *testing.T) {
 
 	if loadedCopy.Spec.Type != domain.SessionTypeCopy {
 		t.Fatalf("copy type=%s", loadedCopy.Spec.Type)
+	}
+
+	byType, err := store.GetByType(
+		ctx,
+		"system",
+		copySession.ID,
+		domain.SessionTypeCopy,
+	)
+	if err != nil || byType.Spec.Type != domain.SessionTypeCopy {
+		t.Fatalf("get by type copy=%#v error=%v", byType, err)
 	}
 }
 

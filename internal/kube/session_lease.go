@@ -40,6 +40,30 @@ func leaseDurationSeconds(duration time.Duration) int32 {
 	return int32(seconds)
 }
 
+// normalizeLeaseTiming keeps renewal comfortably ahead of Lease expiry. A
+// renewal interval at or beyond the duration can let another worker acquire
+// the Lease before this holder renews it.
+func normalizeLeaseTiming(duration, renewEvery time.Duration) (time.Duration, time.Duration) {
+	if duration <= 0 {
+		duration = defaultSessionLeaseDuration
+	}
+
+	if renewEvery <= 0 {
+		renewEvery = defaultSessionLeaseRenewEvery
+	}
+
+	maxRenewEvery := duration / 3
+	if maxRenewEvery <= 0 {
+		maxRenewEvery = time.Nanosecond
+	}
+
+	if renewEvery > maxRenewEvery {
+		renewEvery = maxRenewEvery
+	}
+
+	return duration, renewEvery
+}
+
 // SessionLockName is deterministic for a namespace/session pair while
 // keeping arbitrary session IDs within Kubernetes DNS label limits.
 func SessionLockName(id string) string {
@@ -328,12 +352,7 @@ func newSessionLeaseWithTiming(
 	uid types.UID,
 	duration, renewEvery time.Duration,
 ) *sessionLease {
-	if duration <= 0 {
-		duration = defaultSessionLeaseDuration
-	}
-	if renewEvery <= 0 { //nolint:wsl_v5 // fallback branches intentionally stay adjacent.
-		renewEvery = defaultSessionLeaseRenewEvery
-	}
+	duration, renewEvery = normalizeLeaseTiming(duration, renewEvery)
 
 	ctx, cancel := context.WithCancel(parent)
 

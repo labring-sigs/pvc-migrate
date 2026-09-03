@@ -1018,7 +1018,7 @@ func reportCleanupError(
 			"Inspect the Lease: %s --namespace %s get lease %s\n",
 			prefixes.kubectl,
 			session.Spec.SessionNamespace,
-			kube.SessionLockName(session.ID),
+			kube.SessionLockName(kube.SessionLockID(session)),
 		)
 		_, _ = fmt.Fprintln(
 			cmd.ErrOrStderr(),

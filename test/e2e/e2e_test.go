@@ -39,8 +39,8 @@ import (
 )
 
 const (
-	sessionLabel      = "pvc-migrate.io/session"
-	roleLabel         = "pvc-migrate.io/role"
+	sessionLabel      = kube.MetadataDomain + "/session"
+	roleLabel         = kube.MetadataDomain + "/role"
 	sessionKey        = "session.json"
 	workflowGroup     = "migrate.sealos.io"
 	workflowVersion   = "v1alpha1"

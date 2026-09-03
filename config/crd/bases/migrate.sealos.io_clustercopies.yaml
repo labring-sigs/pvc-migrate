@@ -87,6 +87,8 @@ spec:
                 type: string
               toolImage:
                 type: string
+              verifyChecksum:
+                type: boolean
               volumes:
                 items:
                   description: |-

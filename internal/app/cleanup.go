@@ -416,7 +416,11 @@ func (s *Service) deleteCleanupSession(ctx context.Context, session *domain.Sess
 	}
 
 	if cleaner, ok := s.store.(kube.SessionLeaseCleaner); ok {
-		return cleaner.DeleteSessionLease(ctx, session.Spec.SessionNamespace, session.ID)
+		return cleaner.DeleteSessionLease(
+			ctx,
+			session.Spec.SessionNamespace,
+			kube.LockIDForSession(s.store, session),
+		)
 	}
 
 	return nil

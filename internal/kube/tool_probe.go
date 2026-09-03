@@ -30,7 +30,7 @@ const (
 	ToolComponentRsync        = "rsync"
 	ToolComponentSSHD         = "sshd"
 	ToolComponentRclone       = "rclone"
-	toolProbeOperation        = "pvc-migrate.io/probe-operation"
+	toolProbeOperation        = MetadataDomain + "/probe-operation"
 	toolProbeTimeout          = 2 * time.Minute
 	toolProbePoll             = 250 * time.Millisecond
 	toolProbeEventPoll        = time.Second
@@ -975,14 +975,14 @@ func toolProbePod(
 	}
 
 	annotations := map[string]string{
-		"pvc-migrate.io/tool-components": strings.Join(target.Components, ","),
+		MetadataDomain + "/tool-components": strings.Join(target.Components, ","),
 	}
 	if target.PVCName != "" {
-		annotations["pvc-migrate.io/probe-pvc"] = target.PVCName
+		annotations[MetadataDomain+"/probe-pvc"] = target.PVCName
 	}
 
 	if target.RequiredPath != "" {
-		annotations["pvc-migrate.io/probe-path"] = target.RequiredPath
+		annotations[MetadataDomain+"/probe-path"] = target.RequiredPath
 	}
 
 	if operationID != "" {

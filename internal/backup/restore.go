@@ -16,8 +16,8 @@ import (
 )
 
 const (
-	restoreLockAnnotation       = "pvc-migrate.io/backup-restore-lock"
-	restoreLockExpiryAnnotation = "pvc-migrate.io/backup-restore-lock-expires-at"
+	restoreLockAnnotation       = kube.MetadataDomain + "/backup-restore-lock"
+	restoreLockExpiryAnnotation = kube.MetadataDomain + "/backup-restore-lock-expires-at"
 )
 
 func pvmigrateRestoreRequest(

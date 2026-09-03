@@ -209,6 +209,7 @@ type CopySpec struct {
 	ToolImage  string       `json:"toolImage,omitempty"  yaml:"toolImage,omitempty"`
 	// +kubebuilder:validation:MaxItems=32
 	Strategies           []string `json:"strategies,omitempty"           yaml:"strategies,omitempty"`
+	VerifyChecksum       bool     `json:"verifyChecksum,omitempty"       yaml:"verifyChecksum,omitempty"`
 	DeleteExtraneous     bool     `json:"deleteExtraneous,omitempty"     yaml:"deleteExtraneous,omitempty"`
 	SkipSourceUsageCheck bool     `json:"skipSourceUsageCheck,omitempty" yaml:"skipSourceUsageCheck,omitempty"`
 	Online               bool     `json:"online,omitempty"               yaml:"online,omitempty"`
@@ -524,6 +525,7 @@ func (s CopySpec) workflowOptions() domain.SessionWorkflowOptions {
 		TargetNode:           s.TargetNode,
 		ToolImage:            s.ToolImage,
 		Strategies:           append([]string(nil), s.Strategies...),
+		VerifyChecksum:       s.VerifyChecksum,
 		DeleteExtraneous:     s.DeleteExtraneous,
 		SkipSourceUsageCheck: s.SkipSourceUsageCheck,
 	}
@@ -818,6 +820,7 @@ func CopySpecFromDomain(s domain.SessionSpec) CopySpec {
 		TargetNode:           options.TargetNode,
 		ToolImage:            options.ToolImage,
 		Strategies:           append([]string(nil), options.Strategies...),
+		VerifyChecksum:       options.VerifyChecksum,
 		DeleteExtraneous:     options.DeleteExtraneous,
 		SkipSourceUsageCheck: options.SkipSourceUsageCheck,
 		Online:               s.Online(),

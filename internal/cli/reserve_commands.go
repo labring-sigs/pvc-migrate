@@ -2,6 +2,7 @@ package cli
 
 import (
 	"github.com/labring-sigs/pvc-migrate/internal/domain"
+	"github.com/labring-sigs/pvc-migrate/internal/kube"
 	"github.com/spf13/cobra"
 )
 
@@ -39,7 +40,9 @@ func (r *rootState) newReserveCommand() *cobra.Command {
 			if existing {
 				namespace := workflowNamespaceForCommand(r, cmd)
 
-				session, err := runtime.store.Get(ctx, namespace, flags.sessionID)
+				session, err := kube.GetSessionByType(
+					ctx, runtime.store, namespace, flags.sessionID, domain.SessionTypeReserve,
+				)
 				if err != nil {
 					return reportSessionLookupError(
 						cmd,
@@ -158,7 +161,9 @@ func (r *rootState) newReservePlanCommand() *cobra.Command {
 			if existing {
 				namespace := workflowNamespaceForCommand(r, cmd)
 
-				session, err := runtime.store.Get(ctx, namespace, flags.sessionID)
+				session, err := kube.GetSessionByType(
+					ctx, runtime.store, namespace, flags.sessionID, domain.SessionTypeReserve,
+				)
 				if err != nil {
 					return reportSessionLookupError(
 						cmd,

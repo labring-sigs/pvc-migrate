@@ -18,9 +18,9 @@ import (
 const (
 	APIVersion     = domain.SessionAPIVersion
 	Kind           = "CrossClusterCopySession"
-	ManagedByLabel = "pvc-migrate.io/managed-by"
+	ManagedByLabel = kube.MetadataDomain + "/managed-by"
 	ManagedBy      = "pvc-migrate-cross-cluster"
-	SessionKey     = "pvc-migrate.io/cross-cluster-session"
+	SessionKey     = kube.MetadataDomain + "/cross-cluster-session"
 )
 
 type Phase string

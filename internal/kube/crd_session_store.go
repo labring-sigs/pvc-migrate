@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"time"
 
 	v1alpha1 "github.com/labring-sigs/pvc-migrate/api/v1alpha1"
@@ -272,6 +273,13 @@ func (s *CRDSessionStore) AcquireSessionLock(
 	return (&ConfigMapSessionStore{client: s.leaseClient}).AcquireSessionLock(ctx, namespace, id)
 }
 
+// SessionLockID scopes CRD fencing by operation kind. Kubernetes allows
+// same-name objects in different CRDs, and each kind has an independent
+// controller/reconcile stream.
+func (s *CRDSessionStore) SessionLockID(session *domain.Session) string {
+	return SessionLockID(session)
+}
+
 // DeleteSessionLease removes the Lease associated with a CRD-backed session
 // after cleanup. It mirrors ConfigMap session lifecycle semantics.
 func (s *CRDSessionStore) DeleteSessionLease(
@@ -454,52 +462,6 @@ func (s *CRDSessionStore) Create(ctx context.Context, session *domain.Session) e
 			"create session",
 			"unsupported workflow type",
 		)
-	}
-
-	// controller-runtime reconciliation requests contain only namespace/name.
-	// Keep those names unique across operation-specific CRDs so a request can
-	// never resolve to an unrelated workflow kind. The probes are independent;
-	// interpret their results in resource order for deterministic conflicts.
-	resources := s.resources()
-	errors := make([]error, len(resources))
-	parallel.For(len(resources), func(index int) {
-		candidate := resources[index]
-		candidateObject := candidate.new()
-
-		errors[index] = s.client.Get(
-			ctx,
-			resourceKey(candidate, session.Spec.SessionNamespace, session.ID),
-			candidateObject,
-		)
-	})
-
-	for index, candidate := range resources {
-		err := errors[index]
-		if err == nil {
-			return domain.NewError(
-				domain.ErrorConflict,
-				"create session",
-				fmt.Sprintf("session %s already exists as %s", session.ID, candidate.kind),
-			)
-		}
-
-		// Tenant RoleBindings commonly grant access to only a subset of
-		// workflow Kinds. Failing a create because the caller cannot probe an
-		// unrelated Kind turns least-privilege RBAC into an unusable API. A
-		// successful create below still provides the authoritative uniqueness
-		// check for the selected Kind.
-		if apierrors.IsForbidden(err) {
-			continue
-		}
-
-		if !apierrors.IsNotFound(err) {
-			return domain.WrapError(
-				domain.ErrorKubernetes,
-				"create session",
-				"check existing "+string(candidate.kind),
-				err,
-			)
-		}
 	}
 
 	if err := s.client.Create(ctx, object); apierrors.IsAlreadyExists(err) {
@@ -784,6 +746,68 @@ func (s *CRDSessionStore) GetByKind(
 	return session, nil
 }
 
+func (s *CRDSessionStore) GetByType(
+	ctx context.Context,
+	namespace, id string,
+	sessionType domain.SessionType,
+) (*domain.Session, error) {
+	workflow, ok := domain.ControllerWorkflowForType(sessionType)
+	if !ok {
+		return nil, domain.NewError(
+			domain.ErrorValidation,
+			"get session",
+			fmt.Sprintf("unsupported session type %q", sessionType),
+		)
+	}
+
+	kinds := []domain.ControllerKind{workflow.Kind}
+	if workflow.ClusterKind != "" {
+		kinds = append(kinds, workflow.ClusterKind)
+	}
+
+	var found *domain.Session
+	for _, kind := range kinds {
+		session, err := s.GetByKind(ctx, namespace, id, kind)
+
+		if IsSessionNotFound(err) {
+			continue
+		}
+
+		if apierrors.IsForbidden(err) {
+			continue
+		}
+
+		if err != nil {
+			return nil, err
+		}
+
+		if found != nil {
+			return nil, domain.NewError(
+				domain.ErrorConflict,
+				"get session",
+				fmt.Sprintf(
+					"session %s/%s exists in multiple %s workflow kinds",
+					namespace,
+					id,
+					sessionType,
+				),
+			)
+		}
+
+		found = session
+	}
+
+	if found != nil {
+		return found, nil
+	}
+
+	return nil, domain.NewError(
+		domain.ErrorValidation,
+		"get session",
+		fmt.Sprintf("session %s/%s does not exist", namespace, id),
+	)
+}
+
 func (s *CRDSessionStore) Update(ctx context.Context, session *domain.Session) error {
 	if session == nil {
 		return domain.NewError(domain.ErrorConflict, "update session", "session is required")
@@ -904,7 +928,7 @@ func (s *CRDSessionStore) Update(ctx context.Context, session *domain.Session) e
 		)
 	}
 
-	updated.SetLabels(sessionLabels(session.ID))
+	updated.SetLabels(MergeSessionLabels(existing.GetLabels(), session.ID))
 	updated.SetFinalizers(ensureSessionFinalizer(updated.GetFinalizers()))
 
 	if !apiequality.Semantic.DeepEqual(existing, updated) {
@@ -987,8 +1011,11 @@ func (s *CRDSessionStore) rebindWorkflowResource(
 		)
 	}
 
-	target.SetAnnotations(previous.GetAnnotations())
-	target.SetLabels(sessionLabels(session.ID))
+	target.SetAnnotations(maps.Clone(previous.GetAnnotations()))
+	target.SetLabels(MergeSessionLabels(previous.GetLabels(), session.ID))
+	target.SetOwnerReferences(
+		append([]metav1.OwnerReference(nil), previous.GetOwnerReferences()...),
+	)
 
 	if err := s.client.Create(ctx, target); err != nil {
 		return domain.WrapError(
@@ -1284,9 +1311,11 @@ func (s *CRDSessionStore) List(ctx context.Context, namespace string) ([]*domain
 		}
 	}
 
+	// Different workflow Kinds are independent Kubernetes resources and may
+	// legitimately share a name. Preserve every object here; type-aware reads
+	// and controllers disambiguate them by Kind.
 	result := make([]*domain.Session, 0)
 
-	seen := make(map[string]domain.ControllerKind)
 	for index, resource := range resources {
 		for _, object := range workflowListItems(lists[index]) {
 			session, decodeErr := DecodeWorkflow(object)
@@ -1298,20 +1327,6 @@ func (s *CRDSessionStore) List(ctx context.Context, namespace string) ([]*domain
 				continue
 			}
 
-			if previousKind, exists := seen[session.ID]; exists {
-				return nil, domain.NewError(
-					domain.ErrorConflict,
-					"list sessions",
-					fmt.Sprintf(
-						"session %s exists as both %s and %s",
-						session.ID,
-						previousKind,
-						resource.kind,
-					),
-				)
-			}
-
-			seen[session.ID] = resource.kind
 			result = append(result, session)
 		}
 	}

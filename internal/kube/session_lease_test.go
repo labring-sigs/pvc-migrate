@@ -391,6 +391,23 @@ func TestSessionLeaseRenewFailureFencesContext(t *testing.T) {
 	}
 }
 
+func TestLeaseTimingClampsRenewalBeforeExpiry(t *testing.T) {
+	store := NewConfigMapSessionStore(newSessionLeaseTestClient()).WithLeaseTiming(
+		30*time.Second,
+		45*time.Second,
+	)
+
+	duration, renewEvery := store.leaseTiming()
+	if duration != 30*time.Second || renewEvery != 10*time.Second {
+		t.Fatalf("lease timing duration=%s renewEvery=%s", duration, renewEvery)
+	}
+
+	duration, renewEvery = normalizeLeaseTiming(20*time.Millisecond, 50*time.Millisecond)
+	if duration != 20*time.Millisecond || renewEvery != 20*time.Millisecond/3 {
+		t.Fatalf("normalized timing duration=%s renewEvery=%s", duration, renewEvery)
+	}
+}
+
 func TestSessionLeaseCancellationStopsInFlightRenewal(t *testing.T) {
 	const (
 		sessionID = "session-cancel-renew"

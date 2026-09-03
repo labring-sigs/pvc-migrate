@@ -244,19 +244,30 @@ func AvailableControllerWorkflowKinds(
 	available := make([]domain.ControllerKind, 0, len(domain.ControllerWorkflows())*2)
 	for _, workflow := range domain.ControllerWorkflows() {
 		if workflow.Resource != "" {
-			if _, ok := served[workflow.Resource]; ok {
+			if workflowResourceWithStatusServed(served, workflow.Resource) {
 				available = append(available, workflow.Kind)
 			}
 		}
 
 		if workflow.ClusterResource != "" {
-			if _, ok := served[workflow.ClusterResource]; ok {
+			if workflowResourceWithStatusServed(served, workflow.ClusterResource) {
 				available = append(available, workflow.ClusterKind)
 			}
 		}
 	}
 
 	return available
+}
+
+func workflowResourceWithStatusServed(served map[string]struct{}, resource string) bool {
+	if resource == "" {
+		return false
+	}
+
+	_, parentServed := served[resource]
+	_, statusServed := served[resource+"/status"]
+
+	return parentServed && statusServed
 }
 
 // BackupRepositoryAvailable reports whether the namespaced repository API is

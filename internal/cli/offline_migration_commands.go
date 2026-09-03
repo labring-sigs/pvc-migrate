@@ -4,6 +4,7 @@ import (
 	"time"
 
 	"github.com/labring-sigs/pvc-migrate/internal/domain"
+	"github.com/labring-sigs/pvc-migrate/internal/kube"
 	"github.com/labring-sigs/pvc-migrate/internal/planner"
 	"github.com/spf13/cobra"
 )
@@ -266,7 +267,9 @@ func (r *rootState) newOfflineMigrationPlanCommand() *cobra.Command {
 			if existing {
 				namespace := workflowNamespaceForCommand(r, cmd)
 
-				session, err := runtime.store.Get(ctx, namespace, flags.sessionID)
+				session, err := kube.GetSessionByType(
+					ctx, runtime.store, namespace, flags.sessionID, domain.SessionTypeMigrate,
+				)
 				if err != nil {
 					return reportSessionLookupError(
 						cmd,

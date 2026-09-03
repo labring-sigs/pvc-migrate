@@ -252,7 +252,13 @@ func (r *rootState) runBackupTransfer(
 		request.BackupSession = session
 		if err := backup.Run(ctx, runtime.clients.Kubernetes, request, false); err != nil {
 			lookupCtx, lookupCancel := context.WithTimeout(context.Background(), 5*time.Second)
-			session, lookupErr := runtime.store.Get(lookupCtx, r.global.sessionNamespace, flags.id)
+			session, lookupErr := kube.GetSessionByType(
+				lookupCtx,
+				runtime.store,
+				r.global.sessionNamespace,
+				flags.id,
+				domain.SessionTypeBackup,
+			)
 
 			lookupCancel()
 
@@ -322,10 +328,12 @@ func (r *rootState) printObjectTransferResult(
 
 		var err error
 
-		completedSession, err = runtime.store.Get(
+		completedSession, err = kube.GetSessionByType(
 			lookupCtx,
+			runtime.store,
 			r.global.sessionNamespace,
 			flags.id,
+			domain.SessionTypeBackup,
 		)
 
 		lookupCancel()

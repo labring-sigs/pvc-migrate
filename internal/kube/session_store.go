@@ -43,6 +43,71 @@ type SessionLeaseCleaner interface {
 	DeleteSessionLease(ctx context.Context, namespace, sessionID string) error
 }
 
+// SessionLockIDProvider lets a persistence backend scope its fencing identity
+// beyond the user-facing session ID. CRD workflows include their Kind so
+// same-name resources in different workflow APIs remain independent.
+type SessionLockIDProvider interface {
+	SessionLockID(session *domain.Session) string
+}
+
+type SessionTypeGetter interface {
+	GetByType(
+		ctx context.Context,
+		namespace string,
+		id string,
+		sessionType domain.SessionType,
+	) (*domain.Session, error)
+}
+
+func GetSessionByType(
+	ctx context.Context,
+	store SessionStore,
+	namespace, id string,
+	sessionType domain.SessionType,
+) (*domain.Session, error) {
+	if getter, ok := store.(SessionTypeGetter); ok {
+		return getter.GetByType(ctx, namespace, id, sessionType)
+	}
+
+	return store.Get(ctx, namespace, id)
+}
+
+func LockIDForSession(store SessionStore, session *domain.Session) string {
+	if session == nil {
+		return ""
+	}
+
+	if provider, ok := store.(SessionLockIDProvider); ok {
+		if id := provider.SessionLockID(session); id != "" {
+			return id
+		}
+	}
+
+	return SessionLockID(session)
+}
+
+func SessionLockID(session *domain.Session) string {
+	if session == nil || session.ID == "" {
+		return ""
+	}
+
+	if session.Backend == SessionBackendCRD {
+		kind := session.BackendResource
+
+		if kind == "" {
+			if resource, ok := domain.ControllerResourceForSession(session); ok {
+				kind = resource.Kind
+			}
+		}
+
+		if kind != "" {
+			return session.ID + "/" + string(kind)
+		}
+	}
+
+	return session.ID
+}
+
 // SessionProtectionEnsurer adds the session-protection finalizer to durable
 // records that were authored outside the CLI adapter. Controller-backed
 // declarative resources need the same deletion guard as CLI-created sessions.
@@ -90,20 +155,17 @@ func (s *ConfigMapSessionStore) WithLeaseTiming(
 		s.leaseRenewEvery = renewEvery
 	}
 
+	s.leaseDuration, s.leaseRenewEvery = normalizeLeaseTiming(
+		s.leaseDuration,
+		s.leaseRenewEvery,
+	)
+
 	return s
 }
 
 func (s *ConfigMapSessionStore) leaseTiming() (time.Duration, time.Duration) {
 	duration, renewEvery := s.leaseDuration, s.leaseRenewEvery
-	if duration <= 0 {
-		duration = defaultSessionLeaseDuration
-	}
-
-	if renewEvery <= 0 {
-		renewEvery = defaultSessionLeaseRenewEvery
-	}
-
-	return duration, renewEvery
+	return normalizeLeaseTiming(duration, renewEvery)
 }
 
 func SessionConfigMapName(id string) string {

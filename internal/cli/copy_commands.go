@@ -100,7 +100,9 @@ func (r *rootState) newCopyCommand() *cobra.Command {
 			if existing {
 				namespace := workflowNamespaceForCommand(r, cmd)
 
-				session, err = runtime.store.Get(ctx, namespace, flags.sessionID)
+				session, err = kube.GetSessionByType(
+					ctx, runtime.store, namespace, flags.sessionID, domain.SessionTypeCopy,
+				)
 				if err == nil {
 					err = adoptReservedSessionForCopy(session, flags)
 				}
@@ -227,7 +229,9 @@ func (r *rootState) newCopyPlanCommand() *cobra.Command {
 			if existing {
 				namespace := workflowNamespaceForCommand(r, cmd)
 
-				session, err := runtime.store.Get(ctx, namespace, flags.sessionID)
+				session, err := kube.GetSessionByType(
+					ctx, runtime.store, namespace, flags.sessionID, domain.SessionTypeCopy,
+				)
 				if err != nil {
 					return reportSessionLookupError(
 						cmd,

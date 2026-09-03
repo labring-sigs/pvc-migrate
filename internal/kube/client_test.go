@@ -166,13 +166,28 @@ func TestAvailableControllerWorkflowKindsSupportsPartialInstall(t *testing.T) {
 		GroupVersion: domain.SessionAPIVersion,
 		APIResources: []metav1.APIResource{
 			{Name: domain.MigrationResource},
+			{Name: domain.MigrationResource + "/status"},
 			{Name: domain.CopyResource},
+			{Name: domain.CopyResource + "/status"},
 		},
 	}}
 
 	kinds := AvailableControllerWorkflowKinds(discovery)
 	if len(kinds) != 2 || kinds[0] != "Migration" || kinds[1] != "Copy" {
 		t.Fatalf("available workflow kinds=%v", kinds)
+	}
+}
+
+func TestAvailableControllerWorkflowKindsRequiresStatusSubresource(t *testing.T) {
+	client := fake.NewClientset()
+	discovery := testutil.MustType[*discoveryfake.FakeDiscovery](t, client.Discovery())
+	discovery.Resources = []*metav1.APIResourceList{{
+		GroupVersion: domain.SessionAPIVersion,
+		APIResources: []metav1.APIResource{{Name: domain.MigrationResource}},
+	}}
+
+	if kinds := AvailableControllerWorkflowKinds(discovery); len(kinds) != 0 {
+		t.Fatalf("workflow without status subresource reported as available: %v", kinds)
 	}
 }
 

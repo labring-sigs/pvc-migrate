@@ -220,14 +220,39 @@ func (r *Runner) checkpointFailure(
 
 	namespace := session.Spec.SessionNamespace
 
-	lock, err := locker.AcquireSessionLock(ctx, namespace, session.ID)
+	lock, err := locker.AcquireSessionLock(
+		ctx,
+		namespace,
+		kube.LockIDForSession(r.store, session),
+	)
 	if err != nil {
 		return errors.Join(cause, err)
 	}
 
 	operationCtx, cancelOperation := lock.Bind(ctx)
 	operationErr := func() error {
-		latest, getErr := r.store.Get(operationCtx, namespace, session.ID)
+		var latest *domain.Session
+
+		var getErr error
+
+		if kindStore, ok := r.store.(interface {
+			GetByKind(
+				ctx context.Context,
+				namespace string,
+				id string,
+				kind domain.ControllerKind,
+			) (*domain.Session, error)
+		}); ok && session.BackendResource != "" {
+			latest, getErr = kindStore.GetByKind(
+				operationCtx,
+				namespace,
+				session.ID,
+				session.BackendResource,
+			)
+		} else {
+			latest, getErr = r.store.Get(operationCtx, namespace, session.ID)
+		}
+
 		if getErr != nil {
 			return errors.Join(cause, getErr)
 		}

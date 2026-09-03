@@ -11,17 +11,18 @@ const (
 )
 
 const (
-	SessionKey                  = "pvc-migrate.io/session"
+	MetadataDomain              = "migrate.sealos.io"
 	PVCProtectionFinalizer      = "kubernetes.io/pvc-protection"
 	PVCStorageResizerAnnotation = "volume.kubernetes.io/storage-resizer"
-	ResourceRoleLabel           = "pvc-migrate.io/role"
-	SessionFinalizer            = "pvc-migrate.io/session-protection"
-	OriginalPolicyAnnotation    = "pvc-migrate.io/original-reclaim-policy"
-	SourcePVCUIDAnnotation      = "pvc-migrate.io/source-pvc-uid"
-	SourcePVAnnotation          = "pvc-migrate.io/source-pv"
-	RollbackPVAnnotation        = "pvc-migrate.io/rollback-pv"
-	PairedPVAnnotation          = "pvc-migrate.io/paired-pv"
-	PauseSessionAnnotation      = "pvc-migrate.io/pause-session"
+	SessionKey                  = MetadataDomain + "/session"
+	ResourceRoleLabel           = MetadataDomain + "/role"
+	SessionFinalizer            = MetadataDomain + "/session-protection"
+	OriginalPolicyAnnotation    = MetadataDomain + "/original-reclaim-policy"
+	SourcePVCUIDAnnotation      = MetadataDomain + "/source-pvc-uid"
+	SourcePVAnnotation          = MetadataDomain + "/source-pv"
+	RollbackPVAnnotation        = MetadataDomain + "/rollback-pv"
+	PairedPVAnnotation          = MetadataDomain + "/paired-pv"
+	PauseSessionAnnotation      = MetadataDomain + "/pause-session"
 
 	pvcBindCompletedAnnotation          = "pv.kubernetes.io/bind-completed"
 	pvcBoundByControllerAnnotation      = "pv.kubernetes.io/bound-by-controller"
@@ -42,7 +43,7 @@ const (
 )
 
 // PVCAnnotationsForRecreation copies user annotations while removing
-// controller-owned binding state and stale pvc-migrate ownership.
+// controller-owned binding state and stale migration ownership.
 func PVCAnnotationsForRecreation(input map[string]string) map[string]string {
 	result := maps.Clone(input)
 	if result == nil {
@@ -61,6 +62,18 @@ func PVCAnnotationsForRecreation(input map[string]string) map[string]string {
 	} {
 		delete(result, key)
 	}
+
+	return result
+}
+
+func MergeSessionLabels(existing map[string]string, id string) map[string]string {
+	result := maps.Clone(existing)
+	if result == nil {
+		result = make(map[string]string, 2)
+	}
+
+	result[ManagedByLabel] = ManagedByValue
+	result[SessionKey] = id
 
 	return result
 }
