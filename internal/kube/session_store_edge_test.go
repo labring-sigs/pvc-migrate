@@ -91,6 +91,42 @@ func TestDecodeSessionRejectsMissingInvalidAndUnsupportedData(t *testing.T) {
 	}
 }
 
+func TestDecodeSessionRejectsUnsupportedAPIVersion(t *testing.T) {
+	session := storeTestSession()
+	session.APIVersion = "legacy.example/v1alpha1"
+
+	data, err := json.Marshal(session)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	_, err = decodeSession(&corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: session.Spec.SessionNamespace,
+			Name:      SessionConfigMapName(session.ID),
+			Labels: map[string]string{
+				ManagedByLabel: ManagedByValue,
+				SessionKey:     session.ID,
+			},
+		},
+		Data: map[string]string{SessionDataKey: string(data)},
+	})
+	if domain.CategoryOf(err) != domain.ErrorValidation {
+		t.Fatalf("unsupported API version category=%s error=%v", domain.CategoryOf(err), err)
+	}
+}
+
+func TestConfigMapSessionStoreListRejectsUnsupportedSchema(t *testing.T) {
+	session := storeTestSession()
+	session.APIVersion = "legacy.example/v1alpha1"
+	client := fake.NewClientset(sessionConfigMap(t, session, true))
+
+	_, err := NewConfigMapSessionStore(client).List(context.Background(), "system")
+	if domain.CategoryOf(err) != domain.ErrorValidation {
+		t.Fatalf("unsupported schema list category=%s error=%v", domain.CategoryOf(err), err)
+	}
+}
+
 func TestConfigMapSessionStoreCreateGetAndUpdateConflicts(t *testing.T) {
 	ctx := context.Background()
 	client := fake.NewClientset()

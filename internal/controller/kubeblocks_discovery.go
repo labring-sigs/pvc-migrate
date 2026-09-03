@@ -388,7 +388,11 @@ func (m *Manager) loadKubeBlocksCluster(
 		)
 	}
 
-	components, ok, err := unstructured.NestedSlice(clusterObject.Object, "spec", "componentSpecs")
+	components, ok, err := unstructured.NestedSlice(
+		clusterObject.Object,
+		"spec",
+		kubeBlocksFieldComponentSpecs,
+	)
 	if err != nil || !ok || len(components) == 0 {
 		return nil, nil, domain.NewError(
 			domain.ErrorPrecondition,
@@ -622,7 +626,7 @@ func (m *Manager) discoverKubeBlocksInstanceSet(
 		return state, err
 	}
 
-	paused, found, err := unstructured.NestedBool(object.Object, "spec", "paused")
+	paused, found, err := unstructured.NestedBool(object.Object, "spec", kubeBlocksFieldPaused)
 	if err != nil {
 		return state, domain.WrapError(
 			domain.ErrorPrecondition,
@@ -637,7 +641,12 @@ func (m *Manager) discoverKubeBlocksInstanceSet(
 	state.PausedConfigured = found
 	if !found {
 		probe := object.DeepCopy()
-		if err := unstructured.SetNestedField(probe.Object, true, "spec", "paused"); err != nil {
+		if err := unstructured.SetNestedField(
+			probe.Object,
+			true,
+			"spec",
+			kubeBlocksFieldPaused,
+		); err != nil {
 			return state, err
 		}
 
@@ -658,7 +667,7 @@ func (m *Manager) discoverKubeBlocksInstanceSet(
 		if _, supported, nestedErr := unstructured.NestedBool(
 			result.Object,
 			"spec",
-			"paused",
+			kubeBlocksFieldPaused,
 		); nestedErr != nil ||
 			!supported {
 			return state, domain.NewError(
@@ -918,10 +927,7 @@ func kubeBlocksSwitchoverCommand(
 ) string {
 	var builder strings.Builder
 
-	clusterField := "clusterRef"
-	if strings.HasPrefix(opsAPIVersion, "operations.kubeblocks.io/") {
-		clusterField = "clusterName"
-	}
+	clusterField := kubeBlocksClusterField(opsAPIVersion)
 
 	fmt.Fprintf(
 		&builder,
@@ -934,7 +940,7 @@ func kubeBlocksSwitchoverCommand(
 		component,
 	)
 
-	if strings.HasPrefix(opsAPIVersion, "operations.kubeblocks.io/") {
+	if usesComponentScopedKubeBlocksOps(opsAPIVersion) {
 		fmt.Fprintf(&builder, "    instanceName: %s\n    candidateName: %s\n", selected, candidate)
 	} else {
 		fmt.Fprintf(&builder, "    instanceName: %s\n", candidate)
@@ -1032,15 +1038,12 @@ func kubeBlocksSwitchoverSpec(
 	opsAPIVersion, cluster, component, selected, candidate string,
 ) map[string]any {
 	switchover := map[string]any{"componentName": component, "instanceName": candidate}
-	if strings.HasPrefix(opsAPIVersion, "operations.kubeblocks.io/") {
+	if usesComponentScopedKubeBlocksOps(opsAPIVersion) {
 		switchover["instanceName"] = selected
 		switchover["candidateName"] = candidate
 	}
 
-	clusterField := "clusterRef"
-	if strings.HasPrefix(opsAPIVersion, "operations.kubeblocks.io/") {
-		clusterField = "clusterName"
-	}
+	clusterField := kubeBlocksClusterField(opsAPIVersion)
 
 	return map[string]any{
 		clusterField: cluster,

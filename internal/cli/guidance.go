@@ -51,12 +51,7 @@ func writeSessionGuidance(w io.Writer, session *domain.Session, prefixes guidanc
 		return err
 	}
 
-	if _, err := fmt.Fprintf(
-		w,
-		"  Record: ConfigMap %s/%s\n",
-		session.Spec.SessionNamespace,
-		kube.SessionConfigMapName(session.ID),
-	); err != nil {
+	if err := writeSessionRecord(w, session); err != nil {
 		return err
 	}
 
@@ -158,6 +153,8 @@ func workflowCommandName(session *domain.Session) string {
 		return "copy"
 	case domain.SessionTypeBackup:
 		return "backup"
+	case domain.SessionTypeRestore:
+		return "restore"
 	case domain.SessionTypeRename:
 		return "rename"
 	case domain.SessionTypeMove:
@@ -188,7 +185,7 @@ func workflowCommandNameForCommand(value any) string {
 	}
 
 	switch current.Name() {
-	case "migrate", "migrate-pod", "reserve", "copy", "backup", "rename", "move":
+	case "migrate", "migrate-pod", "reserve", "copy", "backup", "restore", "rename", "move":
 		return current.Name()
 	default:
 		return "migrate"
@@ -212,11 +209,21 @@ func writeSessionPhaseGuidance(
 		if session.Spec.Type == domain.SessionTypeBackup {
 			return writeCompletedBackupSessionGuidance(w, commands)
 		}
+
+		if session.Spec.Type == domain.SessionTypeRestore {
+			return writeCompletedRestoreSessionGuidance(w, commands)
+		}
+
 		return writeCompletedSessionGuidance(w, commands)
 	case domain.PhaseAborted, domain.PhaseRolledBack:
 		if session.Spec.Type == domain.SessionTypeBackup {
 			return writeClosedBackupSessionGuidance(w, commands)
 		}
+
+		if session.Spec.Type == domain.SessionTypeRestore {
+			return writeClosedRestoreSessionGuidance(w, commands)
+		}
+
 		return writeClosedSessionGuidance(w, commands)
 	default:
 		_, err := fmt.Fprintln(
@@ -376,6 +383,16 @@ func writeFailedSessionGuidance(
 		return err
 	}
 
+	if session.Spec.Type == domain.SessionTypeBackup ||
+		session.Spec.Type == domain.SessionTypeRestore {
+		if failedCanAbort(session) {
+			_, err := fmt.Fprintln(w, "  Abort:", commands.abort)
+			return err
+		}
+
+		return nil
+	}
+
 	if failedCanAbort(session) {
 		if _, err := fmt.Fprintln(
 			w,
@@ -425,6 +442,16 @@ func writeCompletedBackupSessionGuidance(w io.Writer, commands sessionGuidanceCo
 	return writeGuidanceLines(w, lines)
 }
 
+func writeCompletedRestoreSessionGuidance(w io.Writer, commands sessionGuidanceCommands) error {
+	lines := [][2]string{
+		{"  Verify the restored destination PVC before deleting session credentials.", ""},
+		{"  Validate cleanup:", commands.cleanupPlan},
+		{"  Finalize and delete session/credentials:", commands.cleanup},
+	}
+
+	return writeGuidanceLines(w, lines)
+}
+
 func writeClosedSessionGuidance(w io.Writer, commands sessionGuidanceCommands) error {
 	lines := [][2]string{
 		{"  Verify workload and PVC state before deleting retained resources.", ""},
@@ -438,6 +465,16 @@ func writeClosedSessionGuidance(w io.Writer, commands sessionGuidanceCommands) e
 func writeClosedBackupSessionGuidance(w io.Writer, commands sessionGuidanceCommands) error {
 	lines := [][2]string{
 		{"  Verify the source workload and PVC remain healthy.", ""},
+		{"  Validate cleanup:", commands.cleanupPlan},
+		{"  Delete retained credentials and session:", commands.cleanup},
+	}
+
+	return writeGuidanceLines(w, lines)
+}
+
+func writeClosedRestoreSessionGuidance(w io.Writer, commands sessionGuidanceCommands) error {
+	lines := [][2]string{
+		{"  Verify the destination PVC remains healthy.", ""},
 		{"  Validate cleanup:", commands.cleanupPlan},
 		{"  Delete retained credentials and session:", commands.cleanup},
 	}
@@ -484,7 +521,9 @@ func phaseCanAbortBeforeActivation(session *domain.Session) bool {
 
 func cleanupCommandArgs(session *domain.Session) string {
 	args := []string{workflowCommandName(session), "cleanup", session.ID}
-	if session.Spec.Type != domain.SessionTypeBackup && !session.Spec.Operation().RebindsPVC() {
+	if session.Spec.Type != domain.SessionTypeBackup &&
+		session.Spec.Type != domain.SessionTypeRestore &&
+		!session.Spec.Operation().RebindsPVC() {
 		args = append(args, "--delete-temporary", "--delete-rollback-pv")
 	}
 
@@ -508,6 +547,23 @@ func writeSessionInspection(w io.Writer, session *domain.Session, kubectlPrefix 
 	}
 
 	refs := make(map[string][]string)
+	switch session.Spec.Type {
+	case domain.SessionTypeBackup:
+		if session.Spec.Backup != nil {
+			ref := session.Spec.Backup.SourcePVC
+			if ref.Namespace != "" && ref.Name != "" {
+				refs[ref.Namespace] = append(refs[ref.Namespace], ref.Name)
+			}
+		}
+	case domain.SessionTypeRestore:
+		if session.Spec.Restore != nil {
+			ref := session.Spec.Restore.DestinationPVC
+			if ref.Namespace != "" && ref.Name != "" {
+				refs[ref.Namespace] = append(refs[ref.Namespace], ref.Name)
+			}
+		}
+	}
+
 	for index, volume := range session.Spec.Volumes {
 		ref := volume.SourcePVC
 		if index < len(session.Status.Volumes) &&
@@ -545,6 +601,45 @@ func writeSessionInspection(w io.Writer, session *domain.Session, kubectlPrefix 
 	}
 
 	return nil
+}
+
+func writeSessionRecord(w io.Writer, session *domain.Session) error {
+	if session == nil {
+		return nil
+	}
+
+	if session.Backend == kube.SessionBackendCRD {
+		resource, _ := domain.ControllerResourceForSession(session)
+		if resource.Cluster {
+			_, err := fmt.Fprintf(
+				w,
+				"  Record: %s %s\n",
+				controllerResourceKind(session),
+				session.ID,
+			)
+
+			return err
+		}
+
+		_, err := fmt.Fprintf(
+			w,
+			"  Record: %s %s/%s\n",
+			controllerResourceKind(session),
+			session.Spec.SessionNamespace,
+			session.ID,
+		)
+
+		return err
+	}
+
+	_, err := fmt.Fprintf(
+		w,
+		"  Record: ConfigMap %s/%s\n",
+		session.Spec.SessionNamespace,
+		kube.SessionConfigMapName(session.ID),
+	)
+
+	return err
 }
 
 func failedCanAbort(session *domain.Session) bool {
@@ -589,12 +684,12 @@ func reportSessionError(
 		_ = writeCleanupPodBlockerGuidance(cmd.ErrOrStderr(), cmd, blocker)
 	}
 
-	if session != nil && errorHasOperation(err, "warm-copy mount probe") {
+	if session != nil && errorHasOperation(err, domain.ErrorOperationWarmCopyMountProbe) {
 		_ = writeWarmCopyMountGuidance(cmd.ErrOrStderr(), cmd, session)
 		return err
 	}
 
-	if session != nil && errorHasOperation(err, "copy capacity") {
+	if session != nil && errorHasOperation(err, domain.ErrorOperationCopyCapacity) {
 		_ = writeCapacityFailureGuidance(
 			cmd.ErrOrStderr(),
 			session,
@@ -604,7 +699,7 @@ func reportSessionError(
 		return err
 	}
 
-	if session != nil && errorHasOperation(err, "source usage check") {
+	if session != nil && errorHasOperation(err, domain.ErrorOperationSourceUsageCheck) {
 		_, _ = fmt.Fprintln(
 			cmd.ErrOrStderr(),
 			"\nSource usage could not be read from a trusted storage-backend CRD. Increase --destination-capacity, or independently verify the data size and create a new session with --skip-source-usage-check.",
@@ -613,7 +708,7 @@ func reportSessionError(
 		return err
 	}
 
-	if session != nil && errorHasOperation(err, "transfer path preflight") {
+	if session != nil && errorHasOperation(err, domain.ErrorOperationTransferPathPreflight) {
 		_, _ = fmt.Fprintln(
 			cmd.ErrOrStderr(),
 			"\nTransfer directory validation failed. Correct the source or destination directory and retry. If the stored path is wrong, abort before activation, clean up the retained resources, and create a new session with corrected path flags; transfer paths cannot be changed on an existing session.",
@@ -672,12 +767,7 @@ func writeCapacityFailureGuidance(
 		return err
 	}
 
-	if _, err := fmt.Fprintf(
-		w,
-		"  Record: ConfigMap %s/%s\n",
-		session.Spec.SessionNamespace,
-		kube.SessionConfigMapName(session.ID),
-	); err != nil {
+	if err := writeSessionRecord(w, session); err != nil {
 		return err
 	}
 
@@ -751,7 +841,7 @@ func writeCapacityFailureGuidance(
 
 func sessionHasCapacityFailure(session *domain.Session) bool {
 	return session != nil && session.Status.Phase == domain.PhaseFailed &&
-		strings.HasPrefix(session.Status.Message, "copy capacity:")
+		strings.HasPrefix(session.Status.Message, domain.ErrorOperationCopyCapacity+":")
 }
 
 func reportSessionLookupError(
@@ -831,7 +921,7 @@ func reportTransferError(
 		namespace,
 		pvc,
 	)
-	if errorHasOperation(err, "transfer path preflight") {
+	if errorHasOperation(err, domain.ErrorOperationTransferPathPreflight) {
 		_, _ = fmt.Fprintln(
 			cmd.ErrOrStderr(),
 			"Correct --path and rerun the write command. Object-storage plan validates the path syntax and PVC state, while the mounted directory and symbolic-link checks run immediately before data transfer.",
@@ -900,26 +990,39 @@ func reportCleanupError(
 		_ = writeCleanupPodBlockerGuidance(cmd.ErrOrStderr(), cmd, blocker)
 	}
 
-	deleteRecordFailed := errorHasOperation(err, "delete session", "delete session lock")
+	deleteRecordFailed := errorHasOperation(
+		err,
+		domain.ErrorOperationDeleteSession,
+		domain.ErrorOperationDeleteSessionLock,
+	)
 	if session != nil && options.DeleteSession && deleteRecordFailed {
 		prefixes := guidancePrefixesForCommand(cmd, session.Spec.SessionNamespace)
+		recordKind := "configmap"
+		recordName := kube.SessionConfigMapName(session.ID)
+
+		if session.Backend == kube.SessionBackendCRD {
+			recordKind = controllerResourceForKubectl(session)
+			recordName = session.ID
+		}
+
 		_, _ = fmt.Fprintf(
 			cmd.ErrOrStderr(),
-			"\nCleanup stopped during session record removal. Inspect the ConfigMap: %s --namespace %s get configmap %s\n",
+			"\nCleanup stopped during session record removal. Inspect the session record: %s --namespace %s get %s %s\n",
 			prefixes.kubectl,
 			session.Spec.SessionNamespace,
-			kube.SessionConfigMapName(session.ID),
+			recordKind,
+			recordName,
 		)
 		_, _ = fmt.Fprintf(
 			cmd.ErrOrStderr(),
 			"Inspect the Lease: %s --namespace %s get lease %s\n",
 			prefixes.kubectl,
 			session.Spec.SessionNamespace,
-			kube.SessionLockName(session.ID),
+			kube.SessionLockName(kube.SessionLockID(session)),
 		)
 		_, _ = fmt.Fprintln(
 			cmd.ErrOrStderr(),
-			"Use the owning workflow's status and cleanup commands when the ConfigMap remains; use recovery cleanup-orphan when ownership remains after the ConfigMap is gone.",
+			"Use the owning workflow's status and cleanup commands when the session record remains; use recovery cleanup-orphan when ownership remains after the record is gone.",
 		)
 
 		return err
@@ -1183,6 +1286,7 @@ func sessionCommandPrefix(namespace string) string {
 
 func sessionCommandPrefixForCommand(value any, namespace string) string {
 	args := []string{"pvc-migrate"}
+	controllerMode := false
 
 	command, ok := value.(*cobra.Command)
 	if ok {
@@ -1193,15 +1297,26 @@ func sessionCommandPrefixForCommand(value any, namespace string) string {
 			}
 		}
 
-		for _, name := range []string{"timeout", "retries", "retry-backoff", "helm-timeout", "stream-tool-logs", "no-compress"} {
+		for _, name := range []string{"timeout", "retries", "retry-backoff", "helm-timeout", "stream-tool-logs", "wait", "no-compress"} {
 			if flag := rootFlags.Lookup(name); flag != nil && flag.Changed {
 				args = append(args, "--"+name+"="+shellQuote(flag.Value.String()))
 			}
 		}
+
+		if flag := rootFlags.Lookup("mode"); flag != nil && flag.Changed {
+			mode := strings.ToLower(strings.TrimSpace(flag.Value.String()))
+			args = append(args, "--mode="+shellQuote(mode))
+			controllerMode = mode == string(executionModeController)
+		}
 	}
 
 	if namespace != "" && namespace != "pvc-migrate-system" {
-		args = append(args, "--session-namespace", shellQuote(namespace))
+		namespaceFlag := "--session-namespace"
+		if controllerMode {
+			namespaceFlag = "--workflow-namespace"
+		}
+
+		args = append(args, namespaceFlag, shellQuote(namespace))
 	}
 
 	return strings.Join(args, " ")

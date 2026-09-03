@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"slices"
+	"sort"
 	"strings"
 	"time"
 
@@ -153,7 +154,7 @@ func (s *Service) cleanup(
 		}
 	}
 
-	if session.Spec.Type == domain.SessionTypeBackup &&
+	if (session.Spec.Type == domain.SessionTypeBackup || session.Spec.Type == domain.SessionTypeRestore) &&
 		(options.Finalize || options.DeleteSession) {
 		if err := s.cleanupBackupCredentials(ctx, session); err != nil {
 			return err
@@ -415,7 +416,11 @@ func (s *Service) deleteCleanupSession(ctx context.Context, session *domain.Sess
 	}
 
 	if cleaner, ok := s.store.(kube.SessionLeaseCleaner); ok {
-		return cleaner.DeleteSessionLease(ctx, session.Spec.SessionNamespace, session.ID)
+		return cleaner.DeleteSessionLease(
+			ctx,
+			session.Spec.SessionNamespace,
+			kube.LockIDForSession(s.store, session),
+		)
 	}
 
 	return nil
@@ -1240,28 +1245,55 @@ func (s *Service) validateReservationPods(ctx context.Context, session *domain.S
 		return domain.NewError(domain.ErrorValidation, "cleanup dry-run", "session is nil")
 	}
 
-	namespaces := make(map[string]struct{})
+	namespacesSet := make(map[string]struct{})
 	for _, volume := range session.Spec.Volumes {
 		if volume.DestinationPVC.Namespace != "" {
-			namespaces[volume.DestinationPVC.Namespace] = struct{}{}
+			namespacesSet[volume.DestinationPVC.Namespace] = struct{}{}
 		}
 	}
 
+	namespaces := make([]string, 0, len(namespacesSet))
+	for namespace := range namespacesSet {
+		namespaces = append(namespaces, namespace)
+	}
+
+	sort.Strings(namespaces)
+
 	selector := reservationPodSelector(session.ID)
-	for namespace := range namespaces {
+
+	type podListResult struct {
+		pods   []corev1.Pod
+		listed bool
+		err    error
+	}
+
+	results := make([]podListResult, len(namespaces))
+	parallel.For(len(namespaces), func(index int) {
+		namespace := namespaces[index]
+
 		pods, err := s.client.CoreV1().
 			Pods(namespace).
 			List(ctx, metav1.ListOptions{LabelSelector: selector})
-		if err != nil && !apierrors.IsNotFound(err) {
+		if pods != nil {
+			results[index].pods = pods.Items
+			results[index].listed = true
+		}
+
+		results[index].err = err
+	})
+
+	for index, namespace := range namespaces {
+		result := results[index]
+		if result.err != nil && !apierrors.IsNotFound(result.err) {
 			return domain.WrapError(
 				domain.ErrorKubernetes,
 				"cleanup dry-run",
 				"list reservation Pods in "+namespace,
-				err,
+				result.err,
 			)
 		}
 
-		if err == nil && pods == nil {
+		if result.err == nil && !result.listed {
 			return domain.NewError(
 				domain.ErrorKubernetes,
 				"cleanup dry-run",
@@ -1269,12 +1301,12 @@ func (s *Service) validateReservationPods(ctx context.Context, session *domain.S
 			)
 		}
 
-		if err != nil {
+		if result.err != nil {
 			continue
 		}
 
-		for index := range pods.Items {
-			pod := &pods.Items[index]
+		for podIndex := range result.pods {
+			pod := &result.pods[podIndex]
 			if pod.Labels[kube.ManagedByLabel] != kube.ManagedByValue ||
 				pod.Labels[kube.SessionKey] != session.ID ||
 				pod.Labels[kube.ResourceRoleLabel] != kube.ResourceRoleReservationConsumer {

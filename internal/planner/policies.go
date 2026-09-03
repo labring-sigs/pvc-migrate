@@ -124,14 +124,24 @@ func (p *Planner) checkLimitRanges(
 	}
 
 	if len(violations) > 0 {
-		plan.AddCheck(failed(limitRangeCheckName, strings.Join(violations, "; ")))
+		plan.AddCheck(
+			failed(
+				limitRangeCheckName,
+				fmt.Sprintf("namespace %s: %s", namespace, strings.Join(violations, "; ")),
+			),
+		)
+
 		return
 	}
 
 	plan.AddCheck(
 		passed(
 			limitRangeCheckName,
-			fmt.Sprintf("%d LimitRange object(s) permit all target PVC requests", len(items.Items)),
+			fmt.Sprintf(
+				"namespace %s: %d LimitRange object(s) permit all target PVC requests",
+				namespace,
+				len(items.Items),
+			),
 		),
 	)
 }
@@ -235,7 +245,8 @@ func (p *Planner) checkQuotas(
 		passed(
 			resourceQuotaCheckName,
 			fmt.Sprintf(
-				"%d ResourceQuota object(s), %d bounded resource(s), all have capacity",
+				"namespace %s: %d ResourceQuota object(s), %d bounded resource(s), all have capacity",
+				namespace,
 				len(items.Items),
 				report.Checked,
 			),
@@ -319,7 +330,7 @@ func (p *Planner) checkNetworkPolicies(
 		if err != nil {
 			plan.AddCheck(
 				failed(
-					"network-policy",
+					domain.CheckNameNetworkPolicy,
 					fmt.Sprintf("list NetworkPolicies in %s: %v", namespace, err),
 				),
 			)
@@ -330,7 +341,7 @@ func (p *Planner) checkNetworkPolicies(
 		if result.empty {
 			plan.AddCheck(
 				failed(
-					"network-policy",
+					domain.CheckNameNetworkPolicy,
 					fmt.Sprintf("list NetworkPolicies in %s returned an empty object", namespace),
 				),
 			)
@@ -341,7 +352,7 @@ func (p *Planner) checkNetworkPolicies(
 		if result.count > 0 {
 			plan.AddCheck(
 				warned(
-					"network-policy",
+					domain.CheckNameNetworkPolicy,
 					fmt.Sprintf(
 						"namespace %s has %d NetworkPolicy object(s); clusterip copy connectivity will be validated by the real copy job",
 						namespace,
@@ -352,7 +363,7 @@ func (p *Planner) checkNetworkPolicies(
 		} else {
 			plan.AddCheck(
 				passed(
-					"network-policy",
+					domain.CheckNameNetworkPolicy,
 					fmt.Sprintf("namespace %s has no NetworkPolicy objects", namespace),
 				),
 			)

@@ -20,7 +20,7 @@ func (r *rootState) newMoveCommand() *cobra.Command {
 
 	command := &cobra.Command{
 		Use:   "move",
-		Short: "Move an offline PVC identity to another namespace",
+		Short: "Move an offline PVC identity within or across namespaces",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			if sourcePVC == "" {
@@ -80,6 +80,10 @@ func (r *rootState) newMoveCommand() *cobra.Command {
 			session, err := runtime.service.CreateSession(ctx, plan, false)
 			if err != nil {
 				return reportSessionCreationError(cmd, plan.SessionNamespace, plan.SessionID, err)
+			}
+
+			if deferred, err := deferControllerExecution(ctx, cmd, runtime, session); deferred {
+				return err
 			}
 
 			if err := runtime.service.Move(ctx, session); err != nil {

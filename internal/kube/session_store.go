@@ -7,6 +7,7 @@ import (
 	"slices"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/labring-sigs/pvc-migrate/internal/domain"
 	corev1 "k8s.io/api/core/v1"
@@ -42,6 +43,64 @@ type SessionLeaseCleaner interface {
 	DeleteSessionLease(ctx context.Context, namespace, sessionID string) error
 }
 
+// SessionLockIDProvider lets a persistence backend override the user-facing
+// session ID used for fencing.
+type SessionLockIDProvider interface {
+	SessionLockID(session *domain.Session) string
+}
+
+type SessionTypeGetter interface {
+	GetByType(
+		ctx context.Context,
+		namespace string,
+		id string,
+		sessionType domain.SessionType,
+	) (*domain.Session, error)
+}
+
+func GetSessionByType(
+	ctx context.Context,
+	store SessionStore,
+	namespace, id string,
+	sessionType domain.SessionType,
+) (*domain.Session, error) {
+	if getter, ok := store.(SessionTypeGetter); ok {
+		return getter.GetByType(ctx, namespace, id, sessionType)
+	}
+
+	return store.Get(ctx, namespace, id)
+}
+
+func LockIDForSession(store SessionStore, session *domain.Session) string {
+	if session == nil {
+		return ""
+	}
+
+	if provider, ok := store.(SessionLockIDProvider); ok {
+		if id := provider.SessionLockID(session); id != "" {
+			return id
+		}
+	}
+
+	return SessionLockID(session)
+}
+
+func SessionLockID(session *domain.Session) string {
+	if session == nil || session.ID == "" {
+		return ""
+	}
+
+	return session.ID
+}
+
+// SessionProtectionEnsurer adds the session-protection finalizer to
+// controller-backed resources that were authored outside the CLI adapter.
+// ConfigMap sessions deliberately omit finalizers because no always-running
+// reconciler exists to release them during namespace deletion.
+type SessionProtectionEnsurer interface {
+	EnsureSessionProtection(ctx context.Context, session *domain.Session) error
+}
+
 // SessionLock is a renewable, process-owned lock for one session.
 type SessionLock interface {
 	Bind(ctx context.Context) (context.Context, context.CancelFunc)
@@ -51,11 +110,48 @@ type SessionLock interface {
 }
 
 type ConfigMapSessionStore struct {
-	client kubernetes.Interface
+	client          kubernetes.Interface
+	leaseDuration   time.Duration
+	leaseRenewEvery time.Duration
 }
 
 func NewConfigMapSessionStore(client kubernetes.Interface) *ConfigMapSessionStore {
-	return &ConfigMapSessionStore{client: client}
+	return &ConfigMapSessionStore{
+		client:          client,
+		leaseDuration:   defaultSessionLeaseDuration,
+		leaseRenewEvery: defaultSessionLeaseRenewEvery,
+	}
+}
+
+// WithLeaseTiming configures the per-store Lease timing. Keeping timing on
+// the store isolates independent clients and prevents one workflow or test
+// from changing the renewal behavior of locks already held by another.
+func (s *ConfigMapSessionStore) WithLeaseTiming(
+	duration, renewEvery time.Duration,
+) *ConfigMapSessionStore {
+	if s == nil {
+		return s
+	}
+
+	if duration > 0 {
+		s.leaseDuration = duration
+	}
+
+	if renewEvery > 0 {
+		s.leaseRenewEvery = renewEvery
+	}
+
+	s.leaseDuration, s.leaseRenewEvery = normalizeLeaseTiming(
+		s.leaseDuration,
+		s.leaseRenewEvery,
+	)
+
+	return s
+}
+
+func (s *ConfigMapSessionStore) leaseTiming() (time.Duration, time.Duration) {
+	duration, renewEvery := s.leaseDuration, s.leaseRenewEvery
+	return normalizeLeaseTiming(duration, renewEvery)
 }
 
 func SessionConfigMapName(id string) string {
@@ -80,7 +176,6 @@ func (s *ConfigMapSessionStore) Create(ctx context.Context, session *domain.Sess
 				ManagedByLabel: ManagedByValue,
 				SessionKey:     session.ID,
 			},
-			Finalizers: []string{SessionFinalizer},
 		},
 		Data: map[string]string{SessionDataKey: string(data)},
 	}
@@ -102,6 +197,7 @@ func (s *ConfigMapSessionStore) Create(ctx context.Context, session *domain.Sess
 	}
 
 	session.ResourceVersion = created.ResourceVersion
+	session.Backend = SessionBackendConfigMap
 
 	return nil
 }
@@ -126,7 +222,12 @@ func (s *ConfigMapSessionStore) Get(
 		return nil, domain.WrapError(domain.ErrorKubernetes, "get session", "read ConfigMap", err)
 	}
 
-	return decodeSession(cm)
+	session, decodeErr := decodeSession(cm)
+	if decodeErr == nil {
+		session.Backend = SessionBackendConfigMap
+	}
+
+	return session, decodeErr
 }
 
 func (s *ConfigMapSessionStore) Update(ctx context.Context, session *domain.Session) error {
@@ -194,7 +295,6 @@ func (s *ConfigMapSessionStore) Update(ctx context.Context, session *domain.Sess
 
 	cm.Labels[ManagedByLabel] = ManagedByValue
 	cm.Labels[SessionKey] = session.ID
-	cm.Finalizers = ensureSessionFinalizer(cm.Finalizers)
 	cm.Data = map[string]string{SessionDataKey: string(data)}
 
 	updated, err := s.client.CoreV1().
@@ -223,6 +323,7 @@ func (s *ConfigMapSessionStore) Update(ctx context.Context, session *domain.Sess
 	}
 
 	session.ResourceVersion = updated.ResourceVersion
+	session.Backend = SessionBackendConfigMap
 
 	return nil
 }
@@ -295,36 +396,6 @@ func (s *ConfigMapSessionStore) Delete(ctx context.Context, session *domain.Sess
 		)
 	}
 
-	if containsString(cm.Finalizers, SessionFinalizer) {
-		updated := cm.DeepCopy()
-		updated.Finalizers = removeString(updated.Finalizers, SessionFinalizer)
-
-		latest, err := s.client.CoreV1().
-			ConfigMaps(cm.Namespace).
-			Update(ctx, updated, metav1.UpdateOptions{})
-		if apierrors.IsConflict(err) {
-			return domain.WrapError(
-				domain.ErrorConflict,
-				"delete session",
-				"session ConfigMap changed while removing protection finalizer",
-				err,
-			)
-		}
-
-		if err != nil && !apierrors.IsNotFound(err) {
-			return domain.WrapError(
-				domain.ErrorKubernetes,
-				"delete session",
-				"remove session protection finalizer",
-				err,
-			)
-		}
-
-		if err == nil {
-			cm = latest
-		}
-	}
-
 	uid, resourceVersion := cm.UID, cm.ResourceVersion
 
 	options := metav1.DeleteOptions{
@@ -358,10 +429,10 @@ func containsString(values []string, value string) bool {
 	return slices.Contains(values, value)
 }
 
-func removeString(values []string, value string) []string {
+func removeSessionFinalizer(values []string) []string {
 	result := values[:0]
 	for _, item := range values {
-		if item != value {
+		if item != SessionFinalizer {
 			result = append(result, item)
 		}
 	}
@@ -390,6 +461,8 @@ func decodeSession(cm *corev1.ConfigMap) (*domain.Session, error) {
 	}
 
 	session.ResourceVersion = cm.ResourceVersion
+
+	session.Backend = SessionBackendConfigMap
 	if err := session.Validate(); err != nil {
 		return nil, err
 	}

@@ -950,7 +950,7 @@ func TestPlanHandlesEmptyInventoryObjects(t *testing.T) {
 		name     string
 		resource string
 		object   string
-		check    string
+		check    domain.CheckName
 	}{
 		{name: "PVC", resource: "persistentvolumeclaims", object: "data", check: "source-pvc"},
 		{name: "PV", resource: "persistentvolumes", object: "pv-source", check: "source-pv"},
@@ -1997,7 +1997,7 @@ func TestSchedulingIssuesCoverSelectorAffinityAndTaints(t *testing.T) {
 	}
 }
 
-func hasWarningCheck(plan *domain.MigrationPlan, name string) bool {
+func hasWarningCheck(plan *domain.MigrationPlan, name domain.CheckName) bool {
 	for _, check := range plan.Checks {
 		if check.Name == name && check.Severity == domain.SeverityWarning && check.Passed {
 			return true
@@ -2007,7 +2007,7 @@ func hasWarningCheck(plan *domain.MigrationPlan, name string) bool {
 	return false
 }
 
-func hasPassedCheck(plan *domain.MigrationPlan, name string) bool {
+func hasPassedCheck(plan *domain.MigrationPlan, name domain.CheckName) bool {
 	for _, check := range plan.Checks {
 		if check.Name == name && check.Passed {
 			return true
@@ -2017,7 +2017,11 @@ func hasPassedCheck(plan *domain.MigrationPlan, name string) bool {
 	return false
 }
 
-func hasPassedCheckContaining(plan *domain.MigrationPlan, name, message string) bool {
+func hasPassedCheckContaining(
+	plan *domain.MigrationPlan,
+	name domain.CheckName,
+	message string,
+) bool {
 	for _, check := range plan.Checks {
 		if check.Name == name && check.Passed && strings.Contains(check.Message, message) {
 			return true
@@ -2027,7 +2031,11 @@ func hasPassedCheckContaining(plan *domain.MigrationPlan, name, message string) 
 	return false
 }
 
-func hasFailedCheckContaining(plan *domain.MigrationPlan, name, message string) bool {
+func hasFailedCheckContaining(
+	plan *domain.MigrationPlan,
+	name domain.CheckName,
+	message string,
+) bool {
 	for _, check := range plan.Checks {
 		if check.Name == name && !check.Passed && strings.Contains(check.Message, message) {
 			return true

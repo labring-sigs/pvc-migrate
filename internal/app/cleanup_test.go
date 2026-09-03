@@ -192,6 +192,81 @@ func TestCleanupFinalizesBackupCredentialsSecret(t *testing.T) {
 	}
 }
 
+func TestValidateRestoreCleanupChecksCredentialsOwnership(t *testing.T) {
+	ctx := context.Background()
+	spec := domain.NewSessionSpec(
+		domain.OperationRestore,
+		domain.SessionCommon{
+			SourceNamespace: "app", DestinationNamespace: "app", SessionNamespace: "sessions",
+		},
+		false,
+		domain.SessionWorkflowOptions{},
+	)
+
+	spec.Restore.DestinationPVC = domain.ObjectReference{Namespace: "app", Name: "data"}
+	spec.Restore.Backend = domain.BackupBackendS3
+	spec.Restore.Bucket = "backups"
+	spec.Restore.Name = "daily"
+
+	session := domain.NewSession("restore-cleanup-test", spec, metav1.Now().Time)
+
+	if err := session.Transition(
+		domain.PhaseWarmCopying,
+		"restoring",
+		metav1.Now().Time,
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := session.Transition(
+		domain.PhaseWarmCopied,
+		"restored",
+		metav1.Now().Time,
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := session.Transition(
+		domain.PhaseCompleted,
+		"completed",
+		metav1.Now().Time,
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	client := fake.NewClientset()
+
+	secret, err := kube.CreateBackupCredentialsSecret(
+		ctx, client, session.Spec.SessionNamespace, session.ID,
+		map[string][]byte{kube.BackupAccessKeyDataKey: []byte("access")},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	session.Spec.Restore.CredentialsSecret = domain.ObjectReference{
+		Namespace: secret.Namespace,
+		Name:      secret.Name,
+		UID:       secret.UID,
+	}
+
+	secret.Labels[kube.SessionKey] = "different-session"
+	if _, err := client.CoreV1().Secrets(secret.Namespace).Update(
+		ctx,
+		secret,
+		metav1.UpdateOptions{},
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	service := &Service{client: client, store: &memoryStore{}}
+
+	err = service.validateCleanupWorkflowForTest(ctx, session, CleanupOptions{Finalize: true})
+	if domain.CategoryOf(err) != domain.ErrorConflict {
+		t.Fatalf("restore cleanup validation category=%s error=%v", domain.CategoryOf(err), err)
+	}
+}
+
 func TestCleanupFindsCredentialsSecretMissingFromBackupCheckpoint(t *testing.T) {
 	ctx := context.Background()
 	session := completedBackupCleanupSession(t)
@@ -260,7 +335,6 @@ func completedBackupCleanupSession(t *testing.T) *domain.Session {
 		domain.SessionCommon{
 			SourceNamespace:  "app",
 			SessionNamespace: "sessions",
-			CreatedBy:        "test",
 		},
 
 		false,

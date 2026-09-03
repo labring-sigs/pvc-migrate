@@ -106,6 +106,10 @@ func (s *Service) validateTransferVolume(ctx context.Context, session *Session, 
 		return fmt.Errorf("source PV %s capacity changed; generate a new session", sourcePV.Name)
 	}
 
+	if err := kube.ValidateBoundVolumeCapacity(sourcePVC, sourcePV, nil); err != nil {
+		return err
+	}
+
 	consumers, err := activeConsumers(ctx, s.source.Kubernetes, sourcePVC.Namespace, sourcePVC.Name)
 	if err != nil {
 		return fmt.Errorf(
@@ -209,6 +213,14 @@ func (s *Service) validateDestinationVolume(
 			"destination PV %s capacity is smaller than the session request; refusing to copy",
 			destinationPV.Name,
 		)
+	}
+
+	if err := kube.ValidateBoundVolumeCapacity(
+		destinationPVC,
+		destinationPV,
+		&destinationCapacity,
+	); err != nil {
+		return err
 	}
 
 	return nil

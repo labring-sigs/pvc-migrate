@@ -6,8 +6,8 @@ import (
 	"github.com/spf13/cobra"
 )
 
-// addMoveLifecycle attaches lifecycle commands owned by cross-namespace PVC
-// move. Same-namespace rename has a separate command module.
+// addMoveLifecycle attaches lifecycle commands owned by cluster-scoped PVC
+// moves. Tenant-scoped rename has a separate command module.
 func (r *rootState) addMoveLifecycle(parent *cobra.Command) {
 	parent.AddCommand(
 		r.newMoveStatusCommand(),
@@ -90,6 +90,10 @@ func (r *rootState) newMoveResumeCommand() *cobra.Command {
 
 			if err := r.confirm(ctx, cmd, args[0]); err != nil {
 				return reportApprovalError(cmd, err)
+			}
+
+			if deferred, err := deferControllerExecution(ctx, cmd, runtime, session); deferred {
+				return err
 			}
 
 			if err := runtime.service.ResumeMove(ctx, session); err != nil {
@@ -249,7 +253,7 @@ func (r *rootState) newMoveCleanupCommand() *cobra.Command {
 			}
 
 			if options.DeleteSession {
-				return printDeletedSession(cmd, args[0])
+				return printDeletedSession(cmd, session)
 			}
 
 			return printSessionResult(cmd, runtime, session)

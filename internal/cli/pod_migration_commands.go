@@ -4,6 +4,7 @@ import (
 	"time"
 
 	"github.com/labring-sigs/pvc-migrate/internal/domain"
+	"github.com/labring-sigs/pvc-migrate/internal/kube"
 	"github.com/labring-sigs/pvc-migrate/internal/planner"
 	"github.com/spf13/cobra"
 )
@@ -301,11 +302,15 @@ func (r *rootState) newPodMigrationPlanCommand() *cobra.Command {
 			defer cancel()
 
 			if existing {
-				session, err := runtime.store.Get(ctx, r.global.sessionNamespace, flags.sessionID)
+				namespace := workflowNamespaceForCommand(r, cmd)
+
+				session, err := kube.GetSessionByType(
+					ctx, runtime.store, namespace, flags.sessionID, domain.SessionTypeMigratePod,
+				)
 				if err != nil {
 					return reportSessionLookupError(
 						cmd,
-						r.global.sessionNamespace,
+						namespace,
 						flags.sessionID,
 						err,
 					)
@@ -334,6 +339,16 @@ func (r *rootState) newPodMigrationPlanCommand() *cobra.Command {
 			if err != nil {
 				return err
 			}
+
+			options.SessionNamespace, options.TemporaryNamespace = r.controllerPlanNamespaces(
+				runtime,
+				domain.SessionTypeMigratePod,
+				options.SourceNamespace,
+				options.SourceNamespace,
+				options.TemporaryNamespace,
+				cmd.Flags().Changed("temporary-namespace"),
+			)
+			options.StagingNamespace = options.TemporaryNamespace
 
 			plan, err := runtime.planner.PlanPodMigration(ctx, options)
 			if err != nil {
@@ -371,6 +386,16 @@ func (r *rootState) runPodMigrateCommand(
 		return err
 	}
 
+	options.SessionNamespace, options.TemporaryNamespace = r.controllerPlanNamespaces(
+		runtime,
+		domain.SessionTypeMigratePod,
+		options.SourceNamespace,
+		options.SourceNamespace,
+		options.TemporaryNamespace,
+		cmd.Flags().Changed("temporary-namespace"),
+	)
+	options.StagingNamespace = options.TemporaryNamespace
+
 	plan, err := runtime.planner.PlanPodMigration(ctx, options)
 	if err != nil {
 		return reportPlanningError(cmd, err)
@@ -391,6 +416,10 @@ func (r *rootState) runPodMigrateCommand(
 	session, err := runtime.service.CreateSession(ctx, plan, false)
 	if err != nil {
 		return reportSessionCreationError(cmd, plan.SessionNamespace, plan.SessionID, err)
+	}
+
+	if deferred, err := deferControllerExecution(ctx, cmd, runtime, session); deferred {
+		return err
 	}
 
 	if err := runtime.service.MigratePod(ctx, session); err != nil {

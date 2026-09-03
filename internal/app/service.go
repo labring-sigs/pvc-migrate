@@ -128,6 +128,8 @@ func NewService(
 		config.Writer = io.Discard
 	}
 
+	config.Writer = kube.NewSynchronizedWriter(config.Writer)
+
 	if config.Logger == nil {
 		config.Logger = slog.New(slog.DiscardHandler)
 	}
@@ -233,7 +235,13 @@ func (s *Service) withSessionLock(
 	if session == nil {
 		return domain.NewError(domain.ErrorValidation, "session lock", "session is nil")
 	}
-	return s.withSessionIDLock(ctx, session.Spec.SessionNamespace, session.ID, fn)
+
+	return s.withSessionIDLock(
+		ctx,
+		session.Spec.SessionNamespace,
+		kube.LockIDForSession(s.store, session),
+		fn,
+	)
 }
 
 func (s *Service) CreateSession(
@@ -290,7 +298,7 @@ func (s *Service) CreateSession(
 	createErr := s.withSessionIDLock(
 		ctx,
 		plan.SessionSpec.SessionNamespace,
-		plan.SessionID,
+		kube.LockIDForSession(s.store, session),
 		func(lockedCtx context.Context) error {
 			if err := s.ensureSessionNamespaces(lockedCtx, plan, false); err != nil {
 				return err

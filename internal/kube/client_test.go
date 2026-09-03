@@ -159,6 +159,56 @@ func TestHasAPIResource(t *testing.T) {
 	}
 }
 
+func TestAvailableControllerWorkflowKindsSupportsPartialInstall(t *testing.T) {
+	client := fake.NewClientset()
+	discovery := testutil.MustType[*discoveryfake.FakeDiscovery](t, client.Discovery())
+	discovery.Resources = []*metav1.APIResourceList{{
+		GroupVersion: domain.SessionAPIVersion,
+		APIResources: []metav1.APIResource{
+			{Name: domain.MigrationResource},
+			{Name: domain.MigrationResource + "/status"},
+			{Name: domain.CopyResource},
+			{Name: domain.CopyResource + "/status"},
+		},
+	}}
+
+	kinds := AvailableControllerWorkflowKinds(discovery)
+	if len(kinds) != 2 || kinds[0] != "Migration" || kinds[1] != "Copy" {
+		t.Fatalf("available workflow kinds=%v", kinds)
+	}
+}
+
+func TestAvailableControllerWorkflowKindsRequiresStatusSubresource(t *testing.T) {
+	client := fake.NewClientset()
+	discovery := testutil.MustType[*discoveryfake.FakeDiscovery](t, client.Discovery())
+	discovery.Resources = []*metav1.APIResourceList{{
+		GroupVersion: domain.SessionAPIVersion,
+		APIResources: []metav1.APIResource{{Name: domain.MigrationResource}},
+	}}
+
+	if kinds := AvailableControllerWorkflowKinds(discovery); len(kinds) != 0 {
+		t.Fatalf("workflow without status subresource reported as available: %v", kinds)
+	}
+}
+
+func TestBackupRepositoryAvailableIsIndependentFromWorkflowKinds(t *testing.T) {
+	client := fake.NewClientset()
+	discovery := testutil.MustType[*discoveryfake.FakeDiscovery](t, client.Discovery())
+	discovery.Resources = []*metav1.APIResourceList{{
+		GroupVersion: domain.SessionAPIVersion,
+		APIResources: []metav1.APIResource{{Name: domain.BackupRepositoryResource}},
+	}}
+
+	if !BackupRepositoryAvailable(discovery) {
+		t.Fatal("BackupRepository resource was not detected")
+	}
+
+	discovery.Resources[0].APIResources = nil
+	if BackupRepositoryAvailable(discovery) {
+		t.Fatal("BackupRepository resource reported after removal")
+	}
+}
+
 func TestWaitForReadyErrorAndTimeout(t *testing.T) {
 	calls := 0
 	if err := WaitFor(

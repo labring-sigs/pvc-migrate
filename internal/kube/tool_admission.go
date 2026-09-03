@@ -345,22 +345,19 @@ func isToolQuotaResource(name corev1.ResourceName) bool {
 		resourceName == corev1.ResourcePersistentVolumeClaims
 }
 
-var toolPodQuotaResources = map[corev1.ResourceName]bool{
-	corev1.ResourcePods:                     true,
-	countPodsResource:                       true,
-	corev1.ResourceCPU:                      true,
-	corev1.ResourceMemory:                   true,
-	corev1.ResourceEphemeralStorage:         true,
-	corev1.ResourceRequestsCPU:              true,
-	corev1.ResourceRequestsMemory:           true,
-	corev1.ResourceRequestsEphemeralStorage: true,
-	corev1.ResourceLimitsCPU:                true,
-	corev1.ResourceLimitsMemory:             true,
-	corev1.ResourceLimitsEphemeralStorage:   true,
-}
-
 func isToolPodQuotaResource(name corev1.ResourceName) bool {
-	if toolPodQuotaResources[name] {
+	switch name {
+	case corev1.ResourcePods,
+		countPodsResource,
+		corev1.ResourceCPU,
+		corev1.ResourceMemory,
+		corev1.ResourceEphemeralStorage,
+		corev1.ResourceRequestsCPU,
+		corev1.ResourceRequestsMemory,
+		corev1.ResourceRequestsEphemeralStorage,
+		corev1.ResourceLimitsCPU,
+		corev1.ResourceLimitsMemory,
+		corev1.ResourceLimitsEphemeralStorage:
 		return true
 	}
 

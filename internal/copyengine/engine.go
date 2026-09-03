@@ -36,6 +36,7 @@ type Request struct {
 	IgnoreSizes               bool
 	NoCompress                bool
 	HelmTimeout               time.Duration
+	HelmValues                []string
 	HelmStringValues          []string
 	Writer                    io.Writer
 	Logger                    *slog.Logger

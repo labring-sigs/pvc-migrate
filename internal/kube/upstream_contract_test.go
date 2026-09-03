@@ -214,6 +214,8 @@ func TestUpstreamChartToolContract(t *testing.T) {
 		schedulingValues,
 		ToolComponentTolerationHelmValues(ToolComponentSSHD, toolNode)...,
 	)
+	identityValues := upstreamContractIdentityValues(t)
+	schedulingValues = append(schedulingValues, identityValues.StringValues...)
 
 	pullSecretValues, err := ToolImagePullSecretHelmValues(pullSecretResults)
 	if err != nil {
@@ -221,7 +223,10 @@ func TestUpstreamChartToolContract(t *testing.T) {
 	}
 
 	options := values.Options{
-		Values: ToolSecurityContextHelmValues(),
+		Values: append(
+			ToolSecurityContextHelmValues(),
+			identityValues.Values...,
+		),
 		StringValues: append(
 			append(append(imageValues, ZeroResourceHelmValues()...), pullSecretValues...),
 			schedulingValues...,
@@ -247,6 +252,8 @@ func TestUpstreamChartToolContract(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+
+	assertNoServiceAccountsRendered(t, files)
 
 	containers := upstreamToolContainers(t, files)
 
@@ -287,6 +294,8 @@ func TestUpstreamChartToolContract(t *testing.T) {
 		) {
 			t.Fatalf("%s imagePullSecrets=%v", component, secrets)
 		}
+
+		assertNoTokenServiceAccount(t, component, podSpecs[component])
 
 		if tolerations := podSpecs[component].Tolerations; !slices.Equal(
 			tolerations,
@@ -342,6 +351,22 @@ func TestUpstreamChartToolContract(t *testing.T) {
 
 	if !strings.Contains(containers["rclone"].Command[2], "rclone sync /data remote:bucket/") {
 		t.Fatalf("rclone command=%s", containers["rclone"].Command[2])
+	}
+}
+
+func upstreamContractIdentityValues(t *testing.T) HelmOverrides {
+	t.Helper()
+
+	transfer := TransferServiceAccountHelmValues()
+
+	rclone, err := ToolServiceAccountHelmValues(TransferServiceAccountName)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	return HelmOverrides{
+		Values:       append(transfer.Values, rclone.Values...),
+		StringValues: append(transfer.StringValues, rclone.StringValues...),
 	}
 }
 
@@ -722,6 +747,27 @@ func upstreamToolContainers(t *testing.T, files map[string]string) map[string]co
 	return containers
 }
 
+func assertNoServiceAccountsRendered(t *testing.T, files map[string]string) {
+	t.Helper()
+
+	for filename, content := range files {
+		if strings.TrimSpace(content) == "" {
+			continue
+		}
+
+		var header struct {
+			Kind string `json:"kind"`
+		}
+		if err := yaml.Unmarshal([]byte(content), &header); err != nil {
+			t.Fatalf("parse upstream manifest header %s: %v", filename, err)
+		}
+
+		if header.Kind == "ServiceAccount" {
+			t.Fatalf("upstream chart unexpectedly rendered ServiceAccount %s", filename)
+		}
+	}
+}
+
 func upstreamToolPodSpecs(t *testing.T, files map[string]string) map[string]corev1.PodSpec {
 	t.Helper()
 
@@ -795,6 +841,23 @@ func assertRootToolSecurityContext(
 		context.RunAsGroup == nil ||
 		*context.RunAsGroup != 0 {
 		t.Fatalf("%s securityContext=%#v", component, context)
+	}
+}
+
+func assertNoTokenServiceAccount(t *testing.T, component string, podSpec corev1.PodSpec) {
+	t.Helper()
+
+	if podSpec.ServiceAccountName != TransferServiceAccountName {
+		t.Fatalf(
+			"%s serviceAccountName=%q, want %q",
+			component,
+			podSpec.ServiceAccountName,
+			TransferServiceAccountName,
+		)
+	}
+
+	if podSpec.AutomountServiceAccountToken != nil && *podSpec.AutomountServiceAccountToken {
+		t.Fatalf("%s explicitly enables ServiceAccount token automount", component)
 	}
 }
 

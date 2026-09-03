@@ -12,7 +12,11 @@ import (
 
 func (s *Service) verifyShrinkUsage(ctx context.Context, session *domain.Session) error {
 	if session == nil {
-		return domain.NewError(domain.ErrorValidation, "source usage check", "session is nil")
+		return domain.NewError(
+			domain.ErrorValidation,
+			domain.ErrorOperationSourceUsageCheck,
+			"session is nil",
+		)
 	}
 
 	options := session.Spec.WorkflowOptions()
@@ -41,7 +45,7 @@ func (s *Service) verifyShrinkUsage(ctx context.Context, session *domain.Session
 		if s.config.VolumeUsageReader == nil {
 			return domain.NewError(
 				domain.ErrorPrecondition,
-				"source usage check",
+				domain.ErrorOperationSourceUsageCheck,
 				fmt.Sprintf(
 					"PVC %s/%s has no trusted storage-backend CRD usage reader; pass --skip-source-usage-check only after independently verifying that its data fits destination capacity %s",
 					volume.SourcePVC.Namespace,
@@ -58,7 +62,7 @@ func (s *Service) verifyShrinkUsage(ctx context.Context, session *domain.Session
 		if err != nil {
 			return domain.WrapError(
 				domain.ErrorPrecondition,
-				"source usage check",
+				domain.ErrorOperationSourceUsageCheck,
 				fmt.Sprintf(
 					"PVC %s/%s usage could not be read from its storage backend CRD; pass --skip-source-usage-check only after independently verifying that its data fits",
 					volume.SourcePVC.Namespace,
@@ -71,7 +75,7 @@ func (s *Service) verifyShrinkUsage(ctx context.Context, session *domain.Session
 		if usage.UsedBytes < 0 {
 			return domain.NewError(
 				domain.ErrorPrecondition,
-				"source usage check",
+				domain.ErrorOperationSourceUsageCheck,
 				fmt.Sprintf(
 					"PVC %s/%s storage backend returned invalid used bytes %d",
 					volume.SourcePVC.Namespace,
@@ -92,7 +96,7 @@ func (s *Service) verifyShrinkUsage(ctx context.Context, session *domain.Session
 			); sourcePath != domain.VolumeRootPath {
 				return domain.NewError(
 					domain.ErrorConflict,
-					"source usage check",
+					domain.ErrorOperationSourceUsageCheck,
 					fmt.Sprintf(
 						"PVC %s/%s whole-volume usage is %d bytes according to %s, above destination capacity %s; this cannot prove that selected source directory %q fits; abort this session and create a new one with a larger destination, or use --skip-source-usage-check only after independently measuring the selected data",
 						volume.SourcePVC.Namespace,
@@ -107,7 +111,7 @@ func (s *Service) verifyShrinkUsage(ctx context.Context, session *domain.Session
 
 			return domain.NewError(
 				domain.ErrorConflict,
-				"source usage check",
+				domain.ErrorOperationSourceUsageCheck,
 				fmt.Sprintf(
 					"PVC %s/%s uses %d bytes according to %s, above destination capacity %s; increase --destination-capacity or abort this shrink",
 					volume.SourcePVC.Namespace,

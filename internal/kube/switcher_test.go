@@ -420,6 +420,26 @@ func TestValidateActivePVCRequestRejectsCapacityDrift(t *testing.T) {
 	}
 }
 
+func TestVerifyBindingRejectsIncompleteVolumeExpansion(t *testing.T) {
+	switcher, _, volume, _ := switcherFixture(t)
+
+	pvc, err := switcher.client.CoreV1().PersistentVolumeClaims("system").
+		Get(t.Context(), "data-migrated", metav1.GetOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	pvc.Spec.Resources.Requests = corev1.ResourceList{
+		corev1.ResourceStorage: resource.MustParse("3Gi"),
+	}
+
+	err = switcher.verifyBinding(t.Context(), pvc, volume.DestinationPV)
+	if domain.CategoryOf(err) != domain.ErrorConflict ||
+		!strings.Contains(err.Error(), "volume expansion is incomplete") {
+		t.Fatalf("category=%s error=%v", domain.CategoryOf(err), err)
+	}
+}
+
 func TestRollbackVolumeRetainsDestinationBeforeDeletingActivePVC(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()

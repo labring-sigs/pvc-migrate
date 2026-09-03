@@ -74,6 +74,53 @@ func TestCheckNamespaceResourcePoliciesReadsOneSnapshot(t *testing.T) {
 	}
 }
 
+func TestNamespacePolicyCheckMessagesDistinguishNamespaces(t *testing.T) {
+	planner := New(kubernetesfake.NewClientset(), nil)
+	plan := &domain.MigrationPlan{Ready: true}
+	estimate := domain.ResourceEstimate{
+		StorageRequests:    "0",
+		Pods:               1,
+		ByStorageClass:     map[string]string{},
+		PVCsByStorageClass: map[string]int{},
+	}
+
+	for _, namespace := range []string{"source", "destination"} {
+		planner.checkNamespaceResourcePolicies(
+			context.Background(),
+			plan,
+			namespace,
+			nil,
+			estimate,
+		)
+	}
+
+	if len(plan.Checks) != 4 {
+		t.Fatalf("policy checks=%#v", plan.Checks)
+	}
+
+	for _, namespace := range []string{"source", "destination"} {
+		for _, name := range []domain.CheckName{limitRangeCheckName, resourceQuotaCheckName} {
+			found := false
+			for _, check := range plan.Checks {
+				if check.Name == name &&
+					strings.Contains(check.Message, "namespace "+namespace+":") {
+					found = true
+					break
+				}
+			}
+
+			if !found {
+				t.Fatalf(
+					"check %q does not identify namespace %q: %#v",
+					name,
+					namespace,
+					plan.Checks,
+				)
+			}
+		}
+	}
+}
+
 func TestCheckQuotasAllowsExactCapacityAndReportsAllExcess(t *testing.T) {
 	quota := &corev1.ResourceQuota{
 		ObjectMeta: metav1.ObjectMeta{Namespace: "stage", Name: "bounded"},

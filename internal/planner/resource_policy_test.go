@@ -54,7 +54,7 @@ func TestMigrationNamespaceResourceEstimatesUseSerializedChartAndConcurrentProbe
 	}
 
 	if estimate.Jobs != 1 || estimate.Deployments != 1 || estimate.Services != 1 ||
-		estimate.Secrets != 3 || estimate.ServiceAccounts != 2 {
+		estimate.Secrets != 3 || estimate.ServiceAccounts != 1 {
 		t.Fatalf("chart resources were scaled by volume count: %#v", estimate)
 	}
 

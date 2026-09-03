@@ -3,7 +3,6 @@ package backup
 import (
 	"context"
 	"errors"
-	"os"
 	"time"
 
 	"github.com/labring-sigs/pvc-migrate/internal/domain"
@@ -17,15 +16,32 @@ import (
 )
 
 const (
-	restoreLockAnnotation       = "pvc-migrate.io/backup-restore-lock"
-	restoreLockExpiryAnnotation = "pvc-migrate.io/backup-restore-lock-expires-at"
+	restoreLockAnnotation       = kube.MetadataDomain + "/backup-restore-lock"
+	restoreLockExpiryAnnotation = kube.MetadataDomain + "/backup-restore-lock-expires-at"
 )
 
 func pvmigrateRestoreRequest(
 	req Request,
-	configPath string,
-	helmValues []string,
+	rcloneConfig string,
+	helmValues *kube.HelmOverrides,
 ) (pvmigrate.Restore, error) {
+	if err := requireS3RepositoryBackend(req.Store); err != nil {
+		return pvmigrate.Restore{}, err
+	}
+
+	configValue, err := rcloneConfigHelmValue(rcloneConfig)
+	if err != nil {
+		return pvmigrate.Restore{}, err
+	}
+
+	overrides := kube.HelmOverrides{}
+	if helmValues != nil {
+		overrides.Values = append([]string(nil), helmValues.Values...)
+		overrides.StringValues = append([]string(nil), helmValues.StringValues...)
+	}
+
+	storeConfig := req.Store.Config()
+
 	imageValues, err := kube.ToolImageHelmValues(req.ToolImage)
 	if err != nil {
 		return pvmigrate.Restore{}, err
@@ -39,22 +55,30 @@ func pvmigrateRestoreRequest(
 			Namespace:      req.Namespace,
 			Name:           req.PVCName,
 		},
-		Backend:          "s3",
-		Bucket:           req.Store.Config().Bucket,
-		Name:             req.Store.Config().Name,
+		Backend:          string(domain.BackupBackendS3),
+		Bucket:           storeConfig.Bucket,
+		Name:             storeConfig.Name,
 		Path:             req.Path,
-		Prefix:           req.Store.Config().Prefix,
-		RcloneConfigFile: configPath,
+		Prefix:           storeConfig.Prefix,
+		RcloneConfigFile: upstreamRawConfigSentinel(),
 		Remote:           req.Store.RemotePath(),
 		RcloneExtraArgs:  rclonePreserveLinksArgs,
 		// inspectPVC enforces the requested mounted policy immediately before
 		// launch and excludes terminal Pods that upstream still counts.
 		IgnoreMounted:         true,
 		DeleteExtraneousFiles: req.DeleteExtraneousFiles,
-		HelmValues:            kube.ToolSecurityContextHelmValues(),
+		HelmValues: append(
+			kube.ToolSecurityContextHelmValues(),
+			overrides.Values...,
+		),
+		// Keep the generated credential-bearing config last so generic scheduling
+		// overrides cannot replace the store selected for this operation.
 		HelmStringValues: append(
-			append(kube.ZeroResourceHelmValues(), imageValues...),
-			helmValues...,
+			append(
+				append(kube.ZeroResourceHelmValues(), imageValues...),
+				overrides.StringValues...,
+			),
+			configValue,
 		),
 		HelmTimeout:    toolHelmTimeout(req.HelmTimeout),
 		Writer:         req.Writer,
@@ -220,37 +244,25 @@ func runRestore(
 		return err
 	}
 
-	helmValues, err := transferToolHelmValues(leaseCtx, client, probeResult)
+	helmValues, err := transferToolHelmValues(
+		leaseCtx,
+		client,
+		probeResult,
+		req.Namespace,
+		req.ToolServiceAccountName,
+	)
 	if err != nil {
 		return err
-	}
-
-	configFile, err := os.CreateTemp("", "pvc-migrate-s3-*.conf")
-	if err != nil {
-		return domain.WrapError(domain.ErrorInternal, "restore", "create temporary S3 config", err)
-	}
-
-	configPath := configFile.Name()
-	defer os.Remove(configPath)
-
-	if err := configFile.Chmod(0o600); err != nil {
-		configFile.Close()
-		return domain.WrapError(domain.ErrorInternal, "restore", "protect temporary S3 config", err)
-	}
-
-	if _, err := configFile.WriteString(req.Store.RcloneConfig()); err != nil {
-		configFile.Close()
-		return domain.WrapError(domain.ErrorInternal, "restore", "write temporary S3 config", err)
-	}
-
-	if err := configFile.Close(); err != nil {
-		return domain.WrapError(domain.ErrorInternal, "restore", "close temporary S3 config", err)
 	}
 
 	toolRequest := req
 	toolRequest.ID = toolOperationID(holder)
 
-	restoreRequest, err := pvmigrateRestoreRequest(toolRequest, configPath, helmValues)
+	restoreRequest, err := pvmigrateRestoreRequest(
+		toolRequest,
+		req.Store.RcloneConfig(),
+		&helmValues,
+	)
 	if err != nil {
 		return err
 	}

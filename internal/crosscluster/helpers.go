@@ -34,7 +34,7 @@ func capacitySmaller(destination, source string) bool {
 
 func normalizeStrategies(in []string) []string {
 	if len(in) == 0 {
-		return []string{"local"}
+		return []string{domain.StrategyLocal}
 	}
 	return append([]string(nil), in...)
 }
@@ -42,7 +42,7 @@ func normalizeStrategies(in []string) []string {
 func validateStrategies(in []string) error {
 	for _, v := range in {
 		switch v {
-		case "local", "loadbalancer", "nodeport":
+		case domain.StrategyLocal, domain.StrategyLoadBalancer, domain.StrategyNodePort:
 		default:
 			return fmt.Errorf(
 				"strategy %q is not supported for cross-cluster copy; use local, loadbalancer, or nodeport",

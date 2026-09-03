@@ -10,6 +10,7 @@ import (
 	"github.com/labring-sigs/pvc-migrate/internal/domain"
 	"github.com/labring-sigs/pvc-migrate/internal/testutil"
 	corev1 "k8s.io/api/core/v1"
+	storagev1 "k8s.io/api/storage/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -32,6 +33,9 @@ func reserveSourceObjects() (*corev1.PersistentVolumeClaim, *corev1.PersistentVo
 		},
 		Spec: corev1.PersistentVolumeClaimSpec{
 			VolumeName: "pv-source", StorageClassName: &storageClass, VolumeMode: &mode,
+			Resources: corev1.VolumeResourceRequirements{Requests: corev1.ResourceList{
+				corev1.ResourceStorage: resource.MustParse("1Gi"),
+			}},
 		},
 		Status: corev1.PersistentVolumeClaimStatus{Phase: corev1.ClaimBound},
 	}
@@ -42,6 +46,9 @@ func reserveSourceObjects() (*corev1.PersistentVolumeClaim, *corev1.PersistentVo
 			ResourceVersion: "20",
 		},
 		Spec: corev1.PersistentVolumeSpec{
+			Capacity: corev1.ResourceList{
+				corev1.ResourceStorage: resource.MustParse("1Gi"),
+			},
 			PersistentVolumeReclaimPolicy: corev1.PersistentVolumeReclaimDelete,
 			ClaimRef: &corev1.ObjectReference{
 				Namespace: "app",
@@ -93,10 +100,11 @@ func reserveTestSession() *domain.Session {
 						Namespace: "system",
 						Name:      "data-migrated",
 					},
-					Capacity:     "1Gi",
-					StorageClass: "fast",
-					AccessModes:  []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce},
-					VolumeMode:   mode,
+					Capacity:       "1Gi",
+					SourceCapacity: "1Gi",
+					StorageClass:   "fast",
+					AccessModes:    []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce},
+					VolumeMode:     mode,
 				},
 			},
 		}, false, domain.SessionWorkflowOptions{TargetNode: "node-b"}),
@@ -218,6 +226,134 @@ func TestReserveVolumeDryRunRejectsForeignSourceOwnership(t *testing.T) {
 
 	if pvUpdateCount(client) != 0 {
 		t.Fatalf("foreign source ownership caused PV updates: %d", pvUpdateCount(client))
+	}
+}
+
+func TestReserveVolumeLiveRejectsStorageTopologyDriftBeforeOwnership(t *testing.T) {
+	ctx := context.Background()
+	sourcePVC, sourcePV := reserveSourceObjects()
+	session := reserveTestSession()
+	targetNode := &corev1.Node{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: session.Spec.WorkflowOptions().TargetNode,
+			Labels: map[string]string{
+				corev1.LabelHostname:     session.Spec.WorkflowOptions().TargetNode,
+				corev1.LabelTopologyZone: "zone-b",
+			},
+		},
+		Status: corev1.NodeStatus{Conditions: []corev1.NodeCondition{{
+			Type: corev1.NodeReady, Status: corev1.ConditionTrue,
+		}}},
+	}
+	storageClass := &storagev1.StorageClass{
+		ObjectMeta: metav1.ObjectMeta{Name: session.Spec.Volumes[0].StorageClass},
+		AllowedTopologies: []corev1.TopologySelectorTerm{{
+			MatchLabelExpressions: []corev1.TopologySelectorLabelRequirement{{
+				Key: corev1.LabelTopologyZone, Values: []string{"zone-a"},
+			}},
+		}},
+	}
+	client := fake.NewClientset(sourcePVC, sourcePV, targetNode, storageClass)
+
+	err := NewReserver(client).ReserveVolume(
+		ctx,
+		session,
+		&session.Spec.Volumes[0],
+		&session.Status.Volumes[0],
+		false,
+	)
+	if domain.CategoryOf(err) != domain.ErrorPrecondition ||
+		!strings.Contains(err.Error(), "allowedTopologies") {
+		t.Fatalf("category=%s error=%v", domain.CategoryOf(err), err)
+	}
+
+	currentPVC, getErr := client.CoreV1().PersistentVolumeClaims(sourcePVC.Namespace).
+		Get(ctx, sourcePVC.Name, metav1.GetOptions{})
+	if getErr != nil {
+		t.Fatal(getErr)
+	}
+
+	if currentPVC.Annotations[SessionKey] != "" || pvUpdateCount(client) != 0 {
+		t.Fatalf("topology failure mutated source ownership: pvc=%#v", currentPVC.Annotations)
+	}
+}
+
+func TestReserveVolumeLiveRejectsSourcePVCapacityDriftBeforeOwnership(t *testing.T) {
+	ctx := context.Background()
+	sourcePVC, sourcePV := reserveSourceObjects()
+	sourcePV.Spec.Capacity[corev1.ResourceStorage] = resource.MustParse("2Gi")
+	session := reserveTestSession()
+	client := fake.NewClientset(sourcePVC, sourcePV)
+
+	err := NewReserver(client).ReserveVolume(
+		ctx,
+		session,
+		&session.Spec.Volumes[0],
+		&session.Status.Volumes[0],
+		false,
+	)
+	if domain.CategoryOf(err) != domain.ErrorConflict ||
+		!strings.Contains(err.Error(), "capacity changed after planning") {
+		t.Fatalf("category=%s error=%v", domain.CategoryOf(err), err)
+	}
+
+	currentPVC, getErr := client.CoreV1().PersistentVolumeClaims(sourcePVC.Namespace).
+		Get(ctx, sourcePVC.Name, metav1.GetOptions{})
+	if getErr != nil {
+		t.Fatal(getErr)
+	}
+
+	if currentPVC.Annotations[SessionKey] != "" || pvUpdateCount(client) != 0 {
+		t.Fatalf("capacity drift mutated source ownership: pvc=%#v", currentPVC.Annotations)
+	}
+}
+
+func TestReserveVolumeLiveRejectsUndersizedBoundDestinationBeforeOwnership(t *testing.T) {
+	ctx := context.Background()
+	sourcePVC, sourcePV := reserveSourceObjects()
+	session := reserveTestSession()
+	volume := &session.Spec.Volumes[0]
+	required := resource.MustParse(volume.Capacity)
+	destinationPVC := destinationPVCForReservation(session, volume, required)
+	destinationPVC.UID = types.UID("destination-pvc-uid")
+	destinationPVC.Spec.VolumeName = "pv-destination"
+	destinationPVC.Status.Phase = corev1.ClaimBound
+	destinationPV := &corev1.PersistentVolume{
+		ObjectMeta: metav1.ObjectMeta{Name: "pv-destination", UID: "destination-pv-uid"},
+		Spec: corev1.PersistentVolumeSpec{
+			Capacity: corev1.ResourceList{
+				corev1.ResourceStorage: resource.MustParse("512Mi"),
+			},
+			ClaimRef: &corev1.ObjectReference{
+				Namespace: destinationPVC.Namespace,
+				Name:      destinationPVC.Name,
+				UID:       destinationPVC.UID,
+			},
+		},
+	}
+	client := fake.NewClientset(sourcePVC, sourcePV, destinationPVC, destinationPV)
+
+	err := NewReserver(client).ReserveVolume(
+		ctx,
+		session,
+		volume,
+		&session.Status.Volumes[0],
+		false,
+	)
+	if domain.CategoryOf(err) != domain.ErrorPrecondition ||
+		!strings.Contains(err.Error(), "currently provides 512Mi") ||
+		!strings.Contains(err.Error(), "volume expansion is incomplete") {
+		t.Fatalf("category=%s error=%v", domain.CategoryOf(err), err)
+	}
+
+	currentPVC, getErr := client.CoreV1().PersistentVolumeClaims(sourcePVC.Namespace).
+		Get(ctx, sourcePVC.Name, metav1.GetOptions{})
+	if getErr != nil {
+		t.Fatal(getErr)
+	}
+
+	if currentPVC.Annotations[SessionKey] != "" || pvUpdateCount(client) != 0 {
+		t.Fatalf("undersized destination mutated source ownership: pvc=%#v", currentPVC.Annotations)
 	}
 }
 
@@ -641,6 +777,9 @@ func TestReserveVolumeCleansStaleReservationPodForBoundDestination(t *testing.T)
 	destinationPV := &corev1.PersistentVolume{
 		ObjectMeta: metav1.ObjectMeta{Name: "pv-destination", UID: "destination-pv-uid"},
 		Spec: corev1.PersistentVolumeSpec{
+			Capacity: corev1.ResourceList{
+				corev1.ResourceStorage: resource.MustParse("1Gi"),
+			},
 			PersistentVolumeReclaimPolicy: corev1.PersistentVolumeReclaimDelete,
 			ClaimRef: &corev1.ObjectReference{
 				Namespace: destinationPVC.Namespace,
@@ -992,6 +1131,9 @@ func TestReserveVolumeRejectsBoundDestinationTopologyAndClaimRefConflicts(t *tes
 					UID:  types.UID("destination-pv-uid"),
 				},
 				Spec: corev1.PersistentVolumeSpec{
+					Capacity: corev1.ResourceList{
+						corev1.ResourceStorage: resource.MustParse("1Gi"),
+					},
 					PersistentVolumeReclaimPolicy: corev1.PersistentVolumeReclaimDelete,
 					ClaimRef: &corev1.ObjectReference{
 						Namespace: destinationPVC.Namespace,

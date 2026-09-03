@@ -8,6 +8,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/labring-sigs/pvc-migrate/internal/parallel"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
@@ -216,7 +217,8 @@ func resolveExistingPVCAdmissionState(
 	}
 
 	resolved := append([]PVCAdmissionChange(nil), changes...)
-	for index := range resolved {
+	errors := make([]error, len(resolved))
+	parallel.For(len(resolved), func(index int) {
 		change := &resolved[index]
 		change.RequestedVolumeAttributesClassNames = uniqueNonEmptyStrings(
 			change.RequestedVolumeAttributesClassNames,
@@ -227,7 +229,7 @@ func resolveExistingPVCAdmissionState(
 		)
 		if !change.Existing ||
 			(change.ExistingUID == "" && !resolveVolumeAttributesClasses) {
-			continue
+			return
 		}
 
 		pvc, err := client.CoreV1().PersistentVolumeClaims(change.Namespace).Get(
@@ -236,20 +238,24 @@ func resolveExistingPVCAdmissionState(
 			metav1.GetOptions{},
 		)
 		if err != nil {
-			return nil, fmt.Errorf(
+			errors[index] = fmt.Errorf(
 				"read existing PVC %s/%s for quota projection: %w",
 				change.Namespace,
 				change.Name,
 				err,
 			)
+
+			return
 		}
 
 		if change.ExistingUID != "" && pvc.UID != change.ExistingUID {
-			return nil, fmt.Errorf(
+			errors[index] = fmt.Errorf(
 				"existing PVC %s/%s UID changed while checking quota",
 				change.Namespace,
 				change.Name,
 			)
+
+			return
 		}
 
 		if resolveStorage {
@@ -261,6 +267,12 @@ func resolveExistingPVCAdmissionState(
 
 		if resolveVolumeAttributesClasses {
 			change.ExistingVolumeAttributesClassNames = referencedVolumeAttributesClassNames(pvc)
+		}
+	})
+
+	for _, err := range errors {
+		if err != nil {
+			return nil, err
 		}
 	}
 

@@ -28,7 +28,7 @@ func TestPlanRejectsMixedOfflineAndRealtimeInputs(t *testing.T) {
 	tests := []struct {
 		name    string
 		options planOptions
-		check   string
+		check   domain.CheckName
 	}{
 		{
 			name: "offline pod selection",
@@ -1220,7 +1220,11 @@ func TestPlanRejectsUnschedulableTopologyAndBlockVolumes(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	for _, checkName := range []string{"target-node", "storage-topology", "volume-mode"} {
+	for _, checkName := range []domain.CheckName{
+		domain.CheckNameTargetNode,
+		domain.CheckNameStorageTopology,
+		domain.CheckNameVolumeMode,
+	} {
 		if !hasFailedCheck(plan, checkName) {
 			t.Fatalf("failed check %q missing: %#v", checkName, plan.Checks)
 		}

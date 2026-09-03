@@ -274,7 +274,7 @@ func TestPVMigrateResourceEstimateMatchesStrategyTopology(t *testing.T) {
 			want: domain.ResourceEstimate{
 				Pods: 2, NotTerminatingPods: 2, Jobs: 1,
 				Deployments: 1, ReplicaSets: 1, Services: 1,
-				Endpoints: 1, EndpointSlices: 1, Secrets: 3, ServiceAccounts: 2,
+				Endpoints: 1, EndpointSlices: 1, Secrets: 3, ServiceAccounts: 1,
 			},
 		},
 		{
@@ -289,7 +289,7 @@ func TestPVMigrateResourceEstimateMatchesStrategyTopology(t *testing.T) {
 				Pods: 2, NotTerminatingPods: 2, Jobs: 1,
 				Deployments: 1, ReplicaSets: 1, Services: 1,
 				ServiceNodePorts: 1, ServiceLoadBalancers: 1,
-				Endpoints: 1, EndpointSlices: 1, Secrets: 4, ServiceAccounts: 2,
+				Endpoints: 1, EndpointSlices: 1, Secrets: 4, ServiceAccounts: 1,
 			},
 		},
 		{
@@ -299,7 +299,7 @@ func TestPVMigrateResourceEstimateMatchesStrategyTopology(t *testing.T) {
 			destinationSide: true,
 			want: domain.ResourceEstimate{
 				Pods: 2, NotTerminatingPods: 2, Deployments: 2, ReplicaSets: 2, Services: 2,
-				Endpoints: 2, EndpointSlices: 2, Secrets: 4, ServiceAccounts: 2,
+				Endpoints: 2, EndpointSlices: 2, Secrets: 4, ServiceAccounts: 1,
 			},
 		},
 		{

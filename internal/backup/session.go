@@ -12,6 +12,8 @@ import (
 	"github.com/labring-sigs/pvc-migrate/internal/kube"
 	"github.com/labring-sigs/pvc-migrate/internal/objectstore"
 	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes"
 )
 
@@ -64,7 +66,6 @@ func buildBackupSession(
 			SourceNamespace:  req.Namespace,
 			SessionNamespace: req.SessionNamespace,
 			Volumes:          nil,
-			CreatedBy:        "pvc-migrate",
 		},
 
 		req.Online,
@@ -83,18 +84,208 @@ func buildBackupSession(
 		APIVersion: "v1", Kind: "PersistentVolume", Name: pv.Name, UID: pv.UID,
 	}
 	spec.Backup.Path = req.Path
-	spec.Backup.Backend = "s3"
-	spec.Backup.Bucket = req.Store.Config().Bucket
-	spec.Backup.Prefix = req.Store.Config().Prefix
 	spec.Backup.Name = req.Store.Config().Name
-	spec.Backup.Provider = req.Store.Config().Provider
-	spec.Backup.Endpoint = req.Store.Config().Endpoint
-	spec.Backup.Region = req.Store.Config().Region
-	spec.Backup.AllowInsecureEndpoint = req.Store.Config().AllowInsecureEndpoint
-	spec.Backup.ServerSideEncryption = req.Store.Config().ServerSideEncryption
-	spec.Backup.SSEKMSKeyID = req.Store.Config().SSEKMSKeyID
+	spec.Backup.BackupRepository = strings.TrimSpace(req.BackupRepository)
+
+	spec.Backup.BackupRepositoryNamespace = strings.TrimSpace(req.BackupRepositoryNamespace)
+	if spec.Backup.BackupRepository != "" && spec.Backup.BackupRepositoryNamespace == "" {
+		spec.Backup.BackupRepositoryNamespace = req.Namespace
+	}
+
+	if spec.Backup.BackupRepository == "" {
+		spec.Backup.Backend = domain.BackupBackendS3
+		cfg := req.Store.Config()
+		spec.Backup.Bucket = cfg.Bucket
+		spec.Backup.Prefix = cfg.Prefix
+		spec.Backup.Provider = cfg.Provider
+		spec.Backup.Endpoint = cfg.Endpoint
+		spec.Backup.Region = cfg.Region
+		spec.Backup.AllowInsecureEndpoint = cfg.AllowInsecureEndpoint
+		spec.Backup.ServerSideEncryption = cfg.ServerSideEncryption
+		spec.Backup.SSEKMSKeyID = cfg.SSEKMSKeyID
+	}
 
 	return domain.NewSession(id, spec, time.Now()), nil
+}
+
+// Submit creates the durable backup session and persists its object-store
+// credentials in the per-session Secret. The transfer itself is intentionally
+// separate so a controller can acknowledge the CRD and execute asynchronously.
+func Submit(
+	ctx context.Context,
+	client kubernetes.Interface,
+	req Request,
+	expectedPVCUID, expectedPVUID string,
+) (*domain.Session, error) {
+	if req.SessionStore == nil {
+		return nil, domain.NewError(
+			domain.ErrorValidation,
+			"backup session",
+			"session store is required",
+		)
+	}
+
+	session, err := prepareBackupSession(ctx, client, req, expectedPVCUID, expectedPVUID)
+	if err != nil {
+		return nil, err
+	}
+
+	err = withBackupSessionLock(ctx, req, session, func(lockedCtx context.Context) error {
+		if err := req.SessionStore.Create(lockedCtx, session); err != nil {
+			return err
+		}
+
+		if strings.TrimSpace(req.BackupRepository) != "" {
+			// Controller mode resolves credentials from the referenced repository.
+			// Never materialize repository credentials in a workflow-owned Secret.
+			if session.Backend != kube.SessionBackendCRD {
+				return domain.NewError(
+					domain.ErrorPrecondition,
+					"backup credentials",
+					"BackupRepository requires a controller-backed workflow",
+				)
+			}
+
+			return nil
+		}
+
+		return persistBackupCredentials(lockedCtx, client, req, session)
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	return session, nil
+}
+
+func prepareBackupSession(
+	ctx context.Context,
+	client kubernetes.Interface,
+	req Request,
+	expectedPVCUID, expectedPVUID string,
+) (*domain.Session, error) {
+	pvc, pv, err := verifyPVCIdentity(
+		ctx,
+		client,
+		req.Namespace,
+		req.PVCName,
+		expectedPVCUID,
+		expectedPVUID,
+	)
+	if err != nil {
+		return nil, err
+	}
+
+	return buildBackupSession(req, pvc, pv)
+}
+
+// SubmitRestore creates a durable restore workflow and stores its object-store
+// credentials in a Secret. The controller can then execute the transfer with
+// the same request contract as the synchronous CLI.
+func SubmitRestore(
+	ctx context.Context,
+	client kubernetes.Interface,
+	req Request,
+	plan Plan,
+) (*domain.Session, error) {
+	if req.SessionStore == nil || req.Store == nil {
+		return nil, domain.NewError(
+			domain.ErrorValidation,
+			"restore session",
+			"session store and object store are required",
+		)
+	}
+
+	id := req.ID
+	if id == "" {
+		generated, err := domain.NewSessionID(time.Now())
+		if err != nil {
+			return nil, err
+		}
+
+		id = generated
+	}
+
+	if err := domain.ValidateSessionID(id); err != nil {
+		return nil, err
+	}
+
+	cfg := req.Store.Config()
+	spec := domain.NewSessionSpec(
+		domain.OperationRestore,
+		domain.SessionCommon{
+			SourceNamespace:      req.Namespace,
+			DestinationNamespace: req.Namespace,
+			SessionNamespace:     req.SessionNamespace,
+		},
+		false,
+		domain.SessionWorkflowOptions{
+			ToolImage:        req.ToolImage,
+			DeleteExtraneous: req.DeleteExtraneousFiles,
+		},
+	)
+	spec.Restore.DestinationPVC = domain.ObjectReference{
+		APIVersion: "v1",
+		Kind:       "PersistentVolumeClaim",
+		Namespace:  req.Namespace,
+		Name:       req.PVCName,
+		UID:        types.UID(plan.PVCUID),
+	}
+	spec.Restore.Path = req.Path
+
+	spec.Restore.Name = cfg.Name
+	spec.Restore.BackupRepository = strings.TrimSpace(req.BackupRepository)
+
+	spec.Restore.BackupRepositoryNamespace = strings.TrimSpace(req.BackupRepositoryNamespace)
+	if spec.Restore.BackupRepository != "" && spec.Restore.BackupRepositoryNamespace == "" {
+		spec.Restore.BackupRepositoryNamespace = req.Namespace
+	}
+
+	if spec.Restore.BackupRepository == "" {
+		spec.Restore.Backend = domain.BackupBackendS3
+		spec.Restore.Bucket = cfg.Bucket
+		spec.Restore.Prefix = cfg.Prefix
+		spec.Restore.Provider = cfg.Provider
+		spec.Restore.Endpoint = cfg.Endpoint
+		spec.Restore.Region = cfg.Region
+		spec.Restore.AllowInsecureEndpoint = cfg.AllowInsecureEndpoint
+		spec.Restore.ServerSideEncryption = cfg.ServerSideEncryption
+		spec.Restore.SSEKMSKeyID = cfg.SSEKMSKeyID
+	}
+
+	spec.Restore.CreatePVC = req.CreatePVC
+	spec.Restore.DestinationStorageClass = req.DestinationStorageClass
+	spec.Restore.DestinationAccessMode = req.DestinationAccessMode
+	spec.Restore.DestinationCapacity = req.DestinationCapacity
+	spec.Restore.TargetNode = req.TargetNode
+	spec.Restore.AllowMounted = req.AllowMounted
+	spec.Restore.DeleteExtraneous = req.DeleteExtraneousFiles
+	session := domain.NewSession(id, spec, time.Now())
+
+	err := withBackupSessionLock(ctx, req, session, func(lockedCtx context.Context) error {
+		if err := req.SessionStore.Create(lockedCtx, session); err != nil {
+			return err
+		}
+
+		if strings.TrimSpace(req.BackupRepository) != "" {
+			if session.Backend != kube.SessionBackendCRD {
+				return domain.NewError(
+					domain.ErrorPrecondition,
+					"restore credentials",
+					"BackupRepository requires a controller-backed workflow",
+				)
+			}
+
+			return nil
+		}
+
+		return persistRestoreCredentials(lockedCtx, client, req, session)
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	return session, nil
 }
 
 func persistBackupCredentials(
@@ -123,6 +314,7 @@ func persistBackupCredentials(
 			kube.BackupSecretKeyDataKey:    []byte(credentials.SecretKey),
 			kube.BackupSessionTokenDataKey: []byte(credentials.SessionToken),
 		},
+		backupCredentialsOwner(session)...,
 	)
 	if err != nil {
 		return err
@@ -144,6 +336,67 @@ func persistBackupCredentials(
 	return nil
 }
 
+func persistRestoreCredentials(
+	ctx context.Context,
+	client kubernetes.Interface,
+	req Request,
+	session *domain.Session,
+) error {
+	if session == nil || session.Spec.Restore == nil || req.Store == nil {
+		return domain.NewError(
+			domain.ErrorInternal,
+			"restore credentials",
+			"restore session and object store are required",
+		)
+	}
+
+	credentials := req.Store.Credentials()
+
+	secret, err := kube.CreateBackupCredentialsSecret(
+		ctx,
+		client,
+		session.Spec.SessionNamespace,
+		session.ID,
+		map[string][]byte{
+			kube.BackupAccessKeyDataKey:    []byte(credentials.AccessKey),
+			kube.BackupSecretKeyDataKey:    []byte(credentials.SecretKey),
+			kube.BackupSessionTokenDataKey: []byte(credentials.SessionToken),
+		},
+		backupCredentialsOwner(session)...,
+	)
+	if err != nil {
+		return err
+	}
+
+	session.Spec.Restore.CredentialsSecret = domain.ObjectReference{
+		APIVersion: "v1",
+		Kind:       "Secret",
+		Namespace:  secret.Namespace,
+		Name:       secret.Name,
+		UID:        secret.UID,
+	}
+
+	return req.SessionStore.Update(ctx, session)
+}
+
+func backupCredentialsOwner(session *domain.Session) []metav1.OwnerReference {
+	if session == nil || session.Backend != kube.SessionBackendCRD || session.BackendUID == "" {
+		return nil
+	}
+
+	controller := true
+	blockOwnerDeletion := true
+
+	return []metav1.OwnerReference{{
+		APIVersion:         domain.SessionAPIVersion,
+		Kind:               string(session.BackendResource),
+		Name:               session.ID,
+		UID:                session.BackendUID,
+		Controller:         &controller,
+		BlockOwnerDeletion: &blockOwnerDeletion,
+	}}
+}
+
 func loadBackupCredentials(
 	ctx context.Context,
 	client kubernetes.Interface,
@@ -158,6 +411,43 @@ func loadBackupCredentials(
 	}
 
 	ref := session.Spec.Backup.CredentialsSecret
+	if ref.Namespace == "" || ref.Name == "" {
+		ref = domain.ObjectReference{
+			APIVersion: "v1",
+			Kind:       "Secret",
+			Namespace:  session.Spec.SessionNamespace,
+			Name:       kube.BackupCredentialsSecretName(session.ID),
+		}
+	}
+
+	secret, err := kube.GetBackupCredentialsSecret(ctx, client, ref, session.ID)
+	if err != nil {
+		return objectstore.Credentials{}, err
+	}
+
+	read := func(key string) string { return string(secret.Data[key]) }
+
+	return objectstore.Credentials{
+		AccessKey:    read(kube.BackupAccessKeyDataKey),
+		SecretKey:    read(kube.BackupSecretKeyDataKey),
+		SessionToken: read(kube.BackupSessionTokenDataKey),
+	}, nil
+}
+
+func loadRestoreCredentials(
+	ctx context.Context,
+	client kubernetes.Interface,
+	session *domain.Session,
+) (objectstore.Credentials, error) {
+	if session == nil || session.Spec.Restore == nil {
+		return objectstore.Credentials{}, domain.NewError(
+			domain.ErrorValidation,
+			restoreLockPhase,
+			"restore session payload is required",
+		)
+	}
+
+	ref := session.Spec.Restore.CredentialsSecret
 	if ref.Namespace == "" || ref.Name == "" {
 		ref = domain.ObjectReference{
 			APIVersion: "v1",
@@ -509,36 +799,40 @@ func buildResumeRequest(
 		return nil, err
 	}
 
-	credentials, err := loadBackupCredentials(ctx, client, session)
-	if err != nil {
-		return nil, err
-	}
-
 	payload := session.Spec.Backup
-	config := objectstore.Config{
-		Bucket:                payload.Bucket,
-		Prefix:                payload.Prefix,
-		Name:                  payload.Name,
-		Provider:              payload.Provider,
-		Endpoint:              payload.Endpoint,
-		Region:                payload.Region,
-		AccessKey:             credentials.AccessKey,
-		SecretKey:             credentials.SecretKey,
-		SessionToken:          credentials.SessionToken,
-		AllowInsecureEndpoint: payload.AllowInsecureEndpoint,
-		ForcePathStyle:        payload.Endpoint != "",
-		ServerSideEncryption:  payload.ServerSideEncryption,
-		SSEKMSKeyID:           payload.SSEKMSKeyID,
-	}
+	if req.Store == nil {
+		credentials, err := loadBackupCredentials(ctx, client, session)
+		if err != nil {
+			return nil, err
+		}
 
-	factory := req.ObjectStoreFactory
-	if factory == nil {
-		factory = objectstore.New
-	}
+		config := objectstore.Config{
+			Bucket:                payload.Bucket,
+			Prefix:                payload.Prefix,
+			Name:                  payload.Name,
+			Provider:              payload.Provider,
+			Endpoint:              payload.Endpoint,
+			Region:                payload.Region,
+			AccessKey:             credentials.AccessKey,
+			SecretKey:             credentials.SecretKey,
+			SessionToken:          credentials.SessionToken,
+			AllowInsecureEndpoint: payload.AllowInsecureEndpoint,
+			ForcePathStyle:        payload.Endpoint != "",
+			ServerSideEncryption:  payload.ServerSideEncryption,
+			SSEKMSKeyID:           payload.SSEKMSKeyID,
+		}
 
-	store, err := factory(ctx, config)
-	if err != nil {
-		return nil, err
+		factory := req.ObjectStoreFactory
+		if factory == nil {
+			factory = objectstore.New
+		}
+
+		store, err := factory(ctx, config)
+		if err != nil {
+			return nil, err
+		}
+
+		req.Store = store
 	}
 
 	req.ID = session.ID
@@ -548,11 +842,145 @@ func buildResumeRequest(
 	req.Online = payload.Online
 	req.ToolImage = payload.ToolImage
 	req.OpenEBSLVMEnableShared = payload.OpenEBSLVMEnableShared
-	req.Store = store
 	req.SessionNamespace = session.Spec.SessionNamespace
+
 	req.BackupSession = session
+	if err := pinBackupRepository(ctx, req, session); err != nil {
+		return nil, err
+	}
 
 	return &req, nil
+}
+
+// pinBackupRepository records the repository object identity for the lifetime
+// of a running workflow. Location changes take effect only for a new workflow;
+// Secret data may rotate in place; replacing the referenced Secret changes its
+// identity and requires a new workflow.
+func pinBackupRepository(ctx context.Context, req Request, session *domain.Session) error {
+	if session == nil || strings.TrimSpace(req.BackupRepository) == "" || req.SessionStore == nil {
+		return nil
+	}
+
+	requested := req.BackupRepositoryBinding
+	if requested == nil || requested.Type == "" || requested.UID == "" ||
+		requested.Generation <= 0 {
+		return domain.NewError(
+			domain.ErrorPrecondition,
+			"backup repository",
+			"resolved BackupRepository type, UID, and generation are required",
+		)
+	}
+
+	if err := validateRepositoryBinding(requested); err != nil {
+		return err
+	}
+
+	if session.Status.BackupRepository == nil {
+		session.Status.BackupRepository = copyRepositoryBinding(requested)
+		return req.SessionStore.Update(ctx, session)
+	}
+
+	current := session.Status.BackupRepository
+	if current.Type != requested.Type {
+		return repositoryBindingConflict(
+			"BackupRepository backend changed while the workflow was running",
+		)
+	}
+
+	if current.UID != requested.UID {
+		return repositoryBindingConflict(
+			"BackupRepository was replaced while the workflow was running",
+		)
+	}
+
+	if current.Generation != requested.Generation {
+		return repositoryBindingConflict("BackupRepository changed while the workflow was running")
+	}
+
+	switch requested.Type {
+	case domain.BackupRepositoryTypeS3:
+		if current.S3 == nil ||
+			current.S3.CredentialsSecretUID != requested.S3.CredentialsSecretUID {
+			return repositoryBindingConflict(
+				"BackupRepository credentials Secret was replaced while the workflow was running",
+			)
+		}
+	case domain.BackupRepositoryTypePVC:
+		if current.PVC == nil ||
+			current.PVC.ClaimUID != requested.PVC.ClaimUID {
+			return repositoryBindingConflict(
+				"BackupRepository PVC was replaced while the workflow was running",
+			)
+		}
+	}
+
+	return nil
+}
+
+func validateRepositoryBinding(binding *domain.BackupRepositoryBindingStatus) error {
+	if binding == nil {
+		return domain.NewError(
+			domain.ErrorPrecondition,
+			"backup repository",
+			"resolved repository binding is required",
+		)
+	}
+
+	switch binding.Type {
+	case domain.BackupRepositoryTypeS3:
+		if binding.S3 == nil || binding.PVC != nil || binding.S3.CredentialsSecretUID == "" {
+			return domain.NewError(
+				domain.ErrorPrecondition,
+				"backup repository",
+				"resolved S3 repository requires a credentials Secret UID",
+			)
+		}
+	case domain.BackupRepositoryTypePVC:
+		if binding.PVC == nil || binding.S3 != nil || binding.PVC.ClaimUID == "" {
+			return domain.NewError(
+				domain.ErrorPrecondition,
+				"backup repository",
+				"resolved PVC repository requires a claim UID",
+			)
+		}
+	default:
+		return domain.NewError(
+			domain.ErrorPrecondition,
+			"backup repository",
+			fmt.Sprintf("resolved repository backend %q is unsupported", binding.Type),
+		)
+	}
+
+	return nil
+}
+
+func copyRepositoryBinding(
+	binding *domain.BackupRepositoryBindingStatus,
+) *domain.BackupRepositoryBindingStatus {
+	if binding == nil {
+		return nil
+	}
+
+	out := *binding
+	if binding.S3 != nil {
+		s3 := *binding.S3
+		out.S3 = &s3
+	}
+
+	if binding.PVC != nil {
+		pvc := *binding.PVC
+		out.PVC = &pvc
+	}
+
+	return &out
+}
+
+func repositoryBindingConflict(message string) error {
+	return domain.NewError(
+		domain.ErrorConflict,
+		"backup repository",
+		message+"; create a new workflow",
+	)
 }
 
 func validateBackupResumePhase(session *domain.Session) error {
@@ -700,6 +1128,14 @@ func ValidateResume(
 		return session.Validate()
 	}
 
+	if session != nil && session.Backend == kube.SessionBackendCRD && session.Spec.Backup != nil &&
+		session.Spec.Backup.BackupRepository != "" && req.Store == nil {
+		if err := session.Validate(); err != nil {
+			return err
+		}
+		return validateBackupResumePhase(session)
+	}
+
 	resumeReq, err := buildResumeRequest(ctx, client, req, session)
 	if err != nil {
 		return err
@@ -734,6 +1170,140 @@ func ValidateResume(
 	}
 
 	return nil
+}
+
+func buildRestoreResumeRequest(
+	ctx context.Context,
+	client kubernetes.Interface,
+	req Request,
+	session *domain.Session,
+) (*Request, error) {
+	if client == nil || req.SessionStore == nil || session == nil || session.Spec.Restore == nil {
+		return nil, domain.NewError(
+			domain.ErrorValidation,
+			restoreLockPhase,
+			"Kubernetes client, session store, and restore session are required",
+		)
+	}
+
+	if err := session.Validate(); err != nil {
+		return nil, err
+	}
+
+	if err := validateRestoreResumePhase(session); err != nil {
+		return nil, err
+	}
+
+	payload := session.Spec.Restore
+	if req.Store == nil && payload.BackupRepository == "" {
+		credentials, err := loadRestoreCredentials(ctx, client, session)
+		if err != nil {
+			return nil, err
+		}
+
+		config := objectstore.Config{
+			Bucket:                payload.Bucket,
+			Prefix:                payload.Prefix,
+			Name:                  payload.Name,
+			Provider:              payload.Provider,
+			Endpoint:              payload.Endpoint,
+			Region:                payload.Region,
+			AccessKey:             credentials.AccessKey,
+			SecretKey:             credentials.SecretKey,
+			SessionToken:          credentials.SessionToken,
+			AllowInsecureEndpoint: payload.AllowInsecureEndpoint,
+			ForcePathStyle:        payload.Endpoint != "",
+			ServerSideEncryption:  payload.ServerSideEncryption,
+			SSEKMSKeyID:           payload.SSEKMSKeyID,
+		}
+
+		factory := req.ObjectStoreFactory
+		if factory == nil {
+			factory = objectstore.New
+		}
+
+		store, err := factory(ctx, config)
+		if err != nil {
+			return nil, err
+		}
+
+		req.Store = store
+	}
+
+	req.ID = session.ID
+	req.Namespace = payload.DestinationPVC.Namespace
+	req.PVCName = payload.DestinationPVC.Name
+	req.Path = payload.Path
+	req.ToolImage = payload.ToolImage
+	req.CreatePVC = payload.CreatePVC
+	req.DestinationStorageClass = payload.DestinationStorageClass
+	req.DestinationAccessMode = payload.DestinationAccessMode
+	req.DestinationCapacity = payload.DestinationCapacity
+	req.TargetNode = payload.TargetNode
+	req.AllowMounted = payload.AllowMounted
+	req.DeleteExtraneousFiles = payload.DeleteExtraneous
+	req.SessionNamespace = session.Spec.SessionNamespace
+	req.BackupRepository = payload.BackupRepository
+	req.BackupRepositoryNamespace = payload.BackupRepositoryNamespace
+	req.BackupSession = session
+
+	return &req, nil
+}
+
+func validateRestoreResumePhase(session *domain.Session) error {
+	phase := session.Status.Phase
+	if phase == domain.PhaseFailed {
+		phase = session.Status.ResumeFrom
+	}
+
+	switch phase {
+	case domain.PhasePlanned,
+		domain.PhaseWarmCopying,
+		domain.PhaseWarmCopied,
+		domain.PhaseCompleted:
+		return nil
+	default:
+		return domain.NewError(
+			domain.ErrorPrecondition,
+			restoreLockPhase,
+			fmt.Sprintf("phase %s cannot be resumed for restore", phase),
+		)
+	}
+}
+
+// ValidateRestoreResume performs the same durable destination and recovery
+// point checks as execution. Repository-backed workflows defer remote checks
+// to the controller because the submitting identity intentionally cannot read
+// repository credentials.
+func ValidateRestoreResume(
+	ctx context.Context,
+	client kubernetes.Interface,
+	req Request,
+	session *domain.Session,
+) error {
+	if session != nil && session.Status.Phase == domain.PhaseCompleted {
+		return session.Validate()
+	}
+
+	if session != nil && session.Backend == kube.SessionBackendCRD && session.Spec.Restore != nil &&
+		session.Spec.Restore.BackupRepository != "" && req.Store == nil {
+		if err := session.Validate(); err != nil {
+			return err
+		}
+		return validateRestoreResumePhase(session)
+	}
+
+	resumeReq, err := buildRestoreResumeRequest(ctx, client, req, session)
+	if err != nil {
+		return err
+	}
+
+	plan, err := preflight(ctx, client, *resumeReq, true, "resume revalidation")
+	if err != nil {
+		return err
+	}
+
+	return validateRestoreDestinationIdentity(plan, session)
 }
 
 func Resume(
@@ -789,6 +1359,115 @@ func Resume(
 	})
 }
 
+// ResumeRestore advances a controller-backed restore while holding the
+// per-session Lease for the entire status and transfer sequence. Keeping the
+// checkpoint writes inside the same lock prevents duplicate reconciles from
+// overwriting a newer phase after the restore tool has started.
+func ResumeRestore(
+	ctx context.Context,
+	client kubernetes.Interface,
+	req Request,
+	session *domain.Session,
+) error {
+	if session == nil {
+		return domain.NewError(
+			domain.ErrorValidation,
+			"restore resume",
+			"restore session is required",
+		)
+	}
+
+	if req.SessionStore == nil {
+		return domain.NewError(
+			domain.ErrorValidation,
+			"restore resume",
+			"session store is required",
+		)
+	}
+
+	if session.Status.Phase == domain.PhaseCompleted {
+		return session.Validate()
+	}
+
+	return withBackupSessionLock(ctx, req, session, func(runCtx context.Context) error {
+		resumeReq, err := buildRestoreResumeRequest(runCtx, client, req, session)
+		if err != nil {
+			failureErr := err
+			if transitionErr := session.Transition(
+				domain.PhaseFailed,
+				err.Error(),
+				time.Now(),
+			); transitionErr == nil {
+				failureErr = errors.Join(err, req.SessionStore.Update(runCtx, session))
+			}
+
+			return failureErr
+		}
+
+		if resumeReq.Store == nil {
+			return domain.NewError(
+				domain.ErrorPrecondition,
+				"restore resume",
+				"object store must be resolved before restore execution",
+			)
+		}
+
+		lockedReq := *resumeReq
+
+		if session.Status.Phase == domain.PhaseCompleted {
+			return nil
+		}
+
+		if err := pinBackupRepository(runCtx, lockedReq, session); err != nil {
+			return err
+		}
+
+		if session.Status.Phase == domain.PhasePlanned ||
+			session.Status.Phase == domain.PhaseFailed {
+			if err := updateBackupSession(
+				runCtx,
+				lockedReq,
+				session,
+				domain.PhaseWarmCopying,
+				"restore started",
+			); err != nil {
+				return err
+			}
+		}
+
+		if err := Run(runCtx, client, lockedReq, true); err != nil {
+			failureErr := err
+			if transitionErr := session.Transition(
+				domain.PhaseFailed,
+				err.Error(),
+				time.Now(),
+			); transitionErr == nil {
+				failureErr = errors.Join(err, lockedReq.SessionStore.Update(runCtx, session))
+			}
+
+			return failureErr
+		}
+
+		if err := updateBackupSession(
+			runCtx,
+			lockedReq,
+			session,
+			domain.PhaseWarmCopied,
+			"restore transfer completed",
+		); err != nil {
+			return err
+		}
+
+		return updateBackupSession(
+			runCtx,
+			lockedReq,
+			session,
+			domain.PhaseCompleted,
+			"restore completed",
+		)
+	})
+}
+
 func cleanupBackupSessionToolProbePods(
 	ctx context.Context,
 	client kubernetes.Interface,
@@ -838,7 +1517,11 @@ func withBackupSessionLock(
 		return run(ctx)
 	}
 
-	lock, err := locker.AcquireSessionLock(ctx, session.Spec.SessionNamespace, session.ID)
+	lock, err := locker.AcquireSessionLock(
+		ctx,
+		session.Spec.SessionNamespace,
+		kube.LockIDForSession(req.SessionStore, session),
+	)
 	if err != nil {
 		return err
 	}

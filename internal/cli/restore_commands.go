@@ -2,7 +2,9 @@ package cli
 
 import (
 	"github.com/labring-sigs/pvc-migrate/internal/backup"
+	"github.com/labring-sigs/pvc-migrate/internal/domain"
 	"github.com/labring-sigs/pvc-migrate/internal/kube"
+	"github.com/labring-sigs/pvc-migrate/internal/objectstore"
 	"github.com/spf13/cobra"
 )
 
@@ -30,6 +32,7 @@ func (r *rootState) newRestoreTransferCommand() *cobra.Command {
 		Short: "Restore object-storage backup data into a PVC",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
+			flags.prefixExplicit = cmd.Flags().Changed("prefix")
 			if err := validateBucketFlags(&flags.bucketFlags, "destination-pvc"); err != nil {
 				return reportPreSessionError(cmd, err)
 			}
@@ -46,20 +49,87 @@ func (r *rootState) newRestoreTransferCommand() *cobra.Command {
 			flags.secretKeyExplicit = cmd.Flags().Changed("secret-key")
 
 			flags.sessionTokenExplicit = cmd.Flags().Changed("session-token")
-			if err := loadS3Credentials(
-				ctx,
-				runtime.clients.Kubernetes,
-				&flags.bucketFlags,
-			); err != nil {
-				return reportTransferError(cmd, "restore", flags.namespace, flags.pvc, err)
+
+			controllerWorkflow := controllerWorkflowAvailable(runtime, domain.SessionTypeRestore)
+			if flags.backupRepository != "" {
+				if !controllerWorkflow {
+					return reportTransferError(
+						cmd,
+						"restore",
+						flags.namespace,
+						flags.pvc,
+						domain.NewError(
+							domain.ErrorPrecondition,
+							"backup repository",
+							"--backup-repository requires the Restore CRD and controller mode",
+						),
+					)
+				}
+
+				if !kube.BackupRepositoryAvailable(runtime.clients.Discovery) {
+					return reportTransferError(
+						cmd,
+						"restore",
+						flags.namespace,
+						flags.pvc,
+						domain.NewError(
+							domain.ErrorPrecondition,
+							"backup repository",
+							"BackupRepository CRD is not served by this cluster; install deploy/crd.yaml",
+						),
+					)
+				}
+
+				if err := validateControllerRepositoryFlags(&flags.bucketFlags); err != nil {
+					return reportTransferError(cmd, "restore", flags.namespace, flags.pvc, err)
+				}
 			}
 
-			store, err := r.newObjectStore(ctx, &flags.bucketFlags)
+			if controllerWorkflow &&
+				flags.backupRepository == "" {
+				return reportTransferError(
+					cmd,
+					"restore",
+					flags.namespace,
+					flags.pvc,
+					domain.NewError(
+						domain.ErrorPrecondition,
+						"backup repository",
+						"controller Restore workflows require --backup-repository",
+					),
+				)
+			}
+
+			var store *objectstore.Store
+			if flags.backupRepository != "" {
+				store, err = r.newControllerRepositoryStore(ctx, runtime, &flags.bucketFlags)
+			} else {
+				if err := loadS3Credentials(
+					ctx,
+					runtime.clients.Kubernetes,
+					&flags.bucketFlags,
+				); err != nil {
+					return reportTransferError(cmd, "restore", flags.namespace, flags.pvc, err)
+				}
+
+				store, err = r.newObjectStore(ctx, &flags.bucketFlags)
+			}
+
 			if err != nil {
 				return reportTransferError(cmd, "restore", flags.namespace, flags.pvc, err)
 			}
 
 			request := r.objectTransferRequest(runtime, &flags.bucketFlags, store, false, false)
+			if flags.backupRepository != "" {
+				request.SessionNamespace = r.controllerPlanSessionNamespace(
+					runtime,
+					domain.SessionTypeRestore,
+					flags.namespace,
+					flags.namespace,
+				)
+			}
+
+			request.SkipManifestCheck = flags.backupRepository != ""
 			request.ToolImageProber = kube.NewToolImageProber(runtime.clients.Kubernetes)
 			applyRestoreRequest(&request, flags.restore)
 
@@ -86,9 +156,39 @@ func (r *rootState) newRestoreTransferCommand() *cobra.Command {
 				return reportApprovalError(cmd, err)
 			}
 
-			err = backup.Run(ctx, runtime.clients.Kubernetes, request, true)
+			if err := requireControllerWorkflow(runtime, domain.SessionTypeRestore); err != nil {
+				return reportTransferError(cmd, "restore", flags.namespace, flags.pvc, err)
+			}
+
+			session, err := backup.SubmitRestore(
+				ctx,
+				runtime.clients.Kubernetes,
+				request,
+				*plan,
+			)
 			if err != nil {
 				return reportTransferError(cmd, "restore", flags.namespace, flags.pvc, err)
+			}
+
+			flags.id = session.ID
+
+			if deferred, deferErr := deferControllerExecution(
+				ctx, cmd, runtime, session,
+			); deferred {
+				return deferErr
+			}
+
+			if session.Backend == kube.SessionBackendCRD {
+				return nil
+			}
+
+			if err := backup.ResumeRestore(
+				ctx,
+				runtime.clients.Kubernetes,
+				request,
+				session,
+			); err != nil {
+				return reportSessionError(cmd, session, err)
 			}
 
 			return r.printObjectTransferResult(
@@ -105,7 +205,13 @@ func (r *rootState) newRestoreTransferCommand() *cobra.Command {
 	}
 	bindRestoreFlags(command, flags)
 	bindDryRun(command, &dryRun)
-	command.AddCommand(r.newRestorePlanCommand())
+	command.AddCommand(
+		r.newRestorePlanCommand(),
+		r.newRestoreStatusCommand(),
+		r.newRestoreResumeCommand(),
+		r.newRestoreAbortCommand(),
+		r.newRestoreCleanupCommand(),
+	)
 
 	return command
 }

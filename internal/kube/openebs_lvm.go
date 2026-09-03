@@ -22,7 +22,7 @@ var openEBSLVMVolumeGVR = schema.GroupVersionResource{
 
 const (
 	OpenEBSLVMCSIDriver               = "local.csi.openebs.io"
-	openEBSLVMSharedSessionAnnotation = "pvc-migrate.io/openebs-shared-session"
+	openEBSLVMSharedSessionAnnotation = MetadataDomain + "/openebs-shared-session"
 )
 
 // OpenEBSLVMSharedVolumeManager reads and explicitly enables the same-node

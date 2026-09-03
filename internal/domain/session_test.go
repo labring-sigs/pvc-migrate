@@ -73,6 +73,75 @@ func TestSessionSpecUsesConcretePayload(t *testing.T) {
 	}
 }
 
+func TestSessionConstructorsOwnMutableInputs(t *testing.T) {
+	storageClass := "fast"
+	replicas := int32(3)
+	ordinal := int32(1)
+	common := SessionCommon{
+		SourceNamespace: "app", DestinationNamespace: "app", SessionNamespace: "system",
+		Volumes: []VolumeSpec{{
+			SourcePVCSpec: corev1.PersistentVolumeClaimSpec{
+				StorageClassName: &storageClass,
+				AccessModes:      []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce},
+			},
+			SourcePVCMetadata: PVCMetadata{Labels: map[string]string{"owner": "source"}},
+			AccessModes:       []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce},
+			TransferScope:     &TransferScope{SourcePath: "/source"},
+		}},
+	}
+	workload := WorkloadSpec{
+		Adapter:          WorkloadStatefulSet,
+		OriginalReplicas: &replicas,
+		Ordinal:          &ordinal,
+		AffectedPods:     []ObjectReference{{Name: "db-1"}},
+		OriginalObject:   json.RawMessage("invalid but durable"),
+	}
+	spec := NewPodMigrationSessionSpec(
+		common,
+		workload,
+		SessionWorkflowOptions{Strategies: []string{"mount"}},
+		1,
+		false,
+	)
+
+	storageClass = "slow"
+	common.Volumes[0].SourcePVCSpec.AccessModes[0] = corev1.ReadWriteMany
+	common.Volumes[0].SourcePVCMetadata.Labels["owner"] = "changed"
+	common.Volumes[0].TransferScope.SourcePath = "/changed"
+	workload.OriginalReplicas = new(int32(9))
+	workload.AffectedPods[0].Name = "changed"
+	workload.OriginalObject[0] = 'X'
+
+	if *spec.Volumes[0].SourcePVCSpec.StorageClassName != "fast" ||
+		spec.Volumes[0].SourcePVCSpec.AccessModes[0] != corev1.ReadWriteOnce ||
+		spec.Volumes[0].SourcePVCMetadata.Labels["owner"] != "source" ||
+		spec.Volumes[0].TransferScope.SourcePath != "/source" ||
+		*spec.Workload().OriginalReplicas != 3 ||
+		spec.Workload().AffectedPods[0].Name != "db-1" ||
+		string(spec.Workload().OriginalObject) != "invalid but durable" {
+		t.Fatalf("constructor retained mutable input state: %#v", spec)
+	}
+
+	clonedSpec := spec.DeepCopy()
+	*clonedSpec.WorkloadPtr().OriginalReplicas = 7
+	clonedSpec.WorkloadPtr().AffectedPods[0].Name = "copy"
+	clonedSpec.WorkloadPtr().OriginalObject[0] = 'Y'
+
+	clonedSpec.Volumes[0].SourcePVCMetadata.Labels["owner"] = "copy"
+	if *spec.Workload().OriginalReplicas != 3 || spec.Workload().AffectedPods[0].Name != "db-1" ||
+		string(spec.Workload().OriginalObject) != "invalid but durable" ||
+		spec.Volumes[0].SourcePVCMetadata.Labels["owner"] != "source" {
+		t.Fatal("DeepCopy shared mutable session state")
+	}
+
+	session := NewSession("owned", spec, time.Unix(200, 0))
+
+	spec.Volumes[0].SourcePVCMetadata.Labels["owner"] = "after session"
+	if session.Spec.Volumes[0].SourcePVCMetadata.Labels["owner"] != "source" {
+		t.Fatal("NewSession shared spec ownership with its caller")
+	}
+}
+
 func TestSessionWorkflowOptionsArePersistedInsideConcretePayload(t *testing.T) {
 	common := SessionCommon{
 		SourceNamespace:      "app",
@@ -301,13 +370,13 @@ func TestKubeBlocksSpecOmitsUnusedSwitchoverStrategy(t *testing.T) {
 		t.Fatalf("KubeBlocks spec contains unused switchover strategy: %s", raw)
 	}
 
-	var legacy KubeBlocksSpec
-	if err := json.Unmarshal([]byte(`{"switchoverStrategy":"opsrequest"}`), &legacy); err != nil {
+	var decoded KubeBlocksSpec
+	if err := json.Unmarshal([]byte(`{"switchoverStrategy":"opsrequest"}`), &decoded); err != nil {
 		t.Fatal(err)
 	}
 
-	if legacy.SwitchoverStrategy != KubeBlocksSwitchoverOpsRequest {
-		t.Fatalf("legacy switchover strategy=%q", legacy.SwitchoverStrategy)
+	if decoded.SwitchoverStrategy != KubeBlocksSwitchoverOpsRequest {
+		t.Fatalf("switchover strategy=%q", decoded.SwitchoverStrategy)
 	}
 }
 
@@ -400,6 +469,24 @@ func TestMoveSessionUsesDedicatedRebindPhase(t *testing.T) {
 	}
 }
 
+func TestMoveSessionAllowsSameNamespace(t *testing.T) {
+	base := testSession(t)
+	common := base.Spec.SessionCommon
+	common.TemporaryNamespace = common.SourceNamespace
+	common.DestinationNamespace = common.SourceNamespace
+	common.Volumes[0].DestinationPVC.Namespace = common.SourceNamespace
+	common.Volumes[0].DestinationPVC.Name = "renamed"
+
+	session := NewSession(
+		"move-same-namespace",
+		NewSessionSpec(OperationMove, common, false, SessionWorkflowOptions{}),
+		time.Unix(100, 0),
+	)
+	if err := session.Validate(); err != nil {
+		t.Fatalf("same-namespace Move validation failed: %v", err)
+	}
+}
+
 func TestFailedSessionRecordsResumePhase(t *testing.T) {
 	session := testSession(t)
 	if err := session.Transition(PhaseReserving, "reserve", time.Now()); err != nil {
@@ -421,6 +508,30 @@ func TestFailedSessionRecordsResumePhase(t *testing.T) {
 
 	if session.Status.FailureReason != "" {
 		t.Fatalf("failure reason was not cleared: %q", session.Status.FailureReason)
+	}
+}
+
+func TestFailedSessionReactivatesOnlyThroughExplicitResume(t *testing.T) {
+	session := testSession(t)
+	if err := session.Transition(PhaseReserving, "reserve", time.Now()); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := session.Transition(PhaseFailed, "api timeout", time.Now()); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := session.Reactivate("resume requested", time.Unix(123, 0)); err != nil {
+		t.Fatal(err)
+	}
+
+	if session.Status.Phase != PhaseReserving || session.Status.ResumeFrom != PhaseReserving ||
+		session.Status.FailureReason != "" || session.Status.CompletedAt != nil {
+		t.Fatalf("reactivated status=%#v", session.Status)
+	}
+
+	if got := session.Status.History[len(session.Status.History)-1].Message; got != "resume requested" {
+		t.Fatalf("last history message=%q", got)
 	}
 }
 

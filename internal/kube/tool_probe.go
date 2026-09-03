@@ -30,12 +30,12 @@ const (
 	ToolComponentRsync        = "rsync"
 	ToolComponentSSHD         = "sshd"
 	ToolComponentRclone       = "rclone"
-	toolProbeOperation        = "pvc-migrate.io/probe-operation"
+	toolProbeOperation        = MetadataDomain + "/probe-operation"
 	toolProbeTimeout          = 2 * time.Minute
 	toolProbePoll             = 250 * time.Millisecond
 	toolProbeEventPoll        = time.Second
 	toolProbeCleanupTTL       = 10 * time.Second
-	transferPathFailureMarker = "pvc-migrate: transfer path preflight:"
+	transferPathFailureMarker = "pvc-migrate: " + domain.ErrorOperationTransferPathPreflight + ":"
 )
 
 // ToolProbeTarget describes one node and namespace where a real tool Pod will
@@ -241,7 +241,9 @@ func (p *KubernetesToolImageProber) probeTarget(
 			poll,
 		); cleanupErr != nil {
 			if retErr != nil && errors.Is(retErr, context.Canceled) {
+				p.outputMu.Lock()
 				logProbeCleanupWarning(options, target.Namespace, created.Name, cleanupErr)
+				p.outputMu.Unlock()
 				return
 			}
 
@@ -973,14 +975,14 @@ func toolProbePod(
 	}
 
 	annotations := map[string]string{
-		"pvc-migrate.io/tool-components": strings.Join(target.Components, ","),
+		MetadataDomain + "/tool-components": strings.Join(target.Components, ","),
 	}
 	if target.PVCName != "" {
-		annotations["pvc-migrate.io/probe-pvc"] = target.PVCName
+		annotations[MetadataDomain+"/probe-pvc"] = target.PVCName
 	}
 
 	if target.RequiredPath != "" {
-		annotations["pvc-migrate.io/probe-path"] = target.RequiredPath
+		annotations[MetadataDomain+"/probe-path"] = target.RequiredPath
 	}
 
 	if operationID != "" {
@@ -1116,7 +1118,7 @@ func toolProbePodFailureWithMessage(
 		strings.Join(target.Components, ","),
 	)
 	if target.RequiredPath != "" && reportedTransferPathProbeFailure(pod) {
-		operation = "transfer path preflight"
+		operation = domain.ErrorOperationTransferPathPreflight
 
 		action := "validate"
 		if target.CreatePath {

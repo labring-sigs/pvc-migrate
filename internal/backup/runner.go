@@ -55,17 +55,27 @@ type Request struct {
 	KubeContext             string
 	StreamToolLogs          bool
 	StructuredLogs          bool
-	Store                   *objectstore.Store
-	Writer                  io.Writer
-	Logger                  *slog.Logger
-	ToolImageProber         kube.ToolImageProber
-	SessionStore            kube.SessionStore
-	SessionNamespace        string
-	OpenEBSLVMEnableShared  bool
-	OpenEBSLVMManager       kube.OpenEBSLVMSharedVolumeManager
-	WritablePVCMount        bool
-	BackupSession           *domain.Session
-	ObjectStoreFactory      func(context.Context, objectstore.Config) (*objectstore.Store, error)
+	Store                   S3RepositoryStore
+	// SkipManifestCheck defers remote recovery-point validation to the
+	// controller. The controller is the only component that can resolve a
+	// repository's credentials when the submitting user cannot read its Secret.
+	SkipManifestCheck bool
+	// BackupRepository selects a user-owned namespaced repository containing
+	// the complete object-store location and credentials reference.
+	BackupRepository          string
+	BackupRepositoryNamespace string
+	BackupRepositoryBinding   *domain.BackupRepositoryBindingStatus
+	ToolServiceAccountName    string
+	Writer                    io.Writer
+	Logger                    *slog.Logger
+	ToolImageProber           kube.ToolImageProber
+	SessionStore              kube.SessionStore
+	SessionNamespace          string
+	OpenEBSLVMEnableShared    bool
+	OpenEBSLVMManager         kube.OpenEBSLVMSharedVolumeManager
+	WritablePVCMount          bool
+	BackupSession             *domain.Session
+	ObjectStoreFactory        func(context.Context, objectstore.Config) (*objectstore.Store, error)
 }
 
 type Plan struct {
@@ -243,6 +253,10 @@ func preflight(
 		quotaErr = checkObjectTransferQuota(ctx, client, req, operation)
 	})
 	wg.Go(func() {
+		if req.SkipManifestCheck {
+			return
+		}
+
 		logOperation(
 			req,
 			operation+" "+stage+" checking object-store manifest",
@@ -297,6 +311,13 @@ func preflight(
 		DeleteExtraneous: restore && req.DeleteExtraneousFiles,
 		Compression:      "none",
 	}
+	if req.SkipManifestCheck {
+		plan.Warnings = append(
+			plan.Warnings,
+			"object-store manifest check deferred to the controller",
+		)
+	}
+
 	if req.Online {
 		plan.Mode = ModeOnline
 
@@ -435,6 +456,12 @@ func Run(ctx context.Context, client kubernetes.Interface, req Request, restore 
 		return err
 	}
 
+	if restore {
+		if err := validateRestoreDestinationIdentity(plan, req.BackupSession); err != nil {
+			return err
+		}
+	}
+
 	if restore && plan.CreatePVC {
 		manifest, manifestErr := req.Store.Manifest(ctx)
 		if manifestErr != nil {
@@ -455,6 +482,16 @@ func Run(ctx context.Context, client kubernetes.Interface, req Request, restore 
 
 		plan, err = preflight(ctx, client, req, restore, "post-create revalidation")
 		if err != nil {
+			return err
+		}
+
+		if err := validateRestoreDestinationIdentity(plan, req.BackupSession); err != nil {
+			return err
+		}
+	}
+
+	if restore {
+		if err := checkpointRestoreDestinationIdentity(ctx, client, req, plan); err != nil {
 			return err
 		}
 	}
@@ -484,6 +521,105 @@ func Run(ctx context.Context, client kubernetes.Interface, req Request, restore 
 	}
 
 	return runBackupWithSession(ctx, client, req, plan.PVCUID, plan.PVUID)
+}
+
+func validateRestoreDestinationIdentity(plan *Plan, session *domain.Session) error {
+	if plan == nil || session == nil || session.Spec.Restore == nil {
+		return nil
+	}
+
+	destination := session.Spec.Restore
+	if destination.DestinationPVC.UID != "" &&
+		string(destination.DestinationPVC.UID) != plan.PVCUID {
+		return domain.NewError(
+			domain.ErrorConflict,
+			"restore destination identity",
+			"destination PVC identity changed since the restore checkpoint",
+		)
+	}
+
+	if destination.DestinationPV.UID != "" &&
+		string(destination.DestinationPV.UID) != plan.PVUID {
+		return domain.NewError(
+			domain.ErrorConflict,
+			"restore destination identity",
+			"destination PV identity changed since the restore checkpoint",
+		)
+	}
+
+	return nil
+}
+
+func checkpointRestoreDestinationIdentity(
+	ctx context.Context,
+	client kubernetes.Interface,
+	req Request,
+	plan *Plan,
+) error {
+	session := req.BackupSession
+	if session == nil || session.Spec.Restore == nil {
+		return nil
+	}
+
+	if req.SessionStore == nil {
+		return domain.NewError(
+			domain.ErrorInternal,
+			"restore destination identity",
+			"session store is required to persist the destination checkpoint",
+		)
+	}
+
+	pvc, pv, err := verifyPVCIdentity(
+		ctx,
+		client,
+		req.Namespace,
+		req.PVCName,
+		plan.PVCUID,
+		plan.PVUID,
+	)
+	if err != nil {
+		return err
+	}
+
+	payload := session.Spec.Restore
+	pvcRef := domain.ObjectReference{
+		APIVersion:      "v1",
+		Kind:            "PersistentVolumeClaim",
+		Namespace:       pvc.Namespace,
+		Name:            pvc.Name,
+		UID:             pvc.UID,
+		ResourceVersion: pvc.ResourceVersion,
+	}
+
+	pvRef := domain.ObjectReference{
+		APIVersion:      "v1",
+		Kind:            "PersistentVolume",
+		Name:            pv.Name,
+		UID:             pv.UID,
+		ResourceVersion: pv.ResourceVersion,
+	}
+	if payload.DestinationPVC == pvcRef && payload.DestinationPV == pvRef {
+		return nil
+	}
+
+	previousPVC := payload.DestinationPVC
+	previousPV := payload.DestinationPV
+	payload.DestinationPVC = pvcRef
+
+	payload.DestinationPV = pvRef
+	if err := req.SessionStore.Update(ctx, session); err != nil {
+		payload.DestinationPVC = previousPVC
+		payload.DestinationPV = previousPV
+
+		return domain.WrapError(
+			domain.ErrorKubernetes,
+			"restore destination identity",
+			"persist destination PVC and PV checkpoint",
+			err,
+		)
+	}
+
+	return nil
 }
 
 func probeTransferToolImage(
@@ -539,14 +675,20 @@ func transferToolHelmValues(
 	ctx context.Context,
 	client kubernetes.Interface,
 	probe kube.ToolImageProbeResult,
-) ([]string, error) {
+	namespace string,
+	serviceAccountName string,
+) (kube.HelmOverrides, error) {
 	if probe.NodeName == "" {
-		return nil, nil
+		return kube.HelmOverrides{}, domain.NewError(
+			domain.ErrorInternal,
+			toolSchedulingPhase,
+			"rclone probe returned no scheduled node",
+		)
 	}
 
 	node, err := client.CoreV1().Nodes().Get(ctx, probe.NodeName, metav1.GetOptions{})
 	if err != nil {
-		return nil, domain.WrapError(
+		return kube.HelmOverrides{}, domain.WrapError(
 			domain.ErrorKubernetes,
 			toolSchedulingPhase,
 			"read node "+probe.NodeName,
@@ -556,15 +698,34 @@ func transferToolHelmValues(
 
 	values, err := kube.ToolComponentNodeHelmValues(kube.ToolComponentRclone, node)
 	if err != nil {
-		return nil, err
+		return kube.HelmOverrides{}, err
 	}
 
 	pullSecretValues, err := kube.ToolImagePullSecretHelmValues([]kube.ToolImageProbeResult{probe})
 	if err != nil {
-		return nil, err
+		return kube.HelmOverrides{}, err
 	}
 
-	return append(values, pullSecretValues...), nil
+	if strings.TrimSpace(serviceAccountName) == "" {
+		if err := kube.EnsureTransferServiceAccount(ctx, client, namespace); err != nil {
+			return kube.HelmOverrides{}, err
+		}
+
+		serviceAccountName = kube.TransferServiceAccountName
+	}
+
+	identityValues, err := kube.ToolServiceAccountHelmValues(serviceAccountName)
+	if err != nil {
+		return kube.HelmOverrides{}, err
+	}
+
+	return kube.HelmOverrides{
+		Values: identityValues.Values,
+		StringValues: append(
+			append(values, pullSecretValues...),
+			identityValues.StringValues...,
+		),
+	}, nil
 }
 
 func validateTransferToolLaunch(
@@ -1008,6 +1169,14 @@ func validateInspectedPV(
 			domain.ErrorPrecondition,
 			phase,
 			"PV has no positive storage capacity",
+		)
+	}
+
+	if err := kube.ValidateBoundVolumeCapacity(pvc, pv, nil); err != nil {
+		return resource.Quantity{}, domain.NewError(
+			domain.ErrorPrecondition,
+			phase,
+			err.Error(),
 		)
 	}
 

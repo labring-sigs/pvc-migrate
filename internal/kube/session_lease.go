@@ -18,14 +18,51 @@ import (
 )
 
 const (
-	sessionLeasePrefix                = "pvc-migrate-lock-"
-	sessionLeaseDurationSeconds int32 = 30
+	sessionLeasePrefix            = "pvc-migrate-lock-"
+	defaultSessionLeaseDuration   = 30 * time.Second
+	defaultSessionLeaseRenewEvery = 10 * time.Second
+	maxLeaseDurationSeconds       = int64(1<<31 - 1)
 )
 
-var (
-	sessionLeaseDuration   = 30 * time.Second
-	sessionLeaseRenewEvery = 10 * time.Second
-)
+func leaseDurationSeconds(duration time.Duration) int32 {
+	if duration <= 0 {
+		return 1
+	}
+
+	seconds := int64(duration / time.Second)
+	if duration%time.Second != 0 {
+		seconds++
+	}
+	if seconds > maxLeaseDurationSeconds { //nolint:wsl_v5 // keep clamp adjacent to the bound check.
+		seconds = maxLeaseDurationSeconds
+	}
+
+	return int32(seconds)
+}
+
+// normalizeLeaseTiming keeps renewal comfortably ahead of Lease expiry. A
+// renewal interval at or beyond the duration can let another worker acquire
+// the Lease before this holder renews it.
+func normalizeLeaseTiming(duration, renewEvery time.Duration) (time.Duration, time.Duration) {
+	if duration <= 0 {
+		duration = defaultSessionLeaseDuration
+	}
+
+	if renewEvery <= 0 {
+		renewEvery = defaultSessionLeaseRenewEvery
+	}
+
+	maxRenewEvery := duration / 3
+	if maxRenewEvery <= 0 {
+		maxRenewEvery = time.Nanosecond
+	}
+
+	if renewEvery > maxRenewEvery {
+		renewEvery = maxRenewEvery
+	}
+
+	return duration, renewEvery
+}
 
 // SessionLockName is deterministic for a namespace/session pair while
 // keeping arbitrary session IDs within Kubernetes DNS label limits.
@@ -41,22 +78,31 @@ func (s *ConfigMapSessionStore) AcquireSessionLock(
 	ctx context.Context,
 	namespace, id string,
 ) (SessionLock, error) {
-	if namespace == "" || id == "" {
+	return s.acquireSessionLock(ctx, namespace, id, id)
+}
+
+func (s *ConfigMapSessionStore) acquireSessionLock(
+	ctx context.Context,
+	namespace, id, labelSessionID string,
+) (SessionLock, error) {
+	if namespace == "" || id == "" || labelSessionID == "" {
 		return nil, domain.NewError(
 			domain.ErrorValidation,
 			"acquire session lock",
-			"session namespace and ID are required",
+			"session namespace, lock ID, and label session ID are required",
 		)
 	}
 
 	leases := s.client.CoordinationV1().Leases(namespace)
 	holder := string(uuid.NewUUID())
 	name := SessionLockName(id)
-	durationSeconds := sessionLeaseDurationSeconds
+	duration, renewEvery := s.leaseTiming()
+	durationSeconds := leaseDurationSeconds(duration)
+
 	now := metav1.NewMicroTime(time.Now().UTC())
 	labelsForLease := map[string]string{
 		ManagedByLabel: ManagedByValue,
-		SessionKey:     id,
+		SessionKey:     labelSessionID,
 	}
 
 	for range 2 {
@@ -89,7 +135,17 @@ func (s *ConfigMapSessionStore) AcquireSessionLock(
 					)
 				}
 
-				return newSessionLease(ctx, leases, namespace, name, id, holder, created.UID), nil
+				return newSessionLeaseWithTiming(
+					ctx,
+					leases,
+					namespace,
+					name,
+					labelSessionID,
+					holder,
+					created.UID,
+					duration,
+					renewEvery,
+				), nil
 			}
 
 			if apierrors.IsAlreadyExists(createErr) {
@@ -121,7 +177,8 @@ func (s *ConfigMapSessionStore) AcquireSessionLock(
 			)
 		}
 
-		if lease.Labels[ManagedByLabel] != ManagedByValue || lease.Labels[SessionKey] != id {
+		if lease.Labels[ManagedByLabel] != ManagedByValue ||
+			lease.Labels[SessionKey] != labelSessionID {
 			return nil, domain.NewError(
 				domain.ErrorConflict,
 				"acquire session lock",
@@ -177,7 +234,17 @@ func (s *ConfigMapSessionStore) AcquireSessionLock(
 			)
 		}
 
-		return newSessionLease(ctx, leases, namespace, name, id, holder, claimed.UID), nil
+		return newSessionLeaseWithTiming(
+			ctx,
+			leases,
+			namespace,
+			name,
+			labelSessionID,
+			holder,
+			claimed.UID,
+			duration,
+			renewEvery,
+		), nil
 	}
 
 	return nil, domain.NewError(
@@ -271,6 +338,8 @@ type sessionLease struct {
 	sessionID  string
 	holder     string
 	uid        types.UID
+	duration   time.Duration
+	renewEvery time.Duration
 	stopped    <-chan struct{}
 	cancel     context.CancelFunc
 	done       chan struct{}
@@ -287,11 +356,34 @@ func newSessionLease(
 	namespace, name, sessionID, holder string,
 	uid types.UID,
 ) *sessionLease {
+	return newSessionLeaseWithTiming(
+		parent,
+		leases,
+		namespace,
+		name,
+		sessionID,
+		holder,
+		uid,
+		defaultSessionLeaseDuration,
+		defaultSessionLeaseRenewEvery,
+	)
+}
+
+func newSessionLeaseWithTiming(
+	parent context.Context,
+	leases coordinationclient.LeaseInterface,
+	namespace, name, sessionID, holder string,
+	uid types.UID,
+	duration, renewEvery time.Duration,
+) *sessionLease {
+	duration, renewEvery = normalizeLeaseTiming(duration, renewEvery)
+
 	ctx, cancel := context.WithCancel(parent)
 
 	lock := &sessionLease{
 		leases: leases, namespace: namespace, name: name, sessionID: sessionID,
-		holder: holder, uid: uid, stopped: ctx.Done(), cancel: cancel, done: make(chan struct{}),
+		holder: holder, uid: uid, duration: duration, renewEvery: renewEvery,
+		stopped: ctx.Done(), cancel: cancel, done: make(chan struct{}),
 	}
 	go lock.renewLoop(ctx)
 
@@ -318,7 +410,7 @@ func (l *sessionLease) Err() error {
 }
 
 func (l *sessionLease) renewLoop(ctx context.Context) {
-	ticker := time.NewTicker(sessionLeaseRenewEvery)
+	ticker := time.NewTicker(l.renewEvery)
 	defer ticker.Stop()
 	defer close(l.done)
 
@@ -341,7 +433,7 @@ func (l *sessionLease) renewLoop(ctx context.Context) {
 }
 
 func (l *sessionLease) renew(ctx context.Context) error {
-	renewCtx, cancel := context.WithTimeout(ctx, sessionLeaseRenewTimeout())
+	renewCtx, cancel := context.WithTimeout(ctx, l.renewTimeout())
 	defer cancel()
 
 	lease, err := l.leases.Get(renewCtx, l.name, metav1.GetOptions{})
@@ -394,10 +486,10 @@ func (l *sessionLease) renew(ctx context.Context) error {
 	return nil
 }
 
-func sessionLeaseRenewTimeout() time.Duration {
-	timeout := sessionLeaseRenewEvery
-	if timeout <= 0 || timeout > sessionLeaseDuration/3 {
-		timeout = sessionLeaseDuration / 3
+func (l *sessionLease) renewTimeout() time.Duration {
+	timeout := l.renewEvery
+	if timeout <= 0 || timeout > l.duration/3 {
+		timeout = l.duration / 3
 	}
 
 	if timeout <= 0 {
@@ -589,7 +681,7 @@ func sessionLeaseExpired(lease *coordinationv1.Lease, now time.Time) bool {
 		return true
 	}
 
-	duration := sessionLeaseDuration
+	duration := defaultSessionLeaseDuration
 	if lease.Spec.LeaseDurationSeconds != nil && *lease.Spec.LeaseDurationSeconds > 0 {
 		duration = time.Duration(*lease.Spec.LeaseDurationSeconds) * time.Second
 	}

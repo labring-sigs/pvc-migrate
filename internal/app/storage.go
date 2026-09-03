@@ -315,19 +315,28 @@ func (s *Service) validateActivationPVCPolicies(
 
 	sort.Strings(namespaces)
 
-	for _, namespace := range namespaces {
+	type policyResult struct {
+		err error
+	}
+
+	results := make([]policyResult, len(namespaces))
+	parallel.For(len(namespaces), func(index int) {
+		namespace := namespaces[index]
+
 		report, err := kube.CheckPVCAdmissionPolicies(ctx, s.client, groups[namespace])
 		if err != nil {
-			return domain.WrapError(
+			results[index].err = domain.WrapError(
 				domain.ErrorKubernetes,
 				activationPreflightPhase,
 				"check application PVC admission in "+namespace,
 				err,
 			)
+
+			return
 		}
 
 		if len(report.QuotaViolations) > 0 {
-			return domain.NewError(
+			results[index].err = domain.NewError(
 				domain.ErrorPrecondition,
 				activationPreflightPhase,
 				"application PVC quota rejected the replacement: "+strings.Join(
@@ -335,10 +344,12 @@ func (s *Service) validateActivationPVCPolicies(
 					"; ",
 				),
 			)
+
+			return
 		}
 
 		if len(report.LimitRangeViolations) > 0 {
-			return domain.NewError(
+			results[index].err = domain.NewError(
 				domain.ErrorPrecondition,
 				activationPreflightPhase,
 				"application PVC LimitRange rejected the replacement: "+strings.Join(
@@ -346,6 +357,12 @@ func (s *Service) validateActivationPVCPolicies(
 					"; ",
 				),
 			)
+		}
+	})
+
+	for _, result := range results {
+		if result.err != nil {
+			return result.err
 		}
 	}
 

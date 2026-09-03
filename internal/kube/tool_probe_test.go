@@ -161,8 +161,8 @@ func TestToolImageProbeCorrelatesPVCWithoutMountWhenNodeIsExplicit(t *testing.T)
 		)
 	}
 
-	if pod.Annotations["pvc-migrate.io/probe-pvc"] != "data" {
-		t.Fatalf("probe PVC annotation=%q", pod.Annotations["pvc-migrate.io/probe-pvc"])
+	if pod.Annotations[MetadataDomain+"/probe-pvc"] != "data" {
+		t.Fatalf("probe PVC annotation=%q", pod.Annotations[MetadataDomain+"/probe-pvc"])
 	}
 }
 
@@ -285,7 +285,7 @@ func TestNormalizeToolProbeTargetMakesPathCreationWritable(t *testing.T) {
 		readyProbeNode("node-a"),
 		time.Minute,
 	)
-	if pod.Annotations["pvc-migrate.io/probe-path"] != "nested/data" ||
+	if pod.Annotations[MetadataDomain+"/probe-path"] != "nested/data" ||
 		!strings.Contains(pod.Spec.Containers[0].Command[2], "transfer_path='nested/data'") {
 		t.Fatalf("path probe Pod=%#v command=%q", pod.Annotations, pod.Spec.Containers[0].Command)
 	}
@@ -544,7 +544,7 @@ func TestToolImageProbeReportsSchedulerSelectedNode(t *testing.T) {
 		t.Fatalf("probe volume mounts=%#v", container.VolumeMounts)
 	}
 
-	if created.Annotations["pvc-migrate.io/probe-pvc"] != "source-data" {
+	if created.Annotations[MetadataDomain+"/probe-pvc"] != "source-data" {
 		t.Fatalf("probe annotations=%v", created.Annotations)
 	}
 }

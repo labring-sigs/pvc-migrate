@@ -17,6 +17,14 @@ import (
 	"k8s.io/client-go/util/retry"
 )
 
+const (
+	vmClusterFieldPaused        = "paused"
+	vmClusterFieldReplicaCount  = "replicaCount"
+	vmClusterFieldClusterStatus = "clusterStatus"
+	vmClusterFieldUpdateStatus  = "updateStatus"
+	vmClusterStatusOperational  = "operational"
+)
+
 func (m *Manager) verifyVMClusterPaused(
 	ctx context.Context,
 	session *domain.Session,
@@ -86,7 +94,7 @@ func (m *Manager) verifyVMClusterPaused(
 		return nestedErr
 	}
 
-	paused, _, _ := unstructured.NestedBool(component, "paused")
+	paused, _, _ := unstructured.NestedBool(component, vmClusterFieldPaused)
 	if !paused {
 		return domain.NewError(
 			domain.ErrorPrecondition,
@@ -175,7 +183,7 @@ func (m *Manager) validateVMClusterResume(
 		)
 	}
 
-	paused, _, nestedErr := unstructured.NestedBool(component, "paused")
+	paused, _, nestedErr := unstructured.NestedBool(component, vmClusterFieldPaused)
 	if nestedErr != nil {
 		return domain.WrapError(
 			domain.ErrorPrecondition,
@@ -185,7 +193,10 @@ func (m *Manager) validateVMClusterResume(
 		)
 	}
 
-	currentReplicas, replicasFound, nestedErr := unstructured.NestedInt64(component, "replicaCount")
+	currentReplicas, replicasFound, nestedErr := unstructured.NestedInt64(
+		component,
+		vmClusterFieldReplicaCount,
+	)
 	if nestedErr != nil {
 		return domain.WrapError(
 			domain.ErrorPrecondition,
@@ -223,7 +234,7 @@ func (m *Manager) validateVMClusterResume(
 	clusterPaused, clusterPausedFound, nestedErr := unstructured.NestedBool(
 		object.Object,
 		"spec",
-		"paused",
+		vmClusterFieldPaused,
 	)
 	if nestedErr != nil {
 		return domain.WrapError(
@@ -365,7 +376,7 @@ func (m *Manager) vmClusterWorkload(
 
 		originalPaused, originalPausedConfigured, nestedErr = unstructured.NestedBool(
 			componentObject,
-			"paused",
+			vmClusterFieldPaused,
 		)
 		if nestedErr != nil {
 			return domain.WorkloadSpec{}, domain.WrapError(
@@ -378,7 +389,7 @@ func (m *Manager) vmClusterWorkload(
 
 		configuredReplicas, replicasFound, replicasErr := unstructured.NestedInt64(
 			componentObject,
-			"replicaCount",
+			vmClusterFieldReplicaCount,
 		)
 		if replicasErr != nil {
 			return domain.WorkloadSpec{}, domain.WrapError(
@@ -422,7 +433,7 @@ func (m *Manager) vmClusterWorkload(
 		originalClusterPaused, originalClusterPausedConfigured, nestedErr = unstructured.NestedBool(
 			vm.Object,
 			"spec",
-			"paused",
+			vmClusterFieldPaused,
 		)
 		if nestedErr != nil {
 			return domain.WorkloadSpec{}, domain.WrapError(
@@ -681,7 +692,7 @@ func (m *Manager) waitForVMClusterOperational(ctx context.Context, session *doma
 			currentClusterPaused, clusterPausedFound, nestedErr := unstructured.NestedBool(
 				object.Object,
 				"spec",
-				"paused",
+				vmClusterFieldPaused,
 			)
 			if nestedErr != nil {
 				return false, domain.WrapError(
@@ -721,7 +732,7 @@ func (m *Manager) waitForVMClusterOperational(ctx context.Context, session *doma
 			clusterStatus, _, nestedErr := unstructured.NestedString(
 				object.Object,
 				"status",
-				"clusterStatus",
+				vmClusterFieldClusterStatus,
 			)
 			if nestedErr != nil {
 				return false, domain.WrapError(
@@ -735,7 +746,7 @@ func (m *Manager) waitForVMClusterOperational(ctx context.Context, session *doma
 			updateStatus, _, nestedErr := unstructured.NestedString(
 				object.Object,
 				"status",
-				"updateStatus",
+				vmClusterFieldUpdateStatus,
 			)
 			if nestedErr != nil {
 				return false, domain.WrapError(
@@ -753,8 +764,8 @@ func (m *Manager) waitForVMClusterOperational(ctx context.Context, session *doma
 				return true, nil
 			}
 
-			return strings.EqualFold(clusterStatus, "operational") &&
-				strings.EqualFold(updateStatus, "operational"), nil
+			return strings.EqualFold(clusterStatus, vmClusterStatusOperational) &&
+				strings.EqualFold(updateStatus, vmClusterStatusOperational), nil
 		},
 	)
 }
@@ -825,7 +836,7 @@ func (m *Manager) restoreVMClusterPause(ctx context.Context, session *domain.Ses
 			)
 		}
 
-		current, _, nestedErr := unstructured.NestedBool(componentObject, "paused")
+		current, _, nestedErr := unstructured.NestedBool(componentObject, vmClusterFieldPaused)
 		if nestedErr != nil {
 			return domain.WrapError(
 				domain.ErrorPrecondition,
@@ -841,7 +852,7 @@ func (m *Manager) restoreVMClusterPause(ctx context.Context, session *domain.Ses
 
 		currentReplicas, replicasFound, nestedErr := unstructured.NestedInt64(
 			componentObject,
-			"replicaCount",
+			vmClusterFieldReplicaCount,
 		)
 		if nestedErr != nil {
 			return domain.WrapError(
@@ -869,7 +880,7 @@ func (m *Manager) restoreVMClusterPause(ctx context.Context, session *domain.Ses
 			if err := unstructured.SetNestedField(
 				componentObject,
 				vm.OriginalPaused,
-				"paused",
+				vmClusterFieldPaused,
 			); err != nil {
 				return err
 			}
@@ -890,7 +901,7 @@ func (m *Manager) restoreVMClusterPause(ctx context.Context, session *domain.Ses
 			if err := unstructured.SetNestedField(
 				componentObject,
 				int64(vm.OriginalReplicas),
-				"replicaCount",
+				vmClusterFieldReplicaCount,
 			); err != nil {
 				return err
 			}
@@ -1103,7 +1114,10 @@ func (m *Manager) setVMClusterReplicaCount(
 			)
 		}
 
-		current, found, nestedErr := unstructured.NestedInt64(componentObject, "replicaCount")
+		current, found, nestedErr := unstructured.NestedInt64(
+			componentObject,
+			vmClusterFieldReplicaCount,
+		)
 		if nestedErr != nil {
 			return domain.WrapError(
 				domain.ErrorPrecondition,
@@ -1168,7 +1182,7 @@ func (m *Manager) setVMClusterReplicaCount(
 		if err := unstructured.SetNestedField(
 			componentObject,
 			int64(replicas),
-			"replicaCount",
+			vmClusterFieldReplicaCount,
 		); err != nil {
 			return err
 		}
@@ -1261,7 +1275,7 @@ func (m *Manager) setVMClusterPaused(
 			)
 		}
 
-		current, _, nestedErr := unstructured.NestedBool(componentObject, "paused")
+		current, _, nestedErr := unstructured.NestedBool(componentObject, vmClusterFieldPaused)
 		if nestedErr != nil {
 			return domain.WrapError(
 				domain.ErrorPrecondition,
@@ -1303,7 +1317,7 @@ func (m *Manager) setVMClusterPaused(
 		if pauseOwner == "" {
 			currentReplicas, replicasFound, replicasErr := unstructured.NestedInt64(
 				componentObject,
-				"replicaCount",
+				vmClusterFieldReplicaCount,
 			)
 			if replicasErr != nil {
 				return domain.WrapError(
@@ -1342,7 +1356,11 @@ func (m *Manager) setVMClusterPaused(
 			)
 		}
 
-		if err := unstructured.SetNestedField(componentObject, true, "paused"); err != nil {
+		if err := unstructured.SetNestedField(
+			componentObject,
+			true,
+			vmClusterFieldPaused,
+		); err != nil {
 			return err
 		}
 

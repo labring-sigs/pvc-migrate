@@ -50,6 +50,13 @@ kubectl create rolebinding pvc-migrate-kubeblocks-mongodb \
 
 A locally executed CLI uses the identity from its kubeconfig and requires equivalent permissions.
 
+The bundled ClusterRole is a high-privilege controller identity. Bind it only
+to the controller ServiceAccount; tenant users should receive narrowly scoped
+namespaced permissions to submit and observe the workflow CRs they own.
+The role reads repository credentials by exact name and grants the controller
+the create/update/delete Secret verbs required by Helm's default release
+storage driver. It intentionally omits Secret `list`.
+
 Build the tool image. It runs the CLI by default and also supplies PVC reservation, rsync, SSHD, and rclone roles inside the cluster:
 
 ```bash
@@ -58,6 +65,114 @@ docker run --rm pvc-migrate:0.1.0 version
 ```
 
 Use `--tool-image registry.example/pvc-migrate:0.1.0` when cluster nodes pull the image from an internal registry. New migration sessions persist this image reference and reuse it during resume.
+
+## Execution Modes
+
+The CLI supports two durable execution backends:
+
+The default mode is `session`. Use `--mode=controller` when the controller and
+the required workflow CRDs are installed.
+
+- `--mode=session` always stores sessions in ConfigMaps and executes the workflow in the invoking process.
+- `--mode=controller` stores local sessions as operation-specific `migrate.sealos.io/v1alpha1` CRs. The CLI defaults to namespaced kinds for tenant-local work and selects a `Cluster*` kind when namespace roles differ. Cluster-scoped kinds also accept same-namespace roles, which is useful for an administrator submitting a workflow with cluster-level authority. Pod migration with administrator-selected temporary or session namespaces uses `ClusterPodMigration` while keeping the workload and PVC identities in the source namespace. PVC identity moves always use the cluster-scoped `Move`. Backup, restore, and rename intentionally have no cluster-scoped form. Cross-cluster workflows remain on the ConfigMap/session backend. The controller uses leader election, watches every installed workflow kind, and reuses the same resumable app.Service state machine. The CLI watches that CR and waits for completion by default; use `--wait=false` for detached submission. A command fails clearly when its matching CRD is absent.
+
+Install the controller backend with:
+
+```bash
+kubectl apply -f deploy/crd.yaml
+kubectl apply -f deploy/session-namespace.yaml
+kubectl apply -f deploy/rbac.yaml
+kubectl apply -f deploy/controller.yaml
+```
+
+The repository also exposes the standard Kubebuilder/kustomize entrypoint:
+
+```bash
+kubectl apply -k config/default
+```
+
+Run `make manifests` after changing API markers. It regenerates the typed
+deep-copy code and the CRD under `config/crd/bases`, then synchronizes the
+single-installation `deploy/crd.yaml` file.
+
+The resource boundary and unsupported-workflow decisions are documented in
+[`docs/controller-design.md`](docs/controller-design.md).
+
+Namespaced workflow CRDs use `metadata.namespace` as their tenant boundary.
+Their specs and local object references expose no namespace fields; conversion
+to the execution model derives source, temporary, destination, session, and
+repository namespaces from metadata. Cluster workflow specs declare each
+operational namespace once at the top level and keep nested references local
+to the relevant source or destination namespace.
+Backup and restore use a namespaced `BackupRepository` for a user-selected
+location. `spec.type` selects a structured backend configuration. `s3` is
+currently executable and reads its credentials from a Secret in the repository
+namespace. The API also defines a `pvc` backend for a future data-plane
+adapter; the current controller rejects it explicitly instead of treating it
+as S3. Creating a repository configures a location and does not grant access
+to other namespaces. Namespaced workflows use a name-only `repositoryRef`;
+the repository and its Secret must be in the workflow namespace. Backup and
+restore have no cluster-scoped workflow resource, preventing an operator API
+from becoming an indirect cross-namespace credential path. The controller
+scopes object keys by cluster and workload namespace and pins repository
+UID/generation in workflow status, so replacing a repository requires a new
+workflow while in-place Secret rotation remains possible. Cross-cluster
+commands remain ConfigMap/session workflows because they require a second API
+server identity.
+
+The bundled ClusterRole is controller-only. Tenant bindings should grant
+namespaced workflow create/get/list/watch permissions and `/status` read only;
+`/status` update/patch, repository reads, and Secret access stay with the
+controller/operator identity. The current lifecycle commands that
+perform abort, rollback, cleanup, or failed-workflow reactivation therefore
+require that operator identity in controller mode.
+
+Submit a supported migration and wait for its CR status to reach completion:
+
+```bash
+pvc-migrate --mode=session --yes migrate \
+  --source-namespace application --source-pvc data \
+  --destination-pvc data --dry-run=false
+kubectl -n application get migrations
+```
+
+Controller progress is read from the CR's durable status and written to
+stderr; the final table, JSON, or YAML document is written once to stdout.
+Lifecycle commands use `--workflow-namespace application` to address a
+tenant-scoped CR; the default remains the global `--session-namespace` for
+ConfigMap/session workflows.
+`--timeout` bounds planning, submission, and waiting. A failed or deleted CR
+returns a nonzero exit code. Use `--wait=false` when another process owns
+observation. Tool Pod logs are emitted by the controller process, so inspect
+the controller Deployment logs when transfer-level output is needed.
+
+The controller image defaults to `ghcr.io/labring-sigs/pvc-migrate:dev`; set the image explicitly in `deploy/controller.yaml` for a released build.
+
+### Real-cluster E2E
+
+The E2E suite defaults to the synchronous ConfigMap backend. It creates an
+isolated namespace per test, writes real PVC data, verifies migration and
+rollback digests, and removes its workflow records, Leases, PVCs, and PVs:
+
+```bash
+PVC_MIGRATE_E2E_KUBECONFIG=/path/to/kubeconfig \
+PVC_MIGRATE_E2E_TOOL_IMAGE=registry.example/pvc-migrate:0.1.0 \
+make e2e
+```
+
+Run the same suite through operation-specific CRDs with:
+
+```bash
+PVC_MIGRATE_E2E_KUBECONFIG=/path/to/kubeconfig \
+PVC_MIGRATE_E2E_TOOL_IMAGE=registry.example/pvc-migrate:0.1.0 \
+make e2e PVC_MIGRATE_E2E_MODE=controller
+```
+
+Controller-mode tests start a real controller-runtime manager in the test
+namespace, wait for its leader-election Lease, submit the workflow CR, and
+verify the operation-specific terminal status. Both source and
+destination StorageClasses must be available; override them with
+`PVC_MIGRATE_E2E_SOURCE_CLASS` and `PVC_MIGRATE_E2E_DESTINATION_CLASS`.
 
 ## Quick Start
 
@@ -241,14 +356,14 @@ Controller ownership outside the supported adapters causes the plan to fail. PVC
 | Command | Purpose |
 | --- | --- |
 | `<operation> plan` | Validate an operation and print its resource inventory |
-| `reserve` | Provision and retain staged destination PVCs |
+| `reserve` | Optionally provision and retain staged destination PVCs before a later copy or cutover |
 | `copy` | Run a resumable offline copy or one online warm-copy pass without cutover |
 | `copy cross-cluster` | Copy PVC data between two Kubernetes clusters with separate source and destination connections |
 | `reserve cross-cluster` | Provision destination PVCs in another cluster and persist a cross-cluster session |
 | `migrate` | Run an offline reserve, final sync, activation, and completion |
 | `migrate-pod` | Run real-time warm copy, workload pause, cutover, and resume for one Pod |
 | `rename` | Rename one offline PVC while retaining its PV |
-| `move` | Move one offline PVC identity to another namespace |
+| `move` | Move one offline PVC identity within or across namespaces |
 | `backup` | Copy PVC files to S3-compatible object storage (`--online` keeps active consumers running) |
 | `restore` | Restore a published recovery point into a PVC |
 | `migrate status/resume/abort/rollback/cleanup` | Manage an offline migration session |
@@ -256,6 +371,7 @@ Controller ownership outside the supported adapters causes the plan to fail. PVC
 | `reserve/copy/backup/rename/move status/resume/abort/cleanup` | Manage the lifecycle actions supported by each workflow |
 | `copy cross-cluster` / `reserve cross-cluster` lifecycle commands | Inspect, continue, or clean up a cross-cluster session |
 | `recovery cleanup-orphan` | Validate and clear ownership after a session record was lost |
+| `controller` | Run the controller-runtime reconciliation loop for the installed local workflow CRDs |
 | `completion` | Generate shell completion |
 | `version` | Print version information |
 
@@ -384,7 +500,13 @@ pvc-migrate copy --dry-run=false \
 
 The completion manifest records the source PVC identity, capacity, VolumeMode, path, consistency boundary, object count, total bytes, and inventory digest. Restore validates the manifest and inventory before and after synchronization. The requested `--path` must match the published path.
 
-S3-compatible credentials can come from the AWS default credential chain, explicit credential flags, or a Kubernetes Secret selected with `--credentials-secret`. Custom services such as MinIO use `--endpoint`, `--region`, and `--s3-provider`.
+Session-mode S3-compatible credentials can come from the AWS default credential
+chain, explicit credential flags, or a Kubernetes Secret selected with
+`--credentials-secret`. Controller-mode Backup and Restore require a
+namespaced `BackupRepository`; the selected backend configuration, endpoint,
+provider, region, bucket, prefix, and credentials are taken from that repository
+and cannot be overridden by the workflow. The current controller executes only
+the `s3` backend; `pvc` is reserved for a future data-plane adapter.
 
 ```bash
 pvc-migrate --kubeconfig /path/to/kubeconfig \

@@ -3,11 +3,16 @@ package objectstore_test
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"fmt"
 	"io"
+	"net"
+	"net/url"
 	"sort"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -31,6 +36,54 @@ type fakeS3 struct {
 }
 
 func newFakeS3() *fakeS3 { return &fakeS3{objects: map[string]fakeObject{}} }
+
+func TestConfigOnlyStoreRejectsNetworkOperations(t *testing.T) {
+	store, err := NewConfigOnly(Config{Bucket: "backups", Name: "daily"})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	manifest := Manifest{Version: 2}
+
+	operations := []struct {
+		name string
+		run  func() error
+	}{
+		{
+			name: "manifest",
+			run:  func() error { _, err := store.Manifest(context.Background()); return err },
+		},
+		{
+			name: "put manifest",
+			run:  func() error { return store.PutManifest(context.Background(), manifest) },
+		},
+		{
+			name: "inventory",
+			run:  func() error { _, err := store.Inventory(context.Background()); return err },
+		},
+		{
+			name: "acquire lock",
+			run:  func() error { _, err := store.AcquireLock(context.Background(), "holder", time.Minute); return err },
+		},
+		{
+			name: "release lock",
+			run:  func() error { return store.ReleaseLock(context.Background(), "etag") },
+		},
+		{name: "renew lock", run: func() error {
+			_, err := store.RenewLock(context.Background(), "holder", "etag", time.Minute)
+			return err
+		}},
+	}
+	for _, operation := range operations {
+		t.Run(operation.name, func(t *testing.T) {
+			err := operation.run()
+			if domain.CategoryOf(err) != domain.ErrorPrecondition ||
+				!strings.Contains(err.Error(), "client is not configured") {
+				t.Fatalf("category=%q error=%v", domain.CategoryOf(err), err)
+			}
+		})
+	}
+}
 
 func (f *fakeS3) HeadObject(
 	_ context.Context,
@@ -204,6 +257,19 @@ func (missingS3Bucket) ListObjectsV2(
 
 type timeoutS3 struct{ API }
 
+type getObjectErrorS3 struct {
+	API
+	err error
+}
+
+func (s getObjectErrorS3) GetObject(
+	context.Context,
+	*s3.GetObjectInput,
+	...func(*s3.Options),
+) (*s3.GetObjectOutput, error) {
+	return nil, s.err
+}
+
 func (timeoutS3) GetObject(
 	context.Context,
 	*s3.GetObjectInput,
@@ -374,6 +440,52 @@ func TestS3OperationsPreserveTimeoutCategory(t *testing.T) {
 	}
 }
 
+func TestManifestReportsActionableTransportFailures(t *testing.T) {
+	tests := []struct {
+		name string
+		err  error
+		want string
+	}{
+		{
+			name: "DNS",
+			err: &url.Error{Err: &net.DNSError{
+				Err: "no such host", Name: "private.invalid",
+			}},
+			want: "S3 endpoint DNS resolution failed; verify the endpoint hostname and cluster DNS",
+		},
+		{
+			name: "TLS",
+			err: &url.Error{Err: &tls.CertificateVerificationError{
+				Err: x509.UnknownAuthorityError{},
+			}},
+			want: "S3 endpoint TLS verification failed; verify the certificate chain and endpoint hostname",
+		},
+		{
+			name: "connection",
+			err: &url.Error{Err: &net.OpError{
+				Op: "dial", Net: "tcp", Err: syscall.ECONNREFUSED,
+			}},
+			want: "S3 endpoint connection failed; verify the endpoint, port, network policy, and firewall",
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			store := newTestStore(t, getObjectErrorS3{API: newFakeS3(), err: test.err})
+
+			_, err := store.Manifest(context.Background())
+			if domain.CategoryOf(err) != domain.ErrorPrecondition ||
+				!strings.Contains(err.Error(), test.want) {
+				t.Fatalf("category=%s error=%v, want %q", domain.CategoryOf(err), err, test.want)
+			}
+
+			if strings.Contains(err.Error(), "private.invalid") {
+				t.Fatalf("public error exposed endpoint from cause: %v", err)
+			}
+		})
+	}
+}
+
 func TestManifestRejectsInvalidIdentity(t *testing.T) {
 	client := newFakeS3()
 	store := newTestStore(t, client)
@@ -512,6 +624,23 @@ func TestValidateConfigSecurityBoundaries(t *testing.T) {
 	if err := ValidateConfig(valid); err != nil {
 		t.Fatal(err)
 	}
+
+	for name, cfg := range map[string]Config{
+		"bucket length": {Bucket: strings.Repeat("b", 64), Name: "daily"},
+		"name length":   {Bucket: "backups", Name: strings.Repeat("n", 254)},
+		"prefix length": {Bucket: "backups", Name: "daily", Prefix: strings.Repeat("p", 1025)},
+		"complete key length": {
+			Bucket: "backups",
+			Prefix: strings.Repeat("p", 1010),
+			Name:   "daily",
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if err := ValidateConfig(cfg); err == nil {
+				t.Fatalf("accepted oversized config: %#v", cfg)
+			}
+		})
+	}
 }
 
 func TestValidatePathRejectsAbsoluteAndTraversalPaths(t *testing.T) {
@@ -594,5 +723,25 @@ func TestRcloneConfigSelectsProviderForEndpoint(t *testing.T) {
 
 	if !strings.Contains(explicit.RcloneConfig(), "provider = Minio\n") {
 		t.Fatal("explicit S3 provider was overridden")
+	}
+}
+
+func TestRcloneConfigUsesAmbientCredentialsWithoutSerializingThem(t *testing.T) {
+	store, err := NewWithClient(newFakeS3(), Config{
+		Bucket:                "backups",
+		Name:                  "daily",
+		UseAmbientCredentials: true,
+	}, Credentials{AccessKey: "resolved-access", SecretKey: "resolved-secret"})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	config := store.RcloneConfig()
+	if !strings.Contains(config, "env_auth = true\n") {
+		t.Fatalf("ambient rclone config=%q", config)
+	}
+
+	if strings.Contains(config, "resolved-access") || strings.Contains(config, "resolved-secret") {
+		t.Fatalf("ambient credentials were serialized into rclone config: %q", config)
 	}
 }

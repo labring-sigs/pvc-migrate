@@ -426,7 +426,7 @@ func (f *crossClusterCopyFlags) bind(command *cobra.Command, r *rootState) {
 	flags.StringSliceVar(
 		&f.strategies,
 		"strategy",
-		[]string{"local"},
+		[]string{domain.StrategyLocal},
 		"Cross-cluster strategy: local, loadbalancer, or nodeport",
 	)
 }
@@ -540,6 +540,19 @@ func (r *rootState) crossClusterService(
 ) (*crosscluster.Service, error) {
 	if err := r.validateGlobalFlags(); err != nil {
 		return nil, err
+	}
+
+	mode, err := parseExecutionMode(r.global.mode)
+	if err != nil {
+		return nil, err
+	}
+
+	if mode == executionModeController {
+		return nil, domain.NewError(
+			domain.ErrorPrecondition,
+			"cross-cluster mode",
+			"cross-cluster workflows require two explicit API-server connections and use the session backend; use --mode=session",
+		)
 	}
 
 	if flags.destinationKubeconfig == "" {

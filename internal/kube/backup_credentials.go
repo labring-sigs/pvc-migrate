@@ -31,6 +31,7 @@ func CreateBackupCredentialsSecret(
 	client kubernetes.Interface,
 	namespace, sessionID string,
 	data map[string][]byte,
+	owners ...metav1.OwnerReference,
 ) (*corev1.Secret, error) {
 	if client == nil || namespace == "" || sessionID == "" {
 		return nil, domain.NewError(
@@ -52,6 +53,9 @@ func CreateBackupCredentialsSecret(
 		Type:      corev1.SecretTypeOpaque,
 		Immutable: new(true),
 		Data:      data,
+	}
+	if len(owners) > 0 {
+		secret.OwnerReferences = append([]metav1.OwnerReference(nil), owners...)
 	}
 
 	created, err := client.CoreV1().Secrets(namespace).Create(ctx, secret, metav1.CreateOptions{})
@@ -231,5 +235,46 @@ func GetBackupCredentialsSecret(
 		)
 	}
 
+	if err := ValidateS3CredentialsData(secret.Data); err != nil {
+		return nil, domain.WrapError(
+			domain.ErrorPrecondition,
+			"backup credentials",
+			"credentials Secret is incomplete",
+			err,
+		)
+	}
+
 	return secret, nil
+}
+
+// ValidateS3CredentialsData rejects incomplete credential material before a
+// controller can silently fall back to ambient credentials. Session tokens are
+// optional for long-lived access keys.
+func ValidateS3CredentialsData(data map[string][]byte) error {
+	if len(data[BackupAccessKeyDataKey]) == 0 || len(data[BackupSecretKeyDataKey]) == 0 {
+		return domain.NewError(
+			domain.ErrorPrecondition,
+			"backup credentials",
+			"Secret must contain non-empty accessKey and secretKey data",
+		)
+	}
+
+	for key, value := range data {
+		if key != BackupAccessKeyDataKey && key != BackupSecretKeyDataKey &&
+			key != BackupSessionTokenDataKey {
+			continue
+		}
+
+		for _, b := range value {
+			if b == '\r' || b == '\n' || b == 0 {
+				return domain.NewError(
+					domain.ErrorValidation,
+					"backup credentials",
+					"Secret data contains unsafe control characters",
+				)
+			}
+		}
+	}
+
+	return nil
 }

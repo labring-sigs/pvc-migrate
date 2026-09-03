@@ -98,7 +98,11 @@ func (m *Manager) verifyKubeBlocksPaused(
 		return err
 	}
 
-	components, ok, nestedErr := unstructured.NestedSlice(object.Object, "spec", "componentSpecs")
+	components, ok, nestedErr := unstructured.NestedSlice(
+		object.Object,
+		"spec",
+		kubeBlocksFieldComponentSpecs,
+	)
 	if nestedErr != nil || !ok {
 		return domain.NewError(
 			domain.ErrorPrecondition,
@@ -193,12 +197,12 @@ func (m *Manager) verifyKubeBlocksPauseOperation(
 			)
 		}
 
-		if phaseFound && phase == "Succeed" {
+		if phaseFound && kubeBlocksPhase(phase) == kubeBlocksPhaseSucceeded {
 			return requireKubeBlocksStopped(cluster, kb)
 		}
 
 		states = append(states, fmt.Sprintf("%s=%s", name, phase))
-		if phase != "Failed" && phase != "Cancelled" && phase != "Aborted" {
+		if !kubeBlocksOpsFailed(phase) {
 			break
 		}
 	}
@@ -223,7 +227,7 @@ func requireKubeBlocksStopped(
 		return nil
 	}
 
-	if strings.HasPrefix(kb.OpsAPIVersion, "operations.kubeblocks.io/") {
+	if usesComponentScopedKubeBlocksOps(kb.OpsAPIVersion) {
 		return domain.NewError(
 			domain.ErrorPrecondition,
 			"verify paused",
@@ -249,8 +253,8 @@ func kubeBlocksStopped(
 	path := []string{"status", "phase"}
 
 	stateName := "Cluster"
-	if strings.HasPrefix(kb.OpsAPIVersion, "operations.kubeblocks.io/") {
-		path = []string{"status", "components", kb.Component, "phase"}
+	if usesComponentScopedKubeBlocksOps(kb.OpsAPIVersion) {
+		path = []string{"status", kubeBlocksFieldComponents, kb.Component, "phase"}
 		stateName = "component"
 	}
 
@@ -264,7 +268,7 @@ func kubeBlocksStopped(
 		)
 	}
 
-	return found && phase == "Stopped", phase, nil
+	return found && kubeBlocksPhase(phase) == kubeBlocksPhaseStopped, phase, nil
 }
 
 func kubeBlocksOpsSpecEqual(actual, expected any) bool {
@@ -281,15 +285,17 @@ func normalizeKubeBlocksOpsSpec(value any) any {
 	}
 
 	normalized := maps.Clone(spec)
-	if clusterRef, ok := normalized["clusterRef"].(string); ok {
-		if clusterName, ok := normalized["clusterName"].(string); ok && clusterName == clusterRef {
-			delete(normalized, "clusterName")
+	if clusterRef, ok := normalized[kubeBlocksFieldClusterRef].(string); ok {
+		if clusterName, ok := normalized[kubeBlocksFieldClusterName].(string); ok &&
+			clusterName == clusterRef {
+			delete(normalized, kubeBlocksFieldClusterName)
 		}
 	}
 
-	if clusterName, ok := normalized["clusterName"].(string); ok {
-		if clusterRef, ok := normalized["clusterRef"].(string); ok && clusterRef == clusterName {
-			delete(normalized, "clusterRef")
+	if clusterName, ok := normalized[kubeBlocksFieldClusterName].(string); ok {
+		if clusterRef, ok := normalized[kubeBlocksFieldClusterRef].(string); ok &&
+			clusterRef == clusterName {
+			delete(normalized, kubeBlocksFieldClusterRef)
 		}
 	}
 
@@ -340,7 +346,7 @@ func (m *Manager) createAndWaitOps(
 		}
 
 		phase, _, _ := unstructured.NestedString(existing.Object, "status", "phase")
-		if phase == "Failed" || phase == "Cancelled" || phase == "Aborted" {
+		if kubeBlocksOpsFailed(phase) {
 			uid := existing.GetUID()
 			if err := resource.Delete(
 				ctx,
@@ -480,10 +486,10 @@ func (m *Manager) createAndWaitOps(
 			}
 
 			phase, _, _ := unstructured.NestedString(current.Object, "status", "phase")
-			switch phase {
-			case "Succeed":
+			switch kubeBlocksPhase(phase) {
+			case kubeBlocksPhaseSucceeded:
 				return true, nil
-			case "Failed", "Cancelled", "Aborted":
+			case kubeBlocksPhaseFailed, kubeBlocksPhaseCancelled, kubeBlocksPhaseAborted:
 				return false, domain.NewError(
 					domain.ErrorPrecondition,
 					"KubeBlocks operation",
@@ -761,11 +767,15 @@ func (m *Manager) legacyKubeBlocksPauseNotStarted(
 	}
 
 	phase, found, err := unstructured.NestedString(cluster.Object, "status", "phase")
-	if err != nil || !found || phase != "Running" {
+	if err != nil || !found || kubeBlocksPhase(phase) != kubeBlocksPhaseRunning {
 		return false, nil
 	}
 
-	components, found, err := unstructured.NestedSlice(cluster.Object, "spec", "componentSpecs")
+	components, found, err := unstructured.NestedSlice(
+		cluster.Object,
+		"spec",
+		kubeBlocksFieldComponentSpecs,
+	)
 	if err != nil || !found {
 		return false, nil
 	}
@@ -897,14 +907,14 @@ func (m *Manager) waitForKubeBlocksRunning(ctx context.Context, session *domain.
 				)
 			}
 
-			if !clusterFound || clusterPhase != "Running" {
+			if !clusterFound || kubeBlocksPhase(clusterPhase) != kubeBlocksPhaseRunning {
 				return false, nil
 			}
 
 			componentPhase, componentFound, componentErr := unstructured.NestedString(
 				cluster.Object,
 				"status",
-				"components",
+				kubeBlocksFieldComponents,
 				kb.Component,
 				"phase",
 			)
@@ -917,7 +927,8 @@ func (m *Manager) waitForKubeBlocksRunning(ctx context.Context, session *domain.
 				)
 			}
 
-			return componentFound && componentPhase == "Running", nil
+			return componentFound &&
+				kubeBlocksPhase(componentPhase) == kubeBlocksPhaseRunning, nil
 		},
 	)
 }
@@ -981,7 +992,11 @@ func (m *Manager) validateKubeBlocksResume(ctx context.Context, session *domain.
 			)
 		}
 
-		current, found, nestedErr := unstructured.NestedBool(object.Object, "spec", "paused")
+		current, found, nestedErr := unstructured.NestedBool(
+			object.Object,
+			"spec",
+			kubeBlocksFieldPaused,
+		)
 		if nestedErr != nil {
 			return domain.WrapError(
 				domain.ErrorPrecondition,
@@ -1061,7 +1076,11 @@ func (m *Manager) validateKubeBlocksLegacyResume(
 		)
 	}
 
-	components, ok, nestedErr := unstructured.NestedSlice(cluster.Object, "spec", "componentSpecs")
+	components, ok, nestedErr := unstructured.NestedSlice(
+		cluster.Object,
+		"spec",
+		kubeBlocksFieldComponentSpecs,
+	)
 	if nestedErr != nil {
 		return domain.WrapError(
 			domain.ErrorPrecondition,
@@ -1281,14 +1300,14 @@ func kubeBlocksLegacyResumeConverged(
 		)
 	}
 
-	if !found || phase != "Running" {
+	if !found || kubeBlocksPhase(phase) != kubeBlocksPhaseRunning {
 		return false, nil
 	}
 
 	componentPhase, componentFound, componentErr := unstructured.NestedString(
 		cluster.Object,
 		"status",
-		"components",
+		kubeBlocksFieldComponents,
 		kb.Component,
 		"phase",
 	)
@@ -1301,7 +1320,7 @@ func kubeBlocksLegacyResumeConverged(
 		)
 	}
 
-	if !componentFound || componentPhase != "Running" {
+	if !componentFound || kubeBlocksPhase(componentPhase) != kubeBlocksPhaseRunning {
 		return false, nil
 	}
 
@@ -1320,11 +1339,11 @@ func (m *Manager) recoverLegacyKubeBlocksStoppedWithPod(
 	}
 
 	stopped, phase, err := kubeBlocksStopped(cluster, kb)
-	if err != nil || phase == "Running" {
+	if err != nil || kubeBlocksPhase(phase) == kubeBlocksPhaseRunning {
 		return err
 	}
 
-	if !stopped && phase != "Failed" {
+	if !stopped && kubeBlocksPhase(phase) != kubeBlocksPhaseFailed {
 		return domain.NewError(
 			domain.ErrorPrecondition,
 			"pause KubeBlocks",
@@ -1610,7 +1629,7 @@ func (m *Manager) validateKubeBlocksClusterForPause(
 	components, found, nestedErr := unstructured.NestedSlice(
 		cluster.Object,
 		"spec",
-		"componentSpecs",
+		kubeBlocksFieldComponentSpecs,
 	)
 	if nestedErr != nil || !found {
 		return nil, domain.NewError(
@@ -1706,10 +1725,8 @@ func kubeBlocksPauseSpec(kb *domain.KubeBlocksSpec, paused bool) map[string]any 
 		field = "stop"
 	}
 
-	clusterField := "clusterRef"
-	if strings.HasPrefix(kb.OpsAPIVersion, "operations.kubeblocks.io/") {
-		clusterField = "clusterName"
-
+	clusterField := kubeBlocksClusterField(kb.OpsAPIVersion)
+	if usesComponentScopedKubeBlocksOps(kb.OpsAPIVersion) {
 		return map[string]any{
 			clusterField: kb.Cluster,
 			"type":       typeName,
@@ -1751,7 +1768,7 @@ func (m *Manager) updateKubeBlocksInstanceSet(
 		)
 	}
 
-	current, found, err := unstructured.NestedBool(object.Object, "spec", "paused")
+	current, found, err := unstructured.NestedBool(object.Object, "spec", kubeBlocksFieldPaused)
 	if err != nil {
 		return domain.WrapError(
 			domain.ErrorPrecondition,
@@ -1800,8 +1817,8 @@ func (m *Manager) updateKubeBlocksInstanceSet(
 	changed := current != want || (!paused && found != kb.OriginalPausedConfigured)
 	if changed {
 		if !paused && !kb.OriginalPausedConfigured {
-			unstructured.RemoveNestedField(object.Object, "spec", "paused")
-		} else if err := unstructured.SetNestedField(object.Object, want, "spec", "paused"); err != nil {
+			unstructured.RemoveNestedField(object.Object, "spec", kubeBlocksFieldPaused)
+		} else if err := unstructured.SetNestedField(object.Object, want, "spec", kubeBlocksFieldPaused); err != nil {
 			return err
 		}
 	}
@@ -1841,7 +1858,11 @@ func (m *Manager) updateKubeBlocksInstanceSet(
 		)
 	}
 
-	actual, configured, err := unstructured.NestedBool(updated.Object, "spec", "paused")
+	actual, configured, err := unstructured.NestedBool(
+		updated.Object,
+		"spec",
+		kubeBlocksFieldPaused,
+	)
 	if err != nil {
 		return domain.WrapError(
 			domain.ErrorPrecondition,
@@ -1957,7 +1978,11 @@ func (m *Manager) verifyKubeBlocksInstanceSetPaused(
 		)
 	}
 
-	paused, found, nestedErr := unstructured.NestedBool(object.Object, "spec", "paused")
+	paused, found, nestedErr := unstructured.NestedBool(
+		object.Object,
+		"spec",
+		kubeBlocksFieldPaused,
+	)
 	if nestedErr != nil {
 		return domain.WrapError(
 			domain.ErrorPrecondition,

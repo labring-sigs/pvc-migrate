@@ -67,6 +67,8 @@ func (s *Service) validateAbortWorkflowForTest(ctx context.Context, session *dom
 		return s.ValidateCopyAbort(ctx, session)
 	case domain.SessionTypeBackup:
 		return s.ValidateBackupAbort(ctx, session)
+	case domain.SessionTypeRestore:
+		return s.ValidateRestoreAbort(ctx, session)
 	case domain.SessionTypeRename:
 		return s.ValidateRenameAbort(ctx, session)
 	case domain.SessionTypeMove:
@@ -88,6 +90,8 @@ func (s *Service) abortWorkflowForTest(ctx context.Context, session *domain.Sess
 		return s.AbortCopy(ctx, session)
 	case domain.SessionTypeBackup:
 		return s.AbortBackup(ctx, session)
+	case domain.SessionTypeRestore:
+		return s.AbortRestore(ctx, session)
 	case domain.SessionTypeRename:
 		return s.AbortRename(ctx, session)
 	case domain.SessionTypeMove:

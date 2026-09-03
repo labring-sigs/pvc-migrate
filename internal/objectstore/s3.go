@@ -4,11 +4,14 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"path"
@@ -28,7 +31,13 @@ import (
 	"k8s.io/apimachinery/pkg/api/resource"
 )
 
-const manifestVersion = 2
+const (
+	manifestVersion       = 2
+	maxBucketLength       = 63
+	maxObjectNameLength   = 253
+	maxObjectPrefixLength = 1024
+	maxObjectKeyLength    = 1024
+)
 
 var safeSegment = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]*$`)
 
@@ -46,6 +55,15 @@ type Config struct {
 	ForcePathStyle        bool
 	ServerSideEncryption  string
 	SSEKMSKeyID           string
+	// UseAmbientCredentials makes RcloneConfig use the transfer Pod's ambient
+	// cloud identity instead of embedding static credentials in its config.
+	UseAmbientCredentials bool
+	// RepositoryUID and RepositoryGeneration are controller-only provenance.
+	// They pin a running workflow to the selected repository without exposing
+	// credentials or changing the object-store wire configuration.
+	RepositoryUID        string
+	RepositoryGeneration int64
+	CredentialsSecretUID string
 }
 
 type Credentials struct {
@@ -127,6 +145,11 @@ type Store struct {
 	credentials Credentials
 }
 
+// Backend identifies the repository data plane implemented by Store. Keep
+// this method small so Store can satisfy backup.RepositoryStore without
+// exposing S3 as the workflow's only storage abstraction.
+func (s *Store) Backend() string { return "s3" }
+
 func (s *Store) Config() Config { return s.config }
 
 func New(ctx context.Context, cfg Config) (*Store, error) {
@@ -203,7 +226,27 @@ func NewWithClient(client API, cfg Config, resolved Credentials) (*Store, error)
 	return &Store{client: client, config: cfg, credentials: resolved}, nil
 }
 
+// NewConfigOnly validates object-store routing fields without resolving
+// credentials or constructing a network client. Controller-mode submission
+// uses this form because the controller owns the administrator Secret and the
+// submitting tenant must not receive or persist its contents.
+func NewConfigOnly(cfg Config) (*Store, error) {
+	if err := ValidateConfig(cfg); err != nil {
+		return nil, err
+	}
+
+	return &Store{config: cfg}, nil
+}
+
 func ValidateConfig(cfg Config) error {
+	if len(cfg.Bucket) > maxBucketLength {
+		return domain.NewError(
+			domain.ErrorValidation,
+			"S3 configuration",
+			"bucket exceeds the maximum length of 63 characters",
+		)
+	}
+
 	if !safeSegment.MatchString(cfg.Bucket) {
 		return domain.NewError(
 			domain.ErrorValidation,
@@ -212,11 +255,27 @@ func ValidateConfig(cfg Config) error {
 		)
 	}
 
+	if len(cfg.Name) > maxObjectNameLength {
+		return domain.NewError(
+			domain.ErrorValidation,
+			"S3 configuration",
+			"name exceeds the maximum length of 253 characters",
+		)
+	}
+
 	if !safeSegment.MatchString(cfg.Name) {
 		return domain.NewError(
 			domain.ErrorValidation,
 			"S3 configuration",
 			"name must contain only alphanumeric characters, dots, underscores, and hyphens",
+		)
+	}
+
+	if len(cfg.Prefix) > maxObjectPrefixLength {
+		return domain.NewError(
+			domain.ErrorValidation,
+			"S3 configuration",
+			"prefix exceeds the maximum length of 1024 characters",
 		)
 	}
 
@@ -230,6 +289,18 @@ func ValidateConfig(cfg Config) error {
 				)
 			}
 		}
+	}
+
+	// S3 limits object keys, including the repository prefix, recovery-point
+	// name, and controller-owned completion suffix, to 1024 bytes. Validate
+	// the complete manifest key here so repository-backed workflows fail before
+	// Helm or a transfer Pod is started.
+	if len(path.Join(cfg.Prefix, cfg.Name+".complete.json")) > maxObjectKeyLength {
+		return domain.NewError(
+			domain.ErrorValidation,
+			"S3 configuration",
+			"prefix and recovery-point name exceed S3's 1024-byte object-key limit",
+		)
 	}
 
 	if (cfg.AccessKey == "") != (cfg.SecretKey == "") {
@@ -262,6 +333,15 @@ func ValidateConfig(cfg Config) error {
 				domain.ErrorValidation,
 				"S3 configuration",
 				"endpoint must be an absolute HTTP or HTTPS URL",
+			)
+		}
+
+		if parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" ||
+			parsed.Path != "" && parsed.Path != "/" {
+			return domain.NewError(
+				domain.ErrorValidation,
+				"S3 configuration",
+				"endpoint must not contain credentials, query parameters, fragments, or a path",
 			)
 		}
 
@@ -356,11 +436,16 @@ func (s *Store) RcloneConfig() string {
 	builder.WriteString("[remote]\n")
 	builder.WriteString("type = s3\n")
 	fmt.Fprintf(&builder, "provider = %s\n", provider)
-	fmt.Fprintf(&builder, "access_key_id = %s\n", s.credentials.AccessKey)
-	fmt.Fprintf(&builder, "secret_access_key = %s\n", s.credentials.SecretKey)
 
-	if s.credentials.SessionToken != "" {
-		fmt.Fprintf(&builder, "session_token = %s\n", s.credentials.SessionToken)
+	if s.config.UseAmbientCredentials {
+		builder.WriteString("env_auth = true\n")
+	} else {
+		fmt.Fprintf(&builder, "access_key_id = %s\n", s.credentials.AccessKey)
+		fmt.Fprintf(&builder, "secret_access_key = %s\n", s.credentials.SecretKey)
+
+		if s.credentials.SessionToken != "" {
+			fmt.Fprintf(&builder, "session_token = %s\n", s.credentials.SessionToken)
+		}
 	}
 
 	if s.config.Endpoint != "" {
@@ -386,6 +471,10 @@ func (s *Store) RcloneConfig() string {
 }
 
 func (s *Store) Manifest(ctx context.Context) (*Manifest, error) {
+	if err := s.requireClient("S3 manifest"); err != nil {
+		return nil, err
+	}
+
 	output, err := s.client.GetObject(
 		ctx,
 		&s3.GetObjectInput{Bucket: aws.String(s.config.Bucket), Key: aws.String(s.manifestKey())},
@@ -452,6 +541,10 @@ func (s *Store) Manifest(ctx context.Context) (*Manifest, error) {
 }
 
 func (s *Store) PutManifest(ctx context.Context, manifest Manifest) error {
+	if err := s.requireClient("S3 manifest"); err != nil {
+		return err
+	}
+
 	manifest.Version = manifestVersion
 	manifest.Bucket = s.config.Bucket
 	manifest.Prefix = s.config.Prefix
@@ -494,6 +587,10 @@ func (s *Store) PutManifest(ctx context.Context, manifest Manifest) error {
 }
 
 func (s *Store) Inventory(ctx context.Context) (Inventory, error) {
+	if err := s.requireClient("S3 inventory"); err != nil {
+		return Inventory{}, err
+	}
+
 	prefix := path.Join(s.config.Prefix, s.config.Name) + "/"
 	entries := make([]inventoryEntry, 0)
 
@@ -627,6 +724,10 @@ func (s *Store) AcquireLock(ctx context.Context, holder string, ttl time.Duratio
 		)
 	}
 
+	if err := s.requireClient("S3 lock"); err != nil {
+		return "", err
+	}
+
 	lock := Lock{Holder: holder, ExpiresAt: time.Now().UTC().Add(ttl)}
 
 	data, err := json.Marshal(lock)
@@ -729,6 +830,10 @@ func (s *Store) ReleaseLock(ctx context.Context, etag string) error {
 		)
 	}
 
+	if err := s.requireClient("S3 lock"); err != nil {
+		return err
+	}
+
 	input := &s3.DeleteObjectInput{
 		Bucket: aws.String(s.config.Bucket),
 		Key:    aws.String(s.lockKey()),
@@ -755,6 +860,10 @@ func (s *Store) RenewLock(
 			"S3 lock",
 			"holder, ETag, and positive TTL are required",
 		)
+	}
+
+	if err := s.requireClient("S3 lock"); err != nil {
+		return "", err
 	}
 
 	current, currentETag, err := s.readLock(ctx)
@@ -930,6 +1039,10 @@ func (s *Store) manifestKey() string {
 func (s *Store) lockKey() string { return path.Join(s.config.Prefix, s.config.Name+".lock.json") }
 
 func (s *Store) readLock(ctx context.Context) (*Lock, string, error) {
+	if err := s.requireClient("S3 lock"); err != nil {
+		return nil, "", err
+	}
+
 	output, err := s.client.GetObject(
 		ctx,
 		&s3.GetObjectInput{Bucket: aws.String(s.config.Bucket), Key: aws.String(s.lockKey())},
@@ -955,6 +1068,18 @@ func (s *Store) readLock(ctx context.Context) (*Lock, string, error) {
 	return &lock, aws.ToString(output.ETag), nil
 }
 
+func (s *Store) requireClient(operation string) error {
+	if s == nil || s.client == nil {
+		return domain.NewError(
+			domain.ErrorPrecondition,
+			operation,
+			"object-store client is not configured",
+		)
+	}
+
+	return nil
+}
+
 func (s *Store) applyEncryption(input *s3.PutObjectInput) {
 	if s.config.ServerSideEncryption != "" {
 		input.ServerSideEncryption = types.ServerSideEncryption(s.config.ServerSideEncryption)
@@ -973,7 +1098,7 @@ func wrapS3Error(
 ) error {
 	if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) ||
 		errors.Is(ctx.Err(), context.DeadlineExceeded) ||
-		errors.Is(ctx.Err(), context.Canceled) {
+		errors.Is(ctx.Err(), context.Canceled) || isNetworkTimeout(err) {
 		return domain.WrapError(
 			domain.ErrorTimeout,
 			operation,
@@ -982,12 +1107,50 @@ func wrapS3Error(
 		)
 	}
 
+	if detail := s3TransportFailureMessage(err); detail != "" {
+		message += ": " + detail
+	}
+
 	var apiErr smithy.APIError
 	if errors.As(err, &apiErr) && apiErr.ErrorCode() != "" {
 		message += fmt.Sprintf(" (S3 code %s)", apiErr.ErrorCode())
 	}
 
 	return domain.WrapError(category, operation, message, err)
+}
+
+func isNetworkTimeout(err error) bool {
+	var timeout interface{ Timeout() bool }
+	return errors.As(err, &timeout) && timeout.Timeout()
+}
+
+func s3TransportFailureMessage(err error) string {
+	if _, ok := errors.AsType[*net.DNSError](err); ok {
+		return "S3 endpoint DNS resolution failed; verify the endpoint hostname and cluster DNS"
+	}
+
+	var (
+		verificationErr     *tls.CertificateVerificationError
+		unknownAuthorityErr x509.UnknownAuthorityError
+		hostnameErr         x509.HostnameError
+		certificateErr      x509.CertificateInvalidError
+	)
+	if errors.As(err, &verificationErr) ||
+		errors.As(err, &unknownAuthorityErr) ||
+		errors.As(err, &hostnameErr) ||
+		errors.As(err, &certificateErr) {
+		return "S3 endpoint TLS verification failed; verify the certificate chain and endpoint hostname"
+	}
+
+	var (
+		operationErr *net.OpError
+		urlErr       *url.Error
+	)
+	if errors.As(err, &operationErr) || errors.As(err, &urlErr) {
+		return "S3 endpoint connection failed; verify the endpoint, port, network policy, and firewall"
+	}
+
+	return ""
 }
 
 func isMissing(err error) bool {

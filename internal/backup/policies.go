@@ -6,6 +6,7 @@ import (
 
 	"github.com/labring-sigs/pvc-migrate/internal/domain"
 	"github.com/labring-sigs/pvc-migrate/internal/kube"
+	"github.com/labring-sigs/pvc-migrate/internal/parallel"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -56,23 +57,32 @@ func checkObjectTransferQuota(
 		)
 	}
 
-	if err := checkNamespaceAdmissionPolicies(
-		ctx,
-		client,
-		req.Namespace,
-		operation,
-		toolResources,
-	); err != nil {
-		return err
+	checks := [2]struct {
+		namespace string
+		estimate  domain.ResourceEstimate
+		err       error
+	}{
+		{namespace: req.Namespace, estimate: toolResources},
+		{namespace: req.SessionNamespace, estimate: sessionResources},
 	}
 
-	return checkNamespaceAdmissionPolicies(
-		ctx,
-		client,
-		req.SessionNamespace,
-		operation,
-		sessionResources,
-	)
+	parallel.For(2, func(index int) {
+		checks[index].err = checkNamespaceAdmissionPolicies(
+			ctx,
+			client,
+			checks[index].namespace,
+			operation,
+			checks[index].estimate,
+		)
+	})
+
+	// Return the source-namespace error first for deterministic diagnostics when
+	// both independent policy reads fail in the same preflight.
+	if checks[0].err != nil {
+		return checks[0].err
+	}
+
+	return checks[1].err
 }
 
 func checkNamespaceAdmissionPolicies(
@@ -228,7 +238,10 @@ func backupSessionResourceEstimate(
 
 	if estimate.Leases > 0 {
 		leaseIDs := []string{sessionID, backupTargetLockID(req.Store)}
-		for _, leaseID := range leaseIDs {
+		leaseResults := make([]bool, len(leaseIDs))
+		leaseErrors := make([]error, len(leaseIDs))
+		parallel.For(len(leaseIDs), func(index int) {
+			leaseID := leaseIDs[index]
 			exists, err := backupResourceExists(func() error {
 				_, getErr := client.CoordinationV1().Leases(req.SessionNamespace).Get(
 					ctx,
@@ -238,8 +251,13 @@ func backupSessionResourceEstimate(
 
 				return getErr
 			})
-			if err != nil {
-				return domain.ResourceEstimate{}, err
+			leaseResults[index] = exists
+			leaseErrors[index] = err
+		})
+
+		for index, exists := range leaseResults {
+			if leaseErrors[index] != nil {
+				return domain.ResourceEstimate{}, leaseErrors[index]
 			}
 
 			if exists {

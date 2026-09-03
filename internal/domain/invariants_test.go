@@ -2,10 +2,12 @@ package domain_test
 
 import (
 	"encoding/json"
+	"fmt"
 	"regexp"
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	. "github.com/labring-sigs/pvc-migrate/internal/domain"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -207,6 +209,78 @@ func TestSetConditionAddsAndReplacesByType(t *testing.T) {
 	}
 }
 
+func TestWorkflowStatusFieldsStayBoundedAndUTF8Safe(t *testing.T) {
+	session := testSession(t)
+
+	longMessage := strings.Repeat("状态", MaxWorkflowMessageBytes)
+	if err := session.Transition(PhaseReserving, longMessage, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+
+	if len(session.Status.Message) > MaxWorkflowMessageBytes ||
+		!utf8.ValidString(session.Status.Message) {
+		t.Fatalf("status message is not bounded UTF-8: bytes=%d", len(session.Status.Message))
+	}
+
+	longType := strings.Repeat("T", MaxWorkflowConditionTypeBytes+20)
+	longReason := strings.Repeat("R", MaxWorkflowReasonBytes+20)
+	session.SetCondition(Condition{Type: longType, Reason: longReason, Message: longMessage})
+
+	condition := session.Status.Conditions[0]
+	if len(condition.Type) != MaxWorkflowConditionTypeBytes ||
+		len(condition.Reason) != MaxWorkflowReasonBytes ||
+		len(condition.Message) > MaxWorkflowMessageBytes ||
+		!utf8.ValidString(condition.Message) {
+		t.Fatalf("condition fields are not bounded: type=%d reason=%d message=%d",
+			len(condition.Type), len(condition.Reason), len(condition.Message))
+	}
+}
+
+func TestWorkflowHistoryRetainsOnlyRecentEntries(t *testing.T) {
+	session := testSession(t)
+
+	session.Status.History = make([]HistoryEntry, MaxWorkflowHistoryEntries+17)
+	for i := range session.Status.History {
+		session.Status.History[i].Phase = PhasePlanned
+		session.Status.History[i].Message = string(rune(i))
+	}
+
+	if err := session.Transition(PhaseReserving, "latest", time.Now()); err != nil {
+		t.Fatal(err)
+	}
+
+	if len(session.Status.History) != MaxWorkflowHistoryEntries {
+		t.Fatalf(
+			"history length=%d, want %d",
+			len(session.Status.History),
+			MaxWorkflowHistoryEntries,
+		)
+	}
+
+	if got := session.Status.History[len(session.Status.History)-1].Message; got != "latest" {
+		t.Fatalf("latest history message=%q", got)
+	}
+}
+
+func TestWorkflowConditionsRetainOnlyRecentTypes(t *testing.T) {
+	session := testSession(t)
+	for i := range MaxWorkflowConditions + 5 {
+		session.SetCondition(Condition{Type: fmt.Sprintf("Condition-%d", i)})
+	}
+
+	if len(session.Status.Conditions) != MaxWorkflowConditions {
+		t.Fatalf(
+			"condition length=%d, want %d",
+			len(session.Status.Conditions),
+			MaxWorkflowConditions,
+		)
+	}
+
+	if got := session.Status.Conditions[0].Type; got != "Condition-5" {
+		t.Fatalf("oldest retained condition=%q, want Condition-5", got)
+	}
+}
+
 func TestVolumeStatusMissingIsClassified(t *testing.T) {
 	_, err := testSession(t).VolumeStatus("missing")
 	if CategoryOf(err) != ErrorInternal || !strings.Contains(err.Error(), "missing") {
@@ -240,6 +314,11 @@ func TestSessionValidateRejectsInvalidPersistentShapes(t *testing.T) {
 			name:   "session namespace",
 			mutate: func(s *Session) { s.Spec.SessionNamespace = "" },
 			text:   "identity and namespaces",
+		},
+		{
+			name:   "Pod migration destination namespace",
+			mutate: func(s *Session) { s.Spec.DestinationNamespace = "other" },
+			text:   "pod migration must keep workload and PVC identities in the source namespace",
 		},
 		{
 			name:   "volumes",
@@ -450,5 +529,260 @@ func TestNewSessionIDUsesUTCAndDNSCompatibleShape(t *testing.T) {
 	if matched := regexp.MustCompile(`^mig-20260807-150405-[0-9a-f]{8}$`).
 		MatchString(id); !matched {
 		t.Fatalf("session ID = %q", id)
+	}
+}
+
+func TestControllerWorkflowRegistryCoversEveryLocalWorkflow(t *testing.T) {
+	workflows := ControllerWorkflows()
+	if len(workflows) != 8 {
+		t.Fatalf("controller workflow count=%d, want 8", len(workflows))
+	}
+
+	seenTypes := make(map[SessionType]struct{}, len(workflows))
+	seenKinds := make(map[ControllerKind]struct{}, len(workflows)*2)
+	seenResources := make(map[string]struct{}, len(workflows)*2)
+
+	for _, workflow := range workflows {
+		if workflow.Type == "" || workflow.Kind == "" && workflow.ClusterKind == "" {
+			t.Fatalf("incomplete controller workflow descriptor=%#v", workflow)
+		}
+
+		if workflow.Kind == "" != (workflow.Resource == "") ||
+			workflow.Kind == "" != (workflow.Singular == "") ||
+			workflow.ClusterKind == "" != (workflow.ClusterResource == "") ||
+			workflow.ClusterKind == "" != (workflow.ClusterSingular == "") {
+			t.Fatalf("inconsistent controller workflow scope descriptor=%#v", workflow)
+		}
+
+		if _, exists := seenTypes[workflow.Type]; exists {
+			t.Fatalf("duplicate controller workflow type=%q", workflow.Type)
+		}
+
+		seenTypes[workflow.Type] = struct{}{}
+		for _, kind := range []ControllerKind{workflow.Kind, workflow.ClusterKind} {
+			if kind == "" {
+				continue
+			}
+
+			if _, exists := seenKinds[kind]; exists {
+				t.Fatalf("duplicate controller workflow kind=%q", kind)
+			}
+
+			seenKinds[kind] = struct{}{}
+
+			byKind, ok := ControllerWorkflowForKind(kind)
+			if !ok || byKind.Type != workflow.Type {
+				t.Fatalf("kind lookup for %q returned %#v, found=%t", kind, byKind, ok)
+			}
+		}
+
+		for _, resource := range []string{workflow.Resource, workflow.ClusterResource} {
+			if resource == "" {
+				continue
+			}
+
+			if _, exists := seenResources[resource]; exists {
+				t.Fatalf("duplicate controller workflow resource=%q", resource)
+			}
+
+			seenResources[resource] = struct{}{}
+		}
+
+		byType, ok := ControllerWorkflowForType(workflow.Type)
+		if !ok || byType.Kind != workflow.Kind {
+			t.Fatalf("type lookup for %q returned %#v, found=%t", workflow.Type, byType, ok)
+		}
+	}
+
+	resources := ControllerWorkflowResources()
+	if len(resources) != 12 {
+		t.Fatalf(
+			"controller resources=%v, want 7 namespaced and 5 cluster resources",
+			resources,
+		)
+	}
+
+	backup, _ := ControllerWorkflowForType(SessionTypeBackup)
+	if backup.ClusterKind != "" {
+		t.Fatalf("Backup unexpectedly exposes cluster API: %#v", backup)
+	}
+
+	move, _ := ControllerWorkflowForType(SessionTypeMove)
+	if move.Kind != "" || move.ClusterKind != ControllerKindMove ||
+		move.ClusterResource != MoveResource {
+		t.Fatalf("Move scope contract=%#v", move)
+	}
+
+	originalKind := workflows[0].Kind
+	workflows[0].Kind = ControllerKind("mutated")
+
+	fresh, ok := ControllerWorkflowForType(workflows[0].Type)
+	if !ok || fresh.Kind != originalKind {
+		t.Fatalf("controller workflow registry was exposed for mutation: %#v, found=%t", fresh, ok)
+	}
+
+	resources[0] = "mutated"
+
+	if ControllerWorkflowResources()[0] == "mutated" {
+		t.Fatal("controller workflow resource registry was exposed for mutation")
+	}
+}
+
+func TestControllerResourceScopeUsesOperationNamespaceRoles(t *testing.T) {
+	for _, sessionType := range []SessionType{SessionTypeReserve, SessionTypeCopy} {
+		spec := SessionSpec{
+			SessionCommon: SessionCommon{
+				SourceNamespace:      "tenant",
+				TemporaryNamespace:   "tenant",
+				DestinationNamespace: "unused-final-destination",
+				SessionNamespace:     "tenant",
+			},
+			Type: sessionType,
+		}
+
+		resource, ok := ControllerResourceForSpec(spec)
+		if !ok || resource.Cluster {
+			t.Fatalf("%s resource=%#v found=%t, want namespaced", sessionType, resource, ok)
+		}
+	}
+
+	spec := SessionSpec{
+		SessionCommon: SessionCommon{
+			SourceNamespace:      "tenant",
+			TemporaryNamespace:   "system",
+			DestinationNamespace: "tenant",
+			SessionNamespace:     "system",
+		},
+		Type: SessionTypeMigratePod,
+	}
+
+	resource, ok := ControllerResourceForSpec(spec)
+	if !ok || !resource.Cluster || resource.Kind != ControllerKindClusterPodMigration {
+		t.Fatalf("Pod migration resource=%#v found=%t, want ClusterPodMigration", resource, ok)
+	}
+
+	for _, destinationNamespace := range []string{"tenant", "archive"} {
+		move := NewSessionSpec(OperationMove, SessionCommon{
+			SourceNamespace:      "tenant",
+			TemporaryNamespace:   destinationNamespace,
+			DestinationNamespace: destinationNamespace,
+			SessionNamespace:     "system",
+		}, false, SessionWorkflowOptions{})
+
+		resource, ok := ControllerResourceForSpec(move)
+		if !ok || !resource.Cluster || resource.Kind != ControllerKindMove ||
+			resource.Resource != MoveResource {
+			t.Fatalf(
+				"Move destination namespace %q resource=%#v found=%t",
+				destinationNamespace,
+				resource,
+				ok,
+			)
+		}
+	}
+}
+
+func TestObjectStoreSessionsRejectUnsupportedBackend(t *testing.T) {
+	tests := []struct {
+		name string
+		spec SessionSpec
+	}{
+		{
+			name: "backup",
+			spec: NewSessionSpec(OperationBackup, SessionCommon{
+				SourceNamespace: "app", SessionNamespace: "system",
+			}, false, SessionWorkflowOptions{}),
+		},
+		{
+			name: "restore",
+			spec: NewSessionSpec(OperationRestore, SessionCommon{
+				SourceNamespace: "app", DestinationNamespace: "app", SessionNamespace: "system",
+			}, false, SessionWorkflowOptions{}),
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			spec := test.spec
+			if spec.Backup != nil {
+				spec.Backup.SourcePVC = ObjectReference{
+					Namespace: "app",
+					Name:      "data",
+					UID:       "pvc-uid",
+				}
+				spec.Backup.SourcePV = ObjectReference{Name: "pv-data", UID: "pv-uid"}
+				spec.Backup.Backend = "gcs"
+				spec.Backup.Bucket = "backups"
+				spec.Backup.Name = "daily"
+			} else {
+				spec.Restore.DestinationPVC = ObjectReference{Namespace: "app", Name: "data"}
+				spec.Restore.Backend = "gcs"
+				spec.Restore.Bucket = "backups"
+				spec.Restore.Name = "daily"
+			}
+
+			if err := NewSession(
+				"backend-test",
+				spec,
+				time.Now(),
+			).Validate(); CategoryOf(
+				err,
+			) != ErrorValidation {
+				t.Fatalf("unsupported backend error=%v category=%q", err, CategoryOf(err))
+			}
+		})
+	}
+}
+
+func TestRepositoryBackedSessionsDoNotDeclareADataPlaneBackend(t *testing.T) {
+	tests := []struct {
+		name string
+		spec SessionSpec
+	}{
+		{
+			name: "backup",
+			spec: NewSessionSpec(OperationBackup, SessionCommon{
+				SourceNamespace: "app", SessionNamespace: "app",
+			}, false, SessionWorkflowOptions{}),
+		},
+		{
+			name: "restore",
+			spec: NewSessionSpec(OperationRestore, SessionCommon{
+				SourceNamespace: "app", DestinationNamespace: "app", SessionNamespace: "app",
+			}, false, SessionWorkflowOptions{}),
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			spec := test.spec
+			if spec.Backup != nil {
+				spec.Backup.SourcePVC = ObjectReference{
+					Namespace: "app", Name: "data", UID: "pvc-uid",
+				}
+				spec.Backup.SourcePV = ObjectReference{Name: "pv-data", UID: "pv-uid"}
+				spec.Backup.Name = "daily"
+				spec.Backup.BackupRepository = "archive"
+			} else {
+				spec.Restore.DestinationPVC = ObjectReference{Namespace: "app", Name: "data"}
+				spec.Restore.Name = "daily"
+				spec.Restore.BackupRepository = "archive"
+			}
+
+			session := NewSession("repository-test", spec, time.Now())
+			if err := session.Validate(); err != nil {
+				t.Fatalf("repository-backed session rejected: %v", err)
+			}
+
+			if spec.Backup != nil {
+				session.Spec.Backup.Backend = BackupBackendS3
+			} else {
+				session.Spec.Restore.Backend = BackupBackendS3
+			}
+
+			if err := session.Validate(); CategoryOf(err) != ErrorValidation {
+				t.Fatalf("mixed repository/backend error=%v category=%q", err, CategoryOf(err))
+			}
+		})
 	}
 }

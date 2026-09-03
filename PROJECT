@@ -1,0 +1,125 @@
+domain: sealos.io
+layout:
+- go.kubebuilder.io/v4
+projectName: pvc-migrate
+repo: github.com/labring-sigs/pvc-migrate
+version: "3"
+
+resources:
+- api:
+    crdVersion: v1
+    namespaced: true
+  controller: true
+  domain: sealos.io
+  group: migrate
+  kind: Migration
+  path: github.com/labring-sigs/pvc-migrate/api/v1alpha1
+  version: v1alpha1
+- api:
+    crdVersion: v1
+    namespaced: true
+  controller: true
+  domain: sealos.io
+  group: migrate
+  kind: PodMigration
+  path: github.com/labring-sigs/pvc-migrate/api/v1alpha1
+  version: v1alpha1
+- api:
+    crdVersion: v1
+    namespaced: true
+  controller: true
+  domain: sealos.io
+  group: migrate
+  kind: Reservation
+  path: github.com/labring-sigs/pvc-migrate/api/v1alpha1
+  version: v1alpha1
+- api:
+    crdVersion: v1
+    namespaced: true
+  controller: true
+  domain: sealos.io
+  group: migrate
+  kind: Copy
+  path: github.com/labring-sigs/pvc-migrate/api/v1alpha1
+  version: v1alpha1
+- api:
+    crdVersion: v1
+    namespaced: true
+  controller: true
+  domain: sealos.io
+  group: migrate
+  kind: Backup
+  path: github.com/labring-sigs/pvc-migrate/api/v1alpha1
+  version: v1alpha1
+- api:
+    crdVersion: v1
+    namespaced: true
+  controller: true
+  domain: sealos.io
+  group: migrate
+  kind: Restore
+  path: github.com/labring-sigs/pvc-migrate/api/v1alpha1
+  version: v1alpha1
+- api:
+    crdVersion: v1
+    namespaced: true
+  controller: true
+  domain: sealos.io
+  group: migrate
+  kind: Rename
+  path: github.com/labring-sigs/pvc-migrate/api/v1alpha1
+  version: v1alpha1
+- api:
+    crdVersion: v1
+    namespaced: true
+  controller: false
+  domain: sealos.io
+  group: migrate
+  kind: BackupRepository
+  path: github.com/labring-sigs/pvc-migrate/api/v1alpha1
+  version: v1alpha1
+- api:
+    crdVersion: v1
+    namespaced: false
+  controller: true
+  domain: sealos.io
+  group: migrate
+  kind: ClusterMigration
+  path: github.com/labring-sigs/pvc-migrate/api/v1alpha1
+  version: v1alpha1
+- api:
+    crdVersion: v1
+    namespaced: false
+  controller: true
+  domain: sealos.io
+  group: migrate
+  kind: ClusterPodMigration
+  path: github.com/labring-sigs/pvc-migrate/api/v1alpha1
+  version: v1alpha1
+- api:
+    crdVersion: v1
+    namespaced: false
+  controller: true
+  domain: sealos.io
+  group: migrate
+  kind: ClusterReservation
+  path: github.com/labring-sigs/pvc-migrate/api/v1alpha1
+  version: v1alpha1
+- api:
+    crdVersion: v1
+    namespaced: false
+  controller: true
+  domain: sealos.io
+  group: migrate
+  kind: ClusterCopy
+  path: github.com/labring-sigs/pvc-migrate/api/v1alpha1
+  version: v1alpha1
+- api:
+    crdVersion: v1
+    namespaced: false
+  controller: true
+  domain: sealos.io
+  group: migrate
+  kind: Move
+  path: github.com/labring-sigs/pvc-migrate/api/v1alpha1
+  version: v1alpha1

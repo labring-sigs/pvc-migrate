@@ -2,6 +2,7 @@ package cli
 
 import (
 	"github.com/labring-sigs/pvc-migrate/internal/domain"
+	"github.com/labring-sigs/pvc-migrate/internal/kube"
 	"github.com/labring-sigs/pvc-migrate/internal/planner"
 	"github.com/spf13/cobra"
 )
@@ -11,11 +12,17 @@ import (
 // reserve and copy do not share a mixed command/flag implementation.
 func adoptReservedSessionForCopy(session *domain.Session, flags *copyFlags) error {
 	if session.Spec.Type == domain.SessionTypeReserve {
+		options := session.Spec.WorkflowOptions()
+		options.SourceNode = flags.sourceNode
+		options.Strategies = append([]string(nil), flags.strategies...)
+		options.VerifyChecksum = flags.verifyChecksum
+		options.DeleteExtraneous = flags.deleteExtraneous
+
 		session.Spec = domain.NewSessionSpec(
 			domain.OperationCopy,
 			session.Spec.SessionCommon,
 			flags.online,
-			session.Spec.WorkflowOptions(),
+			options,
 		)
 	}
 
@@ -91,7 +98,11 @@ func (r *rootState) newCopyCommand() *cobra.Command {
 				plan    *domain.MigrationPlan
 			)
 			if existing {
-				session, err = runtime.store.Get(ctx, r.global.sessionNamespace, flags.sessionID)
+				namespace := workflowNamespaceForCommand(r, cmd)
+
+				session, err = kube.GetSessionByType(
+					ctx, runtime.store, namespace, flags.sessionID, domain.SessionTypeCopy,
+				)
 				if err == nil {
 					err = adoptReservedSessionForCopy(session, flags)
 				}
@@ -103,6 +114,17 @@ func (r *rootState) newCopyCommand() *cobra.Command {
 				var options planner.CopyOptions
 
 				options, err = flags.planOptions(r, false)
+				if err == nil {
+					options.SessionNamespace, options.TemporaryNamespace = r.controllerPlanNamespaces(
+						runtime,
+						domain.SessionTypeCopy,
+						options.SourceNamespace,
+						options.DestinationNamespace,
+						options.TemporaryNamespace,
+						false,
+					)
+				}
+
 				if err == nil {
 					plan, err = runtime.planner.PlanCopy(ctx, options)
 				}
@@ -132,6 +154,17 @@ func (r *rootState) newCopyCommand() *cobra.Command {
 				}
 
 				return printPlanResult(cmd, runtime, plan)
+			}
+
+			if existing && runtime.mode == executionModeController &&
+				session.Backend == kube.SessionBackendCRD {
+				if err := runtime.store.Update(ctx, session); err != nil {
+					return reportSessionError(cmd, session, err)
+				}
+			}
+
+			if deferred, err := deferControllerExecution(ctx, cmd, runtime, session); deferred {
+				return err
 			}
 
 			if err := runtime.service.ValidateWarmCopy(ctx, session); err != nil {
@@ -194,11 +227,15 @@ func (r *rootState) newCopyPlanCommand() *cobra.Command {
 			defer cancel()
 
 			if existing {
-				session, err := runtime.store.Get(ctx, r.global.sessionNamespace, flags.sessionID)
+				namespace := workflowNamespaceForCommand(r, cmd)
+
+				session, err := kube.GetSessionByType(
+					ctx, runtime.store, namespace, flags.sessionID, domain.SessionTypeCopy,
+				)
 				if err != nil {
 					return reportSessionLookupError(
 						cmd,
-						r.global.sessionNamespace,
+						namespace,
 						flags.sessionID,
 						err,
 					)
@@ -227,6 +264,15 @@ func (r *rootState) newCopyPlanCommand() *cobra.Command {
 			if err != nil {
 				return err
 			}
+
+			options.SessionNamespace, options.TemporaryNamespace = r.controllerPlanNamespaces(
+				runtime,
+				domain.SessionTypeCopy,
+				options.SourceNamespace,
+				options.DestinationNamespace,
+				options.TemporaryNamespace,
+				false,
+			)
 
 			plan, err := runtime.planner.PlanCopy(ctx, options)
 			if err != nil {

@@ -7,6 +7,7 @@ import (
 
 	"github.com/labring-sigs/pvc-migrate/internal/testutil"
 	corev1 "k8s.io/api/core/v1"
+	storagev1 "k8s.io/api/storage/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -58,6 +59,14 @@ func TestReservationToolPodUsesZeroResourceQuotaFootprint(t *testing.T) {
 
 	if created == nil {
 		t.Fatal("reservation tool Pod was not created")
+	}
+
+	if created.Spec.AutomountServiceAccountToken == nil ||
+		*created.Spec.AutomountServiceAccountToken {
+		t.Fatalf(
+			"reservation automountServiceAccountToken=%v, want false",
+			created.Spec.AutomountServiceAccountToken,
+		)
 	}
 
 	if len(created.Spec.Containers) != 1 {
@@ -152,13 +161,18 @@ func TestReservationKeepsPVCStorageRequestSeparateFromToolResources(t *testing.T
 	session := reserveTestSession()
 	volume := &session.Spec.Volumes[0]
 	sourcePVC, sourcePV := reserveSourceObjects()
-	client := fake.NewClientset(sourcePVC, sourcePV, &corev1.Node{
+	client := fake.NewClientset(sourcePVC, sourcePV, &storagev1.StorageClass{
+		ObjectMeta: metav1.ObjectMeta{Name: volume.StorageClass},
+	}, &corev1.Node{
 		ObjectMeta: metav1.ObjectMeta{
 			Name: session.Spec.WorkflowOptions().TargetNode,
 			Labels: map[string]string{
 				corev1.LabelHostname: session.Spec.WorkflowOptions().TargetNode,
 			},
 		},
+		Status: corev1.NodeStatus{Conditions: []corev1.NodeCondition{{
+			Type: corev1.NodeReady, Status: corev1.ConditionTrue,
+		}}},
 	})
 	client.PrependReactor(
 		"create",

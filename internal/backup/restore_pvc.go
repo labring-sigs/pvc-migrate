@@ -2,6 +2,7 @@ package backup
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -18,9 +19,9 @@ import (
 )
 
 const (
-	restoreBucketAnnotation = "pvc-migrate.io/restore-bucket"
-	restorePrefixAnnotation = "pvc-migrate.io/restore-prefix"
-	restoreNameAnnotation   = "pvc-migrate.io/restore-name"
+	restoreBucketAnnotation = kube.MetadataDomain + "/restore-bucket"
+	restorePrefixAnnotation = kube.MetadataDomain + "/restore-prefix"
+	restoreNameAnnotation   = kube.MetadataDomain + "/restore-name"
 )
 
 func preflightRestorePVCCreation(
@@ -44,37 +45,7 @@ func preflightRestorePVCCreation(
 		)
 	}
 
-	manifest, err := req.Store.Manifest(ctx)
-	if err != nil {
-		return nil, err
-	}
-
-	if manifest == nil {
-		return nil, domain.NewError(
-			domain.ErrorPrecondition,
-			restorePreflightPhase,
-			"S3 completion manifest is missing; the backup is not a published recovery point",
-		)
-	}
-
-	if err := req.Store.VerifyInventory(ctx, *manifest); err != nil {
-		return nil, wrapBackupError(
-			domain.ErrorPrecondition,
-			restorePreflightPhase,
-			"verify S3 backup inventory",
-			err,
-		)
-	}
-
-	if manifest.VolumeMode != string(corev1.PersistentVolumeFilesystem) {
-		return nil, domain.NewError(
-			domain.ErrorPrecondition,
-			restorePreflightPhase,
-			"automatic destination PVC creation requires a Filesystem backup, got "+manifest.VolumeMode,
-		)
-	}
-
-	capacity, err := restoreDestinationCapacity(*manifest, req.DestinationCapacity)
+	manifest, capacity, err := resolveRestoreManifestAndCapacity(ctx, req)
 	if err != nil {
 		return nil, err
 	}
@@ -84,20 +55,25 @@ func preflightRestorePVCCreation(
 		return nil, err
 	}
 
-	if _, err := client.StorageV1().StorageClasses().Get(
-		ctx,
-		req.DestinationStorageClass,
-		metav1.GetOptions{},
-	); err != nil {
-		return nil, domain.WrapError(
-			domain.ErrorPrecondition,
-			restorePreflightPhase,
-			"read destination StorageClass "+req.DestinationStorageClass,
-			err,
-		)
+	requiresPlacementValidation := existing == nil ||
+		existing.Status.Phase != corev1.ClaimBound ||
+		existing.Spec.VolumeName == ""
+	if requiresPlacementValidation {
+		if err := kube.ValidateStorageClassPlacement(
+			ctx,
+			client,
+			req.DestinationStorageClass,
+			req.TargetNode,
+		); err != nil {
+			return nil, err
+		}
 	}
 
-	if existing == nil {
+	// Repository-backed controller submissions may not be able to resolve the
+	// remote manifest in the CLI. Defer size-based admission checks until the
+	// controller has resolved the authoritative backup capacity.
+	capacityKnown := capacity.Sign() > 0
+	if existing == nil && capacityKnown {
 		report, policyErr := kube.CheckPVCAdmissionPolicies(
 			ctx,
 			client,
@@ -150,7 +126,7 @@ func preflightRestorePVCCreation(
 		return nil, err
 	}
 
-	if existing != nil {
+	if existing != nil && capacityKnown {
 		if err := validateRestoreCreatedPVC(
 			existing,
 			req,
@@ -178,6 +154,11 @@ func preflightRestorePVCCreation(
 		}
 	}
 
+	capacityDisplay := ""
+	if capacityKnown {
+		capacityDisplay = capacity.String()
+	}
+
 	plan := &Plan{
 		Operation:       "restore",
 		ToolImage:       toolImage,
@@ -187,21 +168,29 @@ func preflightRestorePVCCreation(
 		Mode:            ModeRestore,
 		Consistency:     "destination PVC write; application must be quiesced",
 		Destination:     req.Store.Destination(),
-		ManifestPresent: true,
-		Capacity:        capacity.String(),
+		ManifestPresent: manifest != nil,
+		Capacity:        capacityDisplay,
 		VolumeMode:      string(corev1.PersistentVolumeFilesystem),
 		CreatePVC:       true,
 		StorageClass:    req.DestinationStorageClass,
 		AccessMode:      string(accessMode),
 		ToolNode:        req.TargetNode,
-		ObjectCount:     manifest.ObjectCount,
-		TotalBytes:      manifest.TotalBytes,
-		InventorySHA256: manifest.InventorySHA256,
 		Compression:     "none",
 		Warnings: []string{
 			"destination PVC does not exist and will be created during restore",
 		},
 	}
+	if manifest != nil {
+		plan.ObjectCount = manifest.ObjectCount
+		plan.TotalBytes = manifest.TotalBytes
+		plan.InventorySHA256 = manifest.InventorySHA256
+	} else {
+		plan.Warnings = append(
+			plan.Warnings,
+			"object-store manifest, backup capacity, and PVC admission validation are deferred to the controller",
+		)
+	}
+
 	if existing != nil {
 		plan.PVCUID = string(existing.UID)
 		plan.Warnings = []string{
@@ -209,7 +198,7 @@ func preflightRestorePVCCreation(
 		}
 	}
 
-	if manifest.Path != req.Path {
+	if manifest != nil && manifest.Path != req.Path {
 		return nil, domain.NewError(
 			domain.ErrorPrecondition,
 			restorePreflightPhase,
@@ -218,6 +207,74 @@ func preflightRestorePVCCreation(
 	}
 
 	return plan, nil
+}
+
+func resolveRestoreManifestAndCapacity(
+	ctx context.Context,
+	req Request,
+) (*objectstore.Manifest, resource.Quantity, error) {
+	if req.SkipManifestCheck {
+		// A controller-backed submission intentionally has a config-only store:
+		// repository credentials and the recovery-point manifest are resolved by
+		// the controller. An explicit capacity remains an optional lower bound;
+		// when omitted, all size-based checks are deferred to the controller.
+		if strings.TrimSpace(req.DestinationCapacity) == "" {
+			return nil, resource.Quantity{}, nil
+		}
+
+		capacity, err := resource.ParseQuantity(req.DestinationCapacity)
+		if err != nil || capacity.Sign() <= 0 {
+			if err == nil {
+				err = errors.New("capacity must be greater than zero")
+			}
+
+			return nil, resource.Quantity{}, domain.WrapError(
+				domain.ErrorValidation,
+				restorePreflightPhase,
+				"parse --destination-capacity",
+				err,
+			)
+		}
+
+		return nil, capacity, nil
+	}
+
+	manifest, err := req.Store.Manifest(ctx)
+	if err != nil {
+		return nil, resource.Quantity{}, err
+	}
+
+	if manifest == nil {
+		return nil, resource.Quantity{}, domain.NewError(
+			domain.ErrorPrecondition,
+			restorePreflightPhase,
+			"S3 completion manifest is missing; the backup is not a published recovery point",
+		)
+	}
+
+	if err := req.Store.VerifyInventory(ctx, *manifest); err != nil {
+		return nil, resource.Quantity{}, wrapBackupError(
+			domain.ErrorPrecondition,
+			restorePreflightPhase,
+			"verify S3 backup inventory",
+			err,
+		)
+	}
+
+	if manifest.VolumeMode != string(corev1.PersistentVolumeFilesystem) {
+		return nil, resource.Quantity{}, domain.NewError(
+			domain.ErrorPrecondition,
+			restorePreflightPhase,
+			"automatic destination PVC creation requires a Filesystem backup, got "+manifest.VolumeMode,
+		)
+	}
+
+	capacity, err := restoreDestinationCapacity(*manifest, req.DestinationCapacity)
+	if err != nil {
+		return nil, resource.Quantity{}, err
+	}
+
+	return manifest, capacity, nil
 }
 
 func prepareRestorePlan(
@@ -448,6 +505,15 @@ func createRestorePVC(
 	req Request,
 	manifest objectstore.Manifest,
 ) error {
+	if err := kube.ValidateStorageClassPlacement(
+		ctx,
+		client,
+		req.DestinationStorageClass,
+		req.TargetNode,
+	); err != nil {
+		return err
+	}
+
 	capacity, err := restoreDestinationCapacity(manifest, req.DestinationCapacity)
 	if err != nil {
 		return err

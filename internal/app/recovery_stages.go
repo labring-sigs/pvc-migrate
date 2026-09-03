@@ -43,7 +43,9 @@ func (s *Service) abort(ctx context.Context, session *domain.Session) error {
 	}
 
 	resumeWorkload := abortRequiresWorkloadResume(session)
-	if err := s.begin(ctx, session, domain.PhaseAborting, "aborting migration"); err != nil {
+
+	startMessage, completedMessage := abortMessages(session.Spec.Type)
+	if err := s.begin(ctx, session, domain.PhaseAborting, startMessage); err != nil {
 		return err
 	}
 
@@ -53,12 +55,28 @@ func (s *Service) abort(ctx context.Context, session *domain.Session) error {
 		}
 	}
 
-	message := "migration aborted; reserved volumes are retained for cleanup"
-	if session.Spec.Type == domain.SessionTypeBackup {
-		message = "backup aborted; no recovery point was published"
-	}
+	return s.finish(ctx, session, domain.PhaseAborted, completedMessage)
+}
 
-	return s.finish(ctx, session, domain.PhaseAborted, message)
+func abortMessages(sessionType domain.SessionType) (string, string) {
+	switch sessionType {
+	case domain.SessionTypeBackup:
+		return "aborting backup", "backup aborted; no recovery point was published"
+	case domain.SessionTypeRestore:
+		return "aborting restore", "restore aborted; destination PVC and session credentials are retained"
+	case domain.SessionTypeReserve:
+		return "aborting reservation", "reservation aborted; reserved volumes are retained for cleanup"
+	case domain.SessionTypeCopy:
+		return "aborting copy", "copy aborted; destination volumes are retained for cleanup"
+	case domain.SessionTypeRename:
+		return "aborting rename", "rename aborted; storage resources are retained for cleanup"
+	case domain.SessionTypeMove:
+		return "aborting move", "move aborted; storage resources are retained for cleanup"
+	case domain.SessionTypeMigratePod:
+		return "aborting Pod migration", "Pod migration aborted; reserved volumes are retained for cleanup"
+	default:
+		return "aborting migration", "migration aborted; reserved volumes are retained for cleanup"
+	}
 }
 
 func (s *Service) rollback(ctx context.Context, session *domain.Session) error {
@@ -169,7 +187,12 @@ func (s *Service) rollbackPVCIdentity(ctx context.Context, session *domain.Sessi
 	}
 	status.Activation.RolledBackAt = &now
 
-	return s.finish(ctx, session, domain.PhaseRolledBack, "PVC name restored")
+	message := "PVC name restored"
+	if session.Spec.Operation() == domain.OperationMove {
+		message = "PVC namespace and name restored"
+	}
+
+	return s.finish(ctx, session, domain.PhaseRolledBack, message)
 }
 
 func (s *Service) rollbackMigrationVolumes(

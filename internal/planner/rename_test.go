@@ -459,6 +459,31 @@ func TestPlanMoveDefaultsDestinationNameAndRecordsMoveOperation(t *testing.T) {
 	}
 }
 
+func TestPlanMoveAllowsSameNamespaceWithDifferentIdentity(t *testing.T) {
+	plan, err := New(plannerClient(plannerObjects("2Gi")...), nil).PlanMovePVC(
+		context.Background(),
+		MovePlanOptions{
+			SessionID:            "move",
+			SourceNamespace:      "app",
+			SourcePVC:            "data",
+			DestinationNamespace: "app",
+			DestinationPVC:       "renamed",
+			SessionNamespace:     "system",
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if !plan.Ready || plan.SessionSpec.Operation() != domain.OperationMove {
+		t.Fatalf("same-namespace Move plan=%#v", plan)
+	}
+
+	if plan.TemporaryUsage.StorageRequests != "0" || plan.TemporaryUsage.PVCs != 0 {
+		t.Fatalf("same-namespace Move temporary usage=%#v", plan.TemporaryUsage)
+	}
+}
+
 func TestPlanMoveRequiresExistingDestinationNamespace(t *testing.T) {
 	plan, err := New(
 		plannerClient(plannerObjects("2Gi")...),
@@ -583,7 +608,7 @@ func TestPlanRenameChecksMutationRBAC(t *testing.T) {
 	}
 }
 
-func hasFailedCheck(plan *domain.MigrationPlan, name string) bool {
+func hasFailedCheck(plan *domain.MigrationPlan, name domain.CheckName) bool {
 	for _, check := range plan.Checks {
 		if check.Name == name && !check.Passed {
 			return true

@@ -1,0 +1,55 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: pvc-migrate-controller
+  namespace: pvc-migrate-system
+  labels:
+    app.kubernetes.io/name: pvc-migrate
+    app.kubernetes.io/component: controller
+    app.kubernetes.io/managed-by: pvc-migrate
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: pvc-migrate
+      app.kubernetes.io/component: controller
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: pvc-migrate
+        app.kubernetes.io/component: controller
+        app.kubernetes.io/managed-by: pvc-migrate
+    spec:
+      serviceAccountName: pvc-migrate
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10000
+        runAsGroup: 10000
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: controller
+          image: ghcr.io/labring-sigs/pvc-migrate:dev
+          imagePullPolicy: IfNotPresent
+          args:
+            - controller
+            - --mode=controller
+            - --session-namespace=pvc-migrate-system
+            - --log-level=info
+          ports:
+            - name: health
+              containerPort: 8081
+              protocol: TCP
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: health
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: health
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]

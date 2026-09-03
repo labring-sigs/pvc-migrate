@@ -72,6 +72,27 @@ func newSessionLeaseTestClient() *fake.Clientset {
 	return client
 }
 
+func TestLeaseDurationSecondsRoundsAndClamps(t *testing.T) {
+	for _, test := range []struct {
+		name     string
+		duration time.Duration
+		want     int32
+	}{
+		{name: "zero", duration: 0, want: 1},
+		{name: "negative", duration: -time.Second, want: 1},
+		{name: "subsecond", duration: 1, want: 1},
+		{name: "round up", duration: time.Second + time.Millisecond, want: 2},
+		{name: "exact", duration: 30 * time.Second, want: 30},
+		{name: "clamp", duration: time.Duration(maxLeaseDurationSeconds+1) * time.Second, want: int32(maxLeaseDurationSeconds)},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if got := leaseDurationSeconds(test.duration); got != test.want {
+				t.Fatalf("leaseDurationSeconds(%s)=%d, want %d", test.duration, got, test.want)
+			}
+		})
+	}
+}
+
 func TestConfigMapSessionStoreSessionLeaseContendsAndReleases(t *testing.T) {
 	ctx := context.Background()
 	store := NewConfigMapSessionStore(newSessionLeaseTestClient())
@@ -97,6 +118,38 @@ func TestConfigMapSessionStoreSessionLeaseContendsAndReleases(t *testing.T) {
 
 	if err := third.Release(ctx); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestCompositeSessionLeaseKeepsQueryableSessionLabel(t *testing.T) {
+	ctx := context.Background()
+	client := newSessionLeaseTestClient()
+	store := NewConfigMapSessionStore(client)
+
+	lockID := "workflow/PodMigration"
+
+	lock, err := store.acquireSessionLock(ctx, "system", lockID, "workflow")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	defer func() {
+		if err := lock.Release(ctx); err != nil {
+			t.Errorf("release lock: %v", err)
+		}
+	}()
+
+	lease, err := client.CoordinationV1().Leases("system").Get(
+		ctx,
+		SessionLockName(lockID),
+		metav1.GetOptions{},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if got := lease.Labels[SessionKey]; got != "workflow" {
+		t.Fatalf("session label=%q, want workflow", got)
 	}
 }
 
@@ -334,16 +387,6 @@ func TestConfigMapSessionStorePreservesReplacedLeaseOnDeleteRace(t *testing.T) {
 }
 
 func TestSessionLeaseRenewFailureFencesContext(t *testing.T) {
-	oldRenewEvery := sessionLeaseRenewEvery
-	oldDuration := sessionLeaseDuration
-	sessionLeaseRenewEvery = 5 * time.Millisecond
-
-	sessionLeaseDuration = 20 * time.Millisecond
-	defer func() {
-		sessionLeaseRenewEvery = oldRenewEvery
-		sessionLeaseDuration = oldDuration
-	}()
-
 	client := newSessionLeaseTestClient()
 	client.PrependReactor(
 		"update",
@@ -352,7 +395,10 @@ func TestSessionLeaseRenewFailureFencesContext(t *testing.T) {
 			return true, nil, errors.New("injected lease API failure")
 		},
 	)
-	store := NewConfigMapSessionStore(client)
+	store := NewConfigMapSessionStore(client).WithLeaseTiming(
+		20*time.Millisecond,
+		5*time.Millisecond,
+	)
 
 	lock, err := store.AcquireSessionLock(context.Background(), "system", "session-2")
 	if err != nil {
@@ -377,17 +423,24 @@ func TestSessionLeaseRenewFailureFencesContext(t *testing.T) {
 	}
 }
 
+func TestLeaseTimingClampsRenewalBeforeExpiry(t *testing.T) {
+	store := NewConfigMapSessionStore(newSessionLeaseTestClient()).WithLeaseTiming(
+		30*time.Second,
+		45*time.Second,
+	)
+
+	duration, renewEvery := store.leaseTiming()
+	if duration != 30*time.Second || renewEvery != 10*time.Second {
+		t.Fatalf("lease timing duration=%s renewEvery=%s", duration, renewEvery)
+	}
+
+	duration, renewEvery = normalizeLeaseTiming(20*time.Millisecond, 50*time.Millisecond)
+	if duration != 20*time.Millisecond || renewEvery != 20*time.Millisecond/3 {
+		t.Fatalf("normalized timing duration=%s renewEvery=%s", duration, renewEvery)
+	}
+}
+
 func TestSessionLeaseCancellationStopsInFlightRenewal(t *testing.T) {
-	oldRenewEvery := sessionLeaseRenewEvery
-	oldDuration := sessionLeaseDuration
-	sessionLeaseRenewEvery = 5 * time.Millisecond
-
-	sessionLeaseDuration = 30 * time.Second
-	defer func() {
-		sessionLeaseRenewEvery = oldRenewEvery
-		sessionLeaseDuration = oldDuration
-	}()
-
 	const (
 		sessionID = "session-cancel-renew"
 		holder    = "holder"
@@ -409,7 +462,7 @@ func TestSessionLeaseCancellationStopsInFlightRenewal(t *testing.T) {
 		},
 	}
 
-	lock := newSessionLease(
+	lock := newSessionLeaseWithTiming(
 		context.Background(),
 		leaseClient,
 		"system",
@@ -417,6 +470,8 @@ func TestSessionLeaseCancellationStopsInFlightRenewal(t *testing.T) {
 		sessionID,
 		holder,
 		leaseClient.lease.UID,
+		30*time.Second,
+		5*time.Millisecond,
 	)
 	select {
 	case <-leaseClient.started:
@@ -434,11 +489,6 @@ func TestSessionLeaseCancellationStopsInFlightRenewal(t *testing.T) {
 }
 
 func TestSessionLeaseRecoversExpiredHolder(t *testing.T) {
-	oldDuration := sessionLeaseDuration
-
-	sessionLeaseDuration = time.Second
-	defer func() { sessionLeaseDuration = oldDuration }()
-
 	now := metav1.NewMicroTime(time.Now().Add(-time.Minute))
 	duration := int32(1)
 	client := fake.NewClientset(&coordinationv1.Lease{

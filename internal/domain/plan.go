@@ -25,6 +25,109 @@ const (
 	SeverityError   CheckSeverity = "error"
 )
 
+// CheckName is a stable machine-readable planning check identifier. CLI
+// guidance and external plan consumers branch on these values, while Message
+// remains human-readable detail.
+type CheckName string
+
+const (
+	// Request and execution checks.
+	CheckNameAccessMode             CheckName = "access-mode"
+	CheckNameAllowLeaderDowntime    CheckName = "allow-leader-downtime"
+	CheckNameCapacity               CheckName = "capacity"
+	CheckNameCapacityAwareness      CheckName = "capacity-awareness"
+	CheckNameClusters               CheckName = "clusters"
+	CheckNameCopyMode               CheckName = "copy-mode"
+	CheckNameForceReprovision       CheckName = "force-reprovision"
+	CheckNameIdentity               CheckName = "identity"
+	CheckNameNamespace              CheckName = "namespace"
+	CheckNameOnline                 CheckName = "online"
+	CheckNameOpenEBSLVMEnableShared CheckName = "openebs-lvm-enable-shared"
+	CheckNameOperation              CheckName = "operation"
+	CheckNamePrecopyPasses          CheckName = "precopy-passes"
+	CheckNameSessionID              CheckName = "session-id"
+	CheckNameStrategy               CheckName = "strategy"
+	CheckNameStrategySelection      CheckName = "strategy-selection"
+	CheckNameToolImage              CheckName = "tool-image"
+	CheckNameTransferPath           CheckName = "transfer-path"
+	CheckNameTransferScope          CheckName = "transfer-scope"
+
+	// Workload, node, and policy checks.
+	CheckNameActivationPolicy    CheckName = "activation-policy"
+	CheckNameControllerAdapter   CheckName = "controller-adapter"
+	CheckNameDatabasePauseScope  CheckName = "database-pause-scope"
+	CheckNameDatabaseRole        CheckName = "database-role"
+	CheckNameKubeBlocksCandidate CheckName = "kubeblocks-candidate"
+	CheckNameLimitRange          CheckName = "limit-range"
+	CheckNameNetworkPolicy       CheckName = "network-policy"
+	CheckNamePod                 CheckName = "pod"
+	CheckNamePodDependencies     CheckName = "pod-dependencies"
+	CheckNamePodResources        CheckName = "pod-resources"
+	CheckNamePodScheduling       CheckName = "pod-scheduling"
+	CheckNameRBAC                CheckName = "rbac"
+	CheckNameResourceQuota       CheckName = "resource-quota"
+	CheckNameSourceConsumers     CheckName = "source-consumers"
+	CheckNameSourceNode          CheckName = "source-node"
+	CheckNameSourceNodeInference CheckName = "source-node-inference"
+	CheckNameSourcePod           CheckName = "source-pod"
+	CheckNameTargetNode          CheckName = "target-node"
+	CheckNameTargetNodeSelection CheckName = "target-node-selection"
+
+	// Storage and transfer checks.
+	CheckNameAvailabilityZone            CheckName = "availability-zone"
+	CheckNameCSINode                     CheckName = "csi-node"
+	CheckNameDestinationAccessModes      CheckName = "destination-access-modes"
+	CheckNameDestinationCapacity         CheckName = "destination-capacity"
+	CheckNameDestinationNamespace        CheckName = "destination-namespace"
+	CheckNameDestinationPath             CheckName = "destination-path"
+	CheckNameDestinationPV               CheckName = "destination-pv"
+	CheckNameDestinationPVC              CheckName = "destination-pvc"
+	CheckNameDestinationPVCPolicy        CheckName = "destination-pvc-policy"
+	CheckNameDestinationSharedMount      CheckName = "destination-shared-mount"
+	CheckNameDestinationSharedScheduling CheckName = "destination-shared-scheduling"
+	CheckNameDestinationStorageClass     CheckName = "destination-storage-class"
+	CheckNameMigrationNeeded             CheckName = "migration-needed"
+	CheckNamePVPair                      CheckName = "pv-pair"
+	CheckNamePVCConsumers                CheckName = "pvc-consumers"
+	CheckNamePVCFinalizers               CheckName = "pvc-finalizers"
+	CheckNameSourceBinding               CheckName = "source-binding"
+	CheckNameSourcePath                  CheckName = "source-path"
+	CheckNameSourcePV                    CheckName = "source-pv"
+	CheckNameSourcePVC                   CheckName = "source-pvc"
+	CheckNameSourcePVCs                  CheckName = "source-pvcs"
+	CheckNameSourceStorageClass          CheckName = "source-storage-class"
+	CheckNameSourceUsage                 CheckName = "source-usage"
+	CheckNameStorageCapacity             CheckName = "storage-capacity"
+	CheckNameStorageClass                CheckName = "storage-class"
+	CheckNameStorageTopology             CheckName = "storage-topology"
+	CheckNameVolumeMode                  CheckName = "volume-mode"
+	CheckNameWarmCopyMount               CheckName = "warm-copy-mount"
+
+	// Ownership and cleanup checks.
+	CheckNameActivationState      CheckName = "activation-state"
+	CheckNameCurrentClaim         CheckName = "current-claim"
+	CheckNameCurrentOwnership     CheckName = "current-ownership"
+	CheckNameCurrentPolicy        CheckName = "current-policy"
+	CheckNameCurrentPV            CheckName = "current-pv"
+	CheckNameDestinationClaim     CheckName = "destination-claim"
+	CheckNameDestinationConsumers CheckName = "destination-consumers"
+	CheckNameDestinationOwnership CheckName = "destination-ownership"
+	CheckNameDestinationPolicy    CheckName = "destination-policy"
+	CheckNameMove                 CheckName = "move"
+	CheckNameOtherResources       CheckName = "other-resources"
+	CheckNamePVCOwnership         CheckName = "pvc-ownership"
+	CheckNameRename               CheckName = "rename"
+	CheckNameRenameOffline        CheckName = "rename-offline"
+	CheckNameResources            CheckName = "resources"
+	CheckNameRollbackOwnership    CheckName = "rollback-ownership"
+	CheckNameRollbackPolicy       CheckName = "rollback-policy"
+	CheckNameRollbackPV           CheckName = "rollback-pv"
+	CheckNameRollbackState        CheckName = "rollback-state"
+	CheckNameSessionConfigMap     CheckName = "session-configmap"
+	CheckNameSessionOwnership     CheckName = "session-ownership"
+	CheckNameSourceOwnership      CheckName = "source-ownership"
+)
+
 type CapacityAwareness string
 
 const (
@@ -42,7 +145,7 @@ const (
 )
 
 type Check struct {
-	Name     string        `json:"name"     yaml:"name"`
+	Name     CheckName     `json:"name"     yaml:"name"`
 	Severity CheckSeverity `json:"severity" yaml:"severity"`
 	Passed   bool          `json:"passed"   yaml:"passed"`
 	Message  string        `json:"message"  yaml:"message"`

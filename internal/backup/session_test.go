@@ -78,6 +78,279 @@ type lockingBackupSessionStore struct {
 	updateWhileBound bool
 }
 
+func TestBuildResumeRequestReusesControllerProvidedStore(t *testing.T) {
+	provided := testBackupObjectStore(t)
+	request := Request{
+		ID:               "backup-resume",
+		Namespace:        "app",
+		SessionNamespace: "app",
+		Store:            provided,
+		SessionStore:     &recordingBackupSessionStore{},
+	}
+	pvc := &corev1.PersistentVolumeClaim{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "app", Name: "data", UID: types.UID("pvc-uid")},
+	}
+	pv := &corev1.PersistentVolume{
+		ObjectMeta: metav1.ObjectMeta{Name: "pv-data", UID: types.UID("pv-uid")},
+	}
+
+	session, err := buildBackupSession(request, pvc, pv)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	resumed, err := buildResumeRequest(
+		context.Background(),
+		fake.NewSimpleClientset(),
+		request,
+		session,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if resumed.Store != provided {
+		t.Fatal("resume rebuilt or replaced the controller-provided object store")
+	}
+}
+
+func TestPinBackupRepositoryCapturesAndRejectsRevisionDrift(t *testing.T) {
+	store := &recordingBackupSessionStore{}
+	session := domain.NewSession(
+		"backup-repository",
+		domain.NewSessionSpec(
+			domain.OperationBackup,
+			domain.SessionCommon{SourceNamespace: "app", SessionNamespace: "app"},
+			false,
+			domain.SessionWorkflowOptions{},
+		),
+		time.Now(),
+	)
+	req := Request{
+		BackupRepository: "shared-s3",
+		BackupRepositoryBinding: &domain.BackupRepositoryBindingStatus{
+			Type:       domain.BackupRepositoryTypeS3,
+			UID:        types.UID("repository-uid"),
+			Generation: 3,
+			S3: &domain.S3BackupRepositoryBindingStatus{
+				CredentialsSecretUID: types.UID("secret-uid"),
+			},
+		},
+		SessionStore: store,
+	}
+
+	if err := pinBackupRepository(context.Background(), req, session); err != nil {
+		t.Fatal(err)
+	}
+
+	if session.Status.BackupRepository == nil ||
+		session.Status.BackupRepository.UID != req.BackupRepositoryBinding.UID ||
+		session.Status.BackupRepository.Generation != req.BackupRepositoryBinding.Generation ||
+		session.Status.BackupRepository.S3.CredentialsSecretUID !=
+			req.BackupRepositoryBinding.S3.CredentialsSecretUID ||
+		len(store.updated) != 1 {
+		t.Fatalf(
+			"repository pin=%q/%d updates=%d",
+			session.Status.BackupRepository.UID,
+			session.Status.BackupRepository.Generation,
+			len(store.updated),
+		)
+	}
+
+	if err := pinBackupRepository(context.Background(), req, session); err != nil {
+		t.Fatalf("same repository revision rejected: %v", err)
+	}
+
+	drifted := req
+	drifted.BackupRepositoryBinding = copyRepositoryBinding(req.BackupRepositoryBinding)
+	drifted.BackupRepositoryBinding.Generation++
+
+	if err := pinBackupRepository(
+		context.Background(),
+		drifted,
+		session,
+	); domain.CategoryOf(
+		err,
+	) != domain.ErrorConflict {
+		t.Fatalf("generation drift error=%v category=%q", err, domain.CategoryOf(err))
+	}
+
+	drifted = req
+	drifted.BackupRepositoryBinding = copyRepositoryBinding(req.BackupRepositoryBinding)
+	drifted.BackupRepositoryBinding.UID = "replacement-uid"
+
+	if err := pinBackupRepository(
+		context.Background(),
+		drifted,
+		session,
+	); domain.CategoryOf(
+		err,
+	) != domain.ErrorConflict {
+		t.Fatalf("UID drift error=%v category=%q", err, domain.CategoryOf(err))
+	}
+
+	drifted = req
+	drifted.BackupRepositoryBinding = copyRepositoryBinding(req.BackupRepositoryBinding)
+	drifted.BackupRepositoryBinding.S3.CredentialsSecretUID = "replacement-secret-uid"
+
+	if err := pinBackupRepository(
+		context.Background(),
+		drifted,
+		session,
+	); domain.CategoryOf(
+		err,
+	) != domain.ErrorConflict {
+		t.Fatalf("Secret UID drift error=%v category=%q", err, domain.CategoryOf(err))
+	}
+
+	drifted = req
+	drifted.BackupRepositoryBinding = copyRepositoryBinding(req.BackupRepositoryBinding)
+	drifted.BackupRepositoryBinding.Type = domain.BackupRepositoryTypePVC
+	drifted.BackupRepositoryBinding.S3 = nil
+	drifted.BackupRepositoryBinding.PVC = &domain.PVCBackupRepositoryBindingStatus{
+		ClaimUID: "claim-uid",
+	}
+
+	if err := pinBackupRepository(
+		context.Background(),
+		drifted,
+		session,
+	); domain.CategoryOf(
+		err,
+	) != domain.ErrorConflict {
+		t.Fatalf("backend drift error=%v category=%q", err, domain.CategoryOf(err))
+	}
+}
+
+func TestPinPVCBackupRepositoryRejectsClaimReplacement(t *testing.T) {
+	store := &recordingBackupSessionStore{}
+	session := domain.NewSession(
+		"backup-pvc-repository",
+		domain.NewSessionSpec(
+			domain.OperationBackup,
+			domain.SessionCommon{SourceNamespace: "app", SessionNamespace: "app"},
+			false,
+			domain.SessionWorkflowOptions{},
+		),
+		time.Now(),
+	)
+	req := Request{
+		BackupRepository: "archive",
+		BackupRepositoryBinding: &domain.BackupRepositoryBindingStatus{
+			Type:       domain.BackupRepositoryTypePVC,
+			UID:        "repository-uid",
+			Generation: 1,
+			PVC: &domain.PVCBackupRepositoryBindingStatus{
+				ClaimUID: "claim-uid",
+			},
+		},
+		SessionStore: store,
+	}
+
+	if err := pinBackupRepository(context.Background(), req, session); err != nil {
+		t.Fatal(err)
+	}
+
+	drifted := req
+	drifted.BackupRepositoryBinding = copyRepositoryBinding(req.BackupRepositoryBinding)
+	drifted.BackupRepositoryBinding.PVC.ClaimUID = "replacement-claim-uid"
+
+	if err := pinBackupRepository(
+		context.Background(),
+		drifted,
+		session,
+	); domain.CategoryOf(
+		err,
+	) != domain.ErrorConflict {
+		t.Fatalf("claim UID drift error=%v category=%q", err, domain.CategoryOf(err))
+	}
+}
+
+func TestValidateRepositoryBindingRejectsIncompleteBackendIdentity(t *testing.T) {
+	tests := []struct {
+		name    string
+		binding *domain.BackupRepositoryBindingStatus
+	}{
+		{name: "nil", binding: nil},
+		{
+			name: "s3 without secret UID",
+			binding: &domain.BackupRepositoryBindingStatus{
+				Type: domain.BackupRepositoryTypeS3,
+				S3:   &domain.S3BackupRepositoryBindingStatus{},
+			},
+		},
+		{
+			name: "s3 with pvc status",
+			binding: &domain.BackupRepositoryBindingStatus{
+				Type: domain.BackupRepositoryTypeS3,
+				S3: &domain.S3BackupRepositoryBindingStatus{
+					CredentialsSecretUID: "secret-uid",
+				},
+				PVC: &domain.PVCBackupRepositoryBindingStatus{ClaimUID: "claim-uid"},
+			},
+		},
+		{
+			name: "pvc without claim UID",
+			binding: &domain.BackupRepositoryBindingStatus{
+				Type: domain.BackupRepositoryTypePVC,
+				PVC:  &domain.PVCBackupRepositoryBindingStatus{},
+			},
+		},
+		{
+			name: "unsupported type",
+			binding: &domain.BackupRepositoryBindingStatus{
+				Type: "filesystem",
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := validateRepositoryBinding(tt.binding)
+			if domain.CategoryOf(err) != domain.ErrorPrecondition {
+				t.Fatalf("error=%v category=%q", err, domain.CategoryOf(err))
+			}
+		})
+	}
+}
+
+func TestResumeRestoreKeepsFailureCheckpointInsideSessionLease(t *testing.T) {
+	lock := &recordingBackupSessionLock{}
+	store := &lockingBackupSessionStore{lock: lock}
+	session := domain.NewSession(
+		"restore-session",
+		domain.NewSessionSpec(
+			domain.OperationRestore,
+			domain.SessionCommon{SessionNamespace: "sessions", DestinationNamespace: "default"},
+			false,
+			domain.SessionWorkflowOptions{},
+		),
+		time.Now(),
+	)
+
+	err := ResumeRestore(
+		context.Background(),
+		nil,
+		Request{SessionStore: store},
+		session,
+	)
+	if err == nil {
+		t.Fatal("ResumeRestore() succeeded without a Kubernetes client")
+	}
+
+	if !lock.bound || !lock.released {
+		t.Fatalf("session lease lifecycle bound=%t released=%t", lock.bound, lock.released)
+	}
+
+	if !store.updateWhileBound {
+		t.Fatal("restore status checkpoint was written outside the session lease")
+	}
+
+	if session.Status.Phase != domain.PhaseFailed {
+		t.Fatalf("phase=%s, want %s", session.Status.Phase, domain.PhaseFailed)
+	}
+}
+
 func (s *lockingBackupSessionStore) Create(ctx context.Context, session *domain.Session) error {
 	s.createWhileBound = s.lock != nil && s.lock.bound && !s.lock.released
 	return s.recordingBackupSessionStore.Create(ctx, session)
@@ -189,6 +462,178 @@ func testBackupObjectStore(t *testing.T) *objectstore.Store {
 	return store
 }
 
+func TestSubmitRestoreSeparatesBackendFromS3Provider(t *testing.T) {
+	objectStore, err := objectstore.NewWithClient(
+		&preflightObjectStore{},
+		objectstore.Config{
+			Bucket:   "backups",
+			Prefix:   "pv-migrate",
+			Name:     "daily",
+			Provider: "Minio",
+		},
+		objectstore.Credentials{AccessKey: "key", SecretKey: "secret"},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	sessions := &recordingBackupSessionStore{}
+
+	session, err := SubmitRestore(
+		context.Background(),
+		fake.NewSimpleClientset(),
+		Request{
+			ID:               "restore-test",
+			Namespace:        "app",
+			PVCName:          "data",
+			SessionNamespace: "pvc-migrate-system",
+			Store:            objectStore,
+			SessionStore:     sessions,
+		},
+		Plan{PVCUID: "pvc-uid"},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if session.Spec.Restore.Backend != domain.BackupBackendS3 {
+		t.Fatalf("restore backend=%q", session.Spec.Restore.Backend)
+	}
+
+	if session.Spec.Restore.Provider != "Minio" {
+		t.Fatalf("restore provider=%q", session.Spec.Restore.Provider)
+	}
+}
+
+func TestSubmitRestoreRepositoryOmitsControllerOwnedConnection(t *testing.T) {
+	objectStore, err := objectstore.NewConfigOnly(
+		objectstore.Config{Bucket: "repository", Name: "daily"},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	session, err := SubmitRestore(
+		context.Background(),
+		fake.NewSimpleClientset(),
+		Request{
+			ID:               "restore-repository",
+			Namespace:        "app",
+			PVCName:          "data",
+			SessionNamespace: "app",
+			BackupRepository: "tenant-s3",
+			Store:            objectStore,
+			SessionStore:     &crdRepositorySessionStore{},
+		},
+		Plan{PVCUID: "pvc-uid"},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	payload := session.Spec.Restore
+	if payload.BackupRepository != "tenant-s3" || payload.Name != "daily" {
+		t.Fatalf("repository metadata = %#v", payload)
+	}
+
+	if payload.Bucket != "" || payload.Prefix != "" || payload.Provider != "" ||
+		payload.Endpoint != "" ||
+		payload.Region != "" ||
+		payload.ServerSideEncryption != "" ||
+		payload.SSEKMSKeyID != "" {
+		t.Fatalf("controller-owned object-store fields leaked into workflow: %#v", payload)
+	}
+}
+
+func TestValidateResumeAllowsRepositoryBackedBackupWithoutTenantCredentials(t *testing.T) {
+	store := testBackupObjectStore(t)
+
+	session, err := buildBackupSession(
+		Request{
+			ID:               "repository-resume",
+			Namespace:        "app",
+			SessionNamespace: "app",
+			BackupRepository: "archive",
+			Store:            store,
+			SessionStore:     &recordingBackupSessionStore{},
+		},
+		&corev1.PersistentVolumeClaim{
+			ObjectMeta: metav1.ObjectMeta{
+				Namespace: "app",
+				Name:      "data",
+				UID:       types.UID("pvc-uid"),
+			},
+		},
+		&corev1.PersistentVolume{
+			ObjectMeta: metav1.ObjectMeta{
+				Name: "pv-data",
+				UID:  types.UID("pv-uid"),
+			},
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	session.Backend = kube.SessionBackendCRD
+
+	if err := ValidateResume(
+		context.Background(),
+		nil,
+		Request{SessionStore: &recordingBackupSessionStore{}},
+		session,
+	); err != nil {
+		t.Fatalf("repository-backed dry-run attempted tenant credentials: %v", err)
+	}
+}
+
+func TestValidateRestoreResumeAllowsRepositoryBackedRestoreWithoutTenantCredentials(t *testing.T) {
+	objectStore, err := objectstore.NewConfigOnly(
+		objectstore.Config{Bucket: "repository", Name: "daily"},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	session, err := SubmitRestore(
+		context.Background(),
+		fake.NewSimpleClientset(),
+		Request{
+			ID:               "repository-restore-resume",
+			Namespace:        "app",
+			PVCName:          "data",
+			SessionNamespace: "app",
+			BackupRepository: "archive",
+			Store:            objectStore,
+			SessionStore:     &crdRepositorySessionStore{},
+		},
+		Plan{PVCUID: "pvc-uid"},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if err := ValidateRestoreResume(
+		context.Background(),
+		nil,
+		Request{SessionStore: &recordingBackupSessionStore{}},
+		session,
+	); err != nil {
+		t.Fatalf("repository-backed restore dry-run attempted tenant credentials: %v", err)
+	}
+}
+
+type crdRepositorySessionStore struct{ recordingBackupSessionStore }
+
+func (s *crdRepositorySessionStore) Create(_ context.Context, session *domain.Session) error {
+	session.Backend = kube.SessionBackendCRD
+	session.BackendResource = domain.ControllerKindRestore
+	session.BackendUID = types.UID("restore-uid")
+	s.created = session
+
+	return session.Validate()
+}
+
 func TestBuildBackupSessionIncludesMetadataWithoutCredentials(t *testing.T) {
 	store := &recordingBackupSessionStore{}
 	req := Request{
@@ -233,6 +678,42 @@ func TestBuildBackupSessionIncludesMetadataWithoutCredentials(t *testing.T) {
 
 	if err := session.Validate(); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestBuildBackupSessionRepositoryOmitsControllerOwnedConnection(t *testing.T) {
+	store := &recordingBackupSessionStore{}
+	req := Request{
+		ID:               "repository-backup",
+		Namespace:        "app",
+		SessionNamespace: "app",
+		BackupRepository: "tenant-s3",
+		Store:            testBackupObjectStore(t),
+		SessionStore:     store,
+	}
+	pvc := &corev1.PersistentVolumeClaim{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "app", Name: "data", UID: types.UID("pvc-uid")},
+	}
+	pv := &corev1.PersistentVolume{
+		ObjectMeta: metav1.ObjectMeta{Name: "pv-data", UID: types.UID("pv-uid")},
+	}
+
+	session, err := buildBackupSession(req, pvc, pv)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	payload := session.Spec.Backup
+	if payload.BackupRepository != "tenant-s3" || payload.Name != "daily" {
+		t.Fatalf("repository metadata = %#v", payload)
+	}
+
+	if payload.Bucket != "" || payload.Prefix != "" || payload.Provider != "" ||
+		payload.Endpoint != "" ||
+		payload.Region != "" ||
+		payload.ServerSideEncryption != "" ||
+		payload.SSEKMSKeyID != "" {
+		t.Fatalf("controller-owned object-store fields leaked into workflow: %#v", payload)
 	}
 }
 
@@ -420,6 +901,47 @@ func TestInitialBackupHoldsSessionLeaseWhilePersistingCredentials(t *testing.T) 
 	}
 }
 
+func TestRunBackupWithSessionReusesSubmittedSession(t *testing.T) {
+	store := &recordingBackupSessionStore{}
+	session := testBackupSession(t, "backup-submitted")
+	session.Status.Phase = domain.PhaseCompleted
+	client := fake.NewSimpleClientset()
+	req := Request{
+		Store:         testBackupObjectStore(t),
+		SessionStore:  store,
+		BackupSession: session,
+	}
+
+	if err := runBackupWithSession(
+		context.Background(),
+		client,
+		req,
+		"pvc-uid",
+		"pv-uid",
+	); err != nil {
+		t.Fatalf("runBackupWithSession() error = %v", err)
+	}
+
+	if store.created != nil {
+		t.Fatal("submitted backup session was created a second time")
+	}
+
+	if len(store.updated) != 0 {
+		t.Fatalf(
+			"completed submitted session was unexpectedly updated %d times",
+			len(store.updated),
+		)
+	}
+
+	if _, err := client.CoreV1().Secrets(session.Spec.SessionNamespace).Get(
+		context.Background(),
+		kube.BackupCredentialsSecretName(session.ID),
+		metav1.GetOptions{},
+	); !apierrors.IsNotFound(err) {
+		t.Fatalf("credentials Secret was persisted during session reuse: %v", err)
+	}
+}
+
 func TestRestoreBackupSharedMountsStopsPersistingAfterLeaseLoss(t *testing.T) {
 	leaseErr := errors.New("injected session lease loss")
 	lock := &recordingBackupSessionLock{}
@@ -469,7 +991,6 @@ func testBackupSession(t *testing.T, id string) *domain.Session {
 		domain.SessionCommon{
 			SourceNamespace:  "app",
 			SessionNamespace: "sessions",
-			CreatedBy:        "test",
 		},
 
 		false,

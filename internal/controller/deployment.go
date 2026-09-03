@@ -8,6 +8,7 @@ import (
 
 	"github.com/labring-sigs/pvc-migrate/internal/domain"
 	"github.com/labring-sigs/pvc-migrate/internal/kube"
+	"github.com/labring-sigs/pvc-migrate/internal/parallel"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -139,12 +140,21 @@ func (m *Manager) readyDeploymentPods(
 	}
 
 	ready := make([]domain.ObjectReference, 0, replicas)
+
 	replicaSets := make(map[string]*appsv1.ReplicaSet)
+	replicaSetErrors := make(map[string]error)
+	m.prefetchDeploymentReplicaSets(ctx, pods.Items, replicaSets, replicaSetErrors)
 
 	for index := range pods.Items {
 		candidate := &pods.Items[index]
 
-		owned, ownerErr := m.podControlledByDeployment(ctx, candidate, deployment, replicaSets)
+		owned, ownerErr := m.podControlledByDeploymentWithErrors(
+			ctx,
+			candidate,
+			deployment,
+			replicaSets,
+			replicaSetErrors,
+		)
 		if ownerErr != nil {
 			return nil, domain.WrapError(
 				domain.ErrorKubernetes,
@@ -199,6 +209,16 @@ func (m *Manager) podControlledByDeployment(
 	deployment *appsv1.Deployment,
 	cache map[string]*appsv1.ReplicaSet,
 ) (bool, error) {
+	return m.podControlledByDeploymentWithErrors(ctx, pod, deployment, cache, nil)
+}
+
+func (m *Manager) podControlledByDeploymentWithErrors(
+	ctx context.Context,
+	pod *corev1.Pod,
+	deployment *appsv1.Deployment,
+	cache map[string]*appsv1.ReplicaSet,
+	cacheErrors map[string]error,
+) (bool, error) {
 	owner := controllerOwner(pod.OwnerReferences)
 	if owner == nil || owner.APIVersion != domain.AppsAPIVersion ||
 		owner.Kind != domain.KindReplicaSet || owner.Name == "" {
@@ -207,6 +227,12 @@ func (m *Manager) podControlledByDeployment(
 
 	replicaSet, found := cache[owner.Name]
 	if !found {
+		if cacheErrors != nil {
+			if err := cacheErrors[owner.Name]; err != nil {
+				return false, err
+			}
+		}
+
 		var err error
 
 		replicaSet, err = m.typed.AppsV1().ReplicaSets(pod.Namespace).
@@ -230,6 +256,66 @@ func (m *Manager) podControlledByDeployment(
 		Name:       deployment.Name,
 		UID:        deployment.UID,
 	}), nil
+}
+
+// prefetchDeploymentReplicaSets reads each distinct ReplicaSet owner once.
+// Pod ownership checks are then pure in-memory lookups, while the result and
+// error order still follow the first occurrence order from the Pod list.
+func (m *Manager) prefetchDeploymentReplicaSets(
+	ctx context.Context,
+	pods []corev1.Pod,
+	cache map[string]*appsv1.ReplicaSet,
+	cacheErrors map[string]error,
+) {
+	if len(pods) == 0 {
+		return
+	}
+
+	names := make([]string, 0, len(pods))
+
+	seen := make(map[string]struct{}, len(pods))
+	for index := range pods {
+		owner := controllerOwner(pods[index].OwnerReferences)
+		if owner == nil || owner.APIVersion != domain.AppsAPIVersion ||
+			owner.Kind != domain.KindReplicaSet || owner.Name == "" {
+			continue
+		}
+
+		if _, exists := seen[owner.Name]; exists {
+			continue
+		}
+
+		seen[owner.Name] = struct{}{}
+		names = append(names, owner.Name)
+	}
+
+	results := make([]*appsv1.ReplicaSet, len(names))
+	errors := make([]error, len(names))
+	parallel.For(len(names), func(index int) {
+		replicaSet, err := m.typed.AppsV1().ReplicaSets(pods[0].Namespace).
+			Get(ctx, names[index], metav1.GetOptions{})
+		if apierrors.IsNotFound(err) {
+			return
+		}
+
+		if err != nil {
+			errors[index] = err
+			return
+		}
+
+		results[index] = replicaSet
+	})
+
+	for index, name := range names {
+		if errors[index] != nil {
+			cacheErrors[name] = errors[index]
+			continue
+		}
+
+		if cacheErrors[name] == nil {
+			cache[name] = results[index]
+		}
+	}
 }
 
 func rejectDeploymentControllerOwner(deployment *appsv1.Deployment, operation string) error {
@@ -362,12 +448,17 @@ func (m *Manager) verifyDeploymentPaused(ctx context.Context, workload domain.Wo
 	}
 
 	replicaSets := make(map[string]*appsv1.ReplicaSet)
+	replicaSetErrors := make(map[string]error)
+
+	m.prefetchDeploymentReplicaSets(ctx, pods.Items, replicaSets, replicaSetErrors)
+
 	for index := range pods.Items {
-		owned, ownerErr := m.podControlledByDeployment(
+		owned, ownerErr := m.podControlledByDeploymentWithErrors(
 			ctx,
 			&pods.Items[index],
 			deployment,
 			replicaSets,
+			replicaSetErrors,
 		)
 		if ownerErr != nil {
 			return domain.WrapError(
@@ -730,12 +821,21 @@ func (m *Manager) observeDeploymentPods(
 
 	current := make([]domain.ObjectReference, 0, len(pods.Items))
 	allReady := true
+
 	replicaSets := make(map[string]*appsv1.ReplicaSet)
+	replicaSetErrors := make(map[string]error)
+	m.prefetchDeploymentReplicaSets(ctx, pods.Items, replicaSets, replicaSetErrors)
 
 	for index := range pods.Items {
 		pod := &pods.Items[index]
 
-		owned, ownerErr := m.podControlledByDeployment(ctx, pod, deployment, replicaSets)
+		owned, ownerErr := m.podControlledByDeploymentWithErrors(
+			ctx,
+			pod,
+			deployment,
+			replicaSets,
+			replicaSetErrors,
+		)
 		if ownerErr != nil {
 			return nil, false, domain.WrapError(
 				domain.ErrorKubernetes,

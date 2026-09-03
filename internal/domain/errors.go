@@ -18,6 +18,17 @@ const (
 	ErrorInternal     ErrorCategory = "internal"
 )
 
+// Stable error operations consumed across package boundaries for specialized
+// CLI guidance. Keep these separate from human-readable error messages.
+const (
+	ErrorOperationWarmCopyMountProbe    = "warm-copy mount probe"
+	ErrorOperationCopyCapacity          = "copy capacity"
+	ErrorOperationSourceUsageCheck      = "source usage check"
+	ErrorOperationTransferPathPreflight = "transfer path preflight"
+	ErrorOperationDeleteSession         = "delete session"
+	ErrorOperationDeleteSessionLock     = "delete session lock"
+)
+
 // Error is an operation error with a stable category and optional wrapped cause.
 type Error struct {
 	Category ErrorCategory `json:"category"            yaml:"category"`

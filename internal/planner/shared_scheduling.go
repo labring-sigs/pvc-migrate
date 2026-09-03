@@ -24,7 +24,7 @@ func (p *Planner) checkSharedRWOScheduling(state *planState) {
 
 		if state.inventory.namespacePodsErr != nil {
 			state.plan.AddCheck(failed(
-				"destination-shared-scheduling",
+				domain.CheckNameDestinationSharedScheduling,
 				fmt.Sprintf(
 					"cannot verify same-node consumers for PVC %s/%s: list Pods: %v",
 					volume.SourcePVC.Namespace,
@@ -49,7 +49,7 @@ func (p *Planner) checkSharedRWOScheduling(state *planState) {
 		)
 		if len(issues) > 0 {
 			state.plan.AddCheck(failed(
-				"destination-shared-scheduling",
+				domain.CheckNameDestinationSharedScheduling,
 				fmt.Sprintf(
 					"OpenEBS LVM shared RWO PVC %s/%s requires all %d consumers on node %s: %s",
 					volume.SourcePVC.Namespace,
@@ -64,7 +64,7 @@ func (p *Planner) checkSharedRWOScheduling(state *planState) {
 		}
 
 		state.plan.AddCheck(passed(
-			"destination-shared-scheduling",
+			domain.CheckNameDestinationSharedScheduling,
 			fmt.Sprintf(
 				"%d consumers of OpenEBS LVM shared RWO PVC %s/%s can run together on node %s",
 				volume.ConcurrentConsumers,

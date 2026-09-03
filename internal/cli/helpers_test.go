@@ -245,19 +245,22 @@ func testRootCommandSurface(t *testing.T, root *cobra.Command) {
 	}
 
 	for name, want := range map[string]string{
-		"session-namespace": "pvc-migrate-system",
-		"timeout":           "30m0s",
-		"retries":           "3",
-		"retry-backoff":     "2s",
-		"helm-timeout":      "10m0s",
-		"output":            "table",
-		"log-format":        "text",
-		"log-level":         "info",
-		"color":             "auto",
-		"stream-tool-logs":  "true",
-		"no-compress":       "false",
-		"yes":               "false",
-		"tool-image":        "ghcr.io/labring-sigs/pvc-migrate:test",
+		"mode":                 "session",
+		"session-namespace":    "pvc-migrate-system",
+		"controller-namespace": "pvc-migrate-system",
+		"timeout":              "30m0s",
+		"retries":              "3",
+		"retry-backoff":        "2s",
+		"helm-timeout":         "10m0s",
+		"output":               "table",
+		"log-format":           "text",
+		"log-level":            "info",
+		"color":                "auto",
+		"stream-tool-logs":     "true",
+		"wait":                 "true",
+		"no-compress":          "false",
+		"yes":                  "false",
+		"tool-image":           "ghcr.io/labring-sigs/pvc-migrate:test",
 	} {
 		flag := root.PersistentFlags().Lookup(name)
 		if flag == nil || flag.DefValue != want {
@@ -434,7 +437,7 @@ func testCopyBackupRestoreFlags(t *testing.T, root *cobra.Command) {
 		t.Fatalf("backup --id usage=%v", backupID)
 	}
 
-	if restoreID == nil || !strings.Contains(restoreID.Usage, "no Session is created") {
+	if restoreID == nil || !strings.Contains(restoreID.Usage, "Restore session ID") {
 		t.Fatalf("restore --id usage=%v", restoreID)
 	}
 
@@ -839,11 +842,10 @@ func TestOfflinePlanOptionsPreserveSourcePVCSelection(t *testing.T) {
 
 func TestParseLogLevel(t *testing.T) {
 	cases := map[string]slog.Level{
-		"debug":   slog.LevelDebug,
-		"INFO":    slog.LevelInfo,
-		"warn":    slog.LevelWarn,
-		"warning": slog.LevelWarn,
-		"error":   slog.LevelError,
+		"debug": slog.LevelDebug,
+		"INFO":  slog.LevelInfo,
+		"warn":  slog.LevelWarn,
+		"error": slog.LevelError,
 	}
 	for input, want := range cases {
 		got, err := parseLogLevel(input)
@@ -852,8 +854,15 @@ func TestParseLogLevel(t *testing.T) {
 		}
 	}
 
-	if _, err := parseLogLevel("trace"); domain.CategoryOf(err) != domain.ErrorValidation {
-		t.Fatalf("invalid log level error=%v category=%q", err, domain.CategoryOf(err))
+	for _, input := range []string{"trace", "warning"} {
+		if _, err := parseLogLevel(input); domain.CategoryOf(err) != domain.ErrorValidation {
+			t.Fatalf(
+				"invalid log level %q error=%v category=%q",
+				input,
+				err,
+				domain.CategoryOf(err),
+			)
+		}
 	}
 }
 
@@ -871,6 +880,50 @@ func TestParseColorMode(t *testing.T) {
 
 	if _, err := parseColorMode("rainbow"); domain.CategoryOf(err) != domain.ErrorValidation {
 		t.Fatalf("invalid color mode error=%v category=%q", err, domain.CategoryOf(err))
+	}
+}
+
+func TestParseExecutionMode(t *testing.T) {
+	tests := []struct {
+		input string
+		want  executionMode
+	}{
+		{input: " SESSION ", want: executionModeSession},
+		{input: "Controller", want: executionModeController},
+	}
+	for _, test := range tests {
+		got, err := parseExecutionMode(test.input)
+		if err != nil {
+			t.Fatalf("parseExecutionMode(%q): %v", test.input, err)
+		}
+
+		if got != test.want {
+			t.Fatalf("parseExecutionMode(%q)=%q, want %q", test.input, got, test.want)
+		}
+	}
+
+	for _, input := range []string{"auto", "direct"} {
+		if _, err := parseExecutionMode(input); domain.CategoryOf(err) != domain.ErrorValidation {
+			t.Fatalf(
+				"invalid execution mode %q error=%v category=%q",
+				input,
+				err,
+				domain.CategoryOf(err),
+			)
+		}
+	}
+}
+
+func TestExecutionModeDefaultsToSession(t *testing.T) {
+	command := NewRoot(Options{Version: "test"})
+	flag := command.PersistentFlags().Lookup("mode")
+
+	if flag == nil {
+		t.Fatal("mode flag is not registered")
+	}
+
+	if flag.DefValue != string(executionModeSession) {
+		t.Fatalf("mode default=%q, want %q", flag.DefValue, executionModeSession)
 	}
 }
 
@@ -1400,6 +1453,29 @@ func TestBucketFlagValidationMatrix(t *testing.T) {
 			pvcFlag: "source-pvc",
 			want:    "unsupported backend",
 		},
+		{
+			name: "repository namespace without repository",
+			flags: bucketFlags{
+				pvc:                       "data",
+				name:                      "daily",
+				backend:                   "s3",
+				backupRepositoryNamespace: "backups",
+			},
+			pvcFlag: "source-pvc",
+			want:    "requires --backup-repository",
+		},
+		{
+			name: "invalid repository namespace",
+			flags: bucketFlags{
+				pvc:                       "data",
+				name:                      "daily",
+				backend:                   "s3",
+				backupRepository:          "shared",
+				backupRepositoryNamespace: "INVALID_NS",
+			},
+			pvcFlag: "source-pvc",
+			want:    "invalid --backup-repository-namespace",
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -1414,6 +1490,39 @@ func TestBucketFlagValidationMatrix(t *testing.T) {
 	valid := bucketFlags{pvc: "data", name: "daily", backend: "s3", bucket: "backups"}
 	if err := validateBucketFlags(&valid, "source-pvc"); err != nil {
 		t.Fatal(err)
+	}
+
+	repository := bucketFlags{
+		pvc:              "data",
+		name:             "daily",
+		backend:          "s3",
+		backupRepository: "shared-s3",
+	}
+	if err := validateBucketFlags(&repository, "source-pvc"); err != nil {
+		t.Fatalf("repository-backed flags should not require bucket: %v", err)
+	}
+
+	if err := validateControllerRepositoryFlags(&repository); err != nil {
+		t.Fatalf("repository-backed defaults should be accepted: %v", err)
+	}
+
+	repository.backupRepositoryNamespace = "backups"
+	if err := validateBucketFlags(&repository, "source-pvc"); err != nil {
+		t.Fatalf("cross-namespace repository reference should be accepted: %v", err)
+	}
+
+	repository.prefixExplicit = true
+	if err := validateControllerRepositoryFlags(
+		&repository,
+	); domain.CategoryOf(
+		err,
+	) != domain.ErrorPrecondition ||
+		!strings.Contains(err.Error(), "BackupRepository") {
+		t.Fatalf(
+			"explicit repository prefix override error=%v category=%q",
+			err,
+			domain.CategoryOf(err),
+		)
 	}
 }
 

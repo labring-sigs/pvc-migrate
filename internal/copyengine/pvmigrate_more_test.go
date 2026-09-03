@@ -83,6 +83,7 @@ func TestCopyBuildsCompleteUpstreamMigrationContract(t *testing.T) {
 		IgnoreSizes:           true,
 		NoCompress:            true,
 		HelmTimeout:           37 * time.Second,
+		HelmValues:            []string{"sshd.serviceAccount.create=false"},
 		HelmStringValues:      []string{"sshd.nodeName=source-node"},
 		Writer:                writer,
 		Logger:                logger,
@@ -129,7 +130,9 @@ func TestCopyBuildsCompleteUpstreamMigrationContract(t *testing.T) {
 		)
 	}
 
-	if len(captured.HelmValues) != len(kube.ToolSecurityContextHelmValues())+1 ||
+	if len(captured.HelmValues) != len(kube.ToolSecurityContextHelmValues())+2 ||
+		captured.HelmValues[len(kube.ToolSecurityContextHelmValues())] !=
+			"sshd.serviceAccount.create=false" ||
 		captured.HelmValues[len(captured.HelmValues)-1] != "rsync.maxRetries=0" ||
 		len(captured.HelmStringValues) != 7 ||
 		captured.HelmStringValues[len(captured.HelmStringValues)-1] != "sshd.nodeName=source-node" {

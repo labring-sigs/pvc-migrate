@@ -6,16 +6,19 @@ import (
 	"fmt"
 	"time"
 
+	v1alpha1 "github.com/labring-sigs/pvc-migrate/api/v1alpha1"
 	"github.com/labring-sigs/pvc-migrate/internal/domain"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	k8sruntime "k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/discovery"
 	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
+	crclient "sigs.k8s.io/controller-runtime/pkg/client"
 )
 
 type Clients struct {
@@ -23,6 +26,10 @@ type Clients struct {
 	Dynamic    dynamic.Interface
 	Discovery  discovery.DiscoveryInterface
 	RESTConfig *rest.Config
+	// Runtime is the typed controller-runtime client for pvc-migrate API
+	// objects. Dynamic remains available for third-party CRDs whose schemas are
+	// intentionally discovered at runtime by existing workflows.
+	Runtime crclient.Client
 }
 
 func NewClients(kubeconfigPath, kubeContext string) (*Clients, error) {
@@ -78,11 +85,32 @@ func NewClients(kubeconfigPath, kubeContext string) (*Clients, error) {
 		)
 	}
 
+	apiScheme := k8sruntime.NewScheme()
+	if err := v1alpha1.AddToScheme(apiScheme); err != nil {
+		return nil, domain.WrapError(
+			domain.ErrorInternal,
+			"kubernetes client",
+			"register pvc-migrate API scheme",
+			err,
+		)
+	}
+
+	runtimeClient, err := crclient.New(config, crclient.Options{Scheme: apiScheme})
+	if err != nil {
+		return nil, domain.WrapError(
+			domain.ErrorKubernetes,
+			"kubernetes client",
+			"create controller-runtime client",
+			err,
+		)
+	}
+
 	return &Clients{
 		Kubernetes: typed,
 		Dynamic:    dynamicClient,
 		Discovery:  discoveryClient,
 		RESTConfig: config,
+		Runtime:    runtimeClient,
 	}, nil
 }
 
@@ -160,6 +188,97 @@ func HasAPIResource(
 	}
 
 	return false
+}
+
+// HasAPIResources verifies that a complete API surface is served. Controller
+// mode uses this to reject partially installed workflow CRDs before commands
+// start creating resources that the active controller cannot watch.
+func HasAPIResources(
+	discoveryClient discovery.DiscoveryInterface,
+	groupVersion string,
+	resources ...string,
+) bool {
+	if discoveryClient == nil || len(resources) == 0 {
+		return false
+	}
+
+	list, err := discoveryClient.ServerResourcesForGroupVersion(groupVersion)
+	if err != nil {
+		return false
+	}
+
+	served := make(map[string]struct{}, len(list.APIResources))
+	for _, candidate := range list.APIResources {
+		served[candidate.Name] = struct{}{}
+	}
+
+	for _, resource := range resources {
+		if _, ok := served[resource]; !ok {
+			return false
+		}
+	}
+
+	return true
+}
+
+// AvailableControllerWorkflowKinds returns the workflow CRD Kinds served by
+// the target cluster. Discovery is best-effort: an unavailable API group
+// yields an empty set and explicit controller mode reports that requirement.
+func AvailableControllerWorkflowKinds(
+	discoveryClient discovery.DiscoveryInterface,
+) []domain.ControllerKind {
+	if discoveryClient == nil {
+		return nil
+	}
+
+	list, err := discoveryClient.ServerResourcesForGroupVersion(domain.SessionAPIVersion)
+	if err != nil {
+		return nil
+	}
+
+	served := make(map[string]struct{}, len(list.APIResources))
+	for _, resource := range list.APIResources {
+		served[resource.Name] = struct{}{}
+	}
+
+	available := make([]domain.ControllerKind, 0, len(domain.ControllerWorkflows())*2)
+	for _, workflow := range domain.ControllerWorkflows() {
+		if workflow.Resource != "" {
+			if workflowResourceWithStatusServed(served, workflow.Resource) {
+				available = append(available, workflow.Kind)
+			}
+		}
+
+		if workflow.ClusterResource != "" {
+			if workflowResourceWithStatusServed(served, workflow.ClusterResource) {
+				available = append(available, workflow.ClusterKind)
+			}
+		}
+	}
+
+	return available
+}
+
+func workflowResourceWithStatusServed(served map[string]struct{}, resource string) bool {
+	if resource == "" {
+		return false
+	}
+
+	_, parentServed := served[resource]
+	_, statusServed := served[resource+"/status"]
+
+	return parentServed && statusServed
+}
+
+// BackupRepositoryAvailable reports whether the namespaced repository API is
+// served. The controller can resolve user-owned locations only when this
+// resource is installed.
+func BackupRepositoryAvailable(discoveryClient discovery.DiscoveryInterface) bool {
+	return HasAPIResource(
+		discoveryClient,
+		domain.SessionAPIVersion,
+		domain.BackupRepositoryResource,
+	)
 }
 
 func WaitFor(

@@ -186,7 +186,7 @@ func (p *Planner) checkPodDependencies(
 
 		plan.AddCheck(
 			failed(
-				"pod-dependencies",
+				domain.CheckNamePodDependencies,
 				fmt.Sprintf("read %s %s/%s: %v", item.kind, pod.Namespace, item.name, err),
 			),
 		)
@@ -197,7 +197,10 @@ func (p *Planner) checkPodDependencies(
 	if len(missing) > 0 {
 		sort.Strings(missing)
 		plan.AddCheck(
-			failed("pod-dependencies", "missing dependencies: "+strings.Join(missing, ", ")),
+			failed(
+				domain.CheckNamePodDependencies,
+				"missing dependencies: "+strings.Join(missing, ", "),
+			),
 		)
 
 		return
@@ -219,7 +222,7 @@ func (p *Planner) checkPodDependencies(
 
 	plan.AddCheck(
 		passed(
-			"pod-dependencies",
+			domain.CheckNamePodDependencies,
 			fmt.Sprintf(
 				"Pod dependencies resolved: %d Secret(s), %d ConfigMap(s), ServiceAccount/%s",
 				secretCount,

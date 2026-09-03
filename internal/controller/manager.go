@@ -25,11 +25,11 @@ import (
 )
 
 const (
-	kubeBlocksClusterAPIVersion = domain.KubeBlocksAppsGroup + "/v1alpha1"
-	kubeBlocksOpsAPIVersion     = "operations.kubeblocks.io/v1alpha1"
+	kubeBlocksClusterAPIVersion = domain.KubeBlocksClusterAPIVersion
+	kubeBlocksOpsAPIVersion     = domain.KubeBlocksOperationsAPIVersion
 	kubeBlocksGroupSuffix       = "kubeblocks.io"
-	vmClusterAPIVersion         = "operator.victoriametrics.com/v1beta1"
-	grafanaAPIVersion           = "grafana.integreatly.org/v1beta1"
+	vmClusterAPIVersion         = domain.VictoriaMetricsAPIVersion
+	grafanaAPIVersion           = domain.GrafanaAPIVersion
 	grafanaAPIGroup             = "grafana.integreatly.org"
 	clusterResource             = "clusters"
 	instanceSetResource         = "instancesets"

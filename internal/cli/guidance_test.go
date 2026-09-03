@@ -11,8 +11,10 @@ import (
 	"time"
 
 	"github.com/labring-sigs/pvc-migrate/internal/app"
+	"github.com/labring-sigs/pvc-migrate/internal/backup"
 	"github.com/labring-sigs/pvc-migrate/internal/domain"
 	"github.com/labring-sigs/pvc-migrate/internal/kube"
+	"github.com/labring-sigs/pvc-migrate/internal/objectstore"
 	"github.com/labring-sigs/pvc-migrate/internal/output"
 	"k8s.io/client-go/kubernetes/fake"
 )
@@ -169,6 +171,144 @@ func TestAbortedBackupGuidanceUsesBackupTerms(t *testing.T) {
 	}
 }
 
+func TestRestoreGuidanceUsesRestoreLifecycle(t *testing.T) {
+	spec := domain.NewSessionSpec(
+		domain.OperationRestore,
+		domain.SessionCommon{
+			SourceNamespace:      "app",
+			DestinationNamespace: "app",
+			SessionNamespace:     "pvc-migrate-system",
+		},
+		false,
+		domain.SessionWorkflowOptions{},
+	)
+	spec.Restore.DestinationPVC = domain.ObjectReference{
+		Namespace: "app",
+		Name:      "data",
+	}
+	spec.Restore.Backend = "s3"
+	spec.Restore.Bucket = "backups"
+	spec.Restore.Name = "daily"
+	session := domain.NewSession("restore-test", spec, time.Now())
+	session.Status.Phase = domain.PhaseFailed
+	session.Status.ResumeFrom = domain.PhaseWarmCopying
+
+	var output bytes.Buffer
+	if err := writeSessionGuidance(
+		&output,
+		session,
+		guidancePrefixesForSession(session),
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	text := output.String()
+	for _, want := range []string{
+		"restore status restore-test",
+		"restore resume restore-test",
+		"restore abort restore-test",
+		"Verify active PVCs: kubectl --namespace app get pvc data",
+	} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("restore guidance=%q missing %q", text, want)
+		}
+	}
+
+	for _, forbidden := range []string{
+		"migrate status restore-test",
+		"restore rollback restore-test",
+		"--delete-temporary",
+		"--delete-rollback-pv",
+	} {
+		if strings.Contains(text, forbidden) {
+			t.Fatalf("restore guidance=%q contains %q", text, forbidden)
+		}
+	}
+}
+
+func TestCompletedRestoreResultLoadsDurableSessionAndPrintsGuidance(t *testing.T) {
+	client := fake.NewClientset()
+	store := kube.NewConfigMapSessionStore(client)
+	spec := domain.NewSessionSpec(
+		domain.OperationRestore,
+		domain.SessionCommon{
+			SourceNamespace:      "app",
+			DestinationNamespace: "app",
+			SessionNamespace:     "migration-control",
+		},
+		false,
+		domain.SessionWorkflowOptions{},
+	)
+	spec.Restore.DestinationPVC = domain.ObjectReference{
+		Namespace: "app",
+		Name:      "restored-data",
+	}
+	spec.Restore.Backend = domain.BackupBackendS3
+	spec.Restore.Bucket = "backups"
+	spec.Restore.Name = "daily"
+	session := domain.NewSession("restore-result", spec, time.Now())
+
+	session.Status.Phase = domain.PhaseCompleted
+	if err := store.Create(context.Background(), session); err != nil {
+		t.Fatal(err)
+	}
+
+	objectStore, err := objectstore.NewConfigOnly(objectstore.Config{
+		Bucket: "backups",
+		Name:   "daily",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var stdout, stderr bytes.Buffer
+
+	root := NewRoot(Options{Version: "test", Out: &stdout, ErrOut: &stderr})
+
+	command, _, err := root.Find([]string{"restore"})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	state := &rootState{
+		options: Options{Out: &stdout, ErrOut: &stderr},
+		global:  globals{sessionNamespace: "migration-control"},
+	}
+
+	err = state.printObjectTransferResult(
+		command,
+		&commandRuntime{store: store},
+		&bucketFlags{
+			id:        session.ID,
+			namespace: "app",
+			pvc:       "restored-data",
+			name:      "daily",
+		},
+		"restore",
+		true,
+		false,
+		&backup.Plan{Path: "/"},
+		objectStore,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if !strings.Contains(stdout.String(), "restore-result") {
+		t.Fatalf("stdout=%q", stdout.String())
+	}
+
+	for _, want := range []string{
+		"restore status restore-result",
+		"restore cleanup restore-result",
+		"--session-namespace migration-control",
+	} {
+		if !strings.Contains(stderr.String(), want) {
+			t.Fatalf("stderr=%q missing %q", stderr.String(), want)
+		}
+	}
+}
+
 func TestSessionGuidancePreservesCommandConnectionSettings(t *testing.T) {
 	client := fake.NewClientset()
 	store := kube.NewConfigMapSessionStore(client)
@@ -230,6 +370,47 @@ func TestSessionGuidancePreservesCommandConnectionSettings(t *testing.T) {
 				text,
 				excluded,
 			)
+		}
+	}
+}
+
+func TestControllerGuidancePreservesModeAndWorkflowNamespace(t *testing.T) {
+	root := NewRoot(
+		Options{Version: "test", In: strings.NewReader(""), Out: io.Discard, ErrOut: io.Discard},
+	)
+	for name, value := range map[string]string{
+		"kubeconfig":         "/tmp/config local",
+		"mode":               "controller",
+		"session-namespace":  "controller-system",
+		"workflow-namespace": "application",
+	} {
+		if err := root.PersistentFlags().Set(name, value); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	command, _, err := root.Find([]string{"copy", "status"})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	prefix := guidancePrefixesForCommand(command, "application").pvcMigrate
+	for _, want := range []string{
+		"--kubeconfig '/tmp/config local'",
+		"--mode=controller",
+		"--workflow-namespace application",
+	} {
+		if !strings.Contains(prefix, want) {
+			t.Fatalf("controller guidance prefix=%q missing %q", prefix, want)
+		}
+	}
+
+	for _, forbidden := range []string{
+		"--session-namespace application",
+		"--session-namespace controller-system",
+	} {
+		if strings.Contains(prefix, forbidden) {
+			t.Fatalf("controller guidance prefix=%q contains %q", prefix, forbidden)
 		}
 	}
 }
@@ -385,6 +566,35 @@ func TestSessionGuidanceCoversTerminalActions(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestSessionGuidanceNamesCRDRecord(t *testing.T) {
+	var output bytes.Buffer
+
+	session := guidanceSession(domain.PhasePlanned)
+
+	session.Backend = kube.SessionBackendCRD
+
+	if err := writeSessionGuidance(
+		&output,
+		session,
+		guidancePrefixesForSession(session),
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	text := output.String()
+
+	if !strings.Contains(
+		text,
+		"Record: ClusterPodMigration "+session.ID,
+	) {
+		t.Fatalf("guidance=%q", text)
+	}
+
+	if strings.Contains(text, "Record: ConfigMap") {
+		t.Fatalf("CRD guidance still names ConfigMap: %q", text)
 	}
 }
 

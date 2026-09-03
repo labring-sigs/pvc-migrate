@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"slices"
 	"strings"
 	"time"
 
@@ -32,22 +33,40 @@ type Options struct {
 }
 
 type globals struct {
-	kubeconfig       string
-	kubeContext      string
-	sessionNamespace string
-	timeout          time.Duration
-	retries          int
-	retryBackoff     time.Duration
-	helmTimeout      time.Duration
-	output           string
-	logFormat        string
-	logLevel         string
-	color            string
-	streamToolLogs   bool
-	noCompress       bool
-	assumeYes        bool
-	toolImage        string
+	kubeconfig          string
+	kubeContext         string
+	sessionNamespace    string
+	controllerNamespace string
+	workflowNamespace   string
+	timeout             time.Duration
+	retries             int
+	retryBackoff        time.Duration
+	helmTimeout         time.Duration
+	output              string
+	logFormat           string
+	logLevel            string
+	color               string
+	streamToolLogs      bool
+	wait                bool
+	noCompress          bool
+	assumeYes           bool
+	toolImage           string
+	mode                string
 }
+
+type executionMode string
+
+const (
+	executionModeSession    executionMode = "session"
+	executionModeController executionMode = "controller"
+)
+
+type logFormat string
+
+const (
+	logFormatText logFormat = "text"
+	logFormatJSON logFormat = "json"
+)
 
 type rootState struct {
 	options Options
@@ -64,6 +83,11 @@ type commandRuntime struct {
 	logger                        *slog.Logger
 	controllers                   *controller.Manager
 	openEBSLVMSharedVolumeManager kube.OpenEBSLVMSharedVolumeManager
+	mode                          executionMode
+	controllerStore               kube.SessionStore
+	controllerKinds               []domain.ControllerKind
+	waitForController             bool
+	controllerWaiter              controllerSessionWaiter
 }
 
 func NewRoot(options Options) *cobra.Command {
@@ -81,11 +105,12 @@ func NewRoot(options Options) *cobra.Command {
 
 	state := &rootState{options: options}
 	coloredErrOut := newColorOutputWriter(options.ErrOut, func() bool {
-		return state.global.logFormat != "json" && colorEnabled(state.global.color, options.ErrOut)
+		return state.global.logFormat != string(logFormatJSON) &&
+			colorEnabled(state.global.color, options.ErrOut)
 	})
 	state.errOut = newLogOutputWriter(
 		coloredErrOut,
-		func() bool { return state.global.logFormat == "json" },
+		func() bool { return state.global.logFormat == string(logFormatJSON) },
 	)
 	command := &cobra.Command{
 		Use:           "pvc-migrate",
@@ -109,6 +134,18 @@ func NewRoot(options Options) *cobra.Command {
 		"pvc-migrate-system",
 		"Namespace for persistent migration sessions",
 	)
+	flags.StringVar(
+		&state.global.controllerNamespace,
+		"controller-namespace",
+		"pvc-migrate-system",
+		"Namespace where the controller is installed",
+	)
+	flags.StringVar(
+		&state.global.workflowNamespace,
+		"workflow-namespace",
+		"",
+		"Tenant namespace containing a controller workflow for lifecycle/status commands",
+	)
 	flags.DurationVar(&state.global.timeout, "timeout", 30*time.Minute, "Operation timeout")
 	flags.IntVar(&state.global.retries, "retries", 3, "Copy retry attempts")
 	flags.DurationVar(
@@ -127,10 +164,15 @@ func NewRoot(options Options) *cobra.Command {
 		&state.global.output,
 		"output",
 		"o",
-		"table",
+		string(output.Table),
 		"Output format: table, json, yaml",
 	)
-	flags.StringVar(&state.global.logFormat, "log-format", "text", "Log format: text, json")
+	flags.StringVar(
+		&state.global.logFormat,
+		"log-format",
+		string(logFormatText),
+		"Log format: text, json",
+	)
 	flags.StringVar(
 		&state.global.logLevel,
 		"log-level",
@@ -149,6 +191,12 @@ func NewRoot(options Options) *cobra.Command {
 		true,
 		"Stream generated tool Pod logs to stderr",
 	)
+	flags.BoolVar(
+		&state.global.wait,
+		"wait",
+		true,
+		"Wait for controller-backed workflows to finish",
+	)
 	flags.BoolVar(&state.global.noCompress, "no-compress", false, "Disable rsync compression")
 	flags.BoolVarP(
 		&state.global.assumeYes,
@@ -163,6 +211,12 @@ func NewRoot(options Options) *cobra.Command {
 		kube.DefaultToolImage(options.ToolImageRepository, options.Version),
 		"Tool image used by PVC reservation, copy, SSHD, and backup tools",
 	)
+	flags.StringVar(
+		&state.global.mode,
+		"mode",
+		string(executionModeSession),
+		"Persistence mode: session uses ConfigMaps, controller uses workflow CRDs",
+	)
 
 	command.AddCommand(
 		state.newReserveCommand(),
@@ -174,6 +228,7 @@ func NewRoot(options Options) *cobra.Command {
 		state.newBackupCommand(),
 		state.newRestoreCommand(),
 		state.newRecoveryCommand(),
+		state.newControllerCommand(),
 		newVersionCommand(options.Version),
 	)
 	// Cross-cluster workflows have an independent session and resource model.
@@ -229,7 +284,37 @@ func (r *rootState) runtime() (*commandRuntime, error) {
 	controllers := controller.NewManager(clients.Kubernetes, clients.Dynamic, clients.Discovery).
 		WithRESTConfig(clients.RESTConfig).
 		WithLogger(logger.With("component", "controller"))
-	store := kube.NewConfigMapSessionStore(clients.Kubernetes)
+
+	requestedMode, err := parseExecutionMode(r.global.mode)
+	if err != nil {
+		return nil, err
+	}
+
+	configMapStore := kube.NewConfigMapSessionStore(clients.Kubernetes)
+
+	var (
+		store           kube.SessionStore = configMapStore
+		controllerStore kube.SessionStore
+		controllerKinds []domain.ControllerKind
+	)
+
+	if requestedMode == executionModeController {
+		controllerKinds = kube.AvailableControllerWorkflowKinds(clients.Discovery)
+		if len(controllerKinds) == 0 {
+			return nil, domain.NewError(
+				domain.ErrorPrecondition,
+				"controller mode",
+				"controller mode requires at least one migrate.sealos.io/v1alpha1 workflow CRD; install deploy/crd.yaml or use --mode=session",
+			)
+		}
+
+		crdStore := kube.NewCRDSessionStore(clients.Runtime).
+			WithLeaseClient(clients.Kubernetes).
+			WithSupportedKinds(controllerKinds)
+		store = crdStore
+		controllerStore = crdStore
+	}
+
 	reserver := kube.NewReserver(clients.Kubernetes).
 		WithLogger(logger.With("component", "reserver"))
 	openEBSLVMSharedVolumeManager := kube.NewOpenEBSLVMSharedVolumeManager(
@@ -241,7 +326,7 @@ func (r *rootState) runtime() (*commandRuntime, error) {
 		reserver = reserver.WithToolLogs(kube.ToolLogOptions{
 			Writer:     r.errWriter(),
 			Logger:     logger.With("component", "tool"),
-			Structured: r.global.logFormat == "json",
+			Structured: r.global.logFormat == string(logFormatJSON),
 		})
 	}
 
@@ -260,7 +345,7 @@ func (r *rootState) runtime() (*commandRuntime, error) {
 			HelmTimeout:                   r.global.helmTimeout,
 			NoCompress:                    r.global.noCompress,
 			StreamToolLogs:                r.global.streamToolLogs,
-			StructuredLogs:                r.global.logFormat == "json",
+			StructuredLogs:                r.global.logFormat == string(logFormatJSON),
 			Writer:                        r.errWriter(),
 			Logger:                        logger.With("component", "migration"),
 			ToolImageProber:               kube.NewToolImageProber(clients.Kubernetes),
@@ -279,10 +364,19 @@ func (r *rootState) runtime() (*commandRuntime, error) {
 		logger:                        logger.With("component", "backup"),
 		controllers:                   controllers,
 		openEBSLVMSharedVolumeManager: openEBSLVMSharedVolumeManager,
+		mode:                          requestedMode,
+		controllerStore:               controllerStore,
+		controllerKinds:               slices.Clone(controllerKinds),
+		waitForController:             r.global.wait,
+		controllerWaiter:              kube.NewControllerSessionWaiter(clients.Dynamic),
 	}, nil
 }
 
 func (r *rootState) validateGlobalFlags() error {
+	if _, err := parseExecutionMode(r.global.mode); err != nil {
+		return err
+	}
+
 	switch {
 	case r.global.retries < 1:
 		return domain.NewError(domain.ErrorValidation, "flags", "--retries must be at least 1")
@@ -312,7 +406,47 @@ func (r *rootState) validateGlobalFlags() error {
 		)
 	}
 
+	if problems := validation.IsDNS1123Label(r.global.controllerNamespace); len(problems) > 0 {
+		return domain.NewError(
+			domain.ErrorValidation,
+			"flags",
+			fmt.Sprintf(
+				"--controller-namespace %q is invalid: %s",
+				r.global.controllerNamespace,
+				strings.Join(problems, "; "),
+			),
+		)
+	}
+
+	if r.global.workflowNamespace != "" {
+		if problems := validation.IsDNS1123Label(r.global.workflowNamespace); len(problems) > 0 {
+			return domain.NewError(
+				domain.ErrorValidation,
+				"flags",
+				fmt.Sprintf(
+					"--workflow-namespace %q is invalid: %s",
+					r.global.workflowNamespace,
+					strings.Join(problems, "; "),
+				),
+			)
+		}
+	}
+
 	return nil
+}
+
+func parseExecutionMode(value string) (executionMode, error) {
+	mode := executionMode(strings.ToLower(strings.TrimSpace(value)))
+	switch mode {
+	case executionModeSession, executionModeController:
+		return mode, nil
+	default:
+		return "", domain.NewError(
+			domain.ErrorValidation,
+			"flags",
+			"--mode must be session or controller",
+		)
+	}
 }
 
 func configureKubernetesLogger(logger *slog.Logger) {
@@ -331,10 +465,10 @@ func loggerFor(r *rootState) (*slog.Logger, error) {
 	}
 
 	handlerOptions := &slog.HandlerOptions{Level: level}
-	switch r.global.logFormat {
-	case "text":
+	switch logFormat(r.global.logFormat) {
+	case logFormatText:
 		return slog.New(slog.NewTextHandler(r.errWriter(), handlerOptions)), nil
-	case "json":
+	case logFormatJSON:
 		return slog.New(slog.NewJSONHandler(r.errWriter(), handlerOptions)), nil
 	default:
 		return nil, domain.NewError(
@@ -369,7 +503,7 @@ func parseLogLevel(value string) (slog.Level, error) {
 		return slog.LevelDebug, nil
 	case "info":
 		return slog.LevelInfo, nil
-	case "warn", "warning":
+	case "warn":
 		return slog.LevelWarn, nil
 	case "error":
 		return slog.LevelError, nil

@@ -16,9 +16,9 @@ func (s *Service) Rename(ctx context.Context, session *domain.Session) error {
 	)
 }
 
-// Move executes the cross-namespace PVC identity workflow. The storage
-// switcher is shared with rename, while the public service entry point keeps
-// the operation boundary explicit.
+// Move executes the cluster-scoped PVC identity workflow. The storage switcher
+// is shared with rename, while the public service entry point keeps the
+// operation boundary explicit.
 func (s *Service) Move(ctx context.Context, session *domain.Session) error {
 	return s.withSessionLock(
 		ctx,

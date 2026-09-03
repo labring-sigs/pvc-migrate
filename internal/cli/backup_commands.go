@@ -6,40 +6,48 @@ import (
 	"os"
 	"time"
 
+	v1alpha1 "github.com/labring-sigs/pvc-migrate/api/v1alpha1"
 	"github.com/labring-sigs/pvc-migrate/internal/backup"
 	"github.com/labring-sigs/pvc-migrate/internal/domain"
 	"github.com/labring-sigs/pvc-migrate/internal/kube"
 	"github.com/labring-sigs/pvc-migrate/internal/objectstore"
+	"github.com/labring-sigs/pvc-migrate/internal/output"
 	"github.com/spf13/cobra"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/util/validation"
 	"k8s.io/client-go/kubernetes"
 )
 
 type bucketFlags struct {
-	id                   string
-	namespace            string
-	pvc                  string
-	backend              string
-	bucket               string
-	name                 string
-	prefix               string
-	path                 string
-	s3Provider           string
-	endpoint             string
-	region               string
-	accessKey            string
-	secretKey            string
-	sessionToken         string
-	credentialsSecret    string
-	accessKeyKey         string
-	secretKeyKey         string
-	sessionTokenKey      string
-	accessKeyExplicit    bool
-	secretKeyExplicit    bool
-	sessionTokenExplicit bool
-	allowInsecure        bool
-	serverEncryption     string
-	sseKMSKeyID          string
+	id                        string
+	namespace                 string
+	pvc                       string
+	backend                   string
+	bucket                    string
+	name                      string
+	prefix                    string
+	path                      string
+	s3Provider                string
+	endpoint                  string
+	region                    string
+	accessKey                 string
+	secretKey                 string
+	sessionToken              string
+	credentialsSecret         string
+	backupRepository          string
+	backupRepositoryNamespace string
+	accessKeyKey              string
+	secretKeyKey              string
+	sessionTokenKey           string
+	accessKeyExplicit         bool
+	secretKeyExplicit         bool
+	sessionTokenExplicit      bool
+	prefixExplicit            bool
+	allowInsecure             bool
+	serverEncryption          string
+	sseKMSKeyID               string
 }
 
 type backupFlags struct {
@@ -93,6 +101,7 @@ func (r *rootState) runBackupCommand(cmd *cobra.Command, flags *backupFlags, dry
 	)
 }
 
+//nolint:gocyclo // Submission, fallback, and reporting branches form one transactional CLI workflow.
 func (r *rootState) runBackupTransfer(
 	cmd *cobra.Command,
 	flags *bucketFlags,
@@ -108,6 +117,8 @@ func (r *rootState) runBackupTransfer(
 		}
 	}
 
+	flags.prefixExplicit = cmd.Flags().Changed("prefix")
+
 	runtime, err := r.runtime()
 	if err != nil {
 		return reportRuntimeError(cmd, err)
@@ -120,11 +131,49 @@ func (r *rootState) runBackupTransfer(
 	flags.secretKeyExplicit = cmd.Flags().Changed("secret-key")
 
 	flags.sessionTokenExplicit = cmd.Flags().Changed("session-token")
-	if err := loadS3Credentials(ctx, runtime.clients.Kubernetes, flags); err != nil {
-		return reportTransferError(cmd, "backup", flags.namespace, flags.pvc, err)
+
+	controllerWorkflow := controllerWorkflowAvailable(runtime, domain.SessionTypeBackup)
+	if flags.backupRepository != "" {
+		if !controllerWorkflow {
+			return reportTransferError(cmd, "backup", flags.namespace, flags.pvc, domain.NewError(
+				domain.ErrorPrecondition,
+				"backup repository",
+				"--backup-repository requires the Backup CRD and controller mode",
+			))
+		}
+
+		if !kube.BackupRepositoryAvailable(runtime.clients.Discovery) {
+			return reportTransferError(cmd, "backup", flags.namespace, flags.pvc, domain.NewError(
+				domain.ErrorPrecondition,
+				"backup repository",
+				"BackupRepository CRD is not served by this cluster; install deploy/crd.yaml",
+			))
+		}
+
+		if err := validateControllerRepositoryFlags(flags); err != nil {
+			return reportTransferError(cmd, "backup", flags.namespace, flags.pvc, err)
+		}
 	}
 
-	store, err := r.newObjectStore(ctx, flags)
+	if controllerWorkflow && flags.backupRepository == "" {
+		return reportTransferError(cmd, "backup", flags.namespace, flags.pvc, domain.NewError(
+			domain.ErrorPrecondition,
+			"backup repository",
+			"controller Backup workflows require --backup-repository",
+		))
+	}
+
+	var store *objectstore.Store
+	if flags.backupRepository != "" {
+		store, err = r.newControllerRepositoryStore(ctx, runtime, flags)
+	} else {
+		if err := loadS3Credentials(ctx, runtime.clients.Kubernetes, flags); err != nil {
+			return reportTransferError(cmd, "backup", flags.namespace, flags.pvc, err)
+		}
+
+		store, err = r.newObjectStore(ctx, flags)
+	}
+
 	if err != nil {
 		return reportTransferError(cmd, "backup", flags.namespace, flags.pvc, err)
 	}
@@ -137,6 +186,16 @@ func (r *rootState) runBackupTransfer(
 	}
 
 	request := r.objectTransferRequest(runtime, flags, store, online, openEBSLVMEnableShared)
+	if flags.backupRepository != "" {
+		request.SessionNamespace = r.controllerPlanSessionNamespace(
+			runtime,
+			domain.SessionTypeBackup,
+			flags.namespace,
+			flags.namespace,
+		)
+	}
+
+	request.SkipManifestCheck = flags.backupRepository != ""
 	request.ToolImageProber = kube.NewToolImageProber(runtime.clients.Kubernetes)
 
 	plan, err := backup.Preflight(ctx, runtime.clients.Kubernetes, request, false)
@@ -162,17 +221,57 @@ func (r *rootState) runBackupTransfer(
 		return reportApprovalError(cmd, err)
 	}
 
-	if err := backup.Run(ctx, runtime.clients.Kubernetes, request, false); err != nil {
-		lookupCtx, lookupCancel := context.WithTimeout(context.Background(), 5*time.Second)
-		session, lookupErr := runtime.store.Get(lookupCtx, r.global.sessionNamespace, flags.id)
+	var session *domain.Session
 
-		lookupCancel()
+	if err := requireControllerWorkflow(runtime, domain.SessionTypeBackup); err != nil {
+		return reportTransferError(cmd, "backup", flags.namespace, flags.pvc, err)
+	}
 
-		if lookupErr == nil {
-			return reportSessionError(cmd, session, err)
+	if controllerWorkflowAvailable(runtime, domain.SessionTypeBackup) {
+		var submitErr error
+
+		session, submitErr = backup.Submit(
+			ctx,
+			runtime.clients.Kubernetes,
+			request,
+			plan.PVCUID,
+			plan.PVUID,
+		)
+		if submitErr != nil {
+			return reportTransferError(cmd, "backup", flags.namespace, flags.pvc, submitErr)
 		}
 
-		return reportTransferError(cmd, "backup", flags.namespace, flags.pvc, err)
+		if deferred, deferErr := deferControllerExecution(ctx, cmd, runtime, session); deferred {
+			return deferErr
+		}
+	}
+
+	if session == nil || session.Backend != kube.SessionBackendCRD {
+		// Keep the durable session identity when execution remains in session
+		// mode, so the record is not prepared and persisted a second time.
+		request.BackupSession = session
+		if err := backup.Run(ctx, runtime.clients.Kubernetes, request, false); err != nil {
+			lookupCtx, lookupCancel := context.WithTimeout(context.Background(), 5*time.Second)
+			session, lookupErr := kube.GetSessionByType(
+				lookupCtx,
+				runtime.store,
+				r.global.sessionNamespace,
+				flags.id,
+				domain.SessionTypeBackup,
+			)
+
+			lookupCancel()
+
+			if lookupErr == nil {
+				return reportSessionError(cmd, session, err)
+			}
+
+			return reportTransferError(cmd, "backup", flags.namespace, flags.pvc, err)
+		}
+	}
+
+	if session != nil && session.Backend == kube.SessionBackendCRD {
+		return nil
 	}
 
 	return r.printObjectTransferResult(cmd, runtime, flags, "backup", false, online, plan, store)
@@ -184,7 +283,7 @@ func (r *rootState) backupResumeRequest(runtime *commandRuntime) backup.Request 
 		KubeconfigPath:     r.global.kubeconfig,
 		KubeContext:        r.global.kubeContext,
 		StreamToolLogs:     r.global.streamToolLogs,
-		StructuredLogs:     r.global.logFormat == "json",
+		StructuredLogs:     r.global.logFormat == string(logFormatJSON),
 		Writer:             r.errWriter(),
 		Logger:             runtime.logger,
 		ToolImageProber:    kube.NewToolImageProber(runtime.clients.Kubernetes),
@@ -223,26 +322,27 @@ func (r *rootState) printObjectTransferResult(
 	plan *backup.Plan,
 	store *objectstore.Store,
 ) error {
-	var completedSession *domain.Session
-	if !restore {
-		lookupCtx, lookupCancel := context.WithTimeout(context.Background(), 5*time.Second)
-
-		var err error
-
-		completedSession, err = runtime.store.Get(
-			lookupCtx,
-			r.global.sessionNamespace,
-			flags.id,
-		)
-
-		lookupCancel()
-
-		if err != nil {
-			return reportSessionLookupError(cmd, r.global.sessionNamespace, flags.id, err)
-		}
+	sessionType := domain.SessionTypeBackup
+	if restore {
+		sessionType = domain.SessionTypeRestore
 	}
 
-	if r.global.output != "table" {
+	lookupCtx, lookupCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	completedSession, err := kube.GetSessionByType(
+		lookupCtx,
+		runtime.store,
+		r.global.sessionNamespace,
+		flags.id,
+		sessionType,
+	)
+
+	lookupCancel()
+
+	if err != nil {
+		return reportSessionLookupError(cmd, r.global.sessionNamespace, flags.id, err)
+	}
+
+	if output.Format(r.global.output) != output.Table {
 		mode := backup.ModeOffline
 		if online {
 			mode = backup.ModeOnline
@@ -293,7 +393,7 @@ func (r *rootState) printObjectTransferResult(
 
 	identityLabel, identity := transferResultIdentity(restore, flags.id)
 
-	_, err := fmt.Fprintf(
+	_, err = fmt.Fprintf(
 		cmd.OutOrStdout(),
 		"%s completed: %s/%s name=%s %s=%s\n",
 		use,
@@ -337,6 +437,7 @@ func (r *rootState) newObjectTransferPlanCommand(
 		Short: "Validate object-storage access and PVC state without mutations",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
+			flags.prefixExplicit = cmd.Flags().Changed("prefix")
 			if err := validateBucketFlags(flags, pvcFlag); err != nil {
 				return reportPreSessionError(cmd, err)
 			}
@@ -353,16 +454,88 @@ func (r *rootState) newObjectTransferPlanCommand(
 			flags.secretKeyExplicit = cmd.Flags().Changed("secret-key")
 
 			flags.sessionTokenExplicit = cmd.Flags().Changed("session-token")
-			if err := loadS3Credentials(ctx, runtime.clients.Kubernetes, flags); err != nil {
-				return reportTransferError(cmd, operation, flags.namespace, flags.pvc, err)
+
+			sessionType := domain.SessionTypeBackup
+			if restore {
+				sessionType = domain.SessionTypeRestore
 			}
 
-			store, err := r.newObjectStore(ctx, flags)
+			controllerWorkflow := controllerWorkflowAvailable(runtime, sessionType)
+			if flags.backupRepository != "" {
+				if !controllerWorkflow {
+					return reportTransferError(
+						cmd,
+						operation,
+						flags.namespace,
+						flags.pvc,
+						domain.NewError(
+							domain.ErrorPrecondition,
+							"backup repository",
+							"--backup-repository requires the matching workflow CRD and controller mode",
+						),
+					)
+				}
+
+				if !kube.BackupRepositoryAvailable(runtime.clients.Discovery) {
+					return reportTransferError(
+						cmd,
+						operation,
+						flags.namespace,
+						flags.pvc,
+						domain.NewError(
+							domain.ErrorPrecondition,
+							"backup repository",
+							"BackupRepository CRD is not served by this cluster; install deploy/crd.yaml",
+						),
+					)
+				}
+
+				if err := validateControllerRepositoryFlags(flags); err != nil {
+					return reportTransferError(cmd, operation, flags.namespace, flags.pvc, err)
+				}
+			}
+
+			if controllerWorkflow &&
+				flags.backupRepository == "" {
+				return reportTransferError(
+					cmd,
+					operation,
+					flags.namespace,
+					flags.pvc,
+					domain.NewError(
+						domain.ErrorPrecondition,
+						"backup repository",
+						"controller object-storage workflows require --backup-repository",
+					),
+				)
+			}
+
+			var store *objectstore.Store
+			if flags.backupRepository != "" {
+				store, err = r.newControllerRepositoryStore(ctx, runtime, flags)
+			} else {
+				if err := loadS3Credentials(ctx, runtime.clients.Kubernetes, flags); err != nil {
+					return reportTransferError(cmd, operation, flags.namespace, flags.pvc, err)
+				}
+
+				store, err = r.newObjectStore(ctx, flags)
+			}
+
 			if err != nil {
 				return reportTransferError(cmd, operation, flags.namespace, flags.pvc, err)
 			}
 
 			request := r.objectTransferRequest(runtime, flags, store, online, false)
+			if flags.backupRepository != "" {
+				request.SessionNamespace = r.controllerPlanSessionNamespace(
+					runtime,
+					sessionType,
+					flags.namespace,
+					flags.namespace,
+				)
+			}
+
+			request.SkipManifestCheck = flags.backupRepository != ""
 			if prepare != nil {
 				if err := prepare(&request); err != nil {
 					return reportPreSessionError(cmd, err)
@@ -399,24 +572,26 @@ func (r *rootState) objectTransferRequest(
 	openEBSLVMEnableShared bool,
 ) backup.Request {
 	return backup.Request{
-		ID:                     flags.id,
-		ToolImage:              r.global.toolImage,
-		Namespace:              flags.namespace,
-		PVCName:                flags.pvc,
-		Path:                   flags.path,
-		Online:                 online,
-		HelmTimeout:            r.global.helmTimeout,
-		KubeconfigPath:         r.global.kubeconfig,
-		KubeContext:            r.global.kubeContext,
-		StreamToolLogs:         r.global.streamToolLogs,
-		StructuredLogs:         r.global.logFormat == "json",
-		Store:                  store,
-		Writer:                 r.errWriter(),
-		Logger:                 runtime.logger,
-		SessionStore:           runtime.store,
-		SessionNamespace:       r.global.sessionNamespace,
-		OpenEBSLVMEnableShared: openEBSLVMEnableShared,
-		OpenEBSLVMManager:      runtime.openEBSLVMSharedVolumeManager,
+		ID:                        flags.id,
+		ToolImage:                 r.global.toolImage,
+		Namespace:                 flags.namespace,
+		PVCName:                   flags.pvc,
+		Path:                      flags.path,
+		Online:                    online,
+		HelmTimeout:               r.global.helmTimeout,
+		KubeconfigPath:            r.global.kubeconfig,
+		KubeContext:               r.global.kubeContext,
+		StreamToolLogs:            r.global.streamToolLogs,
+		StructuredLogs:            r.global.logFormat == string(logFormatJSON),
+		Store:                     store,
+		Writer:                    r.errWriter(),
+		Logger:                    runtime.logger,
+		SessionStore:              runtime.store,
+		SessionNamespace:          r.global.sessionNamespace,
+		BackupRepository:          flags.backupRepository,
+		BackupRepositoryNamespace: flags.backupRepositoryNamespace,
+		OpenEBSLVMEnableShared:    openEBSLVMEnableShared,
+		OpenEBSLVMManager:         runtime.openEBSLVMSharedVolumeManager,
 	}
 }
 
@@ -424,7 +599,12 @@ func bindObjectStoreFlags(command *cobra.Command, flags *bucketFlags, pvcFlag, i
 	command.Flags().StringVar(&flags.id, "id", "", idHelp)
 	command.Flags().StringVarP(&flags.namespace, "namespace", "n", "default", "PVC namespace")
 	command.Flags().StringVar(&flags.pvc, pvcFlag, "", "PVC name")
-	command.Flags().StringVar(&flags.backend, "backend", "s3", "S3-compatible object backend")
+	command.Flags().StringVar(
+		&flags.backend,
+		"backend",
+		string(domain.BackupBackendS3),
+		"S3-compatible object backend",
+	)
 	command.Flags().StringVar(&flags.bucket, "bucket", "", "Bucket or container name")
 	command.Flags().StringVar(&flags.name, "name", "", "Backup identity inside the bucket")
 	command.Flags().StringVar(&flags.prefix, "prefix", "pv-migrate", "Global bucket prefix")
@@ -440,6 +620,10 @@ func bindObjectStoreFlags(command *cobra.Command, flags *bucketFlags, pvcFlag, i
 		StringVar(&flags.sessionToken, "session-token", os.Getenv("AWS_SESSION_TOKEN"), "S3 session token; defaults to AWS_SESSION_TOKEN")
 	command.Flags().
 		StringVar(&flags.credentialsSecret, "credentials-secret", "", "Kubernetes Secret containing S3 credentials")
+	command.Flags().
+		StringVar(&flags.backupRepository, "backup-repository", "", "BackupRepository in the PVC namespace for controller mode")
+	command.Flags().
+		StringVar(&flags.backupRepositoryNamespace, "backup-repository-namespace", "", "BackupRepository namespace; defaults to the PVC namespace")
 	command.Flags().
 		StringVar(&flags.accessKeyKey, "access-key-key", "accessKey", "Key in --credentials-secret containing the access key")
 	command.Flags().
@@ -484,7 +668,7 @@ func bindRestoreFlags(command *cobra.Command, flags *restoreFlags) {
 		command,
 		&flags.bucketFlags,
 		"destination-pvc",
-		"Restore attempt ID used for logs and temporary tool resources; no Session is created",
+		"Restore session ID; generated when omitted during execution",
 	)
 	bindRestoreBucketFlags(command, &flags.restore)
 }
@@ -503,6 +687,14 @@ func transferResultIdentity(restore bool, id string) (string, string) {
 }
 
 func validateBucketFlags(flags *bucketFlags, pvcFlag string) error {
+	if flags == nil {
+		return domain.NewError(
+			domain.ErrorValidation,
+			"backup/restore",
+			"object-store flags are required",
+		)
+	}
+
 	if flags.pvc == "" {
 		return domain.NewError(
 			domain.ErrorValidation,
@@ -515,6 +707,47 @@ func validateBucketFlags(flags *bucketFlags, pvcFlag string) error {
 		return domain.NewError(domain.ErrorValidation, "backup/restore", "--name is required")
 	}
 
+	if flags.backupRepositoryNamespace != "" && flags.backupRepository == "" {
+		return domain.NewError(
+			domain.ErrorValidation,
+			"backup/restore",
+			"--backup-repository-namespace requires --backup-repository",
+		)
+	}
+
+	if flags.backupRepositoryNamespace != "" {
+		if problems := validation.IsDNS1123Label(
+			flags.backupRepositoryNamespace,
+		); len(
+			problems,
+		) > 0 {
+			return domain.NewError(
+				domain.ErrorValidation,
+				"backup/restore",
+				fmt.Sprintf(
+					"invalid --backup-repository-namespace %q: %s",
+					flags.backupRepositoryNamespace,
+					problems[0],
+				),
+			)
+		}
+	}
+
+	// Controller workflows resolve all connection and bucket settings from the
+	// referenced BackupRepository. Only the PVC and recovery-point name are
+	// workflow inputs in this mode.
+	if flags.backupRepository != "" {
+		if flags.backend != "" && flags.backend != string(domain.BackupBackendS3) {
+			return domain.NewError(
+				domain.ErrorValidation,
+				"backup/restore",
+				fmt.Sprintf("unsupported backend %q", flags.backend),
+			)
+		}
+
+		return nil
+	}
+
 	if flags.backend == "" || flags.bucket == "" {
 		return domain.NewError(
 			domain.ErrorValidation,
@@ -523,7 +756,7 @@ func validateBucketFlags(flags *bucketFlags, pvcFlag string) error {
 		)
 	}
 
-	if flags.backend != "s3" {
+	if flags.backend != string(domain.BackupBackendS3) {
 		return domain.NewError(
 			domain.ErrorValidation,
 			"backup/restore",
@@ -558,6 +791,112 @@ func (r *rootState) newObjectStore(
 	}
 
 	return objectstore.New(ctx, cfg)
+}
+
+func (r *rootState) newControllerRepositoryStore(
+	ctx context.Context,
+	runtime *commandRuntime,
+	flags *bucketFlags,
+) (*objectstore.Store, error) {
+	if flags == nil || flags.backupRepository == "" {
+		return nil, domain.NewError(
+			domain.ErrorValidation,
+			"backup repository",
+			"--backup-repository is required",
+		)
+	}
+
+	if runtime == nil || runtime.clients == nil || runtime.clients.Runtime == nil {
+		return nil, domain.NewError(
+			domain.ErrorInternal,
+			"backup repository",
+			"controller runtime client is required",
+		)
+	}
+
+	repositoryNamespace := flags.backupRepositoryNamespace
+	if repositoryNamespace == "" {
+		repositoryNamespace = flags.namespace
+	}
+
+	repository := &v1alpha1.BackupRepository{}
+	if err := runtime.clients.Runtime.Get(
+		ctx,
+		types.NamespacedName{Namespace: repositoryNamespace, Name: flags.backupRepository},
+		repository,
+	); err != nil {
+		if apierrors.IsNotFound(err) {
+			return nil, domain.NewError(
+				domain.ErrorPrecondition,
+				"backup repository",
+				fmt.Sprintf(
+					"BackupRepository %s/%s does not exist",
+					repositoryNamespace,
+					flags.backupRepository,
+				),
+			)
+		}
+
+		return nil, domain.WrapError(
+			domain.ErrorKubernetes,
+			"backup repository",
+			"read BackupRepository",
+			err,
+		)
+	}
+
+	if repository.Spec.Type != v1alpha1.BackupRepositoryTypeS3 || repository.Spec.S3 == nil {
+		return nil, domain.NewError(
+			domain.ErrorPrecondition,
+			"backup repository",
+			"controller currently supports only S3 BackupRepository objects",
+		)
+	}
+
+	s3 := repository.Spec.S3
+
+	return objectstore.NewConfigOnly(objectstore.Config{
+		// Keep routing fields visible in plans and completion output without
+		// resolving or persisting the repository's credentials in the CLI.
+		Bucket:                s3.Bucket,
+		Prefix:                s3.Prefix,
+		Name:                  flags.name,
+		Provider:              s3.Provider,
+		Endpoint:              s3.Endpoint,
+		Region:                s3.Region,
+		AllowInsecureEndpoint: s3.AllowInsecureEndpoint,
+		ForcePathStyle:        s3.ForcePathStyle,
+		ServerSideEncryption:  s3.ServerSideEncryption,
+		SSEKMSKeyID:           s3.SSEKMSKeyID,
+	})
+}
+
+func validateControllerRepositoryFlags(flags *bucketFlags) error {
+	if flags == nil || flags.backupRepository == "" {
+		return domain.NewError(
+			domain.ErrorValidation,
+			"backup repository",
+			"--backup-repository is required",
+		)
+	}
+
+	if flags.bucket != "" || flags.s3Provider != "" || flags.endpoint != "" || flags.region != "" ||
+		flags.prefixExplicit ||
+		flags.credentialsSecret != "" ||
+		flags.allowInsecure ||
+		flags.accessKeyExplicit ||
+		flags.secretKeyExplicit ||
+		flags.sessionTokenExplicit ||
+		flags.serverEncryption != "" ||
+		flags.sseKMSKeyID != "" {
+		return domain.NewError(
+			domain.ErrorPrecondition,
+			"backup repository",
+			"controller workflows take provider, endpoint, region, and credentials from BackupRepository",
+		)
+	}
+
+	return nil
 }
 
 func loadS3Credentials(ctx context.Context, client kubernetes.Interface, flags *bucketFlags) error {

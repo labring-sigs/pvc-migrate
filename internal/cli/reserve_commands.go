@@ -2,6 +2,7 @@ package cli
 
 import (
 	"github.com/labring-sigs/pvc-migrate/internal/domain"
+	"github.com/labring-sigs/pvc-migrate/internal/kube"
 	"github.com/spf13/cobra"
 )
 
@@ -37,11 +38,15 @@ func (r *rootState) newReserveCommand() *cobra.Command {
 			defer cancel()
 
 			if existing {
-				session, err := runtime.store.Get(ctx, r.global.sessionNamespace, flags.sessionID)
+				namespace := workflowNamespaceForCommand(r, cmd)
+
+				session, err := kube.GetSessionByType(
+					ctx, runtime.store, namespace, flags.sessionID, domain.SessionTypeReserve,
+				)
 				if err != nil {
 					return reportSessionLookupError(
 						cmd,
-						r.global.sessionNamespace,
+						namespace,
 						flags.sessionID,
 						err,
 					)
@@ -62,6 +67,10 @@ func (r *rootState) newReserveCommand() *cobra.Command {
 					return printSessionResult(cmd, runtime, session)
 				}
 
+				if deferred, err := deferControllerExecution(ctx, cmd, runtime, session); deferred {
+					return err
+				}
+
 				if err := runtime.service.Reserve(ctx, session); err != nil {
 					return reportSessionError(cmd, session, err)
 				}
@@ -73,6 +82,16 @@ func (r *rootState) newReserveCommand() *cobra.Command {
 			if err != nil {
 				return err
 			}
+
+			options.SessionNamespace, options.TemporaryNamespace = r.controllerPlanNamespaces(
+				runtime,
+				domain.SessionTypeReserve,
+				options.SourceNamespace,
+				options.DestinationNamespace,
+				options.TemporaryNamespace,
+				cmd.Flags().Changed("temporary-namespace"),
+			)
+			options.StagingNamespace = options.TemporaryNamespace
 
 			plan, err := runtime.planner.PlanReserve(ctx, options)
 			if err != nil {
@@ -90,6 +109,10 @@ func (r *rootState) newReserveCommand() *cobra.Command {
 
 			if dryRun {
 				return printPlanResult(cmd, runtime, plan)
+			}
+
+			if deferred, err := deferControllerExecution(ctx, cmd, runtime, session); deferred {
+				return err
 			}
 
 			if err := runtime.service.Reserve(ctx, session); err != nil {
@@ -136,11 +159,15 @@ func (r *rootState) newReservePlanCommand() *cobra.Command {
 			defer cancel()
 
 			if existing {
-				session, err := runtime.store.Get(ctx, r.global.sessionNamespace, flags.sessionID)
+				namespace := workflowNamespaceForCommand(r, cmd)
+
+				session, err := kube.GetSessionByType(
+					ctx, runtime.store, namespace, flags.sessionID, domain.SessionTypeReserve,
+				)
 				if err != nil {
 					return reportSessionLookupError(
 						cmd,
-						r.global.sessionNamespace,
+						namespace,
 						flags.sessionID,
 						err,
 					)
@@ -165,6 +192,16 @@ func (r *rootState) newReservePlanCommand() *cobra.Command {
 			if err != nil {
 				return err
 			}
+
+			options.SessionNamespace, options.TemporaryNamespace = r.controllerPlanNamespaces(
+				runtime,
+				domain.SessionTypeReserve,
+				options.SourceNamespace,
+				options.DestinationNamespace,
+				options.TemporaryNamespace,
+				cmd.Flags().Changed("temporary-namespace"),
+			)
+			options.StagingNamespace = options.TemporaryNamespace
 
 			plan, err := runtime.planner.PlanReserve(ctx, options)
 			if err != nil {
