@@ -1499,15 +1499,15 @@ func withBackupSessionLock(
 		)
 	}
 
-	locker, ok := req.SessionStore.(kube.SessionLocker)
-	if !ok {
+	if req.SessionStore == nil {
 		return run(ctx)
 	}
 
-	lock, err := locker.AcquireSessionLock(
+	lock, err := kube.AcquireRequiredSessionLock(
 		ctx,
+		req.SessionStore,
 		session.Spec.SessionNamespace,
-		kube.LockIDForSession(req.SessionStore, session),
+		kube.SessionLockID(session),
 	)
 	if err != nil {
 		return err

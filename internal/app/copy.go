@@ -134,17 +134,25 @@ func (s *Service) validateCopyConsumersBatch(
 	}
 
 	options.SourceNode = resolvedSourceNode
-	if s.store != nil {
-		if err := s.store.Update(ctx, session); err != nil {
-			options.SourceNode = ""
+	if s.store == nil {
+		options.SourceNode = ""
 
-			return domain.WrapError(
-				domain.ErrorKubernetes,
-				"copy preflight",
-				"persist inferred source node",
-				err,
-			)
-		}
+		return domain.NewError(
+			domain.ErrorInternal,
+			"copy preflight",
+			"session store is required to persist the inferred source node",
+		)
+	}
+
+	if err := s.store.Update(ctx, session); err != nil {
+		options.SourceNode = ""
+
+		return domain.WrapError(
+			domain.ErrorKubernetes,
+			"copy preflight",
+			"persist inferred source node",
+			err,
+		)
 	}
 
 	return nil

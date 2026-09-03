@@ -19,6 +19,35 @@ import (
 	clienttesting "k8s.io/client-go/testing"
 )
 
+type nilLockSessionLocker struct{}
+
+func (nilLockSessionLocker) AcquireSessionLock(
+	context.Context,
+	string,
+	string,
+) (SessionLock, error) {
+	return nil, nil
+}
+
+func TestAcquireRequiredSessionLockRejectsMissingImplementations(t *testing.T) {
+	for name, locker := range map[string]SessionLocker{
+		"missing locker": nil,
+		"nil lock":       nilLockSessionLocker{},
+	} {
+		t.Run(name, func(t *testing.T) {
+			lock, err := AcquireRequiredSessionLock(
+				context.Background(),
+				locker,
+				"system",
+				"session",
+			)
+			if lock != nil || domain.CategoryOf(err) != domain.ErrorInternal {
+				t.Fatalf("lock=%v category=%s error=%v", lock, domain.CategoryOf(err), err)
+			}
+		})
+	}
+}
+
 type cancelAwareLeaseClient struct {
 	coordinationclient.LeaseInterface
 	started chan struct{}

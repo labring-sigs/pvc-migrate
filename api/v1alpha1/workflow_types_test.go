@@ -566,8 +566,8 @@ func TestTransferDestinationIdentityIsStatusOwned(t *testing.T) {
 	}
 
 	apiSpec := v1alpha1.CopySpecFromDomain(spec)
-	if !apiSpec.VerifyChecksum {
-		t.Fatal("CopySpec dropped verifyChecksum")
+	if apiSpec.VerifyChecksum != nil {
+		t.Fatalf("CopySpec serialized the default verifyChecksum=%t", *apiSpec.VerifyChecksum)
 	}
 
 	data, err := json.Marshal(apiSpec)
@@ -593,6 +593,18 @@ func TestTransferDestinationIdentityIsStatusOwned(t *testing.T) {
 		t.Fatal("CopySpec conversion did not restore verifyChecksum")
 	}
 
+	spec.Copy.VerifyChecksum = false
+
+	apiSpec = v1alpha1.CopySpecFromDomain(spec)
+
+	if apiSpec.VerifyChecksum == nil || *apiSpec.VerifyChecksum {
+		t.Fatal("CopySpec did not preserve explicit verifyChecksum=false")
+	}
+
+	if restored := apiSpec.Domain("app"); restored.WorkflowOptions().VerifyChecksum {
+		t.Fatal("CopySpec conversion changed explicit verifyChecksum=false")
+	}
+
 	volume := restored.Volumes[0]
 	if volume.DestinationPVC.UID != "destination-pvc-uid" ||
 		volume.DestinationPVC.ResourceVersion != "17" ||
@@ -615,8 +627,11 @@ func TestClusterCopyVerifyChecksumRoundTrip(t *testing.T) {
 	)
 
 	apiSpec := v1alpha1.ClusterCopySpecFromDomain(spec)
-	if !apiSpec.VerifyChecksum {
-		t.Fatal("ClusterCopySpec dropped verifyChecksum")
+	if apiSpec.VerifyChecksum != nil {
+		t.Fatalf(
+			"ClusterCopySpec serialized the default verifyChecksum=%t",
+			*apiSpec.VerifyChecksum,
+		)
 	}
 
 	if !apiSpec.Domain().WorkflowOptions().VerifyChecksum {

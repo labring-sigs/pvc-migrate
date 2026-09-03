@@ -76,7 +76,7 @@ type rootState struct {
 
 type commandRuntime struct {
 	clients                       *kube.Clients
-	store                         kube.SessionStore
+	store                         kube.LockingSessionStore
 	planner                       *planner.Planner
 	service                       *app.Service
 	printer                       output.Printer
@@ -84,7 +84,7 @@ type commandRuntime struct {
 	controllers                   *controller.Manager
 	openEBSLVMSharedVolumeManager kube.OpenEBSLVMSharedVolumeManager
 	mode                          executionMode
-	controllerStore               kube.SessionStore
+	controllerStore               kube.ControllerSessionStore
 	controllerKinds               []domain.ControllerKind
 	waitForController             bool
 	controllerWaiter              controllerSessionWaiter
@@ -293,8 +293,8 @@ func (r *rootState) runtime() (*commandRuntime, error) {
 	configMapStore := kube.NewConfigMapSessionStore(clients.Kubernetes)
 
 	var (
-		store           kube.SessionStore = configMapStore
-		controllerStore kube.SessionStore
+		store           kube.LockingSessionStore = configMapStore
+		controllerStore kube.ControllerSessionStore
 		controllerKinds []domain.ControllerKind
 	)
 

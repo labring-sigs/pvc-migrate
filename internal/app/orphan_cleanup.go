@@ -948,8 +948,8 @@ func (s *Service) CleanupOrphan(
 					if err := held.lock.Delete(deleteCtx); err != nil {
 						return err
 					}
-				} else if cleaner, ok := s.store.(kube.SessionLeaseCleaner); ok {
-					if err := cleaner.DeleteSessionLease(
+				} else {
+					if err := s.store.DeleteSessionLease(
 						lockedCtx,
 						options.SessionNamespace,
 						options.SessionID,

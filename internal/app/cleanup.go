@@ -415,15 +415,11 @@ func (s *Service) deleteCleanupSession(ctx context.Context, session *domain.Sess
 		return err
 	}
 
-	if cleaner, ok := s.store.(kube.SessionLeaseCleaner); ok {
-		return cleaner.DeleteSessionLease(
-			ctx,
-			session.Spec.SessionNamespace,
-			kube.LockIDForSession(s.store, session),
-		)
-	}
-
-	return nil
+	return s.store.DeleteSessionLease(
+		ctx,
+		session.Spec.SessionNamespace,
+		kube.SessionLockID(session),
+	)
 }
 
 func (s *Service) validateStandalonePodOwnershipRelease(

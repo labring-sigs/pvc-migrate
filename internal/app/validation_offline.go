@@ -50,21 +50,7 @@ func (s *Service) verifyVolumesOffline(
 	session *domain.Session,
 	volumes []*domain.VolumeSpec,
 ) error {
-	if switcher, ok := s.switcher.(sessionBatchVolumeSwitcher); ok {
-		return switcher.VerifyVolumesOfflineForSession(ctx, session.ID, volumes)
-	}
-
-	if switcher, ok := s.switcher.(batchVolumeSwitcher); ok {
-		return switcher.VerifyVolumesOffline(ctx, volumes)
-	}
-
-	for _, volume := range volumes {
-		if err := s.switcher.VerifyVolumeOffline(ctx, volume); err != nil {
-			return err
-		}
-	}
-
-	return nil
+	return s.switcher.VerifyVolumesOfflineForSession(ctx, session.ID, volumes)
 }
 
 // ValidateOfflineFinalSync checks the offline terminal copy without invoking

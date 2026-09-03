@@ -91,11 +91,7 @@ func (s *Service) cleanup(
 			return err
 		}
 
-		if cleaner, ok := s.store.(kube.SessionLeaseCleaner); ok {
-			return cleaner.DeleteSessionLease(ctx, session.Spec.SessionNamespace, session.ID)
-		}
-
-		return nil
+		return s.store.DeleteSessionLease(ctx, session.Spec.SessionNamespace, session.ID)
 	}
 
 	return s.save(ctx, session, false)

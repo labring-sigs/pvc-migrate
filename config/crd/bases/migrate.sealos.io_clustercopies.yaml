@@ -88,6 +88,9 @@ spec:
               toolImage:
                 type: string
               verifyChecksum:
+                description: |-
+                  VerifyChecksum defaults to true when omitted. A pointer preserves an
+                  explicit false without serializing the default into every controller CR.
                 type: boolean
               volumes:
                 items:

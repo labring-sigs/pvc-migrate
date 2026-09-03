@@ -20,6 +20,26 @@ import (
 type recordingBackupSessionStore struct {
 	created *domain.Session
 	updated []*domain.Session
+	backend string
+}
+
+func (s *recordingBackupSessionStore) StorageBackend() string {
+	if s.backend != "" {
+		return s.backend
+	}
+
+	return kube.SessionBackendConfigMap
+}
+
+func TestBackupSessionResourceEstimateRejectsUnknownStorageBackend(t *testing.T) {
+	_, err := backupSessionResourceEstimate(
+		context.Background(),
+		fake.NewSimpleClientset(),
+		Request{SessionStore: &recordingBackupSessionStore{backend: "unknown"}},
+	)
+	if domain.CategoryOf(err) != domain.ErrorInternal {
+		t.Fatalf("category=%s error=%v", domain.CategoryOf(err), err)
+	}
 }
 
 func (s *recordingBackupSessionStore) Create(_ context.Context, session *domain.Session) error {
@@ -35,6 +55,14 @@ func (s *recordingBackupSessionStore) Get(
 	return s.created, nil
 }
 
+func (s *recordingBackupSessionStore) GetByType(
+	ctx context.Context,
+	namespace, id string,
+	_ domain.SessionType,
+) (*domain.Session, error) {
+	return s.Get(ctx, namespace, id)
+}
+
 func (s *recordingBackupSessionStore) Update(_ context.Context, session *domain.Session) error {
 	s.updated = append(s.updated, session)
 	return nil
@@ -45,6 +73,18 @@ func (s *recordingBackupSessionStore) List(context.Context, string) ([]*domain.S
 }
 
 func (s *recordingBackupSessionStore) Delete(context.Context, *domain.Session) error { return nil }
+
+func (*recordingBackupSessionStore) AcquireSessionLock(
+	context.Context,
+	string,
+	string,
+) (kube.SessionLock, error) {
+	return &recordingBackupSessionLock{}, nil
+}
+
+func (*recordingBackupSessionStore) DeleteSessionLease(context.Context, string, string) error {
+	return nil
+}
 
 type recordingBackupSessionLock struct {
 	bound      bool
@@ -624,6 +664,8 @@ func TestValidateRestoreResumeAllowsRepositoryBackedRestoreWithoutTenantCredenti
 }
 
 type crdRepositorySessionStore struct{ recordingBackupSessionStore }
+
+func (*crdRepositorySessionStore) StorageBackend() string { return kube.SessionBackendCRD }
 
 func (s *crdRepositorySessionStore) Create(_ context.Context, session *domain.Session) error {
 	session.Backend = kube.SessionBackendCRD

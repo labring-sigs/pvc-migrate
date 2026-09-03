@@ -157,6 +157,10 @@ func NewCRDSessionStore(client crclient.Client) *CRDSessionStore {
 	return &CRDSessionStore{client: client}
 }
 
+var _ ControllerSessionStore = (*CRDSessionStore)(nil)
+
+func (*CRDSessionStore) StorageBackend() string { return SessionBackendCRD }
+
 // WithLeaseClient enables the same per-session Kubernetes Lease fencing used
 // by ConfigMap sessions.
 func (s *CRDSessionStore) WithLeaseClient(client kubernetes.Interface) *CRDSessionStore {

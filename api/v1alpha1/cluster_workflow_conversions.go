@@ -127,7 +127,7 @@ func (s ClusterCopySpec) workflowOptions() domain.SessionWorkflowOptions {
 		TargetNode:           s.TargetNode,
 		ToolImage:            s.ToolImage,
 		Strategies:           append([]string(nil), s.Strategies...),
-		VerifyChecksum:       s.VerifyChecksum,
+		VerifyChecksum:       boolValueOrDefault(s.VerifyChecksum, true),
 		DeleteExtraneous:     s.DeleteExtraneous,
 		SkipSourceUsageCheck: s.SkipSourceUsageCheck,
 	}
@@ -279,7 +279,7 @@ func ClusterCopySpecFromDomain(s domain.SessionSpec) ClusterCopySpec {
 		TargetNode:           options.TargetNode,
 		ToolImage:            options.ToolImage,
 		Strategies:           append([]string(nil), options.Strategies...),
-		VerifyChecksum:       options.VerifyChecksum,
+		VerifyChecksum:       optionalBool(options.VerifyChecksum, true),
 		DeleteExtraneous:     options.DeleteExtraneous,
 		SkipSourceUsageCheck: options.SkipSourceUsageCheck,
 		Online:               s.Online(),

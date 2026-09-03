@@ -734,13 +734,8 @@ func TestCRDSessionLockIDIsSharedAcrossWorkflowKinds(t *testing.T) {
 		t.Fatalf("CRD lock IDs differ: migration=%q copy=%q", migrationID, copyID)
 	}
 
-	store := NewCRDSessionStore(newCRDTestClient())
-	if got := LockIDForSession(store, migration); got != migration.ID {
-		t.Fatalf("store lock ID=%q, want %q", got, migrationID)
-	}
-
 	unpersisted := storeTestSession()
-	if got := LockIDForSession(store, unpersisted); got != unpersisted.ID {
+	if got := SessionLockID(unpersisted); got != unpersisted.ID {
 		t.Fatalf("unpersisted CRD lock ID=%q want=%q", got, unpersisted.ID)
 	}
 }

@@ -144,18 +144,15 @@ func TestStartManagerRequiresPinnedToolImage(t *testing.T) {
 		"untagged":   "registry.example/pvc-migrate",
 	} {
 		t.Run(name, func(t *testing.T) {
-			err := StartManagerWithKinds(
+			err := StartManager(
 				context.Background(),
 				&rest.Config{},
 				nil,
 				nil,
-				"controller-system",
-				nil,
-				nil,
-				"",
-				"",
-				nil,
-				image,
+				ManagerOptions{
+					Namespace:        "controller-system",
+					TrustedToolImage: image,
+				},
 			)
 			if err == nil {
 				t.Fatal("manager accepted an untrusted tool image")

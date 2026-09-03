@@ -69,7 +69,7 @@ type Request struct {
 	Writer                    io.Writer
 	Logger                    *slog.Logger
 	ToolImageProber           kube.ToolImageProber
-	SessionStore              kube.SessionStore
+	SessionStore              kube.LockingSessionStore
 	SessionNamespace          string
 	OpenEBSLVMEnableShared    bool
 	OpenEBSLVMManager         kube.OpenEBSLVMSharedVolumeManager

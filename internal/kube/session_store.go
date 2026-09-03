@@ -23,11 +23,41 @@ const (
 )
 
 type SessionStore interface {
+	StorageBackend() string
 	Create(ctx context.Context, session *domain.Session) error
 	Get(ctx context.Context, namespace, id string) (*domain.Session, error)
+	GetByType(
+		ctx context.Context,
+		namespace string,
+		id string,
+		sessionType domain.SessionType,
+	) (*domain.Session, error)
 	Update(ctx context.Context, session *domain.Session) error
 	List(ctx context.Context, namespace string) ([]*domain.Session, error)
 	Delete(ctx context.Context, session *domain.Session) error
+}
+
+// LockingSessionStore is the persistence contract for mutable workflows.
+// Session writes and their cleanup must never silently run without fencing.
+type LockingSessionStore interface {
+	SessionStore
+	SessionLocker
+	SessionLeaseCleaner
+}
+
+// ControllerSessionStore exposes the CRD-specific operations required by the
+// controller. Keeping them in one contract prevents controller behavior from
+// changing with the concrete store supplied at runtime.
+type ControllerSessionStore interface {
+	LockingSessionStore
+	GetByKind(
+		ctx context.Context,
+		namespace string,
+		id string,
+		kind domain.ControllerKind,
+	) (*domain.Session, error)
+	CheckWorkflowNameCollision(ctx context.Context, session *domain.Session) error
+	EnsureSessionProtection(ctx context.Context, session *domain.Session) error
 }
 
 // SessionLocker serializes mutating operations for one persisted session.
@@ -37,25 +67,42 @@ type SessionLocker interface {
 	AcquireSessionLock(ctx context.Context, namespace, sessionID string) (SessionLock, error)
 }
 
+// AcquireRequiredSessionLock enforces the SessionLocker contract at the
+// boundary so an invalid implementation cannot turn a fencing operation into
+// a nil-pointer panic.
+func AcquireRequiredSessionLock(
+	ctx context.Context,
+	locker SessionLocker,
+	namespace, sessionID string,
+) (SessionLock, error) {
+	if locker == nil {
+		return nil, domain.NewError(
+			domain.ErrorInternal,
+			"session lock",
+			"session locker is required",
+		)
+	}
+
+	lock, err := locker.AcquireSessionLock(ctx, namespace, sessionID)
+	if err != nil {
+		return nil, err
+	}
+
+	if lock == nil {
+		return nil, domain.NewError(
+			domain.ErrorInternal,
+			"session lock",
+			"session locker returned a nil lock",
+		)
+	}
+
+	return lock, nil
+}
+
 // SessionLeaseCleaner removes the persisted lock after a session is deleted.
 // Implementations may keep leases for lock reuse when a session remains.
 type SessionLeaseCleaner interface {
 	DeleteSessionLease(ctx context.Context, namespace, sessionID string) error
-}
-
-// SessionLockIDProvider lets a persistence backend override the user-facing
-// session ID used for fencing.
-type SessionLockIDProvider interface {
-	SessionLockID(session *domain.Session) string
-}
-
-type SessionTypeGetter interface {
-	GetByType(
-		ctx context.Context,
-		namespace string,
-		id string,
-		sessionType domain.SessionType,
-	) (*domain.Session, error)
 }
 
 func GetSessionByType(
@@ -64,25 +111,7 @@ func GetSessionByType(
 	namespace, id string,
 	sessionType domain.SessionType,
 ) (*domain.Session, error) {
-	if getter, ok := store.(SessionTypeGetter); ok {
-		return getter.GetByType(ctx, namespace, id, sessionType)
-	}
-
-	return store.Get(ctx, namespace, id)
-}
-
-func LockIDForSession(store SessionStore, session *domain.Session) string {
-	if session == nil {
-		return ""
-	}
-
-	if provider, ok := store.(SessionLockIDProvider); ok {
-		if id := provider.SessionLockID(session); id != "" {
-			return id
-		}
-	}
-
-	return SessionLockID(session)
+	return store.GetByType(ctx, namespace, id, sessionType)
 }
 
 func SessionLockID(session *domain.Session) string {
@@ -91,14 +120,6 @@ func SessionLockID(session *domain.Session) string {
 	}
 
 	return session.ID
-}
-
-// SessionProtectionEnsurer adds the session-protection finalizer to
-// controller-backed resources that were authored outside the CLI adapter.
-// ConfigMap sessions deliberately omit finalizers because no always-running
-// reconciler exists to release them during namespace deletion.
-type SessionProtectionEnsurer interface {
-	EnsureSessionProtection(ctx context.Context, session *domain.Session) error
 }
 
 // SessionLock is a renewable, process-owned lock for one session.
@@ -122,6 +143,10 @@ func NewConfigMapSessionStore(client kubernetes.Interface) *ConfigMapSessionStor
 		leaseRenewEvery: defaultSessionLeaseRenewEvery,
 	}
 }
+
+var _ LockingSessionStore = (*ConfigMapSessionStore)(nil)
+
+func (*ConfigMapSessionStore) StorageBackend() string { return SessionBackendConfigMap }
 
 // WithLeaseTiming configures the per-store Lease timing. Keeping timing on
 // the store isolates independent clients and prevents one workflow or test
@@ -228,6 +253,17 @@ func (s *ConfigMapSessionStore) Get(
 	}
 
 	return session, decodeErr
+}
+
+// ConfigMaps have one storage object per session ID, so the caller's expected
+// type does not affect lookup. Command-level validation still reports a
+// mismatched workflow type with the loaded session context.
+func (s *ConfigMapSessionStore) GetByType(
+	ctx context.Context,
+	namespace, id string,
+	_ domain.SessionType,
+) (*domain.Session, error) {
+	return s.Get(ctx, namespace, id)
 }
 
 func (s *ConfigMapSessionStore) Update(ctx context.Context, session *domain.Session) error {

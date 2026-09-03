@@ -36,7 +36,7 @@ type Config struct {
 
 type Service struct {
 	client      kubernetes.Interface
-	store       kube.SessionStore
+	store       kube.LockingSessionStore
 	reserver    volumeReserver
 	copier      copyengine.Engine
 	controllers workloadController
@@ -69,6 +69,11 @@ type workloadController interface {
 
 type volumeSwitcher interface {
 	VerifyVolumeOffline(ctx context.Context, volume *domain.VolumeSpec) error
+	VerifyVolumesOfflineForSession(
+		ctx context.Context,
+		sessionID string,
+		volumes []*domain.VolumeSpec,
+	) error
 	ActivateVolume(
 		ctx context.Context,
 		session *domain.Session,
@@ -91,21 +96,9 @@ type volumeSwitcher interface {
 	) (*corev1.PersistentVolumeClaim, error)
 }
 
-type batchVolumeSwitcher interface {
-	VerifyVolumesOffline(ctx context.Context, volumes []*domain.VolumeSpec) error
-}
-
-type sessionBatchVolumeSwitcher interface {
-	VerifyVolumesOfflineForSession(
-		ctx context.Context,
-		sessionID string,
-		volumes []*domain.VolumeSpec,
-	) error
-}
-
 func NewService(
 	client kubernetes.Interface,
-	store kube.SessionStore,
+	store kube.LockingSessionStore,
 	reserver volumeReserver,
 	copier copyengine.Engine,
 	controllers workloadController,
@@ -155,9 +148,8 @@ type heldSessionLock struct {
 	id        string
 }
 
-// withSessionIDLock serializes every mutating session operation when the
-// configured store supports Kubernetes Lease fencing. The context marker
-// makes nested stage calls re-entrant while preserving the same lease.
+// withSessionIDLock serializes every mutating session operation. The context
+// marker makes nested stage calls re-entrant while preserving the same lease.
 func (s *Service) withSessionIDLock(
 	ctx context.Context,
 	namespace, id string,
@@ -171,6 +163,14 @@ func (s *Service) withSessionIDLock(
 		)
 	}
 
+	if s == nil || s.store == nil {
+		return domain.NewError(
+			domain.ErrorInternal,
+			"session lock",
+			"session store is required",
+		)
+	}
+
 	if held, ok := ctx.Value(sessionLockContextKey{}).(heldSessionLock); ok &&
 		held.namespace == namespace &&
 		held.id == id {
@@ -180,14 +180,9 @@ func (s *Service) withSessionIDLock(
 		return fn(ctx)
 	}
 
-	locker, supported := s.store.(kube.SessionLocker)
-	if !supported {
-		return fn(ctx)
-	}
-
 	s.logInfo("acquiring session lock", "session", id, "namespace", namespace)
 
-	lock, err := locker.AcquireSessionLock(ctx, namespace, id)
+	lock, err := kube.AcquireRequiredSessionLock(ctx, s.store, namespace, id)
 	if err != nil {
 		return err
 	}
@@ -239,7 +234,7 @@ func (s *Service) withSessionLock(
 	return s.withSessionIDLock(
 		ctx,
 		session.Spec.SessionNamespace,
-		kube.LockIDForSession(s.store, session),
+		kube.SessionLockID(session),
 		fn,
 	)
 }
@@ -298,7 +293,7 @@ func (s *Service) CreateSession(
 	createErr := s.withSessionIDLock(
 		ctx,
 		plan.SessionSpec.SessionNamespace,
-		kube.LockIDForSession(s.store, session),
+		kube.SessionLockID(session),
 		func(lockedCtx context.Context) error {
 			if err := s.ensureSessionNamespaces(lockedCtx, plan, false); err != nil {
 				return err

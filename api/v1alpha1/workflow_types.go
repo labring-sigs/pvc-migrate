@@ -208,11 +208,13 @@ type CopySpec struct {
 	TargetNode string       `json:"targetNode,omitempty" yaml:"targetNode,omitempty"`
 	ToolImage  string       `json:"toolImage,omitempty"  yaml:"toolImage,omitempty"`
 	// +kubebuilder:validation:MaxItems=32
-	Strategies           []string `json:"strategies,omitempty"           yaml:"strategies,omitempty"`
-	VerifyChecksum       bool     `json:"verifyChecksum,omitempty"       yaml:"verifyChecksum,omitempty"`
-	DeleteExtraneous     bool     `json:"deleteExtraneous,omitempty"     yaml:"deleteExtraneous,omitempty"`
-	SkipSourceUsageCheck bool     `json:"skipSourceUsageCheck,omitempty" yaml:"skipSourceUsageCheck,omitempty"`
-	Online               bool     `json:"online,omitempty"               yaml:"online,omitempty"`
+	Strategies []string `json:"strategies,omitempty"           yaml:"strategies,omitempty"`
+	// VerifyChecksum defaults to true when omitted. A pointer preserves an
+	// explicit false without serializing the default into every controller CR.
+	VerifyChecksum       *bool `json:"verifyChecksum,omitempty"       yaml:"verifyChecksum,omitempty"`
+	DeleteExtraneous     bool  `json:"deleteExtraneous,omitempty"     yaml:"deleteExtraneous,omitempty"`
+	SkipSourceUsageCheck bool  `json:"skipSourceUsageCheck,omitempty" yaml:"skipSourceUsageCheck,omitempty"`
+	Online               bool  `json:"online,omitempty"               yaml:"online,omitempty"`
 }
 
 type BackupSpec struct {
@@ -484,6 +486,23 @@ type RestoreStatus struct {
 	DestinationPVC *ObjectReference               `json:"destinationPVC,omitempty" yaml:"destinationPVC,omitempty"`
 	DestinationPV  *ObjectReference               `json:"destinationPV,omitempty"  yaml:"destinationPV,omitempty"`
 }
+
+func boolValueOrDefault(value *bool, fallback bool) bool {
+	if value == nil {
+		return fallback
+	}
+
+	return *value
+}
+
+func optionalBool(value, fallback bool) *bool {
+	if value == fallback {
+		return nil
+	}
+
+	return &value
+}
+
 type RenameStatus struct {
 	WorkflowStatus `                          json:",inline" yaml:",inline"`
 	Volumes        []PVCIdentityVolumeStatus `json:"volumes" yaml:"volumes"`
@@ -527,7 +546,7 @@ func (s CopySpec) workflowOptions() domain.SessionWorkflowOptions {
 		TargetNode:           s.TargetNode,
 		ToolImage:            s.ToolImage,
 		Strategies:           append([]string(nil), s.Strategies...),
-		VerifyChecksum:       s.VerifyChecksum,
+		VerifyChecksum:       boolValueOrDefault(s.VerifyChecksum, true),
 		DeleteExtraneous:     s.DeleteExtraneous,
 		SkipSourceUsageCheck: s.SkipSourceUsageCheck,
 	}
@@ -822,7 +841,7 @@ func CopySpecFromDomain(s domain.SessionSpec) CopySpec {
 		TargetNode:           options.TargetNode,
 		ToolImage:            options.ToolImage,
 		Strategies:           append([]string(nil), options.Strategies...),
-		VerifyChecksum:       options.VerifyChecksum,
+		VerifyChecksum:       optionalBool(options.VerifyChecksum, true),
 		DeleteExtraneous:     options.DeleteExtraneous,
 		SkipSourceUsageCheck: options.SkipSourceUsageCheck,
 		Online:               s.Online(),
