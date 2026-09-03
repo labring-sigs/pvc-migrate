@@ -1838,7 +1838,9 @@ func sessionObjectForKind(
 	}
 }
 
-func newWorkflowObject(kind domain.ControllerKind) crclient.Object {
+// WorkflowObjectForKind constructs an empty typed object for a registered
+// controller workflow Kind.
+func WorkflowObjectForKind(kind domain.ControllerKind) crclient.Object {
 	resource, ok := workflowCRDResource(kind)
 	if !ok {
 		return nil

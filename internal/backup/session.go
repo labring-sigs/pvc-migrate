@@ -410,28 +410,7 @@ func loadBackupCredentials(
 		)
 	}
 
-	ref := session.Spec.Backup.CredentialsSecret
-	if ref.Namespace == "" || ref.Name == "" {
-		ref = domain.ObjectReference{
-			APIVersion: "v1",
-			Kind:       "Secret",
-			Namespace:  session.Spec.SessionNamespace,
-			Name:       kube.BackupCredentialsSecretName(session.ID),
-		}
-	}
-
-	secret, err := kube.GetBackupCredentialsSecret(ctx, client, ref, session.ID)
-	if err != nil {
-		return objectstore.Credentials{}, err
-	}
-
-	read := func(key string) string { return string(secret.Data[key]) }
-
-	return objectstore.Credentials{
-		AccessKey:    read(kube.BackupAccessKeyDataKey),
-		SecretKey:    read(kube.BackupSecretKeyDataKey),
-		SessionToken: read(kube.BackupSessionTokenDataKey),
-	}, nil
+	return loadSessionCredentials(ctx, client, session, session.Spec.Backup.CredentialsSecret)
 }
 
 func loadRestoreCredentials(
@@ -447,7 +426,15 @@ func loadRestoreCredentials(
 		)
 	}
 
-	ref := session.Spec.Restore.CredentialsSecret
+	return loadSessionCredentials(ctx, client, session, session.Spec.Restore.CredentialsSecret)
+}
+
+func loadSessionCredentials(
+	ctx context.Context,
+	client kubernetes.Interface,
+	session *domain.Session,
+	ref domain.ObjectReference,
+) (objectstore.Credentials, error) {
 	if ref.Namespace == "" || ref.Name == "" {
 		ref = domain.ObjectReference{
 			APIVersion: "v1",

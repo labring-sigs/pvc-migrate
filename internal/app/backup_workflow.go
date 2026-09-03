@@ -7,29 +7,11 @@ import (
 )
 
 func (s *Service) ValidateBackupAbort(ctx context.Context, session *domain.Session) error {
-	if err := requireWorkflowSession(
-		session,
-		domain.SessionTypeBackup,
-		"abort backup",
-	); err != nil {
-		return err
-	}
-
-	return s.validateAbort(ctx, session)
+	return s.validateWorkflowAbort(ctx, session, domain.SessionTypeBackup, "abort backup")
 }
 
 func (s *Service) AbortBackup(ctx context.Context, session *domain.Session) error {
-	if err := requireWorkflowSession(
-		session,
-		domain.SessionTypeBackup,
-		"abort backup",
-	); err != nil {
-		return err
-	}
-
-	return s.withSessionLock(ctx, session, func(lockedCtx context.Context) error {
-		return s.abort(lockedCtx, session)
-	})
+	return s.abortWorkflow(ctx, session, domain.SessionTypeBackup, "abort backup")
 }
 
 func (s *Service) ValidateBackupCleanup(
@@ -37,15 +19,13 @@ func (s *Service) ValidateBackupCleanup(
 	session *domain.Session,
 	options CleanupOptions,
 ) error {
-	if err := requireWorkflowSession(
+	return s.validateWorkflowCleanup(
+		ctx,
 		session,
 		domain.SessionTypeBackup,
 		"cleanup backup",
-	); err != nil {
-		return err
-	}
-
-	return s.validateCleanup(ctx, session, options)
+		options,
+	)
 }
 
 func (s *Service) CleanupBackup(
@@ -53,13 +33,11 @@ func (s *Service) CleanupBackup(
 	session *domain.Session,
 	options CleanupOptions,
 ) error {
-	if err := requireWorkflowSession(
+	return s.cleanupTypedWorkflow(
+		ctx,
 		session,
 		domain.SessionTypeBackup,
 		"cleanup backup",
-	); err != nil {
-		return err
-	}
-
-	return s.cleanupWorkflow(ctx, session, options)
+		options,
+	)
 }

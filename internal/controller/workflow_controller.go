@@ -403,62 +403,40 @@ func initializeUnobservedStatus(
 func (r *WorkflowReconciler) SetupWithManager(manager ctrl.Manager) error {
 	predicates := builder.WithPredicates(workflowEventPredicate())
 
-	objects := []struct {
-		kind    domain.ControllerKind
-		object  crclient.Object
-		cluster bool
-	}{
-		{kind: domain.ControllerKindMigration, object: &v1alpha1.Migration{}},
-		{
-			kind:    domain.ControllerKindClusterMigration,
-			object:  &v1alpha1.ClusterMigration{},
-			cluster: true,
-		},
-		{kind: domain.ControllerKindPodMigration, object: &v1alpha1.PodMigration{}},
-		{
-			kind:    domain.ControllerKindClusterPodMigration,
-			object:  &v1alpha1.ClusterPodMigration{},
-			cluster: true,
-		},
-		{kind: domain.ControllerKindReservation, object: &v1alpha1.Reservation{}},
-		{
-			kind:    domain.ControllerKindClusterReservation,
-			object:  &v1alpha1.ClusterReservation{},
-			cluster: true,
-		},
-		{kind: domain.ControllerKindCopy, object: &v1alpha1.Copy{}},
-		{kind: domain.ControllerKindClusterCopy, object: &v1alpha1.ClusterCopy{}, cluster: true},
-		{kind: domain.ControllerKindBackup, object: &v1alpha1.Backup{}},
-		{kind: domain.ControllerKindRestore, object: &v1alpha1.Restore{}},
-		{kind: domain.ControllerKindRename, object: &v1alpha1.Rename{}},
-		{kind: domain.ControllerKindMove, object: &v1alpha1.Move{}, cluster: true},
+	kinds := make([]domain.ControllerKind, 0, len(domain.ControllerWorkflows())*2)
+	for _, workflow := range domain.ControllerWorkflows() {
+		if workflow.Kind != "" {
+			kinds = append(kinds, workflow.Kind)
+		}
+
+		if workflow.ClusterKind != "" {
+			kinds = append(kinds, workflow.ClusterKind)
+		}
 	}
-	for _, object := range objects {
-		if !r.supportsKind(object.kind) {
+
+	served := 0
+	for _, kind := range kinds {
+		if !r.supportsKind(kind) {
 			continue
 		}
 
-		name := "workflow-" + strings.ToLower(string(object.kind))
+		object := kube.WorkflowObjectForKind(kind)
+		if object == nil {
+			return fmt.Errorf("workflow %s has no registered API object", kind)
+		}
+
+		name := "workflow-" + strings.ToLower(string(kind))
 		if err := ctrl.NewControllerManagedBy(manager).
 			Named(name).
-			For(object.object, predicates).
-			Complete(&kindWorkflowReconciler{parent: r, kind: object.kind}); err != nil {
+			For(object, predicates).
+			Complete(&kindWorkflowReconciler{parent: r, kind: kind}); err != nil {
 			return err
 		}
+
+		served++
 	}
 
-	if len(r.supportedKinds) > 0 {
-		served := 0
-		for _, object := range objects {
-			if r.supportsKind(object.kind) {
-				served++
-			}
-		}
-
-		if served == 0 {
-			return errors.New("no workflow CRDs are served by the target cluster")
-		}
-	} else if len(objects) == 0 {
+	if served == 0 {
 		return errors.New("no workflow CRDs are served by the target cluster")
 	}
 

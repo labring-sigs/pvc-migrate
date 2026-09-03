@@ -101,6 +101,26 @@ func TestCRDSessionStoreResourceRegistryIsolatedPerCall(t *testing.T) {
 	}
 }
 
+func TestWorkflowObjectForKindCoversControllerRegistry(t *testing.T) {
+	for _, workflow := range domain.ControllerWorkflows() {
+		for _, kind := range []domain.ControllerKind{workflow.Kind, workflow.ClusterKind} {
+			if kind == "" {
+				continue
+			}
+
+			object := WorkflowObjectForKind(kind)
+			if object == nil || workflowKind(object) != kind {
+				t.Fatalf(
+					"workflow kind %q object=%T resolves to %q",
+					kind,
+					object,
+					workflowKind(object),
+				)
+			}
+		}
+	}
+}
+
 func TestCRDSessionStoreRoundTripAndStatusUpdate(t *testing.T) {
 	ctx := context.Background()
 	store := NewCRDSessionStore(newCRDTestClient())

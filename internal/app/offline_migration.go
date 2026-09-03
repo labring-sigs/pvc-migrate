@@ -18,97 +18,50 @@ func (s *Service) ValidateOfflineMigrationResume(
 	ctx context.Context,
 	session *domain.Session,
 ) error {
-	if err := requireWorkflowSession(
+	return s.validateWorkflowResume(
+		ctx,
 		session,
 		domain.SessionTypeMigrate,
 		"resume migrate",
-	); err != nil {
-		return err
-	}
-
-	phase, err := s.validateResumePrerequisites(ctx, session)
-	if err != nil {
-		return err
-	}
-
-	return s.validateOfflineMigrationResume(ctx, session, phase)
+		s.validateOfflineMigrationResume,
+	)
 }
 
 func (s *Service) ResumeOfflineMigration(ctx context.Context, session *domain.Session) error {
-	if err := requireWorkflowSession(
+	return s.resumeWorkflow(
+		ctx,
 		session,
 		domain.SessionTypeMigrate,
 		"resume migrate",
-	); err != nil {
-		return err
-	}
-
-	return s.withSessionLock(ctx, session, func(lockedCtx context.Context) error {
-		phase, err := persistedResumePhase(session)
-		if err != nil {
-			return err
-		}
-
-		return s.resumeOfflineMigration(lockedCtx, session, phase)
-	})
+		s.resumeOfflineMigration,
+	)
 }
 
 func (s *Service) ValidateOfflineMigrationAbort(
 	ctx context.Context,
 	session *domain.Session,
 ) error {
-	if err := requireWorkflowSession(
-		session,
-		domain.SessionTypeMigrate,
-		"abort migrate",
-	); err != nil {
-		return err
-	}
-
-	return s.validateAbort(ctx, session)
+	return s.validateWorkflowAbort(ctx, session, domain.SessionTypeMigrate, "abort migrate")
 }
 
 func (s *Service) AbortOfflineMigration(ctx context.Context, session *domain.Session) error {
-	if err := requireWorkflowSession(
-		session,
-		domain.SessionTypeMigrate,
-		"abort migrate",
-	); err != nil {
-		return err
-	}
-
-	return s.withSessionLock(ctx, session, func(lockedCtx context.Context) error {
-		return s.abort(lockedCtx, session)
-	})
+	return s.abortWorkflow(ctx, session, domain.SessionTypeMigrate, "abort migrate")
 }
 
 func (s *Service) ValidateOfflineMigrationRollback(
 	ctx context.Context,
 	session *domain.Session,
 ) error {
-	if err := requireWorkflowSession(
+	return s.validateWorkflowRollback(
+		ctx,
 		session,
 		domain.SessionTypeMigrate,
 		"rollback migrate",
-	); err != nil {
-		return err
-	}
-
-	return s.validateRollback(ctx, session)
+	)
 }
 
 func (s *Service) RollbackOfflineMigration(ctx context.Context, session *domain.Session) error {
-	if err := requireWorkflowSession(
-		session,
-		domain.SessionTypeMigrate,
-		"rollback migrate",
-	); err != nil {
-		return err
-	}
-
-	return s.withSessionLock(ctx, session, func(lockedCtx context.Context) error {
-		return s.rollback(lockedCtx, session)
-	})
+	return s.rollbackWorkflow(ctx, session, domain.SessionTypeMigrate, "rollback migrate")
 }
 
 func (s *Service) ValidateOfflineMigrationCleanup(
@@ -116,15 +69,13 @@ func (s *Service) ValidateOfflineMigrationCleanup(
 	session *domain.Session,
 	options CleanupOptions,
 ) error {
-	if err := requireWorkflowSession(
+	return s.validateWorkflowCleanup(
+		ctx,
 		session,
 		domain.SessionTypeMigrate,
 		"cleanup migrate",
-	); err != nil {
-		return err
-	}
-
-	return s.validateCleanup(ctx, session, options)
+		options,
+	)
 }
 
 func (s *Service) CleanupOfflineMigration(
@@ -132,15 +83,13 @@ func (s *Service) CleanupOfflineMigration(
 	session *domain.Session,
 	options CleanupOptions,
 ) error {
-	if err := requireWorkflowSession(
+	return s.cleanupTypedWorkflow(
+		ctx,
 		session,
 		domain.SessionTypeMigrate,
 		"cleanup migrate",
-	); err != nil {
-		return err
-	}
-
-	return s.cleanupWorkflow(ctx, session, options)
+		options,
+	)
 }
 
 func (s *Service) OfflineFinalSync(ctx context.Context, session *domain.Session) error {
