@@ -904,6 +904,10 @@ func (r *Reserver) provisionOnTarget(
 	); err != nil {
 		return err
 	}
+	// Stop following before deleting the short-lived Pod. Kubelet may remove
+	// its log file during deletion, which otherwise surfaces a misleading
+	// "failed to try resolving symlinks" line as tool output.
+	toolLogs.Stop()
 
 	return r.cleanupReservationPod(ctx, session, volume)
 }

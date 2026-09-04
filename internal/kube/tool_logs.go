@@ -51,6 +51,7 @@ type ToolLogStream struct {
 	done        chan struct{}
 	logger      *slog.Logger
 	stopTimeout time.Duration
+	stopOnce    sync.Once
 
 	mu            sync.Mutex
 	observedError error
@@ -63,27 +64,29 @@ func (s *ToolLogStream) Stop() {
 		return
 	}
 
-	s.cancel()
+	s.stopOnce.Do(func() {
+		s.cancel()
 
-	timeout := s.stopTimeout
-	if timeout <= 0 {
-		timeout = defaultToolLogStopTimeout
-	}
-
-	timer := time.NewTimer(timeout)
-	defer timer.Stop()
-
-	select {
-	case <-s.done:
-	case <-timer.C:
-		if s.logger != nil {
-			s.logger.Warn(
-				"tool Pod log stream did not stop before timeout; continuing cleanup",
-				"timeout",
-				timeout,
-			)
+		timeout := s.stopTimeout
+		if timeout <= 0 {
+			timeout = defaultToolLogStopTimeout
 		}
-	}
+
+		timer := time.NewTimer(timeout)
+		defer timer.Stop()
+
+		select {
+		case <-s.done:
+		case <-timer.C:
+			if s.logger != nil {
+				s.logger.Warn(
+					"tool Pod log stream did not stop before timeout; continuing cleanup",
+					"timeout",
+					timeout,
+				)
+			}
+		}
+	})
 }
 
 // ObservedError returns a terminal storage error seen in the tool Pod logs.
