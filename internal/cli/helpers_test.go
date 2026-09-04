@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/labring-sigs/pvc-migrate/internal/domain"
+	"github.com/labring-sigs/pvc-migrate/internal/kube"
 	"github.com/labring-sigs/pvc-migrate/internal/output"
 	"github.com/labring-sigs/pvc-migrate/internal/planner"
 	"github.com/spf13/cobra"
@@ -841,6 +842,125 @@ func TestPlanOptionsDirectAndGeneratedIdentity(t *testing.T) {
 	if options.DestinationNamespace != "archive" || options.StagingNamespace != "archive" ||
 		options.TemporaryNamespace != "archive" {
 		t.Fatalf("direct namespaces = %#v", options)
+	}
+}
+
+func TestControllerReservationPlanNamespaces(t *testing.T) {
+	newCommand := func(t *testing.T, arguments ...string) (*cobra.Command, *reserveFlags) {
+		t.Helper()
+
+		command := &cobra.Command{}
+		flags := &reserveFlags{}
+		flags.bind(command)
+
+		if err := command.ParseFlags(arguments); err != nil {
+			t.Fatal(err)
+		}
+
+		return command, flags
+	}
+
+	r := &rootState{global: globals{sessionNamespace: "system"}}
+	runtime := &commandRuntime{
+		mode:            executionModeController,
+		controllerStore: kube.NewCRDSessionStore(nil),
+	}
+
+	for _, test := range []struct {
+		name            string
+		arguments       []string
+		wantDestination string
+		wantSession     string
+	}{
+		{
+			name:            "local defaults",
+			arguments:       []string{"--source-namespace=source"},
+			wantDestination: "source",
+			wantSession:     "source",
+		},
+		{
+			name:            "destination flag",
+			arguments:       []string{"--source-namespace=source", "--destination-namespace=archive"},
+			wantDestination: "archive",
+			wantSession:     "system",
+		},
+		{
+			name:            "legacy temporary flag",
+			arguments:       []string{"--source-namespace=source", "--temporary-namespace=archive"},
+			wantDestination: "archive",
+			wantSession:     "system",
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			command, flags := newCommand(t, test.arguments...)
+
+			options, err := flags.planOptions(r)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			if err := r.resolveReservationPlanNamespaces(runtime, command, &options); err != nil {
+				t.Fatal(err)
+			}
+
+			if options.DestinationNamespace != test.wantDestination ||
+				options.TemporaryNamespace != test.wantDestination ||
+				options.StagingNamespace != test.wantDestination ||
+				options.SessionNamespace != test.wantSession {
+				t.Fatalf("namespaces = %#v", options)
+			}
+		})
+	}
+
+	command, flags := newCommand(t,
+		"--source-namespace=source",
+		"--destination-namespace=archive",
+		"--temporary-namespace=staging",
+	)
+
+	options, err := flags.planOptions(r)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	err = r.resolveReservationPlanNamespaces(runtime, command, &options)
+	if domain.CategoryOf(err) != domain.ErrorValidation ||
+		!strings.Contains(err.Error(), "must match in controller mode") {
+		t.Fatalf("error = %v", err)
+	}
+}
+
+func TestSessionReservationPlanNamespacesRemainDistinct(t *testing.T) {
+	command := &cobra.Command{}
+	flags := &reserveFlags{}
+	flags.bind(command)
+
+	if err := command.ParseFlags([]string{
+		"--source-namespace=source",
+		"--destination-namespace=archive",
+		"--temporary-namespace=staging",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	r := &rootState{global: globals{sessionNamespace: "system"}}
+
+	options, err := flags.planOptions(r)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if err := r.resolveReservationPlanNamespaces(
+		&commandRuntime{mode: executionModeSession}, command, &options,
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	if options.DestinationNamespace != "archive" ||
+		options.TemporaryNamespace != "staging" ||
+		options.StagingNamespace != "staging" ||
+		options.SessionNamespace != "system" {
+		t.Fatalf("namespaces = %#v", options)
 	}
 }
 
