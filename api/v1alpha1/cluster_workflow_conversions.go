@@ -9,7 +9,7 @@ func clusterVolumeSpecFromDomain(v domain.VolumeSpec) ClusterVolumeSpec {
 	return ClusterVolumeSpec{
 		SourcePVC:           localRefFromDomain(v.SourcePVC),
 		SourcePV:            localRefFromDomain(v.SourcePV),
-		DestinationPVC:      localRefFromDomain(v.DestinationPVC),
+		DestinationPVC:      plannedDestinationRefFromDomain(v.DestinationPVC),
 		SourceReclaimPolicy: v.SourceReclaimPolicy,
 		SourcePVCSpec:       *v.SourcePVCSpec.DeepCopy(),
 		SourcePVCMetadata:   pvcMetadataFromDomain(v.SourcePVCMetadata),
