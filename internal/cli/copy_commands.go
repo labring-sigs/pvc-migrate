@@ -1,11 +1,30 @@
 package cli
 
 import (
+	"context"
+
 	"github.com/labring-sigs/pvc-migrate/internal/domain"
 	"github.com/labring-sigs/pvc-migrate/internal/kube"
 	"github.com/labring-sigs/pvc-migrate/internal/planner"
 	"github.com/spf13/cobra"
 )
+
+// getCopySession loads an existing Copy session and accepts the documented
+// Reservation-to-Copy hand-off. CRD storage keeps each workflow type in its
+// own resource, so the fallback is required only when the Copy lookup reports
+// that the session does not exist.
+func getCopySession(
+	ctx context.Context,
+	store kube.SessionStore,
+	namespace, id string,
+) (*domain.Session, error) {
+	session, err := kube.GetSessionByType(ctx, store, namespace, id, domain.SessionTypeCopy)
+	if err == nil || !kube.IsSessionNotFound(err) {
+		return session, err
+	}
+
+	return kube.GetSessionByType(ctx, store, namespace, id, domain.SessionTypeReserve)
+}
 
 // adoptReservedSessionForCopy is the explicit hand-off from the standalone
 // reserve command to copy. The conversion lives in copy's command module so
@@ -100,9 +119,7 @@ func (r *rootState) newCopyCommand() *cobra.Command {
 			if existing {
 				namespace := workflowNamespaceForCommand(r, cmd)
 
-				session, err = kube.GetSessionByType(
-					ctx, runtime.store, namespace, flags.sessionID, domain.SessionTypeCopy,
-				)
+				session, err = getCopySession(ctx, runtime.store, namespace, flags.sessionID)
 				if err == nil {
 					err = adoptReservedSessionForCopy(session, flags)
 				}
@@ -229,9 +246,7 @@ func (r *rootState) newCopyPlanCommand() *cobra.Command {
 			if existing {
 				namespace := workflowNamespaceForCommand(r, cmd)
 
-				session, err := kube.GetSessionByType(
-					ctx, runtime.store, namespace, flags.sessionID, domain.SessionTypeCopy,
-				)
+				session, err := getCopySession(ctx, runtime.store, namespace, flags.sessionID)
 				if err != nil {
 					return reportSessionLookupError(
 						cmd,
