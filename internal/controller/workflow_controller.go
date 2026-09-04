@@ -597,8 +597,10 @@ func normalizeTrustedToolImage(image string) (string, error) {
 	return normalized, nil
 }
 
-var _ reconcile.Reconciler = (*kindWorkflowReconciler)(nil)
-var _ crmanager.LeaderElectionRunnable = (*cacheReadiness)(nil)
+var (
+	_ reconcile.Reconciler             = (*kindWorkflowReconciler)(nil)
+	_ crmanager.LeaderElectionRunnable = (*cacheReadiness)(nil)
+)
 
 func workflowSpecMutationError(session *domain.Session) error {
 	if session == nil || session.Status.ObservedGeneration == 0 ||

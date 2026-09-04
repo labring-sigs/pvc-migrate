@@ -18,14 +18,17 @@ import (
 
 func TestCacheReadinessDoesNotWaitForLeaderElection(t *testing.T) {
 	readiness := &cacheReadiness{}
+
 	if readiness.NeedLeaderElection() {
 		t.Fatal("cache readiness must run before leader election")
 	}
+
 	if err := readiness.Check(nil); err == nil {
 		t.Fatal("cache readiness started ready")
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
+
 	done := make(chan error, 1)
 	go func() { done <- readiness.Start(ctx) }()
 
@@ -33,14 +36,17 @@ func TestCacheReadinessDoesNotWaitForLeaderElection(t *testing.T) {
 	for readiness.Check(nil) != nil && time.Now().Before(deadline) {
 		time.Sleep(time.Millisecond)
 	}
+
 	if err := readiness.Check(nil); err != nil {
 		t.Fatalf("cache readiness did not become ready: %v", err)
 	}
 
 	cancel()
+
 	if err := <-done; err != nil {
 		t.Fatal(err)
 	}
+
 	if err := readiness.Check(nil); err == nil {
 		t.Fatal("cache readiness remained ready after shutdown")
 	}
