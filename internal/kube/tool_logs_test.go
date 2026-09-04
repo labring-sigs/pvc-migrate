@@ -235,6 +235,14 @@ func TestToolLogStreamStopIsBoundedWhenLogStreamIgnoresCancellation(t *testing.T
 		t.Fatalf("Stop took %s", elapsed)
 	}
 
+	start = time.Now()
+
+	stream.Stop()
+
+	if elapsed := time.Since(start); elapsed > time.Second {
+		t.Fatalf("repeated Stop took %s", elapsed)
+	}
+
 	close(release)
 
 	select {
