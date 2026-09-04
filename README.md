@@ -54,8 +54,11 @@ The bundled ClusterRole is a high-privilege controller identity. Bind it only
 to the controller ServiceAccount; tenant users should receive narrowly scoped
 namespaced permissions to submit and observe the workflow CRs they own.
 The role reads repository credentials by exact name and grants the controller
-the create/update/delete Secret verbs required by Helm's default release
-storage driver. It intentionally omits Secret `list`.
+the Secret verbs required by Helm's default release storage driver, including
+listing release history by label. Secret access remains limited to the
+controller/operator identity. Controller sessions use workflow CRDs and
+Kubernetes Leases, so this role intentionally has no session ConfigMap
+permissions; ConfigMap access belongs to the local CLI/session backend.
 
 Build the tool image. It runs the CLI by default and also supplies PVC reservation, rsync, SSHD, and rclone roles inside the cluster:
 

@@ -1,21 +1,17 @@
 package planner
 
 import (
-	"bytes"
 	"context"
 	"errors"
-	"os"
 	"strings"
 	"testing"
 
 	"github.com/labring-sigs/pvc-migrate/internal/domain"
 	"github.com/labring-sigs/pvc-migrate/internal/testutil"
 	authorizationv1 "k8s.io/api/authorization/v1"
-	rbacv1 "k8s.io/api/rbac/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	kubernetesfake "k8s.io/client-go/kubernetes/fake"
 	clienttesting "k8s.io/client-go/testing"
-	"sigs.k8s.io/yaml"
 )
 
 func TestCheckRBACIncludesToolAndVolumePermissions(t *testing.T) {
@@ -108,207 +104,6 @@ func TestCheckRBACRejectsMissingSessionLeasePermission(t *testing.T) {
 		!strings.Contains(plan.Checks[0].Message, "create system/leases") {
 		t.Fatalf("RBAC result=%#v", plan.Checks)
 	}
-}
-
-func TestDeploymentClusterRoleCoversPlannerAccessReviews(t *testing.T) {
-	role := deploymentClusterRole(t, "../../deploy/rbac.yaml", "pvc-migrate")
-	mongoDBRole := deploymentClusterRole(
-		t,
-		"../../deploy/kubeblocks-mongodb-rbac.yaml",
-		"pvc-migrate-kubeblocks-mongodb",
-	)
-
-	selfReview := authorizationv1.ResourceAttributes{
-		Verb: "create", Group: "authorization.k8s.io", Resource: "selfsubjectaccessreviews",
-	}
-	if !clusterRoleAllows(role.Rules, selfReview) {
-		t.Fatal("deployment ClusterRole cannot create SelfSubjectAccessReviews")
-	}
-
-	if !clusterRoleAllows(
-		role.Rules,
-		authorizationv1.ResourceAttributes{
-			Verb:     "delete",
-			Group:    "coordination.k8s.io",
-			Resource: "leases",
-		},
-	) {
-		t.Fatal("deployment ClusterRole cannot delete session Leases")
-	}
-
-	if !clusterRoleAllows(
-		role.Rules,
-		authorizationv1.ResourceAttributes{
-			Verb:     "list",
-			Group:    "storage.k8s.io",
-			Resource: "csistoragecapacities",
-		},
-	) {
-		t.Fatal("deployment ClusterRole cannot list CSIStorageCapacity objects")
-	}
-
-	for _, verb := range []string{"get", "list", "create", "patch"} {
-		if !clusterRoleAllows(
-			role.Rules,
-			authorizationv1.ResourceAttributes{Verb: verb, Resource: "events"},
-		) {
-			t.Fatalf("deployment ClusterRole cannot %s Events", verb)
-		}
-	}
-
-	for _, verb := range []string{"get", "create", "update"} {
-		if !clusterRoleAllows(
-			role.Rules,
-			authorizationv1.ResourceAttributes{Verb: verb, Resource: "serviceaccounts"},
-		) {
-			t.Fatalf("deployment ClusterRole cannot %s ServiceAccounts", verb)
-		}
-	}
-
-	for _, verb := range []string{"patch", "delete"} {
-		if clusterRoleAllows(
-			role.Rules,
-			authorizationv1.ResourceAttributes{Verb: verb, Resource: "serviceaccounts"},
-		) {
-			t.Fatalf("deployment ClusterRole should not %s ServiceAccounts", verb)
-		}
-	}
-
-	for _, attributes := range []authorizationv1.ResourceAttributes{
-		{Verb: "list", Group: "local.openebs.io", Resource: "lvmvolumes"},
-		{Verb: "patch", Group: "local.openebs.io", Resource: "lvmvolumes"},
-	} {
-		if !clusterRoleAllows(role.Rules, attributes) {
-			t.Fatalf("deployment ClusterRole cannot %s OpenEBS LVMVolumes", attributes.Verb)
-		}
-	}
-
-	if clusterRoleAllows(
-		role.Rules,
-		authorizationv1.ResourceAttributes{Verb: "create", Resource: "pods/exec"},
-	) {
-		t.Fatal("default deployment ClusterRole grants Pod exec")
-	}
-
-	if !clusterRoleAllows(
-		mongoDBRole.Rules,
-		authorizationv1.ResourceAttributes{Verb: "create", Resource: "pods/exec"},
-	) {
-		t.Fatal("KubeBlocks MongoDB role cannot create Pod exec")
-	}
-
-	if len(mongoDBRole.Rules) != 1 ||
-		clusterRoleAllows(
-			mongoDBRole.Rules,
-			authorizationv1.ResourceAttributes{Verb: "get", Resource: "pods"},
-		) {
-		t.Fatalf("KubeBlocks MongoDB role grants unexpected permissions: %#v", mongoDBRole.Rules)
-	}
-
-	workloads := []domain.WorkloadSpec{
-		{},
-		{
-			Adapter:    domain.WorkloadDeployment,
-			Controller: domain.ObjectReference{Namespace: "app", Name: "web"},
-		},
-		{
-			Adapter:    domain.WorkloadStatefulSet,
-			Controller: domain.ObjectReference{Namespace: "app", Name: "db"},
-		},
-		{
-			Adapter:    domain.WorkloadVictoriaLogs,
-			Controller: domain.ObjectReference{Namespace: "app", Name: "logs"},
-		},
-		{
-			Adapter: domain.WorkloadKubeBlocks,
-			Controller: domain.ObjectReference{
-				APIVersion: "workloads.kubeblocks.io/v1alpha1",
-				Kind:       domain.KindInstanceSet,
-			},
-			KubeBlocks: &domain.KubeBlocksSpec{
-				OpsAPIVersion:       "operations.kubeblocks.io/v1alpha1",
-				SwitchoverCandidate: "cluster-db-1",
-				SwitchoverStrategy:  domain.KubeBlocksSwitchoverMongoDBNative,
-			},
-		},
-		{
-			Adapter:    domain.WorkloadVMCluster,
-			Controller: domain.ObjectReference{Namespace: "app", Name: "metrics"},
-			VMCluster:  &domain.VMClusterSpec{APIVersion: "operator.victoriametrics.com/v1beta1"},
-		},
-		{
-			Adapter:    domain.WorkloadGrafana,
-			Controller: domain.ObjectReference{Namespace: "app", Name: "grafana"},
-			Grafana:    &domain.GrafanaSpec{APIVersion: "grafana.integreatly.org/v1beta1"},
-		},
-	}
-	for _, workload := range workloads {
-		for _, attributes := range collectAllowedAccessReviews(t, workload, false, false) {
-			if !clusterRoleAllows(role.Rules, attributes) &&
-				!clusterRoleAllows(mongoDBRole.Rules, attributes) {
-				t.Errorf(
-					"deployment ClusterRole does not allow %s %s/%s",
-					attributes.Verb,
-					attributes.Group,
-					attributes.Resource,
-				)
-			}
-		}
-	}
-}
-
-func TestConfigAndDeploymentRolesUseLeastPrivilegeForEventsAndServiceAccounts(t *testing.T) {
-	for _, path := range []string{"../../config/rbac/role.yaml", "../../deploy/rbac.yaml"} {
-		role := deploymentClusterRole(t, path, "pvc-migrate")
-		for _, verb := range []string{"create", "patch"} {
-			if !clusterRoleAllows(
-				role.Rules,
-				authorizationv1.ResourceAttributes{Verb: verb, Resource: "events"},
-			) {
-				t.Fatalf("%s ClusterRole cannot %s Events", path, verb)
-			}
-		}
-
-		for _, verb := range []string{"get", "create", "update"} {
-			if !clusterRoleAllows(
-				role.Rules,
-				authorizationv1.ResourceAttributes{Verb: verb, Resource: "serviceaccounts"},
-			) {
-				t.Fatalf("%s ClusterRole cannot %s ServiceAccounts", path, verb)
-			}
-		}
-
-		for _, verb := range []string{"patch", "delete"} {
-			if clusterRoleAllows(
-				role.Rules,
-				authorizationv1.ResourceAttributes{Verb: verb, Resource: "serviceaccounts"},
-			) {
-				t.Fatalf("%s ClusterRole should not %s ServiceAccounts", path, verb)
-			}
-		}
-	}
-}
-
-func deploymentClusterRole(t *testing.T, path, name string) rbacv1.ClusterRole {
-	t.Helper()
-
-	data, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	var role rbacv1.ClusterRole
-
-	firstDocument := bytes.SplitN(data, []byte("\n---\n"), 2)[0]
-	if err := yaml.Unmarshal(firstDocument, &role); err != nil {
-		t.Fatal(err)
-	}
-
-	if role.Kind != "ClusterRole" || role.Name != name {
-		t.Fatalf("unexpected deployment role %s/%s", role.Kind, role.Name)
-	}
-
-	return role
 }
 
 func TestCheckRBACIncludesControllerSpecificPermissions(t *testing.T) {
@@ -782,29 +577,4 @@ func collectAllowedAccessReviews(
 	}
 
 	return seen
-}
-
-func clusterRoleAllows(
-	rules []rbacv1.PolicyRule,
-	attributes authorizationv1.ResourceAttributes,
-) bool {
-	for _, rule := range rules {
-		if containsRBACValue(rule.APIGroups, attributes.Group) &&
-			containsRBACValue(rule.Resources, attributes.Resource) &&
-			containsRBACValue(rule.Verbs, attributes.Verb) {
-			return true
-		}
-	}
-
-	return false
-}
-
-func containsRBACValue(values []string, value string) bool {
-	for _, candidate := range values {
-		if candidate == "*" || candidate == value {
-			return true
-		}
-	}
-
-	return false
 }

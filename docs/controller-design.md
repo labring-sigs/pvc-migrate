@@ -169,3 +169,6 @@ creates, updates, and deletes short-lived Helm release Secrets. Helm's
 default Secret storage driver lists release history by label; this access is
 required by the upstream
 pv-migrate Helm driver and is limited to the controller/operator identity.
+Controller sessions are stored in workflow CRDs and fenced with Leases, so
+the controller role does not need ConfigMap permissions used by the local
+session backend.

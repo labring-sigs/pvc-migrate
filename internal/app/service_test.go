@@ -1344,6 +1344,15 @@ func TestToolLogErrorOnlyClassifiesFailedCopy(t *testing.T) {
 	}
 }
 
+func TestCopyToolLogsRespectServiceMode(t *testing.T) {
+	service := &Service{config: Config{StreamToolLogs: false}}
+	volume := &domain.VolumeSpec{}
+
+	if stream := service.startCopyToolLogs(context.Background(), volume, "copy"); stream != nil {
+		t.Fatal("controller-style service unexpectedly started a tool log stream")
+	}
+}
+
 func TestDestinationNoSpaceErrorRequiresNewSession(t *testing.T) {
 	copier := &fakeCopier{err: errors.New("rsync: write failed: No space left on device")}
 	service, session, _, _ := appTestService(t, copier)
