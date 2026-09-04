@@ -838,6 +838,85 @@ func TestDecodeWorkflowMarksDeletionRequests(t *testing.T) {
 	}
 }
 
+func TestCRDSessionStoreDeleteOnlyReleasesFinalizerForDeletingWorkflow(t *testing.T) {
+	ctx := context.Background()
+	base := newCRDTestClient()
+	session := storeTestSession()
+	object, ok := sessionObjectForKind(session, domain.ControllerKindMigration)
+	if !ok {
+		t.Fatal("failed to construct Migration object")
+	}
+	object.SetFinalizers([]string{SessionFinalizer})
+	if err := base.Create(ctx, object); err != nil {
+		t.Fatal(err)
+	}
+
+	var deleteCalls int
+	deletionTimestamp := metav1.Now()
+	withDeleteGuard := interceptor.NewClient(base.(crclient.WithWatch), interceptor.Funcs{
+		Get: func(
+			ctx context.Context,
+			underlying crclient.WithWatch,
+			key crclient.ObjectKey,
+			object crclient.Object,
+			options ...crclient.GetOption,
+		) error {
+			if err := underlying.Get(ctx, key, object, options...); err != nil {
+				return err
+			}
+			object.SetDeletionTimestamp(&deletionTimestamp)
+			return nil
+		},
+		Update: func(
+			ctx context.Context,
+			underlying crclient.WithWatch,
+			object crclient.Object,
+			options ...crclient.UpdateOption,
+		) error {
+			updated, ok := object.DeepCopyObject().(crclient.Object)
+			if !ok {
+				return errors.New("workflow deep copy does not implement client.Object")
+			}
+			updated.SetDeletionTimestamp(nil)
+			return underlying.Update(ctx, updated, options...)
+		},
+		Delete: func(
+			ctx context.Context,
+			underlying crclient.WithWatch,
+			object crclient.Object,
+			options ...crclient.DeleteOption,
+		) error {
+			deleteCalls++
+			return apierrors.NewConflict(
+				schema.GroupResource{Group: v1alpha1.GroupVersion.Group, Resource: "migrations"},
+				object.GetName(),
+				errors.New("namespace is terminating"),
+			)
+		},
+	})
+	store := NewCRDSessionStore(withDeleteGuard)
+
+	loaded, err := store.Get(ctx, session.Spec.SessionNamespace, session.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Delete(ctx, loaded); err != nil {
+		t.Fatalf("deleting workflow already marked for deletion: %v", err)
+	}
+	if deleteCalls != 0 {
+		t.Fatalf("delete calls=%d, want 0 for workflow already marked for deletion", deleteCalls)
+	}
+
+	remaining := &v1alpha1.Migration{}
+	if err := base.Get(ctx, crclient.ObjectKeyFromObject(object), remaining); err == nil {
+		if containsString(remaining.GetFinalizers(), SessionFinalizer) {
+			t.Fatalf("session protection finalizer was not removed: %v", remaining.GetFinalizers())
+		}
+	} else if !apierrors.IsNotFound(err) {
+		t.Fatalf("reading workflow after finalizer release: %v", err)
+	}
+}
+
 func TestCRDSessionStoreRejectsSameNameAcrossKinds(t *testing.T) {
 	ctx := context.Background()
 	store := NewCRDSessionStore(newCRDTestClient())

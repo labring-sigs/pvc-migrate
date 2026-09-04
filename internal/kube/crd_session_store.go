@@ -1558,7 +1558,13 @@ func (s *CRDSessionStore) Delete(ctx context.Context, session *domain.Session) e
 		)
 	}
 
-	if session.ResourceVersion != "" && object.GetResourceVersion() != session.ResourceVersion {
+	// Namespace deletion already marked the workflow for deletion. Removing
+	// our protection finalizer is the only required action; issuing another
+	// Delete can fail while the namespace is terminating and creates a noisy,
+	// non-actionable reconcile error.
+	deleting := object.GetDeletionTimestamp() != nil
+
+	if !deleting && session.ResourceVersion != "" && object.GetResourceVersion() != session.ResourceVersion {
 		return domain.NewError(
 			domain.ErrorConflict,
 			"delete session",
@@ -1596,6 +1602,10 @@ func (s *CRDSessionStore) Delete(ctx context.Context, session *domain.Session) e
 		}
 
 		object = updated
+	}
+
+	if deleting {
+		return nil
 	}
 
 	uid := object.GetUID()
