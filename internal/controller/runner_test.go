@@ -29,6 +29,8 @@ type runnerSessionStore struct {
 	lock       *runnerSessionLock
 }
 
+func (*runnerSessionStore) StorageBackend() string { return kube.SessionBackendCRD }
+
 func (s *runnerSessionStore) Create(context.Context, *domain.Session) error { return nil }
 
 func (s *runnerSessionStore) Get(context.Context, string, string) (*domain.Session, error) {
@@ -36,6 +38,33 @@ func (s *runnerSessionStore) Get(context.Context, string, string) (*domain.Sessi
 		return nil, s.getErr
 	}
 	return cloneRunnerSession(s.latest), nil
+}
+
+func (s *runnerSessionStore) GetByType(
+	ctx context.Context,
+	namespace, id string,
+	_ domain.SessionType,
+) (*domain.Session, error) {
+	return s.Get(ctx, namespace, id)
+}
+
+func (s *runnerSessionStore) GetByKind(
+	ctx context.Context,
+	namespace, id string,
+	_ domain.ControllerKind,
+) (*domain.Session, error) {
+	return s.Get(ctx, namespace, id)
+}
+
+func (*runnerSessionStore) CheckWorkflowNameCollision(
+	context.Context,
+	*domain.Session,
+) error {
+	return nil
+}
+
+func (*runnerSessionStore) EnsureSessionProtection(context.Context, *domain.Session) error {
+	return nil
 }
 
 func (s *runnerSessionStore) Update(_ context.Context, session *domain.Session) error {
@@ -52,6 +81,8 @@ func (s *runnerSessionStore) Delete(_ context.Context, session *domain.Session) 
 	s.deleted = append(s.deleted, cloneRunnerSession(session))
 	return nil
 }
+
+func (*runnerSessionStore) DeleteSessionLease(context.Context, string, string) error { return nil }
 
 func (s *runnerSessionStore) AcquireSessionLock(
 	context.Context,
@@ -118,7 +149,11 @@ func newRunnerSession(id string) *domain.Session {
 		domain.SessionWorkflowOptions{},
 	)
 
-	return domain.NewSession(id, spec, time.Unix(1, 0))
+	session := domain.NewSession(id, spec, time.Unix(1, 0))
+	session.Backend = kube.SessionBackendCRD
+	session.BackendResource = domain.ControllerKindCopy
+
+	return session
 }
 
 func TestRunnerRejectsTenantControlledToolImage(t *testing.T) {
@@ -642,5 +677,18 @@ func TestRunnerCheckpointFailurePreservesLockAcquisitionError(t *testing.T) {
 
 	if len(store.updates) != 0 {
 		t.Fatalf("session was updated after lock acquisition failed: %d", len(store.updates))
+	}
+}
+
+func TestRunnerCheckpointFailureRequiresWorkflowKind(t *testing.T) {
+	session := newRunnerSession("missing-kind")
+	session.BackendResource = ""
+	cause := errors.New("reconcile failed")
+	runner := NewRunner(&recordingWorkflowResumer{}, &runnerSessionStore{}, "system")
+
+	err := runner.checkpointFailure(context.Background(), session, cause)
+	if !errors.Is(err, cause) ||
+		!strings.Contains(err.Error(), "backend resource kind is required") {
+		t.Fatalf("checkpoint error=%v", err)
 	}
 }

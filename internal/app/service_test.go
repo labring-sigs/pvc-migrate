@@ -48,31 +48,12 @@ type fakeSessionLocker struct {
 	lock kube.SessionLock
 }
 
-type scopedSessionLocker struct {
-	memoryStore
-	lock       kube.SessionLock
-	acquiredID string
-}
-
 func (f *fakeSessionLocker) AcquireSessionLock(
 	context.Context,
 	string,
 	string,
 ) (kube.SessionLock, error) {
 	return f.lock, nil
-}
-
-func (s *scopedSessionLocker) AcquireSessionLock(
-	_ context.Context,
-	_ string,
-	id string,
-) (kube.SessionLock, error) {
-	s.acquiredID = id
-	return s.lock, nil
-}
-
-func (*scopedSessionLocker) SessionLockID(session *domain.Session) string {
-	return session.ID + "/Copy"
 }
 
 type fakeSessionLock struct {
@@ -107,6 +88,26 @@ func (m *memoryStore) Create(_ context.Context, session *domain.Session) error {
 func (m *memoryStore) Get(context.Context, string, string) (*domain.Session, error) {
 	return nil, errors.New("unused")
 }
+
+func (*memoryStore) StorageBackend() string { return kube.SessionBackendConfigMap }
+
+func (m *memoryStore) GetByType(
+	ctx context.Context,
+	namespace, id string,
+	_ domain.SessionType,
+) (*domain.Session, error) {
+	return m.Get(ctx, namespace, id)
+}
+
+func (*memoryStore) AcquireSessionLock(
+	context.Context,
+	string,
+	string,
+) (kube.SessionLock, error) {
+	return &fakeSessionLock{}, nil
+}
+
+func (*memoryStore) DeleteSessionLease(context.Context, string, string) error { return nil }
 
 func (m *memoryStore) Update(_ context.Context, session *domain.Session) error {
 	m.updates++
@@ -278,6 +279,20 @@ type fakeSwitcher struct {
 }
 
 func (f *fakeSwitcher) VerifyVolumeOffline(context.Context, *domain.VolumeSpec) error { return nil }
+
+func (f *fakeSwitcher) VerifyVolumesOfflineForSession(
+	ctx context.Context,
+	_ string,
+	volumes []*domain.VolumeSpec,
+) error {
+	for _, volume := range volumes {
+		if err := f.VerifyVolumeOffline(ctx, volume); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
 
 func (f *fakeSwitcher) ActivateVolume(
 	ctx context.Context,

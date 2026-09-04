@@ -7,48 +7,31 @@ import (
 )
 
 func (s *Service) ValidateCopyResume(ctx context.Context, session *domain.Session) error {
-	if err := requireWorkflowSession(session, domain.SessionTypeCopy, "resume copy"); err != nil {
-		return err
-	}
-
-	phase, err := s.validateResumePrerequisites(ctx, session)
-	if err != nil {
-		return err
-	}
-
-	return s.validateCopyResume(ctx, session, phase)
+	return s.validateWorkflowResume(
+		ctx,
+		session,
+		domain.SessionTypeCopy,
+		"resume copy",
+		s.validateCopyResume,
+	)
 }
 
 func (s *Service) ResumeCopy(ctx context.Context, session *domain.Session) error {
-	if err := requireWorkflowSession(session, domain.SessionTypeCopy, "resume copy"); err != nil {
-		return err
-	}
-
-	return s.withSessionLock(ctx, session, func(lockedCtx context.Context) error {
-		phase, err := persistedResumePhase(session)
-		if err != nil {
-			return err
-		}
-
-		return s.resumeCopy(lockedCtx, session, phase)
-	})
+	return s.resumeWorkflow(
+		ctx,
+		session,
+		domain.SessionTypeCopy,
+		"resume copy",
+		s.resumeCopy,
+	)
 }
 
 func (s *Service) ValidateCopyAbort(ctx context.Context, session *domain.Session) error {
-	if err := requireWorkflowSession(session, domain.SessionTypeCopy, "abort copy"); err != nil {
-		return err
-	}
-	return s.validateAbort(ctx, session)
+	return s.validateWorkflowAbort(ctx, session, domain.SessionTypeCopy, "abort copy")
 }
 
 func (s *Service) AbortCopy(ctx context.Context, session *domain.Session) error {
-	if err := requireWorkflowSession(session, domain.SessionTypeCopy, "abort copy"); err != nil {
-		return err
-	}
-
-	return s.withSessionLock(ctx, session, func(lockedCtx context.Context) error {
-		return s.abort(lockedCtx, session)
-	})
+	return s.abortWorkflow(ctx, session, domain.SessionTypeCopy, "abort copy")
 }
 
 func (s *Service) ValidateCopyCleanup(
@@ -56,10 +39,13 @@ func (s *Service) ValidateCopyCleanup(
 	session *domain.Session,
 	options CleanupOptions,
 ) error {
-	if err := requireWorkflowSession(session, domain.SessionTypeCopy, "cleanup copy"); err != nil {
-		return err
-	}
-	return s.validateCleanup(ctx, session, options)
+	return s.validateWorkflowCleanup(
+		ctx,
+		session,
+		domain.SessionTypeCopy,
+		"cleanup copy",
+		options,
+	)
 }
 
 func (s *Service) CleanupCopy(
@@ -67,8 +53,11 @@ func (s *Service) CleanupCopy(
 	session *domain.Session,
 	options CleanupOptions,
 ) error {
-	if err := requireWorkflowSession(session, domain.SessionTypeCopy, "cleanup copy"); err != nil {
-		return err
-	}
-	return s.cleanupWorkflow(ctx, session, options)
+	return s.cleanupTypedWorkflow(
+		ctx,
+		session,
+		domain.SessionTypeCopy,
+		"cleanup copy",
+		options,
+	)
 }

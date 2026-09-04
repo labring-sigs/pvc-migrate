@@ -7,6 +7,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net"
 	"net/http"
 	"os"
 	"os/exec"
@@ -243,11 +244,7 @@ func TestControllerS3TransportFailureIsActionableAndRedacted(t *testing.T) {
 	defer controllerProcess.Stop(t)
 
 	storageClass := envOrDefault("PVC_MIGRATE_E2E_SOURCE_CLASS", "openebs-hostpath")
-	output := runCLIExpectExitCode(
-		t,
-		ctx,
-		binary,
-		1,
+	cliArgs := appendE2EToolImage([]string{
 		"--kubeconfig", kubeconfig,
 		"--mode", "controller",
 		"--session-namespace", namespace,
@@ -256,6 +253,9 @@ func TestControllerS3TransportFailureIsActionableAndRedacted(t *testing.T) {
 		"--output", "json",
 		"--log-format", "json",
 		"--yes",
+	})
+	cliArgs = append(
+		cliArgs,
 		"restore",
 		"--id", sessionID,
 		"--namespace", namespace,
@@ -267,6 +267,13 @@ func TestControllerS3TransportFailureIsActionableAndRedacted(t *testing.T) {
 		"--backup-repository", repository.Name,
 		"--name", "missing-recovery-point",
 		"--dry-run=false",
+	)
+	output := runCLIExpectExitCode(
+		t,
+		ctx,
+		binary,
+		1,
+		cliArgs...,
 	)
 
 	const expectedMessage = "S3 endpoint DNS resolution failed; verify the endpoint hostname and cluster DNS"
@@ -2243,9 +2250,7 @@ func TestStandaloneWFFCMigrationAndRollback(t *testing.T) {
 		"--timeout", "12m",
 		"--output", "json",
 	}
-	if toolImage := os.Getenv("PVC_MIGRATE_E2E_TOOL_IMAGE"); toolImage != "" {
-		common = append(common, "--tool-image", toolImage)
-	}
+	common = appendE2EToolImage(common)
 	controllerProcess := startE2EController(
 		t, ctx, client, binary, kubeconfig, namespace, mode,
 	)
@@ -2493,9 +2498,7 @@ func TestOfflineMigrationAndRollback(t *testing.T) {
 		"--timeout", "12m",
 		"--output", "json",
 	}
-	if toolImage := os.Getenv("PVC_MIGRATE_E2E_TOOL_IMAGE"); toolImage != "" {
-		common = append(common, "--tool-image", toolImage)
-	}
+	common = appendE2EToolImage(common)
 	controllerProcess := startE2EController(
 		t, ctx, client, binary, kubeconfig, namespace, mode,
 	)
@@ -2768,9 +2771,7 @@ func TestHelmManagedStatefulSetMigrationAndRollback(t *testing.T) {
 		"--output",
 		"json",
 	}
-	if toolImage := os.Getenv("PVC_MIGRATE_E2E_TOOL_IMAGE"); toolImage != "" {
-		common = append(common, "--tool-image", toolImage)
-	}
+	common = appendE2EToolImage(common)
 	controllerProcess := startE2EController(
 		t, ctx, client, binary, kubeconfig, namespace, mode,
 	)
@@ -3025,9 +3026,7 @@ func TestOnlineCopyMultiVolumeIdempotencyAndCleanup(t *testing.T) {
 		"--output",
 		"json",
 	}
-	if toolImage := os.Getenv("PVC_MIGRATE_E2E_TOOL_IMAGE"); toolImage != "" {
-		common = append(common, "--tool-image", toolImage)
-	}
+	common = appendE2EToolImage(common)
 	controllerProcess := startE2EController(
 		t, ctx, client, binary, kubeconfig, namespace, mode,
 	)
@@ -3400,6 +3399,7 @@ func startE2EController(
 		return nil
 	}
 
+	healthProbeBindAddress := allocateLoopbackAddress(t)
 	process := &e2eControllerProcess{done: make(chan struct{})}
 	args := []string{
 		"--kubeconfig", kubeconfig,
@@ -3409,10 +3409,12 @@ func startE2EController(
 		"--timeout", "0",
 		"--log-level", "info",
 	}
-	if toolImage := os.Getenv("PVC_MIGRATE_E2E_TOOL_IMAGE"); toolImage != "" {
-		args = append(args, "--tool-image", toolImage)
-	}
-	args = append(args, "controller")
+	args = appendE2EToolImage(args)
+	args = append(
+		args,
+		"controller",
+		"--health-probe-bind-address", healthProbeBindAddress,
+	)
 	process.command = exec.CommandContext(ctx, binary, args...)
 	process.command.Stdout = &process.stdout
 	process.command.Stderr = &process.stderr
@@ -3456,7 +3458,7 @@ func startE2EController(
 			request, requestErr := http.NewRequestWithContext(
 				waitCtx,
 				http.MethodGet,
-				"http://[::1]:8081/readyz",
+				"http://"+healthProbeBindAddress+"/readyz",
 				nil,
 			)
 			if requestErr != nil {
@@ -3483,6 +3485,21 @@ func startE2EController(
 	}
 
 	return process
+}
+
+func allocateLoopbackAddress(t *testing.T) string {
+	t.Helper()
+
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("allocate E2E controller health probe address: %v", err)
+	}
+	address := listener.Addr().String()
+	if err := listener.Close(); err != nil {
+		t.Fatalf("release E2E controller health probe address: %v", err)
+	}
+
+	return address
 }
 
 func (p *e2eControllerProcess) Stop(t *testing.T) {
@@ -3881,14 +3898,13 @@ func assertCopySession(
 	if storedOnline != online {
 		t.Fatalf("copy online=%t want=%t", storedOnline, online)
 	}
-	requiredFields := []string{"sourceNode", "targetNode", "strategies", "deleteExtraneous"}
-	if mode == "session" {
-		requiredFields = append(requiredFields, "verifyChecksum")
-	}
-	for _, field := range requiredFields {
+	for _, field := range []string{"sourceNode", "targetNode", "strategies", "deleteExtraneous"} {
 		if _, exists := snapshot.Spec.Copy[field]; !exists {
 			t.Fatalf("copy payload field %q missing", field)
 		}
+	}
+	if _, exists := snapshot.Spec.Copy["verifyChecksum"]; exists {
+		t.Fatal("copy payload serialized the default verifyChecksum=false")
 	}
 	var sourceNode, targetNode string
 	if err := json.Unmarshal(snapshot.Spec.Copy["sourceNode"], &sourceNode); err != nil {
@@ -4216,9 +4232,7 @@ func runCapacityCopy(
 		"--timeout", "12m",
 		"--output", "json",
 	}
-	if toolImage := os.Getenv("PVC_MIGRATE_E2E_TOOL_IMAGE"); toolImage != "" {
-		common = append(common, "--tool-image", toolImage)
-	}
+	common = appendE2EToolImage(common)
 
 	controllerProcess := startE2EController(
 		t, ctx, client, binary, kubeconfig, namespace, mode,
@@ -4934,10 +4948,13 @@ func assertSessionPayloadShape(
 	if err := json.Unmarshal(payload, &fields); err != nil {
 		t.Fatal(err)
 	}
-	for _, field := range []string{"sourceNode", "targetNode", "strategies", "verifyChecksum", "deleteExtraneous", "workload"} {
+	for _, field := range []string{"sourceNode", "targetNode", "strategies", "deleteExtraneous", "workload"} {
 		if _, exists := fields[field]; !exists {
 			t.Fatalf("migratePod payload field %q missing: %s", field, payload)
 		}
+	}
+	if _, exists := fields["verifyChecksum"]; exists {
+		t.Fatal("migratePod payload serialized the default verifyChecksum=false")
 	}
 }
 
@@ -5250,6 +5267,14 @@ func envOrDefault(name, fallback string) string {
 		return value
 	}
 	return fallback
+}
+
+func appendE2EToolImage(args []string) []string {
+	if toolImage := os.Getenv("PVC_MIGRATE_E2E_TOOL_IMAGE"); toolImage != "" {
+		return append(args, "--tool-image", toolImage)
+	}
+
+	return args
 }
 
 func e2eMode(t *testing.T) string {

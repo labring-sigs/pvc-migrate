@@ -559,15 +559,15 @@ func TestTransferDestinationIdentityIsStatusOwned(t *testing.T) {
 			}},
 		},
 		true,
-		domain.SessionWorkflowOptions{VerifyChecksum: true},
+		domain.SessionWorkflowOptions{},
 	)
 	status := domain.SessionStatus{
 		Volumes: []domain.VolumeStatus{{SourcePVCName: "data", Reserved: true}},
 	}
 
 	apiSpec := v1alpha1.CopySpecFromDomain(spec)
-	if !apiSpec.VerifyChecksum {
-		t.Fatal("CopySpec dropped verifyChecksum")
+	if apiSpec.VerifyChecksum {
+		t.Fatal("CopySpec enabled verifyChecksum by default")
 	}
 
 	data, err := json.Marshal(apiSpec)
@@ -579,6 +579,7 @@ func TestTransferDestinationIdentityIsStatusOwned(t *testing.T) {
 	for _, forbidden := range []string{
 		`"destinationPV":`, `"destinationReclaimPolicy":`,
 		`"uid":"destination-pvc-uid"`, `"resourceVersion":"17"`,
+		`"verifyChecksum":`,
 	} {
 		if strings.Contains(encoded, forbidden) {
 			t.Fatalf("controller checkpoint leaked into Copy spec: %s", encoded)
@@ -589,8 +590,20 @@ func TestTransferDestinationIdentityIsStatusOwned(t *testing.T) {
 	restored := apiSpec.Domain("app")
 	apiStatus.ApplyToDomainSpec(&restored)
 
-	if !restored.WorkflowOptions().VerifyChecksum {
-		t.Fatal("CopySpec conversion did not restore verifyChecksum")
+	if restored.WorkflowOptions().VerifyChecksum {
+		t.Fatal("CopySpec conversion enabled verifyChecksum by default")
+	}
+
+	spec.Copy.VerifyChecksum = true
+
+	apiSpec = v1alpha1.CopySpecFromDomain(spec)
+
+	if !apiSpec.VerifyChecksum {
+		t.Fatal("CopySpec did not preserve explicit verifyChecksum=true")
+	}
+
+	if enabled := apiSpec.Domain("app"); !enabled.WorkflowOptions().VerifyChecksum {
+		t.Fatal("CopySpec conversion changed explicit verifyChecksum=true")
 	}
 
 	volume := restored.Volumes[0]
@@ -611,16 +624,33 @@ func TestClusterCopyVerifyChecksumRoundTrip(t *testing.T) {
 			DestinationNamespace: "destination", SessionNamespace: "control",
 		},
 		true,
-		domain.SessionWorkflowOptions{VerifyChecksum: true},
+		domain.SessionWorkflowOptions{},
 	)
 
 	apiSpec := v1alpha1.ClusterCopySpecFromDomain(spec)
-	if !apiSpec.VerifyChecksum {
-		t.Fatal("ClusterCopySpec dropped verifyChecksum")
+	if apiSpec.VerifyChecksum {
+		t.Fatal("ClusterCopySpec enabled verifyChecksum by default")
 	}
 
-	if !apiSpec.Domain().WorkflowOptions().VerifyChecksum {
-		t.Fatal("ClusterCopySpec conversion did not restore verifyChecksum")
+	data, err := json.Marshal(apiSpec)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if strings.Contains(string(data), `"verifyChecksum":`) {
+		t.Fatalf("ClusterCopySpec serialized default verifyChecksum: %s", data)
+	}
+
+	if apiSpec.Domain().WorkflowOptions().VerifyChecksum {
+		t.Fatal("ClusterCopySpec conversion enabled verifyChecksum by default")
+	}
+
+	spec.Copy.VerifyChecksum = true
+
+	apiSpec = v1alpha1.ClusterCopySpecFromDomain(spec)
+
+	if !apiSpec.VerifyChecksum || !apiSpec.Domain().WorkflowOptions().VerifyChecksum {
+		t.Fatal("ClusterCopySpec did not preserve explicit verifyChecksum=true")
 	}
 }
 

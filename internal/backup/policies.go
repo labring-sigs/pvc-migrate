@@ -187,12 +187,19 @@ func backupSessionResourceEstimate(
 	req Request,
 ) (domain.ResourceEstimate, error) {
 	estimate := domain.ResourceEstimate{Secrets: 1}
-	if _, ok := req.SessionStore.(*kube.ConfigMapSessionStore); ok {
-		estimate.ConfigMaps = 1
-	}
-
-	if _, ok := req.SessionStore.(kube.SessionLocker); ok {
+	if req.SessionStore != nil {
 		estimate.Leases = 2
+		switch req.SessionStore.StorageBackend() {
+		case kube.SessionBackendConfigMap:
+			estimate.ConfigMaps = 1
+		case kube.SessionBackendCRD:
+		default:
+			return domain.ResourceEstimate{}, domain.NewError(
+				domain.ErrorInternal,
+				backupPreflightPhase,
+				"session store returned an unsupported storage backend",
+			)
+		}
 	}
 
 	if req.BackupSession == nil {

@@ -32,6 +32,8 @@ type snapshotStore struct {
 	updateErrAt   int
 }
 
+func (*snapshotStore) StorageBackend() string { return kube.SessionBackendConfigMap }
+
 func (s *snapshotStore) Create(_ context.Context, session *domain.Session) error {
 	s.creates++
 	session.ResourceVersion = "1"
@@ -41,6 +43,24 @@ func (s *snapshotStore) Create(_ context.Context, session *domain.Session) error
 func (s *snapshotStore) Get(context.Context, string, string) (*domain.Session, error) {
 	return nil, errors.New("unused")
 }
+
+func (s *snapshotStore) GetByType(
+	ctx context.Context,
+	namespace, id string,
+	_ domain.SessionType,
+) (*domain.Session, error) {
+	return s.Get(ctx, namespace, id)
+}
+
+func (*snapshotStore) AcquireSessionLock(
+	context.Context,
+	string,
+	string,
+) (kube.SessionLock, error) {
+	return &fakeSessionLock{}, nil
+}
+
+func (*snapshotStore) DeleteSessionLease(context.Context, string, string) error { return nil }
 
 func (s *snapshotStore) Update(_ context.Context, session *domain.Session) error {
 	s.updates++
@@ -202,17 +222,18 @@ func (c *scriptedCopier) Copy(
 }
 
 type scriptedSwitcher struct {
-	client        kubernetes.Interface
-	offlineCalls  []string
-	activateCalls []string
-	rollbackCalls []string
-	renameCalls   []domain.VolumeSpec
-	offlineErr    error
-	offlineErrs   map[string]error
-	activateErr   error
-	rollbackErr   map[string]int
-	rollbackHook  func(context.Context, *domain.VolumeSpec) error
-	renameErr     error
+	client            kubernetes.Interface
+	offlineCalls      []string
+	offlineSessionIDs []string
+	activateCalls     []string
+	rollbackCalls     []string
+	renameCalls       []domain.VolumeSpec
+	offlineErr        error
+	offlineErrs       map[string]error
+	activateErr       error
+	rollbackErr       map[string]int
+	rollbackHook      func(context.Context, *domain.VolumeSpec) error
+	renameErr         error
 }
 
 func (s *scriptedSwitcher) VerifyVolumeOffline(_ context.Context, volume *domain.VolumeSpec) error {
@@ -222,6 +243,21 @@ func (s *scriptedSwitcher) VerifyVolumeOffline(_ context.Context, volume *domain
 	}
 
 	return s.offlineErr
+}
+
+func (s *scriptedSwitcher) VerifyVolumesOfflineForSession(
+	ctx context.Context,
+	sessionID string,
+	volumes []*domain.VolumeSpec,
+) error {
+	s.offlineSessionIDs = append(s.offlineSessionIDs, sessionID)
+	for _, volume := range volumes {
+		if err := s.VerifyVolumeOffline(ctx, volume); err != nil {
+			return err
+		}
+	}
+
+	return nil
 }
 
 func (s *scriptedSwitcher) ActivateVolume(
@@ -809,32 +845,6 @@ func TestCreateSessionCreatesSessionNamespaceBeforeLease(t *testing.T) {
 		Leases("sessions").
 		Get(context.Background(), kube.SessionLockName(session.ID), metav1.GetOptions{}); err != nil {
 		t.Fatalf("session Lease: %v", err)
-	}
-}
-
-func TestCreateSessionUsesStoreScopedLockID(t *testing.T) {
-	client := fake.NewClientset()
-	store := &scopedSessionLocker{lock: &fakeSessionLock{}}
-	service := NewService(
-		client,
-		store,
-		&scriptedReserver{failures: map[string]error{}},
-		&scriptedCopier{failures: map[string]int{}},
-		&scriptedController{},
-		&scriptedSwitcher{rollbackErr: map[string]int{}},
-		Config{Retries: 1, RetryBackoff: time.Millisecond},
-	)
-
-	session := appTestSession()
-
-	plan := &domain.MigrationPlan{SessionID: session.ID, SessionSpec: session.Spec, Ready: true}
-	if _, err := service.CreateSession(context.Background(), plan, false); err != nil {
-		t.Fatal(err)
-	}
-
-	want := session.ID + "/Copy"
-	if store.acquiredID != want {
-		t.Fatalf("creation lock ID=%q, want %q", store.acquiredID, want)
 	}
 }
 
@@ -1704,6 +1714,16 @@ func TestValidateResumeRecognizesActivePVCBeforeCheckpointPersistence(t *testing
 
 	if want := []string{"data"}; !slices.Equal(fixture.switcher.offlineCalls, want) {
 		t.Fatalf("offline checks=%v want=%v", fixture.switcher.offlineCalls, want)
+	}
+
+	if len(fixture.switcher.offlineSessionIDs) == 0 {
+		t.Fatal("offline validation did not receive a session ID")
+	}
+
+	for _, id := range fixture.switcher.offlineSessionIDs {
+		if id != session.ID {
+			t.Fatalf("offline session ID=%q want=%q", id, session.ID)
+		}
 	}
 }
 

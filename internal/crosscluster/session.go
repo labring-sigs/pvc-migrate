@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/labring-sigs/pvc-migrate/internal/kube"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -164,7 +165,16 @@ func (s *Service) withLock(
 		return errors.New("cross-cluster session is required")
 	}
 
-	lock, err := s.store.AcquireSessionLock(ctx, session.Spec.SessionNamespace, session.ID)
+	if s == nil || s.store == nil {
+		return errors.New("cross-cluster session store is required")
+	}
+
+	lock, err := kube.AcquireRequiredSessionLock(
+		ctx,
+		s.store,
+		session.Spec.SessionNamespace,
+		session.ID,
+	)
 	if err != nil {
 		return err
 	}

@@ -106,7 +106,7 @@ func (f *podMigrationFlags) bind(command *cobra.Command) {
 	flags.BoolVar(
 		&f.verifyChecksum,
 		"verify-checksum",
-		true,
+		false,
 		"Use rsync checksum comparison during final sync",
 	)
 	flags.BoolVar(

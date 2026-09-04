@@ -233,7 +233,7 @@ func decodeControllerWatchObject(
 	object *unstructured.Unstructured,
 	kind domain.ControllerKind,
 ) (*domain.Session, error) {
-	typed := newWorkflowObject(kind)
+	typed := WorkflowObjectForKind(kind)
 	if typed == nil {
 		return nil, domain.NewError(
 			domain.ErrorValidation,

@@ -598,8 +598,7 @@ func acquireBackupTargetLock(
 	ctx context.Context,
 	req Request,
 ) (context.Context, kube.SessionLock, context.CancelFunc, error) {
-	locker, ok := req.SessionStore.(kube.SessionLocker)
-	if !ok {
+	if req.SessionStore == nil {
 		return ctx, nil, func() {}, nil
 	}
 
@@ -619,7 +618,12 @@ func acquireBackupTargetLock(
 		req.Store.Destination(),
 	)
 
-	lock, err := locker.AcquireSessionLock(ctx, req.SessionNamespace, lockID)
+	lock, err := kube.AcquireRequiredSessionLock(
+		ctx,
+		req.SessionStore,
+		req.SessionNamespace,
+		lockID,
+	)
 	if err != nil {
 		return nil, nil, nil, wrapBackupTargetLockError(
 			req,

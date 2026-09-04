@@ -43,7 +43,7 @@ type Service struct {
 	helmTimeout                               time.Duration
 	writer                                    io.Writer
 	logger                                    *slog.Logger
-	store                                     kube.SessionLocker
+	store                                     kube.LockingSessionStore
 }
 
 func NewService(source, destination *kube.Clients, copier copyengine.Engine) *Service {

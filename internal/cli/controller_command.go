@@ -11,7 +11,10 @@ import (
 )
 
 func (r *rootState) newControllerCommand() *cobra.Command {
-	var once bool
+	var (
+		once                   bool
+		healthProbeBindAddress string
+	)
 
 	command := &cobra.Command{
 		Use:   "controller",
@@ -70,18 +73,21 @@ func (r *rootState) newControllerCommand() *cobra.Command {
 					ReconcileOnce(ctx)
 			}
 
-			err = controller.StartManagerWithKinds(
+			err = controller.StartManager(
 				cmd.Context(),
 				runtime.clients.RESTConfig,
 				runtime.service,
 				runtime.controllerStore,
-				r.global.controllerNamespace,
-				runtime.clients.Kubernetes,
-				runtime.openEBSLVMSharedVolumeManager,
-				r.global.kubeconfig,
-				r.global.kubeContext,
-				runtime.controllerKinds,
-				r.global.toolImage,
+				controller.ManagerOptions{
+					Namespace:                     r.global.controllerNamespace,
+					KubernetesClient:              runtime.clients.Kubernetes,
+					OpenEBSLVMSharedVolumeManager: runtime.openEBSLVMSharedVolumeManager,
+					KubeconfigPath:                r.global.kubeconfig,
+					KubeContext:                   r.global.kubeContext,
+					SupportedKinds:                runtime.controllerKinds,
+					TrustedToolImage:              r.global.toolImage,
+					HealthProbeBindAddress:        healthProbeBindAddress,
+				},
 			)
 			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 				return nil
@@ -91,6 +97,12 @@ func (r *rootState) newControllerCommand() *cobra.Command {
 		},
 	}
 	command.Flags().BoolVar(&once, "once", false, "Run one reconciliation pass and exit")
+	command.Flags().StringVar(
+		&healthProbeBindAddress,
+		"health-probe-bind-address",
+		":8081",
+		"Address for controller health and readiness probes",
+	)
 
 	return command
 }

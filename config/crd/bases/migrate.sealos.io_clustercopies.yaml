@@ -88,6 +88,9 @@ spec:
               toolImage:
                 type: string
               verifyChecksum:
+                description: |-
+                  VerifyChecksum enables rsync checksum comparison during final sync. It
+                  defaults to false when omitted.
                 type: boolean
               volumes:
                 items:

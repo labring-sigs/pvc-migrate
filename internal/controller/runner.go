@@ -30,7 +30,7 @@ import (
 // resource fencing; this runner only provides event polling and dispatch.
 type Runner struct {
 	service          workflowResumer
-	store            kube.SessionStore
+	store            kube.ControllerSessionStore
 	client           kubernetes.Interface
 	controllerClient crclient.Reader
 	namespace        string
@@ -114,7 +114,11 @@ func (r *Runner) WithOpenEBSLVMSharedVolumeManager(
 	return r
 }
 
-func NewRunner(service workflowResumer, store kube.SessionStore, namespace string) *Runner {
+func NewRunner(
+	service workflowResumer,
+	store kube.ControllerSessionStore,
+	namespace string,
+) *Runner {
 	return &Runner{
 		service:      service,
 		store:        store,
@@ -213,17 +217,24 @@ func (r *Runner) checkpointFailure(
 		return cause
 	}
 
-	locker, supported := r.store.(kube.SessionLocker)
-	if !supported {
-		return r.transitionFailure(ctx, session, cause)
+	if session.BackendResource == "" {
+		return errors.Join(
+			cause,
+			domain.NewError(
+				domain.ErrorInternal,
+				"controller checkpoint",
+				"workflow backend resource kind is required",
+			),
+		)
 	}
 
 	namespace := session.Spec.SessionNamespace
 
-	lock, err := locker.AcquireSessionLock(
+	lock, err := kube.AcquireRequiredSessionLock(
 		ctx,
+		r.store,
 		namespace,
-		kube.LockIDForSession(r.store, session),
+		kube.SessionLockID(session),
 	)
 	if err != nil {
 		return errors.Join(cause, err)
@@ -231,28 +242,12 @@ func (r *Runner) checkpointFailure(
 
 	operationCtx, cancelOperation := lock.Bind(ctx)
 	operationErr := func() error {
-		var latest *domain.Session
-
-		var getErr error
-
-		if kindStore, ok := r.store.(interface {
-			GetByKind(
-				ctx context.Context,
-				namespace string,
-				id string,
-				kind domain.ControllerKind,
-			) (*domain.Session, error)
-		}); ok && session.BackendResource != "" {
-			latest, getErr = kindStore.GetByKind(
-				operationCtx,
-				namespace,
-				session.ID,
-				session.BackendResource,
-			)
-		} else {
-			latest, getErr = r.store.Get(operationCtx, namespace, session.ID)
-		}
-
+		latest, getErr := r.store.GetByKind(
+			operationCtx,
+			namespace,
+			session.ID,
+			session.BackendResource,
+		)
 		if getErr != nil {
 			return errors.Join(cause, getErr)
 		}
