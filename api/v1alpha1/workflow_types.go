@@ -109,6 +109,8 @@ type PVCMetadata struct {
 
 // WorkloadSpec is specific to PodMigration and records workload ownership
 // and restoration data needed by that operation.
+// +kubebuilder:validation:XValidation:rule="self.adapter == 'None' || (has(self.pod) && has(self.pod.apiVersion) && size(self.pod.apiVersion) > 0 && has(self.pod.kind) && size(self.pod.kind) > 0 && has(self.pod.name) && size(self.pod.name) > 0 && has(self.pod.uid) && size(self.pod.uid) > 0)",message="workload.pod must include apiVersion, kind, name, and uid"
+// +kubebuilder:validation:XValidation:rule="self.adapter == 'None' || self.adapter == 'StandalonePod' || (has(self.controller) && has(self.controller.apiVersion) && size(self.controller.apiVersion) > 0 && has(self.controller.kind) && size(self.controller.kind) > 0 && has(self.controller.name) && size(self.controller.name) > 0 && has(self.controller.uid) && size(self.controller.uid) > 0)",message="workload.controller must include apiVersion, kind, name, and uid for managed workloads"
 type WorkloadSpec struct {
 	Adapter          WorkloadKind            `json:"adapter"                    yaml:"adapter"`
 	Pod              *LocalResourceReference `json:"pod,omitempty"              yaml:"pod,omitempty"`

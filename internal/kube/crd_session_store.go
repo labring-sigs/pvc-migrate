@@ -993,7 +993,11 @@ func (s *CRDSessionStore) Update(ctx context.Context, session *domain.Session) e
 		// cluster-scoped workflow may intentionally use equal namespace roles;
 		// deriving scope from those roles would incorrectly switch it to a
 		// namespaced Kind during an ordinary status update.
-		if !controllerSessionSupportedForResource(session, storedWorkflow) {
+		// Preserve a terminal failure even when a legacy CR contains a malformed
+		// controller-only field; admission rejects new objects, while old ones
+		// still need a durable outcome instead of an endless reconcile loop.
+		if !controllerSessionSupportedForResource(session, storedWorkflow) &&
+			session.Status.Phase != domain.PhaseFailed {
 			return domain.NewError(
 				domain.ErrorPrecondition,
 				"update session",

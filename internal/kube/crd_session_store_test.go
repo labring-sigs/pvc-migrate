@@ -201,6 +201,79 @@ func TestCRDSessionStoreUpdatesSameNamespaceClusterWorkflow(t *testing.T) {
 	}
 }
 
+func TestCRDSessionStorePersistsFailureForInvalidClusterPodWorkflow(t *testing.T) {
+	ctx := context.Background()
+	client := newCRDTestClient()
+	store := NewCRDSessionStore(client)
+	session := storeTestSession()
+	session.Spec = domain.NewPodMigrationSessionSpec(
+		domain.SessionCommon{
+			SourceNamespace:      "system",
+			TemporaryNamespace:   "system",
+			DestinationNamespace: "system",
+			SessionNamespace:     "system",
+			Volumes:              session.Spec.Volumes,
+		},
+		domain.WorkloadSpec{
+			Adapter: domain.WorkloadStandalone,
+			Pod: domain.ObjectReference{
+				Namespace: "system",
+				Name:      "workload",
+				UID:       "pod-uid",
+			},
+		},
+		domain.SessionWorkflowOptions{},
+		0,
+		false,
+	)
+	session.BackendResource = domain.ControllerKindClusterPodMigration
+
+	object := sessionObjectFor(session)
+	if object == nil {
+		t.Fatal("failed to construct ClusterPodMigration object")
+	}
+
+	if err := client.Create(ctx, object); err != nil {
+		t.Fatal(err)
+	}
+
+	loaded, err := store.GetByKind(
+		ctx,
+		"",
+		session.ID,
+		domain.ControllerKindClusterPodMigration,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if err := loaded.Transition(
+		domain.PhaseFailed,
+		"invalid workload identity",
+		time.Now(),
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := store.Update(ctx, loaded); err != nil {
+		t.Fatalf("failed workflow status should remain persistable: %v", err)
+	}
+
+	reloaded, err := store.GetByKind(
+		ctx,
+		"",
+		session.ID,
+		domain.ControllerKindClusterPodMigration,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if reloaded.Status.Phase != domain.PhaseFailed {
+		t.Fatalf("phase=%q, want Failed", reloaded.Status.Phase)
+	}
+}
+
 func TestCRDSessionStoreListReadsWorkflowKindsConcurrently(t *testing.T) {
 	client := &concurrentListClient{
 		Client: newCRDTestClient(),
