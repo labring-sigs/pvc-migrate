@@ -7,7 +7,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"maps"
 	"net"
 	"net/http"
 	"os"
@@ -45,15 +44,14 @@ import (
 )
 
 const (
-	sessionLabel       = kube.MetadataDomain + "/session"
-	roleLabel          = kube.MetadataDomain + "/role"
-	sessionKey         = "session.json"
-	workflowGroup      = "migrate.sealos.io"
-	workflowVersion    = "v1alpha1"
-	controllerLease    = "pvc-migrate-controller"
-	controllerPoll     = time.Second
-	controllerStartup  = 2 * time.Minute
-	podSecurityVersion = "v1.25"
+	sessionLabel      = kube.MetadataDomain + "/session"
+	roleLabel         = kube.MetadataDomain + "/role"
+	sessionKey        = "session.json"
+	workflowGroup     = "migrate.sealos.io"
+	workflowVersion   = "v1alpha1"
+	controllerLease   = "pvc-migrate-controller"
+	controllerPoll    = time.Second
+	controllerStartup = 2 * time.Minute
 )
 
 func TestBackupRepositoryAdmission(t *testing.T) {
@@ -95,7 +93,7 @@ func TestBackupRepositoryAdmission(t *testing.T) {
 
 	if _, err := clients.Kubernetes.CoreV1().Namespaces().Create(
 		ctx,
-		e2eNamespace(namespace, nil),
+		&corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: namespace}},
 		metav1.CreateOptions{},
 	); err != nil {
 		t.Fatal(err)
@@ -1232,19 +1230,7 @@ func TestControllerPodMigrationStatusCheckpointRoundTrip(t *testing.T) {
 	sessionID := "status-" + suffix
 	defer cleanupTestResources(t, config, client, namespace, sessionID)
 
-	if _, err := client.CoreV1().Namespaces().Create(
-		ctx,
-		e2eNamespace(
-			namespace,
-			map[string]string{
-				"app.kubernetes.io/managed-by": "pvc-migrate-e2e",
-				sessionLabel:                   sessionID,
-			},
-		),
-		metav1.CreateOptions{},
-	); err != nil {
-		t.Fatal(err)
-	}
+	createE2ENamespace(t, ctx, client, namespace, sessionID)
 
 	spec := domain.NewPodMigrationSessionSpec(
 		domain.SessionCommon{
@@ -1377,7 +1363,7 @@ func TestControllerRepositoryStatusCheckpointRoundTrip(t *testing.T) {
 
 			if _, err := client.CoreV1().Namespaces().Create(
 				ctx,
-				e2eNamespace(namespace, nil),
+				&corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: namespace}},
 				metav1.CreateOptions{},
 			); err != nil {
 				t.Fatal(err)
@@ -1593,19 +1579,7 @@ func TestStorageClassAllowedTopologiesRejectsBeforeMutation(t *testing.T) {
 		}
 	}()
 
-	if _, err := client.CoreV1().Namespaces().Create(
-		ctx,
-		e2eNamespace(
-			namespace,
-			map[string]string{
-				"app.kubernetes.io/managed-by": "pvc-migrate-e2e",
-				sessionLabel:                   sessionID,
-			},
-		),
-		metav1.CreateOptions{},
-	); err != nil {
-		t.Fatal(err)
-	}
+	createE2ENamespace(t, ctx, client, namespace, sessionID)
 	sourceClass := envOrDefault("PVC_MIGRATE_E2E_SOURCE_CLASS", "openebs-hostpath")
 	storage := resource.MustParse("32Mi")
 	if _, err := client.CoreV1().PersistentVolumeClaims(namespace).Create(
@@ -2097,17 +2071,7 @@ func TestStandaloneWFFCMigrationAndRollback(t *testing.T) {
 	sessionID := "e2e-" + suffix
 	defer cleanupTestResources(t, config, client, namespace, sessionID)
 
-	if _, err := client.CoreV1().
-		Namespaces().
-		Create(ctx, e2eNamespace(
-			namespace,
-			map[string]string{
-				"app.kubernetes.io/managed-by": "pvc-migrate-e2e",
-				sessionLabel:                   sessionID,
-			},
-		), metav1.CreateOptions{}); err != nil {
-		t.Fatal(err)
-	}
+	createE2ENamespace(t, ctx, client, namespace, sessionID)
 
 	sourceClass := envOrDefault("PVC_MIGRATE_E2E_SOURCE_CLASS", "openebs-hostpath")
 	destinationClass := envOrDefault("PVC_MIGRATE_E2E_DESTINATION_CLASS", "openebs-backup")
@@ -2401,19 +2365,7 @@ func TestOfflineMigrationAndRollback(t *testing.T) {
 	sessionID := "offline-" + suffix
 	defer cleanupTestResources(t, config, client, namespace, sessionID)
 
-	if _, err := client.CoreV1().Namespaces().Create(
-		ctx,
-		e2eNamespace(
-			namespace,
-			map[string]string{
-				"app.kubernetes.io/managed-by": "pvc-migrate-e2e",
-				sessionLabel:                   sessionID,
-			},
-		),
-		metav1.CreateOptions{},
-	); err != nil {
-		t.Fatal(err)
-	}
+	createE2ENamespace(t, ctx, client, namespace, sessionID)
 
 	sourceClass := envOrDefault("PVC_MIGRATE_E2E_SOURCE_CLASS", "openebs-hostpath")
 	destinationClass := envOrDefault(
@@ -2665,17 +2617,7 @@ func TestHelmManagedStatefulSetMigrationAndRollback(t *testing.T) {
 	sessionID := "sts-" + suffix
 	defer cleanupTestResources(t, config, client, namespace, sessionID)
 
-	if _, err := client.CoreV1().
-		Namespaces().
-		Create(ctx, e2eNamespace(
-			namespace,
-			map[string]string{
-				"app.kubernetes.io/managed-by": "pvc-migrate-e2e",
-				sessionLabel:                   sessionID,
-			},
-		), metav1.CreateOptions{}); err != nil {
-		t.Fatal(err)
-	}
+	createE2ENamespace(t, ctx, client, namespace, sessionID)
 
 	sourceClass := envOrDefault("PVC_MIGRATE_E2E_SOURCE_CLASS", "openebs-hostpath")
 	destinationClass := envOrDefault("PVC_MIGRATE_E2E_DESTINATION_CLASS", "openebs-backup")
@@ -2928,17 +2870,7 @@ func TestOnlineCopyMultiVolumeIdempotencyAndCleanup(t *testing.T) {
 	sessionID := "online-" + suffix
 	defer cleanupTestResources(t, config, client, namespace, sessionID)
 
-	if _, err := client.CoreV1().
-		Namespaces().
-		Create(ctx, e2eNamespace(
-			namespace,
-			map[string]string{
-				"app.kubernetes.io/managed-by": "pvc-migrate-e2e",
-				sessionLabel:                   sessionID,
-			},
-		), metav1.CreateOptions{}); err != nil {
-		t.Fatal(err)
-	}
+	createE2ENamespace(t, ctx, client, namespace, sessionID)
 	sourceClass := envOrDefault("PVC_MIGRATE_E2E_SOURCE_CLASS", "openebs-hostpath")
 	destinationClass := envOrDefault("PVC_MIGRATE_E2E_DESTINATION_CLASS", "openebs-backup")
 	claims := []string{"data-a", "data-b"}
@@ -4048,41 +3980,18 @@ func createE2ENamespace(
 	t.Helper()
 	_, err := client.CoreV1().Namespaces().Create(
 		ctx,
-		e2eNamespace(
-			namespace,
-			map[string]string{
+		&corev1.Namespace{ObjectMeta: metav1.ObjectMeta{
+			Name: namespace,
+			Labels: map[string]string{
 				"app.kubernetes.io/managed-by": "pvc-migrate-e2e",
 				sessionLabel:                   sessionID,
 			},
-		),
+		}},
 		metav1.CreateOptions{},
 	)
 	if err != nil {
 		t.Fatal(err)
 	}
-}
-
-func e2eNamespace(name string, additionalLabels map[string]string) *corev1.Namespace {
-	namespaceLabels := maps.Clone(additionalLabels)
-	if namespaceLabels == nil {
-		namespaceLabels = make(map[string]string)
-	}
-
-	for key, value := range map[string]string{
-		"pod-security.kubernetes.io/audit":           "restricted",
-		"pod-security.kubernetes.io/audit-version":   podSecurityVersion,
-		"pod-security.kubernetes.io/enforce":         "baseline",
-		"pod-security.kubernetes.io/enforce-version": podSecurityVersion,
-		"pod-security.kubernetes.io/warn":            "restricted",
-		"pod-security.kubernetes.io/warn-version":    podSecurityVersion,
-	} {
-		namespaceLabels[key] = value
-	}
-
-	return &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{
-		Name:   name,
-		Labels: namespaceLabels,
-	}}
 }
 
 func createE2EStorageClass(
