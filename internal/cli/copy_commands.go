@@ -33,7 +33,11 @@ func adoptReservedSessionForCopy(session *domain.Session, flags *copyFlags) erro
 	if session.Spec.Type == domain.SessionTypeReserve {
 		options := session.Spec.WorkflowOptions()
 		options.SourceNode = flags.sourceNode
-		options.Strategies = append([]string(nil), flags.strategies...)
+		options.Strategies = planner.ResolveStrategies(
+			session.Spec.SourceNamespace,
+			session.Spec.DestinationNamespace,
+			flags.strategies,
+		)
 		options.VerifyChecksum = flags.verifyChecksum
 		options.DeleteExtraneous = flags.deleteExtraneous
 

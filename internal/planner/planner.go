@@ -1722,10 +1722,11 @@ func applyDefaults(options planOptions) planOptions {
 		options.CapacityAwareness = domain.CapacityAwarenessAuto
 	}
 
-	if len(options.Strategies) == 0 ||
-		(len(options.Strategies) == 1 && containsStrategy(options.Strategies, domain.StrategyAuto)) {
-		options.Strategies = autoStrategies(options.SourceNamespace, options.StagingNamespace)
-	}
+	options.Strategies = ResolveStrategies(
+		options.SourceNamespace,
+		options.StagingNamespace,
+		options.Strategies,
+	)
 
 	return options
 }
@@ -2212,6 +2213,21 @@ func autoStrategies(sourceNamespace, destinationNamespace string) []string {
 		return []string{domain.StrategyMount, domain.StrategyClusterIP}
 	}
 	return []string{domain.StrategyClusterIP, domain.StrategyLocal}
+}
+
+// ResolveStrategies expands the user-facing auto strategy into the concrete
+// fallback order required by pv-migrate. Keeping this normalization at the
+// planner boundary also makes resumed and handed-off sessions executable.
+func ResolveStrategies(
+	sourceNamespace, destinationNamespace string,
+	strategies []string,
+) []string {
+	if len(strategies) == 0 ||
+		(len(strategies) == 1 && containsStrategy(strategies, domain.StrategyAuto)) {
+		return autoStrategies(sourceNamespace, destinationNamespace)
+	}
+
+	return slices.Clone(strategies)
 }
 
 func warmCopyRequested(options planOptions) bool {
