@@ -3898,14 +3898,13 @@ func assertCopySession(
 	if storedOnline != online {
 		t.Fatalf("copy online=%t want=%t", storedOnline, online)
 	}
-	requiredFields := []string{"sourceNode", "targetNode", "strategies", "deleteExtraneous"}
-	if mode == "session" {
-		requiredFields = append(requiredFields, "verifyChecksum")
-	}
-	for _, field := range requiredFields {
+	for _, field := range []string{"sourceNode", "targetNode", "strategies", "deleteExtraneous"} {
 		if _, exists := snapshot.Spec.Copy[field]; !exists {
 			t.Fatalf("copy payload field %q missing", field)
 		}
+	}
+	if _, exists := snapshot.Spec.Copy["verifyChecksum"]; exists {
+		t.Fatal("copy payload serialized the default verifyChecksum=false")
 	}
 	var sourceNode, targetNode string
 	if err := json.Unmarshal(snapshot.Spec.Copy["sourceNode"], &sourceNode); err != nil {
@@ -4949,10 +4948,13 @@ func assertSessionPayloadShape(
 	if err := json.Unmarshal(payload, &fields); err != nil {
 		t.Fatal(err)
 	}
-	for _, field := range []string{"sourceNode", "targetNode", "strategies", "verifyChecksum", "deleteExtraneous", "workload"} {
+	for _, field := range []string{"sourceNode", "targetNode", "strategies", "deleteExtraneous", "workload"} {
 		if _, exists := fields[field]; !exists {
 			t.Fatalf("migratePod payload field %q missing: %s", field, payload)
 		}
+	}
+	if _, exists := fields["verifyChecksum"]; exists {
+		t.Fatal("migratePod payload serialized the default verifyChecksum=false")
 	}
 }
 

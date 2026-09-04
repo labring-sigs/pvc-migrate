@@ -412,7 +412,7 @@ func (f *crossClusterCopyFlags) bind(command *cobra.Command, r *rootState) {
 	flags.BoolVar(
 		&f.verifyChecksum,
 		"verify-checksum",
-		true,
+		false,
 		"Verify copied files with rsync checksums",
 	)
 	flags.BoolVar(

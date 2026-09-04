@@ -89,8 +89,8 @@ spec:
                 type: string
               verifyChecksum:
                 description: |-
-                  VerifyChecksum defaults to true when omitted. A pointer preserves an
-                  explicit false without serializing the default into every controller CR.
+                  VerifyChecksum enables rsync checksum comparison during final sync. It
+                  defaults to false when omitted.
                 type: boolean
               volumes:
                 items:

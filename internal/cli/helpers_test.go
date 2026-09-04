@@ -353,11 +353,39 @@ func testRootDryRunPlacement(t *testing.T, root *cobra.Command) {
 func testRootOperationFlags(t *testing.T, root *cobra.Command) {
 	t.Helper()
 
+	testChecksumFlagDefaults(t, root)
 	testCopyBackupRestoreFlags(t, root)
 	testCapacityAndPathFlagPlacement(t, root)
 	testCutoverFlagPlacement(t, root)
 	testCleanupFlagPlacement(t, root)
 	testWorkflowCommandSurface(t, root)
+}
+
+func testChecksumFlagDefaults(t *testing.T, root *cobra.Command) {
+	t.Helper()
+
+	for _, path := range [][]string{
+		{"copy"},
+		{"copy", "plan"},
+		{"copy", "cross-cluster", "run"},
+		{"copy", "cross-cluster", "plan"},
+		{"migrate"},
+		{"migrate", "plan"},
+		{"migrate-pod"},
+		{"migrate-pod", "plan"},
+		{"reserve"},
+		{"reserve", "plan"},
+	} {
+		command, _, err := root.Find(path)
+		if err != nil {
+			t.Fatalf("Find(%v): %v", path, err)
+		}
+
+		flag := command.Flags().Lookup("verify-checksum")
+		if flag == nil || flag.DefValue != "false" {
+			t.Fatalf("%v --verify-checksum default=%v, want false", path, flag)
+		}
+	}
 }
 
 func testCleanupFlagPlacement(t *testing.T, root *cobra.Command) {
@@ -672,7 +700,7 @@ func testMigrationFlagDefaults(t *testing.T, command *cobra.Command) {
 		"temporary-namespace":       "pvc-migrate-system",
 		"target-node":               "auto",
 		"strategy":                  "[auto]",
-		"verify-checksum":           "true",
+		"verify-checksum":           "false",
 		"delete-extraneous":         "true",
 		"precopy-passes":            "1",
 		"openebs-lvm-enable-shared": "false",

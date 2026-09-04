@@ -113,12 +113,12 @@ type ClusterCopySpec struct {
 	ToolImage  string              `json:"toolImage,omitempty"  yaml:"toolImage,omitempty"`
 	// +kubebuilder:validation:MaxItems=32
 	Strategies []string `json:"strategies,omitempty"           yaml:"strategies,omitempty"`
-	// VerifyChecksum defaults to true when omitted. A pointer preserves an
-	// explicit false without serializing the default into every controller CR.
-	VerifyChecksum       *bool `json:"verifyChecksum,omitempty"       yaml:"verifyChecksum,omitempty"`
-	DeleteExtraneous     bool  `json:"deleteExtraneous,omitempty"     yaml:"deleteExtraneous,omitempty"`
-	SkipSourceUsageCheck bool  `json:"skipSourceUsageCheck,omitempty" yaml:"skipSourceUsageCheck,omitempty"`
-	Online               bool  `json:"online,omitempty"               yaml:"online,omitempty"`
+	// VerifyChecksum enables rsync checksum comparison during final sync. It
+	// defaults to false when omitted.
+	VerifyChecksum       bool `json:"verifyChecksum,omitempty"       yaml:"verifyChecksum,omitempty"`
+	DeleteExtraneous     bool `json:"deleteExtraneous,omitempty"     yaml:"deleteExtraneous,omitempty"`
+	SkipSourceUsageCheck bool `json:"skipSourceUsageCheck,omitempty" yaml:"skipSourceUsageCheck,omitempty"`
+	Online               bool `json:"online,omitempty"               yaml:"online,omitempty"`
 }
 
 type MoveIdentity struct {

@@ -209,12 +209,12 @@ type CopySpec struct {
 	ToolImage  string       `json:"toolImage,omitempty"  yaml:"toolImage,omitempty"`
 	// +kubebuilder:validation:MaxItems=32
 	Strategies []string `json:"strategies,omitempty"           yaml:"strategies,omitempty"`
-	// VerifyChecksum defaults to true when omitted. A pointer preserves an
-	// explicit false without serializing the default into every controller CR.
-	VerifyChecksum       *bool `json:"verifyChecksum,omitempty"       yaml:"verifyChecksum,omitempty"`
-	DeleteExtraneous     bool  `json:"deleteExtraneous,omitempty"     yaml:"deleteExtraneous,omitempty"`
-	SkipSourceUsageCheck bool  `json:"skipSourceUsageCheck,omitempty" yaml:"skipSourceUsageCheck,omitempty"`
-	Online               bool  `json:"online,omitempty"               yaml:"online,omitempty"`
+	// VerifyChecksum enables rsync checksum comparison during final sync. It
+	// defaults to false when omitted.
+	VerifyChecksum       bool `json:"verifyChecksum,omitempty"       yaml:"verifyChecksum,omitempty"`
+	DeleteExtraneous     bool `json:"deleteExtraneous,omitempty"     yaml:"deleteExtraneous,omitempty"`
+	SkipSourceUsageCheck bool `json:"skipSourceUsageCheck,omitempty" yaml:"skipSourceUsageCheck,omitempty"`
+	Online               bool `json:"online,omitempty"               yaml:"online,omitempty"`
 }
 
 type BackupSpec struct {
@@ -487,22 +487,6 @@ type RestoreStatus struct {
 	DestinationPV  *ObjectReference               `json:"destinationPV,omitempty"  yaml:"destinationPV,omitempty"`
 }
 
-func boolValueOrDefault(value *bool, fallback bool) bool {
-	if value == nil {
-		return fallback
-	}
-
-	return *value
-}
-
-func optionalBool(value, fallback bool) *bool {
-	if value == fallback {
-		return nil
-	}
-
-	return &value
-}
-
 type RenameStatus struct {
 	WorkflowStatus `                          json:",inline" yaml:",inline"`
 	Volumes        []PVCIdentityVolumeStatus `json:"volumes" yaml:"volumes"`
@@ -546,7 +530,7 @@ func (s CopySpec) workflowOptions() domain.SessionWorkflowOptions {
 		TargetNode:           s.TargetNode,
 		ToolImage:            s.ToolImage,
 		Strategies:           append([]string(nil), s.Strategies...),
-		VerifyChecksum:       boolValueOrDefault(s.VerifyChecksum, true),
+		VerifyChecksum:       s.VerifyChecksum,
 		DeleteExtraneous:     s.DeleteExtraneous,
 		SkipSourceUsageCheck: s.SkipSourceUsageCheck,
 	}
@@ -841,7 +825,7 @@ func CopySpecFromDomain(s domain.SessionSpec) CopySpec {
 		TargetNode:           options.TargetNode,
 		ToolImage:            options.ToolImage,
 		Strategies:           append([]string(nil), options.Strategies...),
-		VerifyChecksum:       optionalBool(options.VerifyChecksum, true),
+		VerifyChecksum:       options.VerifyChecksum,
 		DeleteExtraneous:     options.DeleteExtraneous,
 		SkipSourceUsageCheck: options.SkipSourceUsageCheck,
 		Online:               s.Online(),
