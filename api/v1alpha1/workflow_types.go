@@ -558,11 +558,7 @@ func volumeSpecFromDomain(v domain.VolumeSpec) VolumeSpec {
 		SourceReclaimPolicy: v.SourceReclaimPolicy,
 		SourcePVCSpec:       *v.SourcePVCSpec.DeepCopy(),
 		SourcePVCMetadata:   pvcMetadataFromDomain(v.SourcePVCMetadata),
-		DestinationPVC: LocalResourceReference{
-			APIVersion: v.DestinationPVC.APIVersion,
-			Kind:       v.DestinationPVC.Kind,
-			Name:       v.DestinationPVC.Name,
-		},
+		DestinationPVC:      plannedDestinationRefFromDomain(v.DestinationPVC),
 		Capacity:            v.Capacity,
 		SourceCapacity:      v.SourceCapacity,
 		SourceUsedBytes:     v.SourceUsedBytes,
@@ -856,11 +852,7 @@ func RestoreSpecFromDomain(s domain.SessionSpec) RestoreSpec {
 		p = &domain.RestoreSessionSpec{}
 	}
 	return RestoreSpec{
-		DestinationPVC: LocalResourceReference{
-			APIVersion: p.DestinationPVC.APIVersion,
-			Kind:       p.DestinationPVC.Kind,
-			Name:       p.DestinationPVC.Name,
-		},
+		DestinationPVC:          plannedDestinationRefFromDomain(p.DestinationPVC),
 		Path:                    p.Path,
 		Name:                    p.Name,
 		RepositoryRef:           repositoryRef(p.BackupRepository),
@@ -957,6 +949,16 @@ func localRefFromDomain(in domain.ObjectReference) LocalResourceReference {
 		Name:            in.Name,
 		UID:             in.UID,
 		ResourceVersion: in.ResourceVersion,
+	}
+}
+
+// plannedDestinationRefFromDomain keeps controller-owned runtime identity out
+// of declarative specs. UID and resourceVersion checkpoints live in status.
+func plannedDestinationRefFromDomain(in domain.ObjectReference) LocalResourceReference {
+	return LocalResourceReference{
+		APIVersion: in.APIVersion,
+		Kind:       in.Kind,
+		Name:       in.Name,
 	}
 }
 

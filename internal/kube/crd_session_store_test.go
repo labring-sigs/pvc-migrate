@@ -276,6 +276,74 @@ func TestCRDSessionStorePersistsDestinationIdentityOnlyInStatus(t *testing.T) {
 	}
 }
 
+func TestCRDSessionStorePersistsClusterDestinationIdentityOnlyInStatus(t *testing.T) {
+	ctx := context.Background()
+	client := &updateCountingClient{Client: newCRDTestClient()}
+	store := NewCRDSessionStore(client)
+	base := storeTestSession()
+	common := base.Spec.SessionCommon
+	common.SourceNamespace = "source"
+	common.TemporaryNamespace = "destination"
+	common.DestinationNamespace = "destination"
+	common.SessionNamespace = "system"
+	common.Volumes[0].SourcePVC.Namespace = "source"
+	common.Volumes[0].DestinationPVC.Namespace = "destination"
+	spec := domain.NewSessionSpec(
+		domain.OperationCopy,
+		common,
+		true,
+		domain.SessionWorkflowOptions{},
+	)
+	session := domain.NewSession(base.ID, spec, time.Now())
+
+	if err := store.Create(ctx, session); err != nil {
+		t.Fatal(err)
+	}
+
+	volume := &session.Spec.Volumes[0]
+	volume.DestinationPVC.UID = "destination-pvc-uid"
+	volume.DestinationPVC.ResourceVersion = "17"
+	volume.DestinationPV = domain.ObjectReference{
+		Name: "destination-pv", UID: "destination-pv-uid", ResourceVersion: "19",
+	}
+	volume.DestinationPolicy = corev1.PersistentVolumeReclaimRetain
+	session.Status.Volumes[0].Reserved = true
+
+	if err := store.Update(ctx, session); err != nil {
+		t.Fatal(err)
+	}
+
+	if client.updates != 0 {
+		t.Fatalf("cluster runtime checkpoint caused %d main-resource updates", client.updates)
+	}
+
+	var object v1alpha1.ClusterCopy
+	if err := client.Get(ctx, crclient.ObjectKey{Name: session.ID}, &object); err != nil {
+		t.Fatal(err)
+	}
+
+	if object.Spec.Volumes[0].DestinationPVC.UID != "" ||
+		object.Status.Volumes[0].DestinationPVC.UID != "destination-pvc-uid" ||
+		object.Status.Volumes[0].DestinationPV.Name != "destination-pv" {
+		t.Fatalf(
+			"unexpected ClusterCopy spec/status checkpoint: %#v %#v",
+			object.Spec,
+			object.Status,
+		)
+	}
+
+	loaded, err := store.Get(ctx, session.Spec.SessionNamespace, session.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if loaded.Spec.Volumes[0].DestinationPVC.UID != "destination-pvc-uid" ||
+		loaded.Spec.Volumes[0].DestinationPV.UID != "destination-pv-uid" ||
+		loaded.Spec.Volumes[0].DestinationPolicy != corev1.PersistentVolumeReclaimRetain {
+		t.Fatalf("cluster destination checkpoint was not restored: %#v", loaded.Spec.Volumes[0])
+	}
+}
+
 func TestCRDSessionStorePersistsCurrentPodIdentityOnlyInStatus(t *testing.T) {
 	ctx := context.Background()
 	client := &updateCountingClient{Client: newCRDTestClient()}
