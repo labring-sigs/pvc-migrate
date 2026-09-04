@@ -160,6 +160,7 @@ type GrafanaSpec struct {
 	OriginalReplicas          int32     `json:"originalReplicas"          yaml:"originalReplicas"`
 }
 
+// +kubebuilder:validation:XValidation:rule="has(self.volumes) && size(self.volumes) > 0",message="volumes must contain at least one source PVC"
 // MigrationSpec is an offline PVC migration. It has no workload controls.
 type MigrationSpec struct {
 	// +kubebuilder:validation:MaxItems=1024
@@ -174,6 +175,7 @@ type MigrationSpec struct {
 	SkipSourceUsageCheck bool     `json:"skipSourceUsageCheck,omitempty" yaml:"skipSourceUsageCheck,omitempty"`
 }
 
+// +kubebuilder:validation:XValidation:rule="has(self.volumes) && size(self.volumes) > 0",message="volumes must contain at least one source PVC"
 // +kubebuilder:validation:XValidation:rule="self.workload.adapter != 'None'",message="PodMigration workload.adapter must identify a supported workload"
 // PodMigrationSpec is a workload-aware migration. Workload and precopy
 // controls are exclusive to this operation.
@@ -193,6 +195,7 @@ type PodMigrationSpec struct {
 	OpenEBSLVMEnableShared bool         `json:"openebsLvmEnableShared,omitempty" yaml:"openebsLvmEnableShared,omitempty"`
 }
 
+// +kubebuilder:validation:XValidation:rule="has(self.volumes) && size(self.volumes) > 0",message="volumes must contain at least one source PVC"
 type ReservationSpec struct {
 	// +kubebuilder:validation:MaxItems=1024
 	Volumes              []VolumeSpec `json:"volumes,omitempty"              yaml:"volumes,omitempty"`
@@ -201,6 +204,7 @@ type ReservationSpec struct {
 	SkipSourceUsageCheck bool         `json:"skipSourceUsageCheck,omitempty" yaml:"skipSourceUsageCheck,omitempty"`
 }
 
+// +kubebuilder:validation:XValidation:rule="has(self.volumes) && size(self.volumes) > 0",message="volumes must contain at least one source PVC"
 type CopySpec struct {
 	// +kubebuilder:validation:MaxItems=1024
 	Volumes    []VolumeSpec `json:"volumes,omitempty"    yaml:"volumes,omitempty"`

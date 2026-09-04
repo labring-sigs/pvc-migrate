@@ -692,6 +692,8 @@ spec:
             - workload
             type: object
             x-kubernetes-validations:
+            - message: volumes must contain at least one source PVC
+              rule: has(self.volumes) && size(self.volumes) > 0
             - message: PodMigration workload.adapter must identify a supported workload
               rule: self.workload.adapter != 'None'
           status:

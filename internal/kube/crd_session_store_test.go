@@ -162,6 +162,45 @@ func TestCRDSessionStoreRoundTripAndStatusUpdate(t *testing.T) {
 	}
 }
 
+func TestCRDSessionStoreUpdatesSameNamespaceClusterWorkflow(t *testing.T) {
+	ctx := context.Background()
+	store := NewCRDSessionStore(newCRDTestClient())
+	session := storeTestSession()
+	session.Spec = domain.NewSessionSpec(
+		domain.OperationCopy,
+		session.Spec.SessionCommon,
+		false,
+		domain.SessionWorkflowOptions{},
+	)
+	session.BackendResource = domain.ControllerKindClusterCopy
+
+	if err := store.Create(ctx, session); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := session.Transition(domain.PhaseReserving, "reserving", time.Now()); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := store.Update(ctx, session); err != nil {
+		t.Fatal(err)
+	}
+
+	loaded, err := store.GetByKind(ctx, "", session.ID, domain.ControllerKindClusterCopy)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if loaded.BackendResource != domain.ControllerKindClusterCopy ||
+		loaded.Status.Phase != domain.PhaseReserving {
+		t.Fatalf(
+			"loaded cluster workflow resource=%q phase=%q",
+			loaded.BackendResource,
+			loaded.Status.Phase,
+		)
+	}
+}
+
 func TestCRDSessionStoreListReadsWorkflowKindsConcurrently(t *testing.T) {
 	client := &concurrentListClient{
 		Client: newCRDTestClient(),

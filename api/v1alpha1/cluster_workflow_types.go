@@ -52,6 +52,7 @@ type ClusterWorkloadSpec struct {
 	Grafana        *GrafanaSpec             `json:"grafana,omitempty"        yaml:"grafana,omitempty"`
 }
 
+// +kubebuilder:validation:XValidation:rule="has(self.volumes) && size(self.volumes) > 0",message="volumes must contain at least one source PVC"
 type ClusterMigrationSpec struct {
 	SourceNamespace      NamespaceName `json:"sourceNamespace"      yaml:"sourceNamespace"`
 	TemporaryNamespace   NamespaceName `json:"temporaryNamespace"   yaml:"temporaryNamespace"`
@@ -69,6 +70,7 @@ type ClusterMigrationSpec struct {
 	SkipSourceUsageCheck bool     `json:"skipSourceUsageCheck,omitempty" yaml:"skipSourceUsageCheck,omitempty"`
 }
 
+// +kubebuilder:validation:XValidation:rule="has(self.volumes) && size(self.volumes) > 0",message="volumes must contain at least one source PVC"
 // +kubebuilder:validation:XValidation:rule="self.workload.adapter != 'None'",message="ClusterPodMigration workload.adapter must identify a supported workload"
 type ClusterPodMigrationSpec struct {
 	// Pod migration preserves workload and PVC identities in SourceNamespace.
@@ -91,6 +93,7 @@ type ClusterPodMigrationSpec struct {
 	OpenEBSLVMEnableShared bool                `json:"openebsLvmEnableShared,omitempty" yaml:"openebsLvmEnableShared,omitempty"`
 }
 
+// +kubebuilder:validation:XValidation:rule="has(self.volumes) && size(self.volumes) > 0",message="volumes must contain at least one source PVC"
 type ClusterReservationSpec struct {
 	SourceNamespace      NamespaceName `json:"sourceNamespace"      yaml:"sourceNamespace"`
 	DestinationNamespace NamespaceName `json:"destinationNamespace" yaml:"destinationNamespace"`
@@ -102,6 +105,7 @@ type ClusterReservationSpec struct {
 	SkipSourceUsageCheck bool                `json:"skipSourceUsageCheck,omitempty" yaml:"skipSourceUsageCheck,omitempty"`
 }
 
+// +kubebuilder:validation:XValidation:rule="has(self.volumes) && size(self.volumes) > 0",message="volumes must contain at least one source PVC"
 type ClusterCopySpec struct {
 	SourceNamespace      NamespaceName `json:"sourceNamespace"      yaml:"sourceNamespace"`
 	DestinationNamespace NamespaceName `json:"destinationNamespace" yaml:"destinationNamespace"`

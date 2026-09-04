@@ -987,21 +987,37 @@ func (s *CRDSessionStore) Update(ctx context.Context, session *domain.Session) e
 		)
 	}
 
-	desiredWorkflow, ok := domain.ControllerResourceForSpec(session.Spec)
-	if !ok || desiredWorkflow.Cluster != storedWorkflow.Cluster ||
-		!controllerSessionSupportedForResource(session, desiredWorkflow) {
-		return domain.NewError(
-			domain.ErrorPrecondition,
-			"update session",
-			"this workflow is not valid for the selected namespaced or cluster controller resource",
-		)
+	desiredKind := storedKind
+	if storedWorkflow.Type == session.Spec.Type {
+		// A persisted workflow Kind is authoritative. In particular, a
+		// cluster-scoped workflow may intentionally use equal namespace roles;
+		// deriving scope from those roles would incorrectly switch it to a
+		// namespaced Kind during an ordinary status update.
+		if !controllerSessionSupportedForResource(session, storedWorkflow) {
+			return domain.NewError(
+				domain.ErrorPrecondition,
+				"update session",
+				"this workflow is not valid for the selected namespaced or cluster controller resource",
+			)
+		}
+	} else {
+		desiredWorkflow, desiredOK := domain.ControllerResourceForSpec(session.Spec)
+		if !desiredOK || !controllerSessionSupportedForResource(session, desiredWorkflow) {
+			return domain.NewError(
+				domain.ErrorPrecondition,
+				"update session",
+				"this workflow is not valid for the selected namespaced or cluster controller resource",
+			)
+		}
+
+		desiredKind = desiredWorkflow.Kind
 	}
 
-	if !s.supportsKind(desiredWorkflow.Kind) {
+	if !s.supportsKind(desiredKind) {
 		return domain.NewError(
 			domain.ErrorPrecondition,
 			"update session",
-			string(desiredWorkflow.Kind)+" CRD is not served by this cluster",
+			string(desiredKind)+" CRD is not served by this cluster",
 		)
 	}
 
@@ -1056,8 +1072,6 @@ func (s *CRDSessionStore) Update(ctx context.Context, session *domain.Session) e
 			"session changed by another process",
 		)
 	}
-
-	desiredKind := desiredWorkflow.Kind
 
 	if desiredKind != storedKind {
 		return s.rebindWorkflowResource(ctx, session, existing, desiredKind)

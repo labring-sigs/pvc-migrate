@@ -20,6 +20,8 @@ The operation-specific API types own their fields and statuses. The internal
 `domain.SessionSpec` and `domain.SessionStatus` are translation details and do
 not appear in CRD schemas. Kubebuilder/controller-runtime owns API generation,
 deepcopy code, status subresources, watches, leader election, and retries.
+Transfer workflows require at least one volume at admission time; Backup and
+Restore are the only workflow kinds that operate on a single named PVC.
 
 Namespaced workflows have a strict tenant boundary. `metadata.namespace` is
 the single namespace authority; namespaced specs and their local resource
