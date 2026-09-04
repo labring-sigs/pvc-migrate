@@ -38,6 +38,56 @@ type concurrentListClient struct {
 	delay  time.Duration
 }
 
+type deletingWorkflowClient struct {
+	crclient.WithWatch
+	deletionTimestamp metav1.Time
+	deleteCalls       int
+}
+
+func (c *deletingWorkflowClient) Get(
+	ctx context.Context,
+	key crclient.ObjectKey,
+	object crclient.Object,
+	options ...crclient.GetOption,
+) error {
+	if err := c.WithWatch.Get(ctx, key, object, options...); err != nil {
+		return err
+	}
+
+	object.SetDeletionTimestamp(&c.deletionTimestamp)
+
+	return nil
+}
+
+func (c *deletingWorkflowClient) Update(
+	ctx context.Context,
+	object crclient.Object,
+	options ...crclient.UpdateOption,
+) error {
+	updated, ok := object.DeepCopyObject().(crclient.Object)
+	if !ok {
+		return errors.New("workflow deep copy does not implement client.Object")
+	}
+
+	updated.SetDeletionTimestamp(nil)
+
+	return c.WithWatch.Update(ctx, updated, options...)
+}
+
+func (c *deletingWorkflowClient) Delete(
+	context.Context,
+	crclient.Object,
+	...crclient.DeleteOption,
+) error {
+	c.deleteCalls++
+
+	return apierrors.NewConflict(
+		schema.GroupResource{Group: v1alpha1.GroupVersion.Group, Resource: "migrations"},
+		"workflow",
+		errors.New("namespace is terminating"),
+	)
+}
+
 func (c *concurrentListClient) List(
 	ctx context.Context,
 	list crclient.ObjectList,
@@ -841,70 +891,42 @@ func TestDecodeWorkflowMarksDeletionRequests(t *testing.T) {
 func TestCRDSessionStoreDeleteOnlyReleasesFinalizerForDeletingWorkflow(t *testing.T) {
 	ctx := context.Background()
 	base := newCRDTestClient()
+
+	withWatch, ok := base.(crclient.WithWatch)
+	if !ok {
+		t.Fatal("fake CRD client does not support Watch")
+	}
+
 	session := storeTestSession()
+
 	object, ok := sessionObjectForKind(session, domain.ControllerKindMigration)
 	if !ok {
 		t.Fatal("failed to construct Migration object")
 	}
+
 	object.SetFinalizers([]string{SessionFinalizer})
+
 	if err := base.Create(ctx, object); err != nil {
 		t.Fatal(err)
 	}
 
-	var deleteCalls int
-	deletionTimestamp := metav1.Now()
-	withDeleteGuard := interceptor.NewClient(base.(crclient.WithWatch), interceptor.Funcs{
-		Get: func(
-			ctx context.Context,
-			underlying crclient.WithWatch,
-			key crclient.ObjectKey,
-			object crclient.Object,
-			options ...crclient.GetOption,
-		) error {
-			if err := underlying.Get(ctx, key, object, options...); err != nil {
-				return err
-			}
-			object.SetDeletionTimestamp(&deletionTimestamp)
-			return nil
-		},
-		Update: func(
-			ctx context.Context,
-			underlying crclient.WithWatch,
-			object crclient.Object,
-			options ...crclient.UpdateOption,
-		) error {
-			updated, ok := object.DeepCopyObject().(crclient.Object)
-			if !ok {
-				return errors.New("workflow deep copy does not implement client.Object")
-			}
-			updated.SetDeletionTimestamp(nil)
-			return underlying.Update(ctx, updated, options...)
-		},
-		Delete: func(
-			ctx context.Context,
-			underlying crclient.WithWatch,
-			object crclient.Object,
-			options ...crclient.DeleteOption,
-		) error {
-			deleteCalls++
-			return apierrors.NewConflict(
-				schema.GroupResource{Group: v1alpha1.GroupVersion.Group, Resource: "migrations"},
-				object.GetName(),
-				errors.New("namespace is terminating"),
-			)
-		},
-	})
-	store := NewCRDSessionStore(withDeleteGuard)
+	client := &deletingWorkflowClient{WithWatch: withWatch, deletionTimestamp: metav1.Now()}
+	store := NewCRDSessionStore(client)
 
 	loaded, err := store.Get(ctx, session.Spec.SessionNamespace, session.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	if err := store.Delete(ctx, loaded); err != nil {
 		t.Fatalf("deleting workflow already marked for deletion: %v", err)
 	}
-	if deleteCalls != 0 {
-		t.Fatalf("delete calls=%d, want 0 for workflow already marked for deletion", deleteCalls)
+
+	if client.deleteCalls != 0 {
+		t.Fatalf(
+			"delete calls=%d, want 0 for workflow already marked for deletion",
+			client.deleteCalls,
+		)
 	}
 
 	remaining := &v1alpha1.Migration{}

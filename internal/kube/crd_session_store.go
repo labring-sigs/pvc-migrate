@@ -1564,7 +1564,8 @@ func (s *CRDSessionStore) Delete(ctx context.Context, session *domain.Session) e
 	// non-actionable reconcile error.
 	deleting := object.GetDeletionTimestamp() != nil
 
-	if !deleting && session.ResourceVersion != "" && object.GetResourceVersion() != session.ResourceVersion {
+	if !deleting && session.ResourceVersion != "" &&
+		object.GetResourceVersion() != session.ResourceVersion {
 		return domain.NewError(
 			domain.ErrorConflict,
 			"delete session",
