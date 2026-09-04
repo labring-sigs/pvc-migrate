@@ -3,8 +3,46 @@ package cli
 import (
 	"github.com/labring-sigs/pvc-migrate/internal/domain"
 	"github.com/labring-sigs/pvc-migrate/internal/kube"
+	"github.com/labring-sigs/pvc-migrate/internal/planner"
 	"github.com/spf13/cobra"
 )
+
+func (r *rootState) resolveReservationPlanNamespaces(
+	runtime *commandRuntime,
+	cmd *cobra.Command,
+	options *planner.ReserveOptions,
+) error {
+	temporaryExplicit := cmd.Flags().Changed("temporary-namespace")
+
+	destinationExplicit := cmd.Flags().Changed("destination-namespace")
+	if runtime != nil && runtime.mode == executionModeController {
+		switch {
+		case temporaryExplicit && destinationExplicit &&
+			options.TemporaryNamespace != options.DestinationNamespace:
+			return domain.NewError(
+				domain.ErrorValidation,
+				"controller reservation namespaces",
+				"--temporary-namespace and --destination-namespace must match in controller mode",
+			)
+		case temporaryExplicit:
+			options.DestinationNamespace = options.TemporaryNamespace
+		default:
+			options.TemporaryNamespace = options.DestinationNamespace
+		}
+	}
+
+	options.SessionNamespace, options.TemporaryNamespace = r.controllerPlanNamespaces(
+		runtime,
+		domain.SessionTypeReserve,
+		options.SourceNamespace,
+		options.DestinationNamespace,
+		options.TemporaryNamespace,
+		temporaryExplicit,
+	)
+	options.StagingNamespace = options.TemporaryNamespace
+
+	return nil
+}
 
 func (r *rootState) newReserveCommand() *cobra.Command {
 	flags := &reserveFlags{}
@@ -83,15 +121,9 @@ func (r *rootState) newReserveCommand() *cobra.Command {
 				return err
 			}
 
-			options.SessionNamespace, options.TemporaryNamespace = r.controllerPlanNamespaces(
-				runtime,
-				domain.SessionTypeReserve,
-				options.SourceNamespace,
-				options.DestinationNamespace,
-				options.TemporaryNamespace,
-				cmd.Flags().Changed("temporary-namespace"),
-			)
-			options.StagingNamespace = options.TemporaryNamespace
+			if err := r.resolveReservationPlanNamespaces(runtime, cmd, &options); err != nil {
+				return err
+			}
 
 			plan, err := runtime.planner.PlanReserve(ctx, options)
 			if err != nil {
@@ -193,15 +225,9 @@ func (r *rootState) newReservePlanCommand() *cobra.Command {
 				return err
 			}
 
-			options.SessionNamespace, options.TemporaryNamespace = r.controllerPlanNamespaces(
-				runtime,
-				domain.SessionTypeReserve,
-				options.SourceNamespace,
-				options.DestinationNamespace,
-				options.TemporaryNamespace,
-				cmd.Flags().Changed("temporary-namespace"),
-			)
-			options.StagingNamespace = options.TemporaryNamespace
+			if err := r.resolveReservationPlanNamespaces(runtime, cmd, &options); err != nil {
+				return err
+			}
 
 			plan, err := runtime.planner.PlanReserve(ctx, options)
 			if err != nil {
