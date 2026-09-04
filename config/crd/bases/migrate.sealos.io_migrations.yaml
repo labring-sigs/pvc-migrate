@@ -465,6 +465,11 @@ spec:
                   - storageClass
                   - volumeMode
                   type: object
+                  x-kubernetes-validations:
+                  - message: sourcePVC.uid and sourcePV.uid are required planning
+                      identities
+                    rule: has(self.sourcePVC.uid) && size(self.sourcePVC.uid) > 0
+                      && has(self.sourcePV.uid) && size(self.sourcePV.uid) > 0
                 maxItems: 1024
                 type: array
             type: object

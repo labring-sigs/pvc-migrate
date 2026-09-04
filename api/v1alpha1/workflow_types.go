@@ -79,6 +79,7 @@ type (
 	PVReclaimPolicy = corev1.PersistentVolumeReclaimPolicy
 )
 
+// +kubebuilder:validation:XValidation:rule="has(self.sourcePVC.uid) && size(self.sourcePVC.uid) > 0 && has(self.sourcePV.uid) && size(self.sourcePV.uid) > 0",message="sourcePVC.uid and sourcePV.uid are required planning identities"
 // VolumeSpec is planning output required to resume a PVC transfer. It is an
 // API-owned type with only the fields needed by transfer workflows.
 type VolumeSpec struct {
@@ -221,6 +222,7 @@ type CopySpec struct {
 	Online               bool `json:"online,omitempty"               yaml:"online,omitempty"`
 }
 
+// +kubebuilder:validation:XValidation:rule="has(self.sourcePVC.uid) && size(self.sourcePVC.uid) > 0 && has(self.sourcePV.uid) && size(self.sourcePV.uid) > 0",message="sourcePVC.uid and sourcePV.uid are required planning identities"
 type BackupSpec struct {
 	SourcePVC LocalResourceReference `json:"sourcePVC"           yaml:"sourcePVC"`
 	SourcePV  LocalResourceReference `json:"sourcePV"            yaml:"sourcePV"`
@@ -264,6 +266,7 @@ type PVCSourceTemplate struct {
 	ReclaimPolicy PVReclaimPolicy `json:"reclaimPolicy,omitempty" yaml:"reclaimPolicy,omitempty"`
 }
 
+// +kubebuilder:validation:XValidation:rule="has(self.sourcePVC.uid) && size(self.sourcePVC.uid) > 0 && has(self.sourcePV.uid) && size(self.sourcePV.uid) > 0",message="sourcePVC.uid and sourcePV.uid are required planning identities"
 type PVCIdentityFields struct {
 	SourcePVC      LocalResourceReference `json:"sourcePVC"      yaml:"sourcePVC"`
 	SourcePV       LocalResourceReference `json:"sourcePV"       yaml:"sourcePV"`
