@@ -165,3 +165,35 @@ func TestGetCopySessionReturnsCopyWithoutFallback(t *testing.T) {
 		t.Fatalf("lookup calls=%v, want %v", store.calls, want)
 	}
 }
+
+func TestAdoptReservedSessionResolvesAutoStrategies(t *testing.T) {
+	session := domain.NewSession(
+		"reserved",
+		domain.NewSessionSpec(
+			domain.OperationReserve,
+			domain.SessionCommon{
+				SourceNamespace:      "source",
+				DestinationNamespace: "destination",
+				SessionNamespace:     "system",
+			},
+			false,
+			domain.SessionWorkflowOptions{},
+		),
+		time.Time{},
+	)
+
+	err := adoptReservedSessionForCopy(
+		session,
+		&copyFlags{strategies: []string{domain.StrategyAuto}},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if got := session.Spec.WorkflowOptions().Strategies; !reflect.DeepEqual(
+		got,
+		[]string{domain.StrategyClusterIP, domain.StrategyLocal},
+	) {
+		t.Fatalf("resolved strategies=%v", got)
+	}
+}

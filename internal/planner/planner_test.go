@@ -1413,6 +1413,26 @@ func TestAutoStrategiesChooseNamespaceCompatibleOrder(t *testing.T) {
 	}
 }
 
+func TestResolveStrategiesNormalizesAutoAndClonesExplicitOrder(t *testing.T) {
+	got := ResolveStrategies("app", "archive", []string{domain.StrategyAuto})
+	if strings.Join(got, ",") != "clusterip,local" {
+		t.Fatalf("cross-namespace resolved strategies=%v", got)
+	}
+
+	explicit := []string{domain.StrategyMount}
+
+	got = ResolveStrategies("app", "app", explicit)
+	if strings.Join(got, ",") != "mount" {
+		t.Fatalf("explicit strategies=%v", got)
+	}
+
+	got[0] = domain.StrategyLocal
+
+	if explicit[0] != domain.StrategyMount {
+		t.Fatalf("explicit strategies were not cloned: %v", explicit)
+	}
+}
+
 func TestPlanRejectsMixedAutoStrategyList(t *testing.T) {
 	plan, err := New(
 		plannerClient(plannerObjects("2Gi")...),
