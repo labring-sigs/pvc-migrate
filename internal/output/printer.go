@@ -6,6 +6,7 @@ import (
 	"io"
 	"strings"
 	"text/tabwriter"
+	"time"
 
 	"github.com/labring-sigs/pvc-migrate/internal/backup"
 	"github.com/labring-sigs/pvc-migrate/internal/crosscluster"
@@ -147,7 +148,7 @@ func (p Printer) printCrossClusterSession(session *crosscluster.Session) error {
 		session.Status.Phase,
 		session.Spec.SourceCluster.ID,
 		session.Spec.DestinationCluster.ID,
-		session.Status.UpdatedAt.UTC().Format("2006-01-02T15:04:05Z"),
+		formatDisplayTime(session.Status.UpdatedAt.Time),
 		session.Status.Message,
 	); err != nil {
 		return err
@@ -500,7 +501,7 @@ func (p Printer) printSession(session *domain.Session) error {
 		session.ID,
 		session.Spec.Operation(),
 		session.Status.Phase,
-		session.Status.UpdatedAt.UTC().Format("2006-01-02T15:04:05Z"),
+		formatDisplayTime(session.Status.UpdatedAt.Time),
 		session.Status.Message,
 	); err != nil {
 		return err
@@ -703,7 +704,7 @@ func (p Printer) printSessions(sessions []*domain.Session) error {
 			session.Spec.Operation(),
 			session.Status.Phase,
 			session.Spec.SourceNamespace,
-			session.Status.UpdatedAt.UTC().Format("2006-01-02T15:04:05Z"),
+			formatDisplayTime(session.Status.UpdatedAt.Time),
 		); err != nil {
 			return err
 		}
@@ -716,7 +717,11 @@ func timeValue(value *metav1.Time) string {
 	if value == nil || value.IsZero() {
 		return "-"
 	}
-	return value.UTC().Format("2006-01-02T15:04:05Z")
+	return formatDisplayTime(value.Time)
+}
+
+func formatDisplayTime(value time.Time) string {
+	return value.In(time.Local).Format(time.RFC3339)
 }
 
 func sourceUsageText(known bool, bytes int64) string {

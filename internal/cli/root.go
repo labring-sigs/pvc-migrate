@@ -464,7 +464,7 @@ func loggerFor(r *rootState) (*slog.Logger, error) {
 		return nil, err
 	}
 
-	handlerOptions := &slog.HandlerOptions{Level: level}
+	handlerOptions := localLogHandlerOptions(level)
 	switch logFormat(r.global.logFormat) {
 	case logFormatText:
 		return slog.New(slog.NewTextHandler(r.errWriter(), handlerOptions)), nil
