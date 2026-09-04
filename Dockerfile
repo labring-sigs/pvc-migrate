@@ -33,6 +33,7 @@ ARG TOOL_IMAGE_REPOSITORY=ghcr.io/labring-sigs/pvc-migrate
 # fixed identity used by its non-root tool mode.
 RUN apk add --no-cache \
       ca-certificates \
+      tzdata \
       openssh \
       openssh-server-pam \
       rclone \
