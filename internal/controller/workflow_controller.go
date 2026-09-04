@@ -446,6 +446,34 @@ type ManagerOptions struct {
 	HealthProbeBindAddress        string
 }
 
+// cacheReadiness runs outside leader election. Controller-runtime starts
+// non-leader runnables only after its cache has synchronized, so standby Pods
+// can become Ready during a rolling update without claiming the leader Lease.
+type cacheReadiness struct {
+	ready atomic.Bool
+}
+
+func (r *cacheReadiness) Start(ctx context.Context) error {
+	r.ready.Store(true)
+	defer r.ready.Store(false)
+
+	<-ctx.Done()
+
+	return nil
+}
+
+func (*cacheReadiness) NeedLeaderElection() bool {
+	return false
+}
+
+func (r *cacheReadiness) Check(*http.Request) error {
+	if r.ready.Load() {
+		return nil
+	}
+
+	return errors.New("controller cache has not synced")
+}
+
 // StartManager creates a manager that watches only the discovered workflow
 // kinds. Partial CRD installations remain supported while missing operation
 // kinds are reported explicitly at submission time.
@@ -520,28 +548,12 @@ func StartManager(
 		return err
 	}
 
-	var cacheReady atomic.Bool
-	if err := manager.Add(crmanager.RunnableFunc(func(ctx context.Context) error {
-		// Controller-runtime starts ordinary runnables only after every cache has
-		// synchronized. Publishing readiness here avoids the pre-start behavior
-		// of WaitForCacheSync, which reports success before informers exist.
-		cacheReady.Store(true)
-		defer cacheReady.Store(false)
-
-		<-ctx.Done()
-
-		return nil
-	})); err != nil {
+	cacheReady := &cacheReadiness{}
+	if err := manager.Add(cacheReady); err != nil {
 		return err
 	}
 
-	if err := manager.AddReadyzCheck("cache-sync", func(*http.Request) error {
-		if cacheReady.Load() {
-			return nil
-		}
-
-		return errors.New("controller cache has not synced")
-	}); err != nil {
+	if err := manager.AddReadyzCheck("cache-sync", cacheReady.Check); err != nil {
 		return err
 	}
 
@@ -585,7 +597,10 @@ func normalizeTrustedToolImage(image string) (string, error) {
 	return normalized, nil
 }
 
-var _ reconcile.Reconciler = (*kindWorkflowReconciler)(nil)
+var (
+	_ reconcile.Reconciler             = (*kindWorkflowReconciler)(nil)
+	_ crmanager.LeaderElectionRunnable = (*cacheReadiness)(nil)
+)
 
 func workflowSpecMutationError(session *domain.Session) error {
 	if session == nil || session.Status.ObservedGeneration == 0 ||

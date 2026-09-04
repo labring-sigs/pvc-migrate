@@ -3,6 +3,7 @@ package controller
 import (
 	"context"
 	"testing"
+	"time"
 
 	v1alpha1 "github.com/labring-sigs/pvc-migrate/api/v1alpha1"
 	"github.com/labring-sigs/pvc-migrate/internal/domain"
@@ -14,6 +15,42 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/event"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 )
+
+func TestCacheReadinessDoesNotWaitForLeaderElection(t *testing.T) {
+	readiness := &cacheReadiness{}
+
+	if readiness.NeedLeaderElection() {
+		t.Fatal("cache readiness must run before leader election")
+	}
+
+	if err := readiness.Check(nil); err == nil {
+		t.Fatal("cache readiness started ready")
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+
+	done := make(chan error, 1)
+	go func() { done <- readiness.Start(ctx) }()
+
+	deadline := time.Now().Add(time.Second)
+	for readiness.Check(nil) != nil && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+
+	if err := readiness.Check(nil); err != nil {
+		t.Fatalf("cache readiness did not become ready: %v", err)
+	}
+
+	cancel()
+
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+
+	if err := readiness.Check(nil); err == nil {
+		t.Fatal("cache readiness remained ready after shutdown")
+	}
+}
 
 func TestWorkflowEventPredicateAllowsDeletionTimestampTransition(t *testing.T) {
 	base := &v1alpha1.Copy{ObjectMeta: metav1.ObjectMeta{
