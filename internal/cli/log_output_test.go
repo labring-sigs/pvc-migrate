@@ -2,11 +2,14 @@ package cli
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"regexp"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestLogOutputWriterKeepsJSONLogsAndGuidanceParseable(t *testing.T) {
@@ -72,6 +75,41 @@ func TestRootUsesStructuredStderrForJSONLogFormat(t *testing.T) {
 
 	if entry["msg"] != "dry-run completed" {
 		t.Fatalf("entry=%v", entry)
+	}
+}
+
+func TestLogHandlersUseLocalTimeZone(t *testing.T) {
+	previousLocation := time.Local
+	time.Local = time.FixedZone("local-test", 5*60*60+45*60)
+	t.Cleanup(func() { time.Local = previousLocation })
+
+	recordTime := time.Date(2026, time.August, 7, 1, 2, 3, 0, time.UTC)
+	for _, format := range []logFormat{logFormatText, logFormatJSON} {
+		t.Run(string(format), func(t *testing.T) {
+			var (
+				output  bytes.Buffer
+				handler slog.Handler
+			)
+
+			switch format {
+			case logFormatText:
+				handler = slog.NewTextHandler(&output, localLogHandlerOptions(nil))
+			case logFormatJSON:
+				handler = slog.NewJSONHandler(&output, localLogHandlerOptions(nil))
+			}
+
+			if err := handler.Handle(
+				context.Background(),
+				slog.NewRecord(recordTime, slog.LevelInfo, "local time", 0),
+			); err != nil {
+				t.Fatal(err)
+			}
+
+			if !strings.Contains(output.String(), "2026-08-07T06:47:03") ||
+				!strings.Contains(output.String(), "+05:45") {
+				t.Fatalf("%s log time does not use the local zone: %s", format, output.String())
+			}
+		})
 	}
 }
 

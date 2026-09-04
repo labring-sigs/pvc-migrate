@@ -18,6 +18,7 @@ import (
 type logOutputWriter struct {
 	target     io.Writer
 	structured func() bool
+	json       slog.Handler
 	mu         sync.Mutex
 }
 
@@ -25,7 +26,12 @@ func newLogOutputWriter(target io.Writer, structured func() bool) io.Writer {
 	if target == nil {
 		target = io.Discard
 	}
-	return &logOutputWriter{target: target, structured: structured}
+
+	return &logOutputWriter{
+		target:     target,
+		structured: structured,
+		json:       slog.NewJSONHandler(target, localLogHandlerOptions(nil)),
+	}
 }
 
 // WriteCommandError keeps top-level command failures in the active stderr
@@ -46,7 +52,7 @@ func (w *logOutputWriter) writeCommandError(err error) {
 	if w.structured != nil && w.structured() {
 		record := slog.NewRecord(time.Now(), slog.LevelError, "command failed", 0)
 		record.AddAttrs(slog.String("error", err.Error()))
-		_ = slog.NewJSONHandler(w.target, nil).Handle(context.Background(), record)
+		_ = w.json.Handle(context.Background(), record)
 		return
 	}
 
@@ -74,11 +80,28 @@ func (w *logOutputWriter) Write(data []byte) (int, error) {
 			continue
 		}
 
-		if err := slog.NewJSONHandler(w.target, nil).
-			Handle(context.Background(), slog.NewRecord(time.Now(), slog.LevelInfo, string(line), 0)); err != nil {
+		if err := w.json.Handle(
+			context.Background(),
+			slog.NewRecord(time.Now(), slog.LevelInfo, string(line), 0),
+		); err != nil {
 			return 0, err
 		}
 	}
 
 	return len(data), nil
+}
+
+func localLogHandlerOptions(level slog.Leveler) *slog.HandlerOptions {
+	location := time.Local
+
+	return &slog.HandlerOptions{
+		Level: level,
+		ReplaceAttr: func(groups []string, attr slog.Attr) slog.Attr {
+			if len(groups) == 0 && attr.Key == slog.TimeKey && attr.Value.Kind() == slog.KindTime {
+				attr.Value = slog.TimeValue(attr.Value.Time().In(location))
+			}
+
+			return attr
+		},
+	}
 }

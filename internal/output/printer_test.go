@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/labring-sigs/pvc-migrate/internal/backup"
+	"github.com/labring-sigs/pvc-migrate/internal/crosscluster"
 	"github.com/labring-sigs/pvc-migrate/internal/domain"
 	printeroutput "github.com/labring-sigs/pvc-migrate/internal/output"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -283,10 +284,54 @@ func TestTableSessionRendersSyncAndActivationState(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	for _, want := range []string{"mig-1", "Activated", "cutover complete", "2026-08-07T01:02:03Z", "TRANSFER SCOPE", "data/current -> .", "full", "SOURCE CAPACITY", "DESTINATION CAPACITY", "2Gi", "3Gi", "pv-new", "logs", "-"} {
+	for _, want := range []string{"mig-1", "Activated", "cutover complete", warm.Time.In(time.Local).Format(time.RFC3339), "TRANSFER SCOPE", "data/current -> .", "full", "SOURCE CAPACITY", "DESTINATION CAPACITY", "2Gi", "3Gi", "pv-new", "logs", "-"} {
 		if !strings.Contains(output.String(), want) {
 			t.Fatalf("session table missing %q:\n%s", want, output.String())
 		}
+	}
+}
+
+func TestTableTimesUseLocalTimeZone(t *testing.T) {
+	previousLocation := time.Local
+	time.Local = time.FixedZone("local-test", 8*60*60)
+	t.Cleanup(func() { time.Local = previousLocation })
+
+	updated := metav1.NewTime(time.Date(2026, time.August, 7, 1, 2, 3, 0, time.UTC))
+	domainSession := &domain.Session{
+		ID: "local",
+		Spec: domain.NewOfflineMigrationSessionSpec(
+			domain.SessionCommon{},
+			domain.SessionWorkflowOptions{},
+		),
+		Status: domain.SessionStatus{
+			UpdatedAt: updated,
+			Volumes: []domain.VolumeStatus{{
+				Sync: domain.SyncState{WarmCompletedAt: &updated},
+			}},
+		},
+	}
+
+	for name, value := range map[string]any{
+		"cross-cluster session": &crosscluster.Session{
+			ID:     "local",
+			Status: crosscluster.Status{UpdatedAt: updated},
+		},
+		"session":      domainSession,
+		"session list": []*domain.Session{domainSession},
+	} {
+		t.Run(name, func(t *testing.T) {
+			var output bytes.Buffer
+			if err := (printeroutput.Printer{
+				Writer: &output,
+				Format: printeroutput.Table,
+			}).Print(value); err != nil {
+				t.Fatal(err)
+			}
+
+			if !strings.Contains(output.String(), "2026-08-07T09:02:03+08:00") {
+				t.Fatalf("table time does not use the local zone:\n%s", output.String())
+			}
+		})
 	}
 }
 
