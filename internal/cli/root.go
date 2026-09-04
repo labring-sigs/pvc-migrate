@@ -290,6 +290,19 @@ func (r *rootState) runtime() (*commandRuntime, error) {
 		return nil, err
 	}
 
+	trustedToolImage := ""
+	if requestedMode == executionModeController {
+		trustedToolImage, err = kube.NormalizeToolImage(r.global.toolImage)
+		if err != nil {
+			return nil, domain.WrapError(
+				domain.ErrorPrecondition,
+				"controller mode",
+				"controller trusted tool image is invalid",
+				err,
+			)
+		}
+	}
+
 	configMapStore := kube.NewConfigMapSessionStore(clients.Kubernetes)
 
 	var (
@@ -316,6 +329,7 @@ func (r *rootState) runtime() (*commandRuntime, error) {
 	}
 
 	reserver := kube.NewReserver(clients.Kubernetes).
+		WithTrustedToolImage(trustedToolImage).
 		WithLogger(logger.With("component", "reserver"))
 	openEBSLVMSharedVolumeManager := kube.NewOpenEBSLVMSharedVolumeManager(
 		clients.Kubernetes,
@@ -349,6 +363,7 @@ func (r *rootState) runtime() (*commandRuntime, error) {
 			Writer:                        r.errWriter(),
 			Logger:                        logger.With("component", "migration"),
 			ToolImageProber:               kube.NewToolImageProber(clients.Kubernetes),
+			TrustedToolImage:              trustedToolImage,
 			OpenEBSLVMSharedVolumeManager: openEBSLVMSharedVolumeManager,
 		},
 	)

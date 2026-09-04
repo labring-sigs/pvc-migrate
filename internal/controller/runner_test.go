@@ -156,32 +156,35 @@ func newRunnerSession(id string) *domain.Session {
 	return session
 }
 
-func TestRunnerRejectsTenantControlledToolImage(t *testing.T) {
-	session := newRunnerSession("image-policy")
-	session.Spec.Copy.ToolImage = "registry.example/pvc-migrate:trusted"
-
+func TestRunnerUsesTrustedToolImageForEveryWorkflowValue(t *testing.T) {
 	runner := NewRunner(&recordingWorkflowResumer{}, nil, "system").
 		WithTrustedToolImage("registry.example/pvc-migrate:trusted")
-	if err := runner.validateTrustedToolImage(session); err != nil {
-		t.Fatalf("matching controller image rejected: %v", err)
+
+	for _, requested := range []string{
+		"registry.example/pvc-migrate:trusted",
+		"registry.example/tenant:arbitrary",
+		"registry.example/tenant",
+		"",
+	} {
+		session := newRunnerSession("image-policy")
+		session.Spec.Copy.ToolImage = requested
+
+		if err := runner.validateTrustedToolImage(session); err != nil {
+			t.Fatalf("requested image %q rejected: %v", requested, err)
+		}
+
+		got := runner.executionToolImage(session)
+		if got != "registry.example/pvc-migrate:trusted" {
+			t.Fatalf("execution image=%q, want trusted image", got)
+		}
 	}
 
-	session.Spec.Copy.ToolImage = "registry.example/tenant:arbitrary"
-	if err := runner.validateTrustedToolImage(
-		session,
-	); domain.CategoryOf(
-		err,
-	) != domain.ErrorPrecondition {
-		t.Fatalf("mismatched controller image category=%s error=%v", domain.CategoryOf(err), err)
-	}
+	runner = NewRunner(&recordingWorkflowResumer{}, nil, "system").
+		WithTrustedToolImage("registry.example/pvc-migrate")
 
-	session.Spec.Copy.ToolImage = "registry.example/tenant"
-	if err := runner.validateTrustedToolImage(
-		session,
-	); domain.CategoryOf(
-		err,
-	) != domain.ErrorPrecondition {
-		t.Fatalf("untagged controller image category=%s error=%v", domain.CategoryOf(err), err)
+	err := runner.validateTrustedToolImage(newRunnerSession("invalid-trusted"))
+	if domain.CategoryOf(err) != domain.ErrorPrecondition {
+		t.Fatalf("invalid trusted image category=%s error=%v", domain.CategoryOf(err), err)
 	}
 }
 

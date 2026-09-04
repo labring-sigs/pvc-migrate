@@ -368,25 +368,25 @@ func (r *Runner) validateTrustedToolImage(session *domain.Session) error {
 		)
 	}
 
-	requested, err := kube.NormalizeToolImage(session.Spec.WorkflowOptions().ToolImage)
-	if err != nil {
-		return domain.WrapError(
-			domain.ErrorPrecondition,
-			"controller tool image",
-			"workflow tool image is invalid; use the controller-configured image",
-			err,
-		)
-	}
-
-	if requested != trusted {
-		return domain.NewError(
-			domain.ErrorPrecondition,
-			"controller tool image",
-			"workflow toolImage must match the controller-configured image",
-		)
-	}
+	// The workflow spec is tenant input and may contain an older or arbitrary
+	// toolImage. Execution always uses the administrator-selected image; the
+	// spec value is intentionally ignored so controller upgrades remain able to
+	// resume existing sessions without granting image selection to tenants.
+	r.trustedToolImage = trusted
 
 	return nil
+}
+
+func (r *Runner) executionToolImage(session *domain.Session) string {
+	if r != nil && strings.TrimSpace(r.trustedToolImage) != "" {
+		return r.trustedToolImage
+	}
+
+	if session == nil {
+		return ""
+	}
+
+	return session.Spec.WorkflowOptions().ToolImage
 }
 
 func (r *Runner) resumeBackup(ctx context.Context, session *domain.Session) error {
@@ -427,7 +427,7 @@ func (r *Runner) resumeBackup(ctx context.Context, session *domain.Session) erro
 
 	request := backup.Request{
 		ID:                      session.ID,
-		ToolImage:               payload.ToolImage,
+		ToolImage:               r.executionToolImage(session),
 		KubeconfigPath:          r.kubeconfigPath,
 		KubeContext:             r.kubeContext,
 		Namespace:               payload.SourcePVC.Namespace,
@@ -499,7 +499,7 @@ func (r *Runner) resumeRestore(ctx context.Context, session *domain.Session) err
 
 	request := backup.Request{
 		ID:                      session.ID,
-		ToolImage:               payload.ToolImage,
+		ToolImage:               r.executionToolImage(session),
 		KubeconfigPath:          r.kubeconfigPath,
 		KubeContext:             r.kubeContext,
 		Namespace:               payload.DestinationPVC.Namespace,
