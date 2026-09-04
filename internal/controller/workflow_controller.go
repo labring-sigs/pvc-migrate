@@ -37,7 +37,7 @@ import (
 // existing service state machine.
 type WorkflowReconciler struct {
 	store            kube.ControllerSessionStore
-	service          *app.Service
+	service          workflowResumer
 	kubeClient       kubernetes.Interface
 	controllerClient crclient.Reader
 	openEBS          kube.OpenEBSLVMSharedVolumeManager
@@ -48,13 +48,30 @@ type WorkflowReconciler struct {
 	kubeContext      string
 	requeueAfter     time.Duration
 	supportedKinds   map[domain.ControllerKind]struct{}
+	logger           *slog.Logger
 }
 
 func NewWorkflowReconciler(
-	service *app.Service,
+	service workflowResumer,
 	store kube.ControllerSessionStore,
 ) *WorkflowReconciler {
-	return &WorkflowReconciler{service: service, store: store, requeueAfter: 5 * time.Second}
+	return &WorkflowReconciler{
+		service:      service,
+		store:        store,
+		requeueAfter: 5 * time.Second,
+		logger:       slog.Default(),
+	}
+}
+
+// WithLogger supplies the structured logger owned by the controller process.
+// Reconciliation must not fall back to the process-global slog default, which
+// is commonly discarded or configured for a different CLI command.
+func (r *WorkflowReconciler) WithLogger(logger *slog.Logger) *WorkflowReconciler {
+	if r != nil && logger != nil {
+		r.logger = logger
+	}
+
+	return r
 }
 
 // WithNamespace optionally limits reconciliation to one durable session
@@ -155,6 +172,7 @@ func (r *WorkflowReconciler) WithOpenEBSLVMSharedVolumeManager(
 
 func (r *WorkflowReconciler) runner(namespace string) *Runner {
 	return NewRunner(r.service, r.store, namespace).
+		WithLogger(r.logger).
 		WithKubernetesClient(r.kubeClient).
 		WithControllerClient(r.controllerClient).
 		WithClusterIdentity(r.clusterIdentity).
@@ -239,11 +257,11 @@ func (r *WorkflowReconciler) reconcile(
 	if err := workflowSpecMutationError(session); err != nil {
 		if !terminalSession(session) {
 			runner := r.runner(request.Namespace)
-			return reconcile.Result{}, runner.checkpointFailure(ctx, session, err)
+			return r.checkpointBusinessFailure(ctx, runner, session, err, request)
 		}
 
 		ctrl.LoggerFrom(ctx).
-			Error(err, "terminal workflow spec changed; reconciliation stopped", "workflow", request.NamespacedName)
+			Info("ignored spec change for terminal workflow", "workflow", request.NamespacedName, "reason", err)
 
 		return reconcile.Result{}, nil
 	}
@@ -287,27 +305,49 @@ func (r *WorkflowReconciler) reconcile(
 
 	if boundaryErr := kube.ControllerNamespaceBoundaryError(session); boundaryErr != nil {
 		runner := r.runner(request.Namespace)
-		return reconcile.Result{}, runner.checkpointFailure(ctx, session, boundaryErr)
+		return r.checkpointBusinessFailure(ctx, runner, session, boundaryErr, request)
 	}
 
 	if err := r.validateDeclarativeSourceVolumes(ctx, session); err != nil {
 		runner := r.runner(request.Namespace)
-		return reconcile.Result{}, runner.checkpointFailure(ctx, session, err)
+		return r.checkpointBusinessFailure(ctx, runner, session, err, request)
 	}
 
 	if err := r.ensureStandalonePodSnapshot(ctx, session); err != nil {
 		runner := r.runner(request.Namespace)
-		return reconcile.Result{}, runner.checkpointFailure(ctx, session, err)
+		return r.checkpointBusinessFailure(ctx, runner, session, err, request)
 	}
 
 	runner := r.runner(request.Namespace)
 	if err := runner.reconcileSession(ctx, session); err != nil {
-		err = runner.checkpointFailure(ctx, session, err)
-
-		return reconcile.Result{}, err
+		return r.checkpointBusinessFailure(ctx, runner, session, err, request)
 	}
 
 	return reconcile.Result{RequeueAfter: r.requeueAfter}, nil
+}
+
+func (r *WorkflowReconciler) checkpointBusinessFailure(
+	ctx context.Context,
+	runner *Runner,
+	session *domain.Session,
+	cause error,
+	request reconcile.Request,
+) (reconcile.Result, error) {
+	if err := runner.checkpointFailureForController(ctx, session, cause); err != nil {
+		return reconcile.Result{}, err
+	}
+
+	r.logger.Warn(
+		"workflow entered failed state",
+		"workflow",
+		request.NamespacedName,
+		"phase",
+		domain.PhaseFailed,
+		"reason",
+		cause,
+	)
+
+	return reconcile.Result{}, nil
 }
 
 func (r *WorkflowReconciler) reconcileDeletingWorkflow(
@@ -443,6 +483,7 @@ type ManagerOptions struct {
 	KubeContext                   string
 	SupportedKinds                []domain.ControllerKind
 	TrustedToolImage              string
+	Logger                        *slog.Logger
 	HealthProbeBindAddress        string
 }
 
@@ -519,9 +560,15 @@ func StartManager(
 	}
 
 	// controller-runtime emits recorder and leader-election diagnostics through
-	// logr. Bridge it to the CLI's structured slog handler so failover does not
-	// produce the "log.SetLogger was never called" warning or lose context.
-	crlog.SetLogger(logr.FromSlogHandler(slog.Default().Handler()))
+	// logr. Bridge it to the controller-owned structured logger so failover does
+	// not produce the "log.SetLogger was never called" warning or lose context.
+	logger := options.Logger
+	if logger == nil {
+		logger = slog.Default()
+	}
+
+	logger = NewControllerLogger(logger)
+	crlog.SetLogger(logr.FromSlogHandler(logger.Handler()))
 
 	scheme := runtime.NewScheme()
 	if err := v1alpha1.AddToScheme(scheme); err != nil {
@@ -558,6 +605,7 @@ func StartManager(
 	}
 
 	reconciler := NewWorkflowReconciler(service, store).
+		WithLogger(logger.With("component", "workflow-controller")).
 		// Repository reads use the uncached API reader so deletion, replacement,
 		// and credential changes fail closed immediately.
 		WithControllerClient(manager.GetAPIReader()).

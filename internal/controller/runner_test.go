@@ -26,6 +26,7 @@ type runnerSessionStore struct {
 	deleted    []*domain.Session
 	getErr     error
 	acquireErr error
+	updateErr  error
 	lock       *runnerSessionLock
 }
 
@@ -68,8 +69,13 @@ func (*runnerSessionStore) EnsureSessionProtection(context.Context, *domain.Sess
 }
 
 func (s *runnerSessionStore) Update(_ context.Context, session *domain.Session) error {
+	if s.updateErr != nil {
+		return s.updateErr
+	}
+
 	s.updates = append(s.updates, cloneRunnerSession(session))
 	s.latest = cloneRunnerSession(session)
+
 	return nil
 }
 
@@ -664,6 +670,49 @@ func TestRunnerCheckpointFailureUsesLatestSessionState(t *testing.T) {
 				t.Fatal("session lock was not released")
 			}
 		})
+	}
+}
+
+func TestRunnerControllerFailureCheckpointIsQuietAfterPersistence(t *testing.T) {
+	listed := newRunnerSession("controller-failure")
+	store := &runnerSessionStore{
+		listed: listed,
+		latest: cloneRunnerSession(listed),
+		lock:   &runnerSessionLock{},
+	}
+	runner := NewRunner(&recordingWorkflowResumer{}, store, "system")
+
+	if err := runner.checkpointFailureForController(
+		context.Background(),
+		listed,
+		errors.New("destination PVC is unavailable"),
+	); err != nil {
+		t.Fatalf("controller failure checkpoint returned error: %v", err)
+	}
+
+	if store.latest.Status.Phase != domain.PhaseFailed {
+		t.Fatalf("phase=%s, want %s", store.latest.Status.Phase, domain.PhaseFailed)
+	}
+}
+
+func TestRunnerControllerFailureCheckpointReturnsPersistenceError(t *testing.T) {
+	listed := newRunnerSession("controller-checkpoint-error")
+	checkpointErr := errors.New("status update unavailable")
+	store := &runnerSessionStore{
+		listed:    listed,
+		latest:    cloneRunnerSession(listed),
+		updateErr: checkpointErr,
+		lock:      &runnerSessionLock{},
+	}
+	runner := NewRunner(&recordingWorkflowResumer{}, store, "system")
+
+	err := runner.checkpointFailureForController(
+		context.Background(),
+		listed,
+		errors.New("destination PVC is unavailable"),
+	)
+	if !errors.Is(err, checkpointErr) {
+		t.Fatalf("error=%v, want checkpoint error", err)
 	}
 }
 

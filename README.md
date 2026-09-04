@@ -143,8 +143,10 @@ tenant-scoped CR; the default remains the global `--session-namespace` for
 ConfigMap/session workflows.
 `--timeout` bounds planning, submission, and waiting. A failed or deleted CR
 returns a nonzero exit code. Use `--wait=false` when another process owns
-observation. Tool Pod logs are emitted by the controller process, so inspect
-the controller Deployment logs when transfer-level output is needed.
+observation. The controller records business failures in the CR status and
+does not treat them as reconcile errors; inspect the controller Deployment logs
+for structured reconciliation and data-plane events. Raw tool Pod streams and
+command-oriented `Next steps` guidance remain CLI-only.
 
 The controller image defaults to `ghcr.io/labring-sigs/pvc-migrate:dev`; set the image explicitly in `deploy/controller.yaml` for a released build.
 

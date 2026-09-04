@@ -69,7 +69,7 @@ func (r *rootState) newControllerCommand() *cobra.Command {
 					WithTrustedToolImage(r.global.toolImage).
 					WithKubeconfig(r.global.kubeconfig, r.global.kubeContext).
 					WithOpenEBSLVMSharedVolumeManager(runtime.openEBSLVMSharedVolumeManager).
-					WithLogger(runtime.logger.With("component", "workflow-controller")).
+					WithLogger(runtime.controllerLogger).
 					ReconcileOnce(ctx)
 			}
 
@@ -86,6 +86,7 @@ func (r *rootState) newControllerCommand() *cobra.Command {
 					KubeContext:                   r.global.kubeContext,
 					SupportedKinds:                runtime.controllerKinds,
 					TrustedToolImage:              r.global.toolImage,
+					Logger:                        runtime.controllerLogger,
 					HealthProbeBindAddress:        healthProbeBindAddress,
 				},
 			)

@@ -256,6 +256,52 @@ func TestWorkflowSpecMutationError(t *testing.T) {
 	}
 }
 
+func TestWorkflowReconcilerKeepsBusinessFailureOutOfReconcilerError(t *testing.T) {
+	session := newRunnerSession("controller-business-failure")
+	session.Status.Phase = domain.PhaseReserved
+	session.Status.ObservedGeneration = 1
+	session.Generation = 1
+	store := &runnerSessionStore{
+		listed: session,
+		latest: cloneRunnerSession(session),
+		lock:   &runnerSessionLock{},
+	}
+
+	reconciler := NewWorkflowReconciler(&recordingWorkflowResumer{}, store)
+	request := reconcile.Request{NamespacedName: types.NamespacedName{
+		Namespace: session.Spec.SessionNamespace,
+		Name:      session.ID,
+	}}
+	kindReconciler := &kindWorkflowReconciler{
+		parent: reconciler,
+		kind:   domain.ControllerKindCopy,
+	}
+	result := reconcileWorkflowForTest(t, kindReconciler, request)
+
+	if result != (reconcile.Result{}) {
+		t.Fatalf("result=%#v, want no requeue after terminal failure", result)
+	}
+
+	if store.latest.Status.Phase != domain.PhaseFailed {
+		t.Fatalf("phase=%s, want %s", store.latest.Status.Phase, domain.PhaseFailed)
+	}
+}
+
+func reconcileWorkflowForTest(
+	t *testing.T,
+	reconciler *kindWorkflowReconciler,
+	request reconcile.Request,
+) reconcile.Result {
+	t.Helper()
+
+	result, err := reconciler.Reconcile(context.Background(), request)
+	if err != nil {
+		t.Fatalf("business failure escaped reconcile: %v", err)
+	}
+
+	return result
+}
+
 func TestInitializeUnobservedStatus(t *testing.T) {
 	session := newRunnerSession("unobserved-status")
 	session.Status.Phase = domain.PhaseCompleted
