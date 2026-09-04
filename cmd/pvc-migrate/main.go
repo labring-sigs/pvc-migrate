@@ -7,6 +7,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"syscall"
+	_ "time/tzdata"
 
 	"github.com/labring-sigs/pvc-migrate/internal/cli"
 	"github.com/labring-sigs/pvc-migrate/internal/domain"
