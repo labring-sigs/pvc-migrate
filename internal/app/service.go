@@ -7,6 +7,7 @@ import (
 	"io"
 	"log/slog"
 	"slices"
+	"strings"
 	"time"
 
 	"github.com/labring-sigs/pvc-migrate/internal/copyengine"
@@ -19,19 +20,37 @@ import (
 const openEBSLVMSharedMountCleanupTimeout = 10 * time.Second
 
 type Config struct {
-	KubeconfigPath                string
-	Context                       string
-	Retries                       int
-	RetryBackoff                  time.Duration
-	HelmTimeout                   time.Duration
-	NoCompress                    bool
-	StreamToolLogs                bool
-	StructuredLogs                bool
-	Writer                        io.Writer
-	Logger                        *slog.Logger
-	ToolImageProber               kube.ToolImageProber
+	KubeconfigPath  string
+	Context         string
+	Retries         int
+	RetryBackoff    time.Duration
+	HelmTimeout     time.Duration
+	NoCompress      bool
+	StreamToolLogs  bool
+	StructuredLogs  bool
+	Writer          io.Writer
+	Logger          *slog.Logger
+	ToolImageProber kube.ToolImageProber
+	// TrustedToolImage overrides the workflow image in controller mode. The
+	// controller owns the data-mover image so tenant CRs cannot execute an
+	// arbitrary image, and upgrades can continue existing sessions safely.
+	TrustedToolImage              string
 	VolumeUsageReader             kube.VolumeUsageReader
 	OpenEBSLVMSharedVolumeManager kube.OpenEBSLVMSharedVolumeManager
+}
+
+func (s *Service) toolImage(session *domain.Session) string {
+	if s != nil {
+		if trusted := strings.TrimSpace(s.config.TrustedToolImage); trusted != "" {
+			return trusted
+		}
+	}
+
+	if session == nil {
+		return ""
+	}
+
+	return session.Spec.WorkflowOptions().ToolImage
 }
 
 type Service struct {

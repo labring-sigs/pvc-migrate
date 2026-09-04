@@ -25,14 +25,14 @@ func (s *Service) probeToolImage(
 		"session",
 		session.ID,
 		"image",
-		session.Spec.WorkflowOptions().ToolImage,
+		s.toolImage(session),
 		"targets",
 		len(targets),
 	)
 
 	return s.config.ToolImageProber.Probe(ctx, kube.ToolImageProbeOptions{
 		OperationID: session.ID,
-		Image:       session.Spec.WorkflowOptions().ToolImage,
+		Image:       s.toolImage(session),
 		Targets:     targets,
 		Timeout:     s.config.HelmTimeout,
 		Writer:      s.config.Writer,

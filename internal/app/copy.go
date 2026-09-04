@@ -345,7 +345,7 @@ func (s *Service) copyWithRetry(
 
 		request := copyengine.Request{
 			SessionID:             session.ID,
-			ToolImage:             options.ToolImage,
+			ToolImage:             s.toolImage(session),
 			Source:                volume.SourcePVC,
 			Destination:           volume.DestinationPVC,
 			SourcePath:            domain.SourceTransferPath(volume.TransferScope),

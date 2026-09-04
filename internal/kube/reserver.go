@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"slices"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/labring-sigs/pvc-migrate/internal/domain"
@@ -19,14 +20,37 @@ import (
 )
 
 type Reserver struct {
-	client   kubernetes.Interface
-	poll     time.Duration
-	toolLogs *ToolLogOptions
-	logger   *slog.Logger
+	client           kubernetes.Interface
+	poll             time.Duration
+	toolLogs         *ToolLogOptions
+	logger           *slog.Logger
+	trustedToolImage string
 }
 
 func NewReserver(client kubernetes.Interface) *Reserver {
 	return &Reserver{client: client, poll: time.Second}
+}
+
+// WithTrustedToolImage pins reservation consumer Pods to the controller's
+// administrator-selected image. An empty value keeps session-mode behavior.
+func (r *Reserver) WithTrustedToolImage(image string) *Reserver {
+	if r != nil {
+		r.trustedToolImage = strings.TrimSpace(image)
+	}
+
+	return r
+}
+
+func (r *Reserver) toolImage(session *domain.Session) string {
+	if r != nil && r.trustedToolImage != "" {
+		return r.trustedToolImage
+	}
+
+	if session == nil {
+		return ""
+	}
+
+	return session.Spec.WorkflowOptions().ToolImage
 }
 
 // WithToolLogs enables log streaming for reservation consumer Pods.
@@ -749,7 +773,7 @@ func (r *Reserver) provisionOnTarget(
 ) error {
 	options := session.Spec.WorkflowOptions()
 
-	toolImage, err := NormalizeToolImage(options.ToolImage)
+	toolImage, err := NormalizeToolImage(r.toolImage(session))
 	if err != nil {
 		return domain.WrapError(
 			domain.ErrorValidation,
