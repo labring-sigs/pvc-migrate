@@ -44,9 +44,14 @@ rules:
     verbs: ["get", "list", "create", "update", "patch", "delete"]
   - apiGroups: [""]
     resources: ["serviceaccounts"]
-    # Transfer Pods use one project-managed no-token account. The controller
-    # creates it when absent and repairs only its automount setting.
-    verbs: ["get", "create", "update"]
+    # Transfer Pods use one project-managed no-token account. Creation cannot
+    # be name-scoped by Kubernetes RBAC, while reads and repairs can be
+    # restricted to the fixed account used by the tool chart.
+    verbs: ["create"]
+  - apiGroups: [""]
+    resources: ["serviceaccounts"]
+    resourceNames: ["pvc-migrate-transfer"]
+    verbs: ["get", "update"]
   - apiGroups: [""]
     resources: ["events"]
     # Event reads support tool diagnostics; create/patch are required by

@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/labring-sigs/pvc-migrate/internal/domain"
+	"github.com/labring-sigs/pvc-migrate/internal/kube"
 	rbacv1 "k8s.io/api/rbac/v1"
 	"sigs.k8s.io/yaml"
 )
@@ -95,6 +96,30 @@ func TestControllerRoleKeepsMongoDBExecPermissionSeparate(t *testing.T) {
 	}
 }
 
+func TestControllerRoleScopesTransferServiceAccountReadsAndUpdates(t *testing.T) {
+	role := readClusterRole(t, "../../deploy/rbac.yaml", "pvc-migrate")
+
+	var createRule, scopedRule bool
+	for _, rule := range role.Rules {
+		if len(rule.APIGroups) != 1 || rule.APIGroups[0] != "" ||
+			len(rule.Resources) != 1 || rule.Resources[0] != "serviceaccounts" {
+			continue
+		}
+
+		switch {
+		case reflect.DeepEqual(rule.Verbs, []string{"create"}) && len(rule.ResourceNames) == 0:
+			createRule = true
+		case reflect.DeepEqual(rule.Verbs, []string{"get", "update"}) &&
+			reflect.DeepEqual(rule.ResourceNames, []string{kube.TransferServiceAccountName}):
+			scopedRule = true
+		}
+	}
+
+	if !createRule || !scopedRule {
+		t.Fatalf("ServiceAccount permissions are not narrowly scoped: %#v", role.Rules)
+	}
+}
+
 func controllerRolePermissions() map[permissionKey][]string {
 	want := make(map[permissionKey][]string)
 	add := func(group string, resources []string, verbs ...string) {
@@ -134,7 +159,7 @@ func controllerRolePermissions() map[permissionKey][]string {
 	add("", []string{"pods/portforward"}, "create")
 	add("", []string{"services"}, "get", "list", "watch", "create", "update", "patch", "delete")
 	add("", []string{"secrets"}, "get", "list", "create", "update", "patch", "delete")
-	add("", []string{"serviceaccounts"}, "get", "create", "update")
+	add("", []string{"serviceaccounts"}, "create", "get", "update")
 	add("", []string{"events"}, "get", "list", "create", "patch")
 	add("", []string{"resourcequotas", "limitranges"}, "get", "list")
 	add("apps", []string{"deployments"}, "get", "create", "update", "patch", "delete")
