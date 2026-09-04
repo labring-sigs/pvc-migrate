@@ -160,7 +160,7 @@ func controllerRolePermissions() map[permissionKey][]string {
 	add("", []string{"services"}, "get", "list", "watch", "create", "update", "patch", "delete")
 	add("", []string{"secrets"}, "get", "list", "create", "update", "patch", "delete")
 	add("", []string{"serviceaccounts"}, "create", "get", "update")
-	add("", []string{"events"}, "get", "list", "create", "patch")
+	add("", []string{"events"}, "list", "create", "patch")
 	add("", []string{"resourcequotas", "limitranges"}, "get", "list")
 	add("apps", []string{"deployments"}, "get", "create", "update", "patch", "delete")
 	add("autoscaling", []string{"horizontalpodautoscalers"}, "list")

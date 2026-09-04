@@ -56,7 +56,7 @@ rules:
     resources: ["events"]
     # Event reads support tool diagnostics; create/patch are required by
     # controller-runtime's event recorder and leader-election diagnostics.
-    verbs: ["get", "list", "create", "patch"]
+    verbs: ["list", "create", "patch"]
   - apiGroups: [""]
     resources: ["resourcequotas", "limitranges"]
     verbs: ["get", "list"]
