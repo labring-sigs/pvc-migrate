@@ -460,6 +460,8 @@ pvc-migrate copy cross-cluster \
 
 Use `reserve cross-cluster` to provision and inspect destination PVCs before copying. `reserve cross-cluster status/resume/cleanup` and `copy cross-cluster status/resume/cleanup` require both connections so resource identities can be verified on each cluster. Multiple PVCs use explicit `source=destination`, `source=capacity`, and `source=path` mappings. Cross-cluster shrink keeps the same safety defaults as local copy: `--allow-volume-shrink` and an explicit `--skip-source-usage-check` are required when no trusted usage reader exists.
 
+Set storage mappings and transfer paths when creating the reservation. Continuing with `copy cross-cluster --session ID` reuses that recorded plan and rejects planning flags. Before the first transfer, explicit `--verify-checksum`, `--delete-extraneous`, `--online`, `--strategy`, and `--tool-image` flags configure the copy; omitted flags preserve recorded settings. Once transfer starts, retries retain those settings. Use a new session to change them.
+
 ### Destination Capacity
 
 `reserve`, `copy`, `migrate`, and `migrate-pod` accept `--destination-capacity` because they create destination PVCs. Omit it to keep each source PV capacity. Pass one value to apply it to every source PVC, or use explicit `source-pvc-name=capacity` entries for multiple PVCs. Plans and workflow-specific `status` commands show both source and destination capacities.

@@ -391,6 +391,8 @@ func (r *rootState) newCrossClusterReserveRunCommand() *cobra.Command {
 				session, err = service.Get(ctx, options.SessionNamespace, flags.sessionID)
 				if apierrors.IsNotFound(err) {
 					session, err = nil, nil
+				} else if err == nil {
+					err = validateExistingCrossClusterFlags(cmd, "tool-image", "strategy")
 				}
 			}
 

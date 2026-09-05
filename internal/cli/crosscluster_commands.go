@@ -215,6 +215,8 @@ func (r *rootState) newCrossClusterCopyRunCommand() *cobra.Command {
 				session, err = service.Get(ctx, options.SessionNamespace, flags.sessionID)
 				if apierrors.IsNotFound(err) {
 					session, err = nil, nil
+				} else if err == nil {
+					err = configureExistingCrossClusterCopy(cmd, session, flags)
 				}
 			}
 

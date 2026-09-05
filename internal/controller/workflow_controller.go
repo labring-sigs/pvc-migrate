@@ -231,13 +231,8 @@ func (r *WorkflowReconciler) reconcile(
 
 	if session.Deleting {
 		// The namespace can start terminating after the CR deletion event.
-		return reconcile.Result{
-			RequeueAfter: r.requeueAfter,
-		}, r.reconcileDeletingWorkflow(
-			ctx,
-			request,
-			session,
-		)
+		err := r.reconcileDeletingWorkflow(ctx, request, session)
+		return reconcile.Result{RequeueAfter: r.requeueAfter}, err
 	}
 
 	if err := r.store.CheckWorkflowNameCollision(ctx, session); err != nil {
