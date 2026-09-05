@@ -47,6 +47,7 @@ func TestEnsureStandalonePodSnapshotCapturesLivePod(t *testing.T) {
 
 func TestPodSnapshotHashStableAfterAPIRoundTrip(t *testing.T) {
 	live := trustedSnapshotPod("tenant-a")
+
 	raw, err := json.Marshal(live)
 	if err != nil {
 		t.Fatal(err)
@@ -56,6 +57,7 @@ func TestPodSnapshotHashStableAfterAPIRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	var roundTripped corev1.Pod
 	if err := runtime.DefaultUnstructuredConverter.FromUnstructured(
 		unstructuredPod,
@@ -63,6 +65,7 @@ func TestPodSnapshotHashStableAfterAPIRoundTrip(t *testing.T) {
 	); err != nil {
 		t.Fatal(err)
 	}
+
 	roundTrippedRaw, err := json.Marshal(&roundTripped)
 	if err != nil {
 		t.Fatal(err)
