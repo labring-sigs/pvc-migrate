@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/labring-sigs/pvc-migrate/internal/domain"
+	"github.com/labring-sigs/pvc-migrate/internal/kube"
 	"github.com/labring-sigs/pvc-migrate/internal/testutil"
 	authorizationv1 "k8s.io/api/authorization/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -16,7 +17,7 @@ import (
 
 func TestCheckRBACIncludesToolAndVolumePermissions(t *testing.T) {
 	seen := collectAllowedAccessReviews(t, domain.WorkloadSpec{}, false, false)
-	for _, verb := range []string{"get", "list", "watch", "create", "update", "patch", "delete"} {
+	for _, verb := range []string{"get", "list", "create", "update", "patch", "delete"} {
 		if !hasAccessReview(seen, authorizationv1.ResourceAttributes{
 			Namespace: "app", Verb: verb, Resource: "secrets",
 		}) {
@@ -26,15 +27,23 @@ func TestCheckRBACIncludesToolAndVolumePermissions(t *testing.T) {
 
 	want := []authorizationv1.ResourceAttributes{
 		{Namespace: "app", Verb: "create", Resource: "pods/portforward"},
-		{Namespace: "app", Verb: "get", Resource: "serviceaccounts"},
+		{
+			Namespace: "app",
+			Verb:      "get",
+			Resource:  "serviceaccounts",
+			Name:      kube.TransferServiceAccountName,
+		},
 		{Namespace: "app", Verb: "create", Resource: "serviceaccounts"},
-		{Namespace: "app", Verb: "update", Resource: "serviceaccounts"},
+		{
+			Namespace: "app",
+			Verb:      "update",
+			Resource:  "serviceaccounts",
+			Name:      kube.TransferServiceAccountName,
+		},
 		{Namespace: "system", Verb: "get", Group: "coordination.k8s.io", Resource: "leases"},
 		{Namespace: "system", Verb: "create", Group: "coordination.k8s.io", Resource: "leases"},
 		{Namespace: "system", Verb: "update", Group: "coordination.k8s.io", Resource: "leases"},
-		{Verb: "get", Group: "storage.k8s.io", Resource: "volumeattachments"},
 		{Verb: "list", Group: "storage.k8s.io", Resource: "volumeattachments"},
-		{Verb: "watch", Group: "storage.k8s.io", Resource: "volumeattachments"},
 	}
 	for _, attributes := range want {
 		if !hasAccessReview(seen, attributes) {
@@ -98,7 +107,7 @@ func TestCheckRBACRejectsMissingSessionLeasePermission(t *testing.T) {
 	New(
 		client,
 		nil,
-	).checkRBAC(context.Background(), plan, "app", "stage", "system", domain.WorkloadSpec{}, false, false)
+	).checkRBAC(context.Background(), plan, rbacTestSpec("stage", domain.WorkloadSpec{}), false, false)
 
 	if plan.Ready || len(plan.Checks) != 1 ||
 		!strings.Contains(plan.Checks[0].Message, "create system/leases") {
@@ -151,12 +160,6 @@ func TestCheckRBACIncludesControllerSpecificPermissions(t *testing.T) {
 					Group:     "apps.kubeblocks.io",
 					Resource:  "clusters",
 				},
-				{
-					Namespace: "app",
-					Verb:      "patch",
-					Group:     "apps.kubeblocks.io",
-					Resource:  "clusters",
-				},
 			},
 		},
 		{
@@ -183,12 +186,6 @@ func TestCheckRBACIncludesControllerSpecificPermissions(t *testing.T) {
 				{
 					Namespace: "app",
 					Verb:      "update",
-					Group:     "workloads.kubeblocks.io",
-					Resource:  "instancesets",
-				},
-				{
-					Namespace: "app",
-					Verb:      "patch",
 					Group:     "workloads.kubeblocks.io",
 					Resource:  "instancesets",
 				},
@@ -300,12 +297,6 @@ func TestCheckRBACIncludesControllerSpecificPermissions(t *testing.T) {
 					Group:     "operator.victoriametrics.com",
 					Resource:  "vmclusters",
 				},
-				{
-					Namespace: "app",
-					Verb:      "patch",
-					Group:     "operator.victoriametrics.com",
-					Resource:  "vmclusters",
-				},
 			},
 		},
 		{
@@ -332,12 +323,6 @@ func TestCheckRBACIncludesControllerSpecificPermissions(t *testing.T) {
 				{
 					Namespace: "app",
 					Verb:      "update",
-					Group:     "grafana.integreatly.org",
-					Resource:  "grafanas",
-				},
-				{
-					Namespace: "app",
-					Verb:      "patch",
 					Group:     "grafana.integreatly.org",
 					Resource:  "grafanas",
 				},
@@ -401,7 +386,7 @@ func TestCheckRBACIncludesControllerSpecificPermissions(t *testing.T) {
 			New(
 				client,
 				nil,
-			).checkRBAC(context.Background(), plan, "app", "stage", "system", tt.workload, false, false)
+			).checkRBAC(context.Background(), plan, rbacTestSpec("stage", tt.workload), false, false)
 
 			if !plan.Ready || len(plan.Checks) != 1 || !plan.Checks[0].Passed {
 				t.Fatalf("RBAC result: %#v", plan.Checks)
@@ -436,7 +421,7 @@ func TestCheckRBACDeduplicatesEqualSourceAndStagingNamespace(t *testing.T) {
 
 			attributes := review.Spec.ResourceAttributes
 			if attributes.Namespace == "app" && attributes.Verb == "get" &&
-				attributes.Resource == "pods" {
+				attributes.Resource == "pods" && attributes.Subresource == "" {
 				podGets++
 			}
 
@@ -450,7 +435,7 @@ func TestCheckRBACDeduplicatesEqualSourceAndStagingNamespace(t *testing.T) {
 	New(
 		client,
 		nil,
-	).checkRBAC(context.Background(), plan, "app", "app", "system", domain.WorkloadSpec{}, false, false)
+	).checkRBAC(context.Background(), plan, rbacTestSpec("app", domain.WorkloadSpec{}), false, false)
 
 	if podGets != 1 {
 		t.Fatalf("Pod get reviews=%d want=1", podGets)
@@ -490,7 +475,7 @@ func TestCheckRBACAggregatesDeniedPermissionsAndReasons(t *testing.T) {
 	New(
 		client,
 		nil,
-	).checkRBAC(context.Background(), plan, "app", "stage", "system", domain.WorkloadSpec{}, false, false)
+	).checkRBAC(context.Background(), plan, rbacTestSpec("stage", domain.WorkloadSpec{}), false, false)
 
 	if plan.Ready || len(plan.Checks) != 1 {
 		t.Fatalf("RBAC result: %#v", plan.Checks)
@@ -519,7 +504,7 @@ func TestCheckRBACStopsOnReviewError(t *testing.T) {
 	New(
 		client,
 		nil,
-	).checkRBAC(context.Background(), plan, "app", "stage", "system", domain.WorkloadSpec{}, false, false)
+	).checkRBAC(context.Background(), plan, rbacTestSpec("stage", domain.WorkloadSpec{}), false, false)
 
 	if calls != 1 || plan.Ready || len(plan.Checks) != 1 ||
 		!strings.Contains(plan.Checks[0].Message, "authorization API unavailable") {
@@ -531,10 +516,15 @@ func hasAccessReview(
 	seen []authorizationv1.ResourceAttributes,
 	want authorizationv1.ResourceAttributes,
 ) bool {
+	if resource, subresource, ok := strings.Cut(want.Resource, "/"); ok {
+		want.Resource, want.Subresource = resource, subresource
+	}
+
 	for _, attributes := range seen {
 		if attributes.Namespace == want.Namespace && attributes.Verb == want.Verb &&
 			attributes.Group == want.Group &&
-			attributes.Resource == want.Resource {
+			attributes.Resource == want.Resource && attributes.Subresource == want.Subresource &&
+			attributes.Name == want.Name {
 			return true
 		}
 	}
@@ -570,11 +560,18 @@ func collectAllowedAccessReviews(
 	New(
 		client,
 		nil,
-	).checkRBAC(context.Background(), plan, "app", "stage", "system", workload, inspectOpenEBSLVMShared, enableOpenEBSLVMShared)
+	).checkRBAC(context.Background(), plan, rbacTestSpec("stage", workload), inspectOpenEBSLVMShared, enableOpenEBSLVMShared)
 
 	if !plan.Ready || len(plan.Checks) != 1 || !plan.Checks[0].Passed {
 		t.Fatalf("RBAC result: %#v", plan.Checks)
 	}
 
 	return seen
+}
+
+func rbacTestSpec(staging string, workload domain.WorkloadSpec) domain.SessionSpec {
+	return domain.NewPodMigrationSessionSpec(domain.SessionCommon{
+		SourceNamespace: "app", TemporaryNamespace: staging,
+		DestinationNamespace: "app", SessionNamespace: "system",
+	}, workload, domain.SessionWorkflowOptions{Strategies: []string{domain.StrategyLocal}}, 1, false)
 }

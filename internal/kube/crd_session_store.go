@@ -421,6 +421,14 @@ func (s *CRDSessionStore) configured(operation string) error {
 }
 
 func (s *CRDSessionStore) Create(ctx context.Context, session *domain.Session) error {
+	return s.create(ctx, session, false)
+}
+
+func (s *CRDSessionStore) ValidateCreate(ctx context.Context, session *domain.Session) error {
+	return s.create(ctx, session, true)
+}
+
+func (s *CRDSessionStore) create(ctx context.Context, session *domain.Session, dryRun bool) error {
 	if session == nil {
 		return domain.NewError(domain.ErrorValidation, "create session", "session is nil")
 	}
@@ -457,10 +465,8 @@ func (s *CRDSessionStore) Create(ctx context.Context, session *domain.Session) e
 		)
 	}
 
-	// Service.CreateSession holds the shared session-ID Lease while this check
-	// and create run. A tenant that cannot read a sibling Kind may still submit
-	// the CR; the cluster-authorized controller repeats the check before adding
-	// protection or touching data-plane resources.
+	// This is an early diagnostic only. The controller repeats the collision
+	// check and fences execution with a Lease before touching data-plane resources.
 	if err := s.checkWorkflowNameCollision(ctx, session, false); err != nil {
 		return err
 	}
@@ -474,7 +480,12 @@ func (s *CRDSessionStore) Create(ctx context.Context, session *domain.Session) e
 		)
 	}
 
-	if err := s.client.Create(ctx, object); apierrors.IsAlreadyExists(err) {
+	options := &crclient.CreateOptions{}
+	if dryRun {
+		options.DryRun = []string{metav1.DryRunAll}
+	}
+
+	if err := s.client.Create(ctx, object, options); apierrors.IsAlreadyExists(err) {
 		return domain.WrapError(
 			domain.ErrorConflict,
 			"create session",
@@ -494,29 +505,23 @@ func (s *CRDSessionStore) Create(ctx context.Context, session *domain.Session) e
 		)
 	}
 
-	// CRDs with a status subresource ignore status on the main create call.
-	// Persist the initial Planned checkpoint before returning to the caller.
-	session.Status.ObservedGeneration = object.GetGeneration()
+	if dryRun {
+		return nil
+	}
 
-	statusObject, err := s.initializeStatus(ctx, session, object)
+	// Initial status belongs to the controller. Derive the local Planned view
+	// from the create response without issuing a competing status write.
+	created, err := DecodeWorkflow(object)
 	if err != nil {
-		return domain.WrapError(
-			domain.ErrorKubernetes,
-			"create session",
-			"initialize workflow status",
-			err,
-		)
+		return err
 	}
 
-	if latest, decodeErr := DecodeWorkflow(statusObject); decodeErr == nil {
-		session.Generation = latest.Generation
-		session.Status = latest.Status
-		session.BackendResource = latest.BackendResource
-	}
-
-	session.ResourceVersion = statusObject.GetResourceVersion()
+	session.Generation = created.Generation
+	session.Status = created.Status
+	session.BackendResource = created.BackendResource
+	session.ResourceVersion = object.GetResourceVersion()
 	session.Backend = SessionBackendCRD
-	session.BackendUID = statusObject.GetUID()
+	session.BackendUID = object.GetUID()
 
 	return nil
 }
@@ -657,103 +662,6 @@ func uniqueWorkflowNamespaces(spec domain.SessionSpec) []string {
 	}
 
 	return namespaces
-}
-
-// initializeStatus handles the short race between a CR create and the first
-// controller reconcile. A controller may update the object before the CLI's
-// initial status checkpoint reaches the API server; in that case the latest
-// controller-owned status is authoritative and must be preserved.
-func (s *CRDSessionStore) initializeStatus(
-	ctx context.Context,
-	session *domain.Session,
-	created crclient.Object,
-) (crclient.Object, error) {
-	if session == nil || created == nil {
-		return nil, domain.NewError(
-			domain.ErrorValidation,
-			"create session",
-			"session and workflow resource are required",
-		)
-	}
-
-	current, ok := created.DeepCopyObject().(crclient.Object)
-	if !ok {
-		return nil, domain.NewError(
-			domain.ErrorInternal,
-			"create session",
-			"workflow deep copy does not implement client.Object",
-		)
-	}
-
-	for range 3 {
-		if !setWorkflowStatus(current, session.Spec, session.Status) {
-			return nil, domain.NewError(
-				domain.ErrorInternal,
-				"create session",
-				"unsupported workflow resource",
-			)
-		}
-
-		if err := s.client.Status().Update(ctx, current); err == nil {
-			return current, nil
-		} else if !apierrors.IsConflict(err) {
-			// Status is intentionally controller-owned. A tenant may create a
-			// workflow without status update permission; the controller will
-			// initialize Planned on its first reconcile.
-			if apierrors.IsForbidden(err) {
-				return current, nil
-			}
-
-			return nil, err
-		}
-
-		latestKind := workflowKind(current)
-
-		latestResource, resourceOK := workflowCRDResource(latestKind)
-		if !resourceOK {
-			return nil, domain.NewError(
-				domain.ErrorInternal,
-				"create session",
-				"unsupported workflow resource",
-			)
-		}
-
-		latest := latestResource.new()
-		if latest == nil {
-			return nil, domain.NewError(
-				domain.ErrorInternal,
-				"create session",
-				"unsupported workflow resource",
-			)
-		}
-
-		if err := s.client.Get(
-			ctx,
-			resourceKey(latestResource, session.Spec.SessionNamespace, session.ID),
-			latest,
-		); err != nil {
-			return nil, err
-		}
-
-		latestSession, decodeErr := DecodeWorkflow(latest)
-		if decodeErr != nil {
-			return nil, decodeErr
-		}
-
-		if latestSession.Status.Phase != "" {
-			// The controller has already initialized or advanced status. Keep
-			// that checkpoint and let the caller observe the latest RV.
-			return latest, nil
-		}
-
-		current = latest
-	}
-
-	return nil, domain.NewError(
-		domain.ErrorConflict,
-		"create session",
-		"workflow status changed while initializing",
-	)
 }
 
 func (s *CRDSessionStore) Get(ctx context.Context, namespace, id string) (*domain.Session, error) {

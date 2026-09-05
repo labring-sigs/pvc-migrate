@@ -62,6 +62,7 @@ type Planner struct {
 	openEBSLVMSharedVolumeManager kube.OpenEBSLVMSharedVolumeManager
 	volumeUsageReader             kube.VolumeUsageReader
 	logger                        *slog.Logger
+	controllerSubmission          bool
 }
 
 type planState struct {
@@ -100,6 +101,13 @@ type planState struct {
 
 func New(client kubernetes.Interface, controllers *controller.Manager) *Planner {
 	return &Planner{client: client, controllers: controllers}
+}
+
+// WithControllerSubmission checks the caller's workflow submission permissions;
+// the elected controller owns execution and its data-plane permissions.
+func (p *Planner) WithControllerSubmission(enabled bool) *Planner {
+	p.controllerSubmission = enabled
+	return p
 }
 
 func (p *Planner) WithOpenEBSLVMSharedVolumeManager(
@@ -751,8 +759,8 @@ func (p *Planner) finalizePlan(ctx context.Context, state *planState) {
 
 	p.finalizePlanTarget(ctx, state, capacityInventory)
 	p.finalizePlanStrategies(state)
-	p.finalizePlanResources(ctx, state)
 	p.finalizePlanSession(state)
+	p.finalizePlanResources(ctx, state)
 }
 
 func (p *Planner) finalizePlanTarget(
@@ -1813,7 +1821,7 @@ type planCheckTask func(*domain.MigrationPlan)
 func runPlanCheckTasks(plan *domain.MigrationPlan, tasks []planCheckTask) {
 	checks := make([][]domain.Check, len(tasks))
 	parallel.For(len(tasks), func(index int) {
-		result := &domain.MigrationPlan{Ready: true}
+		result := &domain.MigrationPlan{Ready: true, SessionID: plan.SessionID}
 		tasks[index](result)
 		checks[index] = result.Checks
 	})

@@ -230,7 +230,9 @@ func (r *WorkflowReconciler) reconcile(
 	}
 
 	if session.Deleting {
-		return reconcile.Result{}, r.reconcileDeletingWorkflow(ctx, request, session)
+		// The namespace can start terminating after the CR deletion event.
+		err := r.reconcileDeletingWorkflow(ctx, request, session)
+		return reconcile.Result{RequeueAfter: r.requeueAfter}, err
 	}
 
 	if err := r.store.CheckWorkflowNameCollision(ctx, session); err != nil {
@@ -274,12 +276,7 @@ func (r *WorkflowReconciler) reconcile(
 		return reconcile.Result{}, err
 	}
 
-	// Status is a controller-owned subresource. A declarative create ignores a
-	// user-supplied status, and the CLI may still be writing its initial status
-	// checkpoint while the create event is delivered. Do not begin business
-	// execution until that checkpoint is observed: executing with the create
-	// resource version would race the status write and self-fail with an
-	// optimistic-lock conflict.
+	// Persist the controller-owned initial checkpoint before business execution.
 	if session.Status.ObservedGeneration == 0 {
 		if err := initializeUnobservedStatus(ctx, r.store, session); err != nil {
 			if domain.CategoryOf(err) == domain.ErrorConflict {
@@ -345,6 +342,18 @@ func (r *WorkflowReconciler) checkpointBusinessFailure(
 	cause error,
 	request reconcile.Request,
 ) (reconcile.Result, error) {
+	if errors.Is(ctx.Err(), context.Canceled) {
+		r.logger.Info(
+			"workflow interrupted; preserving checkpoint for reconciliation",
+			"workflow",
+			request.NamespacedName,
+			"phase",
+			session.Status.Phase,
+		)
+
+		return reconcile.Result{}, nil
+	}
+
 	if err := runner.checkpointFailureForController(ctx, session, cause); err != nil {
 		if kube.IsSessionLockContention(err) {
 			r.logger.Info(
@@ -360,16 +369,6 @@ func (r *WorkflowReconciler) checkpointBusinessFailure(
 
 		return reconcile.Result{}, err
 	}
-
-	r.logger.Warn(
-		"workflow entered failed state",
-		"workflow",
-		request.NamespacedName,
-		"phase",
-		domain.PhaseFailed,
-		"reason",
-		cause,
-	)
 
 	return reconcile.Result{}, nil
 }

@@ -196,7 +196,15 @@ func validateCrossClusterHeader(s *Session) error {
 		return errors.New("cross-cluster session has incomplete spec")
 	}
 
-	return nil
+	if _, err := kube.NormalizeToolImage(s.Spec.ToolImage); err != nil {
+		return err
+	}
+
+	if len(s.Spec.Strategies) == 0 {
+		return errors.New("cross-cluster session requires a transfer strategy")
+	}
+
+	return validateStrategies(s.Spec.Strategies)
 }
 
 func validateCrossClusterStatus(s *Session) error {

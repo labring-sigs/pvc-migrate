@@ -63,6 +63,43 @@ func TestRestorePreflightRequiresPublishedManifestCapacityAndMode(t *testing.T) 
 	}
 }
 
+func TestRestoreExistingPVCDefersManifestForControllerSubmission(t *testing.T) {
+	client, request := preflightFixture(t, &preflightObjectStore{})
+	executionStore := request.Store
+
+	store, err := objectstore.NewConfigOnly(objectstore.Config{
+		Bucket: "backups",
+		Prefix: "pv-migrate",
+		Name:   "daily",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	request.Store = store
+	request.SkipManifestCheck = true
+
+	plan, err := Preflight(t.Context(), client, request, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if plan.Operation != "restore" || plan.Mode != ModeRestore || plan.CreatePVC ||
+		plan.ManifestPresent || plan.Capacity != "1Gi" || plan.PVCUID == "" ||
+		!slices.Contains(plan.Warnings, "object-store manifest check deferred to the controller") {
+		t.Fatalf("deferred existing PVC restore plan=%#v", plan)
+	}
+
+	request.SkipManifestCheck = false
+	request.Store = executionStore
+
+	_, err = Preflight(t.Context(), client, request, true)
+	if domain.CategoryOf(err) != domain.ErrorPrecondition ||
+		!strings.Contains(err.Error(), "completion manifest is missing") {
+		t.Fatalf("execution must require the manifest: %v", err)
+	}
+}
+
 func TestRestorePreflightMissingExistingPVCUsesRestoreContext(t *testing.T) {
 	client, request := preflightFixture(
 		t,

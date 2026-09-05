@@ -1,4 +1,3 @@
-Port 22
 PidFile /tmp/sshd.pid
 PasswordAuthentication no
 ChallengeResponseAuthentication no

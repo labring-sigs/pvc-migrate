@@ -319,7 +319,10 @@ func (p *Planner) planPVCIdentity(
 		PVCsByStorageClass: map[string]int{storageClass: requestedPVCs},
 	}
 	if options.SessionNamespace == options.DestinationNamespace {
-		plan.TemporaryUsage.ConfigMaps = 1
+		if !p.controllerSubmission {
+			plan.TemporaryUsage.ConfigMaps = 1
+		}
+
 		plan.TemporaryUsage.Leases = 1
 	}
 
@@ -355,14 +358,17 @@ func (p *Planner) planPVCIdentity(
 			p.checkRenameRBAC(
 				ctx,
 				result,
-				options.SourceNamespace,
-				options.DestinationNamespace,
-				options.SessionNamespace,
+				plan.SessionSpec,
 			)
 		},
 	}
 	if options.SessionNamespace != options.DestinationNamespace {
 		tasks = append(tasks, func(result *domain.MigrationPlan) {
+			configMaps := 1
+			if p.controllerSubmission {
+				configMaps = 0
+			}
+
 			p.checkNamespaceResourcePolicies(
 				ctx,
 				result,
@@ -370,7 +376,7 @@ func (p *Planner) planPVCIdentity(
 				nil,
 				domain.ResourceEstimate{
 					StorageRequests:    "0",
-					ConfigMaps:         1,
+					ConfigMaps:         configMaps,
 					Leases:             1,
 					ByStorageClass:     map[string]string{},
 					PVCsByStorageClass: map[string]int{},

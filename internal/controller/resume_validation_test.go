@@ -292,6 +292,90 @@ func TestKubeBlocksLegacyResumeConvergenceChecksOperationsComponent(t *testing.T
 	}
 }
 
+func TestLegacyResumeValidatesExistingStartWhileClusterConverges(t *testing.T) {
+	for _, test := range []struct {
+		name      string
+		phase     string
+		missing   bool
+		foreign   bool
+		wantError bool
+	}{
+		{name: "pending", phase: ""},
+		{name: "running", phase: "Running"},
+		{name: "succeeded", phase: "Succeed"},
+		{name: "missing", missing: true, wantError: true},
+		{name: "failed", phase: "Failed", wantError: true},
+		{name: "foreign", phase: "Running", foreign: true, wantError: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			session := kubeBlocksSession()
+			session.Status.Phase = domain.PhaseResuming
+			cluster := &unstructured.Unstructured{Object: map[string]any{
+				"apiVersion": kubeBlocksClusterAPIVersion,
+				"kind":       "Cluster",
+				"metadata": map[string]any{
+					"name":        "cluster",
+					"namespace":   "db",
+					"uid":         "cluster-uid",
+					"annotations": map[string]any{pauseSessionAnnotation: session.ID},
+				},
+				"spec": map[string]any{
+					"componentSpecs": []any{map[string]any{"name": "db", "replicas": int64(1)}},
+				},
+				"status": map[string]any{"phase": "Updating"},
+			}}
+
+			objects := []runtime.Object{cluster, opsRequest("session-pause", "Succeed")}
+			if !test.missing {
+				start := opsRequest("session-resume", test.phase)
+				if test.foreign {
+					start.SetLabels(map[string]string{})
+				}
+
+				objects = append(objects, start)
+			}
+
+			dynamicClient := dynamicfake.NewSimpleDynamicClient(runtime.NewScheme(), objects...)
+			manager := NewManager(kubernetesfake.NewClientset(), dynamicClient, nil)
+
+			err := manager.ValidateResume(t.Context(), session)
+			if (err != nil) != test.wantError {
+				t.Fatalf("error=%v wantError=%t", err, test.wantError)
+			}
+
+			if test.phase == "Succeed" {
+				if err := manager.setKubeBlocksPaused(t.Context(), session, false); err != nil {
+					t.Fatal(err)
+				}
+			}
+
+			for _, action := range dynamicClient.Actions() {
+				if action.GetVerb() != "get" {
+					t.Fatalf(
+						"existing Start was mutated: %s %s",
+						action.GetVerb(),
+						action.GetResource().Resource,
+					)
+				}
+			}
+		})
+	}
+}
+
+func TestKubeBlocksFailedRecoveryKeepsOperationName(t *testing.T) {
+	for _, phase := range []domain.Phase{domain.PhaseResuming, domain.PhaseAborting, domain.PhaseRollingBack} {
+		session := kubeBlocksSession()
+		session.Status.Phase = phase
+		want := kubeBlocksOperationName(session, "resume")
+		session.Status.ResumeFrom = phase
+
+		session.Status.Phase = domain.PhaseFailed
+		if got := kubeBlocksOperationName(session, "resume"); got != want {
+			t.Fatalf("phase=%s operation=%s want=%s", phase, got, want)
+		}
+	}
+}
+
 func TestKubeBlocksInstanceSetResumeWaitsForClusterRunning(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()

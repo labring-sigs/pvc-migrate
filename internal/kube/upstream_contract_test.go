@@ -470,7 +470,10 @@ func TestToolDockerfileTracksUpstreamSSHDConfig(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if string(localConfig) != string(upstreamConfig) {
+	// The chart passes Port through -o. OpenSSH accumulates configured ports,
+	// so repeating it in the file emits duplicate bind errors at startup.
+	expected := strings.ReplaceAll(string(upstreamConfig), "Port 22\n", "")
+	if string(localConfig) != expected {
 		t.Fatalf(
 			"tool image sshd_config diverges from upstream:\nlocal:\n%s\nupstream:\n%s",
 			localConfig,
