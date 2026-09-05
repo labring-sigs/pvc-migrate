@@ -313,6 +313,7 @@ func TestWorkflowReconcilerRequeuesSessionLockContention(t *testing.T) {
 		Namespace: session.Spec.SessionNamespace,
 		Name:      session.ID,
 	}}
+
 	result, err := (&kindWorkflowReconciler{
 		parent: reconciler,
 		kind:   domain.ControllerKindCopy,
@@ -320,9 +321,11 @@ func TestWorkflowReconcilerRequeuesSessionLockContention(t *testing.T) {
 	if err != nil {
 		t.Fatalf("lock contention escaped reconcile: %v", err)
 	}
+
 	if result.RequeueAfter != 250*time.Millisecond {
 		t.Fatalf("requeueAfter=%s, want 250ms", result.RequeueAfter)
 	}
+
 	if len(store.updates) != 0 {
 		t.Fatalf("lock contention checkpointed as failure: %d updates", len(store.updates))
 	}

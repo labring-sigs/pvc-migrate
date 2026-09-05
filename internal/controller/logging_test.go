@@ -63,6 +63,7 @@ func TestControllerLoggerWithAttrsAndGroupsRemainStructured(t *testing.T) {
 
 func TestControllerLoggerSuppressesExpectedWatchCancellation(t *testing.T) {
 	var output bytes.Buffer
+
 	logger := NewControllerLogger(slog.New(slog.NewJSONHandler(&output, nil)))
 	logger.Error("Failed to watch", "err", context.Canceled, "resource", "pods")
 
@@ -71,6 +72,7 @@ func TestControllerLoggerSuppressesExpectedWatchCancellation(t *testing.T) {
 	}
 
 	logger.Error("Failed to watch", "err", errors.New("forbidden"), "resource", "pods")
+
 	if !strings.Contains(output.String(), `"msg":"Failed to watch"`) {
 		t.Fatalf("unexpected watch error was suppressed: %q", output.String())
 	}
