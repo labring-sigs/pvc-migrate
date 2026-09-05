@@ -971,6 +971,33 @@ func TestSessionLookupGuidanceUsesOwningWorkflow(t *testing.T) {
 	}
 }
 
+func TestControllerRecordInspectionUsesWorkflowResources(t *testing.T) {
+	for _, test := range []struct {
+		command []string
+		want    string
+	}{
+		{[]string{"copy", "status"}, "copies.migrate.sealos.io,clustercopies.migrate.sealos.io missing"},
+		{[]string{"backup", "status"}, "backups.migrate.sealos.io missing"},
+		{[]string{"move", "status"}, "moves.migrate.sealos.io missing"},
+		{[]string{"copy", "cross-cluster", "status"}, "configmap pvc-migrate-session-missing"},
+	} {
+		t.Run(strings.Join(test.command, "/"), func(t *testing.T) {
+			root := NewRoot(Options{Version: "test"})
+			if err := root.PersistentFlags().Set("mode", "controller"); err != nil {
+				t.Fatal(err)
+			}
+			command, _, err := root.Find(test.command)
+			if err != nil {
+				t.Fatal(err)
+			}
+			got := sessionRecordInspectionCommand(command, "tenant", "missing")
+			if !strings.Contains(got, test.want) {
+				t.Fatalf("inspection=%q, want %q", got, test.want)
+			}
+		})
+	}
+}
+
 func TestSessionCreationErrorGuidanceInspectsPotentialRecord(t *testing.T) {
 	command := &guidanceErrorCommand{}
 

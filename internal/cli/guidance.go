@@ -979,16 +979,20 @@ func reportSessionCreationError(
 func sessionRecordInspectionCommand(value any, namespace, id string) string {
 	prefix := kubectlCommandPrefixForCommand(value)
 	command, ok := value.(*cobra.Command)
+
 	controllerMode := false
 	if ok && command != nil {
 		mode := command.Root().PersistentFlags().Lookup("mode")
-		controllerMode = mode != nil && strings.EqualFold(mode.Value.String(), string(executionModeController))
+
+		controllerMode = mode != nil &&
+			strings.EqualFold(mode.Value.String(), string(executionModeController))
 		for current := command; current != nil; current = current.Parent() {
 			if current.Name() == "cross-cluster" {
 				controllerMode = false
 			}
 		}
 	}
+
 	if controllerMode {
 		name := workflowCommandNameForCommand(value)
 		for _, workflow := range domain.ControllerWorkflows() {
@@ -996,16 +1000,30 @@ func sessionRecordInspectionCommand(value any, namespace, id string) string {
 			if workflowCommandName(session) != name {
 				continue
 			}
+
 			resources := make([]string, 0, 2)
 			for _, resource := range []string{workflow.Resource, workflow.ClusterResource} {
 				if resource != "" {
 					resources = append(resources, resource+"."+domain.SessionAPIGroup)
 				}
 			}
-			return fmt.Sprintf("%s --namespace %s get %s %s", prefix, shellQuote(namespace), strings.Join(resources, ","), shellQuote(id))
+
+			return fmt.Sprintf(
+				"%s --namespace %s get %s %s",
+				prefix,
+				shellQuote(namespace),
+				strings.Join(resources, ","),
+				shellQuote(id),
+			)
 		}
 	}
-	return fmt.Sprintf("%s --namespace %s get configmap %s", prefix, shellQuote(namespace), shellQuote(kube.SessionConfigMapName(id)))
+
+	return fmt.Sprintf(
+		"%s --namespace %s get configmap %s",
+		prefix,
+		shellQuote(namespace),
+		shellQuote(kube.SessionConfigMapName(id)),
+	)
 }
 
 func reportCleanupError(
