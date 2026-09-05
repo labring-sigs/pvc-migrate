@@ -166,12 +166,12 @@ func (s *Service) reserveVolume(ctx context.Context, session *Session, index int
 				UID:        pv.UID,
 			}
 
-			status := &session.Status.Volumes[volumeIndex(session, v.Source.PVC.Name)]
+			status := &session.Status.Volumes[index]
 			if ref := status.Reservation.ConsumerPod; ref.UID != "" {
 				if deleteErr := s.deleteReservationConsumer(
 					waitCtx,
 					session,
-					volumeIndex(session, v.Source.PVC.Name),
+					index,
 				); deleteErr != nil {
 					return false, deleteErr
 				}

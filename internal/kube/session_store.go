@@ -387,7 +387,10 @@ func (s *ConfigMapSessionStore) List(
 	ctx context.Context,
 	namespace string,
 ) ([]*domain.Session, error) {
-	selector := labels.Set{ManagedByLabel: ManagedByValue}.String()
+	// Require the current session label as well as managed-by. Older releases
+	// used a different session label key; attempting to decode those records
+	// would make one stale ConfigMap fail the entire inventory operation.
+	selector := labels.Set{ManagedByLabel: ManagedByValue}.String() + "," + SessionKey
 
 	items, err := s.client.CoreV1().
 		ConfigMaps(namespace).

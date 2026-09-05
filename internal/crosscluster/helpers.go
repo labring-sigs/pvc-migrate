@@ -82,132 +82,57 @@ func activeConsumers(
 }
 
 func resolveNames(values, source []string) ([]string, error) {
-	if len(values) == 0 {
-		out := make([]string, len(source))
-		for i := range source {
-			out[i] = source[i] + "-copy"
-		}
-
-		return out, nil
-	}
-
-	if len(values) == 1 && !strings.Contains(values[0], "=") && len(source) == 1 {
-		return []string{values[0]}, nil
-	}
-
-	if len(source) > 1 {
-		for _, value := range values {
-			if !strings.Contains(value, "=") {
-				return nil, errors.New(
-					"multiple source PVCs require explicit destination mappings such as source=destination",
-				)
-			}
-		}
-	}
-
-	out := make([]string, len(source))
-
-	seen := map[string]bool{}
-	for _, v := range values {
-		key, val, ok := strings.Cut(v, "=")
-		if !ok || key == "" || val == "" {
-			return nil, fmt.Errorf("destination PVC mapping %q must use source=name", v)
-		}
-
-		matched := false
-		for i, s := range source {
-			if s == key {
-				matched = true
-
-				if seen[key] {
-					return nil, fmt.Errorf("duplicate destination PVC mapping for %s", key)
-				}
-
-				out[i] = val
-				seen[key] = true
-			}
-		}
-
-		if !matched {
-			return nil, fmt.Errorf("destination PVC mapping references unknown source PVC %s", key)
-		}
-	}
-
-	for i := range out {
-		if out[i] == "" {
-			return nil, fmt.Errorf("destination PVC mapping is missing source %s", source[i])
-		}
-	}
-
-	seenDestinations := make(map[string]struct{}, len(out))
-	for _, destination := range out {
-		if _, exists := seenDestinations[destination]; exists {
-			return nil, fmt.Errorf(
-				"destination PVC %s is mapped from more than one source PVC",
-				destination,
-			)
-		}
-
-		seenDestinations[destination] = struct{}{}
-	}
-
-	return out, nil
+	return resolveMappedValues(values, source, mappedValueOptions{
+		defaultValue:     func(source string) string { return source + "-copy" },
+		multipleMessage:  "multiple source PVCs require explicit destination mappings such as source=destination",
+		invalidMessage:   "destination PVC mapping %q must use source=name",
+		duplicateMessage: "duplicate destination PVC mapping for %s",
+		unknownMessage:   "destination PVC mapping references unknown source PVC %s",
+		missingMessage:   "destination PVC mapping is missing source %s",
+		requireAll:       true,
+		uniqueValues:     true,
+	})
 }
 
 func resolveValues(values, source []string) ([]string, error) {
-	if len(values) == 0 {
-		return make([]string, len(source)), nil
-	}
-
-	if len(values) == 1 && !strings.Contains(values[0], "=") && len(source) == 1 {
-		return []string{values[0]}, nil
-	}
-
-	if len(source) > 1 {
-		for _, value := range values {
-			if !strings.Contains(value, "=") {
-				return nil, errors.New(
-					"multiple source PVCs require explicit capacity mappings such as source=capacity",
-				)
-			}
-		}
-	}
-
-	out := make([]string, len(source))
-
-	seen := map[string]bool{}
-	for _, v := range values {
-		key, val, ok := strings.Cut(v, "=")
-		if !ok || key == "" || val == "" {
-			return nil, fmt.Errorf("capacity mapping %q must use source=capacity", v)
-		}
-
-		found := false
-		for i, s := range source {
-			if s == key {
-				if seen[key] {
-					return nil, fmt.Errorf("duplicate capacity mapping for %s", key)
-				}
-
-				out[i] = val
-				seen[key] = true
-				found = true
-			}
-		}
-
-		if !found {
-			return nil, fmt.Errorf("capacity mapping references unknown source PVC %s", key)
-		}
-	}
-
-	return out, nil
+	return resolveMappedValues(values, source, mappedValueOptions{
+		multipleMessage:  "multiple source PVCs require explicit capacity mappings such as source=capacity",
+		invalidMessage:   "capacity mapping %q must use source=capacity",
+		duplicateMessage: "duplicate capacity mapping for %s",
+		unknownMessage:   "capacity mapping references unknown source PVC %s",
+	})
 }
 
 func resolvePaths(values, source []string) ([]string, error) {
+	return resolveMappedValues(values, source, mappedValueOptions{
+		defaultValue:     func(string) string { return "." },
+		multipleMessage:  "multiple source PVCs require explicit path mappings such as source=path",
+		invalidMessage:   "path mapping %q must use source=path",
+		duplicateMessage: "duplicate path mapping for %s",
+		unknownMessage:   "path mapping references unknown source PVC %s",
+		missingMessage:   "path mapping is missing source %s",
+		requireAll:       true,
+	})
+}
+
+type mappedValueOptions struct {
+	defaultValue     func(string) string
+	multipleMessage  string
+	invalidMessage   string
+	duplicateMessage string
+	unknownMessage   string
+	missingMessage   string
+	requireAll       bool
+	uniqueValues     bool
+}
+
+func resolveMappedValues(values, source []string, options mappedValueOptions) ([]string, error) {
+	out := make([]string, len(source))
 	if len(values) == 0 {
-		out := make([]string, len(source))
-		for i := range out {
-			out[i] = "."
+		if options.defaultValue != nil {
+			for index, name := range source {
+				out[index] = options.defaultValue(name)
+			}
 		}
 
 		return out, nil
@@ -220,44 +145,58 @@ func resolvePaths(values, source []string) ([]string, error) {
 	if len(source) > 1 {
 		for _, value := range values {
 			if !strings.Contains(value, "=") {
-				return nil, errors.New(
-					"multiple source PVCs require explicit path mappings such as source=path",
-				)
+				return nil, errors.New(options.multipleMessage)
 			}
 		}
 	}
 
-	out := make([]string, len(source))
-
-	seen := map[string]bool{}
-	for _, v := range values {
-		key, val, ok := strings.Cut(v, "=")
-		if !ok || key == "" || val == "" {
-			return nil, fmt.Errorf("path mapping %q must use source=path", v)
+	seen := make(map[string]bool, len(values))
+	for _, value := range values {
+		key, mapped, ok := strings.Cut(value, "=")
+		if !ok || key == "" || mapped == "" {
+			return nil, fmt.Errorf(options.invalidMessage, value)
 		}
 
 		matched := false
-		for i, s := range source {
-			if s == key {
-				matched = true
-
-				if seen[key] {
-					return nil, fmt.Errorf("duplicate path mapping for %s", key)
-				}
-
-				out[i] = val
-				seen[key] = true
+		for index, name := range source {
+			if name != key {
+				continue
 			}
+
+			matched = true
+
+			if seen[key] {
+				return nil, fmt.Errorf(options.duplicateMessage, key)
+			}
+
+			out[index] = mapped
+			seen[key] = true
 		}
 
 		if !matched {
-			return nil, fmt.Errorf("path mapping references unknown source PVC %s", key)
+			return nil, fmt.Errorf(options.unknownMessage, key)
 		}
 	}
 
-	for i := range out {
-		if out[i] == "" {
-			return nil, fmt.Errorf("path mapping is missing source %s", source[i])
+	if options.requireAll {
+		for index, value := range out {
+			if value == "" {
+				return nil, fmt.Errorf(options.missingMessage, source[index])
+			}
+		}
+	}
+
+	if options.uniqueValues {
+		seenValues := make(map[string]struct{}, len(out))
+		for _, value := range out {
+			if _, exists := seenValues[value]; exists {
+				return nil, fmt.Errorf(
+					"destination PVC %s is mapped from more than one source PVC",
+					value,
+				)
+			}
+
+			seenValues[value] = struct{}{}
 		}
 	}
 

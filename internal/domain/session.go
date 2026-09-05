@@ -95,10 +95,9 @@ const (
 	PhaseFailed       Phase = "Failed"
 )
 
-// allowedTransitions constructs a fresh table for callers that need to
-// inspect the state machine. Returning a new map keeps the policy isolated
-// from mutable process-wide state.
-func allowedTransitions() map[Phase][]Phase {
+// buildTransitionPolicy creates the shared transition policy used by the
+// state machine. Callers that inspect it receive a copy from allowedTransitions.
+func buildTransitionPolicy() map[Phase][]Phase {
 	return map[Phase][]Phase{
 		PhasePlanned:   {PhaseReserving, PhaseRenaming, PhaseMoving, PhaseAborting, PhaseFailed},
 		PhaseRenaming:  {PhaseCompleted, PhaseAborting, PhaseFailed},
@@ -149,6 +148,18 @@ func allowedTransitions() map[Phase][]Phase {
 		PhaseRollingBack: {PhaseRolledBack, PhaseFailed},
 		PhaseRolledBack:  {PhaseResuming, PhaseCompleted},
 	}
+}
+
+var transitionPolicy = buildTransitionPolicy()
+
+// allowedTransitions returns an isolated policy copy for validation and tests.
+func allowedTransitions() map[Phase][]Phase {
+	result := make(map[Phase][]Phase, len(transitionPolicy))
+	for phase, next := range transitionPolicy {
+		result[phase] = slices.Clone(next)
+	}
+
+	return result
 }
 
 type ObjectReference struct {
@@ -1295,7 +1306,7 @@ func (s *Session) Transition(next Phase, message string, now time.Time) error {
 	backupTransition := (s.Spec.Type == SessionTypeBackup || s.Spec.Type == SessionTypeRestore) &&
 		((s.Status.Phase == PhasePlanned && next == PhaseWarmCopying) ||
 			(s.Status.Phase == PhaseWarmCopied && next == PhaseCompleted))
-	if !backupTransition && !slices.Contains(allowedTransitions()[s.Status.Phase], next) {
+	if !backupTransition && !slices.Contains(transitionPolicy[s.Status.Phase], next) {
 		return NewError(
 			ErrorConflict,
 			"transition",
@@ -1588,7 +1599,7 @@ func validateSessionStatus(s *Session) error {
 		return NewError(ErrorValidation, "session", "volume specification and status counts differ")
 	}
 
-	if _, known := allowedTransitions()[s.Status.Phase]; !known && s.Status.Phase != PhaseAborted {
+	if _, known := transitionPolicy[s.Status.Phase]; !known && s.Status.Phase != PhaseAborted {
 		return NewError(
 			ErrorValidation,
 			"session",
