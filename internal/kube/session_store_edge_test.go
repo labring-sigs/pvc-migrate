@@ -66,6 +66,39 @@ func TestConfigMapSessionStoreListSortsAndFilters(t *testing.T) {
 	}
 }
 
+func TestConfigMapSessionStoreListIgnoresLegacySessionLabel(t *testing.T) {
+	legacy := storeTestSession()
+	legacy.ID = "legacy"
+
+	data, err := json.Marshal(legacy)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	client := fake.NewClientset(&corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: legacy.Spec.SessionNamespace,
+			Name:      SessionConfigMapName(legacy.ID),
+			Labels: map[string]string{
+				ManagedByLabel:           ManagedByValue,
+				"pvc-migrate.io/session": legacy.ID,
+			},
+		},
+		Data: map[string]string{SessionDataKey: string(data)},
+	})
+
+	store := NewConfigMapSessionStore(client)
+
+	sessions, err := store.List(context.Background(), legacy.Spec.SessionNamespace)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if len(sessions) != 0 {
+		t.Fatalf("legacy session label should be ignored, got %#v", sessions)
+	}
+}
+
 func TestDecodeSessionRejectsMissingInvalidAndUnsupportedData(t *testing.T) {
 	tests := []struct {
 		name string
