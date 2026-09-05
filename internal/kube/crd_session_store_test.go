@@ -38,6 +38,56 @@ type concurrentListClient struct {
 	delay  time.Duration
 }
 
+type deletingWorkflowClient struct {
+	crclient.WithWatch
+	deletionTimestamp metav1.Time
+	deleteCalls       int
+}
+
+func (c *deletingWorkflowClient) Get(
+	ctx context.Context,
+	key crclient.ObjectKey,
+	object crclient.Object,
+	options ...crclient.GetOption,
+) error {
+	if err := c.WithWatch.Get(ctx, key, object, options...); err != nil {
+		return err
+	}
+
+	object.SetDeletionTimestamp(&c.deletionTimestamp)
+
+	return nil
+}
+
+func (c *deletingWorkflowClient) Update(
+	ctx context.Context,
+	object crclient.Object,
+	options ...crclient.UpdateOption,
+) error {
+	updated, ok := object.DeepCopyObject().(crclient.Object)
+	if !ok {
+		return errors.New("workflow deep copy does not implement client.Object")
+	}
+
+	updated.SetDeletionTimestamp(nil)
+
+	return c.WithWatch.Update(ctx, updated, options...)
+}
+
+func (c *deletingWorkflowClient) Delete(
+	context.Context,
+	crclient.Object,
+	...crclient.DeleteOption,
+) error {
+	c.deleteCalls++
+
+	return apierrors.NewConflict(
+		schema.GroupResource{Group: v1alpha1.GroupVersion.Group, Resource: "migrations"},
+		"workflow",
+		errors.New("namespace is terminating"),
+	)
+}
+
 func (c *concurrentListClient) List(
 	ctx context.Context,
 	list crclient.ObjectList,
@@ -159,6 +209,118 @@ func TestCRDSessionStoreRoundTripAndStatusUpdate(t *testing.T) {
 
 	if len(listed) != 1 || listed[0].Status.Phase != domain.PhaseReserving {
 		t.Fatalf("listed sessions=%#v", listed)
+	}
+}
+
+func TestCRDSessionStoreUpdatesSameNamespaceClusterWorkflow(t *testing.T) {
+	ctx := context.Background()
+	store := NewCRDSessionStore(newCRDTestClient())
+	session := storeTestSession()
+	session.Spec = domain.NewSessionSpec(
+		domain.OperationCopy,
+		session.Spec.SessionCommon,
+		false,
+		domain.SessionWorkflowOptions{},
+	)
+	session.BackendResource = domain.ControllerKindClusterCopy
+
+	if err := store.Create(ctx, session); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := session.Transition(domain.PhaseReserving, "reserving", time.Now()); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := store.Update(ctx, session); err != nil {
+		t.Fatal(err)
+	}
+
+	loaded, err := store.GetByKind(ctx, "", session.ID, domain.ControllerKindClusterCopy)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if loaded.BackendResource != domain.ControllerKindClusterCopy ||
+		loaded.Status.Phase != domain.PhaseReserving {
+		t.Fatalf(
+			"loaded cluster workflow resource=%q phase=%q",
+			loaded.BackendResource,
+			loaded.Status.Phase,
+		)
+	}
+}
+
+func TestCRDSessionStorePersistsFailureForInvalidClusterPodWorkflow(t *testing.T) {
+	ctx := context.Background()
+	client := newCRDTestClient()
+	store := NewCRDSessionStore(client)
+	session := storeTestSession()
+	session.Spec = domain.NewPodMigrationSessionSpec(
+		domain.SessionCommon{
+			SourceNamespace:      "system",
+			TemporaryNamespace:   "system",
+			DestinationNamespace: "system",
+			SessionNamespace:     "system",
+			Volumes:              session.Spec.Volumes,
+		},
+		domain.WorkloadSpec{
+			Adapter: domain.WorkloadStandalone,
+			Pod: domain.ObjectReference{
+				Namespace: "system",
+				Name:      "workload",
+				UID:       "pod-uid",
+			},
+		},
+		domain.SessionWorkflowOptions{},
+		0,
+		false,
+	)
+	session.BackendResource = domain.ControllerKindClusterPodMigration
+
+	object := sessionObjectFor(session)
+	if object == nil {
+		t.Fatal("failed to construct ClusterPodMigration object")
+	}
+
+	if err := client.Create(ctx, object); err != nil {
+		t.Fatal(err)
+	}
+
+	loaded, err := store.GetByKind(
+		ctx,
+		"",
+		session.ID,
+		domain.ControllerKindClusterPodMigration,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if err := loaded.Transition(
+		domain.PhaseFailed,
+		"invalid workload identity",
+		time.Now(),
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := store.Update(ctx, loaded); err != nil {
+		t.Fatalf("failed workflow status should remain persistable: %v", err)
+	}
+
+	reloaded, err := store.GetByKind(
+		ctx,
+		"",
+		session.ID,
+		domain.ControllerKindClusterPodMigration,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if reloaded.Status.Phase != domain.PhaseFailed {
+		t.Fatalf("phase=%q, want Failed", reloaded.Status.Phase)
 	}
 }
 
@@ -462,6 +624,39 @@ func TestDecodeWorkflowInitializesDeclarativeResource(t *testing.T) {
 	}
 }
 
+func TestDecodeWorkflowCompletesPlannedVolumeCheckpoint(t *testing.T) {
+	session := storeTestSession()
+	objectValue := sessionObjectFor(session)
+
+	object, ok := objectValue.(*v1alpha1.Migration)
+	if !ok {
+		t.Fatalf("workflow object type=%T", objectValue)
+	}
+
+	object.Status = v1alpha1.MigrationStatus{Phase: v1alpha1.WorkflowPhase(domain.PhasePlanned)}
+
+	decoded, err := DecodeWorkflow(object)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if len(decoded.Status.Volumes) != len(decoded.Spec.Volumes) {
+		t.Fatalf(
+			"status volume count=%d, want %d",
+			len(decoded.Status.Volumes),
+			len(decoded.Spec.Volumes),
+		)
+	}
+
+	if decoded.Status.Volumes[0].SourcePVCName != decoded.Spec.Volumes[0].SourcePVC.Name {
+		t.Fatalf(
+			"status source PVC=%q, want %q",
+			decoded.Status.Volumes[0].SourcePVCName,
+			decoded.Spec.Volumes[0].SourcePVC.Name,
+		)
+	}
+}
+
 func TestCRDSessionStoreAddsProtectionToDeclarativeWorkflow(t *testing.T) {
 	ctx := context.Background()
 	client := newCRDTestClient()
@@ -723,6 +918,57 @@ func TestDecodeWorkflowMarksDeletionRequests(t *testing.T) {
 
 	if !decoded.Deleting {
 		t.Fatal("deletion timestamp was not propagated to the controller session")
+	}
+}
+
+func TestCRDSessionStoreDeleteOnlyReleasesFinalizerForDeletingWorkflow(t *testing.T) {
+	ctx := context.Background()
+	base := newCRDTestClient()
+
+	withWatch, ok := base.(crclient.WithWatch)
+	if !ok {
+		t.Fatal("fake CRD client does not support Watch")
+	}
+
+	session := storeTestSession()
+
+	object, ok := sessionObjectForKind(session, domain.ControllerKindMigration)
+	if !ok {
+		t.Fatal("failed to construct Migration object")
+	}
+
+	object.SetFinalizers([]string{SessionFinalizer})
+
+	if err := base.Create(ctx, object); err != nil {
+		t.Fatal(err)
+	}
+
+	client := &deletingWorkflowClient{WithWatch: withWatch, deletionTimestamp: metav1.Now()}
+	store := NewCRDSessionStore(client)
+
+	loaded, err := store.Get(ctx, session.Spec.SessionNamespace, session.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if err := store.Delete(ctx, loaded); err != nil {
+		t.Fatalf("deleting workflow already marked for deletion: %v", err)
+	}
+
+	if client.deleteCalls != 0 {
+		t.Fatalf(
+			"delete calls=%d, want 0 for workflow already marked for deletion",
+			client.deleteCalls,
+		)
+	}
+
+	remaining := &v1alpha1.Migration{}
+	if err := base.Get(ctx, crclient.ObjectKeyFromObject(object), remaining); err == nil {
+		if containsString(remaining.GetFinalizers(), SessionFinalizer) {
+			t.Fatalf("session protection finalizer was not removed: %v", remaining.GetFinalizers())
+		}
+	} else if !apierrors.IsNotFound(err) {
+		t.Fatalf("reading workflow after finalizer release: %v", err)
 	}
 }
 

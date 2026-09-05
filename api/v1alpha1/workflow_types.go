@@ -79,6 +79,7 @@ type (
 	PVReclaimPolicy = corev1.PersistentVolumeReclaimPolicy
 )
 
+// +kubebuilder:validation:XValidation:rule="has(self.sourcePVC.uid) && size(self.sourcePVC.uid) > 0 && has(self.sourcePV.uid) && size(self.sourcePV.uid) > 0",message="sourcePVC.uid and sourcePV.uid are required planning identities"
 // VolumeSpec is planning output required to resume a PVC transfer. It is an
 // API-owned type with only the fields needed by transfer workflows.
 type VolumeSpec struct {
@@ -108,6 +109,8 @@ type PVCMetadata struct {
 
 // WorkloadSpec is specific to PodMigration and records workload ownership
 // and restoration data needed by that operation.
+// +kubebuilder:validation:XValidation:rule="self.adapter == 'None' || (has(self.pod) && has(self.pod.apiVersion) && size(self.pod.apiVersion) > 0 && has(self.pod.kind) && size(self.pod.kind) > 0 && has(self.pod.name) && size(self.pod.name) > 0 && has(self.pod.uid) && size(self.pod.uid) > 0)",message="workload.pod must include apiVersion, kind, name, and uid"
+// +kubebuilder:validation:XValidation:rule="self.adapter == 'None' || self.adapter == 'StandalonePod' || (has(self.controller) && has(self.controller.apiVersion) && size(self.controller.apiVersion) > 0 && has(self.controller.kind) && size(self.controller.kind) > 0 && has(self.controller.name) && size(self.controller.name) > 0 && has(self.controller.uid) && size(self.controller.uid) > 0)",message="workload.controller must include apiVersion, kind, name, and uid for managed workloads"
 type WorkloadSpec struct {
 	Adapter          WorkloadKind            `json:"adapter"                    yaml:"adapter"`
 	Pod              *LocalResourceReference `json:"pod,omitempty"              yaml:"pod,omitempty"`
@@ -160,6 +163,7 @@ type GrafanaSpec struct {
 	OriginalReplicas          int32     `json:"originalReplicas"          yaml:"originalReplicas"`
 }
 
+// +kubebuilder:validation:XValidation:rule="has(self.volumes) && size(self.volumes) > 0",message="volumes must contain at least one source PVC"
 // MigrationSpec is an offline PVC migration. It has no workload controls.
 type MigrationSpec struct {
 	// +kubebuilder:validation:MaxItems=1024
@@ -174,6 +178,7 @@ type MigrationSpec struct {
 	SkipSourceUsageCheck bool     `json:"skipSourceUsageCheck,omitempty" yaml:"skipSourceUsageCheck,omitempty"`
 }
 
+// +kubebuilder:validation:XValidation:rule="has(self.volumes) && size(self.volumes) > 0",message="volumes must contain at least one source PVC"
 // +kubebuilder:validation:XValidation:rule="self.workload.adapter != 'None'",message="PodMigration workload.adapter must identify a supported workload"
 // PodMigrationSpec is a workload-aware migration. Workload and precopy
 // controls are exclusive to this operation.
@@ -193,6 +198,7 @@ type PodMigrationSpec struct {
 	OpenEBSLVMEnableShared bool         `json:"openebsLvmEnableShared,omitempty" yaml:"openebsLvmEnableShared,omitempty"`
 }
 
+// +kubebuilder:validation:XValidation:rule="has(self.volumes) && size(self.volumes) > 0",message="volumes must contain at least one source PVC"
 type ReservationSpec struct {
 	// +kubebuilder:validation:MaxItems=1024
 	Volumes              []VolumeSpec `json:"volumes,omitempty"              yaml:"volumes,omitempty"`
@@ -201,6 +207,7 @@ type ReservationSpec struct {
 	SkipSourceUsageCheck bool         `json:"skipSourceUsageCheck,omitempty" yaml:"skipSourceUsageCheck,omitempty"`
 }
 
+// +kubebuilder:validation:XValidation:rule="has(self.volumes) && size(self.volumes) > 0",message="volumes must contain at least one source PVC"
 type CopySpec struct {
 	// +kubebuilder:validation:MaxItems=1024
 	Volumes    []VolumeSpec `json:"volumes,omitempty"    yaml:"volumes,omitempty"`
@@ -217,6 +224,7 @@ type CopySpec struct {
 	Online               bool `json:"online,omitempty"               yaml:"online,omitempty"`
 }
 
+// +kubebuilder:validation:XValidation:rule="has(self.sourcePVC.uid) && size(self.sourcePVC.uid) > 0 && has(self.sourcePV.uid) && size(self.sourcePV.uid) > 0",message="sourcePVC.uid and sourcePV.uid are required planning identities"
 type BackupSpec struct {
 	SourcePVC LocalResourceReference `json:"sourcePVC"           yaml:"sourcePVC"`
 	SourcePV  LocalResourceReference `json:"sourcePV"            yaml:"sourcePV"`
@@ -260,6 +268,7 @@ type PVCSourceTemplate struct {
 	ReclaimPolicy PVReclaimPolicy `json:"reclaimPolicy,omitempty" yaml:"reclaimPolicy,omitempty"`
 }
 
+// +kubebuilder:validation:XValidation:rule="has(self.sourcePVC.uid) && size(self.sourcePVC.uid) > 0 && has(self.sourcePV.uid) && size(self.sourcePV.uid) > 0",message="sourcePVC.uid and sourcePV.uid are required planning identities"
 type PVCIdentityFields struct {
 	SourcePVC      LocalResourceReference `json:"sourcePVC"      yaml:"sourcePVC"`
 	SourcePV       LocalResourceReference `json:"sourcePV"       yaml:"sourcePV"`

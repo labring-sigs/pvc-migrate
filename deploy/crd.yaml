@@ -138,6 +138,10 @@ spec:
             - sourcePV
             - sourcePVC
             type: object
+            x-kubernetes-validations:
+            - message: sourcePVC.uid and sourcePV.uid are required planning identities
+              rule: has(self.sourcePVC.uid) && size(self.sourcePVC.uid) > 0 && has(self.sourcePV.uid)
+                && size(self.sourcePV.uid) > 0
           status:
             properties:
               completedAt:
@@ -1068,6 +1072,9 @@ spec:
             - sessionNamespace
             - sourceNamespace
             type: object
+            x-kubernetes-validations:
+            - message: volumes must contain at least one source PVC
+              rule: has(self.volumes) && size(self.volumes) > 0
           status:
             properties:
               completedAt:
@@ -1810,6 +1817,9 @@ spec:
             - sourceNamespace
             - temporaryNamespace
             type: object
+            x-kubernetes-validations:
+            - message: volumes must contain at least one source PVC
+              rule: has(self.volumes) && size(self.volumes) > 0
           status:
             properties:
               completedAt:
@@ -2811,6 +2821,20 @@ spec:
                 required:
                 - adapter
                 type: object
+                x-kubernetes-validations:
+                - message: workload.pod must include apiVersion, kind, name, and uid
+                  rule: self.adapter == 'None' || (has(self.pod) && has(self.pod.apiVersion)
+                    && size(self.pod.apiVersion) > 0 && has(self.pod.kind) && size(self.pod.kind)
+                    > 0 && has(self.pod.name) && size(self.pod.name) > 0 && has(self.pod.uid)
+                    && size(self.pod.uid) > 0)
+                - message: workload.controller must include apiVersion, kind, name,
+                    and uid for managed workloads
+                  rule: self.adapter == 'None' || self.adapter == 'StandalonePod'
+                    || (has(self.controller) && has(self.controller.apiVersion) &&
+                    size(self.controller.apiVersion) > 0 && has(self.controller.kind)
+                    && size(self.controller.kind) > 0 && has(self.controller.name)
+                    && size(self.controller.name) > 0 && has(self.controller.uid)
+                    && size(self.controller.uid) > 0)
             required:
             - precopyPasses
             - sessionNamespace
@@ -2819,6 +2843,8 @@ spec:
             - workload
             type: object
             x-kubernetes-validations:
+            - message: volumes must contain at least one source PVC
+              rule: has(self.volumes) && size(self.volumes) > 0
             - message: ClusterPodMigration workload.adapter must identify a supported
                 workload
               rule: self.workload.adapter != 'None'
@@ -3742,6 +3768,9 @@ spec:
             - sessionNamespace
             - sourceNamespace
             type: object
+            x-kubernetes-validations:
+            - message: volumes must contain at least one source PVC
+              rule: has(self.volumes) && size(self.volumes) > 0
           status:
             properties:
               completedAt:
@@ -4429,9 +4458,17 @@ spec:
                   - storageClass
                   - volumeMode
                   type: object
+                  x-kubernetes-validations:
+                  - message: sourcePVC.uid and sourcePV.uid are required planning
+                      identities
+                    rule: has(self.sourcePVC.uid) && size(self.sourcePVC.uid) > 0
+                      && has(self.sourcePV.uid) && size(self.sourcePV.uid) > 0
                 maxItems: 1024
                 type: array
             type: object
+            x-kubernetes-validations:
+            - message: volumes must contain at least one source PVC
+              rule: has(self.volumes) && size(self.volumes) > 0
           status:
             properties:
               completedAt:
@@ -5138,9 +5175,17 @@ spec:
                   - storageClass
                   - volumeMode
                   type: object
+                  x-kubernetes-validations:
+                  - message: sourcePVC.uid and sourcePV.uid are required planning
+                      identities
+                    rule: has(self.sourcePVC.uid) && size(self.sourcePVC.uid) > 0
+                      && has(self.sourcePV.uid) && size(self.sourcePV.uid) > 0
                 maxItems: 1024
                 type: array
             type: object
+            x-kubernetes-validations:
+            - message: volumes must contain at least one source PVC
+              rule: has(self.volumes) && size(self.volumes) > 0
           status:
             properties:
               completedAt:
@@ -6529,6 +6574,11 @@ spec:
                   - storageClass
                   - volumeMode
                   type: object
+                  x-kubernetes-validations:
+                  - message: sourcePVC.uid and sourcePV.uid are required planning
+                      identities
+                    rule: has(self.sourcePVC.uid) && size(self.sourcePVC.uid) > 0
+                      && has(self.sourcePV.uid) && size(self.sourcePV.uid) > 0
                 maxItems: 1024
                 type: array
               workload:
@@ -6750,11 +6800,27 @@ spec:
                 required:
                 - adapter
                 type: object
+                x-kubernetes-validations:
+                - message: workload.pod must include apiVersion, kind, name, and uid
+                  rule: self.adapter == 'None' || (has(self.pod) && has(self.pod.apiVersion)
+                    && size(self.pod.apiVersion) > 0 && has(self.pod.kind) && size(self.pod.kind)
+                    > 0 && has(self.pod.name) && size(self.pod.name) > 0 && has(self.pod.uid)
+                    && size(self.pod.uid) > 0)
+                - message: workload.controller must include apiVersion, kind, name,
+                    and uid for managed workloads
+                  rule: self.adapter == 'None' || self.adapter == 'StandalonePod'
+                    || (has(self.controller) && has(self.controller.apiVersion) &&
+                    size(self.controller.apiVersion) > 0 && has(self.controller.kind)
+                    && size(self.controller.kind) > 0 && has(self.controller.name)
+                    && size(self.controller.name) > 0 && has(self.controller.uid)
+                    && size(self.controller.uid) > 0)
             required:
             - precopyPasses
             - workload
             type: object
             x-kubernetes-validations:
+            - message: volumes must contain at least one source PVC
+              rule: has(self.volumes) && size(self.volumes) > 0
             - message: PodMigration workload.adapter must identify a supported workload
               rule: self.workload.adapter != 'None'
           status:
@@ -7598,6 +7664,10 @@ spec:
             - sourcePVC
             - sourceTemplate
             type: object
+            x-kubernetes-validations:
+            - message: sourcePVC.uid and sourcePV.uid are required planning identities
+              rule: has(self.sourcePVC.uid) && size(self.sourcePVC.uid) > 0 && has(self.sourcePV.uid)
+                && size(self.sourcePV.uid) > 0
           status:
             properties:
               completedAt:
@@ -8246,9 +8316,17 @@ spec:
                   - storageClass
                   - volumeMode
                   type: object
+                  x-kubernetes-validations:
+                  - message: sourcePVC.uid and sourcePV.uid are required planning
+                      identities
+                    rule: has(self.sourcePVC.uid) && size(self.sourcePVC.uid) > 0
+                      && has(self.sourcePV.uid) && size(self.sourcePV.uid) > 0
                 maxItems: 1024
                 type: array
             type: object
+            x-kubernetes-validations:
+            - message: volumes must contain at least one source PVC
+              rule: has(self.volumes) && size(self.volumes) > 0
           status:
             properties:
               completedAt:

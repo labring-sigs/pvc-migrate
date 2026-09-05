@@ -37,7 +37,7 @@ import (
 // existing service state machine.
 type WorkflowReconciler struct {
 	store            kube.ControllerSessionStore
-	service          *app.Service
+	service          workflowResumer
 	kubeClient       kubernetes.Interface
 	controllerClient crclient.Reader
 	openEBS          kube.OpenEBSLVMSharedVolumeManager
@@ -48,13 +48,30 @@ type WorkflowReconciler struct {
 	kubeContext      string
 	requeueAfter     time.Duration
 	supportedKinds   map[domain.ControllerKind]struct{}
+	logger           *slog.Logger
 }
 
 func NewWorkflowReconciler(
-	service *app.Service,
+	service workflowResumer,
 	store kube.ControllerSessionStore,
 ) *WorkflowReconciler {
-	return &WorkflowReconciler{service: service, store: store, requeueAfter: 5 * time.Second}
+	return &WorkflowReconciler{
+		service:      service,
+		store:        store,
+		requeueAfter: 5 * time.Second,
+		logger:       slog.Default(),
+	}
+}
+
+// WithLogger supplies the structured logger owned by the controller process.
+// Reconciliation must not fall back to the process-global slog default, which
+// is commonly discarded or configured for a different CLI command.
+func (r *WorkflowReconciler) WithLogger(logger *slog.Logger) *WorkflowReconciler {
+	if r != nil && logger != nil {
+		r.logger = logger
+	}
+
+	return r
 }
 
 // WithNamespace optionally limits reconciliation to one durable session
@@ -155,6 +172,7 @@ func (r *WorkflowReconciler) WithOpenEBSLVMSharedVolumeManager(
 
 func (r *WorkflowReconciler) runner(namespace string) *Runner {
 	return NewRunner(r.service, r.store, namespace).
+		WithLogger(r.logger).
 		WithKubernetesClient(r.kubeClient).
 		WithControllerClient(r.controllerClient).
 		WithClusterIdentity(r.clusterIdentity).
@@ -212,7 +230,7 @@ func (r *WorkflowReconciler) reconcile(
 	}
 
 	if session.Deleting {
-		return reconcile.Result{}, r.reconcileDeletingWorkflow(ctx, request, session, kind)
+		return reconcile.Result{}, r.reconcileDeletingWorkflow(ctx, request, session)
 	}
 
 	if err := r.store.CheckWorkflowNameCollision(ctx, session); err != nil {
@@ -239,11 +257,11 @@ func (r *WorkflowReconciler) reconcile(
 	if err := workflowSpecMutationError(session); err != nil {
 		if !terminalSession(session) {
 			runner := r.runner(request.Namespace)
-			return reconcile.Result{}, runner.checkpointFailure(ctx, session, err)
+			return r.checkpointBusinessFailure(ctx, runner, session, err, request)
 		}
 
 		ctrl.LoggerFrom(ctx).
-			Error(err, "terminal workflow spec changed; reconciliation stopped", "workflow", request.NamespacedName)
+			Info("ignored spec change for terminal workflow", "workflow", request.NamespacedName, "reason", err)
 
 		return reconcile.Result{}, nil
 	}
@@ -287,46 +305,94 @@ func (r *WorkflowReconciler) reconcile(
 
 	if boundaryErr := kube.ControllerNamespaceBoundaryError(session); boundaryErr != nil {
 		runner := r.runner(request.Namespace)
-		return reconcile.Result{}, runner.checkpointFailure(ctx, session, boundaryErr)
+		return r.checkpointBusinessFailure(ctx, runner, session, boundaryErr, request)
 	}
 
 	if err := r.validateDeclarativeSourceVolumes(ctx, session); err != nil {
 		runner := r.runner(request.Namespace)
-		return reconcile.Result{}, runner.checkpointFailure(ctx, session, err)
+		return r.checkpointBusinessFailure(ctx, runner, session, err, request)
 	}
 
 	if err := r.ensureStandalonePodSnapshot(ctx, session); err != nil {
 		runner := r.runner(request.Namespace)
-		return reconcile.Result{}, runner.checkpointFailure(ctx, session, err)
+		return r.checkpointBusinessFailure(ctx, runner, session, err, request)
 	}
 
 	runner := r.runner(request.Namespace)
 	if err := runner.reconcileSession(ctx, session); err != nil {
-		err = runner.checkpointFailure(ctx, session, err)
+		if kube.IsSessionLockContention(err) {
+			r.logger.Info(
+				"workflow is waiting for a concurrent session update",
+				"workflow",
+				request.NamespacedName,
+				"requeueAfter",
+				r.requeueAfter,
+			)
+
+			return reconcile.Result{RequeueAfter: r.requeueAfter}, nil
+		}
+
+		return r.checkpointBusinessFailure(ctx, runner, session, err, request)
+	}
+
+	return reconcile.Result{RequeueAfter: r.requeueAfter}, nil
+}
+
+func (r *WorkflowReconciler) checkpointBusinessFailure(
+	ctx context.Context,
+	runner *Runner,
+	session *domain.Session,
+	cause error,
+	request reconcile.Request,
+) (reconcile.Result, error) {
+	if err := runner.checkpointFailureForController(ctx, session, cause); err != nil {
+		if kube.IsSessionLockContention(err) {
+			r.logger.Info(
+				"workflow is waiting for a concurrent session update",
+				"workflow",
+				request.NamespacedName,
+				"requeueAfter",
+				r.requeueAfter,
+			)
+
+			return reconcile.Result{RequeueAfter: r.requeueAfter}, nil
+		}
 
 		return reconcile.Result{}, err
 	}
 
-	return reconcile.Result{RequeueAfter: r.requeueAfter}, nil
+	r.logger.Warn(
+		"workflow entered failed state",
+		"workflow",
+		request.NamespacedName,
+		"phase",
+		domain.PhaseFailed,
+		"reason",
+		cause,
+	)
+
+	return reconcile.Result{}, nil
 }
 
 func (r *WorkflowReconciler) reconcileDeletingWorkflow(
 	ctx context.Context,
 	request reconcile.Request,
 	session *domain.Session,
-	kind domain.ControllerKind,
 ) error {
-	resourceKind := session.BackendResource
-	if resourceKind == "" {
-		resourceKind = kind
+	// Direct deletion of a workflow keeps the explicit cleanup contract while
+	// its session namespace is active. Once that namespace is gone or
+	// terminating, Kubernetes has already removed namespaced data-plane
+	// resources and the workflow finalizer must be released. Cluster-scoped
+	// workflows use spec.sessionNamespace because their request has no
+	// namespace.
+	namespaceName := request.Namespace
+
+	if namespaceName == "" {
+		namespaceName = session.Spec.SessionNamespace
 	}
 
-	// Direct deletion of a workflow keeps the explicit cleanup contract. A
-	// namespaced workflow must not hold its namespace in Terminating forever;
-	// Kubernetes will remove namespaced data-plane resources as part of that
-	// deletion, and orphan recovery remains available for cluster-scoped PVs.
-	if request.Namespace == "" || domain.IsClusterControllerKind(resourceKind) {
-		return nil
+	if namespaceName == "" {
+		return r.store.Delete(ctx, session)
 	}
 
 	if r.kubeClient == nil {
@@ -335,7 +401,7 @@ func (r *WorkflowReconciler) reconcileDeletingWorkflow(
 
 	namespace, err := r.kubeClient.CoreV1().Namespaces().Get(
 		ctx,
-		request.Namespace,
+		namespaceName,
 		metav1.GetOptions{},
 	)
 	if err != nil && !apierrors.IsNotFound(err) {
@@ -428,10 +494,52 @@ func workflowEventPredicate() predicate.Predicate {
 		UpdateFunc: func(e event.UpdateEvent) bool {
 			return e.ObjectNew.GetGeneration() != e.ObjectOld.GetGeneration() ||
 				e.ObjectOld.GetDeletionTimestamp() == nil &&
-					e.ObjectNew.GetDeletionTimestamp() != nil
+					e.ObjectNew.GetDeletionTimestamp() != nil ||
+				workflowResumeStatusChanged(e.ObjectOld, e.ObjectNew)
 		},
 		DeleteFunc:  func(event.DeleteEvent) bool { return false },
 		GenericFunc: func(event.GenericEvent) bool { return true },
+	}
+}
+
+// workflowResumeStatusChanged admits the one status-only update that must
+// wake a controller: an explicit resume moves a failed workflow back to an
+// active checkpoint. Ordinary controller status writes remain filtered so
+// they cannot create a reconcile feedback loop.
+func workflowResumeStatusChanged(oldObject, newObject crclient.Object) bool {
+	return workflowStatusPhase(oldObject) == domain.PhaseFailed &&
+		workflowStatusPhase(newObject) != domain.PhaseFailed &&
+		workflowStatusPhase(newObject) != ""
+}
+
+func workflowStatusPhase(object crclient.Object) domain.Phase {
+	switch typed := object.(type) {
+	case *v1alpha1.Migration:
+		return domain.Phase(typed.Status.Phase)
+	case *v1alpha1.PodMigration:
+		return domain.Phase(typed.Status.Phase)
+	case *v1alpha1.Reservation:
+		return domain.Phase(typed.Status.Phase)
+	case *v1alpha1.Copy:
+		return domain.Phase(typed.Status.Phase)
+	case *v1alpha1.Backup:
+		return domain.Phase(typed.Status.Phase)
+	case *v1alpha1.Restore:
+		return domain.Phase(typed.Status.Phase)
+	case *v1alpha1.Rename:
+		return domain.Phase(typed.Status.Phase)
+	case *v1alpha1.ClusterMigration:
+		return domain.Phase(typed.Status.Phase)
+	case *v1alpha1.ClusterPodMigration:
+		return domain.Phase(typed.Status.Phase)
+	case *v1alpha1.ClusterReservation:
+		return domain.Phase(typed.Status.Phase)
+	case *v1alpha1.ClusterCopy:
+		return domain.Phase(typed.Status.Phase)
+	case *v1alpha1.Move:
+		return domain.Phase(typed.Status.Phase)
+	default:
+		return ""
 	}
 }
 
@@ -443,6 +551,7 @@ type ManagerOptions struct {
 	KubeContext                   string
 	SupportedKinds                []domain.ControllerKind
 	TrustedToolImage              string
+	Logger                        *slog.Logger
 	HealthProbeBindAddress        string
 }
 
@@ -519,9 +628,15 @@ func StartManager(
 	}
 
 	// controller-runtime emits recorder and leader-election diagnostics through
-	// logr. Bridge it to the CLI's structured slog handler so failover does not
-	// produce the "log.SetLogger was never called" warning or lose context.
-	crlog.SetLogger(logr.FromSlogHandler(slog.Default().Handler()))
+	// logr. Bridge it to the controller-owned structured logger so failover does
+	// not produce the "log.SetLogger was never called" warning or lose context.
+	logger := options.Logger
+	if logger == nil {
+		logger = slog.Default()
+	}
+
+	logger = NewControllerLogger(logger)
+	crlog.SetLogger(logr.FromSlogHandler(logger.Handler()))
 
 	scheme := runtime.NewScheme()
 	if err := v1alpha1.AddToScheme(scheme); err != nil {
@@ -558,6 +673,7 @@ func StartManager(
 	}
 
 	reconciler := NewWorkflowReconciler(service, store).
+		WithLogger(logger.With("component", "workflow-controller")).
 		// Repository reads use the uncached API reader so deletion, replacement,
 		// and credential changes fail closed immediately.
 		WithControllerClient(manager.GetAPIReader()).

@@ -81,6 +81,7 @@ type commandRuntime struct {
 	service                       *app.Service
 	printer                       output.Printer
 	logger                        *slog.Logger
+	controllerLogger              *slog.Logger
 	controllers                   *controller.Manager
 	openEBSLVMSharedVolumeManager kube.OpenEBSLVMSharedVolumeManager
 	mode                          executionMode
@@ -336,11 +337,25 @@ func (r *rootState) runtime() (*commandRuntime, error) {
 		clients.Dynamic,
 	)
 
-	if r.global.streamToolLogs {
+	controllerMode := requestedMode == executionModeController
+	streamToolLogs := r.global.streamToolLogs && !controllerMode
+	structuredLogs := controllerMode || r.global.logFormat == string(logFormatJSON)
+	serviceWriter := r.errWriter()
+
+	serviceLogger := logger.With("component", "migration")
+	if controllerMode {
+		// Controller reconciliation is an API-driven worker. Raw tool output is
+		// neither a command result nor a terminal stream and must stay out of the
+		// controller process output.
+		serviceWriter = io.Discard
+		serviceLogger = controller.NewControllerLogger(serviceLogger)
+	}
+
+	if streamToolLogs {
 		reserver = reserver.WithToolLogs(kube.ToolLogOptions{
 			Writer:     r.errWriter(),
 			Logger:     logger.With("component", "tool"),
-			Structured: r.global.logFormat == string(logFormatJSON),
+			Structured: structuredLogs,
 		})
 	}
 
@@ -358,10 +373,10 @@ func (r *rootState) runtime() (*commandRuntime, error) {
 			RetryBackoff:                  r.global.retryBackoff,
 			HelmTimeout:                   r.global.helmTimeout,
 			NoCompress:                    r.global.noCompress,
-			StreamToolLogs:                r.global.streamToolLogs,
-			StructuredLogs:                r.global.logFormat == string(logFormatJSON),
-			Writer:                        r.errWriter(),
-			Logger:                        logger.With("component", "migration"),
+			StreamToolLogs:                streamToolLogs,
+			StructuredLogs:                structuredLogs,
+			Writer:                        serviceWriter,
+			Logger:                        serviceLogger,
 			ToolImageProber:               kube.NewToolImageProber(clients.Kubernetes),
 			TrustedToolImage:              trustedToolImage,
 			OpenEBSLVMSharedVolumeManager: openEBSLVMSharedVolumeManager,
@@ -374,9 +389,12 @@ func (r *rootState) runtime() (*commandRuntime, error) {
 		planner: planner.New(clients.Kubernetes, controllers).
 			WithOpenEBSLVMSharedVolumeManager(openEBSLVMSharedVolumeManager).
 			WithLogger(logger.With("component", "planner")),
-		service:                       service,
-		printer:                       output.Printer{Writer: r.options.Out, Format: format},
-		logger:                        logger.With("component", "backup"),
+		service: service,
+		printer: output.Printer{Writer: r.options.Out, Format: format},
+		logger:  logger.With("component", "backup"),
+		controllerLogger: controller.NewControllerLogger(
+			logger.With("component", "workflow-controller"),
+		),
 		controllers:                   controllers,
 		openEBSLVMSharedVolumeManager: openEBSLVMSharedVolumeManager,
 		mode:                          requestedMode,

@@ -386,17 +386,11 @@ func (s *Service) copyWithRetry(
 			request.DestinationPath,
 		)
 
-		toolLogOptions := kube.ToolLogOptions{
-			Namespaces:  []string{volume.SourcePVC.Namespace, volume.DestinationPVC.Namespace},
-			OperationID: copyengine.OperationID(request),
-		}
-		if s.config.StreamToolLogs {
-			toolLogOptions.Writer = s.config.Writer
-			toolLogOptions.Logger = s.config.Logger
-			toolLogOptions.Structured = s.config.StructuredLogs
-		}
-
-		toolLogs := kube.StartPVMigrateToolLogs(ctx, s.client, toolLogOptions)
+		toolLogs := s.startCopyToolLogs(
+			ctx,
+			volume,
+			copyengine.OperationID(request),
+		)
 		copyErr := s.copier.Copy(ctx, request, func(progress copyengine.Progress) {
 			s.logInfo(
 				"copy progress",
@@ -683,6 +677,24 @@ func (s *Service) deleteCopyToolPods(
 	}
 
 	return nil
+}
+
+func (s *Service) startCopyToolLogs(
+	ctx context.Context,
+	volume *domain.VolumeSpec,
+	operationID string,
+) *kube.ToolLogStream {
+	if s == nil || !s.config.StreamToolLogs || volume == nil || operationID == "" {
+		return nil
+	}
+
+	return kube.StartPVMigrateToolLogs(ctx, s.client, kube.ToolLogOptions{
+		Namespaces:  []string{volume.SourcePVC.Namespace, volume.DestinationPVC.Namespace},
+		OperationID: operationID,
+		Writer:      s.config.Writer,
+		Logger:      s.config.Logger,
+		Structured:  s.config.StructuredLogs,
+	})
 }
 
 func isPVMigrateToolForClaims(pod *corev1.Pod, claims map[string]struct{}) bool {

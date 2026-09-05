@@ -987,21 +987,41 @@ func (s *CRDSessionStore) Update(ctx context.Context, session *domain.Session) e
 		)
 	}
 
-	desiredWorkflow, ok := domain.ControllerResourceForSpec(session.Spec)
-	if !ok || desiredWorkflow.Cluster != storedWorkflow.Cluster ||
-		!controllerSessionSupportedForResource(session, desiredWorkflow) {
-		return domain.NewError(
-			domain.ErrorPrecondition,
-			"update session",
-			"this workflow is not valid for the selected namespaced or cluster controller resource",
-		)
+	desiredKind := storedKind
+	if storedWorkflow.Type == session.Spec.Type {
+		// A persisted workflow Kind is authoritative. In particular, a
+		// cluster-scoped workflow may intentionally use equal namespace roles;
+		// deriving scope from those roles would incorrectly switch it to a
+		// namespaced Kind during an ordinary status update.
+		// Preserve a terminal failure even when a legacy CR contains a malformed
+		// controller-only field; admission rejects new objects, while old ones
+		// still need a durable outcome instead of an endless reconcile loop.
+		if !controllerSessionSupportedForResource(session, storedWorkflow) &&
+			session.Status.Phase != domain.PhaseFailed {
+			return domain.NewError(
+				domain.ErrorPrecondition,
+				"update session",
+				"this workflow is not valid for the selected namespaced or cluster controller resource",
+			)
+		}
+	} else {
+		desiredWorkflow, desiredOK := domain.ControllerResourceForSpec(session.Spec)
+		if !desiredOK || !controllerSessionSupportedForResource(session, desiredWorkflow) {
+			return domain.NewError(
+				domain.ErrorPrecondition,
+				"update session",
+				"this workflow is not valid for the selected namespaced or cluster controller resource",
+			)
+		}
+
+		desiredKind = desiredWorkflow.Kind
 	}
 
-	if !s.supportsKind(desiredWorkflow.Kind) {
+	if !s.supportsKind(desiredKind) {
 		return domain.NewError(
 			domain.ErrorPrecondition,
 			"update session",
-			string(desiredWorkflow.Kind)+" CRD is not served by this cluster",
+			string(desiredKind)+" CRD is not served by this cluster",
 		)
 	}
 
@@ -1056,8 +1076,6 @@ func (s *CRDSessionStore) Update(ctx context.Context, session *domain.Session) e
 			"session changed by another process",
 		)
 	}
-
-	desiredKind := desiredWorkflow.Kind
 
 	if desiredKind != storedKind {
 		return s.rebindWorkflowResource(ctx, session, existing, desiredKind)
@@ -1540,7 +1558,14 @@ func (s *CRDSessionStore) Delete(ctx context.Context, session *domain.Session) e
 		)
 	}
 
-	if session.ResourceVersion != "" && object.GetResourceVersion() != session.ResourceVersion {
+	// Namespace deletion already marked the workflow for deletion. Removing
+	// our protection finalizer is the only required action; issuing another
+	// Delete can fail while the namespace is terminating and creates a noisy,
+	// non-actionable reconcile error.
+	deleting := object.GetDeletionTimestamp() != nil
+
+	if !deleting && session.ResourceVersion != "" &&
+		object.GetResourceVersion() != session.ResourceVersion {
 		return domain.NewError(
 			domain.ErrorConflict,
 			"delete session",
@@ -1578,6 +1603,10 @@ func (s *CRDSessionStore) Delete(ctx context.Context, session *domain.Session) e
 		}
 
 		object = updated
+	}
+
+	if deleting {
+		return nil
 	}
 
 	uid := object.GetUID()
@@ -1661,6 +1690,19 @@ func DecodeWorkflow(object crclient.Object) (*domain.Session, error) {
 
 	session.Deleting = object.GetDeletionTimestamp() != nil
 	if status.Phase != "" {
+		// A declarative client may checkpoint only the phase before the first
+		// controller observation. Keep the status-owned fields while deriving
+		// the initial per-volume identities needed by the domain invariant.
+		if status.Phase == domain.PhasePlanned && status.ObservedGeneration == 0 &&
+			len(status.Volumes) == 0 && len(spec.Volumes) > 0 {
+			status.Volumes = make([]domain.VolumeStatus, 0, len(spec.Volumes))
+			for _, volume := range spec.Volumes {
+				status.Volumes = append(status.Volumes, domain.VolumeStatus{
+					SourcePVCName: volume.SourcePVC.Name,
+				})
+			}
+		}
+
 		session.Status = status
 	}
 

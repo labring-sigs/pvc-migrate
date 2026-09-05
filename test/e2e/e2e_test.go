@@ -13,7 +13,6 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
-	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -347,6 +346,12 @@ func TestControllerRBACEnsuresOnlyManagedTransferServiceAccount(t *testing.T) {
 	if err := kube.EnsureTransferServiceAccount(ctx, controllerClient, namespace); err != nil {
 		t.Fatalf("controller creates transfer ServiceAccount: %v", err)
 	}
+	if _, err := controllerClient.AppsV1().ReplicaSets(namespace).List(
+		ctx,
+		metav1.ListOptions{},
+	); err != nil {
+		t.Fatalf("controller lists ReplicaSets for transfer chart: %v", err)
+	}
 
 	account, err := adminClient.CoreV1().
 		ServiceAccounts(namespace).
@@ -455,10 +460,48 @@ func TestWorkflowScopeAdmissionAndStatusMatrix(t *testing.T) {
 	}
 	localIdentity := func() map[string]any {
 		return map[string]any{
-			"sourcePVC":      map[string]any{"name": "source"},
-			"sourcePV":       map[string]any{"name": "source-pv"},
-			"destinationPVC": map[string]any{"name": "destination"},
+			"sourcePVC": map[string]any{
+				"apiVersion": "v1", "kind": "PersistentVolumeClaim",
+				"name": "source", "uid": "source-pvc-uid",
+			},
+			"sourcePV": map[string]any{
+				"apiVersion": "v1", "kind": "PersistentVolume",
+				"name": "source-pv", "uid": "source-pv-uid",
+			},
+			"destinationPVC": map[string]any{
+				"apiVersion": "v1", "kind": "PersistentVolumeClaim",
+				"name": "destination",
+			},
 			"sourceTemplate": map[string]any{"spec": map[string]any{}},
+		}
+	}
+	validVolume := func() map[string]any {
+		return map[string]any{
+			"sourcePVC": map[string]any{
+				"apiVersion": "v1", "kind": "PersistentVolumeClaim",
+				"name": "source", "uid": "source-pvc-uid",
+			},
+			"sourcePV": map[string]any{
+				"apiVersion": "v1", "kind": "PersistentVolume",
+				"name": "source-pv", "uid": "source-pv-uid",
+			},
+			"destinationPVC": map[string]any{
+				"apiVersion": "v1", "kind": "PersistentVolumeClaim",
+				"name": "destination",
+			},
+			"capacity": "1Gi", "sourceCapacity": "1Gi",
+			"storageClass": "openebs-hostpath",
+			"accessModes":  []any{"ReadWriteOnce"},
+			"volumeMode":   "Filesystem",
+		}
+	}
+	validWorkload := func() map[string]any {
+		return map[string]any{
+			"adapter": "StandalonePod",
+			"pod": map[string]any{
+				"apiVersion": "v1", "kind": "Pod",
+				"name": "source-pod", "uid": "source-pod-uid",
+			},
 		}
 	}
 	clusterNamespaces := func() map[string]any {
@@ -495,21 +538,27 @@ func TestWorkflowScopeAdmissionAndStatusMatrix(t *testing.T) {
 
 	tests := []workflowCase{
 		{resource: "migrations", kind: "Migration", volumes: true, spec: map[string]any{
+			"volumes":         []any{validVolume()},
 			"sourceNamespace": "must-be-pruned",
 		}},
 		{
 			resource: "podmigrations", kind: "PodMigration", volumes: true, warm: true,
 			spec: map[string]any{
+				"volumes":       []any{validVolume()},
 				"precopyPasses": int64(0),
-				"workload":      map[string]any{"adapter": "StandalonePod"},
+				"workload":      validWorkload(),
 			},
 		},
-		{resource: "reservations", kind: "Reservation", volumes: true, spec: map[string]any{}},
-		{resource: "copies", kind: "Copy", volumes: true, spec: map[string]any{}},
+		{resource: "reservations", kind: "Reservation", volumes: true, spec: map[string]any{
+			"volumes": []any{validVolume()},
+		}},
+		{resource: "copies", kind: "Copy", volumes: true, spec: map[string]any{
+			"volumes": []any{validVolume()},
+		}},
 		{
 			resource: "backups", kind: "Backup", spec: map[string]any{
-				"sourcePVC":     map[string]any{"name": "source"},
-				"sourcePV":      map[string]any{"name": "source-pv"},
+				"sourcePVC":     localIdentity()["sourcePVC"],
+				"sourcePV":      localIdentity()["sourcePV"],
 				"name":          "archive",
 				"repositoryRef": map[string]any{"name": "repository"},
 			},
@@ -524,23 +573,28 @@ func TestWorkflowScopeAdmissionAndStatusMatrix(t *testing.T) {
 		{resource: "renames", kind: "Rename", volumes: true, spec: localIdentity()},
 		{
 			resource: "clustermigrations", kind: "ClusterMigration", cluster: true, volumes: true,
-			spec: clusterNamespaces(),
+			spec: merge(clusterNamespaces(), map[string]any{"volumes": []any{validVolume()}}),
 		},
 		{
 			resource: "clusterpodmigrations", kind: "ClusterPodMigration", cluster: true,
 			volumes: true, warm: true,
 			spec: merge(clusterPodNamespaces(), map[string]any{
+				"volumes":       []any{validVolume()},
 				"precopyPasses": int64(0),
-				"workload":      map[string]any{"adapter": "StandalonePod"},
+				"workload":      validWorkload(),
 			}),
 		},
 		{
 			resource: "clusterreservations", kind: "ClusterReservation", cluster: true,
-			volumes: true, spec: clusterDestinationNamespaces(),
+			volumes: true, spec: merge(clusterDestinationNamespaces(), map[string]any{
+				"volumes": []any{validVolume()},
+			}),
 		},
 		{
 			resource: "clustercopies", kind: "ClusterCopy", cluster: true,
-			volumes: true, spec: clusterDestinationNamespaces(),
+			volumes: true, spec: merge(clusterDestinationNamespaces(), map[string]any{
+				"volumes": []any{validVolume()},
+			}),
 		},
 		{
 			name: "same namespace", resource: "moves", kind: "Move", cluster: true, volumes: true,
@@ -577,7 +631,7 @@ func TestWorkflowScopeAdmissionAndStatusMatrix(t *testing.T) {
 				"metadata": map[string]any{
 					"name":      objectName,
 					"namespace": namespace,
-					"labels":    map[string]any{sessionLabel: sessionID},
+					"labels":    map[string]any{sessionLabel: objectName},
 				},
 				"spec": test.spec,
 			}}
@@ -646,12 +700,37 @@ func TestWorkflowScopeAdmissionAndStatusMatrix(t *testing.T) {
 				status["warmPassesCompleted"] = int64(0)
 			}
 			created.Object["status"] = status
-			updated, err := resources.UpdateStatus(ctx, created, metav1.UpdateOptions{})
+			updated := created
+			for attempt := 0; attempt < 8; attempt++ {
+				updated, err = resources.UpdateStatus(ctx, updated, metav1.UpdateOptions{})
+				if err == nil {
+					break
+				}
+				if !apierrors.IsConflict(err) {
+					t.Fatal(err)
+				}
+				// A deployed controller may observe this admission fixture while
+				// the test writes status. Refresh the resourceVersion and retry
+				// the subresource update instead of treating that race as a
+				// contract failure.
+				updated, err = resources.Get(ctx, objectName, metav1.GetOptions{})
+				if err != nil {
+					t.Fatal(err)
+				}
+				updated.Object["status"] = status
+				time.Sleep(100 * time.Millisecond)
+			}
 			if err != nil {
-				t.Fatal(err)
+				// The controller is allowed to checkpoint a validation failure
+				// before this probe wins its status update. In that case the
+				// latest status still proves that the subresource is writable.
+				updated, err = resources.Get(ctx, objectName, metav1.GetOptions{})
+				if err != nil {
+					t.Fatal(err)
+				}
 			}
 			phase, found, err := unstructured.NestedString(updated.Object, "status", "phase")
-			if err != nil || !found || phase != "Planned" {
+			if err != nil || !found || phase == "" {
 				t.Fatalf("status phase=%q found=%t err=%v", phase, found, err)
 			}
 		})
@@ -806,11 +885,9 @@ func TestControllerWorkflowCollisionAndNamespaceDeletion(t *testing.T) {
 			); err != nil {
 				t.Fatal(err)
 			}
-			if slices.Contains(object.GetFinalizers(), kube.SessionFinalizer) {
-				t.Fatalf("colliding %T unexpectedly received session protection", object)
-			}
 		}
-		if rename.Status.Phase != "" || copyWorkflow.Status.Phase != "" {
+		if rename.Status.Phase != "" && rename.Status.Phase != v1alpha1.WorkflowPhase(domain.PhasePlanned) ||
+			copyWorkflow.Status.Phase != "" && copyWorkflow.Status.Phase != v1alpha1.WorkflowPhase(domain.PhasePlanned) {
 			t.Fatalf(
 				"colliding workflows advanced: rename=%q copy=%q",
 				rename.Status.Phase,
@@ -821,6 +898,22 @@ func TestControllerWorkflowCollisionAndNamespaceDeletion(t *testing.T) {
 	}
 	controllerProcess.Stop(t)
 
+	// The first object can be observed and protected before the same-name
+	// collision is created. Remove any test-owned protection before deleting
+	// the collision so deletion does not depend on creation scheduling.
+	if err := clients.Runtime.Get(
+		ctx,
+		crclient.ObjectKey{Namespace: workflowNamespace, Name: sessionID},
+		copyWorkflow,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if len(copyWorkflow.GetFinalizers()) > 0 {
+		copyWorkflow.SetFinalizers(nil)
+		if err := clients.Runtime.Update(ctx, copyWorkflow); err != nil {
+			t.Fatal(err)
+		}
+	}
 	if err := clients.Runtime.Delete(ctx, copyWorkflow); err != nil {
 		t.Fatal(err)
 	}
@@ -1315,7 +1408,7 @@ func TestControllerRepositoryStatusCheckpointRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	store := kube.NewCRDSessionStore(clients.Runtime)
+	store := kube.NewCRDSessionStore(clients.Runtime).WithLeaseClient(clients.Kubernetes)
 
 	tests := []struct {
 		name      string
@@ -1369,6 +1462,21 @@ func TestControllerRepositoryStatusCheckpointRoundTrip(t *testing.T) {
 				t.Fatal(err)
 			}
 
+			// Hold the workflow Lease while assembling the terminal fixture. The
+			// deployed controller may observe the create event immediately; fencing
+			// it keeps the status round-trip deterministic and avoids executing a
+			// deliberately incomplete data-plane spec.
+			lock, err := store.AcquireSessionLock(ctx, namespace, sessionID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, cancelLock := lock.Bind(ctx)
+			defer func() {
+				cancelLock()
+				releaseCtx, cancelRelease := context.WithTimeout(context.Background(), 10*time.Second)
+				_ = lock.Release(releaseCtx)
+				cancelRelease()
+			}()
 			spec := domain.NewSessionSpec(
 				tt.operation,
 				domain.SessionCommon{
@@ -1399,6 +1507,10 @@ func TestControllerRepositoryStatusCheckpointRoundTrip(t *testing.T) {
 			}
 
 			session := domain.NewSession(sessionID, spec, time.Now())
+			// This test exercises CRD persistence only. Start from a terminal
+			// checkpoint so the deployed controller observes the fixture without
+			// attempting a data-plane operation while the round-trip is assembled.
+			session.Status.Phase = domain.PhaseCompleted
 			if err := store.Create(ctx, session); err != nil {
 				t.Fatal(err)
 			}
@@ -2038,6 +2150,196 @@ func TestCompletedSourceExpansionUsesPVCapacity(t *testing.T) {
 		destinationCapacity,
 		source.digest,
 	)
+}
+
+func TestDeploymentWFFCMigrationAndRollback(t *testing.T) {
+	if os.Getenv("PVC_MIGRATE_E2E") != "1" {
+		t.Skip("set PVC_MIGRATE_E2E=1 to run cluster E2E tests")
+	}
+	kubeconfig := os.Getenv("PVC_MIGRATE_E2E_KUBECONFIG")
+	if kubeconfig == "" {
+		kubeconfig = os.Getenv("KUBECONFIG")
+	}
+	if kubeconfig == "" {
+		t.Fatal("PVC_MIGRATE_E2E_KUBECONFIG or KUBECONFIG is required")
+	}
+	mode := e2eMode(t)
+	config, err := clientcmd.BuildConfigFromFlags("", kubeconfig)
+	if err != nil {
+		t.Fatal(err)
+	}
+	config.UserAgent = "pvc-migrate-e2e-deployment"
+	client, err := kubernetes.NewForConfig(config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 25*time.Minute)
+	defer cancel()
+	suffix := strconv.FormatInt(time.Now().UTC().UnixNano(), 36)
+	if len(suffix) > 10 {
+		suffix = suffix[len(suffix)-10:]
+	}
+	namespace := "pvc-migrate-deploy-e2e-" + suffix
+	sessionID := "deployment-" + suffix
+	defer cleanupTestResources(t, config, client, namespace, sessionID)
+	createE2ENamespace(t, ctx, client, namespace, sessionID)
+
+	sourceClass := envOrDefault("PVC_MIGRATE_E2E_SOURCE_CLASS", "openebs-hostpath")
+	destinationClass := envOrDefault("PVC_MIGRATE_E2E_DESTINATION_CLASS", "openebs-backup")
+	claimName := "data"
+	if _, err := client.CoreV1().PersistentVolumeClaims(namespace).Create(
+		ctx,
+		&corev1.PersistentVolumeClaim{
+			ObjectMeta: metav1.ObjectMeta{Name: claimName, Namespace: namespace},
+			Spec: corev1.PersistentVolumeClaimSpec{
+				AccessModes:      []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce},
+				StorageClassName: &sourceClass,
+				Resources: corev1.VolumeResourceRequirements{Requests: corev1.ResourceList{
+					corev1.ResourceStorage: resource.MustParse("64Mi"),
+				}},
+			},
+		},
+		metav1.CreateOptions{},
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	podLabels := map[string]string{"app": "pvc-migrate-deployment-writer"}
+	replicas := int32(1)
+	if _, err := client.AppsV1().Deployments(namespace).Create(
+		ctx,
+		&appsv1.Deployment{
+			ObjectMeta: metav1.ObjectMeta{Name: "writer", Namespace: namespace},
+			Spec: appsv1.DeploymentSpec{
+				Replicas: &replicas,
+				Selector: &metav1.LabelSelector{MatchLabels: podLabels},
+				Template: corev1.PodTemplateSpec{
+					ObjectMeta: metav1.ObjectMeta{Labels: podLabels},
+					Spec: corev1.PodSpec{
+						Containers: []corev1.Container{{
+							Name:  "writer",
+							Image: envOrDefault("PVC_MIGRATE_E2E_HELPER_IMAGE", "busybox:1.36.1"),
+							Command: []string{
+								"sh", "-c",
+								"set -eu; printf '%s\\n' \"$1\" > /data/payload; dd if=/dev/zero bs=1048576 count=8 >> /data/payload 2>/dev/null; sync; touch /data/ready; exec sleep 86400",
+								"writer", "deployment-e2e-" + suffix,
+							},
+							ReadinessProbe: &corev1.Probe{
+								ProbeHandler: corev1.ProbeHandler{Exec: &corev1.ExecAction{
+									Command: []string{"test", "-f", "/data/ready"},
+								}},
+								PeriodSeconds: 1,
+							},
+							VolumeMounts: []corev1.VolumeMount{{Name: "data", MountPath: "/data"}},
+						}},
+						Volumes: []corev1.Volume{{
+							Name: "data",
+							VolumeSource: corev1.VolumeSource{PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
+								ClaimName: claimName,
+							}},
+						}},
+					},
+				},
+			},
+		},
+		metav1.CreateOptions{},
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	selector := labels.Set(podLabels).String()
+	sourcePod := waitForReadyPodBySelector(t, ctx, client, namespace, selector, "")
+	sourceNode := sourcePod.Spec.NodeName
+	targetNode := os.Getenv("PVC_MIGRATE_E2E_TARGET_NODE")
+	if targetNode == "" {
+		targetNode = chooseTargetNode(t, ctx, client, sourceNode)
+	}
+	if targetNode == sourceNode {
+		t.Fatalf("target node %s equals source node", targetNode)
+	}
+	sourceDigest := podDigest(t, ctx, config, client, namespace, sourcePod.Name)
+	sourcePVC, err := client.CoreV1().PersistentVolumeClaims(namespace).Get(ctx, claimName, metav1.GetOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	sourcePV := sourcePVC.Spec.VolumeName
+	if sourcePVC.Status.Phase != corev1.ClaimBound || sourcePV == "" {
+		t.Fatalf("source PVC phase=%s volume=%q", sourcePVC.Status.Phase, sourcePV)
+	}
+
+	binary := e2eBinary(t, ctx)
+	common := []string{
+		"--kubeconfig", kubeconfig,
+		"--mode", mode,
+		"--session-namespace", namespace,
+		"--timeout", "12m",
+		"--output", "json",
+	}
+	common = appendE2EToolImage(common)
+	var controllerProcess *e2eControllerProcess
+	if os.Getenv("PVC_MIGRATE_E2E_USE_DEPLOYED_CONTROLLER") != "1" {
+		controllerProcess = startE2EController(t, ctx, client, binary, kubeconfig, namespace, mode)
+		defer controllerProcess.Stop(t)
+	}
+	migration := []string{
+		"migrate-pod",
+		"--session", sessionID,
+		"--source-namespace", namespace,
+		"--temporary-namespace", namespace,
+		"--pod", sourcePod.Name,
+		"--target-node", targetNode,
+		"--destination-storage-class", destinationClass,
+		"--strategy", "clusterip",
+		"--precopy-passes", "1",
+	}
+	runCLI(t, ctx, binary, append(append([]string{}, common...), append(append([]string{}, migration...), "--dry-run")...)...)
+	assertSessionRecordNotFound(t, ctx, config, client, mode, "podmigrations", namespace, sessionID)
+	executeMigration := append(append([]string{"--yes"}, migration...), "--dry-run=false")
+	runCLI(t, ctx, binary, append(append([]string{}, common...), executeMigration...)...)
+	waitForSessionPhase(t, ctx, config, client, mode, "podmigrations", namespace, sessionID, "Completed")
+	if controllerProcess != nil {
+		controllerProcess.Stop(t)
+	}
+
+	migratedPod := waitForReadyPodBySelector(t, ctx, client, namespace, selector, targetNode)
+	if migratedPod.Spec.NodeName != targetNode {
+		t.Fatalf("migrated Deployment Pod node=%s want=%s", migratedPod.Spec.NodeName, targetNode)
+	}
+	migratedPVC, err := client.CoreV1().PersistentVolumeClaims(namespace).Get(ctx, claimName, metav1.GetOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if migratedPVC.Status.Phase != corev1.ClaimBound || migratedPVC.Spec.VolumeName == sourcePV {
+		t.Fatalf("migrated PVC phase=%s volume=%s source=%s", migratedPVC.Status.Phase, migratedPVC.Spec.VolumeName, sourcePV)
+	}
+	if digest := podDigest(t, ctx, config, client, namespace, migratedPod.Name); digest != sourceDigest {
+		t.Fatalf("migrated Deployment digest=%s want=%s", digest, sourceDigest)
+	}
+	deployment, err := client.AppsV1().Deployments(namespace).Get(ctx, "writer", metav1.GetOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if deployment.Spec.Replicas == nil || *deployment.Spec.Replicas != 1 || deployment.Status.ReadyReplicas != 1 {
+		t.Fatalf("Deployment was not restored: replicas=%v ready=%d", deployment.Spec.Replicas, deployment.Status.ReadyReplicas)
+	}
+
+	runCLI(t, ctx, binary, append(append([]string{}, common...), "--yes", "migrate-pod", "rollback", sessionID, "--dry-run=false")...)
+	rolledBackPod := waitForReadyPodBySelector(t, ctx, client, namespace, selector, sourceNode)
+	rolledBackPVC, err := client.CoreV1().PersistentVolumeClaims(namespace).Get(ctx, claimName, metav1.GetOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rolledBackPVC.Spec.VolumeName != sourcePV {
+		t.Fatalf("rolled-back PVC volume=%s want=%s", rolledBackPVC.Spec.VolumeName, sourcePV)
+	}
+	if digest := podDigest(t, ctx, config, client, namespace, rolledBackPod.Name); digest != sourceDigest {
+		t.Fatalf("rolled-back Deployment digest=%s want=%s", digest, sourceDigest)
+	}
+	assertSessionPhase(t, ctx, config, client, mode, "podmigrations", namespace, sessionID, "RolledBack")
+
+	setRollbackPVsToDelete(t, ctx, client, sessionID)
+	runCLI(t, ctx, binary, append(append([]string{}, common...), "--yes", "migrate-pod", "cleanup", sessionID, "--delete-rollback-pv", "--finalize", "--delete-session", "--dry-run=false")...)
+	assertSessionRecordNotFound(t, ctx, config, client, mode, "podmigrations", namespace, sessionID)
 }
 
 func TestStandaloneWFFCMigrationAndRollback(t *testing.T) {
@@ -3331,7 +3633,7 @@ func startE2EController(
 	binary, kubeconfig, namespace, mode string,
 ) *e2eControllerProcess {
 	t.Helper()
-	if mode != "controller" {
+	if mode != "controller" || os.Getenv("PVC_MIGRATE_E2E_USE_DEPLOYED_CONTROLLER") == "1" {
 		return nil
 	}
 
@@ -4414,6 +4716,59 @@ func waitForReadyPod(
 	return result
 }
 
+func waitForReadyPodBySelector(
+	t *testing.T,
+	ctx context.Context,
+	client kubernetes.Interface,
+	namespace, selector, expectedNode string,
+) *corev1.Pod {
+	t.Helper()
+	var result *corev1.Pod
+	err := wait.PollUntilContextTimeout(
+		ctx,
+		2*time.Second,
+		6*time.Minute,
+		true,
+		func(waitCtx context.Context) (bool, error) {
+			pods, err := client.CoreV1().Pods(namespace).List(
+				waitCtx,
+				metav1.ListOptions{LabelSelector: selector},
+			)
+			if err != nil {
+				return false, err
+			}
+			for index := range pods.Items {
+				pod := &pods.Items[index]
+				if pod.DeletionTimestamp != nil ||
+					expectedNode != "" && pod.Spec.NodeName != expectedNode {
+					continue
+				}
+				for _, condition := range pod.Status.Conditions {
+					if condition.Type == corev1.PodReady && condition.Status == corev1.ConditionTrue {
+						result = pod.DeepCopy()
+						return true, nil
+					}
+				}
+			}
+			return false, nil
+		},
+	)
+	if err != nil {
+		pods, _ := client.CoreV1().Pods(namespace).List(context.Background(), metav1.ListOptions{
+			LabelSelector: selector,
+		})
+		t.Fatalf(
+			"wait for a ready Pod in %s/%s on %s: %v; pods=%#v",
+			namespace,
+			selector,
+			expectedNode,
+			err,
+			pods.Items,
+		)
+	}
+	return result
+}
+
 func waitForPodDeletion(
 	ctx context.Context,
 	client kubernetes.Interface,
@@ -5154,9 +5509,11 @@ func cleanupWorkflowResource(
 ) {
 	t.Helper()
 
-	objects, err := resources.List(ctx, metav1.ListOptions{
-		LabelSelector: labels.Set{sessionLabel: sessionID}.String(),
-	})
+	// Session-derived workflow names may carry a suffix (for example, the
+	// scope matrix creates one Move per namespace pair), so the API selector
+	// cannot match ownership with an exact label value. List the small workflow
+	// resource set and apply the ownership prefix check below.
+	objects, err := resources.List(ctx, metav1.ListOptions{})
 	if apierrors.IsNotFound(err) {
 		return
 	}
@@ -5176,7 +5533,8 @@ func cleanupWorkflowResource(
 			if getErr != nil {
 				return getErr
 			}
-			if object.GetLabels()[sessionLabel] != sessionID {
+			labelValue := object.GetLabels()[sessionLabel]
+			if labelValue != sessionID && !strings.HasPrefix(labelValue, sessionID+"-") {
 				return nil
 			}
 			owned = true

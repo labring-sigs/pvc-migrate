@@ -38,6 +38,8 @@ type ClusterVolumeSpec struct {
 
 // ClusterWorkloadSpec is the workload snapshot owned by ClusterPodMigration.
 // Workload references are relative to spec.sourceNamespace.
+// +kubebuilder:validation:XValidation:rule="self.adapter == 'None' || (has(self.pod) && has(self.pod.apiVersion) && size(self.pod.apiVersion) > 0 && has(self.pod.kind) && size(self.pod.kind) > 0 && has(self.pod.name) && size(self.pod.name) > 0 && has(self.pod.uid) && size(self.pod.uid) > 0)",message="workload.pod must include apiVersion, kind, name, and uid"
+// +kubebuilder:validation:XValidation:rule="self.adapter == 'None' || self.adapter == 'StandalonePod' || (has(self.controller) && has(self.controller.apiVersion) && size(self.controller.apiVersion) > 0 && has(self.controller.kind) && size(self.controller.kind) > 0 && has(self.controller.name) && size(self.controller.name) > 0 && has(self.controller.uid) && size(self.controller.uid) > 0)",message="workload.controller must include apiVersion, kind, name, and uid for managed workloads"
 type ClusterWorkloadSpec struct {
 	Adapter          WorkloadKind            `json:"adapter"                    yaml:"adapter"`
 	Pod              *LocalResourceReference `json:"pod,omitempty"              yaml:"pod,omitempty"`
@@ -52,6 +54,7 @@ type ClusterWorkloadSpec struct {
 	Grafana        *GrafanaSpec             `json:"grafana,omitempty"        yaml:"grafana,omitempty"`
 }
 
+// +kubebuilder:validation:XValidation:rule="has(self.volumes) && size(self.volumes) > 0",message="volumes must contain at least one source PVC"
 type ClusterMigrationSpec struct {
 	SourceNamespace      NamespaceName `json:"sourceNamespace"      yaml:"sourceNamespace"`
 	TemporaryNamespace   NamespaceName `json:"temporaryNamespace"   yaml:"temporaryNamespace"`
@@ -69,6 +72,7 @@ type ClusterMigrationSpec struct {
 	SkipSourceUsageCheck bool     `json:"skipSourceUsageCheck,omitempty" yaml:"skipSourceUsageCheck,omitempty"`
 }
 
+// +kubebuilder:validation:XValidation:rule="has(self.volumes) && size(self.volumes) > 0",message="volumes must contain at least one source PVC"
 // +kubebuilder:validation:XValidation:rule="self.workload.adapter != 'None'",message="ClusterPodMigration workload.adapter must identify a supported workload"
 type ClusterPodMigrationSpec struct {
 	// Pod migration preserves workload and PVC identities in SourceNamespace.
@@ -91,6 +95,7 @@ type ClusterPodMigrationSpec struct {
 	OpenEBSLVMEnableShared bool                `json:"openebsLvmEnableShared,omitempty" yaml:"openebsLvmEnableShared,omitempty"`
 }
 
+// +kubebuilder:validation:XValidation:rule="has(self.volumes) && size(self.volumes) > 0",message="volumes must contain at least one source PVC"
 type ClusterReservationSpec struct {
 	SourceNamespace      NamespaceName `json:"sourceNamespace"      yaml:"sourceNamespace"`
 	DestinationNamespace NamespaceName `json:"destinationNamespace" yaml:"destinationNamespace"`
@@ -102,6 +107,7 @@ type ClusterReservationSpec struct {
 	SkipSourceUsageCheck bool                `json:"skipSourceUsageCheck,omitempty" yaml:"skipSourceUsageCheck,omitempty"`
 }
 
+// +kubebuilder:validation:XValidation:rule="has(self.volumes) && size(self.volumes) > 0",message="volumes must contain at least one source PVC"
 type ClusterCopySpec struct {
 	SourceNamespace      NamespaceName `json:"sourceNamespace"      yaml:"sourceNamespace"`
 	DestinationNamespace NamespaceName `json:"destinationNamespace" yaml:"destinationNamespace"`

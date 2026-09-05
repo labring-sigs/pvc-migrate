@@ -54,8 +54,11 @@ The bundled ClusterRole is a high-privilege controller identity. Bind it only
 to the controller ServiceAccount; tenant users should receive narrowly scoped
 namespaced permissions to submit and observe the workflow CRs they own.
 The role reads repository credentials by exact name and grants the controller
-the create/update/delete Secret verbs required by Helm's default release
-storage driver. It intentionally omits Secret `list`.
+the Secret verbs required by Helm's default release storage driver, including
+listing release history by label. Secret access remains limited to the
+controller/operator identity. Controller sessions use workflow CRDs and
+Kubernetes Leases, so this role intentionally has no session ConfigMap
+permissions; ConfigMap access belongs to the local CLI/session backend.
 
 Build the tool image. It runs the CLI by default and also supplies PVC reservation, rsync, SSHD, and rclone roles inside the cluster:
 
@@ -143,8 +146,10 @@ tenant-scoped CR; the default remains the global `--session-namespace` for
 ConfigMap/session workflows.
 `--timeout` bounds planning, submission, and waiting. A failed or deleted CR
 returns a nonzero exit code. Use `--wait=false` when another process owns
-observation. Tool Pod logs are emitted by the controller process, so inspect
-the controller Deployment logs when transfer-level output is needed.
+observation. The controller records business failures in the CR status and
+does not treat them as reconcile errors; inspect the controller Deployment logs
+for structured reconciliation and data-plane events. Raw tool Pod streams and
+command-oriented `Next steps` guidance remain CLI-only.
 
 The controller image defaults to `ghcr.io/labring-sigs/pvc-migrate:dev`; set the image explicitly in `deploy/controller.yaml` for a released build.
 

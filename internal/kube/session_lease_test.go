@@ -132,7 +132,8 @@ func TestConfigMapSessionStoreSessionLeaseContendsAndReleases(t *testing.T) {
 	}
 
 	second, err := store.AcquireSessionLock(ctx, "system", "session-1")
-	if second != nil || domain.CategoryOf(err) != domain.ErrorConflict {
+	if second != nil || domain.CategoryOf(err) != domain.ErrorConflict ||
+		!IsSessionLockContention(err) {
 		t.Fatalf("second holder = %v, error = %v", second, err)
 	}
 

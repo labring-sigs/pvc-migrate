@@ -500,6 +500,9 @@ spec:
             - sourceNamespace
             - temporaryNamespace
             type: object
+            x-kubernetes-validations:
+            - message: volumes must contain at least one source PVC
+              rule: has(self.volumes) && size(self.volumes) > 0
           status:
             properties:
               completedAt:

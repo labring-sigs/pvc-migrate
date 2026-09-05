@@ -188,10 +188,11 @@ func (s *ConfigMapSessionStore) acquireSessionLock(
 
 		if lease.Spec.HolderIdentity != nil && *lease.Spec.HolderIdentity != "" &&
 			!sessionLeaseExpired(lease, time.Now().UTC()) {
-			return nil, domain.NewError(
+			return nil, domain.WrapError(
 				domain.ErrorConflict,
 				"acquire session lock",
 				fmt.Sprintf("session %s is already being changed", id),
+				ErrSessionLockContention,
 			)
 		}
 
@@ -210,10 +211,11 @@ func (s *ConfigMapSessionStore) acquireSessionLock(
 
 		claimed, err := leases.Update(ctx, updated, metav1.UpdateOptions{})
 		if apierrors.IsConflict(err) {
-			return nil, domain.NewError(
+			return nil, domain.WrapError(
 				domain.ErrorConflict,
 				"acquire session lock",
 				fmt.Sprintf("session %s changed while acquiring its lock", id),
+				ErrSessionLockContention,
 			)
 		}
 
@@ -247,10 +249,11 @@ func (s *ConfigMapSessionStore) acquireSessionLock(
 		), nil
 	}
 
-	return nil, domain.NewError(
+	return nil, domain.WrapError(
 		domain.ErrorConflict,
 		"acquire session lock",
 		fmt.Sprintf("session %s lock acquisition raced with another process", id),
+		ErrSessionLockContention,
 	)
 }
 

@@ -20,6 +20,8 @@ The operation-specific API types own their fields and statuses. The internal
 `domain.SessionSpec` and `domain.SessionStatus` are translation details and do
 not appear in CRD schemas. Kubebuilder/controller-runtime owns API generation,
 deepcopy code, status subresources, watches, leader election, and retries.
+Transfer workflows require at least one volume at admission time; Backup and
+Restore are the only workflow kinds that operate on a single named PVC.
 
 Namespaced workflows have a strict tenant boundary. `metadata.namespace` is
 the single namespace authority; namespaced specs and their local resource
@@ -75,8 +77,9 @@ same-namespace operation when cluster-level authority or a uniform automation
 interface is required. The CLI creates the CR, then watches that exact object by
 resource version until a terminal status. It reconnects after watch closure or
 expiration and reports CR status history and conditions while the controller owns
-tool Pod logs. `--wait=false` returns after creation; the default waits for
-completion.
+tool execution. `--wait=false` returns after creation; the default waits for
+completion. Raw tool Pod streams and command-oriented guidance are CLI-only;
+the controller emits structured records through its process logger.
 
 `Reservation` is an optional two-phase workflow. It provisions and retains the
 destination PVCs, allowing capacity, topology, quota, and scheduling checks to be
@@ -138,7 +141,10 @@ becoming an indirect path to another namespace's credentials.
 
 The controller initializes a missing status to `Planned`, persists every phase
 checkpoint through the status subresource, and resumes idempotently after
-restarts. A failed workflow remains quiescent until an explicit resume. Session
+restarts. Business execution failures are checkpointed as `Failed` and return
+no reconcile error once that status is durable; persistence, locking, and API
+failures remain retryable controller errors. A failed workflow remains
+quiescent until an explicit resume. Session
 Leases fence concurrent execution, and controller-owned CR finalizers protect
 resources during explicit cleanup. A namespaced workflow keeps that protection
 when it alone is deleted, while the controller releases it when the containing
@@ -163,3 +169,6 @@ creates, updates, and deletes short-lived Helm release Secrets. Helm's
 default Secret storage driver lists release history by label; this access is
 required by the upstream
 pv-migrate Helm driver and is limited to the controller/operator identity.
+Controller sessions are stored in workflow CRDs and fenced with Leases, so
+the controller role does not need ConfigMap permissions used by the local
+session backend.

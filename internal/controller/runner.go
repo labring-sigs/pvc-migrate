@@ -38,7 +38,6 @@ type Runner struct {
 	trustedToolImage string
 	kubeconfigPath   string
 	kubeContext      string
-	pollInterval     time.Duration
 	logger           *slog.Logger
 	openEBS          kube.OpenEBSLVMSharedVolumeManager
 }
@@ -120,19 +119,11 @@ func NewRunner(
 	namespace string,
 ) *Runner {
 	return &Runner{
-		service:      service,
-		store:        store,
-		namespace:    namespace,
-		pollInterval: 5 * time.Second,
-		logger:       slog.Default(),
+		service:   service,
+		store:     store,
+		namespace: namespace,
+		logger:    slog.Default(),
 	}
-}
-
-func (r *Runner) WithPollInterval(interval time.Duration) *Runner {
-	if interval > 0 {
-		r.pollInterval = interval
-	}
-	return r
 }
 
 func (r *Runner) WithLogger(logger *slog.Logger) *Runner {
@@ -140,36 +131,6 @@ func (r *Runner) WithLogger(logger *slog.Logger) *Runner {
 		r.logger = logger
 	}
 	return r
-}
-
-// Run blocks until ctx is canceled. A reconciliation pass runs immediately
-// so newly submitted resources do not wait for the first ticker interval.
-func (r *Runner) Run(ctx context.Context) error {
-	if r == nil || r.service == nil || r.store == nil {
-		return domain.NewError(
-			domain.ErrorValidation,
-			"controller",
-			"service and session store are required",
-		)
-	}
-
-	if err := r.ReconcileOnce(ctx); err != nil {
-		r.logger.Warn("controller reconciliation pass failed", "error", err)
-	}
-
-	ticker := time.NewTicker(r.pollInterval)
-	defer ticker.Stop()
-
-	for {
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case <-ticker.C:
-			if err := r.ReconcileOnce(ctx); err != nil {
-				r.logger.Warn("controller reconciliation pass failed", "error", err)
-			}
-		}
-	}
 }
 
 // ReconcileOnce processes all active workflow CRs in the configured
@@ -205,26 +166,54 @@ func (r *Runner) ReconcileOnce(ctx context.Context) error {
 	return errors.Join(failures...)
 }
 
-// checkpointFailure records errors that happen before a workflow service can
-// acquire its own session lock. Re-read the session while holding the Lease so
-// a stale reconcile cannot overwrite a newer phase written by another worker.
+// checkpointFailure is the CLI-facing form of failure checkpointing. It keeps
+// the original business error in the returned value so controller --once can
+// report a non-zero exit status after persisting Failed.
 func (r *Runner) checkpointFailure(
 	ctx context.Context,
 	session *domain.Session,
 	cause error,
 ) error {
+	return errors.Join(cause, r.persistFailure(ctx, session, cause))
+}
+
+// checkpointFailureForController records a business failure and returns only
+// errors that prevented the controller from persisting it. A workflow that
+// reaches Failed is a normal terminal outcome for reconcile and must not be
+// surfaced as a controller-runtime Reconciler error.
+func (r *Runner) checkpointFailureForController(
+	ctx context.Context,
+	session *domain.Session,
+	cause error,
+) error {
+	return r.persistFailure(ctx, session, cause)
+}
+
+// persistFailure records errors that happen before a workflow service can
+// acquire its own session lock. Re-read the session while holding the Lease so
+// a stale reconcile cannot overwrite a newer phase written by another worker.
+func (r *Runner) persistFailure(
+	ctx context.Context,
+	session *domain.Session,
+	cause error,
+) error {
+	if cause == nil {
+		return domain.NewError(
+			domain.ErrorInternal,
+			"controller checkpoint",
+			"workflow failure cause is required",
+		)
+	}
+
 	if session == nil {
-		return cause
+		return nil
 	}
 
 	if session.BackendResource == "" {
-		return errors.Join(
-			cause,
-			domain.NewError(
-				domain.ErrorInternal,
-				"controller checkpoint",
-				"workflow backend resource kind is required",
-			),
+		return domain.NewError(
+			domain.ErrorInternal,
+			"controller checkpoint",
+			"workflow backend resource kind is required",
 		)
 	}
 
@@ -237,7 +226,7 @@ func (r *Runner) checkpointFailure(
 		kube.SessionLockID(session),
 	)
 	if err != nil {
-		return errors.Join(cause, err)
+		return err
 	}
 
 	operationCtx, cancelOperation := lock.Bind(ctx)
@@ -249,11 +238,11 @@ func (r *Runner) checkpointFailure(
 			session.BackendResource,
 		)
 		if getErr != nil {
-			return errors.Join(cause, getErr)
+			return getErr
 		}
 
 		if latest == nil || terminalSession(latest) || latest.Status.Phase == domain.PhaseFailed {
-			return cause
+			return nil
 		}
 
 		return r.transitionFailure(operationCtx, latest, cause)
@@ -283,10 +272,10 @@ func (r *Runner) transitionFailure(
 	}
 
 	if err := session.Transition(domain.PhaseFailed, cause.Error(), time.Now()); err != nil {
-		return errors.Join(cause, err)
+		return err
 	}
 
-	return errors.Join(cause, r.store.Update(ctx, session))
+	return r.store.Update(ctx, session)
 }
 
 func (r *Runner) reconcileSession(ctx context.Context, session *domain.Session) error {

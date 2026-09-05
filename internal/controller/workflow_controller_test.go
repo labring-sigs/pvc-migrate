@@ -2,11 +2,13 @@ package controller
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
 	v1alpha1 "github.com/labring-sigs/pvc-migrate/api/v1alpha1"
 	"github.com/labring-sigs/pvc-migrate/internal/domain"
+	"github.com/labring-sigs/pvc-migrate/internal/kube"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
@@ -74,6 +76,24 @@ func TestWorkflowEventPredicateAllowsDeletionTimestampTransition(t *testing.T) {
 			updated.DeletionTimestamp = &metav1.Time{Time: metav1.Now().Time}
 			return updated
 		}(), want: true},
+		{name: "failed workflow resumes", old: func() *v1alpha1.Copy {
+			updated := base.DeepCopy()
+			updated.Status.Phase = v1alpha1.WorkflowPhase(domain.PhaseFailed)
+			return updated
+		}(), new: func() *v1alpha1.Copy {
+			updated := base.DeepCopy()
+			updated.Status.Phase = v1alpha1.WorkflowPhase(domain.PhasePlanned)
+			return updated
+		}(), want: true},
+		{name: "active status remains filtered", old: func() *v1alpha1.Copy {
+			updated := base.DeepCopy()
+			updated.Status.Phase = v1alpha1.WorkflowPhase(domain.PhasePlanned)
+			return updated
+		}(), new: func() *v1alpha1.Copy {
+			updated := base.DeepCopy()
+			updated.Status.Phase = v1alpha1.WorkflowPhase(domain.PhaseReserving)
+			return updated
+		}()},
 		{name: "already deleting", old: func() *v1alpha1.Copy {
 			updated := base.DeepCopy()
 			updated.DeletionTimestamp = &metav1.Time{Time: metav1.Now().Time}
@@ -136,9 +156,16 @@ func TestReconcileDeletingWorkflowReleasesOnlyTerminatingNamespace(t *testing.T)
 			wantDeleted: true,
 		},
 		{
-			name:    "cluster workflow keeps explicit cleanup protection",
-			request: reconcile.Request{NamespacedName: types.NamespacedName{Name: "workflow"}},
-			kind:    domain.ControllerKindClusterCopy,
+			name:      "cluster workflow keeps explicit cleanup protection while namespace is active",
+			namespace: &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "system"}},
+			request:   reconcile.Request{NamespacedName: types.NamespacedName{Name: "workflow"}},
+			kind:      domain.ControllerKindClusterCopy,
+		},
+		{
+			name:        "cluster workflow releases stale protection when namespace is missing",
+			request:     reconcile.Request{NamespacedName: types.NamespacedName{Name: "workflow"}},
+			kind:        domain.ControllerKindClusterCopy,
+			wantDeleted: true,
 		},
 	}
 
@@ -161,7 +188,6 @@ func TestReconcileDeletingWorkflowReleasesOnlyTerminatingNamespace(t *testing.T)
 				context.Background(),
 				test.request,
 				session,
-				test.kind,
 			); err != nil {
 				t.Fatal(err)
 			}
@@ -254,6 +280,169 @@ func TestWorkflowSpecMutationError(t *testing.T) {
 	if err := workflowSpecMutationError(session); err == nil {
 		t.Fatal("spec generation drift was accepted")
 	}
+}
+
+func TestWorkflowReconcilerKeepsBusinessFailureOutOfReconcilerError(t *testing.T) {
+	session := newRunnerSession("controller-business-failure")
+	session.Status.Phase = domain.PhaseReserved
+	session.Status.ObservedGeneration = 1
+	session.Generation = 1
+	store := &runnerSessionStore{
+		listed: session,
+		latest: cloneRunnerSession(session),
+		lock:   &runnerSessionLock{},
+	}
+
+	reconciler := NewWorkflowReconciler(&recordingWorkflowResumer{}, store)
+	request := reconcile.Request{NamespacedName: types.NamespacedName{
+		Namespace: session.Spec.SessionNamespace,
+		Name:      session.ID,
+	}}
+	kindReconciler := &kindWorkflowReconciler{
+		parent: reconciler,
+		kind:   domain.ControllerKindCopy,
+	}
+	result := reconcileWorkflowForTest(t, kindReconciler, request)
+
+	if result != (reconcile.Result{}) {
+		t.Fatalf("result=%#v, want no requeue after terminal failure", result)
+	}
+
+	if store.latest.Status.Phase != domain.PhaseFailed {
+		t.Fatalf("phase=%s, want %s", store.latest.Status.Phase, domain.PhaseFailed)
+	}
+}
+
+func TestWorkflowReconcilerRequeuesSessionLockContention(t *testing.T) {
+	session := newRunnerSession("controller-lock-contention")
+	session.Status.Phase = domain.PhaseReserved
+	session.Status.ObservedGeneration = 1
+	session.Generation = 1
+	store := &runnerSessionStore{
+		listed: session,
+		latest: cloneRunnerSession(session),
+		lock:   &runnerSessionLock{},
+	}
+	reconciler := NewWorkflowReconciler(
+		&errorWorkflowResumer{err: domain.WrapError(
+			domain.ErrorConflict,
+			"acquire session lock",
+			"session is already being changed",
+			kube.ErrSessionLockContention,
+		)},
+		store,
+	)
+	reconciler.requeueAfter = 250 * time.Millisecond
+
+	request := reconcile.Request{NamespacedName: types.NamespacedName{
+		Namespace: session.Spec.SessionNamespace,
+		Name:      session.ID,
+	}}
+
+	result, err := (&kindWorkflowReconciler{
+		parent: reconciler,
+		kind:   domain.ControllerKindCopy,
+	}).Reconcile(context.Background(), request)
+	if err != nil {
+		t.Fatalf("lock contention escaped reconcile: %v", err)
+	}
+
+	if result.RequeueAfter != 250*time.Millisecond {
+		t.Fatalf("requeueAfter=%s, want 250ms", result.RequeueAfter)
+	}
+
+	if len(store.updates) != 0 {
+		t.Fatalf("lock contention checkpointed as failure: %d updates", len(store.updates))
+	}
+}
+
+func TestWorkflowReconcilerRequeuesFailureCheckpointLockContention(t *testing.T) {
+	session := newRunnerSession("controller-failure-lock-contention")
+	session.Status.Phase = domain.PhaseReserved
+	session.Status.ObservedGeneration = 1
+	session.Generation = 1
+	store := &runnerSessionStore{
+		listed: session,
+		latest: cloneRunnerSession(session),
+		acquireErr: domain.WrapError(
+			domain.ErrorConflict,
+			"acquire session lock",
+			"session is already being changed",
+			kube.ErrSessionLockContention,
+		),
+	}
+	reconciler := NewWorkflowReconciler(
+		&errorWorkflowResumer{err: errors.New("destination PVC is unavailable")},
+		store,
+	)
+	reconciler.requeueAfter = 250 * time.Millisecond
+
+	request := reconcile.Request{NamespacedName: types.NamespacedName{
+		Namespace: session.Spec.SessionNamespace,
+		Name:      session.ID,
+	}}
+
+	result, err := (&kindWorkflowReconciler{
+		parent: reconciler,
+		kind:   domain.ControllerKindCopy,
+	}).Reconcile(context.Background(), request)
+	if err != nil {
+		t.Fatalf("failure checkpoint lock contention escaped reconcile: %v", err)
+	}
+
+	if result.RequeueAfter != 250*time.Millisecond {
+		t.Fatalf("requeueAfter=%s, want 250ms", result.RequeueAfter)
+	}
+
+	if len(store.updates) != 0 {
+		t.Fatalf(
+			"failure checkpoint updated session despite lock contention: %d updates",
+			len(store.updates),
+		)
+	}
+}
+
+func reconcileWorkflowForTest(
+	t *testing.T,
+	reconciler *kindWorkflowReconciler,
+	request reconcile.Request,
+) reconcile.Result {
+	t.Helper()
+
+	result, err := reconciler.Reconcile(context.Background(), request)
+	if err != nil {
+		t.Fatalf("business failure escaped reconcile: %v", err)
+	}
+
+	return result
+}
+
+type errorWorkflowResumer struct {
+	err error
+}
+
+func (r *errorWorkflowResumer) ResumeReserve(context.Context, *domain.Session) error {
+	return r.err
+}
+
+func (r *errorWorkflowResumer) ResumeOfflineMigration(context.Context, *domain.Session) error {
+	return r.err
+}
+
+func (r *errorWorkflowResumer) ResumePodMigration(context.Context, *domain.Session) error {
+	return r.err
+}
+
+func (r *errorWorkflowResumer) ResumeCopy(context.Context, *domain.Session) error {
+	return r.err
+}
+
+func (r *errorWorkflowResumer) ResumeRename(context.Context, *domain.Session) error {
+	return r.err
+}
+
+func (r *errorWorkflowResumer) ResumeMove(context.Context, *domain.Session) error {
+	return r.err
 }
 
 func TestInitializeUnobservedStatus(t *testing.T) {
