@@ -98,9 +98,6 @@ Run `make manifests` after changing API markers. It regenerates the typed
 deep-copy code and the CRD under `config/crd/bases`, then synchronizes the
 single-installation `deploy/crd.yaml` file.
 
-The resource boundary and unsupported-workflow decisions are documented in
-[`docs/controller-design.md`](docs/controller-design.md).
-
 Namespaced workflow CRDs use `metadata.namespace` as their tenant boundary.
 Their specs and local object references expose no namespace fields; conversion
 to the execution model derives source, temporary, destination, session, and
