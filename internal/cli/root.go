@@ -387,6 +387,7 @@ func (r *rootState) runtime() (*commandRuntime, error) {
 		clients: clients,
 		store:   store,
 		planner: planner.New(clients.Kubernetes, controllers).
+			WithControllerSubmission(controllerMode).
 			WithOpenEBSLVMSharedVolumeManager(openEBSLVMSharedVolumeManager).
 			WithLogger(logger.With("component", "planner")),
 		service: service,

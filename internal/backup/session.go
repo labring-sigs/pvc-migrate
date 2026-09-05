@@ -130,23 +130,24 @@ func Submit(
 		return nil, err
 	}
 
+	if req.SessionStore.StorageBackend() == kube.SessionBackendCRD {
+		if err := req.SessionStore.Create(ctx, session); err != nil {
+			return nil, err
+		}
+		return session, nil
+	}
+
+	if strings.TrimSpace(req.BackupRepository) != "" {
+		return nil, domain.NewError(
+			domain.ErrorPrecondition,
+			"backup credentials",
+			"BackupRepository requires a controller-backed workflow",
+		)
+	}
+
 	err = withBackupSessionLock(ctx, req, session, func(lockedCtx context.Context) error {
 		if err := req.SessionStore.Create(lockedCtx, session); err != nil {
 			return err
-		}
-
-		if strings.TrimSpace(req.BackupRepository) != "" {
-			// Controller mode resolves credentials from the referenced repository.
-			// Never materialize repository credentials in a workflow-owned Secret.
-			if session.Backend != kube.SessionBackendCRD {
-				return domain.NewError(
-					domain.ErrorPrecondition,
-					"backup credentials",
-					"BackupRepository requires a controller-backed workflow",
-				)
-			}
-
-			return nil
 		}
 
 		return persistBackupCredentials(lockedCtx, client, req, session)
@@ -260,23 +261,26 @@ func SubmitRestore(
 	spec.Restore.TargetNode = req.TargetNode
 	spec.Restore.AllowMounted = req.AllowMounted
 	spec.Restore.DeleteExtraneous = req.DeleteExtraneousFiles
+
 	session := domain.NewSession(id, spec, time.Now())
+	if req.SessionStore.StorageBackend() == kube.SessionBackendCRD {
+		if err := req.SessionStore.Create(ctx, session); err != nil {
+			return nil, err
+		}
+		return session, nil
+	}
+
+	if strings.TrimSpace(req.BackupRepository) != "" {
+		return nil, domain.NewError(
+			domain.ErrorPrecondition,
+			"restore credentials",
+			"BackupRepository requires a controller-backed workflow",
+		)
+	}
 
 	err := withBackupSessionLock(ctx, req, session, func(lockedCtx context.Context) error {
 		if err := req.SessionStore.Create(lockedCtx, session); err != nil {
 			return err
-		}
-
-		if strings.TrimSpace(req.BackupRepository) != "" {
-			if session.Backend != kube.SessionBackendCRD {
-				return domain.NewError(
-					domain.ErrorPrecondition,
-					"restore credentials",
-					"BackupRepository requires a controller-backed workflow",
-				)
-			}
-
-			return nil
 		}
 
 		return persistRestoreCredentials(lockedCtx, client, req, session)

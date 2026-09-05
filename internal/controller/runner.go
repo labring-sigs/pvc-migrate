@@ -299,6 +299,28 @@ func (r *Runner) reconcileSession(ctx context.Context, session *domain.Session) 
 		return err
 	}
 
+	if err := kube.ControllerNamespaceBoundaryError(session); err != nil {
+		return err
+	}
+
+	if r.client != nil {
+		for _, namespace := range []string{session.Spec.SessionNamespace, session.Spec.TemporaryNamespace, session.Spec.DestinationNamespace} {
+			if namespace == "" {
+				continue
+			}
+
+			if err := kube.EnsureNamespace(
+				ctx,
+				r.client,
+				namespace,
+				session.ID,
+				false,
+			); err != nil {
+				return err
+			}
+		}
+	}
+
 	r.logger.Info(
 		"reconciling migration",
 		"session",

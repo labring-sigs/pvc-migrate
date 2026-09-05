@@ -276,6 +276,20 @@ func (s *Service) CreateSession(
 	}
 
 	session := domain.NewSession(plan.SessionID, plan.SessionSpec, s.now())
+	if s.store.StorageBackend() == kube.SessionBackendCRD {
+		if err := session.Validate(); err != nil {
+			return nil, err
+		}
+
+		if !dryRun {
+			if err := s.store.Create(ctx, session); err != nil {
+				return nil, err
+			}
+		}
+
+		return session, nil
+	}
+
 	if dryRun {
 		if err := s.ensureSessionNamespaces(ctx, plan, true); err != nil {
 			return nil, err

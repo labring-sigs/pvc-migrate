@@ -32,7 +32,14 @@ func (p *Planner) finalizePlanStrategies(state *planState) {
 
 func (p *Planner) finalizePlanResources(ctx context.Context, state *planState) {
 	state.plan.Volumes = state.plannedVolumes
+
 	estimates := migrationNamespaceResourceEstimates(state)
+	if p.controllerSubmission {
+		session := estimates[state.options.SessionNamespace]
+		session.ConfigMaps--
+		estimates[state.options.SessionNamespace] = session
+	}
+
 	state.plan.TemporaryUsage = estimates[state.options.StagingNamespace]
 
 	state.plan.RollbackRetention.StorageRequests = state.rollbackStorage.String()
@@ -304,10 +311,7 @@ func (p *Planner) runPlanPolicyChecks(
 			p.checkRBAC(
 				ctx,
 				result,
-				options.SourceNamespace,
-				options.StagingNamespace,
-				options.SessionNamespace,
-				state.workload,
+				state.plan.SessionSpec,
 				state.inspectOpenEBSShared,
 				state.patchOpenEBSShared,
 			)

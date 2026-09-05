@@ -69,6 +69,12 @@ destination identity and lifecycle protocol.
 The CLI defaults to `session`; `controller` is selected explicitly when the
 controller and the required workflow CRDs are installed.
 
+Controller submission creates only the workflow spec. Initial status,
+execution namespaces, and execution Leases belong to the controller.
+The planner checks the caller's submission permissions while retaining its
+inventory and policy checks. See [Kubernetes Permissions](rbac.md) for the
+separate planning, submission, and execution requirements.
+
 `controller` mode never silently falls back. It discovers each served workflow
 kind independently. The CLI chooses a namespaced kind for tenant-local work and
 a cluster kind when namespace roles differ. Every cluster-scoped workflow also

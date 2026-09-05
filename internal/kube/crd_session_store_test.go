@@ -1591,6 +1591,36 @@ func TestCRDSessionStoreSupportsLeastPrivilegeTenantAccess(t *testing.T) {
 	}
 }
 
+func TestCRDSessionStoreCreateNeverWritesControllerStatus(t *testing.T) {
+	base := newCRDTestClient()
+
+	withWatch, ok := base.(crclient.WithWatch)
+	if !ok {
+		t.Fatal("fake CRD client does not support Watch")
+	}
+
+	statusWrites := 0
+	client := interceptor.NewClient(withWatch, interceptor.Funcs{
+		SubResourceUpdate: func(context.Context, crclient.Client, string, crclient.Object, ...crclient.SubResourceUpdateOption) error {
+			statusWrites++
+			return errors.New("status belongs to the controller")
+		},
+	})
+
+	session := storeTestSession()
+	if err := NewCRDSessionStore(client).Create(context.Background(), session); err != nil {
+		t.Fatal(err)
+	}
+
+	if statusWrites != 0 || session.Status.ObservedGeneration != 0 {
+		t.Fatalf(
+			"create wrote status: writes=%d observedGeneration=%d",
+			statusWrites,
+			session.Status.ObservedGeneration,
+		)
+	}
+}
+
 func TestCRDSessionStoreGetByKindDisambiguatesSameNameWorkflows(t *testing.T) {
 	ctx := context.Background()
 	client := newCRDTestClient()
