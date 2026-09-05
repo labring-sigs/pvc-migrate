@@ -10,7 +10,8 @@ are separate authorization boundaries.
 Creating a controller workflow submits its spec. The controller initializes
 status, creates execution namespaces, and acquires session Leases. The submitting
 CLI does not create Leases, write status, or reserve PVCs. Kubernetes makes each
-CR create atomic; the controller checks cross-kind name collisions before
+CR create atomic. Controller-mode dry-run submits the CR with the API server's
+dry-run option to validate admission without persisting it. The controller checks cross-kind name collisions before
 execution and uses the session Lease to fence execution.
 
 The CLI's controller-mode RBAC preflight checks `create`, `get`, and `watch` on

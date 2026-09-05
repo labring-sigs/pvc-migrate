@@ -38,6 +38,12 @@ type SessionStore interface {
 	Delete(ctx context.Context, session *domain.Session) error
 }
 
+// SessionCreateValidator checks submission against API-server admission without
+// persisting the workflow or acquiring execution permissions.
+type SessionCreateValidator interface {
+	ValidateCreate(ctx context.Context, session *domain.Session) error
+}
+
 // LockingSessionStore is the persistence contract for mutable workflows.
 // Session writes and their cleanup must never silently run without fencing.
 type LockingSessionStore interface {

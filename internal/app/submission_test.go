@@ -12,7 +12,8 @@ import (
 
 type submissionStore struct {
 	memoryStore
-	creates int
+	creates     int
+	validations int
 }
 
 func (*submissionStore) StorageBackend() string { return kube.SessionBackendCRD }
@@ -20,6 +21,11 @@ func (*submissionStore) StorageBackend() string { return kube.SessionBackendCRD 
 func (s *submissionStore) Create(ctx context.Context, session *domain.Session) error {
 	s.creates++
 	return s.memoryStore.Create(ctx, session)
+}
+
+func (s *submissionStore) ValidateCreate(context.Context, *domain.Session) error {
+	s.validations++
+	return nil
 }
 
 func (*submissionStore) AcquireSessionLock(
@@ -62,6 +68,10 @@ func TestControllerSubmissionLeavesExecutionToController(t *testing.T) {
 
 			if store.creates != wantCreates {
 				t.Fatalf("creates=%d, want %d", store.creates, wantCreates)
+			}
+
+			if store.validations != 1-wantCreates {
+				t.Fatalf("validations=%d, want %d", store.validations, 1-wantCreates)
 			}
 		})
 	}

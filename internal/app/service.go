@@ -281,10 +281,21 @@ func (s *Service) CreateSession(
 			return nil, err
 		}
 
-		if !dryRun {
-			if err := s.store.Create(ctx, session); err != nil {
-				return nil, err
+		if dryRun {
+			validator, ok := s.store.(kube.SessionCreateValidator)
+			if !ok {
+				return nil, domain.NewError(
+					domain.ErrorInternal,
+					"create session",
+					"controller session store must support admission validation",
+				)
 			}
+
+			return session, validator.ValidateCreate(ctx, session)
+		}
+
+		if err := s.store.Create(ctx, session); err != nil {
+			return nil, err
 		}
 
 		return session, nil

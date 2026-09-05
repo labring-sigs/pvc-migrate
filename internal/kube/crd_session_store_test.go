@@ -1621,6 +1621,40 @@ func TestCRDSessionStoreCreateNeverWritesControllerStatus(t *testing.T) {
 	}
 }
 
+func TestCRDSessionStoreValidateCreateUsesServerAdmission(t *testing.T) {
+	base := newCRDTestClient()
+
+	withWatch, ok := base.(crclient.WithWatch)
+	if !ok {
+		t.Fatal("fake CRD client does not support Watch")
+	}
+
+	admissionErr := errors.New("admission rejected the workflow")
+	creates := 0
+	client := interceptor.NewClient(withWatch, interceptor.Funcs{
+		Create: func(_ context.Context, _ crclient.WithWatch, _ crclient.Object, options ...crclient.CreateOption) error {
+			creates++
+
+			resolved := (&crclient.CreateOptions{}).ApplyOptions(options)
+			if len(resolved.DryRun) != 1 || resolved.DryRun[0] != metav1.DryRunAll {
+				t.Fatalf("dry-run options=%v", resolved.DryRun)
+			}
+
+			return admissionErr
+		},
+	})
+	session := storeTestSession()
+
+	err := NewCRDSessionStore(client).ValidateCreate(context.Background(), session)
+	if !errors.Is(err, admissionErr) || creates != 1 {
+		t.Fatalf("error=%v creates=%d", err, creates)
+	}
+
+	if session.BackendUID != "" || session.ResourceVersion != "" {
+		t.Fatal("dry-run persisted a workflow identity")
+	}
+}
+
 func TestCRDSessionStoreGetByKindDisambiguatesSameNameWorkflows(t *testing.T) {
 	ctx := context.Background()
 	client := newCRDTestClient()

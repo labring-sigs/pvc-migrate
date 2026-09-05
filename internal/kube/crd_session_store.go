@@ -421,6 +421,14 @@ func (s *CRDSessionStore) configured(operation string) error {
 }
 
 func (s *CRDSessionStore) Create(ctx context.Context, session *domain.Session) error {
+	return s.create(ctx, session, false)
+}
+
+func (s *CRDSessionStore) ValidateCreate(ctx context.Context, session *domain.Session) error {
+	return s.create(ctx, session, true)
+}
+
+func (s *CRDSessionStore) create(ctx context.Context, session *domain.Session, dryRun bool) error {
 	if session == nil {
 		return domain.NewError(domain.ErrorValidation, "create session", "session is nil")
 	}
@@ -472,7 +480,12 @@ func (s *CRDSessionStore) Create(ctx context.Context, session *domain.Session) e
 		)
 	}
 
-	if err := s.client.Create(ctx, object); apierrors.IsAlreadyExists(err) {
+	options := &crclient.CreateOptions{}
+	if dryRun {
+		options.DryRun = []string{metav1.DryRunAll}
+	}
+
+	if err := s.client.Create(ctx, object, options); apierrors.IsAlreadyExists(err) {
 		return domain.WrapError(
 			domain.ErrorConflict,
 			"create session",
@@ -490,6 +503,10 @@ func (s *CRDSessionStore) Create(ctx context.Context, session *domain.Session) e
 			),
 			err,
 		)
+	}
+
+	if dryRun {
+		return nil
 	}
 
 	// Initial status belongs to the controller. Derive the local Planned view
