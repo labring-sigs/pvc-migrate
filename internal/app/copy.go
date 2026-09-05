@@ -20,7 +20,9 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
-const copyToolCleanupTimeout = 10 * time.Second
+// Transfer charts use a 30-second Pod termination grace period. Allow that
+// grace period and asynchronous garbage collection to finish before retrying.
+const copyToolCleanupTimeout = 90 * time.Second
 
 func (s *Service) validateCopyConsumers(
 	ctx context.Context,
