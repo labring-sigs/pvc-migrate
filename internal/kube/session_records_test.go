@@ -26,6 +26,25 @@ func TestSessionRecordsFindsWorkflowDespiteMissingConfigMap(t *testing.T) {
 	}
 }
 
+func TestSessionRecordsRejectsDuplicatePersistenceRecords(t *testing.T) {
+	session := newControllerWaitTestSession(domain.PhaseReserving, "reserving")
+	typedClient := kubernetesfake.NewClientset()
+
+	if err := NewConfigMapSessionStore(typedClient).
+		Create(context.Background(), session); err != nil {
+		t.Fatal(err)
+	}
+
+	dynamicClient := newControllerWaitDynamicClient(controllerWaitTestObject(t, session))
+	records := NewSessionRecords(typedClient, dynamicClient)
+
+	got, err := records.Find(context.Background(), session.ID, session.Spec.SessionNamespace)
+	if got != nil || domain.CategoryOf(err) != domain.ErrorConflict ||
+		!strings.Contains(err.Error(), "multiple persistence records") {
+		t.Fatalf("session=%#v error=%v", got, err)
+	}
+}
+
 func TestSessionRecordsCannotProveAbsenceWithoutReadAccess(t *testing.T) {
 	client := dynamicfake.NewSimpleDynamicClient(runtime.NewScheme())
 	client.PrependReactor(

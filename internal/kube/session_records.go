@@ -96,10 +96,23 @@ func (r *SessionRecords) Find(
 		}
 	})
 
+	found := make([]*domain.Session, 0, 1)
 	for _, session := range sessions {
 		if session != nil {
-			return session, nil
+			found = append(found, session)
 		}
+	}
+
+	if len(found) > 1 {
+		return nil, domain.NewError(
+			domain.ErrorConflict,
+			"find session record",
+			fmt.Sprintf("session %s exists in multiple persistence records", id),
+		)
+	}
+
+	if len(found) == 1 {
+		return found[0], nil
 	}
 
 	if err := errors.Join(errs...); err != nil {
