@@ -2,6 +2,7 @@ package kube
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -246,6 +247,35 @@ func TestControllerSessionWaiterHonorsDeadline(t *testing.T) {
 	)
 	if domain.CategoryOf(err) != domain.ErrorTimeout {
 		t.Fatalf("category=%s error=%v", domain.CategoryOf(err), err)
+	}
+}
+
+func TestControllerSessionWaiterCancellationKeepsWorkflowRunning(t *testing.T) {
+	initial := newControllerWaitTestSession(domain.PhasePlanned, "planned")
+	client := newControllerWaitDynamicClient(controllerWaitTestObject(t, initial))
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	client.PrependWatchReactor(
+		"migrations",
+		func(clienttesting.Action) (bool, watch.Interface, error) {
+			cancel()
+			return true, watch.NewRaceFreeFake(), nil
+		},
+	)
+
+	_, err := NewControllerSessionWaiter(
+		client,
+	).Wait(ctx, initial, func(*domain.Session) (bool, error) { return false, nil })
+	if !errors.Is(err, context.Canceled) || !strings.Contains(err.Error(), "workflow continues") {
+		t.Fatalf("cancellation=%v", err)
+	}
+
+	for _, action := range client.Actions() {
+		if action.GetVerb() != "get" && action.GetVerb() != "watch" {
+			t.Fatalf("canceling wait mutated workflow: %v", action)
+		}
 	}
 }
 

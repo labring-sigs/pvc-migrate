@@ -37,6 +37,7 @@ type Config struct {
 	TrustedToolImage              string
 	VolumeUsageReader             kube.VolumeUsageReader
 	OpenEBSLVMSharedVolumeManager kube.OpenEBSLVMSharedVolumeManager
+	SessionRecords                *kube.SessionRecords
 }
 
 func (s *Service) toolImage(session *domain.Session) string {

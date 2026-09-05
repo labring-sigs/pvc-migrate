@@ -63,6 +63,7 @@ type Planner struct {
 	volumeUsageReader             kube.VolumeUsageReader
 	logger                        *slog.Logger
 	controllerSubmission          bool
+	sessionRecords                *kube.SessionRecords
 }
 
 type planState struct {
@@ -100,7 +101,16 @@ type planState struct {
 }
 
 func New(client kubernetes.Interface, controllers *controller.Manager) *Planner {
-	return &Planner{client: client, controllers: controllers}
+	return &Planner{
+		client:         client,
+		controllers:    controllers,
+		sessionRecords: kube.NewSessionRecords(client, nil),
+	}
+}
+
+func (p *Planner) WithSessionRecords(records *kube.SessionRecords) *Planner {
+	p.sessionRecords = records
+	return p
 }
 
 // WithControllerSubmission checks the caller's workflow submission permissions;

@@ -293,6 +293,13 @@ func controllerWaitError(ctx context.Context, action string, err error) error {
 		)
 	}
 
+	if errors.Is(err, context.Canceled) || errors.Is(ctx.Err(), context.Canceled) {
+		return fmt.Errorf(
+			"wait for controller workflow: waiting canceled; the submitted workflow continues under controller control: %w",
+			context.Canceled,
+		)
+	}
+
 	if err == nil {
 		err = context.Canceled
 	}
