@@ -186,3 +186,31 @@ func ownershipMessage(plan *domain.MigrationPlan) string {
 
 	return ""
 }
+
+func TestControllerOwnerGuidanceUsesWorkflowBackend(t *testing.T) {
+	session := domain.NewSession("owned-copy", domain.NewSessionSpec(
+		domain.OperationCopy,
+		domain.SessionCommon{
+			SourceNamespace:      "app",
+			DestinationNamespace: "app",
+			TemporaryNamespace:   "app",
+			SessionNamespace:     "app",
+		},
+		false,
+		domain.SessionWorkflowOptions{},
+	), time.Now())
+	session.Backend = kube.SessionBackendCRD
+	session.BackendResource = domain.ControllerKindCopy
+	session.Status.Phase = domain.PhaseWarmCopied
+
+	message := persistedOwnerGuidance(session)
+	for _, want := range []string{"--mode=controller", "--workflow-namespace app", "copy status owned-copy", "copy cleanup owned-copy"} {
+		if !strings.Contains(message, want) {
+			t.Fatalf("guidance %q missing %q", message, want)
+		}
+	}
+
+	if strings.Contains(message, "cleanup-orphan") {
+		t.Fatalf("persisted workflow called orphan: %s", message)
+	}
+}

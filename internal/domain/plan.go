@@ -123,7 +123,7 @@ const (
 	CheckNameRollbackPolicy       CheckName = "rollback-policy"
 	CheckNameRollbackPV           CheckName = "rollback-pv"
 	CheckNameRollbackState        CheckName = "rollback-state"
-	CheckNameSessionConfigMap     CheckName = "session-configmap"
+	CheckNameSessionRecord        CheckName = "session-record"
 	CheckNameSessionOwnership     CheckName = "session-ownership"
 	CheckNameSourceOwnership      CheckName = "source-ownership"
 )

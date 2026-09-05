@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	v1alpha1 "github.com/labring-sigs/pvc-migrate/api/v1alpha1"
 	"github.com/labring-sigs/pvc-migrate/internal/domain"
 	"github.com/labring-sigs/pvc-migrate/internal/kube"
 	"github.com/labring-sigs/pvc-migrate/internal/testutil"
@@ -17,6 +18,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
+	dynamicfake "k8s.io/client-go/dynamic/fake"
 	"k8s.io/client-go/kubernetes/fake"
 	k8stesting "k8s.io/client-go/testing"
 )
@@ -697,7 +699,7 @@ func TestPlanOrphanCleanupRejectsUnsafeStates(t *testing.T) {
 		{
 			name:   "session exists",
 			mutate: func(*corev1.PersistentVolumeClaim, *corev1.PersistentVolume, *corev1.PersistentVolume) {},
-			want:   "session ConfigMap",
+			want:   "still exists in the configmap backend",
 		},
 		{
 			name: "rollback bound",
@@ -824,6 +826,45 @@ func TestPlanOrphanCleanupRejectsUnsafeStates(t *testing.T) {
 				t.Fatalf("plan=%#v", plan)
 			}
 		})
+	}
+}
+
+func TestOrphanCleanupRejectsExistingControllerWorkflow(t *testing.T) {
+	client, options := orphanFixture()
+
+	scheme := runtime.NewScheme()
+	if err := v1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+
+	workflow := &v1alpha1.Reservation{
+		TypeMeta:   metav1.TypeMeta{APIVersion: domain.SessionAPIVersion, Kind: "Reservation"},
+		ObjectMeta: metav1.ObjectMeta{Name: options.SessionID, Namespace: options.SourceNamespace},
+		Spec:       v1alpha1.ReservationSpecFromDomain(appTestSession().Spec),
+	}
+	dynamicClient := dynamicfake.NewSimpleDynamicClient(scheme, workflow)
+	service := &Service{
+		client: client,
+		store:  &memoryStore{},
+		config: Config{SessionRecords: kube.NewSessionRecords(client, dynamicClient)},
+	}
+
+	plan, err := service.PlanOrphanCleanup(context.Background(), options)
+	if err != nil || plan.Ready || !containsOrphanCheck(plan, "still exists in the crd backend") {
+		t.Fatalf("plan=%#v error=%v", plan, err)
+	}
+
+	client.ClearActions()
+
+	_, err = service.CleanupOrphan(context.Background(), options)
+	if err == nil {
+		t.Fatal("orphan cleanup accepted an existing workflow")
+	}
+
+	for _, action := range client.Actions() {
+		if action.GetVerb() != "get" && action.GetVerb() != "list" {
+			t.Fatalf("orphan cleanup mutated live workflow resources: %#v", action)
+		}
 	}
 }
 

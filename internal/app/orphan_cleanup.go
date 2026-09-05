@@ -24,7 +24,7 @@ type OrphanCleanupOptions struct {
 
 // PlanOrphanCleanup reconstructs either a pre-activation source/destination
 // relationship or a post-activation active/rollback relationship after the
-// durable session ConfigMap was lost.
+// durable workflow record was lost.
 func (s *Service) PlanOrphanCleanup(
 	ctx context.Context,
 	options OrphanCleanupOptions,
@@ -63,36 +63,7 @@ func (s *Service) PlanOrphanCleanup(
 		return plan, nil
 	}
 
-	_, err := s.client.CoreV1().
-		ConfigMaps(options.SessionNamespace).
-		Get(ctx, kube.SessionConfigMapName(options.SessionID), metav1.GetOptions{})
-	switch {
-	case err == nil:
-		plan.AddCheck(
-			orphanFailed(
-				domain.CheckNameSessionConfigMap,
-				fmt.Sprintf(
-					"session ConfigMap %s/%s still exists; use the owning workflow `cleanup` command after reading its status",
-					options.SessionNamespace,
-					kube.SessionConfigMapName(options.SessionID),
-				),
-			),
-		)
-	case !apierrors.IsNotFound(err):
-		plan.AddCheck(
-			orphanFailed(
-				domain.CheckNameSessionConfigMap,
-				fmt.Sprintf("read session ConfigMap: %v", err),
-			),
-		)
-	default:
-		plan.AddCheck(
-			orphanPassed(
-				domain.CheckNameSessionConfigMap,
-				"session ConfigMap is absent; orphan ownership recovery is required",
-			),
-		)
-	}
+	plan.AddCheck(s.checkOrphanSessionRecord(ctx, options))
 
 	pvc, err := s.client.CoreV1().
 		PersistentVolumeClaims(options.SourceNamespace).
@@ -1160,6 +1131,46 @@ func (s *Service) hasOrphanSessionResources(ctx context.Context, sessionID strin
 	}
 
 	return len(pods.Items) > 0, nil
+}
+
+func (s *Service) checkOrphanSessionRecord(
+	ctx context.Context,
+	options OrphanCleanupOptions,
+) domain.Check {
+	records := s.config.SessionRecords
+	if records == nil {
+		records = kube.NewSessionRecords(s.client, nil)
+	}
+
+	owner, err := records.Find(
+		ctx,
+		options.SessionID,
+		options.SessionNamespace,
+		options.SourceNamespace,
+	)
+	switch {
+	case owner != nil:
+		return orphanFailed(
+			domain.CheckNameSessionRecord,
+			fmt.Sprintf(
+				"session %s/%s still exists in the %s backend (phase %s); use the owning workflow lifecycle commands after reading its status",
+				owner.Spec.SessionNamespace,
+				owner.ID,
+				owner.Backend,
+				owner.Status.Phase,
+			),
+		)
+	case err != nil:
+		return orphanFailed(
+			domain.CheckNameSessionRecord,
+			fmt.Sprintf("read workflow records: %v", err),
+		)
+	default:
+		return orphanPassed(
+			domain.CheckNameSessionRecord,
+			"workflow records are absent; orphan ownership recovery is required",
+		)
+	}
 }
 
 func orphanPassed(name domain.CheckName, message string) domain.Check {

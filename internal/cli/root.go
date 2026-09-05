@@ -305,6 +305,7 @@ func (r *rootState) runtime() (*commandRuntime, error) {
 	}
 
 	configMapStore := kube.NewConfigMapSessionStore(clients.Kubernetes)
+	sessionRecords := kube.NewSessionRecords(clients.Kubernetes, clients.Dynamic)
 
 	var (
 		store           kube.LockingSessionStore = configMapStore
@@ -380,6 +381,7 @@ func (r *rootState) runtime() (*commandRuntime, error) {
 			ToolImageProber:               kube.NewToolImageProber(clients.Kubernetes),
 			TrustedToolImage:              trustedToolImage,
 			OpenEBSLVMSharedVolumeManager: openEBSLVMSharedVolumeManager,
+			SessionRecords:                sessionRecords,
 		},
 	)
 
@@ -387,6 +389,7 @@ func (r *rootState) runtime() (*commandRuntime, error) {
 		clients: clients,
 		store:   store,
 		planner: planner.New(clients.Kubernetes, controllers).
+			WithSessionRecords(sessionRecords).
 			WithControllerSubmission(controllerMode).
 			WithOpenEBSLVMSharedVolumeManager(openEBSLVMSharedVolumeManager).
 			WithLogger(logger.With("component", "planner")),

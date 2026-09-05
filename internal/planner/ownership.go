@@ -9,7 +9,6 @@ import (
 	"github.com/labring-sigs/pvc-migrate/internal/domain"
 	"github.com/labring-sigs/pvc-migrate/internal/kube"
 	corev1 "k8s.io/api/core/v1"
-	apierrors "k8s.io/apimachinery/pkg/api/errors"
 )
 
 // checkSessionOwnership stops a new session before approval or resource
@@ -71,10 +70,9 @@ func (p *Planner) checkSessionOwnership(
 	}
 
 	owner := ids[0]
-	store := kube.NewConfigMapSessionStore(p.client)
 
-	ownerSession, err := store.Get(ctx, sessionNamespace, owner)
-	if err == nil {
+	ownerSession, err := p.sessionRecords.Find(ctx, owner, sessionNamespace, pvc.Namespace)
+	if ownerSession != nil {
 		plan.AddCheck(
 			failed(
 				domain.CheckNameSessionOwnership,
@@ -93,7 +91,7 @@ func (p *Planner) checkSessionOwnership(
 		return
 	}
 
-	if apierrors.IsNotFound(err) {
+	if err == nil {
 		base := sessionCLIBase(sessionNamespace, false)
 		executeBase := sessionCLIBase(sessionNamespace, true)
 		args := fmt.Sprintf(
@@ -126,7 +124,7 @@ func (p *Planner) checkSessionOwnership(
 		failed(
 			domain.CheckNameSessionOwnership,
 			fmt.Sprintf(
-				"PVC %s/%s or PV %s refers to session %s, but its session ConfigMap cannot be read: %v",
+				"PVC %s/%s or PV %s refers to session %s, but its workflow records cannot be read: %v",
 				pvc.Namespace,
 				pvc.Name,
 				pv.Name,
@@ -139,7 +137,21 @@ func (p *Planner) checkSessionOwnership(
 
 func persistedOwnerGuidance(session *domain.Session) string {
 	base := sessionCLIBase(session.Spec.SessionNamespace, false)
+
 	executeBase := sessionCLIBase(session.Spec.SessionNamespace, true)
+	if session.Backend == kube.SessionBackendCRD {
+		base = "pvc-migrate --mode=controller"
+
+		resource, _ := domain.ControllerResourceForSession(session)
+		if !resource.Cluster {
+			base += " --workflow-namespace " + session.Spec.SessionNamespace
+		} else if session.Spec.SessionNamespace != "pvc-migrate-system" {
+			base += " --session-namespace " + session.Spec.SessionNamespace
+		}
+
+		executeBase = base + " --yes"
+	}
+
 	workflow := workflowCommand(session)
 
 	status := fmt.Sprintf("inspect with `%s %s status %s`", base, workflow, session.ID)
