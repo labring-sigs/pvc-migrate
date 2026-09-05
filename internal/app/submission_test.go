@@ -76,3 +76,27 @@ func TestControllerSubmissionLeavesExecutionToController(t *testing.T) {
 		})
 	}
 }
+
+func TestControllerCancellationPreservesExecutionCheckpoint(t *testing.T) {
+	store := &submissionStore{}
+	service := NewService(fake.NewClientset(), store, nil, nil, nil, nil, Config{})
+	session := appTestSession()
+	session.Status.Phase = domain.PhaseReserving
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	if err := service.failContext(
+		ctx,
+		session,
+		context.Canceled,
+	); !errors.Is(
+		err,
+		context.Canceled,
+	) {
+		t.Fatalf("error=%v", err)
+	}
+
+	if session.Status.Phase != domain.PhaseReserving || store.updates != 0 {
+		t.Fatalf("phase=%s updates=%d", session.Status.Phase, store.updates)
+	}
+}

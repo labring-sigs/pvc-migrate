@@ -54,4 +54,5 @@ type ProgressFunc func(Progress)
 
 type Engine interface {
 	Copy(ctx context.Context, request Request, progress ProgressFunc) error
+	Cleanup(ctx context.Context, request Request) error
 }

@@ -497,6 +497,11 @@ func failBackupSession(
 		return nil
 	}
 
+	if req.SessionStore.StorageBackend() == kube.SessionBackendCRD &&
+		errors.Is(ctx.Err(), context.Canceled) {
+		return nil
+	}
+
 	if err := backupSessionFenceError(ctx); err != nil {
 		return err
 	}
@@ -1383,16 +1388,16 @@ func ResumeRestore(
 	return withBackupSessionLock(ctx, req, session, func(runCtx context.Context) error {
 		resumeReq, err := buildRestoreResumeRequest(runCtx, client, req, session)
 		if err != nil {
-			failureErr := err
-			if transitionErr := session.Transition(
-				domain.PhaseFailed,
-				err.Error(),
-				time.Now(),
-			); transitionErr == nil {
-				failureErr = errors.Join(err, req.SessionStore.Update(runCtx, session))
-			}
+			return errors.Join(err, failBackupSession(runCtx, req, session, err))
+		}
 
-			return failureErr
+		if err := kube.CleanupSessionToolProbePods(
+			runCtx,
+			client,
+			session.ID,
+			[]string{resumeReq.Namespace},
+		); err != nil {
+			return err
 		}
 
 		if resumeReq.Store == nil {
@@ -1427,16 +1432,7 @@ func ResumeRestore(
 		}
 
 		if err := Run(runCtx, client, lockedReq, true); err != nil {
-			failureErr := err
-			if transitionErr := session.Transition(
-				domain.PhaseFailed,
-				err.Error(),
-				time.Now(),
-			); transitionErr == nil {
-				failureErr = errors.Join(err, lockedReq.SessionStore.Update(runCtx, session))
-			}
-
-			return failureErr
+			return errors.Join(err, failBackupSession(runCtx, lockedReq, session, err))
 		}
 
 		if err := updateBackupSession(

@@ -111,6 +111,11 @@ func runBackupSession(
 		}
 
 		if retErr != nil {
+			if req.SessionStore.StorageBackend() == kube.SessionBackendCRD &&
+				errors.Is(ctx.Err(), context.Canceled) {
+				return
+			}
+
 			failureCtx, cancel := context.WithTimeout(
 				context.WithoutCancel(ctx),
 				lockReleaseTimeout,

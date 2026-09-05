@@ -986,10 +986,12 @@ func TestControllerRecordInspectionUsesWorkflowResources(t *testing.T) {
 			if err := root.PersistentFlags().Set("mode", "controller"); err != nil {
 				t.Fatal(err)
 			}
+
 			command, _, err := root.Find(test.command)
 			if err != nil {
 				t.Fatal(err)
 			}
+
 			got := sessionRecordInspectionCommand(command, "tenant", "missing")
 			if !strings.Contains(got, test.want) {
 				t.Fatalf("inspection=%q, want %q", got, test.want)

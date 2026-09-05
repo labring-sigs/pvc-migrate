@@ -34,6 +34,8 @@ type fakeCopier struct {
 	failures int
 }
 
+func (*fakeCopier) Cleanup(context.Context, copyengine.Request) error { return nil }
+
 func (f *fakeCopier) Copy(
 	_ context.Context,
 	request copyengine.Request,

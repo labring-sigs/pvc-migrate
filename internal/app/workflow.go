@@ -63,6 +63,10 @@ func (s *Service) resumeWorkflow(
 			return err
 		}
 
+		if err := s.cleanupInterruptedCopy(lockedCtx, session, phase); err != nil {
+			return err
+		}
+
 		return resume(lockedCtx, session, phase)
 	})
 }

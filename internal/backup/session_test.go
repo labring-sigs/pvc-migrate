@@ -42,6 +42,26 @@ func TestBackupSessionResourceEstimateRejectsUnknownStorageBackend(t *testing.T)
 	}
 }
 
+func TestControllerTransferCancellationPreservesCheckpoint(t *testing.T) {
+	store := &recordingBackupSessionStore{backend: kube.SessionBackendCRD}
+	session := &domain.Session{Status: domain.SessionStatus{Phase: domain.PhaseWarmCopying}}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	if err := failBackupSession(
+		ctx,
+		Request{SessionStore: store},
+		session,
+		context.Canceled,
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	if session.Status.Phase != domain.PhaseWarmCopying || len(store.updated) != 0 {
+		t.Fatalf("phase=%s updates=%d", session.Status.Phase, len(store.updated))
+	}
+}
+
 func (s *recordingBackupSessionStore) Create(_ context.Context, session *domain.Session) error {
 	s.created = session
 	return session.Validate()

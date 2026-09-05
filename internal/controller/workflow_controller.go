@@ -230,7 +230,14 @@ func (r *WorkflowReconciler) reconcile(
 	}
 
 	if session.Deleting {
-		return reconcile.Result{}, r.reconcileDeletingWorkflow(ctx, request, session)
+		// The namespace can start terminating after the CR deletion event.
+		return reconcile.Result{
+			RequeueAfter: r.requeueAfter,
+		}, r.reconcileDeletingWorkflow(
+			ctx,
+			request,
+			session,
+		)
 	}
 
 	if err := r.store.CheckWorkflowNameCollision(ctx, session); err != nil {
@@ -340,6 +347,18 @@ func (r *WorkflowReconciler) checkpointBusinessFailure(
 	cause error,
 	request reconcile.Request,
 ) (reconcile.Result, error) {
+	if errors.Is(ctx.Err(), context.Canceled) {
+		r.logger.Info(
+			"workflow interrupted; preserving checkpoint for reconciliation",
+			"workflow",
+			request.NamespacedName,
+			"phase",
+			session.Status.Phase,
+		)
+
+		return reconcile.Result{}, nil
+	}
+
 	if err := runner.checkpointFailureForController(ctx, session, cause); err != nil {
 		if kube.IsSessionLockContention(err) {
 			r.logger.Info(

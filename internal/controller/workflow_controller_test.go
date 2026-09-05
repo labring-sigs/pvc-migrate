@@ -199,6 +199,55 @@ func TestReconcileDeletingWorkflowReleasesOnlyTerminatingNamespace(t *testing.T)
 	}
 }
 
+func TestDeletingWorkflowRechecksNamespaceAfterDeletionStarts(t *testing.T) {
+	session := newRunnerSession("deleting-workflow")
+	session.Deleting = true
+	store := &runnerSessionStore{latest: session}
+	client := clientfake.NewClientset(
+		&corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "system"}},
+	)
+	reconciler := NewWorkflowReconciler(
+		&recordingWorkflowResumer{},
+		store,
+	).WithKubernetesClient(client)
+	reconciler.requeueAfter = time.Second
+	request := reconcile.Request{
+		NamespacedName: types.NamespacedName{Namespace: "system", Name: session.ID},
+	}
+
+	result, err := reconciler.reconcile(t.Context(), request, domain.ControllerKindCopy)
+	if err != nil || result.RequeueAfter != time.Second || len(store.deleted) != 0 {
+		t.Fatalf(
+			"active namespace: result=%#v deleted=%d error=%v",
+			result,
+			len(store.deleted),
+			err,
+		)
+	}
+
+	namespace, err := client.CoreV1().Namespaces().Get(t.Context(), "system", metav1.GetOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	now := metav1.Now()
+
+	namespace.DeletionTimestamp = &now
+	if _, err := client.CoreV1().
+		Namespaces().
+		Update(t.Context(), namespace, metav1.UpdateOptions{}); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := reconciler.reconcile(t.Context(), request, domain.ControllerKindCopy); err != nil {
+		t.Fatal(err)
+	}
+
+	if len(store.deleted) != 1 {
+		t.Fatal("namespace termination did not release workflow protection on requeue")
+	}
+}
+
 func TestStartManagerRequiresPinnedToolImage(t *testing.T) {
 	for name, image := range map[string]string{
 		"missing":    "",

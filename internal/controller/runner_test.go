@@ -695,6 +695,29 @@ func TestRunnerControllerFailureCheckpointIsQuietAfterPersistence(t *testing.T) 
 	}
 }
 
+func TestRunnerDoesNotCheckpointControllerShutdown(t *testing.T) {
+	session := newRunnerSession("interrupted")
+	store := &runnerSessionStore{listed: session, latest: cloneRunnerSession(session)}
+	runner := NewRunner(&recordingWorkflowResumer{}, store, "system")
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	if err := runner.checkpointFailureForController(
+		ctx,
+		session,
+		context.Canceled,
+	); !errors.Is(
+		err,
+		context.Canceled,
+	) {
+		t.Fatalf("error=%v", err)
+	}
+
+	if len(store.updates) != 0 || store.latest.Status.Phase != session.Status.Phase {
+		t.Fatal("controller shutdown changed the execution checkpoint")
+	}
+}
+
 func TestRunnerControllerFailureCheckpointReturnsPersistenceError(t *testing.T) {
 	listed := newRunnerSession("controller-checkpoint-error")
 	checkpointErr := errors.New("status update unavailable")

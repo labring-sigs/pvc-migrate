@@ -460,6 +460,13 @@ func (s *Service) fail(ctx context.Context, session *domain.Session, cause error
 }
 
 func (s *Service) failContext(ctx context.Context, session *domain.Session, cause error) error {
+	// A controller shutdown or lost execution fence must leave the durable
+	// checkpoint available to the next reconciler.
+	if s.store.StorageBackend() == kube.SessionBackendCRD &&
+		errors.Is(ctx.Err(), context.Canceled) {
+		return cause
+	}
+
 	if session.Status.Phase != domain.PhaseFailed {
 		session.Status.FailureReason = failureReason(cause)
 		if err := session.Transition(domain.PhaseFailed, cause.Error(), s.now()); err != nil {

@@ -165,11 +165,19 @@ func (c *scriptedController) CurrentRollbackPods(
 }
 
 type scriptedCopier struct {
-	requests  []copyengine.Request
-	failures  map[string]int
-	failure   error
-	copyError error
-	copyHook  func()
+	requests    []copyengine.Request
+	failures    map[string]int
+	failure     error
+	copyError   error
+	copyHook    func()
+	cleanupHook func(copyengine.Request) error
+}
+
+func (c *scriptedCopier) Cleanup(_ context.Context, request copyengine.Request) error {
+	if c.cleanupHook != nil {
+		return c.cleanupHook(request)
+	}
+	return nil
 }
 
 type cleanupAwareCopier struct {
@@ -180,6 +188,8 @@ type cleanupAwareCopier struct {
 	secondSawTool     bool
 	firstAttemptEnded chan struct{}
 }
+
+func (*cleanupAwareCopier) Cleanup(context.Context, copyengine.Request) error { return nil }
 
 func (c *cleanupAwareCopier) Copy(
 	ctx context.Context,
@@ -1067,6 +1077,105 @@ func TestReserveResumesMultiVolumePartialProgress(t *testing.T) {
 
 	if len(fixture.reserver.calls) != 2 {
 		t.Fatalf("completed reserve repeated work: calls=%v", fixture.reserver.calls)
+	}
+}
+
+func TestResumeCleansInterruptedAttemptBeforeRevalidation(t *testing.T) {
+	for _, cleanupFails := range []bool{false, true} {
+		t.Run(strconv.FormatBool(cleanupFails), func(t *testing.T) {
+			fixture := newRecoveryFixture(t)
+			session := appTestSession()
+			transitionThrough(
+				t,
+				session,
+				domain.PhaseReserving,
+				domain.PhaseReserved,
+				domain.PhaseWarmCopying,
+			)
+			session.Status.Volumes[0].Sync.Attempts = 2
+			volume := session.Spec.Volumes[0]
+			request := copyengine.Request{
+				SessionID: session.ID,
+				Source:    volume.SourcePVC,
+				Mode:      copyengine.ModeWarm,
+				Attempt:   2,
+			}
+
+			pod := &corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{
+					Namespace: volume.SourcePVC.Namespace,
+					Name:      "interrupted-copy",
+					UID:       "tool-uid",
+					Labels: map[string]string{
+						kube.AppInstanceLabel: "pv-migrate-" + copyengine.OperationID(
+							request,
+						) + "-clusterip",
+						kube.AppComponentLabel: kube.ToolComponentSSHD,
+					},
+				},
+				Spec: corev1.PodSpec{
+					Volumes: []corev1.Volume{
+						{
+							Name: "data",
+							VolumeSource: corev1.VolumeSource{
+								PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
+									ClaimName: volume.SourcePVC.Name,
+								},
+							},
+						},
+					},
+				},
+			}
+			if _, err := fixture.client.CoreV1().
+				Pods(pod.Namespace).
+				Create(t.Context(), pod, metav1.CreateOptions{}); err != nil {
+				t.Fatal(err)
+			}
+
+			cleanupErr := errors.New("release cleanup unavailable")
+			fixture.copier.cleanupHook = func(got copyengine.Request) error {
+				if copyengine.OperationID(got) != copyengine.OperationID(request) {
+					t.Fatalf("cleanup targets another attempt: %#v", got)
+				}
+
+				if len(fixture.reserver.dryRunCalls) != 1 {
+					t.Fatal("cleanup started before validating reserved volume identity")
+				}
+
+				if cleanupFails {
+					return cleanupErr
+				}
+
+				return nil
+			}
+			resumed := false
+
+			err := fixture.service.resumeWorkflow(
+				t.Context(),
+				session,
+				session.Spec.Type,
+				"resume",
+				func(ctx context.Context, _ *domain.Session, _ domain.Phase) error {
+					resumed = true
+
+					_, err := fixture.client.CoreV1().
+						Pods(pod.Namespace).
+						Get(ctx, pod.Name, metav1.GetOptions{})
+					if !apierrors.IsNotFound(err) {
+						t.Fatalf("offline revalidation still sees interrupted tool: %v", err)
+					}
+
+					return nil
+				},
+			)
+			if cleanupFails {
+				if !errors.Is(err, cleanupErr) || resumed {
+					t.Fatalf("cleanup failure ignored: resumed=%t error=%v", resumed, err)
+				}
+			} else if err != nil || !resumed {
+				t.Fatalf("resume=%t error=%v", resumed, err)
+			}
+		})
 	}
 }
 

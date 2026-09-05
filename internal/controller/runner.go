@@ -197,6 +197,10 @@ func (r *Runner) persistFailure(
 	session *domain.Session,
 	cause error,
 ) error {
+	if errors.Is(ctx.Err(), context.Canceled) {
+		return ctx.Err()
+	}
+
 	if cause == nil {
 		return domain.NewError(
 			domain.ErrorInternal,
