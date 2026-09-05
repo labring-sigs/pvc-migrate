@@ -279,7 +279,21 @@ func (r *Runner) transitionFailure(
 		return err
 	}
 
-	return r.store.Update(ctx, session)
+	if err := r.store.Update(ctx, session); err != nil {
+		return err
+	}
+
+	r.logger.Warn(
+		"workflow entered failed state",
+		"workflow",
+		types.NamespacedName{Namespace: session.Spec.SessionNamespace, Name: session.ID},
+		"phase",
+		domain.PhaseFailed,
+		"reason",
+		cause,
+	)
+
+	return nil
 }
 
 func (r *Runner) reconcileSession(ctx context.Context, session *domain.Session) error {

@@ -1,9 +1,11 @@
 package controller
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"strings"
 	"testing"
 	"time"
@@ -649,6 +651,9 @@ func TestRunnerCheckpointFailureUsesLatestSessionState(t *testing.T) {
 			}
 			runner := NewRunner(&recordingWorkflowResumer{}, store, "system")
 
+			var logs bytes.Buffer
+			runner.WithLogger(slog.New(slog.NewTextHandler(&logs, nil)))
+
 			err := runner.ReconcileOnce(context.Background())
 			if err == nil || !strings.Contains(err.Error(), "copy dispatched") {
 				t.Fatalf("reconcile error=%v", err)
@@ -656,6 +661,10 @@ func TestRunnerCheckpointFailureUsesLatestSessionState(t *testing.T) {
 
 			if (len(store.updates) > 0) != test.wantUpdate {
 				t.Fatalf("updates=%d, want update=%t", len(store.updates), test.wantUpdate)
+			}
+
+			if strings.Contains(logs.String(), "workflow entered failed state") != test.wantUpdate {
+				t.Fatalf("failure log must reflect the persisted transition: %s", logs.String())
 			}
 
 			if store.latest.Status.Phase != test.wantLatestPhase {

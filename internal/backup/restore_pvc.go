@@ -289,6 +289,10 @@ func prepareRestorePlan(
 	plan.Mode = ModeRestore
 	plan.Consistency = "destination PVC write; application must be quiesced"
 
+	if req.SkipManifestCheck {
+		return plan, nil
+	}
+
 	if manifest == nil {
 		return nil, domain.NewError(
 			domain.ErrorPrecondition,

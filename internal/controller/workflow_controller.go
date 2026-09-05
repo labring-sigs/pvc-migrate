@@ -375,16 +375,6 @@ func (r *WorkflowReconciler) checkpointBusinessFailure(
 		return reconcile.Result{}, err
 	}
 
-	r.logger.Warn(
-		"workflow entered failed state",
-		"workflow",
-		request.NamespacedName,
-		"phase",
-		domain.PhaseFailed,
-		"reason",
-		cause,
-	)
-
 	return reconcile.Result{}, nil
 }
 
