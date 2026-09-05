@@ -12,8 +12,9 @@ import (
 
 type submissionStore struct {
 	memoryStore
-	creates     int
-	validations int
+	creates       int
+	validations   int
+	validationErr error
 }
 
 func (*submissionStore) StorageBackend() string { return kube.SessionBackendCRD }
@@ -25,7 +26,7 @@ func (s *submissionStore) Create(ctx context.Context, session *domain.Session) e
 
 func (s *submissionStore) ValidateCreate(context.Context, *domain.Session) error {
 	s.validations++
-	return nil
+	return s.validationErr
 }
 
 func (*submissionStore) AcquireSessionLock(
@@ -74,6 +75,22 @@ func TestControllerSubmissionLeavesExecutionToController(t *testing.T) {
 				t.Fatalf("validations=%d, want %d", store.validations, 1-wantCreates)
 			}
 		})
+	}
+}
+
+func TestRejectedSubmissionDryRunDoesNotReturnAnUncreatedSession(t *testing.T) {
+	denied := errors.New("workflow quota exceeded")
+	store := &submissionStore{validationErr: denied}
+	service := NewService(fake.NewClientset(), store, nil, nil, nil, nil, Config{})
+	plan := &domain.MigrationPlan{
+		Ready:       true,
+		SessionID:   "rejected",
+		SessionSpec: appTestSession().Spec,
+	}
+
+	session, err := service.CreateSession(t.Context(), plan, true)
+	if !errors.Is(err, denied) || session != nil {
+		t.Fatalf("rejected submission returned session=%#v error=%v", session, err)
 	}
 }
 

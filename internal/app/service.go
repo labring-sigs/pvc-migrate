@@ -291,7 +291,11 @@ func (s *Service) CreateSession(
 				)
 			}
 
-			return session, validator.ValidateCreate(ctx, session)
+			if err := validator.ValidateCreate(ctx, session); err != nil {
+				return nil, err
+			}
+
+			return session, nil
 		}
 
 		if err := s.store.Create(ctx, session); err != nil {
