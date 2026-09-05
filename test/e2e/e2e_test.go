@@ -5509,9 +5509,11 @@ func cleanupWorkflowResource(
 ) {
 	t.Helper()
 
-	objects, err := resources.List(ctx, metav1.ListOptions{
-		LabelSelector: labels.Set{sessionLabel: sessionID}.String(),
-	})
+	// Session-derived workflow names may carry a suffix (for example, the
+	// scope matrix creates one Move per namespace pair), so the API selector
+	// cannot match ownership with an exact label value. List the small workflow
+	// resource set and apply the ownership prefix check below.
+	objects, err := resources.List(ctx, metav1.ListOptions{})
 	if apierrors.IsNotFound(err) {
 		return
 	}
