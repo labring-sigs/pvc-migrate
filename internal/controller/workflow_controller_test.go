@@ -2,6 +2,7 @@ package controller
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -328,6 +329,52 @@ func TestWorkflowReconcilerRequeuesSessionLockContention(t *testing.T) {
 
 	if len(store.updates) != 0 {
 		t.Fatalf("lock contention checkpointed as failure: %d updates", len(store.updates))
+	}
+}
+
+func TestWorkflowReconcilerRequeuesFailureCheckpointLockContention(t *testing.T) {
+	session := newRunnerSession("controller-failure-lock-contention")
+	session.Status.Phase = domain.PhaseReserved
+	session.Status.ObservedGeneration = 1
+	session.Generation = 1
+	store := &runnerSessionStore{
+		listed: session,
+		latest: cloneRunnerSession(session),
+		acquireErr: domain.WrapError(
+			domain.ErrorConflict,
+			"acquire session lock",
+			"session is already being changed",
+			kube.ErrSessionLockContention,
+		),
+	}
+	reconciler := NewWorkflowReconciler(
+		&errorWorkflowResumer{err: errors.New("destination PVC is unavailable")},
+		store,
+	)
+	reconciler.requeueAfter = 250 * time.Millisecond
+
+	request := reconcile.Request{NamespacedName: types.NamespacedName{
+		Namespace: session.Spec.SessionNamespace,
+		Name:      session.ID,
+	}}
+
+	result, err := (&kindWorkflowReconciler{
+		parent: reconciler,
+		kind:   domain.ControllerKindCopy,
+	}).Reconcile(context.Background(), request)
+	if err != nil {
+		t.Fatalf("failure checkpoint lock contention escaped reconcile: %v", err)
+	}
+
+	if result.RequeueAfter != 250*time.Millisecond {
+		t.Fatalf("requeueAfter=%s, want 250ms", result.RequeueAfter)
+	}
+
+	if len(store.updates) != 0 {
+		t.Fatalf(
+			"failure checkpoint updated session despite lock contention: %d updates",
+			len(store.updates),
+		)
 	}
 }
 

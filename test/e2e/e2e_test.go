@@ -1408,7 +1408,7 @@ func TestControllerRepositoryStatusCheckpointRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	store := kube.NewCRDSessionStore(clients.Runtime)
+	store := kube.NewCRDSessionStore(clients.Runtime).WithLeaseClient(clients.Kubernetes)
 
 	tests := []struct {
 		name      string
@@ -1462,6 +1462,21 @@ func TestControllerRepositoryStatusCheckpointRoundTrip(t *testing.T) {
 				t.Fatal(err)
 			}
 
+			// Hold the workflow Lease while assembling the terminal fixture. The
+			// deployed controller may observe the create event immediately; fencing
+			// it keeps the status round-trip deterministic and avoids executing a
+			// deliberately incomplete data-plane spec.
+			lock, err := store.AcquireSessionLock(ctx, namespace, sessionID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, cancelLock := lock.Bind(ctx)
+			defer func() {
+				cancelLock()
+				releaseCtx, cancelRelease := context.WithTimeout(context.Background(), 10*time.Second)
+				_ = lock.Release(releaseCtx)
+				cancelRelease()
+			}()
 			spec := domain.NewSessionSpec(
 				tt.operation,
 				domain.SessionCommon{
@@ -1492,6 +1507,10 @@ func TestControllerRepositoryStatusCheckpointRoundTrip(t *testing.T) {
 			}
 
 			session := domain.NewSession(sessionID, spec, time.Now())
+			// This test exercises CRD persistence only. Start from a terminal
+			// checkpoint so the deployed controller observes the fixture without
+			// attempting a data-plane operation while the round-trip is assembled.
+			session.Status.Phase = domain.PhaseCompleted
 			if err := store.Create(ctx, session); err != nil {
 				t.Fatal(err)
 			}

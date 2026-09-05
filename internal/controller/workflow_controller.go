@@ -346,6 +346,18 @@ func (r *WorkflowReconciler) checkpointBusinessFailure(
 	request reconcile.Request,
 ) (reconcile.Result, error) {
 	if err := runner.checkpointFailureForController(ctx, session, cause); err != nil {
+		if kube.IsSessionLockContention(err) {
+			r.logger.Info(
+				"workflow is waiting for a concurrent session update",
+				"workflow",
+				request.NamespacedName,
+				"requeueAfter",
+				r.requeueAfter,
+			)
+
+			return reconcile.Result{RequeueAfter: r.requeueAfter}, nil
+		}
+
 		return reconcile.Result{}, err
 	}
 
