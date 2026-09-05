@@ -631,7 +631,7 @@ func TestWorkflowScopeAdmissionAndStatusMatrix(t *testing.T) {
 				"metadata": map[string]any{
 					"name":      objectName,
 					"namespace": namespace,
-					"labels":    map[string]any{sessionLabel: sessionID},
+					"labels":    map[string]any{sessionLabel: objectName},
 				},
 				"spec": test.spec,
 			}}

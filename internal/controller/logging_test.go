@@ -3,6 +3,7 @@ package controller
 import (
 	"bytes"
 	"context"
+	"errors"
 	"log/slog"
 	"strings"
 	"testing"
@@ -57,5 +58,20 @@ func TestControllerLoggerWithAttrsAndGroupsRemainStructured(t *testing.T) {
 		if !strings.Contains(text, want) {
 			t.Fatalf("structured controller log lacks %q: %s", want, text)
 		}
+	}
+}
+
+func TestControllerLoggerSuppressesExpectedWatchCancellation(t *testing.T) {
+	var output bytes.Buffer
+	logger := NewControllerLogger(slog.New(slog.NewJSONHandler(&output, nil)))
+	logger.Error("Failed to watch", "err", context.Canceled, "resource", "pods")
+
+	if output.Len() != 0 {
+		t.Fatalf("expected canceled watch log to be suppressed, got %q", output.String())
+	}
+
+	logger.Error("Failed to watch", "err", errors.New("forbidden"), "resource", "pods")
+	if !strings.Contains(output.String(), `"msg":"Failed to watch"`) {
+		t.Fatalf("unexpected watch error was suppressed: %q", output.String())
 	}
 }

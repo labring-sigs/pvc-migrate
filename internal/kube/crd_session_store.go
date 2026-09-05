@@ -1690,6 +1690,19 @@ func DecodeWorkflow(object crclient.Object) (*domain.Session, error) {
 
 	session.Deleting = object.GetDeletionTimestamp() != nil
 	if status.Phase != "" {
+		// A declarative client may checkpoint only the phase before the first
+		// controller observation. Keep the status-owned fields while deriving
+		// the initial per-volume identities needed by the domain invariant.
+		if status.Phase == domain.PhasePlanned && status.ObservedGeneration == 0 &&
+			len(status.Volumes) == 0 && len(spec.Volumes) > 0 {
+			status.Volumes = make([]domain.VolumeStatus, 0, len(spec.Volumes))
+			for _, volume := range spec.Volumes {
+				status.Volumes = append(status.Volumes, domain.VolumeStatus{
+					SourcePVCName: volume.SourcePVC.Name,
+				})
+			}
+		}
+
 		session.Status = status
 	}
 

@@ -624,6 +624,28 @@ func TestDecodeWorkflowInitializesDeclarativeResource(t *testing.T) {
 	}
 }
 
+func TestDecodeWorkflowCompletesPlannedVolumeCheckpoint(t *testing.T) {
+	session := storeTestSession()
+	objectValue := sessionObjectFor(session)
+	object, ok := objectValue.(*v1alpha1.Migration)
+	if !ok {
+		t.Fatalf("workflow object type=%T", objectValue)
+	}
+
+	object.Status = v1alpha1.MigrationStatus{Phase: v1alpha1.WorkflowPhase(domain.PhasePlanned)}
+
+	decoded, err := DecodeWorkflow(object)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(decoded.Status.Volumes) != len(decoded.Spec.Volumes) {
+		t.Fatalf("status volume count=%d, want %d", len(decoded.Status.Volumes), len(decoded.Spec.Volumes))
+	}
+	if decoded.Status.Volumes[0].SourcePVCName != decoded.Spec.Volumes[0].SourcePVC.Name {
+		t.Fatalf("status source PVC=%q, want %q", decoded.Status.Volumes[0].SourcePVCName, decoded.Spec.Volumes[0].SourcePVC.Name)
+	}
+}
+
 func TestCRDSessionStoreAddsProtectionToDeclarativeWorkflow(t *testing.T) {
 	ctx := context.Background()
 	client := newCRDTestClient()

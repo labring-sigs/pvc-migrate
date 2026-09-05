@@ -2,6 +2,7 @@ package controller
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"strings"
 )
@@ -31,9 +32,37 @@ func (h *controllerLogHandler) Handle(ctx context.Context, record slog.Record) e
 		return nil
 	}
 
+	if isExpectedWatchCancellation(record) {
+		return nil
+	}
+
 	record.Message = normalizeControllerLogMessage(record.Message)
 
 	return h.next.Handle(ctx, record)
+}
+
+// controller-runtime dependencies report normal reflector shutdown as an
+// ERROR-level "Failed to watch" record when a reconcile context is canceled.
+// Suppress only that exact cancellation so real watch failures remain visible.
+func isExpectedWatchCancellation(record slog.Record) bool {
+	if record.Message != "Failed to watch" {
+		return false
+	}
+
+	var canceled bool
+	record.Attrs(func(attr slog.Attr) bool {
+		if attr.Key != "err" {
+			return true
+		}
+
+		if err, ok := attr.Value.Any().(error); ok {
+			canceled = errors.Is(err, context.Canceled)
+		}
+
+		return false
+	})
+
+	return canceled
 }
 
 func (h *controllerLogHandler) WithAttrs(attrs []slog.Attr) slog.Handler {
