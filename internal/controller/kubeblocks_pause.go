@@ -503,7 +503,12 @@ func (m *Manager) createAndWaitOps(
 }
 
 func kubeBlocksOperationName(session *domain.Session, action string) string {
-	switch session.Status.Phase {
+	phase := session.Status.Phase
+	if phase == domain.PhaseFailed {
+		phase = session.Status.ResumeFrom
+	}
+
+	switch phase {
 	case domain.PhaseRollingBack:
 		action = "rollback-" + action
 	case domain.PhaseAborting:
@@ -1107,8 +1112,17 @@ func (m *Manager) validateKubeBlocksLegacyResume(
 		return nil
 	}
 
-	if err := m.verifyKubeBlocksPauseOperation(ctx, session, cluster); err != nil {
+	// A previous process may already have submitted Start. Its owned request
+	// remains authoritative while the Cluster and Pods are still converging.
+	starting, err := m.kubeBlocksResumeOperationStarted(ctx, session)
+	if err != nil {
 		return err
+	}
+
+	if !starting {
+		if err := m.verifyKubeBlocksPauseOperation(ctx, session, cluster); err != nil {
+			return err
+		}
 	}
 
 	for index := range components {
@@ -1142,6 +1156,56 @@ func (m *Manager) validateKubeBlocksLegacyResume(
 		"resume KubeBlocks",
 		"Cluster component "+kb.Component+" was removed after discovery",
 	)
+}
+
+func (m *Manager) kubeBlocksResumeOperationStarted(
+	ctx context.Context,
+	session *domain.Session,
+) (bool, error) {
+	kb := session.Spec.Workload().KubeBlocks
+
+	gvr, err := opsGVR(kb.OpsAPIVersion)
+	if err != nil {
+		return false, err
+	}
+
+	name := kubeBlocksOperationName(session, "resume")
+
+	request, err := m.dynamic.Resource(gvr).Namespace(session.Spec.Workload().Pod.Namespace).
+		Get(ctx, name, metav1.GetOptions{})
+	if apierrors.IsNotFound(err) {
+		return false, nil
+	}
+
+	if err != nil {
+		return false, domain.WrapError(
+			domain.ErrorKubernetes,
+			"resume KubeBlocks",
+			"read Start OpsRequest "+name,
+			err,
+		)
+	}
+
+	if _, err := validateKubeBlocksOpsRequest(
+		request,
+		name,
+		session.ID,
+		kubeBlocksPauseSpec(kb, false),
+	); err != nil {
+		return false, err
+	}
+
+	phase, _, err := unstructured.NestedString(request.Object, "status", "phase")
+	if err != nil {
+		return false, domain.WrapError(
+			domain.ErrorPrecondition,
+			"resume KubeBlocks",
+			"read Start OpsRequest phase",
+			err,
+		)
+	}
+
+	return !kubeBlocksOpsFailed(phase), nil
 }
 
 func (m *Manager) currentKubeBlocksRollbackPods(
