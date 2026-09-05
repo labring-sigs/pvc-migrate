@@ -170,6 +170,14 @@ func (r *WorkflowReconciler) ensureStandalonePodSnapshot(
 }
 
 func podSnapshotHash(raw []byte) string {
+	var pod corev1.Pod
+	if err := json.Unmarshal(raw, &pod); err == nil {
+		if canonical, marshalErr := json.Marshal(&pod); marshalErr == nil {
+			raw = canonical
+		}
+	}
+
 	digest := sha256.Sum256(raw)
+
 	return hex.EncodeToString(digest[:])
 }

@@ -10,6 +10,7 @@ import (
 	"github.com/labring-sigs/pvc-migrate/internal/domain"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	kubernetesfake "k8s.io/client-go/kubernetes/fake"
 )
@@ -41,6 +42,34 @@ func TestEnsureStandalonePodSnapshotCapturesLivePod(t *testing.T) {
 
 	if len(store.updates) != 1 || store.updates[0].Status.OriginalPodSnapshotHash == "" {
 		t.Fatalf("snapshot persistence updates=%d", len(store.updates))
+	}
+}
+
+func TestPodSnapshotHashStableAfterAPIRoundTrip(t *testing.T) {
+	live := trustedSnapshotPod("tenant-a")
+	raw, err := json.Marshal(live)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	unstructuredPod, err := runtime.DefaultUnstructuredConverter.ToUnstructured(live)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var roundTripped corev1.Pod
+	if err := runtime.DefaultUnstructuredConverter.FromUnstructured(
+		unstructuredPod,
+		&roundTripped,
+	); err != nil {
+		t.Fatal(err)
+	}
+	roundTrippedRaw, err := json.Marshal(&roundTripped)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if podSnapshotHash(raw) != podSnapshotHash(roundTrippedRaw) {
+		t.Fatal("Pod snapshot hash changed after API object round-trip")
 	}
 }
 
