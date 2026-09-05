@@ -494,10 +494,52 @@ func workflowEventPredicate() predicate.Predicate {
 		UpdateFunc: func(e event.UpdateEvent) bool {
 			return e.ObjectNew.GetGeneration() != e.ObjectOld.GetGeneration() ||
 				e.ObjectOld.GetDeletionTimestamp() == nil &&
-					e.ObjectNew.GetDeletionTimestamp() != nil
+					e.ObjectNew.GetDeletionTimestamp() != nil ||
+				workflowResumeStatusChanged(e.ObjectOld, e.ObjectNew)
 		},
 		DeleteFunc:  func(event.DeleteEvent) bool { return false },
 		GenericFunc: func(event.GenericEvent) bool { return true },
+	}
+}
+
+// workflowResumeStatusChanged admits the one status-only update that must
+// wake a controller: an explicit resume moves a failed workflow back to an
+// active checkpoint. Ordinary controller status writes remain filtered so
+// they cannot create a reconcile feedback loop.
+func workflowResumeStatusChanged(oldObject, newObject crclient.Object) bool {
+	return workflowStatusPhase(oldObject) == domain.PhaseFailed &&
+		workflowStatusPhase(newObject) != domain.PhaseFailed &&
+		workflowStatusPhase(newObject) != ""
+}
+
+func workflowStatusPhase(object crclient.Object) domain.Phase {
+	switch typed := object.(type) {
+	case *v1alpha1.Migration:
+		return domain.Phase(typed.Status.Phase)
+	case *v1alpha1.PodMigration:
+		return domain.Phase(typed.Status.Phase)
+	case *v1alpha1.Reservation:
+		return domain.Phase(typed.Status.Phase)
+	case *v1alpha1.Copy:
+		return domain.Phase(typed.Status.Phase)
+	case *v1alpha1.Backup:
+		return domain.Phase(typed.Status.Phase)
+	case *v1alpha1.Restore:
+		return domain.Phase(typed.Status.Phase)
+	case *v1alpha1.Rename:
+		return domain.Phase(typed.Status.Phase)
+	case *v1alpha1.ClusterMigration:
+		return domain.Phase(typed.Status.Phase)
+	case *v1alpha1.ClusterPodMigration:
+		return domain.Phase(typed.Status.Phase)
+	case *v1alpha1.ClusterReservation:
+		return domain.Phase(typed.Status.Phase)
+	case *v1alpha1.ClusterCopy:
+		return domain.Phase(typed.Status.Phase)
+	case *v1alpha1.Move:
+		return domain.Phase(typed.Status.Phase)
+	default:
+		return ""
 	}
 }
 

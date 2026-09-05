@@ -76,6 +76,24 @@ func TestWorkflowEventPredicateAllowsDeletionTimestampTransition(t *testing.T) {
 			updated.DeletionTimestamp = &metav1.Time{Time: metav1.Now().Time}
 			return updated
 		}(), want: true},
+		{name: "failed workflow resumes", old: func() *v1alpha1.Copy {
+			updated := base.DeepCopy()
+			updated.Status.Phase = v1alpha1.WorkflowPhase(domain.PhaseFailed)
+			return updated
+		}(), new: func() *v1alpha1.Copy {
+			updated := base.DeepCopy()
+			updated.Status.Phase = v1alpha1.WorkflowPhase(domain.PhasePlanned)
+			return updated
+		}(), want: true},
+		{name: "active status remains filtered", old: func() *v1alpha1.Copy {
+			updated := base.DeepCopy()
+			updated.Status.Phase = v1alpha1.WorkflowPhase(domain.PhasePlanned)
+			return updated
+		}(), new: func() *v1alpha1.Copy {
+			updated := base.DeepCopy()
+			updated.Status.Phase = v1alpha1.WorkflowPhase(domain.PhaseReserving)
+			return updated
+		}()},
 		{name: "already deleting", old: func() *v1alpha1.Copy {
 			updated := base.DeepCopy()
 			updated.DeletionTimestamp = &metav1.Time{Time: metav1.Now().Time}
