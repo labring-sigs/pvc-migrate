@@ -138,9 +138,16 @@ func TestReconcileDeletingWorkflowReleasesOnlyTerminatingNamespace(t *testing.T)
 			wantDeleted: true,
 		},
 		{
-			name:    "cluster workflow keeps explicit cleanup protection",
-			request: reconcile.Request{NamespacedName: types.NamespacedName{Name: "workflow"}},
-			kind:    domain.ControllerKindClusterCopy,
+			name:      "cluster workflow keeps explicit cleanup protection while namespace is active",
+			namespace: &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "system"}},
+			request:   reconcile.Request{NamespacedName: types.NamespacedName{Name: "workflow"}},
+			kind:      domain.ControllerKindClusterCopy,
+		},
+		{
+			name:        "cluster workflow releases stale protection when namespace is missing",
+			request:     reconcile.Request{NamespacedName: types.NamespacedName{Name: "workflow"}},
+			kind:        domain.ControllerKindClusterCopy,
+			wantDeleted: true,
 		},
 	}
 
@@ -163,7 +170,6 @@ func TestReconcileDeletingWorkflowReleasesOnlyTerminatingNamespace(t *testing.T)
 				context.Background(),
 				test.request,
 				session,
-				test.kind,
 			); err != nil {
 				t.Fatal(err)
 			}

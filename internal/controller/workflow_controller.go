@@ -230,7 +230,7 @@ func (r *WorkflowReconciler) reconcile(
 	}
 
 	if session.Deleting {
-		return reconcile.Result{}, r.reconcileDeletingWorkflow(ctx, request, session, kind)
+		return reconcile.Result{}, r.reconcileDeletingWorkflow(ctx, request, session)
 	}
 
 	if err := r.store.CheckWorkflowNameCollision(ctx, session); err != nil {
@@ -378,19 +378,21 @@ func (r *WorkflowReconciler) reconcileDeletingWorkflow(
 	ctx context.Context,
 	request reconcile.Request,
 	session *domain.Session,
-	kind domain.ControllerKind,
 ) error {
-	resourceKind := session.BackendResource
-	if resourceKind == "" {
-		resourceKind = kind
+	// Direct deletion of a workflow keeps the explicit cleanup contract while
+	// its session namespace is active. Once that namespace is gone or
+	// terminating, Kubernetes has already removed namespaced data-plane
+	// resources and the workflow finalizer must be released. Cluster-scoped
+	// workflows use spec.sessionNamespace because their request has no
+	// namespace.
+	namespaceName := request.Namespace
+
+	if namespaceName == "" {
+		namespaceName = session.Spec.SessionNamespace
 	}
 
-	// Direct deletion of a workflow keeps the explicit cleanup contract. A
-	// namespaced workflow must not hold its namespace in Terminating forever;
-	// Kubernetes will remove namespaced data-plane resources as part of that
-	// deletion, and orphan recovery remains available for cluster-scoped PVs.
-	if request.Namespace == "" || domain.IsClusterControllerKind(resourceKind) {
-		return nil
+	if namespaceName == "" {
+		return r.store.Delete(ctx, session)
 	}
 
 	if r.kubeClient == nil {
@@ -399,7 +401,7 @@ func (r *WorkflowReconciler) reconcileDeletingWorkflow(
 
 	namespace, err := r.kubeClient.CoreV1().Namespaces().Get(
 		ctx,
-		request.Namespace,
+		namespaceName,
 		metav1.GetOptions{},
 	)
 	if err != nil && !apierrors.IsNotFound(err) {
