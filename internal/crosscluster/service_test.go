@@ -1367,6 +1367,25 @@ func TestResolveMultiPVCValuesAreAlignedByName(t *testing.T) {
 	}
 }
 
+func TestResolveMappingDefaultsAndOptionalCapacityMappings(t *testing.T) {
+	sources := []string{"one", "two"}
+
+	names, err := ResolveNamesForTest(nil, sources)
+	if err != nil || len(names) != 2 || names[0] != "one-copy" || names[1] != "two-copy" {
+		t.Fatalf("destination defaults = %#v, err=%v", names, err)
+	}
+
+	paths, err := ResolvePathsForTest(nil, sources)
+	if err != nil || len(paths) != 2 || paths[0] != "." || paths[1] != "." {
+		t.Fatalf("path defaults = %#v, err=%v", paths, err)
+	}
+
+	capacities, err := ResolveValuesForTest([]string{"one=2Gi"}, sources)
+	if err != nil || len(capacities) != 2 || capacities[0] != "2Gi" || capacities[1] != "" {
+		t.Fatalf("optional capacity mapping = %#v, err=%v", capacities, err)
+	}
+}
+
 func TestResolveMultiPVCPathsRequireEveryExplicitMapping(t *testing.T) {
 	if _, err := ResolvePathsForTest([]string{"one=data"}, []string{"one", "two"}); err == nil {
 		t.Fatal("path resolver accepted a partially specified multi-PVC mapping")
