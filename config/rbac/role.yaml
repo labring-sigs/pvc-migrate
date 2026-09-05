@@ -68,7 +68,7 @@ rules:
     verbs: ["list"]
   - apiGroups: ["apps"]
     resources: ["replicasets"]
-    verbs: ["get"]
+    verbs: ["get", "list"]
   - apiGroups: ["apps"]
     resources: ["statefulsets"]
     verbs: ["get", "update"]

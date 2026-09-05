@@ -3,6 +3,7 @@ package kube
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"slices"
 	"sort"
@@ -65,6 +66,18 @@ type ControllerSessionStore interface {
 // callers stop issuing Kubernetes mutations through the returned context.
 type SessionLocker interface {
 	AcquireSessionLock(ctx context.Context, namespace, sessionID string) (SessionLock, error)
+}
+
+// ErrSessionLockContention marks a transient Lease race. Controllers should
+// requeue these errors because another worker may be actively progressing the
+// same session; they are not workflow failures.
+var ErrSessionLockContention = errors.New("session lock contention")
+
+// IsSessionLockContention reports whether an error means the session Lease is
+// temporarily held or was concurrently claimed. The sentinel is attached by
+// Lease implementations so callers never need to parse human-readable text.
+func IsSessionLockContention(err error) bool {
+	return errors.Is(err, ErrSessionLockContention)
 }
 
 // AcquireRequiredSessionLock enforces the SessionLocker contract at the

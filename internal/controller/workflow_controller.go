@@ -320,6 +320,18 @@ func (r *WorkflowReconciler) reconcile(
 
 	runner := r.runner(request.Namespace)
 	if err := runner.reconcileSession(ctx, session); err != nil {
+		if kube.IsSessionLockContention(err) {
+			r.logger.Info(
+				"workflow is waiting for a concurrent session update",
+				"workflow",
+				request.NamespacedName,
+				"requeueAfter",
+				r.requeueAfter,
+			)
+
+			return reconcile.Result{RequeueAfter: r.requeueAfter}, nil
+		}
+
 		return r.checkpointBusinessFailure(ctx, runner, session, err, request)
 	}
 

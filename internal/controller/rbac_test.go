@@ -164,7 +164,7 @@ func controllerRolePermissions() map[permissionKey][]string {
 	add("", []string{"resourcequotas", "limitranges"}, "get", "list")
 	add("apps", []string{"deployments"}, "get", "create", "update", "patch", "delete")
 	add("autoscaling", []string{"horizontalpodautoscalers"}, "list")
-	add("apps", []string{"replicasets"}, "get")
+	add("apps", []string{"replicasets"}, "get", "list")
 	add("apps", []string{"statefulsets"}, "get", "update")
 	add("batch", []string{"jobs"}, "get", "create", "update", "patch", "delete")
 	add("storage.k8s.io", []string{"storageclasses"}, "get")

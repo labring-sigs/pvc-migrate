@@ -7,6 +7,7 @@ import (
 
 	v1alpha1 "github.com/labring-sigs/pvc-migrate/api/v1alpha1"
 	"github.com/labring-sigs/pvc-migrate/internal/domain"
+	"github.com/labring-sigs/pvc-migrate/internal/kube"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
@@ -287,6 +288,46 @@ func TestWorkflowReconcilerKeepsBusinessFailureOutOfReconcilerError(t *testing.T
 	}
 }
 
+func TestWorkflowReconcilerRequeuesSessionLockContention(t *testing.T) {
+	session := newRunnerSession("controller-lock-contention")
+	session.Status.Phase = domain.PhaseReserved
+	session.Status.ObservedGeneration = 1
+	session.Generation = 1
+	store := &runnerSessionStore{
+		listed: session,
+		latest: cloneRunnerSession(session),
+		lock:   &runnerSessionLock{},
+	}
+	reconciler := NewWorkflowReconciler(
+		&errorWorkflowResumer{err: domain.WrapError(
+			domain.ErrorConflict,
+			"acquire session lock",
+			"session is already being changed",
+			kube.ErrSessionLockContention,
+		)},
+		store,
+	)
+	reconciler.requeueAfter = 250 * time.Millisecond
+
+	request := reconcile.Request{NamespacedName: types.NamespacedName{
+		Namespace: session.Spec.SessionNamespace,
+		Name:      session.ID,
+	}}
+	result, err := (&kindWorkflowReconciler{
+		parent: reconciler,
+		kind:   domain.ControllerKindCopy,
+	}).Reconcile(context.Background(), request)
+	if err != nil {
+		t.Fatalf("lock contention escaped reconcile: %v", err)
+	}
+	if result.RequeueAfter != 250*time.Millisecond {
+		t.Fatalf("requeueAfter=%s, want 250ms", result.RequeueAfter)
+	}
+	if len(store.updates) != 0 {
+		t.Fatalf("lock contention checkpointed as failure: %d updates", len(store.updates))
+	}
+}
+
 func reconcileWorkflowForTest(
 	t *testing.T,
 	reconciler *kindWorkflowReconciler,
@@ -300,6 +341,34 @@ func reconcileWorkflowForTest(
 	}
 
 	return result
+}
+
+type errorWorkflowResumer struct {
+	err error
+}
+
+func (r *errorWorkflowResumer) ResumeReserve(context.Context, *domain.Session) error {
+	return r.err
+}
+
+func (r *errorWorkflowResumer) ResumeOfflineMigration(context.Context, *domain.Session) error {
+	return r.err
+}
+
+func (r *errorWorkflowResumer) ResumePodMigration(context.Context, *domain.Session) error {
+	return r.err
+}
+
+func (r *errorWorkflowResumer) ResumeCopy(context.Context, *domain.Session) error {
+	return r.err
+}
+
+func (r *errorWorkflowResumer) ResumeRename(context.Context, *domain.Session) error {
+	return r.err
+}
+
+func (r *errorWorkflowResumer) ResumeMove(context.Context, *domain.Session) error {
+	return r.err
 }
 
 func TestInitializeUnobservedStatus(t *testing.T) {
