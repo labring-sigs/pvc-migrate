@@ -274,12 +274,26 @@ func (s *CRDSessionStore) AcquireSessionLock(
 		)
 	}
 
-	return (&ConfigMapSessionStore{client: s.leaseClient}).acquireSessionLock(
+	if err := s.checkConfigMapNameCollision(ctx, id, []string{namespace}, true); err != nil {
+		return nil, err
+	}
+
+	lock, err := (&ConfigMapSessionStore{client: s.leaseClient}).acquireSessionLock(
 		ctx,
 		namespace,
 		id,
 		id,
 	)
+	if err != nil {
+		return nil, err
+	}
+
+	// A ConfigMap session can be created while this worker waits for the Lease.
+	if err := s.checkConfigMapNameCollision(ctx, id, []string{namespace}, true); err != nil {
+		return nil, errors.Join(err, lock.Release(ctx))
+	}
+
+	return lock, nil
 }
 
 // DeleteSessionLease removes the Lease associated with a CRD-backed session
@@ -564,6 +578,14 @@ func (s *CRDSessionStore) checkWorkflowNameCollision(
 	}
 
 	namespaces := uniqueWorkflowNamespaces(session.Spec)
+	if err := s.checkConfigMapNameCollision(
+		ctx,
+		session.ID,
+		namespaces,
+		failOnForbidden,
+	); err != nil {
+		return err
+	}
 
 	lookups := make([]workflowCollisionLookup, 0, len(s.resources())*len(namespaces))
 	for _, resource := range s.resources() {
@@ -631,6 +653,48 @@ func (s *CRDSessionStore) checkWorkflowNameCollision(
 				session.ID,
 				lookup.resource.kind,
 				location,
+			),
+		)
+	}
+
+	return nil
+}
+
+func (s *CRDSessionStore) checkConfigMapNameCollision(
+	ctx context.Context,
+	id string,
+	namespaces []string,
+	failOnForbidden bool,
+) error {
+	if s.leaseClient == nil {
+		return nil
+	}
+
+	for _, namespace := range namespaces {
+		name := SessionConfigMapName(id)
+
+		_, err := s.leaseClient.CoreV1().ConfigMaps(namespace).Get(ctx, name, metav1.GetOptions{})
+		if apierrors.IsNotFound(err) || apierrors.IsForbidden(err) && !failOnForbidden {
+			continue
+		}
+
+		if err != nil {
+			return domain.WrapError(
+				domain.ErrorKubernetes,
+				"check workflow name collision",
+				"read session ConfigMap",
+				err,
+			)
+		}
+
+		return domain.NewError(
+			domain.ErrorConflict,
+			"check workflow name collision",
+			fmt.Sprintf(
+				"workflow name %q is already used by ConfigMap session %s/%s; use a different workflow name",
+				id,
+				namespace,
+				name,
 			),
 		)
 	}

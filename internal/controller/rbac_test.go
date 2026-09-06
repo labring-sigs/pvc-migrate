@@ -54,7 +54,6 @@ func TestControllerRoleExcludesPlannerOnlyPermissions(t *testing.T) {
 		{group: "networking.k8s.io", resource: "networkpolicies"},
 		{group: "storage.k8s.io", resource: "csinodes"},
 		{group: "storage.k8s.io", resource: "csistoragecapacities"},
-		{group: "", resource: "configmaps"},
 	} {
 		if _, ok := permissions[forbidden]; ok {
 			t.Fatalf(
@@ -151,6 +150,7 @@ func controllerRolePermissions() map[permissionKey][]string {
 	add("migrate.sealos.io", []string{"backuprepositories"}, "get")
 
 	add("", []string{"namespaces"}, "get")
+	add("", []string{"configmaps"}, "get")
 	add("", []string{"nodes"}, "get", "list")
 	add("", []string{"persistentvolumes"}, "get", "list", "update", "delete")
 	add("", []string{"persistentvolumeclaims"}, "get", "list", "create", "update", "delete")
