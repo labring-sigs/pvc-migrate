@@ -1,0 +1,13 @@
+Controller: {{ include "pvc-migrate.fullname" . }}-controller
+Namespace: {{ .Release.Namespace }}
+Image: {{ include "pvc-migrate.image" . }}
+Transfer image: {{ include "pvc-migrate.toolImage" . }}
+
+helm status {{ .Release.Name }} --namespace {{ .Release.Namespace }}
+helm test {{ .Release.Name }} --namespace {{ .Release.Namespace }} --logs
+kubectl logs --namespace {{ .Release.Namespace }} deployment/{{ include "pvc-migrate.fullname" . }}-controller
+
+CRDs are retained on uninstall and are not upgraded by Helm. Apply the CRDs
+from the new chart version before upgrading the controller. Finish or abort
+active workflows and run their cleanup commands before uninstalling.
+All workflow namespaces must already exist.

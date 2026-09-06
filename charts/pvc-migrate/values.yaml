@@ -1,0 +1,84 @@
+# One elected leader and one warm standby, watching the same workflow CRs.
+replicaCount: 2
+image:
+  repository: ghcr.io/labring-sigs/pvc-migrate
+  pullPolicy: IfNotPresent
+  # Defaults to Chart.appVersion. Use a release or immutable commit tag.
+  tag: ""
+  # Pins the controller only; transfer tools require a tagged image.
+  digest: ""
+toolImage:
+  # Defaults to image.repository and image.tag / Chart.appVersion.
+  repository: ""
+  tag: ""
+# Existing secrets in the release namespace. Transfer Pods use pull secrets
+# from their own namespace's ServiceAccounts.
+imagePullSecrets: []
+nameOverride: ""
+fullnameOverride: ""
+serviceAccount:
+  create: true
+  annotations: {}
+  # Required when create=false; do not use the default ServiceAccount.
+  name: ""
+rbac:
+  create: true
+  # Grant pods/exec only in approved, existing source namespaces for
+  # KubeBlocks MongoDB native switchover. Empty by default.
+  kubeBlocksMongoDBNamespaces: []
+controller:
+  logLevel: info
+  logFormat: json
+  operationTimeout: 30m
+podAnnotations: {}
+# Chart identity and selector labels are reserved.
+podLabels: {}
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 10000
+  runAsGroup: 10000
+  seccompProfile:
+    type: RuntimeDefault
+securityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop: [ALL]
+resources:
+  requests:
+    cpu: 100m
+    memory: 128Mi
+  limits:
+    memory: 512Mi
+terminationGracePeriodSeconds: 60
+startupProbe:
+  httpGet:
+    path: /healthz
+    port: health
+  periodSeconds: 5
+  timeoutSeconds: 2
+  failureThreshold: 30
+livenessProbe:
+  httpGet:
+    path: /healthz
+    port: health
+  periodSeconds: 10
+  timeoutSeconds: 2
+  failureThreshold: 3
+readinessProbe:
+  httpGet:
+    path: /readyz
+    port: health
+  periodSeconds: 5
+  timeoutSeconds: 2
+  failureThreshold: 3
+podDisruptionBudget:
+  # Rendered only for replicaCount > 1, allowing a single replica to drain.
+  enabled: true
+  minAvailable: 1
+priorityClassName: ""
+nodeSelector: {}
+tolerations: []
+# Empty uses preferred anti-affinity across nodes; set this to replace it.
+affinity: {}
+topologySpreadConstraints: []

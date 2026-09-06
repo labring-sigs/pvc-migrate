@@ -6,10 +6,12 @@ LDFLAGS := -s -w -X main.version=$(VERSION) -X main.toolImageRepository=$(TOOL_I
 LOCALBIN ?= $(shell pwd)/bin
 CONTROLLER_GEN ?= $(LOCALBIN)/controller-gen
 CONTROLLER_GEN_VERSION ?= v0.19.0
+HELM ?= helm
+CHART := charts/pvc-migrate
 PVC_MIGRATE_E2E_MODE ?= session
 E2E_TIMEOUT ?= 90m
 
-.PHONY: all build test test-race vet lint check e2e manifests clean
+.PHONY: all build test test-race vet lint check e2e manifests chart-sync chart-lint chart-package clean
 
 all: check build
 
@@ -34,6 +36,18 @@ manifests: $(CONTROLLER_GEN)
 	$(CONTROLLER_GEN) object paths=./api/... output:dir=api/v1alpha1
 	$(CONTROLLER_GEN) crd paths=./api/... output:crd:artifacts:config=config/crd/bases
 	$(CONTROLLER_GEN) crd paths=./api/... output:stdout > deploy/crd.yaml
+	$(MAKE) chart-sync
+
+chart-sync:
+	mkdir -p $(CHART)/crds
+	cp config/crd/bases/*.yaml $(CHART)/crds/
+
+chart-lint:
+	$(HELM) lint $(CHART) --strict
+	go test ./internal/controller -run '^TestHelm'
+
+chart-package: chart-lint
+	$(HELM) package $(CHART) --destination $(LOCALBIN)
 
 $(LOCALBIN)/controller-gen:
 	GOBIN=$(LOCALBIN) go install sigs.k8s.io/controller-tools/cmd/controller-gen@$(CONTROLLER_GEN_VERSION)

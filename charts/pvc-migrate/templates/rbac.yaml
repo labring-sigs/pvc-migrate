@@ -1,0 +1,145 @@
+{{- if .Values.rbac.create }}
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "pvc-migrate.fullname" . }}
+  labels:
+    {{- include "pvc-migrate.labels" . | nindent 4 }}
+rules:
+  - apiGroups: ["migrate.sealos.io"]
+    resources: ["migrations", "podmigrations", "reservations", "copies", "backups", "restores", "renames", "clustermigrations", "clusterpodmigrations", "clusterreservations", "clustercopies", "moves"]
+    verbs: ["get", "list", "watch", "update"]
+  - apiGroups: ["migrate.sealos.io"]
+    resources: ["migrations/status", "podmigrations/status", "reservations/status", "copies/status", "backups/status", "restores/status", "renames/status", "clustermigrations/status", "clusterpodmigrations/status", "clusterreservations/status", "clustercopies/status", "moves/status"]
+    verbs: ["update"]
+  - apiGroups: ["migrate.sealos.io"]
+    resources: ["backuprepositories"]
+    verbs: ["get"]
+  - apiGroups: [""]
+    resources: ["namespaces", "configmaps"]
+    verbs: ["get"]
+  - apiGroups: [""]
+    resources: ["nodes"]
+    verbs: ["get", "list"]
+  - apiGroups: [""]
+    resources: ["persistentvolumes"]
+    verbs: ["get", "list", "update", "delete"]
+  - apiGroups: [""]
+    resources: ["persistentvolumeclaims"]
+    verbs: ["get", "list", "create", "update", "delete"]
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "watch", "create", "update", "delete"]
+  - apiGroups: [""]
+    resources: ["pods/log"]
+    verbs: ["get"]
+  - apiGroups: [""]
+    resources: ["pods/portforward"]
+    verbs: ["create"]
+  - apiGroups: [""]
+    resources: ["services"]
+    verbs: ["get", "list", "watch", "create", "patch", "delete"]
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["get", "list", "create", "update", "patch", "delete"]
+  - apiGroups: [""]
+    resources: ["serviceaccounts"]
+    verbs: ["create"]
+  - apiGroups: [""]
+    resources: ["serviceaccounts"]
+    resourceNames: ["pvc-migrate-transfer"]
+    verbs: ["get", "update"]
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["list", "create", "patch"]
+  - apiGroups: [""]
+    resources: ["resourcequotas", "limitranges"]
+    verbs: ["list"]
+  - apiGroups: ["apps"]
+    resources: ["deployments"]
+    verbs: ["get", "list", "create", "update", "patch", "delete"]
+  - apiGroups: ["autoscaling"]
+    resources: ["horizontalpodautoscalers"]
+    verbs: ["list"]
+  - apiGroups: ["apps"]
+    resources: ["replicasets"]
+    verbs: ["get", "list"]
+  - apiGroups: ["apps"]
+    resources: ["statefulsets"]
+    verbs: ["get", "update"]
+  - apiGroups: ["batch"]
+    resources: ["jobs"]
+    verbs: ["get", "list", "create", "patch", "delete"]
+  - apiGroups: ["storage.k8s.io"]
+    resources: ["storageclasses"]
+    verbs: ["get"]
+  - apiGroups: ["storage.k8s.io"]
+    resources: ["volumeattachments"]
+    verbs: ["list"]
+  - apiGroups: ["local.openebs.io"]
+    resources: ["lvmvolumes"]
+    verbs: ["list", "patch"]
+  - apiGroups: ["coordination.k8s.io"]
+    resources: ["leases"]
+    verbs: ["get", "create", "update", "delete"]
+  - apiGroups: ["apps.kubeblocks.io"]
+    resources: ["clusters"]
+    verbs: ["get", "update"]
+  - apiGroups: ["workloads.kubeblocks.io"]
+    resources: ["instancesets"]
+    verbs: ["get", "update"]
+  - apiGroups: ["apps.kubeblocks.io", "operations.kubeblocks.io"]
+    resources: ["opsrequests"]
+    verbs: ["get", "create", "delete"]
+  - apiGroups: ["operator.victoriametrics.com"]
+    resources: ["vmclusters"]
+    verbs: ["get", "update"]
+  - apiGroups: ["grafana.integreatly.org"]
+    resources: ["grafanas"]
+    verbs: ["get", "update"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ include "pvc-migrate.fullname" . }}
+  labels:
+    {{- include "pvc-migrate.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ include "pvc-migrate.fullname" . }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "pvc-migrate.serviceAccountName" . }}
+    namespace: {{ .Release.Namespace }}
+{{- range .Values.rbac.kubeBlocksMongoDBNamespaces }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ include "pvc-migrate.fullname" $ }}-kubeblocks-mongodb
+  namespace: {{ . }}
+  labels:
+    {{- include "pvc-migrate.labels" $ | nindent 4 }}
+rules:
+  - apiGroups: [""]
+    resources: ["pods/exec"]
+    verbs: ["create"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ include "pvc-migrate.fullname" $ }}-kubeblocks-mongodb
+  namespace: {{ . }}
+  labels:
+    {{- include "pvc-migrate.labels" $ | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ include "pvc-migrate.fullname" $ }}-kubeblocks-mongodb
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "pvc-migrate.serviceAccountName" $ }}
+    namespace: {{ $.Release.Namespace }}
+{{- end }}
+{{- end }}

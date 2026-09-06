@@ -9,6 +9,16 @@ permissions:
   contents: read
 
 jobs:
+  helm:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: azure/setup-helm@v4.3.1
+        with:
+          version: v4.2.4
+      - run: helm lint charts/pvc-migrate --strict
+      - run: helm package charts/pvc-migrate --destination /tmp/charts
+
   lint:
     runs-on: ubuntu-latest
     steps:

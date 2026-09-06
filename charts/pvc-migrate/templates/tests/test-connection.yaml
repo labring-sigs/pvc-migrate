@@ -1,0 +1,41 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: {{ include "pvc-migrate.fullname" . }}-test-connection
+  namespace: {{ .Release.Namespace }}
+  labels:
+    helm.sh/chart: {{ include "pvc-migrate.chart" . }}
+    app.kubernetes.io/name: {{ include "pvc-migrate.fullname" . }}
+    app.kubernetes.io/instance: {{ .Release.Name }}
+    app.kubernetes.io/component: test
+    app.kubernetes.io/managed-by: {{ .Release.Service }}
+  annotations:
+    helm.sh/hook: test
+    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
+spec:
+  automountServiceAccountToken: false
+  restartPolicy: Never
+  activeDeadlineSeconds: 120
+  {{- with .Values.imagePullSecrets }}
+  imagePullSecrets:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+  securityContext:
+    {{- toYaml .Values.podSecurityContext | nindent 4 }}
+  containers:
+    - name: readiness
+      image: {{ include "pvc-migrate.image" . | quote }}
+      imagePullPolicy: {{ .Values.image.pullPolicy }}
+      command: [wget]
+      args:
+        - --spider
+        - --timeout=10
+        - http://{{ include "pvc-migrate.fullname" . }}-health:8081/readyz
+      securityContext:
+        {{- toYaml .Values.securityContext | nindent 8 }}
+      resources:
+        requests:
+          cpu: 10m
+          memory: 16Mi
+        limits:
+          memory: 64Mi

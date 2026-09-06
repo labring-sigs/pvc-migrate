@@ -1,0 +1,159 @@
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.19.0
+  name: backuprepositories.migrate.sealos.io
+spec:
+  group: migrate.sealos.io
+  names:
+    kind: BackupRepository
+    listKind: BackupRepositoryList
+    plural: backuprepositories
+    shortNames:
+    - br
+    singular: backuprepository
+  scope: Namespaced
+  versions:
+  - name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: |-
+          BackupRepository is a user-owned namespaced backup location. Its endpoint,
+          bucket and prefix are deliberately user configurable; credentials are read
+          from a Secret in the same namespace. Creating this object does not grant
+          access to any other namespace or cluster resource.
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            properties:
+              pvc:
+                description: |-
+                  PVCBackupRepositorySpec selects a PVC in the repository namespace. The
+                  controller exposes the schema before its data-plane adapter is enabled so
+                  clients can adopt one stable API while execution support is added.
+                properties:
+                  claimRef:
+                    description: LocalObjectReference identifies a resource in the
+                      same namespace.
+                    properties:
+                      name:
+                        maxLength: 253
+                        minLength: 1
+                        pattern: ^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$
+                        type: string
+                    required:
+                    - name
+                    type: object
+                  subPath:
+                    maxLength: 1024
+                    pattern: ^$|^[A-Za-z0-9][A-Za-z0-9._-]*(/[A-Za-z0-9][A-Za-z0-9._-]*)*$
+                    type: string
+                    x-kubernetes-validations:
+                    - message: subPath must be a normalized relative path and may
+                        not contain '.' or '..' segments
+                      rule: self == '' || self.split('/').all(segment, segment !=
+                        '.' && segment != '..')
+                required:
+                - claimRef
+                type: object
+              s3:
+                description: |-
+                  S3BackupRepositorySpec describes an S3-compatible object store. Credentials
+                  are read from a Secret in the BackupRepository namespace.
+                properties:
+                  allowInsecureEndpoint:
+                    type: boolean
+                  bucket:
+                    maxLength: 63
+                    minLength: 1
+                    pattern: ^[A-Za-z0-9][A-Za-z0-9._-]*$
+                    type: string
+                  credentialsSecret:
+                    description: |-
+                      BackupRepositorySecretReference points to a Secret in the BackupRepository
+                      namespace. It intentionally has no namespace field, preventing a tenant CR
+                      from reading another namespace's credentials.
+                    properties:
+                      name:
+                        maxLength: 253
+                        minLength: 1
+                        pattern: ^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$
+                        type: string
+                    required:
+                    - name
+                    type: object
+                  endpoint:
+                    maxLength: 2048
+                    type: string
+                  forcePathStyle:
+                    type: boolean
+                  prefix:
+                    maxLength: 639
+                    pattern: ^$|^[A-Za-z0-9][A-Za-z0-9._-]*(/[A-Za-z0-9][A-Za-z0-9._-]*)*$
+                    type: string
+                  provider:
+                    maxLength: 63
+                    type: string
+                  region:
+                    maxLength: 63
+                    type: string
+                  serverSideEncryption:
+                    enum:
+                    - AES256
+                    - aws:kms
+                    type: string
+                  sseKmsKeyID:
+                    maxLength: 2048
+                    type: string
+                required:
+                - bucket
+                - credentialsSecret
+                type: object
+                x-kubernetes-validations:
+                - message: object store endpoints must use HTTPS unless allowInsecureEndpoint
+                    is true
+                  rule: '!has(self.endpoint) || size(self.endpoint) == 0 || self.endpoint.startsWith(''https://'')
+                    || (has(self.allowInsecureEndpoint) && self.allowInsecureEndpoint)'
+                - message: sseKmsKeyID requires serverSideEncryption aws:kms
+                  rule: '!has(self.sseKmsKeyID) || size(self.sseKmsKeyID) == 0 ||
+                    (has(self.serverSideEncryption) && self.serverSideEncryption ==
+                    ''aws:kms'')'
+              type:
+                description: |-
+                  BackupRepositoryType selects the storage backend used by a repository.
+                  Backend-specific fields are isolated below dedicated configuration objects
+                  so adding a backend does not create invalid cross-backend combinations.
+                enum:
+                - s3
+                - pvc
+                type: string
+            required:
+            - type
+            type: object
+            x-kubernetes-validations:
+            - message: exactly one backend configuration must match type
+              rule: (self.type == 's3' && has(self.s3) && !has(self.pvc)) || (self.type
+                == 'pvc' && has(self.pvc) && !has(self.s3))
+        required:
+        - spec
+        type: object
+    served: true
+    storage: true
