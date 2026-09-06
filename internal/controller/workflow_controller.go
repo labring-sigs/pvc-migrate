@@ -487,7 +487,6 @@ func initializeUnobservedStatus(
 // execution when different Kinds use the same data-plane session identity.
 func (r *WorkflowReconciler) SetupWithManager(manager ctrl.Manager) error {
 	r.recorder = manager.GetEventRecorder("pvc-migrate-controller")
-	predicates := builder.WithPredicates(workflowEventPredicate(r.cancelWorkflow))
 
 	kinds := make([]domain.ControllerKind, 0, len(domain.ControllerWorkflows())*2)
 	for _, workflow := range domain.ControllerWorkflows() {
@@ -518,12 +517,20 @@ func (r *WorkflowReconciler) SetupWithManager(manager ctrl.Manager) error {
 			return fmt.Errorf("register %s informer: %w", kind, err)
 		}
 
-		name := "workflow-" + strings.ToLower(string(kind))
-		if err := ctrl.NewControllerManagedBy(manager).
-			Named(name).
-			For(object, predicates).
-			Complete(&kindWorkflowReconciler{parent: r, kind: kind}); err != nil {
-			return err
+		// Recovery of a paused workload must not wait behind another long
+		// migration. Both queues share the informer and the session Lease fence.
+		for _, deleting := range []bool{false, true} {
+			name := "workflow-" + strings.ToLower(string(kind))
+			if deleting {
+				name += "-deletion"
+			}
+
+			if err := ctrl.NewControllerManagedBy(manager).
+				Named(name).
+				For(object, builder.WithPredicates(workflowQueuePredicate(deleting, r.cancelWorkflow))).
+				Complete(&kindWorkflowReconciler{parent: r, kind: kind}); err != nil {
+				return err
+			}
 		}
 
 		served++
@@ -542,6 +549,15 @@ func (r *WorkflowReconciler) cancelWorkflow(object crclient.Object) {
 			cancelFunc()
 		}
 	}
+}
+
+func workflowQueuePredicate(deleting bool, onDelete func(crclient.Object)) predicate.Predicate {
+	return predicate.And(
+		workflowEventPredicate(onDelete),
+		predicate.NewPredicateFuncs(func(object crclient.Object) bool {
+			return (object.GetDeletionTimestamp() != nil) == deleting
+		}),
+	)
 }
 
 func workflowEventPredicate(onDelete ...func(crclient.Object)) predicate.Predicate {
