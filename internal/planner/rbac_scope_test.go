@@ -18,7 +18,7 @@ import (
 	clienttesting "k8s.io/client-go/testing"
 )
 
-func TestSessionNamespacePermissionsFollowNamespaceExistence(t *testing.T) {
+func TestSessionNamespaceChecksRejectMissingNamespacesWithoutCreatePermission(t *testing.T) {
 	for _, operation := range []domain.Operation{domain.OperationCopy, domain.OperationRename} {
 		for _, missing := range []string{"", "sessions", "staging", "destination"} {
 			t.Run(string(operation)+"/missing="+missing, func(t *testing.T) {
@@ -69,6 +69,17 @@ func TestSessionNamespacePermissionsFollowNamespaceExistence(t *testing.T) {
 				for _, action := range client.Actions() {
 					if action.GetResource().Resource == "namespaces" && action.GetVerb() != "get" {
 						t.Fatalf("planning mutated namespaces: %#v", action)
+					}
+
+					if action.GetResource().Resource == "selfsubjectaccessreviews" {
+						review := testutil.MustActionObject[*authorizationv1.SelfSubjectAccessReview](
+							t,
+							action,
+						)
+						if a := review.Spec.ResourceAttributes; a.Resource == "namespaces" &&
+							a.Verb != "get" {
+							t.Fatalf("requested namespace write permission: %#v", a)
+						}
 					}
 				}
 			})
@@ -152,7 +163,7 @@ func TestControllerSubmissionChecksOnlySelectedWorkflow(t *testing.T) {
 }
 
 func TestReservationDoesNotRequireTransferOrSourceDeletionPermissions(t *testing.T) {
-	client := kubernetesfake.NewClientset()
+	client := rbacTestClient()
 	client.PrependReactor(
 		"create",
 		"selfsubjectaccessreviews",

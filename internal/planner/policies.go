@@ -9,7 +9,6 @@ import (
 	"github.com/labring-sigs/pvc-migrate/internal/kube"
 	"github.com/labring-sigs/pvc-migrate/internal/parallel"
 	corev1 "k8s.io/api/core/v1"
-	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
@@ -29,20 +28,6 @@ func (p *Planner) checkLimitRanges(
 	p.logInfo("checking LimitRanges", "namespace", namespace, "volumes", len(volumes))
 
 	items, err := policies.LimitRanges, policies.LimitRangeErr
-	if apierrors.IsNotFound(err) {
-		plan.AddCheck(
-			warned(
-				limitRangeCheckName,
-				fmt.Sprintf(
-					"namespace %s does not exist yet; reservation will create it",
-					namespace,
-				),
-			),
-		)
-
-		return
-	}
-
 	if err != nil {
 		plan.AddCheck(
 			failed(limitRangeCheckName, fmt.Sprintf("list LimitRanges in %s: %v", namespace, err)),
@@ -155,20 +140,6 @@ func (p *Planner) checkQuotas(
 	p.logInfo("checking ResourceQuotas", "namespace", namespace)
 
 	items, err := policies.ResourceQuotas, policies.ResourceQuotaErr
-	if apierrors.IsNotFound(err) {
-		plan.AddCheck(
-			warned(
-				resourceQuotaCheckName,
-				fmt.Sprintf(
-					"namespace %s does not exist yet; no quota is currently applied",
-					namespace,
-				),
-			),
-		)
-
-		return
-	}
-
 	if err != nil {
 		plan.AddCheck(
 			failed(
@@ -323,10 +294,6 @@ func (p *Planner) checkNetworkPolicies(
 
 	for _, result := range results {
 		namespace, err := result.namespace, result.err
-		if apierrors.IsNotFound(err) {
-			continue
-		}
-
 		if err != nil {
 			plan.AddCheck(
 				failed(

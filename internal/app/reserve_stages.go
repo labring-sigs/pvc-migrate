@@ -42,12 +42,10 @@ func (s *Service) reserve(ctx context.Context, session *domain.Session) error {
 		return err
 	}
 
-	if err := kube.EnsureNamespace(
+	if err := kube.RequireNamespace(
 		ctx,
 		s.client,
 		session.Spec.TemporaryNamespace,
-		session.ID,
-		false,
 	); err != nil {
 		return s.failContext(ctx, session, err)
 	}

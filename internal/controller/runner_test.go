@@ -431,6 +431,48 @@ func TestRunnerRequiresServiceBeforeReconcilingCrossNamespaceMigration(t *testin
 	}
 }
 
+func TestRunnerRejectsMissingNamespacesWithoutCreatingThem(t *testing.T) {
+	for _, missing := range []string{"session", "temporary", "destination"} {
+		t.Run(missing, func(t *testing.T) {
+			objects := make([]runtime.Object, 0, 2)
+			for _, name := range []string{"session", "temporary", "destination"} {
+				if name != missing {
+					objects = append(
+						objects,
+						&corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: name}},
+					)
+				}
+			}
+
+			client := clientfake.NewClientset(objects...)
+			runner := NewRunner(
+				&recordingWorkflowResumer{},
+				nil,
+				"session",
+			).WithKubernetesClient(client)
+			spec := domain.NewSessionSpec(domain.OperationCopy, domain.SessionCommon{
+				SourceNamespace: "source", SessionNamespace: "session",
+				TemporaryNamespace: "temporary", DestinationNamespace: "destination",
+			}, false, domain.SessionWorkflowOptions{})
+
+			err := runner.reconcileSession(
+				context.Background(),
+				domain.NewSession("copy", spec, time.Now()),
+			)
+			if domain.CategoryOf(err) != domain.ErrorPrecondition ||
+				!strings.Contains(err.Error(), "namespace "+missing+" does not exist") {
+				t.Fatalf("missing namespace: %v", err)
+			}
+
+			for _, action := range client.Actions() {
+				if action.GetVerb() != "get" || action.GetResource().Resource != "namespaces" {
+					t.Fatalf("missing namespace caused unexpected action: %#v", action)
+				}
+			}
+		})
+	}
+}
+
 func TestRunnerDispatchesEveryControllerWorkflow(t *testing.T) {
 	common := domain.SessionCommon{
 		SourceNamespace:      "system",

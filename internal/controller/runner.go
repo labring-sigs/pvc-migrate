@@ -327,12 +327,10 @@ func (r *Runner) reconcileSession(ctx context.Context, session *domain.Session) 
 				continue
 			}
 
-			if err := kube.EnsureNamespace(
+			if err := kube.RequireNamespace(
 				ctx,
 				r.client,
 				namespace,
-				session.ID,
-				false,
 			); err != nil {
 				return err
 			}

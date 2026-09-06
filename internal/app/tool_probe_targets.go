@@ -220,30 +220,25 @@ func destinationTransferPathProbeTargets(
 	return targets
 }
 
-func (s *Service) ensureSessionNamespaces(
+func (s *Service) requireSessionNamespaces(
 	ctx context.Context,
 	plan *domain.MigrationPlan,
-	dryRun bool,
 ) error {
-	s.logInfo("ensuring migration namespaces", "session", plan.SessionID, "dryRun", dryRun)
+	s.logInfo("checking migration namespaces", "session", plan.SessionID)
 
-	if err := kube.EnsureNamespace(
+	if err := kube.RequireNamespace(
 		ctx,
 		s.client,
 		plan.SessionSpec.SessionNamespace,
-		plan.SessionID,
-		dryRun,
 	); err != nil {
 		return err
 	}
 
 	if plan.SessionSpec.TemporaryNamespace != plan.SessionSpec.SessionNamespace {
-		if err := kube.EnsureNamespace(
+		if err := kube.RequireNamespace(
 			ctx,
 			s.client,
 			plan.SessionSpec.TemporaryNamespace,
-			plan.SessionID,
-			dryRun,
 		); err != nil {
 			return err
 		}
@@ -258,12 +253,10 @@ func (s *Service) ensureSessionNamespaces(
 			continue
 		}
 
-		if err := kube.EnsureNamespace(
+		if err := kube.RequireNamespace(
 			ctx,
 			s.client,
 			volume.DestinationPVC.Namespace,
-			plan.SessionID,
-			dryRun,
 		); err != nil {
 			return err
 		}

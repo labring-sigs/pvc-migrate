@@ -306,11 +306,11 @@ func (s *Service) CreateSession(
 		return session, nil
 	}
 
-	if dryRun {
-		if err := s.ensureSessionNamespaces(ctx, plan, true); err != nil {
-			return nil, err
-		}
+	if err := s.requireSessionNamespaces(ctx, plan); err != nil {
+		return nil, err
+	}
 
+	if dryRun {
 		if err := s.ValidateReservation(ctx, session); err != nil {
 			return nil, err
 		}
@@ -327,24 +327,13 @@ func (s *Service) CreateSession(
 		"temporaryNamespace",
 		plan.SessionSpec.TemporaryNamespace,
 	)
-	// The Lease used to serialize creation lives in the session namespace.
-	// Ensure that namespace exists before attempting to acquire the Lease.
-	if err := kube.EnsureNamespace(
-		ctx,
-		s.client,
-		plan.SessionSpec.SessionNamespace,
-		plan.SessionID,
-		false,
-	); err != nil {
-		return nil, err
-	}
 
 	createErr := s.withSessionIDLock(
 		ctx,
 		plan.SessionSpec.SessionNamespace,
 		kube.SessionLockID(session),
 		func(lockedCtx context.Context) error {
-			if err := s.ensureSessionNamespaces(lockedCtx, plan, false); err != nil {
+			if err := s.requireSessionNamespaces(lockedCtx, plan); err != nil {
 				return err
 			}
 			return s.store.Create(lockedCtx, session)

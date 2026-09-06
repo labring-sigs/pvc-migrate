@@ -1303,7 +1303,7 @@ func probeConsumerPod(name, claim, node string) *corev1.Pod {
 }
 
 func TestCreateSessionPersistsBeforeStageProbe(t *testing.T) {
-	client := fake.NewClientset()
+	client := fake.NewClientset(&corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "system"}})
 	assignLeaseUIDs(client)
 	store := kube.NewConfigMapSessionStore(client)
 	probeErr := domain.NewError(domain.ErrorPrecondition, "tool image probe", "image pull failed")
@@ -1347,7 +1347,7 @@ func TestCreateSessionPersistsBeforeStageProbe(t *testing.T) {
 }
 
 func TestStageProbeRunsInsideSessionLease(t *testing.T) {
-	client := fake.NewClientset()
+	client := fake.NewClientset(&corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "system"}})
 	assignLeaseUIDs(client)
 	store := kube.NewConfigMapSessionStore(client)
 	probeErr := domain.NewError(

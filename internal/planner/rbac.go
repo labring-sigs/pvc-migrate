@@ -11,7 +11,6 @@ import (
 	"github.com/labring-sigs/pvc-migrate/internal/kube"
 	"github.com/labring-sigs/pvc-migrate/internal/parallel"
 	authorizationv1 "k8s.io/api/authorization/v1"
-	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
@@ -293,13 +292,9 @@ func (p *Planner) namespaceRBAC(
 
 		checks = append(checks, rbacAccess{resource: "namespaces", verb: "get", name: namespace})
 
-		_, err := p.client.CoreV1().Namespaces().Get(ctx, namespace, metav1.GetOptions{})
-		switch {
-		case apierrors.IsNotFound(err):
-			checks.add("", "", "namespaces", "create")
-		case err != nil:
+		if err := kube.RequireNamespace(ctx, p.client, namespace); err != nil {
 			plan.AddCheck(
-				failed(domain.CheckNameRBAC, fmt.Sprintf("read namespace %s: %v", namespace, err)),
+				failed(domain.CheckNameNamespace, err.Error()),
 			)
 		}
 	}

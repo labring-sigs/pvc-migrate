@@ -14,7 +14,7 @@ rules:
     verbs: ["get"]
   - apiGroups: [""]
     resources: ["namespaces"]
-    verbs: ["get", "create"]
+    verbs: ["get"]
   - apiGroups: [""]
     resources: ["nodes"]
     verbs: ["get", "list"]
