@@ -56,7 +56,7 @@ func (f *offlineMigrationFlags) bind(command *cobra.Command) {
 		&f.destinationPVCs,
 		"destination-pvc",
 		nil,
-		"Destination PVC name; for multiple PVCs use source-pvc-name=destination-pvc-name",
+		"Temporary PVC name before switching the source PVC; for multiple PVCs use source-pvc-name=destination-pvc-name",
 	)
 	flags.StringSliceVar(
 		&f.destinationCapacities,

@@ -614,6 +614,20 @@ func uncheckpointedSource(session *domain.Session, index int) bool {
 		volume.DestinationPV.Name == ""
 }
 
+func isUnreservedSourcePVC(
+	session *domain.Session,
+	index int,
+	pvc *corev1.PersistentVolumeClaim,
+) bool {
+	if !uncheckpointedSource(session, index) {
+		return false
+	}
+
+	source := session.Spec.Volumes[index].SourcePVC
+
+	return pvc.Namespace == source.Namespace && pvc.Name == source.Name && pvc.UID == source.UID
+}
+
 func uncheckpointedDestination(session *domain.Session, index int) bool {
 	if session == nil || session.Status.Phase != domain.PhaseAborted || index < 0 ||
 		index >= len(session.Status.Volumes) ||
@@ -1068,6 +1082,12 @@ func (s *Service) discoverDestinationRefs(
 			),
 			err,
 		)
+	}
+
+	// Older plans could alias the source before reservation. Keep its identity
+	// out of destination recovery so cleanup cannot treat source data as temporary.
+	if isUnreservedSourcePVC(session, index, pvc) {
+		return false, nil
 	}
 
 	if pvc.Labels[kube.ManagedByLabel] != kube.ManagedByValue ||
