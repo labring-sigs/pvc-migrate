@@ -204,7 +204,7 @@ func (r *WorkflowReconciler) reconcile(
 	ctx context.Context,
 	request reconcile.Request,
 	kind domain.ControllerKind,
-) (reconcile.Result, error) {
+) (result reconcile.Result, resultErr error) {
 	if r == nil || r.store == nil || r.service == nil {
 		return reconcile.Result{}, errors.New("workflow reconciler is not configured")
 	}
@@ -234,15 +234,25 @@ func (r *WorkflowReconciler) reconcile(
 
 	if session.Deleting {
 		err := r.reconcileDeletingWorkflow(ctx, request, session)
-		return reconcile.Result{RequeueAfter: r.requeueAfter}, err
+		if kube.IsSessionLockContention(err) {
+			return reconcile.Result{RequeueAfter: r.requeueAfter}, nil
+		}
+
+		return reconcile.Result{}, err
 	}
 
 	ctx, cancel := context.WithCancel(ctx)
 
 	r.activeWorkflows.Store(session.BackendUID, cancel)
 	defer func() {
+		interrupted := errors.Is(ctx.Err(), context.Canceled)
+
 		cancel()
 		r.activeWorkflows.Delete(session.BackendUID)
+
+		if interrupted {
+			result, resultErr = reconcile.Result{}, nil
+		}
 	}()
 	// Close the gap between the first read and registering cancellation. The
 	// queue cannot interrupt an already-running reconcile for the same key.
@@ -795,6 +805,22 @@ func workflowSpecMutationError(session *domain.Session) error {
 	if session == nil || session.Status.ObservedGeneration == 0 ||
 		session.Generation == session.Status.ObservedGeneration {
 		return nil
+	}
+	// The API server increments generation when it first sets deletionTimestamp,
+	// even though spec is unchanged. Accept that single increment only until a
+	// deletion checkpoint has been observed; later spec changes remain fenced.
+	if session.Deleting && session.Generation == session.Status.ObservedGeneration+1 {
+		observedDeletion := false
+		for _, condition := range session.Status.Conditions {
+			if condition.Type == "Deleting" || condition.Type == "DeletionBlocked" {
+				observedDeletion = true
+				break
+			}
+		}
+
+		if !observedDeletion {
+			return nil
+		}
 	}
 
 	return domain.NewError(

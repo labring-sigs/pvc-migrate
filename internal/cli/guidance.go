@@ -37,6 +37,17 @@ func writeSessionGuidance(w io.Writer, session *domain.Session, prefixes guidanc
 		return nil
 	}
 
+	if session.Deleting {
+		if _, err := fmt.Fprintln(
+			w,
+			"\nWorkflow deletion is in progress; the controller owns recovery and cleanup. Inspect the Deleting and DeletionBlocked conditions and workflow Events. Do not remove the protection finalizer while recovery is incomplete.",
+		); err != nil {
+			return err
+		}
+
+		return writeSessionInspection(w, session, prefixes.kubectl)
+	}
+
 	if sessionHasCapacityFailure(session) {
 		return writeCapacityFailureGuidance(w, session, prefixes)
 	}

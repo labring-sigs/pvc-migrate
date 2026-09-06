@@ -56,6 +56,31 @@ func guidanceSession(phase domain.Phase) *domain.Session {
 	return session
 }
 
+func TestDeletingWorkflowGuidanceIsReadOnly(t *testing.T) {
+	session := guidanceSession(domain.PhaseWarmCopying)
+	session.Deleting = true
+
+	var output bytes.Buffer
+	if err := writeSessionGuidance(
+		&output,
+		session,
+		guidancePrefixes{pvcMigrate: "pvc-migrate", kubectl: "kubectl"},
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	text := output.String()
+	if !strings.Contains(text, "DeletionBlocked") {
+		t.Fatalf("missing deletion guidance: %s", text)
+	}
+
+	for _, action := range []string{" resume ", " abort ", " rollback ", " cleanup "} {
+		if strings.Contains(text, "pvc-migrate") && strings.Contains(text, action) {
+			t.Fatalf("deletion guidance offered mutation: %s", text)
+		}
+	}
+}
+
 func guidancePrefixesForSession(session *domain.Session) guidancePrefixes {
 	return guidancePrefixes{
 		pvcMigrate: sessionCommandPrefix(session.Spec.SessionNamespace),

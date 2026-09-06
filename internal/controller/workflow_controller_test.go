@@ -445,6 +445,37 @@ func TestWorkflowSpecMutationError(t *testing.T) {
 	}
 }
 
+func TestDeletingWorkflowGenerationFence(t *testing.T) {
+	for _, test := range []struct {
+		name       string
+		generation int64
+		observed   int64
+		condition  string
+		wantError  bool
+	}{
+		{name: "initial API deletion bump", generation: 2, observed: 1},
+		{name: "checkpointed deletion", generation: 2, observed: 2, condition: "Deleting"},
+		{name: "spec changed before deletion", generation: 3, observed: 1, wantError: true},
+		{name: "spec changed after deletion checkpoint", generation: 3, observed: 2, condition: "Deleting", wantError: true},
+		{name: "spec changed after blocked checkpoint", generation: 3, observed: 2, condition: "DeletionBlocked", wantError: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			session := newRunnerSession("deletion-generation")
+			session.Deleting = true
+			session.Generation = test.generation
+
+			session.Status.ObservedGeneration = test.observed
+			if test.condition != "" {
+				session.SetCondition(domain.Condition{Type: test.condition})
+			}
+
+			if err := workflowSpecMutationError(session); (err != nil) != test.wantError {
+				t.Fatalf("error=%v", err)
+			}
+		})
+	}
+}
+
 func TestWorkflowReconcilerKeepsBusinessFailureOutOfReconcilerError(t *testing.T) {
 	session := newRunnerSession("controller-business-failure")
 	session.Status.Phase = domain.PhaseReserved
