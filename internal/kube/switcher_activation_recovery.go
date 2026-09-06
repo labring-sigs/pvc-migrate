@@ -41,7 +41,8 @@ func (s *Switcher) verifyRetainedActivationPV(
 	original := claim != nil && claim.Namespace == pvcRef.Namespace &&
 		claim.Name == pvcRef.Name && claim.UID == pvcRef.UID
 
-	reserved := claim != nil && reservation.Name != "" && claim.Namespace == reservation.Namespace &&
+	reserved := claim != nil && reservation.Name != "" &&
+		claim.Namespace == reservation.Namespace &&
 		claim.Name == reservation.Name &&
 		claim.UID == ""
 	if !original && !reserved {

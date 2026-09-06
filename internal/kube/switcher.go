@@ -116,6 +116,7 @@ func (s *Switcher) VerifyActivationRecovery(
 			"session ID is required",
 		)
 	}
+
 	return s.verifyVolumesOffline(ctx, sessionID, volumes, true)
 }
 
