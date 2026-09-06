@@ -1041,6 +1041,10 @@ func (s *CRDSessionStore) Update(ctx context.Context, session *domain.Session) e
 		)
 	}
 
+	if existing.GetUID() == session.BackendUID && existing.GetDeletionTimestamp() != nil {
+		session.Deleting = true
+	}
+
 	if existing.GetResourceVersion() != session.ResourceVersion {
 		return domain.NewError(
 			domain.ErrorConflict,

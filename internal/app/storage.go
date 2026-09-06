@@ -390,9 +390,19 @@ func (s *Service) validateRollbackRecoveryStorage(
 
 		if originWasActive || status.Activation.ActivatedAt != nil ||
 			status.Activation.ActivePVC.Name != "" {
+			recovered, err := s.validateUnrecordedRollbackStorage(ctx, session, index)
+			if err != nil {
+				return err
+			}
+
+			if recovered {
+				continue
+			}
+
 			if err := s.verifyActiveStorageVolume(ctx, session, index); err != nil {
 				return err
 			}
+
 			continue
 		}
 
@@ -448,9 +458,21 @@ func (s *Service) verifyRollbackStorageVolume(
 	session *domain.Session,
 	index int,
 ) error {
-	volume := &session.Spec.Volumes[index]
+	return s.verifyRollbackStorageVolumeWithRef(
+		ctx,
+		session,
+		index,
+		session.Status.Volumes[index].Activation.ActivePVC,
+	)
+}
 
-	active := session.Status.Volumes[index].Activation.ActivePVC
+func (s *Service) verifyRollbackStorageVolumeWithRef(
+	ctx context.Context,
+	session *domain.Session,
+	index int,
+	active domain.ObjectReference,
+) error {
+	volume := &session.Spec.Volumes[index]
 	if active.Namespace == "" || active.Name == "" || active.UID == "" {
 		return domain.NewError(
 			domain.ErrorPrecondition,

@@ -1023,6 +1023,42 @@ func TestCRDSessionStoreDeletionRejectsReplacedUID(t *testing.T) {
 	}
 }
 
+func TestCRDSessionStoreUpdateObservesConcurrentDeletion(t *testing.T) {
+	client := newCRDTestClient()
+	store := NewCRDSessionStore(client)
+
+	session := storeTestSession()
+	if err := store.Create(t.Context(), session); err != nil {
+		t.Fatal(err)
+	}
+
+	loaded, err := store.Get(t.Context(), session.Spec.SessionNamespace, session.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	object := WorkflowObjectForKind(loaded.BackendResource)
+	if err := client.Get(
+		t.Context(),
+		crclient.ObjectKey{Namespace: session.Spec.SessionNamespace, Name: session.ID},
+		object,
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := client.Delete(t.Context(), object); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := store.Update(t.Context(), loaded); domain.CategoryOf(err) != domain.ErrorConflict {
+		t.Fatalf("error=%v", err)
+	}
+
+	if !loaded.Deleting {
+		t.Fatal("stale CLI session did not observe deletion")
+	}
+}
+
 func TestCRDSessionStoreDetectsDeclarativeCollisionAcrossNamespaceRoles(t *testing.T) {
 	ctx := context.Background()
 	client := newCRDTestClient()
