@@ -13,6 +13,21 @@ The release namespace and every workflow namespace must already exist.
 There is no Namespace template, namespace hook, or namespace create permission.
 The installer needs privileges to install CRDs and controller RBAC.
 
+Set `CHART_VERSION` to a published release version without the `v` prefix:
+
+```bash
+CHART_VERSION=X.Y.Z
+kubectl get namespace pvc-migrate-system
+helm upgrade --install pvc-migrate \
+  oci://ghcr.io/labring-sigs/pvc-migrate/charts/pvc-migrate \
+  --version "$CHART_VERSION" --namespace pvc-migrate-system \
+  --rollback-on-failure --wait --timeout 10m --history-max 10
+helm test pvc-migrate --namespace pvc-migrate-system --logs
+```
+
+Controller and tool images default to the selected chart version; image values
+need no overrides. To install from a checkout instead:
+
 ```bash
 kubectl get namespace pvc-migrate-system
 helm lint ./charts/pvc-migrate --strict
@@ -116,6 +131,15 @@ Helm installs missing files in `crds/` only at installation. It does not
 upgrade or delete them. For a new chart version, review schema compatibility
 and back up workflow CRs, then apply that version's CRDs before the controller:
 
+For OCI releases, extract the selected chart first and run the commands below
+from the extraction directory:
+
+```bash
+helm pull oci://ghcr.io/labring-sigs/pvc-migrate/charts/pvc-migrate \
+  --version "$CHART_VERSION" --untar --untardir chart-release/charts
+cd chart-release
+```
+
 ```bash
 kubectl diff --server-side --field-manager=pvc-migrate-crds \
   -f charts/pvc-migrate/crds/
@@ -158,3 +182,23 @@ Uninstall does not run migration cleanup; unfinished workflows can retain
 finalizers until a compatible controller is reinstalled. Do not delete CRDs
 as a substitute for cleanup. The controller leader-election Lease can remain;
 remove only that Lease after confirming all controller replicas are stopped.
+
+## Publishing
+
+The tool-image workflow invokes `.github/workflows/helm.yml` only for release
+tag pushes, after the image build and push succeed. Branches and pull requests
+run chart validation without packaging or publishing an OCI chart. The release
+job runs Helm packaging and strict lint; it does not run cluster tests.
+
+For `vX.Y.Z` (including prereleases such as `vX.Y.Z-rc.1`), `helm package`
+automatically sets both `version` and `appVersion` to `X.Y.Z`. Empty controller
+and tool image tags resolve to that `appVersion`. The staged values use
+`ghcr.io/<repository-owner>/<repository-name>` as the image repository, and the
+chart is pushed to `oci://ghcr.io/<repository-owner>/<repository-name>/charts`.
+Source files do not need a version-bump commit for each release. Build metadata
+(`+...`) is rejected because the same version must be a valid container tag.
+
+Publishing uses the workflow's `GITHUB_TOKEN` with `packages: write`. Set the
+GHCR chart package visibility to public for anonymous installation. OCI charts
+become available starting with the first release containing this workflow;
+older application tags do not gain charts automatically.

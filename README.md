@@ -31,23 +31,27 @@ make build VERSION=0.1.0
 ./bin/pvc-migrate version
 ```
 
-Deploy the controller with Helm 4 into an existing namespace:
+Deploy a published OCI chart with Helm 4 into an existing namespace.
+Set `CHART_VERSION` to the release version without the `v` prefix:
 
 ```bash
+CHART_VERSION=X.Y.Z
 kubectl get namespace pvc-migrate-system
-helm lint charts/pvc-migrate --strict
-helm upgrade --install pvc-migrate ./charts/pvc-migrate \
-  --namespace pvc-migrate-system \
+helm upgrade --install pvc-migrate \
+  oci://ghcr.io/labring-sigs/pvc-migrate/charts/pvc-migrate \
+  --version "$CHART_VERSION" --namespace pvc-migrate-system \
   --rollback-on-failure --wait --timeout 10m --history-max 10
 helm test pvc-migrate --namespace pvc-migrate-system --logs
 ```
 
-The chart installs workflow CRDs and defaults to the released application
-version, two controller replicas with leader election, restricted security
+The controller and tool image versions automatically match the selected chart
+version. No image overrides are required. The chart installs workflow CRDs
+and defaults to two controller replicas with leader election, restricted security
 contexts, health probes, resource requests/limits, and a disruption budget.
 It never creates namespaces. For Helm 3.17+, use `--atomic` instead of
 `--rollback-on-failure`. See [chart operations](charts/pvc-migrate/README.md)
-for values, CRD upgrades, adoption of existing manifests, and rollback.
+for source-chart installation, values, CRD upgrades, adoption of existing
+manifests, and rollback.
 
 The default ClusterRole excludes Pod exec. KubeBlocks MongoDB native
 switchover needs it only in approved source namespaces. Add to your values:
@@ -151,10 +155,11 @@ does not treat them as reconcile errors; inspect the controller Deployment logs
 for structured reconciliation and data-plane events. Raw tool Pod streams and
 command-oriented `Next steps` guidance remain CLI-only.
 
-The Helm chart defaults to `ghcr.io/labring-sigs/pvc-migrate:0.4.0`.
-Set `image.tag` or `image.digest` to pin the controller and `toolImage.tag`
-to select the tagged transfer image. Chart values apply to controller Pods;
-workflow transfer Pod configuration is managed by the application.
+Released Helm charts default both images to
+`ghcr.io/labring-sigs/pvc-migrate:<chart-version>`. Explicit `image.tag`,
+`image.digest`, or `toolImage.tag` overrides are optional. Chart values apply
+to controller Pods; workflow transfer Pod configuration is managed by the
+application.
 
 ### Real-cluster E2E
 

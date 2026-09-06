@@ -1,0 +1,71 @@
+name: Helm Release
+
+on:
+  workflow_call:
+    inputs:
+      release-tag:
+        description: "Release tag, for example v0.4.1 or v0.4.1-rc.1"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  publish:
+    name: Publish Helm chart
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6
+      - uses: azure/setup-helm@v4.3.1
+        with:
+          version: v4.2.4
+
+      - name: Package released chart
+        id: chart
+        env:
+          RELEASE_TAG: ${{ inputs.release-tag }}
+        run: |
+          set -euo pipefail
+          version="${RELEASE_TAG#v}"
+          if [[ ! "$RELEASE_TAG" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z.-]+)?$ ]]; then
+            echo "Release tag must be vMAJOR.MINOR.PATCH with an optional prerelease and no build metadata." >&2
+            exit 1
+          fi
+
+          export CHART_STAGE="$RUNNER_TEMP/pvc-migrate-chart"
+          cp -R charts/pvc-migrate "$CHART_STAGE"
+          ruby <<'RUBY'
+          require "yaml"
+          path = File.join(ENV.fetch("CHART_STAGE"), "values.yaml")
+          values = YAML.load_file(path)
+          values.fetch("image").merge!(
+            "repository" => "ghcr.io/#{ENV.fetch('GITHUB_REPOSITORY').downcase}",
+            "tag" => "", "digest" => ""
+          )
+          values.fetch("toolImage").merge!("repository" => "", "tag" => "")
+          File.write(path, YAML.dump(values))
+          RUBY
+
+          helm package "$CHART_STAGE" --version "$version" --app-version "$version" --destination dist
+          package="dist/pvc-migrate-$version.tgz"
+          helm lint "$package" --strict
+          echo "package=$package" >> "$GITHUB_OUTPUT"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - name: Login to GHCR
+        env:
+          GHCR_TOKEN: ${{ github.token }}
+        run: printf '%s' "$GHCR_TOKEN" | helm registry login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
+
+      - name: Push chart to OCI
+        env:
+          CHART_PACKAGE: ${{ steps.chart.outputs.package }}
+          CHART_VERSION: ${{ steps.chart.outputs.version }}
+        run: |
+          set -euo pipefail
+          repository="oci://ghcr.io/${GITHUB_REPOSITORY,,}/charts"
+          helm push "$CHART_PACKAGE" "$repository"
+          echo "Published $repository/pvc-migrate:$CHART_VERSION; controller and tool image default to $CHART_VERSION." >> "$GITHUB_STEP_SUMMARY"

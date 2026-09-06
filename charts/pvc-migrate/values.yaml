@@ -3,12 +3,12 @@ replicaCount: 2
 image:
   repository: ghcr.io/labring-sigs/pvc-migrate
   pullPolicy: IfNotPresent
-  # Defaults to Chart.appVersion. Use a release or immutable commit tag.
+  # Empty uses Chart.appVersion, which matches the published chart version.
   tag: ""
   # Pins the controller only; transfer tools require a tagged image.
   digest: ""
 toolImage:
-  # Defaults to image.repository and image.tag / Chart.appVersion.
+  # Empty uses the controller repository/tag, then Chart.appVersion.
   repository: ""
   tag: ""
 # Existing secrets in the release namespace. Transfer Pods use pull secrets
