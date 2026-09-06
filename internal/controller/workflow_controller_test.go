@@ -2,6 +2,7 @@ package controller
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"testing"
 	"time"
@@ -196,6 +197,94 @@ func TestReconcileDeletingWorkflowReleasesOnlyTerminatingNamespace(t *testing.T)
 				t.Fatalf("workflow deleted=%t, want %t", got, test.wantDeleted)
 			}
 		})
+	}
+}
+
+func TestFailedWorkflowWaitsForResumeEventWithoutPolling(t *testing.T) {
+	session := newRunnerSession("resume-event")
+	session.Generation = 1
+	session.Status.ObservedGeneration = 1
+	session.Status.Phase = domain.PhaseFailed
+	session.Status.ResumeFrom = domain.PhaseWarmCopying
+	store := &runnerSessionStore{latest: session, lock: &runnerSessionLock{}}
+	resumer := &recordingWorkflowResumer{}
+	reconciler := NewWorkflowReconciler(resumer, store)
+	request := reconcile.Request{
+		NamespacedName: types.NamespacedName{Namespace: "system", Name: session.ID},
+	}
+
+	result, err := reconciler.reconcile(t.Context(), request, domain.ControllerKindCopy)
+	if err != nil || result != (reconcile.Result{}) || resumer.called != "" {
+		t.Fatalf(
+			"failed workflow should be idle: result=%+v called=%q err=%v",
+			result,
+			resumer.called,
+			err,
+		)
+	}
+
+	before := &v1alpha1.Copy{
+		Status: v1alpha1.CopyStatusFromDomain(session.Status, session.Spec.Volumes),
+	}
+	if err := session.Reactivate("controller resume requested", time.Now()); err != nil {
+		t.Fatal(err)
+	}
+
+	after := &v1alpha1.Copy{
+		Status: v1alpha1.CopyStatusFromDomain(session.Status, session.Spec.Volumes),
+	}
+	if !workflowEventPredicate().Update(event.UpdateEvent{ObjectOld: before, ObjectNew: after}) {
+		t.Fatal("status-only resume did not enqueue the workflow")
+	}
+
+	if _, err := reconciler.reconcile(t.Context(), request, domain.ControllerKindCopy); err != nil {
+		t.Fatal(err)
+	}
+
+	if resumer.called != "copy" {
+		t.Fatalf("resume event dispatched %q, want copy", resumer.called)
+	}
+}
+
+func TestResumeEventsForEveryWorkflowKind(t *testing.T) {
+	for _, workflow := range domain.ControllerWorkflows() {
+		for _, kind := range []domain.ControllerKind{workflow.Kind, workflow.ClusterKind} {
+			if kind == "" {
+				continue
+			}
+
+			t.Run(string(kind), func(t *testing.T) {
+				before := kube.WorkflowObjectForKind(kind)
+				if err := json.Unmarshal(
+					[]byte(`{"status":{"phase":"Failed"}}`),
+					before,
+				); err != nil {
+					t.Fatal(err)
+				}
+
+				for _, phase := range []domain.Phase{
+					domain.PhaseWarmCopying, domain.PhaseRollingBack, domain.PhaseAborting, domain.PhaseFailed, "",
+				} {
+					after := kube.WorkflowObjectForKind(kind)
+
+					payload, err := json.Marshal(
+						map[string]any{"status": map[string]any{"phase": phase}},
+					)
+					if err != nil {
+						t.Fatal(err)
+					}
+
+					if err := json.Unmarshal(payload, after); err != nil {
+						t.Fatal(err)
+					}
+
+					want := phase != domain.PhaseFailed && phase != ""
+					if got := workflowEventPredicate().Update(event.UpdateEvent{ObjectOld: before, ObjectNew: after}); got != want {
+						t.Fatalf("Failed -> %s: enqueued=%v want=%v", phase, got, want)
+					}
+				}
+			})
+		}
 	}
 }
 
