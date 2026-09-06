@@ -9,10 +9,96 @@ import (
 	"github.com/labring-sigs/pvc-migrate/internal/kube"
 	"github.com/labring-sigs/pvc-migrate/internal/testutil"
 	authorizationv1 "k8s.io/api/authorization/v1"
+	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	kubernetesfake "k8s.io/client-go/kubernetes/fake"
 	clienttesting "k8s.io/client-go/testing"
 )
+
+func TestSessionNamespacePermissionsFollowNamespaceExistence(t *testing.T) {
+	for _, operation := range []domain.Operation{domain.OperationCopy, domain.OperationRename} {
+		for _, missing := range []string{"", "sessions", "staging", "destination"} {
+			t.Run(string(operation)+"/missing="+missing, func(t *testing.T) {
+				objects := []runtime.Object{}
+				for _, name := range []string{"sessions", "staging", "destination"} {
+					if name != missing {
+						objects = append(
+							objects,
+							&corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: name}},
+						)
+					}
+				}
+
+				client := kubernetesfake.NewClientset(objects...)
+				client.PrependReactor(
+					"create",
+					"selfsubjectaccessreviews",
+					func(action clienttesting.Action) (bool, runtime.Object, error) {
+						review := testutil.MustActionObject[*authorizationv1.SelfSubjectAccessReview](
+							t,
+							action,
+						).DeepCopy()
+						a := review.Spec.ResourceAttributes
+						review.Status.Allowed = a.Resource != "namespaces" ||
+							a.Verb == "get" && a.Name != ""
+
+						return true, review, nil
+					},
+				)
+
+				spec := domain.NewSessionSpec(operation, domain.SessionCommon{
+					SourceNamespace: "source", SessionNamespace: "sessions",
+					TemporaryNamespace: "staging", DestinationNamespace: "destination",
+				}, false, domain.SessionWorkflowOptions{})
+				plan := &domain.MigrationPlan{Ready: true}
+
+				planner := New(client, nil)
+				if operation == domain.OperationRename {
+					planner.checkRenameRBAC(context.Background(), plan, spec)
+				} else {
+					planner.checkRBAC(context.Background(), plan, spec, false, false)
+				}
+
+				if plan.Ready != (missing == "") {
+					t.Fatalf("missing=%q checks=%#v", missing, plan.Checks)
+				}
+
+				for _, action := range client.Actions() {
+					if action.GetResource().Resource == "namespaces" && action.GetVerb() != "get" {
+						t.Fatalf("planning mutated namespaces: %#v", action)
+					}
+				}
+			})
+		}
+	}
+}
+
+func TestNamespacePermissionCheckFailsClosedOnReadError(t *testing.T) {
+	client := kubernetesfake.NewClientset()
+	client.PrependReactor(
+		"get",
+		"namespaces",
+		func(clienttesting.Action) (bool, runtime.Object, error) {
+			return true, nil, apierrors.NewForbidden(
+				schema.GroupResource{Resource: "namespaces"},
+				"app",
+				nil,
+			)
+		},
+	)
+
+	plan := &domain.MigrationPlan{Ready: true}
+
+	checks := New(client, nil).namespaceRBAC(context.Background(), plan, domain.SessionSpec{
+		SessionCommon: domain.SessionCommon{SessionNamespace: "app", TemporaryNamespace: "app"},
+	})
+	if plan.Ready || len(checks) != 1 || checks[0].verb != "get" {
+		t.Fatalf("checks=%#v plan=%#v", checks, plan.Checks)
+	}
+}
 
 func TestControllerSubmissionChecksOnlySelectedWorkflow(t *testing.T) {
 	for _, cluster := range []bool{false, true} {

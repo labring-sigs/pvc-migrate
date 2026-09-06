@@ -11,6 +11,7 @@ import (
 	"github.com/labring-sigs/pvc-migrate/internal/kube"
 	"github.com/labring-sigs/pvc-migrate/internal/parallel"
 	authorizationv1 "k8s.io/api/authorization/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
@@ -58,7 +59,7 @@ func (p *Planner) checkRBAC(
 		sessionNamespace,
 	)
 
-	checks := rbacChecks{}
+	checks := p.namespaceRBAC(ctx, plan, spec)
 
 	add := checks.add
 	for _, namespace := range uniqueSorted([]string{sourceNamespace, stagingNamespace}) {
@@ -154,7 +155,6 @@ func (p *Planner) checkRBAC(
 		add(namespace, "", "limitranges", "list")
 	}
 
-	add("", "", "namespaces", "get", "create")
 	add("", "", "nodes", "get", "list")
 	add("", "", "persistentvolumes", "get", "update", "delete")
 	add("", "storage.k8s.io", "storageclasses", "get")
@@ -255,7 +255,7 @@ func (p *Planner) checkRenameRBAC(
 	}
 
 	sourceNamespace, destinationNamespace, sessionNamespace := spec.SourceNamespace, spec.DestinationNamespace, spec.SessionNamespace
-	checks := rbacChecks{}
+	checks := p.namespaceRBAC(ctx, plan, spec)
 	add := checks.add
 	add(sourceNamespace, "", "pods", "list")
 	add(destinationNamespace, "", "pods", "list")
@@ -263,11 +263,48 @@ func (p *Planner) checkRenameRBAC(
 	add(destinationNamespace, "", "persistentvolumeclaims", "get", "create")
 	add(sessionNamespace, "", "configmaps", "get", "create", "update", "delete")
 	add(sessionNamespace, "coordination.k8s.io", "leases", "get", "create", "update", "delete")
-	add("", "", "namespaces", "get", "create")
 	add("", "", "persistentvolumes", "get", "update")
 	add("", "storage.k8s.io", "storageclasses", "get")
 	add("", "storage.k8s.io", "volumeattachments", "list")
 	p.checkAccessReviews(ctx, plan, checks)
+}
+
+func (p *Planner) namespaceRBAC(
+	ctx context.Context,
+	plan *domain.MigrationPlan,
+	spec domain.SessionSpec,
+) rbacChecks {
+	namespaces := make([]string, 0, 3+len(spec.Volumes))
+
+	namespaces = append(namespaces,
+		spec.SessionNamespace,
+		spec.TemporaryNamespace,
+		spec.DestinationNamespace,
+	)
+	for _, volume := range spec.Volumes {
+		namespaces = append(namespaces, volume.DestinationPVC.Namespace)
+	}
+
+	checks := rbacChecks{}
+	for _, namespace := range uniqueSorted(namespaces) {
+		if namespace == "" {
+			continue
+		}
+
+		checks = append(checks, rbacAccess{resource: "namespaces", verb: "get", name: namespace})
+
+		_, err := p.client.CoreV1().Namespaces().Get(ctx, namespace, metav1.GetOptions{})
+		switch {
+		case apierrors.IsNotFound(err):
+			checks.add("", "", "namespaces", "create")
+		case err != nil:
+			plan.AddCheck(
+				failed(domain.CheckNameRBAC, fmt.Sprintf("read namespace %s: %v", namespace, err)),
+			)
+		}
+	}
+
+	return checks
 }
 
 func (p *Planner) checkControllerSubmissionRBAC(
