@@ -106,3 +106,14 @@ jobs:
         ${{ (vars.DOCKERHUB_USERNAME || secrets.DOCKERHUB_USERNAME) != '' && format('- registry: docker.io
           username: {0}
           password: {1}', vars.DOCKERHUB_USERNAME || secrets.DOCKERHUB_USERNAME, secrets.DOCKERHUB_PASSWORD) || '' }}
+
+  helm-release:
+    name: Helm release
+    needs: docker-build
+    if: ${{ github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v') }}
+    permissions:
+      contents: read
+      packages: write
+    uses: ./.github/workflows/helm.yml
+    with:
+      release-tag: ${{ github.ref_name }}

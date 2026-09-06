@@ -1,0 +1,17 @@
+{{- if and .Values.podDisruptionBudget.enabled (gt (int .Values.replicaCount) 1) }}
+{{- if ge (int .Values.podDisruptionBudget.minAvailable) (int .Values.replicaCount) }}
+{{- fail "podDisruptionBudget.minAvailable must be smaller than replicaCount" }}
+{{- end }}
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "pvc-migrate.fullname" . }}-controller
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "pvc-migrate.labels" . | nindent 4 }}
+spec:
+  minAvailable: {{ .Values.podDisruptionBudget.minAvailable }}
+  selector:
+    matchLabels:
+      {{- include "pvc-migrate.selectorLabels" . | nindent 6 }}
+{{- end }}

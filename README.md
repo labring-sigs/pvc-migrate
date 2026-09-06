@@ -31,22 +31,35 @@ make build VERSION=0.1.0
 ./bin/pvc-migrate version
 ```
 
-Install the session namespace and reference RBAC for an in-cluster service account:
+Deploy a published OCI chart with Helm 4 into an existing namespace.
+Set `CHART_VERSION` to the release version without the `v` prefix:
 
 ```bash
-kubectl apply -f deploy/session-namespace.yaml
-kubectl apply -f deploy/rbac.yaml
+CHART_VERSION=X.Y.Z
+kubectl get namespace pvc-migrate-system
+helm upgrade --install pvc-migrate \
+  oci://ghcr.io/labring-sigs/pvc-migrate/charts/pvc-migrate \
+  --version "$CHART_VERSION" --namespace pvc-migrate-system \
+  --rollback-on-failure --wait --timeout 10m --history-max 10
+helm test pvc-migrate --namespace pvc-migrate-system --logs
 ```
 
-The default ClusterRole excludes Pod exec. KubeBlocks MongoDB native switchover needs it for the source namespace only:
+The controller and tool image versions automatically match the selected chart
+version. No image overrides are required. The chart installs workflow CRDs
+and defaults to two controller replicas with leader election, restricted security
+contexts, health probes, resource requests/limits, and a disruption budget.
+It never creates namespaces. For Helm 3.17+, use `--atomic` instead of
+`--rollback-on-failure`. See [chart operations](charts/pvc-migrate/README.md)
+for source-chart installation, values, CRD upgrades, adoption of existing
+manifests, and rollback.
 
-```bash
-SOURCE_NAMESPACE=app
-kubectl apply -f deploy/kubeblocks-mongodb-rbac.yaml
-kubectl create rolebinding pvc-migrate-kubeblocks-mongodb \
-  --namespace "$SOURCE_NAMESPACE" \
-  --clusterrole pvc-migrate-kubeblocks-mongodb \
-  --serviceaccount pvc-migrate-system:pvc-migrate
+The default ClusterRole excludes Pod exec. KubeBlocks MongoDB native
+switchover needs it only in approved source namespaces. Add to your values:
+
+```yaml
+rbac:
+  kubeBlocksMongoDBNamespaces:
+    - application
 ```
 
 A locally executed CLI uses the identity from its kubeconfig and requires equivalent permissions.
@@ -58,8 +71,8 @@ The role reads repository credentials by exact name and grants the controller
 the Secret verbs required by Helm's default release storage driver, including
 listing release history by label. Secret access remains limited to the
 controller/operator identity. Controller sessions use workflow CRDs and
-Kubernetes Leases, so this role intentionally has no session ConfigMap
-permissions; ConfigMap access belongs to the local CLI/session backend.
+Kubernetes Leases. The role has only ConfigMap `get` permission to reject
+cross-backend session name collisions; it cannot write ConfigMap sessions.
 
 Build the tool image. It runs the CLI by default and also supplies PVC reservation, rsync, SSHD, and rclone roles inside the cluster:
 
@@ -80,24 +93,17 @@ the required workflow CRDs are installed.
 - `--mode=session` always stores sessions in ConfigMaps and executes the workflow in the invoking process.
 - `--mode=controller` stores local sessions as operation-specific `migrate.sealos.io/v1alpha1` CRs. The CLI defaults to namespaced kinds for tenant-local work and selects a `Cluster*` kind when namespace roles differ. Cluster-scoped kinds also accept same-namespace roles, which is useful for an administrator submitting a workflow with cluster-level authority. Pod migration with administrator-selected temporary or session namespaces uses `ClusterPodMigration` while keeping the workload and PVC identities in the source namespace. PVC identity moves always use the cluster-scoped `Move`. Backup, restore, and rename intentionally have no cluster-scoped form. Cross-cluster workflows remain on the ConfigMap/session backend. The controller uses leader election, watches every installed workflow kind, and reuses the same resumable app.Service state machine. The CLI watches that CR and waits for completion by default; use `--wait=false` for detached submission. A command fails clearly when its matching CRD is absent.
 
-Install the controller backend with:
-
-```bash
-kubectl apply -f deploy/crd.yaml
-kubectl apply -f deploy/session-namespace.yaml
-kubectl apply -f deploy/rbac.yaml
-kubectl apply -f deploy/controller.yaml
-```
-
-The repository also exposes the standard Kubebuilder/kustomize entrypoint:
-
-```bash
-kubectl apply -k config/default
-```
+Install the controller backend using the Helm command above. The `config/`
+Kubebuilder files and `deploy/` reference manifests remain available for
+development and permission review; do not apply them over a Helm-managed
+installation. The legacy namespace manifest creates a namespace explicitly
+and is not part of the Helm chart.
 
 Run `make manifests` after changing API markers. It regenerates the typed
 deep-copy code and the CRD under `config/crd/bases`, then synchronizes the
-single-installation `deploy/crd.yaml` file.
+single-installation `deploy/crd.yaml` file and chart `crds/` directory.
+`make chart-lint` checks templates and deployment contracts;
+`make chart-package` produces a versioned chart archive in `bin/`.
 
 Namespaced workflow CRDs use `metadata.namespace` as their tenant boundary.
 Their specs and local object references expose no namespace fields; conversion
@@ -149,7 +155,11 @@ does not treat them as reconcile errors; inspect the controller Deployment logs
 for structured reconciliation and data-plane events. Raw tool Pod streams and
 command-oriented `Next steps` guidance remain CLI-only.
 
-The controller image defaults to `ghcr.io/labring-sigs/pvc-migrate:dev`; set the image explicitly in `deploy/controller.yaml` for a released build.
+Released Helm charts default both images to
+`ghcr.io/labring-sigs/pvc-migrate:<chart-version>`. Explicit `image.tag`,
+`image.digest`, or `toolImage.tag` overrides are optional. Chart values apply
+to controller Pods; workflow transfer Pod configuration is managed by the
+application.
 
 ### Real-cluster E2E
 
