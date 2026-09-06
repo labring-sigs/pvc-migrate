@@ -578,7 +578,12 @@ func (s *CRDSessionStore) checkWorkflowNameCollision(
 	}
 
 	namespaces := uniqueWorkflowNamespaces(session.Spec)
-	if err := s.checkConfigMapNameCollision(ctx, session.ID, namespaces, failOnForbidden); err != nil {
+	if err := s.checkConfigMapNameCollision(
+		ctx,
+		session.ID,
+		namespaces,
+		failOnForbidden,
+	); err != nil {
 		return err
 	}
 
@@ -667,18 +672,30 @@ func (s *CRDSessionStore) checkConfigMapNameCollision(
 
 	for _, namespace := range namespaces {
 		name := SessionConfigMapName(id)
+
 		_, err := s.leaseClient.CoreV1().ConfigMaps(namespace).Get(ctx, name, metav1.GetOptions{})
 		if apierrors.IsNotFound(err) || apierrors.IsForbidden(err) && !failOnForbidden {
 			continue
 		}
+
 		if err != nil {
-			return domain.WrapError(domain.ErrorKubernetes, "check workflow name collision", "read session ConfigMap", err)
+			return domain.WrapError(
+				domain.ErrorKubernetes,
+				"check workflow name collision",
+				"read session ConfigMap",
+				err,
+			)
 		}
 
 		return domain.NewError(
 			domain.ErrorConflict,
 			"check workflow name collision",
-			fmt.Sprintf("workflow name %q is already used by ConfigMap session %s/%s; use a different workflow name", id, namespace, name),
+			fmt.Sprintf(
+				"workflow name %q is already used by ConfigMap session %s/%s; use a different workflow name",
+				id,
+				namespace,
+				name,
+			),
 		)
 	}
 

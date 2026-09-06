@@ -948,8 +948,13 @@ func (p *Planner) checkPlanSourceNode(state *planState) {
 			if pv != nil && !kube.PVSupportsNode(pv, node) {
 				state.plan.AddCheck(failed(
 					domain.CheckNameSourceNode,
-					fmt.Sprintf("source PV %s node affinity does not allow source node %s", pv.Name, node.Name),
+					fmt.Sprintf(
+						"source PV %s node affinity does not allow source node %s",
+						pv.Name,
+						node.Name,
+					),
 				))
+
 				return
 			}
 		}
