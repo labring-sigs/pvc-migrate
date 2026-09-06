@@ -59,6 +59,7 @@ func crossFixture() (*Service, Options, *fakeCopier) {
 			},
 		},
 		&corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "app"}},
+		&corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "pvc-migrate-system"}},
 		&corev1.PersistentVolumeClaim{
 			ObjectMeta: metav1.ObjectMeta{Namespace: "app", Name: "data", UID: "source-pvc"},
 			Spec: corev1.PersistentVolumeClaimSpec{
@@ -164,6 +165,54 @@ func crossFixture() (*Service, Options, *fakeCopier) {
 	}
 
 	return service, options, copier
+}
+
+func TestCrossClusterMissingNamespacesRejectPlanningAndStalePlans(t *testing.T) {
+	for _, role := range []string{"session", "destination"} {
+		t.Run(role, func(t *testing.T) {
+			service, options, _ := crossFixture()
+			ctx := context.Background()
+
+			stalePlan, err := service.Plan(ctx, options)
+			if err != nil || !stalePlan.Ready {
+				t.Fatalf("initial plan=%+v error=%v", stalePlan, err)
+			}
+
+			source := testutil.MustType[*fake.Clientset](t, service.SourceClientForTest())
+			destination := testutil.MustType[*fake.Clientset](t, service.DestinationClientForTest())
+
+			client, name := source, options.SessionNamespace
+			if role == "destination" {
+				client, name = destination, options.DestinationNamespace
+			}
+
+			if err := client.CoreV1().
+				Namespaces().
+				Delete(ctx, name, metav1.DeleteOptions{}); err != nil {
+				t.Fatal(err)
+			}
+
+			source.ClearActions()
+			destination.ClearActions()
+
+			plan, err := service.Plan(ctx, options)
+			if err != nil || plan.Ready {
+				t.Fatalf("missing namespace plan=%+v error=%v", plan, err)
+			}
+
+			_, err = service.CreateSession(ctx, options, stalePlan)
+			if domain.CategoryOf(err) != domain.ErrorPrecondition ||
+				!strings.Contains(err.Error(), "namespace "+name+" does not exist") {
+				t.Fatalf("stale plan: %v", err)
+			}
+
+			for _, action := range append(source.Actions(), destination.Actions()...) {
+				if action.GetVerb() != "get" && action.GetVerb() != "list" {
+					t.Fatalf("missing namespace caused a write: %#v", action)
+				}
+			}
+		})
+	}
 }
 
 func TestPlanAndCreateSessionKeepClustersSeparate(t *testing.T) {

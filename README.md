@@ -18,6 +18,7 @@
 
 - A Kubernetes cluster with filesystem PVC support
 - Kubernetes credentials with the permissions validated by the relevant `plan` command
+- Pre-existing session, temporary, and destination namespaces; the CLI and controller report an error when a required namespace is missing and never create namespaces automatically
 - Network access for the temporary tool image on source and target nodes
 - Go 1.27.0 or a compatible newer toolchain when building from source
 

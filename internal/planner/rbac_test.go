@@ -10,10 +10,21 @@ import (
 	"github.com/labring-sigs/pvc-migrate/internal/kube"
 	"github.com/labring-sigs/pvc-migrate/internal/testutil"
 	authorizationv1 "k8s.io/api/authorization/v1"
+	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	kubernetesfake "k8s.io/client-go/kubernetes/fake"
 	clienttesting "k8s.io/client-go/testing"
 )
+
+func rbacTestClient() *kubernetesfake.Clientset {
+	return kubernetesfake.NewClientset(
+		&corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "app"}},
+		&corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "stage"}},
+		&corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "system"}},
+		&corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "destination"}},
+	)
+}
 
 func TestCheckRBACIncludesToolAndVolumePermissions(t *testing.T) {
 	seen := collectAllowedAccessReviews(t, domain.WorkloadSpec{}, false, false)
@@ -84,7 +95,7 @@ func TestCheckRBACIncludesOpenEBSLVMVolumePermissionsWhenNeeded(t *testing.T) {
 }
 
 func TestCheckRBACRejectsMissingSessionLeasePermission(t *testing.T) {
-	client := kubernetesfake.NewClientset()
+	client := rbacTestClient()
 	client.PrependReactor(
 		"create",
 		"selfsubjectaccessreviews",
@@ -365,7 +376,7 @@ func TestCheckRBACIncludesControllerSpecificPermissions(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			client := kubernetesfake.NewClientset()
+			client := rbacTestClient()
 			seen := make([]authorizationv1.ResourceAttributes, 0)
 			client.PrependReactor(
 				"create",
@@ -408,7 +419,7 @@ func TestCheckRBACIncludesControllerSpecificPermissions(t *testing.T) {
 }
 
 func TestCheckRBACDeduplicatesEqualSourceAndStagingNamespace(t *testing.T) {
-	client := kubernetesfake.NewClientset()
+	client := rbacTestClient()
 	podGets := 0
 	client.PrependReactor(
 		"create",
@@ -443,7 +454,7 @@ func TestCheckRBACDeduplicatesEqualSourceAndStagingNamespace(t *testing.T) {
 }
 
 func TestCheckRBACAggregatesDeniedPermissionsAndReasons(t *testing.T) {
-	client := kubernetesfake.NewClientset()
+	client := rbacTestClient()
 	client.PrependReactor(
 		"create",
 		"selfsubjectaccessreviews",
@@ -489,7 +500,7 @@ func TestCheckRBACAggregatesDeniedPermissionsAndReasons(t *testing.T) {
 }
 
 func TestCheckRBACStopsOnReviewError(t *testing.T) {
-	client := kubernetesfake.NewClientset()
+	client := rbacTestClient()
 	calls := 0
 	client.PrependReactor(
 		"create",
@@ -539,7 +550,7 @@ func collectAllowedAccessReviews(
 ) []authorizationv1.ResourceAttributes {
 	t.Helper()
 
-	client := kubernetesfake.NewClientset()
+	client := rbacTestClient()
 	seen := make([]authorizationv1.ResourceAttributes, 0)
 	client.PrependReactor(
 		"create",

@@ -763,7 +763,7 @@ func requestSources(requests []copyengine.Request) []string {
 	return names
 }
 
-func TestCreateSessionValidatesPlanAndCreatesDistinctNamespaces(t *testing.T) {
+func TestCreateSessionValidatesPlanAndUsesDistinctExistingNamespaces(t *testing.T) {
 	fixture := newRecoveryFixture(t)
 	if _, err := fixture.service.CreateSession(
 		context.Background(),
@@ -791,6 +791,16 @@ func TestCreateSessionValidatesPlanAndCreatesDistinctNamespaces(t *testing.T) {
 	session.Spec.Volumes[0].DestinationPVC.Namespace = "destination"
 	plan := &domain.MigrationPlan{SessionID: session.ID, SessionSpec: session.Spec, Ready: true}
 
+	for _, name := range []string{"sessions", "temporary", "destination"} {
+		if err := testutil.MustType[*fake.Clientset](
+			t,
+			fixture.client,
+		).Tracker().
+			Add(&corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: name}}); err != nil {
+			t.Fatal(err)
+		}
+	}
+
 	created, err := fixture.service.CreateSession(context.Background(), plan, false)
 	if err != nil {
 		t.Fatal(err)
@@ -809,8 +819,12 @@ func TestCreateSessionValidatesPlanAndCreatesDistinctNamespaces(t *testing.T) {
 	}
 }
 
-func TestCreateSessionCreatesSessionNamespaceBeforeLease(t *testing.T) {
-	client := fake.NewClientset()
+func TestCreateSessionUsesExistingSessionNamespaceBeforeLease(t *testing.T) {
+	client := fake.NewClientset(
+		&corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "sessions"}},
+		&corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "temporary"}},
+		&corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "destination"}},
+	)
 	assignLeaseUIDs(client)
 	store := kube.NewConfigMapSessionStore(client)
 	reserver := &scriptedReserver{failures: map[string]error{}}
@@ -855,6 +869,52 @@ func TestCreateSessionCreatesSessionNamespaceBeforeLease(t *testing.T) {
 		Leases("sessions").
 		Get(context.Background(), kube.SessionLockName(session.ID), metav1.GetOptions{}); err != nil {
 		t.Fatalf("session Lease: %v", err)
+	}
+}
+
+func TestCreateSessionRejectsMissingNamespaceBeforeCreatingResources(t *testing.T) {
+	for _, missing := range []string{"sessions", "temporary", "destination"} {
+		for _, dryRun := range []bool{false, true} {
+			t.Run(missing+"/dryRun="+strconv.FormatBool(dryRun), func(t *testing.T) {
+				fixture := newRecoveryFixture(t)
+
+				client := testutil.MustType[*fake.Clientset](t, fixture.client)
+				for _, name := range []string{"sessions", "temporary", "destination"} {
+					if name != missing {
+						if err := client.Tracker().
+							Add(&corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: name}}); err != nil {
+							t.Fatal(err)
+						}
+					}
+				}
+
+				session := appTestSession()
+				session.Spec.SessionNamespace = "sessions"
+				session.Spec.TemporaryNamespace = "temporary"
+				session.Spec.Volumes[0].DestinationPVC.Namespace = "destination"
+				plan := &domain.MigrationPlan{
+					SessionID:   session.ID,
+					SessionSpec: session.Spec,
+					Ready:       true,
+				}
+
+				_, err := fixture.service.CreateSession(context.Background(), plan, dryRun)
+				if domain.CategoryOf(err) != domain.ErrorPrecondition ||
+					!strings.Contains(err.Error(), "namespace "+missing+" does not exist") {
+					t.Fatalf("missing namespace: %v", err)
+				}
+
+				if fixture.store.creates != 0 {
+					t.Fatal("created a session despite missing namespace")
+				}
+
+				for _, action := range client.Actions() {
+					if action.GetVerb() != "get" {
+						t.Fatalf("missing namespace caused a write: %#v", action)
+					}
+				}
+			})
+		}
 	}
 }
 

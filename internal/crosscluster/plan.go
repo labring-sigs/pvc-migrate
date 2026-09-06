@@ -98,16 +98,24 @@ func (s *Service) planCrossClusterEnvironment(
 	}
 
 	var (
-		namespaceErr     error
-		destinationClass *storagev1.StorageClass
-		storageClassErr  error
-		environmentReads sync.WaitGroup
+		namespaceErr        error
+		sessionNamespaceErr error
+		destinationClass    *storagev1.StorageClass
+		storageClassErr     error
+		environmentReads    sync.WaitGroup
 	)
 	environmentReads.Go(func() {
-		_, namespaceErr = s.destination.Kubernetes.CoreV1().Namespaces().Get(
+		namespaceErr = kube.RequireNamespace(
 			ctx,
+			s.destination.Kubernetes,
 			options.DestinationNamespace,
-			metav1.GetOptions{},
+		)
+	})
+	environmentReads.Go(func() {
+		sessionNamespaceErr = kube.RequireNamespace(
+			ctx,
+			s.source.Kubernetes,
+			options.SessionNamespace,
 		)
 	})
 
@@ -120,24 +128,17 @@ func (s *Service) planCrossClusterEnvironment(
 
 	environmentReads.Wait()
 
-	err := namespaceErr
-	switch {
-	case err != nil && !apierrors.IsNotFound(err):
+	if sessionNamespaceErr != nil {
+		plan.AddCheck(domain.CheckNameNamespace, false, "session "+sessionNamespaceErr.Error())
+	}
+
+	if namespaceErr != nil {
 		plan.AddCheck(
 			domain.CheckNameDestinationNamespace,
 			false,
-			fmt.Sprintf("read destination namespace %s: %v", options.DestinationNamespace, err),
+			namespaceErr.Error(),
 		)
-	case apierrors.IsNotFound(err):
-		plan.AddCheck(
-			domain.CheckNameDestinationNamespace,
-			true,
-			fmt.Sprintf(
-				"destination namespace %s will be created by reserve",
-				options.DestinationNamespace,
-			),
-		)
-	default:
+	} else {
 		plan.AddCheck(
 			domain.CheckNameDestinationNamespace,
 			true,

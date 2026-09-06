@@ -14,10 +14,13 @@ import (
 	"github.com/labring-sigs/pvc-migrate/internal/domain"
 	"github.com/labring-sigs/pvc-migrate/internal/kube"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	clientfake "k8s.io/client-go/kubernetes/fake"
+	clienttesting "k8s.io/client-go/testing"
 	crfake "sigs.k8s.io/controller-runtime/pkg/client/fake"
 )
 
@@ -431,6 +434,48 @@ func TestRunnerRequiresServiceBeforeReconcilingCrossNamespaceMigration(t *testin
 	}
 }
 
+func TestRunnerRejectsMissingNamespacesWithoutCreatingThem(t *testing.T) {
+	for _, missing := range []string{"session", "temporary", "destination"} {
+		t.Run(missing, func(t *testing.T) {
+			objects := make([]runtime.Object, 0, 2)
+			for _, name := range []string{"session", "temporary", "destination"} {
+				if name != missing {
+					objects = append(
+						objects,
+						&corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: name}},
+					)
+				}
+			}
+
+			client := clientfake.NewClientset(objects...)
+			runner := NewRunner(
+				&recordingWorkflowResumer{},
+				nil,
+				"session",
+			).WithKubernetesClient(client)
+			spec := domain.NewSessionSpec(domain.OperationCopy, domain.SessionCommon{
+				SourceNamespace: "source", SessionNamespace: "session",
+				TemporaryNamespace: "temporary", DestinationNamespace: "destination",
+			}, false, domain.SessionWorkflowOptions{})
+
+			err := runner.reconcileSession(
+				context.Background(),
+				domain.NewSession("copy", spec, time.Now()),
+			)
+			if domain.CategoryOf(err) != domain.ErrorPrecondition ||
+				!strings.Contains(err.Error(), "namespace "+missing+" does not exist") {
+				t.Fatalf("missing namespace: %v", err)
+			}
+
+			for _, action := range client.Actions() {
+				if action.GetVerb() != "get" || action.GetResource().Resource != "namespaces" {
+					t.Fatalf("missing namespace caused unexpected action: %#v", action)
+				}
+			}
+		})
+	}
+}
+
 func TestRunnerDispatchesEveryControllerWorkflow(t *testing.T) {
 	common := domain.SessionCommon{
 		SourceNamespace:      "system",
@@ -701,6 +746,93 @@ func TestRunnerControllerFailureCheckpointIsQuietAfterPersistence(t *testing.T) 
 
 	if store.latest.Status.Phase != domain.PhaseFailed {
 		t.Fatalf("phase=%s, want %s", store.latest.Status.Phase, domain.PhaseFailed)
+	}
+}
+
+func TestRunnerCheckpointsMissingClusterSessionNamespace(t *testing.T) {
+	missingLease := apierrors.NewNotFound(schema.GroupResource{Resource: "namespaces"}, "system")
+
+	conflict := domain.NewError(
+		domain.ErrorConflict,
+		"update session",
+		"session changed by another process",
+	)
+	for _, test := range []struct {
+		name      string
+		kind      domain.ControllerKind
+		namespace bool
+		forbidden bool
+		lockErr   error
+		updateErr error
+		wantError error
+	}{
+		{name: "missing namespace", kind: domain.ControllerKindClusterCopy, lockErr: missingLease},
+		{name: "namespace exists", kind: domain.ControllerKindClusterCopy, namespace: true, lockErr: missingLease, wantError: missingLease},
+		{name: "namespace unreadable", kind: domain.ControllerKindClusterCopy, forbidden: true, lockErr: missingLease, wantError: missingLease},
+		{name: "namespaced workflow", kind: domain.ControllerKindCopy, lockErr: missingLease, wantError: missingLease},
+		{name: "lock contention", kind: domain.ControllerKindClusterCopy, lockErr: kube.ErrSessionLockContention, wantError: kube.ErrSessionLockContention},
+		{name: "concurrent status update", kind: domain.ControllerKindClusterCopy, lockErr: missingLease, updateErr: conflict, wantError: conflict},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			session := newRunnerSession("missing-session-namespace")
+			session.BackendResource = test.kind
+			store := &runnerSessionStore{
+				listed: session, latest: cloneRunnerSession(session),
+				acquireErr: test.lockErr, updateErr: test.updateErr,
+			}
+
+			client := clientfake.NewClientset()
+			if test.namespace {
+				client = clientfake.NewClientset(
+					&corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "system"}},
+				)
+			}
+
+			if test.forbidden {
+				client.PrependReactor(
+					"get",
+					"namespaces",
+					func(clienttesting.Action) (bool, runtime.Object, error) {
+						return true, nil, apierrors.NewForbidden(
+							schema.GroupResource{Resource: "namespaces"},
+							"system",
+							errors.New("denied"),
+						)
+					},
+				)
+			}
+
+			runner := NewRunner(
+				&recordingWorkflowResumer{},
+				store,
+				"system",
+			).WithKubernetesClient(client)
+			cause := domain.NewError(
+				domain.ErrorPrecondition,
+				"require namespace",
+				"namespace system does not exist",
+			)
+
+			err := runner.checkpointFailureForController(context.Background(), session, cause)
+			if !errors.Is(err, test.wantError) {
+				t.Fatalf("error=%v, want %v", err, test.wantError)
+			}
+
+			if test.wantError == nil {
+				if store.latest.Status.Phase != domain.PhaseFailed ||
+					store.latest.Status.Message != cause.Error() {
+					t.Fatalf("failure checkpoint=%+v", store.latest.Status)
+				}
+			} else if len(store.updates) != 0 {
+				t.Fatal("failed lock or conflicting status update changed the workflow")
+			}
+
+			for _, action := range client.Actions() {
+				if action.GetVerb() != "get" {
+					t.Fatalf("unexpected Kubernetes mutation: %+v", action)
+				}
+			}
+		})
 	}
 }
 

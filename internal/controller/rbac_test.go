@@ -150,7 +150,7 @@ func controllerRolePermissions() map[permissionKey][]string {
 
 	add("migrate.sealos.io", []string{"backuprepositories"}, "get")
 
-	add("", []string{"namespaces"}, "get", "create")
+	add("", []string{"namespaces"}, "get")
 	add("", []string{"nodes"}, "get", "list")
 	add("", []string{"persistentvolumes"}, "get", "list", "update", "delete")
 	add("", []string{"persistentvolumeclaims"}, "get", "list", "create", "update", "delete")

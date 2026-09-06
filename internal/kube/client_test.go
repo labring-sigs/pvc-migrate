@@ -11,68 +11,65 @@ import (
 
 	"github.com/labring-sigs/pvc-migrate/internal/domain"
 	"github.com/labring-sigs/pvc-migrate/internal/testutil"
+	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	discoveryfake "k8s.io/client-go/discovery/fake"
 	"k8s.io/client-go/kubernetes/fake"
 	clienttesting "k8s.io/client-go/testing"
 )
 
-func TestEnsureNamespaceCreateExistingAndDryRun(t *testing.T) {
-	ctx := context.Background()
+func TestRequireNamespaceNeverCreatesOrModifiesNamespaces(t *testing.T) {
+	for _, name := range []string{"existing", "missing", "forbidden", ""} {
+		t.Run(name, func(t *testing.T) {
+			client := fake.NewClientset(
+				&corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "existing"}},
+			)
+			client.PrependReactor(
+				"get",
+				"namespaces",
+				func(action clienttesting.Action) (bool, runtime.Object, error) {
+					if name == "forbidden" {
+						return true, nil, apierrors.NewForbidden(
+							schema.GroupResource{Resource: "namespaces"},
+							name,
+							nil,
+						)
+					}
 
-	client := fake.NewClientset()
-	if err := EnsureNamespace(ctx, client, "system", "session", false); err != nil {
-		t.Fatal(err)
-	}
+					return false, nil, nil
+				},
+			)
 
-	namespace, err := client.CoreV1().Namespaces().Get(ctx, "system", metav1.GetOptions{})
-	if err != nil {
-		t.Fatal(err)
-	}
+			err := RequireNamespace(context.Background(), client, name)
+			switch name {
+			case "existing":
+				if err != nil {
+					t.Fatal(err)
+				}
+			case "missing":
+				if domain.CategoryOf(err) != domain.ErrorPrecondition ||
+					!strings.Contains(err.Error(), "namespace missing does not exist") {
+					t.Fatalf("missing namespace: %v", err)
+				}
+			case "forbidden":
+				if domain.CategoryOf(err) != domain.ErrorKubernetes || !apierrors.IsForbidden(err) {
+					t.Fatalf("forbidden namespace: %v", err)
+				}
+			case "":
+				if domain.CategoryOf(err) != domain.ErrorValidation {
+					t.Fatalf("empty namespace: %v", err)
+				}
+			}
 
-	if namespace.Labels[ManagedByLabel] != ManagedByValue ||
-		namespace.Labels[SessionKey] != "session" {
-		t.Fatalf("namespace labels: %#v", namespace.Labels)
-	}
-
-	if err := EnsureNamespace(ctx, client, "system", "other-session", false); err != nil {
-		t.Fatalf("existing namespace: %v", err)
-	}
-
-	dryRunClient := fake.NewClientset()
-
-	var options metav1.CreateOptions
-	dryRunClient.PrependReactor(
-		"create",
-		"namespaces",
-		func(action clienttesting.Action) (bool, runtime.Object, error) {
-			options = testutil.MustType[interface {
-				GetCreateOptions() metav1.CreateOptions
-			}](t, action).GetCreateOptions()
-
-			return true, testutil.MustActionObject[runtime.Object](t, action), nil
-		},
-	)
-
-	if err := EnsureNamespace(ctx, dryRunClient, "dry-run", "", true); err != nil {
-		t.Fatal(err)
-	}
-
-	if len(options.DryRun) != 1 || options.DryRun[0] != metav1.DryRunAll {
-		t.Fatalf("dry-run options: %#v", options.DryRun)
-	}
-
-	if err := EnsureNamespace(
-		ctx,
-		client,
-		"",
-		"session",
-		false,
-	); domain.CategoryOf(
-		err,
-	) != domain.ErrorValidation {
-		t.Fatalf("empty namespace category=%s error=%v", domain.CategoryOf(err), err)
+			for _, action := range client.Actions() {
+				if action.GetVerb() != "get" || action.GetResource().Resource != "namespaces" {
+					t.Fatalf("namespace check performed unexpected action: %#v", action)
+				}
+			}
+		})
 	}
 }
 

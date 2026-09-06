@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -878,6 +879,80 @@ func TestCleanupOrphanRecoveryProtectsForeignDestinationPVC(t *testing.T) {
 		PersistentVolumeClaims(pvc.Namespace).
 		Get(ctx, pvc.Name, metav1.GetOptions{}); err != nil {
 		t.Fatalf("foreign destination PVC was changed: %v", err)
+	}
+}
+
+func TestCleanupAbortedSourceAliasPreservesSource(t *testing.T) {
+	for _, replaced := range []bool{false, true} {
+		t.Run(fmt.Sprint("replaced=", replaced), func(t *testing.T) {
+			ctx := context.Background()
+			session := appTestSession()
+			setSessionOperation(session, domain.OperationMigrate)
+			session.Status.Phase = domain.PhaseAborted
+			volume := &session.Spec.Volumes[0]
+			volume.DestinationPVC = domain.ObjectReference{
+				Namespace: volume.SourcePVC.Namespace, Name: volume.SourcePVC.Name,
+			}
+
+			pvc := &corev1.PersistentVolumeClaim{ObjectMeta: metav1.ObjectMeta{
+				Namespace: volume.SourcePVC.Namespace,
+				Name:      volume.SourcePVC.Name,
+				UID:       volume.SourcePVC.UID,
+			}, Spec: corev1.PersistentVolumeClaimSpec{VolumeName: volume.SourcePV.Name}}
+			if replaced {
+				pvc.UID = "replacement-uid"
+			}
+
+			pv := &corev1.PersistentVolume{ObjectMeta: metav1.ObjectMeta{
+				Name: volume.SourcePV.Name, UID: volume.SourcePV.UID,
+			}, Spec: corev1.PersistentVolumeSpec{
+				PersistentVolumeReclaimPolicy: corev1.PersistentVolumeReclaimDelete,
+				ClaimRef: &corev1.ObjectReference{
+					Namespace: pvc.Namespace,
+					Name:      pvc.Name,
+					UID:       pvc.UID,
+				},
+			}}
+			client := fake.NewClientset(pvc, pv)
+			store := &memoryStore{}
+			service := &Service{client: client, store: store}
+
+			options := CleanupOptions{
+				DeleteTemporary: true,
+				DeleteRollback:  true,
+				Finalize:        true,
+				DeleteSession:   true,
+			}
+			for _, run := range []func(context.Context, *domain.Session, CleanupOptions) error{
+				service.validateCleanupWorkflowForTest, service.cleanupWorkflowForTest,
+			} {
+				err := run(ctx, session, options)
+				if replaced {
+					if domain.CategoryOf(err) != domain.ErrorConflict {
+						t.Fatalf("replacement category=%s error=%v", domain.CategoryOf(err), err)
+					}
+				} else if err != nil {
+					t.Fatal(err)
+				}
+			}
+
+			gotPVC, err := client.CoreV1().
+				PersistentVolumeClaims(pvc.Namespace).
+				Get(ctx, pvc.Name, metav1.GetOptions{})
+			if err != nil || gotPVC.UID != pvc.UID {
+				t.Fatalf("source PVC changed: %#v, %v", gotPVC, err)
+			}
+
+			gotPV, err := client.CoreV1().PersistentVolumes().Get(ctx, pv.Name, metav1.GetOptions{})
+			if err != nil || gotPV.UID != pv.UID ||
+				gotPV.Spec.PersistentVolumeReclaimPolicy != corev1.PersistentVolumeReclaimDelete {
+				t.Fatalf("source PV changed: %#v, %v", gotPV, err)
+			}
+
+			if !replaced && store.deletes != 1 || replaced && store.deletes != 0 {
+				t.Fatalf("session deletes=%d", store.deletes)
+			}
+		})
 	}
 }
 

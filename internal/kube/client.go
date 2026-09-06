@@ -8,7 +8,6 @@ import (
 
 	v1alpha1 "github.com/labring-sigs/pvc-migrate/api/v1alpha1"
 	"github.com/labring-sigs/pvc-migrate/internal/domain"
-	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	k8sruntime "k8s.io/apimachinery/pkg/runtime"
@@ -114,14 +113,13 @@ func NewClients(kubeconfigPath, kubeContext string) (*Clients, error) {
 	}, nil
 }
 
-func EnsureNamespace(
+func RequireNamespace(
 	ctx context.Context,
 	client kubernetes.Interface,
-	name, sessionID string,
-	dryRun bool,
+	name string,
 ) error {
 	if name == "" {
-		return domain.NewError(domain.ErrorValidation, "ensure namespace", "namespace is empty")
+		return domain.NewError(domain.ErrorValidation, "require namespace", "namespace is empty")
 	}
 
 	_, err := client.CoreV1().Namespaces().Get(ctx, name, metav1.GetOptions{})
@@ -129,43 +127,21 @@ func EnsureNamespace(
 		return nil
 	}
 
-	if !apierrors.IsNotFound(err) {
+	if apierrors.IsNotFound(err) {
 		return domain.WrapError(
-			domain.ErrorKubernetes,
-			"ensure namespace",
-			"read namespace "+name,
+			domain.ErrorPrecondition,
+			"require namespace",
+			fmt.Sprintf("namespace %s does not exist; create it before running this command", name),
 			err,
 		)
 	}
 
-	namespace := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{
-		Name: name,
-		Labels: map[string]string{
-			ManagedByLabel: ManagedByValue,
-		},
-	}}
-	if sessionID != "" {
-		namespace.Labels[SessionKey] = sessionID
-	}
-
-	options := metav1.CreateOptions{}
-	if dryRun {
-		options.DryRun = []string{metav1.DryRunAll}
-	}
-
-	if _, err := client.CoreV1().
-		Namespaces().
-		Create(ctx, namespace, options); err != nil &&
-		!apierrors.IsAlreadyExists(err) {
-		return domain.WrapError(
-			domain.ErrorKubernetes,
-			"ensure namespace",
-			"create namespace "+name,
-			err,
-		)
-	}
-
-	return nil
+	return domain.WrapError(
+		domain.ErrorKubernetes,
+		"require namespace",
+		"read namespace "+name,
+		err,
+	)
 }
 
 func HasAPIResource(

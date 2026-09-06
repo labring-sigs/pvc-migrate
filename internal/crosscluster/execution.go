@@ -94,12 +94,18 @@ func (s *Service) CreateSession(
 		return nil, err
 	}
 
-	if err := kube.EnsureNamespace(
+	if err := kube.RequireNamespace(
 		ctx,
 		s.source.Kubernetes,
 		session.Spec.SessionNamespace,
-		session.ID,
-		false,
+	); err != nil {
+		return nil, err
+	}
+
+	if err := kube.RequireNamespace(
+		ctx,
+		s.destination.Kubernetes,
+		session.Spec.DestinationNamespace,
 	); err != nil {
 		return nil, err
 	}
@@ -253,12 +259,10 @@ func (s *Service) reserve(ctx context.Context, session *Session) error {
 	session.Status.Message = "creating destination PVCs"
 	s.touch(session)
 
-	if err := kube.EnsureNamespace(
+	if err := kube.RequireNamespace(
 		ctx,
 		s.destination.Kubernetes,
 		session.Spec.DestinationNamespace,
-		session.ID,
-		false,
 	); err != nil {
 		return err
 	}

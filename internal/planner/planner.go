@@ -1347,6 +1347,19 @@ func (p *Planner) appendPlanVolume(
 	}
 
 	destinationKey := state.options.StagingNamespace + "/" + destinationName
+	if state.options.StagingNamespace == state.options.SourceNamespace &&
+		slices.Contains(state.pvcNames, destinationName) {
+		state.plan.AddCheck(failed(
+			domain.CheckNameDestinationPVC,
+			fmt.Sprintf(
+				"destination PVC %s conflicts with a source PVC; choose a distinct destination name or temporary namespace",
+				destinationKey,
+			),
+		))
+
+		return false
+	}
+
 	if previousSource, exists := state.destinationSources[destinationKey]; exists {
 		state.plan.AddCheck(failed(
 			domain.CheckNameDestinationPVC,

@@ -409,6 +409,35 @@ func TestPlanPreservesExplicitPVCMappingAndRejectsDuplicateDestinations(t *testi
 	if duplicate.Ready || !hasFailedCheck(duplicate, "destination-pvc") {
 		t.Fatalf("duplicate destination plan checks=%#v", duplicate.Checks)
 	}
+
+	for _, mapping := range [][]string{
+		{"logs=logs", "data=data-new"},
+		{"logs=data", "data=logs"},
+	} {
+		base.StagingNamespace = base.SourceNamespace
+		base.DestinationPVCs = mapping
+
+		conflict, err := New(plannerClient(objects...), nil).plan(context.Background(), base)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		if conflict.Ready ||
+			!hasFailedCheckContaining(conflict, "destination-pvc", "conflicts with a source PVC") {
+			t.Fatalf("source collision mapping=%v checks=%#v", mapping, conflict.Checks)
+		}
+
+		base.StagingNamespace = "system"
+
+		separate, err := New(plannerClient(objects...), nil).plan(context.Background(), base)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		if !separate.Ready {
+			t.Fatalf("separate namespace mapping=%v checks=%#v", mapping, separate.Checks)
+		}
+	}
 }
 
 func TestCopySupportsOfflineAndOnlineModesAcrossNamespaces(t *testing.T) {
