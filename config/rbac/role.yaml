@@ -16,6 +16,10 @@ rules:
     resources: ["namespaces"]
     verbs: ["get"]
   - apiGroups: [""]
+    resources: ["configmaps"]
+    # Session IDs share resource ownership and Leases across persistence backends.
+    verbs: ["get"]
+  - apiGroups: [""]
     resources: ["nodes"]
     verbs: ["get", "list"]
   - apiGroups: [""]
