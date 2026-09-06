@@ -230,6 +230,16 @@ func (r *Runner) persistFailure(
 		kube.SessionLockID(session),
 	)
 	if err != nil {
+		resource, ok := domain.ControllerResourceForKind(session.BackendResource)
+		if r.client != nil && ok && resource.Cluster && apierrors.IsNotFound(err) {
+			namespaceErr := kube.RequireNamespace(ctx, r.client, namespace)
+			if apierrors.IsNotFound(namespaceErr) {
+				// An absent namespace cannot hold a Lease. The CR's resourceVersion
+				// still fences this failure checkpoint against concurrent updates.
+				return r.transitionFailure(ctx, session, cause)
+			}
+		}
+
 		return err
 	}
 
