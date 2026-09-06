@@ -56,7 +56,7 @@ func (s *Switcher) VerifyVolumeOffline(ctx context.Context, volume *domain.Volum
 	if volume == nil {
 		return domain.NewError(domain.ErrorValidation, "verify PVC offline", "volume is nil")
 	}
-	return s.verifyVolumesOffline(ctx, "", []*domain.VolumeSpec{volume})
+	return s.verifyVolumesOffline(ctx, "", []*domain.VolumeSpec{volume}, false)
 }
 
 type offlineIdentityKey struct {
@@ -65,10 +65,11 @@ type offlineIdentityKey struct {
 }
 
 type offlineIdentityRead struct {
-	pvc  domain.ObjectReference
-	pv   domain.ObjectReference
-	role string
-	err  error
+	pvc           domain.ObjectReference
+	pv            domain.ObjectReference
+	role          string
+	err           error
+	recoveryClaim *domain.ObjectReference
 }
 
 type podListResult struct {
@@ -79,7 +80,7 @@ type podListResult struct {
 // VerifyVolumesOffline shares namespace and cluster-wide inventory reads
 // across volumes while preserving source-first, input-order validation.
 func (s *Switcher) VerifyVolumesOffline(ctx context.Context, volumes []*domain.VolumeSpec) error {
-	return s.verifyVolumesOffline(ctx, "", volumes)
+	return s.verifyVolumesOffline(ctx, "", volumes, false)
 }
 
 // VerifyVolumesOfflineForSession also fences live PVC/PV ownership. This
@@ -98,19 +99,37 @@ func (s *Switcher) VerifyVolumesOfflineForSession(
 		)
 	}
 
-	return s.verifyVolumesOffline(ctx, sessionID, volumes)
+	return s.verifyVolumesOffline(ctx, sessionID, volumes, false)
+}
+
+// VerifyActivationRecovery accepts missing claims only when their retained PVs
+// still prove session ownership and an expected cutover binding.
+func (s *Switcher) VerifyActivationRecovery(
+	ctx context.Context,
+	sessionID string,
+	volumes []*domain.VolumeSpec,
+) error {
+	if strings.TrimSpace(sessionID) == "" {
+		return domain.NewError(
+			domain.ErrorValidation,
+			"verify activation recovery",
+			"session ID is required",
+		)
+	}
+	return s.verifyVolumesOffline(ctx, sessionID, volumes, true)
 }
 
 func (s *Switcher) verifyVolumesOffline(
 	ctx context.Context,
 	sessionID string,
 	volumes []*domain.VolumeSpec,
+	recovering bool,
 ) error {
 	identities := make([]offlineIdentityRead, 0, 2*len(volumes))
 	identityIndexes := make([]int, 0, 2*len(volumes))
 	identityByKey := make(map[offlineIdentityKey]int, 2*len(volumes))
 
-	addIdentity := func(pvc, pv domain.ObjectReference, role string) {
+	addIdentity := func(pvc, pv domain.ObjectReference, role string, recoveryClaim domain.ObjectReference) {
 		key := offlineIdentityKey{pvc: pvc, pv: pv}
 
 		index, exists := identityByKey[key]
@@ -119,6 +138,9 @@ func (s *Switcher) verifyVolumesOffline(
 			identityByKey[key] = index
 
 			identities = append(identities, offlineIdentityRead{pvc: pvc, pv: pv, role: role})
+			if recovering {
+				identities[index].recoveryClaim = &recoveryClaim
+			}
 		}
 
 		identityIndexes = append(identityIndexes, index)
@@ -128,8 +150,13 @@ func (s *Switcher) verifyVolumesOffline(
 			return domain.NewError(domain.ErrorValidation, "verify PVC offline", "volume is nil")
 		}
 
-		addIdentity(volume.SourcePVC, volume.SourcePV, ResourceRoleSource)
-		addIdentity(volume.DestinationPVC, volume.DestinationPV, ResourceRoleDestination)
+		addIdentity(volume.SourcePVC, volume.SourcePV, ResourceRoleSource, domain.ObjectReference{})
+		addIdentity(
+			volume.DestinationPVC,
+			volume.DestinationPV,
+			ResourceRoleDestination,
+			volume.SourcePVC,
+		)
 	}
 
 	parallel.For(len(identities), func(index int) {
@@ -140,6 +167,7 @@ func (s *Switcher) verifyVolumesOffline(
 			identity.pv,
 			identity.role,
 			sessionID,
+			identity.recoveryClaim,
 		)
 	})
 

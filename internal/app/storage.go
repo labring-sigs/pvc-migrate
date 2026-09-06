@@ -191,7 +191,7 @@ func (s *Service) validateActivationStorage(ctx context.Context, session *domain
 		offline = append(offline, &session.Spec.Volumes[index])
 	}
 
-	return s.verifyVolumesOffline(ctx, session, offline)
+	return s.switcher.VerifyActivationRecovery(ctx, session.ID, offline)
 }
 
 func (s *Service) unrecordedActivePVC(

@@ -296,6 +296,14 @@ func (f *fakeSwitcher) VerifyVolumesOfflineForSession(
 	return nil
 }
 
+func (f *fakeSwitcher) VerifyActivationRecovery(
+	ctx context.Context,
+	sessionID string,
+	volumes []*domain.VolumeSpec,
+) error {
+	return f.VerifyVolumesOfflineForSession(ctx, sessionID, volumes)
+}
+
 func (f *fakeSwitcher) ActivateVolume(
 	ctx context.Context,
 	session *domain.Session,

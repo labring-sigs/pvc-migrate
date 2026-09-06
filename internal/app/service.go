@@ -88,6 +88,11 @@ type workloadController interface {
 }
 
 type volumeSwitcher interface {
+	VerifyActivationRecovery(
+		ctx context.Context,
+		sessionID string,
+		volumes []*domain.VolumeSpec,
+	) error
 	VerifyVolumeOffline(ctx context.Context, volume *domain.VolumeSpec) error
 	VerifyVolumesOfflineForSession(
 		ctx context.Context,
