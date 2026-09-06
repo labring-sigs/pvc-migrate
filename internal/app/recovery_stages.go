@@ -23,7 +23,9 @@ func (s *Service) abort(ctx context.Context, session *domain.Session) error {
 		)
 	}
 
-	if session.Status.Phase == domain.PhaseActivated ||
+	if session.Status.Phase == domain.PhaseActivating ||
+		session.Status.Phase == domain.PhaseResuming ||
+		session.Status.Phase == domain.PhaseActivated ||
 		session.Status.Phase == domain.PhaseCompleted ||
 		session.Status.ResumeFrom == domain.PhaseActivating ||
 		session.Status.ResumeFrom == domain.PhaseResuming {

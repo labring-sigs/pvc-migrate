@@ -127,7 +127,10 @@ func TestControllerSubmissionChecksOnlySelectedWorkflow(t *testing.T) {
 				resource, namespace = "clustercopies", ""
 			}
 
-			client := kubernetesfake.NewClientset()
+			client := kubernetesfake.NewClientset(
+				&corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "app"}},
+				&corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "destination"}},
+			)
 			calls := 0
 			client.PrependReactor(
 				"create",
@@ -159,6 +162,67 @@ func TestControllerSubmissionChecksOnlySelectedWorkflow(t *testing.T) {
 				t.Fatalf("submission checks=%#v calls=%d", plan.Checks, calls)
 			}
 		})
+	}
+}
+
+func TestControllerSubmissionNamespacePreflight(t *testing.T) {
+	for _, forbidden := range []bool{false, true} {
+		client := rbacTestClient()
+		client.PrependReactor(
+			"create",
+			"selfsubjectaccessreviews",
+			func(action clienttesting.Action) (bool, runtime.Object, error) {
+				review := testutil.MustActionObject[*authorizationv1.SelfSubjectAccessReview](
+					t,
+					action,
+				).DeepCopy()
+				review.Status.Allowed = true
+
+				return true, review, nil
+			},
+		)
+		client.PrependReactor(
+			"get",
+			"namespaces",
+			func(action clienttesting.Action) (bool, runtime.Object, error) {
+				if forbidden {
+					return true, nil, apierrors.NewForbidden(
+						schema.GroupResource{Resource: "namespaces"},
+						"missing",
+						nil,
+					)
+				}
+
+				return true, nil, apierrors.NewNotFound(
+					schema.GroupResource{Resource: "namespaces"},
+					"missing",
+				)
+			},
+		)
+
+		spec := domain.NewSessionSpec(
+			domain.OperationCopy,
+			domain.SessionCommon{
+				SessionNamespace:     "missing",
+				TemporaryNamespace:   "missing",
+				DestinationNamespace: "missing",
+			},
+			false,
+			domain.SessionWorkflowOptions{},
+		)
+		plan := &domain.MigrationPlan{Ready: true, SessionID: "preflight"}
+		New(client, nil).checkControllerSubmissionRBAC(t.Context(), plan, spec)
+
+		if plan.Ready != forbidden {
+			t.Fatalf("forbidden=%v ready=%v checks=%v", forbidden, plan.Ready, plan.Checks)
+		}
+
+		for _, action := range client.Actions() {
+			if action.GetVerb() == "create" &&
+				action.GetResource().Resource != "selfsubjectaccessreviews" {
+				t.Fatal("preflight created a resource")
+			}
+		}
 	}
 }
 

@@ -251,11 +251,50 @@ func (s *Service) withSessionLock(
 		return domain.NewError(domain.ErrorValidation, "session lock", "session is nil")
 	}
 
+	if session.Deleting && ctx.Value(workflowDeletionContextKey{}) != true {
+		return domain.NewError(
+			domain.ErrorPrecondition,
+			"session lock",
+			"workflow is being deleted; the controller owns recovery and cleanup",
+		)
+	}
+
 	return s.withSessionIDLock(
 		ctx,
 		session.Spec.SessionNamespace,
 		kube.SessionLockID(session),
-		fn,
+		func(lockedCtx context.Context) error {
+			if store, ok := s.store.(kube.ControllerSessionStore); ok &&
+				ctx.Value(workflowDeletionContextKey{}) != true && session.BackendResource != "" {
+				latest, err := store.GetByKind(
+					lockedCtx,
+					session.Spec.SessionNamespace,
+					session.ID,
+					session.BackendResource,
+				)
+				if err != nil {
+					return err
+				}
+
+				if latest.Deleting {
+					return domain.NewError(
+						domain.ErrorPrecondition,
+						"session lock",
+						"workflow is being deleted; the controller owns recovery and cleanup",
+					)
+				}
+
+				if latest.BackendUID != session.BackendUID {
+					return domain.NewError(
+						domain.ErrorConflict,
+						"session lock",
+						"workflow UID changed after it was loaded",
+					)
+				}
+			}
+
+			return fn(lockedCtx)
+		},
 	)
 }
 
@@ -463,6 +502,8 @@ func (s *Service) failContext(ctx context.Context, session *domain.Session, caus
 
 	if session.Status.Phase != domain.PhaseFailed {
 		session.Status.FailureReason = failureReason(cause)
+
+		session.Status.ErrorCategory = domain.CategoryOf(cause)
 		if err := session.Transition(domain.PhaseFailed, cause.Error(), s.now()); err != nil {
 			return errors.Join(cause, err)
 		}

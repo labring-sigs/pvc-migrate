@@ -402,6 +402,22 @@ func (s *Service) validateAbortedActivePV(
 }
 
 func (s *Service) deleteCleanupSession(ctx context.Context, session *domain.Session) error {
+	if ctx.Value(workflowDeletionContextKey{}) == true {
+		// Once deletion is requested, normal lifecycle mutations are rejected.
+		// Remove the Lease before the finalizer so failed Lease deletion remains
+		// retryable while the CR still records its ownership and checkpoints.
+		if held, ok := ctx.Value(sessionLockContextKey{}).(heldSessionLock); ok {
+			deleteCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+			defer cancel()
+
+			if err := held.lock.Delete(deleteCtx); err != nil {
+				return err
+			}
+
+			return s.store.Delete(deleteCtx, session)
+		}
+	}
+
 	if err := s.store.Delete(ctx, session); err != nil {
 		return err
 	}

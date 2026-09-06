@@ -997,6 +997,7 @@ type SessionStatus struct {
 	Phase               Phase                `json:"phase"                   yaml:"phase"`
 	ResumeFrom          Phase                `json:"resumeFrom,omitempty"    yaml:"resumeFrom,omitempty"`
 	FailureReason       SessionFailureReason `json:"failureReason,omitempty" yaml:"failureReason,omitempty"`
+	ErrorCategory       ErrorCategory        `json:"errorCategory,omitempty" yaml:"errorCategory,omitempty"`
 	WarmPassesCompleted int                  `json:"warmPassesCompleted"     yaml:"warmPassesCompleted"`
 	// OriginalPodSnapshotHash records the controller-captured standalone Pod
 	// snapshot used for a later workload resume. It is populated only for
@@ -1324,6 +1325,7 @@ func (s *Session) Transition(next Phase, message string, now time.Time) error {
 	s.Status.Phase = next
 	if next != PhaseFailed {
 		s.Status.FailureReason = ""
+		s.Status.ErrorCategory = ""
 	}
 
 	message = BoundWorkflowMessage(message)
@@ -1361,6 +1363,7 @@ func (s *Session) Reactivate(message string, now time.Time) error {
 	t := metav1.NewTime(now.UTC())
 	s.Status.Phase = s.Status.ResumeFrom
 	s.Status.FailureReason = ""
+	s.Status.ErrorCategory = ""
 	message = BoundWorkflowMessage(message)
 	s.Status.Message = message
 	s.Status.UpdatedAt = t

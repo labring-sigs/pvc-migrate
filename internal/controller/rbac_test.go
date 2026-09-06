@@ -161,6 +161,7 @@ func controllerRolePermissions() map[permissionKey][]string {
 	add("", []string{"secrets"}, "get", "list", "create", "update", "patch", "delete")
 	add("", []string{"serviceaccounts"}, "create", "get", "update")
 	add("", []string{"events"}, "list", "create", "patch")
+	add("events.k8s.io", []string{"events"}, "create", "patch")
 	add("", []string{"resourcequotas", "limitranges"}, "list")
 	add("apps", []string{"deployments"}, "get", "list", "create", "update", "patch", "delete")
 	add("autoscaling", []string{"horizontalpodautoscalers"}, "list")

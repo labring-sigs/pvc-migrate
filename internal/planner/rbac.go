@@ -11,6 +11,7 @@ import (
 	"github.com/labring-sigs/pvc-migrate/internal/kube"
 	"github.com/labring-sigs/pvc-migrate/internal/parallel"
 	authorizationv1 "k8s.io/api/authorization/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
@@ -307,6 +308,36 @@ func (p *Planner) checkControllerSubmissionRBAC(
 	plan *domain.MigrationPlan,
 	spec domain.SessionSpec,
 ) {
+	namespaces := make([]string, 0, 3+len(spec.Volumes))
+
+	namespaces = append(namespaces,
+		spec.SessionNamespace,
+		spec.TemporaryNamespace,
+		spec.DestinationNamespace,
+	)
+	for _, volume := range spec.Volumes {
+		namespaces = append(namespaces, volume.DestinationPVC.Namespace)
+	}
+
+	for _, namespace := range uniqueSorted(namespaces) {
+		if namespace == "" {
+			continue
+		}
+
+		if err := kube.RequireNamespace(ctx, p.client, namespace); err != nil {
+			if apierrors.IsForbidden(err) {
+				plan.AddCheck(
+					warned(
+						domain.CheckNameNamespace,
+						"namespace "+namespace+" existence must be verified by the controller: caller lacks get permission",
+					),
+				)
+			} else {
+				plan.AddCheck(failed(domain.CheckNameNamespace, err.Error()))
+			}
+		}
+	}
+
 	resource, ok := domain.ControllerResourceForSpec(spec)
 	if !ok {
 		plan.AddCheck(failed(domain.CheckNameRBAC, "workflow has no controller resource"))

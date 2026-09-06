@@ -720,8 +720,10 @@ func TestRunnerCheckpointFailureUsesLatestSessionState(t *testing.T) {
 				)
 			}
 
-			if !store.lock.released {
-				t.Fatal("session lock was not released")
+			if store.lock.released != test.wantUpdate {
+				t.Fatal(
+					"terminal checkpoints must skip the Lease; active checkpoints must release it",
+				)
 			}
 		})
 	}

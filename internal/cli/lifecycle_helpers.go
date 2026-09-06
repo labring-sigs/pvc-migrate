@@ -418,7 +418,12 @@ func controllerWaitResultError(session *domain.Session) error {
 		message = "controller workflow failed"
 	}
 
-	return domain.NewError(domain.ErrorInternal, "controller execution", message)
+	category := session.Status.ErrorCategory
+	if category == "" {
+		category = domain.ErrorInternal
+	}
+
+	return domain.NewError(category, "controller execution", message)
 }
 
 func controllerExecutionFinished(session *domain.Session) bool {

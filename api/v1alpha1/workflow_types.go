@@ -303,8 +303,10 @@ type WorkflowHistoryEntry struct {
 }
 
 type WorkflowStatus struct {
-	Phase      WorkflowPhase `json:"phase"                yaml:"phase"`
-	ResumeFrom WorkflowPhase `json:"resumeFrom,omitempty" yaml:"resumeFrom,omitempty"`
+	// +kubebuilder:validation:Enum=validation;precondition;conflict;kubernetes;copy;timeout;internal
+	ErrorCategory string        `json:"errorCategory,omitempty" yaml:"errorCategory,omitempty"`
+	Phase         WorkflowPhase `json:"phase"                yaml:"phase"`
+	ResumeFrom    WorkflowPhase `json:"resumeFrom,omitempty" yaml:"resumeFrom,omitempty"`
 	// +kubebuilder:validation:MaxLength=8192
 	FailureReason      string       `json:"failureReason,omitempty"      yaml:"failureReason,omitempty"`
 	ObservedGeneration int64        `json:"observedGeneration,omitempty" yaml:"observedGeneration,omitempty"`
@@ -1215,6 +1217,7 @@ func workflowStatusFromDomain(s domain.SessionStatus) WorkflowStatus {
 		Phase:              WorkflowPhase(s.Phase),
 		ResumeFrom:         WorkflowPhase(s.ResumeFrom),
 		FailureReason:      domain.BoundWorkflowMessage(string(s.FailureReason)),
+		ErrorCategory:      string(s.ErrorCategory),
 		ObservedGeneration: s.ObservedGeneration,
 		StartedAt:          s.StartedAt,
 		UpdatedAt:          s.UpdatedAt,
@@ -1259,6 +1262,7 @@ func workflowStatusToDomain(s WorkflowStatus) domain.SessionStatus {
 		Phase:              domain.Phase(s.Phase),
 		ResumeFrom:         domain.Phase(s.ResumeFrom),
 		FailureReason:      domain.SessionFailureReason(s.FailureReason),
+		ErrorCategory:      domain.ErrorCategory(s.ErrorCategory),
 		ObservedGeneration: s.ObservedGeneration,
 		StartedAt:          s.StartedAt,
 		UpdatedAt:          s.UpdatedAt,

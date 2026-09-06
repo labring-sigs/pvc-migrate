@@ -996,6 +996,33 @@ func TestCRDSessionStoreRejectsSameNameAcrossKinds(t *testing.T) {
 	}
 }
 
+func TestCRDSessionStoreDeletionRejectsReplacedUID(t *testing.T) {
+	client := newCRDTestClient()
+	store := NewCRDSessionStore(client)
+
+	session := storeTestSession()
+	if err := store.Create(t.Context(), session); err != nil {
+		t.Fatal(err)
+	}
+
+	loaded, err := store.Get(t.Context(), session.Spec.SessionNamespace, session.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	loaded.BackendUID = "previous-workflow"
+
+	loaded.Deleting = true
+	if err := store.Delete(t.Context(), loaded); domain.CategoryOf(err) != domain.ErrorConflict {
+		t.Fatalf("error=%v", err)
+	}
+
+	remaining, err := store.Get(t.Context(), session.Spec.SessionNamespace, session.ID)
+	if err != nil || remaining == nil {
+		t.Fatalf("replacement was removed: %v", err)
+	}
+}
+
 func TestCRDSessionStoreDetectsDeclarativeCollisionAcrossNamespaceRoles(t *testing.T) {
 	ctx := context.Background()
 	client := newCRDTestClient()

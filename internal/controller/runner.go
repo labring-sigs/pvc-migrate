@@ -152,7 +152,7 @@ func (r *Runner) ReconcileOnce(ctx context.Context) error {
 
 	var failures []error
 	for _, session := range sessions {
-		if session == nil || terminalSession(session) {
+		if session == nil || session.Deleting || terminalSession(session) {
 			continue
 		}
 
@@ -223,6 +223,15 @@ func (r *Runner) persistFailure(
 
 	namespace := session.Spec.SessionNamespace
 
+	latest, err := r.store.GetByKind(ctx, namespace, session.ID, session.BackendResource)
+	if err != nil {
+		return err
+	}
+
+	if latest == nil || latest.Deleting || terminalSession(latest) {
+		return nil
+	}
+
 	lock, err := kube.AcquireRequiredSessionLock(
 		ctx,
 		r.store,
@@ -255,7 +264,8 @@ func (r *Runner) persistFailure(
 			return getErr
 		}
 
-		if latest == nil || terminalSession(latest) || latest.Status.Phase == domain.PhaseFailed {
+		if latest == nil || latest.Deleting || terminalSession(latest) ||
+			latest.Status.Phase == domain.PhaseFailed {
 			return nil
 		}
 
@@ -288,6 +298,8 @@ func (r *Runner) transitionFailure(
 	if err := session.Transition(domain.PhaseFailed, cause.Error(), time.Now()); err != nil {
 		return err
 	}
+
+	session.Status.ErrorCategory = domain.CategoryOf(cause)
 
 	if err := r.store.Update(ctx, session); err != nil {
 		return err

@@ -1530,6 +1530,14 @@ func (s *CRDSessionStore) Delete(ctx context.Context, session *domain.Session) e
 		)
 	}
 
+	if session.BackendUID != "" && object.GetUID() != session.BackendUID {
+		return domain.NewError(
+			domain.ErrorConflict,
+			"delete session",
+			"workflow UID changed after it was loaded",
+		)
+	}
+
 	// Namespace deletion already marked the workflow for deletion. Removing
 	// our protection finalizer is the only required action; issuing another
 	// Delete can fail while the namespace is terminating and creates a noisy,

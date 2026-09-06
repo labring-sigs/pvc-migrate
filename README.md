@@ -155,6 +155,23 @@ does not treat them as reconcile errors; inspect the controller Deployment logs
 for structured reconciliation and data-plane events. Raw tool Pod streams and
 command-oriented `Next steps` guidance remain CLI-only.
 
+Deleting a workflow CR requests cancellation and finalization. Before storage
+activation, the controller stops transfer tools, restores paused workloads and
+removes staging resources. Once activation has started, it finishes the storage
+switch before cleanup; an in-progress rollback is completed instead. Successful
+Copy output and the current active migration volume are retained. Deleting a
+migration CR closes its rollback window and removes the inactive rollback volume.
+Use the explicit rollback command before deletion to keep the original volume.
+
+The protection finalizer remains until recovery and cleanup succeed, including
+Lease removal. Inspect the `Deleting` and `DeletionBlocked` conditions, Events and
+controller logs when deletion is waiting. Resource identity conflicts and missing
+or terminating session namespaces require operator intervention; namespaces are
+never recreated. Backup/Restore payload data is retained, and unattributable
+orphan transfer Jobs or Pods block deletion pending inspection. Do not force-remove
+the finalizer to stop a running transfer. Normal CLI lifecycle mutations are
+rejected once deletion has started.
+
 Released Helm charts default both images to
 `ghcr.io/labring-sigs/pvc-migrate:<chart-version>`. Explicit `image.tag`,
 `image.digest`, or `toolImage.tag` overrides are optional. Chart values apply
