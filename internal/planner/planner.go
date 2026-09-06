@@ -943,6 +943,17 @@ func (p *Planner) checkPlanSourceNode(state *planState) {
 			fmt.Sprintf("node %s must be Ready and schedulable for the source tool", node.Name),
 		))
 	default:
+		for _, volume := range state.plannedVolumes {
+			pv := state.sourcePVs[volume.SourcePV.Name]
+			if pv != nil && !kube.PVSupportsNode(pv, node) {
+				state.plan.AddCheck(failed(
+					domain.CheckNameSourceNode,
+					fmt.Sprintf("source PV %s node affinity does not allow source node %s", pv.Name, node.Name),
+				))
+				return
+			}
+		}
+
 		state.plan.AddCheck(
 			passed(
 				domain.CheckNameSourceNode,
