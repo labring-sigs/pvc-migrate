@@ -290,13 +290,8 @@ func (r *WorkflowReconciler) reconcile(
 	}
 
 	if terminalSession(session) {
-		if session.Status.Phase == domain.PhaseFailed {
-			// Failed workflows are quiescent until an explicit resume changes
-			// the phase. Poll them slowly because status updates are filtered to
-			// avoid a controller-owned feedback loop.
-			return reconcile.Result{RequeueAfter: r.requeueAfter}, nil
-		}
-
+		// Explicit resume is admitted by workflowResumeStatusChanged. Failed
+		// workflows need no polling while waiting for that status update.
 		return reconcile.Result{}, nil
 	}
 
@@ -469,6 +464,13 @@ func (r *WorkflowReconciler) SetupWithManager(manager ctrl.Manager) error {
 			return fmt.Errorf("workflow %s has no registered API object", kind)
 		}
 
+		// For() starts its source only after leader election. Register the
+		// informer now so standby readiness waits for the same initial snapshot.
+		if _, err := manager.GetCache().
+			GetInformer(context.Background(), object, cache.BlockUntilSynced(false)); err != nil {
+			return fmt.Errorf("register %s informer: %w", kind, err)
+		}
+
 		name := "workflow-" + strings.ToLower(string(kind))
 		if err := ctrl.NewControllerManagedBy(manager).
 			Named(name).
@@ -552,6 +554,13 @@ type ManagerOptions struct {
 	TrustedToolImage              string
 	Logger                        *slog.Logger
 	HealthProbeBindAddress        string
+}
+
+func workflowCacheOptions() cache.Options {
+	return cache.Options{
+		ReaderFailOnMissingInformer: true,
+		DefaultTransform:            cache.TransformStripManagedFields(),
+	}
 }
 
 // cacheReadiness runs outside leader election. Controller-runtime starts
@@ -644,10 +653,9 @@ func StartManager(
 
 	manager, err := ctrl.NewManager(config, ctrl.Options{
 		Scheme: scheme,
-		// Workflow CRs are tenant-namespaced. The controller watches every
-		// namespace; the reconciler enforces that each referenced object stays
-		// in the CR namespace.
-		Cache:                   cache.Options{},
+		// Watch namespaced and cluster workflows without label selectors:
+		// declaratively submitted CRs may have no CLI ownership labels.
+		Cache:                   workflowCacheOptions(),
 		LeaderElection:          true,
 		LeaderElectionID:        "pvc-migrate-controller",
 		LeaderElectionNamespace: options.Namespace,
