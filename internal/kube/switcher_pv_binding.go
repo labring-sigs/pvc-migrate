@@ -396,6 +396,7 @@ func (s *Switcher) verifyPVCAndPVIdentity(
 	ctx context.Context,
 	pvcRef, pvRef domain.ObjectReference,
 	role, sessionID string,
+	recoveryClaim *domain.ObjectReference,
 ) error {
 	if pvcRef.Namespace == "" || pvcRef.Name == "" || pvcRef.UID == "" {
 		return domain.NewError(
@@ -416,6 +417,10 @@ func (s *Switcher) verifyPVCAndPVIdentity(
 	pvc, err := s.client.CoreV1().
 		PersistentVolumeClaims(pvcRef.Namespace).
 		Get(ctx, pvcRef.Name, metav1.GetOptions{})
+	if apierrors.IsNotFound(err) && recoveryClaim != nil {
+		return s.verifyRetainedActivationPV(ctx, sessionID, pvcRef, pvRef, *recoveryClaim)
+	}
+
 	if err != nil {
 		return domain.WrapError(
 			domain.ErrorKubernetes,

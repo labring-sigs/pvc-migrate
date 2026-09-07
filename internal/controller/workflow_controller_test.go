@@ -4,16 +4,15 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"strconv"
 	"testing"
 	"time"
 
 	v1alpha1 "github.com/labring-sigs/pvc-migrate/api/v1alpha1"
 	"github.com/labring-sigs/pvc-migrate/internal/domain"
 	"github.com/labring-sigs/pvc-migrate/internal/kube"
-	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
-	clientfake "k8s.io/client-go/kubernetes/fake"
 	"k8s.io/client-go/rest"
 	"sigs.k8s.io/controller-runtime/pkg/event"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
@@ -117,87 +116,49 @@ func TestWorkflowEventPredicateAllowsDeletionTimestampTransition(t *testing.T) {
 	}
 }
 
-func TestReconcileDeletingWorkflowReleasesOnlyTerminatingNamespace(t *testing.T) {
-	tests := []struct {
-		name        string
-		namespace   *corev1.Namespace
-		request     reconcile.Request
-		kind        domain.ControllerKind
-		wantDeleted bool
-	}{
-		{
-			name:      "active namespace keeps explicit cleanup protection",
-			namespace: &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "system"}},
-			request: reconcile.Request{NamespacedName: types.NamespacedName{
-				Namespace: "system",
-				Name:      "workflow",
-			}},
-			kind: domain.ControllerKindCopy,
-		},
-		{
-			name: "terminating namespace releases protection",
-			namespace: &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{
-				Name:              "system",
-				DeletionTimestamp: func() *metav1.Time { value := metav1.Now(); return &value }(),
-			}},
-			request: reconcile.Request{NamespacedName: types.NamespacedName{
-				Namespace: "system",
-				Name:      "workflow",
-			}},
-			kind:        domain.ControllerKindCopy,
-			wantDeleted: true,
-		},
-		{
-			name: "missing namespace releases stale protection",
-			request: reconcile.Request{NamespacedName: types.NamespacedName{
-				Namespace: "system",
-				Name:      "workflow",
-			}},
-			kind:        domain.ControllerKindCopy,
-			wantDeleted: true,
-		},
-		{
-			name:      "cluster workflow keeps explicit cleanup protection while namespace is active",
-			namespace: &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "system"}},
-			request:   reconcile.Request{NamespacedName: types.NamespacedName{Name: "workflow"}},
-			kind:      domain.ControllerKindClusterCopy,
-		},
-		{
-			name:        "cluster workflow releases stale protection when namespace is missing",
-			request:     reconcile.Request{NamespacedName: types.NamespacedName{Name: "workflow"}},
-			kind:        domain.ControllerKindClusterCopy,
-			wantDeleted: true,
-		},
-	}
-
-	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			store := &runnerSessionStore{}
-
-			reconciler := NewWorkflowReconciler(nil, store)
-			if test.namespace != nil {
-				reconciler.WithKubernetesClient(clientfake.NewSimpleClientset(test.namespace))
-			} else {
-				reconciler.WithKubernetesClient(clientfake.NewSimpleClientset())
-			}
-
+func TestDeletingWorkflowRequiresSuccessfulFinalization(t *testing.T) {
+	for _, blocked := range []bool{false, true} {
+		t.Run(strconv.FormatBool(blocked), func(t *testing.T) {
 			session := newRunnerSession("workflow")
+			session.Generation = 1
+			session.Status.ObservedGeneration = 1
 			session.Deleting = true
+			session.BackendResource = domain.ControllerKindClusterCopy
+			store := &runnerSessionStore{latest: session}
 
-			session.BackendResource = test.kind
-			if err := reconciler.reconcileDeletingWorkflow(
-				context.Background(),
-				test.request,
-				session,
-			); err != nil {
-				t.Fatal(err)
+			finalizer := &deletionWorkflowService{}
+			if blocked {
+				finalizer.err = errors.New("injected cleanup failure")
 			}
 
-			if got := len(store.deleted) == 1; got != test.wantDeleted {
-				t.Fatalf("workflow deleted=%t, want %t", got, test.wantDeleted)
+			reconciler := NewWorkflowReconciler(finalizer, store)
+
+			err := reconciler.reconcileDeletingWorkflow(t.Context(), reconcile.Request{}, session)
+			if (err != nil) != blocked || finalizer.calls != 1 {
+				t.Fatalf("error=%v calls=%d", err, finalizer.calls)
+			}
+
+			if len(store.deleted) != 0 {
+				t.Fatal("reconciler bypassed service cleanup")
+			}
+
+			if blocked &&
+				(len(session.Status.Conditions) == 0 || session.Status.Conditions[len(session.Status.Conditions)-1].Type != "DeletionBlocked") {
+				t.Fatal("cleanup failure was not visible")
 			}
 		})
 	}
+}
+
+type deletionWorkflowService struct {
+	recordingWorkflowResumer
+	calls int
+	err   error
+}
+
+func (s *deletionWorkflowService) FinalizeDeletedWorkflow(context.Context, *domain.Session) error {
+	s.calls++
+	return s.err
 }
 
 func TestFailedWorkflowWaitsForResumeEventWithoutPolling(t *testing.T) {
@@ -256,7 +217,7 @@ func TestResumeEventsForEveryWorkflowKind(t *testing.T) {
 			t.Run(string(kind), func(t *testing.T) {
 				before := kube.WorkflowObjectForKind(kind)
 				if err := json.Unmarshal(
-					[]byte(`{"status":{"phase":"Failed"}}`),
+					[]byte(`{"status":{"phase":"Failed","resumeFrom":"WarmCopying"}}`),
 					before,
 				); err != nil {
 					t.Fatal(err)
@@ -278,7 +239,7 @@ func TestResumeEventsForEveryWorkflowKind(t *testing.T) {
 						t.Fatal(err)
 					}
 
-					want := phase != domain.PhaseFailed && phase != ""
+					want := phase == domain.PhaseWarmCopying
 					if got := workflowEventPredicate().Update(event.UpdateEvent{ObjectOld: before, ObjectNew: after}); got != want {
 						t.Fatalf("Failed -> %s: enqueued=%v want=%v", phase, got, want)
 					}
@@ -288,52 +249,116 @@ func TestResumeEventsForEveryWorkflowKind(t *testing.T) {
 	}
 }
 
-func TestDeletingWorkflowRechecksNamespaceAfterDeletionStarts(t *testing.T) {
-	session := newRunnerSession("deleting-workflow")
-	session.Deleting = true
-	store := &runnerSessionStore{latest: session}
-	client := clientfake.NewClientset(
-		&corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "system"}},
-	)
-	reconciler := NewWorkflowReconciler(
-		&recordingWorkflowResumer{},
-		store,
-	).WithKubernetesClient(client)
-	reconciler.requeueAfter = time.Second
-	request := reconcile.Request{
-		NamespacedName: types.NamespacedName{Namespace: "system", Name: session.ID},
-	}
+func TestDeletionEventCancelsOnlyMatchingUID(t *testing.T) {
+	r := NewWorkflowReconciler(nil, nil)
 
-	result, err := reconciler.reconcile(t.Context(), request, domain.ControllerKindCopy)
-	if err != nil || result.RequeueAfter != time.Second || len(store.deleted) != 0 {
-		t.Fatalf(
-			"active namespace: result=%#v deleted=%d error=%v",
-			result,
-			len(store.deleted),
-			err,
-		)
-	}
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
 
-	namespace, err := client.CoreV1().Namespaces().Get(t.Context(), "system", metav1.GetOptions{})
-	if err != nil {
-		t.Fatal(err)
-	}
-
+	uid := types.UID("running-workflow")
+	r.activeWorkflows.Store(uid, cancel)
+	before := &v1alpha1.Copy{ObjectMeta: metav1.ObjectMeta{UID: uid}}
+	after := before.DeepCopy()
 	now := metav1.Now()
+	after.DeletionTimestamp = &now
+	p := workflowEventPredicate(r.cancelWorkflow)
+	replacement := after.DeepCopy()
+	replacement.UID = "replacement"
+	p.Update(event.UpdateEvent{ObjectOld: before, ObjectNew: replacement})
 
-	namespace.DeletionTimestamp = &now
-	if _, err := client.CoreV1().
-		Namespaces().
-		Update(t.Context(), namespace, metav1.UpdateOptions{}); err != nil {
+	if ctx.Err() != nil {
+		t.Fatal("replacement UID canceled existing worker")
+	}
+
+	if !p.Update(event.UpdateEvent{ObjectOld: before, ObjectNew: after}) ||
+		ctx.Err() != context.Canceled {
+		t.Fatal("deletion did not cancel and enqueue matching worker")
+	}
+}
+
+type blockingCopyService struct {
+	recordingWorkflowResumer
+	started chan struct{}
+}
+
+func (s *blockingCopyService) ResumeCopy(ctx context.Context, _ *domain.Session) error {
+	close(s.started)
+	<-ctx.Done()
+	return ctx.Err()
+}
+
+func TestDeleteInterruptsRunningCopyWithoutFailingCheckpoint(t *testing.T) {
+	session := newRunnerSession("cancel-copy")
+	session.Generation = 1
+	session.Status.ObservedGeneration = 1
+	session.Status.Phase = domain.PhaseWarmCopying
+	session.BackendUID = "running-uid"
+	store := &runnerSessionStore{latest: session}
+	service := &blockingCopyService{started: make(chan struct{})}
+	r := NewWorkflowReconciler(service, store)
+
+	done := make(chan error, 1)
+	go func() {
+		_, err := r.reconcile(
+			t.Context(),
+			reconcile.Request{
+				NamespacedName: types.NamespacedName{Namespace: "system", Name: session.ID},
+			},
+			domain.ControllerKindCopy,
+		)
+		done <- err
+	}()
+
+	select {
+	case <-service.started:
+	case <-time.After(5 * time.Second):
+		t.Fatal("copy did not start")
+	}
+
+	before := &v1alpha1.Copy{ObjectMeta: metav1.ObjectMeta{UID: session.BackendUID}}
+	after := before.DeepCopy()
+	now := metav1.Now()
+	after.DeletionTimestamp = &now
+	workflowEventPredicate(
+		r.cancelWorkflow,
+	).Update(event.UpdateEvent{ObjectOld: before, ObjectNew: after})
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("copy ignored cancellation")
+	}
+
+	if len(store.updates) != 0 || session.Status.Phase != domain.PhaseWarmCopying {
+		t.Fatal("cancellation overwrote recovery checkpoint")
+	}
+}
+
+func TestDeletionRetriesCleanupAfterFailure(t *testing.T) {
+	session := newRunnerSession("deletion-retry")
+	session.Generation = 1
+	session.Status.ObservedGeneration = 1
+	session.Deleting = true
+	session.BackendResource = domain.ControllerKindClusterCopy
+	store := &runnerSessionStore{latest: session}
+	service := &deletionWorkflowService{err: errors.New("cleanup blocked")}
+	r := NewWorkflowReconciler(service, store)
+
+	request := reconcile.Request{NamespacedName: types.NamespacedName{Name: session.ID}}
+	if _, err := r.reconcile(t.Context(), request, session.BackendResource); err == nil {
+		t.Fatal("expected failure")
+	}
+
+	service.err = nil
+	if _, err := r.reconcile(t.Context(), request, session.BackendResource); err != nil {
 		t.Fatal(err)
 	}
 
-	if _, err := reconciler.reconcile(t.Context(), request, domain.ControllerKindCopy); err != nil {
-		t.Fatal(err)
-	}
-
-	if len(store.deleted) != 1 {
-		t.Fatal("namespace termination did not release workflow protection on requeue")
+	if service.calls != 2 {
+		t.Fatalf("cleanup calls=%d", service.calls)
 	}
 }
 
@@ -417,6 +442,37 @@ func TestWorkflowSpecMutationError(t *testing.T) {
 	session.Status.ObservedGeneration = 3
 	if err := workflowSpecMutationError(session); err == nil {
 		t.Fatal("spec generation drift was accepted")
+	}
+}
+
+func TestDeletingWorkflowGenerationFence(t *testing.T) {
+	for _, test := range []struct {
+		name       string
+		generation int64
+		observed   int64
+		condition  string
+		wantError  bool
+	}{
+		{name: "initial API deletion bump", generation: 2, observed: 1},
+		{name: "checkpointed deletion", generation: 2, observed: 2, condition: "Deleting"},
+		{name: "spec changed before deletion", generation: 3, observed: 1, wantError: true},
+		{name: "spec changed after deletion checkpoint", generation: 3, observed: 2, condition: "Deleting", wantError: true},
+		{name: "spec changed after blocked checkpoint", generation: 3, observed: 2, condition: "DeletionBlocked", wantError: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			session := newRunnerSession("deletion-generation")
+			session.Deleting = true
+			session.Generation = test.generation
+
+			session.Status.ObservedGeneration = test.observed
+			if test.condition != "" {
+				session.SetCondition(domain.Condition{Type: test.condition})
+			}
+
+			if err := workflowSpecMutationError(session); (err != nil) != test.wantError {
+				t.Fatalf("error=%v", err)
+			}
+		})
 	}
 }
 

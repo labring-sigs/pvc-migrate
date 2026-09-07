@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"net/http"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -15,11 +16,11 @@ import (
 	"github.com/labring-sigs/pvc-migrate/internal/app"
 	"github.com/labring-sigs/pvc-migrate/internal/domain"
 	"github.com/labring-sigs/pvc-migrate/internal/kube"
-	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
+	"k8s.io/client-go/tools/events"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/cache"
@@ -49,6 +50,8 @@ type WorkflowReconciler struct {
 	requeueAfter     time.Duration
 	supportedKinds   map[domain.ControllerKind]struct{}
 	logger           *slog.Logger
+	activeWorkflows  sync.Map // CR UID -> context.CancelFunc
+	recorder         events.EventRecorder
 }
 
 func NewWorkflowReconciler(
@@ -201,7 +204,7 @@ func (r *WorkflowReconciler) reconcile(
 	ctx context.Context,
 	request reconcile.Request,
 	kind domain.ControllerKind,
-) (reconcile.Result, error) {
+) (result reconcile.Result, resultErr error) {
 	if r == nil || r.store == nil || r.service == nil {
 		return reconcile.Result{}, errors.New("workflow reconciler is not configured")
 	}
@@ -230,10 +233,42 @@ func (r *WorkflowReconciler) reconcile(
 	}
 
 	if session.Deleting {
-		// The namespace can start terminating after the CR deletion event.
 		err := r.reconcileDeletingWorkflow(ctx, request, session)
-		return reconcile.Result{RequeueAfter: r.requeueAfter}, err
+		if kube.IsSessionLockContention(err) {
+			return reconcile.Result{RequeueAfter: r.requeueAfter}, nil
+		}
+
+		return reconcile.Result{}, err
 	}
+
+	ctx, cancel := context.WithCancel(ctx)
+
+	r.activeWorkflows.Store(session.BackendUID, cancel)
+	defer func() {
+		interrupted := errors.Is(ctx.Err(), context.Canceled)
+
+		cancel()
+		r.activeWorkflows.Delete(session.BackendUID)
+
+		if interrupted {
+			result, resultErr = reconcile.Result{}, nil
+		}
+	}()
+	// Close the gap between the first read and registering cancellation. The
+	// queue cannot interrupt an already-running reconcile for the same key.
+	latest, err := r.store.GetByKind(ctx, request.Namespace, request.Name, kind)
+	if err != nil {
+		if kube.IsSessionNotFound(err) {
+			return reconcile.Result{}, nil
+		}
+		return reconcile.Result{}, err
+	}
+
+	if latest.BackendUID != session.BackendUID || latest.Deleting {
+		return reconcile.Result{RequeueAfter: time.Millisecond}, nil
+	}
+
+	session = latest
 
 	if err := r.store.CheckWorkflowNameCollision(ctx, session); err != nil {
 		if domain.CategoryOf(err) == domain.ErrorConflict {
@@ -373,46 +408,57 @@ func (r *WorkflowReconciler) reconcileDeletingWorkflow(
 	request reconcile.Request,
 	session *domain.Session,
 ) error {
-	// Direct deletion of a workflow keeps the explicit cleanup contract while
-	// its session namespace is active. Once that namespace is gone or
-	// terminating, Kubernetes has already removed namespaced data-plane
-	// resources and the workflow finalizer must be released. Cluster-scoped
-	// workflows use spec.sessionNamespace because their request has no
-	// namespace.
-	namespaceName := request.Namespace
-
-	if namespaceName == "" {
-		namespaceName = session.Spec.SessionNamespace
-	}
-
-	if namespaceName == "" {
+	// Execution cannot start before the controller persists its first trusted
+	// checkpoint. Such objects need neither a Lease nor data-plane cleanup.
+	if session.Status.ObservedGeneration == 0 {
 		return r.store.Delete(ctx, session)
 	}
 
-	if r.kubeClient == nil {
-		return errors.New("controller Kubernetes client is required to reconcile workflow deletion")
+	finalizer, ok := r.service.(interface {
+		FinalizeDeletedWorkflow(ctx context.Context, session *domain.Session) error
+	})
+	if !ok {
+		return errors.New("workflow service does not support safe deletion")
 	}
 
-	namespace, err := r.kubeClient.CoreV1().Namespaces().Get(
-		ctx,
-		namespaceName,
-		metav1.GetOptions{},
-	)
-	if err != nil && !apierrors.IsNotFound(err) {
+	if err := kube.ControllerNamespaceBoundaryError(session); err != nil {
 		return err
 	}
 
-	if err == nil && namespace.DeletionTimestamp == nil {
-		return nil
+	if err := workflowSpecMutationError(session); err != nil {
+		return err
 	}
 
-	ctrl.LoggerFrom(ctx).Info(
-		"releasing workflow protection for terminating namespace",
-		"workflow",
-		request.NamespacedName,
-	)
+	err := finalizer.FinalizeDeletedWorkflow(ctx, session)
+	if err == nil || kube.IsSessionLockContention(err) || ctx.Err() != nil {
+		return err
+	}
 
-	return r.store.Delete(ctx, session)
+	ctrl.LoggerFrom(ctx).
+		Error(err, "workflow deletion blocked; protection retained", "workflow", request.NamespacedName)
+
+	if r.recorder != nil {
+		object := kube.WorkflowObjectForKind(session.BackendResource)
+		object.SetName(request.Name)
+		object.SetNamespace(request.Namespace)
+		object.SetUID(session.BackendUID)
+		r.recorder.Eventf(
+			object,
+			nil,
+			"Warning",
+			"DeletionBlocked",
+			"Finalize",
+			"%s",
+			domain.BoundWorkflowMessage(err.Error()),
+		)
+	}
+
+	session.SetCondition(domain.Condition{
+		Type: "DeletionBlocked", Status: metav1.ConditionTrue,
+		Reason: "RecoveryOrCleanupFailed", Message: err.Error(), LastTransitionTime: metav1.Now(),
+	})
+
+	return errors.Join(err, r.store.Update(ctx, session))
 }
 
 func initializeUnobservedStatus(
@@ -440,7 +486,7 @@ func initializeUnobservedStatus(
 // dispatch unambiguous; the shared collision guard prevents unsafe concurrent
 // execution when different Kinds use the same data-plane session identity.
 func (r *WorkflowReconciler) SetupWithManager(manager ctrl.Manager) error {
-	predicates := builder.WithPredicates(workflowEventPredicate())
+	r.recorder = manager.GetEventRecorder("pvc-migrate-controller")
 
 	kinds := make([]domain.ControllerKind, 0, len(domain.ControllerWorkflows())*2)
 	for _, workflow := range domain.ControllerWorkflows() {
@@ -471,12 +517,20 @@ func (r *WorkflowReconciler) SetupWithManager(manager ctrl.Manager) error {
 			return fmt.Errorf("register %s informer: %w", kind, err)
 		}
 
-		name := "workflow-" + strings.ToLower(string(kind))
-		if err := ctrl.NewControllerManagedBy(manager).
-			Named(name).
-			For(object, predicates).
-			Complete(&kindWorkflowReconciler{parent: r, kind: kind}); err != nil {
-			return err
+		// Recovery of a paused workload must not wait behind another long
+		// migration. Both queues share the informer and the session Lease fence.
+		for _, deleting := range []bool{false, true} {
+			name := "workflow-" + strings.ToLower(string(kind))
+			if deleting {
+				name += "-deletion"
+			}
+
+			if err := ctrl.NewControllerManagedBy(manager).
+				Named(name).
+				For(object, builder.WithPredicates(workflowQueuePredicate(deleting, r.cancelWorkflow))).
+				Complete(&kindWorkflowReconciler{parent: r, kind: kind}); err != nil {
+				return err
+			}
 		}
 
 		served++
@@ -489,16 +543,44 @@ func (r *WorkflowReconciler) SetupWithManager(manager ctrl.Manager) error {
 	return nil
 }
 
-func workflowEventPredicate() predicate.Predicate {
+func (r *WorkflowReconciler) cancelWorkflow(object crclient.Object) {
+	if cancel, ok := r.activeWorkflows.Load(object.GetUID()); ok {
+		if cancelFunc, ok := cancel.(context.CancelFunc); ok {
+			cancelFunc()
+		}
+	}
+}
+
+func workflowQueuePredicate(deleting bool, onDelete func(crclient.Object)) predicate.Predicate {
+	return predicate.And(
+		workflowEventPredicate(onDelete),
+		predicate.NewPredicateFuncs(func(object crclient.Object) bool {
+			return (object.GetDeletionTimestamp() != nil) == deleting
+		}),
+	)
+}
+
+func workflowEventPredicate(onDelete ...func(crclient.Object)) predicate.Predicate {
 	return predicate.Funcs{
 		CreateFunc: func(event.CreateEvent) bool { return true },
 		UpdateFunc: func(e event.UpdateEvent) bool {
+			if e.ObjectNew.GetDeletionTimestamp() != nil {
+				for _, cancel := range onDelete {
+					cancel(e.ObjectNew)
+				}
+			}
+
 			return e.ObjectNew.GetGeneration() != e.ObjectOld.GetGeneration() ||
 				e.ObjectOld.GetDeletionTimestamp() == nil &&
 					e.ObjectNew.GetDeletionTimestamp() != nil ||
 				workflowResumeStatusChanged(e.ObjectOld, e.ObjectNew)
 		},
-		DeleteFunc:  func(event.DeleteEvent) bool { return false },
+		DeleteFunc: func(e event.DeleteEvent) bool {
+			for _, cancel := range onDelete {
+				cancel(e.Object)
+			}
+			return false
+		},
 		GenericFunc: func(event.GenericEvent) bool { return true },
 	}
 }
@@ -508,39 +590,49 @@ func workflowEventPredicate() predicate.Predicate {
 // active checkpoint. Ordinary controller status writes remain filtered so
 // they cannot create a reconcile feedback loop.
 func workflowResumeStatusChanged(oldObject, newObject crclient.Object) bool {
-	return workflowStatusPhase(oldObject) == domain.PhaseFailed &&
-		workflowStatusPhase(newObject) != domain.PhaseFailed &&
-		workflowStatusPhase(newObject) != ""
+	oldStatus, newStatus := workflowStatus(oldObject), workflowStatus(newObject)
+
+	resumeFrom := oldStatus.ResumeFrom
+	if resumeFrom == "" {
+		resumeFrom = v1alpha1.WorkflowPhase(domain.PhasePlanned)
+	}
+
+	return oldStatus.Phase == v1alpha1.WorkflowPhase(domain.PhaseFailed) &&
+		newStatus.Phase == resumeFrom
 }
 
 func workflowStatusPhase(object crclient.Object) domain.Phase {
+	return domain.Phase(workflowStatus(object).Phase)
+}
+
+func workflowStatus(object crclient.Object) v1alpha1.WorkflowStatus {
 	switch typed := object.(type) {
 	case *v1alpha1.Migration:
-		return domain.Phase(typed.Status.Phase)
+		return typed.Status.WorkflowStatus
 	case *v1alpha1.PodMigration:
-		return domain.Phase(typed.Status.Phase)
+		return typed.Status.WorkflowStatus
 	case *v1alpha1.Reservation:
-		return domain.Phase(typed.Status.Phase)
+		return typed.Status.WorkflowStatus
 	case *v1alpha1.Copy:
-		return domain.Phase(typed.Status.Phase)
+		return typed.Status.WorkflowStatus
 	case *v1alpha1.Backup:
-		return domain.Phase(typed.Status.Phase)
+		return typed.Status.WorkflowStatus
 	case *v1alpha1.Restore:
-		return domain.Phase(typed.Status.Phase)
+		return typed.Status.WorkflowStatus
 	case *v1alpha1.Rename:
-		return domain.Phase(typed.Status.Phase)
+		return typed.Status.WorkflowStatus
 	case *v1alpha1.ClusterMigration:
-		return domain.Phase(typed.Status.Phase)
+		return typed.Status.WorkflowStatus
 	case *v1alpha1.ClusterPodMigration:
-		return domain.Phase(typed.Status.Phase)
+		return typed.Status.WorkflowStatus
 	case *v1alpha1.ClusterReservation:
-		return domain.Phase(typed.Status.Phase)
+		return typed.Status.WorkflowStatus
 	case *v1alpha1.ClusterCopy:
-		return domain.Phase(typed.Status.Phase)
+		return typed.Status.WorkflowStatus
 	case *v1alpha1.Move:
-		return domain.Phase(typed.Status.Phase)
+		return typed.Status.WorkflowStatus
 	default:
-		return ""
+		return v1alpha1.WorkflowStatus{}
 	}
 }
 
@@ -729,6 +821,22 @@ func workflowSpecMutationError(session *domain.Session) error {
 	if session == nil || session.Status.ObservedGeneration == 0 ||
 		session.Generation == session.Status.ObservedGeneration {
 		return nil
+	}
+	// The API server increments generation when it first sets deletionTimestamp,
+	// even though spec is unchanged. Accept that single increment only until a
+	// deletion checkpoint has been observed; later spec changes remain fenced.
+	if session.Deleting && session.Generation == session.Status.ObservedGeneration+1 {
+		observedDeletion := false
+		for _, condition := range session.Status.Conditions {
+			if condition.Type == "Deleting" || condition.Type == "DeletionBlocked" {
+				observedDeletion = true
+				break
+			}
+		}
+
+		if !observedDeletion {
+			return nil
+		}
 	}
 
 	return domain.NewError(

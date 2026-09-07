@@ -979,6 +979,15 @@ func TestActivateVolumeResumesAtEveryProgressBoundary(t *testing.T) {
 			}
 
 			status.Activation = persisted
+
+			if err := switcher.VerifyActivationRecovery(
+				ctx,
+				session.ID,
+				[]*domain.VolumeSpec{volume},
+			); err != nil {
+				t.Fatalf("validate interrupted activation: %v", err)
+			}
+
 			if err := switcher.ActivateVolume(ctx, session, volume, status, nil); err != nil {
 				t.Fatalf("resume activation: %v", err)
 			}

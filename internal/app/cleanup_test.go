@@ -992,7 +992,7 @@ func TestCleanupSingleStageSessionsRemovesDestinationAndFinalizesSource(t *testi
 	}
 }
 
-func TestCleanupCompletedCopyCanPreserveOutputAndDeleteSession(t *testing.T) {
+func TestDeletedCompletedCopyPreservesOutputAndFinalizesSession(t *testing.T) {
 	ctx := context.Background()
 	session := appTestSession()
 	setSessionOperation(session, domain.OperationCopy)
@@ -1041,7 +1041,8 @@ func TestCleanupCompletedCopyCanPreserveOutputAndDeleteSession(t *testing.T) {
 		UID:       destinationPVC.UID,
 	}
 	client := fake.NewClientset(sourcePVC, destinationPVC, sourcePV, destinationPV)
-	store := &memoryStore{}
+	session.Deleting = true
+	store := &deletionStore{latest: session}
 	service := &Service{client: client, store: store}
 	options := CleanupOptions{Finalize: true, DeleteSession: true}
 
@@ -1049,7 +1050,7 @@ func TestCleanupCompletedCopyCanPreserveOutputAndDeleteSession(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := service.cleanupWorkflowForTest(ctx, session, options); err != nil {
+	if err := service.FinalizeDeletedWorkflow(ctx, session); err != nil {
 		t.Fatal(err)
 	}
 
@@ -1101,7 +1102,7 @@ func TestCleanupCompletedCopyCanPreserveOutputAndDeleteSession(t *testing.T) {
 		t.Fatalf("idempotent validation: %v", err)
 	}
 
-	if err := service.cleanupWorkflowForTest(ctx, session, options); err != nil {
+	if err := service.FinalizeDeletedWorkflow(ctx, session); err != nil {
 		t.Fatalf("idempotent cleanup: %v", err)
 	}
 }

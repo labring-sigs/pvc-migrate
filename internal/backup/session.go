@@ -518,6 +518,7 @@ func failBackupSession(
 	}
 
 	session.Status.Message = message
+	session.Status.ErrorCategory = domain.CategoryOf(cause)
 	updateErr := req.SessionStore.Update(ctx, session)
 
 	return errors.Join(updateErr, backupSessionFenceError(ctx))

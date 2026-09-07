@@ -1041,6 +1041,10 @@ func (s *CRDSessionStore) Update(ctx context.Context, session *domain.Session) e
 		)
 	}
 
+	if existing.GetUID() == session.BackendUID && existing.GetDeletionTimestamp() != nil {
+		session.Deleting = true
+	}
+
 	if existing.GetResourceVersion() != session.ResourceVersion {
 		return domain.NewError(
 			domain.ErrorConflict,
@@ -1527,6 +1531,14 @@ func (s *CRDSessionStore) Delete(ctx context.Context, session *domain.Session) e
 			"delete session",
 			string(resource.kind)+" ownership does not match the session",
 			err,
+		)
+	}
+
+	if session.BackendUID != "" && object.GetUID() != session.BackendUID {
+		return domain.NewError(
+			domain.ErrorConflict,
+			"delete session",
+			"workflow UID changed after it was loaded",
 		)
 	}
 

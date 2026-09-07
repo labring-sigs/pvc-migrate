@@ -37,6 +37,17 @@ func writeSessionGuidance(w io.Writer, session *domain.Session, prefixes guidanc
 		return nil
 	}
 
+	if session.Deleting {
+		if _, err := fmt.Fprintln(
+			w,
+			"\nWorkflow deletion is in progress; the controller owns recovery and cleanup. Inspect the Deleting and DeletionBlocked conditions and workflow Events. Do not remove the protection finalizer while recovery is incomplete.",
+		); err != nil {
+			return err
+		}
+
+		return writeSessionInspection(w, session, prefixes.kubectl)
+	}
+
 	if sessionHasCapacityFailure(session) {
 		return writeCapacityFailureGuidance(w, session, prefixes)
 	}
@@ -383,6 +394,12 @@ func writeFailedSessionGuidance(
 		return err
 	}
 
+	if session.Status.ResumeFrom == domain.PhaseRenaming ||
+		session.Status.ResumeFrom == domain.PhaseMoving {
+		_, err := fmt.Fprintln(w, "  Finish PVC identity recovery before rollback or cleanup.")
+		return err
+	}
+
 	if session.Spec.Type == domain.SessionTypeBackup ||
 		session.Spec.Type == domain.SessionTypeRestore {
 		if failedCanAbort(session) {
@@ -651,6 +668,8 @@ func failedCanAbort(session *domain.Session) bool {
 	case domain.PhaseActivating,
 		domain.PhaseActivated,
 		domain.PhaseResuming,
+		domain.PhaseRenaming,
+		domain.PhaseMoving,
 		domain.PhaseCompleted,
 		domain.PhaseRollingBack:
 		return false

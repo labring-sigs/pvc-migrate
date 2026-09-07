@@ -505,6 +505,16 @@ spec:
                   type: object
                 maxItems: 32
                 type: array
+              errorCategory:
+                enum:
+                - validation
+                - precondition
+                - conflict
+                - kubernetes
+                - copy
+                - timeout
+                - internal
+                type: string
               failureReason:
                 maxLength: 8192
                 type: string
