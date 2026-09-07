@@ -278,6 +278,15 @@ func (s *scriptedSwitcher) VerifyActivationRecovery(
 	return s.VerifyVolumesOfflineForSession(ctx, sessionID, volumes)
 }
 
+func (s *scriptedSwitcher) VerifyPVCRebindRecovery(
+	ctx context.Context,
+	sessionID string,
+	from, to, pv domain.ObjectReference,
+) error {
+	s.offlineCalls = append(s.offlineCalls, to.Name)
+	return nil
+}
+
 func (s *scriptedSwitcher) ActivateVolume(
 	ctx context.Context,
 	session *domain.Session,

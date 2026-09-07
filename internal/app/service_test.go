@@ -304,6 +304,14 @@ func (f *fakeSwitcher) VerifyActivationRecovery(
 	return f.VerifyVolumesOfflineForSession(ctx, sessionID, volumes)
 }
 
+func (f *fakeSwitcher) VerifyPVCRebindRecovery(
+	ctx context.Context,
+	sessionID string,
+	from, to, pv domain.ObjectReference,
+) error {
+	return nil
+}
+
 func (f *fakeSwitcher) ActivateVolume(
 	ctx context.Context,
 	session *domain.Session,

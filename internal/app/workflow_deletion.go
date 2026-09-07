@@ -125,6 +125,8 @@ func deletionRequiresConvergence(phase domain.Phase) bool {
 	case domain.PhaseActivating,
 		domain.PhaseActivated,
 		domain.PhaseResuming,
+		domain.PhaseRenaming,
+		domain.PhaseMoving,
 		domain.PhaseRollingBack:
 		return true
 	default:

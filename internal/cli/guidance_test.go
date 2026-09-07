@@ -81,6 +81,33 @@ func TestDeletingWorkflowGuidanceIsReadOnly(t *testing.T) {
 	}
 }
 
+func TestInterruptedPVCIdentityGuidanceRequiresResume(t *testing.T) {
+	for _, phase := range []domain.Phase{domain.PhaseRenaming, domain.PhaseMoving} {
+		session := guidanceSession(domain.PhaseFailed)
+		session.Status.ResumeFrom = phase
+
+		var output bytes.Buffer
+		if err := writeSessionGuidance(
+			&output,
+			session,
+			guidancePrefixes{pvcMigrate: "pvc-migrate", kubectl: "kubectl"},
+		); err != nil {
+			t.Fatal(err)
+		}
+
+		text := output.String()
+		if !strings.Contains(text, " resume ") || failedCanAbort(session) {
+			t.Fatalf("missing recovery guidance: %s", text)
+		}
+
+		for _, action := range []string{" abort ", " rollback ", " cleanup "} {
+			if strings.Contains(text, action+session.ID) {
+				t.Fatalf("premature lifecycle command: %s", text)
+			}
+		}
+	}
+}
+
 func guidancePrefixesForSession(session *domain.Session) guidancePrefixes {
 	return guidancePrefixes{
 		pvcMigrate: sessionCommandPrefix(session.Spec.SessionNamespace),

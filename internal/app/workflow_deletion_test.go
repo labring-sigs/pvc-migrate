@@ -140,3 +140,37 @@ func TestAbortRejectsInProgressActivation(t *testing.T) {
 		}
 	}
 }
+
+func TestAbortRejectsInterruptedPVCIdentity(t *testing.T) {
+	for _, operation := range []domain.Operation{domain.OperationRename, domain.OperationMove} {
+		for _, failed := range []bool{false, true} {
+			session := appTestSession()
+			setSessionOperation(session, operation)
+
+			phase := domain.PhaseRenaming
+			if operation == domain.OperationMove {
+				phase = domain.PhaseMoving
+			}
+
+			session.Status.Phase = phase
+			if failed {
+				session.Status.Phase = domain.PhaseFailed
+				session.Status.ResumeFrom = phase
+			}
+
+			service := &Service{now: time.Now}
+			if err := service.validateAbort(
+				t.Context(),
+				session,
+			); domain.CategoryOf(
+				err,
+			) != domain.ErrorPrecondition {
+				t.Fatalf("operation=%s failed=%v error=%v", operation, failed, err)
+			}
+
+			if !deletionRequiresConvergence(phase) {
+				t.Fatalf("deletion would abort %s", phase)
+			}
+		}
+	}
+}

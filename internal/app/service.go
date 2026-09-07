@@ -88,6 +88,11 @@ type workloadController interface {
 }
 
 type volumeSwitcher interface {
+	VerifyPVCRebindRecovery(
+		ctx context.Context,
+		sessionID string,
+		from, to, pv domain.ObjectReference,
+	) error
 	VerifyActivationRecovery(
 		ctx context.Context,
 		sessionID string,

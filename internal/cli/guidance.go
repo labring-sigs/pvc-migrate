@@ -394,6 +394,12 @@ func writeFailedSessionGuidance(
 		return err
 	}
 
+	if session.Status.ResumeFrom == domain.PhaseRenaming ||
+		session.Status.ResumeFrom == domain.PhaseMoving {
+		_, err := fmt.Fprintln(w, "  Finish PVC identity recovery before rollback or cleanup.")
+		return err
+	}
+
 	if session.Spec.Type == domain.SessionTypeBackup ||
 		session.Spec.Type == domain.SessionTypeRestore {
 		if failedCanAbort(session) {
@@ -662,6 +668,8 @@ func failedCanAbort(session *domain.Session) bool {
 	case domain.PhaseActivating,
 		domain.PhaseActivated,
 		domain.PhaseResuming,
+		domain.PhaseRenaming,
+		domain.PhaseMoving,
 		domain.PhaseCompleted,
 		domain.PhaseRollingBack:
 		return false

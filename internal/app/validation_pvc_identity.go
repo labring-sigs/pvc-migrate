@@ -73,6 +73,21 @@ func (s *Service) validateRebindTransition(
 
 	fromExists := fromErr == nil
 
+	phase := session.Status.Phase
+	if phase == domain.PhaseFailed {
+		phase = session.Status.ResumeFrom
+	}
+
+	if !fromExists &&
+		(phase == domain.PhaseRenaming || phase == domain.PhaseMoving || phase == domain.PhaseRollingBack) {
+		if phase == domain.PhaseRollingBack {
+			// Rollback recreates the original name with a new Kubernetes UID.
+			to.UID = ""
+		}
+
+		return s.switcher.VerifyPVCRebindRecovery(ctx, session.ID, from, to, volume.SourcePV)
+	}
+
 	toExists := toErr == nil
 	if !sameEndpoint && fromExists && toExists {
 		return domain.NewError(

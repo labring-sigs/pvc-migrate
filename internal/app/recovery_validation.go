@@ -41,6 +41,11 @@ func (s *Service) validateAbort(ctx context.Context, session *domain.Session) er
 		)
 	}
 
+	if phase == domain.PhaseRenaming || phase == domain.PhaseMoving {
+		return domain.NewError(domain.ErrorPrecondition, "abort dry-run",
+			"PVC identity change must finish through resume before rollback or cleanup")
+	}
+
 	if phase == domain.PhaseActivating || phase == domain.PhaseActivated ||
 		phase == domain.PhaseCompleted ||
 		phase == domain.PhaseResuming ||
