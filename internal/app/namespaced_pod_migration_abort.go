@@ -62,6 +62,24 @@ func (m *PodMigrationExecutor) ValidateAbort(
 	}
 
 	plan := object.Status.Plan
+	if workflowDeletionInProgress(ctx) {
+		deleted, err := deletedPlannedSourcePVC(
+			ctx,
+			m.client,
+			object.Namespace,
+			plan.Volumes,
+		)
+		if err != nil {
+			return err
+		}
+
+		// Deleted source storage cannot be re-verified and gives the workload
+		// nothing to resume onto; deletion converges through cleanup instead.
+		if deleted {
+			return nil
+		}
+	}
+
 	for _, volume := range plan.Volumes {
 		if err := verifySourceStorage(
 			ctx,
@@ -95,11 +113,29 @@ func (m *PodMigrationExecutor) abort(ctx context.Context, object *v1alpha1.PodMi
 	}
 
 	plan := object.Status.Plan
+
 	resume := podAbortNeedsResume(
 		object.Status.Phase,
 		object.Status.ResumeFrom,
 		object.Status.History,
 	)
+	if resume && workflowDeletionInProgress(ctx) {
+		deleted, err := deletedPlannedSourcePVC(
+			ctx,
+			m.client,
+			object.Namespace,
+			plan.Volumes,
+		)
+		if err != nil {
+			return m.fail(ctx, object, err)
+		}
+
+		// Resuming the workload onto deleted source storage can only fail;
+		// the deletion pass converges to Aborted and cleanup takes over.
+		if deleted {
+			resume = false
+		}
+	}
 
 	save := func(ctx context.Context) error { return m.store.Save(ctx, object) }
 	if object.Status.Phase == domain.PhaseAborted {

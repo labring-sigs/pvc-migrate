@@ -5,11 +5,13 @@ import (
 	"reflect"
 	"testing"
 
+	v1alpha1 "github.com/labring-sigs/pvc-migrate/api/v1alpha1"
 	"github.com/labring-sigs/pvc-migrate/internal/domain"
 	"github.com/labring-sigs/pvc-migrate/internal/kube"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 	crclient "sigs.k8s.io/controller-runtime/pkg/client"
 )
 
@@ -87,6 +89,79 @@ func TestPodMigrationDeletionRetriesWorkloadResumeBeforeReleasingStorage(t *test
 	if controller.resumed != 3 || controller.paused != 1 || len(engine.requests) != 2 {
 		t.Fatalf("deletion repeated cutover: paused=%d resumed=%d copies=%d",
 			controller.paused, controller.resumed, len(engine.requests))
+	}
+}
+
+func TestPodMigrationDeletionConvergesWhenSourceStorageDeleted(t *testing.T) {
+	executor, object, store, _ := podMigrationExecutorFixture(t)
+	engine := &concreteCopyEngine{}
+	executor.transfer.copier = engine
+	executor.workloads = &fakeController{}
+
+	object.Status.Phase = domain.PhaseFailed
+	object.Status.ResumeFrom = domain.PhasePausing
+
+	object.Status.History = []v1alpha1.WorkflowHistoryEntry{
+		{Phase: domain.PhasePausing, Message: "pausing workload"},
+		{Phase: domain.PhaseFailed, Message: "pause interrupted"},
+	}
+	for _, volume := range object.Status.Plan.Volumes {
+		object.Status.Volumes = append(object.Status.Volumes,
+			v1alpha1.ClusterPodMigrationVolumeStatus{
+				ClusterVolumeReservationStatus: v1alpha1.ClusterVolumeReservationStatus{
+					SourcePVCName:     volume.SourcePVC.Name,
+					Reserved:          true,
+					DestinationPolicy: corev1.PersistentVolumeReclaimRetain,
+					DestinationPVC: &v1alpha1.ObjectReference{
+						Kind:      "PersistentVolumeClaim",
+						Namespace: "temporary",
+						Name:      "reserved-" + volume.SourcePVC.Name,
+						UID:       types.UID("reserved-" + volume.SourcePVC.Name),
+					},
+					DestinationPV: &v1alpha1.ObjectReference{
+						Kind: "PersistentVolume",
+						Name: "reserved-pv-" + volume.SourcePVC.Name,
+						UID:  types.UID("reserved-pv-" + volume.SourcePVC.Name),
+					},
+				},
+			},
+		)
+	}
+
+	object.DeletionTimestamp = &metav1.Time{Time: executor.now()}
+	if err := store.Save(t.Context(), object); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := executor.FinalizeDeleted(t.Context(), object); err != nil {
+		t.Fatalf("deleted source storage must not wedge finalization: %v", err)
+	}
+
+	if _, err := store.Load(
+		t.Context(),
+		crclient.ObjectKey{Name: object.Name},
+	); !apierrors.IsNotFound(err) {
+		t.Fatalf("converged workflow remains in store: %v", err)
+	}
+}
+
+func TestPodMigrationLiveAbortStillRequiresSourceStorage(t *testing.T) {
+	executor, object, store, _ := podMigrationExecutorFixture(t)
+	executor.workloads = &fakeController{}
+
+	object.Status.Phase = domain.PhaseFailed
+	object.Status.ResumeFrom = domain.PhasePausing
+	object.Status.History = []v1alpha1.WorkflowHistoryEntry{
+		{Phase: domain.PhasePausing, Message: "pausing workload"},
+		{Phase: domain.PhaseFailed, Message: "pause interrupted"},
+	}
+
+	if err := store.Save(t.Context(), object); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := executor.Abort(t.Context(), object); err == nil {
+		t.Fatal("live abort must still verify the source storage it restores")
 	}
 }
 

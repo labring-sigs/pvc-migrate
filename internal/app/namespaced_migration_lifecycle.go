@@ -291,6 +291,24 @@ func (m *MigrationExecutor) ValidateAbort(
 	}
 
 	plan := object.Status.Plan
+	if workflowDeletionInProgress(ctx) {
+		deleted, err := deletedPlannedSourcePVC(
+			ctx,
+			m.client,
+			object.Namespace,
+			plan.Volumes,
+		)
+		if err != nil {
+			return err
+		}
+
+		// Deleted source storage cannot be re-verified; deletion converges
+		// through cleanup, which releases the retained volumes instead.
+		if deleted {
+			return nil
+		}
+	}
+
 	for _, volume := range plan.Volumes {
 		if err := verifySourceStorage(
 			ctx,
