@@ -462,13 +462,45 @@ flag 描述同步更新为涵盖三族约束（podAffinity/podAntiAffinity/topol
 用户指出 migrate-pod 缺少 plan 子命令后核对全矩阵：8 个操作中 7 个有 plan 子命令（migrate/copy/reserve/rename/move/backup/restore），仅 migrate-pod 缺失——它的 planning 语义之前只在主命令 dry-run 中。补齐 `migrate-pod plan` 子命令后，8 个操作全部具备完整的 plan/create/status/resume/abort/rollback/cleanup 生命周期对称性（pod-migration 与 backup/restore 无 rollback 属设计：无 PV 身份切换语义）。
 
 **E2E 验证**：`migrate-pod plan` 对 Running 中的 Mongo pod 执行 dry-run 校验，pod-scheduling PASS，无集群变更。
+### 第二十三轮：CI 镜像全量笛卡尔积复测（会话 + CRD 双模式，147 + 53 双集群）
+
+**前置**：推送 refactor-type2 至 origin（`d82f2f2`→`c0bb8cd`→`25c3947`→`723f5b6`→`66ac77c`→`fc4757b`→`dcafc08` 共 7 个提交），等待 GitHub Actions "Tool image" 构建成功后，将 CI 产物镜像 `ghcr.io/zijiren233/pvc-migrate:sha-<sha>` 部署至 147 与 53 的 in-cluster controller（移除 `--mode`、同步 `--tool-image`）。测试以独立命名空间 `pvc-migrate-r23-147{,-dst}` / `pvc-migrate-r23-53{,-dst}` 进行（吸取第二十二轮前误删 kb-redis-test 的教训，全部资源命名空间隔离，清理仅按精确命名空间）。round23 harness：`bin/round23-helpers.mjs` + `bin/r23-setup/s1/s1b/s2/s2b/s3/s4/s5*.mjs`（结果 JSON 落盘 `bin/round23/`）。
+
+**本轮新修复（均含单测/集群验证）**：
+- **#28 工作流删除收敛（三笔）**：源 PVC 已删除的工作流 CR 无法删除——FinalizeDeleted 驱动的 abort 要求 re-verify 源存储并恢复工作负载，PVC 缺失时 finalizer 永久卡死、reconciler 无限报错。修复：删除收敛路径探测计划内源 PVC，缺失时跳过 re-verify 与 workload resume，收敛至 Aborted 交由 cleanup 释放（`d82f2f2`）；abort 的预留卷校验同样读取源 PVC，删除路径按卷跳过（`c0bb8cd`）。**集群验证**：卡死 90 分钟的孤儿 PodMigration CR 在新 controller 启动后 30 秒内收敛删除，零错误；S4 注入场景再次验证删除即时收敛。
+- **#29 standalone Pod 会话标记泄漏**：resumeStandalone 重建 Pod 时写入 `migrate.sealos.io/session` 标注，finalize 后无人清除——Pod 被永久拒绝再次迁移（controller-adapter check "still owned by migration session"）。修复：cleanup 终态释放该标注（仅限本会话所有）。集群复现→修复→标注清除验证。
+- **#30 S3 备份/恢复丢失权限位**：rclone copy 缺 `--metadata` 时 0640 源文件恢复为 0644。 MinIO 实验验证 `--links --metadata` 完整保留权限位与符号链接后落地（`723f5b6`）。空目录为 S3 backend 固有限制（无目录对象），记为已知限制。
+- **#31 CLI 生命周期命令的存储绑定（35 处）**：resume/abort/rollback/cleanup 一律绑定 ConfigMap store，CRD 提交的工作流无法从 CLI 生命周期管理（executor 锁栅栏找 CM 记录 NotFound）。修复：loader 返回 owning backend，copy/reserve/migrate 按 backend 选 store，backup/restore/move/rename 增加 CRD 兜底；status list 枚举 CR（`66ac77c`）。**集群验证**：53 与 147 的 CRD copy/rename/move/migrate/podmig cleanup 全链路通过。
+- **#32（记录未修，UX）**：`create --wait` 遇工作流 Failed 时输出误导性的 "is managed by the controller"（controller_submission 打印先于等待），真实失败原因只在 CR condition。建议后续在 wait 终态后输出 condition 摘要。
+- **#33（记录未修，低危）**：源 PVC 在 **Reserved 阶段**被删除时，reconcile 循环报 "reserve volume: read source PVC"（预留重校验）而非转入 Failed；无害（无限退避重试、无数据风险、CR 可删除收敛）。修复建议：Reserved 阶段重校验失败转 `m.fail`。
+- **#34（升级注意）**：53 旧 chart（0.4.3）RBAC 缺 `csinodes` 读权限，新 planner CSINode 探测被拒。仓库 RBAC（deploy/rbac.yaml）已含该权限——**升级部署必须重新 apply RBAC**，已在新文档记录。
+- **#35（已知限制）**：跨集群恢复——备份写入方向跨集群可用（53→147 MinIO 发布+manifest 校验通过），但 restore 按本地 cluster identity 寻址恢复点（安全隔离，防误拉他集群数据），无显式 override 入口；DR 场景需要后续增加 `--cluster-identity` 类参数。
+- **move 会话 key 回归（当轮引入当轮修复）**：为 move 增加 CRD 兜底时误给 CM Load key 加了 namespace，而 move 会话记录本无 namespace——identity 校验拒绝所有 move cleanup。回归 Name-only key，CRD 探测覆盖 source/workflow/session namespace（`dcafc08`）。
+
+**笛卡尔积矩阵（全部使用 CI 构建镜像 + 对应本地 CLI，controller in-cluster）**：
+
+| 维度 | 取值 | 结果 |
+|---|---|---|
+| 模式 × 操作 | 会话模式 8 操作（copy/reserve/rename(+rollback)/move/migrate(+rollback)/migrate-pod(跨 SC 换盘)/backup/restore(经 S3)）| 147 全通过（62+ 记录，数据 sha256+权限位+符号链接+目录校验）|
+| 模式 × 操作 | CRD 模式 8 操作（create→controller reconcile→CLI lifecycle）| 147 全通过（同上校验；namespaced PodMigration 生命周期由 `fc4757b` 修复覆盖）|
+| 参数 | 多 PVC 单工作流、Delete/Retain 回收策略、subpath 隔离（非空子目录，根文件排除）、`--allow-volume-shrink --skip-source-usage-check` 缩容、capacity guard 负例 | 11/11 ✅ |
+| 负例 | 容量不足无 shrink、未知 SC、未知 strategy、缺失源 PVC、`--allow-placement-violation` 参数隔离（copy 拒绝） | 5/5 ✅ |
+| 故障注入 | controller kill→failover 恢复完成 + 数据校验；源 PVC 删除→CR 删除收敛 + 0 tool 泄漏；delete-before-planning 无泄漏；Spec 篡改→SpecMutated condition 生效 + fenced CR 可删；并发同 session 互斥（second 退出码 3） | 10/10 ✅ |
+| 53 子集 | controller 升级 fc4757b + CRD 更新 + RBAC 修复；copy/rename(+rollback)/move 会话模式、CRD copy（controller reconcile）、跨集群 S3 备份发布 | 全通过 |
+
+**修复过程中验证的设计正确性**（非缺陷，测试设计触及的安全护栏）：目标 SC/节点已满足时 migrate-pod 要求 `--force-reprovision`；同类同节点拒绝静默重供；cleanup 拒绝仍被 Succeeded Pod 挂载的 PVC；move/rename/restore 使用 `--id` 而 copy/reserve/migrate/backup 使用 `--session`（CLI 一致性观察项，未改）。
+
+**recovery 实战验证**：S3 中断留下的孤儿所有权由 `recovery cleanup-orphan` 三次实战清除（pre-activation 与 post-activation 两种模式均触发），恢复路径首次在非测试条件下真实使用。
+
+**集群终态**：147/53 测试命名空间与 r23 S3 bucket 已精确清理；147 controller 驻留 `sha-fc4757b`（1 副本）；53 controller 驻留 `sha-fc4757b`（2 副本）+ 新 CRD + 修复后 RBAC；两集群 controller 均零错误运行。
+
 ## 六、明确未覆盖项（含原因）
 
 1. **KubeBlocks 0.9 InstanceSet**：147 集群安装的是 sealos KB fork v0.8.2.1，workloads.kubeblocks.io 仅 ReplicatedStateMachine，组件 Pod 归属 apps/v1 StatefulSet；无 InstanceSet CRD/controller。升级共享集群 KB operator 风险不可接受。本集群 KB pause guard 已验证安全拒绝（集群 phase 卡 Creating，见下条）。
 2. **KB OpsRequest pause/resume 端到端**：三个 m2 KB 集群 phase 卡在 `Creating`（Pod Ready 3.5h+，fork 的 cluster/component phase 不推进）。pvc-migrate 正确拒绝暂停"创建中"集群（安全行为已验证）。作为替代，**KB mongo 数据 PVC 离线迁移**完成闭环（scale to 0 → migrate → scale to 1 → mongosh 校验 200 docs + sample 一致）。
-3. **真实 in-cluster controller 部署**：无 ghcr.io 推送权限（两个 token 均无 write:packages）。controller 以本地进程 + kubeconfig 验证；多副本 leader election 通过本地进程重启示例（lease 获取/释放/接管均验证）。
+3. **~~真实 in-cluster controller 部署~~**：第二十三轮起已具备 ghcr.io 推送权限，CI 构建镜像部署至 147/53 in-cluster controller 完成全量验证。
 4. **--precopy-passes=0 在 LVM 源**：0-pass + enableShared 路径已随 #16 修复覆盖（prepare 在 probe 前使能共享）；LVM 源 0-pass 的独立全周期未单独重跑（hostpath 源 0-pass 已完整验证）。
-5. **53 集群 controller 模式**：聚焦 147；53 完成会话模式 migrate + 跨集群目的端全链路。
+5. **~~53 集群 controller 模式~~**：第二十三轮已覆盖（CRD copy 经 controller reconcile + 会话模式子集 + 跨集群备份发布；见第二十三轮）。
 6. **旧 E2E harness 重建**：`test/e2e/e2e_test.go`（5721 行，含 18 处旧类型引用）随旧栈正确删除，`make e2e` 目标目前响亮失败；重建声明式时代的自动化 harness 是独立工作项。
 
 ## 七、环境备注
