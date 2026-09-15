@@ -24,7 +24,10 @@ import (
 )
 
 const (
-	rclonePreserveLinksArgs = "--links"
+	// --links keeps symbolic links through the S3 round trip; --metadata
+	// carries POSIX mode bits in object metadata, which plain rclone copy
+	// otherwise normalizes away (e.g. 0640 source becomes 0644 on restore).
+	rclonePreserveLinksArgs = "--links --metadata"
 	lockReleaseTimeout      = 10 * time.Second
 )
 
