@@ -3,12 +3,15 @@ package cli
 import (
 	"context"
 	"fmt"
+	"slices"
+	"strings"
 
 	v1alpha1 "github.com/labring-sigs/pvc-migrate/api/v1alpha1"
 	"github.com/labring-sigs/pvc-migrate/internal/app"
 	"github.com/labring-sigs/pvc-migrate/internal/kube"
 	"github.com/spf13/cobra"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	crclient "sigs.k8s.io/controller-runtime/pkg/client"
 )
 
@@ -56,9 +59,9 @@ func (r *rootState) loadMove(
 		return nil, nil, err
 	}
 
-	key := crclient.ObjectKey{Name: id, Namespace: r.global.sessionNamespace}
-
-	object, err := store.Load(ctx, key)
+	// Session records carry no namespace of their own; the ConfigMap location
+	// is the session namespace, not a workload namespace.
+	object, err := store.Load(ctx, crclient.ObjectKey{Name: id})
 	if err == nil {
 		return object, store, nil
 	}
@@ -67,6 +70,8 @@ func (r *rootState) loadMove(
 		return nil, nil, err
 	}
 
+	// Controller-submitted Move CRs live in the source namespace. Probe the
+	// namespaces a caller could have addressed.
 	crdStore, err := cliCRDWorkflowStore(
 		runtime,
 		func() *v1alpha1.Move { return &v1alpha1.Move{} },
@@ -75,12 +80,64 @@ func (r *rootState) loadMove(
 		return nil, nil, err
 	}
 
-	object, err = crdStore.Load(ctx, key)
-	if err != nil {
-		return nil, nil, reportSessionLookupError(cmd, r.global.sessionNamespace, id, err)
+	var lastErr error
+	for _, namespace := range r.moveProbeNamespaces(cmd) {
+		object, err := crdStore.Load(ctx, crclient.ObjectKey{Name: id, Namespace: namespace})
+		if apierrors.IsNotFound(err) {
+			lastErr = err
+			continue
+		}
+
+		if err != nil {
+			return nil, nil, err
+		}
+
+		return object, crdStore, nil
 	}
 
-	return object, crdStore, nil
+	if lastErr == nil {
+		lastErr = apierrors.NewNotFound(
+			schema.GroupResource{Group: v1alpha1.GroupVersion.Group, Resource: "moves"}, id,
+		)
+	}
+
+	return nil, nil, reportSessionLookupError(cmd, r.global.sessionNamespace, id, lastErr)
+}
+
+// moveProbeNamespaces lists the tenant namespaces a controller-submitted Move
+// CR lookup must cover.
+func (r *rootState) moveProbeNamespaces(cmd *cobra.Command) []string {
+	namespaces := make([]string, 0, 3)
+
+	if cmd != nil {
+		for _, name := range []string{"source-namespace", "namespace", "workflow-namespace"} {
+			flag := cmd.Flags().Lookup(name)
+			if flag == nil {
+				continue
+			}
+
+			value, err := cmd.Flags().GetString(name)
+			if err != nil || strings.TrimSpace(value) == "" || value == "default" {
+				continue
+			}
+
+			if !slices.Contains(namespaces, strings.TrimSpace(value)) {
+				namespaces = append(namespaces, strings.TrimSpace(value))
+			}
+		}
+	}
+
+	if candidate := strings.TrimSpace(r.global.workflowNamespace); candidate != "" &&
+		!slices.Contains(namespaces, candidate) {
+		namespaces = append(namespaces, candidate)
+	}
+
+	if candidate := strings.TrimSpace(r.global.sessionNamespace); candidate != "" &&
+		!slices.Contains(namespaces, candidate) {
+		namespaces = append(namespaces, candidate)
+	}
+
+	return namespaces
 }
 
 func (r *rootState) newMoveStatusCommand() *cobra.Command {
