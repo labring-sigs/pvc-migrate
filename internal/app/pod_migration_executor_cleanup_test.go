@@ -166,6 +166,71 @@ func TestPodMigrationLiveAbortStillRequiresSourceStorage(t *testing.T) {
 	}
 }
 
+func TestPodMigrationCleanupReleasesStandalonePodMarker(t *testing.T) {
+	executor, object, store, _ := podMigrationExecutorFixture(t)
+	executor.workloads = &fakeController{}
+
+	object.Status.Phase = domain.PhaseAborted
+	for _, volume := range object.Status.Plan.Volumes {
+		object.Status.Volumes = append(object.Status.Volumes,
+			v1alpha1.ClusterPodMigrationVolumeStatus{
+				ClusterVolumeReservationStatus: v1alpha1.ClusterVolumeReservationStatus{
+					SourcePVCName:     volume.SourcePVC.Name,
+					Reserved:          true,
+					DestinationPolicy: corev1.PersistentVolumeReclaimRetain,
+					DestinationPVC: &v1alpha1.ObjectReference{
+						Kind:      "PersistentVolumeClaim",
+						Namespace: "temporary",
+						Name:      "reserved-" + volume.SourcePVC.Name,
+						UID:       types.UID("reserved-" + volume.SourcePVC.Name),
+					},
+					DestinationPV: &v1alpha1.ObjectReference{
+						Kind: "PersistentVolume",
+						Name: "reserved-pv-" + volume.SourcePVC.Name,
+						UID:  types.UID("reserved-pv-" + volume.SourcePVC.Name),
+					},
+				},
+			},
+		)
+	}
+
+	if err := store.Save(t.Context(), object); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := executor.client.CoreV1().Pods("source").Create(t.Context(), &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace:   "source",
+			Name:        "workload",
+			Annotations: map[string]string{kube.SessionKey: object.Name},
+		},
+	}, metav1.CreateOptions{}); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := executor.Cleanup(
+		t.Context(),
+		object,
+		MigrationCleanupOptions{Finalize: true, DeleteSession: true},
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	pod, err := executor.client.CoreV1().Pods("source").Get(
+		t.Context(), "workload", metav1.GetOptions{},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if pod.Annotations[kube.SessionKey] != "" {
+		t.Fatalf(
+			"finalized workflow left the standalone Pod owned: %q",
+			pod.Annotations[kube.SessionKey],
+		)
+	}
+}
+
 func TestPodMigrationCleanupUsesCutoverIdentityAndExplicitPolicies(t *testing.T) {
 	executor, object, _, _ := podMigrationExecutorFixture(t)
 	executor.transfer.copier = &concreteCopyEngine{}

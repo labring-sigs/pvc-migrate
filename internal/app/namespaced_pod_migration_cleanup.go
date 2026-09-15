@@ -198,6 +198,14 @@ func (m *PodMigrationExecutor) cleanup(
 	}
 
 	if plan := object.Status.Plan; plan != nil {
+		if err := releaseWorkloadMarkers(
+			ctx, m.client, object.Name, plan.Workload, object.Namespace,
+		); err != nil {
+			return err
+		}
+	}
+
+	if plan := object.Status.Plan; plan != nil {
 		if err := m.restoreSharedMounts(ctx, object.Name, []string{object.Namespace},
 			&object.Status.OpenEBSLVMSharedMounts,
 			func(ctx context.Context) error { return m.store.Save(ctx, object) }); err != nil {

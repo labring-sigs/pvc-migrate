@@ -187,6 +187,14 @@ func (m *ClusterPodMigrationExecutor) cleanup(
 	}
 
 	if plan := object.Status.Plan; plan != nil {
+		if err := releaseWorkloadMarkers(
+			ctx, m.client, object.Name, plan.Workload, string(plan.SourceNamespace),
+		); err != nil {
+			return err
+		}
+	}
+
+	if plan := object.Status.Plan; plan != nil {
 		if err := m.restoreSharedMounts(
 			ctx,
 			object.Name,
