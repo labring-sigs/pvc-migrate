@@ -69,3 +69,23 @@ func deletedPlannedSourcePVC(
 
 	return false, nil
 }
+
+// deletionSourceMissing reports whether a planned volume's source PVC is gone
+// while finalizing a deleted workflow. Only a deletion pass may skip the
+// validations that re-verify the live source identity.
+func deletionSourceMissing(
+	ctx context.Context,
+	client kubernetes.Interface,
+	sourceNamespace string,
+	volume v1alpha1.VolumeSpec,
+) (bool, error) {
+	if !workflowDeletionInProgress(ctx) || volume.SourcePVC.Name == "" {
+		return false, nil
+	}
+
+	return sourcePVCDeleted(
+		ctx,
+		client,
+		qualifiedResourceReference(volume.SourcePVC, sourceNamespace),
+	)
+}

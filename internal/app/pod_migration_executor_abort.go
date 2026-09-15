@@ -178,16 +178,28 @@ func (m *ClusterPodMigrationExecutor) abort(
 		checkpoint := status.ClusterVolumeReservationStatus
 
 		binding := plannedMigrationBindings(string(plan.SourceNamespace), volume, checkpoint)
-		if err := m.validateReservedVolume(
-			ctx,
-			object.Name,
-			plan.TargetNode,
-			plan.ToolImage,
-			binding,
-			volume,
-			checkpoint,
-		); err != nil {
+
+		skipValidation, err := deletionSourceMissing(
+			ctx, m.client, string(plan.SourceNamespace), volume,
+		)
+		if err != nil {
 			return m.fail(ctx, object, err)
+		}
+
+		// The reserved-volume validation re-verifies the source identity,
+		// which no longer exists during deletion convergence.
+		if !skipValidation {
+			if err := m.validateReservedVolume(
+				ctx,
+				object.Name,
+				plan.TargetNode,
+				plan.ToolImage,
+				binding,
+				volume,
+				checkpoint,
+			); err != nil {
+				return m.fail(ctx, object, err)
+			}
 		}
 
 		for _, mode := range []copyengine.Mode{copyengine.ModeWarm, copyengine.ModeFinal} {

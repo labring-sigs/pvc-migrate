@@ -108,6 +108,7 @@ func TestPodMigrationDeletionConvergesWhenSourceStorageDeleted(t *testing.T) {
 	for _, volume := range object.Status.Plan.Volumes {
 		object.Status.Volumes = append(object.Status.Volumes,
 			v1alpha1.ClusterPodMigrationVolumeStatus{
+				Sync: v1alpha1.PodMigrationSyncStatus{Attempts: 1},
 				ClusterVolumeReservationStatus: v1alpha1.ClusterVolumeReservationStatus{
 					SourcePVCName:     volume.SourcePVC.Name,
 					Reserved:          true,
