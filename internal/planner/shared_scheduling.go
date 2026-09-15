@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"slices"
 
+	v1alpha1 "github.com/labring-sigs/pvc-migrate/api/v1alpha1"
 	"github.com/labring-sigs/pvc-migrate/internal/domain"
 	"github.com/labring-sigs/pvc-migrate/internal/kube"
 	corev1 "k8s.io/api/core/v1"
@@ -12,8 +13,14 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 )
 
-func (p *Planner) checkSharedRWOScheduling(state *planState) {
-	if !state.options.OpenEBSLVMEnableShared || state.sourcePod == nil || state.targetNode == nil {
+func checkPodSharedRWOScheduling(
+	state *planState,
+	sourcePod *corev1.Pod,
+	affectedPods []v1alpha1.LocalResourceReference,
+	namespace *corev1.Namespace,
+	namespaceErr error,
+) {
+	if sourcePod == nil || state.targetNode == nil {
 		return
 	}
 
@@ -37,12 +44,14 @@ func (p *Planner) checkSharedRWOScheduling(state *planState) {
 		}
 
 		issues := sharedRWOCollocationIssues(
-			state.workload,
-			state.sourcePod,
+			workloadPodUIDs(
+				affectedPods,
+				sourcePod,
+			),
 			volume.SourcePVC.Name,
 			state.inventory.namespacePods,
-			state.inventory.sourceNamespace,
-			state.inventory.sourceNamespaceErr,
+			namespace,
+			namespaceErr,
 			state.targetNode,
 			state.inventory.nodes,
 			state.inventory.nodesErr,
@@ -83,8 +92,7 @@ func plannedVolumeRequiresSharedCollocation(volume domain.PlannedVolume) bool {
 }
 
 func sharedRWOCollocationIssues(
-	workload domain.WorkloadSpec,
-	selected *corev1.Pod,
+	unitUIDs map[string]types.UID,
 	pvcName string,
 	pods []corev1.Pod,
 	namespace *corev1.Namespace,
@@ -93,12 +101,11 @@ func sharedRWOCollocationIssues(
 	nodes []corev1.Node,
 	nodesErr error,
 ) []string {
-	consumers := migrationUnitPVCConsumers(workload, selected, pvcName, pods)
+	consumers := migrationUnitPVCConsumers(unitUIDs, pvcName, pods)
 	if len(consumers) < 2 {
 		return nil
 	}
 
-	unitUIDs := workloadPodUIDs(workload, selected, selected.Namespace)
 	for _, consumer := range consumers {
 		if issue := requiredAntiAffinityCollocationIssue(
 			consumer,
@@ -127,13 +134,10 @@ func sharedRWOCollocationIssues(
 }
 
 func migrationUnitPVCConsumers(
-	workload domain.WorkloadSpec,
-	selected *corev1.Pod,
+	unitUIDs map[string]types.UID,
 	pvcName string,
 	pods []corev1.Pod,
 ) []*corev1.Pod {
-	unitUIDs := workloadPodUIDs(workload, selected, selected.Namespace)
-
 	consumers := make([]*corev1.Pod, 0, len(unitUIDs))
 	for index := range pods {
 		pod := &pods[index]

@@ -2,24 +2,34 @@ package kube
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
+	v1alpha1 "github.com/labring-sigs/pvc-migrate/api/v1alpha1"
 	"github.com/labring-sigs/pvc-migrate/internal/domain"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
-func (s *Switcher) RollbackVolume(
+// RollbackPVC restores the recorded source binding using an operation-owned manifest.
+func (s *Switcher) RollbackPVC(
 	ctx context.Context,
-	session *domain.Session,
-	volume *domain.VolumeSpec,
-	status *domain.VolumeStatus,
+	sessionID string,
+	volume PVCTransferBindings,
+	desired *corev1.PersistentVolumeClaim,
+	status *v1alpha1.ClusterVolumeActivationStatus,
 	progress ProgressFunc,
 ) error {
-	if err := validateRollbackVolume(session, volume, status); err != nil {
+	if err := validateRollbackPVC(sessionID, volume, desired, status); err != nil {
 		return err
 	}
+
+	if err := errors.Join(ctx.Err(), LeaseFenceError(ctx)); err != nil {
+		return err
+	}
+
+	manifest := desired.DeepCopy()
 
 	if err := s.ensureNoConsumers(
 		ctx,
@@ -35,7 +45,7 @@ func (s *Switcher) RollbackVolume(
 	if err == nil && current.Spec.VolumeName == volume.SourcePV.Name {
 		original := current.UID == volume.SourcePVC.UID
 
-		recovered := current.Annotations[SessionKey] == session.ID
+		recovered := current.Annotations[SessionKey] == sessionID
 		if !original && !recovered {
 			return domain.NewError(
 				domain.ErrorConflict,
@@ -48,7 +58,7 @@ func (s *Switcher) RollbackVolume(
 			)
 		}
 
-		return s.completeRollback(ctx, session, volume, status, current, progress)
+		return s.completeRollback(ctx, sessionID, volume, status, current, progress)
 	}
 
 	if err != nil && !apierrors.IsNotFound(err) {
@@ -56,30 +66,25 @@ func (s *Switcher) RollbackVolume(
 	}
 
 	if err == nil {
-		if err := s.removeActiveDestination(ctx, session, volume, current); err != nil {
+		if err := s.removeActiveDestination(ctx, sessionID, volume, current); err != nil {
 			return err
 		}
 	}
 
-	if err := s.ensureRetain(ctx, volume.SourcePV, session.ID, ResourceRoleSource); err != nil {
+	if err := s.ensureRetain(ctx, volume.SourcePV, sessionID, ResourceRoleSource); err != nil {
 		return err
 	}
 
 	if err := s.ensureRetain(
 		ctx,
 		volume.DestinationPV,
-		session.ID,
+		sessionID,
 		ResourceRoleDestination,
 	); err != nil {
 		return err
 	}
 
-	sourceClass := ""
-	if volume.SourcePVCSpec.StorageClassName != nil {
-		sourceClass = *volume.SourcePVCSpec.StorageClassName
-	}
-
-	if err := s.validateActivePVC(ctx, session, volume, volume.SourcePV, sourceClass); err != nil {
+	if err := s.validateBoundPVC(ctx, manifest); err != nil {
 		return err
 	}
 
@@ -88,53 +93,27 @@ func (s *Switcher) RollbackVolume(
 		volume.SourcePV,
 		volume.SourcePVC.Namespace,
 		volume.SourcePVC.Name,
-		session.ID,
+		sessionID,
 	); err != nil {
 		return err
 	}
 
-	recreated, err := s.createActivePVC(ctx, session, volume, volume.SourcePV, sourceClass)
+	recreated, err := s.createBoundPVC(ctx, sessionID, manifest)
 	if err != nil {
 		return err
 	}
 
-	return s.completeRollback(ctx, session, volume, status, recreated, progress)
-}
-
-func validateRollbackVolume(
-	session *domain.Session,
-	volume *domain.VolumeSpec,
-	status *domain.VolumeStatus,
-) error {
-	if session == nil || volume == nil || status == nil {
-		return domain.NewError(
-			domain.ErrorValidation,
-			"rollback volume",
-			"session, volume, and volume status are required",
-		)
-	}
-
-	if volume.SourcePVC.Namespace == "" || volume.SourcePVC.Name == "" ||
-		volume.SourcePVC.UID == "" || volume.SourcePV.Name == "" || volume.SourcePV.UID == "" ||
-		volume.DestinationPV.Name == "" || volume.DestinationPV.UID == "" {
-		return domain.NewError(
-			domain.ErrorPrecondition,
-			"rollback volume",
-			"source PVC and source/destination PV identities are required",
-		)
-	}
-
-	return nil
+	return s.completeRollback(ctx, sessionID, volume, status, recreated, progress)
 }
 
 func (s *Switcher) removeActiveDestination(
 	ctx context.Context,
-	session *domain.Session,
-	volume *domain.VolumeSpec,
+	sessionID string,
+	volume PVCTransferBindings,
 	current *corev1.PersistentVolumeClaim,
 ) error {
 	if current.Spec.VolumeName != volume.DestinationPV.Name ||
-		current.Annotations[SessionKey] != session.ID {
+		current.Annotations[SessionKey] != sessionID {
 		return domain.NewError(
 			domain.ErrorConflict,
 			"rollback volume",
@@ -154,13 +133,13 @@ func (s *Switcher) removeActiveDestination(
 	if err := s.ensureRetain(
 		ctx,
 		volume.DestinationPV,
-		session.ID,
+		sessionID,
 		ResourceRoleDestination,
 	); err != nil {
 		return err
 	}
 
-	ref := domain.ObjectReference{
+	ref := v1alpha1.ObjectReference{
 		Namespace: current.Namespace, Name: current.Name, UID: current.UID,
 		ResourceVersion: current.ResourceVersion,
 	}
@@ -169,4 +148,54 @@ func (s *Switcher) removeActiveDestination(
 	}
 
 	return s.ensureDetached(ctx, volume.DestinationPV.Name)
+}
+
+func validateRollbackPVC(sessionID string, volume PVCTransferBindings,
+	desired *corev1.PersistentVolumeClaim, status *v1alpha1.ClusterVolumeActivationStatus,
+) error {
+	if sessionID == "" || desired == nil || status == nil {
+		return domain.NewError(
+			domain.ErrorValidation,
+			"rollback PVC",
+			"workflow ID, desired PVC and activation checkpoint are required",
+		)
+	}
+
+	if volume.SourcePVC.Namespace == "" ||
+		volume.SourcePVC.Name == "" ||
+		volume.SourcePVC.UID == "" ||
+		volume.SourcePV.Name == "" ||
+		volume.SourcePV.UID == "" ||
+		volume.DestinationPV.Name == "" ||
+		volume.DestinationPV.UID == "" {
+		return domain.NewError(
+			domain.ErrorPrecondition,
+			"rollback PVC",
+			"source PVC and source/destination PV identities are required",
+		)
+	}
+
+	if desired.Namespace != volume.SourcePVC.Namespace ||
+		desired.Name != volume.SourcePVC.Name ||
+		desired.Spec.VolumeName != volume.SourcePV.Name ||
+		desired.Labels[SessionKey] != sessionID ||
+		desired.Annotations[SessionKey] != sessionID ||
+		desired.Labels[ManagedByLabel] != ManagedByValue {
+		return domain.NewError(
+			domain.ErrorConflict,
+			"rollback PVC",
+			"desired PVC differs from the recorded rollback identity or ownership",
+		)
+	}
+
+	capacity := desired.Spec.Resources.Requests[corev1.ResourceStorage]
+	if capacity.Sign() <= 0 {
+		return domain.NewError(
+			domain.ErrorValidation,
+			"rollback PVC",
+			"desired PVC capacity must be positive",
+		)
+	}
+
+	return nil
 }

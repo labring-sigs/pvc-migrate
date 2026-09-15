@@ -8,6 +8,7 @@ import (
 	"sync"
 	"time"
 
+	v1alpha1 "github.com/labring-sigs/pvc-migrate/api/v1alpha1"
 	"github.com/labring-sigs/pvc-migrate/internal/domain"
 	"github.com/labring-sigs/pvc-migrate/internal/parallel"
 	corev1 "k8s.io/api/core/v1"
@@ -52,24 +53,27 @@ func (s *Switcher) waitFor(
 	return WaitFor(ctx, s.poll, description, condition)
 }
 
-func (s *Switcher) VerifyVolumeOffline(ctx context.Context, volume *domain.VolumeSpec) error {
-	if volume == nil {
-		return domain.NewError(domain.ErrorValidation, "verify PVC offline", "volume is nil")
-	}
-	return s.verifyVolumesOffline(ctx, "", []*domain.VolumeSpec{volume}, false)
+// PVCTransferBindings contains only the storage identities needed to verify
+// consumers, ownership and a retained-volume cutover.
+type PVCTransferBindings struct {
+	SourcePVC, SourcePV, DestinationPVC, DestinationPV v1alpha1.ObjectReference
+}
+
+func (s *Switcher) VerifyVolumeOffline(ctx context.Context, bindings PVCTransferBindings) error {
+	return s.verifyOfflineBindings(ctx, "", []PVCTransferBindings{bindings}, false)
 }
 
 type offlineIdentityKey struct {
-	pvc domain.ObjectReference
-	pv  domain.ObjectReference
+	pvc v1alpha1.ObjectReference
+	pv  v1alpha1.ObjectReference
 }
 
 type offlineIdentityRead struct {
-	pvc           domain.ObjectReference
-	pv            domain.ObjectReference
+	pvc           v1alpha1.ObjectReference
+	pv            v1alpha1.ObjectReference
 	role          string
 	err           error
-	recoveryClaim *domain.ObjectReference
+	recoveryClaim *v1alpha1.ObjectReference
 }
 
 type podListResult struct {
@@ -79,8 +83,8 @@ type podListResult struct {
 
 // VerifyVolumesOffline shares namespace and cluster-wide inventory reads
 // across volumes while preserving source-first, input-order validation.
-func (s *Switcher) VerifyVolumesOffline(ctx context.Context, volumes []*domain.VolumeSpec) error {
-	return s.verifyVolumesOffline(ctx, "", volumes, false)
+func (s *Switcher) VerifyVolumesOffline(ctx context.Context, volumes []PVCTransferBindings) error {
+	return s.verifyOfflineBindings(ctx, "", volumes, false)
 }
 
 // VerifyVolumesOfflineForSession also fences live PVC/PV ownership. This
@@ -89,7 +93,7 @@ func (s *Switcher) VerifyVolumesOffline(ctx context.Context, volumes []*domain.V
 func (s *Switcher) VerifyVolumesOfflineForSession(
 	ctx context.Context,
 	sessionID string,
-	volumes []*domain.VolumeSpec,
+	volumes []PVCTransferBindings,
 ) error {
 	if strings.TrimSpace(sessionID) == "" {
 		return domain.NewError(
@@ -99,7 +103,7 @@ func (s *Switcher) VerifyVolumesOfflineForSession(
 		)
 	}
 
-	return s.verifyVolumesOffline(ctx, sessionID, volumes, false)
+	return s.verifyOfflineBindings(ctx, sessionID, volumes, false)
 }
 
 // VerifyActivationRecovery accepts missing claims only when their retained PVs
@@ -107,7 +111,7 @@ func (s *Switcher) VerifyVolumesOfflineForSession(
 func (s *Switcher) VerifyActivationRecovery(
 	ctx context.Context,
 	sessionID string,
-	volumes []*domain.VolumeSpec,
+	volumes []PVCTransferBindings,
 ) error {
 	if strings.TrimSpace(sessionID) == "" {
 		return domain.NewError(
@@ -117,20 +121,30 @@ func (s *Switcher) VerifyActivationRecovery(
 		)
 	}
 
-	return s.verifyVolumesOffline(ctx, sessionID, volumes, true)
+	return s.verifyOfflineBindings(ctx, sessionID, volumes, true)
 }
 
-func (s *Switcher) verifyVolumesOffline(
+// VerifyPVCOffline checks the exact binding and its consumers without any
+// transfer plan, destination capacity, or activation policy.
+func (s *Switcher) VerifyPVCOffline(
 	ctx context.Context,
 	sessionID string,
-	volumes []*domain.VolumeSpec,
+	pvc, pv v1alpha1.ObjectReference,
+) error {
+	return s.verifyOfflineBindings(ctx, sessionID, []PVCTransferBindings{{pvc, pv, pvc, pv}}, false)
+}
+
+func (s *Switcher) verifyOfflineBindings(
+	ctx context.Context,
+	sessionID string,
+	volumes []PVCTransferBindings,
 	recovering bool,
 ) error {
 	identities := make([]offlineIdentityRead, 0, 2*len(volumes))
 	identityIndexes := make([]int, 0, 2*len(volumes))
 	identityByKey := make(map[offlineIdentityKey]int, 2*len(volumes))
 
-	addIdentity := func(pvc, pv domain.ObjectReference, role string, recoveryClaim domain.ObjectReference) {
+	addIdentity := func(pvc, pv v1alpha1.ObjectReference, role string, recoveryClaim v1alpha1.ObjectReference) {
 		key := offlineIdentityKey{pvc: pvc, pv: pv}
 
 		index, exists := identityByKey[key]
@@ -147,11 +161,12 @@ func (s *Switcher) verifyVolumesOffline(
 		identityIndexes = append(identityIndexes, index)
 	}
 	for _, volume := range volumes {
-		if volume == nil {
-			return domain.NewError(domain.ErrorValidation, "verify PVC offline", "volume is nil")
-		}
-
-		addIdentity(volume.SourcePVC, volume.SourcePV, ResourceRoleSource, domain.ObjectReference{})
+		addIdentity(
+			volume.SourcePVC,
+			volume.SourcePV,
+			ResourceRoleSource,
+			v1alpha1.ObjectReference{},
+		)
 		addIdentity(
 			volume.DestinationPVC,
 			volume.DestinationPV,
@@ -184,14 +199,14 @@ func (s *Switcher) verifyVolumesOffline(
 
 	seenPVs := make(map[string]struct{}, 2*len(volumes))
 	for _, volume := range volumes {
-		for _, ref := range []domain.ObjectReference{volume.SourcePVC, volume.DestinationPVC} {
+		for _, ref := range []v1alpha1.ObjectReference{volume.SourcePVC, volume.DestinationPVC} {
 			if _, exists := namespaceIndexes[ref.Namespace]; !exists {
 				namespaceIndexes[ref.Namespace] = len(namespaces)
 				namespaces = append(namespaces, ref.Namespace)
 			}
 		}
 
-		for _, ref := range []domain.ObjectReference{volume.SourcePV, volume.DestinationPV} {
+		for _, ref := range []v1alpha1.ObjectReference{volume.SourcePV, volume.DestinationPV} {
 			if ref.Name == "" {
 				continue
 			}
@@ -213,7 +228,7 @@ func (s *Switcher) verifyVolumesOffline(
 	detachDone := make(chan error, 1)
 	checkPods := func() error {
 		for _, volume := range volumes {
-			for _, ref := range []domain.ObjectReference{volume.SourcePVC, volume.DestinationPVC} {
+			for _, ref := range []v1alpha1.ObjectReference{volume.SourcePVC, volume.DestinationPVC} {
 				result := podLists[namespaceIndexes[ref.Namespace]]
 				if result.err != nil {
 					return domain.WrapError(

@@ -1,13 +1,16 @@
 package cli
 
 import (
+	"context"
+	"fmt"
+
+	v1alpha1 "github.com/labring-sigs/pvc-migrate/api/v1alpha1"
 	"github.com/labring-sigs/pvc-migrate/internal/app"
-	"github.com/labring-sigs/pvc-migrate/internal/domain"
+	"github.com/labring-sigs/pvc-migrate/internal/kube"
 	"github.com/spf13/cobra"
+	crclient "sigs.k8s.io/controller-runtime/pkg/client"
 )
 
-// addMoveLifecycle attaches lifecycle commands owned by cluster-scoped PVC
-// moves. Tenant-scoped rename has a separate command module.
 func (r *rootState) addMoveLifecycle(parent *cobra.Command) {
 	parent.AddCommand(
 		r.newMoveStatusCommand(),
@@ -18,10 +21,52 @@ func (r *rootState) addMoveLifecycle(parent *cobra.Command) {
 	)
 }
 
+func moveStorageNamespace(object *v1alpha1.Move) string {
+	if object.Status.Plan != nil {
+		return string(object.Status.Plan.SessionNamespace)
+	}
+
+	if object.Spec.SessionNamespace != "" {
+		return string(object.Spec.SessionNamespace)
+	}
+
+	return string(object.Spec.SourceNamespace)
+}
+
+func moveStore(
+	runtime *commandRuntime,
+	namespace string,
+) (kube.WorkflowStore[*v1alpha1.Move], error) {
+	return kube.NewConfigMapWorkflowStore(
+		runtime.clients.Kubernetes,
+		namespace,
+		func() *v1alpha1.Move { return &v1alpha1.Move{} },
+	)
+}
+
+func (r *rootState) loadMove(
+	ctx context.Context,
+	cmd *cobra.Command,
+	runtime *commandRuntime,
+	id string,
+) (*v1alpha1.Move, kube.WorkflowStore[*v1alpha1.Move], error) {
+	store, err := moveStore(runtime, r.global.sessionNamespace)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	object, err := store.Load(ctx, crclient.ObjectKey{Name: id})
+	if err != nil {
+		return nil, nil, reportSessionLookupError(cmd, r.global.sessionNamespace, id, err)
+	}
+
+	return object, store, nil
+}
+
 func (r *rootState) newMoveStatusCommand() *cobra.Command {
 	return &cobra.Command{
 		Use:   "status [SESSION]",
-		Short: "Show one move session or list all move sessions",
+		Short: "Show one move workflow or list move workflows",
 		Args:  cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			runtime, err := r.runtime()
@@ -33,75 +78,74 @@ func (r *rootState) newMoveStatusCommand() *cobra.Command {
 			defer cancel()
 
 			if len(args) == 1 {
-				session, err := r.workflowSession(
-					ctx,
-					runtime,
-					cmd,
-					args[0],
-					domain.SessionTypeMove,
-					"move status",
-				)
+				object, _, err := r.loadMove(ctx, cmd, runtime, args[0])
 				if err != nil {
 					return err
 				}
 
-				return printSessionResult(cmd, runtime, session)
+				return runtime.printer.Print(object)
 			}
 
-			return r.workflowSessionList(ctx, runtime, cmd, domain.SessionTypeMove, "move")
+			store, err := moveStore(runtime, r.global.sessionNamespace)
+			if err != nil {
+				return err
+			}
+
+			objects, err := store.List(ctx, "")
+			if err != nil {
+				return err
+			}
+
+			return runtime.printer.Print(objects)
 		},
 	}
 }
 
-func (r *rootState) newMoveResumeCommand() *cobra.Command {
+type moveAction func(context.Context, *app.MoveExecutor, *v1alpha1.Move) error
+
+func (r *rootState) moveLifecycleCommand(
+	use, short string,
+	validate, execute moveAction,
+) *cobra.Command {
 	var dryRun bool
 
-	command := &cobra.Command{
-		Use:   "resume SESSION",
-		Short: "Continue a move session from its persisted phase",
-		Args:  cobra.ExactArgs(1),
-		RunE: func(cmd *cobra.Command, args []string) error {
-			runtime, err := r.runtime()
-			if err != nil {
-				return err
+	command := &cobra.Command{Use: use + " SESSION", Short: short, Args: cobra.ExactArgs(1)}
+	command.RunE = func(cmd *cobra.Command, args []string) error {
+		runtime, err := r.runtime()
+		if err != nil {
+			return err
+		}
+
+		ctx, cancel := r.context(cmd.Context())
+		defer cancel()
+
+		object, store, err := r.loadMove(ctx, cmd, runtime, args[0])
+		if err != nil {
+			return err
+		}
+
+		executor := app.NewMoveExecutor(
+			runtime.clients.Kubernetes,
+			store,
+			cliWorkflowLocker(runtime),
+			moveStorageNamespace(object),
+		)
+		if dryRun {
+			if err := validate(ctx, executor, object); err != nil {
+				return reportMoveError(cmd, object, err)
 			}
+			return runtime.printer.Print(object)
+		}
 
-			ctx, cancel := r.context(cmd.Context())
-			defer cancel()
+		if err := r.confirm(ctx, cmd, object.Name); err != nil {
+			return reportApprovalError(cmd, err)
+		}
 
-			session, err := r.workflowSession(
-				ctx,
-				runtime,
-				cmd,
-				args[0],
-				domain.SessionTypeMove,
-				"move resume",
-			)
-			if err != nil {
-				return err
-			}
+		if err := execute(ctx, executor, object); err != nil {
+			return reportMoveError(cmd, object, err)
+		}
 
-			if dryRun {
-				if err := runtime.service.ValidateMoveResume(ctx, session); err != nil {
-					return reportSessionError(cmd, session, err)
-				}
-				return printSessionResult(cmd, runtime, session)
-			}
-
-			if err := r.confirm(ctx, cmd, args[0]); err != nil {
-				return reportApprovalError(cmd, err)
-			}
-
-			if deferred, err := deferControllerExecution(ctx, cmd, runtime, session); deferred {
-				return err
-			}
-
-			if err := runtime.service.ResumeMove(ctx, session); err != nil {
-				return reportSessionError(cmd, session, err)
-			}
-
-			return printSessionResult(cmd, runtime, session)
-		},
+		return runtime.printer.Print(object)
 	}
 	bindDryRun(command, &dryRun)
 
@@ -109,97 +153,73 @@ func (r *rootState) newMoveResumeCommand() *cobra.Command {
 }
 
 func (r *rootState) newMoveAbortCommand() *cobra.Command {
-	var dryRun bool
-
-	command := &cobra.Command{
-		Use: "abort SESSION", Short: "Abort a move session", Args: cobra.ExactArgs(1),
-		RunE: func(cmd *cobra.Command, args []string) error {
-			runtime, err := r.runtime()
-			if err != nil {
-				return err
-			}
-
-			ctx, cancel := r.context(cmd.Context())
-			defer cancel()
-
-			session, err := r.workflowSession(
-				ctx,
-				runtime,
-				cmd,
-				args[0],
-				domain.SessionTypeMove,
-				"move abort",
-			)
-			if err != nil {
-				return err
-			}
-
-			if dryRun {
-				if err := runtime.service.ValidateMoveAbort(ctx, session); err != nil {
-					return reportSessionError(cmd, session, err)
-				}
-				return printSessionResult(cmd, runtime, session)
-			}
-
-			if err := r.confirm(ctx, cmd, args[0]); err != nil {
-				return reportApprovalError(cmd, err)
-			}
-
-			if err := runtime.service.AbortMove(ctx, session); err != nil {
-				return reportSessionError(cmd, session, err)
-			}
-
-			return printSessionResult(cmd, runtime, session)
+	return r.moveLifecycleCommand("abort", "Abort a move workflow",
+		func(_ context.Context, executor *app.MoveExecutor, object *v1alpha1.Move) error {
+			return executor.ValidateAbort(object)
 		},
-	}
-	bindDryRun(command, &dryRun)
-
-	return command
+		func(ctx context.Context, executor *app.MoveExecutor, object *v1alpha1.Move) error {
+			return executor.Abort(ctx, object)
+		})
 }
 
 func (r *rootState) newMoveRollbackCommand() *cobra.Command {
+	return r.moveLifecycleCommand("rollback", "Restore the original PVC namespace and name",
+		func(ctx context.Context, executor *app.MoveExecutor, object *v1alpha1.Move) error {
+			return executor.ValidateRollback(ctx, object)
+		},
+		func(ctx context.Context, executor *app.MoveExecutor, object *v1alpha1.Move) error {
+			return executor.Rollback(ctx, object)
+		})
+}
+
+func (r *rootState) newMoveResumeCommand() *cobra.Command {
 	var dryRun bool
 
 	command := &cobra.Command{
-		Use: "rollback SESSION", Short: "Roll back a move session", Args: cobra.ExactArgs(1),
-		RunE: func(cmd *cobra.Command, args []string) error {
-			runtime, err := r.runtime()
-			if err != nil {
-				return err
+		Use:   "resume SESSION",
+		Short: "Continue a move from its persisted checkpoint",
+		Args:  cobra.ExactArgs(1),
+	}
+	command.RunE = func(cmd *cobra.Command, args []string) error {
+		runtime, err := r.runtime()
+		if err != nil {
+			return err
+		}
+
+		ctx, cancel := r.context(cmd.Context())
+		defer cancel()
+
+		object, store, err := r.loadMove(ctx, cmd, runtime, args[0])
+		if err != nil {
+			return err
+		}
+
+		executor := app.NewMoveExecutor(
+			runtime.clients.Kubernetes,
+			store,
+			cliWorkflowLocker(runtime),
+			moveStorageNamespace(object),
+		)
+		if dryRun {
+			if err := executor.ValidateResume(ctx, object); err != nil {
+				return reportMoveError(cmd, object, err)
 			}
+			return runtime.printer.Print(object)
+		}
 
-			ctx, cancel := r.context(cmd.Context())
-			defer cancel()
+		if err := r.confirm(ctx, cmd, object.Name); err != nil {
+			return reportApprovalError(cmd, err)
+		}
 
-			session, err := r.workflowSession(
-				ctx,
-				runtime,
-				cmd,
-				args[0],
-				domain.SessionTypeMove,
-				"move rollback",
-			)
-			if err != nil {
-				return err
-			}
+		if err := executor.RequestResume(ctx, object); err != nil {
+			return reportMoveError(cmd, object, err)
+		}
 
-			if dryRun {
-				if err := runtime.service.ValidateMoveRollback(ctx, session); err != nil {
-					return reportSessionError(cmd, session, err)
-				}
-				return printSessionResult(cmd, runtime, session)
-			}
+		if err := executor.Run(ctx, object); err != nil {
+			return reportMoveError(cmd, object, err)
+		}
 
-			if err := r.confirm(ctx, cmd, args[0]); err != nil {
-				return reportApprovalError(cmd, err)
-			}
-
-			if err := runtime.service.RollbackMove(ctx, session); err != nil {
-				return reportSessionError(cmd, session, err)
-			}
-
-			return printSessionResult(cmd, runtime, session)
-		},
+		return runtime.printer.Print(object)
 	}
 	bindDryRun(command, &dryRun)
 
@@ -208,56 +228,56 @@ func (r *rootState) newMoveRollbackCommand() *cobra.Command {
 
 func (r *rootState) newMoveCleanupCommand() *cobra.Command {
 	var (
-		options app.CleanupOptions
+		options app.IdentityCleanupOptions
 		dryRun  bool
 	)
 
 	command := &cobra.Command{
-		Use: "cleanup SESSION", Short: "Clean up a move session", Args: cobra.ExactArgs(1),
-		RunE: func(cmd *cobra.Command, args []string) error {
-			runtime, err := r.runtime()
-			if err != nil {
-				return err
+		Use:   "cleanup SESSION",
+		Short: "Finalize retained move resources and clean up the workflow",
+		Args:  cobra.ExactArgs(1),
+	}
+	command.RunE = func(cmd *cobra.Command, args []string) error {
+		runtime, err := r.runtime()
+		if err != nil {
+			return err
+		}
+
+		ctx, cancel := r.context(cmd.Context())
+		defer cancel()
+
+		object, store, err := r.loadMove(ctx, cmd, runtime, args[0])
+		if err != nil {
+			return err
+		}
+
+		executor := app.NewMoveExecutor(
+			runtime.clients.Kubernetes,
+			store,
+			cliWorkflowLocker(runtime),
+			moveStorageNamespace(object),
+		)
+		if dryRun {
+			if err := executor.ValidateCleanup(ctx, object, options); err != nil {
+				return reportMoveError(cmd, object, err)
 			}
+			return runtime.printer.Print(object)
+		}
 
-			ctx, cancel := r.context(cmd.Context())
-			defer cancel()
+		if err := r.confirm(ctx, cmd, object.Name); err != nil {
+			return reportApprovalError(cmd, err)
+		}
 
-			session, err := r.workflowSession(
-				ctx,
-				runtime,
-				cmd,
-				args[0],
-				domain.SessionTypeMove,
-				"move cleanup",
-			)
-			if err != nil {
-				return err
-			}
+		if err := executor.Cleanup(ctx, object, options); err != nil {
+			return reportMoveError(cmd, object, err)
+		}
 
-			if dryRun {
-				if err := runtime.service.ValidateMoveCleanup(ctx, session, options); err != nil {
-					return reportSessionError(cmd, session, err)
-				}
-				return printSessionResult(cmd, runtime, session)
-			}
+		if options.DeleteSession {
+			_, err := fmt.Fprintf(cmd.OutOrStdout(), "Deleted move workflow %s.\n", object.Name)
+			return err
+		}
 
-			if options.Finalize || options.DeleteSession {
-				if err := r.confirm(ctx, cmd, args[0]); err != nil {
-					return reportApprovalError(cmd, err)
-				}
-			}
-
-			if err := runtime.service.CleanupMove(ctx, session, options); err != nil {
-				return reportCleanupError(cmd, session, options, err)
-			}
-
-			if options.DeleteSession {
-				return printDeletedSession(cmd, session)
-			}
-
-			return printSessionResult(cmd, runtime, session)
-		},
+		return runtime.printer.Print(object)
 	}
 	bindIdentityCleanupFlags(command, &options)
 	bindDryRun(command, &dryRun)

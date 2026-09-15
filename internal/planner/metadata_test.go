@@ -4,6 +4,7 @@ import (
 	"context"
 	"testing"
 
+	v1alpha1 "github.com/labring-sigs/pvc-migrate/api/v1alpha1"
 	"github.com/labring-sigs/pvc-migrate/internal/domain"
 	"github.com/labring-sigs/pvc-migrate/internal/kube"
 	corev1 "k8s.io/api/core/v1"
@@ -18,22 +19,24 @@ func TestPlanRejectsCustomPVCFinalizerBeforeRecreate(t *testing.T) {
 	}
 
 	plan, err := New(plannerClient(objects...), nil).plan(context.Background(), planOptions{
-		Operation:          domain.OperationMigrate,
-		SessionID:          "migration-finalizer",
+		operationKind: domain.OperationMigrate,
+		Volumes:       testSourceVolumes("data"), SessionID: "migration-finalizer",
 		SourceNamespace:    "app",
 		TemporaryNamespace: "system",
 		StagingNamespace:   "system",
 		SessionNamespace:   "system",
-		SourcePVCs:         []string{"data"},
-		TargetNode:         "node-b",
-		DestinationClass:   "fast",
+
+		TransferOptions: v1alpha1.TransferOptions{
+			TargetNode:              "node-b",
+			DestinationStorageClass: "fast",
+		},
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 
 	if plan.Ready || !hasFailedCheckContaining(
-		plan,
+		plan.Checks,
 		"pvc-finalizers",
 		"apps.victoriametrics.com/finalizer",
 	) {
@@ -68,21 +71,25 @@ func TestPlanAllowsPVCProtectionFinalizerAndCopyKeepsSource(t *testing.T) {
 			}
 
 			plan, err := New(plannerClient(objects...), nil).plan(context.Background(), planOptions{
-				Operation:          tt.operation,
-				SessionID:          "metadata-finalizer",
+				operationKind: tt.operation,
+				Volumes:       testSourceVolumes("data"), SessionID: "metadata-finalizer",
 				SourceNamespace:    "app",
 				TemporaryNamespace: "system",
 				StagingNamespace:   "system",
 				SessionNamespace:   "system",
-				SourcePVCs:         []string{"data"},
-				TargetNode:         "node-b",
-				DestinationClass:   "fast",
+
+				TransferOptions: v1alpha1.TransferOptions{
+					TargetNode:              "node-b",
+					DestinationStorageClass: "fast",
+				},
 			})
 			if err != nil {
 				t.Fatal(err)
 			}
 
-			if !plan.Ready || hasFailedCheck(plan, "pvc-finalizers") {
+			if !plan.Ready || hasFailedCheck(
+				plan.Checks, "pvc-finalizers",
+			) {
 				t.Fatalf("plan checks=%#v", plan.Checks)
 			}
 		})

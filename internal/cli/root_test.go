@@ -11,14 +11,18 @@ import (
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/aws/smithy-go"
+	v1alpha1 "github.com/labring-sigs/pvc-migrate/api/v1alpha1"
 	"github.com/labring-sigs/pvc-migrate/internal/domain"
 	"github.com/labring-sigs/pvc-migrate/internal/kube"
 	"github.com/labring-sigs/pvc-migrate/internal/objectstore"
+	"github.com/labring-sigs/pvc-migrate/internal/planner"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	kubernetesfake "k8s.io/client-go/kubernetes/fake"
+	crfake "sigs.k8s.io/controller-runtime/pkg/client/fake"
 )
 
 func executeCLI(t *testing.T, args ...string) (string, error) {
@@ -38,6 +42,11 @@ func executeCLI(t *testing.T, args ...string) (string, error) {
 func executeBackupCLI(t *testing.T, args ...string) (string, string, error) {
 	t.Helper()
 
+	args = append([]string{}, args...)
+
+	t.Setenv("AWS_ACCESS_KEY_ID", "test")
+	t.Setenv("AWS_SECRET_ACCESS_KEY", "test")
+
 	var (
 		stdout bytes.Buffer
 		stderr bytes.Buffer
@@ -48,10 +57,14 @@ func executeBackupCLI(t *testing.T, args ...string) (string, string, error) {
 		In:      strings.NewReader(""),
 		Out:     &stdout,
 		ErrOut:  &stderr,
-		runtimeFactory: func(_ *rootState) (*commandRuntime, error) {
+		runtimeFactory: func(state *rootState) (*commandRuntime, error) {
 			mode := corev1.PersistentVolumeFilesystem
 
-			return &commandRuntime{clients: &kube.Clients{Kubernetes: kubernetesfake.NewClientset(
+			client := kubernetesfake.NewClientset(
+				&corev1.Namespace{
+					ObjectMeta: metav1.ObjectMeta{Name: "kube-system", UID: "cluster"},
+				},
+				&corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "default", UID: "namespace"}},
 				&corev1.PersistentVolumeClaim{
 					ObjectMeta: metav1.ObjectMeta{
 						Namespace: "default",
@@ -79,7 +92,40 @@ func executeBackupCLI(t *testing.T, args ...string) (string, string, error) {
 					},
 					Status: corev1.PersistentVolumeStatus{Phase: corev1.VolumeBound},
 				},
-			)}}, nil
+			)
+
+			repository := &v1alpha1.BackupRepository{
+				ObjectMeta: metav1.ObjectMeta{Name: "daily", Namespace: "default"},
+				Spec: v1alpha1.BackupRepositorySpec{
+					Type: v1alpha1.BackupRepositoryTypeS3,
+					S3: &v1alpha1.S3BackupRepositorySpec{
+						Bucket: "backups",
+						CredentialsSecret: v1alpha1.BackupRepositorySecretReference{
+							Name: "repo-credentials",
+						},
+					},
+				},
+			}
+
+			scheme := runtime.NewScheme()
+			if err := v1alpha1.AddToScheme(scheme); err != nil {
+				t.Fatal(err)
+			}
+
+			crClient := crfake.NewClientBuilder().
+				WithScheme(scheme).
+				WithStatusSubresource(&v1alpha1.Backup{}, &v1alpha1.Restore{}).
+				WithObjects(repository).
+				Build()
+
+			return &commandRuntime{
+				clients: &kube.Clients{
+					Kubernetes: client,
+					Runtime:    crClient,
+				},
+				planner: planner.New(client, nil),
+				printer: printerFor(state),
+			}, nil
 		},
 		objectStoreFactory: func(_ context.Context, cfg objectstore.Config) (*objectstore.Store, error) {
 			return objectstore.NewWithClient(
@@ -276,14 +322,15 @@ func TestBackupDryRunPrintsStructuredPlanWithoutSecrets(t *testing.T) {
 		t.Fatalf("decode output: %v\n%s", err, stdout)
 	}
 
-	if result["operation"] != "backup" || result["pvc"] != "data" ||
-		result["path"] != domain.VolumeRootPath ||
-		result["mode"] != "offline" {
-		t.Fatalf("output=%v", result)
+	var workflow v1alpha1.Backup
+	if err := json.Unmarshal([]byte(stdout), &workflow); err != nil {
+		t.Fatal(err)
 	}
 
-	if result["destination"] != "s3://backups/pv-migrate/daily/" {
-		t.Fatalf("destination=%v", result["destination"])
+	if workflow.Spec.SourcePVC.Name != "data" || workflow.Spec.Path != "" || workflow.Spec.Online ||
+		workflow.Status.Plan == nil ||
+		workflow.Status.Plan.SourcePVC.UID != "pvc" {
+		t.Fatalf("output=%v", result)
 	}
 
 	if strings.Contains(stdout, "visible-key") || strings.Contains(stdout, "sensitive-secret") {
@@ -323,8 +370,14 @@ func TestBackupDryRunPrintsNormalizedPath(t *testing.T) {
 		t.Fatalf("decode output: %v\n%s", err, stdout)
 	}
 
-	if result["path"] != "tenant data/当前's files" {
-		t.Fatalf("path=%v", result["path"])
+	var workflow v1alpha1.Backup
+	if err := json.Unmarshal([]byte(stdout), &workflow); err != nil {
+		t.Fatal(err)
+	}
+
+	if workflow.Spec.Path != "tenant data/当前's files" || workflow.Status.Plan == nil ||
+		workflow.Status.Plan.Path != workflow.Spec.Path {
+		t.Fatalf("output=%v", result)
 	}
 }
 
@@ -353,8 +406,12 @@ func TestBackupOnlineDryRunAllowsMountedSourceSemantics(t *testing.T) {
 		t.Fatalf("decode output: %v\n%s", err, stdout)
 	}
 
-	if result["mode"] != "online" ||
-		result["consistency"] != "best-effort crash-consistent file copy" {
+	var workflow v1alpha1.Backup
+	if err := json.Unmarshal([]byte(stdout), &workflow); err != nil {
+		t.Fatal(err)
+	}
+
+	if !workflow.Spec.Online || workflow.Status.Plan == nil || !workflow.Status.Plan.Online {
 		t.Fatalf("online backup output=%v", result)
 	}
 }
@@ -407,7 +464,13 @@ func TestBackupPlanSubcommandIsOperationSpecific(t *testing.T) {
 		t.Fatalf("decode output: %v\n%s", err, stdout)
 	}
 
-	if result["operation"] != "backup" || result["mode"] != "offline" {
+	var workflow v1alpha1.Backup
+	if err := json.Unmarshal([]byte(stdout), &workflow); err != nil {
+		t.Fatal(err)
+	}
+
+	if workflow.Spec.Online || workflow.Status.Plan == nil ||
+		workflow.Status.Phase != domain.PhasePlanned {
 		t.Fatalf("backup plan output=%v", result)
 	}
 
@@ -435,7 +498,11 @@ func TestBackupPlanSubcommandIsOperationSpecific(t *testing.T) {
 		t.Fatalf("decode online backup plan: %v\n%s", err, stdout)
 	}
 
-	if result["mode"] != "online" {
+	if err := json.Unmarshal([]byte(stdout), &workflow); err != nil {
+		t.Fatal(err)
+	}
+
+	if !workflow.Spec.Online || workflow.Status.Plan == nil || !workflow.Status.Plan.Online {
 		t.Fatalf("online backup plan output=%v", result)
 	}
 }
@@ -459,7 +526,7 @@ func TestBackupDefaultsToDryRun(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if !strings.Contains(stdout, `"mode": "offline"`) {
+	if !strings.Contains(stdout, `"phase": "Planned"`) {
 		t.Fatalf("default backup did not produce a dry-run plan: %s", stdout)
 	}
 }

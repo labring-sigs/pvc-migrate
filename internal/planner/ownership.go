@@ -18,7 +18,7 @@ import (
 // Kubernetes controllers converge.
 func (p *Planner) checkSessionOwnership(
 	ctx context.Context,
-	plan *domain.MigrationPlan,
+	plan checkRecorder,
 	sessionNamespace string,
 	pvc *corev1.PersistentVolumeClaim,
 	pv *corev1.PersistentVolume,
@@ -71,7 +71,16 @@ func (p *Planner) checkSessionOwnership(
 
 	owner := ids[0]
 
-	ownerSession, err := p.sessionRecords.Find(ctx, owner, sessionNamespace, pvc.Namespace)
+	if p.workflowOwners == nil {
+		plan.AddCheck(failed(
+			domain.CheckNameSessionOwnership,
+			"workflow ownership cannot be verified because the owner lookup capability is unavailable",
+		))
+
+		return
+	}
+
+	ownerSession, err := p.workflowOwners.Find(ctx, owner, sessionNamespace, pvc.Namespace)
 	if ownerSession != nil {
 		plan.AddCheck(
 			failed(
@@ -82,7 +91,7 @@ func (p *Planner) checkSessionOwnership(
 					pvc.Name,
 					pv.Name,
 					owner,
-					ownerSession.Status.Phase,
+					ownerSession.Phase,
 					persistedOwnerGuidance(ownerSession),
 				),
 			),
@@ -135,39 +144,47 @@ func (p *Planner) checkSessionOwnership(
 	)
 }
 
-func retainedCleanupArgs(session *domain.Session, workflow string) string {
+func retainedCleanupArgs(session *kube.WorkflowOwner, workflow string) string {
 	args := fmt.Sprintf("%s cleanup %s", workflow, session.ID)
-	switch session.Spec.Operation() {
-	case domain.OperationMigrate, domain.OperationMigratePod:
+	switch session.Resource.Type {
+	case domain.SessionTypeMigrate, domain.SessionTypeMigratePod:
 		args += " --source-pv-reclaim-policy Retain --destination-pvc-reclaim-policy Retain"
-	case domain.OperationCopy, domain.OperationReserve:
+	case domain.SessionTypeCopy, domain.SessionTypeReserve:
 		args += " --destination-pvc-reclaim-policy Retain"
 	}
 
 	return args + " --finalize --delete-session"
 }
 
-func persistedOwnerGuidance(session *domain.Session) string {
-	base := sessionCLIBase(session.Spec.SessionNamespace, false)
+func persistedOwnerGuidance(session *kube.WorkflowOwner) string {
+	base := sessionCLIBase(session.SessionNamespace, false)
 
-	executeBase := sessionCLIBase(session.Spec.SessionNamespace, true)
+	executeBase := sessionCLIBase(session.SessionNamespace, true)
+	// Controller workflows are owned by the elected controller: the CLI
+	// lifecycle commands only manage ConfigMap-backed sessions. Deleting the
+	// CR converges storage through the controller's finalizer.
 	if session.Backend == kube.SessionBackendCRD {
-		base = "pvc-migrate --mode=controller"
+		resource := session.Resource
 
-		resource, _ := domain.ControllerResourceForSession(session)
+		scope := ""
 		if !resource.Cluster {
-			base += " --workflow-namespace " + session.Spec.SessionNamespace
-		} else if session.Spec.SessionNamespace != "pvc-migrate-system" {
-			base += " --session-namespace " + session.Spec.SessionNamespace
+			scope = " -n " + session.SessionNamespace
 		}
 
-		executeBase = base + " --yes"
+		return fmt.Sprintf(
+			"inspect with `kubectl get %s %s -o yaml`; the controller owns this workflow — delete it with `kubectl%s delete %s %s` and the finalizer converges storage per its spec reclaim policies",
+			resource.Resource,
+			session.ID,
+			scope,
+			resource.Resource,
+			session.ID,
+		)
 	}
 
 	workflow := workflowCommand(session)
 
 	status := fmt.Sprintf("inspect with `%s %s status %s`", base, workflow, session.ID)
-	switch session.Status.Phase {
+	switch session.Phase {
 	case domain.PhaseCompleted, domain.PhaseAborted, domain.PhaseRolledBack:
 		args := retainedCleanupArgs(session, workflow)
 
@@ -180,7 +197,7 @@ func persistedOwnerGuidance(session *domain.Session) string {
 			args,
 		)
 	case domain.PhaseWarmCopied:
-		if session.Spec.Operation() == domain.OperationCopy {
+		if session.Resource.Type == domain.SessionTypeCopy {
 			args := retainedCleanupArgs(session, workflow)
 
 			return fmt.Sprintf(
@@ -193,7 +210,7 @@ func persistedOwnerGuidance(session *domain.Session) string {
 			)
 		}
 	case domain.PhaseReserved:
-		if session.Spec.Operation() == domain.OperationReserve {
+		if session.Resource.Type == domain.SessionTypeReserve {
 			args := retainedCleanupArgs(session, workflow)
 
 			return fmt.Sprintf(
@@ -247,12 +264,12 @@ func persistedOwnerGuidance(session *domain.Session) string {
 	)
 }
 
-func workflowCommand(session *domain.Session) string {
+func workflowCommand(session *kube.WorkflowOwner) string {
 	if session == nil {
 		return "migrate"
 	}
 
-	switch session.Spec.Type {
+	switch session.Resource.Type {
 	case domain.SessionTypeMigrate:
 		return "migrate"
 	case domain.SessionTypeMigratePod:
@@ -272,9 +289,11 @@ func workflowCommand(session *domain.Session) string {
 	}
 }
 
-func failedSessionCanAbort(session *domain.Session) bool {
-	switch session.Status.ResumeFrom {
+func failedSessionCanAbort(session *kube.WorkflowOwner) bool {
+	switch session.ResumeFrom {
 	case domain.PhaseActivating,
+		domain.PhaseRenaming,
+		domain.PhaseMoving,
 		domain.PhaseActivated,
 		domain.PhaseResuming,
 		domain.PhaseCompleted,

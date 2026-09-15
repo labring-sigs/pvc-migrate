@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	v1alpha1 "github.com/labring-sigs/pvc-migrate/api/v1alpha1"
 	"github.com/labring-sigs/pvc-migrate/internal/domain"
 	"github.com/labring-sigs/pvc-migrate/internal/testutil"
 	corev1 "k8s.io/api/core/v1"
@@ -103,7 +104,7 @@ func TestStorageCapacityRejectsCapacityAndMaximumVolumeLimits(t *testing.T) {
 
 func TestStorageCapacityMissingObjectsFollowPolicy(t *testing.T) {
 	node := &corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "node-b"}}
-	plan := &domain.MigrationPlan{Ready: true}
+	plan := &domain.TransferPlan{PlanSummary: domain.PlanSummary{Ready: true}}
 	inventory := New(
 		plannerClient(),
 		nil,
@@ -119,7 +120,7 @@ func TestStorageCapacityMissingObjectsFollowPolicy(t *testing.T) {
 		t.Fatalf("auto plan=%#v", plan)
 	}
 
-	required := &domain.MigrationPlan{Ready: true}
+	required := &domain.TransferPlan{PlanSummary: domain.PlanSummary{Ready: true}}
 	New(
 		nil,
 		nil,
@@ -145,7 +146,7 @@ func TestStorageCapacityCheckRejectsMalformedDemandByPolicy(t *testing.T) {
 		{name: "require error", mode: domain.CapacityAwarenessRequire, wantReady: false, severity: domain.SeverityError},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			plan := &domain.MigrationPlan{Ready: true}
+			plan := &domain.TransferPlan{PlanSummary: domain.PlanSummary{Ready: true}}
 			New(
 				nil,
 				nil,
@@ -160,7 +161,7 @@ func TestStorageCapacityCheckRejectsMalformedDemandByPolicy(t *testing.T) {
 }
 
 func TestStorageCapacityCheckSortsMultipleStorageClassesAndKeepsReadyWarnings(t *testing.T) {
-	plan := &domain.MigrationPlan{Ready: true}
+	plan := &domain.TransferPlan{PlanSummary: domain.PlanSummary{Ready: true}}
 	volumes := []domain.PlannedVolume{
 		plannedCapacityVolume("z-data", "z-class", "2Gi"),
 		plannedCapacityVolume("a-data", "a-class", "1Gi"),
@@ -474,12 +475,12 @@ func TestStorageCapacityScoreHandlesUnknownInsufficientAndDisabledInventories(t 
 }
 
 func TestSelectTargetNodeHandlesEmptyVolumesAndCapacityExhaustion(t *testing.T) {
-	emptyPlan := &domain.MigrationPlan{Ready: true}
+	emptyPlan := &domain.TransferPlan{PlanSummary: domain.PlanSummary{Ready: true}}
 	if node := New(
 		plannerClient(),
 		nil,
-	).selectTargetNode(context.Background(), emptyPlan, domain.WorkloadSpec{}, nil, "", nil, nil); node != nil || emptyPlan.Ready ||
-		!hasFailedCheck(emptyPlan, "target-node") {
+	).selectTargetNode(context.Background(), emptyPlan, v1alpha1.WorkloadNone, nil, "", nil, nil); node != nil || emptyPlan.Ready ||
+		!hasFailedCheck(emptyPlan.Checks, "target-node") {
 		t.Fatalf("empty selection node=%v plan=%#v", node, emptyPlan)
 	}
 
@@ -526,13 +527,15 @@ func TestSelectTargetNodeHandlesEmptyVolumesAndCapacityExhaustion(t *testing.T) 
 		client,
 		nil,
 	).loadStorageCapacity(context.Background(), domain.CapacityAwarenessAuto)
-	plan := &domain.MigrationPlan{Ready: true}
+	plan := &domain.TransferPlan{PlanSummary: domain.PlanSummary{Ready: true}}
 
 	volume := plannedCapacityVolume("data", "fast", "2Gi")
 	if node := New(
 		client,
 		nil,
-	).selectTargetNode(context.Background(), plan, domain.WorkloadSpec{}, nil, "", []domain.PlannedVolume{volume}, inventory); node != nil || plan.Ready || !hasFailedCheck(plan, "target-node") ||
+	).selectTargetNode(context.Background(), plan, v1alpha1.WorkloadNone, nil, "", []domain.PlannedVolume{volume}, inventory); node != nil || plan.Ready || !hasFailedCheck(
+		plan.Checks, "target-node",
+	) ||
 		!strings.Contains(
 			plan.Checks[len(plan.Checks)-1].Message,
 			"sufficient CSI-reported capacity",
@@ -569,7 +572,7 @@ func TestSelectTargetNodeRejectsStandalonePodResourceOverflow(t *testing.T) {
 		},
 	}
 	client := plannerClient(objects...)
-	plan := &domain.MigrationPlan{Ready: true}
+	plan := &domain.TransferPlan{PlanSummary: domain.PlanSummary{Ready: true}}
 	volume := plannedCapacityVolume("data", "fast", "1Gi")
 	sourcePod := &corev1.Pod{
 		Spec: corev1.PodSpec{NodeName: "node-a", Containers: []corev1.Container{
@@ -584,8 +587,10 @@ func TestSelectTargetNodeRejectsStandalonePodResourceOverflow(t *testing.T) {
 	selected := New(
 		client,
 		nil,
-	).selectTargetNode(context.Background(), plan, domain.WorkloadSpec{Adapter: domain.WorkloadStandalone}, sourcePod, "node-a", []domain.PlannedVolume{volume}, nil)
-	if selected != nil || plan.Ready || !hasFailedCheck(plan, "target-node") {
+	).selectTargetNode(context.Background(), plan, v1alpha1.WorkloadStandalone, sourcePod, "node-a", []domain.PlannedVolume{volume}, nil)
+	if selected != nil || plan.Ready || !hasFailedCheck(
+		plan.Checks, "target-node",
+	) {
 		t.Fatalf("selected=%v ready=%t checks=%#v", selected, plan.Ready, plan.Checks)
 	}
 }
@@ -688,11 +693,11 @@ func TestSelectTargetNodeHandlesNodeListFailureAndSourceReasons(t *testing.T) {
 		},
 	)
 
-	failingPlan := &domain.MigrationPlan{Ready: true}
+	failingPlan := &domain.TransferPlan{PlanSummary: domain.PlanSummary{Ready: true}}
 	if node := New(
 		failingClient,
 		nil,
-	).selectTargetNode(context.Background(), failingPlan, domain.WorkloadSpec{}, nil, "", []domain.PlannedVolume{volume}, nil); node != nil || failingPlan.Ready ||
+	).selectTargetNode(context.Background(), failingPlan, v1alpha1.WorkloadNone, nil, "", []domain.PlannedVolume{volume}, nil); node != nil || failingPlan.Ready ||
 		!strings.Contains(failingPlan.Checks[0].Message, "node list unavailable") {
 		t.Fatalf("failure node=%v plan=%#v", node, failingPlan)
 	}
@@ -722,24 +727,24 @@ func TestSelectTargetNodeHandlesNodeListFailureAndSourceReasons(t *testing.T) {
 		},
 	}
 	client := plannerClient(objects...)
-	distinctPlan := &domain.MigrationPlan{Ready: true}
+	distinctPlan := &domain.TransferPlan{PlanSummary: domain.PlanSummary{Ready: true}}
 
 	selected := New(
 		client,
 		nil,
-	).selectTargetNode(context.Background(), distinctPlan, domain.WorkloadSpec{}, nil, "node-a", []domain.PlannedVolume{volume}, nil)
+	).selectTargetNode(context.Background(), distinctPlan, v1alpha1.WorkloadNone, nil, "node-a", []domain.PlannedVolume{volume}, nil)
 	if selected == nil || selected.Name != "node-b" ||
 		!strings.Contains(distinctPlan.Checks[0].Message, "distinct from source node-a") {
 		t.Fatalf("distinct selection=%v plan=%#v", selected, distinctPlan)
 	}
 
 	onlyClient := plannerClient(objects[0])
-	onlyPlan := &domain.MigrationPlan{Ready: true}
+	onlyPlan := &domain.TransferPlan{PlanSummary: domain.PlanSummary{Ready: true}}
 
 	selected = New(
 		onlyClient,
 		nil,
-	).selectTargetNode(context.Background(), onlyPlan, domain.WorkloadSpec{}, nil, "node-a", []domain.PlannedVolume{volume}, nil)
+	).selectTargetNode(context.Background(), onlyPlan, v1alpha1.WorkloadNone, nil, "node-a", []domain.PlannedVolume{volume}, nil)
 	if selected == nil || selected.Name != "node-a" ||
 		!strings.Contains(onlyPlan.Checks[0].Message, "only compatible node") {
 		t.Fatalf("only selection=%v plan=%#v", selected, onlyPlan)
@@ -846,13 +851,16 @@ func TestPlanAutoTargetPrefersGreaterReportedCapacity(t *testing.T) {
 	)
 
 	plan, err := New(plannerClient(objects...), nil).plan(context.Background(), planOptions{
-		SessionID:          "capacity-target",
+		operationKind: domain.OperationMigrate,
+		Volumes:       testSourceVolumes("data"), SessionID: "capacity-target",
 		SourceNamespace:    "app",
 		TemporaryNamespace: "system",
 		StagingNamespace:   "system",
 		SessionNamespace:   "system",
-		SourcePVCs:         []string{"data"},
-		DestinationClass:   "fast",
+
+		TransferOptions: v1alpha1.TransferOptions{
+			DestinationStorageClass: "fast",
+		},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -872,14 +880,17 @@ func TestPlanAutoTargetPrefersGreaterReportedCapacity(t *testing.T) {
 
 func TestPlanCapacityAwarenessPolicies(t *testing.T) {
 	base := planOptions{
-		SessionID:          "capacity-policy",
+		operationKind: domain.OperationMigrate,
+		Volumes:       testSourceVolumes("data"), SessionID: "capacity-policy",
 		SourceNamespace:    "app",
 		TemporaryNamespace: "system",
 		StagingNamespace:   "system",
 		SessionNamespace:   "system",
-		SourcePVCs:         []string{"data"},
-		DestinationClass:   "fast",
-		TargetNode:         "node-b",
+
+		TransferOptions: v1alpha1.TransferOptions{
+			DestinationStorageClass: "fast",
+			TargetNode:              "node-b",
+		},
 	}
 
 	tests := []struct {
@@ -940,7 +951,7 @@ func TestPlanCapacityAwarenessPolicies(t *testing.T) {
 			}
 
 			options := base
-			options.CapacityAwareness = tt.mode
+			options.CapacityAwareness = string(tt.mode)
 
 			plan, err := New(plannerClient(objects...), nil).plan(context.Background(), options)
 			if err != nil {
@@ -1005,7 +1016,7 @@ func TestStorageCapacityListErrorIsUnknownOrRequired(t *testing.T) {
 		{mode: domain.CapacityAwarenessAuto, wantReady: true},
 		{mode: domain.CapacityAwarenessRequire, wantReady: false},
 	} {
-		plan := &domain.MigrationPlan{Ready: true}
+		plan := &domain.TransferPlan{PlanSummary: domain.PlanSummary{Ready: true}}
 		New(
 			nil,
 			nil,
@@ -1029,17 +1040,20 @@ func TestCapacityAwarenessModes(t *testing.T) {
 	}
 
 	options := planOptions{
-		SessionID:          "invalid-capacity-mode",
+		operationKind: domain.OperationMigrate,
+		Volumes: testSourceVolumes(
+			"data",
+		), SessionID: "invalid-capacity-mode",
 		SourceNamespace:    "app",
 		TemporaryNamespace: "system",
 		StagingNamespace:   "system",
 		SessionNamespace:   "system",
-		SourcePVCs: []string{
-			"data",
+
+		TransferOptions: v1alpha1.TransferOptions{
+			DestinationStorageClass: "fast",
+			TargetNode:              "node-b",
+			CapacityAwareness:       "strict",
 		},
-		DestinationClass:  "fast",
-		TargetNode:        "node-b",
-		CapacityAwareness: "strict",
 	}
 
 	plan, err := New(
@@ -1050,7 +1064,9 @@ func TestCapacityAwarenessModes(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if plan.Ready || !hasFailedCheck(plan, "capacity-awareness") || len(plan.StorageCapacity) != 0 {
+	if plan.Ready || !hasFailedCheck(
+		plan.Checks, "capacity-awareness",
+	) || len(plan.StorageCapacity) != 0 {
 		t.Fatalf("plan=%#v", plan)
 	}
 }
@@ -1090,7 +1106,7 @@ func capacityDemandFor(class, total, largest string) capacityDemand {
 
 func plannedCapacityVolume(name, class, capacity string) domain.PlannedVolume {
 	return domain.PlannedVolume{
-		SourcePVC:      domain.ObjectReference{Namespace: "app", Name: name},
+		SourcePVC:      v1alpha1.ObjectReference{Namespace: "app", Name: name},
 		StorageClass:   class,
 		CSIProvisioner: "example.csi.io",
 		Capacity:       capacity,

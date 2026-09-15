@@ -7,67 +7,71 @@ import (
 	"testing"
 
 	v1alpha1 "github.com/labring-sigs/pvc-migrate/api/v1alpha1"
-	"github.com/labring-sigs/pvc-migrate/internal/domain"
 )
 
-func TestReservationTransferSettingsSurviveIntentAndPlan(t *testing.T) {
-	for _, cluster := range []bool{false, true} {
-		for _, remove := range []bool{false, true} {
-			t.Run(fmt.Sprintf("cluster=%t/delete=%t", cluster, remove), func(t *testing.T) {
-				options := domain.SessionWorkflowOptions{
+func TestReservationTransferSettingsSurviveSerialization(t *testing.T) {
+	for _, remove := range []bool{false, true} {
+		t.Run(fmt.Sprintf("delete=%t", remove), func(t *testing.T) {
+			spec := v1alpha1.ReservationSpec{
+				TransferOptions: v1alpha1.TransferOptions{
 					SourceNode: "source-node", TargetNode: "target-node",
-					Strategies:     []string{domain.StrategyMount, domain.StrategyClusterIP},
+					Strategies:     []string{"mount", "clusterip"},
 					VerifyChecksum: true, DeleteExtraneous: remove, SkipSourceUsageCheck: true,
-				}
-				spec := domain.NewSessionSpec(domain.OperationReserve, domain.SessionCommon{
-					SourceNamespace: "app", TemporaryNamespace: "archive",
-					DestinationNamespace: "archive", SessionNamespace: "control",
-				}, false, options)
+				},
+				Volumes: []v1alpha1.VolumeRequest{
+					{SourcePVC: v1alpha1.LocalResourceReference{Name: "data"}},
+				},
+			}
+			plan := v1alpha1.ReservationPlan{
+				SourceNode:           "source-node",
+				TargetNode:           "target-node",
+				ToolImage:            "registry.example/tool:v1",
+				Strategies:           []string{"mount", "clusterip"},
+				VerifyChecksum:       true,
+				DeleteExtraneous:     remove,
+				SkipSourceUsageCheck: true,
+				Volumes: []v1alpha1.VolumeSpec{
+					{SourcePVC: v1alpha1.LocalResourceReference{Name: "data", UID: "source"}},
+				},
+			}
+			namespaced := v1alpha1.Reservation{
+				Spec: spec, Status: v1alpha1.ReservationStatus{Plan: &plan},
+			}
+			cluster := v1alpha1.ClusterReservation{
+				Spec: v1alpha1.ClusterReservationSpec{
+					ReservationSpec:      spec,
+					SourceNamespace:      "app",
+					DestinationNamespace: "archive",
+					SessionNamespace:     "control",
+				},
+				Status: v1alpha1.ClusterReservationStatus{Plan: &v1alpha1.ClusterReservationPlan{
+					ReservationPlan:      plan,
+					SourceNamespace:      "app",
+					DestinationNamespace: "archive",
+					SessionNamespace:     "control",
+				}},
+			}
 
-				var intent domain.SessionSpec
-				if cluster {
-					payload := reservationJSONRoundTrip(
-						t,
-						v1alpha1.ClusterReservationSpecFromDomain(spec),
-					)
-					intent = payload.Domain()
-				} else {
-					payload := reservationJSONRoundTrip(t, v1alpha1.ReservationSpecFromDomain(spec))
-					intent = payload.Domain("app")
-				}
+			if restored := reservationJSONRoundTrip(
+				t,
+				namespaced,
+			); !reflect.DeepEqual(
+				restored,
+				namespaced,
+			) {
+				t.Fatalf("namespaced reservation lost spec or plan settings: %+v", restored)
+			}
 
-				if !reflect.DeepEqual(intent.WorkflowOptions(), options) {
-					t.Fatalf(
-						"intent lost transfer settings: got %+v, want %+v",
-						intent.WorkflowOptions(),
-						options,
-					)
-				}
-
-				options.ToolImage = "registry.example/tool:v1"
-				intent.WorkflowOptionsPtr().ToolImage = options.ToolImage
-
-				var restored domain.SessionSpec
-				if cluster {
-					plan := reservationJSONRoundTrip(
-						t,
-						v1alpha1.ClusterReservationPlanFromDomain(intent),
-					)
-					restored = plan.Domain()
-				} else {
-					plan := reservationJSONRoundTrip(t, v1alpha1.ReservationPlanFromDomain(intent))
-					restored = plan.Domain("app")
-				}
-
-				if !reflect.DeepEqual(restored.WorkflowOptions(), options) {
-					t.Fatalf(
-						"plan lost transfer settings: got %+v, want %+v",
-						restored.WorkflowOptions(),
-						options,
-					)
-				}
-			})
-		}
+			if restored := reservationJSONRoundTrip(
+				t,
+				cluster,
+			); !reflect.DeepEqual(
+				restored,
+				cluster,
+			) {
+				t.Fatalf("cluster reservation lost spec or plan settings: %+v", restored)
+			}
+		})
 	}
 }
 

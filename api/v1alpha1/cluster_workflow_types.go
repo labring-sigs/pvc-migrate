@@ -1,8 +1,6 @@
 package v1alpha1
 
 import (
-	corev1 "k8s.io/api/core/v1"
-	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
@@ -12,46 +10,6 @@ import (
 // +kubebuilder:validation:MaxLength=63
 // +kubebuilder:validation:Pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`
 type NamespaceName string
-
-// ClusterVolumeSpec is the cluster-workflow planning contract. PVC names are
-// relative to the source and destination-storage namespace roles declared by
-// the parent workflow. PV references remain cluster-scoped.
-type ClusterVolumeSpec struct {
-	SourcePVC      LocalResourceReference `json:"sourcePVC"      yaml:"sourcePVC"`
-	SourcePV       LocalResourceReference `json:"sourcePV"       yaml:"sourcePV"`
-	DestinationPVC LocalResourceReference `json:"destinationPVC" yaml:"destinationPVC"`
-
-	SourceReclaimPolicy PVReclaimPolicy                     `json:"sourceReclaimPolicy,omitempty" yaml:"sourceReclaimPolicy,omitempty"`
-	SourcePVCSpec       PVCSpec                             `json:"sourcePVCSpec,omitempty"       yaml:"sourcePVCSpec,omitempty"`
-	SourcePVCMetadata   PVCMetadata                         `json:"sourcePVCMetadata,omitempty"   yaml:"sourcePVCMetadata,omitempty"`
-	Capacity            string                              `json:"capacity"                      yaml:"capacity"`
-	SourceCapacity      string                              `json:"sourceCapacity"                yaml:"sourceCapacity"`
-	SourceUsedBytes     int64                               `json:"sourceUsedBytes,omitempty"     yaml:"sourceUsedBytes,omitempty"`
-	SourceUsageKnown    bool                                `json:"sourceUsageKnown,omitempty"    yaml:"sourceUsageKnown,omitempty"`
-	StorageClass        string                              `json:"storageClass"                  yaml:"storageClass"`
-	AccessModes         []corev1.PersistentVolumeAccessMode `json:"accessModes"                   yaml:"accessModes"`
-	VolumeMode          corev1.PersistentVolumeMode         `json:"volumeMode"                    yaml:"volumeMode"`
-	ConcurrentConsumers int                                 `json:"concurrentConsumers,omitempty" yaml:"concurrentConsumers,omitempty"`
-	TransferScope       *TransferScope                      `json:"transferScope,omitempty"       yaml:"transferScope,omitempty"`
-}
-
-// ClusterWorkloadSpec is the workload snapshot owned by ClusterPodMigration.
-// Workload references are relative to spec.sourceNamespace.
-// +kubebuilder:validation:XValidation:rule="self.adapter == 'None' || (has(self.pod) && has(self.pod.apiVersion) && size(self.pod.apiVersion) > 0 && has(self.pod.kind) && size(self.pod.kind) > 0 && has(self.pod.name) && size(self.pod.name) > 0 && has(self.pod.uid) && size(self.pod.uid) > 0)",message="workload.pod must include apiVersion, kind, name, and uid"
-// +kubebuilder:validation:XValidation:rule="self.adapter == 'None' || self.adapter == 'StandalonePod' || (has(self.controller) && has(self.controller.apiVersion) && size(self.controller.apiVersion) > 0 && has(self.controller.kind) && size(self.controller.kind) > 0 && has(self.controller.name) && size(self.controller.name) > 0 && has(self.controller.uid) && size(self.controller.uid) > 0)",message="workload.controller must include apiVersion, kind, name, and uid for managed workloads"
-type ClusterWorkloadSpec struct {
-	Adapter          WorkloadKind            `json:"adapter"                    yaml:"adapter"`
-	Pod              *LocalResourceReference `json:"pod,omitempty"              yaml:"pod,omitempty"`
-	Controller       *LocalResourceReference `json:"controller,omitempty"       yaml:"controller,omitempty"`
-	OriginalReplicas *int32                  `json:"originalReplicas,omitempty" yaml:"originalReplicas,omitempty"`
-	Ordinal          *int32                  `json:"ordinal,omitempty"          yaml:"ordinal,omitempty"`
-	// +kubebuilder:validation:MaxItems=1024
-	AffectedPods   []LocalResourceReference `json:"affectedPods,omitempty"   yaml:"affectedPods,omitempty"`
-	OriginalObject *apiextensionsv1.JSON    `json:"originalObject,omitempty" yaml:"originalObject,omitempty"`
-	KubeBlocks     *KubeBlocksSpec          `json:"kubeBlocks,omitempty"     yaml:"kubeBlocks,omitempty"`
-	VMCluster      *VMClusterSpec           `json:"vmCluster,omitempty"      yaml:"vmCluster,omitempty"`
-	Grafana        *GrafanaSpec             `json:"grafana,omitempty"        yaml:"grafana,omitempty"`
-}
 
 // +kubebuilder:validation:XValidation:rule="has(self.volumes) && size(self.volumes) > 0",message="volumes must contain at least one source PVC"
 type ClusterMigrationPlan struct {
@@ -64,10 +22,10 @@ type ClusterMigrationPlan struct {
 	DestinationNamespace        NamespaceName `json:"destinationNamespace"                  yaml:"destinationNamespace"`
 	SessionNamespace            NamespaceName `json:"sessionNamespace"                      yaml:"sessionNamespace"`
 	// +kubebuilder:validation:MaxItems=1024
-	Volumes    []ClusterVolumeSpec `json:"volumes,omitempty"    yaml:"volumes,omitempty"`
-	SourceNode string              `json:"sourceNode,omitempty" yaml:"sourceNode,omitempty"`
-	TargetNode string              `json:"targetNode,omitempty" yaml:"targetNode,omitempty"`
-	ToolImage  string              `json:"toolImage,omitempty"  yaml:"toolImage,omitempty"`
+	Volumes    []VolumeSpec `json:"volumes,omitempty"    yaml:"volumes,omitempty"`
+	SourceNode string       `json:"sourceNode,omitempty" yaml:"sourceNode,omitempty"`
+	TargetNode string       `json:"targetNode,omitempty" yaml:"targetNode,omitempty"`
+	ToolImage  string       `json:"toolImage,omitempty"  yaml:"toolImage,omitempty"`
 	// +kubebuilder:validation:MaxItems=32
 	Strategies           []string `json:"strategies,omitempty"           yaml:"strategies,omitempty"`
 	VerifyChecksum       bool     `json:"verifyChecksum,omitempty"       yaml:"verifyChecksum,omitempty"`
@@ -88,59 +46,32 @@ type ClusterPodMigrationPlan struct {
 	TemporaryNamespace NamespaceName `json:"temporaryNamespace" yaml:"temporaryNamespace"`
 	SessionNamespace   NamespaceName `json:"sessionNamespace"   yaml:"sessionNamespace"`
 	// +kubebuilder:validation:MaxItems=1024
-	Volumes    []ClusterVolumeSpec `json:"volumes,omitempty"    yaml:"volumes,omitempty"`
-	SourceNode string              `json:"sourceNode,omitempty" yaml:"sourceNode,omitempty"`
-	TargetNode string              `json:"targetNode,omitempty" yaml:"targetNode,omitempty"`
-	ToolImage  string              `json:"toolImage,omitempty"  yaml:"toolImage,omitempty"`
+	Volumes    []VolumeSpec `json:"volumes,omitempty"    yaml:"volumes,omitempty"`
+	SourceNode string       `json:"sourceNode,omitempty" yaml:"sourceNode,omitempty"`
+	TargetNode string       `json:"targetNode,omitempty" yaml:"targetNode,omitempty"`
+	ToolImage  string       `json:"toolImage,omitempty"  yaml:"toolImage,omitempty"`
 	// +kubebuilder:validation:MaxItems=32
-	Strategies             []string            `json:"strategies,omitempty"             yaml:"strategies,omitempty"`
-	VerifyChecksum         bool                `json:"verifyChecksum,omitempty"         yaml:"verifyChecksum,omitempty"`
-	DeleteExtraneous       bool                `json:"deleteExtraneous,omitempty"       yaml:"deleteExtraneous,omitempty"`
-	SkipSourceUsageCheck   bool                `json:"skipSourceUsageCheck,omitempty"   yaml:"skipSourceUsageCheck,omitempty"`
-	Workload               ClusterWorkloadSpec `json:"workload"                         yaml:"workload"`
-	PrecopyPasses          int                 `json:"precopyPasses"                    yaml:"precopyPasses"`
-	OpenEBSLVMEnableShared bool                `json:"openebsLvmEnableShared,omitempty" yaml:"openebsLvmEnableShared,omitempty"`
+	Strategies             []string     `json:"strategies,omitempty"             yaml:"strategies,omitempty"`
+	VerifyChecksum         bool         `json:"verifyChecksum,omitempty"         yaml:"verifyChecksum,omitempty"`
+	DeleteExtraneous       bool         `json:"deleteExtraneous,omitempty"       yaml:"deleteExtraneous,omitempty"`
+	SkipSourceUsageCheck   bool         `json:"skipSourceUsageCheck,omitempty"   yaml:"skipSourceUsageCheck,omitempty"`
+	Workload               WorkloadSpec `json:"workload"                         yaml:"workload"`
+	PrecopyPasses          int          `json:"precopyPasses"                    yaml:"precopyPasses"`
+	OpenEBSLVMEnableShared bool         `json:"openebsLvmEnableShared,omitempty" yaml:"openebsLvmEnableShared,omitempty"`
 }
 
-// +kubebuilder:validation:XValidation:rule="has(self.volumes) && size(self.volumes) > 0",message="volumes must contain at least one source PVC"
 type ClusterReservationPlan struct {
-	// +kubebuilder:validation:Enum=Retain;Delete
-	DestinationPVCReclaimPolicy string        `json:"destinationPVCReclaimPolicy,omitempty" yaml:"destinationPVCReclaimPolicy,omitempty"`
-	SourceNamespace             NamespaceName `json:"sourceNamespace"                       yaml:"sourceNamespace"`
-	DestinationNamespace        NamespaceName `json:"destinationNamespace"                  yaml:"destinationNamespace"`
-	SessionNamespace            NamespaceName `json:"sessionNamespace"                      yaml:"sessionNamespace"`
-	// +kubebuilder:validation:MaxItems=1024
-	Volumes    []ClusterVolumeSpec `json:"volumes,omitempty"    yaml:"volumes,omitempty"`
-	SourceNode string              `json:"sourceNode,omitempty" yaml:"sourceNode,omitempty"`
-	TargetNode string              `json:"targetNode,omitempty" yaml:"targetNode,omitempty"`
-	ToolImage  string              `json:"toolImage,omitempty"  yaml:"toolImage,omitempty"`
-	// +kubebuilder:validation:MaxItems=32
-	Strategies           []string `json:"strategies,omitempty"           yaml:"strategies,omitempty"`
-	VerifyChecksum       bool     `json:"verifyChecksum,omitempty"       yaml:"verifyChecksum,omitempty"`
-	DeleteExtraneous     bool     `json:"deleteExtraneous,omitempty"     yaml:"deleteExtraneous,omitempty"`
-	SkipSourceUsageCheck bool     `json:"skipSourceUsageCheck,omitempty" yaml:"skipSourceUsageCheck,omitempty"`
+	ReservationPlan      `              json:",inline"              yaml:",inline"`
+	SourceNamespace      NamespaceName `json:"sourceNamespace"      yaml:"sourceNamespace"`
+	DestinationNamespace NamespaceName `json:"destinationNamespace" yaml:"destinationNamespace"`
+	SessionNamespace     NamespaceName `json:"sessionNamespace"     yaml:"sessionNamespace"`
 }
 
-// +kubebuilder:validation:XValidation:rule="has(self.volumes) && size(self.volumes) > 0",message="volumes must contain at least one source PVC"
 type ClusterCopyPlan struct {
-	// +kubebuilder:validation:Enum=Retain;Delete
-	DestinationPVCReclaimPolicy string        `json:"destinationPVCReclaimPolicy,omitempty" yaml:"destinationPVCReclaimPolicy,omitempty"`
-	SourceNamespace             NamespaceName `json:"sourceNamespace"                       yaml:"sourceNamespace"`
-	DestinationNamespace        NamespaceName `json:"destinationNamespace"                  yaml:"destinationNamespace"`
-	SessionNamespace            NamespaceName `json:"sessionNamespace"                      yaml:"sessionNamespace"`
-	// +kubebuilder:validation:MaxItems=1024
-	Volumes    []ClusterVolumeSpec `json:"volumes,omitempty"    yaml:"volumes,omitempty"`
-	SourceNode string              `json:"sourceNode,omitempty" yaml:"sourceNode,omitempty"`
-	TargetNode string              `json:"targetNode,omitempty" yaml:"targetNode,omitempty"`
-	ToolImage  string              `json:"toolImage,omitempty"  yaml:"toolImage,omitempty"`
-	// +kubebuilder:validation:MaxItems=32
-	Strategies []string `json:"strategies,omitempty" yaml:"strategies,omitempty"`
-	// VerifyChecksum enables rsync checksum comparison during final sync. It
-	// defaults to false when omitted.
-	VerifyChecksum       bool `json:"verifyChecksum,omitempty"       yaml:"verifyChecksum,omitempty"`
-	DeleteExtraneous     bool `json:"deleteExtraneous,omitempty"     yaml:"deleteExtraneous,omitempty"`
-	SkipSourceUsageCheck bool `json:"skipSourceUsageCheck,omitempty" yaml:"skipSourceUsageCheck,omitempty"`
-	Online               bool `json:"online,omitempty"               yaml:"online,omitempty"`
+	CopyPlan             `              json:",inline"              yaml:",inline"`
+	SourceNamespace      NamespaceName `json:"sourceNamespace"      yaml:"sourceNamespace"`
+	DestinationNamespace NamespaceName `json:"destinationNamespace" yaml:"destinationNamespace"`
+	SessionNamespace     NamespaceName `json:"sessionNamespace"     yaml:"sessionNamespace"`
 }
 
 type MoveIdentity struct {
@@ -168,56 +99,41 @@ type ClusterVolumeActivationStatus struct {
 	RolledBackAt        *metav1.Time     `json:"rolledBackAt,omitempty"        yaml:"rolledBackAt,omitempty"`
 }
 
-type ClusterSharedMountStatus struct {
-	// SourcePV is cluster-scoped and therefore normally has no namespace.
-	SourcePV LocalResourceReference `json:"sourcePV" yaml:"sourcePV"`
-	// LVMVolume is namespaced and must retain its namespace for controller
-	// recovery when a cluster PodMigration spans namespaces.
-	LVMVolume         ObjectReference `json:"lvmVolume"                   yaml:"lvmVolume"`
-	PreviousShared    string          `json:"previousShared,omitempty"    yaml:"previousShared,omitempty"`
-	PreviousSharedSet bool            `json:"previousSharedSet,omitempty" yaml:"previousSharedSet,omitempty"`
-}
-
 type ClusterPodMigrationWorkloadStatus struct {
 	Pod          *ObjectReference  `json:"pod,omitempty"          yaml:"pod,omitempty"`
 	AffectedPods []ObjectReference `json:"affectedPods,omitempty" yaml:"affectedPods,omitempty"`
 }
 
+// ClusterVolumeReservationStatus is the storage-provisioning checkpoint shared by
+// workflows that reserve a destination volume. Copy and activation progress
+// remain in their owning operation types.
+type ClusterVolumeReservationStatus struct {
+	SourcePVCName     string           `json:"sourcePVCName"                      yaml:"sourcePVCName"`
+	DestinationPVC    *ObjectReference `json:"destinationPVC,omitempty"           yaml:"destinationPVC,omitempty"`
+	DestinationPV     *ObjectReference `json:"destinationPV,omitempty"            yaml:"destinationPV,omitempty"`
+	DestinationPolicy PVReclaimPolicy  `json:"destinationReclaimPolicy,omitempty" yaml:"destinationReclaimPolicy,omitempty"`
+	Reserved          bool             `json:"reserved,omitempty"                 yaml:"reserved,omitempty"`
+}
+
 type ClusterMigrationVolumeStatus struct {
-	SourcePVCName     string                        `json:"sourcePVCName"                      yaml:"sourcePVCName"`
-	DestinationPVC    *ObjectReference              `json:"destinationPVC,omitempty"           yaml:"destinationPVC,omitempty"`
-	DestinationPV     *ObjectReference              `json:"destinationPV,omitempty"            yaml:"destinationPV,omitempty"`
-	DestinationPolicy PVReclaimPolicy               `json:"destinationReclaimPolicy,omitempty" yaml:"destinationReclaimPolicy,omitempty"`
-	Reserved          bool                          `json:"reserved,omitempty"                 yaml:"reserved,omitempty"`
-	Sync              MigrationSyncStatus           `json:"sync"                               yaml:"sync"`
-	Activation        ClusterVolumeActivationStatus `json:"activation"                         yaml:"activation"`
+	ClusterVolumeReservationStatus `                              json:",inline"    yaml:",inline"`
+	Sync                           MigrationSyncStatus           `json:"sync"       yaml:"sync"`
+	Activation                     ClusterVolumeActivationStatus `json:"activation" yaml:"activation"`
 }
 
 type ClusterPodMigrationVolumeStatus struct {
-	SourcePVCName     string                        `json:"sourcePVCName"                      yaml:"sourcePVCName"`
-	DestinationPVC    *ObjectReference              `json:"destinationPVC,omitempty"           yaml:"destinationPVC,omitempty"`
-	DestinationPV     *ObjectReference              `json:"destinationPV,omitempty"            yaml:"destinationPV,omitempty"`
-	DestinationPolicy PVReclaimPolicy               `json:"destinationReclaimPolicy,omitempty" yaml:"destinationReclaimPolicy,omitempty"`
-	Reserved          bool                          `json:"reserved,omitempty"                 yaml:"reserved,omitempty"`
-	Sync              PodMigrationSyncStatus        `json:"sync"                               yaml:"sync"`
-	Activation        ClusterVolumeActivationStatus `json:"activation"                         yaml:"activation"`
+	ClusterVolumeReservationStatus `                              json:",inline"    yaml:",inline"`
+	Sync                           PodMigrationSyncStatus        `json:"sync"       yaml:"sync"`
+	Activation                     ClusterVolumeActivationStatus `json:"activation" yaml:"activation"`
 }
 
 type ClusterReservationVolumeStatus struct {
-	SourcePVCName     string           `json:"sourcePVCName"                      yaml:"sourcePVCName"`
-	DestinationPVC    *ObjectReference `json:"destinationPVC,omitempty"           yaml:"destinationPVC,omitempty"`
-	DestinationPV     *ObjectReference `json:"destinationPV,omitempty"            yaml:"destinationPV,omitempty"`
-	DestinationPolicy PVReclaimPolicy  `json:"destinationReclaimPolicy,omitempty" yaml:"destinationReclaimPolicy,omitempty"`
-	Reserved          bool             `json:"reserved,omitempty"                 yaml:"reserved,omitempty"`
+	ClusterVolumeReservationStatus `json:",inline" yaml:",inline"`
 }
 
 type ClusterCopyVolumeStatus struct {
-	SourcePVCName     string           `json:"sourcePVCName"                      yaml:"sourcePVCName"`
-	DestinationPVC    *ObjectReference `json:"destinationPVC,omitempty"           yaml:"destinationPVC,omitempty"`
-	DestinationPV     *ObjectReference `json:"destinationPV,omitempty"            yaml:"destinationPV,omitempty"`
-	DestinationPolicy PVReclaimPolicy  `json:"destinationReclaimPolicy,omitempty" yaml:"destinationReclaimPolicy,omitempty"`
-	Reserved          bool             `json:"reserved,omitempty"                 yaml:"reserved,omitempty"`
-	Sync              CopySyncStatus   `json:"sync"                               yaml:"sync"`
+	ClusterVolumeReservationStatus `               json:",inline" yaml:",inline"`
+	Sync                           CopySyncStatus `json:"sync"    yaml:"sync"`
 }
 
 type MoveActivationStatus struct {
@@ -226,15 +142,10 @@ type MoveActivationStatus struct {
 	RolledBackAt *metav1.Time     `json:"rolledBackAt,omitempty" yaml:"rolledBackAt,omitempty"`
 }
 
-type MoveVolumeStatus struct {
-	SourcePVCName string               `json:"sourcePVCName" yaml:"sourcePVCName"`
-	Activation    MoveActivationStatus `json:"activation"    yaml:"activation"`
-}
-
 type ClusterMigrationStatus struct {
-	Plan           *ClusterMigrationPlan `json:"plan,omitempty" yaml:"plan,omitempty"`
-	WorkflowStatus `                               json:",inline"        yaml:",inline"`
-	Volumes        []ClusterMigrationVolumeStatus `json:"volumes"        yaml:"volumes"`
+	Plan           *ClusterMigrationPlan `json:"plan,omitempty"    yaml:"plan,omitempty"`
+	WorkflowStatus `                               json:",inline"           yaml:",inline"`
+	Volumes        []ClusterMigrationVolumeStatus `json:"volumes,omitempty" yaml:"volumes,omitempty"`
 }
 
 type ClusterPodMigrationStatus struct {
@@ -243,26 +154,28 @@ type ClusterPodMigrationStatus struct {
 	WarmPassesCompleted     int                                `json:"warmPassesCompleted"               yaml:"warmPassesCompleted"`
 	OriginalPodSnapshotHash string                             `json:"originalPodSnapshotHash,omitempty" yaml:"originalPodSnapshotHash,omitempty"`
 	Workload                *ClusterPodMigrationWorkloadStatus `json:"workload,omitempty"                yaml:"workload,omitempty"`
-	Volumes                 []ClusterPodMigrationVolumeStatus  `json:"volumes"                           yaml:"volumes"`
-	OpenEBSLVMSharedMounts  []ClusterSharedMountStatus         `json:"openebsLvmSharedMounts,omitempty"  yaml:"openebsLvmSharedMounts,omitempty"`
+	Volumes                 []ClusterPodMigrationVolumeStatus  `json:"volumes,omitempty"                 yaml:"volumes,omitempty"`
+	OpenEBSLVMSharedMounts  []SharedMountStatus                `json:"openebsLvmSharedMounts,omitempty"  yaml:"openebsLvmSharedMounts,omitempty"`
 }
 
 type ClusterReservationStatus struct {
-	Plan           *ClusterReservationPlan `json:"plan,omitempty" yaml:"plan,omitempty"`
-	WorkflowStatus `                                 json:",inline"        yaml:",inline"`
-	Volumes        []ClusterReservationVolumeStatus `json:"volumes"        yaml:"volumes"`
+	Plan           *ClusterReservationPlan `json:"plan,omitempty"    yaml:"plan,omitempty"`
+	WorkflowStatus `                                 json:",inline"           yaml:",inline"`
+	Volumes        []ClusterReservationVolumeStatus `json:"volumes,omitempty" yaml:"volumes,omitempty"`
 }
 
 type ClusterCopyStatus struct {
-	Plan           *ClusterCopyPlan `json:"plan,omitempty" yaml:"plan,omitempty"`
-	WorkflowStatus `                          json:",inline"        yaml:",inline"`
-	Volumes        []ClusterCopyVolumeStatus `json:"volumes"        yaml:"volumes"`
+	// SourceNode checkpoints runtime placement inferred from online consumers.
+	SourceNode     string           `json:"sourceNode,omitempty" yaml:"sourceNode,omitempty"`
+	Plan           *ClusterCopyPlan `json:"plan,omitempty"       yaml:"plan,omitempty"`
+	WorkflowStatus `                          json:",inline"              yaml:",inline"`
+	Volumes        []ClusterCopyVolumeStatus `json:"volumes,omitempty"    yaml:"volumes,omitempty"`
 }
 
 type MoveStatus struct {
 	Plan           *MovePlan `json:"plan,omitempty" yaml:"plan,omitempty"`
-	WorkflowStatus `                   json:",inline"        yaml:",inline"`
-	Volumes        []MoveVolumeStatus `json:"volumes"        yaml:"volumes"`
+	WorkflowStatus `                     json:",inline"        yaml:",inline"`
+	Activation     MoveActivationStatus `json:"activation"     yaml:"activation"`
 }
 
 // +kubebuilder:object:root=true

@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	v1alpha1 "github.com/labring-sigs/pvc-migrate/api/v1alpha1"
 	"github.com/labring-sigs/pvc-migrate/internal/domain"
 	"github.com/labring-sigs/pvc-migrate/internal/kube"
 	"github.com/labring-sigs/pvc-migrate/internal/testutil"
@@ -107,15 +108,19 @@ func TestVMClusterUsesComponentPauseAndStatefulSetScale(t *testing.T) {
 	manager := NewManager(client, dynamicClient, client.Discovery())
 	manager.poll = time.Millisecond
 
-	workload, err := manager.Discover(
+	workload, err := manager.discoverForTest(
 		ctx,
-		DiscoverOptions{Namespace: "vm", PodName: pod.Name, AllowLeaderDowntime: true},
+		"vm",
+		v1alpha1.PodMigrationSpec{
+			Pod:                 v1alpha1.LocalResourceReference{Name: pod.Name},
+			AllowLeaderDowntime: true,
+		},
 	)
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	if workload.Adapter != domain.WorkloadVMCluster || workload.VMCluster == nil ||
+	if workload.Adapter != v1alpha1.WorkloadVMCluster || workload.VMCluster == nil ||
 		workload.VMCluster.Component != "vmstorage" {
 		t.Fatalf("workload=%#v", workload)
 	}
@@ -129,11 +134,8 @@ func TestVMClusterUsesComponentPauseAndStatefulSetScale(t *testing.T) {
 		t.Fatalf("top-level VMCluster pause state=%#v", workload.VMCluster)
 	}
 
-	session := controllerSession(workload)
-	session.Spec.WorkflowOptionsPtr().TargetNode = "node-b"
-
-	session.Status.Phase = domain.PhasePausing
-	if err := manager.Pause(ctx, session); err != nil {
+	owner, namespace, phase := "adapter-test", "vm", domain.PhasePausing
+	if _, err := manager.Pause(ctx, owner, namespace, workload, phase, ""); err != nil {
 		t.Fatal(err)
 	}
 
@@ -172,7 +174,7 @@ func TestVMClusterUsesComponentPauseAndStatefulSetScale(t *testing.T) {
 		t.Fatalf("paused StatefulSet replicas=%d, want ordinal 1", got)
 	}
 
-	if err := manager.Resume(ctx, session); err != nil {
+	if _, err := manager.Resume(ctx, owner, namespace, workload, "", phase, "", nil); err != nil {
 		t.Fatal(err)
 	}
 
@@ -246,9 +248,13 @@ func TestVMClusterDiscoveryRejectsUnconvergedReplicaCount(t *testing.T) {
 		client.Discovery(),
 	)
 
-	_, err := manager.Discover(
+	_, err := manager.discoverForTest(
 		context.Background(),
-		DiscoverOptions{Namespace: pod.Namespace, PodName: pod.Name, AllowLeaderDowntime: true},
+		pod.Namespace,
+		v1alpha1.PodMigrationSpec{
+			Pod:                 v1alpha1.LocalResourceReference{Name: pod.Name},
+			AllowLeaderDowntime: true,
+		},
 	)
 	if domain.CategoryOf(err) != domain.ErrorPrecondition ||
 		!strings.Contains(err.Error(), "has not converged") {
@@ -301,21 +307,20 @@ func TestVMClusterResumeWaitsForOperatorConvergence(t *testing.T) {
 	)
 	manager := NewManager(fake.NewClientset(), dynamicClient, nil)
 	manager.poll = time.Millisecond
-	session := controllerSession(domain.WorkloadSpec{
-		Adapter: domain.WorkloadVMCluster,
-		Pod:     domain.ObjectReference{Namespace: "vm", Name: "vmstorage-metrics-0"},
-		VMCluster: &domain.VMClusterSpec{
-			APIVersion: vmClusterAPIVersion,
-			Name:       "metrics",
-			UID:        "vm-uid",
-			Component:  "vmstorage",
-		},
-	})
+	plan := &v1alpha1.VMClusterSpec{
+		APIVersion: vmClusterAPIVersion,
+		Name:       "metrics",
+		UID:        "vm-uid",
+		Component:  "vmstorage",
+	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
 
-	if err := manager.waitForVMClusterOperational(ctx, session); err != nil {
+	if err := manager.waitForVMClusterOperational(
+		ctx,
+		"vm", plan,
+	); err != nil {
 		t.Fatal(err)
 	}
 
@@ -344,19 +349,18 @@ func TestVMClusterResumeAcceptsOriginallyPausedCluster(t *testing.T) {
 	dynamicClient := dynamicfake.NewSimpleDynamicClient(runtime.NewScheme(), vm)
 	manager := NewManager(fake.NewClientset(), dynamicClient, nil)
 	manager.poll = time.Millisecond
-	session := controllerSession(domain.WorkloadSpec{
-		Adapter: domain.WorkloadVMCluster,
-		Pod:     domain.ObjectReference{Namespace: "vm", Name: "vmstorage-metrics-0"},
-		VMCluster: &domain.VMClusterSpec{
-			APIVersion: vmClusterAPIVersion, Name: "metrics", UID: "vm-uid", Component: "vmstorage",
-			OriginalClusterPaused: true, OriginalClusterPausedConfigured: true,
-		},
-	})
+	plan := &v1alpha1.VMClusterSpec{
+		APIVersion: vmClusterAPIVersion, Name: "metrics", UID: "vm-uid", Component: "vmstorage",
+		OriginalClusterPaused: true, OriginalClusterPausedConfigured: true,
+	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
 
-	if err := manager.waitForVMClusterOperational(ctx, session); err != nil {
+	if err := manager.waitForVMClusterOperational(
+		ctx,
+		"vm", plan,
+	); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -463,19 +467,21 @@ func TestGrafanaUsesCRSuspendAndDeploymentScale(t *testing.T) {
 	manager := NewManager(client, dynamicClient, client.Discovery())
 	manager.poll = time.Millisecond
 
-	workload, err := manager.Discover(ctx, DiscoverOptions{Namespace: "vm", PodName: pod.Name})
+	workload, err := manager.discoverForTest(
+		ctx,
+		"vm",
+		v1alpha1.PodMigrationSpec{Pod: v1alpha1.LocalResourceReference{Name: pod.Name}},
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	if workload.Adapter != domain.WorkloadGrafana || workload.Grafana == nil {
+	if workload.Adapter != v1alpha1.WorkloadGrafana || workload.Grafana == nil {
 		t.Fatalf("workload=%#v", workload)
 	}
 
-	session := controllerSession(workload)
-
-	session.Status.Phase = domain.PhasePausing
-	if err := manager.Pause(ctx, session); err != nil {
+	owner, namespace, phase := "adapter-test", "vm", domain.PhasePausing
+	if _, err := manager.Pause(ctx, owner, namespace, workload, phase, ""); err != nil {
 		t.Fatal(err)
 	}
 
@@ -500,11 +506,12 @@ func TestGrafanaUsesCRSuspendAndDeploymentScale(t *testing.T) {
 		)
 	}
 
-	if err := manager.Resume(ctx, session); err != nil {
+	resumedWorkload, err := manager.Resume(ctx, owner, namespace, workload, "", phase, "", nil)
+	if err != nil {
 		t.Fatal(err)
 	}
 
-	if session.Spec.Workload().Pod.UID == "" {
+	if resumedWorkload == nil || resumedWorkload.Pod == nil || resumedWorkload.Pod.UID == "" {
 		t.Fatal("resumed Grafana Pod identity was not recorded")
 	}
 
@@ -608,9 +615,13 @@ func TestDiscoverRejectsControllerSpecificUnsafeWorkloads(t *testing.T) {
 				client.Discovery(),
 			)
 
-			_, err := manager.Discover(
+			_, err := manager.discoverForTest(
 				context.Background(),
-				DiscoverOptions{Namespace: "app", PodName: pod.Name, AllowLeaderDowntime: true},
+				"app",
+				v1alpha1.PodMigrationSpec{
+					Pod:                 v1alpha1.LocalResourceReference{Name: pod.Name},
+					AllowLeaderDowntime: true,
+				},
 			)
 			if domain.CategoryOf(err) != domain.ErrorPrecondition ||
 				!strings.Contains(err.Error(), tt.want) {
@@ -658,9 +669,9 @@ func TestDiscoverRejectsBackupWorkloadBeforeReadiness(t *testing.T) {
 		nil,
 	)
 
-	_, err := manager.Discover(
+	_, err := manager.discoverForTest(
 		context.Background(),
-		DiscoverOptions{Namespace: "app", PodName: pod.Name},
+		"app", v1alpha1.PodMigrationSpec{Pod: v1alpha1.LocalResourceReference{Name: pod.Name}},
 	)
 	if domain.CategoryOf(err) != domain.ErrorPrecondition ||
 		!strings.Contains(err.Error(), "backup workload") {
@@ -702,9 +713,9 @@ func TestDiscoverRejectsBackupOwnedJobBeforeReadiness(t *testing.T) {
 		nil,
 	)
 
-	_, err := manager.Discover(
+	_, err := manager.discoverForTest(
 		context.Background(),
-		DiscoverOptions{Namespace: "app", PodName: pod.Name},
+		"app", v1alpha1.PodMigrationSpec{Pod: v1alpha1.LocalResourceReference{Name: pod.Name}},
 	)
 	if domain.CategoryOf(err) != domain.ErrorPrecondition ||
 		!strings.Contains(err.Error(), "archive-WAL Job") {
@@ -745,15 +756,19 @@ func TestVictoriaLogsHelmStatefulSetUsesOrdinalAdapter(t *testing.T) {
 		nil,
 	)
 
-	workload, err := manager.Discover(
+	workload, err := manager.discoverForTest(
 		context.Background(),
-		DiscoverOptions{Namespace: "logs", PodName: pod.Name, AllowLeaderDowntime: true},
+		"logs",
+		v1alpha1.PodMigrationSpec{
+			Pod:                 v1alpha1.LocalResourceReference{Name: pod.Name},
+			AllowLeaderDowntime: true,
+		},
 	)
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	if workload.Adapter != domain.WorkloadVictoriaLogs || workload.Controller.Name != sts.Name {
+	if workload.Adapter != v1alpha1.WorkloadVictoriaLogs || workload.Controller.Name != sts.Name {
 		t.Fatalf("workload=%#v", workload)
 	}
 }
@@ -826,24 +841,22 @@ func TestVictoriaLogsPauseUsesFullReplicaLock(t *testing.T) {
 	)
 	manager.poll = time.Millisecond
 
-	workload, err := manager.Discover(
+	workload, err := manager.discoverForTest(
 		ctx,
-		DiscoverOptions{Namespace: "logs", PodName: pods[1].Name},
+		"logs", v1alpha1.PodMigrationSpec{Pod: v1alpha1.LocalResourceReference{Name: pods[1].Name}},
 	)
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	if workload.Adapter != domain.WorkloadVictoriaLogs || workload.Ordinal == nil ||
+	if workload.Adapter != v1alpha1.WorkloadVictoriaLogs || workload.Ordinal == nil ||
 		*workload.Ordinal != 0 ||
 		len(workload.AffectedPods) != 2 {
 		t.Fatalf("workload=%#v", workload)
 	}
 
-	session := controllerSession(workload)
-
-	session.Status.Phase = domain.PhasePausing
-	if err := manager.Pause(ctx, session); err != nil {
+	owner, namespace, phase := "adapter-test", "logs", domain.PhasePausing
+	if _, err := manager.Pause(ctx, owner, namespace, workload, phase, ""); err != nil {
 		t.Fatal(err)
 	}
 
@@ -853,7 +866,7 @@ func TestVictoriaLogsPauseUsesFullReplicaLock(t *testing.T) {
 	}
 
 	if statefulSetReplicas(paused) != 0 ||
-		paused.Annotations[pauseSessionAnnotation] != session.ID {
+		paused.Annotations[pauseSessionAnnotation] != owner {
 		t.Fatalf(
 			"paused StatefulSet replicas=%d annotations=%v",
 			statefulSetReplicas(paused),
@@ -861,7 +874,7 @@ func TestVictoriaLogsPauseUsesFullReplicaLock(t *testing.T) {
 		)
 	}
 
-	if err := manager.Resume(ctx, session); err != nil {
+	if _, err := manager.Resume(ctx, owner, namespace, workload, "", phase, "", nil); err != nil {
 		t.Fatal(err)
 	}
 
@@ -947,9 +960,12 @@ func TestDiscoverRejectsUnsafeKubeBlocksInstanceSetComponents(t *testing.T) {
 			dynamicClient := dynamicfake.NewSimpleDynamicClient(runtime.NewScheme(), cluster)
 			manager := NewManager(typed, dynamicClient, discovery)
 
-			_, err := manager.Discover(
+			_, err := manager.discoverForTest(
 				context.Background(),
-				DiscoverOptions{Namespace: "db", PodName: selected.Name},
+				"db",
+				v1alpha1.PodMigrationSpec{
+					Pod: v1alpha1.LocalResourceReference{Name: selected.Name},
+				},
 			)
 			if domain.CategoryOf(err) != domain.ErrorPrecondition ||
 				!strings.Contains(err.Error(), tt.wantMessage) {

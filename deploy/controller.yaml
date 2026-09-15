@@ -33,7 +33,6 @@ spec:
           imagePullPolicy: IfNotPresent
           args:
             - controller
-            - --mode=controller
             - --session-namespace=pvc-migrate-system
             - --log-level=info
           ports:

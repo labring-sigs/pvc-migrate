@@ -101,7 +101,7 @@ func TestWorkflowCacheSyncsBeforeStandbyReady(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	reconciler := NewWorkflowReconciler(nil, nil).WithSupportedKinds([]domain.ControllerKind{
+	reconciler := NewWorkflowReconciler().WithSupportedKinds([]domain.ControllerKind{
 		domain.ControllerKindCopy, domain.ControllerKindClusterCopy,
 	})
 	if err := reconciler.SetupWithManager(manager); err != nil {

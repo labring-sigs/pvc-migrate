@@ -3,6 +3,7 @@ package copyengine_test
 import (
 	"testing"
 
+	v1alpha1 "github.com/labring-sigs/pvc-migrate/api/v1alpha1"
 	. "github.com/labring-sigs/pvc-migrate/internal/copyengine"
 	"github.com/labring-sigs/pvc-migrate/internal/domain"
 	"github.com/utkuozdemir/pv-migrate/pvmigrate"
@@ -11,13 +12,13 @@ import (
 func TestOperationIDIsStableAndValid(t *testing.T) {
 	request := Request{
 		SessionID: "migration-123",
-		Source:    domain.ObjectReference{Namespace: "app", Name: "data"},
+		Source:    v1alpha1.ObjectReference{Namespace: "app", Name: "data"},
 		Mode:      ModeFinal,
 		Attempt:   2,
 	}
-	first := OperationID(request)
+	first := OperationID(request.AttemptIdentity)
 
-	second := OperationID(request)
+	second := OperationID(request.AttemptIdentity)
 	if first != second {
 		t.Fatalf("operation IDs differ: %q != %q", first, second)
 	}

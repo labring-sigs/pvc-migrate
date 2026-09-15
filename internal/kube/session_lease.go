@@ -14,6 +14,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/uuid"
+	"k8s.io/client-go/kubernetes"
 	coordinationclient "k8s.io/client-go/kubernetes/typed/coordination/v1"
 )
 
@@ -21,6 +22,7 @@ const (
 	sessionLeasePrefix            = "pvc-migrate-lock-"
 	defaultSessionLeaseDuration   = 30 * time.Second
 	defaultSessionLeaseRenewEvery = 10 * time.Second
+	leaseAPIStopTimeout           = 15 * time.Second
 	maxLeaseDurationSeconds       = int64(1<<31 - 1)
 )
 
@@ -71,19 +73,11 @@ func SessionLockName(id string) string {
 	return sessionLeasePrefix + hex.EncodeToString(digest[:])[:32]
 }
 
-// AcquireSessionLock acquires a renewable Kubernetes Lease. A live holder is
-// never overwritten; an expired holder may be fenced with an optimistic
-// resourceVersion update.
-func (s *ConfigMapSessionStore) AcquireSessionLock(
+func acquireWorkflowLease(
 	ctx context.Context,
-	namespace, id string,
-) (SessionLock, error) {
-	return s.acquireSessionLock(ctx, namespace, id, id)
-}
-
-func (s *ConfigMapSessionStore) acquireSessionLock(
-	ctx context.Context,
+	client kubernetes.Interface,
 	namespace, id, labelSessionID string,
+	duration, renewEvery time.Duration,
 ) (SessionLock, error) {
 	if namespace == "" || id == "" || labelSessionID == "" {
 		return nil, domain.NewError(
@@ -93,10 +87,10 @@ func (s *ConfigMapSessionStore) acquireSessionLock(
 		)
 	}
 
-	leases := s.client.CoordinationV1().Leases(namespace)
+	leases := client.CoordinationV1().Leases(namespace)
 	holder := string(uuid.NewUUID())
 	name := SessionLockName(id)
-	duration, renewEvery := s.leaseTiming()
+	duration, renewEvery = normalizeLeaseTiming(duration, renewEvery)
 	durationSeconds := leaseDurationSeconds(duration)
 
 	now := metav1.NewMicroTime(time.Now().UTC())
@@ -257,119 +251,24 @@ func (s *ConfigMapSessionStore) acquireSessionLock(
 	)
 }
 
-// DeleteSessionLease removes a lock owned by the session. Cleanup holds the
-// same lock while deleting the session, so a concurrent mutator cannot race
-// this operation. The resourceVersion precondition also protects the small
-// window where an expired holder is replaced before its cleanup call runs.
-func (s *ConfigMapSessionStore) DeleteSessionLease(
-	ctx context.Context,
-	namespace, id string,
-) error {
-	if namespace == "" || id == "" {
-		return domain.NewError(
-			domain.ErrorValidation,
-			"delete session lock",
-			"session namespace and ID are required",
-		)
-	}
-
-	leases := s.client.CoordinationV1().Leases(namespace)
-	name := SessionLockName(id)
-
-	lease, err := leases.Get(ctx, name, metav1.GetOptions{})
-	if apierrors.IsNotFound(err) {
-		return nil
-	}
-
-	if err != nil {
-		return domain.WrapError(
-			domain.ErrorKubernetes,
-			"delete session lock",
-			fmt.Sprintf("read Lease %s/%s", namespace, name),
-			err,
-		)
-	}
-
-	if lease.Labels[ManagedByLabel] != ManagedByValue || lease.Labels[SessionKey] != id {
-		return domain.NewError(
-			domain.ErrorConflict,
-			"delete session lock",
-			fmt.Sprintf("Lease %s/%s is owned by another resource", namespace, name),
-		)
-	}
-
-	if lease.UID == "" {
-		return domain.NewError(
-			domain.ErrorKubernetes,
-			"delete session lock",
-			fmt.Sprintf("Lease %s/%s has an incomplete identity", namespace, name),
-		)
-	}
-
-	preconditions := &metav1.Preconditions{UID: &lease.UID, ResourceVersion: &lease.ResourceVersion}
-
-	err = leases.Delete(ctx, name, metav1.DeleteOptions{Preconditions: preconditions})
-	if apierrors.IsNotFound(err) {
-		return nil
-	}
-
-	if apierrors.IsConflict(err) {
-		return domain.WrapError(
-			domain.ErrorConflict,
-			"delete session lock",
-			fmt.Sprintf("Lease %s/%s changed while deleting", namespace, name),
-			err,
-		)
-	}
-
-	if err != nil {
-		return domain.WrapError(
-			domain.ErrorKubernetes,
-			"delete session lock",
-			fmt.Sprintf("delete Lease %s/%s", namespace, name),
-			err,
-		)
-	}
-
-	return nil
-}
-
 type sessionLease struct {
-	leases     coordinationclient.LeaseInterface
-	namespace  string
-	name       string
-	sessionID  string
-	holder     string
-	uid        types.UID
-	duration   time.Duration
-	renewEvery time.Duration
-	stopped    <-chan struct{}
-	cancel     context.CancelFunc
-	done       chan struct{}
-	once       sync.Once
-	mu         sync.RWMutex
-	err        error
-	releaseErr error
-	deleted    bool
-}
-
-func newSessionLease(
-	parent context.Context,
-	leases coordinationclient.LeaseInterface,
-	namespace, name, sessionID, holder string,
-	uid types.UID,
-) *sessionLease {
-	return newSessionLeaseWithTiming(
-		parent,
-		leases,
-		namespace,
-		name,
-		sessionID,
-		holder,
-		uid,
-		defaultSessionLeaseDuration,
-		defaultSessionLeaseRenewEvery,
-	)
+	leases      coordinationclient.LeaseInterface
+	namespace   string
+	name        string
+	sessionID   string
+	holder      string
+	uid         types.UID
+	duration    time.Duration
+	renewEvery  time.Duration
+	stopped     chan struct{}
+	stoppedOnce sync.Once
+	cancel      context.CancelFunc
+	done        chan struct{}
+	once        sync.Once
+	mu          sync.RWMutex
+	err         error
+	releaseErr  error
+	deleted     bool
 }
 
 func newSessionLeaseWithTiming(
@@ -386,7 +285,7 @@ func newSessionLeaseWithTiming(
 	lock := &sessionLease{
 		leases: leases, namespace: namespace, name: name, sessionID: sessionID,
 		holder: holder, uid: uid, duration: duration, renewEvery: renewEvery,
-		stopped: ctx.Done(), cancel: cancel, done: make(chan struct{}),
+		stopped: make(chan struct{}), cancel: cancel, done: make(chan struct{}),
 	}
 	go lock.renewLoop(ctx)
 
@@ -404,6 +303,15 @@ func (l *sessionLease) Bind(parent context.Context) (context.Context, context.Ca
 	}()
 
 	return ctx, cancel
+}
+
+// apiContext returns a context for Lease API calls made after renewal has
+// stopped. Stopping the renewal loop closes the watched channel, so every
+// context bound through Bind is canceled and callers must not use it to
+// delete or release the lock. The detached context keeps caller values such
+// as tracing while dropping cancellation, bounded by a short timeout.
+func (l *sessionLease) apiContext(ctx context.Context) (context.Context, context.CancelFunc) {
+	return context.WithTimeout(context.WithoutCancel(ctx), leaseAPIStopTimeout)
 }
 
 func (l *sessionLease) Err() error {
@@ -502,6 +410,15 @@ func (l *sessionLease) renewTimeout() time.Duration {
 	return timeout
 }
 
+// markStopped terminates the renewal loop and releases every context bound
+// through Bind. It signals that the lock is no longer usable: renewal was
+// lost, the lock was released, or the owning worker is shutting down.
+// Deliberately NOT called by Delete: deleting the Lease must leave the
+// caller's bound context usable for the final store operations that follow.
+func (l *sessionLease) markStopped() {
+	l.stoppedOnce.Do(func() { close(l.stopped) })
+}
+
 func (l *sessionLease) markLost(err error) {
 	l.mu.Lock()
 	if l.err == nil {
@@ -509,11 +426,13 @@ func (l *sessionLease) markLost(err error) {
 	}
 	l.mu.Unlock()
 	l.cancel()
+	l.markStopped()
 }
 
 func (l *sessionLease) Release(ctx context.Context) error {
 	l.once.Do(func() {
 		l.cancel()
+		l.markStopped()
 		<-l.done
 		l.mu.RLock()
 		deleted := l.deleted
@@ -528,7 +447,10 @@ func (l *sessionLease) Release(ctx context.Context) error {
 			return
 		}
 
-		lease, err := l.leases.Get(ctx, l.name, metav1.GetOptions{})
+		apiCtx, apiCancel := l.apiContext(ctx)
+		defer apiCancel()
+
+		lease, err := l.leases.Get(apiCtx, l.name, metav1.GetOptions{})
 		if apierrors.IsNotFound(err) {
 			return
 		}
@@ -562,7 +484,7 @@ func (l *sessionLease) Release(ctx context.Context) error {
 
 		lease.Spec.RenewTime = nil
 		if _, err := l.leases.Update(
-			ctx,
+			apiCtx,
 			lease,
 			metav1.UpdateOptions{},
 		); err != nil &&
@@ -601,7 +523,10 @@ func (l *sessionLease) Delete(ctx context.Context) error {
 	l.cancel()
 	<-l.done
 
-	lease, err := l.leases.Get(ctx, l.name, metav1.GetOptions{})
+	apiCtx, apiCancel := l.apiContext(ctx)
+	defer apiCancel()
+
+	lease, err := l.leases.Get(apiCtx, l.name, metav1.GetOptions{})
 	if apierrors.IsNotFound(err) {
 		l.mu.Lock()
 		l.deleted = true
@@ -628,7 +553,7 @@ func (l *sessionLease) Delete(ctx context.Context) error {
 
 	preconditions := &metav1.Preconditions{UID: &lease.UID, ResourceVersion: &lease.ResourceVersion}
 
-	err = l.leases.Delete(ctx, l.name, metav1.DeleteOptions{Preconditions: preconditions})
+	err = l.leases.Delete(apiCtx, l.name, metav1.DeleteOptions{Preconditions: preconditions})
 	if apierrors.IsNotFound(err) {
 		err = nil
 	}
@@ -691,6 +616,3 @@ func sessionLeaseExpired(lease *coordinationv1.Lease, now time.Time) bool {
 
 	return now.Sub(renewed) >= duration
 }
-
-//go:fix inline
-func ptr[T any](value T) *T { return new(value) }

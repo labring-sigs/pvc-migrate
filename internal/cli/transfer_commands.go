@@ -9,6 +9,7 @@ import (
 	"github.com/labring-sigs/pvc-migrate/internal/domain"
 	"github.com/spf13/cobra"
 	"k8s.io/apimachinery/pkg/api/resource"
+	crclient "sigs.k8s.io/controller-runtime/pkg/client"
 )
 
 func targetsExistingSession(sessionID string, sourcePVCs []string, podName string) bool {
@@ -143,23 +144,35 @@ func validateTransferPathFlags(
 func printCopyDryRunResult(
 	cmd *cobra.Command,
 	runtime *commandRuntime,
-	session *domain.Session,
-	flags *copyFlags,
+	object crclient.Object,
+	namespace string,
 ) error {
-	if err := runtime.printer.Print(session); err != nil {
+	if err := runtime.printer.Print(object); err != nil {
 		return err
 	}
 
 	args := []string{
-		sessionCommandPrefixForCommand(cmd, session.Spec.SessionNamespace),
-		"copy", "--session", shellQuote(session.ID),
+		sessionCommandPrefixForCommand(cmd, namespace),
+		"copy", "--session", shellQuote(object.GetName()),
 	}
-	if flags.online {
-		args = append(args, "--online")
-	}
+	for _, name := range []string{"online", "source-node", "strategy", "verify-checksum", "delete-extraneous", "destination-pvc-reclaim-policy"} {
+		if flag := cmd.Flags().Lookup(name); flag != nil && flag.Changed {
+			if flag.Value.Type() == "bool" {
+				args = append(args, "--"+name+"="+flag.Value.String())
+			} else {
+				value := flag.Value.String()
+				if name == "strategy" {
+					values, err := cmd.Flags().GetStringSlice(name)
+					if err != nil {
+						return err
+					}
 
-	if flags.sourceNode != "" {
-		args = append(args, "--source-node", shellQuote(flags.sourceNode))
+					value = strings.Join(values, ",")
+				}
+
+				args = append(args, "--"+name, shellQuote(value))
+			}
+		}
 	}
 
 	args = append(args, "--dry-run=false")
@@ -233,8 +246,8 @@ func (r *rootState) confirm(ctx context.Context, command *cobra.Command, expecte
 	return nil
 }
 
-func requireReady(plan *domain.MigrationPlan) error {
-	if plan.Ready {
+func requireReady(plan *domain.TransferPlan) error {
+	if plan.Summary().Ready {
 		return nil
 	}
 
@@ -247,10 +260,11 @@ func requireReady(plan *domain.MigrationPlan) error {
 
 func requireReadyWithOutput(
 	runtime *commandRuntime,
-	plan *domain.MigrationPlan,
+	plan *domain.TransferPlan,
 	guidance io.Writer,
+	advice func(domain.Check) string,
 ) error {
-	if plan.Ready {
+	if plan.Summary().Ready {
 		return nil
 	}
 
@@ -265,7 +279,7 @@ func requireReadyWithOutput(
 		return err
 	}
 
-	if err := writePlanFailureGuidance(guidance, plan); err != nil {
+	if err := writePlanFailureGuidance(guidance, plan.Checks, advice); err != nil {
 		return err
 	}
 

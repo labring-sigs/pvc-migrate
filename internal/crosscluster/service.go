@@ -44,7 +44,8 @@ type Service struct {
 	helmTimeout                               time.Duration
 	writer                                    io.Writer
 	logger                                    *slog.Logger
-	store                                     kube.LockingSessionStore
+	locker                                    kube.SessionLocker
+	leases                                    *kube.CRDWorkflowLeaseCleaner
 }
 
 func NewService(source, destination *kube.Clients, copier copyengine.Engine) *Service {
@@ -59,7 +60,8 @@ func NewService(source, destination *kube.Clients, copier copyengine.Engine) *Se
 		logger:      slog.Default(),
 	}
 	if source != nil {
-		service.store = kube.NewConfigMapSessionStore(source.Kubernetes)
+		service.locker = kube.NewConfigMapWorkflowLocker(source.Kubernetes)
+		service.leases = kube.NewCRDWorkflowLeaseCleaner(source.Kubernetes)
 	}
 
 	return service

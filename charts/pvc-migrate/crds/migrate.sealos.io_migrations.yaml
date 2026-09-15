@@ -362,6 +362,8 @@ spec:
                       description: |-
                         VolumeSpec is planning output required to resume a PVC transfer. It is an
                         API-owned type with only the fields needed by transfer workflows.
+                        PVC references are relative to the workflow's source and destination
+                        namespace roles; PV references are always cluster-scoped.
                       properties:
                         accessModes:
                           items:
@@ -801,10 +803,6 @@ spec:
                 type: string
               volumes:
                 items:
-                  description: |-
-                    MigrationVolumeStatus is the durable checkpoint for an offline migration
-                    volume. It intentionally excludes workload-only progress and OpenEBS
-                    shared-mount state.
                   properties:
                     activation:
                       properties:
@@ -943,11 +941,6 @@ spec:
                   - sync
                   type: object
                 type: array
-            required:
-            - phase
-            - startedAt
-            - updatedAt
-            - volumes
             type: object
         required:
         - spec

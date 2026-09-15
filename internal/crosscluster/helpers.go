@@ -7,6 +7,7 @@ import (
 	"sort"
 	"strings"
 
+	v1alpha1 "github.com/labring-sigs/pvc-migrate/api/v1alpha1"
 	"github.com/labring-sigs/pvc-migrate/internal/domain"
 	"github.com/labring-sigs/pvc-migrate/internal/kube"
 	corev1 "k8s.io/api/core/v1"
@@ -15,8 +16,8 @@ import (
 	"k8s.io/client-go/kubernetes"
 )
 
-func objectRef(v ClusterResourceRef) domain.ObjectReference {
-	return domain.ObjectReference{
+func objectRef(v ClusterResourceRef) v1alpha1.ObjectReference {
+	return v1alpha1.ObjectReference{
 		APIVersion:      v.APIVersion,
 		Kind:            v.Kind,
 		Namespace:       v.Namespace,

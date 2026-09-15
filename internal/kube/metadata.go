@@ -11,12 +11,18 @@ const (
 )
 
 const (
-	MetadataDomain              = "migrate.sealos.io"
+	MetadataDomain = "migrate.sealos.io"
+	// LegacyMetadataDomain was the metadata domain written by releases before
+	// the CRD-only refactor. Session records created by those releases still
+	// carry protection finalizers in the legacy domain, and their deletion
+	// must converge without the old binary.
+	LegacyMetadataDomain        = "pvc-migrate.io"
 	PVCProtectionFinalizer      = "kubernetes.io/pvc-protection"
 	PVCStorageResizerAnnotation = "volume.kubernetes.io/storage-resizer"
 	SessionKey                  = MetadataDomain + "/session"
 	ResourceRoleLabel           = MetadataDomain + "/role"
 	SessionFinalizer            = MetadataDomain + "/session-protection"
+	LegacySessionFinalizer      = LegacyMetadataDomain + "/session-protection"
 	OriginalPolicyAnnotation    = MetadataDomain + "/original-reclaim-policy"
 	SourcePVCUIDAnnotation      = MetadataDomain + "/source-pvc-uid"
 	SourcePVAnnotation          = MetadataDomain + "/source-pv"

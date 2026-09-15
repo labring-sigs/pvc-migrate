@@ -12,7 +12,8 @@ import (
 func (p *Planner) finalizePlanStrategies(state *planState) {
 	filtered := filterStrategies(
 		state.plan,
-		state.options,
+		state.options.Strategies,
+		state.options.SourceNamespace, state.options.StagingNamespace,
 		state.mountTopologyConflict,
 	)
 	state.options.Strategies = filtered
@@ -30,10 +31,15 @@ func (p *Planner) finalizePlanStrategies(state *planState) {
 	}
 }
 
-func (p *Planner) finalizePlanResources(ctx context.Context, state *planState) {
+func (p *Planner) finalizePlanResources(
+	ctx context.Context,
+	state *planState,
+	chartEstimates map[string]domain.ResourceEstimate,
+	probePodPeaks map[string]int,
+) {
 	state.plan.Volumes = state.plannedVolumes
 
-	estimates := migrationNamespaceResourceEstimates(state)
+	estimates := migrationNamespaceResourceEstimates(state, chartEstimates, probePodPeaks)
 	if p.controllerSubmission {
 		session := estimates[state.options.SessionNamespace]
 		session.ConfigMaps--
@@ -50,11 +56,6 @@ func (p *Planner) finalizePlanResources(ctx context.Context, state *planState) {
 		state.plan.RollbackRetention.PVCsByStorageClass[class] = state.rollbackPVCsByClass[class]
 	}
 
-	if state.options.Operation == domain.OperationMigrate ||
-		state.options.Operation == domain.OperationMigratePod {
-		p.checkActivationPVCPolicies(ctx, state.plan, state.volumeSpecs)
-	}
-
 	if len(state.plannedVolumes) == 0 {
 		return
 	}
@@ -64,20 +65,14 @@ func (p *Planner) finalizePlanResources(ctx context.Context, state *planState) {
 
 func migrationNamespaceResourceEstimates(
 	state *planState,
+	chartEstimates map[string]domain.ResourceEstimate,
+	probePodPeaks map[string]int,
 ) map[string]domain.ResourceEstimate {
 	options := state.options
 	volumeCount := len(state.plannedVolumes)
 	estimates := map[string]domain.ResourceEstimate{}
 
-	staging := domain.ResourceEstimate{}
-	if volumeCount > 0 {
-		staging = migrationChartResourceEstimate(
-			options.Operation,
-			options.Strategies,
-			options.SourceNamespace == options.StagingNamespace,
-			true,
-		)
-	}
+	staging := chartEstimates[options.StagingNamespace]
 
 	staging.StorageRequests = state.totalStorage.String()
 	staging.PVCs = volumeCount
@@ -92,24 +87,13 @@ func migrationNamespaceResourceEstimates(
 	estimates[options.StagingNamespace] = staging
 
 	if options.SourceNamespace != options.StagingNamespace {
-		source := domain.ResourceEstimate{}
-		if volumeCount > 0 {
-			source = migrationChartResourceEstimate(
-				options.Operation,
-				options.Strategies,
-				false,
-				false,
-			)
-		}
+		source := chartEstimates[options.SourceNamespace]
 
 		initializeResourceEstimateMaps(&source)
 		estimates[options.SourceNamespace] = source
 	}
 
-	for namespace, terminatingPods := range migrationProbePodPeaks(
-		options,
-		state.plannedVolumes,
-	) {
+	for namespace, terminatingPods := range probePodPeaks {
 		estimate := estimates[namespace]
 		initializeResourceEstimateMaps(&estimate)
 		estimate.TerminatingPods = terminatingPods
@@ -135,98 +119,82 @@ func migrationNamespaceResourceEstimates(
 	return estimates
 }
 
-func migrationChartResourceEstimate(
-	operation domain.Operation,
+func transferChartResourceEstimates(
+	sourceNamespace, destinationNamespace string,
 	strategies []string,
-	sameNamespace bool,
-	destinationSide bool,
-) domain.ResourceEstimate {
-	switch operation {
-	case domain.OperationCopy, domain.OperationMigrate, domain.OperationMigratePod:
-		return kube.PVMigrateResourceEstimate(
-			strategies,
-			sameNamespace,
-			destinationSide,
-		)
-	default:
-		return domain.ResourceEstimate{}
+	volumeCount int,
+) map[string]domain.ResourceEstimate {
+	if volumeCount == 0 {
+		return nil
 	}
+
+	sameNamespace := sourceNamespace == destinationNamespace
+
+	estimates := map[string]domain.ResourceEstimate{
+		destinationNamespace: kube.PVMigrateResourceEstimate(strategies, sameNamespace, true),
+	}
+	if !sameNamespace {
+		estimates[sourceNamespace] = kube.PVMigrateResourceEstimate(strategies, false, false)
+	}
+
+	return estimates
 }
 
-func migrationProbePodPeaks(
-	options planOptions,
+func destinationToolProbePods(targetNode string, volumes []domain.PlannedVolume) map[string]int {
+	stage := map[string]int{}
+	if targetNode == "" {
+		return stage
+	}
+
+	for _, volume := range volumes {
+		stage[volume.DestinationPVC.Namespace] = 1
+	}
+
+	return stage
+}
+
+func transferProbePods(
+	targetNode string,
+	strategies []string,
 	volumes []domain.PlannedVolume,
+	probeSourceMount bool,
 ) map[string]int {
+	stage := destinationToolProbePods(targetNode, volumes)
+
+	needsSource := probeSourceMount || slices.ContainsFunc(
+		strategies,
+		func(strategy string) bool { return strategy != domain.StrategyMount },
+	)
+	for _, volume := range volumes {
+		if needsSource {
+			stage[volume.SourcePVC.Namespace]++
+		}
+
+		if domain.DestinationTransferPath(volume.TransferScope) != domain.VolumeRootPath {
+			stage[volume.DestinationPVC.Namespace]++
+		}
+	}
+
+	return stage
+}
+
+func sourcePathProbePods(volumes []domain.PlannedVolume) map[string]int {
+	stage := map[string]int{}
+	for _, volume := range volumes {
+		if domain.SourceTransferPath(volume.TransferScope) != domain.VolumeRootPath {
+			stage[volume.SourcePVC.Namespace]++
+		}
+	}
+
+	return stage
+}
+
+func mergeProbePodPeaks(stages ...map[string]int) map[string]int {
 	peaks := map[string]int{}
-	addStage := func(stage map[string]int) {
+	for _, stage := range stages {
 		for namespace, pods := range stage {
 			peaks[namespace] = max(peaks[namespace], pods)
 		}
-	}
-	addDestinationBase := func(stage map[string]int) {
-		if options.TargetNode == "" {
-			return
-		}
-
-		seen := map[string]struct{}{}
-		for _, volume := range volumes {
-			namespace := volume.DestinationPVC.Namespace
-			if _, exists := seen[namespace]; exists {
-				continue
-			}
-
-			seen[namespace] = struct{}{}
-			stage[namespace]++
-		}
-	}
-	addCopyStage := func(mountSourcePVC bool) {
-		stage := map[string]int{}
-		addDestinationBase(stage)
-
-		needsSource := mountSourcePVC || slices.ContainsFunc(
-			options.Strategies,
-			func(strategy string) bool { return strategy != domain.StrategyMount },
-		)
-		for _, volume := range volumes {
-			if needsSource {
-				stage[volume.SourcePVC.Namespace]++
-			}
-
-			if domain.DestinationTransferPath(volume.TransferScope) != domain.VolumeRootPath {
-				stage[volume.DestinationPVC.Namespace]++
-			}
-		}
-
-		addStage(stage)
-	}
-
-	reservation := map[string]int{}
-	addDestinationBase(reservation)
-	addStage(reservation)
-
-	switch options.Operation {
-	case domain.OperationCopy:
-		addCopyStage(true)
-	case domain.OperationMigrate:
-		addCopyStage(false)
-	case domain.OperationMigratePod:
-		if options.PrecopyPasses > 0 {
-			addCopyStage(true)
-		}
-
-		addCopyStage(false)
-	}
-
-	if options.Operation == domain.OperationMigrate ||
-		options.Operation == domain.OperationMigratePod {
-		sourcePathStage := map[string]int{}
-		for _, volume := range volumes {
-			if domain.SourceTransferPath(volume.TransferScope) != domain.VolumeRootPath {
-				sourcePathStage[volume.SourcePVC.Namespace]++
-			}
-		}
-
-		addStage(sourcePathStage)
 	}
 
 	return peaks
@@ -264,7 +232,7 @@ func (p *Planner) runPlanPolicyChecks(
 	staging := estimates[options.StagingNamespace]
 
 	tasks := []planCheckTask{
-		func(result *domain.MigrationPlan) {
+		func(result checkRecorder) {
 			p.checkNamespaceResourcePolicies(
 				ctx,
 				result,
@@ -277,7 +245,7 @@ func (p *Planner) runPlanPolicyChecks(
 	if options.SourceNamespace != options.StagingNamespace {
 		source := estimates[options.SourceNamespace]
 
-		tasks = append(tasks, func(result *domain.MigrationPlan) {
+		tasks = append(tasks, func(result checkRecorder) {
 			p.checkNamespaceResourcePolicies(
 				ctx,
 				result,
@@ -292,7 +260,7 @@ func (p *Planner) runPlanPolicyChecks(
 		options.SessionNamespace != options.SourceNamespace {
 		session := estimates[options.SessionNamespace]
 
-		tasks = append(tasks, func(result *domain.MigrationPlan) {
+		tasks = append(tasks, func(result checkRecorder) {
 			p.checkNamespaceResourcePolicies(
 				ctx,
 				result,
@@ -304,34 +272,9 @@ func (p *Planner) runPlanPolicyChecks(
 	}
 
 	tasks = append(tasks,
-		func(result *domain.MigrationPlan) {
+		func(result checkRecorder) {
 			p.checkNetworkPolicies(ctx, result, options.SourceNamespace, options.StagingNamespace)
 		},
-		func(result *domain.MigrationPlan) {
-			p.checkRBAC(
-				ctx,
-				result,
-				state.plan.SessionSpec,
-				state.inspectOpenEBSShared,
-				state.patchOpenEBSShared,
-			)
-		},
 	)
-	if state.sourcePod != nil {
-		tasks = append(tasks, func(result *domain.MigrationPlan) {
-			p.checkPodDependencies(ctx, result, state.sourcePod)
-		})
-	}
-
 	runPlanCheckTasks(state.plan, tasks)
-
-	if state.sourcePod != nil {
-		for _, issue := range podMigrationIssues(
-			state.sourcePod.Spec,
-			options.SourceNode,
-			options.TargetNode,
-		) {
-			state.plan.AddCheck(failed(domain.CheckNamePodScheduling, issue))
-		}
-	}
 }

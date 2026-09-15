@@ -378,7 +378,7 @@ func evaluateCapacityMatches(
 }
 
 func (p *Planner) checkStorageCapacity(
-	plan *domain.MigrationPlan,
+	plan *domain.TransferPlan,
 	node *corev1.Node,
 	volumes []domain.PlannedVolume,
 	inventory *storageCapacityInventory,

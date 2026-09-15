@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	v1alpha1 "github.com/labring-sigs/pvc-migrate/api/v1alpha1"
 	"github.com/labring-sigs/pvc-migrate/internal/controller"
 	"github.com/labring-sigs/pvc-migrate/internal/domain"
 	"github.com/labring-sigs/pvc-migrate/internal/kube"
@@ -24,68 +25,49 @@ type plannerOpenEBSLVMSharedVolumeManager struct {
 	err    error
 }
 
-func TestPlanRejectsMixedOfflineAndRealtimeInputs(t *testing.T) {
+func TestPodMigrationRejectsInvalidInputs(t *testing.T) {
 	tests := []struct {
 		name    string
-		options planOptions
-		check   domain.CheckName
+		spec    v1alpha1.PodMigrationSpec
+		message string
 	}{
 		{
-			name: "offline pod selection",
-			options: planOptions{
-				Operation:       domain.OperationMigrate,
-				SourceNamespace: "app",
-				PodName:         "db-0",
-			},
-			check: "pod",
+			name:    "realtime requires pod",
+			spec:    v1alpha1.PodMigrationSpec{},
+			message: "Pod name is required",
 		},
 		{
-			name: "realtime requires pod",
-			options: planOptions{
-				Operation:       domain.OperationMigratePod,
-				SourceNamespace: "app",
+			name: "realtime destination override",
+			spec: v1alpha1.PodMigrationSpec{
+				Pod: v1alpha1.LocalResourceReference{Name: "db-0"},
+				Volumes: []v1alpha1.VolumeRequest{{
+					SourcePVC:      v1alpha1.LocalResourceReference{Name: "data"},
+					DestinationPVC: &v1alpha1.LocalResourceReference{Name: "other"},
+				}},
 			},
-			check: "pod",
-		},
-		{
-			name: "realtime source pvc selection",
-			options: planOptions{
-				Operation:       domain.OperationMigratePod,
-				SourceNamespace: "app",
-				PodName:         "db-0",
-				SourcePVCs:      []string{"data"},
-			},
-			check: "source-pvc",
-		},
-		{
-			name: "realtime destination pvc selection",
-			options: planOptions{
-				Operation:       domain.OperationMigratePod,
-				SourceNamespace: "app",
-				PodName:         "db-0",
-				DestinationPVCs: []string{"data-migrated"},
-			},
-			check: "destination-pvc",
-		},
-		{
-			name: "realtime namespace switch",
-			options: planOptions{
-				Operation:            domain.OperationMigratePod,
-				SourceNamespace:      "app",
-				DestinationNamespace: "archive",
-				PodName:              "db-0",
-			},
-			check: "destination-namespace",
+			message: "destinationPVC is not supported",
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			state := newPlanState(nil, tt.options)
-			New(nil, nil).validatePlanInputs(state.plan, state.options)
-
-			if !hasFailedCheck(state.plan, tt.check) {
-				t.Fatalf("checks=%#v, missing failed check %q", state.plan.Checks, tt.check)
+			for _, submission := range []bool{false, true} {
+				_, err := New(
+					nil,
+					nil,
+				).WithControllerSubmission(submission).
+					PlanPodMigration(t.Context(),
+						&v1alpha1.ClusterPodMigration{
+							ObjectMeta: metav1.ObjectMeta{Name: "migration"},
+							Spec: v1alpha1.ClusterPodMigrationSpec{
+								SourceNamespace:  "app",
+								PodMigrationSpec: tt.spec,
+							},
+						}, "example/tool:v1")
+				if domain.CategoryOf(err) != domain.ErrorValidation ||
+					!strings.Contains(err.Error(), tt.message) {
+					t.Fatalf("submission=%t error=%v, want %q", submission, err, tt.message)
+				}
 			}
 		})
 	}
@@ -94,33 +76,34 @@ func TestPlanRejectsMixedOfflineAndRealtimeInputs(t *testing.T) {
 func TestMigratePodAvailabilityZoneBoundary(t *testing.T) {
 	tests := []struct {
 		name       string
-		operation  domain.Operation
 		sourceZone string
 		targetZone string
-		check      func(*testing.T, *domain.MigrationPlan)
+		check      func(*testing.T, *domain.TransferPlan)
 	}{
 		{
 			name:       "same zone passes",
-			operation:  domain.OperationMigratePod,
 			sourceZone: "zone-a",
 			targetZone: "zone-a",
-			check: func(t *testing.T, plan *domain.MigrationPlan) {
+			check: func(t *testing.T, plan *domain.TransferPlan) {
 				t.Helper()
 
-				if !hasPassedCheck(plan, "availability-zone") {
+				if !hasPassedCheck(
+					plan.Checks, "availability-zone",
+				) {
 					t.Fatalf("checks=%#v", plan.Checks)
 				}
 			},
 		},
 		{
 			name:       "cross zone fails",
-			operation:  domain.OperationMigratePod,
 			sourceZone: "zone-a",
 			targetZone: "zone-b",
-			check: func(t *testing.T, plan *domain.MigrationPlan) {
+			check: func(t *testing.T, plan *domain.TransferPlan) {
 				t.Helper()
 
-				if !hasFailedCheck(plan, "availability-zone") {
+				if !hasFailedCheck(
+					plan.Checks, "availability-zone",
+				) {
 					t.Fatalf("checks=%#v", plan.Checks)
 				}
 
@@ -136,27 +119,14 @@ func TestMigratePodAvailabilityZoneBoundary(t *testing.T) {
 		},
 		{
 			name:       "missing zone warns",
-			operation:  domain.OperationMigratePod,
 			sourceZone: "",
 			targetZone: "zone-b",
-			check: func(t *testing.T, plan *domain.MigrationPlan) {
+			check: func(t *testing.T, plan *domain.TransferPlan) {
 				t.Helper()
 
-				if !hasWarningCheck(plan, "availability-zone") {
-					t.Fatalf("checks=%#v", plan.Checks)
-				}
-			},
-		},
-		{
-			name:       "offline ignores zone boundary",
-			operation:  domain.OperationMigrate,
-			sourceZone: "zone-a",
-			targetZone: "zone-b",
-			check: func(t *testing.T, plan *domain.MigrationPlan) {
-				t.Helper()
-
-				if hasFailedCheck(plan, "availability-zone") ||
-					hasWarningCheck(plan, "availability-zone") {
+				if !hasWarningCheck(
+					plan.Checks, "availability-zone",
+				) {
 					t.Fatalf("checks=%#v", plan.Checks)
 				}
 			},
@@ -165,27 +135,22 @@ func TestMigratePodAvailabilityZoneBoundary(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			state := &planState{
-				options:   planOptions{Operation: tt.operation, SourceNode: "source-node"},
-				plan:      &domain.MigrationPlan{Ready: true},
-				sourcePod: &corev1.Pod{},
-				inventory: planInventory{
-					sourceNode: &corev1.Node{
-						ObjectMeta: metav1.ObjectMeta{
-							Labels: map[string]string{corev1.LabelTopologyZone: tt.sourceZone},
-						},
-					},
+			plan := &domain.TransferPlan{PlanSummary: domain.PlanSummary{Ready: true}}
+			source := &corev1.Node{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:   "source-node",
+					Labels: map[string]string{corev1.LabelTopologyZone: tt.sourceZone},
 				},
-				targetNode: &corev1.Node{
-					ObjectMeta: metav1.ObjectMeta{
-						Name:   "target-node",
-						Labels: map[string]string{corev1.LabelTopologyZone: tt.targetZone},
-					},
+			}
+			target := &corev1.Node{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:   "target-node",
+					Labels: map[string]string{corev1.LabelTopologyZone: tt.targetZone},
 				},
 			}
 
-			New(nil, nil).checkMigratePodAvailabilityZone(state)
-			tt.check(t, state.plan)
+			checkPodMigrationAvailabilityZone(plan, source.Name, source, target)
+			tt.check(t, plan)
 		})
 	}
 }
@@ -199,25 +164,18 @@ func TestPlanVolumeCapacityHandlesKubeBlocksCapacityChangeByOperation(t *testing
 	} {
 		for _, requested := range []string{"1Gi", "3Gi"} {
 			t.Run(string(operation)+"/"+requested, func(t *testing.T) {
-				workloadKind := domain.WorkloadKubeBlocks
-
-				kubeBlocksDetected := false
-				if operation == domain.OperationCopy {
-					workloadKind = domain.WorkloadNone
-					kubeBlocksDetected = true
-				}
+				workloadKind := v1alpha1.WorkloadKubeBlocks
 
 				state := &planState{
 					options: planOptions{
-						Operation:            operation,
-						AllowVolumeShrink:    true,
-						SkipSourceUsageCheck: true,
+						operationKind: operation, TransferOptions: v1alpha1.TransferOptions{
+							AllowVolumeShrink:    true,
+							SkipSourceUsageCheck: true,
+						},
 					},
-					plan: &domain.MigrationPlan{Ready: true},
-					workload: domain.WorkloadSpec{
-						Adapter: workloadKind,
+					plan: &domain.TransferPlan{
+						PlanSummary: domain.PlanSummary{Ready: true},
 					},
-					kubeBlocksDetected:  kubeBlocksDetected,
 					requestedCapacities: []string{requested},
 				}
 
@@ -235,8 +193,14 @@ func TestPlanVolumeCapacityHandlesKubeBlocksCapacityChangeByOperation(t *testing
 				)
 
 				wantReject := operation == domain.OperationMigratePod
+				if wantReject {
+					checkPodMigrationCapacity(state.plan, input.pvc, input.capacity, requested,
+						workloadKind == v1alpha1.WorkloadKubeBlocks, nil)
+				}
 
-				rejected := hasFailedCheck(state.plan, "destination-capacity")
+				rejected := hasFailedCheck(
+					state.plan.Checks, "destination-capacity",
+				)
 				if capacity.Cmp(resource.MustParse(requested)) != 0 || rejected != wantReject ||
 					state.plan.Ready == wantReject {
 					t.Fatalf("capacity=%s checks=%#v", capacity.String(), state.plan.Checks)
@@ -246,45 +210,27 @@ func TestPlanVolumeCapacityHandlesKubeBlocksCapacityChangeByOperation(t *testing
 	}
 }
 
-func TestPlanVolumeCapacityDetectsKubeBlocksSourcePVC(t *testing.T) {
+func TestPodMigrationCapacityDetectsKubeBlocksSourcePVC(t *testing.T) {
 	for _, labels := range []map[string]string{
 		{kube.ManagedByLabel: "kubeblocks"},
 		{"apps.kubeblocks.io/component-name": "mongodb"},
 	} {
-		state := &planState{
-			options:             planOptions{Operation: domain.OperationMigratePod},
-			plan:                &domain.MigrationPlan{Ready: true},
-			requestedCapacities: []string{"3Gi"},
-		}
-		input := planVolumeInput{
-			pvc: &corev1.PersistentVolumeClaim{
-				ObjectMeta: metav1.ObjectMeta{Namespace: "app", Name: "data", Labels: labels},
-			},
-			capacity: resource.MustParse("2Gi"),
-		}
+		plan := &domain.PlanSummary{Ready: true}
 
-		capacity, _, _ := New(nil, nil).planVolumeCapacity(
-			context.Background(),
-			state,
-			0,
-			input,
-		)
-		if capacity.Cmp(resource.MustParse("3Gi")) != 0 ||
-			!hasFailedCheck(state.plan, "destination-capacity") {
-			t.Fatalf(
-				"labels=%v capacity=%s checks=%#v",
-				labels,
-				capacity.String(),
-				state.plan.Checks,
-			)
+		pvc := &corev1.PersistentVolumeClaim{
+			ObjectMeta: metav1.ObjectMeta{Namespace: "app", Name: "data", Labels: labels},
+		}
+		if checkPodMigrationCapacity(plan, pvc, resource.MustParse("2Gi"), "3Gi", false, nil) ||
+			plan.Ready {
+			t.Fatalf("labels=%v checks=%#v", labels, plan.Checks)
 		}
 	}
 }
 
 func TestPlanVolumeCapacityDoesNotTreatPvcMigratePVCAsKubeBlocks(t *testing.T) {
 	state := &planState{
-		options:             planOptions{Operation: domain.OperationMigrate},
-		plan:                &domain.MigrationPlan{Ready: true},
+		options:             planOptions{operationKind: domain.OperationMigrate},
+		plan:                &domain.TransferPlan{PlanSummary: domain.PlanSummary{Ready: true}},
 		requestedCapacities: []string{"3Gi"},
 	}
 	input := planVolumeInput{
@@ -303,15 +249,17 @@ func TestPlanVolumeCapacityDoesNotTreatPvcMigratePVCAsKubeBlocks(t *testing.T) {
 		input,
 	)
 	if capacity.Cmp(resource.MustParse("3Gi")) != 0 ||
-		hasFailedCheck(state.plan, "destination-capacity") {
+		hasFailedCheck(
+			state.plan.Checks, "destination-capacity",
+		) {
 		t.Fatalf("capacity=%s checks=%#v", capacity.String(), state.plan.Checks)
 	}
 }
 
 func (m plannerOpenEBSLVMSharedVolumeManager) Shared(
 	context.Context,
-	domain.ObjectReference,
-	domain.ObjectReference,
+	v1alpha1.ObjectReference,
+	v1alpha1.ObjectReference,
 	string,
 ) (bool, error) {
 	return m.shared, m.err
@@ -319,15 +267,15 @@ func (m plannerOpenEBSLVMSharedVolumeManager) Shared(
 
 func (plannerOpenEBSLVMSharedVolumeManager) PrepareShared(
 	context.Context,
-	domain.ObjectReference,
+	v1alpha1.ObjectReference,
 ) (kube.OpenEBSLVMSharedResult, error) {
 	return kube.OpenEBSLVMSharedResult{}, nil
 }
 
 func (plannerOpenEBSLVMSharedVolumeManager) EnsureShared(
 	context.Context,
-	domain.ObjectReference,
-	domain.ObjectReference,
+	v1alpha1.ObjectReference,
+	v1alpha1.ObjectReference,
 ) (kube.OpenEBSLVMSharedResult, error) {
 	return kube.OpenEBSLVMSharedResult{}, nil
 }
@@ -335,7 +283,7 @@ func (plannerOpenEBSLVMSharedVolumeManager) EnsureShared(
 func (plannerOpenEBSLVMSharedVolumeManager) EnableShared(
 	context.Context,
 	string,
-	domain.OpenEBSLVMSharedMount,
+	v1alpha1.SharedMountStatus,
 ) error {
 	return nil
 }
@@ -343,7 +291,7 @@ func (plannerOpenEBSLVMSharedVolumeManager) EnableShared(
 func (plannerOpenEBSLVMSharedVolumeManager) ValidateRestoreShared(
 	context.Context,
 	string,
-	domain.OpenEBSLVMSharedMount,
+	v1alpha1.SharedMountStatus,
 ) error {
 	return nil
 }
@@ -351,7 +299,7 @@ func (plannerOpenEBSLVMSharedVolumeManager) ValidateRestoreShared(
 func (plannerOpenEBSLVMSharedVolumeManager) RestoreShared(
 	context.Context,
 	string,
-	domain.OpenEBSLVMSharedMount,
+	v1alpha1.SharedMountStatus,
 ) error {
 	return nil
 }
@@ -405,8 +353,8 @@ func TestCheckPVCReferencesModelsOfflineWarmCopyRWOPAndSharedUnit(t *testing.T) 
 			message:   "reservation keeps the source PVC mounted",
 		},
 		{
-			name:      "selected unit has another consumer",
-			operation: domain.OperationCopy,
+			name:      "selected migration unit has another consumer",
+			operation: domain.OperationMigratePod,
 			mode:      rwo,
 			pods: []*corev1.Pod{
 				podWithPVC("selected"),
@@ -425,23 +373,28 @@ func TestCheckPVCReferencesModelsOfflineWarmCopyRWOPAndSharedUnit(t *testing.T) 
 					AccessModes: []corev1.PersistentVolumeAccessMode{tt.mode},
 				},
 			}
-			plan := &domain.MigrationPlan{Ready: true}
+			plan := &domain.TransferPlan{PlanSummary: domain.PlanSummary{Ready: true}}
 
 			pods := make([]corev1.Pod, len(tt.pods))
 			for index, pod := range tt.pods {
 				pods[index] = *pod
 			}
 
-			New(nil, nil).checkPVCReferencesFromPods(
-				plan,
-				pvc,
-				tt.sourcePod,
-				domain.WorkloadSpec{},
-				tt.operation,
-				true,
-				pods,
-				nil,
-			)
+			consumers, _ := collectPVCConsumers(plan, pvc, pods, nil, kube.ActivePodUsesPVC)
+			switch tt.operation {
+			case domain.OperationCopy:
+				checkCopyConsumers(plan, pvc, true, consumers)
+			case domain.OperationReserve:
+				checkReservationConsumers(plan, pvc, consumers)
+			case domain.OperationMigratePod:
+				checkPodMigrationConsumers(
+					plan,
+					pvc,
+					tt.sourcePod,
+					"", nil,
+					consumers,
+				)
+			}
 
 			if plan.Ready != tt.ready || len(plan.Checks) != 1 ||
 				plan.Checks[0].Severity != tt.severity ||
@@ -539,7 +492,7 @@ func TestCheckWarmCopyMountCompatibility(t *testing.T) {
 		},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			plan := &domain.MigrationPlan{Ready: true}
+			plan := &domain.TransferPlan{PlanSummary: domain.PlanSummary{Ready: true}}
 
 			operation := test.operation
 			if operation == "" {
@@ -596,18 +549,8 @@ func TestCheckWarmCopyMountCompatibility(t *testing.T) {
 	}
 }
 
-func TestWarmCopyRequestedUsesPrecopyPasses(t *testing.T) {
-	if warmCopyRequested(planOptions{Operation: domain.OperationMigratePod, PrecopyPasses: 0}) {
-		t.Fatal("offline migration requested warm copy")
-	}
-
-	if !warmCopyRequested(planOptions{Operation: domain.OperationMigratePod, PrecopyPasses: 1}) {
-		t.Fatal("precopy migration did not request warm copy")
-	}
-}
-
 func TestCheckWarmCopyMountCompatibilityUsesLVMSourcePVWithoutStorageClass(t *testing.T) {
-	plan := &domain.MigrationPlan{Ready: true}
+	plan := &domain.TransferPlan{PlanSummary: domain.PlanSummary{Ready: true}}
 	pvc := &corev1.PersistentVolumeClaim{
 		ObjectMeta: metav1.ObjectMeta{Namespace: "app", Name: "data"},
 	}
@@ -639,7 +582,9 @@ func TestCheckWarmCopyMountCompatibilityUsesLVMSourcePVWithoutStorageClass(t *te
 		[]*corev1.Pod{consumer},
 	)
 	if !inspect || patch || plan.Ready ||
-		!hasFailedCheckContaining(plan, "warm-copy-mount", "LVMVolume") {
+		!hasFailedCheckContaining(
+			plan.Checks, "warm-copy-mount", "LVMVolume",
+		) {
 		t.Fatalf("inspect=%t patch=%t ready=%t checks=%#v", inspect, patch, plan.Ready, plan.Checks)
 	}
 }
@@ -681,46 +626,53 @@ func TestPlanReportsOpenEBSWarmCopyMountCheck(t *testing.T) {
 			Type: corev1.NodeReady, Status: corev1.ConditionTrue,
 		}}},
 	})
-	options := planOptions{
-		SessionID:          "migration",
-		Operation:          domain.OperationMigratePod,
-		SourceNamespace:    "app",
-		TemporaryNamespace: "system",
-		StagingNamespace:   "system",
-		SessionNamespace:   "system",
-		PodName:            "database-0",
-		TargetNode:         "node-b",
-		DestinationClass:   "fast",
-		PrecopyPasses:      1,
+	object := &v1alpha1.ClusterPodMigration{
+		ObjectMeta: metav1.ObjectMeta{Name: "migration"},
+		Spec: v1alpha1.ClusterPodMigrationSpec{
+			SourceNamespace: "app", TemporaryNamespace: "system", SessionNamespace: "system",
+			PodMigrationSpec: v1alpha1.PodMigrationSpec{
+				Pod:           v1alpha1.LocalResourceReference{Name: "database-0"},
+				PrecopyPasses: 1,
+				TransferOptions: v1alpha1.TransferOptions{
+					TargetNode: "node-b", DestinationStorageClass: "fast",
+				},
+			},
+		},
 	}
 
 	client := plannerClient(objects...)
 
 	plan, err := New(client, controller.NewManager(client, nil, nil)).
 		WithOpenEBSLVMSharedVolumeManager(plannerOpenEBSLVMSharedVolumeManager{}).
-		plan(context.Background(), options)
+		PlanPodMigration(t.Context(), object, "")
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	if !hasFailedCheckContaining(plan, "warm-copy-mount", "--precopy-passes 0") {
+	if !hasFailedCheckContaining(
+		plan.Checks, "warm-copy-mount", "--precopy-passes 0",
+	) {
 		t.Fatalf("warm-copy mount check missing: %#v", plan.Checks)
 	}
 
-	if !hasFailedCheckContaining(plan, "warm-copy-mount", "--openebs-lvm-enable-shared") {
+	if !hasFailedCheckContaining(
+		plan.Checks, "warm-copy-mount", "--openebs-lvm-enable-shared",
+	) {
 		t.Fatalf("OpenEBS LVM shared recovery missing: %#v", plan.Checks)
 	}
 
-	options.PrecopyPasses = 0
+	object.Spec.PrecopyPasses = 0
 
 	cutoverPlan, err := New(client, controller.NewManager(client, nil, nil)).
 		WithOpenEBSLVMSharedVolumeManager(plannerOpenEBSLVMSharedVolumeManager{}).
-		plan(context.Background(), options)
+		PlanPodMigration(t.Context(), object, "")
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	if hasFailedCheck(cutoverPlan, "warm-copy-mount") {
+	if hasFailedCheck(
+		cutoverPlan.Checks, "warm-copy-mount",
+	) {
 		t.Fatalf("zero-pass Pod migration includes warm-copy mount check: %#v", cutoverPlan.Checks)
 	}
 }
@@ -731,39 +683,40 @@ func TestPlanRejectsSourcePVClaimRefDrift(t *testing.T) {
 	pv.Spec.ClaimRef.Name = "other"
 
 	plan, err := New(plannerClient(objects...), nil).plan(context.Background(), planOptions{
-		SessionID:          "binding-drift",
-		Operation:          domain.OperationMigrate,
+		operationKind: domain.OperationMigrate,
+		Volumes:       testSourceVolumes("data"), SessionID: "binding-drift",
+
 		SourceNamespace:    "app",
 		TemporaryNamespace: "system",
 		StagingNamespace:   "system",
 		SessionNamespace:   "system",
-		SourcePVCs:         []string{"data"},
-		TargetNode:         "node-b",
-		DestinationClass:   "fast",
-		PrecopyPasses:      0,
+
+		TransferOptions: v1alpha1.TransferOptions{
+			TargetNode:              "node-b",
+			DestinationStorageClass: "fast",
+		},
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	if plan.Ready || !hasFailedCheck(plan, "source-binding") {
+	if plan.Ready || !hasFailedCheck(
+		plan.Checks, "source-binding",
+	) {
 		t.Fatalf("plan=%#v", plan)
 	}
 }
 
 func TestCheckPVCReferencesReportsListErrors(t *testing.T) {
-	plan := &domain.MigrationPlan{Ready: true}
-	New(nil, nil).checkPVCReferencesFromPods(
+	plan := &domain.TransferPlan{PlanSummary: domain.PlanSummary{Ready: true}}
+	collectPVCConsumers(
 		plan,
 		&corev1.PersistentVolumeClaim{
 			ObjectMeta: metav1.ObjectMeta{Namespace: "app", Name: "data"},
 		},
 		nil,
-		domain.WorkloadSpec{},
-		domain.OperationMigrate,
-		false,
-		nil,
 		errors.New("list timeout"),
+		kube.ActivePodUsesPVC,
 	)
 
 	if plan.Ready || len(plan.Checks) != 1 ||
@@ -779,40 +732,34 @@ func TestCheckPVCReferencesTreatsDeploymentPodsAsOneMigrationUnit(t *testing.T) 
 	selected := podWithPVC("web-1")
 	sibling := podWithPVC("web-2")
 	foreign := podWithPVC("other")
-	workload := domain.WorkloadSpec{
-		Adapter: domain.WorkloadDeployment,
-		AffectedPods: []domain.ObjectReference{
-			{Namespace: "app", Name: selected.Name, UID: selected.UID},
-			{Namespace: "app", Name: sibling.Name, UID: sibling.UID},
+	workload := v1alpha1.WorkloadSpec{
+		Adapter: v1alpha1.WorkloadDeployment,
+		AffectedPods: []v1alpha1.LocalResourceReference{
+			{Name: selected.Name, UID: selected.UID},
+			{Name: sibling.Name, UID: sibling.UID},
 		},
 	}
 
-	plan := &domain.MigrationPlan{Ready: true}
-	New(nil, nil).checkPVCReferencesFromPods(
+	plan := &domain.TransferPlan{PlanSummary: domain.PlanSummary{Ready: true}}
+	checkPodMigrationConsumers(
 		plan,
 		pvc,
 		selected,
-		workload,
-		domain.OperationMigratePod,
-		false,
-		[]corev1.Pod{*selected, *sibling},
-		nil,
+		workload.Adapter, workload.AffectedPods,
+		[]*corev1.Pod{selected, sibling},
 	)
 
 	if !plan.Ready || len(plan.Checks) != 1 || !plan.Checks[0].Passed {
 		t.Fatalf("same-Deployment consumers plan=%#v", plan)
 	}
 
-	plan = &domain.MigrationPlan{Ready: true}
-	New(nil, nil).checkPVCReferencesFromPods(
+	plan = &domain.TransferPlan{PlanSummary: domain.PlanSummary{Ready: true}}
+	checkPodMigrationConsumers(
 		plan,
 		pvc,
 		selected,
-		workload,
-		domain.OperationMigratePod,
-		false,
-		[]corev1.Pod{*selected, *sibling, *foreign},
-		nil,
+		workload.Adapter, workload.AffectedPods,
+		[]*corev1.Pod{selected, sibling, foreign},
 	)
 
 	if plan.Ready || len(plan.Checks) != 1 ||
@@ -822,16 +769,13 @@ func TestCheckPVCReferencesTreatsDeploymentPodsAsOneMigrationUnit(t *testing.T) 
 
 	replacement := sibling.DeepCopy()
 	replacement.UID = "replacement-uid"
-	plan = &domain.MigrationPlan{Ready: true}
-	New(nil, nil).checkPVCReferencesFromPods(
+	plan = &domain.TransferPlan{PlanSummary: domain.PlanSummary{Ready: true}}
+	checkPodMigrationConsumers(
 		plan,
 		pvc,
 		selected,
-		workload,
-		domain.OperationMigratePod,
-		false,
-		[]corev1.Pod{*selected, *replacement},
-		nil,
+		workload.Adapter, workload.AffectedPods,
+		[]*corev1.Pod{selected, replacement},
 	)
 
 	if plan.Ready || len(plan.Checks) != 1 ||
@@ -842,6 +786,12 @@ func TestCheckPVCReferencesTreatsDeploymentPodsAsOneMigrationUnit(t *testing.T) 
 
 func TestPlanVolumeConsumersModelsConcurrentRWODestinationByVolume(t *testing.T) {
 	selected := podWithPVC("database-0")
+	selected.Spec.Volumes = append(selected.Spec.Volumes, corev1.Volume{
+		Name: "solo",
+		VolumeSource: corev1.VolumeSource{
+			PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: "solo"},
+		},
+	})
 	sibling := podWithPVC("database-1")
 	pvc := &corev1.PersistentVolumeClaim{
 		ObjectMeta: metav1.ObjectMeta{Namespace: "app", Name: "data"},
@@ -849,11 +799,14 @@ func TestPlanVolumeConsumersModelsConcurrentRWODestinationByVolume(t *testing.T)
 			AccessModes: []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce},
 		},
 	}
-	workload := domain.WorkloadSpec{
-		Adapter: domain.WorkloadStatefulSet,
-		AffectedPods: []domain.ObjectReference{
-			{Namespace: selected.Namespace, Name: selected.Name, UID: selected.UID},
-			{Namespace: sibling.Namespace, Name: sibling.Name, UID: sibling.UID},
+	solo := pvc.DeepCopy()
+	solo.Name = "solo"
+
+	workload := v1alpha1.WorkloadSpec{
+		Adapter: v1alpha1.WorkloadStatefulSet,
+		AffectedPods: []v1alpha1.LocalResourceReference{
+			{Name: selected.Name, UID: selected.UID},
+			{Name: sibling.Name, UID: sibling.UID},
 		},
 	}
 
@@ -892,57 +845,62 @@ func TestPlanVolumeConsumersModelsConcurrentRWODestinationByVolume(t *testing.T)
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			state := &planState{
-				options: planOptions{
-					Operation:              domain.OperationMigratePod,
-					OpenEBSLVMEnableShared: test.enableShared,
-				},
-				plan:      &domain.MigrationPlan{Ready: true},
-				workload:  workload,
-				sourcePod: selected,
+				plan:      &domain.TransferPlan{PlanSummary: domain.PlanSummary{Ready: true}},
 				inventory: planInventory{namespacePods: []corev1.Pod{*selected, *sibling}},
-				plannedVolumes: []domain.PlannedVolume{{
-					AccessModes:    test.accessModes,
-					CSIProvisioner: test.provisioner,
-				}},
-				volumeSpecs:        []domain.VolumeSpec{{AccessModes: test.accessModes}},
+				plannedVolumes: []domain.PlannedVolume{
+					{AccessModes: test.accessModes, CSIProvisioner: test.provisioner},
+					{AccessModes: test.accessModes, CSIProvisioner: test.provisioner},
+				},
+				volumeSpecs: []v1alpha1.VolumeSpec{
+					{AccessModes: test.accessModes},
+					{AccessModes: test.accessModes},
+				},
 				storageClasses:     map[string]*storagev1.StorageClass{},
 				storageClassErrors: map[string]error{},
-				unmanagedConsumers: map[string]struct{}{},
-				copyConsumerNodes:  map[string]struct{}{},
 			}
 
-			New(nil, nil).checkPlanVolumeConsumers(
+			_, patchShared := New(nil, nil).checkPodMigrationPlanConsumers(
 				context.Background(),
 				state,
-				planVolumeInput{pvc: pvc},
+				selected,
+				workload.Adapter,
+				workload.AffectedPods,
+				[]planVolumeInput{{pvc: solo}, {pvc: pvc}},
+				0,
+				test.enableShared,
 			)
 
-			if got := state.volumeSpecs[0].ConcurrentConsumers; got != 2 {
+			if state.volumeSpecs[0].ConcurrentConsumers != 1 ||
+				state.plannedVolumes[0].ConcurrentConsumers != 1 {
+				t.Fatal("single-consumer volume inherited another volume's consumers")
+			}
+
+			if got := state.volumeSpecs[1].ConcurrentConsumers; got != 2 {
 				t.Fatalf("session concurrent consumers=%d, want 2", got)
 			}
 
-			if got := state.plannedVolumes[0].ConcurrentConsumers; got != 2 {
+			if got := state.plannedVolumes[1].ConcurrentConsumers; got != 2 {
 				t.Fatalf("plan concurrent consumers=%d, want 2", got)
 			}
 
 			if got := hasFailedCheck(
-				state.plan,
+				state.plan.Checks,
 				"destination-shared-mount",
 			); got != (test.wantSharedCheck && !test.enableShared) {
 				t.Fatalf("failed shared check=%t checks=%#v", got, state.plan.Checks)
 			}
 
 			if got := hasPassedCheck(
-				state.plan,
+				state.plan.Checks,
 				"destination-shared-mount",
 			); got != (test.wantSharedCheck && test.enableShared) {
 				t.Fatalf("passed shared check=%t checks=%#v", got, state.plan.Checks)
 			}
 
-			if state.patchOpenEBSShared != test.wantPatch {
+			if patchShared != test.wantPatch {
 				t.Fatalf(
 					"patch OpenEBS shared=%t, want %t",
-					state.patchOpenEBSShared,
+					patchShared,
 					test.wantPatch,
 				)
 			}
@@ -1046,24 +1004,14 @@ func TestCheckSharedRWOSchedulingRejectsHardCollocationConflicts(t *testing.T) {
 			target := sharedSchedulingNode("node-a")
 			other := sharedSchedulingNode("node-b")
 			state := &planState{
-				options: planOptions{OpenEBSLVMEnableShared: true},
-				plan:    &domain.MigrationPlan{Ready: true},
-				workload: domain.WorkloadSpec{
-					Adapter: domain.WorkloadDeployment,
-					AffectedPods: []domain.ObjectReference{
-						{Namespace: selected.Namespace, Name: selected.Name, UID: selected.UID},
-						{Namespace: sibling.Namespace, Name: sibling.Name, UID: sibling.UID},
-					},
-				},
-				sourcePod:  selected,
+				plan:       &domain.TransferPlan{PlanSummary: domain.PlanSummary{Ready: true}},
 				targetNode: target,
 				inventory: planInventory{
-					namespacePods:   []corev1.Pod{*selected, *sibling},
-					sourceNamespace: &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "app"}},
-					nodes:           []corev1.Node{*target, *other},
+					namespacePods: []corev1.Pod{*selected, *sibling},
+					nodes:         []corev1.Node{*target, *other},
 				},
 				plannedVolumes: []domain.PlannedVolume{{
-					SourcePVC: domain.ObjectReference{Namespace: "app", Name: "data"},
+					SourcePVC: v1alpha1.ObjectReference{Namespace: "app", Name: "data"},
 					AccessModes: []corev1.PersistentVolumeAccessMode{
 						corev1.ReadWriteOnce,
 					},
@@ -1072,10 +1020,13 @@ func TestCheckSharedRWOSchedulingRejectsHardCollocationConflicts(t *testing.T) {
 				}},
 			}
 
-			New(nil, nil).checkSharedRWOScheduling(state)
+			checkPodSharedRWOScheduling(state, selected, []v1alpha1.LocalResourceReference{
+				{Name: selected.Name, UID: selected.UID},
+				{Name: sibling.Name, UID: sibling.UID},
+			}, &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "app"}}, nil)
 
 			if got := hasFailedCheck(
-				state.plan,
+				state.plan.Checks,
 				"destination-shared-scheduling",
 			); got != test.wantFailure {
 				t.Fatalf(
@@ -1086,7 +1037,9 @@ func TestCheckSharedRWOSchedulingRejectsHardCollocationConflicts(t *testing.T) {
 				)
 			}
 
-			if !test.wantFailure && !hasPassedCheck(state.plan, "destination-shared-scheduling") {
+			if !test.wantFailure && !hasPassedCheck(
+				state.plan.Checks, "destination-shared-scheduling",
+			) {
 				t.Fatalf("missing passed scheduling check: %#v", state.plan.Checks)
 			}
 
@@ -1127,12 +1080,10 @@ func TestCheckSharedRWOSchedulingIgnoresUnrelatedVolumes(t *testing.T) {
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			state := &planState{
-				options:    planOptions{OpenEBSLVMEnableShared: true},
-				plan:       &domain.MigrationPlan{Ready: true},
-				sourcePod:  selected,
+				plan:       &domain.TransferPlan{PlanSummary: domain.PlanSummary{Ready: true}},
 				targetNode: target,
 				plannedVolumes: []domain.PlannedVolume{{
-					SourcePVC:           domain.ObjectReference{Namespace: "app", Name: "data"},
+					SourcePVC:           v1alpha1.ObjectReference{Namespace: "app", Name: "data"},
 					AccessModes:         test.accessModes,
 					CSIProvisioner:      test.provisioner,
 					ConcurrentConsumers: test.consumers,
@@ -1140,7 +1091,7 @@ func TestCheckSharedRWOSchedulingIgnoresUnrelatedVolumes(t *testing.T) {
 				inventory: planInventory{namespacePods: []corev1.Pod{*selected, *sibling}},
 			}
 
-			New(nil, nil).checkSharedRWOScheduling(state)
+			checkPodSharedRWOScheduling(state, selected, nil, nil, nil)
 
 			if len(state.plan.Checks) != 0 {
 				t.Fatalf("unrelated volume checks=%#v", state.plan.Checks)
@@ -1168,16 +1119,16 @@ func TestMigrationUnitConsumerCountUsesRecordedPodIdentity(t *testing.T) {
 	sibling := podWithPVC("web-2")
 	replacement := sibling.DeepCopy()
 	replacement.UID = "replacement-uid"
-	workload := domain.WorkloadSpec{
-		Adapter: domain.WorkloadDeployment,
-		AffectedPods: []domain.ObjectReference{
-			{Namespace: selected.Namespace, Name: selected.Name, UID: selected.UID},
-			{Namespace: sibling.Namespace, Name: sibling.Name, UID: sibling.UID},
+	workload := v1alpha1.WorkloadSpec{
+		Adapter: v1alpha1.WorkloadDeployment,
+		AffectedPods: []v1alpha1.LocalResourceReference{
+			{Name: selected.Name, UID: selected.UID},
+			{Name: sibling.Name, UID: sibling.UID},
 		},
 	}
 
 	if got := migrationUnitConsumerCount(
-		workload,
+		workload.AffectedPods,
 		selected,
 		[]*corev1.Pod{selected, sibling},
 	); got != 2 {
@@ -1185,7 +1136,7 @@ func TestMigrationUnitConsumerCountUsesRecordedPodIdentity(t *testing.T) {
 	}
 
 	if got := migrationUnitConsumerCount(
-		workload,
+		workload.AffectedPods,
 		selected,
 		[]*corev1.Pod{selected, replacement},
 	); got != 1 {
@@ -1207,14 +1158,17 @@ func TestPlanRejectsUnschedulableTopologyAndBlockVolumes(t *testing.T) {
 	}
 
 	plan, err := New(plannerClient(objects...), nil).plan(context.Background(), planOptions{
-		SessionID:          "migration",
+		operationKind: domain.OperationMigrate,
+		Volumes:       testSourceVolumes("data"), SessionID: "migration",
 		SourceNamespace:    "app",
 		StagingNamespace:   "system",
 		SessionNamespace:   "system",
 		TemporaryNamespace: "system",
-		SourcePVCs:         []string{"data"},
-		TargetNode:         "node-b",
-		DestinationClass:   "fast",
+
+		TransferOptions: v1alpha1.TransferOptions{
+			TargetNode:              "node-b",
+			DestinationStorageClass: "fast",
+		},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -1225,7 +1179,9 @@ func TestPlanRejectsUnschedulableTopologyAndBlockVolumes(t *testing.T) {
 		domain.CheckNameStorageTopology,
 		domain.CheckNameVolumeMode,
 	} {
-		if !hasFailedCheck(plan, checkName) {
+		if !hasFailedCheck(
+			plan.Checks, checkName,
+		) {
 			t.Fatalf("failed check %q missing: %#v", checkName, plan.Checks)
 		}
 	}
@@ -1257,7 +1213,7 @@ func TestCheckCSINodeTreatsMissingAndUnregisteredDriversAsWarnings(t *testing.T)
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			plan := &domain.MigrationPlan{Ready: true}
+			plan := &domain.TransferPlan{PlanSummary: domain.PlanSummary{Ready: true}}
 
 			var err error
 			if tt.csiNode == nil {
@@ -1279,7 +1235,7 @@ func TestCheckCSINodeTreatsMissingAndUnregisteredDriversAsWarnings(t *testing.T)
 }
 
 func TestCheckCSINodeFailsOnEmptyObject(t *testing.T) {
-	plan := &domain.MigrationPlan{Ready: true}
+	plan := &domain.TransferPlan{PlanSummary: domain.PlanSummary{Ready: true}}
 	New(nil, nil).checkCSINodeFromObject(plan,
 		&storagev1.StorageClass{
 			ObjectMeta:  metav1.ObjectMeta{Name: "fast"},

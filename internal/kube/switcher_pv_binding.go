@@ -2,8 +2,10 @@ package kube
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
+	v1alpha1 "github.com/labring-sigs/pvc-migrate/api/v1alpha1"
 	"github.com/labring-sigs/pvc-migrate/internal/domain"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -11,7 +13,7 @@ import (
 	"k8s.io/client-go/util/retry"
 )
 
-func (s *Switcher) deletePVC(ctx context.Context, ref domain.ObjectReference) error {
+func (s *Switcher) deletePVC(ctx context.Context, ref v1alpha1.ObjectReference) error {
 	if ref.Namespace == "" || ref.Name == "" || ref.UID == "" {
 		return domain.NewError(
 			domain.ErrorValidation,
@@ -55,6 +57,11 @@ func (s *Switcher) deletePVC(ctx context.Context, ref domain.ObjectReference) er
 	}
 
 	preconditions := &metav1.Preconditions{UID: &pvc.UID, ResourceVersion: &pvc.ResourceVersion}
+
+	if err := errors.Join(ctx.Err(), LeaseFenceError(ctx)); err != nil {
+		return err
+	}
+
 	if err := s.client.CoreV1().
 		PersistentVolumeClaims(ref.Namespace).
 		Delete(ctx, ref.Name, metav1.DeleteOptions{Preconditions: preconditions}); err != nil &&
@@ -106,7 +113,7 @@ func (s *Switcher) deletePVC(ctx context.Context, ref domain.ObjectReference) er
 
 func (s *Switcher) reservePV(
 	ctx context.Context,
-	ref domain.ObjectReference,
+	ref v1alpha1.ObjectReference,
 	namespace, claim, sessionID string,
 ) error {
 	if ref.Name == "" || ref.UID == "" || namespace == "" || claim == "" || sessionID == "" {
@@ -142,7 +149,7 @@ func (s *Switcher) reservePV(
 
 func (s *Switcher) waitForPVReservation(
 	ctx context.Context,
-	ref domain.ObjectReference,
+	ref v1alpha1.ObjectReference,
 	namespace, claim string,
 ) error {
 	return s.waitFor(
@@ -156,7 +163,7 @@ func (s *Switcher) waitForPVReservation(
 
 func (s *Switcher) pvReadyForReservation(
 	ctx context.Context,
-	ref domain.ObjectReference,
+	ref v1alpha1.ObjectReference,
 	namespace, claim string,
 ) (bool, error) {
 	pv, err := s.client.CoreV1().PersistentVolumes().Get(ctx, ref.Name, metav1.GetOptions{})
@@ -174,8 +181,9 @@ func (s *Switcher) pvReadyForReservation(
 
 	if pv.Spec.ClaimRef == nil || pv.Spec.ClaimRef.Namespace != namespace ||
 		pv.Spec.ClaimRef.Name != claim {
-		return pv.Status.Phase == corev1.VolumeReleased ||
-			pv.Status.Phase == corev1.VolumeAvailable, nil
+		ok := pv.Status.Phase == corev1.VolumeReleased ||
+			pv.Status.Phase == corev1.VolumeAvailable
+		return ok, nil
 	}
 
 	current, getErr := s.client.CoreV1().
@@ -204,7 +212,7 @@ func (s *Switcher) pvReadyForReservation(
 
 func (s *Switcher) updatePVReservation(
 	ctx context.Context,
-	ref domain.ObjectReference,
+	ref v1alpha1.ObjectReference,
 	namespace, claim, sessionID string,
 ) error {
 	pv, err := s.client.CoreV1().PersistentVolumes().Get(ctx, ref.Name, metav1.GetOptions{})
@@ -261,6 +269,11 @@ func (s *Switcher) updatePVReservation(
 		Namespace:  namespace,
 		Name:       claim,
 	}
+
+	if err := errors.Join(ctx.Err(), LeaseFenceError(ctx)); err != nil {
+		return err
+	}
+
 	_, err = s.client.CoreV1().PersistentVolumes().Update(ctx, pv, metav1.UpdateOptions{})
 
 	return err
@@ -268,7 +281,7 @@ func (s *Switcher) updatePVReservation(
 
 func (s *Switcher) ensureRetain(
 	ctx context.Context,
-	ref domain.ObjectReference,
+	ref v1alpha1.ObjectReference,
 	sessionID, role string,
 ) error {
 	if ref.Name == "" || ref.UID == "" || sessionID == "" || role == "" {
@@ -324,6 +337,10 @@ func (s *Switcher) ensureRetain(
 			return nil
 		}
 
+		if err := errors.Join(ctx.Err(), LeaseFenceError(ctx)); err != nil {
+			return err
+		}
+
 		_, err = s.client.CoreV1().PersistentVolumes().Update(ctx, pv, metav1.UpdateOptions{})
 
 		return err
@@ -341,7 +358,7 @@ func (s *Switcher) ensureRetain(
 func (s *Switcher) verifyBinding(
 	ctx context.Context,
 	pvc *corev1.PersistentVolumeClaim,
-	ref domain.ObjectReference,
+	ref v1alpha1.ObjectReference,
 ) error {
 	if pvc == nil || pvc.Namespace == "" || pvc.Name == "" || pvc.UID == "" || ref.Name == "" ||
 		ref.UID == "" {
@@ -394,9 +411,9 @@ func (s *Switcher) verifyBinding(
 // persisted identities and the two-sided Kubernetes binding relationship.
 func (s *Switcher) verifyPVCAndPVIdentity(
 	ctx context.Context,
-	pvcRef, pvRef domain.ObjectReference,
+	pvcRef, pvRef v1alpha1.ObjectReference,
 	role, sessionID string,
-	recoveryClaim *domain.ObjectReference,
+	recoveryClaim *v1alpha1.ObjectReference,
 ) error {
 	if pvcRef.Namespace == "" || pvcRef.Name == "" || pvcRef.UID == "" {
 		return domain.NewError(
@@ -541,13 +558,13 @@ func (s *Switcher) verifyPVCAndPVIdentity(
 func (s *Switcher) markPVPair(
 	ctx context.Context,
 	sessionID string,
-	volume *domain.VolumeSpec,
+	sourcePV, destinationPV v1alpha1.ObjectReference,
 	rolledBack bool,
 ) error {
-	if sessionID == "" || volume == nil || volume.SourcePV.Name == "" ||
-		volume.SourcePV.UID == "" ||
-		volume.DestinationPV.Name == "" ||
-		volume.DestinationPV.UID == "" {
+	if sessionID == "" || sourcePV.Name == "" ||
+		sourcePV.UID == "" ||
+		destinationPV.Name == "" ||
+		destinationPV.UID == "" {
 		return domain.NewError(
 			domain.ErrorValidation,
 			"mark PV pair",
@@ -555,15 +572,15 @@ func (s *Switcher) markPVPair(
 		)
 	}
 
-	active := volume.DestinationPV
+	active := destinationPV
 
-	rollback := volume.SourcePV
+	rollback := sourcePV
 	if rolledBack {
 		active, rollback = rollback, active
 	}
 
 	for _, item := range []struct {
-		ref   domain.ObjectReference
+		ref   v1alpha1.ObjectReference
 		role  string
 		other string
 	}{
@@ -622,6 +639,10 @@ func (s *Switcher) markPVPair(
 
 			if !changed {
 				return nil
+			}
+
+			if err := errors.Join(ctx.Err(), LeaseFenceError(ctx)); err != nil {
+				return err
 			}
 
 			_, err = s.client.CoreV1().PersistentVolumes().Update(ctx, pv, metav1.UpdateOptions{})

@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	v1alpha1 "github.com/labring-sigs/pvc-migrate/api/v1alpha1"
 	"github.com/labring-sigs/pvc-migrate/internal/domain"
 	"github.com/labring-sigs/pvc-migrate/internal/kube"
 	"github.com/labring-sigs/pvc-migrate/internal/parallel"
@@ -42,13 +43,6 @@ const (
 	genericRoleLabel            = "role"
 	validateRollbackConsumers   = "validate rollback consumers"
 )
-
-type DiscoverOptions struct {
-	Namespace           string
-	PodName             string
-	SwitchoverCandidate string
-	AllowLeaderDowntime bool
-}
 
 type kubeBlocksInstanceSetState struct {
 	Paused           bool
@@ -120,7 +114,7 @@ func (m *Manager) waitFor(
 // workload instance.
 func (m *Manager) waitForPodDeletion(
 	ctx context.Context,
-	ref domain.ObjectReference,
+	ref v1alpha1.ObjectReference,
 	operation string,
 ) error {
 	if ref.Namespace == "" || ref.Name == "" || ref.UID == "" {
@@ -163,83 +157,64 @@ func (m *Manager) waitForPodDeletion(
 	)
 }
 
-func (m *Manager) Discover(
-	ctx context.Context,
-	options DiscoverOptions,
-) (domain.WorkloadSpec, error) {
-	pod, err := m.typed.CoreV1().
-		Pods(options.Namespace).
-		Get(ctx, options.PodName, metav1.GetOptions{})
-	if err != nil {
-		return domain.WorkloadSpec{}, domain.WrapError(
-			domain.ErrorKubernetes,
-			"discover workload",
-			fmt.Sprintf("read Pod %s/%s", options.Namespace, options.PodName),
-			err,
-		)
-	}
-
-	return m.DiscoverPod(ctx, pod, options)
-}
-
 // DiscoverPod resolves a workload from a caller-owned Pod snapshot.
 func (m *Manager) DiscoverPod(
 	ctx context.Context,
 	pod *corev1.Pod,
-	options DiscoverOptions,
-) (domain.WorkloadSpec, error) {
-	options, err := normalizeDiscoverPodInput(pod, options)
-	if err != nil {
-		return domain.WorkloadSpec{}, err
+	namespace string,
+	expected v1alpha1.LocalResourceReference,
+	switchoverCandidate string,
+	allowLeaderDowntime bool,
+) (v1alpha1.WorkloadSpec, error) {
+	if err := validateDiscoverPodInput(pod, namespace, expected); err != nil {
+		return v1alpha1.WorkloadSpec{}, err
 	}
 
 	owner := controllerOwner(pod.OwnerReferences)
 	if owner == nil {
-		if err := requireReadyPod(pod, options.Namespace, options.PodName); err != nil {
-			return domain.WorkloadSpec{}, err
+		if err := requireReadyPod(pod, pod.Namespace, pod.Name); err != nil {
+			return v1alpha1.WorkloadSpec{}, err
 		}
 		return standaloneWorkload(pod)
 	}
 
-	return m.discoverOwnedWorkload(ctx, pod, owner, options)
+	return m.discoverOwnedWorkload(
+		ctx,
+		pod,
+		owner,
+		switchoverCandidate,
+		allowLeaderDowntime,
+	)
 }
 
-func normalizeDiscoverPodInput(
+func validateDiscoverPodInput(
 	pod *corev1.Pod,
-	options DiscoverOptions,
-) (DiscoverOptions, error) {
+	namespace string,
+	expected v1alpha1.LocalResourceReference,
+) error {
 	if pod == nil {
-		return options, domain.NewError(
-			domain.ErrorValidation,
-			"discover workload",
-			"Pod is nil",
-		)
+		return domain.NewError(domain.ErrorValidation, "discover workload", "Pod is nil")
 	}
 
-	if options.Namespace == "" {
-		options.Namespace = pod.Namespace
-	}
-
-	if options.PodName == "" {
-		options.PodName = pod.Name
-	}
-
-	if pod.Namespace != options.Namespace || pod.Name != options.PodName {
-		return options, domain.NewError(
+	if (namespace != "" && pod.Namespace != namespace) ||
+		(expected.Name != "" && pod.Name != expected.Name) ||
+		(expected.UID != "" && pod.UID != expected.UID) ||
+		(expected.ResourceVersion != "" && pod.ResourceVersion != expected.ResourceVersion) ||
+		(expected.Kind != "" && expected.Kind != domain.KindPod) ||
+		(expected.APIVersion != "" && expected.APIVersion != corev1.SchemeGroupVersion.String()) {
+		return domain.NewError(
 			domain.ErrorConflict,
 			"discover workload",
 			fmt.Sprintf(
-				"Pod snapshot %s/%s does not match requested %s/%s",
+				"Pod snapshot %s/%s does not match requested identity",
 				pod.Namespace,
 				pod.Name,
-				options.Namespace,
-				options.PodName,
 			),
 		)
 	}
 
 	if pod.Namespace == "" || pod.Name == "" || pod.UID == "" {
-		return options, domain.NewError(
+		return domain.NewError(
 			domain.ErrorKubernetes,
 			"discover workload",
 			"Kubernetes returned an incomplete Pod identity",
@@ -247,7 +222,7 @@ func normalizeDiscoverPodInput(
 	}
 
 	if pod.Annotations[corev1.MirrorPodAnnotationKey] != "" {
-		return options, domain.NewError(
+		return domain.NewError(
 			domain.ErrorPrecondition,
 			"discover workload",
 			"static mirror Pods are unsupported",
@@ -255,7 +230,7 @@ func normalizeDiscoverPodInput(
 	}
 
 	if owner := pod.Annotations[kube.SessionKey]; owner != "" {
-		return options, domain.NewError(
+		return domain.NewError(
 			domain.ErrorConflict,
 			"discover workload",
 			fmt.Sprintf(
@@ -267,17 +242,18 @@ func normalizeDiscoverPodInput(
 		)
 	}
 
-	return options, nil
+	return nil
 }
 
 func (m *Manager) discoverOwnedWorkload(
 	ctx context.Context,
 	pod *corev1.Pod,
 	owner *metav1.OwnerReference,
-	options DiscoverOptions,
-) (domain.WorkloadSpec, error) {
+	candidate string,
+	allowLeaderDowntime bool,
+) (v1alpha1.WorkloadSpec, error) {
 	if owner.UID == "" {
-		return domain.WorkloadSpec{}, domain.NewError(
+		return v1alpha1.WorkloadSpec{}, domain.NewError(
 			domain.ErrorPrecondition,
 			"discover workload",
 			fmt.Sprintf("Pod %s/%s controller reference has no UID", pod.Namespace, pod.Name),
@@ -286,7 +262,7 @@ func (m *Manager) discoverOwnedWorkload(
 
 	groupVersion, err := schema.ParseGroupVersion(owner.APIVersion)
 	if err != nil {
-		return domain.WorkloadSpec{}, domain.WrapError(
+		return v1alpha1.WorkloadSpec{}, domain.WrapError(
 			domain.ErrorPrecondition,
 			"discover workload",
 			"parse controller apiVersion",
@@ -296,16 +272,16 @@ func (m *Manager) discoverOwnedWorkload(
 
 	switch {
 	case owner.Kind == domain.KindStatefulSet && groupVersion.Group == appsv1.GroupName:
-		return m.discoverStatefulSetOwner(ctx, pod, owner, options)
+		return m.discoverStatefulSetOwner(ctx, pod, owner, candidate, allowLeaderDowntime)
 	case owner.Kind == domain.KindJob && groupVersion.Group == batchv1.GroupName:
-		return m.discoverJobOwner(ctx, pod, owner, options)
+		return m.discoverJobOwner(ctx, pod, owner)
 	case owner.Kind == domain.KindReplicaSet && groupVersion.Group == appsv1.GroupName:
-		return m.discoverReplicaSetOwner(ctx, pod, owner, options)
+		return m.discoverReplicaSetOwner(ctx, pod, owner)
 	case owner.Kind == domain.KindInstanceSet &&
 		strings.Contains(groupVersion.Group, kubeBlocksGroupSuffix):
-		return m.kubeBlocksWorkload(ctx, pod, owner, options)
+		return m.kubeBlocksWorkload(ctx, pod, owner, candidate, allowLeaderDowntime)
 	default:
-		return domain.WorkloadSpec{}, domain.NewError(
+		return v1alpha1.WorkloadSpec{}, domain.NewError(
 			domain.ErrorPrecondition,
 			"discover workload",
 			fmt.Sprintf("controller %s/%s has no safe pause adapter", owner.APIVersion, owner.Kind),
@@ -317,15 +293,16 @@ func (m *Manager) discoverStatefulSetOwner(
 	ctx context.Context,
 	pod *corev1.Pod,
 	owner *metav1.OwnerReference,
-	options DiscoverOptions,
-) (domain.WorkloadSpec, error) {
-	sts, err := m.typed.AppsV1().StatefulSets(options.Namespace).Get(
+	candidate string,
+	allowLeaderDowntime bool,
+) (v1alpha1.WorkloadSpec, error) {
+	sts, err := m.typed.AppsV1().StatefulSets(pod.Namespace).Get(
 		ctx,
 		owner.Name,
 		metav1.GetOptions{},
 	)
 	if err != nil {
-		return domain.WorkloadSpec{}, domain.WrapError(
+		return v1alpha1.WorkloadSpec{}, domain.WrapError(
 			domain.ErrorKubernetes,
 			"discover workload",
 			"read StatefulSet",
@@ -334,7 +311,7 @@ func (m *Manager) discoverStatefulSetOwner(
 	}
 
 	if sts.UID == "" || sts.UID != owner.UID {
-		return domain.WorkloadSpec{}, domain.NewError(
+		return v1alpha1.WorkloadSpec{}, domain.NewError(
 			domain.ErrorConflict,
 			"discover workload",
 			fmt.Sprintf("Pod %s/%s StatefulSet owner UID changed", pod.Namespace, pod.Name),
@@ -342,7 +319,7 @@ func (m *Manager) discoverStatefulSetOwner(
 	}
 
 	if reason := unsupportedStatefulSetReason(sts); reason != "" {
-		return domain.WorkloadSpec{}, domain.NewError(
+		return v1alpha1.WorkloadSpec{}, domain.NewError(
 			domain.ErrorPrecondition,
 			"discover workload",
 			reason,
@@ -353,16 +330,16 @@ func (m *Manager) discoverStatefulSetOwner(
 		return m.victoriaLogsWorkload(ctx, pod, sts)
 	}
 
-	if err := requireReadyPod(pod, options.Namespace, options.PodName); err != nil {
-		return domain.WorkloadSpec{}, err
+	if err := requireReadyPod(pod, pod.Namespace, pod.Name); err != nil {
+		return v1alpha1.WorkloadSpec{}, err
 	}
 
 	parent := controllerOwner(sts.OwnerReferences)
 	if parent == nil {
-		return m.statefulSetWorkload(ctx, pod, sts, options)
+		return m.statefulSetWorkload(ctx, pod, sts, allowLeaderDowntime)
 	}
 
-	return m.discoverStatefulSetParent(ctx, pod, sts, parent, options)
+	return m.discoverStatefulSetParent(ctx, pod, sts, parent, candidate, allowLeaderDowntime)
 }
 
 func (m *Manager) discoverStatefulSetParent(
@@ -370,10 +347,11 @@ func (m *Manager) discoverStatefulSetParent(
 	pod *corev1.Pod,
 	sts *appsv1.StatefulSet,
 	parent *metav1.OwnerReference,
-	options DiscoverOptions,
-) (domain.WorkloadSpec, error) {
+	candidate string,
+	allowLeaderDowntime bool,
+) (v1alpha1.WorkloadSpec, error) {
 	if parent.UID == "" {
-		return domain.WorkloadSpec{}, domain.NewError(
+		return v1alpha1.WorkloadSpec{}, domain.NewError(
 			domain.ErrorPrecondition,
 			"discover workload",
 			fmt.Sprintf(
@@ -386,7 +364,7 @@ func (m *Manager) discoverStatefulSetParent(
 
 	parentGV, err := schema.ParseGroupVersion(parent.APIVersion)
 	if err != nil {
-		return domain.WorkloadSpec{}, domain.WrapError(
+		return v1alpha1.WorkloadSpec{}, domain.WrapError(
 			domain.ErrorPrecondition,
 			"discover workload",
 			"parse parent controller apiVersion",
@@ -397,19 +375,31 @@ func (m *Manager) discoverStatefulSetParent(
 	switch parent.Kind {
 	case domain.KindVMCluster:
 		if parentGV.Group == "operator.victoriametrics.com" {
-			return m.vmClusterWorkload(ctx, pod, parent, sts, options)
+			return m.vmClusterWorkload(ctx, pod, parent, sts, allowLeaderDowntime)
 		}
 	case domain.KindComponent:
 		if strings.Contains(parentGV.Group, "kubeblocks.io") {
-			return m.kubeBlocksWorkload(ctx, pod, controllerOwner(pod.OwnerReferences), options)
+			return m.kubeBlocksWorkload(
+				ctx,
+				pod,
+				controllerOwner(pod.OwnerReferences),
+				candidate,
+				allowLeaderDowntime,
+			)
 		}
 	}
 
 	if strings.Contains(parentGV.Group, "kubeblocks.io") {
-		return m.kubeBlocksWorkload(ctx, pod, controllerOwner(pod.OwnerReferences), options)
+		return m.kubeBlocksWorkload(
+			ctx,
+			pod,
+			controllerOwner(pod.OwnerReferences),
+			candidate,
+			allowLeaderDowntime,
+		)
 	}
 
-	return domain.WorkloadSpec{}, domain.NewError(
+	return v1alpha1.WorkloadSpec{}, domain.NewError(
 		domain.ErrorPrecondition,
 		"discover workload",
 		fmt.Sprintf(
@@ -424,11 +414,10 @@ func (m *Manager) discoverJobOwner(
 	ctx context.Context,
 	pod *corev1.Pod,
 	owner *metav1.OwnerReference,
-	options DiscoverOptions,
-) (domain.WorkloadSpec, error) {
-	job, err := m.typed.BatchV1().Jobs(options.Namespace).Get(ctx, owner.Name, metav1.GetOptions{})
+) (v1alpha1.WorkloadSpec, error) {
+	job, err := m.typed.BatchV1().Jobs(pod.Namespace).Get(ctx, owner.Name, metav1.GetOptions{})
 	if err != nil {
-		return domain.WorkloadSpec{}, domain.WrapError(
+		return v1alpha1.WorkloadSpec{}, domain.WrapError(
 			domain.ErrorKubernetes,
 			"discover workload",
 			"read Job",
@@ -437,7 +426,7 @@ func (m *Manager) discoverJobOwner(
 	}
 
 	if job.UID == "" || job.UID != owner.UID {
-		return domain.WorkloadSpec{}, domain.NewError(
+		return v1alpha1.WorkloadSpec{}, domain.NewError(
 			domain.ErrorConflict,
 			"discover workload",
 			fmt.Sprintf("Pod %s/%s Job owner UID changed", pod.Namespace, pod.Name),
@@ -448,22 +437,22 @@ func (m *Manager) discoverJobOwner(
 		job.OwnerReferences,
 	); parent != nil &&
 		parent.Kind == domain.KindBackup {
-		return domain.WorkloadSpec{}, domain.NewError(
+		return v1alpha1.WorkloadSpec{}, domain.NewError(
 			domain.ErrorPrecondition,
 			"discover workload",
 			fmt.Sprintf(
 				"Backup-owned archive-WAL Job %s/%s is a backup workload and cannot be migrated",
-				options.Namespace,
+				pod.Namespace,
 				job.Name,
 			),
 		)
 	}
 
-	if err := requireReadyPod(pod, options.Namespace, options.PodName); err != nil {
-		return domain.WorkloadSpec{}, err
+	if err := requireReadyPod(pod, pod.Namespace, pod.Name); err != nil {
+		return v1alpha1.WorkloadSpec{}, err
 	}
 
-	return domain.WorkloadSpec{}, domain.NewError(
+	return v1alpha1.WorkloadSpec{}, domain.NewError(
 		domain.ErrorPrecondition,
 		"discover workload",
 		fmt.Sprintf("controller %s/%s has no safe pause adapter", owner.APIVersion, owner.Kind),
@@ -474,13 +463,12 @@ func (m *Manager) discoverReplicaSetOwner(
 	ctx context.Context,
 	pod *corev1.Pod,
 	owner *metav1.OwnerReference,
-	options DiscoverOptions,
-) (domain.WorkloadSpec, error) {
+) (v1alpha1.WorkloadSpec, error) {
 	rs, err := m.typed.AppsV1().
-		ReplicaSets(options.Namespace).
+		ReplicaSets(pod.Namespace).
 		Get(ctx, owner.Name, metav1.GetOptions{})
 	if err != nil {
-		return domain.WorkloadSpec{}, domain.WrapError(
+		return v1alpha1.WorkloadSpec{}, domain.WrapError(
 			domain.ErrorKubernetes,
 			"discover workload",
 			"read ReplicaSet",
@@ -489,7 +477,7 @@ func (m *Manager) discoverReplicaSetOwner(
 	}
 
 	if rs.UID == "" || rs.UID != owner.UID {
-		return domain.WorkloadSpec{}, domain.NewError(
+		return v1alpha1.WorkloadSpec{}, domain.NewError(
 			domain.ErrorConflict,
 			"discover workload",
 			fmt.Sprintf("Pod %s/%s ReplicaSet owner UID changed", pod.Namespace, pod.Name),
@@ -498,7 +486,7 @@ func (m *Manager) discoverReplicaSetOwner(
 
 	deployment := controllerOwner(rs.OwnerReferences)
 	if deployment == nil || deployment.Kind != domain.KindDeployment {
-		return domain.WorkloadSpec{}, domain.NewError(
+		return v1alpha1.WorkloadSpec{}, domain.NewError(
 			domain.ErrorPrecondition,
 			"discover workload",
 			"ReplicaSet has no Deployment controller",
@@ -506,7 +494,7 @@ func (m *Manager) discoverReplicaSetOwner(
 	}
 
 	if deployment.UID == "" {
-		return domain.WorkloadSpec{}, domain.NewError(
+		return v1alpha1.WorkloadSpec{}, domain.NewError(
 			domain.ErrorPrecondition,
 			"discover workload",
 			fmt.Sprintf("ReplicaSet %s/%s Deployment reference has no UID", rs.Namespace, rs.Name),
@@ -514,10 +502,10 @@ func (m *Manager) discoverReplicaSetOwner(
 	}
 
 	deploymentObject, err := m.typed.AppsV1().
-		Deployments(options.Namespace).
+		Deployments(pod.Namespace).
 		Get(ctx, deployment.Name, metav1.GetOptions{})
 	if err != nil {
-		return domain.WorkloadSpec{}, domain.WrapError(
+		return v1alpha1.WorkloadSpec{}, domain.WrapError(
 			domain.ErrorKubernetes,
 			"discover workload",
 			"read Deployment",
@@ -526,7 +514,7 @@ func (m *Manager) discoverReplicaSetOwner(
 	}
 
 	if deploymentObject.UID == "" || deploymentObject.UID != deployment.UID {
-		return domain.WorkloadSpec{}, domain.NewError(
+		return v1alpha1.WorkloadSpec{}, domain.NewError(
 			domain.ErrorConflict,
 			"discover workload",
 			fmt.Sprintf("ReplicaSet %s/%s Deployment owner UID changed", rs.Namespace, rs.Name),
@@ -536,7 +524,7 @@ func (m *Manager) discoverReplicaSetOwner(
 	grafanaOwner := controllerOwner(deploymentObject.OwnerReferences)
 	if grafanaOwner != nil {
 		if grafanaOwner.UID == "" {
-			return domain.WorkloadSpec{}, domain.NewError(
+			return v1alpha1.WorkloadSpec{}, domain.NewError(
 				domain.ErrorPrecondition,
 				"discover workload",
 				fmt.Sprintf(
@@ -553,146 +541,135 @@ func (m *Manager) discoverReplicaSetOwner(
 		}
 	}
 
-	if err := requireReadyPod(pod, options.Namespace, options.PodName); err != nil {
-		return domain.WorkloadSpec{}, err
+	if err := requireReadyPod(pod, pod.Namespace, pod.Name); err != nil {
+		return v1alpha1.WorkloadSpec{}, err
 	}
 
 	return m.deploymentWorkload(ctx, pod, deploymentObject)
 }
 
-func (m *Manager) Pause(ctx context.Context, session *domain.Session) error {
-	switch session.Spec.Workload().Adapter {
-	case domain.WorkloadNone:
-		return nil
-	case domain.WorkloadStandalone:
-		return m.pauseStandalone(ctx, session)
-	case domain.WorkloadDeployment:
-		return m.pauseDeployment(ctx, session)
-	case domain.WorkloadStatefulSet:
-		return m.pauseStatefulSet(ctx, session)
-	case domain.WorkloadVictoriaLogs:
-		return m.pauseVictoriaLogs(ctx, session)
-	case domain.WorkloadKubeBlocks:
-		return m.pauseKubeBlocks(ctx, session)
-	case domain.WorkloadVMCluster:
-		return m.pauseVMCluster(ctx, session)
-	case domain.WorkloadGrafana:
-		return m.pauseGrafana(ctx, session)
-	default:
-		return domain.NewError(
-			domain.ErrorPrecondition,
-			"pause workload",
-			fmt.Sprintf("adapter %q is unsupported", session.Spec.Workload().Adapter),
-		)
-	}
-}
-
-func (m *Manager) Resume(ctx context.Context, session *domain.Session) error {
-	switch session.Spec.Workload().Adapter {
-	case domain.WorkloadNone:
-		return nil
-	case domain.WorkloadStandalone:
-		return m.resumeStandalone(ctx, session)
-	case domain.WorkloadDeployment:
-		return m.resumeDeployment(ctx, session)
-	case domain.WorkloadStatefulSet:
-		return m.resumeStatefulSet(ctx, session)
-	case domain.WorkloadVictoriaLogs:
-		return m.resumeVictoriaLogs(ctx, session)
-	case domain.WorkloadKubeBlocks:
-		return m.resumeKubeBlocks(ctx, session)
-	case domain.WorkloadVMCluster:
-		return m.resumeVMCluster(ctx, session)
-	case domain.WorkloadGrafana:
-		return m.resumeGrafana(ctx, session)
-	default:
-		return domain.NewError(
-			domain.ErrorPrecondition,
-			"resume workload",
-			fmt.Sprintf("adapter %q is unsupported", session.Spec.Workload().Adapter),
-		)
-	}
-}
-
-func (m *Manager) ValidateResume(ctx context.Context, session *domain.Session) error {
-	if session == nil {
-		return domain.NewError(
-			domain.ErrorValidation,
-			"validate workload resume",
-			"session is nil",
-		)
+func (m *Manager) ValidateResume(
+	ctx context.Context,
+	owner, namespace string,
+	workload v1alpha1.WorkloadSpec,
+	phase, resumeFrom v1alpha1.WorkflowPhase,
+) error {
+	if err := validateWorkloadScope(namespace, workload.Adapter); err != nil {
+		return err
 	}
 
-	switch session.Spec.Workload().Adapter {
-	case domain.WorkloadNone:
+	controller := qualifiedWorkloadReference(workload.Controller, namespace)
+	pod := qualifiedWorkloadReference(workload.Pod, namespace)
+
+	switch workload.Adapter {
+	case v1alpha1.WorkloadNone:
 		return nil
-	case domain.WorkloadStandalone:
-		return m.validateStandaloneResume(ctx, session)
-	case domain.WorkloadDeployment:
-		return m.validateDeploymentResume(ctx, session)
-	case domain.WorkloadStatefulSet:
-		return m.validateStatefulSetResume(ctx, session)
-	case domain.WorkloadVictoriaLogs:
-		return m.validateVictoriaLogsResume(ctx, session)
-	case domain.WorkloadVMCluster:
-		return m.validateVMClusterResume(ctx, session)
-	case domain.WorkloadKubeBlocks:
-		return m.validateKubeBlocksResume(ctx, session)
-	case domain.WorkloadGrafana:
-		return m.validateGrafanaResume(ctx, session)
+	case v1alpha1.WorkloadStandalone:
+		return m.validateStandaloneResume(ctx, owner, pod)
+	case v1alpha1.WorkloadDeployment:
+		return m.validateDeploymentResume(ctx, controller,
+			workload.OriginalReplicas)
+	case v1alpha1.WorkloadStatefulSet:
+		return m.validateStatefulSetTransitionReplicas(ctx, controller,
+			workload.OriginalReplicas, workload.Ordinal, "resume StatefulSet")
+	case v1alpha1.WorkloadVictoriaLogs:
+		return m.validateVictoriaLogsResume(ctx, owner, controller,
+			workload.OriginalReplicas)
+	case v1alpha1.WorkloadVMCluster:
+		return m.validateVMClusterResume(ctx, owner, namespace,
+			controller, workload.OriginalReplicas,
+			workload.Ordinal, workload.VMCluster)
+	case v1alpha1.WorkloadKubeBlocks:
+		return m.validateKubeBlocksResume(ctx, owner, namespace,
+			controller, workload.KubeBlocks,
+			phase, resumeFrom)
+	case v1alpha1.WorkloadGrafana:
+		return m.validateGrafanaResume(
+			ctx,
+			owner,
+			namespace,
+			controller,
+			workload.OriginalReplicas,
+			workload.Grafana,
+		)
 	default:
 		return domain.NewError(
 			domain.ErrorPrecondition,
 			"validate workload resume",
-			fmt.Sprintf("adapter %q is unsupported", session.Spec.Workload().Adapter),
+			fmt.Sprintf("adapter %q is unsupported", workload.Adapter),
 		)
 	}
 }
 
 func (m *Manager) CurrentRollbackPods(
 	ctx context.Context,
-	session *domain.Session,
-) ([]domain.ObjectReference, error) {
-	if session == nil {
-		return nil, domain.NewError(
-			domain.ErrorValidation,
-			validateRollbackConsumers,
-			"session is nil",
-		)
+	owner, namespace string,
+	workload v1alpha1.WorkloadSpec,
+) ([]v1alpha1.ObjectReference, error) {
+	if err := validateWorkloadScope(namespace, workload.Adapter); err != nil {
+		return nil, err
 	}
 
-	switch session.Spec.Workload().Adapter {
-	case domain.WorkloadNone:
+	pod := qualifiedWorkloadReference(workload.Pod, namespace)
+	controller := qualifiedWorkloadReference(workload.Controller, namespace)
+
+	switch workload.Adapter {
+	case v1alpha1.WorkloadNone:
 		return nil, nil
-	case domain.WorkloadStandalone:
-		return m.currentStandaloneRollbackPods(ctx, session)
-	case domain.WorkloadDeployment:
-		return m.currentDeploymentRollbackPods(ctx, session)
-	case domain.WorkloadStatefulSet,
-		domain.WorkloadVictoriaLogs,
-		domain.WorkloadVMCluster:
-		return m.currentStatefulSetRollbackPods(ctx, session)
-	case domain.WorkloadKubeBlocks:
-		return m.currentKubeBlocksRollbackPods(ctx, session)
-	case domain.WorkloadGrafana:
-		return m.currentGrafanaRollbackPods(ctx, session)
+	case v1alpha1.WorkloadStandalone:
+		return m.currentStandaloneRollbackPods(ctx, owner, pod)
+	case v1alpha1.WorkloadDeployment:
+		return m.currentDeploymentRollbackPods(ctx, controller, workload.OriginalReplicas)
+	case v1alpha1.WorkloadStatefulSet,
+		v1alpha1.WorkloadVictoriaLogs,
+		v1alpha1.WorkloadVMCluster:
+		if err := m.validateStatefulSetTransitionReplicas(ctx, controller,
+			workload.OriginalReplicas, workload.Ordinal, validateRollbackConsumers); err != nil {
+			return nil, err
+		}
+
+		references := qualifiedWorkloadReferences(workload.AffectedPods, namespace)
+		if len(references) == 0 {
+			references = []v1alpha1.ObjectReference{pod}
+		}
+
+		return m.currentControllerPods(
+			ctx,
+			references,
+			controller,
+			validateRollbackConsumers,
+		)
+	case v1alpha1.WorkloadKubeBlocks:
+		if workload.KubeBlocks == nil {
+			return nil, domain.NewError(domain.ErrorInternal, validateRollbackConsumers,
+				"session lacks KubeBlocks state")
+		}
+
+		return m.currentKubeBlocksRollbackPods(
+			ctx,
+			pod,
+			controller,
+		)
+	case v1alpha1.WorkloadGrafana:
+		return m.currentGrafanaRollbackPods(ctx, controller,
+			workload.OriginalReplicas, workload.Grafana)
 	default:
 		return nil, domain.NewError(
 			domain.ErrorPrecondition,
 			validateRollbackConsumers,
-			fmt.Sprintf("adapter %q is unsupported", session.Spec.Workload().Adapter),
+			fmt.Sprintf("adapter %q is unsupported", workload.Adapter),
 		)
 	}
 }
 
 func (m *Manager) currentControllerPods(
 	ctx context.Context,
-	references []domain.ObjectReference,
-	controller domain.ObjectReference,
+	references []v1alpha1.ObjectReference,
+	controller v1alpha1.ObjectReference,
 	operation string,
-) ([]domain.ObjectReference, error) {
+) ([]v1alpha1.ObjectReference, error) {
 	pods, errors := m.readPodReferences(ctx, references)
-	current := make([]domain.ObjectReference, 0, len(references))
+	current := make([]v1alpha1.ObjectReference, 0, len(references))
 
 	for index, ref := range references {
 		err := errors[index]
@@ -719,24 +696,32 @@ func (m *Manager) currentControllerPods(
 	return current, nil
 }
 
-func (m *Manager) VerifyPaused(ctx context.Context, session *domain.Session) error {
-	workload := session.Spec.Workload()
-	if workload.Adapter == domain.WorkloadNone {
-		return nil
-	}
-
-	if err := m.verifyPauseControl(ctx, session); err != nil {
+func (m *Manager) VerifyPaused(
+	ctx context.Context,
+	owner, namespace string,
+	workload v1alpha1.WorkloadSpec,
+	phase, resumeFrom v1alpha1.WorkflowPhase,
+) error {
+	if err := validateWorkloadScope(namespace, workload.Adapter); err != nil {
 		return err
 	}
 
-	references := workload.AffectedPods
+	if workload.Adapter == v1alpha1.WorkloadNone {
+		return nil
+	}
+
+	if err := m.verifyPauseControl(ctx, owner, namespace, workload, phase, resumeFrom); err != nil {
+		return err
+	}
+
+	references := qualifiedWorkloadReferences(workload.AffectedPods, namespace)
 	if len(references) == 0 {
-		references = []domain.ObjectReference{workload.Pod}
+		references = []v1alpha1.ObjectReference{qualifiedWorkloadReference(workload.Pod, namespace)}
 	}
 
 	seen := make(map[string]struct{}, len(references))
 
-	uniqueReferences := make([]domain.ObjectReference, 0, len(references))
+	uniqueReferences := make([]v1alpha1.ObjectReference, 0, len(references))
 	for _, reference := range references {
 		key := reference.Namespace + "/" + reference.Name
 		if _, ok := seen[key]; ok || reference.Name == "" {
@@ -776,7 +761,7 @@ func (m *Manager) VerifyPaused(ctx context.Context, session *domain.Session) err
 
 func (m *Manager) readPodReferences(
 	ctx context.Context,
-	references []domain.ObjectReference,
+	references []v1alpha1.ObjectReference,
 ) ([]*corev1.Pod, []error) {
 	pods := make([]*corev1.Pod, len(references))
 	errors := make([]error, len(references))
@@ -807,29 +792,58 @@ func (m *Manager) readPods(
 	namespace string,
 	names []string,
 ) ([]*corev1.Pod, []error) {
-	references := make([]domain.ObjectReference, len(names))
+	references := make([]v1alpha1.ObjectReference, len(names))
 	for index, name := range names {
-		references[index] = domain.ObjectReference{Namespace: namespace, Name: name}
+		references[index] = v1alpha1.ObjectReference{Namespace: namespace, Name: name}
 	}
 
 	return m.readPodReferences(ctx, references)
 }
 
-func (m *Manager) verifyPauseControl(ctx context.Context, session *domain.Session) error {
-	workload := session.Spec.Workload()
+func (m *Manager) verifyPauseControl(
+	ctx context.Context,
+	owner, namespace string,
+	workload v1alpha1.WorkloadSpec,
+	phase, resumeFrom v1alpha1.WorkflowPhase,
+) error {
+	controller := qualifiedWorkloadReference(workload.Controller, namespace)
+	pod := qualifiedWorkloadReference(workload.Pod, namespace)
+
 	switch workload.Adapter {
-	case domain.WorkloadDeployment:
-		return m.verifyDeploymentPaused(ctx, workload)
-	case domain.WorkloadStatefulSet:
-		return m.verifyStatefulSetPaused(ctx, workload)
-	case domain.WorkloadVictoriaLogs:
-		return m.verifyVictoriaLogsPaused(ctx, session, workload)
-	case domain.WorkloadVMCluster:
-		return m.verifyVMClusterPaused(ctx, session, workload)
-	case domain.WorkloadGrafana:
-		return m.verifyGrafanaPaused(ctx, session, workload)
-	case domain.WorkloadKubeBlocks:
-		return m.verifyKubeBlocksPaused(ctx, session, workload)
+	case v1alpha1.WorkloadDeployment:
+		return m.verifyDeploymentPaused(ctx, controller, workload.OriginalReplicas)
+	case v1alpha1.WorkloadStatefulSet:
+		return m.verifyStatefulSetPaused(
+			ctx,
+			controller,
+			workload.OriginalReplicas,
+			workload.Ordinal,
+		)
+	case v1alpha1.WorkloadVictoriaLogs:
+		return m.verifyVictoriaLogsPaused(ctx, owner, controller)
+	case v1alpha1.WorkloadVMCluster:
+		return m.verifyVMClusterPaused(
+			ctx,
+			owner, namespace, controller,
+			workload.VMCluster,
+		)
+	case v1alpha1.WorkloadGrafana:
+		return m.verifyGrafanaPaused(
+			ctx,
+			owner, controller, pod,
+			workload.Grafana,
+		)
+	case v1alpha1.WorkloadKubeBlocks:
+		return m.verifyKubeBlocksPaused(
+			ctx,
+			owner, namespace,
+			kubeBlocksOperationName(
+				owner, phase, resumeFrom,
+				"pause",
+			),
+			controller,
+			workload.KubeBlocks,
+		)
 	default:
 		return nil
 	}
@@ -969,7 +983,7 @@ func sameControllerOwner(current, expected *metav1.OwnerReference) bool {
 
 func validatePodController(
 	pod *corev1.Pod,
-	expected domain.ObjectReference,
+	expected v1alpha1.ObjectReference,
 	operation string,
 ) error {
 	if pod == nil || pod.Namespace == "" || pod.Name == "" || pod.UID == "" {
@@ -1009,7 +1023,7 @@ func validatePodController(
 	)
 }
 
-func podReference(pod *corev1.Pod) domain.ObjectReference {
+func podReference(pod *corev1.Pod) v1alpha1.ObjectReference {
 	return objectReference(
 		domain.CoreAPIVersion,
 		domain.KindPod,
@@ -1020,20 +1034,13 @@ func podReference(pod *corev1.Pod) domain.ObjectReference {
 	)
 }
 
-// waitForResumedPod fences readiness to the controller-owned Pod name and
-// refreshes every session reference for that name. Controllers commonly
-// recreate a Pod during resume, so retaining the paused Pod UID would make a
-// later pause or rollback reject the healthy replacement as an unsafe drift.
+// waitForResumedPod returns the ready Pod identity fenced to its controller.
+// The caller owns checkpointing replacements before a later pause or rollback.
 func (m *Manager) waitForResumedPod(
 	ctx context.Context,
-	session *domain.Session,
-	ref, controller domain.ObjectReference,
+	ref, controller v1alpha1.ObjectReference,
 	operation string,
-) error {
-	if session == nil || session.Spec.WorkloadPtr() == nil {
-		return domain.NewError(domain.ErrorValidation, operation, "session workload is required")
-	}
-
+) (v1alpha1.ObjectReference, error) {
 	var ready *corev1.Pod
 	if err := m.waitFor(
 		ctx,
@@ -1063,50 +1070,45 @@ func (m *Manager) waitForResumedPod(
 			return true, nil
 		},
 	); err != nil {
-		return err
+		return v1alpha1.ObjectReference{}, err
 	}
 
 	if ready == nil {
-		return domain.NewError(
+		return v1alpha1.ObjectReference{}, domain.NewError(
 			domain.ErrorKubernetes,
 			operation,
 			fmt.Sprintf("Pod %s/%s readiness wait returned no Pod", ref.Namespace, ref.Name),
 		)
 	}
 
-	refreshResumedPodReference(session.Spec.WorkloadPtr(), ref, ready)
-
-	return nil
+	return podReference(ready), nil
 }
 
-func refreshResumedPodReference(
-	workload *domain.WorkloadSpec,
-	previous domain.ObjectReference,
-	pod *corev1.Pod,
-) {
-	if workload == nil || pod == nil {
-		return
-	}
-
-	updated := podReference(pod)
-	if workload.Pod.Namespace == previous.Namespace && workload.Pod.Name == previous.Name {
-		workload.Pod = updated
-	}
-
-	for index := range workload.AffectedPods {
-		if workload.AffectedPods[index].Namespace == previous.Namespace &&
-			workload.AffectedPods[index].Name == previous.Name {
-			workload.AffectedPods[index] = updated
+func (m *Manager) waitForResumedPods(
+	ctx context.Context,
+	references []v1alpha1.ObjectReference,
+	controller v1alpha1.ObjectReference,
+	operation string,
+) ([]v1alpha1.ObjectReference, error) {
+	observed := make([]v1alpha1.ObjectReference, 0, len(references))
+	for _, ref := range references {
+		updated, err := m.waitForResumedPod(ctx, ref, controller, operation)
+		if err != nil {
+			return observed, err
 		}
+
+		observed = append(observed, updated)
 	}
+
+	return observed, nil
 }
 
 func objectReference(
 	apiVersion, kind, namespace, name string,
 	uid types.UID,
 	resourceVersion string,
-) domain.ObjectReference {
-	return domain.ObjectReference{
+) v1alpha1.ObjectReference {
+	return v1alpha1.ObjectReference{
 		APIVersion:      apiVersion,
 		Kind:            kind,
 		Namespace:       namespace,

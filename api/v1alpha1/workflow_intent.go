@@ -66,11 +66,17 @@ type PodMigrationSpec struct {
 	Pod                   LocalResourceReference `json:"pod"`
 	// +kubebuilder:validation:Minimum=0
 	// +kubebuilder:default=1
-	PrecopyPasses          int    `json:"precopyPasses,omitempty"`
+	// +optional
+	PrecopyPasses          int    `json:"precopyPasses"`
 	SwitchoverCandidate    string `json:"switchoverCandidate,omitempty"`
 	AllowLeaderDowntime    bool   `json:"allowLeaderDowntime,omitempty"`
 	ForceReprovision       bool   `json:"forceReprovision,omitempty"`
 	OpenEBSLVMEnableShared bool   `json:"openebsLvmEnableShared,omitempty"`
+	// AllowPlacementViolation proceeds when the recreated Pod may violate
+	// required podAffinity, required podAntiAffinity, or DoNotSchedule
+	// topologySpread constraints on the target node — for topologies where
+	// the operator will re-balance the remaining replicas afterwards.
+	AllowPlacementViolation bool `json:"allowPlacementViolation,omitempty"`
 	// Optional per-volume capacity and path settings, keyed by source PVC name.
 	// +kubebuilder:validation:MaxItems=1024
 	Volumes []VolumeRequest `json:"volumes,omitempty"`
@@ -130,7 +136,6 @@ type BackupSpec struct {
 	RepositoryRef          LocalObjectReference `json:"repositoryRef"`
 	Online                 bool                 `json:"online,omitempty"`
 	OpenEBSLVMEnableShared bool                 `json:"openebsLvmEnableShared,omitempty"`
-	DeleteExtraneous       bool                 `json:"deleteExtraneous,omitempty"`
 }
 
 type RestoreSpec struct {

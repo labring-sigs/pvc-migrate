@@ -3,40 +3,45 @@ package app
 import (
 	"context"
 
+	v1alpha1 "github.com/labring-sigs/pvc-migrate/api/v1alpha1"
 	"github.com/labring-sigs/pvc-migrate/internal/domain"
+	"github.com/labring-sigs/pvc-migrate/internal/kube"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/client-go/kubernetes"
 )
 
 // A successful API mutation may precede the status checkpoint. Recover from
-// live storage identities without changing the persisted session during validation.
-func (s *Service) validateUnrecordedRollbackStorage(
+// live storage identities without changing the persisted workflow during
+// validation.
+func validateUnrecordedRollbackStorage(
 	ctx context.Context,
-	session *domain.Session,
-	index int,
+	client kubernetes.Interface,
+	switcher volumeSwitcher,
+	sessionID string,
+	sourcePVC, sourcePV, destinationPV v1alpha1.ObjectReference,
+	active *v1alpha1.ObjectReference,
 ) (bool, error) {
-	volume := &session.Spec.Volumes[index]
-
-	pvc, err := s.client.CoreV1().PersistentVolumeClaims(volume.SourcePVC.Namespace).
-		Get(ctx, volume.SourcePVC.Name, metav1.GetOptions{})
+	pvc, err := client.CoreV1().PersistentVolumeClaims(sourcePVC.Namespace).
+		Get(ctx, sourcePVC.Name, metav1.GetOptions{})
 	if apierrors.IsNotFound(err) {
-		active := session.Status.Volumes[index].Activation.ActivePVC
-		if active.Name == "" || active.UID == "" {
+		if active == nil || active.Name == "" || active.UID == "" {
 			return false, nil
 		}
 		// Rollback reverses the retained pair: the deleted claim was on the
 		// destination PV, and the original PV may already be reserved again.
-		reverse := *volume
-		reverse.SourcePVC = active
-		reverse.SourcePV = volume.DestinationPV
-		reverse.DestinationPVC = volume.SourcePVC
-		reverse.DestinationPV = volume.SourcePV
+		reverse := kube.PVCTransferBindings{
+			SourcePVC:      *active,
+			SourcePV:       destinationPV,
+			DestinationPVC: sourcePVC,
+			DestinationPV:  sourcePV,
+		}
 
-		return true, s.switcher.VerifyActivationRecovery(
+		return true, switcher.VerifyActivationRecovery(
 			ctx,
-			session.ID,
-			[]*domain.VolumeSpec{&reverse},
+			sessionID,
+			[]kube.PVCTransferBindings{reverse},
 		)
 	}
 
@@ -49,18 +54,25 @@ func (s *Service) validateUnrecordedRollbackStorage(
 		)
 	}
 
-	if pvc.Spec.VolumeName != volume.SourcePV.Name {
+	if pvc.Spec.VolumeName != sourcePV.Name {
 		return false, nil
 	}
 
-	ref := domain.ObjectReference{
+	ref := v1alpha1.ObjectReference{
 		APIVersion:      corev1.SchemeGroupVersion.String(),
-		Kind:            domain.KindPersistentVolumeClaim,
+		Kind:            "PersistentVolumeClaim",
 		Namespace:       pvc.Namespace,
 		Name:            pvc.Name,
 		UID:             pvc.UID,
 		ResourceVersion: pvc.ResourceVersion,
 	}
 
-	return true, s.verifyRollbackStorageVolumeWithRef(ctx, session, index, ref)
+	return true, verifyRollbackStorageVolume(
+		ctx,
+		client,
+		sessionID,
+		sourcePVC,
+		sourcePV,
+		&ref,
+	)
 }

@@ -22,19 +22,27 @@ func LoadS3CredentialsForTest(
 	client kubernetes.Interface,
 	input BucketFlagsForTest,
 ) (BucketFlagsForTest, error) {
-	flags := &bucketFlags{
-		accessKey: input.AccessKey, secretKey: input.SecretKey, namespace: input.Namespace,
+	flags := &s3CredentialFlags{
+		accessKey: input.AccessKey, secretKey: input.SecretKey,
 		accessKeyKey: input.AccessKeyKey, secretKeyKey: input.SecretKeyKey,
-		credentialsSecret: input.CredentialsSecret,
+		secretName:        input.CredentialsSecret,
 		accessKeyExplicit: input.AccessKeyExplicit, secretKeyExplicit: input.SecretKeyExplicit,
 	}
-	if err := loadS3Credentials(ctx, client, flags); err != nil {
+	if err := loadS3Credentials(ctx, client, input.Namespace, flags); err != nil {
 		return BucketFlagsForTest{}, err
 	}
 
 	input.AccessKey, input.SecretKey = flags.accessKey, flags.secretKey
 
 	return input, nil
+}
+
+type CrossClusterFlagsForTest struct {
+	SourceKubeconfig      string
+	SourceContext         string
+	DestinationKubeconfig string
+	DestinationContext    string
+	SessionNamespace      string
 }
 
 func CrossClusterCleanupGuidanceForTest(input CrossClusterFlagsForTest, sessionID string) string {
@@ -47,12 +55,4 @@ func CrossClusterCleanupGuidanceForTest(input CrossClusterFlagsForTest, sessionI
 			sessionNamespace:      input.SessionNamespace,
 		},
 	}, sessionID)
-}
-
-type CrossClusterFlagsForTest struct {
-	SourceKubeconfig      string
-	SourceContext         string
-	DestinationKubeconfig string
-	DestinationContext    string
-	SessionNamespace      string
 }

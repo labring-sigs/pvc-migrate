@@ -46,8 +46,6 @@ spec:
             type: object
           spec:
             properties:
-              deleteExtraneous:
-                type: boolean
               name:
                 maxLength: 253
                 minLength: 1
@@ -227,10 +225,7 @@ spec:
                 items:
                   properties:
                     lvmVolume:
-                      description: |-
-                        LocalResourceReference identifies a resource whose namespace is established
-                        by the containing workflow, or a cluster-scoped resource such as a PV.
-                        Namespaced workflow APIs derive their boundary from metadata.namespace.
+                      description: LVMVolume can live outside the workflow namespace.
                       properties:
                         apiVersion:
                           maxLength: 253
@@ -242,6 +237,10 @@ spec:
                           maxLength: 253
                           minLength: 1
                           pattern: ^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$
+                          type: string
+                        namespace:
+                          maxLength: 63
+                          pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
                           type: string
                         resourceVersion:
                           maxLength: 256
@@ -319,8 +318,6 @@ spec:
                 type: string
               plan:
                 properties:
-                  deleteExtraneous:
-                    type: boolean
                   name:
                     maxLength: 253
                     minLength: 1
@@ -505,10 +502,6 @@ spec:
               updatedAt:
                 format: date-time
                 type: string
-            required:
-            - phase
-            - startedAt
-            - updatedAt
             type: object
         required:
         - spec
@@ -1106,9 +1099,10 @@ spec:
                   volumes:
                     items:
                       description: |-
-                        ClusterVolumeSpec is the cluster-workflow planning contract. PVC names are
-                        relative to the source and destination-storage namespace roles declared by
-                        the parent workflow. PV references remain cluster-scoped.
+                        VolumeSpec is planning output required to resume a PVC transfer. It is an
+                        API-owned type with only the fields needed by transfer workflows.
+                        PVC references are relative to the workflow's source and destination
+                        namespace roles; PV references are always cluster-scoped.
                       properties:
                         accessModes:
                           items:
@@ -1504,6 +1498,12 @@ spec:
                       - storageClass
                       - volumeMode
                       type: object
+                      x-kubernetes-validations:
+                      - message: sourcePVC.uid and sourcePV.uid are required planning
+                          identities
+                        rule: has(self.sourcePVC.uid) && size(self.sourcePVC.uid)
+                          > 0 && has(self.sourcePV.uid) && size(self.sourcePV.uid)
+                          > 0
                     maxItems: 1024
                     type: array
                 required:
@@ -1537,6 +1537,10 @@ spec:
                 - Renaming
                 - Moving
                 - Failed
+                type: string
+              sourceNode:
+                description: SourceNode checkpoints runtime placement inferred from
+                  online consumers.
                 type: string
               startedAt:
                 format: date-time
@@ -1640,11 +1644,6 @@ spec:
                   - sync
                   type: object
                 type: array
-            required:
-            - phase
-            - startedAt
-            - updatedAt
-            - volumes
             type: object
         required:
         - spec
@@ -2066,9 +2065,10 @@ spec:
                   volumes:
                     items:
                       description: |-
-                        ClusterVolumeSpec is the cluster-workflow planning contract. PVC names are
-                        relative to the source and destination-storage namespace roles declared by
-                        the parent workflow. PV references remain cluster-scoped.
+                        VolumeSpec is planning output required to resume a PVC transfer. It is an
+                        API-owned type with only the fields needed by transfer workflows.
+                        PVC references are relative to the workflow's source and destination
+                        namespace roles; PV references are always cluster-scoped.
                       properties:
                         accessModes:
                           items:
@@ -2464,6 +2464,12 @@ spec:
                       - storageClass
                       - volumeMode
                       type: object
+                      x-kubernetes-validations:
+                      - message: sourcePVC.uid and sourcePV.uid are required planning
+                          identities
+                        rule: has(self.sourcePVC.uid) && size(self.sourcePVC.uid)
+                          > 0 && has(self.sourcePV.uid) && size(self.sourcePV.uid)
+                          > 0
                     maxItems: 1024
                     type: array
                 required:
@@ -2654,11 +2660,6 @@ spec:
                   - sync
                   type: object
                 type: array
-            required:
-            - phase
-            - startedAt
-            - updatedAt
-            - volumes
             type: object
         required:
         - spec
@@ -2716,6 +2717,13 @@ spec:
           spec:
             properties:
               allowLeaderDowntime:
+                type: boolean
+              allowPlacementViolation:
+                description: |-
+                  AllowPlacementViolation proceeds when the recreated Pod may violate
+                  required podAffinity, required podAntiAffinity, or DoNotSchedule
+                  topologySpread constraints on the target node — for topologies where
+                  the operator will re-balance the remaining replicas afterwards.
                 type: boolean
               allowVolumeShrink:
                 type: boolean
@@ -3036,9 +3044,7 @@ spec:
                 items:
                   properties:
                     lvmVolume:
-                      description: |-
-                        LVMVolume is namespaced and must retain its namespace for controller
-                        recovery when a cluster PodMigration spans namespaces.
+                      description: LVMVolume can live outside the workflow namespace.
                       properties:
                         apiVersion:
                           maxLength: 253
@@ -3072,8 +3078,10 @@ spec:
                     previousSharedSet:
                       type: boolean
                     sourcePV:
-                      description: SourcePV is cluster-scoped and therefore normally
-                        has no namespace.
+                      description: |-
+                        LocalResourceReference identifies a resource whose namespace is established
+                        by the containing workflow, or a cluster-scoped resource such as a PV.
+                        Namespaced workflow APIs derive their boundary from metadata.namespace.
                       properties:
                         apiVersion:
                           maxLength: 253
@@ -3189,9 +3197,10 @@ spec:
                   volumes:
                     items:
                       description: |-
-                        ClusterVolumeSpec is the cluster-workflow planning contract. PVC names are
-                        relative to the source and destination-storage namespace roles declared by
-                        the parent workflow. PV references remain cluster-scoped.
+                        VolumeSpec is planning output required to resume a PVC transfer. It is an
+                        API-owned type with only the fields needed by transfer workflows.
+                        PVC references are relative to the workflow's source and destination
+                        namespace roles; PV references are always cluster-scoped.
                       properties:
                         accessModes:
                           items:
@@ -3587,12 +3596,18 @@ spec:
                       - storageClass
                       - volumeMode
                       type: object
+                      x-kubernetes-validations:
+                      - message: sourcePVC.uid and sourcePV.uid are required planning
+                          identities
+                        rule: has(self.sourcePVC.uid) && size(self.sourcePVC.uid)
+                          > 0 && has(self.sourcePV.uid) && size(self.sourcePV.uid)
+                          > 0
                     maxItems: 1024
                     type: array
                   workload:
                     description: |-
-                      ClusterWorkloadSpec is the workload snapshot owned by ClusterPodMigration.
-                      Workload references are relative to spec.sourceNamespace.
+                      WorkloadSpec is specific to PodMigration and records workload ownership
+                      and restoration data needed by that operation.
                     properties:
                       adapter:
                         enum:
@@ -3719,6 +3734,8 @@ spec:
                           switchoverContainer:
                             type: string
                           switchoverStrategy:
+                            description: KubeBlocksSwitchoverStrategy identifies the
+                              planned leader handoff mechanism.
                             type: string
                         required:
                         - cluster
@@ -3731,6 +3748,9 @@ spec:
                         format: int32
                         type: integer
                       originalObject:
+                        description: |-
+                          The serialized byte-size limit is enforced by the controller/domain
+                          boundary because OpenAPI cannot express a byte limit for opaque JSON.
                         x-kubernetes-preserve-unknown-fields: true
                       originalReplicas:
                         format: int32
@@ -4084,10 +4104,6 @@ spec:
                     type: object
                 type: object
             required:
-            - phase
-            - startedAt
-            - updatedAt
-            - volumes
             - warmPassesCompleted
             type: object
         required:
@@ -4520,9 +4536,10 @@ spec:
                   volumes:
                     items:
                       description: |-
-                        ClusterVolumeSpec is the cluster-workflow planning contract. PVC names are
-                        relative to the source and destination-storage namespace roles declared by
-                        the parent workflow. PV references remain cluster-scoped.
+                        VolumeSpec is planning output required to resume a PVC transfer. It is an
+                        API-owned type with only the fields needed by transfer workflows.
+                        PVC references are relative to the workflow's source and destination
+                        namespace roles; PV references are always cluster-scoped.
                       properties:
                         accessModes:
                           items:
@@ -4918,6 +4935,12 @@ spec:
                       - storageClass
                       - volumeMode
                       type: object
+                      x-kubernetes-validations:
+                      - message: sourcePVC.uid and sourcePV.uid are required planning
+                          identities
+                        rule: has(self.sourcePVC.uid) && size(self.sourcePVC.uid)
+                          > 0 && has(self.sourcePV.uid) && size(self.sourcePV.uid)
+                          > 0
                     maxItems: 1024
                     type: array
                 required:
@@ -5035,11 +5058,6 @@ spec:
                   - sourcePVCName
                   type: object
                 type: array
-            required:
-            - phase
-            - startedAt
-            - updatedAt
-            - volumes
             type: object
         required:
         - spec
@@ -5429,6 +5447,8 @@ spec:
                       description: |-
                         VolumeSpec is planning output required to resume a PVC transfer. It is an
                         API-owned type with only the fields needed by transfer workflows.
+                        PVC references are relative to the workflow's source and destination
+                        namespace roles; PV references are always cluster-scoped.
                       properties:
                         accessModes:
                           items:
@@ -5860,6 +5880,10 @@ spec:
                 - Moving
                 - Failed
                 type: string
+              sourceNode:
+                description: SourceNode checkpoints runtime placement inferred from
+                  online consumers.
+                type: string
               startedAt:
                 format: date-time
                 type: string
@@ -5961,11 +5985,6 @@ spec:
                   - sync
                   type: object
                 type: array
-            required:
-            - phase
-            - startedAt
-            - updatedAt
-            - volumes
             type: object
         required:
         - spec
@@ -6338,6 +6357,8 @@ spec:
                       description: |-
                         VolumeSpec is planning output required to resume a PVC transfer. It is an
                         API-owned type with only the fields needed by transfer workflows.
+                        PVC references are relative to the workflow's source and destination
+                        namespace roles; PV references are always cluster-scoped.
                       properties:
                         accessModes:
                           items:
@@ -6777,10 +6798,6 @@ spec:
                 type: string
               volumes:
                 items:
-                  description: |-
-                    MigrationVolumeStatus is the durable checkpoint for an offline migration
-                    volume. It intentionally excludes workload-only progress and OpenEBS
-                    shared-mount state.
                   properties:
                     activation:
                       properties:
@@ -6919,11 +6936,6 @@ spec:
                   - sync
                   type: object
                 type: array
-            required:
-            - phase
-            - startedAt
-            - updatedAt
-            - volumes
             type: object
         required:
         - spec
@@ -7098,6 +7110,46 @@ spec:
             type: object
           status:
             properties:
+              activation:
+                properties:
+                  activatedAt:
+                    format: date-time
+                    type: string
+                  activePVC:
+                    description: ObjectReference identifies a Kubernetes object involved
+                      in a workflow.
+                    properties:
+                      apiVersion:
+                        maxLength: 253
+                        type: string
+                      kind:
+                        maxLength: 253
+                        type: string
+                      name:
+                        maxLength: 253
+                        minLength: 1
+                        pattern: ^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$
+                        type: string
+                      namespace:
+                        maxLength: 63
+                        pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
+                        type: string
+                      resourceVersion:
+                        maxLength: 256
+                        type: string
+                      uid:
+                        description: |-
+                          UID is a type that holds unique ID values, including UUIDs.  Because we
+                          don't ONLY use UUIDs, this is an alias to string.  Being a type captures
+                          intent and helps make sure that UIDs and names do not get conflated.
+                        type: string
+                    required:
+                    - name
+                    type: object
+                  rolledBackAt:
+                    format: date-time
+                    type: string
+                type: object
               completedAt:
                 format: date-time
                 type: string
@@ -7636,61 +7688,8 @@ spec:
               updatedAt:
                 format: date-time
                 type: string
-              volumes:
-                items:
-                  properties:
-                    activation:
-                      properties:
-                        activatedAt:
-                          format: date-time
-                          type: string
-                        activePVC:
-                          description: ObjectReference identifies a Kubernetes object
-                            involved in a workflow.
-                          properties:
-                            apiVersion:
-                              maxLength: 253
-                              type: string
-                            kind:
-                              maxLength: 253
-                              type: string
-                            name:
-                              maxLength: 253
-                              minLength: 1
-                              pattern: ^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$
-                              type: string
-                            namespace:
-                              maxLength: 63
-                              pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
-                              type: string
-                            resourceVersion:
-                              maxLength: 256
-                              type: string
-                            uid:
-                              description: |-
-                                UID is a type that holds unique ID values, including UUIDs.  Because we
-                                don't ONLY use UUIDs, this is an alias to string.  Being a type captures
-                                intent and helps make sure that UIDs and names do not get conflated.
-                              type: string
-                          required:
-                          - name
-                          type: object
-                        rolledBackAt:
-                          format: date-time
-                          type: string
-                      type: object
-                    sourcePVCName:
-                      type: string
-                  required:
-                  - activation
-                  - sourcePVCName
-                  type: object
-                type: array
             required:
-            - phase
-            - startedAt
-            - updatedAt
-            - volumes
+            - activation
             type: object
         required:
         - spec
@@ -7748,6 +7747,13 @@ spec:
           spec:
             properties:
               allowLeaderDowntime:
+                type: boolean
+              allowPlacementViolation:
+                description: |-
+                  AllowPlacementViolation proceeds when the recreated Pod may violate
+                  required podAffinity, required podAntiAffinity, or DoNotSchedule
+                  topologySpread constraints on the target node — for topologies where
+                  the operator will re-balance the remaining replicas afterwards.
                 type: boolean
               allowVolumeShrink:
                 type: boolean
@@ -8043,10 +8049,7 @@ spec:
                 items:
                   properties:
                     lvmVolume:
-                      description: |-
-                        LocalResourceReference identifies a resource whose namespace is established
-                        by the containing workflow, or a cluster-scoped resource such as a PV.
-                        Namespaced workflow APIs derive their boundary from metadata.namespace.
+                      description: LVMVolume can live outside the workflow namespace.
                       properties:
                         apiVersion:
                           maxLength: 253
@@ -8058,6 +8061,10 @@ spec:
                           maxLength: 253
                           minLength: 1
                           pattern: ^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$
+                          type: string
+                        namespace:
+                          maxLength: 63
+                          pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
                           type: string
                         resourceVersion:
                           maxLength: 256
@@ -8179,6 +8186,8 @@ spec:
                       description: |-
                         VolumeSpec is planning output required to resume a PVC transfer. It is an
                         API-owned type with only the fields needed by transfer workflows.
+                        PVC references are relative to the workflow's source and destination
+                        namespace roles; PV references are always cluster-scoped.
                       properties:
                         accessModes:
                           items:
@@ -8712,6 +8721,8 @@ spec:
                           switchoverContainer:
                             type: string
                           switchoverStrategy:
+                            description: KubeBlocksSwitchoverStrategy identifies the
+                              planned leader handoff mechanism.
                             type: string
                         required:
                         - cluster
@@ -9072,10 +9083,6 @@ spec:
                     type: object
                 type: object
             required:
-            - phase
-            - startedAt
-            - updatedAt
-            - volumes
             - warmPassesCompleted
             type: object
         required:
@@ -9226,6 +9233,47 @@ spec:
             type: object
           status:
             properties:
+              activation:
+                description: |-
+                  RenameActivationStatus is the checkpoint needed to roll back a Rename.
+                  Temporary-volume cleanup fields do not apply to identity operations.
+                properties:
+                  activatedAt:
+                    format: date-time
+                    type: string
+                  activePVC:
+                    description: |-
+                      LocalResourceReference identifies a resource whose namespace is established
+                      by the containing workflow, or a cluster-scoped resource such as a PV.
+                      Namespaced workflow APIs derive their boundary from metadata.namespace.
+                    properties:
+                      apiVersion:
+                        maxLength: 253
+                        type: string
+                      kind:
+                        maxLength: 253
+                        type: string
+                      name:
+                        maxLength: 253
+                        minLength: 1
+                        pattern: ^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$
+                        type: string
+                      resourceVersion:
+                        maxLength: 256
+                        type: string
+                      uid:
+                        description: |-
+                          UID is a type that holds unique ID values, including UUIDs.  Because we
+                          don't ONLY use UUIDs, this is an alias to string.  Being a type captures
+                          intent and helps make sure that UIDs and names do not get conflated.
+                        type: string
+                    required:
+                    - name
+                    type: object
+                  rolledBackAt:
+                    format: date-time
+                    type: string
+                type: object
               completedAt:
                 format: date-time
                 type: string
@@ -9731,65 +9779,8 @@ spec:
               updatedAt:
                 format: date-time
                 type: string
-              volumes:
-                items:
-                  description: |-
-                    PVCIdentityVolumeStatus is the namespaced Rename checkpoint. Rename changes
-                    PVC identity and never runs a data-copy phase.
-                  properties:
-                    activation:
-                      description: |-
-                        PVCIdentityActivationStatus is the checkpoint needed to roll back a Rename.
-                        Temporary-volume cleanup fields do not apply to identity operations.
-                      properties:
-                        activatedAt:
-                          format: date-time
-                          type: string
-                        activePVC:
-                          description: |-
-                            LocalResourceReference identifies a resource whose namespace is established
-                            by the containing workflow, or a cluster-scoped resource such as a PV.
-                            Namespaced workflow APIs derive their boundary from metadata.namespace.
-                          properties:
-                            apiVersion:
-                              maxLength: 253
-                              type: string
-                            kind:
-                              maxLength: 253
-                              type: string
-                            name:
-                              maxLength: 253
-                              minLength: 1
-                              pattern: ^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$
-                              type: string
-                            resourceVersion:
-                              maxLength: 256
-                              type: string
-                            uid:
-                              description: |-
-                                UID is a type that holds unique ID values, including UUIDs.  Because we
-                                don't ONLY use UUIDs, this is an alias to string.  Being a type captures
-                                intent and helps make sure that UIDs and names do not get conflated.
-                              type: string
-                          required:
-                          - name
-                          type: object
-                        rolledBackAt:
-                          format: date-time
-                          type: string
-                      type: object
-                    sourcePVCName:
-                      type: string
-                  required:
-                  - activation
-                  - sourcePVCName
-                  type: object
-                type: array
             required:
-            - phase
-            - startedAt
-            - updatedAt
-            - volumes
+            - activation
             type: object
         required:
         - spec
@@ -10172,6 +10163,8 @@ spec:
                       description: |-
                         VolumeSpec is planning output required to resume a PVC transfer. It is an
                         API-owned type with only the fields needed by transfer workflows.
+                        PVC references are relative to the workflow's source and destination
+                        namespace roles; PV references are always cluster-scoped.
                       properties:
                         accessModes:
                           items:
@@ -10685,11 +10678,6 @@ spec:
                   - sourcePVCName
                   type: object
                 type: array
-            required:
-            - phase
-            - startedAt
-            - updatedAt
-            - volumes
             type: object
         required:
         - spec
@@ -11150,10 +11138,6 @@ spec:
               updatedAt:
                 format: date-time
                 type: string
-            required:
-            - phase
-            - startedAt
-            - updatedAt
             type: object
         required:
         - spec

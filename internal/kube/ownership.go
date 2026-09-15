@@ -2,9 +2,11 @@ package kube
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"maps"
 
+	v1alpha1 "github.com/labring-sigs/pvc-migrate/api/v1alpha1"
 	"github.com/labring-sigs/pvc-migrate/internal/domain"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -30,7 +32,7 @@ func markPVSession(labels map[string]string, sessionID, role string) (changed bo
 func AcquirePVC(
 	ctx context.Context,
 	client kubernetes.Interface,
-	ref domain.ObjectReference,
+	ref v1alpha1.ObjectReference,
 	sessionID string,
 ) error {
 	if err := validatePVCOwnershipInput(ref, sessionID, "acquire PVC"); err != nil {
@@ -38,6 +40,10 @@ func AcquirePVC(
 	}
 
 	err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		if err := errors.Join(ctx.Err(), LeaseFenceError(ctx)); err != nil {
+			return err
+		}
+
 		pvc, err := client.CoreV1().
 			PersistentVolumeClaims(ref.Namespace).
 			Get(ctx, ref.Name, metav1.GetOptions{})
@@ -71,6 +77,11 @@ func AcquirePVC(
 		}
 
 		pvc.Annotations[SessionKey] = sessionID
+
+		if err := errors.Join(ctx.Err(), LeaseFenceError(ctx)); err != nil {
+			return err
+		}
+
 		_, err = client.CoreV1().
 			PersistentVolumeClaims(ref.Namespace).
 			Update(ctx, pvc, metav1.UpdateOptions{})
@@ -105,7 +116,7 @@ func AcquirePVC(
 func ReleasePVC(
 	ctx context.Context,
 	client kubernetes.Interface,
-	ref domain.ObjectReference,
+	ref v1alpha1.ObjectReference,
 	sessionID string,
 ) error {
 	if err := validatePVCOwnershipInput(ref, sessionID, "release PVC"); err != nil {
@@ -113,6 +124,10 @@ func ReleasePVC(
 	}
 
 	err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		if err := errors.Join(ctx.Err(), LeaseFenceError(ctx)); err != nil {
+			return err
+		}
+
 		pvc, err := client.CoreV1().
 			PersistentVolumeClaims(ref.Namespace).
 			Get(ctx, ref.Name, metav1.GetOptions{})
@@ -137,6 +152,11 @@ func ReleasePVC(
 		}
 
 		delete(pvc.Annotations, SessionKey)
+
+		if err := errors.Join(ctx.Err(), LeaseFenceError(ctx)); err != nil {
+			return err
+		}
+
 		_, err = client.CoreV1().
 			PersistentVolumeClaims(ref.Namespace).
 			Update(ctx, pvc, metav1.UpdateOptions{})
@@ -162,15 +182,19 @@ func ReleasePVC(
 func FinalizePVC(
 	ctx context.Context,
 	client kubernetes.Interface,
-	ref domain.ObjectReference,
+	ref v1alpha1.ObjectReference,
 	sessionID string,
-	original domain.PVCMetadata,
+	original v1alpha1.PVCMetadata,
 ) error {
 	if err := validatePVCOwnershipInput(ref, sessionID, "finalize PVC"); err != nil {
 		return err
 	}
 
 	err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		if err := errors.Join(ctx.Err(), LeaseFenceError(ctx)); err != nil {
+			return err
+		}
+
 		pvc, err := client.CoreV1().
 			PersistentVolumeClaims(ref.Namespace).
 			Get(ctx, ref.Name, metav1.GetOptions{})
@@ -222,6 +246,11 @@ func FinalizePVC(
 		maps.Copy(pvc.Annotations, original.Annotations)
 
 		pvc.OwnerReferences = append([]metav1.OwnerReference(nil), original.OwnerReferences...)
+
+		if err := errors.Join(ctx.Err(), LeaseFenceError(ctx)); err != nil {
+			return err
+		}
+
 		_, err = client.CoreV1().
 			PersistentVolumeClaims(ref.Namespace).
 			Update(ctx, pvc, metav1.UpdateOptions{})
@@ -244,7 +273,7 @@ func FinalizePVC(
 	return nil
 }
 
-func validatePVCOwnershipInput(ref domain.ObjectReference, sessionID, operation string) error {
+func validatePVCOwnershipInput(ref v1alpha1.ObjectReference, sessionID, operation string) error {
 	if ref.Namespace == "" || ref.Name == "" || ref.UID == "" {
 		return domain.NewError(
 			domain.ErrorValidation,

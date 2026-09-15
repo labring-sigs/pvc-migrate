@@ -58,12 +58,6 @@ type Config struct {
 	// UseAmbientCredentials makes RcloneConfig use the transfer Pod's ambient
 	// cloud identity instead of embedding static credentials in its config.
 	UseAmbientCredentials bool
-	// RepositoryUID and RepositoryGeneration are controller-only provenance.
-	// They pin a running workflow to the selected repository without exposing
-	// credentials or changing the object-store wire configuration.
-	RepositoryUID        string
-	RepositoryGeneration int64
-	CredentialsSecretUID string
 }
 
 type Credentials struct {
@@ -593,9 +587,20 @@ func (s *Store) Inventory(ctx context.Context) (Inventory, error) {
 
 	prefix := path.Join(s.config.Prefix, s.config.Name) + "/"
 	entries := make([]inventoryEntry, 0)
+	seenTokens := make(map[string]struct{})
 
 	var continuationToken *string
 	for {
+		if err := ctx.Err(); err != nil {
+			return Inventory{}, wrapS3Error(
+				ctx,
+				domain.ErrorPrecondition,
+				"S3 inventory",
+				"list backup objects",
+				err,
+			)
+		}
+
 		output, err := s.client.ListObjectsV2(ctx, &s3.ListObjectsV2Input{
 			Bucket:            aws.String(s.config.Bucket),
 			Prefix:            aws.String(prefix),
@@ -652,6 +657,17 @@ func (s *Store) Inventory(ctx context.Context) (Inventory, error) {
 				"truncated object listing has no continuation token",
 			)
 		}
+
+		nextToken := aws.ToString(output.NextContinuationToken)
+		if _, repeated := seenTokens[nextToken]; repeated {
+			return Inventory{}, domain.NewError(
+				domain.ErrorPrecondition,
+				"S3 inventory",
+				"object listing repeated a continuation token",
+			)
+		}
+
+		seenTokens[nextToken] = struct{}{}
 
 		continuationToken = output.NextContinuationToken
 	}
@@ -757,6 +773,23 @@ func (s *Store) AcquireLock(ctx context.Context, holder string, ttl time.Duratio
 				domain.ErrorConflict,
 				"S3 lock",
 				"S3 did not return an ETag for the newly acquired lock",
+			)
+		}
+
+		// Some S3 implementations ignore If-None-Match on non-versioned
+		// buckets, so a concurrent holder may have overwritten our write.
+		// Read the lock back and refuse ownership when someone else won.
+		current, _, readErr := s.readLock(ctx)
+		if readErr == nil && current != nil &&
+			current.Holder != "" && current.Holder != holder {
+			return "", domain.WrapError(
+				domain.ErrorConflict,
+				"S3 lock",
+				fmt.Sprintf(
+					"backup recovery point is locked by %s (backend ignored conditional write)",
+					current.Holder,
+				),
+				err,
 			)
 		}
 

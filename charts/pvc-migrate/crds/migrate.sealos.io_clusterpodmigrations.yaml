@@ -48,6 +48,13 @@ spec:
             properties:
               allowLeaderDowntime:
                 type: boolean
+              allowPlacementViolation:
+                description: |-
+                  AllowPlacementViolation proceeds when the recreated Pod may violate
+                  required podAffinity, required podAntiAffinity, or DoNotSchedule
+                  topologySpread constraints on the target node — for topologies where
+                  the operator will re-balance the remaining replicas afterwards.
+                type: boolean
               allowVolumeShrink:
                 type: boolean
               capacityAwareness:
@@ -367,9 +374,7 @@ spec:
                 items:
                   properties:
                     lvmVolume:
-                      description: |-
-                        LVMVolume is namespaced and must retain its namespace for controller
-                        recovery when a cluster PodMigration spans namespaces.
+                      description: LVMVolume can live outside the workflow namespace.
                       properties:
                         apiVersion:
                           maxLength: 253
@@ -403,8 +408,10 @@ spec:
                     previousSharedSet:
                       type: boolean
                     sourcePV:
-                      description: SourcePV is cluster-scoped and therefore normally
-                        has no namespace.
+                      description: |-
+                        LocalResourceReference identifies a resource whose namespace is established
+                        by the containing workflow, or a cluster-scoped resource such as a PV.
+                        Namespaced workflow APIs derive their boundary from metadata.namespace.
                       properties:
                         apiVersion:
                           maxLength: 253
@@ -520,9 +527,10 @@ spec:
                   volumes:
                     items:
                       description: |-
-                        ClusterVolumeSpec is the cluster-workflow planning contract. PVC names are
-                        relative to the source and destination-storage namespace roles declared by
-                        the parent workflow. PV references remain cluster-scoped.
+                        VolumeSpec is planning output required to resume a PVC transfer. It is an
+                        API-owned type with only the fields needed by transfer workflows.
+                        PVC references are relative to the workflow's source and destination
+                        namespace roles; PV references are always cluster-scoped.
                       properties:
                         accessModes:
                           items:
@@ -918,12 +926,18 @@ spec:
                       - storageClass
                       - volumeMode
                       type: object
+                      x-kubernetes-validations:
+                      - message: sourcePVC.uid and sourcePV.uid are required planning
+                          identities
+                        rule: has(self.sourcePVC.uid) && size(self.sourcePVC.uid)
+                          > 0 && has(self.sourcePV.uid) && size(self.sourcePV.uid)
+                          > 0
                     maxItems: 1024
                     type: array
                   workload:
                     description: |-
-                      ClusterWorkloadSpec is the workload snapshot owned by ClusterPodMigration.
-                      Workload references are relative to spec.sourceNamespace.
+                      WorkloadSpec is specific to PodMigration and records workload ownership
+                      and restoration data needed by that operation.
                     properties:
                       adapter:
                         enum:
@@ -1050,6 +1064,8 @@ spec:
                           switchoverContainer:
                             type: string
                           switchoverStrategy:
+                            description: KubeBlocksSwitchoverStrategy identifies the
+                              planned leader handoff mechanism.
                             type: string
                         required:
                         - cluster
@@ -1062,6 +1078,9 @@ spec:
                         format: int32
                         type: integer
                       originalObject:
+                        description: |-
+                          The serialized byte-size limit is enforced by the controller/domain
+                          boundary because OpenAPI cannot express a byte limit for opaque JSON.
                         x-kubernetes-preserve-unknown-fields: true
                       originalReplicas:
                         format: int32
@@ -1415,10 +1434,6 @@ spec:
                     type: object
                 type: object
             required:
-            - phase
-            - startedAt
-            - updatedAt
-            - volumes
             - warmPassesCompleted
             type: object
         required:

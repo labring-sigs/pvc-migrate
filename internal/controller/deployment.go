@@ -6,6 +6,7 @@ import (
 	"slices"
 	"sort"
 
+	v1alpha1 "github.com/labring-sigs/pvc-migrate/api/v1alpha1"
 	"github.com/labring-sigs/pvc-migrate/internal/domain"
 	"github.com/labring-sigs/pvc-migrate/internal/kube"
 	"github.com/labring-sigs/pvc-migrate/internal/parallel"
@@ -20,9 +21,9 @@ func (m *Manager) deploymentWorkload(
 	ctx context.Context,
 	selected *corev1.Pod,
 	deployment *appsv1.Deployment,
-) (domain.WorkloadSpec, error) {
+) (v1alpha1.WorkloadSpec, error) {
 	if err := rejectDeploymentControllerOwner(deployment, "discover Deployment"); err != nil {
-		return domain.WorkloadSpec{}, err
+		return v1alpha1.WorkloadSpec{}, err
 	}
 
 	if err := m.rejectHorizontalPodAutoscaler(
@@ -32,12 +33,12 @@ func (m *Manager) deploymentWorkload(
 		deployment.Name,
 		"discover Deployment",
 	); err != nil {
-		return domain.WorkloadSpec{}, err
+		return v1alpha1.WorkloadSpec{}, err
 	}
 
 	replicas := deploymentReplicas(deployment)
 	if replicas <= 0 {
-		return domain.WorkloadSpec{}, domain.NewError(
+		return v1alpha1.WorkloadSpec{}, domain.NewError(
 			domain.ErrorPrecondition,
 			"discover Deployment",
 			fmt.Sprintf(
@@ -50,7 +51,7 @@ func (m *Manager) deploymentWorkload(
 
 	affected, err := m.readyDeploymentPods(ctx, deployment, replicas, "discover Deployment")
 	if err != nil {
-		return domain.WorkloadSpec{}, err
+		return v1alpha1.WorkloadSpec{}, err
 	}
 
 	selectedFound := false
@@ -63,7 +64,7 @@ func (m *Manager) deploymentWorkload(
 	}
 
 	if !selectedFound {
-		return domain.WorkloadSpec{}, domain.NewError(
+		return v1alpha1.WorkloadSpec{}, domain.NewError(
 			domain.ErrorConflict,
 			"discover Deployment",
 			fmt.Sprintf(
@@ -76,19 +77,18 @@ func (m *Manager) deploymentWorkload(
 		)
 	}
 
-	return domain.WorkloadSpec{
-		Adapter: domain.WorkloadDeployment,
-		Pod:     podReference(selected),
-		Controller: objectReference(
+	return v1alpha1.WorkloadSpec{
+		Adapter: v1alpha1.WorkloadDeployment,
+		Pod:     workloadPodReference(selected),
+		Controller: workloadObjectReference(
 			domain.AppsAPIVersion,
 			domain.KindDeployment,
-			deployment.Namespace,
 			deployment.Name,
 			deployment.UID,
 			deployment.ResourceVersion,
 		),
 		OriginalReplicas: &replicas,
-		AffectedPods:     affected,
+		AffectedPods:     localWorkloadReferences(affected),
 	}, nil
 }
 
@@ -97,7 +97,7 @@ func (m *Manager) readyDeploymentPods(
 	deployment *appsv1.Deployment,
 	replicas int32,
 	operation string,
-) ([]domain.ObjectReference, error) {
+) ([]v1alpha1.ObjectReference, error) {
 	if deployment.Status.ObservedGeneration < deployment.Generation ||
 		deployment.Status.Replicas != replicas ||
 		deployment.Status.ReadyReplicas != replicas ||
@@ -139,7 +139,7 @@ func (m *Manager) readyDeploymentPods(
 		)
 	}
 
-	ready := make([]domain.ObjectReference, 0, replicas)
+	ready := make([]v1alpha1.ObjectReference, 0, replicas)
 
 	replicaSets := make(map[string]*appsv1.ReplicaSet)
 	replicaSetErrors := make(map[string]error)
@@ -201,15 +201,6 @@ func (m *Manager) readyDeploymentPods(
 	sort.Slice(ready, func(i, j int) bool { return ready[i].Name < ready[j].Name })
 
 	return ready, nil
-}
-
-func (m *Manager) podControlledByDeployment(
-	ctx context.Context,
-	pod *corev1.Pod,
-	deployment *appsv1.Deployment,
-	cache map[string]*appsv1.ReplicaSet,
-) (bool, error) {
-	return m.podControlledByDeploymentWithErrors(ctx, pod, deployment, cache, nil)
 }
 
 func (m *Manager) podControlledByDeploymentWithErrors(
@@ -339,7 +330,7 @@ func rejectDeploymentControllerOwner(deployment *appsv1.Deployment, operation st
 
 func (m *Manager) readUnmanagedDeployment(
 	ctx context.Context,
-	ref domain.ObjectReference,
+	ref v1alpha1.ObjectReference,
 	operation string,
 ) (*appsv1.Deployment, error) {
 	deployment, err := m.readDeployment(ctx, ref, operation)
@@ -366,7 +357,7 @@ func (m *Manager) readUnmanagedDeployment(
 
 func (m *Manager) readDeployment(
 	ctx context.Context,
-	ref domain.ObjectReference,
+	ref v1alpha1.ObjectReference,
 	operation string,
 ) (*appsv1.Deployment, error) {
 	deployment, err := m.typed.AppsV1().Deployments(ref.Namespace).Get(
@@ -394,8 +385,12 @@ func (m *Manager) readDeployment(
 	return deployment, nil
 }
 
-func (m *Manager) verifyDeploymentPaused(ctx context.Context, workload domain.WorkloadSpec) error {
-	if workload.Controller.Kind != domain.KindDeployment || workload.OriginalReplicas == nil {
+func (m *Manager) verifyDeploymentPaused(
+	ctx context.Context,
+	controller v1alpha1.ObjectReference,
+	originalReplicas *int32,
+) error {
+	if controller.Kind != domain.KindDeployment || originalReplicas == nil {
 		return domain.NewError(
 			domain.ErrorInternal,
 			"verify paused",
@@ -405,7 +400,7 @@ func (m *Manager) verifyDeploymentPaused(ctx context.Context, workload domain.Wo
 
 	deployment, err := m.readUnmanagedDeployment(
 		ctx,
-		workload.Controller,
+		controller,
 		"verify paused",
 	)
 	if err != nil {
@@ -485,10 +480,15 @@ func (m *Manager) verifyDeploymentPaused(ctx context.Context, workload domain.Wo
 	return nil
 }
 
-func (m *Manager) pauseDeployment(ctx context.Context, session *domain.Session) error {
-	workload := session.Spec.Workload()
-	if workload.OriginalReplicas == nil {
-		return domain.NewError(
+func (m *Manager) pauseDeployment(
+	ctx context.Context,
+	controller v1alpha1.ObjectReference,
+	originalReplicas *int32,
+	affectedPods []v1alpha1.ObjectReference,
+	rollingBack bool,
+) ([]v1alpha1.ObjectReference, error) {
+	if originalReplicas == nil {
+		return nil, domain.NewError(
 			domain.ErrorInternal,
 			"pause Deployment",
 			"session lacks replica state",
@@ -497,34 +497,38 @@ func (m *Manager) pauseDeployment(ctx context.Context, session *domain.Session) 
 
 	deployment, err := m.readUnmanagedDeployment(
 		ctx,
-		workload.Controller,
+		controller,
 		"pause Deployment",
 	)
 	if err != nil {
-		return err
+		return nil, err
 	}
 
-	if deploymentReplicas(deployment) == *workload.OriginalReplicas {
-		if session.Status.Phase == domain.PhaseRollingBack {
+	var observed []v1alpha1.ObjectReference
+	if deploymentReplicas(deployment) == *originalReplicas {
+		if rollingBack {
 			currentPods, _, observeErr := m.observeDeploymentPods(ctx, deployment)
 			if observeErr != nil {
-				return observeErr
+				return nil, observeErr
 			}
 
-			updateDeploymentPodReferences(session.Spec.WorkloadPtr(), currentPods)
+			observed = currentPods
+			if len(currentPods) > 0 {
+				affectedPods = currentPods
+			}
 		} else {
 			currentPods, readyErr := m.readyDeploymentPods(
 				ctx,
 				deployment,
-				*workload.OriginalReplicas,
+				*originalReplicas,
 				"pause Deployment",
 			)
 			if readyErr != nil {
-				return readyErr
+				return nil, readyErr
 			}
 
-			if !samePodIdentitySet(workload.AffectedPods, currentPods) {
-				return domain.NewError(
+			if !samePodIdentitySet(affectedPods, currentPods) {
+				return nil, domain.NewError(
 					domain.ErrorConflict,
 					"pause Deployment",
 					fmt.Sprintf(
@@ -542,21 +546,21 @@ func (m *Manager) pauseDeployment(ctx context.Context, session *domain.Session) 
 		deployment,
 		"pause Deployment",
 		0,
-		*workload.OriginalReplicas,
+		*originalReplicas,
 	); err != nil {
-		return workloadScaleError("pause Deployment", "scale down", err)
+		return observed, workloadScaleError("pause Deployment", "scale down", err)
 	}
 
-	for _, ref := range session.Spec.Workload().AffectedPods {
+	for _, ref := range affectedPods {
 		if err := m.waitForPodDeletion(ctx, ref, "pause Deployment"); err != nil {
-			return err
+			return observed, err
 		}
 	}
 
-	return nil
+	return observed, nil
 }
 
-func samePodIdentitySet(expected, current []domain.ObjectReference) bool {
+func samePodIdentitySet(expected, current []v1alpha1.ObjectReference) bool {
 	if len(expected) != len(current) {
 		return false
 	}
@@ -581,10 +585,13 @@ func samePodIdentitySet(expected, current []domain.ObjectReference) bool {
 	return true
 }
 
-func (m *Manager) resumeDeployment(ctx context.Context, session *domain.Session) error {
-	workload := session.Spec.Workload()
-	if workload.OriginalReplicas == nil {
-		return domain.NewError(
+func (m *Manager) resumeDeployment(
+	ctx context.Context,
+	controller v1alpha1.ObjectReference,
+	originalReplicas *int32,
+) ([]v1alpha1.ObjectReference, error) {
+	if originalReplicas == nil {
+		return nil, domain.NewError(
 			domain.ErrorInternal,
 			"resume Deployment",
 			"session lacks replica state",
@@ -593,37 +600,36 @@ func (m *Manager) resumeDeployment(ctx context.Context, session *domain.Session)
 
 	deployment, err := m.readUnmanagedDeployment(
 		ctx,
-		workload.Controller,
+		controller,
 		"resume Deployment",
 	)
 	if err != nil {
-		return err
+		return nil, err
 	}
 
 	if err := m.updateDeploymentReplicas(
 		ctx,
 		deployment,
 		"resume Deployment",
-		*workload.OriginalReplicas,
+		*originalReplicas,
 		0,
 	); err != nil {
-		return workloadScaleError("resume Deployment", "restore replicas", err)
+		return nil, workloadScaleError("resume Deployment", "restore replicas", err)
 	}
 
 	return m.waitForDeploymentReady(
 		ctx,
-		session,
-		workload.Controller,
-		*workload.OriginalReplicas,
+		controller,
+		*originalReplicas,
 	)
 }
 
 func (m *Manager) validateDeploymentResume(
 	ctx context.Context,
-	session *domain.Session,
+	controller v1alpha1.ObjectReference,
+	originalReplicas *int32,
 ) error {
-	workload := session.Spec.Workload()
-	if workload.OriginalReplicas == nil {
+	if originalReplicas == nil {
 		return domain.NewError(
 			domain.ErrorInternal,
 			"resume Deployment",
@@ -633,7 +639,7 @@ func (m *Manager) validateDeploymentResume(
 
 	deployment, err := m.readUnmanagedDeployment(
 		ctx,
-		workload.Controller,
+		controller,
 		"resume Deployment",
 	)
 	if err != nil {
@@ -654,7 +660,7 @@ func (m *Manager) validateDeploymentResume(
 		deployment.Namespace,
 		deployment.Name,
 		deploymentReplicas(deployment),
-		*workload.OriginalReplicas,
+		*originalReplicas,
 		0,
 		"resume Deployment",
 		domain.KindDeployment,
@@ -663,12 +669,12 @@ func (m *Manager) validateDeploymentResume(
 
 func (m *Manager) currentDeploymentRollbackPods(
 	ctx context.Context,
-	session *domain.Session,
-) ([]domain.ObjectReference, error) {
+	controller v1alpha1.ObjectReference,
+	originalReplicas *int32,
+) ([]v1alpha1.ObjectReference, error) {
 	const operation = validateRollbackConsumers
 
-	workload := session.Spec.Workload()
-	if workload.OriginalReplicas == nil {
+	if originalReplicas == nil {
 		return nil, domain.NewError(
 			domain.ErrorInternal,
 			operation,
@@ -676,7 +682,7 @@ func (m *Manager) currentDeploymentRollbackPods(
 		)
 	}
 
-	deployment, err := m.readUnmanagedDeployment(ctx, workload.Controller, operation)
+	deployment, err := m.readUnmanagedDeployment(ctx, controller, operation)
 	if err != nil {
 		return nil, err
 	}
@@ -685,7 +691,7 @@ func (m *Manager) currentDeploymentRollbackPods(
 		deployment.Namespace,
 		deployment.Name,
 		deploymentReplicas(deployment),
-		*workload.OriginalReplicas,
+		*originalReplicas,
 		0,
 		operation,
 		domain.KindDeployment,
@@ -727,11 +733,12 @@ func validateResumeReplicas(
 
 func (m *Manager) waitForDeploymentReady(
 	ctx context.Context,
-	session *domain.Session,
-	ref domain.ObjectReference,
+	ref v1alpha1.ObjectReference,
 	replicas int32,
-) error {
-	return m.waitFor(
+) ([]v1alpha1.ObjectReference, error) {
+	var observed []v1alpha1.ObjectReference
+
+	err := m.waitFor(
 		ctx,
 		fmt.Sprintf("Deployment %s/%s readiness", ref.Namespace, ref.Name),
 		func(waitCtx context.Context) (bool, error) {
@@ -767,7 +774,9 @@ func (m *Manager) waitForDeploymentReady(
 				return false, err
 			}
 
-			updateDeploymentPodReferences(session.Spec.WorkloadPtr(), current)
+			if len(current) > 0 {
+				observed = current
+			}
 
 			if err := m.rejectHorizontalPodAutoscaler(
 				waitCtx,
@@ -790,12 +799,14 @@ func (m *Manager) waitForDeploymentReady(
 			return true, nil
 		},
 	)
+
+	return observed, err
 }
 
 func (m *Manager) observeDeploymentPods(
 	ctx context.Context,
 	deployment *appsv1.Deployment,
-) ([]domain.ObjectReference, bool, error) {
+) ([]v1alpha1.ObjectReference, bool, error) {
 	selector, err := metav1.LabelSelectorAsSelector(deployment.Spec.Selector)
 	if err != nil {
 		return nil, false, domain.WrapError(
@@ -819,7 +830,7 @@ func (m *Manager) observeDeploymentPods(
 		)
 	}
 
-	current := make([]domain.ObjectReference, 0, len(pods.Items))
+	current := make([]v1alpha1.ObjectReference, 0, len(pods.Items))
 	allReady := true
 
 	replicaSets := make(map[string]*appsv1.ReplicaSet)
@@ -859,18 +870,6 @@ func (m *Manager) observeDeploymentPods(
 	sort.Slice(current, func(i, j int) bool { return current[i].Name < current[j].Name })
 
 	return current, allReady, nil
-}
-
-func updateDeploymentPodReferences(
-	workload *domain.WorkloadSpec,
-	current []domain.ObjectReference,
-) {
-	if workload == nil || len(current) == 0 {
-		return
-	}
-
-	workload.AffectedPods = slices.Clone(current)
-	workload.Pod = current[0]
 }
 
 func (m *Manager) updateDeploymentReplicas(

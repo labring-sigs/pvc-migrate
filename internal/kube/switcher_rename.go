@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 
+	v1alpha1 "github.com/labring-sigs/pvc-migrate/api/v1alpha1"
 	"github.com/labring-sigs/pvc-migrate/internal/domain"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -12,25 +13,26 @@ import (
 
 func (s *Switcher) RenamePVC(
 	ctx context.Context,
-	session *domain.Session,
-	volume *domain.VolumeSpec,
+	sessionID string,
+	sourcePVC, sourcePV v1alpha1.ObjectReference,
+	destination *corev1.PersistentVolumeClaim,
 	progress ProgressFunc,
 ) (*corev1.PersistentVolumeClaim, error) {
-	if err := validateRenamePVCRequest(session, volume); err != nil {
+	if err := validateRenamePVCRequest(sessionID, sourcePVC, sourcePV, destination); err != nil {
 		return nil, err
 	}
 
 	if err := s.ensureNoConsumers(
 		ctx,
-		volume.SourcePVC.Namespace,
-		volume.SourcePVC.Name,
+		sourcePVC.Namespace,
+		sourcePVC.Name,
 	); err != nil {
 		return nil, err
 	}
 
 	source, sourceErr := s.client.CoreV1().
-		PersistentVolumeClaims(volume.SourcePVC.Namespace).
-		Get(ctx, volume.SourcePVC.Name, metav1.GetOptions{})
+		PersistentVolumeClaims(sourcePVC.Namespace).
+		Get(ctx, sourcePVC.Name, metav1.GetOptions{})
 	if sourceErr != nil && !apierrors.IsNotFound(sourceErr) {
 		return nil, domain.WrapError(
 			domain.ErrorKubernetes,
@@ -41,7 +43,7 @@ func (s *Switcher) RenamePVC(
 	}
 
 	if sourceErr == nil {
-		if source.UID != volume.SourcePVC.UID {
+		if source.UID != sourcePVC.UID {
 			return nil, domain.NewError(
 				domain.ErrorConflict,
 				"rename PVC",
@@ -49,14 +51,14 @@ func (s *Switcher) RenamePVC(
 			)
 		}
 
-		if err := s.verifyBinding(ctx, source, volume.SourcePV); err != nil {
+		if err := s.verifyBinding(ctx, source, sourcePV); err != nil {
 			return nil, err
 		}
 	}
 
 	if existing, err := s.client.CoreV1().
-		PersistentVolumeClaims(volume.DestinationPVC.Namespace).
-		Get(ctx, volume.DestinationPVC.Name, metav1.GetOptions{}); err == nil {
+		PersistentVolumeClaims(destination.Namespace).
+		Get(ctx, destination.Name, metav1.GetOptions{}); err == nil {
 		if sourceErr == nil &&
 			(source.Namespace != existing.Namespace || source.Name != existing.Name) {
 			return nil, domain.NewError(
@@ -72,20 +74,20 @@ func (s *Switcher) RenamePVC(
 			)
 		}
 
-		if existing.Spec.VolumeName == volume.SourcePV.Name &&
-			existing.Annotations[SessionKey] == session.ID {
+		if existing.Spec.VolumeName == sourcePV.Name &&
+			existing.Annotations[SessionKey] == sessionID {
 			if err := s.ensureNoConsumers(ctx, existing.Namespace, existing.Name); err != nil {
 				return nil, err
 			}
 
-			if err := s.verifyBinding(ctx, existing, volume.SourcePV); err != nil {
+			if err := s.verifyBinding(ctx, existing, sourcePV); err != nil {
 				return nil, err
 			}
 
 			if err := s.ensureRetain(
 				ctx,
-				volume.SourcePV,
-				session.ID,
+				sourcePV,
+				sessionID,
 				ResourceRoleActive,
 			); err != nil {
 				return nil, err
@@ -110,15 +112,15 @@ func (s *Switcher) RenamePVC(
 		)
 	}
 
-	if err := s.ensureRetain(ctx, volume.SourcePV, session.ID, ResourceRoleRename); err != nil {
+	if err := s.ensureRetain(ctx, sourcePV, sessionID, ResourceRoleRename); err != nil {
 		return nil, err
 	}
 
-	if err := s.deletePVC(ctx, volume.SourcePVC); err != nil {
+	if err := s.deletePVC(ctx, sourcePVC); err != nil {
 		return nil, err
 	}
 
-	if err := s.ensureDetached(ctx, volume.SourcePV.Name); err != nil {
+	if err := s.ensureDetached(ctx, sourcePV.Name); err != nil {
 		return nil, err
 	}
 
@@ -126,47 +128,45 @@ func (s *Switcher) RenamePVC(
 		return nil, err
 	}
 
-	cloned := *volume
-	cloned.SourcePVC.Namespace = volume.DestinationPVC.Namespace
-	cloned.SourcePVC.Name = volume.DestinationPVC.Name
+	destination = destination.DeepCopy()
 
-	sourceClass := ""
-	if volume.SourcePVCSpec.StorageClassName != nil {
-		sourceClass = *volume.SourcePVCSpec.StorageClassName
-	}
-
-	if err := s.validateActivePVC(ctx, session, &cloned, volume.SourcePV, sourceClass); err != nil {
+	destination.Spec.VolumeName = sourcePV.Name
+	if err := s.validateBoundPVC(ctx, destination); err != nil {
 		return nil, err
 	}
 
 	if err := s.reservePV(
 		ctx,
-		volume.SourcePV,
-		volume.DestinationPVC.Namespace,
-		volume.DestinationPVC.Name,
-		session.ID,
+		sourcePV,
+		destination.Namespace,
+		destination.Name,
+		sessionID,
 	); err != nil {
 		return nil, err
 	}
 
-	created, err := s.createActivePVC(ctx, session, &cloned, volume.SourcePV, sourceClass)
+	created, err := s.createBoundPVC(ctx, sessionID, destination)
 	if err != nil {
 		return nil, err
 	}
 
-	if err := s.verifyBinding(ctx, created, volume.SourcePV); err != nil {
+	if err := s.verifyBinding(ctx, created, sourcePV); err != nil {
 		return nil, err
 	}
 
-	if err := s.ensureRetain(ctx, volume.SourcePV, session.ID, ResourceRoleActive); err != nil {
+	if err := s.ensureRetain(ctx, sourcePV, sessionID, ResourceRoleActive); err != nil {
 		return nil, err
 	}
 
 	return created, nil
 }
 
-func validateRenamePVCRequest(session *domain.Session, volume *domain.VolumeSpec) error {
-	if session == nil || volume == nil {
+func validateRenamePVCRequest(
+	sessionID string,
+	sourcePVC, sourcePV v1alpha1.ObjectReference,
+	destination *corev1.PersistentVolumeClaim,
+) error {
+	if sessionID == "" || destination == nil {
 		return domain.NewError(
 			domain.ErrorValidation,
 			"rename PVC",
@@ -174,17 +174,25 @@ func validateRenamePVCRequest(session *domain.Session, volume *domain.VolumeSpec
 		)
 	}
 
-	if volume.SourcePVC.Namespace == "" || volume.SourcePVC.Name == "" ||
-		volume.SourcePVC.UID == "" ||
-		volume.SourcePV.Name == "" ||
-		volume.SourcePV.UID == "" ||
-		volume.DestinationPVC.Namespace == "" ||
-		volume.DestinationPVC.Name == "" {
+	if sourcePVC.Namespace == "" || sourcePVC.Name == "" ||
+		sourcePVC.UID == "" ||
+		sourcePV.Name == "" ||
+		sourcePV.UID == "" ||
+		destination.Namespace == "" ||
+		destination.Name == "" {
 		return domain.NewError(
 			domain.ErrorPrecondition,
 			"rename PVC",
 			"source PVC/PV identity and destination PVC name are required",
 		)
+	}
+
+	if destination.Spec.VolumeName != sourcePV.Name ||
+		destination.Labels[ManagedByLabel] != ManagedByValue ||
+		destination.Labels[SessionKey] != sessionID ||
+		destination.Annotations[SessionKey] != sessionID {
+		return domain.NewError(domain.ErrorValidation, "rename PVC",
+			"destination manifest must retain the source PV and identify its owning session")
 	}
 
 	return nil

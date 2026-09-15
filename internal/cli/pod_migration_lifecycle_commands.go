@@ -1,15 +1,20 @@
 package cli
 
 import (
+	"context"
+
+	v1alpha1 "github.com/labring-sigs/pvc-migrate/api/v1alpha1"
 	"github.com/labring-sigs/pvc-migrate/internal/app"
 	"github.com/labring-sigs/pvc-migrate/internal/domain"
 	"github.com/spf13/cobra"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	crclient "sigs.k8s.io/controller-runtime/pkg/client"
 )
 
 func (r *rootState) newPodMigrationStatusCommand() *cobra.Command {
 	return &cobra.Command{
 		Use:   "status [SESSION]",
-		Short: "Show one real-time Pod migration session or list all Pod migrations",
+		Short: "Show one Pod migration or list Pod migrations",
 		Args:  cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			runtime, err := r.runtime()
@@ -21,28 +26,31 @@ func (r *rootState) newPodMigrationStatusCommand() *cobra.Command {
 			defer cancel()
 
 			if len(args) == 1 {
-				session, err := r.workflowSession(
-					ctx,
-					runtime,
-					cmd,
-					args[0],
-					domain.SessionTypeMigratePod,
-					"migrate-pod status",
-				)
+				object, _, err := r.loadPodMigration(ctx, runtime, args[0])
 				if err != nil {
 					return err
 				}
 
-				return printSessionResult(cmd, runtime, session)
+				return runtime.printer.Print(object)
 			}
 
-			return r.workflowSessionList(
+			sessions, err := runtime.clusterPodMigrationSessionStore.List(
 				ctx,
-				runtime,
-				cmd,
-				domain.SessionTypeMigratePod,
-				"migrate-pod",
+				workflowNamespaceForCommand(r, cmd),
 			)
+			if err != nil {
+				return err
+			}
+
+			objects, err := runtime.clusterPodMigrationStore.List(
+				ctx,
+				workflowNamespaceForCommand(r, cmd),
+			)
+			if err != nil {
+				return err
+			}
+
+			return runtime.printer.Print(append(sessions, objects...))
 		},
 	}
 }
@@ -52,7 +60,7 @@ func (r *rootState) newPodMigrationResumeCommand() *cobra.Command {
 
 	command := &cobra.Command{
 		Use:   "resume SESSION",
-		Short: "Continue a real-time Pod migration from its persisted phase",
+		Short: "Continue a Pod migration from its persisted phase",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			runtime, err := r.runtime()
@@ -63,42 +71,31 @@ func (r *rootState) newPodMigrationResumeCommand() *cobra.Command {
 			ctx, cancel := r.context(cmd.Context())
 			defer cancel()
 
-			session, err := r.workflowSession(
-				ctx,
-				runtime,
-				cmd,
-				args[0],
-				domain.SessionTypeMigratePod,
-				"migrate-pod resume",
-			)
+			object, executor, err := r.loadPodMigration(ctx, runtime, args[0])
 			if err != nil {
 				return err
 			}
 
 			if dryRun {
-				if err := runtime.service.ValidatePodMigrationResume(ctx, session); err != nil {
-					return reportSessionError(cmd, session, err)
+				if err := executor.Validate(ctx, object); err != nil {
+					return err
 				}
-
-				return printSessionResult(cmd, runtime, session)
+				return runtime.printer.Print(object)
 			}
 
-			phase := sessionResumePhase(session)
-			if requiresResumeApproval(phase) {
-				if err := r.confirm(ctx, cmd, args[0]); err != nil {
-					return reportApprovalError(cmd, err)
-				}
+			if err := r.confirm(ctx, cmd, args[0]); err != nil {
+				return reportApprovalError(cmd, err)
 			}
 
-			if deferred, err := deferControllerExecution(ctx, cmd, runtime, session); deferred {
+			if err := executor.RequestResume(ctx, object); err != nil {
 				return err
 			}
 
-			if err := runtime.service.ResumePodMigration(ctx, session); err != nil {
-				return reportSessionError(cmd, session, err)
+			if err := executor.Run(ctx, object); err != nil {
+				return err
 			}
 
-			return printSessionResult(cmd, runtime, session)
+			return runtime.printer.Print(object)
 		},
 	}
 	bindDryRun(command, &dryRun)
@@ -111,7 +108,7 @@ func (r *rootState) newPodMigrationAbortCommand() *cobra.Command {
 
 	command := &cobra.Command{
 		Use:   "abort SESSION",
-		Short: "Stop a real-time Pod migration before cutover and retain staged storage",
+		Short: "Stop a Pod migration before cutover",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			runtime, err := r.runtime()
@@ -122,35 +119,27 @@ func (r *rootState) newPodMigrationAbortCommand() *cobra.Command {
 			ctx, cancel := r.context(cmd.Context())
 			defer cancel()
 
-			session, err := r.workflowSession(
-				ctx,
-				runtime,
-				cmd,
-				args[0],
-				domain.SessionTypeMigratePod,
-				"migrate-pod abort",
-			)
+			object, executor, err := r.loadPodMigration(ctx, runtime, args[0])
 			if err != nil {
 				return err
 			}
 
 			if dryRun {
-				if err := runtime.service.ValidatePodMigrationAbort(ctx, session); err != nil {
-					return reportSessionError(cmd, session, err)
+				if err := executor.ValidateAbort(ctx, object); err != nil {
+					return err
 				}
-
-				return printSessionResult(cmd, runtime, session)
+				return runtime.printer.Print(object)
 			}
 
 			if err := r.confirm(ctx, cmd, args[0]); err != nil {
 				return reportApprovalError(cmd, err)
 			}
 
-			if err := runtime.service.AbortPodMigration(ctx, session); err != nil {
-				return reportSessionError(cmd, session, err)
+			if err := executor.Abort(ctx, object); err != nil {
+				return err
 			}
 
-			return printSessionResult(cmd, runtime, session)
+			return runtime.printer.Print(object)
 		},
 	}
 	bindDryRun(command, &dryRun)
@@ -163,7 +152,7 @@ func (r *rootState) newPodMigrationRollbackCommand() *cobra.Command {
 
 	command := &cobra.Command{
 		Use:   "rollback SESSION",
-		Short: "Restore source PV bindings after real-time Pod migration cutover",
+		Short: "Restore source bindings after Pod migration cutover",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			runtime, err := r.runtime()
@@ -174,34 +163,27 @@ func (r *rootState) newPodMigrationRollbackCommand() *cobra.Command {
 			ctx, cancel := r.context(cmd.Context())
 			defer cancel()
 
-			session, err := r.workflowSession(
-				ctx,
-				runtime,
-				cmd,
-				args[0],
-				domain.SessionTypeMigratePod,
-				"migrate-pod rollback",
-			)
+			object, executor, err := r.loadPodMigration(ctx, runtime, args[0])
 			if err != nil {
 				return err
 			}
 
 			if dryRun {
-				if err := runtime.service.ValidatePodMigrationRollback(ctx, session); err != nil {
-					return reportSessionError(cmd, session, err)
+				if err := executor.ValidateRollback(ctx, object); err != nil {
+					return err
 				}
-				return printSessionResult(cmd, runtime, session)
+				return runtime.printer.Print(object)
 			}
 
 			if err := r.confirm(ctx, cmd, args[0]); err != nil {
 				return reportApprovalError(cmd, err)
 			}
 
-			if err := runtime.service.RollbackPodMigration(ctx, session); err != nil {
-				return reportSessionError(cmd, session, err)
+			if err := executor.Rollback(ctx, object); err != nil {
+				return err
 			}
 
-			return printSessionResult(cmd, runtime, session)
+			return runtime.printer.Print(object)
 		},
 	}
 	bindDryRun(command, &dryRun)
@@ -211,13 +193,13 @@ func (r *rootState) newPodMigrationRollbackCommand() *cobra.Command {
 
 func (r *rootState) newPodMigrationCleanupCommand() *cobra.Command {
 	var (
-		options app.CleanupOptions
+		options app.MigrationCleanupOptions
 		dryRun  bool
 	)
 
 	command := &cobra.Command{
 		Use:   "cleanup SESSION",
-		Short: "Apply storage reclaim policies and close the Pod migration rollback window",
+		Short: "Apply storage reclaim policies and close the Pod migration",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			runtime, err := r.runtime()
@@ -228,47 +210,80 @@ func (r *rootState) newPodMigrationCleanupCommand() *cobra.Command {
 			ctx, cancel := r.context(cmd.Context())
 			defer cancel()
 
-			session, err := r.workflowSession(
-				ctx,
-				runtime,
-				cmd,
-				args[0],
-				domain.SessionTypeMigratePod,
-				"migrate-pod cleanup",
-			)
+			object, executor, err := r.loadPodMigration(ctx, runtime, args[0])
 			if err != nil {
 				return err
 			}
 
 			if dryRun {
-				if err := runtime.service.ValidatePodMigrationCleanup(
-					ctx,
-					session,
-					options,
-				); err != nil {
-					return reportCleanupError(cmd, session, options, err)
+				if err := executor.ValidateCleanup(ctx, object, options); err != nil {
+					return err
 				}
-
-				return printCleanupResult(cmd, runtime, session, options, true)
+				return runtime.printer.Print(object)
 			}
 
 			if err := r.confirm(ctx, cmd, args[0]); err != nil {
 				return reportApprovalError(cmd, err)
 			}
 
-			if err := runtime.service.CleanupPodMigration(ctx, session, options); err != nil {
-				return reportCleanupError(cmd, session, options, err)
+			if err := executor.Cleanup(ctx, object, options); err != nil {
+				return err
 			}
 
 			if options.DeleteSession {
-				return printDeletedSession(cmd, session)
+				return nil
 			}
 
-			return printCleanupResult(cmd, runtime, session, options, false)
+			return runtime.printer.Print(object)
 		},
 	}
-	bindCleanupFlags(command, &options)
+	bindMigrationCleanupFlags(command, &options)
 	bindDryRun(command, &dryRun)
 
 	return command
+}
+
+func bindMigrationCleanupFlags(command *cobra.Command, options *app.MigrationCleanupOptions) {
+	command.Flags().
+		StringVar(&options.SourcePVReclaimPolicy, "source-pv-reclaim-policy", "", "Source PV reclaim policy")
+	command.Flags().
+		StringVar(&options.DestinationPVCReclaimPolicy, "destination-pvc-reclaim-policy", "", "Destination PVC reclaim policy")
+	command.Flags().BoolVar(&options.Finalize, "finalize", false, "Finalize cleanup")
+	command.Flags().
+		BoolVar(&options.DeleteSession, "delete-session", false, "Delete the workflow after cleanup")
+}
+
+// loadPodMigration resolves one Pod migration from session (ConfigMap) or
+// controller (CRD) storage and returns the executor bound to that backend.
+func (r *rootState) loadPodMigration(
+	ctx context.Context,
+	runtime *commandRuntime,
+	name string,
+) (*v1alpha1.ClusterPodMigration, *app.ClusterPodMigrationExecutor, error) {
+	if runtime == nil || runtime.clusterPodMigrationStore == nil ||
+		runtime.clusterPodMigrationSessionStore == nil {
+		return nil, nil, domain.NewError(
+			domain.ErrorInternal,
+			"pod migration",
+			"workflow store is not configured",
+		)
+	}
+
+	key := crclient.ObjectKey{Name: name}
+
+	object, err := runtime.clusterPodMigrationSessionStore.Load(ctx, key)
+	if err == nil {
+		return object, runtime.clusterPodMigrationSessionExecutor, nil
+	}
+
+	if !apierrors.IsNotFound(err) {
+		return nil, nil, err
+	}
+
+	object, err = runtime.clusterPodMigrationStore.Load(ctx, key)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	return object, runtime.clusterPodMigrationExecutor, nil
 }

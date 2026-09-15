@@ -26,7 +26,6 @@ const (
 	KindReplicaSet            = "ReplicaSet"
 	KindJob                   = "Job"
 	KindBackup                = "Backup"
-	KindCluster               = "Cluster"
 	KindComponent             = "Component"
 	KindInstanceSet           = "InstanceSet"
 	KindVMCluster             = "VMCluster"

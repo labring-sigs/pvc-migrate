@@ -3,9 +3,9 @@ package planner
 import (
 	"context"
 	"fmt"
-	"sort"
 	"strings"
 
+	v1alpha1 "github.com/labring-sigs/pvc-migrate/api/v1alpha1"
 	"github.com/labring-sigs/pvc-migrate/internal/domain"
 	"github.com/labring-sigs/pvc-migrate/internal/kube"
 	corev1 "k8s.io/api/core/v1"
@@ -14,10 +14,11 @@ import (
 
 func (p *Planner) checkActivationPVCPolicies(
 	ctx context.Context,
-	plan *domain.MigrationPlan,
-	volumes []domain.VolumeSpec,
+	plan checkRecorder,
+	namespace string,
+	volumes []v1alpha1.VolumeSpec,
 ) {
-	groups := make(map[string][]kube.PVCAdmissionChange)
+	changes := make([]kube.PVCAdmissionChange, 0, len(volumes))
 	for _, volume := range volumes {
 		requested, err := resource.ParseQuantity(volume.Capacity)
 		if err != nil || requested.Sign() <= 0 {
@@ -26,7 +27,7 @@ func (p *Planner) checkActivationPVCPolicies(
 					domain.CheckNameActivationPolicy,
 					fmt.Sprintf(
 						"PVC %s/%s has invalid destination capacity %q",
-						volume.SourcePVC.Namespace,
+						namespace,
 						volume.SourcePVC.Name,
 						volume.Capacity,
 					),
@@ -45,10 +46,10 @@ func (p *Planner) checkActivationPVCPolicies(
 
 		volumeAttributesClasses := kube.RequestedVolumeAttributesClassNames(volume.SourcePVCSpec)
 
-		groups[volume.SourcePVC.Namespace] = append(
-			groups[volume.SourcePVC.Namespace],
+		changes = append(
+			changes,
 			kube.PVCAdmissionChange{
-				Namespace:                           volume.SourcePVC.Namespace,
+				Namespace:                           namespace,
 				Name:                                volume.SourcePVC.Name,
 				RequestedStorage:                    requested,
 				RequestedStorageClass:               volume.StorageClass,
@@ -62,42 +63,33 @@ func (p *Planner) checkActivationPVCPolicies(
 		)
 	}
 
-	namespaces := make([]string, 0, len(groups))
-	for namespace := range groups {
-		namespaces = append(namespaces, namespace)
+	report, err := kube.CheckPVCAdmissionPolicies(ctx, p.client, changes)
+	if err != nil {
+		plan.AddCheck(
+			failed(
+				domain.CheckNameActivationPolicy,
+				fmt.Sprintf("check application PVC admission in %s: %v", namespace, err),
+			),
+		)
+
+		return
 	}
 
-	sort.Strings(namespaces)
+	if len(report.QuotaViolations) > 0 {
+		plan.AddCheck(
+			failed(
+				domain.CheckNameResourceQuota,
+				"activation PVC: "+strings.Join(report.QuotaViolations, "; "),
+			),
+		)
+	}
 
-	for _, namespace := range namespaces {
-		report, err := kube.CheckPVCAdmissionPolicies(ctx, p.client, groups[namespace])
-		if err != nil {
-			plan.AddCheck(
-				failed(
-					domain.CheckNameActivationPolicy,
-					fmt.Sprintf("check application PVC admission in %s: %v", namespace, err),
-				),
-			)
-
-			continue
-		}
-
-		if len(report.QuotaViolations) > 0 {
-			plan.AddCheck(
-				failed(
-					domain.CheckNameResourceQuota,
-					"activation PVC: "+strings.Join(report.QuotaViolations, "; "),
-				),
-			)
-		}
-
-		if len(report.LimitRangeViolations) > 0 {
-			plan.AddCheck(
-				failed(
-					domain.CheckNameLimitRange,
-					"activation PVC: "+strings.Join(report.LimitRangeViolations, "; "),
-				),
-			)
-		}
+	if len(report.LimitRangeViolations) > 0 {
+		plan.AddCheck(
+			failed(
+				domain.CheckNameLimitRange,
+				"activation PVC: "+strings.Join(report.LimitRangeViolations, "; "),
+			),
+		)
 	}
 }

@@ -39,37 +39,11 @@ func podMigrationIssues(spec corev1.PodSpec, sourceNode, targetNode string) []st
 		}
 	}
 
-	if sourceNode != targetNode && spec.Affinity != nil {
-		if spec.Affinity.PodAffinity != nil &&
-			len(spec.Affinity.PodAffinity.RequiredDuringSchedulingIgnoredDuringExecution) > 0 {
-			issues = append(
-				issues,
-				"required podAffinity depends on co-located Pods during recreation",
-			)
-		}
-
-		if spec.Affinity.PodAntiAffinity != nil &&
-			len(spec.Affinity.PodAntiAffinity.RequiredDuringSchedulingIgnoredDuringExecution) > 0 {
-			issues = append(
-				issues,
-				"required podAntiAffinity depends on the existing Pod layout during recreation",
-			)
-		}
-	}
-
-	if sourceNode != targetNode {
-		for _, constraint := range spec.TopologySpreadConstraints {
-			if constraint.WhenUnsatisfiable == corev1.DoNotSchedule {
-				issues = append(
-					issues,
-					fmt.Sprintf(
-						"topologySpread constraint %q can reject the recreated Pod on the target node",
-						constraint.TopologyKey,
-					),
-				)
-			}
-		}
-	}
+	// required podAffinity/podAntiAffinity and DoNotSchedule topologySpread
+	// constraints are evaluated for real in recreationSchedulingIssues against
+	// the live Pod layout minus the source Pod itself: the recreated Pod never
+	// competes with its own previous incarnation, so a blanket refusal here
+	// produced false positives for single-replica databases.
 
 	return issues
 }

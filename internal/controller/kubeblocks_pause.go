@@ -7,6 +7,7 @@ import (
 	"slices"
 	"strings"
 
+	v1alpha1 "github.com/labring-sigs/pvc-migrate/api/v1alpha1"
 	"github.com/labring-sigs/pvc-migrate/internal/domain"
 	"github.com/labring-sigs/pvc-migrate/internal/kube"
 	corev1 "k8s.io/api/core/v1"
@@ -21,8 +22,9 @@ import (
 
 func (m *Manager) verifyKubeBlocksPaused(
 	ctx context.Context,
-	session *domain.Session,
-	workload domain.WorkloadSpec,
+	workflowID, namespace, pauseOperation string,
+	controller v1alpha1.ObjectReference,
+	kb *v1alpha1.KubeBlocksSpec,
 ) error {
 	if m.dynamic == nil {
 		return domain.NewError(
@@ -32,7 +34,6 @@ func (m *Manager) verifyKubeBlocksPaused(
 		)
 	}
 
-	kb := workload.KubeBlocks
 	if kb == nil {
 		return domain.NewError(
 			domain.ErrorInternal,
@@ -41,8 +42,8 @@ func (m *Manager) verifyKubeBlocksPaused(
 		)
 	}
 
-	if workload.Controller.Kind == domain.KindInstanceSet {
-		return m.verifyKubeBlocksInstanceSetPaused(ctx, session)
+	if controller.Kind == domain.KindInstanceSet {
+		return m.verifyKubeBlocksInstanceSetPaused(ctx, workflowID, controller)
 	}
 
 	if kb.ClusterUID == "" || kb.Component == "" {
@@ -59,7 +60,7 @@ func (m *Manager) verifyKubeBlocksPaused(
 	}
 
 	object, err := m.dynamic.Resource(gvr).
-		Namespace(workload.Pod.Namespace).
+		Namespace(namespace).
 		Get(ctx, kb.Cluster, metav1.GetOptions{})
 	if err != nil {
 		return domain.WrapError(
@@ -82,7 +83,7 @@ func (m *Manager) verifyKubeBlocksPaused(
 		)
 	}
 
-	if object.GetAnnotations()[pauseSessionAnnotation] != session.ID {
+	if object.GetAnnotations()[pauseSessionAnnotation] != workflowID {
 		return domain.NewError(
 			domain.ErrorConflict,
 			"verify paused",
@@ -94,7 +95,14 @@ func (m *Manager) verifyKubeBlocksPaused(
 		)
 	}
 
-	if err := m.verifyKubeBlocksPauseOperation(ctx, session, object); err != nil {
+	if err := m.verifyKubeBlocksPauseOperation(
+		ctx,
+		workflowID,
+		namespace,
+		pauseOperation,
+		kb,
+		object,
+	); err != nil {
 		return err
 	}
 
@@ -138,21 +146,19 @@ func (m *Manager) verifyKubeBlocksPaused(
 
 func (m *Manager) verifyKubeBlocksPauseOperation(
 	ctx context.Context,
-	session *domain.Session,
+	workflowID, namespace, currentName string,
+	kb *v1alpha1.KubeBlocksSpec,
 	cluster *unstructured.Unstructured,
 ) error {
-	kb := session.Spec.Workload().KubeBlocks
-
 	gvr, err := opsGVR(kb.OpsAPIVersion)
 	if err != nil {
 		return err
 	}
 
-	resource := m.dynamic.Resource(gvr).Namespace(session.Spec.Workload().Pod.Namespace)
-	currentName := kubeBlocksOperationName(session, "pause")
+	resource := m.dynamic.Resource(gvr).Namespace(namespace)
 	names := []string{currentName}
 
-	initialName := operationName(session.ID, "pause")
+	initialName := operationName(workflowID, "pause")
 	if initialName != currentName {
 		names = append(names, initialName)
 	}
@@ -177,7 +183,7 @@ func (m *Manager) verifyKubeBlocksPauseOperation(
 		if _, err := validateKubeBlocksOpsRequest(
 			request,
 			name,
-			session.ID,
+			workflowID,
 			kubeBlocksPauseSpec(kb, true),
 		); err != nil {
 			return err
@@ -216,7 +222,7 @@ func (m *Manager) verifyKubeBlocksPauseOperation(
 
 func requireKubeBlocksStopped(
 	cluster *unstructured.Unstructured,
-	kb *domain.KubeBlocksSpec,
+	kb *v1alpha1.KubeBlocksSpec,
 ) error {
 	stopped, phase, err := kubeBlocksStopped(cluster, kb)
 	if err != nil {
@@ -248,7 +254,7 @@ func requireKubeBlocksStopped(
 
 func kubeBlocksStopped(
 	cluster *unstructured.Unstructured,
-	kb *domain.KubeBlocksSpec,
+	kb *v1alpha1.KubeBlocksSpec,
 ) (bool, string, error) {
 	path := []string{"status", "phase"}
 
@@ -322,25 +328,21 @@ func opsGVR(apiVersion string) (schema.GroupVersionResource, error) {
 
 func (m *Manager) createAndWaitOps(
 	ctx context.Context,
-	session *domain.Session,
-	action string,
+	workflowID, namespace, apiVersion, name string,
 	spec map[string]any,
 ) error {
-	kb := session.Spec.Workload().KubeBlocks
-
-	gvr, err := opsGVR(kb.OpsAPIVersion)
+	gvr, err := opsGVR(apiVersion)
 	if err != nil {
 		return err
 	}
 
-	name := kubeBlocksOperationName(session, action)
-	resource := m.dynamic.Resource(gvr).Namespace(session.Spec.Workload().Pod.Namespace)
+	resource := m.dynamic.Resource(gvr).Namespace(namespace)
 	existing, getErr := resource.Get(ctx, name, metav1.GetOptions{})
 	create := apierrors.IsNotFound(getErr)
 
 	var expectedUID types.UID
 	if getErr == nil {
-		expectedUID, err = validateKubeBlocksOpsRequest(existing, name, session.ID, spec)
+		expectedUID, err = validateKubeBlocksOpsRequest(existing, name, workflowID, spec)
 		if err != nil {
 			return err
 		}
@@ -395,14 +397,14 @@ func (m *Manager) createAndWaitOps(
 
 	if create {
 		object := &unstructured.Unstructured{Object: map[string]any{
-			"apiVersion": kb.OpsAPIVersion,
+			"apiVersion": apiVersion,
 			"kind":       "OpsRequest",
 			"metadata": map[string]any{
 				"name":      name,
-				"namespace": session.Spec.Workload().Pod.Namespace,
+				"namespace": namespace,
 				"labels": map[string]any{
 					kube.ManagedByLabel: kube.ManagedByValue,
-					kube.SessionKey:     session.ID,
+					kube.SessionKey:     workflowID,
 				},
 			},
 			"spec": spec,
@@ -420,7 +422,7 @@ func (m *Manager) createAndWaitOps(
 				)
 			}
 
-			expectedUID, err = validateKubeBlocksOpsRequest(existing, name, session.ID, spec)
+			expectedUID, err = validateKubeBlocksOpsRequest(existing, name, workflowID, spec)
 			if err != nil {
 				return err
 			}
@@ -469,7 +471,7 @@ func (m *Manager) createAndWaitOps(
 
 			labels := current.GetLabels()
 			if labels[kube.ManagedByLabel] != kube.ManagedByValue ||
-				labels[kube.SessionKey] != session.ID {
+				labels[kube.SessionKey] != workflowID {
 				return false, domain.NewError(
 					domain.ErrorConflict,
 					"KubeBlocks operation",
@@ -502,10 +504,13 @@ func (m *Manager) createAndWaitOps(
 	)
 }
 
-func kubeBlocksOperationName(session *domain.Session, action string) string {
-	phase := session.Status.Phase
+func kubeBlocksOperationName(
+	workflowID string,
+	phase, resumeFrom v1alpha1.WorkflowPhase,
+	action string,
+) string {
 	if phase == domain.PhaseFailed {
-		phase = session.Status.ResumeFrom
+		phase = resumeFrom
 	}
 
 	switch phase {
@@ -515,7 +520,7 @@ func kubeBlocksOperationName(session *domain.Session, action string) string {
 		action = "abort-" + action
 	}
 
-	return operationName(session.ID, action)
+	return operationName(workflowID, action)
 }
 
 func operationName(sessionID, action string) string {
@@ -558,10 +563,17 @@ func validateKubeBlocksOpsRequest(
 	return uid, nil
 }
 
-func (m *Manager) pauseKubeBlocks(ctx context.Context, session *domain.Session) error {
-	kb := session.Spec.Workload().KubeBlocks
+func (m *Manager) pauseKubeBlocks(
+	ctx context.Context,
+	owner string,
+	podRef, controller v1alpha1.ObjectReference,
+	kb *v1alpha1.KubeBlocksSpec,
+	phase, resumeFrom v1alpha1.WorkflowPhase,
+) (v1alpha1.ObjectReference, error) {
+	var updated v1alpha1.ObjectReference
+
 	if kb == nil {
-		return domain.NewError(
+		return updated, domain.NewError(
 			domain.ErrorInternal,
 			"pause KubeBlocks",
 			"session lacks KubeBlocks state",
@@ -569,10 +581,10 @@ func (m *Manager) pauseKubeBlocks(ctx context.Context, session *domain.Session) 
 	}
 
 	pod, err := m.typed.CoreV1().
-		Pods(session.Spec.Workload().Pod.Namespace).
+		Pods(podRef.Namespace).
 		Get(ctx, kb.Instance, metav1.GetOptions{})
 	if err != nil && !apierrors.IsNotFound(err) {
-		return domain.WrapError(
+		return updated, domain.WrapError(
 			domain.ErrorKubernetes,
 			"pause KubeBlocks",
 			"read instance Pod",
@@ -581,8 +593,8 @@ func (m *Manager) pauseKubeBlocks(ctx context.Context, session *domain.Session) 
 	}
 
 	if err == nil {
-		if pod.UID != session.Spec.Workload().Pod.UID {
-			return domain.NewError(
+		if pod.UID != podRef.UID {
+			return updated, domain.NewError(
 				domain.ErrorConflict,
 				"pause KubeBlocks",
 				fmt.Sprintf("Pod %s/%s UID changed", pod.Namespace, pod.Name),
@@ -591,25 +603,33 @@ func (m *Manager) pauseKubeBlocks(ctx context.Context, session *domain.Session) 
 
 		if err := validatePodController(
 			pod,
-			session.Spec.Workload().Controller,
+			controller,
 			"pause KubeBlocks",
 		); err != nil {
-			return err
+			return updated, err
 		}
 	}
 
-	if err == nil && session.Spec.Workload().Controller.Kind != domain.KindInstanceSet {
-		if err := m.recoverLegacyKubeBlocksStoppedWithPod(ctx, session); err != nil {
-			return err
+	if err == nil && controller.Kind != domain.KindInstanceSet {
+		var recoverErr error
+
+		updated, recoverErr = m.recoverLegacyKubeBlocksStoppedWithPod(ctx,
+			owner, podRef, controller, kb, phase, resumeFrom)
+		if updated.UID != "" {
+			podRef = updated
+		}
+
+		if recoverErr != nil {
+			return updated, recoverErr
 		}
 	}
 
-	if session.Status.Phase == domain.PhasePausing &&
-		session.Spec.Workload().Controller.Kind == domain.KindInstanceSet &&
+	if phase == domain.PhasePausing &&
+		controller.Kind == domain.KindInstanceSet &&
 		err == nil && isLeaderRole(podRole(pod)) &&
 		kb.SwitchoverCandidate != "" {
 		switch kb.SwitchoverStrategy {
-		case domain.KubeBlocksSwitchoverOpsRequest:
+		case v1alpha1.KubeBlocksSwitchoverOpsRequest:
 			spec := kubeBlocksSwitchoverSpec(
 				kb.OpsAPIVersion,
 				kb.Cluster,
@@ -617,27 +637,39 @@ func (m *Manager) pauseKubeBlocks(ctx context.Context, session *domain.Session) 
 				kb.Instance,
 				kb.SwitchoverCandidate,
 			)
-			if err := m.createAndWaitOps(ctx, session, "switchover", spec); err != nil {
-				return err
+			if err := m.createAndWaitOps(
+				ctx,
+				owner,
+				podRef.Namespace,
+				kb.OpsAPIVersion,
+				kubeBlocksOperationName(
+					owner,
+					phase,
+					resumeFrom,
+					"switchover",
+				),
+				spec,
+			); err != nil {
+				return updated, err
 			}
-		case domain.KubeBlocksSwitchoverMongoDBNative:
-			if err := m.runMongoDBNativeSwitchover(ctx, session); err != nil {
-				return err
+		case v1alpha1.KubeBlocksSwitchoverMongoDBNative:
+			if err := m.runMongoDBNativeSwitchover(ctx, podRef, controller, kb); err != nil {
+				return updated, err
 			}
 		default:
-			return domain.NewError(
+			return updated, domain.NewError(
 				domain.ErrorPrecondition,
 				"pause KubeBlocks",
 				fmt.Sprintf("unsupported persisted switchover strategy %q", kb.SwitchoverStrategy),
 			)
 		}
 
-		if kb.SwitchoverStrategy != domain.KubeBlocksSwitchoverMongoDBNative {
+		if kb.SwitchoverStrategy != v1alpha1.KubeBlocksSwitchoverMongoDBNative {
 			current, getErr := m.typed.CoreV1().
-				Pods(session.Spec.Workload().Pod.Namespace).
+				Pods(podRef.Namespace).
 				Get(ctx, kb.Instance, metav1.GetOptions{})
 			if getErr != nil {
-				return domain.WrapError(
+				return updated, domain.WrapError(
 					domain.ErrorKubernetes,
 					"pause KubeBlocks",
 					"verify switchover role",
@@ -647,14 +679,14 @@ func (m *Manager) pauseKubeBlocks(ctx context.Context, session *domain.Session) 
 
 			if err := validatePodController(
 				current,
-				session.Spec.Workload().Controller,
+				controller,
 				"pause KubeBlocks",
 			); err != nil {
-				return err
+				return updated, err
 			}
 
 			if isLeaderRole(podRole(current)) {
-				return domain.NewError(
+				return updated, domain.NewError(
 					domain.ErrorPrecondition,
 					"pause KubeBlocks",
 					fmt.Sprintf(
@@ -667,70 +699,77 @@ func (m *Manager) pauseKubeBlocks(ctx context.Context, session *domain.Session) 
 		}
 	}
 
-	if err := m.setKubeBlocksPaused(ctx, session, true); err != nil {
-		return err
+	if err := m.setKubeBlocksPaused(ctx, owner, podRef.Namespace,
+		controller, kb, phase, resumeFrom, true); err != nil {
+		return updated, err
 	}
 
-	if err := m.deleteKubeBlocksPod(ctx, session); err != nil {
-		return err
-	}
-
-	return m.VerifyPaused(ctx, session)
+	return updated, m.deleteKubeBlocksPod(ctx, podRef, controller)
 }
 
-func (m *Manager) resumeKubeBlocks(ctx context.Context, session *domain.Session) error {
-	pauseNotStarted, err := m.legacyKubeBlocksPauseNotStarted(ctx, session)
-	if err != nil {
-		return err
+func (m *Manager) resumeKubeBlocks(
+	ctx context.Context,
+	owner string,
+	pod, controller v1alpha1.ObjectReference,
+	kb *v1alpha1.KubeBlocksSpec,
+	phase, resumeFrom v1alpha1.WorkflowPhase,
+	abortStartedFromPausing bool,
+) (v1alpha1.ObjectReference, error) {
+	if abortStartedFromPausing {
+		pauseNotStarted, err := m.legacyKubeBlocksPauseNotStarted(ctx,
+			pod, controller, kb)
+		if err != nil {
+			return v1alpha1.ObjectReference{}, err
+		}
+
+		if pauseNotStarted {
+			return v1alpha1.ObjectReference{}, nil
+		}
 	}
 
-	if pauseNotStarted {
-		return nil
+	if err := m.validateKubeBlocksResume(ctx, owner, pod.Namespace,
+		controller, kb, phase, resumeFrom); err != nil {
+		return v1alpha1.ObjectReference{}, err
 	}
 
-	if err := m.validateKubeBlocksResume(ctx, session); err != nil {
-		return err
+	if err := m.setKubeBlocksPaused(ctx, owner, pod.Namespace,
+		controller, kb, phase, resumeFrom, false); err != nil {
+		return v1alpha1.ObjectReference{}, err
 	}
 
-	if err := m.setKubeBlocksPaused(ctx, session, false); err != nil {
-		return err
-	}
-
-	workload := session.Spec.Workload()
-
-	if err := m.waitForResumedPod(
+	updated, err := m.waitForResumedPod(
 		ctx,
-		session,
-		workload.Pod,
-		workload.Controller,
+		pod,
+		controller,
 		"resume KubeBlocks",
-	); err != nil {
-		return err
+	)
+	if err != nil {
+		return v1alpha1.ObjectReference{}, err
 	}
 
-	if err := m.waitForKubeBlocksRunning(ctx, session); err != nil {
-		return err
+	if err := m.waitForKubeBlocksRunning(ctx, pod.Namespace, kb); err != nil {
+		return updated, err
 	}
 
-	if workload.Controller.Kind == domain.KindInstanceSet {
-		return nil
+	if controller.Kind == domain.KindInstanceSet {
+		return updated, nil
 	}
 
-	return m.updateKubeBlocksPauseOwner(ctx, session, false)
+	return updated, m.updateKubeBlocksPauseOwner(
+		ctx,
+		owner,
+		pod.Namespace,
+		kb,
+		false,
+	)
 }
 
 func (m *Manager) legacyKubeBlocksPauseNotStarted(
 	ctx context.Context,
-	session *domain.Session,
+	podRef, controller v1alpha1.ObjectReference,
+	kb *v1alpha1.KubeBlocksSpec,
 ) (bool, error) {
-	if !kubeBlocksAbortStartedFromPausing(session) {
-		return false, nil
-	}
-
-	workload := session.Spec.Workload()
-
-	kb := workload.KubeBlocks
-	if kb == nil || workload.Controller.Kind == domain.KindInstanceSet {
+	if kb == nil || controller.Kind == domain.KindInstanceSet {
 		return false, nil
 	}
 
@@ -747,7 +786,7 @@ func (m *Manager) legacyKubeBlocksPauseNotStarted(
 		return false, err
 	}
 
-	cluster, err := m.dynamic.Resource(gvr).Namespace(workload.Pod.Namespace).
+	cluster, err := m.dynamic.Resource(gvr).Namespace(podRef.Namespace).
 		Get(ctx, kb.Cluster, metav1.GetOptions{})
 	if err != nil {
 		return false, domain.WrapError(
@@ -806,8 +845,8 @@ func (m *Manager) legacyKubeBlocksPauseNotStarted(
 		return false, nil
 	}
 
-	pod, err := m.typed.CoreV1().Pods(workload.Pod.Namespace).
-		Get(ctx, workload.Pod.Name, metav1.GetOptions{})
+	pod, err := m.typed.CoreV1().Pods(podRef.Namespace).
+		Get(ctx, podRef.Name, metav1.GetOptions{})
 	if err != nil {
 		if apierrors.IsNotFound(err) {
 			return false, nil
@@ -821,26 +860,28 @@ func (m *Manager) legacyKubeBlocksPauseNotStarted(
 		)
 	}
 
-	if pod.UID != workload.Pod.UID || !kube.PodReady(pod) {
+	if pod.UID != podRef.UID || !kube.PodReady(pod) {
 		return false, nil
 	}
 
-	if err := validatePodController(pod, workload.Controller, "resume KubeBlocks"); err != nil {
+	if err := validatePodController(pod, controller, "resume KubeBlocks"); err != nil {
 		return false, err
 	}
 
 	return true, nil
 }
 
-func kubeBlocksAbortStartedFromPausing(session *domain.Session) bool {
-	if session == nil || (session.Status.Phase != domain.PhaseAborting &&
-		(session.Status.Phase != domain.PhaseFailed ||
-			session.Status.ResumeFrom != domain.PhaseAborting)) {
+func kubeBlocksAbortStartedFromPausing(
+	phase, resumeFrom v1alpha1.WorkflowPhase,
+	history []v1alpha1.WorkflowHistoryEntry,
+) bool {
+	if phase != domain.PhaseAborting &&
+		(phase != domain.PhaseFailed || resumeFrom != domain.PhaseAborting) {
 		return false
 	}
 
-	for _, history := range slices.Backward(session.Status.History) {
-		switch history.Phase {
+	for _, entry := range slices.Backward(history) {
+		switch entry.Phase {
 		case domain.PhaseFailed, domain.PhaseAborting:
 			continue
 		case domain.PhasePausing:
@@ -850,13 +891,14 @@ func kubeBlocksAbortStartedFromPausing(session *domain.Session) bool {
 		}
 	}
 
-	return session.Status.ResumeFrom == domain.PhasePausing
+	return resumeFrom == domain.PhasePausing
 }
 
-func (m *Manager) waitForKubeBlocksRunning(ctx context.Context, session *domain.Session) error {
-	workload := session.Spec.Workload()
-
-	kb := workload.KubeBlocks
+func (m *Manager) waitForKubeBlocksRunning(
+	ctx context.Context,
+	namespace string,
+	kb *v1alpha1.KubeBlocksSpec,
+) error {
 	if kb == nil {
 		return domain.NewError(
 			domain.ErrorInternal,
@@ -870,11 +912,11 @@ func (m *Manager) waitForKubeBlocksRunning(ctx context.Context, session *domain.
 		return err
 	}
 
-	resource := m.dynamic.Resource(gvr).Namespace(workload.Pod.Namespace)
+	resource := m.dynamic.Resource(gvr).Namespace(namespace)
 
 	return m.waitFor(
 		ctx,
-		fmt.Sprintf("KubeBlocks Cluster %s/%s convergence", workload.Pod.Namespace, kb.Cluster),
+		fmt.Sprintf("KubeBlocks Cluster %s/%s convergence", namespace, kb.Cluster),
 		func(waitCtx context.Context) (bool, error) {
 			cluster, getErr := resource.Get(waitCtx, kb.Cluster, metav1.GetOptions{})
 			if getErr != nil {
@@ -938,8 +980,13 @@ func (m *Manager) waitForKubeBlocksRunning(ctx context.Context, session *domain.
 	)
 }
 
-func (m *Manager) validateKubeBlocksResume(ctx context.Context, session *domain.Session) error {
-	kb := session.Spec.Workload().KubeBlocks
+func (m *Manager) validateKubeBlocksResume(
+	ctx context.Context,
+	workflowID, namespace string,
+	controller v1alpha1.ObjectReference,
+	kb *v1alpha1.KubeBlocksSpec,
+	phase, resumeFrom v1alpha1.WorkflowPhase,
+) error {
 	if kb == nil {
 		return domain.NewError(
 			domain.ErrorInternal,
@@ -948,7 +995,7 @@ func (m *Manager) validateKubeBlocksResume(ctx context.Context, session *domain.
 		)
 	}
 
-	if session.Spec.Workload().Controller.Kind == domain.KindInstanceSet && kb.OriginalPaused {
+	if controller.Kind == domain.KindInstanceSet && kb.OriginalPaused {
 		return domain.NewError(
 			domain.ErrorPrecondition,
 			"resume KubeBlocks",
@@ -964,18 +1011,17 @@ func (m *Manager) validateKubeBlocksResume(ctx context.Context, session *domain.
 		)
 	}
 
-	workload := session.Spec.Workload()
-	if workload.Controller.Kind == domain.KindInstanceSet {
+	if controller.Kind == domain.KindInstanceSet {
 		gvr, err := kube.ParseGroupVersionResource(
-			workload.Controller.APIVersion,
+			controller.APIVersion,
 			instanceSetResource,
 		)
 		if err != nil {
 			return err
 		}
 
-		object, err := m.dynamic.Resource(gvr).Namespace(workload.Controller.Namespace).
-			Get(ctx, workload.Controller.Name, metav1.GetOptions{})
+		object, err := m.dynamic.Resource(gvr).Namespace(controller.Namespace).
+			Get(ctx, controller.Name, metav1.GetOptions{})
 		if err != nil {
 			return domain.WrapError(
 				domain.ErrorKubernetes,
@@ -985,7 +1031,7 @@ func (m *Manager) validateKubeBlocksResume(ctx context.Context, session *domain.
 			)
 		}
 
-		if object.GetUID() != workload.Controller.UID {
+		if object.GetUID() != controller.UID {
 			return domain.NewError(
 				domain.ErrorConflict,
 				"resume KubeBlocks",
@@ -1016,7 +1062,7 @@ func (m *Manager) validateKubeBlocksResume(ctx context.Context, session *domain.
 		}
 
 		owner := object.GetAnnotations()[pauseSessionAnnotation]
-		if owner != "" && owner != session.ID {
+		if owner != "" && owner != workflowID {
 			return domain.NewError(
 				domain.ErrorConflict,
 				"resume KubeBlocks",
@@ -1029,17 +1075,19 @@ func (m *Manager) validateKubeBlocksResume(ctx context.Context, session *domain.
 			)
 		}
 
-		return validateInstanceSetPauseState(workload.Controller, kb, false, current, found, owner)
+		return validateInstanceSetPauseState(controller, kb, false, current, found, owner)
 	}
 
-	return m.validateKubeBlocksLegacyResume(ctx, session, workload, kb)
+	return m.validateKubeBlocksLegacyResume(ctx, workflowID, namespace, kb,
+		kubeBlocksOperationName(workflowID, phase, resumeFrom, "pause"),
+		kubeBlocksOperationName(workflowID, phase, resumeFrom, "resume"))
 }
 
 func (m *Manager) validateKubeBlocksLegacyResume(
 	ctx context.Context,
-	session *domain.Session,
-	workload domain.WorkloadSpec,
-	kb *domain.KubeBlocksSpec,
+	workflowID, namespace string,
+	kb *v1alpha1.KubeBlocksSpec,
+	pauseOperation, resumeOperation string,
 ) error {
 	if kb.ClusterUID == "" || kb.Component == "" {
 		return domain.NewError(
@@ -1054,7 +1102,7 @@ func (m *Manager) validateKubeBlocksLegacyResume(
 		return err
 	}
 
-	cluster, err := m.dynamic.Resource(gvr).Namespace(workload.Pod.Namespace).
+	cluster, err := m.dynamic.Resource(gvr).Namespace(namespace).
 		Get(ctx, kb.Cluster, metav1.GetOptions{})
 	if err != nil {
 		return domain.WrapError(domain.ErrorKubernetes, "resume KubeBlocks", "read Cluster", err)
@@ -1069,7 +1117,7 @@ func (m *Manager) validateKubeBlocksLegacyResume(
 	}
 
 	owner := cluster.GetAnnotations()[pauseSessionAnnotation]
-	if owner != session.ID {
+	if owner != workflowID {
 		return domain.NewError(
 			domain.ErrorConflict,
 			"resume KubeBlocks",
@@ -1114,13 +1162,26 @@ func (m *Manager) validateKubeBlocksLegacyResume(
 
 	// A previous process may already have submitted Start. Its owned request
 	// remains authoritative while the Cluster and Pods are still converging.
-	starting, err := m.kubeBlocksResumeOperationStarted(ctx, session)
+	starting, err := m.kubeBlocksResumeOperationStarted(
+		ctx,
+		workflowID,
+		namespace,
+		resumeOperation,
+		kb,
+	)
 	if err != nil {
 		return err
 	}
 
 	if !starting {
-		if err := m.verifyKubeBlocksPauseOperation(ctx, session, cluster); err != nil {
+		if err := m.verifyKubeBlocksPauseOperation(
+			ctx,
+			workflowID,
+			namespace,
+			pauseOperation,
+			kb,
+			cluster,
+		); err != nil {
 			return err
 		}
 	}
@@ -1160,18 +1221,15 @@ func (m *Manager) validateKubeBlocksLegacyResume(
 
 func (m *Manager) kubeBlocksResumeOperationStarted(
 	ctx context.Context,
-	session *domain.Session,
+	workflowID, namespace, name string,
+	kb *v1alpha1.KubeBlocksSpec,
 ) (bool, error) {
-	kb := session.Spec.Workload().KubeBlocks
-
 	gvr, err := opsGVR(kb.OpsAPIVersion)
 	if err != nil {
 		return false, err
 	}
 
-	name := kubeBlocksOperationName(session, "resume")
-
-	request, err := m.dynamic.Resource(gvr).Namespace(session.Spec.Workload().Pod.Namespace).
+	request, err := m.dynamic.Resource(gvr).Namespace(namespace).
 		Get(ctx, name, metav1.GetOptions{})
 	if apierrors.IsNotFound(err) {
 		return false, nil
@@ -1189,7 +1247,7 @@ func (m *Manager) kubeBlocksResumeOperationStarted(
 	if _, err := validateKubeBlocksOpsRequest(
 		request,
 		name,
-		session.ID,
+		workflowID,
 		kubeBlocksPauseSpec(kb, false),
 	); err != nil {
 		return false, err
@@ -1210,21 +1268,12 @@ func (m *Manager) kubeBlocksResumeOperationStarted(
 
 func (m *Manager) currentKubeBlocksRollbackPods(
 	ctx context.Context,
-	session *domain.Session,
-) ([]domain.ObjectReference, error) {
+	ref, controller v1alpha1.ObjectReference,
+) ([]v1alpha1.ObjectReference, error) {
 	const operation = validateRollbackConsumers
 
-	workload := session.Spec.Workload()
-	if workload.KubeBlocks == nil {
-		return nil, domain.NewError(
-			domain.ErrorInternal,
-			operation,
-			"session lacks KubeBlocks state",
-		)
-	}
-
-	pod, err := m.typed.CoreV1().Pods(workload.Pod.Namespace).
-		Get(ctx, workload.Pod.Name, metav1.GetOptions{})
+	pod, err := m.typed.CoreV1().Pods(ref.Namespace).
+		Get(ctx, ref.Name, metav1.GetOptions{})
 	if apierrors.IsNotFound(err) {
 		return nil, nil
 	}
@@ -1233,21 +1282,21 @@ func (m *Manager) currentKubeBlocksRollbackPods(
 		return nil, domain.WrapError(domain.ErrorKubernetes, operation, "read KubeBlocks Pod", err)
 	}
 
-	if err := validatePodController(pod, workload.Controller, operation); err != nil {
+	if err := validatePodController(pod, controller, operation); err != nil {
 		return nil, err
 	}
 
-	return []domain.ObjectReference{podReference(pod)}, nil
+	return []v1alpha1.ObjectReference{podReference(pod)}, nil
 }
 
 func (m *Manager) setKubeBlocksPaused(
 	ctx context.Context,
-	session *domain.Session,
+	owner, namespace string,
+	controller v1alpha1.ObjectReference,
+	kb *v1alpha1.KubeBlocksSpec,
+	phase, resumeFrom v1alpha1.WorkflowPhase,
 	paused bool,
 ) error {
-	workload := session.Spec.Workload()
-
-	kb := workload.KubeBlocks
 	if kb == nil {
 		return domain.NewError(
 			domain.ErrorInternal,
@@ -1256,8 +1305,8 @@ func (m *Manager) setKubeBlocksPaused(
 		)
 	}
 
-	if workload.Controller.Kind == domain.KindInstanceSet {
-		return m.setKubeBlocksInstanceSetPaused(ctx, session, paused)
+	if controller.Kind == domain.KindInstanceSet {
+		return m.setKubeBlocksInstanceSetPaused(ctx, owner, controller, kb, paused)
 	}
 
 	if kb.ClusterUID == "" || kb.Component == "" {
@@ -1276,7 +1325,7 @@ func (m *Manager) setKubeBlocksPaused(
 		)
 	}
 
-	if session.ID == "" {
+	if owner == "" {
 		return domain.NewError(
 			domain.ErrorInternal,
 			"KubeBlocks pause",
@@ -1284,7 +1333,7 @@ func (m *Manager) setKubeBlocksPaused(
 		)
 	}
 
-	cluster, err := m.validateKubeBlocksClusterForPause(ctx, session)
+	cluster, err := m.validateKubeBlocksClusterForPause(ctx, namespace, kb)
 	if err != nil {
 		return err
 	}
@@ -1310,7 +1359,7 @@ func (m *Manager) setKubeBlocksPaused(
 		}
 
 		if stopped {
-			if cluster.GetAnnotations()[pauseSessionAnnotation] != session.ID {
+			if cluster.GetAnnotations()[pauseSessionAnnotation] != owner {
 				return domain.NewError(
 					domain.ErrorConflict,
 					"KubeBlocks pause",
@@ -1325,15 +1374,28 @@ func (m *Manager) setKubeBlocksPaused(
 			return nil
 		}
 
-		if err := m.updateKubeBlocksPauseOwner(ctx, session, true); err != nil {
+		if err := m.updateKubeBlocksPauseOwner(
+			ctx,
+			owner,
+			namespace,
+			kb,
+			true,
+		); err != nil {
 			return err
 		}
 	}
 
 	if err := m.createAndWaitOps(
 		ctx,
-		session,
-		action,
+		owner,
+		namespace,
+		kb.OpsAPIVersion,
+		kubeBlocksOperationName(
+			owner,
+			phase,
+			resumeFrom,
+			action,
+		),
 		kubeBlocksPauseSpec(kb, paused),
 	); err != nil {
 		return err
@@ -1344,7 +1406,7 @@ func (m *Manager) setKubeBlocksPaused(
 
 func kubeBlocksLegacyResumeConverged(
 	cluster *unstructured.Unstructured,
-	kb *domain.KubeBlocksSpec,
+	kb *v1alpha1.KubeBlocksSpec,
 ) (bool, error) {
 	if cluster == nil || kb == nil {
 		return false, domain.NewError(
@@ -1393,35 +1455,36 @@ func kubeBlocksLegacyResumeConverged(
 
 func (m *Manager) recoverLegacyKubeBlocksStoppedWithPod(
 	ctx context.Context,
-	session *domain.Session,
-) error {
-	kb := session.Spec.Workload().KubeBlocks
-
-	cluster, err := m.validateKubeBlocksClusterForPause(ctx, session)
+	owner string,
+	pod, controller v1alpha1.ObjectReference,
+	kb *v1alpha1.KubeBlocksSpec,
+	phase, resumeFrom v1alpha1.WorkflowPhase,
+) (v1alpha1.ObjectReference, error) {
+	cluster, err := m.validateKubeBlocksClusterForPause(ctx, pod.Namespace, kb)
 	if err != nil {
-		return err
+		return v1alpha1.ObjectReference{}, err
 	}
 
-	stopped, phase, err := kubeBlocksStopped(cluster, kb)
-	if err != nil || kubeBlocksPhase(phase) == kubeBlocksPhaseRunning {
-		return err
+	stopped, clusterPhase, err := kubeBlocksStopped(cluster, kb)
+	if err != nil || kubeBlocksPhase(clusterPhase) == kubeBlocksPhaseRunning {
+		return v1alpha1.ObjectReference{}, err
 	}
 
-	if !stopped && kubeBlocksPhase(phase) != kubeBlocksPhaseFailed {
-		return domain.NewError(
+	if !stopped && kubeBlocksPhase(clusterPhase) != kubeBlocksPhaseFailed {
+		return v1alpha1.ObjectReference{}, domain.NewError(
 			domain.ErrorPrecondition,
 			"pause KubeBlocks",
 			fmt.Sprintf(
 				"Cluster %s/%s phase is %s while its instance Pod is still present",
 				cluster.GetNamespace(),
 				cluster.GetName(),
-				phase,
+				clusterPhase,
 			),
 		)
 	}
 
-	if cluster.GetAnnotations()[pauseSessionAnnotation] != session.ID {
-		return domain.NewError(
+	if cluster.GetAnnotations()[pauseSessionAnnotation] != owner {
+		return v1alpha1.ObjectReference{}, domain.NewError(
 			domain.ErrorConflict,
 			"pause KubeBlocks",
 			fmt.Sprintf(
@@ -1434,36 +1497,38 @@ func (m *Manager) recoverLegacyKubeBlocksStoppedWithPod(
 
 	if err := m.createAndWaitOps(
 		ctx,
-		session,
-		"reconcile",
+		owner,
+		pod.Namespace,
+		kb.OpsAPIVersion,
+		kubeBlocksOperationName(
+			owner,
+			phase,
+			resumeFrom,
+			"reconcile",
+		),
 		kubeBlocksPauseSpec(kb, false),
 	); err != nil {
-		return err
+		return v1alpha1.ObjectReference{}, err
 	}
 
-	if err := m.replaceLegacyKubeBlocksPod(ctx, session); err != nil {
-		return err
+	replacement, err := m.replaceLegacyKubeBlocksPod(
+		ctx,
+		pod,
+		controller,
+	)
+	if err != nil {
+		return v1alpha1.ObjectReference{}, err
 	}
 
-	return m.waitForKubeBlocksRunning(ctx, session)
+	return replacement, m.waitForKubeBlocksRunning(ctx, pod.Namespace, kb)
 }
 
 func (m *Manager) replaceLegacyKubeBlocksPod(
 	ctx context.Context,
-	session *domain.Session,
-) error {
-	workload := session.Spec.WorkloadPtr()
-	if workload == nil {
-		return domain.NewError(
-			domain.ErrorValidation,
-			"reconcile KubeBlocks",
-			"session workload is required",
-		)
-	}
-
-	previous := workload.Pod
+	previous, controller v1alpha1.ObjectReference,
+) (v1alpha1.ObjectReference, error) {
 	if previous.Namespace == "" || previous.Name == "" || previous.UID == "" {
-		return domain.NewError(
+		return v1alpha1.ObjectReference{}, domain.NewError(
 			domain.ErrorValidation,
 			"reconcile KubeBlocks",
 			"persisted KubeBlocks Pod identity is incomplete",
@@ -1474,7 +1539,7 @@ func (m *Manager) replaceLegacyKubeBlocksPod(
 
 	current, err := pods.Get(ctx, previous.Name, metav1.GetOptions{})
 	if err != nil {
-		return domain.WrapError(
+		return v1alpha1.ObjectReference{}, domain.WrapError(
 			domain.ErrorKubernetes,
 			"reconcile KubeBlocks",
 			"read stale KubeBlocks Pod",
@@ -1483,7 +1548,7 @@ func (m *Manager) replaceLegacyKubeBlocksPod(
 	}
 
 	if current.UID != previous.UID {
-		return domain.NewError(
+		return v1alpha1.ObjectReference{}, domain.NewError(
 			domain.ErrorConflict,
 			"reconcile KubeBlocks",
 			fmt.Sprintf("Pod %s/%s UID changed", previous.Namespace, previous.Name),
@@ -1492,10 +1557,10 @@ func (m *Manager) replaceLegacyKubeBlocksPod(
 
 	if err := validatePodController(
 		current,
-		workload.Controller,
+		controller,
 		"reconcile KubeBlocks",
 	); err != nil {
-		return err
+		return v1alpha1.ObjectReference{}, err
 	}
 
 	uid := current.UID
@@ -1504,7 +1569,7 @@ func (m *Manager) replaceLegacyKubeBlocksPod(
 		previous.Name,
 		metav1.DeleteOptions{Preconditions: &metav1.Preconditions{UID: &uid}},
 	); err != nil && !apierrors.IsNotFound(err) {
-		return domain.WrapError(
+		return v1alpha1.ObjectReference{}, domain.WrapError(
 			domain.ErrorKubernetes,
 			"reconcile KubeBlocks",
 			"delete stale KubeBlocks Pod",
@@ -1532,7 +1597,7 @@ func (m *Manager) replaceLegacyKubeBlocksPod(
 
 			if err := validatePodController(
 				pod,
-				workload.Controller,
+				controller,
 				"reconcile KubeBlocks",
 			); err != nil {
 				return false, err
@@ -1547,11 +1612,11 @@ func (m *Manager) replaceLegacyKubeBlocksPod(
 			return true, nil
 		},
 	); err != nil {
-		return err
+		return v1alpha1.ObjectReference{}, err
 	}
 
 	if replacement == nil {
-		return domain.NewError(
+		return v1alpha1.ObjectReference{}, domain.NewError(
 			domain.ErrorKubernetes,
 			"reconcile KubeBlocks",
 			fmt.Sprintf(
@@ -1562,24 +1627,21 @@ func (m *Manager) replaceLegacyKubeBlocksPod(
 		)
 	}
 
-	refreshResumedPodReference(workload, previous, replacement)
-
-	return nil
+	return podReference(replacement), nil
 }
 
 func (m *Manager) updateKubeBlocksPauseOwner(
 	ctx context.Context,
-	session *domain.Session,
+	workflowID, namespace string,
+	kb *v1alpha1.KubeBlocksSpec,
 	paused bool,
 ) error {
-	kb := session.Spec.Workload().KubeBlocks
-
 	gvr, err := kube.ParseGroupVersionResource(kubeBlocksClusterAPIVersion, clusterResource)
 	if err != nil {
 		return err
 	}
 
-	resource := m.dynamic.Resource(gvr).Namespace(session.Spec.Workload().Pod.Namespace)
+	resource := m.dynamic.Resource(gvr).Namespace(namespace)
 
 	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
 		cluster, err := resource.Get(ctx, kb.Cluster, metav1.GetOptions{})
@@ -1603,7 +1665,7 @@ func (m *Manager) updateKubeBlocksPauseOwner(
 		annotations := cluster.GetAnnotations()
 
 		owner := annotations[pauseSessionAnnotation]
-		if owner != "" && owner != session.ID {
+		if owner != "" && owner != workflowID {
 			return domain.NewError(
 				domain.ErrorConflict,
 				"KubeBlocks pause",
@@ -1617,7 +1679,7 @@ func (m *Manager) updateKubeBlocksPauseOwner(
 		}
 
 		if paused {
-			if owner == session.ID {
+			if owner == workflowID {
 				return nil
 			}
 
@@ -1626,10 +1688,10 @@ func (m *Manager) updateKubeBlocksPauseOwner(
 				annotations = map[string]string{}
 			}
 
-			annotations[pauseSessionAnnotation] = session.ID
+			annotations[pauseSessionAnnotation] = workflowID
 			cluster.SetAnnotations(annotations)
 		} else {
-			if owner != session.ID {
+			if owner != workflowID {
 				return nil
 			}
 
@@ -1661,17 +1723,16 @@ func (m *Manager) updateKubeBlocksPauseOwner(
 
 func (m *Manager) validateKubeBlocksClusterForPause(
 	ctx context.Context,
-	session *domain.Session,
+	namespace string,
+	kb *v1alpha1.KubeBlocksSpec,
 ) (*unstructured.Unstructured, error) {
-	kb := session.Spec.Workload().KubeBlocks
-
 	gvr, err := kube.ParseGroupVersionResource(kubeBlocksClusterAPIVersion, clusterResource)
 	if err != nil {
 		return nil, err
 	}
 
 	cluster, err := m.dynamic.Resource(gvr).
-		Namespace(session.Spec.Workload().Pod.Namespace).
+		Namespace(namespace).
 		Get(ctx, kb.Cluster, metav1.GetOptions{})
 	if err != nil {
 		return nil, domain.WrapError(
@@ -1738,12 +1799,11 @@ func (m *Manager) validateKubeBlocksClusterForPause(
 
 func (m *Manager) setKubeBlocksInstanceSetPaused(
 	ctx context.Context,
-	session *domain.Session,
+	workflowID string,
+	ref v1alpha1.ObjectReference,
+	kb *v1alpha1.KubeBlocksSpec,
 	paused bool,
 ) error {
-	workload := session.Spec.Workload()
-
-	kb := workload.KubeBlocks
 	if kb == nil {
 		return domain.NewError(
 			domain.ErrorInternal,
@@ -1760,7 +1820,7 @@ func (m *Manager) setKubeBlocksInstanceSetPaused(
 		)
 	}
 
-	if session.ID == "" {
+	if workflowID == "" {
 		return domain.NewError(
 			domain.ErrorInternal,
 			"InstanceSet pause",
@@ -1768,19 +1828,17 @@ func (m *Manager) setKubeBlocksInstanceSetPaused(
 		)
 	}
 
-	ref := workload.Controller
-
 	gvr, err := kube.ParseGroupVersionResource(ref.APIVersion, instanceSetResource)
 	if err != nil {
 		return err
 	}
 
 	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
-		return m.updateKubeBlocksInstanceSet(ctx, session, kb, ref, paused, gvr)
+		return m.updateKubeBlocksInstanceSet(ctx, workflowID, kb, ref, paused, gvr)
 	})
 }
 
-func kubeBlocksPauseSpec(kb *domain.KubeBlocksSpec, paused bool) map[string]any {
+func kubeBlocksPauseSpec(kb *v1alpha1.KubeBlocksSpec, paused bool) map[string]any {
 	typeName := "Start"
 
 	field := "start"
@@ -1806,9 +1864,9 @@ func kubeBlocksPauseSpec(kb *domain.KubeBlocksSpec, paused bool) map[string]any 
 
 func (m *Manager) updateKubeBlocksInstanceSet(
 	ctx context.Context,
-	session *domain.Session,
-	kb *domain.KubeBlocksSpec,
-	ref domain.ObjectReference,
+	workflowID string,
+	kb *v1alpha1.KubeBlocksSpec,
+	ref v1alpha1.ObjectReference,
 	paused bool,
 	gvr schema.GroupVersionResource,
 ) error {
@@ -1849,7 +1907,7 @@ func (m *Manager) updateKubeBlocksInstanceSet(
 	annotations := object.GetAnnotations()
 
 	pauseOwner := annotations[pauseSessionAnnotation]
-	if pauseOwner != "" && pauseOwner != session.ID {
+	if pauseOwner != "" && pauseOwner != workflowID {
 		return domain.NewError(
 			domain.ErrorConflict,
 			"InstanceSet pause",
@@ -1892,11 +1950,11 @@ func (m *Manager) updateKubeBlocksInstanceSet(
 			annotations = map[string]string{}
 		}
 
-		if annotations[pauseSessionAnnotation] != session.ID {
-			annotations[pauseSessionAnnotation] = session.ID
+		if annotations[pauseSessionAnnotation] != workflowID {
+			annotations[pauseSessionAnnotation] = workflowID
 			changed = true
 		}
-	} else if annotations[pauseSessionAnnotation] == session.ID {
+	} else if annotations[pauseSessionAnnotation] == workflowID {
 		delete(annotations, pauseSessionAnnotation)
 
 		changed = true
@@ -1952,8 +2010,8 @@ func (m *Manager) updateKubeBlocksInstanceSet(
 }
 
 func validateInstanceSetPauseState(
-	ref domain.ObjectReference,
-	kb *domain.KubeBlocksSpec,
+	ref v1alpha1.ObjectReference,
+	kb *v1alpha1.KubeBlocksSpec,
 	paused, current, found bool,
 	pauseOwner string,
 ) error {
@@ -2010,10 +2068,9 @@ func validateInstanceSetPauseState(
 
 func (m *Manager) verifyKubeBlocksInstanceSetPaused(
 	ctx context.Context,
-	session *domain.Session,
+	workflowID string,
+	ref v1alpha1.ObjectReference,
 ) error {
-	ref := session.Spec.Workload().Controller
-
 	gvr, err := kube.ParseGroupVersionResource(ref.APIVersion, instanceSetResource)
 	if err != nil {
 		return err
@@ -2034,7 +2091,7 @@ func (m *Manager) verifyKubeBlocksInstanceSetPaused(
 		)
 	}
 
-	if object.GetAnnotations()[pauseSessionAnnotation] != session.ID {
+	if object.GetAnnotations()[pauseSessionAnnotation] != workflowID {
 		return domain.NewError(
 			domain.ErrorConflict,
 			"verify paused",
@@ -2067,9 +2124,10 @@ func (m *Manager) verifyKubeBlocksInstanceSetPaused(
 	return nil
 }
 
-func (m *Manager) deleteKubeBlocksPod(ctx context.Context, session *domain.Session) error {
-	ref := session.Spec.Workload().Pod
-
+func (m *Manager) deleteKubeBlocksPod(
+	ctx context.Context,
+	ref, controller v1alpha1.ObjectReference,
+) error {
 	pod, err := m.typed.CoreV1().Pods(ref.Namespace).Get(ctx, ref.Name, metav1.GetOptions{})
 	if apierrors.IsNotFound(err) {
 		return nil
@@ -2094,7 +2152,7 @@ func (m *Manager) deleteKubeBlocksPod(ctx context.Context, session *domain.Sessi
 
 	if err := validatePodController(
 		pod,
-		session.Spec.Workload().Controller,
+		controller,
 		"pause KubeBlocks",
 	); err != nil {
 		return err

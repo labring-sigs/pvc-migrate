@@ -428,9 +428,10 @@ spec:
                   volumes:
                     items:
                       description: |-
-                        ClusterVolumeSpec is the cluster-workflow planning contract. PVC names are
-                        relative to the source and destination-storage namespace roles declared by
-                        the parent workflow. PV references remain cluster-scoped.
+                        VolumeSpec is planning output required to resume a PVC transfer. It is an
+                        API-owned type with only the fields needed by transfer workflows.
+                        PVC references are relative to the workflow's source and destination
+                        namespace roles; PV references are always cluster-scoped.
                       properties:
                         accessModes:
                           items:
@@ -826,6 +827,12 @@ spec:
                       - storageClass
                       - volumeMode
                       type: object
+                      x-kubernetes-validations:
+                      - message: sourcePVC.uid and sourcePV.uid are required planning
+                          identities
+                        rule: has(self.sourcePVC.uid) && size(self.sourcePVC.uid)
+                          > 0 && has(self.sourcePV.uid) && size(self.sourcePV.uid)
+                          > 0
                     maxItems: 1024
                     type: array
                 required:
@@ -859,6 +866,10 @@ spec:
                 - Renaming
                 - Moving
                 - Failed
+                type: string
+              sourceNode:
+                description: SourceNode checkpoints runtime placement inferred from
+                  online consumers.
                 type: string
               startedAt:
                 format: date-time
@@ -962,11 +973,6 @@ spec:
                   - sync
                   type: object
                 type: array
-            required:
-            - phase
-            - startedAt
-            - updatedAt
-            - volumes
             type: object
         required:
         - spec

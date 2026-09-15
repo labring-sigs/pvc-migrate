@@ -2,10 +2,13 @@ package app
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"log/slog"
 	"strings"
 	"time"
 
+	v1alpha1 "github.com/labring-sigs/pvc-migrate/api/v1alpha1"
 	"github.com/labring-sigs/pvc-migrate/internal/domain"
 	"github.com/labring-sigs/pvc-migrate/internal/kube"
 	corev1 "k8s.io/api/core/v1"
@@ -13,6 +16,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/validation"
+	"k8s.io/client-go/kubernetes"
 )
 
 type OrphanCleanupOptions struct {
@@ -25,7 +29,89 @@ type OrphanCleanupOptions struct {
 // PlanOrphanCleanup reconstructs either a pre-activation source/destination
 // relationship or a post-activation active/rollback relationship after the
 // durable workflow record was lost.
-func (s *Service) PlanOrphanCleanup(
+// OrphanCleaner inspects and clears ownership labels left behind when a
+// workflow record was lost. It never reconstructs a workflow; it only verifies
+// and removes session-scoped resource ownership.
+type OrphanCleaner struct {
+	client  kubernetes.Interface
+	locker  kube.SessionLocker
+	leases  orphanLeaseCleaner
+	records kube.WorkflowOwnerFinder
+	logger  *slog.Logger
+}
+
+// orphanLeaseCleaner removes an abandoned session Lease by identity.
+type orphanLeaseCleaner interface {
+	DeleteSessionLease(ctx context.Context, namespace, sessionID string) error
+}
+
+func NewOrphanCleaner(
+	client kubernetes.Interface,
+	locker kube.SessionLocker,
+	leases orphanLeaseCleaner,
+	records kube.WorkflowOwnerFinder,
+	logger *slog.Logger,
+) *OrphanCleaner {
+	return &OrphanCleaner{
+		client:  client,
+		locker:  locker,
+		leases:  leases,
+		records: records,
+		logger:  logger,
+	}
+}
+
+func (s *OrphanCleaner) logInfo(message string, args ...any) {
+	if s != nil && s.logger != nil {
+		s.logger.Info(message, args...)
+	}
+}
+
+func (s *OrphanCleaner) ensurePVCUnused(
+	ctx context.Context,
+	ref v1alpha1.ObjectReference,
+	sessionID string,
+) error {
+	_, err := inspectPVCUnusedWithOperations(ctx, s.client, ref, sessionID)
+	return err
+}
+
+// withSessionIDLock serializes cleanup against any live workflow holding the
+// same identity, and exposes the held lock to the cleanup body for release.
+func (s *OrphanCleaner) withSessionIDLock(
+	ctx context.Context,
+	namespace, id string,
+	fn func(context.Context) error,
+) error {
+	if namespace == "" || id == "" {
+		return domain.NewError(
+			domain.ErrorValidation,
+			"cleanup orphan",
+			"session namespace and id are required",
+		)
+	}
+
+	lock, err := kube.AcquireRequiredSessionLock(ctx, s.locker, namespace, id)
+	if err != nil {
+		return err
+	}
+
+	operationCtx, cancelOperation := lock.Bind(ctx)
+	defer cancelOperation()
+
+	lockedCtx := withHeldSessionLock(
+		operationCtx, heldSessionLock{lock: lock, namespace: namespace, id: id},
+	)
+
+	operationErr := fn(lockedCtx)
+	if leaseErr := kube.LeaseFenceError(lockedCtx); leaseErr != nil {
+		operationErr = errors.Join(operationErr, leaseErr)
+	}
+
+	return operationErr
+}
+
+func (s *OrphanCleaner) PlanOrphanCleanup(
 	ctx context.Context,
 	options OrphanCleanupOptions,
 ) (*domain.OrphanCleanupPlan, error) {
@@ -255,7 +341,7 @@ func (s *Service) PlanOrphanCleanup(
 	}
 }
 
-func (s *Service) planPostActivationOrphan(
+func (s *OrphanCleaner) planPostActivationOrphan(
 	ctx context.Context,
 	plan *domain.OrphanCleanupPlan,
 	options OrphanCleanupOptions,
@@ -310,7 +396,7 @@ func (s *Service) planPostActivationOrphan(
 		Get(ctx, rollbackName, metav1.GetOptions{})
 	switch {
 	case apierrors.IsNotFound(err):
-		resources.RollbackPV = domain.ObjectReference{
+		resources.RollbackPV = v1alpha1.ObjectReference{
 			APIVersion: domain.CoreAPIVersion,
 			Kind:       domain.KindPersistentVolume,
 			Name:       rollbackName,
@@ -443,7 +529,7 @@ func (s *Service) planPostActivationOrphan(
 	return plan, nil
 }
 
-func (s *Service) planPreActivationOrphan(
+func (s *OrphanCleaner) planPreActivationOrphan(
 	ctx context.Context,
 	plan *domain.OrphanCleanupPlan,
 	options OrphanCleanupOptions,
@@ -557,7 +643,7 @@ func preActivationSourceSelector(sessionID string) string {
 	)
 }
 
-func (s *Service) loadPreActivationOrphanResources(
+func (s *OrphanCleaner) loadPreActivationOrphanResources(
 	ctx context.Context,
 	plan *domain.OrphanCleanupPlan,
 	options OrphanCleanupOptions,
@@ -637,7 +723,7 @@ func validatePreActivationDestinationPVC(
 	))
 }
 
-func (s *Service) resolvePreActivationDestinationPV(
+func (s *OrphanCleaner) resolvePreActivationDestinationPV(
 	ctx context.Context,
 	plan *domain.OrphanCleanupPlan,
 	pvc *corev1.PersistentVolumeClaim,
@@ -661,7 +747,7 @@ func (s *Service) resolvePreActivationDestinationPV(
 	case len(orphanPVs) == 1 && len(sourcePVs) == 1:
 		destinationPV := &orphanPVs[0]
 		if destinationPV.Spec.ClaimRef != nil {
-			resources.DestinationPVC = domain.ObjectReference{
+			resources.DestinationPVC = v1alpha1.ObjectReference{
 				APIVersion: domain.CoreAPIVersion,
 				Kind:       domain.KindPersistentVolumeClaim,
 				Namespace:  destinationPV.Spec.ClaimRef.Namespace,
@@ -691,10 +777,10 @@ func (s *Service) resolvePreActivationDestinationPV(
 	return nil
 }
 
-func (s *Service) destinationPVForPVC(
+func (s *OrphanCleaner) destinationPVForPVC(
 	ctx context.Context,
 	plan *domain.OrphanCleanupPlan,
-	pvc domain.ObjectReference,
+	pvc v1alpha1.ObjectReference,
 ) *corev1.PersistentVolume {
 	claim, err := s.client.CoreV1().PersistentVolumeClaims(pvc.Namespace).Get(
 		ctx,
@@ -845,7 +931,7 @@ func addPreActivationReadyCheck(
 
 // CleanupOrphan performs the validated metadata cleanup and removes the
 // session lease. It never deletes the active PVC or active PV.
-func (s *Service) CleanupOrphan(
+func (s *OrphanCleaner) CleanupOrphan(
 	ctx context.Context,
 	options OrphanCleanupOptions,
 ) (*domain.OrphanCleanupPlan, error) {
@@ -920,7 +1006,7 @@ func (s *Service) CleanupOrphan(
 						return err
 					}
 				} else {
-					if err := s.store.DeleteSessionLease(
+					if err := s.leases.DeleteSessionLease(
 						lockedCtx,
 						options.SessionNamespace,
 						options.SessionID,
@@ -940,7 +1026,7 @@ func (s *Service) CleanupOrphan(
 	return result, nil
 }
 
-func (s *Service) cleanupPostActivationOrphan(
+func (s *OrphanCleaner) cleanupPostActivationOrphan(
 	ctx context.Context,
 	sessionID string,
 	resources *domain.OrphanPostActivationCleanup,
@@ -969,7 +1055,7 @@ func (s *Service) cleanupPostActivationOrphan(
 	return s.finalizeOrphanPV(ctx, sessionID, resources.ActivePV, kube.ResourceRoleActive)
 }
 
-func (s *Service) cleanupPreActivationOrphan(
+func (s *OrphanCleaner) cleanupPreActivationOrphan(
 	ctx context.Context,
 	sessionID string,
 	resources *domain.OrphanPreActivationCleanup,
@@ -983,15 +1069,14 @@ func (s *Service) cleanupPreActivationOrphan(
 	}
 
 	if resources.DestinationPVC.Namespace != "" {
-		session := &domain.Session{
-			ID: sessionID,
-			Spec: domain.NewSessionSpec(domain.OperationReserve, domain.SessionCommon{
-				TemporaryNamespace: resources.DestinationPVC.Namespace,
-				SessionNamespace:   resources.DestinationPVC.Namespace,
-				Volumes:            []domain.VolumeSpec{{DestinationPVC: resources.DestinationPVC}},
-			}, false, domain.SessionWorkflowOptions{}),
+		pods, err := inventoryReservationPods(
+			ctx, s.client, sessionID, []string{resources.DestinationPVC.Namespace},
+		)
+		if err != nil {
+			return err
 		}
-		if err := s.deleteReservationPods(ctx, session); err != nil {
+
+		if err := deleteReservationConsumers(ctx, s.client, pods); err != nil {
 			return err
 		}
 
@@ -1010,8 +1095,8 @@ func (s *Service) cleanupPreActivationOrphan(
 	}
 
 	if resources.DestinationPV.Name != "" {
-		if err := s.deleteReclaimedPV(
-			ctx,
+		if err := deleteReclaimedPV(
+			ctx, s.client, s.logger,
 			sessionID,
 			resources.DestinationPV,
 			kube.ResourceRoleDestination,
@@ -1029,11 +1114,11 @@ func (s *Service) cleanupPreActivationOrphan(
 	return s.finalizeOrphanPV(ctx, sessionID, resources.SourcePV, kube.ResourceRoleSource)
 }
 
-func (s *Service) deleteOrphanDestinationPVC(
+func (s *OrphanCleaner) deleteOrphanDestinationPVC(
 	ctx context.Context,
 	sessionID string,
 	sourcePVCUID types.UID,
-	ref domain.ObjectReference,
+	ref v1alpha1.ObjectReference,
 ) error {
 	pvc, err := s.client.CoreV1().
 		PersistentVolumeClaims(ref.Namespace).
@@ -1084,7 +1169,10 @@ func (s *Service) deleteOrphanDestinationPVC(
 	return nil
 }
 
-func (s *Service) hasOrphanSessionResources(ctx context.Context, sessionID string) (bool, error) {
+func (s *OrphanCleaner) hasOrphanSessionResources(
+	ctx context.Context,
+	sessionID string,
+) (bool, error) {
 	pvcs, err := s.client.CoreV1().PersistentVolumeClaims("").List(ctx, metav1.ListOptions{})
 	if err != nil {
 		return false, domain.WrapError(
@@ -1133,16 +1221,11 @@ func (s *Service) hasOrphanSessionResources(ctx context.Context, sessionID strin
 	return len(pods.Items) > 0, nil
 }
 
-func (s *Service) checkOrphanSessionRecord(
+func (s *OrphanCleaner) checkOrphanSessionRecord(
 	ctx context.Context,
 	options OrphanCleanupOptions,
 ) domain.Check {
-	records := s.config.SessionRecords
-	if records == nil {
-		records = kube.NewSessionRecords(s.client, nil)
-	}
-
-	owner, err := records.Find(
+	owner, err := s.records.Find(
 		ctx,
 		options.SessionID,
 		options.SessionNamespace,
@@ -1154,10 +1237,10 @@ func (s *Service) checkOrphanSessionRecord(
 			domain.CheckNameSessionRecord,
 			fmt.Sprintf(
 				"session %s/%s still exists in the %s backend (phase %s); use the owning workflow lifecycle commands after reading its status",
-				owner.Spec.SessionNamespace,
+				owner.SessionNamespace,
 				owner.ID,
 				owner.Backend,
-				owner.Status.Phase,
+				owner.Phase,
 			),
 		)
 	case err != nil:
@@ -1196,10 +1279,10 @@ func validReclaimPolicy(policy corev1.PersistentVolumeReclaimPolicy) bool {
 		policy == corev1.PersistentVolumeReclaimRecycle
 }
 
-func (s *Service) deleteOrphanRollbackPV(
+func (s *OrphanCleaner) deleteOrphanRollbackPV(
 	ctx context.Context,
 	sessionID string,
-	ref domain.ObjectReference,
+	ref v1alpha1.ObjectReference,
 	policy corev1.PersistentVolumeReclaimPolicy,
 ) error {
 	pv, err := s.client.CoreV1().PersistentVolumes().Get(ctx, ref.Name, metav1.GetOptions{})
@@ -1272,13 +1355,13 @@ func (s *Service) deleteOrphanRollbackPV(
 		)
 	}
 
-	return s.waitForRollbackPVDeletion(ctx, ref)
+	return waitForPVDeletion(ctx, s.client, ref)
 }
 
-func (s *Service) finalizeOrphanPVC(
+func (s *OrphanCleaner) finalizeOrphanPVC(
 	ctx context.Context,
 	sessionID string,
-	ref domain.ObjectReference,
+	ref v1alpha1.ObjectReference,
 ) error {
 	pvc, err := s.client.CoreV1().
 		PersistentVolumeClaims(ref.Namespace).
@@ -1350,10 +1433,10 @@ func (s *Service) finalizeOrphanPVC(
 	return nil
 }
 
-func (s *Service) finalizeOrphanPV(
+func (s *OrphanCleaner) finalizeOrphanPV(
 	ctx context.Context,
 	sessionID string,
-	ref domain.ObjectReference,
+	ref v1alpha1.ObjectReference,
 	expectedRole string,
 ) error {
 	role := orphanPVRoleName(expectedRole)

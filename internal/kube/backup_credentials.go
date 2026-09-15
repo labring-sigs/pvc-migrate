@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"fmt"
 
+	v1alpha1 "github.com/labring-sigs/pvc-migrate/api/v1alpha1"
 	"github.com/labring-sigs/pvc-migrate/internal/domain"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -83,7 +84,7 @@ func CreateBackupCredentialsSecret(
 func DeleteBackupCredentialsSecret(
 	ctx context.Context,
 	client kubernetes.Interface,
-	ref domain.ObjectReference,
+	ref v1alpha1.ObjectReference,
 	sessionID string,
 ) error {
 	secret, err := backupCredentialsSecretForCleanup(ctx, client, ref, sessionID)
@@ -116,7 +117,7 @@ func DeleteBackupCredentialsSecret(
 func ValidateBackupCredentialsSecretCleanup(
 	ctx context.Context,
 	client kubernetes.Interface,
-	ref domain.ObjectReference,
+	ref v1alpha1.ObjectReference,
 	sessionID string,
 ) error {
 	_, err := backupCredentialsSecretForCleanup(ctx, client, ref, sessionID)
@@ -126,7 +127,7 @@ func ValidateBackupCredentialsSecretCleanup(
 func backupCredentialsSecretForCleanup(
 	ctx context.Context,
 	client kubernetes.Interface,
-	ref domain.ObjectReference,
+	ref v1alpha1.ObjectReference,
 	sessionID string,
 ) (*corev1.Secret, error) {
 	if client == nil || ref.Namespace == "" || ref.Name == "" {
@@ -177,7 +178,7 @@ func backupCredentialsSecretForCleanup(
 func GetBackupCredentialsSecret(
 	ctx context.Context,
 	client kubernetes.Interface,
-	ref domain.ObjectReference,
+	ref v1alpha1.ObjectReference,
 	sessionID string,
 ) (*corev1.Secret, error) {
 	if client == nil || ref.Namespace == "" || ref.Name == "" || sessionID == "" {

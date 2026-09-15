@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"maps"
 
+	v1alpha1 "github.com/labring-sigs/pvc-migrate/api/v1alpha1"
 	"github.com/labring-sigs/pvc-migrate/internal/domain"
 	"github.com/labring-sigs/pvc-migrate/internal/kube"
 	"github.com/labring-sigs/pvc-migrate/internal/parallel"
@@ -15,177 +16,87 @@ import (
 	"k8s.io/apimachinery/pkg/util/validation"
 )
 
-// pvcIdentityPlanOptions is the shared planning kernel for the independent
-// rename and move entry points. It is private so callers cannot accidentally
-// build a mixed identity operation by selecting an Operation field.
-type pvcIdentityPlanOptions struct {
-	Operation            domain.Operation
-	SessionID            string
-	SourceNamespace      string
-	SourcePVC            string
-	DestinationNamespace string
-	DestinationPVC       string
-	SessionNamespace     string
+type pvcRebindPlan struct {
+	domain.PVCIdentityReport
+	identity v1alpha1.PVCIdentityFields
 }
 
-// RenamePlanOptions is the dedicated same-namespace PVC rename contract.
-type RenamePlanOptions struct {
-	SessionID        string
-	SourceNamespace  string
-	SourcePVC        string
-	DestinationPVC   string
-	SessionNamespace string
-}
+func newPVCIdentityReport(
+	kind, id, storageNamespace, sourceNamespace, destinationNamespace string,
+) domain.PVCIdentityReport {
+	return domain.PVCIdentityReport{
+		PlanSummary: domain.PlanSummary{
+			APIVersion: domain.SessionAPIVersion,
+			Kind:       kind,
+			SessionID:  id,
 
-// MovePlanOptions is the dedicated cluster-scoped PVC identity contract.
-type MovePlanOptions struct {
-	SessionID            string
-	SourceNamespace      string
-	SourcePVC            string
-	DestinationNamespace string
-	DestinationPVC       string
-	SessionNamespace     string
-}
+			SessionNamespace: storageNamespace,
+			Ready:            true,
+		}, SourceNamespace: sourceNamespace,
 
-func (p *Planner) PlanRenamePVC(
-	ctx context.Context,
-	options RenamePlanOptions,
-) (*domain.MigrationPlan, error) {
-	return p.planPVCIdentity(ctx, pvcIdentityPlanOptions{
-		Operation: domain.OperationRename, SessionID: options.SessionID,
-		SourceNamespace: options.SourceNamespace, SourcePVC: options.SourcePVC,
-		DestinationNamespace: options.SourceNamespace, DestinationPVC: options.DestinationPVC,
-		SessionNamespace: options.SessionNamespace,
-	})
-}
+		DestinationNamespace: destinationNamespace,
 
-func (p *Planner) PlanMovePVC(
-	ctx context.Context,
-	options MovePlanOptions,
-) (*domain.MigrationPlan, error) {
-	return p.planPVCIdentity(ctx, pvcIdentityPlanOptions{
-		Operation: domain.OperationMove, SessionID: options.SessionID,
-		SourceNamespace: options.SourceNamespace, SourcePVC: options.SourcePVC,
-		DestinationNamespace: options.DestinationNamespace, DestinationPVC: options.DestinationPVC,
-		SessionNamespace: options.SessionNamespace,
-	})
-}
-
-func (p *Planner) planPVCIdentity(
-	ctx context.Context,
-	options pvcIdentityPlanOptions,
-) (*domain.MigrationPlan, error) {
-	options, destinationNamespaceProvided := normalizeRenameOptions(options)
-
-	if options.Operation == domain.OperationMove && options.DestinationPVC == "" {
-		options.DestinationPVC = options.SourcePVC
-	}
-
-	if p.requestOnly {
-		return p.identityIntentPlan(options)
-	}
-
-	p.logInfo(
-		"PVC identity planning started",
-		"operation",
-		options.Operation,
-		"session",
-		options.SessionID,
-		"source",
-		options.SourceNamespace+"/"+options.SourcePVC,
-		"destination",
-		options.DestinationNamespace+"/"+options.DestinationPVC,
-	)
-
-	kind := "RenamePlan"
-	if options.Operation == domain.OperationMove {
-		kind = "MovePlan"
-	}
-
-	plan := &domain.MigrationPlan{
-		APIVersion:           domain.SessionAPIVersion,
-		Kind:                 kind,
-		SessionID:            options.SessionID,
-		SourceNamespace:      options.SourceNamespace,
-		TemporaryNamespace:   options.DestinationNamespace,
-		DestinationNamespace: options.DestinationNamespace,
-		SessionNamespace:     options.SessionNamespace,
-		Ready:                true,
 		TemporaryUsage: domain.ResourceEstimate{
 			ByStorageClass:     map[string]string{},
 			PVCsByStorageClass: map[string]int{},
 		},
-		RollbackRetention: domain.ResourceEstimate{
-			ByStorageClass:     map[string]string{},
-			PVCsByStorageClass: map[string]int{},
-		},
-		Workload: domain.WorkloadSpec{Adapter: domain.WorkloadNone},
 	}
-	if !validateRenameInputs(plan, options, destinationNamespaceProvided) {
-		return plan, nil
-	}
+}
 
-	if !options.Operation.RebindsPVC() {
-		plan.AddCheck(
-			failed(
-				domain.CheckNameOperation,
-				fmt.Sprintf("unsupported PVC identity operation %q", options.Operation),
-			),
-		)
-
-		return plan, nil
+func (p *Planner) planPVCRebind(
+	ctx context.Context,
+	report domain.PVCIdentityReport,
+	sourcePVC, destinationPVC string,
+) *pvcRebindPlan {
+	plan := &pvcRebindPlan{PVCIdentityReport: report}
+	if !validatePVCRebindInputs(&plan.PVCIdentityReport, sourcePVC, destinationPVC) {
+		return plan
 	}
 
 	if !plan.Ready {
-		return plan, nil
+		return plan
 	}
 
 	p.logInfo(
 		"loading PVC identity cluster inventory",
 		"session",
-		options.SessionID,
+		plan.SessionID,
 		"source",
-		options.SourceNamespace+"/"+options.SourcePVC,
+		plan.SourceNamespace+"/"+sourcePVC,
 		"destination",
-		options.DestinationNamespace+"/"+options.DestinationPVC,
+		plan.DestinationNamespace+"/"+destinationPVC,
 	)
 
 	var (
-		destinationNamespaceErr error
-		pvc                     *corev1.PersistentVolumeClaim
-		pvcErr                  error
-		existing                *corev1.PersistentVolumeClaim
-		destinationPVCErr       error
-		pods                    *corev1.PodList
-		podListErr              error
+		pvc               *corev1.PersistentVolumeClaim
+		pvcErr            error
+		existing          *corev1.PersistentVolumeClaim
+		destinationPVCErr error
+		pods              *corev1.PodList
+		podListErr        error
 	)
-	parallel.ForLimit(4, 4, func(index int) {
+	parallel.ForLimit(3, 3, func(index int) {
 		switch index {
 		case 0:
 			pvc, pvcErr = p.client.CoreV1().
-				PersistentVolumeClaims(options.SourceNamespace).
-				Get(ctx, options.SourcePVC, metav1.GetOptions{})
+				PersistentVolumeClaims(plan.SourceNamespace).
+				Get(ctx, sourcePVC, metav1.GetOptions{})
 		case 1:
 			existing, destinationPVCErr = p.client.CoreV1().
-				PersistentVolumeClaims(options.DestinationNamespace).
-				Get(ctx, options.DestinationPVC, metav1.GetOptions{})
+				PersistentVolumeClaims(plan.DestinationNamespace).
+				Get(ctx, destinationPVC, metav1.GetOptions{})
 		case 2:
 			pods, podListErr = p.client.CoreV1().
-				Pods(options.SourceNamespace).
+				Pods(plan.SourceNamespace).
 				List(ctx, metav1.ListOptions{})
-		case 3:
-			if options.Operation == domain.OperationMove {
-				_, destinationNamespaceErr = p.client.CoreV1().
-					Namespaces().
-					Get(ctx, options.DestinationNamespace, metav1.GetOptions{})
-			}
 		}
 	})
 
 	if !p.validateRenameInventory(
-		plan,
-		options,
-		destinationNamespaceErr,
+		&plan.PlanSummary,
+		plan.SourceNamespace,
+		plan.DestinationNamespace,
+		destinationPVC,
 		pvc,
 		pvcErr,
 		existing,
@@ -193,7 +104,7 @@ func (p *Planner) planPVCIdentity(
 		pods,
 		podListErr,
 	) {
-		return plan, nil
+		return plan
 	}
 
 	storageClass := ""
@@ -224,12 +135,12 @@ func (p *Planner) planPVCIdentity(
 
 	if pvErr != nil {
 		plan.AddCheck(failed(domain.CheckNameSourcePV, fmt.Sprintf("read source PV: %v", pvErr)))
-		return plan, nil
+		return plan
 	}
 
 	if pv == nil || pv.Name == "" {
 		plan.AddCheck(failed(domain.CheckNameSourcePV, "read source PV returned an empty object"))
-		return plan, nil
+		return plan
 	}
 
 	if scErr != nil {
@@ -238,7 +149,7 @@ func (p *Planner) planPVCIdentity(
 			fmt.Sprintf("read source StorageClass %s: %v", storageClass, scErr),
 		))
 
-		return plan, nil
+		return plan
 	}
 
 	if !sourceBindingMatches(pvc, pv) {
@@ -256,7 +167,7 @@ func (p *Planner) planPVCIdentity(
 		)
 	}
 
-	p.checkSessionOwnership(ctx, plan, options.SessionNamespace, pvc, pv)
+	p.checkSessionOwnership(ctx, plan, plan.SessionNamespace, pvc, pv)
 	capacity := pv.Spec.Capacity[corev1.ResourceStorage]
 	bindingMode := storagev1.VolumeBindingImmediate
 
@@ -273,36 +184,33 @@ func (p *Planner) planPVCIdentity(
 		mode = *pvc.Spec.VolumeMode
 	}
 
-	destinationRef := domain.ObjectReference{
+	destinationRef := v1alpha1.ObjectReference{
 		APIVersion: domain.CoreAPIVersion,
 		Kind:       domain.KindPersistentVolumeClaim,
-		Namespace:  options.DestinationNamespace,
-		Name:       options.DestinationPVC,
+		Namespace:  plan.DestinationNamespace,
+		Name:       destinationPVC,
 	}
-	volume := domain.VolumeSpec{
-		SourcePVC:           kube.PVCReference(pvc),
-		SourcePV:            kube.PVReference(pv),
-		SourceReclaimPolicy: pv.Spec.PersistentVolumeReclaimPolicy,
-		SourcePVCSpec:       *pvc.Spec.DeepCopy(),
-		SourcePVCMetadata: domain.PVCMetadata{
-			Labels:          maps.Clone(pvc.Labels),
-			Annotations:     kube.PVCAnnotationsForRecreation(pvc.Annotations),
-			OwnerReferences: append([]metav1.OwnerReference(nil), pvc.OwnerReferences...),
+	plan.identity = v1alpha1.PVCIdentityFields{
+		SourcePVC:      localPlanningReference(kube.PVCReference(pvc)),
+		SourcePV:       localPlanningReference(kube.PVReference(pv)),
+		DestinationPVC: localPlanningReference(destinationRef),
+		SourceTemplate: v1alpha1.PVCSourceTemplate{
+			Spec: *pvc.Spec.DeepCopy(),
+			Metadata: v1alpha1.PVCMetadata{
+				Labels:          maps.Clone(pvc.Labels),
+				Annotations:     kube.PVCAnnotationsForRecreation(pvc.Annotations),
+				OwnerReferences: pvc.DeepCopy().OwnerReferences,
+			},
+			ReclaimPolicy: pv.Spec.PersistentVolumeReclaimPolicy,
 		},
+	}
+	plan.Volumes = []domain.PlannedVolume{{
+		SourcePVC:      kube.PVCReference(pvc),
+		SourcePV:       kube.PVReference(pv),
 		DestinationPVC: destinationRef,
 		Capacity:       capacity.String(),
 		SourceCapacity: capacity.String(),
-		StorageClass:   storageClass,
 		AccessModes:    append([]corev1.PersistentVolumeAccessMode(nil), pvc.Spec.AccessModes...),
-		VolumeMode:     mode,
-	}
-	plan.Volumes = []domain.PlannedVolume{{
-		SourcePVC:      volume.SourcePVC,
-		SourcePV:       volume.SourcePV,
-		DestinationPVC: destinationRef,
-		Capacity:       volume.Capacity,
-		SourceCapacity: volume.SourceCapacity,
-		AccessModes:    volume.AccessModes,
 		VolumeMode:     mode,
 		StorageClass:   storageClass,
 		BindingMode:    bindingMode,
@@ -311,7 +219,7 @@ func (p *Planner) planPVCIdentity(
 	requestedCapacity := capacity.String()
 
 	requestedPVCs := 1
-	if options.SourceNamespace == options.DestinationNamespace {
+	if plan.SourceNamespace == plan.DestinationNamespace {
 		requestedCapacity = "0"
 		requestedPVCs = 0
 	}
@@ -322,7 +230,7 @@ func (p *Planner) planPVCIdentity(
 		ByStorageClass:     map[string]string{storageClass: requestedCapacity},
 		PVCsByStorageClass: map[string]int{storageClass: requestedPVCs},
 	}
-	if options.SessionNamespace == options.DestinationNamespace {
+	if plan.SessionNamespace == plan.DestinationNamespace {
 		if !p.controllerSubmission {
 			plan.TemporaryUsage.ConfigMaps = 1
 		}
@@ -330,44 +238,47 @@ func (p *Planner) planPVCIdentity(
 		plan.TemporaryUsage.Leases = 1
 	}
 
-	plan.SessionSpec = domain.NewSessionSpec(options.Operation, domain.SessionCommon{
-		SourceNamespace:      options.SourceNamespace,
-		TemporaryNamespace:   options.DestinationNamespace,
-		DestinationNamespace: options.DestinationNamespace,
-		SessionNamespace:     options.SessionNamespace,
-		Volumes:              []domain.VolumeSpec{volume},
-	}, false, domain.SessionWorkflowOptions{})
-
 	p.logInfo(
 		"validating PVC identity cluster policies",
 		"session",
-		options.SessionID,
+		plan.SessionID,
 		"sourceNamespace",
-		options.SourceNamespace,
+		plan.SourceNamespace,
 		"destinationNamespace",
-		options.DestinationNamespace,
+		plan.DestinationNamespace,
 	)
 
+	p.checkIdentityPlanPolicies(ctx, &plan.PVCIdentityReport)
+
+	return plan
+}
+
+func (p *Planner) checkIdentityPlanPolicies(
+	ctx context.Context,
+	plan *domain.PVCIdentityReport,
+) {
 	tasks := []planCheckTask{
-		func(result *domain.MigrationPlan) {
+		func(result checkRecorder) {
 			p.checkNamespaceResourcePolicies(
 				ctx,
 				result,
-				options.DestinationNamespace,
+				plan.DestinationNamespace,
 				plan.Volumes,
 				plan.TemporaryUsage,
 			)
 		},
-		func(result *domain.MigrationPlan) {
+		func(result checkRecorder) {
 			p.checkRenameRBAC(
 				ctx,
 				result,
-				plan.SessionSpec,
+				plan.SourceNamespace,
+				plan.DestinationNamespace,
+				plan.SessionNamespace,
 			)
 		},
 	}
-	if options.SessionNamespace != options.DestinationNamespace {
-		tasks = append(tasks, func(result *domain.MigrationPlan) {
+	if plan.SessionNamespace != plan.DestinationNamespace {
+		tasks = append(tasks, func(result checkRecorder) {
 			configMaps := 1
 			if p.controllerSubmission {
 				configMaps = 0
@@ -376,7 +287,7 @@ func (p *Planner) planPVCIdentity(
 			p.checkNamespaceResourcePolicies(
 				ctx,
 				result,
-				options.SessionNamespace,
+				plan.SessionNamespace,
 				nil,
 				domain.ResourceEstimate{
 					StorageRequests:    "0",
@@ -390,14 +301,11 @@ func (p *Planner) planPVCIdentity(
 	}
 
 	runPlanCheckTasks(plan, tasks)
-
-	return plan, nil
 }
 
 func (p *Planner) validateRenameInventory(
-	plan *domain.MigrationPlan,
-	options pvcIdentityPlanOptions,
-	destinationNamespaceErr error,
+	plan *domain.PlanSummary,
+	sourceNamespace, destinationNamespace, destinationPVC string,
 	pvc *corev1.PersistentVolumeClaim,
 	pvcErr error,
 	existing *corev1.PersistentVolumeClaim,
@@ -405,30 +313,6 @@ func (p *Planner) validateRenameInventory(
 	pods *corev1.PodList,
 	podListErr error,
 ) bool {
-	if options.Operation == domain.OperationMove {
-		if destinationNamespaceErr != nil {
-			plan.AddCheck(
-				failed(
-					domain.CheckNameDestinationNamespace,
-					fmt.Sprintf(
-						"read destination namespace %s: %v",
-						options.DestinationNamespace,
-						destinationNamespaceErr,
-					),
-				),
-			)
-
-			return false
-		}
-
-		plan.AddCheck(
-			passed(
-				domain.CheckNameDestinationNamespace,
-				fmt.Sprintf("destination namespace %s exists", options.DestinationNamespace),
-			),
-		)
-	}
-
 	if pvcErr != nil {
 		plan.AddCheck(failed(domain.CheckNameSourcePVC, fmt.Sprintf("read source PVC: %v", pvcErr)))
 		return false
@@ -444,7 +328,7 @@ func (p *Planner) validateRenameInventory(
 		return false
 	}
 
-	p.checkPVCFinalizers(plan, pvc, options.Operation)
+	p.checkPVCFinalizers(plan, pvc)
 
 	switch {
 	case destinationPVCErr == nil && existing == nil:
@@ -476,15 +360,15 @@ func (p *Planner) validateRenameInventory(
 				domain.CheckNameDestinationPVC,
 				fmt.Sprintf(
 					"destination identity %s/%s is available",
-					options.DestinationNamespace,
-					options.DestinationPVC,
+					destinationNamespace,
+					destinationPVC,
 				),
 			),
 		)
 	}
 
 	if podListErr == nil && pods == nil {
-		podListErr = fmt.Errorf("list Pods in %s returned an empty object", options.SourceNamespace)
+		podListErr = fmt.Errorf("list Pods in %s returned an empty object", sourceNamespace)
 	}
 
 	var podItems []corev1.Pod
@@ -492,16 +376,16 @@ func (p *Planner) validateRenameInventory(
 		podItems = pods.Items
 	}
 
-	p.checkPVCReferencesFromPods(
+	consumers, listed := collectPVCConsumers(
 		plan,
 		pvc,
-		nil,
-		domain.WorkloadSpec{},
-		domain.OperationRename,
-		false,
 		podItems,
 		podListErr,
+		kube.PodPreventsSafePVCDeletion,
 	)
+	if listed {
+		checkIdentityConsumers(plan, pvc, consumers)
+	}
 
 	if len(pvc.OwnerReferences) > 0 {
 		plan.AddCheck(
@@ -512,63 +396,14 @@ func (p *Planner) validateRenameInventory(
 		)
 	}
 
-	for _, check := range plan.Checks {
-		if check.Name == "pvc-consumers" && check.Severity == domain.SeverityWarning {
-			plan.Ready = false
-			plan.AddCheck(
-				failed(
-					domain.CheckNameRenameOffline,
-					"PVC identity changes require the source PVC to have zero active Pod references",
-				),
-			)
-
-			break
-		}
-	}
-
 	return true
 }
 
-func normalizeRenameOptions(options pvcIdentityPlanOptions) (pvcIdentityPlanOptions, bool) {
-	destinationProvided := options.DestinationNamespace != ""
-	if options.Operation == "" {
-		options.Operation = domain.OperationRename
-	}
-
-	if options.SourceNamespace == "" {
-		options.SourceNamespace = "default"
-	}
-
-	if options.DestinationNamespace == "" {
-		options.DestinationNamespace = options.SourceNamespace
-	}
-
-	if options.SessionNamespace == "" {
-		options.SessionNamespace = "pvc-migrate-system"
-	}
-
-	if options.Operation == domain.OperationMove && options.DestinationPVC == "" {
-		options.DestinationPVC = options.SourcePVC
-	}
-
-	return options, destinationProvided
-}
-
-func validateRenameInputs(
-	plan *domain.MigrationPlan,
-	options pvcIdentityPlanOptions,
-	destinationProvided bool,
+func validatePVCRebindInputs(
+	plan *domain.PVCIdentityReport,
+	sourcePVC, destinationPVC string,
 ) bool {
-	if !options.Operation.RebindsPVC() {
-		return true
-	}
-
-	if options.Operation == domain.OperationMove && !destinationProvided {
-		plan.AddCheck(failed(domain.CheckNameMove, "destination namespace is required"))
-		return false
-	}
-
-	if options.SourcePVC == "" || options.DestinationPVC == "" {
+	if sourcePVC == "" || destinationPVC == "" {
 		plan.AddCheck(
 			failed(domain.CheckNameIdentity, "source and destination PVC names are required"),
 		)
@@ -576,12 +411,12 @@ func validateRenameInputs(
 	}
 
 	for _, field := range []struct{ name, value string }{
-		{name: "session ID", value: options.SessionID},
-		{name: "source namespace", value: options.SourceNamespace},
-		{name: "destination namespace", value: options.DestinationNamespace},
-		{name: "session namespace", value: options.SessionNamespace},
-		{name: "source PVC", value: options.SourcePVC},
-		{name: "destination PVC", value: options.DestinationPVC},
+		{name: "session ID", value: plan.SessionID},
+		{name: "source namespace", value: plan.SourceNamespace},
+		{name: "destination namespace", value: plan.DestinationNamespace},
+		{name: "session namespace", value: plan.SessionNamespace},
+		{name: "source PVC", value: sourcePVC},
+		{name: "destination PVC", value: destinationPVC},
 	} {
 		if problems := validation.IsDNS1123Subdomain(field.value); len(problems) > 0 {
 			plan.AddCheck(
@@ -593,18 +428,7 @@ func validateRenameInputs(
 		}
 	}
 
-	if options.Operation == domain.OperationRename &&
-		options.SourceNamespace != options.DestinationNamespace {
-		plan.AddCheck(
-			failed(
-				domain.CheckNameRename,
-				"rename requires source and destination PVCs in the same namespace; use move for a cross-namespace identity change",
-			),
-		)
-	}
-
-	if options.SourceNamespace == options.DestinationNamespace &&
-		options.SourcePVC == options.DestinationPVC {
+	if plan.SourceNamespace == plan.DestinationNamespace && sourcePVC == destinationPVC {
 		plan.AddCheck(
 			failed(domain.CheckNameRename, "source and destination PVC identities must differ"),
 		)

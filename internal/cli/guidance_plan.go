@@ -5,20 +5,22 @@ import (
 	"io"
 	"strings"
 
+	v1alpha1 "github.com/labring-sigs/pvc-migrate/api/v1alpha1"
 	"github.com/labring-sigs/pvc-migrate/internal/domain"
 )
 
 func printPlanResult(
 	cmd interface{ ErrOrStderr() io.Writer },
 	runtime *commandRuntime,
-	plan *domain.MigrationPlan,
+	plan *domain.TransferPlan,
+	advice func(domain.Check) string,
 ) error {
 	if err := runtime.printer.Print(plan); err != nil {
 		return reportPlanningError(cmd, err)
 	}
 
 	message := "\nPlanning completed without cluster mutations. Resolve the failed checks, then rerun the command."
-	if plan.Ready {
+	if plan.Summary().Ready {
 		message = "\nDry-run completed without cluster mutations. Run the write command with the same inputs and --dry-run=false; provide --yes or typed approval when requested."
 	}
 
@@ -26,26 +28,26 @@ func printPlanResult(
 		return err
 	}
 
-	if plan.Ready {
+	if plan.Summary().Ready {
 		return nil
 	}
 
-	return writePlanFailureGuidance(cmd.ErrOrStderr(), plan)
+	return writePlanFailureGuidance(cmd.ErrOrStderr(), plan.Checks, advice)
 }
 
-func writePlanFailureGuidance(w io.Writer, plan *domain.MigrationPlan) error {
-	if plan == nil {
-		return nil
-	}
-
+func writePlanFailureGuidance(
+	w io.Writer,
+	checks []domain.Check,
+	advise func(domain.Check) string,
+) error {
 	seen := make(map[string]struct{})
-	for _, check := range plan.Checks {
+	for _, check := range checks {
 		if check.Passed || check.Severity != domain.SeverityError {
 			continue
 		}
 
-		advice, suppress := planFailureAdvice(plan, check)
-		if suppress || advice == "" {
+		advice := advise(check)
+		if advice == "" {
 			continue
 		}
 
@@ -62,21 +64,45 @@ func writePlanFailureGuidance(w io.Writer, plan *domain.MigrationPlan) error {
 	return nil
 }
 
-func planFailureAdvice(plan *domain.MigrationPlan, check domain.Check) (string, bool) {
-	if advice := workloadFailureAdvice(check); advice != "" {
-		return advice, false
+func offlineMigrationPlanFailureAdvice(check domain.Check) string {
+	if check.Name == domain.CheckNamePVCConsumers {
+		return "Offline PVC action: stop every consumer of the source PVC, then rerun migrate plan after the PVC has no active Pod references."
 	}
+	return commonPlanFailureAdvice(check)
+}
 
-	if check.Name == domain.CheckNameControllerAdapter &&
-		strings.Contains(check.Message, "discover KubeBlocks") {
-		return "", true
+func copyPlanFailureAdvice(check domain.Check) string {
+	if check.Name == domain.CheckNameWarmCopyMount {
+		return "Copy action: stop all active PVC consumers and rerun without --online, or use storage that explicitly supports a second same-node Pod mount."
 	}
+	return commonPlanFailureAdvice(check)
+}
 
-	if advice := operationFailureAdvice(plan, check); advice != "" {
-		return advice, false
+func podMigrationPlanAdvice(workload *v1alpha1.KubeBlocksSpec) func(domain.Check) string {
+	return func(check domain.Check) string {
+		if advice := workloadFailureAdvice(check); advice != "" {
+			return advice
+		}
+
+		switch {
+		case check.Name == domain.CheckNameControllerAdapter && strings.Contains(check.Message, "discover KubeBlocks"):
+			return ""
+		case check.Name == domain.CheckNameControllerAdapter:
+			return "Workload action: use a supported workload adapter or the controller's native maintenance procedure, then rerun the plan; ordinary Deployments require no operator owner, and directly scaled Deployments and StatefulSets require no HorizontalPodAutoscaler."
+		case check.Name == domain.CheckNamePVCConsumers:
+			return "Real-time Pod action: stop every consumer outside the selected workload, then rerun migrate-pod plan; migrate-pod coordinates one workload and cannot cut over multiple independent workloads in one session."
+		case workload != nil && (check.Name == domain.CheckNameStorageCapacity || check.Name == domain.CheckNameDestinationCapacity):
+			return kubeBlocksRealtimeCapacityAdvice(workload)
+		case check.Name == domain.CheckNameWarmCopyMount:
+			if strings.Contains(check.Message, "OpenEBS LVM") {
+				return "OpenEBS LVM action: rerun migrate-pod with --precopy-passes 0 to skip warm copy and proceed directly to controlled cutover and final sync, or explicitly pass --openebs-lvm-enable-shared to temporarily patch the matching LVMVolume before the mount probe."
+			}
+			return "Warm-copy action: rerun migrate-pod with --precopy-passes 0 to skip warm copy and proceed directly to controlled cutover and final sync, or use storage that explicitly supports a second same-node Pod mount."
+
+		default:
+			return commonPlanFailureAdvice(check)
+		}
 	}
-
-	return storageFailureAdvice(plan, check), false
 }
 
 func workloadFailureAdvice(check domain.Check) string {
@@ -96,74 +122,34 @@ func workloadFailureAdvice(check domain.Check) string {
 	}
 }
 
-func operationFailureAdvice(plan *domain.MigrationPlan, check domain.Check) string {
-	switch {
-	case check.Name == domain.CheckNamePVCConsumers && isOfflineMigrationPlan(plan):
-		return "Offline PVC action: stop every consumer of the source PVC, then rerun migrate plan after the PVC has no active Pod references."
-	case check.Name == domain.CheckNamePVCConsumers && plan != nil && plan.SessionSpec.Operation() == domain.OperationMigratePod:
-		return "Real-time Pod action: stop every consumer outside the selected workload, then rerun migrate-pod plan; migrate-pod coordinates one workload and cannot cut over multiple independent workloads in one session."
-	case check.Name == domain.CheckNamePVCConsumers:
+func commonPlanFailureAdvice(check domain.Check) string {
+	switch check.Name {
+	case domain.CheckNamePVCConsumers:
 		return "PVC action: stop unmanaged consumers, or select the owning workload with --pod, then verify that every PVC consumer belongs to the migration unit before rerunning the plan."
-	case check.Name == domain.CheckNameControllerAdapter:
-		return "Workload action: use a supported workload adapter or the controller's native maintenance procedure, then rerun the plan; ordinary Deployments require no operator owner, and directly scaled Deployments and StatefulSets require no HorizontalPodAutoscaler."
-	case check.Name == domain.CheckNameTargetNode:
+	case domain.CheckNameTargetNode:
 		return "Node action: choose a Ready, schedulable target with --target-node, or correct the target node condition before rerunning the plan."
-	default:
-		return ""
-	}
-}
-
-func storageFailureAdvice(plan *domain.MigrationPlan, check domain.Check) string {
-	switch {
-	case isKubeBlocksRealtimePlan(plan) &&
-		(check.Name == domain.CheckNameStorageCapacity ||
-			check.Name == domain.CheckNameDestinationCapacity):
-		return kubeBlocksRealtimeCapacityAdvice(plan)
-	case check.Name == domain.CheckNameStorageTopology ||
-		check.Name == domain.CheckNameStorageCapacity:
+	case domain.CheckNameStorageTopology, domain.CheckNameStorageCapacity:
 		return "Storage action: choose a compatible StorageClass or target node, then verify topology and capacity before rerunning the plan."
-	case check.Name == domain.CheckNameDestinationCapacity:
+	case domain.CheckNameDestinationCapacity:
 		return "Capacity action: correct --destination-capacity, or add --allow-volume-shrink only after verifying the copied data fits in every smaller destination PVC."
-	case check.Name == domain.CheckNameSourceUsage:
+	case domain.CheckNameSourceUsage:
 		return "Usage action: use a destination that is at least the source capacity, or independently verify the data size and rerun with --skip-source-usage-check."
-	case check.Name == domain.CheckNameMigrationNeeded:
+	case domain.CheckNameMigrationNeeded:
 		return "Migration action: the requested node and StorageClass already match; use --force-reprovision only for an intentional backing-PV replacement."
-	case check.Name == domain.CheckNameWarmCopyMount && plan.SessionSpec.Operation() == domain.OperationCopy:
-		return "Copy action: stop all active PVC consumers and rerun without --online, or use storage that explicitly supports a second same-node Pod mount."
-	case check.Name == domain.CheckNameWarmCopyMount:
-		if strings.Contains(check.Message, "OpenEBS LVM") {
-			return "OpenEBS LVM action: rerun migrate-pod with --precopy-passes 0 to skip warm copy and proceed directly to controlled cutover and final sync, or explicitly pass --openebs-lvm-enable-shared to temporarily patch the matching LVMVolume before the mount probe."
-		}
-		return "Warm-copy action: rerun migrate-pod with --precopy-passes 0 to skip warm copy and proceed directly to controlled cutover and final sync, or use storage that explicitly supports a second same-node Pod mount."
 	default:
 		return ""
 	}
 }
 
-func isOfflineMigrationPlan(plan *domain.MigrationPlan) bool {
-	return plan != nil && plan.SessionSpec.Operation() == domain.OperationMigrate
-}
-
-func isKubeBlocksRealtimePlan(plan *domain.MigrationPlan) bool {
-	if plan == nil || plan.SessionSpec.Operation() != domain.OperationMigratePod {
-		return false
-	}
-
-	workload := plan.SessionSpec.Workload()
-
-	return workload.Adapter == domain.WorkloadKubeBlocks && workload.KubeBlocks != nil
-}
-
-func kubeBlocksRealtimeCapacityAdvice(plan *domain.MigrationPlan) string {
-	workload := plan.SessionSpec.Workload()
-	if workload.KubeBlocks == nil || workload.KubeBlocks.Cluster == "" ||
-		workload.KubeBlocks.Component == "" {
+func kubeBlocksRealtimeCapacityAdvice(workload *v1alpha1.KubeBlocksSpec) string {
+	if workload == nil || workload.Cluster == "" ||
+		workload.Component == "" {
 		return "KubeBlocks action: update the Cluster component volumeClaimTemplates storage request, then rerun migrate-pod."
 	}
 
 	return fmt.Sprintf(
 		"KubeBlocks action: update Cluster %s component %s volumeClaimTemplates storage request, then rerun migrate-pod.",
-		workload.KubeBlocks.Cluster,
-		workload.KubeBlocks.Component,
+		workload.Cluster,
+		workload.Component,
 	)
 }

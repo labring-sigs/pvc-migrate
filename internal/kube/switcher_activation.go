@@ -2,56 +2,31 @@ package kube
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
+	v1alpha1 "github.com/labring-sigs/pvc-migrate/api/v1alpha1"
 	"github.com/labring-sigs/pvc-migrate/internal/domain"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
-func (s *Switcher) ActivateVolume(
+// ActivatePVC replaces the source claim with the prepared destination binding.
+// The operation must verify final synchronization before entering this resource step.
+func (s *Switcher) ActivatePVC(
 	ctx context.Context,
-	session *domain.Session,
-	volume *domain.VolumeSpec,
-	status *domain.VolumeStatus,
+	sessionID string,
+	volume PVCTransferBindings,
+	desired *corev1.PersistentVolumeClaim,
+	status *v1alpha1.ClusterVolumeActivationStatus,
 	progress ProgressFunc,
 ) error {
-	if err := validateActivationInputs(session, volume, status); err != nil {
-		return err
-	}
-
-	temporaryPVC, err := s.client.CoreV1().
-		PersistentVolumeClaims(volume.DestinationPVC.Namespace).
-		Get(ctx, volume.DestinationPVC.Name, metav1.GetOptions{})
-	if err != nil && !apierrors.IsNotFound(err) {
-		return domain.WrapError(
-			domain.ErrorKubernetes,
-			"activate volume",
-			"read temporary destination PVC",
-			err,
-		)
-	}
-
-	if err == nil {
-		if err := s.validateTemporaryActivationPVC(ctx, temporaryPVC, volume, status); err != nil {
-			return err
-		}
-	}
-
-	return s.activateVolumeResources(ctx, session, volume, status, progress)
-}
-
-func validateActivationInputs(
-	session *domain.Session,
-	volume *domain.VolumeSpec,
-	status *domain.VolumeStatus,
-) error {
-	if session == nil || volume == nil || status == nil {
+	if sessionID == "" || status == nil || desired == nil {
 		return domain.NewError(
 			domain.ErrorValidation,
-			"activate volume",
-			"session, volume, and volume status are required",
+			"activate PVC",
+			"workflow ID, desired PVC and activation checkpoint are required",
 		)
 	}
 
@@ -67,29 +42,65 @@ func validateActivationInputs(
 		volume.DestinationPV.UID == "" {
 		return domain.NewError(
 			domain.ErrorPrecondition,
-			"activate volume",
+			"activate PVC",
 			"source and destination PVC/PV identities are required",
 		)
 	}
 
-	if status.Sync.FinalCompletedAt == nil {
+	if desired.Namespace != volume.SourcePVC.Namespace ||
+		desired.Name != volume.SourcePVC.Name ||
+		desired.Spec.VolumeName != volume.DestinationPV.Name ||
+		desired.Labels[SessionKey] != sessionID ||
+		desired.Annotations[SessionKey] != sessionID ||
+		desired.Labels[ManagedByLabel] != ManagedByValue {
 		return domain.NewError(
-			domain.ErrorPrecondition,
-			"activate volume",
-			fmt.Sprintf("PVC %s has no completed final sync", volume.SourcePVC.Name),
+			domain.ErrorConflict,
+			"activate PVC",
+			"desired PVC differs from the recorded cutover identity or ownership",
 		)
 	}
 
-	return nil
+	capacity := desired.Spec.Resources.Requests[corev1.ResourceStorage]
+	if capacity.Sign() <= 0 {
+		return domain.NewError(
+			domain.ErrorValidation,
+			"activate PVC",
+			"desired PVC capacity must be positive",
+		)
+	}
+
+	if err := errors.Join(ctx.Err(), LeaseFenceError(ctx)); err != nil {
+		return err
+	}
+
+	temporaryPVC, err := s.client.CoreV1().
+		PersistentVolumeClaims(volume.DestinationPVC.Namespace).
+		Get(ctx, volume.DestinationPVC.Name, metav1.GetOptions{})
+	if err != nil && !apierrors.IsNotFound(err) {
+		return domain.WrapError(
+			domain.ErrorKubernetes,
+			"activate PVC",
+			"read temporary destination PVC",
+			err,
+		)
+	}
+
+	if err == nil {
+		if err := s.validateTemporaryActivationPVC(ctx, temporaryPVC, volume, status); err != nil {
+			return err
+		}
+	}
+
+	return s.activateVolumeResources(ctx, sessionID, volume, desired.DeepCopy(), status, progress)
 }
 
 func (s *Switcher) validateTemporaryActivationPVC(
 	ctx context.Context,
 	temporaryPVC *corev1.PersistentVolumeClaim,
-	volume *domain.VolumeSpec,
-	status *domain.VolumeStatus,
+	volume PVCTransferBindings,
+	status *v1alpha1.ClusterVolumeActivationStatus,
 ) error {
-	if status.Activation.TemporaryPVCDeleted {
+	if status.TemporaryPVCDeleted {
 		return domain.NewError(
 			domain.ErrorConflict,
 			"activate volume",
@@ -118,9 +129,10 @@ func (s *Switcher) validateTemporaryActivationPVC(
 
 func (s *Switcher) activateVolumeResources(
 	ctx context.Context,
-	session *domain.Session,
-	volume *domain.VolumeSpec,
-	status *domain.VolumeStatus,
+	sessionID string,
+	volume PVCTransferBindings,
+	desired *corev1.PersistentVolumeClaim,
+	status *v1alpha1.ClusterVolumeActivationStatus,
 	progress ProgressFunc,
 ) error {
 	if err := s.ensureNoConsumers(
@@ -147,20 +159,26 @@ func (s *Switcher) activateVolumeResources(
 		return err
 	}
 
-	if active, err := s.activePVC(ctx, session, volume); err != nil {
+	if active, err := s.activePVC(
+		ctx,
+		sessionID,
+		volume.SourcePVC,
+		volume.SourcePV,
+		volume.DestinationPV,
+	); err != nil {
 		return err
 	} else if active != nil {
-		return s.completeActivation(ctx, session, volume, status, active, progress)
+		return s.completeActivation(ctx, sessionID, volume, desired, status, active, progress)
 	}
 
-	if err := s.ensureRetain(ctx, volume.SourcePV, session.ID, ResourceRoleSource); err != nil {
+	if err := s.ensureRetain(ctx, volume.SourcePV, sessionID, ResourceRoleSource); err != nil {
 		return err
 	}
 
 	if err := s.ensureRetain(
 		ctx,
 		volume.DestinationPV,
-		session.ID,
+		sessionID,
 		ResourceRoleDestination,
 	); err != nil {
 		return err
@@ -174,31 +192,32 @@ func (s *Switcher) activateVolumeResources(
 		return err
 	}
 
-	if err := s.reserveActivationDestination(ctx, session, volume, status, progress); err != nil {
+	if err := s.reserveActivationDestination(
+		ctx,
+		sessionID,
+		volume,
+		desired,
+		status,
+		progress,
+	); err != nil {
 		return err
 	}
 
-	created, err := s.createActivePVC(
-		ctx,
-		session,
-		volume,
-		volume.DestinationPV,
-		volume.StorageClass,
-	)
+	created, err := s.createBoundPVC(ctx, sessionID, desired)
 	if err != nil {
 		return err
 	}
 
-	return s.completeActivation(ctx, session, volume, status, created, progress)
+	return s.completeActivation(ctx, sessionID, volume, desired, status, created, progress)
 }
 
 func (s *Switcher) deleteTemporaryActivationPVC(
 	ctx context.Context,
-	volume *domain.VolumeSpec,
-	status *domain.VolumeStatus,
+	volume PVCTransferBindings,
+	status *v1alpha1.ClusterVolumeActivationStatus,
 	progress ProgressFunc,
 ) error {
-	if status.Activation.TemporaryPVCDeleted {
+	if status.TemporaryPVCDeleted {
 		return nil
 	}
 
@@ -210,18 +229,19 @@ func (s *Switcher) deleteTemporaryActivationPVC(
 		return err
 	}
 
-	status.Activation.TemporaryPVCDeleted = true
+	before := status.DeepCopy()
+	status.TemporaryPVCDeleted = true
 
-	return callProgress(progress)
+	return saveActivationCheckpoint(ctx, status, before, progress)
 }
 
 func (s *Switcher) deleteSourceActivationPVC(
 	ctx context.Context,
-	volume *domain.VolumeSpec,
-	status *domain.VolumeStatus,
+	volume PVCTransferBindings,
+	status *v1alpha1.ClusterVolumeActivationStatus,
 	progress ProgressFunc,
 ) error {
-	if status.Activation.SourcePVCDeleted {
+	if status.SourcePVCDeleted {
 		return nil
 	}
 
@@ -233,29 +253,25 @@ func (s *Switcher) deleteSourceActivationPVC(
 		return err
 	}
 
-	status.Activation.SourcePVCDeleted = true
+	before := status.DeepCopy()
+	status.SourcePVCDeleted = true
 
-	return callProgress(progress)
+	return saveActivationCheckpoint(ctx, status, before, progress)
 }
 
 func (s *Switcher) reserveActivationDestination(
 	ctx context.Context,
-	session *domain.Session,
-	volume *domain.VolumeSpec,
-	status *domain.VolumeStatus,
+	sessionID string,
+	volume PVCTransferBindings,
+	desired *corev1.PersistentVolumeClaim,
+	status *v1alpha1.ClusterVolumeActivationStatus,
 	progress ProgressFunc,
 ) error {
-	if status.Activation.DestinationReserved {
+	if status.DestinationReserved {
 		return nil
 	}
 
-	if err := s.validateActivePVC(
-		ctx,
-		session,
-		volume,
-		volume.DestinationPV,
-		volume.StorageClass,
-	); err != nil {
+	if err := s.validateBoundPVC(ctx, desired); err != nil {
 		return err
 	}
 
@@ -264,12 +280,30 @@ func (s *Switcher) reserveActivationDestination(
 		volume.DestinationPV,
 		volume.SourcePVC.Namespace,
 		volume.SourcePVC.Name,
-		session.ID,
+		sessionID,
 	); err != nil {
 		return err
 	}
 
-	status.Activation.DestinationReserved = true
+	before := status.DeepCopy()
+	status.DestinationReserved = true
 
-	return callProgress(progress)
+	return saveActivationCheckpoint(ctx, status, before, progress)
+}
+
+func saveActivationCheckpoint(
+	ctx context.Context,
+	status, previous *v1alpha1.ClusterVolumeActivationStatus,
+	progress ProgressFunc,
+) error {
+	err := errors.Join(ctx.Err(), LeaseFenceError(ctx))
+	if err == nil {
+		err = callProgress(progress)
+	}
+
+	if err != nil {
+		*status = *previous
+	}
+
+	return err
 }

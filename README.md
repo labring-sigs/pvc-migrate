@@ -90,13 +90,28 @@ Use `--tool-image registry.example/pvc-migrate:0.1.0` when cluster nodes pull th
 
 ## Execution Modes
 
-The CLI supports two durable execution backends:
+The CLI separates the two durable execution backends by subcommand instead of a
+mode flag:
 
-The default mode is `session`. Use `--mode=controller` when the controller and
-the required workflow CRDs are installed.
-
-- `--mode=session` always stores sessions in ConfigMaps and executes the workflow in the invoking process.
-- `--mode=controller` stores local sessions as operation-specific `migrate.sealos.io/v1alpha1` CRs. The CLI defaults to namespaced kinds for tenant-local work and selects a `Cluster*` kind when namespace roles differ. Cluster-scoped kinds also accept same-namespace roles, which is useful for an administrator submitting a workflow with cluster-level authority. Pod migration with administrator-selected temporary or session namespaces uses `ClusterPodMigration` while keeping the workload and PVC identities in the source namespace. PVC identity moves always use the cluster-scoped `Move`. Backup, restore, and rename intentionally have no cluster-scoped form. Cross-cluster workflows remain on the ConfigMap/session backend. The controller uses leader election, watches every installed workflow kind, and reuses the same resumable app.Service state machine. The CLI watches that CR and waits for completion by default; use `--wait=false` for detached submission. A command fails clearly when its matching CRD is absent.
+- Top-level commands (`migrate`, `copy`, `reserve`, `backup`, `restore`,
+  `rename`, `move`, `migrate-pod`) run the session backend: sessions persist in
+  ConfigMaps and the invoking process executes the workflow.
+- `<command> create` (for example `migrate create`) submits declarative intent
+  as operation-specific `migrate.sealos.io/v1alpha1` CRs for the elected
+  controller. The CLI defaults to namespaced kinds for tenant-local work and
+  selects a `Cluster*` kind when namespace roles differ. Cluster-scoped kinds
+  also accept same-namespace roles, which is useful for an administrator
+  submitting a workflow with cluster-level authority. Pod migration with
+  administrator-selected temporary or session namespaces uses
+  `ClusterPodMigration` while keeping the workload and PVC identities in the
+  source namespace. PVC identity moves always use the cluster-scoped `Move`.
+  Backup, restore, and rename intentionally have no cluster-scoped form.
+  Cross-cluster workflows remain on the ConfigMap/session backend. The
+  controller uses leader election, watches every installed workflow kind, and
+  reuses the same resumable state machine. `create` defaults to printing the
+  workflow it would submit; pass `--dry-run=false` to submit. A command fails
+  clearly when its matching CRD is absent.
+- `<command> plan` validates either backend without mutations.
 
 Install the controller backend using the Helm command above. The `config/`
 Kubebuilder files and `deploy/` reference manifests remain available for
@@ -117,7 +132,8 @@ repository namespaces from metadata. Cluster workflow specs declare each
 operational namespace once at the top level and keep nested references local
 to the relevant source or destination namespace.
 
-Submit declarative intent directly, or use `--mode=controller` in the CLI:
+Submit declarative intent directly, or use `migrate create`-style subcommands
+in the CLI:
 
 ```yaml
 apiVersion: migrate.sealos.io/v1alpha1
@@ -196,9 +212,9 @@ require that operator identity in controller mode.
 Submit a supported migration and wait for its CR status to reach completion:
 
 ```bash
-pvc-migrate --mode=controller --yes migrate \
+pvc-migrate --yes migrate create \
   --source-namespace application --source-pvc data \
-  --destination-pvc data --dry-run=false
+  --destination-pvc data
 kubectl -n application get migrations
 ```
 
@@ -299,7 +315,7 @@ accept `--pod` and does not inspect workload ownership or KubeBlocks metadata:
 pvc-migrate migrate plan \
   --source-namespace application \
   --source-pvc database-data \
-  --destination-namespace archive \
+  --temporary-namespace pvc-migrate-system \
   --destination-pvc database-data
 ```
 

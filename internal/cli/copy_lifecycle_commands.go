@@ -1,14 +1,18 @@
 package cli
 
 import (
+	"errors"
+	"fmt"
+	"slices"
+
+	v1alpha1 "github.com/labring-sigs/pvc-migrate/api/v1alpha1"
 	"github.com/labring-sigs/pvc-migrate/internal/app"
+	"github.com/labring-sigs/pvc-migrate/internal/copyengine"
 	"github.com/labring-sigs/pvc-migrate/internal/domain"
 	"github.com/spf13/cobra"
+	crclient "sigs.k8s.io/controller-runtime/pkg/client"
 )
 
-// addCopyLifecycle attaches lifecycle commands owned exclusively by copy.
-// The command bodies stay here so copy-specific service validation and output
-// cannot drift into reserve or migration command construction.
 func (r *rootState) addCopyLifecycle(parent *cobra.Command) {
 	parent.AddCommand(
 		r.newCopyStatusCommand(),
@@ -20,9 +24,7 @@ func (r *rootState) addCopyLifecycle(parent *cobra.Command) {
 
 func (r *rootState) newCopyStatusCommand() *cobra.Command {
 	return &cobra.Command{
-		Use:   "status [SESSION]",
-		Short: "Show one copy session or list all copy sessions",
-		Args:  cobra.MaximumNArgs(1),
+		Use: "status [SESSION]", Short: "Show one copy or list copies", Args: cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			runtime, err := r.runtime()
 			if err != nil {
@@ -33,22 +35,60 @@ func (r *rootState) newCopyStatusCommand() *cobra.Command {
 			defer cancel()
 
 			if len(args) == 1 {
-				session, err := r.workflowSession(
-					ctx,
+				object, err := r.loadCopy(ctx, cmd, runtime, args[0])
+				if err != nil {
+					return err
+				}
+
+				return runtime.printer.Print(object)
+			}
+
+			namespace := r.workflowStorageNamespace(cmd)
+
+			objects := []crclient.Object{}
+			if false || len(runtime.controllerKinds) == 0 ||
+				slices.Contains(runtime.controllerKinds, domain.ControllerKindCopy) {
+				store, err := cliWorkflowStore(
 					runtime,
-					cmd,
-					args[0],
-					domain.SessionTypeCopy,
-					"copy status",
+					namespace,
+					func() *v1alpha1.Copy { return &v1alpha1.Copy{} },
 				)
 				if err != nil {
 					return err
 				}
 
-				return printSessionResult(cmd, runtime, session)
+				items, err := store.List(ctx, namespace)
+				if err != nil {
+					return err
+				}
+
+				for _, object := range items {
+					objects = append(objects, object)
+				}
 			}
 
-			return r.workflowSessionList(ctx, runtime, cmd, domain.SessionTypeCopy, "copy")
+			if false || len(runtime.controllerKinds) == 0 ||
+				slices.Contains(runtime.controllerKinds, domain.ControllerKindClusterCopy) {
+				store, err := cliWorkflowStore(
+					runtime,
+					namespace,
+					func() *v1alpha1.ClusterCopy { return &v1alpha1.ClusterCopy{} },
+				)
+				if err != nil {
+					return err
+				}
+
+				items, err := store.List(ctx, "")
+				if err != nil {
+					return err
+				}
+
+				for _, object := range items {
+					objects = append(objects, object)
+				}
+			}
+
+			return runtime.printer.Print(objects)
 		},
 	}
 }
@@ -58,54 +98,19 @@ func (r *rootState) newCopyResumeCommand() *cobra.Command {
 
 	command := &cobra.Command{
 		Use:   "resume SESSION",
-		Short: "Continue a copy session from its persisted phase",
+		Short: "Continue a copy from its persisted checkpoint",
 		Args:  cobra.ExactArgs(1),
-		RunE: func(cmd *cobra.Command, args []string) error {
-			runtime, err := r.runtime()
-			if err != nil {
-				return err
-			}
+	}
+	command.RunE = func(cmd *cobra.Command, args []string) error {
+		runtime, err := r.runtime()
+		if err != nil {
+			return err
+		}
 
-			ctx, cancel := r.context(cmd.Context())
-			defer cancel()
+		ctx, cancel := r.context(cmd.Context())
+		defer cancel()
 
-			session, err := r.workflowSession(
-				ctx,
-				runtime,
-				cmd,
-				args[0],
-				domain.SessionTypeCopy,
-				"copy resume",
-			)
-			if err != nil {
-				return err
-			}
-
-			if dryRun {
-				if err := runtime.service.ValidateCopyResume(ctx, session); err != nil {
-					return reportSessionError(cmd, session, err)
-				}
-				return printSessionResult(cmd, runtime, session)
-			}
-
-			phase := sessionResumePhase(session)
-			if requiresResumeApproval(phase) ||
-				requiresOperationResumeApproval(session.Spec.Operation(), phase) {
-				if err := r.confirm(ctx, cmd, args[0]); err != nil {
-					return reportApprovalError(cmd, err)
-				}
-			}
-
-			if deferred, err := deferControllerExecution(ctx, cmd, runtime, session); deferred {
-				return err
-			}
-
-			if err := runtime.service.ResumeCopy(ctx, session); err != nil {
-				return reportSessionError(cmd, session, err)
-			}
-
-			return printSessionResult(cmd, runtime, session)
-		},
+		return r.resumeCopy(ctx, cmd, runtime, args[0], dryRun)
 	}
 	bindDryRun(command, &dryRun)
 
@@ -115,46 +120,89 @@ func (r *rootState) newCopyResumeCommand() *cobra.Command {
 func (r *rootState) newCopyAbortCommand() *cobra.Command {
 	var dryRun bool
 
-	command := &cobra.Command{
-		Use: "abort SESSION", Short: "Abort a copy session", Args: cobra.ExactArgs(1),
-		RunE: func(cmd *cobra.Command, args []string) error {
-			runtime, err := r.runtime()
-			if err != nil {
-				return err
+	command := &cobra.Command{Use: "abort SESSION", Short: "Abort a copy", Args: cobra.ExactArgs(1)}
+	command.RunE = func(cmd *cobra.Command, args []string) error {
+		runtime, err := r.runtime()
+		if err != nil {
+			return err
+		}
+
+		ctx, cancel := r.context(cmd.Context())
+		defer cancel()
+
+		object, err := r.loadCopy(ctx, cmd, runtime, args[0])
+		if err != nil {
+			return err
+		}
+
+		if !dryRun {
+			if err := r.confirm(ctx, cmd, object.GetName()); err != nil {
+				return reportApprovalError(cmd, err)
 			}
+		}
 
-			ctx, cancel := r.context(cmd.Context())
-			defer cancel()
-
-			session, err := r.workflowSession(
-				ctx,
+		switch current := object.(type) {
+		case *v1alpha1.Copy:
+			store, err := cliWorkflowStore(
 				runtime,
-				cmd,
-				args[0],
-				domain.SessionTypeCopy,
-				"copy abort",
+				r.workflowStorageNamespace(cmd),
+				func() *v1alpha1.Copy { return &v1alpha1.Copy{} },
 			)
 			if err != nil {
 				return err
 			}
 
+			executor := app.NewCopyExecutor(
+				runtime.clients.Kubernetes,
+				store,
+				cliWorkflowLocker(runtime),
+				copyengine.NewPVMigrate(),
+				r.copyConfig(runtime),
+			)
 			if dryRun {
-				if err := runtime.service.ValidateCopyAbort(ctx, session); err != nil {
-					return reportSessionError(cmd, session, err)
-				}
-				return printSessionResult(cmd, runtime, session)
+				err = executor.ValidateAbort(current)
+			} else {
+				err = executor.Abort(ctx, current)
 			}
 
-			if err := r.confirm(ctx, cmd, args[0]); err != nil {
-				return reportApprovalError(cmd, err)
+			if err != nil {
+				return reportCopyError(cmd, current.Name, current.Status.Phase, err)
+			}
+		case *v1alpha1.ClusterCopy:
+			store, err := cliWorkflowStore(
+				runtime,
+				r.workflowStorageNamespace(cmd),
+				func() *v1alpha1.ClusterCopy { return &v1alpha1.ClusterCopy{} },
+			)
+			if err != nil {
+				return err
 			}
 
-			if err := runtime.service.AbortCopy(ctx, session); err != nil {
-				return reportSessionError(cmd, session, err)
+			namespace := string(current.Spec.SessionNamespace)
+			if namespace == "" {
+				namespace = string(current.Spec.SourceNamespace)
 			}
 
-			return printSessionResult(cmd, runtime, session)
-		},
+			executor := app.NewClusterCopyExecutor(
+				runtime.clients.Kubernetes,
+				store,
+				cliWorkflowLocker(runtime),
+				namespace,
+				copyengine.NewPVMigrate(),
+				r.copyConfig(runtime),
+			)
+			if dryRun {
+				err = executor.ValidateAbort(current)
+			} else {
+				err = executor.Abort(ctx, current)
+			}
+
+			if err != nil {
+				return reportCopyError(cmd, current.Name, current.Status.Phase, err)
+			}
+		}
+
+		return runtime.printer.Print(object)
 	}
 	bindDryRun(command, &dryRun)
 
@@ -163,57 +211,185 @@ func (r *rootState) newCopyAbortCommand() *cobra.Command {
 
 func (r *rootState) newCopyCleanupCommand() *cobra.Command {
 	var (
-		options app.CleanupOptions
+		options app.CopyCleanupOptions
 		dryRun  bool
 	)
 
 	command := &cobra.Command{
-		Use: "cleanup SESSION", Short: "Clean up a copy session", Args: cobra.ExactArgs(1),
-		RunE: func(cmd *cobra.Command, args []string) error {
-			runtime, err := r.runtime()
-			if err != nil {
-				return err
+		Use:   "cleanup SESSION",
+		Short: "Finalize copy storage and clean up its workflow",
+		Args:  cobra.ExactArgs(1),
+	}
+	command.RunE = func(cmd *cobra.Command, args []string) error {
+		runtime, err := r.runtime()
+		if err != nil {
+			return err
+		}
+
+		ctx, cancel := r.context(cmd.Context())
+		defer cancel()
+
+		object, err := r.loadCopy(ctx, cmd, runtime, args[0])
+		if err != nil {
+			return err
+		}
+
+		if !dryRun {
+			if err := r.confirm(ctx, cmd, object.GetName()); err != nil {
+				return reportApprovalError(cmd, err)
 			}
+		}
 
-			ctx, cancel := r.context(cmd.Context())
-			defer cancel()
-
-			session, err := r.workflowSession(
-				ctx,
+		switch current := object.(type) {
+		case *v1alpha1.Copy:
+			store, err := cliWorkflowStore(
 				runtime,
-				cmd,
-				args[0],
-				domain.SessionTypeCopy,
-				"copy cleanup",
+				r.workflowStorageNamespace(cmd),
+				func() *v1alpha1.Copy { return &v1alpha1.Copy{} },
 			)
 			if err != nil {
 				return err
 			}
 
+			executor := app.NewCopyExecutor(
+				runtime.clients.Kubernetes,
+				store,
+				cliWorkflowLocker(runtime),
+				copyengine.NewPVMigrate(),
+				r.copyConfig(runtime),
+			)
 			if dryRun {
-				if err := runtime.service.ValidateCopyCleanup(ctx, session, options); err != nil {
-					return reportCleanupError(cmd, session, options, err)
-				}
-				return printCleanupResult(cmd, runtime, session, options, true)
+				err = executor.ValidateCleanup(ctx, current, options)
+			} else {
+				err = executor.Cleanup(ctx, current, options)
 			}
 
-			if err := r.confirm(ctx, cmd, args[0]); err != nil {
-				return reportApprovalError(cmd, err)
+			if err != nil {
+				return reportCopyCleanupError(
+					cmd,
+					r.workflowStorageNamespace(cmd),
+					current.Name,
+					options,
+					err,
+				)
+			}
+		case *v1alpha1.ClusterCopy:
+			store, err := cliWorkflowStore(
+				runtime,
+				r.workflowStorageNamespace(cmd),
+				func() *v1alpha1.ClusterCopy { return &v1alpha1.ClusterCopy{} },
+			)
+			if err != nil {
+				return err
 			}
 
-			if err := runtime.service.CleanupCopy(ctx, session, options); err != nil {
-				return reportCleanupError(cmd, session, options, err)
+			namespace := string(current.Spec.SessionNamespace)
+			if namespace == "" {
+				namespace = string(current.Spec.SourceNamespace)
 			}
 
-			if options.DeleteSession {
-				return printDeletedSession(cmd, session)
+			executor := app.NewClusterCopyExecutor(
+				runtime.clients.Kubernetes,
+				store,
+				cliWorkflowLocker(runtime),
+				namespace,
+				copyengine.NewPVMigrate(),
+				r.copyConfig(runtime),
+			)
+			if dryRun {
+				err = executor.ValidateCleanup(ctx, current, options)
+			} else {
+				err = executor.Cleanup(ctx, current, options)
 			}
 
-			return printCleanupResult(cmd, runtime, session, options, false)
-		},
+			if err != nil {
+				return reportCopyCleanupError(
+					cmd,
+					r.workflowStorageNamespace(cmd),
+					current.Name,
+					options,
+					err,
+				)
+			}
+		}
+
+		if options.DeleteSession && !dryRun {
+			_, err := fmt.Fprintf(
+				cmd.OutOrStdout(),
+				"Deleted copy workflow %s.\n",
+				object.GetName(),
+			)
+
+			return err
+		}
+
+		return runtime.printer.Print(object)
 	}
-	bindDestinationCleanupFlags(command, &options)
+	command.Flags().
+		StringVar(&options.DestinationPVCReclaimPolicy, "destination-pvc-reclaim-policy", "", "Destination PVC policy: Retain or Delete; defaults to the recorded policy")
+	command.Flags().
+		BoolVar(&options.Finalize, "finalize", false, "Release ownership of retained storage and close the recovery window")
+	command.Flags().
+		BoolVar(&options.DeleteSession, "delete-session", false, "Delete the workflow record after cleanup")
 	bindDryRun(command, &dryRun)
 
 	return command
+}
+
+func reportCopyError(
+	cmd *cobra.Command,
+	name string,
+	phase v1alpha1.WorkflowPhase,
+	cause error,
+) error {
+	_, err := fmt.Fprintf(
+		cmd.ErrOrStderr(),
+		"Copy %s stopped in phase %s. Inspect copy status %s before resume or cleanup.\n",
+		name,
+		phase,
+		name,
+	)
+
+	return errors.Join(cause, err)
+}
+
+func reportCopyCleanupError(
+	cmd *cobra.Command,
+	namespace, name string,
+	options app.CopyCleanupOptions,
+	cause error,
+) error {
+	if blocker, ok := errors.AsType[*app.CleanupPodBlockerError](cause); ok {
+		if err := writeCleanupPodBlockerGuidance(cmd.ErrOrStderr(), cmd, blocker); err != nil {
+			cause = errors.Join(cause, err)
+		}
+	}
+
+	prefix := guidancePrefixesForCommand(cmd, namespace).pvcMigrate
+
+	retry := "copy cleanup " + shellQuote(name)
+	if options.DestinationPVCReclaimPolicy != "" {
+		retry += " --destination-pvc-reclaim-policy " + shellQuote(
+			options.DestinationPVCReclaimPolicy,
+		)
+	}
+
+	if options.Finalize {
+		retry += " --finalize"
+	}
+
+	if options.DeleteSession {
+		retry += " --delete-session"
+	}
+
+	_, err := fmt.Fprintf(
+		cmd.ErrOrStderr(),
+		"Cleanup stopped before confirmed completion. Inspect current state: %s copy status %s\nRevalidate cleanup before retrying: %s %s --dry-run\n",
+		prefix,
+		shellQuote(name),
+		prefix,
+		retry,
+	)
+
+	return errors.Join(cause, err)
 }

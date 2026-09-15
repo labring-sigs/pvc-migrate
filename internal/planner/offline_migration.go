@@ -2,93 +2,288 @@ package planner
 
 import (
 	"context"
+	"fmt"
 	"slices"
+	"sort"
+	"strings"
 
+	v1alpha1 "github.com/labring-sigs/pvc-migrate/api/v1alpha1"
 	"github.com/labring-sigs/pvc-migrate/internal/domain"
+	"github.com/labring-sigs/pvc-migrate/internal/kube"
+	corev1 "k8s.io/api/core/v1"
 )
-
-type OfflineMigrationOptions struct {
-	SessionID                   string
-	SourceNamespace             string
-	TemporaryNamespace          string
-	DestinationNamespace        string
-	SessionNamespace            string
-	StagingNamespace            string
-	ToolImage                   string
-	CapacityAwareness           domain.CapacityAwareness
-	SourcePVCs                  []string
-	DestinationPVCs             []string
-	DestinationCapacities       []string
-	SourcePaths                 []string
-	DestinationPaths            []string
-	AllowVolumeShrink           bool
-	SkipSourceUsageCheck        bool
-	SourceNode                  string
-	TargetNode                  string
-	DestinationClass            string
-	Strategies                  []string
-	VerifyChecksum              bool
-	DeleteExtraneous            bool
-	SourcePVReclaimPolicy       string
-	DestinationPVCReclaimPolicy string
-}
 
 func (p *Planner) PlanOfflineMigration(
 	ctx context.Context,
-	options OfflineMigrationOptions,
-) (*domain.MigrationPlan, error) {
-	if options.SourcePVReclaimPolicy != "" &&
-		options.SourcePVReclaimPolicy != domain.SourcePVReclaimRetain &&
-		options.SourcePVReclaimPolicy != domain.SourcePVReclaimDelete {
+	object *v1alpha1.ClusterMigration,
+	image string,
+) (*domain.TransferPlan, error) {
+	if object == nil || object.Name == "" {
 		return nil, domain.NewError(
 			domain.ErrorValidation,
 			"plan migration",
-			"source-pv-reclaim-policy must be Retain or Delete",
+			"migration name is required",
 		)
 	}
 
-	if options.DestinationPVCReclaimPolicy != "" &&
-		options.DestinationPVCReclaimPolicy != domain.DestinationPVCReclaimRetain &&
-		options.DestinationPVCReclaimPolicy != domain.DestinationPVCReclaimDelete {
+	spec := object.Spec.DeepCopy()
+	if spec.TemporaryNamespace == "" {
+		spec.TemporaryNamespace = spec.SourceNamespace
+	}
+
+	if spec.SessionNamespace == "" {
+		spec.SessionNamespace = spec.SourceNamespace
+	}
+
+	if !migrationCanPlan(
+		object.Status.WorkflowStatus,
+		object.Status.Plan != nil,
+		len(object.Status.Volumes),
+		object.DeletionTimestamp != nil,
+	) {
+		return nil, domain.NewError(
+			domain.ErrorPrecondition,
+			"plan migration",
+			"only an unplanned migration can be planned",
+		)
+	}
+
+	plan, resolved, err := p.resolveMigration(
+		ctx,
+		object.Name,
+		spec.MigrationSpec,
+		string(
+			spec.SourceNamespace,
+		),
+		string(spec.TemporaryNamespace),
+		string(spec.SessionNamespace),
+		image,
+	)
+	if err != nil {
+		return nil, err
+	}
+
+	clusterPlan := v1alpha1.ClusterMigrationPlan{
+		SourceNamespace:             spec.SourceNamespace,
+		DestinationNamespace:        spec.SourceNamespace,
+		TemporaryNamespace:          spec.TemporaryNamespace,
+		SessionNamespace:            spec.SessionNamespace,
+		SourcePVReclaimPolicy:       resolved.SourcePVReclaimPolicy,
+		DestinationPVCReclaimPolicy: resolved.DestinationPVCReclaimPolicy,
+		Volumes:                     resolved.Volumes,
+		SourceNode:                  resolved.SourceNode,
+		TargetNode:                  resolved.TargetNode,
+		ToolImage:                   resolved.ToolImage,
+		Strategies:                  resolved.Strategies,
+		VerifyChecksum:              resolved.VerifyChecksum,
+		DeleteExtraneous:            resolved.DeleteExtraneous,
+		SkipSourceUsageCheck:        resolved.SkipSourceUsageCheck,
+	}
+	if plan.Ready {
+		object.Status.Plan = clusterPlan.DeepCopy()
+	}
+
+	return plan, nil
+}
+
+// PlanNamespacedMigration discovers storage directly into the Migration CRD status.
+func (p *Planner) PlanNamespacedMigration(
+	ctx context.Context,
+	object *v1alpha1.Migration,
+	image string,
+) (*domain.TransferPlan, error) {
+	if object == nil || object.Name == "" || object.Namespace == "" {
 		return nil, domain.NewError(
 			domain.ErrorValidation,
 			"plan migration",
-			"destination-pvc-reclaim-policy must be Retain or Delete",
+			"migration name and namespace are required",
 		)
 	}
 
-	state := newPlanState(p, planOptions{
-		SessionID:                   options.SessionID,
-		Operation:                   domain.OperationMigrate,
-		SourceNamespace:             options.SourceNamespace,
-		TemporaryNamespace:          options.TemporaryNamespace,
-		DestinationNamespace:        options.DestinationNamespace,
-		SessionNamespace:            options.SessionNamespace,
-		StagingNamespace:            options.StagingNamespace,
-		ToolImage:                   options.ToolImage,
-		CapacityAwareness:           options.CapacityAwareness,
-		SourcePVCs:                  slices.Clone(options.SourcePVCs),
-		DestinationPVCs:             slices.Clone(options.DestinationPVCs),
-		DestinationCapacities:       slices.Clone(options.DestinationCapacities),
-		SourcePaths:                 slices.Clone(options.SourcePaths),
-		DestinationPaths:            slices.Clone(options.DestinationPaths),
-		AllowVolumeShrink:           options.AllowVolumeShrink,
-		SkipSourceUsageCheck:        options.SkipSourceUsageCheck,
-		SourceNode:                  options.SourceNode,
-		TargetNode:                  options.TargetNode,
-		DestinationClass:            options.DestinationClass,
-		Strategies:                  slices.Clone(options.Strategies),
-		VerifyChecksum:              options.VerifyChecksum,
-		DeleteExtraneous:            options.DeleteExtraneous,
-		SourcePVReclaimPolicy:       options.SourcePVReclaimPolicy,
-		DestinationPVCReclaimPolicy: options.DestinationPVCReclaimPolicy,
-	})
-	if p.requestOnly {
-		return p.intentPlan(state.options)
+	if !migrationCanPlan(
+		object.Status.WorkflowStatus,
+		object.Status.Plan != nil,
+		len(object.Status.Volumes),
+		object.DeletionTimestamp != nil,
+	) {
+		return nil, domain.NewError(
+			domain.ErrorPrecondition,
+			"plan migration",
+			"only an unplanned migration can be planned",
+		)
 	}
 
-	p.validatePlanInputs(state.plan, state.options)
-	p.prepareOfflineMigration(&state)
+	plan, resolved, err := p.resolveMigration(
+		ctx,
+		object.Name,
+		*object.Spec.DeepCopy(),
+		object.Namespace,
+		object.Namespace,
+		object.Namespace,
+		image,
+	)
+	if err != nil {
+		return nil, err
+	}
 
-	return p.completePlan(ctx, &state), nil
+	if plan.Ready {
+		object.Status.Plan = resolved.DeepCopy()
+	}
+
+	return plan, nil
+}
+
+func migrationCanPlan(
+	status v1alpha1.WorkflowStatus,
+	planned bool,
+	checkpoints int,
+	deleting bool,
+) bool {
+	return !planned && checkpoints == 0 && !deleting &&
+		(status.Phase == "" || status.Phase == domain.PhasePlanned ||
+			(status.Phase == domain.PhaseFailed && status.ResumeFrom == domain.PhasePlanned))
+}
+
+func (p *Planner) resolveMigration(ctx context.Context, name string, spec v1alpha1.MigrationSpec,
+	sourceNamespace, temporaryNamespace, sessionNamespace, image string,
+) (*domain.TransferPlan, *v1alpha1.MigrationPlan, error) {
+	options := planOptions{
+		SessionID:            name,
+		SourceNamespace:      sourceNamespace,
+		DestinationNamespace: sourceNamespace,
+		TemporaryNamespace:   temporaryNamespace,
+		StagingNamespace:     temporaryNamespace,
+		SessionNamespace:     sessionNamespace,
+		ToolImage:            image,
+		operationKind:        domain.OperationMigrate,
+	}
+
+	if err := domain.ValidateReclaimPolicies(
+		spec.SourcePVReclaimPolicy,
+		spec.DestinationPVCReclaimPolicy,
+	); err != nil {
+		return nil, nil, err
+	}
+
+	state := p.newTransferPlanState(options, spec.TransferOptions, spec.Volumes)
+	if _, err := p.selectPlanVolumes(ctx, &state, spec.Volumes, nil); err != nil {
+		return nil, nil, err
+	}
+
+	if err := p.loadPlanContext(ctx, &state); err != nil {
+		return nil, nil, err
+	}
+
+	inputs := p.planVolumes(ctx, &state, p.loadPlanVolumeInputs(ctx, &state))
+	recordTransferScopeChecks(
+		state.plan,
+		state.options.SourceNamespace,
+		state.volumeSpecs,
+		domain.SeverityWarning,
+	)
+
+	for _, input := range inputs {
+		p.checkPVCFinalizers(state.plan, input.pvc)
+	}
+
+	checkOfflineMigrationPlanConsumers(
+		state.plan,
+		inputs,
+		state.inventory.namespacePods,
+		state.inventory.namespacePodsErr,
+	)
+
+	p.selectPlanTarget(&state, v1alpha1.WorkloadNone, nil, "")
+
+	plan, err := p.completeTransferPlan(ctx, &state, spec.Volumes)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	p.checkActivationPVCPolicies(ctx, plan, state.options.SourceNamespace, state.volumeSpecs)
+	p.finalizePlanResources(ctx, &state, transferChartResourceEstimates(
+		state.options.SourceNamespace, state.options.StagingNamespace,
+		state.options.Strategies, len(state.plannedVolumes),
+	), migrationProbePodPeaks(
+		state.options.TargetNode, state.options.Strategies, state.plannedVolumes,
+	))
+
+	resolved := v1alpha1.MigrationPlan{
+		DestinationPVCReclaimPolicy: state.options.DestinationPVCReclaimPolicy,
+		Volumes:                     state.volumeSpecs,
+		SourceNode:                  state.options.SourceNode,
+		TargetNode:                  state.options.TargetNode,
+		ToolImage:                   state.options.ToolImage,
+		Strategies:                  state.options.Strategies,
+		VerifyChecksum:              state.options.VerifyChecksum,
+		DeleteExtraneous:            state.options.DeleteExtraneous,
+		SkipSourceUsageCheck:        state.options.SkipSourceUsageCheck,
+		SourcePVReclaimPolicy:       spec.SourcePVReclaimPolicy,
+	}
+	if len(resolved.Volumes) > 0 {
+		p.checkMigrationPermissions(
+			ctx,
+			plan,
+			name,
+			sourceNamespace,
+			temporaryNamespace,
+			sessionNamespace,
+			resolved.Strategies,
+		)
+	}
+
+	return plan, &resolved, nil
+}
+
+func migrationProbePodPeaks(
+	targetNode string,
+	strategies []string,
+	volumes []domain.PlannedVolume,
+) map[string]int {
+	return mergeProbePodPeaks(
+		transferProbePods(targetNode, strategies, volumes, false),
+		sourcePathProbePods(volumes),
+	)
+}
+
+func checkOfflineMigrationPlanConsumers(
+	plan checkRecorder,
+	inputs []planVolumeInput,
+	pods []corev1.Pod,
+	listErr error,
+) {
+	names := []string{}
+	for _, input := range inputs {
+		consumers, listed := collectPVCConsumers(
+			plan,
+			input.pvc,
+			pods,
+			listErr,
+			kube.PodPreventsSafePVCDeletion,
+		)
+		if !listed {
+			continue
+		}
+
+		if len(consumers) == 0 {
+			checkOfflinePVC(plan, input.pvc)
+		}
+
+		for _, consumer := range consumers {
+			names = append(names, consumer.Name)
+		}
+	}
+
+	if len(names) == 0 {
+		return
+	}
+
+	sort.Strings(names)
+	names = slices.Compact(names)
+	plan.AddCheck(failed(domain.CheckNamePVCConsumers,
+		fmt.Sprintf(
+			"offline migrate found active Pod consumer(s) %s; stop them before offline migration, or use the separate migrate-pod command to select a workload that pvc-migrate can pause before final sync",
+			strings.Join(names, ","),
+		),
+	))
 }

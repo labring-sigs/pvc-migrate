@@ -164,6 +164,46 @@ spec:
             type: object
           status:
             properties:
+              activation:
+                properties:
+                  activatedAt:
+                    format: date-time
+                    type: string
+                  activePVC:
+                    description: ObjectReference identifies a Kubernetes object involved
+                      in a workflow.
+                    properties:
+                      apiVersion:
+                        maxLength: 253
+                        type: string
+                      kind:
+                        maxLength: 253
+                        type: string
+                      name:
+                        maxLength: 253
+                        minLength: 1
+                        pattern: ^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$
+                        type: string
+                      namespace:
+                        maxLength: 63
+                        pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
+                        type: string
+                      resourceVersion:
+                        maxLength: 256
+                        type: string
+                      uid:
+                        description: |-
+                          UID is a type that holds unique ID values, including UUIDs.  Because we
+                          don't ONLY use UUIDs, this is an alias to string.  Being a type captures
+                          intent and helps make sure that UIDs and names do not get conflated.
+                        type: string
+                    required:
+                    - name
+                    type: object
+                  rolledBackAt:
+                    format: date-time
+                    type: string
+                type: object
               completedAt:
                 format: date-time
                 type: string
@@ -702,61 +742,8 @@ spec:
               updatedAt:
                 format: date-time
                 type: string
-              volumes:
-                items:
-                  properties:
-                    activation:
-                      properties:
-                        activatedAt:
-                          format: date-time
-                          type: string
-                        activePVC:
-                          description: ObjectReference identifies a Kubernetes object
-                            involved in a workflow.
-                          properties:
-                            apiVersion:
-                              maxLength: 253
-                              type: string
-                            kind:
-                              maxLength: 253
-                              type: string
-                            name:
-                              maxLength: 253
-                              minLength: 1
-                              pattern: ^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$
-                              type: string
-                            namespace:
-                              maxLength: 63
-                              pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
-                              type: string
-                            resourceVersion:
-                              maxLength: 256
-                              type: string
-                            uid:
-                              description: |-
-                                UID is a type that holds unique ID values, including UUIDs.  Because we
-                                don't ONLY use UUIDs, this is an alias to string.  Being a type captures
-                                intent and helps make sure that UIDs and names do not get conflated.
-                              type: string
-                          required:
-                          - name
-                          type: object
-                        rolledBackAt:
-                          format: date-time
-                          type: string
-                      type: object
-                    sourcePVCName:
-                      type: string
-                  required:
-                  - activation
-                  - sourcePVCName
-                  type: object
-                type: array
             required:
-            - phase
-            - startedAt
-            - updatedAt
-            - volumes
+            - activation
             type: object
         required:
         - spec

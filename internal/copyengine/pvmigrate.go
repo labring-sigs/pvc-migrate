@@ -41,7 +41,7 @@ func (p *PVMigrate) Copy(ctx context.Context, request Request, progress Progress
 		rsyncArgs += " --mkpath"
 	}
 
-	operationID := OperationID(request)
+	operationID := OperationID(request.AttemptIdentity)
 
 	imageValues, err := kube.ToolImageHelmValues(request.ToolImage)
 	if err != nil {
@@ -317,7 +317,7 @@ func strategyValue(value string) (pvmigrate.Strategy, error) {
 
 // OperationID returns the stable upstream operation identity used in Helm
 // release names and tool Pod labels.
-func OperationID(request Request) string {
+func OperationID(request AttemptIdentity) string {
 	value := fmt.Sprintf(
 		"%s/%s/%s/%s/%d",
 		request.SessionID,

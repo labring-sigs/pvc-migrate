@@ -9,6 +9,7 @@ import (
 	"strings"
 	"sync"
 
+	v1alpha1 "github.com/labring-sigs/pvc-migrate/api/v1alpha1"
 	"github.com/labring-sigs/pvc-migrate/internal/domain"
 )
 
@@ -209,7 +210,7 @@ func colorizeGuidanceLine(line string) string {
 }
 
 func guidancePhaseColor(phase string) string {
-	switch domain.Phase(phase) {
+	switch v1alpha1.WorkflowPhase(phase) {
 	case domain.PhaseCompleted:
 		return "1;32"
 	case domain.PhaseFailed:

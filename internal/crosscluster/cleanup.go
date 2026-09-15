@@ -17,7 +17,7 @@ func (s *Service) Cleanup(
 	destinationPolicy string,
 	deleteSession bool,
 ) error {
-	if s.store != nil {
+	if s.locker != nil {
 		return s.withLock(ctx, session, func(locked context.Context) error {
 			return s.cleanup(locked, session, destinationPolicy, deleteSession)
 		})
@@ -89,7 +89,7 @@ func (s *Service) cleanup(
 			return err
 		}
 
-		return s.store.DeleteSessionLease(ctx, session.Spec.SessionNamespace, session.ID)
+		return s.leases.DeleteSessionLease(ctx, session.Spec.SessionNamespace, session.ID)
 	}
 
 	return s.save(ctx, session, false)

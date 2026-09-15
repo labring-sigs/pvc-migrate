@@ -165,13 +165,13 @@ func (s *Service) withLock(
 		return errors.New("cross-cluster session is required")
 	}
 
-	if s == nil || s.store == nil {
+	if s == nil || s.locker == nil {
 		return errors.New("cross-cluster session store is required")
 	}
 
 	lock, err := kube.AcquireRequiredSessionLock(
 		ctx,
-		s.store,
+		s.locker,
 		session.Spec.SessionNamespace,
 		session.ID,
 	)

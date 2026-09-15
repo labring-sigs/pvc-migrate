@@ -231,7 +231,7 @@ func (s *Service) buildSessionVolume(
 }
 
 func (s *Service) Reserve(ctx context.Context, session *Session) error {
-	if s.store != nil {
+	if s.locker != nil {
 		return s.withLock(
 			ctx,
 			session,
@@ -297,7 +297,7 @@ func (s *Service) Copy(ctx context.Context, session *Session, retries int, noCom
 		return err
 	}
 
-	if s.store != nil {
+	if s.locker != nil {
 		return s.withLock(
 			ctx,
 			session,

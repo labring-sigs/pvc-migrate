@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	v1alpha1 "github.com/labring-sigs/pvc-migrate/api/v1alpha1"
 	"github.com/labring-sigs/pvc-migrate/internal/domain"
 	"github.com/labring-sigs/pvc-migrate/internal/kube"
 	"github.com/labring-sigs/pvc-migrate/internal/testutil"
@@ -20,9 +21,7 @@ import (
 	clienttesting "k8s.io/client-go/testing"
 )
 
-// RenameOptions and PlanRename are test-only adapters retained while the
-// shared identity planning matrix exercises both operations. Production code
-// exposes only PlanRenamePVC and PlanMovePVC, each with a fixed operation.
+// RenameOptions describes the shared identity planning test matrix.
 type RenameOptions struct {
 	Operation            domain.Operation
 	SessionID            string
@@ -33,24 +32,67 @@ type RenameOptions struct {
 	SessionNamespace     string
 }
 
-func (p *Planner) PlanRename(
+func (p *Planner) planIdentityForTest(
 	ctx context.Context,
 	options RenameOptions,
-) (*domain.MigrationPlan, error) {
-	if options.Operation == domain.OperationMove {
-		return p.PlanMovePVC(ctx, MovePlanOptions{
-			SessionID: options.SessionID, SourceNamespace: options.SourceNamespace,
-			SourcePVC: options.SourcePVC, DestinationNamespace: options.DestinationNamespace,
-			DestinationPVC: options.DestinationPVC, SessionNamespace: options.SessionNamespace,
-		})
+) (*identityTestPlan, error) {
+	if options.SourceNamespace == "" {
+		options.SourceNamespace = "default"
 	}
 
-	return p.planPVCIdentity(ctx, pvcIdentityPlanOptions{
-		Operation: domain.OperationRename, SessionID: options.SessionID,
-		SourceNamespace: options.SourceNamespace, SourcePVC: options.SourcePVC,
-		DestinationNamespace: options.DestinationNamespace, DestinationPVC: options.DestinationPVC,
-		SessionNamespace: options.SessionNamespace,
-	})
+	if options.SessionNamespace == "" {
+		options.SessionNamespace = "system"
+	}
+
+	if options.Operation == domain.OperationMove {
+		object := &v1alpha1.Move{
+			ObjectMeta: metav1.ObjectMeta{Name: options.SessionID},
+			Spec: v1alpha1.MoveSpec{
+				SourceNamespace:      v1alpha1.NamespaceName(options.SourceNamespace),
+				DestinationNamespace: v1alpha1.NamespaceName(options.DestinationNamespace),
+				SessionNamespace:     v1alpha1.NamespaceName(options.SessionNamespace),
+				SourcePVC:            v1alpha1.LocalResourceReference{Name: options.SourcePVC},
+				DestinationPVC: &v1alpha1.LocalResourceReference{
+					Name: options.DestinationPVC,
+				},
+			},
+		}
+
+		if options.DestinationPVC == "" {
+			object.Spec.DestinationPVC = nil
+		}
+
+		plan, err := p.PlanMove(ctx, object, options.SessionNamespace)
+		if err != nil {
+			return nil, err
+		}
+
+		return &identityTestPlan{
+			PVCIdentityReport: *plan,
+			move:              object,
+		}, nil
+	}
+
+	object := &v1alpha1.Rename{
+		ObjectMeta: metav1.ObjectMeta{Name: options.SessionID, Namespace: options.SourceNamespace},
+		Spec: v1alpha1.RenameSpec{
+			SourcePVC:      v1alpha1.LocalResourceReference{Name: options.SourcePVC},
+			DestinationPVC: v1alpha1.LocalResourceReference{Name: options.DestinationPVC},
+		},
+	}
+
+	plan, err := p.PlanRename(ctx, object, options.SessionNamespace)
+	if err != nil {
+		return nil, err
+	}
+
+	return &identityTestPlan{PVCIdentityReport: *plan, rename: object}, nil
+}
+
+type identityTestPlan struct {
+	domain.PVCIdentityReport
+	move   *v1alpha1.Move
+	rename *v1alpha1.Rename
 }
 
 func TestPlanRenameValidatesRequiredAndDistinctIdentities(t *testing.T) {
@@ -80,7 +122,7 @@ func TestPlanRenameValidatesRequiredAndDistinctIdentities(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			plan, err := planner.PlanRename(context.Background(), tt.options)
+			plan, err := planner.planIdentityForTest(context.Background(), tt.options)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -111,7 +153,10 @@ func TestPlanRenameSameNamespacePreservesDurableMetadataWithoutQuotaDemand(t *te
 		}
 	}
 
-	plan, err := New(plannerClient(objects...), nil).PlanRename(context.Background(), RenameOptions{
+	plan, err := New(
+		plannerClient(objects...),
+		nil,
+	).planIdentityForTest(context.Background(), RenameOptions{
 		SessionID:            "rename",
 		SourceNamespace:      "app",
 		SourcePVC:            "data",
@@ -132,11 +177,15 @@ func TestPlanRenameSameNamespacePreservesDurableMetadataWithoutQuotaDemand(t *te
 	}
 
 	if plan.Volumes[0].SourceCapacity != "2Gi" || plan.Volumes[0].Capacity != "2Gi" ||
-		plan.SessionSpec.Volumes[0].SourceCapacity != "2Gi" {
-		t.Fatalf("rename capacities=%#v session=%#v", plan.Volumes[0], plan.SessionSpec.Volumes[0])
+		plan.rename.Status.Plan.SourceTemplate.Spec.Resources.Requests.Storage().String() != "2Gi" {
+		t.Fatalf(
+			"rename capacities=%#v session=%#v",
+			plan.Volumes[0],
+			plan.rename.Status.Plan,
+		)
 	}
 
-	metadata := plan.SessionSpec.Volumes[0].SourcePVCMetadata
+	metadata := plan.rename.Status.Plan.SourceTemplate.Metadata
 	if metadata.Labels["application"] != "database" ||
 		metadata.Annotations["application.example/setting"] != "keep" {
 		t.Fatalf("preserved metadata=%#v", metadata)
@@ -159,7 +208,7 @@ func TestPlanRenameFailsWhenSourceStorageClassCannotBeRead(t *testing.T) {
 		},
 	)
 
-	plan, err := New(client, nil).PlanRename(context.Background(), RenameOptions{
+	plan, err := New(client, nil).planIdentityForTest(context.Background(), RenameOptions{
 		SessionID:            "rename-storage-class-error",
 		SourceNamespace:      "app",
 		SourcePVC:            "data",
@@ -171,8 +220,12 @@ func TestPlanRenameFailsWhenSourceStorageClassCannotBeRead(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if plan.Ready || !hasFailedCheck(plan, "source-storage-class") ||
-		!hasFailedCheckContaining(plan, "source-storage-class", "storage class access denied") {
+	if plan.Ready || !hasFailedCheck(
+		plan.Checks, "source-storage-class",
+	) ||
+		!hasFailedCheckContaining(
+			plan.Checks, "source-storage-class", "storage class access denied",
+		) {
 		t.Fatalf("plan=%#v", plan)
 	}
 }
@@ -187,7 +240,7 @@ func TestPlanRenameAccountsForSessionObjectsInTheirNamespace(t *testing.T) {
 			}},
 		})
 
-		plan, err := New(plannerClient(objects...), nil).PlanRename(
+		plan, err := New(plannerClient(objects...), nil).planIdentityForTest(
 			context.Background(),
 			RenameOptions{
 				SessionID:            "rename-session-quota",
@@ -203,7 +256,9 @@ func TestPlanRenameAccountsForSessionObjectsInTheirNamespace(t *testing.T) {
 		}
 
 		if plan.TemporaryUsage.ConfigMaps != 1 || plan.TemporaryUsage.Leases != 1 ||
-			!hasFailedCheckContaining(plan, "resource-quota", "app/session-objects") {
+			!hasFailedCheckContaining(
+				plan.Checks, "resource-quota", "app/session-objects",
+			) {
 			t.Fatalf("plan=%#v", plan)
 		}
 	})
@@ -227,7 +282,7 @@ func TestPlanRenameAccountsForSessionObjectsInTheirNamespace(t *testing.T) {
 			},
 		)
 
-		plan, err := New(plannerClient(objects...), nil).PlanRename(
+		plan, err := New(plannerClient(objects...), nil).planIdentityForTest(
 			context.Background(),
 			RenameOptions{
 				SessionID:            "rename-split-session-quota",
@@ -243,8 +298,12 @@ func TestPlanRenameAccountsForSessionObjectsInTheirNamespace(t *testing.T) {
 		}
 
 		if plan.TemporaryUsage.ConfigMaps != 0 || plan.TemporaryUsage.Leases != 0 ||
-			!hasFailedCheckContaining(plan, "resource-quota", "system/session-objects") ||
-			hasFailedCheckContaining(plan, "resource-quota", "app/destination-objects") {
+			!hasFailedCheckContaining(
+				plan.Checks, "resource-quota", "system/session-objects",
+			) ||
+			hasFailedCheckContaining(
+				plan.Checks, "resource-quota", "app/destination-objects",
+			) {
 			t.Fatalf("plan=%#v", plan)
 		}
 	})
@@ -259,7 +318,10 @@ func TestPlanRenameDoesNotApplyToolPodLimitRange(t *testing.T) {
 		}}},
 	})
 
-	plan, err := New(plannerClient(objects...), nil).PlanRename(context.Background(), RenameOptions{
+	plan, err := New(
+		plannerClient(objects...),
+		nil,
+	).planIdentityForTest(context.Background(), RenameOptions{
 		SessionID:            "rename-no-tool-pod",
 		SourceNamespace:      "app",
 		SourcePVC:            "data",
@@ -284,7 +346,10 @@ func TestPlanRenameRejectsCustomPVCFinalizer(t *testing.T) {
 		}
 	}
 
-	plan, err := New(plannerClient(objects...), nil).PlanRename(context.Background(), RenameOptions{
+	plan, err := New(
+		plannerClient(objects...),
+		nil,
+	).planIdentityForTest(context.Background(), RenameOptions{
 		SessionID:        "rename-finalizer",
 		SourceNamespace:  "app",
 		SourcePVC:        "data",
@@ -295,7 +360,9 @@ func TestPlanRenameRejectsCustomPVCFinalizer(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if plan.Ready || !hasFailedCheck(plan, "pvc-finalizers") {
+	if plan.Ready || !hasFailedCheck(
+		plan.Checks, "pvc-finalizers",
+	) {
 		t.Fatalf("plan=%#v", plan)
 	}
 }
@@ -310,14 +377,19 @@ func TestPlanRenameRequiresOfflinePVC(t *testing.T) {
 		},
 	})
 
-	plan, err := New(plannerClient(objects...), nil).PlanRename(context.Background(), RenameOptions{
+	plan, err := New(
+		plannerClient(objects...),
+		nil,
+	).planIdentityForTest(context.Background(), RenameOptions{
 		SessionID: "rename", SourceNamespace: "app", SourcePVC: "data", DestinationPVC: "renamed",
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	if plan.Ready || !hasFailedCheck(plan, "rename-offline") {
+	if plan.Ready || !hasFailedCheck(
+		plan.Checks, "pvc-consumers",
+	) {
 		t.Fatalf("checks=%#v", plan.Checks)
 	}
 }
@@ -342,12 +414,14 @@ func TestPlanRenameFailsOnEmptyPodList(t *testing.T) {
 			plan, err := New(
 				&nilPodListClient{Interface: base},
 				nil,
-			).PlanRename(context.Background(), options)
+			).planIdentityForTest(context.Background(), options)
 			if err != nil {
 				t.Fatal(err)
 			}
 
-			if plan.Ready || !hasFailedCheck(plan, "pvc-consumers") {
+			if plan.Ready || !hasFailedCheck(
+				plan.Checks, "pvc-consumers",
+			) {
 				t.Fatalf("empty PodList must fail closed: checks=%#v", plan.Checks)
 			}
 		})
@@ -390,7 +464,10 @@ func TestPlanMoveCrossNamespaceRejectsOwnersAndAccountsForStorage(t *testing.T) 
 		}
 	}
 
-	plan, err := New(plannerClient(objects...), nil).PlanRename(context.Background(), RenameOptions{
+	plan, err := New(
+		plannerClient(objects...),
+		nil,
+	).planIdentityForTest(context.Background(), RenameOptions{
 		Operation:            domain.OperationMove,
 		SessionID:            "move",
 		SourceNamespace:      "app",
@@ -402,7 +479,9 @@ func TestPlanMoveCrossNamespaceRejectsOwnersAndAccountsForStorage(t *testing.T) 
 		t.Fatal(err)
 	}
 
-	if plan.Ready || !hasFailedCheck(plan, "pvc-ownership") {
+	if plan.Ready || !hasFailedCheck(
+		plan.Checks, "pvc-ownership",
+	) {
 		t.Fatalf("checks=%#v", plan.Checks)
 	}
 
@@ -415,20 +494,20 @@ func TestPlanRenameStaysInSourceNamespace(t *testing.T) {
 	plan, err := New(
 		plannerClient(plannerObjects("2Gi")...),
 		nil,
-	).PlanRename(context.Background(), RenameOptions{
-		SessionID:            "rename",
-		SourceNamespace:      "app",
-		SourcePVC:            "data",
-		DestinationNamespace: "archive",
-		DestinationPVC:       "renamed",
-		SessionNamespace:     "system",
+	).planIdentityForTest(context.Background(), RenameOptions{
+		SessionID:        "rename",
+		SourceNamespace:  "app",
+		SourcePVC:        "data",
+		DestinationPVC:   "renamed",
+		SessionNamespace: "system",
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	if plan.Ready || !hasFailedCheck(plan, "rename") {
-		t.Fatalf("checks=%#v", plan.Checks)
+	if !plan.Ready || plan.SourceNamespace != "app" || plan.DestinationNamespace != "app" ||
+		plan.Volumes[0].DestinationPVC.Namespace != "app" {
+		t.Fatalf("rename must retain the source namespace: %#v", plan)
 	}
 }
 
@@ -436,7 +515,10 @@ func TestPlanMoveDefaultsDestinationNameAndRecordsMoveOperation(t *testing.T) {
 	objects := plannerObjects("2Gi")
 	objects = append(objects, &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "archive"}})
 
-	plan, err := New(plannerClient(objects...), nil).PlanRename(context.Background(), RenameOptions{
+	plan, err := New(
+		plannerClient(objects...),
+		nil,
+	).planIdentityForTest(context.Background(), RenameOptions{
 		Operation:            domain.OperationMove,
 		SessionID:            "move",
 		SourceNamespace:      "app",
@@ -452,7 +534,7 @@ func TestPlanMoveDefaultsDestinationNameAndRecordsMoveOperation(t *testing.T) {
 		t.Fatalf("checks=%#v", plan.Checks)
 	}
 
-	if plan.Kind != "MovePlan" || plan.SessionSpec.Operation() != domain.OperationMove ||
+	if plan.Kind != "MovePlan" || plan.move.Status.Plan == nil ||
 		plan.Volumes[0].DestinationPVC.Name != "data" ||
 		plan.Volumes[0].DestinationPVC.Namespace != "archive" {
 		t.Fatalf("plan=%#v", plan)
@@ -460,22 +542,24 @@ func TestPlanMoveDefaultsDestinationNameAndRecordsMoveOperation(t *testing.T) {
 }
 
 func TestPlanMoveAllowsSameNamespaceWithDifferentIdentity(t *testing.T) {
-	plan, err := New(plannerClient(plannerObjects("2Gi")...), nil).PlanMovePVC(
-		context.Background(),
-		MovePlanOptions{
-			SessionID:            "move",
-			SourceNamespace:      "app",
-			SourcePVC:            "data",
-			DestinationNamespace: "app",
-			DestinationPVC:       "renamed",
-			SessionNamespace:     "system",
+	object := &v1alpha1.Move{
+		ObjectMeta: metav1.ObjectMeta{Name: "move"},
+		Spec: v1alpha1.MoveSpec{
+			SourceNamespace: "app", DestinationNamespace: "app", SessionNamespace: "system",
+			SourcePVC:      v1alpha1.LocalResourceReference{Name: "data"},
+			DestinationPVC: &v1alpha1.LocalResourceReference{Name: "renamed"},
 		},
-	)
+	}
+
+	plan, err := New(
+		plannerClient(plannerObjects("2Gi")...),
+		nil,
+	).PlanMove(t.Context(), object, "system")
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	if !plan.Ready || plan.SessionSpec.Operation() != domain.OperationMove {
+	if !plan.Ready || object.Status.Plan == nil {
 		t.Fatalf("same-namespace Move plan=%#v", plan)
 	}
 
@@ -488,7 +572,7 @@ func TestPlanMoveRequiresExistingDestinationNamespace(t *testing.T) {
 	plan, err := New(
 		plannerClient(plannerObjects("2Gi")...),
 		nil,
-	).PlanRename(context.Background(), RenameOptions{
+	).planIdentityForTest(context.Background(), RenameOptions{
 		Operation:            domain.OperationMove,
 		SessionID:            "move",
 		SourceNamespace:      "app",
@@ -500,7 +584,9 @@ func TestPlanMoveRequiresExistingDestinationNamespace(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if plan.Ready || !hasFailedCheck(plan, "destination-namespace") {
+	if plan.Ready || !hasFailedCheck(
+		plan.Checks, "destination-namespace",
+	) {
 		t.Fatalf("checks=%#v", plan.Checks)
 	}
 }
@@ -515,14 +601,19 @@ func TestPlanRenameSameNamespaceRejectsControllerOwnedPVC(t *testing.T) {
 		}
 	}
 
-	plan, err := New(plannerClient(objects...), nil).PlanRename(context.Background(), RenameOptions{
+	plan, err := New(
+		plannerClient(objects...),
+		nil,
+	).planIdentityForTest(context.Background(), RenameOptions{
 		SessionID: "rename", SourceNamespace: "app", SourcePVC: "data", DestinationPVC: "renamed",
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	if plan.Ready || !hasFailedCheck(plan, "pvc-ownership") {
+	if plan.Ready || !hasFailedCheck(
+		plan.Checks, "pvc-ownership",
+	) {
 		t.Fatalf("checks=%#v", plan.Checks)
 	}
 }
@@ -536,14 +627,19 @@ func TestPlanRenameRejectsExistingDestination(t *testing.T) {
 		},
 	})
 
-	plan, err := New(plannerClient(objects...), nil).PlanRename(context.Background(), RenameOptions{
+	plan, err := New(
+		plannerClient(objects...),
+		nil,
+	).planIdentityForTest(context.Background(), RenameOptions{
 		SessionID: "rename", SourceNamespace: "app", SourcePVC: "data", DestinationPVC: "renamed",
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	if plan.Ready || !hasFailedCheck(plan, "destination-pvc") {
+	if plan.Ready || !hasFailedCheck(
+		plan.Checks, "destination-pvc",
+	) {
 		t.Fatalf("checks=%#v", plan.Checks)
 	}
 }
@@ -552,7 +648,10 @@ func TestPlanRenameRejectsSourcePVClaimRefDrift(t *testing.T) {
 	objects := plannerObjects("2Gi")
 	testutil.MustType[*corev1.PersistentVolume](t, objects[6]).Spec.ClaimRef.Name = "other"
 
-	plan, err := New(plannerClient(objects...), nil).PlanRename(context.Background(), RenameOptions{
+	plan, err := New(
+		plannerClient(objects...),
+		nil,
+	).planIdentityForTest(context.Background(), RenameOptions{
 		SessionID:        "rename-binding-drift",
 		SourceNamespace:  "app",
 		SourcePVC:        "data",
@@ -563,7 +662,9 @@ func TestPlanRenameRejectsSourcePVClaimRefDrift(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if plan.Ready || !hasFailedCheck(plan, "source-binding") {
+	if plan.Ready || !hasFailedCheck(
+		plan.Checks, "source-binding",
+	) {
 		t.Fatalf("plan=%#v", plan)
 	}
 }
@@ -591,7 +692,7 @@ func TestPlanRenameChecksMutationRBAC(t *testing.T) {
 		},
 	)
 
-	plan, err := New(client, nil).PlanRename(context.Background(), RenameOptions{
+	plan, err := New(client, nil).planIdentityForTest(context.Background(), RenameOptions{
 		SessionID:        "rename",
 		SourceNamespace:  "app",
 		SourcePVC:        "data",
@@ -603,17 +704,9 @@ func TestPlanRenameChecksMutationRBAC(t *testing.T) {
 	}
 
 	if plan.Ready ||
-		!hasFailedCheckContaining(plan, "rbac", "delete app/persistentvolumeclaims") {
+		!hasFailedCheckContaining(
+			plan.Checks, "rbac", "delete app/persistentvolumeclaims",
+		) {
 		t.Fatalf("checks=%#v", plan.Checks)
 	}
-}
-
-func hasFailedCheck(plan *domain.MigrationPlan, name domain.CheckName) bool {
-	for _, check := range plan.Checks {
-		if check.Name == name && !check.Passed {
-			return true
-		}
-	}
-
-	return false
 }

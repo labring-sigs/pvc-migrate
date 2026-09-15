@@ -4,7 +4,6 @@ import (
 	"context"
 	"testing"
 
-	"github.com/labring-sigs/pvc-migrate/internal/domain"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
@@ -33,6 +32,13 @@ func TestActivationRecoveryFencesMissingPVC(t *testing.T) {
 			}
 
 			switch scenario {
+			case "retained":
+				// The deleted claim leaves a reservation binding behind: the
+				// recovery claim identity without a UID.
+				if pv.Spec.ClaimRef != nil {
+					pv.Spec.ClaimRef.Name = volume.SourcePVC.Name
+					pv.Spec.ClaimRef.UID = ""
+				}
 			case "uid":
 				pv.UID = "replacement"
 			case "owner":
@@ -99,12 +105,16 @@ func TestActivationRecoveryFencesMissingPVC(t *testing.T) {
 			if err := switcher.VerifyVolumesOfflineForSession(
 				ctx,
 				session.ID,
-				[]*domain.VolumeSpec{volume},
+				[]PVCTransferBindings{testPVCTransferBindings(volume)},
 			); err == nil {
 				t.Fatal("ordinary validation accepted missing/replaced PVC")
 			}
 
-			err = switcher.VerifyActivationRecovery(ctx, session.ID, []*domain.VolumeSpec{volume})
+			err = switcher.VerifyActivationRecovery(
+				ctx,
+				session.ID,
+				[]PVCTransferBindings{testPVCTransferBindings(volume)},
+			)
 			if scenario == "retained" {
 				if err != nil {
 					t.Fatal(err)

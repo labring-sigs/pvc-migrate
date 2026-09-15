@@ -46,8 +46,6 @@ spec:
             type: object
           spec:
             properties:
-              deleteExtraneous:
-                type: boolean
               name:
                 maxLength: 253
                 minLength: 1
@@ -227,10 +225,7 @@ spec:
                 items:
                   properties:
                     lvmVolume:
-                      description: |-
-                        LocalResourceReference identifies a resource whose namespace is established
-                        by the containing workflow, or a cluster-scoped resource such as a PV.
-                        Namespaced workflow APIs derive their boundary from metadata.namespace.
+                      description: LVMVolume can live outside the workflow namespace.
                       properties:
                         apiVersion:
                           maxLength: 253
@@ -242,6 +237,10 @@ spec:
                           maxLength: 253
                           minLength: 1
                           pattern: ^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$
+                          type: string
+                        namespace:
+                          maxLength: 63
+                          pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
                           type: string
                         resourceVersion:
                           maxLength: 256
@@ -319,8 +318,6 @@ spec:
                 type: string
               plan:
                 properties:
-                  deleteExtraneous:
-                    type: boolean
                   name:
                     maxLength: 253
                     minLength: 1
@@ -505,10 +502,6 @@ spec:
               updatedAt:
                 format: date-time
                 type: string
-            required:
-            - phase
-            - startedAt
-            - updatedAt
             type: object
         required:
         - spec

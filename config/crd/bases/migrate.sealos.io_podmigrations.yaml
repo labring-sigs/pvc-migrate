@@ -48,6 +48,13 @@ spec:
             properties:
               allowLeaderDowntime:
                 type: boolean
+              allowPlacementViolation:
+                description: |-
+                  AllowPlacementViolation proceeds when the recreated Pod may violate
+                  required podAffinity, required podAntiAffinity, or DoNotSchedule
+                  topologySpread constraints on the target node — for topologies where
+                  the operator will re-balance the remaining replicas afterwards.
+                type: boolean
               allowVolumeShrink:
                 type: boolean
               capacityAwareness:
@@ -342,10 +349,7 @@ spec:
                 items:
                   properties:
                     lvmVolume:
-                      description: |-
-                        LocalResourceReference identifies a resource whose namespace is established
-                        by the containing workflow, or a cluster-scoped resource such as a PV.
-                        Namespaced workflow APIs derive their boundary from metadata.namespace.
+                      description: LVMVolume can live outside the workflow namespace.
                       properties:
                         apiVersion:
                           maxLength: 253
@@ -357,6 +361,10 @@ spec:
                           maxLength: 253
                           minLength: 1
                           pattern: ^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$
+                          type: string
+                        namespace:
+                          maxLength: 63
+                          pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
                           type: string
                         resourceVersion:
                           maxLength: 256
@@ -478,6 +486,8 @@ spec:
                       description: |-
                         VolumeSpec is planning output required to resume a PVC transfer. It is an
                         API-owned type with only the fields needed by transfer workflows.
+                        PVC references are relative to the workflow's source and destination
+                        namespace roles; PV references are always cluster-scoped.
                       properties:
                         accessModes:
                           items:
@@ -1011,6 +1021,8 @@ spec:
                           switchoverContainer:
                             type: string
                           switchoverStrategy:
+                            description: KubeBlocksSwitchoverStrategy identifies the
+                              planned leader handoff mechanism.
                             type: string
                         required:
                         - cluster
@@ -1371,10 +1383,6 @@ spec:
                     type: object
                 type: object
             required:
-            - phase
-            - startedAt
-            - updatedAt
-            - volumes
             - warmPassesCompleted
             type: object
         required:

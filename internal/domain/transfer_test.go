@@ -4,6 +4,7 @@ import (
 	"strings"
 	"testing"
 
+	v1alpha1 "github.com/labring-sigs/pvc-migrate/api/v1alpha1"
 	. "github.com/labring-sigs/pvc-migrate/internal/domain"
 )
 
@@ -51,13 +52,13 @@ func TestTransferScopeUsesNilForFullVolumeAndValidatesCanonicalPaths(t *testing.
 	}
 
 	if err := ValidateTransferScope(
-		&TransferScope{SourcePath: "data/", DestinationPath: "."},
+		&v1alpha1.TransferScope{SourcePath: "data/", DestinationPath: "."},
 	); err == nil {
 		t.Fatal("non-canonical scope validated")
 	}
 
 	if err := ValidateTransferScope(
-		&TransferScope{SourcePath: ".", DestinationPath: "."},
+		&v1alpha1.TransferScope{SourcePath: ".", DestinationPath: "."},
 	); err == nil {
 		t.Fatal("explicit full-volume scope validated")
 	}

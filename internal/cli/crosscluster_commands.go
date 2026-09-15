@@ -559,19 +559,9 @@ func (r *rootState) crossClusterService(
 		return nil, err
 	}
 
-	mode, err := parseExecutionMode(r.global.mode)
-	if err != nil {
-		return nil, err
-	}
-
-	if mode == executionModeController {
-		return nil, domain.NewError(
-			domain.ErrorPrecondition,
-			"cross-cluster mode",
-			"cross-cluster workflows require two explicit API-server connections and use the session backend; use --mode=session",
-		)
-	}
-
+	// Cross-cluster workflows always run in the submitting process against two
+	// explicit API-server connections; they never reconcile through a
+	// controller and never create workflow CRDs.
 	if flags.destinationKubeconfig == "" {
 		return nil, domain.NewError(
 			domain.ErrorValidation,
