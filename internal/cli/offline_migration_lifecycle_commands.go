@@ -27,7 +27,7 @@ func (r *rootState) newOfflineMigrationStatusCommand() *cobra.Command {
 			defer cancel()
 
 			if len(args) == 1 {
-				object, err := r.loadMigration(ctx, cmd, runtime, args[0])
+				object, _, err := r.loadMigrationWithBackend(ctx, cmd, runtime, args[0])
 				if err != nil {
 					return err
 				}
@@ -38,7 +38,7 @@ func (r *rootState) newOfflineMigrationStatusCommand() *cobra.Command {
 			namespace := r.workflowStorageNamespace(cmd)
 			objects := []crclient.Object{}
 
-			if false || len(runtime.controllerKinds) == 0 ||
+			if len(runtime.controllerKinds) == 0 ||
 				slices.Contains(runtime.controllerKinds, domain.ControllerKindMigration) {
 				store, err := cliWorkflowStore(
 					runtime,
@@ -59,7 +59,7 @@ func (r *rootState) newOfflineMigrationStatusCommand() *cobra.Command {
 				}
 			}
 
-			if false || len(runtime.controllerKinds) == 0 ||
+			if len(runtime.controllerKinds) == 0 ||
 				slices.Contains(runtime.controllerKinds, domain.ControllerKindClusterMigration) {
 				store, err := cliWorkflowStore(
 					runtime,
@@ -73,6 +73,46 @@ func (r *rootState) newOfflineMigrationStatusCommand() *cobra.Command {
 				filter := ""
 
 				items, err := store.List(ctx, filter)
+				if err != nil {
+					return err
+				}
+
+				for _, object := range items {
+					objects = append(objects, object)
+				}
+			}
+
+			if crdListable(runtime) && (len(runtime.controllerKinds) == 0 ||
+				slices.Contains(runtime.controllerKinds, domain.ControllerKindMigration)) {
+				crdStore, err := cliCRDWorkflowStore(
+					runtime,
+					func() *v1alpha1.Migration { return &v1alpha1.Migration{} },
+				)
+				if err != nil {
+					return err
+				}
+
+				items, err := crdStore.List(ctx, namespace)
+				if err != nil {
+					return err
+				}
+
+				for _, object := range items {
+					objects = append(objects, object)
+				}
+			}
+
+			if crdListable(runtime) && (len(runtime.controllerKinds) == 0 ||
+				slices.Contains(runtime.controllerKinds, domain.ControllerKindClusterMigration)) {
+				crdStore, err := cliCRDWorkflowStore(
+					runtime,
+					func() *v1alpha1.ClusterMigration { return &v1alpha1.ClusterMigration{} },
+				)
+				if err != nil {
+					return err
+				}
+
+				items, err := crdStore.List(ctx, "")
 				if err != nil {
 					return err
 				}
@@ -125,7 +165,7 @@ func (r *rootState) newOfflineMigrationAbortCommand() *cobra.Command {
 			ctx, cancel := r.context(cmd.Context())
 			defer cancel()
 
-			object, err := r.loadMigration(ctx, cmd, runtime, args[0])
+			object, backend, err := r.loadMigrationWithBackend(ctx, cmd, runtime, args[0])
 			if err != nil {
 				return err
 			}
@@ -138,7 +178,7 @@ func (r *rootState) newOfflineMigrationAbortCommand() *cobra.Command {
 
 			switch current := object.(type) {
 			case *v1alpha1.Migration:
-				executor, err := r.migrationExecutor(runtime, cmd)
+				executor, err := r.migrationExecutor(runtime, cmd, backend)
 				if err != nil {
 					return err
 				}
@@ -154,7 +194,7 @@ func (r *rootState) newOfflineMigrationAbortCommand() *cobra.Command {
 				}
 
 			case *v1alpha1.ClusterMigration:
-				executor, err := r.clusterMigrationExecutor(runtime, cmd, current)
+				executor, err := r.clusterMigrationExecutor(runtime, cmd, current, backend)
 				if err != nil {
 					return err
 				}
@@ -193,7 +233,7 @@ func (r *rootState) newOfflineMigrationRollbackCommand() *cobra.Command {
 			ctx, cancel := r.context(cmd.Context())
 			defer cancel()
 
-			object, err := r.loadMigration(ctx, cmd, runtime, args[0])
+			object, backend, err := r.loadMigrationWithBackend(ctx, cmd, runtime, args[0])
 			if err != nil {
 				return err
 			}
@@ -206,7 +246,7 @@ func (r *rootState) newOfflineMigrationRollbackCommand() *cobra.Command {
 
 			switch current := object.(type) {
 			case *v1alpha1.Migration:
-				executor, err := r.migrationExecutor(runtime, cmd)
+				executor, err := r.migrationExecutor(runtime, cmd, backend)
 				if err != nil {
 					return err
 				}
@@ -222,7 +262,7 @@ func (r *rootState) newOfflineMigrationRollbackCommand() *cobra.Command {
 				}
 
 			case *v1alpha1.ClusterMigration:
-				executor, err := r.clusterMigrationExecutor(runtime, cmd, current)
+				executor, err := r.clusterMigrationExecutor(runtime, cmd, current, backend)
 				if err != nil {
 					return err
 				}
@@ -264,7 +304,7 @@ func (r *rootState) newOfflineMigrationCleanupCommand() *cobra.Command {
 			ctx, cancel := r.context(cmd.Context())
 			defer cancel()
 
-			object, err := r.loadMigration(ctx, cmd, runtime, args[0])
+			object, backend, err := r.loadMigrationWithBackend(ctx, cmd, runtime, args[0])
 			if err != nil {
 				return err
 			}
@@ -277,7 +317,7 @@ func (r *rootState) newOfflineMigrationCleanupCommand() *cobra.Command {
 
 			switch current := object.(type) {
 			case *v1alpha1.Migration:
-				executor, err := r.migrationExecutor(runtime, cmd)
+				executor, err := r.migrationExecutor(runtime, cmd, backend)
 				if err != nil {
 					return err
 				}
@@ -299,7 +339,7 @@ func (r *rootState) newOfflineMigrationCleanupCommand() *cobra.Command {
 				}
 
 			case *v1alpha1.ClusterMigration:
-				executor, err := r.clusterMigrationExecutor(runtime, cmd, current)
+				executor, err := r.clusterMigrationExecutor(runtime, cmd, current, backend)
 				if err != nil {
 					return err
 				}

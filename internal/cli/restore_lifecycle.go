@@ -3,12 +3,14 @@ package cli
 import (
 	"context"
 	"fmt"
+	"slices"
 
 	v1alpha1 "github.com/labring-sigs/pvc-migrate/api/v1alpha1"
 	"github.com/labring-sigs/pvc-migrate/internal/backup"
 	"github.com/labring-sigs/pvc-migrate/internal/domain"
 	"github.com/labring-sigs/pvc-migrate/internal/kube"
 	"github.com/spf13/cobra"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	crclient "sigs.k8s.io/controller-runtime/pkg/client"
 )
 
@@ -32,8 +34,25 @@ func (r *rootState) loadRestore(
 	key := crclient.ObjectKey{Name: name, Namespace: namespace}
 
 	object, err := store.Load(ctx, key)
+	if err == nil {
+		return object, store, nil
+	}
 
-	return object, store, err
+	if !apierrors.IsNotFound(err) {
+		return nil, nil, err
+	}
+
+	crdStore, err := cliCRDWorkflowStore(
+		runtime,
+		func() *v1alpha1.Restore { return &v1alpha1.Restore{} },
+	)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	object, err = crdStore.Load(ctx, key)
+
+	return object, crdStore, err
 }
 
 func (r *rootState) newRestoreStatusCommand() *cobra.Command {
@@ -84,6 +103,26 @@ func (r *rootState) newRestoreStatusCommand() *cobra.Command {
 			objects := make([]crclient.Object, len(items))
 			for i, object := range items {
 				objects[i] = object
+			}
+
+			if crdListable(runtime) && (len(runtime.controllerKinds) == 0 ||
+				slices.Contains(runtime.controllerKinds, domain.ControllerKindRestore)) {
+				crdStore, err := cliCRDWorkflowStore(
+					runtime,
+					func() *v1alpha1.Restore { return &v1alpha1.Restore{} },
+				)
+				if err != nil {
+					return err
+				}
+
+				items, err := crdStore.List(ctx, namespace)
+				if err != nil {
+					return err
+				}
+
+				for _, object := range items {
+					objects = append(objects, object)
+				}
 			}
 
 			return runtime.printer.Print(objects)

@@ -57,6 +57,22 @@ func cliCRDWorkflowStore[T crclient.Object](
 	return kube.NewCRDWorkflowStore(runtime.clients.Runtime, factory)
 }
 
+// cliWorkflowStoreForBackend binds the store family that owns the workflow
+// identity the loader resolved. Lifecycle mutations fence through their owning
+// store, so a CRD-submitted workflow must never be driven through the
+// ConfigMap session storage or the other way around.
+func cliWorkflowStoreForBackend[T crclient.Object](
+	runtime *commandRuntime,
+	backend, namespace string,
+	factory func() T,
+) (kube.WorkflowStore[T], error) {
+	if backend == backendCRD {
+		return cliCRDWorkflowStore(runtime, factory)
+	}
+
+	return cliWorkflowStore(runtime, namespace, factory)
+}
+
 // loadWorkflowWithBackend resolves one workflow identity from ConfigMap session
 // storage first and the workflow CRDs second, reporting which backend served
 // the lookup so callers can bind matching stores and handoff callbacks. CRD
@@ -136,6 +152,13 @@ const (
 	backendConfigMap = "configmap"
 	backendCRD       = "crd"
 )
+
+// crdListable reports whether the runtime can enumerate workflow CRs. A
+// session-only runtime (no controller-runtime client) still lists ConfigMap
+// sessions; it simply has no CRD records to add.
+func crdListable(runtime *commandRuntime) bool {
+	return runtime != nil && runtime.clients != nil && runtime.clients.Runtime != nil
+}
 
 // lookupControllerObjects is an input boundary. It detects ambiguity before an
 // operation receives its concrete object; it never reconstructs execution state.

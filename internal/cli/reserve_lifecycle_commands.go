@@ -9,7 +9,6 @@ import (
 	v1alpha1 "github.com/labring-sigs/pvc-migrate/api/v1alpha1"
 	"github.com/labring-sigs/pvc-migrate/internal/app"
 	"github.com/labring-sigs/pvc-migrate/internal/domain"
-	"github.com/labring-sigs/pvc-migrate/internal/kube"
 	"github.com/spf13/cobra"
 	crclient "sigs.k8s.io/controller-runtime/pkg/client"
 )
@@ -29,8 +28,18 @@ func (r *rootState) loadReservation(
 	runtime *commandRuntime,
 	id string,
 ) (crclient.Object, error) {
+	object, _, err := r.loadReservationWithBackend(ctx, cmd, runtime, id)
+	return object, err
+}
+
+func (r *rootState) loadReservationWithBackend(
+	ctx context.Context,
+	cmd *cobra.Command,
+	runtime *commandRuntime,
+	id string,
+) (crclient.Object, string, error) {
 	if runtime.clients == nil {
-		return nil, domain.NewError(
+		return nil, "", domain.NewError(
 			domain.ErrorInternal,
 			"reserve",
 			"Kubernetes clients are required",
@@ -39,21 +48,26 @@ func (r *rootState) loadReservation(
 
 	namespace := r.workflowStorageNamespace(cmd)
 
-	var (
-		object crclient.Object
-		err    error
+	object, backend, err := r.loadWorkflowWithBackend(
+		ctx,
+		cmd,
+		runtime,
+		namespace,
+		id,
+		map[domain.ControllerKind]crclient.Object{
+			domain.ControllerKindReservation:        &v1alpha1.Reservation{},
+			domain.ControllerKindClusterReservation: &v1alpha1.ClusterReservation{},
+		},
 	)
-
-	object, err = kube.LoadConfigMapWorkflow(ctx, runtime.clients.Kubernetes, namespace, id)
 	if err != nil {
-		return nil, reportSessionLookupError(cmd, namespace, id, err)
+		return nil, "", reportSessionLookupError(cmd, namespace, id, err)
 	}
 
 	switch object.(type) {
 	case *v1alpha1.Reservation, *v1alpha1.ClusterReservation:
-		return object, nil
+		return object, backend, nil
 	default:
-		return nil, domain.NewError(
+		return nil, "", domain.NewError(
 			domain.ErrorValidation,
 			"reserve",
 			"stored workflow is not a reservation",
@@ -87,7 +101,7 @@ func (r *rootState) newReserveStatusCommand() *cobra.Command {
 			namespace := r.workflowStorageNamespace(cmd)
 
 			objects := []crclient.Object{}
-			if false || len(runtime.controllerKinds) == 0 ||
+			if len(runtime.controllerKinds) == 0 ||
 				slices.Contains(runtime.controllerKinds, domain.ControllerKindReservation) {
 				store, err := cliWorkflowStore(
 					runtime,
@@ -108,7 +122,7 @@ func (r *rootState) newReserveStatusCommand() *cobra.Command {
 				}
 			}
 
-			if false || len(runtime.controllerKinds) == 0 ||
+			if len(runtime.controllerKinds) == 0 ||
 				slices.Contains(runtime.controllerKinds, domain.ControllerKindClusterReservation) {
 				store, err := cliWorkflowStore(
 					runtime,
@@ -120,6 +134,46 @@ func (r *rootState) newReserveStatusCommand() *cobra.Command {
 				}
 
 				items, err := store.List(ctx, "")
+				if err != nil {
+					return err
+				}
+
+				for _, object := range items {
+					objects = append(objects, object)
+				}
+			}
+
+			if crdListable(runtime) && (len(runtime.controllerKinds) == 0 ||
+				slices.Contains(runtime.controllerKinds, domain.ControllerKindReservation)) {
+				crdStore, err := cliCRDWorkflowStore(
+					runtime,
+					func() *v1alpha1.Reservation { return &v1alpha1.Reservation{} },
+				)
+				if err != nil {
+					return err
+				}
+
+				items, err := crdStore.List(ctx, namespace)
+				if err != nil {
+					return err
+				}
+
+				for _, object := range items {
+					objects = append(objects, object)
+				}
+			}
+
+			if crdListable(runtime) && (len(runtime.controllerKinds) == 0 ||
+				slices.Contains(runtime.controllerKinds, domain.ControllerKindClusterReservation)) {
+				crdStore, err := cliCRDWorkflowStore(
+					runtime,
+					func() *v1alpha1.ClusterReservation { return &v1alpha1.ClusterReservation{} },
+				)
+				if err != nil {
+					return err
+				}
+
+				items, err := crdStore.List(ctx, "")
 				if err != nil {
 					return err
 				}
@@ -175,7 +229,7 @@ func (r *rootState) newReserveAbortCommand() *cobra.Command {
 		ctx, cancel := r.context(cmd.Context())
 		defer cancel()
 
-		object, err := r.loadReservation(ctx, cmd, runtime, args[0])
+		object, backend, err := r.loadReservationWithBackend(ctx, cmd, runtime, args[0])
 		if err != nil {
 			return err
 		}
@@ -188,8 +242,9 @@ func (r *rootState) newReserveAbortCommand() *cobra.Command {
 
 		switch current := object.(type) {
 		case *v1alpha1.Reservation:
-			store, err := cliWorkflowStore(
+			store, err := cliWorkflowStoreForBackend(
 				runtime,
+				backend,
 				r.workflowStorageNamespace(cmd),
 				func() *v1alpha1.Reservation { return &v1alpha1.Reservation{} },
 			)
@@ -213,8 +268,9 @@ func (r *rootState) newReserveAbortCommand() *cobra.Command {
 				return reportReservationError(cmd, current.Name, current.Status.Phase, err)
 			}
 		case *v1alpha1.ClusterReservation:
-			store, err := cliWorkflowStore(
+			store, err := cliWorkflowStoreForBackend(
 				runtime,
+				backend,
 				r.workflowStorageNamespace(cmd),
 				func() *v1alpha1.ClusterReservation { return &v1alpha1.ClusterReservation{} },
 			)
@@ -272,7 +328,7 @@ func (r *rootState) newReserveCleanupCommand() *cobra.Command {
 		ctx, cancel := r.context(cmd.Context())
 		defer cancel()
 
-		object, err := r.loadReservation(ctx, cmd, runtime, args[0])
+		object, backend, err := r.loadReservationWithBackend(ctx, cmd, runtime, args[0])
 		if err != nil {
 			return err
 		}
@@ -285,8 +341,9 @@ func (r *rootState) newReserveCleanupCommand() *cobra.Command {
 
 		switch current := object.(type) {
 		case *v1alpha1.Reservation:
-			store, err := cliWorkflowStore(
+			store, err := cliWorkflowStoreForBackend(
 				runtime,
+				backend,
 				r.workflowStorageNamespace(cmd),
 				func() *v1alpha1.Reservation { return &v1alpha1.Reservation{} },
 			)
@@ -316,8 +373,9 @@ func (r *rootState) newReserveCleanupCommand() *cobra.Command {
 				)
 			}
 		case *v1alpha1.ClusterReservation:
-			store, err := cliWorkflowStore(
+			store, err := cliWorkflowStoreForBackend(
 				runtime,
+				backend,
 				r.workflowStorageNamespace(cmd),
 				func() *v1alpha1.ClusterReservation { return &v1alpha1.ClusterReservation{} },
 			)

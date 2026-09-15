@@ -14,14 +14,14 @@ import (
 	crclient "sigs.k8s.io/controller-runtime/pkg/client"
 )
 
-func (r *rootState) loadMigration(
+func (r *rootState) loadMigrationWithBackend(
 	ctx context.Context,
 	cmd *cobra.Command,
 	runtime *commandRuntime,
 	id string,
-) (crclient.Object, error) {
+) (crclient.Object, string, error) {
 	if runtime.clients == nil {
-		return nil, domain.NewError(
+		return nil, "", domain.NewError(
 			domain.ErrorInternal,
 			"migration",
 			"Kubernetes clients are required",
@@ -30,21 +30,26 @@ func (r *rootState) loadMigration(
 
 	namespace := r.workflowStorageNamespace(cmd)
 
-	var (
-		object crclient.Object
-		err    error
+	object, backend, err := r.loadWorkflowWithBackend(
+		ctx,
+		cmd,
+		runtime,
+		namespace,
+		id,
+		map[domain.ControllerKind]crclient.Object{
+			domain.ControllerKindMigration:        &v1alpha1.Migration{},
+			domain.ControllerKindClusterMigration: &v1alpha1.ClusterMigration{},
+		},
 	)
-
-	object, err = kube.LoadConfigMapWorkflow(ctx, runtime.clients.Kubernetes, namespace, id)
 	if err != nil {
-		return nil, reportSessionLookupError(cmd, namespace, id, err)
+		return nil, "", reportSessionLookupError(cmd, namespace, id, err)
 	}
 
 	switch object.(type) {
 	case *v1alpha1.Migration, *v1alpha1.ClusterMigration:
-		return object, nil
+		return object, backend, nil
 	default:
-		return nil, domain.NewError(
+		return nil, "", domain.NewError(
 			domain.ErrorValidation,
 			"migration",
 			"stored workflow is not an offline migration",
@@ -80,9 +85,11 @@ func reportMigrationError(
 func (r *rootState) migrationExecutor(
 	runtime *commandRuntime,
 	cmd *cobra.Command,
+	backend string,
 ) (*app.MigrationExecutor, error) {
-	store, err := cliWorkflowStore(
+	store, err := cliWorkflowStoreForBackend(
 		runtime,
+		backend,
 		r.workflowStorageNamespace(cmd),
 		func() *v1alpha1.Migration { return &v1alpha1.Migration{} },
 	)
@@ -105,8 +112,9 @@ func (r *rootState) executeMigration(
 	runtime *commandRuntime,
 	object *v1alpha1.Migration,
 	dryRun bool,
+	backend string,
 ) error {
-	executor, err := r.migrationExecutor(runtime, cmd)
+	executor, err := r.migrationExecutor(runtime, cmd, backend)
 	if err != nil {
 		return err
 	}
@@ -141,9 +149,11 @@ func (r *rootState) clusterMigrationExecutor(
 	runtime *commandRuntime,
 	cmd *cobra.Command,
 	object *v1alpha1.ClusterMigration,
+	backend string,
 ) (*app.ClusterMigrationExecutor, error) {
-	store, err := cliWorkflowStore(
+	store, err := cliWorkflowStoreForBackend(
 		runtime,
+		backend,
 		r.workflowStorageNamespace(cmd),
 		func() *v1alpha1.ClusterMigration { return &v1alpha1.ClusterMigration{} },
 	)
@@ -172,8 +182,9 @@ func (r *rootState) executeClusterMigration(
 	runtime *commandRuntime,
 	object *v1alpha1.ClusterMigration,
 	dryRun bool,
+	backend string,
 ) error {
-	executor, err := r.clusterMigrationExecutor(runtime, cmd, object)
+	executor, err := r.clusterMigrationExecutor(runtime, cmd, object, backend)
 	if err != nil {
 		return err
 	}
@@ -211,16 +222,16 @@ func (r *rootState) resumeMigration(
 	id string,
 	dryRun bool,
 ) error {
-	object, err := r.loadMigration(ctx, cmd, runtime, id)
+	object, backend, err := r.loadMigrationWithBackend(ctx, cmd, runtime, id)
 	if err != nil {
 		return err
 	}
 
 	switch current := object.(type) {
 	case *v1alpha1.Migration:
-		return r.executeMigration(ctx, cmd, runtime, current, dryRun)
+		return r.executeMigration(ctx, cmd, runtime, current, dryRun, backend)
 	case *v1alpha1.ClusterMigration:
-		return r.executeClusterMigration(ctx, cmd, runtime, current, dryRun)
+		return r.executeClusterMigration(ctx, cmd, runtime, current, dryRun, backend)
 	default:
 		return domain.NewError(domain.ErrorValidation, "migration", "unsupported migration input")
 	}
@@ -232,14 +243,14 @@ func (r *rootState) validateMigrationReservation(
 	runtime *commandRuntime,
 	id string,
 ) error {
-	object, err := r.loadMigration(ctx, cmd, runtime, id)
+	object, backend, err := r.loadMigrationWithBackend(ctx, cmd, runtime, id)
 	if err != nil {
 		return err
 	}
 
 	switch current := object.(type) {
 	case *v1alpha1.Migration:
-		executor, err := r.migrationExecutor(runtime, cmd)
+		executor, err := r.migrationExecutor(runtime, cmd, backend)
 		if err != nil {
 			return err
 		}
@@ -248,7 +259,7 @@ func (r *rootState) validateMigrationReservation(
 			return reportMigrationError(cmd, current.Name, current.Status.Phase, err)
 		}
 	case *v1alpha1.ClusterMigration:
-		executor, err := r.clusterMigrationExecutor(runtime, cmd, current)
+		executor, err := r.clusterMigrationExecutor(runtime, cmd, current, backend)
 		if err != nil {
 			return err
 		}

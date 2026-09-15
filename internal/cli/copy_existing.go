@@ -159,7 +159,7 @@ func (r *rootState) copyExisting(
 			return err
 		}
 
-		return r.executeCopy(ctx, cmd, runtime, current, dryRun, true)
+		return r.executeCopy(ctx, cmd, runtime, current, dryRun, true, backend)
 	case *v1alpha1.ClusterCopy:
 		if submit {
 			return domain.NewError(
@@ -173,7 +173,7 @@ func (r *rootState) copyExisting(
 			return err
 		}
 
-		return r.executeClusterCopy(ctx, cmd, runtime, current, dryRun, true)
+		return r.executeClusterCopy(ctx, cmd, runtime, current, dryRun, true, backend)
 	case *v1alpha1.Reservation:
 		return r.adoptReservation(ctx, cmd, runtime, current, flags, dryRun, backend)
 	case *v1alpha1.ClusterReservation:
@@ -190,16 +190,16 @@ func (r *rootState) resumeCopy(
 	id string,
 	dryRun bool,
 ) error {
-	object, err := r.loadCopy(ctx, cmd, runtime, id)
+	object, backend, err := r.loadCopyWithBackend(ctx, cmd, runtime, id, false)
 	if err != nil {
 		return err
 	}
 
 	switch current := object.(type) {
 	case *v1alpha1.Copy:
-		return r.executeCopy(ctx, cmd, runtime, current, dryRun, false)
+		return r.executeCopy(ctx, cmd, runtime, current, dryRun, false, backend)
 	case *v1alpha1.ClusterCopy:
-		return r.executeClusterCopy(ctx, cmd, runtime, current, dryRun, false)
+		return r.executeClusterCopy(ctx, cmd, runtime, current, dryRun, false, backend)
 	default:
 		return domain.NewError(domain.ErrorValidation, "copy", "stored workflow is not a copy")
 	}
@@ -210,10 +210,11 @@ func (r *rootState) executeCopy(
 	cmd *cobra.Command,
 	runtime *commandRuntime,
 	object *v1alpha1.Copy,
-	dryRun, repeat bool,
+	dryRun, repeat bool, backend string,
 ) error {
-	store, err := cliWorkflowStore(
+	store, err := cliWorkflowStoreForBackend(
 		runtime,
+		backend,
 		r.workflowStorageNamespace(cmd),
 		func() *v1alpha1.Copy { return &v1alpha1.Copy{} },
 	)
@@ -268,10 +269,11 @@ func (r *rootState) executeClusterCopy(
 	cmd *cobra.Command,
 	runtime *commandRuntime,
 	object *v1alpha1.ClusterCopy,
-	dryRun, repeat bool,
+	dryRun, repeat bool, backend string,
 ) error {
-	store, err := cliWorkflowStore(
+	store, err := cliWorkflowStoreForBackend(
 		runtime,
+		backend,
 		r.workflowStorageNamespace(cmd),
 		func() *v1alpha1.ClusterCopy { return &v1alpha1.ClusterCopy{} },
 	)

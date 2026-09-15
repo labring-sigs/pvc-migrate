@@ -8,6 +8,7 @@ import (
 	"github.com/labring-sigs/pvc-migrate/internal/app"
 	"github.com/labring-sigs/pvc-migrate/internal/kube"
 	"github.com/spf13/cobra"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	crclient "sigs.k8s.io/controller-runtime/pkg/client"
 )
 
@@ -55,12 +56,31 @@ func (r *rootState) loadMove(
 		return nil, nil, err
 	}
 
-	object, err := store.Load(ctx, crclient.ObjectKey{Name: id})
+	key := crclient.ObjectKey{Name: id, Namespace: r.global.sessionNamespace}
+
+	object, err := store.Load(ctx, key)
+	if err == nil {
+		return object, store, nil
+	}
+
+	if !apierrors.IsNotFound(err) {
+		return nil, nil, err
+	}
+
+	crdStore, err := cliCRDWorkflowStore(
+		runtime,
+		func() *v1alpha1.Move { return &v1alpha1.Move{} },
+	)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	object, err = crdStore.Load(ctx, key)
 	if err != nil {
 		return nil, nil, reportSessionLookupError(cmd, r.global.sessionNamespace, id, err)
 	}
 
-	return object, store, nil
+	return object, crdStore, nil
 }
 
 func (r *rootState) newMoveStatusCommand() *cobra.Command {
