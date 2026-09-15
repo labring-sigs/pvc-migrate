@@ -79,6 +79,8 @@ type commandRuntime struct {
 	clusterPodMigrationExecutor        *app.ClusterPodMigrationExecutor
 	clusterPodMigrationSessionStore    kube.WorkflowStore[*v1alpha1.ClusterPodMigration]
 	clusterPodMigrationSessionExecutor *app.ClusterPodMigrationExecutor
+	podMigrationStore                  kube.WorkflowStore[*v1alpha1.PodMigration]
+	podMigrationExecutor               *app.PodMigrationExecutor
 	orphanCleaner                      *app.OrphanCleaner
 }
 
@@ -374,6 +376,32 @@ func (r *rootState) runtime() (*commandRuntime, error) {
 		},
 	)
 
+	// Controller-submitted namespaced PodMigrations live as CRs in the tenant
+	// namespace; lifecycle commands drive them through the namespaced executor.
+	podMigrationStore, err := kube.NewCRDWorkflowStore(
+		clients.Runtime,
+		func() *v1alpha1.PodMigration { return &v1alpha1.PodMigration{} },
+	)
+	if err != nil {
+		return nil, err
+	}
+
+	podMigrationExecutor := app.NewPodMigrationExecutor(
+		clients.Kubernetes,
+		podMigrationStore,
+		clusterPodMigrationLocker,
+		copyengine.NewPVMigrate(),
+		app.PodMigrationExecutorConfig{
+			Storage: app.MigrationExecutorConfig{
+				Transfer:        transferConfig,
+				ToolImageProber: kube.NewToolImageProber(clients.Kubernetes),
+				ProbeTimeout:    r.global.helmTimeout,
+			},
+			SharedVolumes: openEBSLVMSharedVolumeManager,
+			Workloads:     controllers,
+		},
+	)
+
 	orphanCleaner := app.NewOrphanCleaner(
 		clients.Kubernetes,
 		clusterPodMigrationLocker,
@@ -408,6 +436,8 @@ func (r *rootState) runtime() (*commandRuntime, error) {
 		clusterPodMigrationExecutor:        clusterPodMigrationExecutor,
 		clusterPodMigrationSessionStore:    clusterPodMigrationSessionStore,
 		clusterPodMigrationSessionExecutor: clusterPodMigrationSessionExecutor,
+		podMigrationStore:                  podMigrationStore,
+		podMigrationExecutor:               podMigrationExecutor,
 		orphanCleaner:                      orphanCleaner,
 	}, nil
 }
