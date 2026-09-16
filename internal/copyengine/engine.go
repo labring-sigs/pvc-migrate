@@ -64,11 +64,11 @@ type Request struct {
 	// is treated as done: the pre-copy is best effort by definition. Never
 	// set it for final-sync or standalone copies, which must be exact.
 	TolerateLiveSourceChurn bool
-	HelmTimeout               time.Duration
-	HelmValues                []string
-	HelmStringValues          []string
-	Writer                    io.Writer
-	Logger                    *slog.Logger
+	HelmTimeout             time.Duration
+	HelmValues              []string
+	HelmStringValues        []string
+	Writer                  io.Writer
+	Logger                  *slog.Logger
 }
 
 type Progress struct {
