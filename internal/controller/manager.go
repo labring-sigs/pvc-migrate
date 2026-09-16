@@ -733,30 +733,52 @@ func (m *Manager) VerifyPaused(
 		uniqueReferences = append(uniqueReferences, reference)
 	}
 
-	_, errors := m.readPodReferences(ctx, uniqueReferences)
-	for index, reference := range uniqueReferences {
-		err := errors[index]
-		if apierrors.IsNotFound(err) {
-			continue
-		}
-
-		if err != nil {
-			return domain.WrapError(
-				domain.ErrorKubernetes,
-				"verify paused",
-				"read workload Pod",
-				err,
-			)
-		}
-
-		return domain.NewError(
-			domain.ErrorPrecondition,
+	// Workload operators can transiently recreate a paused component's Pod
+	// while they reconcile around the pause (VMCluster rolling updates
+	// recreate from the highest ordinal first). The reduced replicaCount
+	// guarantees any recreation is reaped, so wait the Pod out -- by name,
+	// tolerating replacements -- instead of failing the workflow on the
+	// first sighting.
+	for _, reference := range uniqueReferences {
+		if err := m.waitForPodNameGone(
+			ctx,
+			reference.Namespace,
+			reference.Name,
 			"verify paused",
-			fmt.Sprintf("Pod %s/%s is still present", reference.Namespace, reference.Name),
-		)
+		); err != nil {
+			return err
+		}
 	}
 
 	return nil
+}
+
+// waitForPodNameGone polls until no Pod with the given name exists,
+// regardless of UID. Unlike waitForPodDeletion, a same-name replacement is
+// not an error: while the reduced replicaCount (or the operator's pause) is
+// held, the recreated Pod is guaranteed to be reaped.
+func (m *Manager) waitForPodNameGone(
+	ctx context.Context,
+	namespace, name, operation string,
+) error {
+	return m.waitFor(
+		ctx,
+		fmt.Sprintf("%s Pod %s/%s removal", operation, namespace, name),
+		func(waitCtx context.Context) (bool, error) {
+			_, getErr := m.typed.CoreV1().
+				Pods(namespace).
+				Get(waitCtx, name, metav1.GetOptions{})
+			if apierrors.IsNotFound(getErr) {
+				return true, nil
+			}
+
+			if getErr != nil {
+				return false, getErr
+			}
+
+			return false, nil
+		},
+	)
 }
 
 func (m *Manager) readPodReferences(
