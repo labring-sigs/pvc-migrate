@@ -509,6 +509,24 @@ flag 描述同步更新为涵盖三族约束（podAffinity/podAntiAffinity/topol
 
 **集群终态**：两集群 r23 测试命名空间与 S3 bucket 已精确清理；controller 均驻留 `sha-52e7bbc` 零错误。
 
+### 第二十五轮：线上 VMCluster 迁移问题复现、根因修复与实战验证
+
+用户以 0.4.3 在生产迁移 `VMCluster`（vmselect 组件，3 副本）失败：Pausing 阶段 "unknown field spec.vmselect.paused"（CRD 剪裁告警）后报 "Pod was replaced while waiting for deletion"，且 resume/abort 均被 "paused changed while session was active" 卡死。
+
+**根因（三层缺陷链，全部修复）**：
+1. **#37 旧版 operator 剪裁 paused 字段**：`spec.<component>.paused` 在旧 VictoriaMetrics operator 的 CRD 中不存在，API 仅告警并丢弃——pause 写入"成功"但组件从未暂停。修复（`23a0469`）：pause 写入后重读 VMCluster 验证字段是否持久化，会话状态记录 `componentPausedSupported`；未支持时 pause 语义退化为**按 reduced replicaCount 持有**（目标 ordinal 之上无副本，Pod 无法回归），verify/restore/resume 的全部 paused 字段断言与写回按该标志门控；新 operator 的 supported 路径行为不变。
+2. **#38 activation 校验对瞬时重建零容忍**：operator 围绕 pause 的 reconcile 会从高序号到低序号滚动重建组件 Pod，迁移目标 Pod 在 activation 前校验时短暂重现即被误判失败。修复（`9472e3f`）：`VerifyPaused` 的 Pod 存在性检查改为**按名字等待消失**（有界轮询、容忍同名替换）——副本收缩持有期间重建必然被回收。
+3. **#39 探测结果不持久化**：controller 在 workload 副本上记录的 probe 结果（`componentPausedSupported`）从未写入会话（checkpoint 为 nil 且结构无该字段），resume/restore 永远按"不支持"处理并在集群留下 `paused=true` 残留。修复（`bbfb433`+`122c007`）：checkpoint 状态增加 `vmCluster` 字段，pause 流程回写探测结果（含 `Status.Workload` 为 nil 的首次分配——原实现此处 **panic**），重建 workload 时 checkpoint 优先于 plan。
+
+**实战验证（147，部署与生产同构的 laf-vmcluster：vmselect×3/vminsert×2/vmstorage×2 + LVM）**：
+- 全新完整 migrate-pod（pause→warm copy→final sync→cutover→resume）：**Completed**，VMCluster 恢复 `replicaCount=3 / paused=false` / 无残留注解 / operational，目标 Pod 在新建 PV 上 Running，checkpoint 正确携带 vmCluster 探测状态 ✅
+- 中断恢复路径：panic 会话（Pausing 中断）经 resume 完成全周期 ✅；Completed 会话经 cleanup 释放所有权后可再次迁移 ✅
+- **附带修复**：CSIStorageCapacity 无拓扑对象（OpenEBS local CSI 实际发布形态）此前被跳过导致所有目标节点误判容量不可用——按 CSI 规范改为全集群适用（`c0a4a7b`）✅
+
+**required 反亲和场景（用户指定）**：修正生产 YAML 中拼写错误的 `prefered...`（该无效参数被 K8s 静默忽略，用户反亲和从未生效）为 `required...` 后实测：① STS 模板传导后，迁移目标节点与同组件存活 Pod 冲突时计划被正确拒绝（存储拓扑/容量检查先行拦截跨节点目标）；② 若以 `--allow-placement-violation` 强行绕过，VM operator 自身的滚动重建会使组件 Pod Pending（"didn't match pod anti-affinity rules"）——**反亲和与副本同宿主时迁移本质上不可行，属环境约束而非工具缺陷**。暴露的检查缺口记录为 **#36**：放置评估读取旧 Pod 快照的 affinity 而非控制器当前模板，后续修复方向为发现阶段叠加 STS 模板 affinity。
+
+**遗留**：vm-test 命名空间保留（用户可比对）；controller 驻留 `sha-122c007`。
+
 ## 六、明确未覆盖项（含原因）
 
 1. **KubeBlocks 0.9 InstanceSet**：147 集群安装的是 sealos KB fork v0.8.2.1，workloads.kubeblocks.io 仅 ReplicatedStateMachine，组件 Pod 归属 apps/v1 StatefulSet；无 InstanceSet CRD/controller。升级共享集群 KB operator 风险不可接受。本集群 KB pause guard 已验证安全拒绝（集群 phase 卡 Creating，见下条）。
