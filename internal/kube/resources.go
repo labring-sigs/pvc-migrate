@@ -1,9 +1,7 @@
 package kube
 
 import (
-	"os"
 	"slices"
-	"strings"
 
 	"github.com/labring-sigs/pvc-migrate/internal/domain"
 	corev1 "k8s.io/api/core/v1"
@@ -214,10 +212,10 @@ func AddHelmReleaseObjectEstimate(estimate *domain.ResourceEstimate, releases in
 		return
 	}
 
-	switch strings.ToLower(strings.TrimSpace(os.Getenv("HELM_DRIVER"))) {
-	case "configmap", "configmaps":
+	switch HelmReleaseStorageFromEnv() {
+	case HelmReleaseStorageConfigMap:
 		estimate.ConfigMaps += releases
-	case "memory", "sql":
+	case HelmReleaseStorageEphemeral:
 	default:
 		estimate.Secrets += releases
 	}

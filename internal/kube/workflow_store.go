@@ -655,3 +655,31 @@ func copyWorkflowObject(source, destination crclient.Object) error {
 func workflowStoreConflict(action, message string) error {
 	return domain.NewError(domain.ErrorConflict, action+" workflow", message)
 }
+
+// Workflow storage backends. LoadConfigMapWorkflow-style lookups report which
+// backend served a workflow so callers can bind the matching store family.
+const (
+	BackendConfigMap = "configmap"
+	BackendCRD       = "crd"
+)
+
+// NewWorkflowStoreForBackend binds the store family that owns a workflow
+// identity. Sessions persist in ConfigMaps under a storage namespace;
+// controller-submitted workflows persist as API-server CRs. Centralizing the
+// decision keeps every entrypoint -- CLI, controller, future APIs -- from
+// drifting into binding the wrong family for a backend.
+func NewWorkflowStoreForBackend[T crclient.Object](
+	clients *Clients,
+	backend, namespace string,
+	factory func() T,
+) (WorkflowStore[T], error) {
+	if clients == nil {
+		return nil, errors.New("workflow storage requires clients")
+	}
+
+	if backend == BackendCRD {
+		return NewCRDWorkflowStore(clients.Runtime, factory)
+	}
+
+	return NewConfigMapWorkflowStore(clients.Kubernetes, namespace, factory)
+}

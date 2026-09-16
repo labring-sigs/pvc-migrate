@@ -60,17 +60,23 @@ func cliCRDWorkflowStore[T crclient.Object](
 // cliWorkflowStoreForBackend binds the store family that owns the workflow
 // identity the loader resolved. Lifecycle mutations fence through their owning
 // store, so a CRD-submitted workflow must never be driven through the
-// ConfigMap session storage or the other way around.
+// ConfigMap session storage or the other way around. The backend decision
+// itself lives in kube.NewWorkflowStoreForBackend so every entrypoint shares
+// one definition.
 func cliWorkflowStoreForBackend[T crclient.Object](
 	runtime *commandRuntime,
 	backend, namespace string,
 	factory func() T,
 ) (kube.WorkflowStore[T], error) {
-	if backend == backendCRD {
-		return cliCRDWorkflowStore(runtime, factory)
+	if runtime == nil || runtime.clients == nil {
+		return nil, domain.NewError(
+			domain.ErrorInternal,
+			"workflow storage",
+			"Kubernetes clients are required",
+		)
 	}
 
-	return cliWorkflowStore(runtime, namespace, factory)
+	return kube.NewWorkflowStoreForBackend(runtime.clients, backend, namespace, factory)
 }
 
 // loadWorkflowWithBackend resolves one workflow identity from ConfigMap session
@@ -148,9 +154,10 @@ func (r *rootState) crdProbeNamespaces(cmd *cobra.Command) []string {
 	return namespaces
 }
 
+// Workflow storage backends, mirrored from kube for load-reporting call sites.
 const (
-	backendConfigMap = "configmap"
-	backendCRD       = "crd"
+	backendConfigMap = kube.BackendConfigMap
+	backendCRD       = kube.BackendCRD
 )
 
 // crdListable reports whether the runtime can enumerate workflow CRs. A

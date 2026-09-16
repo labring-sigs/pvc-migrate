@@ -3,7 +3,6 @@ package planner
 import (
 	"context"
 	"fmt"
-	"os"
 	"slices"
 	"strings"
 
@@ -105,7 +104,7 @@ func transferToolAccess(namespaces, strategies []string) rbacChecks {
 		add(namespace, "", "secrets", "get", "create", "patch", "delete")
 
 		releaseResource := "secrets"
-		if driver := os.Getenv("HELM_DRIVER"); driver == "configmap" || driver == "configmaps" {
+		if kube.HelmReleaseStorageFromEnv() == kube.HelmReleaseStorageConfigMap {
 			releaseResource = "configmaps"
 		}
 
