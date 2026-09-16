@@ -1440,7 +1440,6 @@ func (m *Manager) setVMClusterPaused(
 		// through: the paused write below is pruned again, and the post-update
 		// probe keeps recording support.
 
-
 		if err := unstructured.SetNestedField(
 			componentObject,
 			true,
@@ -1487,7 +1486,12 @@ func (m *Manager) setVMClusterPaused(
 		// reduced replicaCount instead of relying on the paused flag.
 		stored, readErr := resource.Get(ctx, vm.Name, metav1.GetOptions{})
 		if readErr == nil {
-			if component, ok, _ := unstructured.NestedMap(stored.Object, "spec", vm.Component); ok && component != nil {
+			if component, ok, _ := unstructured.NestedMap(
+				stored.Object,
+				"spec",
+				vm.Component,
+			); ok &&
+				component != nil {
 				stuck, _, _ := unstructured.NestedBool(component, vmClusterFieldPaused)
 				vm.ComponentPausedSupported = stuck
 			}

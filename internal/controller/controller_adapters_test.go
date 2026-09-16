@@ -1056,7 +1056,11 @@ func TestVMClusterPauseHoldsWhenCRDPrunesPausedField(t *testing.T) {
 			// reaction persist it: the stored VMCluster never carries the
 			// paused field, exactly like an old CRD pruning it.
 			updated := testutil.MustActionObject[*unstructured.Unstructured](t, action)
-			if component, found, _ := unstructured.NestedMap(updated.Object, "spec", "vmstorage"); found {
+			if component, found, _ := unstructured.NestedMap(
+				updated.Object,
+				"spec",
+				"vmstorage",
+			); found {
 				delete(component, "paused")
 				_ = unstructured.SetNestedField(updated.Object, component, "spec", "vmstorage")
 			}
@@ -1088,16 +1092,30 @@ func TestVMClusterPauseHoldsWhenCRDPrunesPausedField(t *testing.T) {
 		t.Fatal("pruned paused field must record the component as unsupported")
 	}
 
-	stored, err := dynamicClient.Resource(vmResource).Namespace("vm").Get(ctx, "metrics", metav1.GetOptions{})
+	stored, err := dynamicClient.Resource(vmResource).
+		Namespace("vm").
+		Get(ctx, "metrics", metav1.GetOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	if got, found, _ := unstructured.NestedBool(stored.Object, "spec", "vmstorage", "paused"); found && got {
+	if got, found, _ := unstructured.NestedBool(
+		stored.Object,
+		"spec",
+		"vmstorage",
+		"paused",
+	); found &&
+		got {
 		t.Fatal("pruned CRD unexpectedly persisted the paused field")
 	}
 
-	if got, found, _ := unstructured.NestedInt64(stored.Object, "spec", "vmstorage", "replicaCount"); !found || got != 1 {
+	if got, found, _ := unstructured.NestedInt64(
+		stored.Object,
+		"spec",
+		"vmstorage",
+		"replicaCount",
+	); !found ||
+		got != 1 {
 		t.Fatalf("replicaCount=%d found=%t, want the ordinal 1", got, found)
 	}
 
@@ -1113,12 +1131,20 @@ func TestVMClusterPauseHoldsWhenCRDPrunesPausedField(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	resumed, err := dynamicClient.Resource(vmResource).Namespace("vm").Get(ctx, "metrics", metav1.GetOptions{})
+	resumed, err := dynamicClient.Resource(vmResource).
+		Namespace("vm").
+		Get(ctx, "metrics", metav1.GetOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	if got, found, _ := unstructured.NestedInt64(resumed.Object, "spec", "vmstorage", "replicaCount"); !found || got != 2 {
+	if got, found, _ := unstructured.NestedInt64(
+		resumed.Object,
+		"spec",
+		"vmstorage",
+		"replicaCount",
+	); !found ||
+		got != 2 {
 		t.Fatalf("resumed replicaCount=%d found=%t, want 2", got, found)
 	}
 
