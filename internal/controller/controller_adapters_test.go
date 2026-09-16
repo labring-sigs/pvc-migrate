@@ -1158,12 +1158,22 @@ func TestVerifyPausedWaitsForReplacedPodToBeReaped(t *testing.T) {
 	defer cancel()
 
 	sts := &appsv1.StatefulSet{
-		ObjectMeta: metav1.ObjectMeta{Namespace: "vm", Name: "vmselect-metrics", UID: types.UID("sts-uid")},
-		Spec:       appsv1.StatefulSetSpec{Replicas: ptrInt32(1)},
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: "vm",
+			Name:      "vmselect-metrics",
+			UID:       types.UID("sts-uid"),
+		},
+		Spec: appsv1.StatefulSetSpec{Replicas: ptrInt32(1)},
 	}
 	pod := readyPod("vm", "vmselect-metrics-1", "node-a")
 	pod.OwnerReferences = []metav1.OwnerReference{
-		{APIVersion: "apps/v1", Kind: "StatefulSet", Name: sts.Name, UID: sts.UID, Controller: new(true)},
+		{
+			APIVersion: "apps/v1",
+			Kind:       "StatefulSet",
+			Name:       sts.Name,
+			UID:        sts.UID,
+			Controller: new(true),
+		},
 	}
 	client := fake.NewClientset(sts, pod)
 	podsResource := corev1.SchemeGroupVersion.WithResource("pods")
@@ -1172,11 +1182,14 @@ func TestVerifyPausedWaitsForReplacedPodToBeReaped(t *testing.T) {
 	// a new UID; the StatefulSet then reaps it because it is beyond replicas.
 	go func() {
 		time.Sleep(300 * time.Millisecond)
+
 		replacement := readyPod("vm", pod.Name, "node-b")
 		replacement.OwnerReferences = pod.OwnerReferences
 		_ = client.Tracker().Delete(podsResource, "vm", pod.Name)
 		_ = client.Tracker().Create(podsResource, replacement, "vm")
+
 		time.Sleep(300 * time.Millisecond)
+
 		_ = client.Tracker().Delete(podsResource, "vm", replacement.Name)
 	}()
 
@@ -1194,13 +1207,21 @@ func TestVerifyPausedWaitsForReplacedPodToBeReaped(t *testing.T) {
 		AffectedPods: []v1alpha1.LocalResourceReference{{
 			Kind: "Pod", Name: pod.Name, UID: pod.UID,
 		}},
-		Ordinal:         ptrInt32(1),
+		Ordinal:          ptrInt32(1),
 		OriginalReplicas: ptrInt32(2),
 	}
 
-	if err := manager.VerifyPaused(ctx, "wait-test", "vm", workload, domain.PhaseFinalSynced, ""); err != nil {
+	if err := manager.VerifyPaused(
+		ctx,
+		"wait-test",
+		"vm",
+		workload,
+		domain.PhaseFinalSynced,
+		"",
+	); err != nil {
 		t.Fatalf("verify must tolerate a transiently recreated Pod: %v", err)
 	}
 }
 
-func ptrInt32(v int32) *int32 { return &v }
+//go:fix inline
+func ptrInt32(v int32) *int32 { return new(v) }
