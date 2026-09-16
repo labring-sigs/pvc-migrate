@@ -102,6 +102,10 @@ type ClusterVolumeActivationStatus struct {
 type ClusterPodMigrationWorkloadStatus struct {
 	Pod          *ObjectReference  `json:"pod,omitempty"          yaml:"pod,omitempty"`
 	AffectedPods []ObjectReference `json:"affectedPods,omitempty" yaml:"affectedPods,omitempty"`
+	// VMCluster carries the controller's pause-probe outcomes (such as
+	// whether the CRD kept the per-component paused field) so resume and
+	// restore reuse the semantics recorded during the pause.
+	VMCluster *VMClusterSpec `json:"vmCluster,omitempty" yaml:"vmCluster,omitempty"`
 }
 
 // ClusterVolumeReservationStatus is the storage-provisioning checkpoint shared by

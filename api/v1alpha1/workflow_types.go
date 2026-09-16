@@ -404,6 +404,9 @@ type SharedMountStatus struct {
 type PodMigrationWorkloadStatus struct {
 	Pod          *LocalResourceReference  `json:"pod,omitempty"          yaml:"pod,omitempty"`
 	AffectedPods []LocalResourceReference `json:"affectedPods,omitempty" yaml:"affectedPods,omitempty"`
+	// VMCluster carries the controller's pause-probe outcomes; see
+	// ClusterPodMigrationWorkloadStatus.VMCluster.
+	VMCluster *VMClusterSpec `json:"vmCluster,omitempty" yaml:"vmCluster,omitempty"`
 }
 
 // MigrationVolumeStatus is the durable checkpoint for an offline migration

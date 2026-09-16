@@ -24,6 +24,12 @@ func podWorkload(
 ) v1alpha1.WorkloadSpec {
 	workload := plan.DeepCopy()
 	if checkpoint != nil {
+		// Checkpointed pause-probe outcomes win over the plan; see
+		// clusterPodWorkload.
+		if checkpoint.VMCluster != nil {
+			workload.VMCluster = checkpoint.VMCluster.DeepCopy()
+		}
+
 		if checkpoint.Pod != nil {
 			workload.Pod = checkpoint.Pod.DeepCopy()
 		}
@@ -40,6 +46,13 @@ func clusterPodWorkload(
 ) v1alpha1.WorkloadSpec {
 	workload := plan.DeepCopy()
 	if checkpoint != nil {
+		// The pause-probe outcomes (e.g. whether the VMCluster CRD kept the
+		// per-component paused field) live in the durable checkpoint, not in
+		// the plan; the checkpoint always wins.
+		if checkpoint.VMCluster != nil {
+			workload.VMCluster = checkpoint.VMCluster.DeepCopy()
+		}
+
 		if checkpoint.Pod != nil {
 			workload.Pod = localResourceReference(*checkpoint.Pod)
 		}

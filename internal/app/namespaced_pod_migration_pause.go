@@ -65,6 +65,15 @@ func (m *PodMigrationExecutor) pause(ctx context.Context, object *v1alpha1.PodMi
 
 	checkpoint, pauseErr := m.workloads.Pause(ctx, object.Name, object.Namespace, workload,
 		object.Status.Phase, object.Status.ResumeFrom)
+	// The controller records pause-probe outcomes on the passed workload;
+	// persist them so resume and restore reuse the same semantics.
+	if workload.VMCluster != nil {
+		if object.Status.Workload.VMCluster == nil {
+			object.Status.Workload.VMCluster = workload.VMCluster
+		} else {
+			object.Status.Workload.VMCluster.ComponentPausedSupported = workload.VMCluster.ComponentPausedSupported
+		}
+	}
 	// A controller can return recovery identities before a later convergence failure.
 	// Persist them before recording the failure or attempting further mutations.
 	if err := m.saveWorkloadCheckpoint(ctx, object, checkpoint); err != nil {
