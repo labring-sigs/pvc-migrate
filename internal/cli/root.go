@@ -151,8 +151,12 @@ func NewRoot(options Options) *cobra.Command {
 		30*time.Minute,
 		"Operation timeout; copy, migrate, migrate-pod, backup, and restore default to 24h when unset",
 	)
-	flags.DurationVar(&state.global.copyTimeout, "copy-timeout", 0,
-		"Per-attempt data transfer timeout for copy, migrate, and migrate-pod; 0 disables. Must be shorter than --timeout when both are set")
+	flags.DurationVar(
+		&state.global.copyTimeout,
+		"copy-timeout",
+		0,
+		"Per-attempt data transfer timeout for copy, migrate, and migrate-pod; 0 disables. Must be shorter than --timeout when both are set",
+	)
 	flags.IntVar(&state.global.retries, "retries", 3, "Copy retry attempts")
 	flags.DurationVar(
 		&state.global.retryBackoff,

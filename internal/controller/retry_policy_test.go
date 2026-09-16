@@ -2,10 +2,10 @@ package controller
 
 import (
 	"testing"
+	"time"
 
 	v1alpha1 "github.com/labring-sigs/pvc-migrate/api/v1alpha1"
 	"github.com/labring-sigs/pvc-migrate/internal/app"
-	"time"
 )
 
 func TestApplyRetryPolicy(t *testing.T) {
@@ -71,4 +71,3 @@ func TestApplyRetryPolicy(t *testing.T) {
 		}
 	})
 }
-
