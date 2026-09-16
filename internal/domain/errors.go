@@ -21,6 +21,7 @@ const (
 // Stable error operations consumed across package boundaries for specialized
 // CLI guidance. Keep these separate from human-readable error messages.
 const (
+	ErrorOperationCopyAttempt           = "copy attempt"
 	ErrorOperationWarmCopyMountProbe    = "warm-copy mount probe"
 	ErrorOperationCopyCapacity          = "copy capacity"
 	ErrorOperationSourceUsageCheck      = "source usage check"

@@ -24,11 +24,14 @@ import (
 // VolumeCopyConfig configures transfer execution infrastructure. Workflow input
 // and durable progress belong to the operation's CRD and are passed per copy.
 type VolumeCopyConfig struct {
-	KubeconfigPath   string
-	Context          string
-	Retries          int
-	RetryBackoff     time.Duration
-	HelmTimeout      time.Duration
+	KubeconfigPath string
+	Context        string
+	Retries        int
+	RetryBackoff   time.Duration
+	HelmTimeout    time.Duration
+	// CopyTimeout bounds a single data-transfer attempt. Zero disables the
+	// per-attempt bound; the operation context remains the only limit.
+	CopyTimeout      time.Duration
 	NoCompress       bool
 	StreamToolLogs   bool
 	StructuredLogs   bool

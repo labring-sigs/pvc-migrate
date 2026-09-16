@@ -132,7 +132,16 @@ func (s *volumeCopyRunner) copyWithRetry(
 		attemptRequest.Strategies = slices.Clone(request.Strategies)
 		attemptRequest.HelmValues = slices.Clone(request.HelmValues)
 		attemptRequest.HelmStringValues = slices.Clone(request.HelmStringValues)
-		copyErr := s.copier.Copy(ctx, attemptRequest, func(progress copyengine.Progress) {
+
+		// A per-attempt bound turns a hung transfer into a retryable failure
+		// instead of burning the whole operation budget. Tool cleanup below
+		// still runs on the operation context on purpose.
+		attemptCtx, attemptCancel := ctx, func() {}
+		if s.config.CopyTimeout > 0 {
+			attemptCtx, attemptCancel = context.WithTimeout(ctx, s.config.CopyTimeout)
+		}
+
+		copyErr := s.copier.Copy(attemptCtx, attemptRequest, func(progress copyengine.Progress) {
 			s.logInfo(
 				"copy progress",
 				"session",
@@ -152,6 +161,21 @@ func (s *volumeCopyRunner) copyWithRetry(
 
 		toolLogs.Stop()
 		copyErr = mergeToolLogError(copyErr, toolLogs.ObservedError())
+
+		attemptCancel()
+
+		if copyErr != nil && attemptCtx.Err() != nil && ctx.Err() == nil {
+			copyErr = domain.WrapError(
+				domain.ErrorTimeout,
+				domain.ErrorOperationCopyAttempt,
+				fmt.Sprintf(
+					"copy attempt %d exceeded --copy-timeout %s",
+					*attempts,
+					s.config.CopyTimeout,
+				),
+				copyErr,
+			)
+		}
 
 		s.logInfo(
 			"waiting for copy tool Pods to release PVCs",

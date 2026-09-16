@@ -147,6 +147,7 @@ func (r *rootState) volumeCopyConfig(runtime *commandRuntime) app.VolumeCopyConf
 		Retries:        r.global.retries,
 		RetryBackoff:   r.global.retryBackoff,
 		HelmTimeout:    r.global.helmTimeout,
+		CopyTimeout:    r.global.copyTimeout,
 		NoCompress:     r.global.noCompress,
 		Writer:         r.errWriter(),
 		Logger:         runtime.logger,

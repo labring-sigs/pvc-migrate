@@ -39,6 +39,7 @@ type globals struct {
 	sessionNamespace  string
 	workflowNamespace string
 	timeout           time.Duration
+	copyTimeout       time.Duration
 	retries           int
 	retryBackoff      time.Duration
 	helmTimeout       time.Duration
@@ -117,6 +118,10 @@ func NewRoot(options Options) *cobra.Command {
 			state.currentCommand = cmd
 			state.timeoutExplicit = cmd.Flags().Changed("timeout")
 
+			if err := state.validateCopyTimeout(cmd); err != nil {
+				return err
+			}
+
 			_, err := parseColorMode(state.global.color)
 
 			return err
@@ -146,6 +151,8 @@ func NewRoot(options Options) *cobra.Command {
 		30*time.Minute,
 		"Operation timeout; copy, migrate, migrate-pod, backup, and restore default to 24h when unset",
 	)
+	flags.DurationVar(&state.global.copyTimeout, "copy-timeout", 0,
+		"Per-attempt data transfer timeout for copy, migrate, and migrate-pod; 0 disables. Must be shorter than --timeout when both are set")
 	flags.IntVar(&state.global.retries, "retries", 3, "Copy retry attempts")
 	flags.DurationVar(
 		&state.global.retryBackoff,
@@ -561,6 +568,41 @@ func (r *rootState) effectiveTimeout() time.Duration {
 	}
 
 	return r.global.timeout
+}
+
+// validateCopyTimeout rejects a per-attempt copy bound that can never fire:
+// when both bounds are positive and the copy bound is not shorter than the
+// effective operation timeout, the copy timeout would be silently ignored.
+// Commands without data transfers do not consume the copy timeout and are
+// not validated.
+func (r *rootState) validateCopyTimeout(cmd *cobra.Command) error {
+	if r.global.copyTimeout <= 0 {
+		return nil
+	}
+
+	for c := cmd; c != nil; c = c.Parent() {
+		if !dataTransferRootCommands[c.Name()] {
+			continue
+		}
+
+		effective := r.effectiveTimeout()
+		if effective > 0 && r.global.copyTimeout >= effective {
+			return domain.NewError(
+				domain.ErrorValidation,
+				"flags",
+				fmt.Sprintf(
+					"--copy-timeout %s must be shorter than the effective --timeout %s for %s",
+					r.global.copyTimeout,
+					effective,
+					c.Name(),
+				),
+			)
+		}
+
+		break
+	}
+
+	return nil
 }
 
 func (r *rootState) context(parent context.Context) (context.Context, context.CancelFunc) {
