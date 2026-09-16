@@ -214,6 +214,8 @@ func (m *ClusterPodMigrationExecutor) warmCopy(
 			Strategies:            plan.Strategies,
 			DeleteExtraneousFiles: plan.DeleteExtraneous,
 			Mode:                  copyengine.ModeWarm,
+
+			TolerateLiveSourceChurn: true,
 		}
 
 		recovery := ""

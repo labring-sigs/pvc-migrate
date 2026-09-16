@@ -133,6 +133,34 @@ func (p *PVMigrate) Copy(ctx context.Context, request Request, progress Progress
 			)
 		}
 
+		// A warm pass against a live workload is best effort: when the source
+		// rewrites files faster than the pass transfers them, rsync ends with
+		// code 23 on every retry and the pre-copy can never finish. The
+		// paused final sync converges the remainder, so record the churn and
+		// report success instead of failing the migration.
+		if request.TolerateLiveSourceChurn && isRsyncPartialTransferError(classified) {
+			if logger := request.Logger; logger != nil {
+				logger.Warn(
+					"warm copy ended with live-source churn; the paused final sync will converge",
+					"operation", operationID,
+					"error", classified.Error(),
+				)
+			}
+
+			if progress != nil {
+				progress(
+					Progress{
+						Mode:    request.Mode,
+						Attempt: request.Attempt,
+						State:   "completed",
+						Message: operationID,
+					},
+				)
+			}
+
+			return nil
+		}
+
 		return classified
 	}
 
@@ -148,6 +176,20 @@ func (p *PVMigrate) Copy(ctx context.Context, request Request, progress Progress
 	}
 
 	return nil
+}
+
+// isRsyncPartialTransferError reports whether the data mover exited with
+// rsync's partial-transfer status (code 23): the source rewrote or removed
+// files while they were being transferred. The rsync job's own script already
+// treats the vanished-files code 24 as success.
+func isRsyncPartialTransferError(err error) bool {
+	for e := err; e != nil; e = errors.Unwrap(e) {
+		if strings.Contains(e.Error(), "the data mover exited with code 23") {
+			return true
+		}
+	}
+
+	return false
 }
 
 func transferEnginePath(value string) string {

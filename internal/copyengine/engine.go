@@ -58,6 +58,12 @@ type Request struct {
 	SourceMountReadWrite      bool
 	IgnoreSizes               bool
 	NoCompress                bool
+	// TolerateLiveSourceChurn marks a warm-copy pass whose destination will
+	// be converged by a later paused final sync. With it set, a transfer that
+	// fails because the live source rewrote files mid-pass (rsync code 23)
+	// is treated as done: the pre-copy is best effort by definition. Never
+	// set it for final-sync or standalone copies, which must be exact.
+	TolerateLiveSourceChurn bool
 	HelmTimeout               time.Duration
 	HelmValues                []string
 	HelmStringValues          []string
