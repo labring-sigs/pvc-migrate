@@ -30,6 +30,7 @@ func (m *Manager) verifyVMClusterPaused(
 	ctx context.Context,
 	workflowID, namespace string,
 	controller v1alpha1.ObjectReference,
+	ordinal *int32,
 	vm *v1alpha1.VMClusterSpec,
 ) error {
 	if vm == nil {
@@ -93,6 +94,42 @@ func (m *Manager) verifyVMClusterPaused(
 	component, _, nestedErr := unstructured.NestedMap(object.Object, "spec", vm.Component)
 	if nestedErr != nil {
 		return nestedErr
+	}
+
+	if !vm.ComponentPausedSupported {
+		// The CRD pruned the paused write: the hold is the reduced
+		// replicaCount, which keeps the migrated ordinal beyond the
+		// component's replica set while the session owns the pause.
+		if ordinal == nil {
+			return domain.NewError(
+				domain.ErrorInternal,
+				"verify paused",
+				"session lacks StatefulSet replica state",
+			)
+		}
+
+		replicas, found, err := unstructured.NestedInt64(
+			component,
+			vmClusterFieldReplicaCount,
+		)
+		if err != nil {
+			return err
+		}
+
+		if !found || replicas > int64(*ordinal) {
+			return domain.NewError(
+				domain.ErrorPrecondition,
+				"verify paused",
+				fmt.Sprintf(
+					"VMCluster component %s replicaCount %d exceeds migration ordinal %d; the operator may restore the migrated Pod",
+					vm.Component,
+					replicas,
+					*ordinal,
+				),
+			)
+		}
+
+		return nil
 	}
 
 	paused, _, _ := unstructured.NestedBool(component, vmClusterFieldPaused)
@@ -917,7 +954,9 @@ func (m *Manager) restoreVMClusterPause(
 			return validateErr
 		}
 
-		if current != vm.OriginalPaused {
+		// On CRDs that prune the component paused field the write-back is a
+		// no-op at the API server; skipping it avoids a pointless update.
+		if current != vm.OriginalPaused && vm.ComponentPausedSupported {
 			if err := unstructured.SetNestedField(
 				componentObject,
 				vm.OriginalPaused,
@@ -1000,7 +1039,7 @@ func validateVMClusterPauseRestoreState(
 	}
 
 	if pauseOwner == "" {
-		if current != vm.OriginalPaused {
+		if vm.ComponentPausedSupported && current != vm.OriginalPaused {
 			return false, domain.NewError(
 				domain.ErrorConflict,
 				"restore VMCluster pause",
@@ -1028,7 +1067,7 @@ func validateVMClusterPauseRestoreState(
 		return false, nil
 	}
 
-	if !current {
+	if !current && vm.ComponentPausedSupported {
 		return false, domain.NewError(
 			domain.ErrorConflict,
 			"restore VMCluster pause",
@@ -1381,10 +1420,12 @@ func (m *Manager) setVMClusterPaused(
 		}
 
 		if pauseOwner == workflowID && current {
+			vm.ComponentPausedSupported = true
+
 			return nil
 		}
 
-		if pauseOwner == workflowID && !current {
+		if pauseOwner == workflowID && !current && vm.ComponentPausedSupported {
 			return domain.NewError(
 				domain.ErrorConflict,
 				"VMCluster pause",
@@ -1394,6 +1435,11 @@ func (m *Manager) setVMClusterPaused(
 				),
 			)
 		}
+
+		// pauseOwner == workflowID && !current on an unsupported CRD falls
+		// through: the paused write below is pruned again, and the post-update
+		// probe keeps recording support.
+
 
 		if err := unstructured.SetNestedField(
 			componentObject,
@@ -1432,6 +1478,19 @@ func (m *Manager) setVMClusterPaused(
 				"update component paused state",
 				updateErr,
 			)
+		}
+
+		// Older VMCluster CRDs prune the per-component paused field with only
+		// a warning, so a successful update says nothing about whether the
+		// pause took. Re-read and record the outcome: when the field did not
+		// persist, pause semantics degrade to holding the component at the
+		// reduced replicaCount instead of relying on the paused flag.
+		stored, readErr := resource.Get(ctx, vm.Name, metav1.GetOptions{})
+		if readErr == nil {
+			if component, ok, _ := unstructured.NestedMap(stored.Object, "spec", vm.Component); ok && component != nil {
+				stuck, _, _ := unstructured.NestedBool(component, vmClusterFieldPaused)
+				vm.ComponentPausedSupported = stuck
+			}
 		}
 
 		return nil

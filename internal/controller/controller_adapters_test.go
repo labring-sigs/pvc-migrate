@@ -974,3 +974,155 @@ func TestDiscoverRejectsUnsafeKubeBlocksInstanceSetComponents(t *testing.T) {
 		})
 	}
 }
+
+func TestVMClusterPauseHoldsWhenCRDPrunesPausedField(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	replicas := int32(2)
+	vm := &unstructured.Unstructured{Object: map[string]any{
+		"apiVersion": vmClusterAPIVersion,
+		"kind":       "VMCluster",
+		"metadata": map[string]any{
+			"name":       "metrics",
+			"namespace":  "vm",
+			"uid":        "vm-uid",
+			"generation": int64(1),
+		},
+		"spec": map[string]any{
+			"vmstorage": map[string]any{"replicaCount": int64(2), "paused": false},
+		},
+		"status": map[string]any{
+			"observedGeneration": int64(1),
+			"clusterStatus":      "operational",
+			"updateStatus":       "operational",
+		},
+	}}
+	sts := &appsv1.StatefulSet{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: "vm",
+			Name:      "vmstorage-metrics",
+			UID:       types.UID("sts-uid"),
+			OwnerReferences: []metav1.OwnerReference{
+				{
+					APIVersion: vmClusterAPIVersion,
+					Kind:       "VMCluster",
+					Name:       "metrics",
+					UID:        "vm-uid",
+					Controller: new(true),
+				},
+			},
+		},
+		Spec: appsv1.StatefulSetSpec{Replicas: &replicas},
+	}
+	pod := readyPod("vm", "vmstorage-metrics-1", "node-a")
+	pod.OwnerReferences = []metav1.OwnerReference{
+		{
+			APIVersion: "apps/v1",
+			Kind:       "StatefulSet",
+			Name:       sts.Name,
+			UID:        sts.UID,
+			Controller: new(true),
+		},
+	}
+	client := fake.NewClientset(sts, pod)
+	podsResource := corev1.SchemeGroupVersion.WithResource("pods")
+	client.PrependReactor(
+		"update",
+		"statefulsets",
+		func(action clienttesting.Action) (bool, runtime.Object, error) {
+			updated := testutil.MustActionObject[*appsv1.StatefulSet](t, action)
+			if *updated.Spec.Replicas == 1 {
+				_ = client.Tracker().Delete(podsResource, "vm", pod.Name)
+			} else {
+				resumed := readyPod("vm", pod.Name, "node-b")
+				resumed.OwnerReferences = pod.OwnerReferences
+				_ = client.Tracker().Create(podsResource, resumed, "vm")
+			}
+
+			return false, nil, nil
+		},
+	)
+
+	dynamicClient := dynamicfake.NewSimpleDynamicClient(runtime.NewScheme(), vm)
+	vmResource := mustGVR(vmClusterAPIVersion, vmClusterResource)
+	// An old VMCluster CRD prunes the unknown per-component paused field with
+	// only a warning: the update succeeds but the field never persists.
+	dynamicClient.PrependReactor(
+		"update",
+		"vmclusters",
+		func(action clienttesting.Action) (bool, runtime.Object, error) {
+			// Mutate the action object in place and let the default tracker
+			// reaction persist it: the stored VMCluster never carries the
+			// paused field, exactly like an old CRD pruning it.
+			updated := testutil.MustActionObject[*unstructured.Unstructured](t, action)
+			if component, found, _ := unstructured.NestedMap(updated.Object, "spec", "vmstorage"); found {
+				delete(component, "paused")
+				_ = unstructured.SetNestedField(updated.Object, component, "spec", "vmstorage")
+			}
+
+			return false, nil, nil
+		},
+	)
+	manager := NewManager(client, dynamicClient, client.Discovery())
+	manager.poll = time.Millisecond
+
+	workload, err := manager.discoverForTest(
+		ctx,
+		"vm",
+		v1alpha1.PodMigrationSpec{
+			Pod:                 v1alpha1.LocalResourceReference{Name: pod.Name},
+			AllowLeaderDowntime: true,
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	owner, namespace, phase := "pruned-pause-test", "vm", domain.PhasePausing
+	if _, err := manager.Pause(ctx, owner, namespace, workload, phase, ""); err != nil {
+		t.Fatalf("pause must survive a CRD that prunes the paused field: %v", err)
+	}
+
+	if workload.VMCluster.ComponentPausedSupported {
+		t.Fatal("pruned paused field must record the component as unsupported")
+	}
+
+	stored, err := dynamicClient.Resource(vmResource).Namespace("vm").Get(ctx, "metrics", metav1.GetOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if got, found, _ := unstructured.NestedBool(stored.Object, "spec", "vmstorage", "paused"); found && got {
+		t.Fatal("pruned CRD unexpectedly persisted the paused field")
+	}
+
+	if got, found, _ := unstructured.NestedInt64(stored.Object, "spec", "vmstorage", "replicaCount"); !found || got != 1 {
+		t.Fatalf("replicaCount=%d found=%t, want the ordinal 1", got, found)
+	}
+
+	if stored.GetAnnotations()[pauseSessionAnnotation] != owner {
+		t.Fatalf("pause owner=%q", stored.GetAnnotations()[pauseSessionAnnotation])
+	}
+
+	if err := manager.VerifyPaused(ctx, owner, namespace, workload, phase, ""); err != nil {
+		t.Fatalf("verify must hold via the reduced replicaCount: %v", err)
+	}
+
+	if _, err := manager.Resume(ctx, owner, namespace, workload, "", phase, "", nil); err != nil {
+		t.Fatal(err)
+	}
+
+	resumed, err := dynamicClient.Resource(vmResource).Namespace("vm").Get(ctx, "metrics", metav1.GetOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if got, found, _ := unstructured.NestedInt64(resumed.Object, "spec", "vmstorage", "replicaCount"); !found || got != 2 {
+		t.Fatalf("resumed replicaCount=%d found=%t, want 2", got, found)
+	}
+
+	if resumed.GetAnnotations()[pauseSessionAnnotation] != "" {
+		t.Fatalf("pause owner=%q", resumed.GetAnnotations()[pauseSessionAnnotation])
+	}
+}

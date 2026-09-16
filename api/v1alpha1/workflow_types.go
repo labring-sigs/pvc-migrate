@@ -159,6 +159,11 @@ type VMClusterSpec struct {
 	OriginalClusterPausedConfigured bool      `json:"originalClusterPausedConfigured" yaml:"originalClusterPausedConfigured"`
 	OriginalReplicas                int32     `json:"originalReplicas"                yaml:"originalReplicas"`
 	OriginalReplicasConfigured      bool      `json:"originalReplicasConfigured"      yaml:"originalReplicasConfigured"`
+	// ComponentPausedSupported records whether the VMCluster CRD kept the
+	// per-component paused write. Older operator versions prune the unknown
+	// field, so pause semantics degrade to holding the component at a reduced
+	// replicaCount instead of relying on the paused flag.
+	ComponentPausedSupported bool `json:"componentPausedSupported,omitempty" yaml:"componentPausedSupported,omitempty"`
 }
 
 type GrafanaSpec struct {

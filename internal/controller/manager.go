@@ -825,6 +825,7 @@ func (m *Manager) verifyPauseControl(
 		return m.verifyVMClusterPaused(
 			ctx,
 			owner, namespace, controller,
+			workload.Ordinal,
 			workload.VMCluster,
 		)
 	case v1alpha1.WorkloadGrafana:
