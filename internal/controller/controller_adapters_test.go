@@ -1157,7 +1157,7 @@ func TestVerifyPausedWaitsForReplacedPodToBeReaped(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	one := int32(1)
+	two, three := int32(1), int32(2)
 	sts := &appsv1.StatefulSet{
 		ObjectMeta: metav1.ObjectMeta{
 			Namespace: "vm",
