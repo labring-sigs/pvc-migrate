@@ -314,7 +314,11 @@ func matchingCapacityObjects(
 
 	invalidTopology := 0
 	for _, item := range objects {
+		// A capacity object without node topology applies to the whole
+		// cluster -- the same semantics the Kubernetes scheduler uses when
+		// filtering capacities for a node.
 		if item.NodeTopology == nil {
+			matching = append(matching, item)
 			continue
 		}
 

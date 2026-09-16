@@ -291,16 +291,18 @@ func TestStorageCapacityDemandsRejectMalformedAndNonPositiveCapacity(t *testing.
 	}
 }
 
-func TestStorageCapacityTopologyNilAndInvalidRemainUnavailable(t *testing.T) {
+func TestStorageCapacityTopologyNilAppliesClusterWideAndInvalidStaysUnknown(t *testing.T) {
 	tests := []struct {
 		name       string
 		topology   *metav1.LabelSelector
 		wantStatus domain.StorageCapacityStatus
 	}{
 		{
-			name:       "nil means inaccessible",
+			// A capacity object without node topology applies to the whole
+			// cluster, matching the Kubernetes scheduler's own filtering.
+			name:       "nil applies cluster-wide",
 			topology:   nil,
-			wantStatus: domain.StorageCapacityInsufficient,
+			wantStatus: domain.StorageCapacitySufficient,
 		},
 		{
 			name: "invalid selector",
