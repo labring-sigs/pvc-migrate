@@ -72,4 +72,3 @@ func TestApplyRetryPolicy(t *testing.T) {
 	})
 }
 
-func ptrToStr(v string) *string { return &v }
