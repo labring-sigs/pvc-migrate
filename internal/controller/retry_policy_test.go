@@ -47,7 +47,7 @@ func TestApplyRetryPolicy(t *testing.T) {
 		reports := []string{}
 
 		applyRetryPolicy(&config, &v1alpha1.RetryPolicySpec{
-			RetryBackoff: ptrToStr("tomorrow"),
+			RetryBackoff: new("tomorrow"),
 		}, func(message string) {
 			reports = append(reports, message)
 		})
