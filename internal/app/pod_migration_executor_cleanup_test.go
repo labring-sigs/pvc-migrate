@@ -392,6 +392,7 @@ func TestPodMigrationFailSourceDeletedConvergesToFailed(t *testing.T) {
 	if err := executor.FailSourceDeleted(t.Context(), object); err != nil {
 		t.Fatal(err)
 	}
+
 	if len(object.Status.History) != historyLen {
 		t.Fatal("failed workflow accumulated duplicate source-loss records")
 	}
@@ -434,6 +435,7 @@ func TestPodMigrationFailSourceDeletedNoopWhenSourcePresent(t *testing.T) {
 	if err := executor.FailSourceDeleted(t.Context(), object); err != nil {
 		t.Fatal(err)
 	}
+
 	if object.Status.Phase != domain.PhaseReserved {
 		t.Fatalf("phase = %s, want untouched Reserved", object.Status.Phase)
 	}

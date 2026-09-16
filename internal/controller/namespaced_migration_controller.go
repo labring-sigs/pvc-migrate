@@ -126,7 +126,7 @@ func (r *MigrationReconciler) reconcile(
 		return workflowReconcileResult(err)
 	}
 
-		if err := r.executor().FailSourceDeleted(ctx, object); err != nil {
+	if err := r.executor().FailSourceDeleted(ctx, object); err != nil {
 		return workflowReconcileResult(err)
 	}
 

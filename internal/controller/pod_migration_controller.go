@@ -126,7 +126,7 @@ func (r *ClusterPodMigrationReconciler) reconcile(
 		return workflowReconcileResult(err)
 	}
 
-		if err := r.executor(object).FailSourceDeleted(ctx, object); err != nil {
+	if err := r.executor(object).FailSourceDeleted(ctx, object); err != nil {
 		return workflowReconcileResult(err)
 	}
 

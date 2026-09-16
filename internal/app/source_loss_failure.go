@@ -44,7 +44,12 @@ func (m *ClusterPodMigrationExecutor) FailSourceDeleted(
 		return nil
 	}
 
-	deleted, err := deletedPlannedSourcePVC(ctx, m.client, string(plan.SourceNamespace), plan.Volumes)
+	deleted, err := deletedPlannedSourcePVC(
+		ctx,
+		m.client,
+		string(plan.SourceNamespace),
+		plan.Volumes,
+	)
 	if err != nil || !deleted {
 		return err
 	}
@@ -88,7 +93,12 @@ func (m *ClusterMigrationExecutor) FailSourceDeleted(
 		return nil
 	}
 
-	deleted, err := deletedPlannedSourcePVC(ctx, m.client, string(plan.SourceNamespace), plan.Volumes)
+	deleted, err := deletedPlannedSourcePVC(
+		ctx,
+		m.client,
+		string(plan.SourceNamespace),
+		plan.Volumes,
+	)
 	if err != nil || !deleted {
 		return err
 	}
