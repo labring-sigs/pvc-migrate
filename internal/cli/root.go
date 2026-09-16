@@ -60,9 +60,11 @@ const (
 )
 
 type rootState struct {
-	options Options
-	global  globals
-	errOut  io.Writer
+	options         Options
+	global          globals
+	errOut          io.Writer
+	currentCommand  *cobra.Command
+	timeoutExplicit bool
 }
 
 type commandRuntime struct {
@@ -111,8 +113,12 @@ func NewRoot(options Options) *cobra.Command {
 		Short:         "Resumable Kubernetes PVC migration",
 		SilenceUsage:  true,
 		SilenceErrors: true,
-		PersistentPreRunE: func(*cobra.Command, []string) error {
+		PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
+			state.currentCommand = cmd
+			state.timeoutExplicit = cmd.Flags().Changed("timeout")
+
 			_, err := parseColorMode(state.global.color)
+
 			return err
 		},
 	}
@@ -134,7 +140,12 @@ func NewRoot(options Options) *cobra.Command {
 		"",
 		"Tenant namespace containing a controller workflow for lifecycle/status commands",
 	)
-	flags.DurationVar(&state.global.timeout, "timeout", 30*time.Minute, "Operation timeout")
+	flags.DurationVar(
+		&state.global.timeout,
+		"timeout",
+		30*time.Minute,
+		"Operation timeout; copy, migrate, migrate-pod, backup, and restore default to 24h when unset",
+	)
 	flags.IntVar(&state.global.retries, "retries", 3, "Copy retry attempts")
 	flags.DurationVar(
 		&state.global.retryBackoff,
@@ -521,11 +532,44 @@ func printerFor(r *rootState) output.Printer {
 	return output.Printer{Writer: r.options.Out, Format: output.Format(r.global.output)}
 }
 
+// dataTransferOperationTimeout bounds operations that move payload data.
+// Datasets have no natural upper size, so the short metadata-operation
+// default would kill legitimate large copies mid-transfer.
+const dataTransferOperationTimeout = 24 * time.Hour
+
+// dataTransferRootCommands are the root operations that transfer payload
+// data (copy, migrate, migrate-pod, backup, restore) or resume it from a
+// checkpoint. Metadata-only operations (rename, move, reserve) keep the
+// short default.
+var dataTransferRootCommands = map[string]bool{
+	"copy": true, "migrate": true, "migrate-pod": true,
+	"backup": true, "restore": true,
+}
+
+// effectiveTimeout resolves the operation timeout: an explicit --timeout
+// always wins; otherwise data-transferring operations default to the long
+// transfer bound while everything else keeps the metadata default.
+func (r *rootState) effectiveTimeout() time.Duration {
+	if r.timeoutExplicit {
+		return r.global.timeout
+	}
+
+	for c := r.currentCommand; c != nil; c = c.Parent() {
+		if dataTransferRootCommands[c.Name()] {
+			return dataTransferOperationTimeout
+		}
+	}
+
+	return r.global.timeout
+}
+
 func (r *rootState) context(parent context.Context) (context.Context, context.CancelFunc) {
-	if r.global.timeout <= 0 {
+	timeout := r.effectiveTimeout()
+	if timeout <= 0 {
 		return context.WithCancel(parent)
 	}
-	return context.WithTimeout(parent, r.global.timeout)
+
+	return context.WithTimeout(parent, timeout)
 }
 
 func parseLogLevel(value string) (slog.Level, error) {
