@@ -213,3 +213,24 @@ func TestNamespacedPodMigrationUnplannedDeletionRemovesStoredObject(t *testing.T
 		t.Fatalf("deleted migration remains in store: %v", err)
 	}
 }
+
+func TestNamespacedPodMigrationFailSourceDeletedUsesObjectNamespace(t *testing.T) {
+	executor, object, store, _ := namespacedPodMigrationFixture(t)
+	executor.workloads = &fakeController{}
+
+	object.Status.Phase = domain.PhaseReserved
+	if err := store.Save(t.Context(), object); err != nil {
+		t.Fatal(err)
+	}
+
+	// The fixture world holds no source PVCs in the object's namespace: the
+	// wrapper must resolve the source namespace from the workflow object, not
+	// a plan field, for the probe to find the deletion.
+	if err := executor.FailSourceDeleted(t.Context(), object); err == nil {
+		t.Fatal("expected the recorded source-loss failure")
+	}
+
+	if object.Status.Phase != domain.PhaseFailed {
+		t.Fatalf("phase = %s, want Failed", object.Status.Phase)
+	}
+}

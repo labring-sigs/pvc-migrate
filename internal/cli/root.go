@@ -330,13 +330,11 @@ func (r *rootState) runtime() (*commandRuntime, error) {
 		// requested tool image and every executor stage must use exactly that
 		// image. The controller pins its own trusted image separately.
 	}
-	clusterPodMigrationExecutor := app.NewClusterPodMigrationExecutor(
-		clients.Kubernetes,
-		clusterPodMigrationStore,
-		clusterPodMigrationLocker,
-		r.global.sessionNamespace,
-		copyengine.NewPVMigrate(),
-		app.PodMigrationExecutorConfig{
+	// podMigrationExecutorConfig is the one place the pod-migration executor
+	// dependencies are described; the cluster, session, and namespaced
+	// executors differ only in store and locker.
+	podMigrationExecutorConfig := func() app.PodMigrationExecutorConfig {
+		return app.PodMigrationExecutorConfig{
 			Storage: app.MigrationExecutorConfig{
 				Transfer:        transferConfig,
 				ToolImageProber: kube.NewToolImageProber(clients.Kubernetes),
@@ -344,7 +342,16 @@ func (r *rootState) runtime() (*commandRuntime, error) {
 			},
 			SharedVolumes: openEBSLVMSharedVolumeManager,
 			Workloads:     controllers,
-		},
+		}
+	}
+
+	clusterPodMigrationExecutor := app.NewClusterPodMigrationExecutor(
+		clients.Kubernetes,
+		clusterPodMigrationStore,
+		clusterPodMigrationLocker,
+		r.global.sessionNamespace,
+		copyengine.NewPVMigrate(),
+		podMigrationExecutorConfig(),
 	)
 
 	// Session-side migrate-pod persists the concrete CRD in a ConfigMap: the
@@ -365,15 +372,7 @@ func (r *rootState) runtime() (*commandRuntime, error) {
 		kube.NewConfigMapWorkflowLocker(clients.Kubernetes),
 		r.global.sessionNamespace,
 		copyengine.NewPVMigrate(),
-		app.PodMigrationExecutorConfig{
-			Storage: app.MigrationExecutorConfig{
-				Transfer:        transferConfig,
-				ToolImageProber: kube.NewToolImageProber(clients.Kubernetes),
-				ProbeTimeout:    r.global.helmTimeout,
-			},
-			SharedVolumes: openEBSLVMSharedVolumeManager,
-			Workloads:     controllers,
-		},
+		podMigrationExecutorConfig(),
 	)
 
 	// Controller-submitted namespaced PodMigrations live as CRs in the tenant
@@ -391,15 +390,7 @@ func (r *rootState) runtime() (*commandRuntime, error) {
 		podMigrationStore,
 		clusterPodMigrationLocker,
 		copyengine.NewPVMigrate(),
-		app.PodMigrationExecutorConfig{
-			Storage: app.MigrationExecutorConfig{
-				Transfer:        transferConfig,
-				ToolImageProber: kube.NewToolImageProber(clients.Kubernetes),
-				ProbeTimeout:    r.global.helmTimeout,
-			},
-			SharedVolumes: openEBSLVMSharedVolumeManager,
-			Workloads:     controllers,
-		},
+		podMigrationExecutorConfig(),
 	)
 
 	orphanCleaner := app.NewOrphanCleaner(

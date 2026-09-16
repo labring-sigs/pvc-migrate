@@ -5,6 +5,7 @@ import (
 
 	v1alpha1 "github.com/labring-sigs/pvc-migrate/api/v1alpha1"
 	"github.com/labring-sigs/pvc-migrate/internal/domain"
+	"k8s.io/client-go/kubernetes"
 )
 
 // sourceLossFailure builds the terminal failure recorded when the planned
@@ -30,34 +31,57 @@ func sourceLossRelevant(status v1alpha1.WorkflowStatus) bool {
 	return true
 }
 
+// failSourceDeleted is the shared convergence core behind every executor's
+// FailSourceDeleted probe. A deleted source PVC can never be migrated:
+// reserve and final-sync revalidation would re-read the missing identity
+// forever, wedging the workflow in a non-terminal phase and looping the
+// reconciler. The scope variance between workflow kinds is exactly the
+// source namespace plus each executor's lock and failure plumbing; the
+// decision itself is written once here.
+func failSourceDeleted(
+	ctx context.Context,
+	status v1alpha1.WorkflowStatus,
+	planVolumes []v1alpha1.VolumeSpec,
+	sourceNamespace string,
+	clients kubernetes.Interface,
+	lock func(context.Context, func(context.Context) error) error,
+	fail func(context.Context, error) error,
+	operation string,
+) error {
+	if !sourceLossRelevant(status) {
+		return nil
+	}
+
+	deleted, err := deletedPlannedSourcePVC(ctx, clients, sourceNamespace, planVolumes)
+	if err != nil || !deleted {
+		return err
+	}
+
+	return lock(ctx, func(ctx context.Context) error {
+		return fail(ctx, sourceLossFailure(operation))
+	})
+}
+
 // FailSourceDeleted converges a live workflow whose planned source PVC was
-// deleted to Failed. Reserve and final-sync revalidation can only re-read the
-// missing identity forever, wedging the workflow in a non-terminal phase and
-// looping the reconciler. Returns nil without mutating the workflow when the
+// deleted to Failed. Returns nil without mutating the workflow when the
 // source storage still exists or the phase is terminal.
 func (m *ClusterPodMigrationExecutor) FailSourceDeleted(
 	ctx context.Context,
 	object *v1alpha1.ClusterPodMigration,
 ) error {
 	plan := object.Status.Plan
-	if plan == nil || !sourceLossRelevant(object.Status.WorkflowStatus) {
+	if plan == nil {
 		return nil
 	}
 
-	deleted, err := deletedPlannedSourcePVC(
-		ctx,
-		m.client,
-		string(plan.SourceNamespace),
-		plan.Volumes,
-	)
-	if err != nil || !deleted {
-		return err
-	}
-
-	return withStoredWorkflowLock(ctx, m.store, m.locker, m.storageNamespace, object,
-		func(ctx context.Context) error {
-			return m.fail(ctx, object, sourceLossFailure("pod migration"))
-		})
+	return failSourceDeleted(ctx, object.Status.WorkflowStatus,
+		plan.Volumes, string(plan.SourceNamespace), m.client,
+		func(ctx context.Context, run func(context.Context) error) error {
+			return withStoredWorkflowLock(ctx, m.store, m.locker, m.storageNamespace, object, run)
+		},
+		func(ctx context.Context, cause error) error {
+			return m.fail(ctx, object, cause)
+		}, "pod migration")
 }
 
 // FailSourceDeleted mirrors the cluster-scoped convergence for namespaced
@@ -67,19 +91,18 @@ func (m *PodMigrationExecutor) FailSourceDeleted(
 	object *v1alpha1.PodMigration,
 ) error {
 	plan := object.Status.Plan
-	if plan == nil || !sourceLossRelevant(object.Status.WorkflowStatus) {
+	if plan == nil {
 		return nil
 	}
 
-	deleted, err := deletedPlannedSourcePVC(ctx, m.client, object.Namespace, plan.Volumes)
-	if err != nil || !deleted {
-		return err
-	}
-
-	return withStoredWorkflowLock(ctx, m.store, m.locker, object.Namespace, object,
-		func(ctx context.Context) error {
-			return m.fail(ctx, object, sourceLossFailure("pod migration"))
-		})
+	return failSourceDeleted(ctx, object.Status.WorkflowStatus,
+		plan.Volumes, object.Namespace, m.client,
+		func(ctx context.Context, run func(context.Context) error) error {
+			return withStoredWorkflowLock(ctx, m.store, m.locker, object.Namespace, object, run)
+		},
+		func(ctx context.Context, cause error) error {
+			return m.fail(ctx, object, cause)
+		}, "pod migration")
 }
 
 // FailSourceDeleted mirrors the cluster-scoped convergence for offline
@@ -89,24 +112,18 @@ func (m *ClusterMigrationExecutor) FailSourceDeleted(
 	object *v1alpha1.ClusterMigration,
 ) error {
 	plan := object.Status.Plan
-	if plan == nil || !sourceLossRelevant(object.Status.WorkflowStatus) {
+	if plan == nil {
 		return nil
 	}
 
-	deleted, err := deletedPlannedSourcePVC(
-		ctx,
-		m.client,
-		string(plan.SourceNamespace),
-		plan.Volumes,
-	)
-	if err != nil || !deleted {
-		return err
-	}
-
-	return withStoredWorkflowLock(ctx, m.store, m.locker, m.storageNamespace, object,
-		func(ctx context.Context) error {
-			return m.fail(ctx, object, sourceLossFailure("migration"))
-		})
+	return failSourceDeleted(ctx, object.Status.WorkflowStatus,
+		plan.Volumes, string(plan.SourceNamespace), m.client,
+		func(ctx context.Context, run func(context.Context) error) error {
+			return withStoredWorkflowLock(ctx, m.store, m.locker, m.storageNamespace, object, run)
+		},
+		func(ctx context.Context, cause error) error {
+			return m.fail(ctx, object, cause)
+		}, "migration")
 }
 
 // FailSourceDeleted mirrors the cluster-scoped convergence for namespaced
@@ -116,17 +133,16 @@ func (m *MigrationExecutor) FailSourceDeleted(
 	object *v1alpha1.Migration,
 ) error {
 	plan := object.Status.Plan
-	if plan == nil || !sourceLossRelevant(object.Status.WorkflowStatus) {
+	if plan == nil {
 		return nil
 	}
 
-	deleted, err := deletedPlannedSourcePVC(ctx, m.client, object.Namespace, plan.Volumes)
-	if err != nil || !deleted {
-		return err
-	}
-
-	return withStoredWorkflowLock(ctx, m.store, m.locker, object.Namespace, object,
-		func(ctx context.Context) error {
-			return m.fail(ctx, object, sourceLossFailure("migration"))
-		})
+	return failSourceDeleted(ctx, object.Status.WorkflowStatus,
+		plan.Volumes, object.Namespace, m.client,
+		func(ctx context.Context, run func(context.Context) error) error {
+			return withStoredWorkflowLock(ctx, m.store, m.locker, object.Namespace, object, run)
+		},
+		func(ctx context.Context, cause error) error {
+			return m.fail(ctx, object, cause)
+		}, "migration")
 }
