@@ -1157,13 +1157,14 @@ func TestVerifyPausedWaitsForReplacedPodToBeReaped(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
+	one := int32(1)
 	sts := &appsv1.StatefulSet{
 		ObjectMeta: metav1.ObjectMeta{
 			Namespace: "vm",
 			Name:      "vmselect-metrics",
 			UID:       types.UID("sts-uid"),
 		},
-		Spec: appsv1.StatefulSetSpec{Replicas: ptrInt32(1)},
+		Spec: appsv1.StatefulSetSpec{Replicas: &one},
 	}
 	pod := readyPod("vm", "vmselect-metrics-1", "node-a")
 	pod.OwnerReferences = []metav1.OwnerReference{
@@ -1207,8 +1208,8 @@ func TestVerifyPausedWaitsForReplacedPodToBeReaped(t *testing.T) {
 		AffectedPods: []v1alpha1.LocalResourceReference{{
 			Kind: "Pod", Name: pod.Name, UID: pod.UID,
 		}},
-		Ordinal:          ptrInt32(1),
-		OriginalReplicas: ptrInt32(2),
+		Ordinal:          &two,
+		OriginalReplicas: &three,
 	}
 
 	if err := manager.VerifyPaused(
