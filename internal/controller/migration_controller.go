@@ -126,6 +126,10 @@ func (r *ClusterMigrationReconciler) reconcile(
 		return workflowReconcileResult(err)
 	}
 
+		if err := r.executor(object).FailSourceDeleted(ctx, object); err != nil {
+		return workflowReconcileResult(err)
+	}
+
 	return workflowReconcileResult(r.executor(object).Run(ctx, object))
 }
 

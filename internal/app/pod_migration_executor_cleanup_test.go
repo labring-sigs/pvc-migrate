@@ -3,6 +3,7 @@ package app
 import (
 	"errors"
 	"reflect"
+	"strings"
 	"testing"
 
 	v1alpha1 "github.com/labring-sigs/pvc-migrate/api/v1alpha1"
@@ -334,5 +335,106 @@ func TestPodMigrationUnplannedDeletionRemovesStoredObject(t *testing.T) {
 		err,
 	) {
 		t.Fatalf("deleted migration remains in store: %v", err)
+	}
+}
+
+func TestPodMigrationFailSourceDeletedConvergesToFailed(t *testing.T) {
+	executor, object, store, _ := podMigrationExecutorFixture(t)
+	executor.workloads = &fakeController{}
+
+	object.Status.Phase = domain.PhaseReserved
+	for _, volume := range object.Status.Plan.Volumes {
+		object.Status.Volumes = append(object.Status.Volumes,
+			v1alpha1.ClusterPodMigrationVolumeStatus{
+				ClusterVolumeReservationStatus: v1alpha1.ClusterVolumeReservationStatus{
+					SourcePVCName:     volume.SourcePVC.Name,
+					Reserved:          true,
+					DestinationPolicy: corev1.PersistentVolumeReclaimRetain,
+					DestinationPVC: &v1alpha1.ObjectReference{
+						Kind:      "PersistentVolumeClaim",
+						Namespace: "temporary",
+						Name:      "reserved-" + volume.SourcePVC.Name,
+						UID:       types.UID("reserved-" + volume.SourcePVC.Name),
+					},
+					DestinationPV: &v1alpha1.ObjectReference{
+						Kind: "PersistentVolume",
+						Name: "reserved-pv-" + volume.SourcePVC.Name,
+						UID:  types.UID("reserved-pv-" + volume.SourcePVC.Name),
+					},
+				},
+			},
+		)
+	}
+
+	if err := store.Save(t.Context(), object); err != nil {
+		t.Fatal(err)
+	}
+
+	// The fixture world holds no source PVCs: the planned source storage was
+	// deleted underneath the Reserved phase. The reconciler calls this probe
+	// before Run; the workflow must converge to Failed instead of looping.
+	if err := executor.FailSourceDeleted(t.Context(), object); err == nil {
+		t.Fatal("expected the recorded source-loss failure")
+	}
+
+	if object.Status.Phase != domain.PhaseFailed {
+		t.Fatalf("phase = %s, want Failed", object.Status.Phase)
+	}
+
+	last := object.Status.History[len(object.Status.History)-1]
+	if last.Phase != domain.PhaseFailed ||
+		!strings.Contains(last.Message, "source PVC no longer exists") {
+		t.Fatalf("failure history = %s/%s", last.Phase, last.Message)
+	}
+
+	// The probe is idempotent on a Failed workflow: no duplicate history.
+	historyLen := len(object.Status.History)
+	if err := executor.FailSourceDeleted(t.Context(), object); err != nil {
+		t.Fatal(err)
+	}
+	if len(object.Status.History) != historyLen {
+		t.Fatal("failed workflow accumulated duplicate source-loss records")
+	}
+}
+
+func TestPodMigrationFailSourceDeletedNoopWhenSourcePresent(t *testing.T) {
+	executor, object, store, _ := podMigrationExecutorFixture(t)
+	executor.workloads = &fakeController{}
+
+	object.Status.Phase = domain.PhaseReserved
+	if err := store.Save(t.Context(), object); err != nil {
+		t.Fatal(err)
+	}
+
+	// Materialize the planned source storage so the probe finds it present.
+	for _, volume := range object.Status.Plan.Volumes {
+		pv := &corev1.PersistentVolume{
+			ObjectMeta: metav1.ObjectMeta{Name: volume.SourcePV.Name, UID: volume.SourcePV.UID},
+		}
+		if _, err := executor.client.CoreV1().
+			PersistentVolumes().
+			Create(t.Context(), pv, metav1.CreateOptions{}); err != nil {
+			t.Fatal(err)
+		}
+
+		pvc := &corev1.PersistentVolumeClaim{
+			ObjectMeta: metav1.ObjectMeta{
+				Namespace: "source",
+				Name:      volume.SourcePVC.Name,
+				UID:       volume.SourcePVC.UID,
+			},
+		}
+		if _, err := executor.client.CoreV1().
+			PersistentVolumeClaims("source").
+			Create(t.Context(), pvc, metav1.CreateOptions{}); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	if err := executor.FailSourceDeleted(t.Context(), object); err != nil {
+		t.Fatal(err)
+	}
+	if object.Status.Phase != domain.PhaseReserved {
+		t.Fatalf("phase = %s, want untouched Reserved", object.Status.Phase)
 	}
 }
