@@ -440,3 +440,68 @@ func TestPodMigrationFailSourceDeletedNoopWhenSourcePresent(t *testing.T) {
 		t.Fatalf("phase = %s, want untouched Reserved", object.Status.Phase)
 	}
 }
+
+func TestPodMigrationPausePersistsVMClusterProbeOutcome(t *testing.T) {
+	executor, object, store, _ := podMigrationExecutorFixture(t)
+	executor.workloads = &fakeController{}
+
+	object.Status.Plan.Workload.Adapter = v1alpha1.WorkloadVMCluster
+	object.Status.Plan.Workload.Controller = &v1alpha1.LocalResourceReference{
+		Kind: "StatefulSet", Name: "vmselect-laf-vmcluster", UID: "vmselect-sts-uid",
+	}
+	object.Status.Plan.Workload.VMCluster = &v1alpha1.VMClusterSpec{
+		APIVersion:       "operator.victoriametrics.com/v1beta1",
+		Name:             "metrics",
+		UID:              "vm-uid",
+		Component:        "vmselect",
+		OriginalReplicas: 3,
+	}
+
+	// Status.Workload is nil until the first checkpoint: the very first pause
+	// must not panic writing the probe outcome into it.
+	if object.Status.Workload != nil {
+		t.Fatal("fixture precondition: workload checkpoint starts nil")
+	}
+
+	// A VMCluster workload is controller-managed: the standalone Pod snapshot
+	// digest recorded by the fixture does not apply.
+	object.Status.OriginalPodSnapshotHash = ""
+
+	// Pause admission requires the workflow to sit in a pre-pause phase with
+	// per-volume checkpoints recorded by the reservation stage.
+	object.Status.Phase = domain.PhaseReserved
+	for _, volume := range object.Status.Plan.Volumes {
+		object.Status.Volumes = append(object.Status.Volumes,
+			v1alpha1.ClusterPodMigrationVolumeStatus{
+				ClusterVolumeReservationStatus: v1alpha1.ClusterVolumeReservationStatus{
+					SourcePVCName:     volume.SourcePVC.Name,
+					Reserved:          true,
+					DestinationPolicy: corev1.PersistentVolumeReclaimRetain,
+					DestinationPVC: &v1alpha1.ObjectReference{
+						Kind:      "PersistentVolumeClaim",
+						Namespace: "temporary",
+						Name:      "reserved-" + volume.SourcePVC.Name,
+						UID:       types.UID("reserved-" + volume.SourcePVC.Name),
+					},
+					DestinationPV: &v1alpha1.ObjectReference{
+						Kind: "PersistentVolume",
+						Name: "reserved-pv-" + volume.SourcePVC.Name,
+						UID:  types.UID("reserved-pv-" + volume.SourcePVC.Name),
+					},
+				},
+			},
+		)
+	}
+
+	if err := store.Save(t.Context(), object); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := executor.Pause(t.Context(), object); err != nil {
+		t.Fatal(err)
+	}
+
+	if object.Status.Workload == nil || object.Status.Workload.VMCluster == nil {
+		t.Fatal("pause lost the VMCluster probe state")
+	}
+}

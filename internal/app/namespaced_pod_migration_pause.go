@@ -68,6 +68,10 @@ func (m *PodMigrationExecutor) pause(ctx context.Context, object *v1alpha1.PodMi
 	// The controller records pause-probe outcomes on the passed workload;
 	// persist them so resume and restore reuse the same semantics.
 	if workload.VMCluster != nil {
+		if object.Status.Workload == nil {
+			object.Status.Workload = &v1alpha1.PodMigrationWorkloadStatus{}
+		}
+
 		if object.Status.Workload.VMCluster == nil {
 			object.Status.Workload.VMCluster = workload.VMCluster
 		} else {

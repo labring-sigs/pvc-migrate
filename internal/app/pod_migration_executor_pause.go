@@ -85,6 +85,10 @@ func (m *ClusterPodMigrationExecutor) pause(
 	// The controller records pause-probe outcomes on the passed workload;
 	// persist them so resume and restore reuse the same semantics.
 	if workload.VMCluster != nil {
+		if object.Status.Workload == nil {
+			object.Status.Workload = &v1alpha1.ClusterPodMigrationWorkloadStatus{}
+		}
+
 		if object.Status.Workload.VMCluster == nil {
 			object.Status.Workload.VMCluster = workload.VMCluster
 		} else {
