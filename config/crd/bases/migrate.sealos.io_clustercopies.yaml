@@ -108,6 +108,30 @@ spec:
                 required:
                 - name
                 type: object
+              retryPolicy:
+                description: |-
+                  RetryPolicy overrides the retry behavior of the data-transfer attempts
+                  for this workflow. Zero values keep the controller defaults. Only
+                  copy-bearing workflows consume it.
+                properties:
+                  copyTimeout:
+                    description: CopyTimeout bounds one data-transfer attempt. 0 disables
+                      the bound.
+                    pattern: ^([0-9]+h)?([0-9]+m)?([0-9]+s)?
+                    type: string
+                  retries:
+                    description: Retries overrides the number of data-transfer attempts.
+                    format: int32
+                    maximum: 100
+                    minimum: 0
+                    type: integer
+                  retryBackoff:
+                    description: |-
+                      RetryBackoff is the delay before the first retry; it doubles on every
+                      further attempt.
+                    pattern: ^([0-9]+h)?([0-9]+m)?([0-9]+s)?
+                    type: string
+                type: object
               sessionNamespace:
                 description: |-
                   NamespaceName is a Kubernetes namespace name used by a cluster-scoped

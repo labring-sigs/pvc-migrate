@@ -46,7 +46,7 @@ func (r *PodMigrationReconciler) Reconcile(
 
 	if object.DeletionTimestamp != nil {
 		cancelActiveReconcile(r.active, object.UID)
-		return workflowReconcileResult(r.executor().FinalizeDeleted(ctx, object))
+		return workflowReconcileResult(r.executor(object).FinalizeDeleted(ctx, object))
 	}
 
 	return runActiveReconcile(
@@ -126,14 +126,29 @@ func (r *PodMigrationReconciler) reconcile(
 		return workflowReconcileResult(err)
 	}
 
-	if err := r.executor().FailSourceDeleted(ctx, object); err != nil {
+	if err := r.executor(object).FailSourceDeleted(ctx, object); err != nil {
 		return workflowReconcileResult(err)
 	}
 
-	return workflowReconcileResult(r.executor().Run(ctx, object))
+	return workflowReconcileResult(r.executor(object).Run(ctx, object))
 }
 
-func (r *PodMigrationReconciler) executor() *app.PodMigrationExecutor {
+func (r *PodMigrationReconciler) executor(object *v1alpha1.PodMigration) *app.PodMigrationExecutor {
+	config := r.config.Storage
+	applyRetryPolicy(&config.Transfer, object.Spec.RetryPolicy, func(message string) {
+		if r.recorder != nil {
+			r.recorder.Eventf(
+				object,
+				nil,
+				"Warning",
+				"RetryPolicyInvalid",
+				"Execute",
+				"%s",
+				message,
+			)
+		}
+	})
+
 	return app.NewPodMigrationExecutor(
 		r.client,
 		r.store,

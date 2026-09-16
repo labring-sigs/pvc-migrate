@@ -54,7 +54,7 @@ func (r *CopyReconciler) Reconcile(
 			}
 		}
 
-		return workflowReconcileResult(r.executor().FinalizeDeleted(ctx, object))
+		return workflowReconcileResult(r.executor(object).FinalizeDeleted(ctx, object))
 	}
 
 	return runActiveReconcile(
@@ -141,11 +141,26 @@ func (r *CopyReconciler) reconcile(
 		return workflowReconcileResult(err)
 	}
 
-	return workflowReconcileResult(r.executor().Run(ctx, object))
+	return workflowReconcileResult(r.executor(object).Run(ctx, object))
 }
 
-func (r *CopyReconciler) executor() *app.CopyExecutor {
-	return app.NewCopyExecutor(r.client, r.store, r.locker, r.engine, r.config)
+func (r *CopyReconciler) executor(object *v1alpha1.Copy) *app.CopyExecutor {
+	config := r.config
+	applyRetryPolicy(&config.Transfer, object.Spec.RetryPolicy, func(message string) {
+		if r.recorder != nil {
+			r.recorder.Eventf(
+				object,
+				nil,
+				"Warning",
+				"RetryPolicyInvalid",
+				"Execute",
+				"%s",
+				message,
+			)
+		}
+	})
+
+	return app.NewCopyExecutor(r.client, r.store, r.locker, r.engine, config)
 }
 
 func (r *CopyReconciler) plan(ctx context.Context, object *v1alpha1.Copy) error {

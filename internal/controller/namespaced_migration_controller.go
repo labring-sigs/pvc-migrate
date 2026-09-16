@@ -46,7 +46,7 @@ func (r *MigrationReconciler) Reconcile(
 
 	if object.DeletionTimestamp != nil {
 		cancelActiveReconcile(r.active, object.UID)
-		return workflowReconcileResult(r.executor().FinalizeDeleted(ctx, object))
+		return workflowReconcileResult(r.executor(object).FinalizeDeleted(ctx, object))
 	}
 
 	return runActiveReconcile(
@@ -126,14 +126,29 @@ func (r *MigrationReconciler) reconcile(
 		return workflowReconcileResult(err)
 	}
 
-	if err := r.executor().FailSourceDeleted(ctx, object); err != nil {
+	if err := r.executor(object).FailSourceDeleted(ctx, object); err != nil {
 		return workflowReconcileResult(err)
 	}
 
-	return workflowReconcileResult(r.executor().Run(ctx, object))
+	return workflowReconcileResult(r.executor(object).Run(ctx, object))
 }
 
-func (r *MigrationReconciler) executor() *app.MigrationExecutor {
+func (r *MigrationReconciler) executor(object *v1alpha1.Migration) *app.MigrationExecutor {
+	config := r.config
+	applyRetryPolicy(&config.Transfer, object.Spec.RetryPolicy, func(message string) {
+		if r.recorder != nil {
+			r.recorder.Eventf(
+				object,
+				nil,
+				"Warning",
+				"RetryPolicyInvalid",
+				"Execute",
+				"%s",
+				message,
+			)
+		}
+	})
+
 	return app.NewMigrationExecutor(
 		r.client,
 		r.store,

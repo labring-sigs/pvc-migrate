@@ -145,8 +145,23 @@ func (r *ClusterCopyReconciler) reconcile(
 }
 
 func (r *ClusterCopyReconciler) executor(object *v1alpha1.ClusterCopy) *app.ClusterCopyExecutor {
+	config := r.config
+	applyRetryPolicy(&config.Transfer, object.Spec.RetryPolicy, func(message string) {
+		if r.recorder != nil {
+			r.recorder.Eventf(
+				object,
+				nil,
+				"Warning",
+				"RetryPolicyInvalid",
+				"Execute",
+				"%s",
+				message,
+			)
+		}
+	})
+
 	return app.NewClusterCopyExecutor(r.client, r.store, r.locker,
-		copyWorkflowStorageNamespace(object.Spec, object.Status.Plan), r.engine, r.config)
+		copyWorkflowStorageNamespace(object.Spec, object.Status.Plan), r.engine, config)
 }
 
 func (r *ClusterCopyReconciler) plan(ctx context.Context, object *v1alpha1.ClusterCopy) error {

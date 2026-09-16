@@ -136,13 +136,28 @@ func (r *ClusterPodMigrationReconciler) reconcile(
 func (r *ClusterPodMigrationReconciler) executor(
 	object *v1alpha1.ClusterPodMigration,
 ) *app.ClusterPodMigrationExecutor {
+	config := r.config
+	applyRetryPolicy(&config.Storage.Transfer, object.Spec.RetryPolicy, func(message string) {
+		if r.recorder != nil {
+			r.recorder.Eventf(
+				object,
+				nil,
+				"Warning",
+				"RetryPolicyInvalid",
+				"Execute",
+				"%s",
+				message,
+			)
+		}
+	})
+
 	return app.NewClusterPodMigrationExecutor(
 		r.client,
 		r.store,
 		r.locker,
 		podMigrationWorkflowStorageNamespace(object.Spec, object.Status.Plan),
 		r.engine,
-		r.config,
+		config,
 	)
 }
 

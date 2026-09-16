@@ -136,13 +136,28 @@ func (r *ClusterMigrationReconciler) reconcile(
 func (r *ClusterMigrationReconciler) executor(
 	object *v1alpha1.ClusterMigration,
 ) *app.ClusterMigrationExecutor {
+	config := r.config
+	applyRetryPolicy(&config.Transfer, object.Spec.RetryPolicy, func(message string) {
+		if r.recorder != nil {
+			r.recorder.Eventf(
+				object,
+				nil,
+				"Warning",
+				"RetryPolicyInvalid",
+				"Execute",
+				"%s",
+				message,
+			)
+		}
+	})
+
 	return app.NewClusterMigrationExecutor(
 		r.client,
 		r.store,
 		r.locker,
 		migrationWorkflowStorageNamespace(object.Spec, object.Status.Plan),
 		r.engine,
-		r.config,
+		config,
 	)
 }
 

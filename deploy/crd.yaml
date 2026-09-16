@@ -779,6 +779,30 @@ spec:
                 required:
                 - name
                 type: object
+              retryPolicy:
+                description: |-
+                  RetryPolicy overrides the retry behavior of the data-transfer attempts
+                  for this workflow. Zero values keep the controller defaults. Only
+                  copy-bearing workflows consume it.
+                properties:
+                  copyTimeout:
+                    description: CopyTimeout bounds one data-transfer attempt. 0 disables
+                      the bound.
+                    pattern: ^([0-9]+h)?([0-9]+m)?([0-9]+s)?
+                    type: string
+                  retries:
+                    description: Retries overrides the number of data-transfer attempts.
+                    format: int32
+                    maximum: 100
+                    minimum: 0
+                    type: integer
+                  retryBackoff:
+                    description: |-
+                      RetryBackoff is the delay before the first retry; it doubles on every
+                      further attempt.
+                    pattern: ^([0-9]+h)?([0-9]+m)?([0-9]+s)?
+                    type: string
+                type: object
               sessionNamespace:
                 description: |-
                   NamespaceName is a Kubernetes namespace name used by a cluster-scoped
@@ -1723,6 +1747,30 @@ spec:
                 type: string
               destinationStorageClass:
                 type: string
+              retryPolicy:
+                description: |-
+                  RetryPolicy overrides the retry behavior of the data-transfer attempts
+                  for this workflow. Zero values keep the controller defaults. Only
+                  copy-bearing workflows consume it.
+                properties:
+                  copyTimeout:
+                    description: CopyTimeout bounds one data-transfer attempt. 0 disables
+                      the bound.
+                    pattern: ^([0-9]+h)?([0-9]+m)?([0-9]+s)?
+                    type: string
+                  retries:
+                    description: Retries overrides the number of data-transfer attempts.
+                    format: int32
+                    maximum: 100
+                    minimum: 0
+                    type: integer
+                  retryBackoff:
+                    description: |-
+                      RetryBackoff is the delay before the first retry; it doubles on every
+                      further attempt.
+                    pattern: ^([0-9]+h)?([0-9]+m)?([0-9]+s)?
+                    type: string
+                type: object
               sessionNamespace:
                 description: |-
                   NamespaceName is a Kubernetes namespace name used by a cluster-scoped
@@ -2785,6 +2833,30 @@ spec:
                 default: 1
                 minimum: 0
                 type: integer
+              retryPolicy:
+                description: |-
+                  RetryPolicy overrides the retry behavior of the data-transfer attempts
+                  for this workflow. Zero values keep the controller defaults. Only
+                  copy-bearing workflows consume it.
+                properties:
+                  copyTimeout:
+                    description: CopyTimeout bounds one data-transfer attempt. 0 disables
+                      the bound.
+                    pattern: ^([0-9]+h)?([0-9]+m)?([0-9]+s)?
+                    type: string
+                  retries:
+                    description: Retries overrides the number of data-transfer attempts.
+                    format: int32
+                    maximum: 100
+                    minimum: 0
+                    type: integer
+                  retryBackoff:
+                    description: |-
+                      RetryBackoff is the delay before the first retry; it doubles on every
+                      further attempt.
+                    pattern: ^([0-9]+h)?([0-9]+m)?([0-9]+s)?
+                    type: string
+                type: object
               sessionNamespace:
                 description: |-
                   NamespaceName is a Kubernetes namespace name used by a cluster-scoped
@@ -3790,6 +3862,13 @@ spec:
                             type: string
                           component:
                             type: string
+                          componentPausedSupported:
+                            description: |-
+                              ComponentPausedSupported records whether the VMCluster CRD kept the
+                              per-component paused write. Older operator versions prune the unknown
+                              field, so pause semantics degrade to holding the component at a reduced
+                              replicaCount instead of relying on the paused flag.
+                            type: boolean
                           name:
                             type: string
                           originalClusterPaused:
@@ -4102,6 +4181,55 @@ spec:
                     required:
                     - name
                     type: object
+                  vmCluster:
+                    description: |-
+                      VMCluster carries the controller's pause-probe outcomes (such as
+                      whether the CRD kept the per-component paused field) so resume and
+                      restore reuse the semantics recorded during the pause.
+                    properties:
+                      apiVersion:
+                        type: string
+                      component:
+                        type: string
+                      componentPausedSupported:
+                        description: |-
+                          ComponentPausedSupported records whether the VMCluster CRD kept the
+                          per-component paused write. Older operator versions prune the unknown
+                          field, so pause semantics degrade to holding the component at a reduced
+                          replicaCount instead of relying on the paused flag.
+                        type: boolean
+                      name:
+                        type: string
+                      originalClusterPaused:
+                        type: boolean
+                      originalClusterPausedConfigured:
+                        type: boolean
+                      originalPaused:
+                        type: boolean
+                      originalPausedConfigured:
+                        type: boolean
+                      originalReplicas:
+                        format: int32
+                        type: integer
+                      originalReplicasConfigured:
+                        type: boolean
+                      uid:
+                        description: |-
+                          UID is a type that holds unique ID values, including UUIDs.  Because we
+                          don't ONLY use UUIDs, this is an alias to string.  Being a type captures
+                          intent and helps make sure that UIDs and names do not get conflated.
+                        type: string
+                    required:
+                    - apiVersion
+                    - component
+                    - name
+                    - originalClusterPaused
+                    - originalClusterPausedConfigured
+                    - originalPaused
+                    - originalPausedConfigured
+                    - originalReplicas
+                    - originalReplicasConfigured
+                    type: object
                 type: object
             required:
             - warmPassesCompleted
@@ -4220,6 +4348,30 @@ spec:
                     type: string
                 required:
                 - name
+                type: object
+              retryPolicy:
+                description: |-
+                  RetryPolicy overrides the retry behavior of the data-transfer attempts
+                  for this workflow. Zero values keep the controller defaults. Only
+                  copy-bearing workflows consume it.
+                properties:
+                  copyTimeout:
+                    description: CopyTimeout bounds one data-transfer attempt. 0 disables
+                      the bound.
+                    pattern: ^([0-9]+h)?([0-9]+m)?([0-9]+s)?
+                    type: string
+                  retries:
+                    description: Retries overrides the number of data-transfer attempts.
+                    format: int32
+                    maximum: 100
+                    minimum: 0
+                    type: integer
+                  retryBackoff:
+                    description: |-
+                      RetryBackoff is the delay before the first retry; it doubles on every
+                      further attempt.
+                    pattern: ^([0-9]+h)?([0-9]+m)?([0-9]+s)?
+                    type: string
                 type: object
               sessionNamespace:
                 description: |-
@@ -5168,6 +5320,30 @@ spec:
                 required:
                 - name
                 type: object
+              retryPolicy:
+                description: |-
+                  RetryPolicy overrides the retry behavior of the data-transfer attempts
+                  for this workflow. Zero values keep the controller defaults. Only
+                  copy-bearing workflows consume it.
+                properties:
+                  copyTimeout:
+                    description: CopyTimeout bounds one data-transfer attempt. 0 disables
+                      the bound.
+                    pattern: ^([0-9]+h)?([0-9]+m)?([0-9]+s)?
+                    type: string
+                  retries:
+                    description: Retries overrides the number of data-transfer attempts.
+                    format: int32
+                    maximum: 100
+                    minimum: 0
+                    type: integer
+                  retryBackoff:
+                    description: |-
+                      RetryBackoff is the delay before the first retry; it doubles on every
+                      further attempt.
+                    pattern: ^([0-9]+h)?([0-9]+m)?([0-9]+s)?
+                    type: string
+                type: object
               skipSourceUsageCheck:
                 type: boolean
               sourceNode:
@@ -6068,6 +6244,30 @@ spec:
                 type: string
               destinationStorageClass:
                 type: string
+              retryPolicy:
+                description: |-
+                  RetryPolicy overrides the retry behavior of the data-transfer attempts
+                  for this workflow. Zero values keep the controller defaults. Only
+                  copy-bearing workflows consume it.
+                properties:
+                  copyTimeout:
+                    description: CopyTimeout bounds one data-transfer attempt. 0 disables
+                      the bound.
+                    pattern: ^([0-9]+h)?([0-9]+m)?([0-9]+s)?
+                    type: string
+                  retries:
+                    description: Retries overrides the number of data-transfer attempts.
+                    format: int32
+                    maximum: 100
+                    minimum: 0
+                    type: integer
+                  retryBackoff:
+                    description: |-
+                      RetryBackoff is the delay before the first retry; it doubles on every
+                      further attempt.
+                    pattern: ^([0-9]+h)?([0-9]+m)?([0-9]+s)?
+                    type: string
+                type: object
               skipSourceUsageCheck:
                 type: boolean
               sourceNode:
@@ -7815,6 +8015,30 @@ spec:
                 default: 1
                 minimum: 0
                 type: integer
+              retryPolicy:
+                description: |-
+                  RetryPolicy overrides the retry behavior of the data-transfer attempts
+                  for this workflow. Zero values keep the controller defaults. Only
+                  copy-bearing workflows consume it.
+                properties:
+                  copyTimeout:
+                    description: CopyTimeout bounds one data-transfer attempt. 0 disables
+                      the bound.
+                    pattern: ^([0-9]+h)?([0-9]+m)?([0-9]+s)?
+                    type: string
+                  retries:
+                    description: Retries overrides the number of data-transfer attempts.
+                    format: int32
+                    maximum: 100
+                    minimum: 0
+                    type: integer
+                  retryBackoff:
+                    description: |-
+                      RetryBackoff is the delay before the first retry; it doubles on every
+                      further attempt.
+                    pattern: ^([0-9]+h)?([0-9]+m)?([0-9]+s)?
+                    type: string
+                type: object
               skipSourceUsageCheck:
                 type: boolean
               sourceNode:
@@ -8777,6 +9001,13 @@ spec:
                             type: string
                           component:
                             type: string
+                          componentPausedSupported:
+                            description: |-
+                              ComponentPausedSupported records whether the VMCluster CRD kept the
+                              per-component paused write. Older operator versions prune the unknown
+                              field, so pause semantics degrade to holding the component at a reduced
+                              replicaCount instead of relying on the paused flag.
+                            type: boolean
                           name:
                             type: string
                           originalClusterPaused:
@@ -9080,6 +9311,54 @@ spec:
                         type: string
                     required:
                     - name
+                    type: object
+                  vmCluster:
+                    description: |-
+                      VMCluster carries the controller's pause-probe outcomes; see
+                      ClusterPodMigrationWorkloadStatus.VMCluster.
+                    properties:
+                      apiVersion:
+                        type: string
+                      component:
+                        type: string
+                      componentPausedSupported:
+                        description: |-
+                          ComponentPausedSupported records whether the VMCluster CRD kept the
+                          per-component paused write. Older operator versions prune the unknown
+                          field, so pause semantics degrade to holding the component at a reduced
+                          replicaCount instead of relying on the paused flag.
+                        type: boolean
+                      name:
+                        type: string
+                      originalClusterPaused:
+                        type: boolean
+                      originalClusterPausedConfigured:
+                        type: boolean
+                      originalPaused:
+                        type: boolean
+                      originalPausedConfigured:
+                        type: boolean
+                      originalReplicas:
+                        format: int32
+                        type: integer
+                      originalReplicasConfigured:
+                        type: boolean
+                      uid:
+                        description: |-
+                          UID is a type that holds unique ID values, including UUIDs.  Because we
+                          don't ONLY use UUIDs, this is an alias to string.  Being a type captures
+                          intent and helps make sure that UIDs and names do not get conflated.
+                        type: string
+                    required:
+                    - apiVersion
+                    - component
+                    - name
+                    - originalClusterPaused
+                    - originalClusterPausedConfigured
+                    - originalPaused
+                    - originalPausedConfigured
+                    - originalReplicas
+                    - originalReplicasConfigured
                     type: object
                 type: object
             required:
@@ -9888,6 +10167,30 @@ spec:
                     type: string
                 required:
                 - name
+                type: object
+              retryPolicy:
+                description: |-
+                  RetryPolicy overrides the retry behavior of the data-transfer attempts
+                  for this workflow. Zero values keep the controller defaults. Only
+                  copy-bearing workflows consume it.
+                properties:
+                  copyTimeout:
+                    description: CopyTimeout bounds one data-transfer attempt. 0 disables
+                      the bound.
+                    pattern: ^([0-9]+h)?([0-9]+m)?([0-9]+s)?
+                    type: string
+                  retries:
+                    description: Retries overrides the number of data-transfer attempts.
+                    format: int32
+                    maximum: 100
+                    minimum: 0
+                    type: integer
+                  retryBackoff:
+                    description: |-
+                      RetryBackoff is the delay before the first retry; it doubles on every
+                      further attempt.
+                    pattern: ^([0-9]+h)?([0-9]+m)?([0-9]+s)?
+                    type: string
                 type: object
               skipSourceUsageCheck:
                 type: boolean

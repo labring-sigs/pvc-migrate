@@ -99,7 +99,8 @@ func TestNamespacedMigrationControllerPlanningRetryUsesCRD(t *testing.T) {
 		t.Fatalf("failed planning leaked or retried: %d %+v", plans, loaded.Status)
 	}
 
-	if err := r.namespacedMigration.executor().RequestResume(t.Context(), loaded); err != nil {
+	if err := r.namespacedMigration.executor(loaded).
+		RequestResume(t.Context(), loaded); err != nil {
 		t.Fatal(err)
 	}
 

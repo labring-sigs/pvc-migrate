@@ -83,7 +83,7 @@ func TestNamespacedCopyControllerOwnsPlanningResumeAndDeletion(t *testing.T) {
 		t.Fatal("failed discovery was not suspended")
 	}
 
-	executor := r.namespacedCopy.executor()
+	executor := r.namespacedCopy.executor(object)
 	if err := executor.RequestResume(t.Context(), object); err != nil {
 		t.Fatal(err)
 	}

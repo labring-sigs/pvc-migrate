@@ -28,6 +28,30 @@ type TransferOptions struct {
 	DeleteExtraneous     bool     `json:"deleteExtraneous,omitempty"`
 	AllowVolumeShrink    bool     `json:"allowVolumeShrink,omitempty"`
 	SkipSourceUsageCheck bool     `json:"skipSourceUsageCheck,omitempty"`
+	// RetryPolicy overrides the retry behavior of the data-transfer attempts
+	// for this workflow. Zero values keep the controller defaults. Only
+	// copy-bearing workflows consume it.
+	// +optional
+	RetryPolicy *RetryPolicySpec `json:"retryPolicy,omitempty" yaml:"retryPolicy,omitempty"`
+}
+
+// RetryPolicySpec overrides the data-transfer retry defaults for one
+// workflow. Durations accept Go duration strings ("30m", "2h").
+type RetryPolicySpec struct {
+	// Retries overrides the number of data-transfer attempts.
+	// +kubebuilder:validation:Minimum=0
+	// +kubebuilder:validation:Maximum=100
+	// +optional
+	Retries *int32 `json:"retries,omitempty" yaml:"retries,omitempty"`
+	// RetryBackoff is the delay before the first retry; it doubles on every
+	// further attempt.
+	// +kubebuilder:validation:Pattern=`^([0-9]+h)?([0-9]+m)?([0-9]+s)?`
+	// +optional
+	RetryBackoff *string `json:"retryBackoff,omitempty" yaml:"retryBackoff,omitempty"`
+	// CopyTimeout bounds one data-transfer attempt. 0 disables the bound.
+	// +kubebuilder:validation:Pattern=`^([0-9]+h)?([0-9]+m)?([0-9]+s)?`
+	// +optional
+	CopyTimeout *string `json:"copyTimeout,omitempty" yaml:"copyTimeout,omitempty"`
 }
 
 // +kubebuilder:validation:XValidation:rule="has(self.volumes) && size(self.volumes) > 0",message="at least one source PVC is required"
