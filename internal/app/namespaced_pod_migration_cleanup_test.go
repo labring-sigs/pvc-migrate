@@ -5,11 +5,13 @@ import (
 	"reflect"
 	"testing"
 
+	v1alpha1 "github.com/labring-sigs/pvc-migrate/api/v1alpha1"
 	"github.com/labring-sigs/pvc-migrate/internal/domain"
 	"github.com/labring-sigs/pvc-migrate/internal/kube"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 	crclient "sigs.k8s.io/controller-runtime/pkg/client"
 )
 
@@ -232,5 +234,119 @@ func TestNamespacedPodMigrationFailSourceDeletedUsesObjectNamespace(t *testing.T
 
 	if object.Status.Phase != domain.PhaseFailed {
 		t.Fatalf("phase = %s, want Failed", object.Status.Phase)
+	}
+}
+
+func namespacedPausedCheckpointFixture(object *v1alpha1.PodMigration) {
+	object.Status.Phase = domain.PhaseFailed
+	object.Status.ResumeFrom = domain.PhasePausing
+	object.Status.History = []v1alpha1.WorkflowHistoryEntry{
+		{Phase: domain.PhasePausing, Message: "pausing workload"},
+		{Phase: domain.PhaseFailed, Message: "pause interrupted"},
+	}
+
+	for _, volume := range object.Status.Plan.Volumes {
+		object.Status.Volumes = append(object.Status.Volumes,
+			v1alpha1.PodMigrationVolumeStatus{
+				VolumeReservationStatus: v1alpha1.VolumeReservationStatus{
+					SourcePVCName:     volume.SourcePVC.Name,
+					Reserved:          true,
+					DestinationPolicy: corev1.PersistentVolumeReclaimRetain,
+					DestinationPVC: &v1alpha1.LocalResourceReference{
+						Kind: "PersistentVolumeClaim",
+						Name: "reserved-" + volume.SourcePVC.Name,
+						UID:  types.UID("reserved-" + volume.SourcePVC.Name),
+					},
+					DestinationPV: &v1alpha1.LocalResourceReference{
+						Kind: "PersistentVolume",
+						Name: "reserved-pv-" + volume.SourcePVC.Name,
+						UID:  types.UID("reserved-pv-" + volume.SourcePVC.Name),
+					},
+				},
+			},
+		)
+	}
+}
+
+func TestNamespacedPodMigrationDeletionConvergesWhenSourceStorageDeleted(t *testing.T) {
+	executor, object, store, _ := namespacedPodMigrationFixture(t)
+	executor.workloads = &fakeController{}
+
+	namespacedPausedCheckpointFixture(object)
+
+	object.DeletionTimestamp = &metav1.Time{Time: executor.now()}
+	if err := store.Save(t.Context(), object); err != nil {
+		t.Fatal(err)
+	}
+
+	// The fake world holds no source PVCs: deletion must converge without
+	// re-verifying them (#28) instead of wedging the finalizer.
+	if err := executor.FinalizeDeleted(t.Context(), object); err != nil {
+		t.Fatalf("deleted source storage must not wedge finalization: %v", err)
+	}
+
+	if _, err := store.Load(
+		t.Context(),
+		crclient.ObjectKey{Namespace: object.Namespace, Name: object.Name},
+	); !apierrors.IsNotFound(err) {
+		t.Fatalf("converged workflow remains in store: %v", err)
+	}
+}
+
+func TestNamespacedPodMigrationLiveAbortStillRequiresSourceStorage(t *testing.T) {
+	executor, object, store, _ := namespacedPodMigrationFixture(t)
+	executor.workloads = &fakeController{}
+
+	namespacedPausedCheckpointFixture(object)
+
+	if err := store.Save(t.Context(), object); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := executor.Abort(t.Context(), object); err == nil {
+		t.Fatal("live abort must still verify the source storage it restores")
+	}
+}
+
+func TestNamespacedPodMigrationCleanupReleasesStandalonePodMarker(t *testing.T) {
+	executor, object, store, _ := namespacedPodMigrationFixture(t)
+	executor.workloads = &fakeController{}
+
+	namespacedPausedCheckpointFixture(object)
+	// Cleanup admission requires a terminal phase; the fixture helper records
+	// the pause-failure shape first.
+	object.Status.Phase = domain.PhaseAborted
+
+	if err := store.Save(t.Context(), object); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := executor.client.CoreV1().Pods(object.Namespace).Create(t.Context(), &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace:   object.Namespace,
+			Name:        "workload",
+			Annotations: map[string]string{kube.SessionKey: object.Name},
+		},
+	}, metav1.CreateOptions{}); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := executor.Cleanup(t.Context(), object,
+		MigrationCleanupOptions{Finalize: true, DeleteSession: true}); err != nil {
+		t.Fatal(err)
+	}
+
+	pod, err := executor.client.CoreV1().Pods(object.Namespace).Get(
+		t.Context(), "workload", metav1.GetOptions{},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if pod.Annotations[kube.SessionKey] != "" {
+		t.Fatalf(
+			"finalized workflow left the standalone Pod owned: %q",
+			pod.Annotations[kube.SessionKey],
+		)
 	}
 }
