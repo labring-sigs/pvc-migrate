@@ -1164,7 +1164,7 @@ func TestVerifyPausedWaitsForReplacedPodToBeReaped(t *testing.T) {
 			Name:      "vmselect-metrics",
 			UID:       types.UID("sts-uid"),
 		},
-		Spec: appsv1.StatefulSetSpec{Replicas: &one},
+		Spec: appsv1.StatefulSetSpec{Replicas: &two},
 	}
 	pod := readyPod("vm", "vmselect-metrics-1", "node-a")
 	pod.OwnerReferences = []metav1.OwnerReference{
