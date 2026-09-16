@@ -1225,4 +1225,3 @@ func TestVerifyPausedWaitsForReplacedPodToBeReaped(t *testing.T) {
 }
 
 //go:fix inline
-func ptrInt32(v int32) *int32 { return new(v) }
