@@ -494,6 +494,21 @@ flag 描述同步更新为涵盖三族约束（podAffinity/podAntiAffinity/topol
 
 **集群终态**：147/53 测试命名空间与 r23 S3 bucket 已精确清理；147 controller 驻留 `sha-fc4757b`（1 副本）；53 controller 驻留 `sha-fc4757b`（2 副本）+ 新 CRD + 修复后 RBAC；两集群 controller 均零错误运行。
 
+### 第二十四轮：新镜像二次全量复测 + 数据传输操作默认超时 24h
+
+**行为变更（`52e7bbc`）**：`--timeout`（30m）约束整个操作，大容量复制必然中途超时。修复：`copy`、`migrate`、`migrate-pod`、`backup`、`restore`（含其生命周期与跨集群子命令）在未显式指定 `--timeout` 时默认 **24h** 传输上限；`rename`/`move`/`reserve` 等元数据操作保持 30m；显式 `--timeout`（含 `--timeout=0` 解除上限）始终优先。controller 常驻 reconcile 模式本就不受 `--timeout` 约束（仅 `--once` 消费），维持不变。单测 9 用例覆盖显式优先/类别默认/零值解除；`--help` 文案同步。
+
+**二次全量复测（sha-52e7bbc 部署 147+53 后）**：
+- S1 会话模式 8 操作全生命周期 ✅（copy/reserve/rename+rollback/move/migrate+rollback/migrate-pod 跨 SC 换盘/backup/restore）
+- **#30 严格验证**：跨 S3 备份→恢复回环后 `MODE_640_OK` + `LINK_OK`（权限位 640 与符号链接在真实发布恢复点上确认保留）✅
+- S2 CRD 模式 8 操作 ✅（backup/restore 经 BackupRepository CR + controller reconcile）
+- S3 参数矩阵 11/11 ✅（多 PVC、Delete 策略、subpath 隔离、shrink、5 负例）
+- **S4 故障注入 10/10，其中源 PVC 删除场景自主转入 Failed**——#33 修复（`FailSourceDeleted`）在真实集群确认生效（上一轮该场景楔死 Reserved）✅
+- 53 子集：copy/rename+rollback/move 会话模式 + CRD copy（controller reconcile）+ 跨集群备份发布 ✅
+- 跨集群 restore 维持 #35 已知限制（按本地 cluster identity 寻址，设计隔离）
+
+**集群终态**：两集群 r23 测试命名空间与 S3 bucket 已精确清理；controller 均驻留 `sha-52e7bbc` 零错误。
+
 ## 六、明确未覆盖项（含原因）
 
 1. **KubeBlocks 0.9 InstanceSet**：147 集群安装的是 sealos KB fork v0.8.2.1，workloads.kubeblocks.io 仅 ReplicatedStateMachine，组件 Pod 归属 apps/v1 StatefulSet；无 InstanceSet CRD/controller。升级共享集群 KB operator 风险不可接受。本集群 KB pause guard 已验证安全拒绝（集群 phase 卡 Creating，见下条）。
