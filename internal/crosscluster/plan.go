@@ -7,6 +7,7 @@ import (
 	"strings"
 	"sync"
 
+	v1alpha1 "github.com/labring-sigs/pvc-migrate/api/v1alpha1"
 	"github.com/labring-sigs/pvc-migrate/internal/domain"
 	"github.com/labring-sigs/pvc-migrate/internal/kube"
 	"github.com/labring-sigs/pvc-migrate/internal/parallel"
@@ -18,7 +19,10 @@ import (
 )
 
 func (s *Service) Plan(ctx context.Context, options Options) (*Plan, error) {
-	if err := domain.ValidateReclaimPolicies("", options.DestinationPVCReclaimPolicy); err != nil {
+	if err := domain.ValidateReclaimPolicies(
+		"",
+		v1alpha1.PVReclaimPolicy(options.DestinationPVCReclaimPolicy),
+	); err != nil {
 		return nil, err
 	}
 

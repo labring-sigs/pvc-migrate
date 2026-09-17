@@ -109,7 +109,9 @@ func applyCopyOverrides(cmd *cobra.Command, spec *v1alpha1.CopySpec, flags *copy
 	}
 
 	if cmd.Flags().Changed("destination-pvc-reclaim-policy") {
-		spec.DestinationPVCReclaimPolicy = flags.destinationPVCReclaimPolicy
+		spec.DestinationPVCReclaimPolicy = v1alpha1.PVReclaimPolicy(
+			flags.destinationPVCReclaimPolicy,
+		)
 	}
 
 	return domain.ValidateReclaimPolicies("", spec.DestinationPVCReclaimPolicy)

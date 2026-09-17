@@ -100,12 +100,12 @@ func (m *PodMigrationExecutor) prepareCleanup(
 		policy := migrationSourceCleanupPolicy(
 			phase,
 			plan.SourcePVReclaimPolicy,
-			options.SourcePVReclaimPolicy,
+			v1alpha1.PVReclaimPolicy(options.SourcePVReclaimPolicy),
 		)
 
 		destinationPolicy := plan.DestinationPVCReclaimPolicy
 		if options.DestinationPVCReclaimPolicy != "" {
-			destinationPolicy = options.DestinationPVCReclaimPolicy
+			destinationPolicy = v1alpha1.PVReclaimPolicy(options.DestinationPVCReclaimPolicy)
 		}
 
 		recovered, reclaimed, err := prepareMigrationReclaimVolume(

@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 
+	v1alpha1 "github.com/labring-sigs/pvc-migrate/api/v1alpha1"
 	"github.com/labring-sigs/pvc-migrate/internal/domain"
 	"github.com/labring-sigs/pvc-migrate/internal/kube"
 	corev1 "k8s.io/api/core/v1"
@@ -105,7 +106,7 @@ func (s *Service) ValidateCleanup(ctx context.Context, session *Session, policy 
 		policy = session.Spec.DestinationPVCReclaimPolicy
 	}
 
-	if err := domain.ValidateReclaimPolicies("", policy); err != nil {
+	if err := domain.ValidateReclaimPolicies("", v1alpha1.PVReclaimPolicy(policy)); err != nil {
 		return err
 	}
 

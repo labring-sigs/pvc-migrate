@@ -46,7 +46,10 @@ func (r *ClusterCopyExecutor) prepareCleanup(
 		return nil, nil, nil, err
 	}
 
-	if err := domain.ValidateReclaimPolicies("", options.DestinationPVCReclaimPolicy); err != nil {
+	if err := domain.ValidateReclaimPolicies(
+		"",
+		v1alpha1.PVReclaimPolicy(options.DestinationPVCReclaimPolicy),
+	); err != nil {
 		return nil, nil, nil, err
 	}
 
@@ -85,7 +88,7 @@ func (r *ClusterCopyExecutor) prepareCleanup(
 
 	policy := preview.Spec.DestinationPVCReclaimPolicy
 	if options.DestinationPVCReclaimPolicy != "" {
-		policy = options.DestinationPVCReclaimPolicy
+		policy = v1alpha1.PVReclaimPolicy(options.DestinationPVCReclaimPolicy)
 	}
 
 	indexes := clusterCopyVolumeIndexes(preview.Status.Volumes)

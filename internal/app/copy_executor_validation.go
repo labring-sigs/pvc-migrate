@@ -37,7 +37,10 @@ func validateClusterCopyObject(object *v1alpha1.ClusterCopy) error {
 		return invalid("copy plan must match its spec and contain resolved volumes")
 	}
 
-	if err := domain.ValidateReclaimPolicies("", plan.DestinationPVCReclaimPolicy); err != nil {
+	if err := domain.ValidateReclaimPolicies(
+		"",
+		plan.DestinationPVCReclaimPolicy,
+	); err != nil {
 		return err
 	}
 

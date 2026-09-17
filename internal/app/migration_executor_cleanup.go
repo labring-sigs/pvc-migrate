@@ -6,6 +6,7 @@ import (
 
 	v1alpha1 "github.com/labring-sigs/pvc-migrate/api/v1alpha1"
 	"github.com/labring-sigs/pvc-migrate/internal/domain"
+	corev1 "k8s.io/api/core/v1"
 )
 
 // MigrationCleanupOptions contains only policies that belong to migration.
@@ -52,8 +53,8 @@ func validateMigrationCleanupOptions(
 	options MigrationCleanupOptions,
 ) error {
 	if err := domain.ValidateReclaimPolicies(
-		options.SourcePVReclaimPolicy,
-		options.DestinationPVCReclaimPolicy,
+		v1alpha1.PVReclaimPolicy(options.SourcePVReclaimPolicy),
+		v1alpha1.PVReclaimPolicy(options.DestinationPVCReclaimPolicy),
 	); err != nil {
 		return err
 	}
@@ -141,12 +142,12 @@ func (m *ClusterMigrationExecutor) prepareCleanup(
 		policy := migrationSourceCleanupPolicy(
 			phase,
 			plan.SourcePVReclaimPolicy,
-			options.SourcePVReclaimPolicy,
+			v1alpha1.PVReclaimPolicy(options.SourcePVReclaimPolicy),
 		)
 
 		destinationPolicy := plan.DestinationPVCReclaimPolicy
 		if options.DestinationPVCReclaimPolicy != "" {
-			destinationPolicy = options.DestinationPVCReclaimPolicy
+			destinationPolicy = v1alpha1.PVReclaimPolicy(options.DestinationPVCReclaimPolicy)
 		}
 
 		recovered, reclaimed, err := prepareMigrationReclaimVolume(
@@ -202,14 +203,14 @@ func (m *ClusterMigrationExecutor) prepareCleanup(
 
 func migrationSourceCleanupPolicy(
 	phase v1alpha1.WorkflowPhase,
-	configured, override string,
-) string {
+	configured, override v1alpha1.PVReclaimPolicy,
+) v1alpha1.PVReclaimPolicy {
 	if override != "" {
 		configured = override
 	}
 
 	if phase != domain.PhaseCompleted {
-		return "Retain"
+		return corev1.PersistentVolumeReclaimRetain
 	}
 
 	return configured

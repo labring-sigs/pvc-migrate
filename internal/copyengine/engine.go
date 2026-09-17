@@ -60,7 +60,7 @@ type Request struct {
 	NoCompress                bool
 	// RsyncMaxRetries overrides how many times the rsync job re-runs on a
 	// failed attempt within one transfer. Zero keeps the upstream default.
-	RsyncMaxRetries           int
+	RsyncMaxRetries int
 	// TolerateLiveSourceChurn marks a warm-copy pass whose destination will
 	// be converged by a later paused final sync. With it set, a transfer that
 	// fails because the live source rewrote files mid-pass (rsync code 23)

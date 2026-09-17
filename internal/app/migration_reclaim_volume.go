@@ -21,7 +21,7 @@ func prepareMigrationReclaimVolume(
 	planned v1alpha1.VolumeSpec,
 	checkpoint v1alpha1.ClusterVolumeReservationStatus,
 	activePVC *v1alpha1.ObjectReference,
-	sourcePolicy, destinationPolicy string,
+	sourcePolicy, destinationPolicy v1alpha1.PVReclaimPolicy,
 ) (v1alpha1.ClusterVolumeReservationStatus, []reclaimVolume, error) {
 	source := qualifiedResourceReference(planned.SourcePVC, sourceNamespace)
 

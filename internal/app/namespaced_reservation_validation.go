@@ -38,7 +38,10 @@ func validateReservationObject(object *v1alpha1.Reservation) error {
 		return err
 	}
 
-	if err := domain.ValidateReclaimPolicies("", plan.DestinationPVCReclaimPolicy); err != nil {
+	if err := domain.ValidateReclaimPolicies(
+		"",
+		plan.DestinationPVCReclaimPolicy,
+	); err != nil {
 		return err
 	}
 

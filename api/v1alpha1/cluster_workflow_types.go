@@ -14,13 +14,13 @@ type NamespaceName string
 // +kubebuilder:validation:XValidation:rule="has(self.volumes) && size(self.volumes) > 0",message="volumes must contain at least one source PVC"
 type ClusterMigrationPlan struct {
 	// +kubebuilder:validation:Enum=Retain;Delete
-	SourcePVReclaimPolicy string `json:"sourcePVReclaimPolicy,omitempty" yaml:"sourcePVReclaimPolicy,omitempty"`
+	SourcePVReclaimPolicy PVReclaimPolicy `json:"sourcePVReclaimPolicy,omitempty" yaml:"sourcePVReclaimPolicy,omitempty"`
 	// +kubebuilder:validation:Enum=Retain;Delete
-	DestinationPVCReclaimPolicy string        `json:"destinationPVCReclaimPolicy,omitempty" yaml:"destinationPVCReclaimPolicy,omitempty"`
-	SourceNamespace             NamespaceName `json:"sourceNamespace"                       yaml:"sourceNamespace"`
-	TemporaryNamespace          NamespaceName `json:"temporaryNamespace"                    yaml:"temporaryNamespace"`
-	DestinationNamespace        NamespaceName `json:"destinationNamespace"                  yaml:"destinationNamespace"`
-	SessionNamespace            NamespaceName `json:"sessionNamespace"                      yaml:"sessionNamespace"`
+	DestinationPVCReclaimPolicy PVReclaimPolicy `json:"destinationPVCReclaimPolicy,omitempty" yaml:"destinationPVCReclaimPolicy,omitempty"`
+	SourceNamespace             NamespaceName   `json:"sourceNamespace"                       yaml:"sourceNamespace"`
+	TemporaryNamespace          NamespaceName   `json:"temporaryNamespace"                    yaml:"temporaryNamespace"`
+	DestinationNamespace        NamespaceName   `json:"destinationNamespace"                  yaml:"destinationNamespace"`
+	SessionNamespace            NamespaceName   `json:"sessionNamespace"                      yaml:"sessionNamespace"`
 	// +kubebuilder:validation:MaxItems=1024
 	Volumes    []VolumeSpec `json:"volumes,omitempty"    yaml:"volumes,omitempty"`
 	SourceNode string       `json:"sourceNode,omitempty" yaml:"sourceNode,omitempty"`
@@ -37,9 +37,9 @@ type ClusterMigrationPlan struct {
 // +kubebuilder:validation:XValidation:rule="self.workload.adapter != 'None'",message="ClusterPodMigration workload.adapter must identify a supported workload"
 type ClusterPodMigrationPlan struct {
 	// +kubebuilder:validation:Enum=Retain;Delete
-	SourcePVReclaimPolicy string `json:"sourcePVReclaimPolicy,omitempty" yaml:"sourcePVReclaimPolicy,omitempty"`
+	SourcePVReclaimPolicy PVReclaimPolicy `json:"sourcePVReclaimPolicy,omitempty" yaml:"sourcePVReclaimPolicy,omitempty"`
 	// +kubebuilder:validation:Enum=Retain;Delete
-	DestinationPVCReclaimPolicy string `json:"destinationPVCReclaimPolicy,omitempty" yaml:"destinationPVCReclaimPolicy,omitempty"`
+	DestinationPVCReclaimPolicy PVReclaimPolicy `json:"destinationPVCReclaimPolicy,omitempty" yaml:"destinationPVCReclaimPolicy,omitempty"`
 	// Pod migration preserves workload and PVC identities in SourceNamespace.
 	// TemporaryNamespace and SessionNamespace are the only cross-namespace roles.
 	SourceNamespace    NamespaceName `json:"sourceNamespace"    yaml:"sourceNamespace"`

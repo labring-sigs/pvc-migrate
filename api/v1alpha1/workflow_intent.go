@@ -13,13 +13,13 @@ type VolumeRequest struct {
 type TransferOptions struct {
 	// DestinationPVCReclaimPolicy controls workflow-owned destination storage during cleanup.
 	// +kubebuilder:validation:Enum=Retain;Delete
-	DestinationPVCReclaimPolicy string `json:"destinationPVCReclaimPolicy,omitempty" yaml:"destinationPVCReclaimPolicy,omitempty"`
-	DestinationCapacity         string `json:"destinationCapacity,omitempty"`
-	SourcePath                  string `json:"sourcePath,omitempty"`
-	DestinationPath             string `json:"destinationPath,omitempty"`
-	DestinationStorageClass     string `json:"destinationStorageClass,omitempty"`
-	SourceNode                  string `json:"sourceNode,omitempty"`
-	TargetNode                  string `json:"targetNode,omitempty"`
+	DestinationPVCReclaimPolicy PVReclaimPolicy `json:"destinationPVCReclaimPolicy,omitempty" yaml:"destinationPVCReclaimPolicy,omitempty"`
+	DestinationCapacity         string          `json:"destinationCapacity,omitempty"`
+	SourcePath                  string          `json:"sourcePath,omitempty"`
+	DestinationPath             string          `json:"destinationPath,omitempty"`
+	DestinationStorageClass     string          `json:"destinationStorageClass,omitempty"`
+	SourceNode                  string          `json:"sourceNode,omitempty"`
+	TargetNode                  string          `json:"targetNode,omitempty"`
 	// +kubebuilder:validation:Enum=auto;require;off
 	CapacityAwareness string `json:"capacityAwareness,omitempty"`
 	// +kubebuilder:validation:MaxItems=32
@@ -65,8 +65,8 @@ type RetryPolicySpec struct {
 type MigrationSpec struct {
 	// The inactive source PV is retained by default. Mutable until cleanup.
 	// +kubebuilder:validation:Enum=Retain;Delete
-	SourcePVReclaimPolicy string `json:"sourcePVReclaimPolicy,omitempty"`
-	TransferOptions       `       json:",inline"`
+	SourcePVReclaimPolicy PVReclaimPolicy `json:"sourcePVReclaimPolicy,omitempty"`
+	TransferOptions       `                json:",inline"`
 	// +kubebuilder:validation:MaxItems=1024
 	Volumes []VolumeRequest `json:"volumes"`
 }
@@ -92,7 +92,7 @@ type ReservationSpec struct {
 type PodMigrationSpec struct {
 	// The inactive source PV is retained by default. Mutable until cleanup.
 	// +kubebuilder:validation:Enum=Retain;Delete
-	SourcePVReclaimPolicy string `json:"sourcePVReclaimPolicy,omitempty"`
+	SourcePVReclaimPolicy PVReclaimPolicy `json:"sourcePVReclaimPolicy,omitempty"`
 	TransferOptions       `                       json:",inline"`
 	Pod                   LocalResourceReference `json:"pod"`
 	// +kubebuilder:validation:Minimum=0

@@ -6,6 +6,7 @@ import (
 	"strings"
 	"time"
 
+	v1alpha1 "github.com/labring-sigs/pvc-migrate/api/v1alpha1"
 	"github.com/labring-sigs/pvc-migrate/internal/domain"
 	"github.com/labring-sigs/pvc-migrate/internal/kube"
 	corev1 "k8s.io/api/core/v1"
@@ -176,7 +177,10 @@ func (s *Session) Validate() error {
 		return err
 	}
 
-	if err := domain.ValidateReclaimPolicies("", s.Spec.DestinationPVCReclaimPolicy); err != nil {
+	if err := domain.ValidateReclaimPolicies(
+		"",
+		v1alpha1.PVReclaimPolicy(s.Spec.DestinationPVCReclaimPolicy),
+	); err != nil {
 		return err
 	}
 
