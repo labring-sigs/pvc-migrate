@@ -135,7 +135,7 @@ func (r *PodMigrationReconciler) reconcile(
 
 func (r *PodMigrationReconciler) executor(object *v1alpha1.PodMigration) *app.PodMigrationExecutor {
 	config := r.config.Storage
-	applyRetryPolicy(&config.Transfer, object.Spec.RetryPolicy, func(message string) {
+	applyTransferPolicy(&config.Transfer, &object.Spec.TransferOptions, func(message string) {
 		if r.recorder != nil {
 			r.recorder.Eventf(
 				object,

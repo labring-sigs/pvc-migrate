@@ -28,6 +28,17 @@ type TransferOptions struct {
 	DeleteExtraneous     bool     `json:"deleteExtraneous,omitempty"`
 	AllowVolumeShrink    bool     `json:"allowVolumeShrink,omitempty"`
 	SkipSourceUsageCheck bool     `json:"skipSourceUsageCheck,omitempty"`
+	// CopyTimeout bounds one data-transfer attempt (warm copy, final sync, or
+	// copy pass). Unset keeps the operation-level bound only.
+	// +kubebuilder:validation:Pattern=`^([0-9]+h)?([0-9]+m)?([0-9]+s)?`
+	// +optional
+	CopyTimeout *string `json:"copyTimeout,omitempty" yaml:"copyTimeout,omitempty"`
+	// RsyncMaxRetries overrides how many times the rsync job re-runs on a
+	// failed attempt within one transfer. Unset keeps the upstream default.
+	// +kubebuilder:validation:Minimum=0
+	// +kubebuilder:validation:Maximum=100
+	// +optional
+	RsyncMaxRetries *int32 `json:"rsyncMaxRetries,omitempty" yaml:"rsyncMaxRetries,omitempty"`
 	// RetryPolicy overrides the retry behavior of the data-transfer attempts
 	// for this workflow. Zero values keep the controller defaults. Only
 	// copy-bearing workflows consume it.
@@ -48,10 +59,6 @@ type RetryPolicySpec struct {
 	// +kubebuilder:validation:Pattern=`^([0-9]+h)?([0-9]+m)?([0-9]+s)?`
 	// +optional
 	RetryBackoff *string `json:"retryBackoff,omitempty" yaml:"retryBackoff,omitempty"`
-	// CopyTimeout bounds one data-transfer attempt. 0 disables the bound.
-	// +kubebuilder:validation:Pattern=`^([0-9]+h)?([0-9]+m)?([0-9]+s)?`
-	// +optional
-	CopyTimeout *string `json:"copyTimeout,omitempty" yaml:"copyTimeout,omitempty"`
 }
 
 // +kubebuilder:validation:XValidation:rule="has(self.volumes) && size(self.volumes) > 0",message="at least one source PVC is required"

@@ -32,6 +32,9 @@ type VolumeCopyConfig struct {
 	// CopyTimeout bounds a single data-transfer attempt. Zero disables the
 	// per-attempt bound; the operation context remains the only limit.
 	CopyTimeout      time.Duration
+	// RsyncMaxRetries overrides the rsync job's internal retry count within
+	// one transfer attempt. Zero keeps the upstream default (10).
+	RsyncMaxRetries  int
 	NoCompress       bool
 	StreamToolLogs   bool
 	StructuredLogs   bool

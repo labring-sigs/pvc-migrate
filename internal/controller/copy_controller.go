@@ -146,7 +146,7 @@ func (r *ClusterCopyReconciler) reconcile(
 
 func (r *ClusterCopyReconciler) executor(object *v1alpha1.ClusterCopy) *app.ClusterCopyExecutor {
 	config := r.config
-	applyRetryPolicy(&config.Transfer, object.Spec.RetryPolicy, func(message string) {
+	applyTransferPolicy(&config.Transfer, &object.Spec.TransferOptions, func(message string) {
 		if r.recorder != nil {
 			r.recorder.Eventf(
 				object,

@@ -8,16 +8,17 @@ import (
 	"github.com/labring-sigs/pvc-migrate/internal/app"
 )
 
-func TestApplyRetryPolicy(t *testing.T) {
+func TestApplyTransferPolicy(t *testing.T) {
 	retries := int32(5)
 	backoff := "30s"
 	timeout := "2h"
+	rsyncRetries := int32(7)
 
-	t.Run("overrides only set fields", func(t *testing.T) {
+	t.Run("retry policy overrides only set fields", func(t *testing.T) {
 		config := app.VolumeCopyConfig{Retries: 3, RetryBackoff: 2 * time.Second}
 
-		applyRetryPolicy(&config, &v1alpha1.RetryPolicySpec{
-			Retries: &retries,
+		applyTransferPolicy(&config, &v1alpha1.TransferOptions{
+			RetryPolicy: &v1alpha1.RetryPolicySpec{Retries: &retries},
 		}, func(string) {})
 
 		if config.Retries != 5 || config.RetryBackoff != 2*time.Second {
@@ -28,9 +29,12 @@ func TestApplyRetryPolicy(t *testing.T) {
 	t.Run("parses durations", func(t *testing.T) {
 		config := app.VolumeCopyConfig{Retries: 3}
 
-		applyRetryPolicy(&config, &v1alpha1.RetryPolicySpec{
-			RetryBackoff: &backoff,
-			CopyTimeout:  &timeout,
+		applyTransferPolicy(&config, &v1alpha1.TransferOptions{
+			CopyTimeout:     &timeout,
+			RsyncMaxRetries: &rsyncRetries,
+			RetryPolicy: &v1alpha1.RetryPolicySpec{
+				RetryBackoff: &backoff,
+			},
 		}, func(string) {})
 
 		if config.RetryBackoff != 30*time.Second {
@@ -40,14 +44,19 @@ func TestApplyRetryPolicy(t *testing.T) {
 		if config.CopyTimeout != 2*time.Hour {
 			t.Fatalf("copyTimeout=%s", config.CopyTimeout)
 		}
+
+		if config.RsyncMaxRetries != 7 {
+			t.Fatalf("rsyncMaxRetries=%d", config.RsyncMaxRetries)
+		}
 	})
 
 	t.Run("invalid duration keeps default and reports", func(t *testing.T) {
 		config := app.VolumeCopyConfig{Retries: 3, RetryBackoff: 2 * time.Second}
 		reports := []string{}
+		bad := "tomorrow"
 
-		applyRetryPolicy(&config, &v1alpha1.RetryPolicySpec{
-			RetryBackoff: new("tomorrow"),
+		applyTransferPolicy(&config, &v1alpha1.TransferOptions{
+			RetryPolicy: &v1alpha1.RetryPolicySpec{RetryBackoff: &bad},
 		}, func(message string) {
 			reports = append(reports, message)
 		})
@@ -61,10 +70,10 @@ func TestApplyRetryPolicy(t *testing.T) {
 		}
 	})
 
-	t.Run("nil policy keeps defaults", func(t *testing.T) {
+	t.Run("nil options keep defaults", func(t *testing.T) {
 		config := app.VolumeCopyConfig{Retries: 3}
 
-		applyRetryPolicy(&config, nil, func(string) {})
+		applyTransferPolicy(&config, nil, func(string) {})
 
 		if config.Retries != 3 {
 			t.Fatalf("retries=%d", config.Retries)

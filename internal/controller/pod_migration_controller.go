@@ -137,19 +137,23 @@ func (r *ClusterPodMigrationReconciler) executor(
 	object *v1alpha1.ClusterPodMigration,
 ) *app.ClusterPodMigrationExecutor {
 	config := r.config
-	applyRetryPolicy(&config.Storage.Transfer, object.Spec.RetryPolicy, func(message string) {
-		if r.recorder != nil {
-			r.recorder.Eventf(
-				object,
-				nil,
-				"Warning",
-				"RetryPolicyInvalid",
-				"Execute",
-				"%s",
-				message,
-			)
-		}
-	})
+	applyTransferPolicy(
+		&config.Storage.Transfer,
+		&object.Spec.TransferOptions,
+		func(message string) {
+			if r.recorder != nil {
+				r.recorder.Eventf(
+					object,
+					nil,
+					"Warning",
+					"RetryPolicyInvalid",
+					"Execute",
+					"%s",
+					message,
+				)
+			}
+		},
+	)
 
 	return app.NewClusterPodMigrationExecutor(
 		r.client,

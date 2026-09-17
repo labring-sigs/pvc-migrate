@@ -135,7 +135,7 @@ func (r *MigrationReconciler) reconcile(
 
 func (r *MigrationReconciler) executor(object *v1alpha1.Migration) *app.MigrationExecutor {
 	config := r.config
-	applyRetryPolicy(&config.Transfer, object.Spec.RetryPolicy, func(message string) {
+	applyTransferPolicy(&config.Transfer, &object.Spec.TransferOptions, func(message string) {
 		if r.recorder != nil {
 			r.recorder.Eventf(
 				object,

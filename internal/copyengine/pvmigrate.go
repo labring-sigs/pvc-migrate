@@ -60,6 +60,10 @@ func (p *PVMigrate) Copy(ctx context.Context, request Request, progress Progress
 	}
 
 	helmValues := append(kube.ToolSecurityContextHelmValues(), request.HelmValues...)
+	if request.RsyncMaxRetries > 0 {
+		helmValues = append(helmValues,
+			fmt.Sprintf("rsync.maxRetries=%d", request.RsyncMaxRetries))
+	}
 	if request.IgnoreSizes {
 		// A smaller destination can deterministically exhaust its filesystem.
 		// Let the session-level retry policy handle transient failures so an
