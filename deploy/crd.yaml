@@ -725,6 +725,12 @@ spec:
                 - require
                 - "off"
                 type: string
+              copyTimeout:
+                description: |-
+                  CopyTimeout bounds one data-transfer attempt (warm copy, final sync, or
+                  copy pass). Unset keeps the operation-level bound only.
+                pattern: ^([0-9]+h)?([0-9]+m)?([0-9]+s)?
+                type: string
               deleteExtraneous:
                 type: boolean
               destinationCapacity:
@@ -785,11 +791,6 @@ spec:
                   for this workflow. Zero values keep the controller defaults. Only
                   copy-bearing workflows consume it.
                 properties:
-                  copyTimeout:
-                    description: CopyTimeout bounds one data-transfer attempt. 0 disables
-                      the bound.
-                    pattern: ^([0-9]+h)?([0-9]+m)?([0-9]+s)?
-                    type: string
                   retries:
                     description: Retries overrides the number of data-transfer attempts.
                     format: int32
@@ -803,6 +804,14 @@ spec:
                     pattern: ^([0-9]+h)?([0-9]+m)?([0-9]+s)?
                     type: string
                 type: object
+              rsyncMaxRetries:
+                description: |-
+                  RsyncMaxRetries overrides how many times the rsync job re-runs on a
+                  failed attempt within one transfer. Unset keeps the upstream default.
+                format: int32
+                maximum: 100
+                minimum: 0
+                type: integer
               sessionNamespace:
                 description: |-
                   NamespaceName is a Kubernetes namespace name used by a cluster-scoped
@@ -1732,6 +1741,12 @@ spec:
                 - require
                 - "off"
                 type: string
+              copyTimeout:
+                description: |-
+                  CopyTimeout bounds one data-transfer attempt (warm copy, final sync, or
+                  copy pass). Unset keeps the operation-level bound only.
+                pattern: ^([0-9]+h)?([0-9]+m)?([0-9]+s)?
+                type: string
               deleteExtraneous:
                 type: boolean
               destinationCapacity:
@@ -1753,11 +1768,6 @@ spec:
                   for this workflow. Zero values keep the controller defaults. Only
                   copy-bearing workflows consume it.
                 properties:
-                  copyTimeout:
-                    description: CopyTimeout bounds one data-transfer attempt. 0 disables
-                      the bound.
-                    pattern: ^([0-9]+h)?([0-9]+m)?([0-9]+s)?
-                    type: string
                   retries:
                     description: Retries overrides the number of data-transfer attempts.
                     format: int32
@@ -1771,6 +1781,14 @@ spec:
                     pattern: ^([0-9]+h)?([0-9]+m)?([0-9]+s)?
                     type: string
                 type: object
+              rsyncMaxRetries:
+                description: |-
+                  RsyncMaxRetries overrides how many times the rsync job re-runs on a
+                  failed attempt within one transfer. Unset keeps the upstream default.
+                format: int32
+                maximum: 100
+                minimum: 0
+                type: integer
               sessionNamespace:
                 description: |-
                   NamespaceName is a Kubernetes namespace name used by a cluster-scoped
@@ -2781,6 +2799,12 @@ spec:
                 - require
                 - "off"
                 type: string
+              copyTimeout:
+                description: |-
+                  CopyTimeout bounds one data-transfer attempt (warm copy, final sync, or
+                  copy pass). Unset keeps the operation-level bound only.
+                pattern: ^([0-9]+h)?([0-9]+m)?([0-9]+s)?
+                type: string
               deleteExtraneous:
                 type: boolean
               destinationCapacity:
@@ -2839,11 +2863,6 @@ spec:
                   for this workflow. Zero values keep the controller defaults. Only
                   copy-bearing workflows consume it.
                 properties:
-                  copyTimeout:
-                    description: CopyTimeout bounds one data-transfer attempt. 0 disables
-                      the bound.
-                    pattern: ^([0-9]+h)?([0-9]+m)?([0-9]+s)?
-                    type: string
                   retries:
                     description: Retries overrides the number of data-transfer attempts.
                     format: int32
@@ -2857,6 +2876,14 @@ spec:
                     pattern: ^([0-9]+h)?([0-9]+m)?([0-9]+s)?
                     type: string
                 type: object
+              rsyncMaxRetries:
+                description: |-
+                  RsyncMaxRetries overrides how many times the rsync job re-runs on a
+                  failed attempt within one transfer. Unset keeps the upstream default.
+                format: int32
+                maximum: 100
+                minimum: 0
+                type: integer
               sessionNamespace:
                 description: |-
                   NamespaceName is a Kubernetes namespace name used by a cluster-scoped
@@ -4297,6 +4324,12 @@ spec:
                 - require
                 - "off"
                 type: string
+              copyTimeout:
+                description: |-
+                  CopyTimeout bounds one data-transfer attempt (warm copy, final sync, or
+                  copy pass). Unset keeps the operation-level bound only.
+                pattern: ^([0-9]+h)?([0-9]+m)?([0-9]+s)?
+                type: string
               deleteExtraneous:
                 type: boolean
               destinationCapacity:
@@ -4355,11 +4388,6 @@ spec:
                   for this workflow. Zero values keep the controller defaults. Only
                   copy-bearing workflows consume it.
                 properties:
-                  copyTimeout:
-                    description: CopyTimeout bounds one data-transfer attempt. 0 disables
-                      the bound.
-                    pattern: ^([0-9]+h)?([0-9]+m)?([0-9]+s)?
-                    type: string
                   retries:
                     description: Retries overrides the number of data-transfer attempts.
                     format: int32
@@ -4373,6 +4401,14 @@ spec:
                     pattern: ^([0-9]+h)?([0-9]+m)?([0-9]+s)?
                     type: string
                 type: object
+              rsyncMaxRetries:
+                description: |-
+                  RsyncMaxRetries overrides how many times the rsync job re-runs on a
+                  failed attempt within one transfer. Unset keeps the upstream default.
+                format: int32
+                maximum: 100
+                minimum: 0
+                type: integer
               sessionNamespace:
                 description: |-
                   NamespaceName is a Kubernetes namespace name used by a cluster-scoped
@@ -5274,6 +5310,12 @@ spec:
                 - require
                 - "off"
                 type: string
+              copyTimeout:
+                description: |-
+                  CopyTimeout bounds one data-transfer attempt (warm copy, final sync, or
+                  copy pass). Unset keeps the operation-level bound only.
+                pattern: ^([0-9]+h)?([0-9]+m)?([0-9]+s)?
+                type: string
               deleteExtraneous:
                 type: boolean
               destinationCapacity:
@@ -5326,11 +5368,6 @@ spec:
                   for this workflow. Zero values keep the controller defaults. Only
                   copy-bearing workflows consume it.
                 properties:
-                  copyTimeout:
-                    description: CopyTimeout bounds one data-transfer attempt. 0 disables
-                      the bound.
-                    pattern: ^([0-9]+h)?([0-9]+m)?([0-9]+s)?
-                    type: string
                   retries:
                     description: Retries overrides the number of data-transfer attempts.
                     format: int32
@@ -5344,6 +5381,14 @@ spec:
                     pattern: ^([0-9]+h)?([0-9]+m)?([0-9]+s)?
                     type: string
                 type: object
+              rsyncMaxRetries:
+                description: |-
+                  RsyncMaxRetries overrides how many times the rsync job re-runs on a
+                  failed attempt within one transfer. Unset keeps the upstream default.
+                format: int32
+                maximum: 100
+                minimum: 0
+                type: integer
               skipSourceUsageCheck:
                 type: boolean
               sourceNode:
@@ -6229,6 +6274,12 @@ spec:
                 - require
                 - "off"
                 type: string
+              copyTimeout:
+                description: |-
+                  CopyTimeout bounds one data-transfer attempt (warm copy, final sync, or
+                  copy pass). Unset keeps the operation-level bound only.
+                pattern: ^([0-9]+h)?([0-9]+m)?([0-9]+s)?
+                type: string
               deleteExtraneous:
                 type: boolean
               destinationCapacity:
@@ -6250,11 +6301,6 @@ spec:
                   for this workflow. Zero values keep the controller defaults. Only
                   copy-bearing workflows consume it.
                 properties:
-                  copyTimeout:
-                    description: CopyTimeout bounds one data-transfer attempt. 0 disables
-                      the bound.
-                    pattern: ^([0-9]+h)?([0-9]+m)?([0-9]+s)?
-                    type: string
                   retries:
                     description: Retries overrides the number of data-transfer attempts.
                     format: int32
@@ -6268,6 +6314,14 @@ spec:
                     pattern: ^([0-9]+h)?([0-9]+m)?([0-9]+s)?
                     type: string
                 type: object
+              rsyncMaxRetries:
+                description: |-
+                  RsyncMaxRetries overrides how many times the rsync job re-runs on a
+                  failed attempt within one transfer. Unset keeps the upstream default.
+                format: int32
+                maximum: 100
+                minimum: 0
+                type: integer
               skipSourceUsageCheck:
                 type: boolean
               sourceNode:
@@ -7963,6 +8017,12 @@ spec:
                 - require
                 - "off"
                 type: string
+              copyTimeout:
+                description: |-
+                  CopyTimeout bounds one data-transfer attempt (warm copy, final sync, or
+                  copy pass). Unset keeps the operation-level bound only.
+                pattern: ^([0-9]+h)?([0-9]+m)?([0-9]+s)?
+                type: string
               deleteExtraneous:
                 type: boolean
               destinationCapacity:
@@ -8021,11 +8081,6 @@ spec:
                   for this workflow. Zero values keep the controller defaults. Only
                   copy-bearing workflows consume it.
                 properties:
-                  copyTimeout:
-                    description: CopyTimeout bounds one data-transfer attempt. 0 disables
-                      the bound.
-                    pattern: ^([0-9]+h)?([0-9]+m)?([0-9]+s)?
-                    type: string
                   retries:
                     description: Retries overrides the number of data-transfer attempts.
                     format: int32
@@ -8039,6 +8094,14 @@ spec:
                     pattern: ^([0-9]+h)?([0-9]+m)?([0-9]+s)?
                     type: string
                 type: object
+              rsyncMaxRetries:
+                description: |-
+                  RsyncMaxRetries overrides how many times the rsync job re-runs on a
+                  failed attempt within one transfer. Unset keeps the upstream default.
+                format: int32
+                maximum: 100
+                minimum: 0
+                type: integer
               skipSourceUsageCheck:
                 type: boolean
               sourceNode:
@@ -10124,6 +10187,12 @@ spec:
                 - require
                 - "off"
                 type: string
+              copyTimeout:
+                description: |-
+                  CopyTimeout bounds one data-transfer attempt (warm copy, final sync, or
+                  copy pass). Unset keeps the operation-level bound only.
+                pattern: ^([0-9]+h)?([0-9]+m)?([0-9]+s)?
+                type: string
               deleteExtraneous:
                 type: boolean
               destinationCapacity:
@@ -10174,11 +10243,6 @@ spec:
                   for this workflow. Zero values keep the controller defaults. Only
                   copy-bearing workflows consume it.
                 properties:
-                  copyTimeout:
-                    description: CopyTimeout bounds one data-transfer attempt. 0 disables
-                      the bound.
-                    pattern: ^([0-9]+h)?([0-9]+m)?([0-9]+s)?
-                    type: string
                   retries:
                     description: Retries overrides the number of data-transfer attempts.
                     format: int32
@@ -10192,6 +10256,14 @@ spec:
                     pattern: ^([0-9]+h)?([0-9]+m)?([0-9]+s)?
                     type: string
                 type: object
+              rsyncMaxRetries:
+                description: |-
+                  RsyncMaxRetries overrides how many times the rsync job re-runs on a
+                  failed attempt within one transfer. Unset keeps the upstream default.
+                format: int32
+                maximum: 100
+                minimum: 0
+                type: integer
               skipSourceUsageCheck:
                 type: boolean
               sourceNode:
