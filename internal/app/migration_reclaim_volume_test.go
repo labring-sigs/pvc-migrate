@@ -1,6 +1,7 @@
 package app
 
 import (
+	"context"
 	"testing"
 
 	v1alpha1 "github.com/labring-sigs/pvc-migrate/api/v1alpha1"
@@ -210,4 +211,40 @@ func TestPrepareMigrationReclaimVolume(t *testing.T) {
 			t.Fatalf("failed source must be kept: %+v", source)
 		}
 	})
+}
+
+// TestRecoverReservationVolumeAcceptsFinalizedPVCDuringDeletion: an earlier
+// finalize pass strips destination ownership metadata; deletion convergence
+// must still recover the PVC instead of conflicting forever.
+func TestRecoverReservationVolumeAcceptsFinalizedPVCDuringDeletion(t *testing.T) {
+	client := fake.NewSimpleClientset(&corev1.PersistentVolumeClaim{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: "temporary", Name: "staged", UID: types.UID("staged-uid"),
+			// no pvc-migrate ownership metadata: already finalized
+		},
+	})
+
+	checkpoint := v1alpha1.ClusterVolumeReservationStatus{
+		DestinationPolicy: corev1.PersistentVolumeReclaimDelete,
+	}
+	source := v1alpha1.ObjectReference{
+		Kind: "PersistentVolumeClaim", Namespace: "apps",
+		Name: "src", UID: types.UID("src-uid"),
+	}
+	destination := v1alpha1.ObjectReference{
+		Kind: "PersistentVolumeClaim", Namespace: "temporary", Name: "staged",
+	}
+
+	deleting := context.WithValue(t.Context(), workflowDeletionContextKey{}, true)
+	if _, err := recoverReservationVolume(
+		deleting, client, "workflow", source, destination, checkpoint, true,
+	); err != nil {
+		t.Fatalf("deleting convergence rejected a finalized PVC: %v", err)
+	}
+
+	if _, err := recoverReservationVolume(
+		t.Context(), client, "workflow", source, destination, checkpoint, true,
+	); domain.CategoryOf(err) != domain.ErrorConflict {
+		t.Fatalf("non-deleting recovery must still conflict, got %v", err)
+	}
 }
