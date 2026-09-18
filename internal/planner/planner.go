@@ -11,7 +11,6 @@ import (
 	"strings"
 
 	v1alpha1 "github.com/labring-sigs/pvc-migrate/api/v1alpha1"
-	"github.com/labring-sigs/pvc-migrate/internal/controller"
 	"github.com/labring-sigs/pvc-migrate/internal/copyengine"
 	"github.com/labring-sigs/pvc-migrate/internal/domain"
 	"github.com/labring-sigs/pvc-migrate/internal/kube"
@@ -47,9 +46,23 @@ func (o planOptions) operation() domain.Operation {
 	return o.operationKind
 }
 
+// PodWorkloadDiscoverer resolves the workload adapter for a Pod. Defined here
+// to invert the dependency: the planner layer must not import the controller
+// package, which implements this on top of its k8s reconciliation machinery.
+type PodWorkloadDiscoverer interface {
+	DiscoverPod(
+		ctx context.Context,
+		pod *corev1.Pod,
+		namespace string,
+		expected v1alpha1.LocalResourceReference,
+		switchoverCandidate string,
+		allowLeaderDowntime bool,
+	) (v1alpha1.WorkloadSpec, error)
+}
+
 type Planner struct {
 	client                        kubernetes.Interface
-	controllers                   *controller.Manager
+	controllers                   PodWorkloadDiscoverer
 	openEBSLVMSharedVolumeManager kube.OpenEBSLVMSharedVolumeManager
 	volumeUsageReader             kube.VolumeUsageReader
 	logger                        *slog.Logger
@@ -91,7 +104,7 @@ type planState struct {
 	storageClassChanged   bool
 }
 
-func New(client kubernetes.Interface, controllers *controller.Manager) *Planner {
+func New(client kubernetes.Interface, controllers PodWorkloadDiscoverer) *Planner {
 	return &Planner{
 		client:         client,
 		controllers:    controllers,
