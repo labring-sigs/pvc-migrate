@@ -57,10 +57,17 @@ spec:
               copyTimeout:
                 description: |-
                   CopyTimeout bounds one data-transfer attempt (warm copy, final sync, or
-                  copy pass). Unset keeps the operation-level bound only.
-                pattern: ^([0-9]+h)?([0-9]+m)?([0-9]+s)?
+                  copy pass). Unset keeps the operation-level bound only. The pattern
+                  requires at least one unit-suffixed component ("30m", "1h30m", "90s")
+                  so empty or unitless values are rejected at admission instead of
+                  silently falling back to the default during planning.
+                pattern: ^([0-9]+(h|m|s))+$
                 type: string
               deleteExtraneous:
+                default: true
+                description: |-
+                  DeleteExtraneous defaults to true so a raw workflow CR means the same
+                  thing as the CLI default: the destination mirrors the source exactly.
                 type: boolean
               destinationCapacity:
                 type: string
@@ -127,8 +134,9 @@ spec:
                   retryBackoff:
                     description: |-
                       RetryBackoff is the delay before the first retry; it doubles on every
-                      further attempt.
-                    pattern: ^([0-9]+h)?([0-9]+m)?([0-9]+s)?
+                      further attempt. The pattern requires at least one unit-suffixed
+                      component ("2s", "1m30s").
+                    pattern: ^([0-9]+(h|m|s))+$
                     type: string
                 type: object
               rsyncMaxRetries:

@@ -186,18 +186,3 @@ func TestRepositorySubmissionPersistsConcreteCRDs(t *testing.T) {
 		t.Fatalf("expected CRD output, got %s", out.String())
 	}
 }
-
-func TestRepositorySubmissionRejectsForeignRepositoryNamespace(t *testing.T) {
-	command := &cobra.Command{}
-
-	flags := &s3RepositoryFlags{backend: "s3", repositoryNamespace: "other"}
-	if err := validateRepositoryFlags(
-		command,
-		flags,
-		"data",
-		"archive",
-		true,
-	); err == nil {
-		t.Fatal("accepted a repository outside the workflow namespace")
-	}
-}

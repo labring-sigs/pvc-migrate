@@ -68,8 +68,7 @@ func TestNewControllerRepositoryStoreUsesRoutingFieldsWithoutCredentials(t *test
 		t.Fatalf("controller repository store retained credentials: %#v", cfg)
 	}
 
-	if got := store.Destination(); !strings.HasPrefix(got, "s3://backups/controller/clusters/") ||
-		!strings.HasSuffix(got, "/namespaces/application/daily/") {
+	if got := store.Destination(); got != "s3://backups/controller/daily/" {
 		t.Fatalf("destination = %q", got)
 	}
 }

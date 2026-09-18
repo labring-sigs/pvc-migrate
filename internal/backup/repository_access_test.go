@@ -125,7 +125,6 @@ func TestRepositoryResolverUsesConfigMapAPIWithoutCRDClient(t *testing.T) {
 	resolver := NewS3RepositoryResolver(
 		store.Load,
 		client,
-		"cluster",
 		func(_ context.Context, config objectstore.Config) (*objectstore.Store, error) {
 			resolved = config
 			return objectstore.NewConfigOnly(config)
@@ -207,8 +206,6 @@ func TestRepositoryLoaderCannotRedirectCredentialNamespace(t *testing.T) {
 			Namespace: "tenant",
 			Name:      repository.Name,
 		},
-		"tenant",
-		"cluster",
 		"daily",
 	)
 	if domain.CategoryOf(err) != domain.ErrorConflict {

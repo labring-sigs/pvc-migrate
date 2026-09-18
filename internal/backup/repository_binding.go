@@ -2,8 +2,6 @@ package backup
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"fmt"
 	"path"
 
@@ -13,7 +11,6 @@ import (
 	"github.com/labring-sigs/pvc-migrate/internal/objectstore"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/util/validation"
 	"k8s.io/client-go/kubernetes"
 	crclient "sigs.k8s.io/controller-runtime/pkg/client"
 )
@@ -26,7 +23,7 @@ func ResolveS3Repository(
 	reader crclient.Reader,
 	client kubernetes.Interface,
 	key crclient.ObjectKey,
-	dataNamespace, clusterIdentity, name string,
+	name string,
 ) (objectstore.Config, *v1alpha1.BackupRepositoryBindingStatus, error) {
 	if reader == nil {
 		return objectstore.Config{}, nil, domain.NewError(
@@ -43,8 +40,6 @@ func ResolveS3Repository(
 		},
 		client,
 		key,
-		dataNamespace,
-		clusterIdentity,
 		name,
 	)
 }
@@ -56,7 +51,7 @@ func resolveStoredS3Repository(
 	load RepositoryLoader,
 	client kubernetes.Interface,
 	key crclient.ObjectKey,
-	dataNamespace, clusterIdentity, name string,
+	name string,
 ) (objectstore.Config, *v1alpha1.BackupRepositoryBindingStatus, error) {
 	if load == nil {
 		return objectstore.Config{}, nil, domain.NewError(
@@ -94,7 +89,7 @@ func resolveStoredS3Repository(
 		)
 	}
 
-	config, err := S3RepositoryLocation(repository, dataNamespace, clusterIdentity, name)
+	config, err := S3RepositoryLocation(repository, name)
 	if err != nil {
 		return objectstore.Config{}, nil, err
 	}
@@ -172,7 +167,7 @@ func resolveStoredS3Repository(
 // submission previews to use the same namespace isolation as execution.
 func S3RepositoryLocation(
 	repository *v1alpha1.BackupRepository,
-	dataNamespace, clusterIdentity, name string,
+	name string,
 ) (objectstore.Config, error) {
 	if repository == nil {
 		return objectstore.Config{}, domain.NewError(
@@ -223,27 +218,10 @@ func S3RepositoryLocation(
 		)
 	}
 
-	if dataNamespace == "" {
-		dataNamespace = repository.Namespace
-	}
-
-	if problems := validation.IsDNS1123Label(dataNamespace); len(problems) != 0 {
-		return objectstore.Config{}, domain.NewError(
-			domain.ErrorValidation, "backup repository", "a valid data namespace is required",
-		)
-	}
-
-	config.Prefix = path.Join(spec.Prefix, "namespaces", dataNamespace)
-	if clusterIdentity != "" {
-		digest := sha256.Sum256([]byte(clusterIdentity))
-		config.Prefix = path.Join(
-			spec.Prefix,
-			"clusters",
-			hex.EncodeToString(digest[:16]),
-			"namespaces",
-			dataNamespace,
-		)
-	}
+	// Recovery points live directly under the configured prefix; the
+	// recovery-point name (config.Name) is the only per-workflow segment
+	// appended by the data plane.
+	config.Prefix = path.Clean("/" + spec.Prefix)[1:]
 
 	if err := objectstore.ValidateConfig(config); err != nil {
 		return objectstore.Config{}, domain.WrapError(

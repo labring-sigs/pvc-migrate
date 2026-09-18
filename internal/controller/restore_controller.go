@@ -219,7 +219,6 @@ func (r *WorkflowReconciler) configureRestoreController(
 					return repository, err
 				},
 				options.KubernetesClient,
-				r.clusterIdentity,
 				nil,
 			),
 			Tools: backup.ToolRuntime{

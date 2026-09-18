@@ -24,12 +24,7 @@ func (r cliRepositoryResolver) Resolve(
 	key crclient.ObjectKey,
 	name string,
 ) (backup.S3RepositoryStore, *v1alpha1.BackupRepositoryBindingStatus, error) {
-	identity, err := kube.Identity(ctx, r.clients)
-	if err != nil {
-		return nil, nil, err
-	}
-
-	return backup.NewS3RepositoryResolver(r.load, r.clients.Kubernetes, identity.ID, r.factory).
+	return backup.NewS3RepositoryResolver(r.load, r.clients.Kubernetes, r.factory).
 		Resolve(ctx, key, name)
 }
 

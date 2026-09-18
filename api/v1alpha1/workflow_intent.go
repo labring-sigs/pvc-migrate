@@ -23,14 +23,20 @@ type TransferOptions struct {
 	// +kubebuilder:validation:Enum=auto;require;off
 	CapacityAwareness string `json:"capacityAwareness,omitempty"`
 	// +kubebuilder:validation:MaxItems=32
-	Strategies           []string `json:"strategies,omitempty"`
-	VerifyChecksum       bool     `json:"verifyChecksum,omitempty"`
-	DeleteExtraneous     bool     `json:"deleteExtraneous,omitempty"`
-	AllowVolumeShrink    bool     `json:"allowVolumeShrink,omitempty"`
-	SkipSourceUsageCheck bool     `json:"skipSourceUsageCheck,omitempty"`
+	Strategies     []string `json:"strategies,omitempty"`
+	VerifyChecksum bool     `json:"verifyChecksum,omitempty"`
+	// DeleteExtraneous defaults to true so a raw workflow CR means the same
+	// thing as the CLI default: the destination mirrors the source exactly.
+	// +kubebuilder:default=true
+	DeleteExtraneous     bool `json:"deleteExtraneous,omitempty"`
+	AllowVolumeShrink    bool `json:"allowVolumeShrink,omitempty"`
+	SkipSourceUsageCheck bool `json:"skipSourceUsageCheck,omitempty"`
 	// CopyTimeout bounds one data-transfer attempt (warm copy, final sync, or
-	// copy pass). Unset keeps the operation-level bound only.
-	// +kubebuilder:validation:Pattern=`^([0-9]+h)?([0-9]+m)?([0-9]+s)?`
+	// copy pass). Unset keeps the operation-level bound only. The pattern
+	// requires at least one unit-suffixed component ("30m", "1h30m", "90s")
+	// so empty or unitless values are rejected at admission instead of
+	// silently falling back to the default during planning.
+	// +kubebuilder:validation:Pattern=`^([0-9]+(h|m|s))+$`
 	// +optional
 	CopyTimeout *string `json:"copyTimeout,omitempty" yaml:"copyTimeout,omitempty"`
 	// RsyncMaxRetries overrides how many times the rsync job re-runs on a
@@ -55,8 +61,9 @@ type RetryPolicySpec struct {
 	// +optional
 	Retries *int32 `json:"retries,omitempty" yaml:"retries,omitempty"`
 	// RetryBackoff is the delay before the first retry; it doubles on every
-	// further attempt.
-	// +kubebuilder:validation:Pattern=`^([0-9]+h)?([0-9]+m)?([0-9]+s)?`
+	// further attempt. The pattern requires at least one unit-suffixed
+	// component ("2s", "1m30s").
+	// +kubebuilder:validation:Pattern=`^([0-9]+(h|m|s))+$`
 	// +optional
 	RetryBackoff *string `json:"retryBackoff,omitempty" yaml:"retryBackoff,omitempty"`
 }
@@ -178,10 +185,10 @@ type RestoreSpec struct {
 	Name                    string               `json:"name"`
 	RepositoryRef           LocalObjectReference `json:"repositoryRef"`
 	CreatePVC               bool                 `json:"createPVC,omitempty"`
-	DestinationStorageClass string               `json:"destinationStorageClass,omitempty"`
-	DestinationAccessMode   string               `json:"destinationAccessMode,omitempty"`
-	DestinationCapacity     string               `json:"destinationCapacity,omitempty"`
-	AllowMounted            bool                 `json:"allowMounted,omitempty"`
-	TargetNode              string               `json:"targetNode,omitempty"`
-	DeleteExtraneous        bool                 `json:"deleteExtraneous,omitempty"`
+	DestinationStorageClass string               `json:"destinationStorageClass,omitempty" yaml:"destinationStorageClass,omitempty"`
+	DestinationAccessMode   string               `json:"destinationAccessMode,omitempty"   yaml:"destinationAccessMode,omitempty"`
+	DestinationCapacity     string               `json:"destinationCapacity,omitempty"     yaml:"destinationCapacity,omitempty"`
+	AllowMounted            bool                 `json:"allowMounted,omitempty"            yaml:"allowMounted,omitempty"`
+	TargetNode              string               `json:"targetNode,omitempty"              yaml:"targetNode,omitempty"`
+	DeleteExtraneous        bool                 `json:"deleteExtraneous,omitempty"        yaml:"deleteExtraneous,omitempty"`
 }

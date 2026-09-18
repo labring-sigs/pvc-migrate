@@ -88,6 +88,13 @@ func (r backupExecutorResolver) Resolve(
 	}, nil
 }
 
+func (r backupExecutorResolver) ResolveCluster(
+	context.Context,
+	string, string,
+) (S3RepositoryStore, *v1alpha1.BackupRepositoryBindingStatus, error) {
+	return r.Resolve(context.Background(), crclient.ObjectKey{}, "")
+}
+
 func plannedBackupObject() *v1alpha1.Backup {
 	return &v1alpha1.Backup{
 		ObjectMeta: metav1.ObjectMeta{

@@ -111,12 +111,12 @@ func workloadFailureAdvice(check domain.Check) string {
 		return "StatefulSet action: set persistentVolumeClaimRetentionPolicy.whenScaled=Retain and verify the StatefulSet before rerunning the plan."
 	case strings.Contains(check.Message, "scale-down affects"):
 		return "StatefulSet action: complete an application switchover, or explicitly acknowledge the restart with --allow-leader-downtime when the workload can tolerate it."
-	case strings.Contains(check.Message, "--kubeblocks-candidate applies only when the selected InstanceSet Pod has a leader role"):
-		return "KubeBlocks action: remove --kubeblocks-candidate when migrating a non-leader InstanceSet Pod, then rerun the plan."
-	case strings.Contains(check.Message, "--kubeblocks-candidate is supported only for InstanceSet-backed KubeBlocks components"):
-		return "KubeBlocks action: remove --kubeblocks-candidate for a legacy KubeBlocks component; its Stop/Start OpsRequest already pauses the affected Cluster or component."
+	case strings.Contains(check.Message, "--switchover-candidate applies only when the selected InstanceSet Pod has a leader role"):
+		return "KubeBlocks action: remove --switchover-candidate when migrating a non-leader InstanceSet Pod, then rerun the plan."
+	case strings.Contains(check.Message, "--switchover-candidate is supported only for InstanceSet-backed KubeBlocks components"):
+		return "KubeBlocks action: remove --switchover-candidate for a legacy KubeBlocks component; its Stop/Start OpsRequest already pauses the affected Cluster or component."
 	case strings.Contains(check.Message, "KubeBlocks Redis addon does not provide a Switchover action"):
-		return "KubeBlocks Redis action: remove --kubeblocks-candidate and rerun with --allow-leader-downtime."
+		return "KubeBlocks Redis action: remove --switchover-candidate and rerun with --allow-leader-downtime."
 	default:
 		return ""
 	}

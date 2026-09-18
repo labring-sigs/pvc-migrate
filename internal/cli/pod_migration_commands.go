@@ -146,7 +146,7 @@ func (f *podMigrationFlags) bind(command *cobra.Command) {
 	flags.StringVar(&f.podName, "pod", "", "Stateful Pod migration unit")
 	flags.StringVar(
 		&f.switchoverCandidate,
-		"kubeblocks-candidate",
+		"switchover-candidate",
 		"",
 		"Switchover target for a supported InstanceSet-backed KubeBlocks primary",
 	)

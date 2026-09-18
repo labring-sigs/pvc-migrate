@@ -2350,6 +2350,16 @@ func (in *TransferOptions) DeepCopyInto(out *TransferOptions) {
 		*out = make([]string, len(*in))
 		copy(*out, *in)
 	}
+	if in.CopyTimeout != nil {
+		in, out := &in.CopyTimeout, &out.CopyTimeout
+		*out = new(string)
+		**out = **in
+	}
+	if in.RsyncMaxRetries != nil {
+		in, out := &in.RsyncMaxRetries, &out.RsyncMaxRetries
+		*out = new(int32)
+		**out = **in
+	}
 	if in.RetryPolicy != nil {
 		in, out := &in.RetryPolicy, &out.RetryPolicy
 		*out = new(RetryPolicySpec)

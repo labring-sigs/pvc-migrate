@@ -219,7 +219,6 @@ func (r *WorkflowReconciler) configureBackupController(
 					return repository, err
 				},
 				options.KubernetesClient,
-				r.clusterIdentity,
 				nil,
 			),
 			SharedVolumeManager: options.OpenEBSLVMSharedVolumeManager,

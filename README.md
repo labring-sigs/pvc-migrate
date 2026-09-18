@@ -435,7 +435,7 @@ The destination PVCs are provisioned before downtime. Warm-copy passes run while
 | CockroachDB | Use drain, decommission, and CockroachDB recovery procedures | Rejected during planning |
 | Backup archive-WAL workload | Use the owning backup controller workflow | Rejected during planning |
 
-For a KubeBlocks primary, `--kubeblocks-candidate` requests an automated switchover. Non-MongoDB components use the served KubeBlocks Switchover action and receive matching `kbcli` and OpsRequest guidance. MongoDB InstanceSet migrations validate and call the native candidate script directly without probing an OpsRequest API; choose a Ready, caught-up secondary as the candidate. Failure guidance includes the fully resolved equivalent command. The native command has this form:
+For a KubeBlocks primary, `--switchover-candidate` requests an automated switchover. Non-MongoDB components use the served KubeBlocks Switchover action and receive matching `kbcli` and OpsRequest guidance. MongoDB InstanceSet migrations validate and call the native candidate script directly without probing an OpsRequest API; choose a Ready, caught-up secondary as the candidate. Failure guidance includes the fully resolved equivalent command. The native command has this form:
 
 ```sh
 kubectl --namespace <namespace> exec <current-primary-pod> -c mongodb -- env \
@@ -446,7 +446,7 @@ kubectl --namespace <namespace> exec <current-primary-pod> -c mongodb -- env \
 
 `--allow-leader-downtime` acknowledges a direct primary restart when the application can tolerate it.
 
-InstanceSet-backed components use the served `spec.paused` field to suspend InstanceSet reconciliation while the selected Pod is migrated. The adapter deletes that Pod with a UID precondition and verifies the InstanceSet pause owner before final sync. Legacy StatefulSet-backed components use Stop/Start OpsRequests: the apps API pauses the complete Cluster, while the operations API can target the selected component. Legacy workloads reject `--kubeblocks-candidate` because the pause operation affects every instance in its scope. The `kubeblocks.io/reconcile` annotation triggers reconciliation and has no pause semantics.
+InstanceSet-backed components use the served `spec.paused` field to suspend InstanceSet reconciliation while the selected Pod is migrated. The adapter deletes that Pod with a UID precondition and verifies the InstanceSet pause owner before final sync. Legacy StatefulSet-backed components use Stop/Start OpsRequests: the apps API pauses the complete Cluster, while the operations API can target the selected component. Legacy workloads reject `--switchover-candidate` because the pause operation affects every instance in its scope. The `kubeblocks.io/reconcile` annotation triggers reconciliation and has no pause semantics.
 
 Controller ownership outside the supported adapters causes the plan to fail. PVCs that are already offline can use `migrate`, `copy`, `rename`, or `move` directly.
 

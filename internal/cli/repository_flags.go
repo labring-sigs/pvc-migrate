@@ -22,10 +22,9 @@ type s3CredentialFlags struct {
 }
 
 type s3RepositoryFlags struct {
-	spec                v1alpha1.S3BackupRepositorySpec
-	credentials         s3CredentialFlags
-	backend             string
-	repositoryNamespace string
+	spec        v1alpha1.S3BackupRepositorySpec
+	credentials s3CredentialFlags
+	backend     string
 }
 
 func bindRepositoryFlags(
@@ -66,20 +65,13 @@ func bindRepositoryFlags(
 	// Session runs build the repository from inline parameters; the
 	// BackupRepository reference does not apply.
 	_ = command.Flags().MarkHidden("backup-repository")
-	_ = command.Flags().MarkHidden("backup-repository-namespace")
 
-	f.StringVar(
-		&flags.repositoryNamespace,
-		"backup-repository-namespace",
-		"",
-		"Repository namespace; must match the workflow namespace",
-	)
 	f.StringVar(&flags.spec.Bucket, "bucket", "", "Backup bucket")
 	f.StringVar(
 		&flags.spec.Prefix,
 		"prefix",
 		"pv-migrate",
-		"Repository prefix; workflows are isolated by cluster and namespace",
+		"Object-store prefix holding the recovery points",
 	)
 	f.StringVar(&flags.spec.Provider, "s3-provider", "", "rclone S3 provider")
 	f.StringVar(&flags.spec.Endpoint, "endpoint", "", "S3 endpoint")
@@ -120,7 +112,7 @@ func bindRepositoryFlags(
 		&c.secretName,
 		"credentials-secret",
 		"",
-		"Secret containing credentials to snapshot for this workflow",
+		"Secret whose accessKey/secretKey/sessionToken fields supply the S3 credentials for this workflow",
 	)
 	f.StringVar(
 		&c.accessKeyKey,
@@ -153,15 +145,6 @@ func validateRepositoryFlags(
 			domain.ErrorValidation,
 			"repository",
 			"unsupported backend: only s3 is supported",
-		)
-	}
-
-	if flags.repositoryNamespace != "" &&
-		(reference == "" || flags.repositoryNamespace != namespace) {
-		return domain.NewError(
-			domain.ErrorValidation,
-			"repository",
-			"BackupRepository must be in the workflow namespace",
 		)
 	}
 
@@ -301,11 +284,6 @@ func (r *rootState) loadRestoreRepositoryConnection(
 		)
 	}
 
-	identity, err := kube.Identity(ctx, runtime.clients)
-	if err != nil {
-		return nil, err
-	}
-
 	// The session persisted its inline BackupRepository alongside its
 	// credentials; reload it to rebuild the connection.
 	store := kube.NewConfigMapRepositoryStore(runtime.clients.Kubernetes)
@@ -320,8 +298,6 @@ func (r *rootState) loadRestoreRepositoryConnection(
 
 	config, err := backup.S3RepositoryLocation(
 		repository,
-		object.Namespace,
-		identity.ID,
 		object.Spec.Name,
 	)
 	if err != nil {
@@ -346,12 +322,7 @@ func (r *rootState) inlineRepositoryConnection(
 	name string,
 	data map[string][]byte,
 ) (*objectstore.Store, error) {
-	identity, err := kube.Identity(ctx, runtime.clients)
-	if err != nil {
-		return nil, err
-	}
-
-	config, err := backup.S3RepositoryLocation(repository, repository.Namespace, identity.ID, name)
+	config, err := backup.S3RepositoryLocation(repository, name)
 	if err != nil {
 		return nil, err
 	}
@@ -384,12 +355,7 @@ func (r *rootState) newControllerRepositoryStore(
 		return nil, err
 	}
 
-	identity, err := kube.Identity(ctx, runtime.clients)
-	if err != nil {
-		return nil, err
-	}
-
-	config, err := backup.S3RepositoryLocation(repository, namespace, identity.ID, name)
+	config, err := backup.S3RepositoryLocation(repository, name)
 	if err != nil {
 		return nil, err
 	}

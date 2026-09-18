@@ -50,7 +50,7 @@ func (m *Manager) kubeBlocksWorkload(
 			domain.ErrorPrecondition,
 			"discover KubeBlocks",
 			fmt.Sprintf(
-				"--kubeblocks-candidate applies only when the selected InstanceSet Pod has a leader role; Pod %s/%s has role %s, so omit the candidate",
+				"--switchover-candidate applies only when the selected InstanceSet Pod has a leader role; Pod %s/%s has role %s, so omit the candidate",
 				pod.Namespace,
 				pod.Name,
 				role,
@@ -183,7 +183,7 @@ func (m *Manager) prepareKubeBlocksDiscovery(
 		return state, domain.NewError(
 			domain.ErrorPrecondition,
 			"discover KubeBlocks",
-			"the KubeBlocks Redis addon does not provide a Switchover action; omit --kubeblocks-candidate",
+			"the KubeBlocks Redis addon does not provide a Switchover action; omit --switchover-candidate",
 		)
 	}
 
@@ -257,7 +257,7 @@ func validateKubeBlocksSwitchoverCandidate(
 	return domain.NewError(
 		domain.ErrorPrecondition,
 		"discover KubeBlocks",
-		"--kubeblocks-candidate is supported only for InstanceSet-backed KubeBlocks components; Stop OpsRequests pause the complete legacy Cluster or component",
+		"--switchover-candidate is supported only for InstanceSet-backed KubeBlocks components; Stop OpsRequests pause the complete legacy Cluster or component",
 	)
 }
 
@@ -287,7 +287,7 @@ func (m *Manager) discoverKubeBlocksCandidate(
 			domain.ErrorPrecondition,
 			"discover KubeBlocks",
 			fmt.Sprintf(
-				"--kubeblocks-candidate %s refers to the selected source Pod; choose a different Ready non-leader Pod in cluster %s component %s%s",
+				"--switchover-candidate %s refers to the selected source Pod; choose a different Ready non-leader Pod in cluster %s component %s%s",
 				pod.Name,
 				state.cluster,
 				state.component,
@@ -310,7 +310,7 @@ func (m *Manager) discoverKubeBlocksCandidate(
 		)
 		if apierrors.IsNotFound(err) {
 			message = fmt.Sprintf(
-				"switchover candidate Pod %s/%s does not exist; verify --kubeblocks-candidate%s",
+				"switchover candidate Pod %s/%s does not exist; verify --switchover-candidate%s",
 				pod.Namespace,
 				candidateName,
 				m.kubeBlocksCandidateSuggestion(ctx, pod, state.cluster, state.component),
@@ -815,7 +815,7 @@ func (m *Manager) kubeBlocksLeaderGuidance(
 		}
 
 		return fmt.Sprintf(
-			"selected MongoDB instance %s has role %s; use --kubeblocks-candidate %s and pvc-migrate will validate and run the native switchover script. Manual MongoDB switchover: %s. The candidate must remain Ready and caught up; --allow-leader-downtime acknowledges a leader outage",
+			"selected MongoDB instance %s has role %s; use --switchover-candidate %s and pvc-migrate will validate and run the native switchover script. Manual MongoDB switchover: %s. The candidate must remain Ready and caught up; --allow-leader-downtime acknowledges a leader outage",
 			selected.Name,
 			role,
 			candidate,
@@ -831,7 +831,7 @@ func (m *Manager) kubeBlocksLeaderGuidance(
 
 	if isKubeBlocksRedis(selected) {
 		return fmt.Sprintf(
-			"selected instance %s has role %s; the KubeBlocks Redis addon does not provide a Switchover action. Rerun without --kubeblocks-candidate and use --allow-leader-downtime to acknowledge the leader outage",
+			"selected instance %s has role %s; the KubeBlocks Redis addon does not provide a Switchover action. Rerun without --switchover-candidate and use --allow-leader-downtime to acknowledge the leader outage",
 			selected.Name,
 			role,
 		)
@@ -863,7 +863,7 @@ func (m *Manager) kubeBlocksLeaderGuidance(
 	}
 
 	return fmt.Sprintf(
-		"selected instance %s has role %s; use --kubeblocks-candidate %s for an automatic switchover, or complete a native switchover first and rerun the plan. Use --allow-leader-downtime to acknowledge the leader outage. KubeBlocks commands: kbcli cluster promote %s --namespace %s --instance %s --candidate %s; or %s",
+		"selected instance %s has role %s; use --switchover-candidate %s for an automatic switchover, or complete a native switchover first and rerun the plan. Use --allow-leader-downtime to acknowledge the leader outage. KubeBlocks commands: kbcli cluster promote %s --namespace %s --instance %s --candidate %s; or %s",
 		selected.Name,
 		role,
 		candidate,
@@ -927,7 +927,7 @@ func (m *Manager) kubeBlocksCandidateSuggestion(
 		return ""
 	}
 
-	return "; available Ready non-leader candidate: --kubeblocks-candidate " + candidate
+	return "; available Ready non-leader candidate: --switchover-candidate " + candidate
 }
 
 func kubeBlocksSwitchoverCommand(
@@ -1007,7 +1007,7 @@ func (m *Manager) kubeBlocksSwitchoverStrategy(
 ) (v1alpha1.KubeBlocksSwitchoverStrategy, string, error) {
 	if isKubeBlocksRedis(selected) {
 		return "", "", errors.New(
-			"the KubeBlocks Redis addon does not provide a Switchover action; omit --kubeblocks-candidate",
+			"the KubeBlocks Redis addon does not provide a Switchover action; omit --switchover-candidate",
 		)
 	}
 

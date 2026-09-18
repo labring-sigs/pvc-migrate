@@ -58,7 +58,7 @@ const (
 	CheckNameControllerAdapter   CheckName = "controller-adapter"
 	CheckNameDatabasePauseScope  CheckName = "database-pause-scope"
 	CheckNameDatabaseRole        CheckName = "database-role"
-	CheckNameKubeBlocksCandidate CheckName = "kubeblocks-candidate"
+	CheckNameKubeBlocksCandidate CheckName = "switchover-candidate"
 	CheckNameLimitRange          CheckName = "limit-range"
 	CheckNameNetworkPolicy       CheckName = "network-policy"
 	CheckNamePod                 CheckName = "pod"

@@ -248,8 +248,8 @@ func TestMigrationModesRejectEachOthersFlags(t *testing.T) {
 		},
 		{
 			name: "offline KubeBlocks candidate",
-			args: []string{"migrate", "--kubeblocks-candidate", "db-1"},
-			flag: "--kubeblocks-candidate",
+			args: []string{"migrate", "--switchover-candidate", "db-1"},
+			flag: "--switchover-candidate",
 		},
 		{
 			name: "pod source PVC",

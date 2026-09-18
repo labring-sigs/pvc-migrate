@@ -149,7 +149,7 @@ func NewRoot(options Options) *cobra.Command {
 		&state.global.timeout,
 		"timeout",
 		30*time.Minute,
-		"Operation timeout; copy, migrate, migrate-pod, backup, and restore default to 24h when unset",
+		"Whole-operation context timeout; data-transfer operations (copy, migrate, migrate-pod, backup, restore) run under 24h when this flag keeps its 30m default",
 	)
 	flags.DurationVar(
 		&state.global.copyTimeout,

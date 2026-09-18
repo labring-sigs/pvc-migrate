@@ -32,16 +32,14 @@ type RepositoryResources interface {
 }
 
 type repositoryAccess struct {
-	load            RepositoryLoader
-	client          kubernetes.Interface
-	clusterIdentity string
-	factory         func(context.Context, objectstore.Config) (*objectstore.Store, error)
+	load    RepositoryLoader
+	client  kubernetes.Interface
+	factory func(context.Context, objectstore.Config) (*objectstore.Store, error)
 }
 
 func NewS3RepositoryResolver(
 	load RepositoryLoader,
 	client kubernetes.Interface,
-	clusterIdentity string,
 	factory func(context.Context, objectstore.Config) (*objectstore.Store, error),
 ) S3RepositoryResolver {
 	if factory == nil {
@@ -49,10 +47,9 @@ func NewS3RepositoryResolver(
 	}
 
 	return &repositoryAccess{
-		load:            load,
-		client:          client,
-		clusterIdentity: clusterIdentity,
-		factory:         factory,
+		load:    load,
+		client:  client,
+		factory: factory,
 	}
 }
 
@@ -66,8 +63,6 @@ func (r *repositoryAccess) Resolve(
 		r.load,
 		r.client,
 		key,
-		key.Namespace,
-		r.clusterIdentity,
 		name,
 	)
 	if err != nil {

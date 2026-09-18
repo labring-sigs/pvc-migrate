@@ -64,8 +64,6 @@ func TestRepositoryResolutionAllowsCredentialRotationAndRejectsReplacement(t *te
 		reader,
 		client,
 		key,
-		"data",
-		"cluster",
 		"daily",
 	)
 	if err != nil {
@@ -107,8 +105,6 @@ func TestRepositoryResolutionAllowsCredentialRotationAndRejectsReplacement(t *te
 		reader,
 		client,
 		key,
-		"data",
-		"cluster",
 		"daily",
 	)
 	if err != nil || rotatedConfig.SecretKey != "rotated" {
@@ -137,8 +133,6 @@ func TestRepositoryResolutionAllowsCredentialRotationAndRejectsReplacement(t *te
 		reader,
 		client,
 		key,
-		"data",
-		"cluster",
 		"daily",
 	)
 	if err != nil {
@@ -161,39 +155,42 @@ func TestRepositoryResolutionAllowsCredentialRotationAndRejectsReplacement(t *te
 	}
 }
 
-func TestRepositoryRoutingIsolatesClustersAndNamespaces(t *testing.T) {
+func TestRepositoryRoutingUsesRecoveryPointName(t *testing.T) {
 	repository := s3BindingRepository()
 	original := repository.DeepCopy()
 
-	paths := map[string]bool{}
-	for _, cluster := range []string{"cluster-a", "cluster-b"} {
-		for _, namespace := range []string{"tenant-a", "tenant-b"} {
-			config, err := S3RepositoryLocation(repository, namespace, cluster, "daily")
-			if err != nil {
-				t.Fatal(err)
-			}
-
-			if paths[config.Prefix] || !strings.HasSuffix(config.Prefix, "/namespaces/"+namespace) {
-				t.Fatalf("repository scope collided: %s", config.Prefix)
-			}
-
-			paths[config.Prefix] = true
+	// No namespace or cluster segments: the prefix is used verbatim and the
+	// recovery-point name stays a separate data-plane segment.
+	for _, name := range []string{"daily", "weekly"} {
+		config, err := S3RepositoryLocation(repository, name)
+		if err != nil {
+			t.Fatal(err)
 		}
+
+		if config.Prefix != "team" {
+			t.Fatalf("prefix = %q, want %q", config.Prefix, "team")
+		}
+
+		if config.Name != name {
+			t.Fatalf("recovery-point name = %q, want %q", config.Name, name)
+		}
+	}
+
+	config, err := S3RepositoryLocation(repository, "monthly")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if config.Prefix != "team" || config.Name != "monthly" {
+		t.Fatalf("repeated routing drifted: %q / %q", config.Prefix, config.Name)
 	}
 
 	if !reflect.DeepEqual(repository, original) {
 		t.Fatal("routing mutated the repository spec")
 	}
 
-	for _, namespace := range []string{"../other", "tenant/other", "Tenant"} {
-		if _, err := S3RepositoryLocation(repository, namespace, "cluster", "daily"); err == nil {
-			t.Fatalf("invalid scope accepted: %s", namespace)
-		}
-	}
-
-	repository.Spec.S3.Prefix = strings.Repeat("p", 1000)
-	if _, err := S3RepositoryLocation(repository, "tenant", "cluster", "daily"); err == nil {
-		t.Fatal("scoped object-store prefix exceeded its limit")
+	repository.Spec.S3.Prefix = strings.Repeat("p", 1100)
+	if _, err := S3RepositoryLocation(repository, "daily"); err == nil {
+		t.Fatal("object-store prefix exceeded its limit")
 	}
 }
 
