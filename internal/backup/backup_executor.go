@@ -141,6 +141,19 @@ func (b *BackupExecutor) run(ctx context.Context, object *v1alpha1.Backup) (resu
 	}
 
 	if manifest != nil {
+		if manifest.SessionID != object.Name {
+			// A different backup already published this recovery-point name.
+			// Refuse clearly at admission instead of surfacing a confusing
+			// resume conflict mid-run.
+			return domain.NewError(
+				domain.ErrorValidation,
+				"backup",
+				"recovery point "+object.Status.Plan.Name+
+					" already exists in this repository (published by backup "+
+					manifest.SessionID+"); choose a different recovery point name",
+			)
+		}
+
 		if err := validatePublishedBackup(
 			ctx,
 			repository,
@@ -410,6 +423,16 @@ func (b *BackupExecutor) ValidateRepositoryPlan(
 	}
 
 	if manifest != nil {
+		if manifest.SessionID != object.Name {
+			return domain.NewError(
+				domain.ErrorValidation,
+				"backup",
+				"recovery point "+object.Status.Plan.Name+
+					" already exists in this repository (published by backup "+
+					manifest.SessionID+"); choose a different recovery point name",
+			)
+		}
+
 		err = validatePublishedBackup(
 			ctx,
 			repository,

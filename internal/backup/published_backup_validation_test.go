@@ -24,7 +24,7 @@ func TestBackupRepositoryValidationResumesPublishedCRDPlan(t *testing.T) {
 	object.Name = "another-backup"
 	if err := executor.ValidateRepositoryPlan(t.Context(), object, repository); domain.CategoryOf(
 		err,
-	) != domain.ErrorConflict {
+	) != domain.ErrorValidation {
 		t.Fatalf("foreign backup accepted: %v", err)
 	}
 }

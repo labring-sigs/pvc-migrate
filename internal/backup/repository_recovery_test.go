@@ -1,6 +1,7 @@
 package backup
 
 import (
+	"strings"
 	"context"
 	"reflect"
 	"testing"
@@ -126,7 +127,7 @@ func TestBackupRecoveryRejectsForeignPublishedManifest(t *testing.T) {
 		object,
 	); domain.CategoryOf(
 		err,
-	) != domain.ErrorConflict {
+	) != domain.ErrorValidation {
 		t.Fatalf("foreign manifest accepted during validation: %v", err)
 	}
 
@@ -134,8 +135,15 @@ func TestBackupRecoveryRejectsForeignPublishedManifest(t *testing.T) {
 		t.Fatal("validation mutated workflow")
 	}
 
-	if err := executor.Run(t.Context(), object); domain.CategoryOf(err) != domain.ErrorConflict {
+	err := executor.Run(t.Context(), object)
+	if domain.CategoryOf(err) != domain.ErrorValidation {
 		t.Fatalf("foreign manifest accepted during execution: %v", err)
+	}
+
+	// The collision error must tell the user exactly what to change.
+	if err == nil || !strings.Contains(err.Error(), "already exists") ||
+		!strings.Contains(err.Error(), "different recovery point name") {
+		t.Fatalf("collision error lacks user guidance: %v", err)
 	}
 
 	if object.Status.Phase != domain.PhaseFailed ||
