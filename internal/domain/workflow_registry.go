@@ -269,13 +269,6 @@ func ControllerResourceForKind(kind ControllerKind) (ControllerResource, bool) {
 }
 
 const (
-	SourcePVReclaimRetain       = "Retain"
-	SourcePVReclaimDelete       = "Delete"
-	DestinationPVCReclaimRetain = "Retain"
-	DestinationPVCReclaimDelete = "Delete"
-)
-
-const (
 	StrategyAuto         = AutoValue
 	StrategyMount        = "mount"
 	StrategyClusterIP    = "clusterip"

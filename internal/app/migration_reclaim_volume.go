@@ -7,6 +7,8 @@ import (
 	"github.com/labring-sigs/pvc-migrate/internal/domain"
 	"github.com/labring-sigs/pvc-migrate/internal/kube"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
 )
 
@@ -43,6 +45,21 @@ func prepareMigrationReclaimVolume(
 
 	recovered := *checkpoint.DeepCopy()
 	if phase == domain.PhaseAborted {
+		// The cutover never happened. When the source PVC identity is gone,
+		// the staged destination may be the only surviving copy — keep it
+		// whatever the policy says.
+		if activePVC == nil {
+			_, probeErr := client.CoreV1().
+				PersistentVolumeClaims(source.Namespace).
+				Get(ctx, source.Name, metav1.GetOptions{})
+			switch {
+			case apierrors.IsNotFound(probeErr):
+				deleteUnused = false
+			case probeErr != nil:
+				return checkpoint, nil, probeErr
+			}
+		}
+
 		var err error
 
 		recovered, destination, err = prepareReservedDestination(
@@ -89,6 +106,8 @@ func prepareMigrationReclaimVolume(
 
 		if phase == domain.PhaseRolledBack {
 			destination.role = kube.ResourceRoleRollback
+			// The staged destination lost the cutover; it is the unused copy.
+			destination.delete = deleteUnused
 		}
 	}
 

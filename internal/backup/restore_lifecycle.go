@@ -14,8 +14,10 @@ import (
 )
 
 type RestoreCleanupOptions struct {
-	Finalize      bool
-	DeleteSession bool
+	// UnusedStoragePolicy overrides the recorded policy; empty uses the plan's.
+	UnusedStoragePolicy string
+	Finalize            bool
+	DeleteSession       bool
 }
 
 func (r *RestoreExecutor) RequestResume(ctx context.Context, object *v1alpha1.Restore) error {
@@ -193,6 +195,22 @@ func (r *RestoreExecutor) cleanup(
 		return err
 	}
 
+	policy := v1alpha1.UnusedStoragePolicy("")
+	if plan := object.Status.Plan; plan != nil {
+		policy = plan.UnusedStoragePolicy
+	}
+	if options.UnusedStoragePolicy != "" {
+		policy = v1alpha1.UnusedStoragePolicy(options.UnusedStoragePolicy)
+	}
+	if err := domain.ValidateUnusedStoragePolicy(policy); err != nil {
+		return err
+	}
+
+	// A completed restore keeps its deliverable; only an aborted restore has
+	// an unused created destination, and only then the policy may remove it.
+	deleteUnused := domain.DeletesUnusedStorage(policy) &&
+		object.Status.Phase == domain.PhaseAborted
+
 	if options.Finalize {
 		ref, err := r.createdDestination(ctx, object)
 		if err != nil {
@@ -210,7 +228,11 @@ func (r *RestoreExecutor) cleanup(
 				}
 			}
 
-			if err := kube.FinalizePVC(
+			if deleteUnused {
+				if err := r.deleteCreatedDestination(ctx, *ref); err != nil {
+					return err
+				}
+			} else if err := kube.FinalizePVC(
 				ctx,
 				r.client,
 				*ref,
@@ -239,6 +261,48 @@ func (r *RestoreExecutor) cleanup(
 		}
 
 		return r.store.Delete(ctx, object)
+	}
+
+	return nil
+}
+
+// deleteCreatedDestination removes a workflow-created destination PVC after
+// an aborted restore. Ownership is re-checked by the caller via
+// createdDestination; the PV follows its StorageClass reclaim policy.
+func (r *RestoreExecutor) deleteCreatedDestination(
+	ctx context.Context,
+	ref v1alpha1.ObjectReference,
+) error {
+	pvc, err := r.client.CoreV1().
+		PersistentVolumeClaims(ref.Namespace).
+		Get(ctx, ref.Name, metav1.GetOptions{})
+	if apierrors.IsNotFound(err) {
+		return nil
+	}
+
+	if err != nil {
+		return domain.WrapError(
+			domain.ErrorKubernetes, "cleanup restore", "read destination PVC", err,
+		)
+	}
+
+	if pvc.UID != ref.UID {
+		return domain.NewError(
+			domain.ErrorConflict,
+			"cleanup restore",
+			"destination PVC identity changed",
+		)
+	}
+
+	uid, resourceVersion := pvc.UID, pvc.ResourceVersion
+	if err := r.client.CoreV1().
+		PersistentVolumeClaims(ref.Namespace).
+		Delete(ctx, ref.Name, metav1.DeleteOptions{
+			Preconditions: &metav1.Preconditions{UID: &uid, ResourceVersion: &resourceVersion},
+		}); err != nil && !apierrors.IsNotFound(err) {
+		return domain.WrapError(
+			domain.ErrorKubernetes, "cleanup restore", "delete destination PVC", err,
+		)
 	}
 
 	return nil

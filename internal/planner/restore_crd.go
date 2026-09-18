@@ -53,6 +53,7 @@ func (p *Planner) PlanRestore(ctx context.Context, object *v1alpha1.Restore, ima
 		AllowMounted:            request.AllowMounted,
 		TargetNode:              request.TargetNode,
 		DeleteExtraneous:        request.DeleteExtraneous,
+		UnusedStoragePolicy:     request.UnusedStoragePolicy,
 		ToolImage:               image,
 	}
 	if plan.CreatePVC && plan.DestinationAccessMode == "" {

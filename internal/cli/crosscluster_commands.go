@@ -642,7 +642,7 @@ func crossClusterCopyCleanupCommand(flags *crossClusterCopyFlags, sessionID stri
 	args = append(
 		args,
 		"--unused-storage-policy",
-		"Delete",
+		string(v1alpha1.UnusedStorageDelete),
 		"--delete-session",
 		"--yes",
 		"--dry-run=false",

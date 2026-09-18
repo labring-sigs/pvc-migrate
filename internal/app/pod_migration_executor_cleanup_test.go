@@ -303,6 +303,19 @@ func TestPodMigrationCleanupAbortedDeletesStagedDestinationButNeverTheSource(t *
 		)
 	}
 
+	// the source-identity probe needs the live source PVCs
+	for _, volume := range object.Status.Plan.Volumes {
+		if _, err := executor.client.CoreV1().PersistentVolumeClaims("source").
+			Create(t.Context(), &corev1.PersistentVolumeClaim{
+				ObjectMeta: metav1.ObjectMeta{
+					Namespace: "source", Name: volume.SourcePVC.Name,
+					UID: volume.SourcePVC.UID,
+				},
+			}, metav1.CreateOptions{}); err != nil {
+			t.Fatal(err)
+		}
+	}
+
 	_, volumes, _, err := executor.prepareCleanup(
 		t.Context(),
 		object,

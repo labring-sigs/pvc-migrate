@@ -87,6 +87,20 @@ func TestNamespacedMigrationCleanupAbortedDeletesStagedDestinationButNeverTheSou
 		)
 	}
 
+	// the source-identity probe needs the live source PVCs; namespaced
+	// migrations keep them in the workflow namespace
+	for _, volume := range object.Status.Plan.Volumes {
+		if _, err := executor.client.CoreV1().PersistentVolumeClaims(object.Namespace).
+			Create(t.Context(), &corev1.PersistentVolumeClaim{
+				ObjectMeta: metav1.ObjectMeta{
+					Namespace: object.Namespace, Name: volume.SourcePVC.Name,
+					UID: volume.SourcePVC.UID,
+				},
+			}, metav1.CreateOptions{}); err != nil {
+			t.Fatal(err)
+		}
+	}
+
 	_, volumes, _, err := executor.prepareCleanup(
 		t.Context(),
 		object,
