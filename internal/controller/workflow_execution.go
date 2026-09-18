@@ -3,6 +3,7 @@ package controller
 import (
 	"context"
 	"errors"
+	"log/slog"
 	"strings"
 	"sync"
 	"time"
@@ -56,6 +57,9 @@ func cancelActiveReconcile(active *sync.Map, uid types.UID) {
 func workflowReconcileResult(err error) (reconcile.Result, error) {
 	if kube.IsSessionLockContention(err) || domain.CategoryOf(err) == domain.ErrorConflict ||
 		apierrors.IsConflict(err) {
+		// Conflicts are expected under concurrent writers, but a workflow
+		// that retries forever is invisible unless the reason is logged.
+		slog.Warn("reconcile deferred by conflict; retrying", "error", err.Error())
 		return reconcile.Result{RequeueAfter: time.Second}, nil
 	}
 
