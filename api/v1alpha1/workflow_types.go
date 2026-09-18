@@ -198,12 +198,12 @@ type MigrationPlan struct {
 	TargetNode string       `json:"targetNode,omitempty" yaml:"targetNode,omitempty"`
 	ToolImage  string       `json:"toolImage,omitempty"  yaml:"toolImage,omitempty"`
 	// +kubebuilder:validation:MaxItems=32
-	Strategies     []string `json:"strategies,omitempty"           yaml:"strategies,omitempty"`
-	VerifyChecksum bool     `json:"verifyChecksum,omitempty"       yaml:"verifyChecksum,omitempty"`
+	Strategies     []string `json:"strategies,omitempty"     yaml:"strategies,omitempty"`
+	VerifyChecksum bool     `json:"verifyChecksum,omitempty" yaml:"verifyChecksum,omitempty"`
 	// UnusedStoragePolicy controls storage identities that are no longer in
 	// use at a terminal state. The in-use copy is always kept.
 	// +kubebuilder:validation:Enum=Keep;Delete
-	UnusedStoragePolicy  UnusedStoragePolicy `json:"unusedStoragePolicy,omitempty" yaml:"unusedStoragePolicy,omitempty"`
+	UnusedStoragePolicy  UnusedStoragePolicy `json:"unusedStoragePolicy,omitempty"  yaml:"unusedStoragePolicy,omitempty"`
 	DeleteExtraneous     bool                `json:"deleteExtraneous,omitempty"     yaml:"deleteExtraneous,omitempty"`
 	SkipSourceUsageCheck bool                `json:"skipSourceUsageCheck,omitempty" yaml:"skipSourceUsageCheck,omitempty"`
 }
@@ -240,12 +240,12 @@ type ReservationPlan struct {
 	TargetNode string       `json:"targetNode,omitempty" yaml:"targetNode,omitempty"`
 	ToolImage  string       `json:"toolImage,omitempty"  yaml:"toolImage,omitempty"`
 	// +kubebuilder:validation:MaxItems=32
-	Strategies     []string `json:"strategies,omitempty"           yaml:"strategies,omitempty"`
-	VerifyChecksum bool     `json:"verifyChecksum,omitempty"       yaml:"verifyChecksum,omitempty"`
+	Strategies     []string `json:"strategies,omitempty"     yaml:"strategies,omitempty"`
+	VerifyChecksum bool     `json:"verifyChecksum,omitempty" yaml:"verifyChecksum,omitempty"`
 	// UnusedStoragePolicy controls storage identities that are no longer in
 	// use at a terminal state. The in-use copy is always kept.
 	// +kubebuilder:validation:Enum=Keep;Delete
-	UnusedStoragePolicy  UnusedStoragePolicy `json:"unusedStoragePolicy,omitempty" yaml:"unusedStoragePolicy,omitempty"`
+	UnusedStoragePolicy  UnusedStoragePolicy `json:"unusedStoragePolicy,omitempty"  yaml:"unusedStoragePolicy,omitempty"`
 	DeleteExtraneous     bool                `json:"deleteExtraneous,omitempty"     yaml:"deleteExtraneous,omitempty"`
 	SkipSourceUsageCheck bool                `json:"skipSourceUsageCheck,omitempty" yaml:"skipSourceUsageCheck,omitempty"`
 }
@@ -261,12 +261,12 @@ type CopyPlan struct {
 	Strategies []string `json:"strategies,omitempty" yaml:"strategies,omitempty"`
 	// VerifyChecksum enables rsync checksum comparison during final sync. It
 	// defaults to false when omitted.
-	VerifyChecksum   bool `json:"verifyChecksum,omitempty"       yaml:"verifyChecksum,omitempty"`
-	DeleteExtraneous bool `json:"deleteExtraneous,omitempty"     yaml:"deleteExtraneous,omitempty"`
+	VerifyChecksum   bool `json:"verifyChecksum,omitempty"   yaml:"verifyChecksum,omitempty"`
+	DeleteExtraneous bool `json:"deleteExtraneous,omitempty" yaml:"deleteExtraneous,omitempty"`
 	// UnusedStoragePolicy controls storage identities that are no longer in
 	// use at a terminal state. The in-use copy is always kept.
 	// +kubebuilder:validation:Enum=Keep;Delete
-	UnusedStoragePolicy  UnusedStoragePolicy `json:"unusedStoragePolicy,omitempty" yaml:"unusedStoragePolicy,omitempty"`
+	UnusedStoragePolicy  UnusedStoragePolicy `json:"unusedStoragePolicy,omitempty"  yaml:"unusedStoragePolicy,omitempty"`
 	SkipSourceUsageCheck bool                `json:"skipSourceUsageCheck,omitempty" yaml:"skipSourceUsageCheck,omitempty"`
 	Online               bool                `json:"online,omitempty"               yaml:"online,omitempty"`
 }

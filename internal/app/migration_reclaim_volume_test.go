@@ -27,12 +27,6 @@ type reclaimFixture struct {
 func (f reclaimFixture) run(t *testing.T) []reclaimVolume {
 	t.Helper()
 
-	scheme := runtime.NewScheme()
-	if err := corev1.AddToScheme(scheme); err != nil {
-		t.Fatal(err)
-	}
-	client := fake.NewSimpleClientset()
-
 	var objects []runtime.Object
 	if f.sourcePresent {
 		objects = append(objects, &corev1.PersistentVolumeClaim{
@@ -41,7 +35,8 @@ func (f reclaimFixture) run(t *testing.T) []reclaimVolume {
 			},
 		})
 	}
-	client = fake.NewSimpleClientset(objects...)
+
+	client := fake.NewSimpleClientset(objects...)
 
 	planned := v1alpha1.VolumeSpec{
 		SourcePVC: v1alpha1.LocalResourceReference{
@@ -91,6 +86,7 @@ func findVolume(volumes []reclaimVolume, name string) *reclaimVolume {
 			return &volumes[i]
 		}
 	}
+
 	return nil
 }
 
@@ -110,7 +106,8 @@ func TestPrepareMigrationReclaimVolume(t *testing.T) {
 			}.run(t)
 
 			destination := findVolume(volumes, "src-new")
-			if destination == nil || destination.role != kube.ResourceRoleActive || destination.delete {
+			if destination == nil || destination.role != kube.ResourceRoleActive ||
+				destination.delete {
 				t.Fatalf("policy=%v active destination must be kept: %+v", policy, destination)
 			}
 
@@ -118,6 +115,7 @@ func TestPrepareMigrationReclaimVolume(t *testing.T) {
 			if source == nil || source.delete != policy {
 				t.Fatalf("policy=%v old source PV delete mismatch: %+v", policy, source)
 			}
+
 			if source.role != kube.ResourceRoleRollback {
 				t.Fatalf("old source PV role = %s", source.role)
 			}
@@ -127,7 +125,10 @@ func TestPrepareMigrationReclaimVolume(t *testing.T) {
 	t.Run("aborted keeps the source and follows policy for the staged copy", func(t *testing.T) {
 		for _, policy := range []bool{false, true} {
 			volumes := reclaimFixture{
-				phase: domain.PhaseAborted, deleteUnused: policy, sourcePresent: true, reserved: true,
+				phase:         domain.PhaseAborted,
+				deleteUnused:  policy,
+				sourcePresent: true,
+				reserved:      true,
 			}.run(t)
 
 			staged := findVolume(volumes, keepStged)
@@ -142,23 +143,33 @@ func TestPrepareMigrationReclaimVolume(t *testing.T) {
 		}
 	})
 
-	t.Run("rolled back keeps the source and follows policy for the staged copy", func(t *testing.T) {
-		for _, policy := range []bool{false, true} {
-			volumes := reclaimFixture{
-				phase: domain.PhaseRolledBack, deleteUnused: policy, sourcePresent: true, reserved: true,
-			}.run(t)
+	t.Run(
+		"rolled back keeps the source and follows policy for the staged copy",
+		func(t *testing.T) {
+			for _, policy := range []bool{false, true} {
+				volumes := reclaimFixture{
+					phase:         domain.PhaseRolledBack,
+					deleteUnused:  policy,
+					sourcePresent: true,
+					reserved:      true,
+				}.run(t)
 
-			staged := findVolume(volumes, keepStged)
-			if staged == nil || staged.delete != policy {
-				t.Fatalf("policy=%v rolled-back staged destination delete mismatch: %+v", policy, staged)
-			}
+				staged := findVolume(volumes, keepStged)
+				if staged == nil || staged.delete != policy {
+					t.Fatalf(
+						"policy=%v rolled-back staged destination delete mismatch: %+v",
+						policy,
+						staged,
+					)
+				}
 
-			source := findVolume(volumes, "src")
-			if source == nil || source.delete {
-				t.Fatalf("policy=%v rolled-back source must be kept: %+v", policy, source)
+				source := findVolume(volumes, "src")
+				if source == nil || source.delete {
+					t.Fatalf("policy=%v rolled-back source must be kept: %+v", policy, source)
+				}
 			}
-		}
-	})
+		},
+	)
 
 	t.Run("aborted without the source identity keeps everything", func(t *testing.T) {
 		volumes := reclaimFixture{

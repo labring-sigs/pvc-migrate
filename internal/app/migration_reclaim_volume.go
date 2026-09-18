@@ -99,6 +99,7 @@ func prepareMigrationReclaimVolume(
 		// Failed, aborted, and rolled-back workflows keep the source: it is
 		// the copy the workload can actually run on.
 		src.delete = false
+
 		src.pvc = source
 		if activePVC != nil {
 			src.pvc = *activePVC

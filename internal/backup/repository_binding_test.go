@@ -180,6 +180,7 @@ func TestRepositoryRoutingUsesRecoveryPointName(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	if config.Prefix != "team" || config.Name != "monthly" {
 		t.Fatalf("repeated routing drifted: %q / %q", config.Prefix, config.Name)
 	}

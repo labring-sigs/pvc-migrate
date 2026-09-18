@@ -98,7 +98,11 @@ func (s *Service) cleanup(
 }
 
 // ValidateCleanup checks policy, identities and consumers without changing the session.
-func (s *Service) ValidateCleanup(ctx context.Context, session *Session, unusedStoragePolicy string) error {
+func (s *Service) ValidateCleanup(
+	ctx context.Context,
+	session *Session,
+	unusedStoragePolicy string,
+) error {
 	if err := s.validateSession(ctx, session); err != nil {
 		return err
 	}

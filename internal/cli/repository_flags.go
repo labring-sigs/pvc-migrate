@@ -137,7 +137,7 @@ func bindRepositoryFlags(
 func validateRepositoryFlags(
 	command *cobra.Command,
 	flags *s3RepositoryFlags,
-	namespace, reference string,
+	reference string,
 	requireReference bool,
 ) error {
 	if flags.backend != "s3" {
@@ -317,7 +317,6 @@ func (r *rootState) loadRestoreRepositoryConnection(
 
 func (r *rootState) inlineRepositoryConnection(
 	ctx context.Context,
-	runtime *commandRuntime,
 	repository *v1alpha1.BackupRepository,
 	name string,
 	data map[string][]byte,

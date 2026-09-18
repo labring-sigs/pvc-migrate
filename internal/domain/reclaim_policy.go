@@ -7,7 +7,8 @@ import (
 // ValidateUnusedStoragePolicy accepts only the empty value (treated as Keep)
 // or the explicit Keep/Delete spellings.
 func ValidateUnusedStoragePolicy(policy v1alpha1.UnusedStoragePolicy) error {
-	if policy != "" && policy != v1alpha1.UnusedStorageKeep && policy != v1alpha1.UnusedStorageDelete {
+	if policy != "" && policy != v1alpha1.UnusedStorageKeep &&
+		policy != v1alpha1.UnusedStorageDelete {
 		return NewError(
 			ErrorValidation,
 			"unused storage policy",

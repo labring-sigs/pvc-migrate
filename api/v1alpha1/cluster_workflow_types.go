@@ -15,10 +15,10 @@ type NamespaceName string
 type ClusterMigrationPlan struct {
 	// +kubebuilder:validation:Enum=Keep;Delete
 	UnusedStoragePolicy  UnusedStoragePolicy `json:"unusedStoragePolicy,omitempty" yaml:"unusedStoragePolicy,omitempty"`
-	SourceNamespace      NamespaceName       `json:"sourceNamespace"                       yaml:"sourceNamespace"`
-	TemporaryNamespace   NamespaceName       `json:"temporaryNamespace"                    yaml:"temporaryNamespace"`
-	DestinationNamespace NamespaceName       `json:"destinationNamespace"                  yaml:"destinationNamespace"`
-	SessionNamespace     NamespaceName       `json:"sessionNamespace"                      yaml:"sessionNamespace"`
+	SourceNamespace      NamespaceName       `json:"sourceNamespace"               yaml:"sourceNamespace"`
+	TemporaryNamespace   NamespaceName       `json:"temporaryNamespace"            yaml:"temporaryNamespace"`
+	DestinationNamespace NamespaceName       `json:"destinationNamespace"          yaml:"destinationNamespace"`
+	SessionNamespace     NamespaceName       `json:"sessionNamespace"              yaml:"sessionNamespace"`
 	// +kubebuilder:validation:MaxItems=1024
 	Volumes    []VolumeSpec `json:"volumes,omitempty"    yaml:"volumes,omitempty"`
 	SourceNode string       `json:"sourceNode,omitempty" yaml:"sourceNode,omitempty"`

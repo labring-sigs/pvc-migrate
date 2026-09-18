@@ -154,7 +154,9 @@ func TestNamespacedPodMigrationCleanupUsesCutoverIdentityAndExplicitPolicies(t *
 	}
 }
 
-func TestNamespacedPodMigrationCleanupAbortedDeletesStagedDestinationButNeverTheSource(t *testing.T) {
+func TestNamespacedPodMigrationCleanupAbortedDeletesStagedDestinationButNeverTheSource(
+	t *testing.T,
+) {
 	executor, object, _, _ := namespacedPodMigrationFixture(t)
 
 	object.Status.Phase = domain.PhaseAborted

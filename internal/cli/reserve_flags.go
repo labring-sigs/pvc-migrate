@@ -121,7 +121,12 @@ func (f *reserveFlags) bind(command *cobra.Command) {
 		"Delete destination files absent from the source",
 	)
 	flags.StringVar(&f.podName, "pod", "", "Pod whose PVCs define the reservation set")
-	flags.StringVar(&f.unusedStoragePolicy, "unused-storage-policy", string(v1alpha1.UnusedStorageKeep), "What happens to storage that is no longer in use at a terminal state: Keep or Delete. The copy the workload uses is always kept")
+	flags.StringVar(
+		&f.unusedStoragePolicy,
+		"unused-storage-policy",
+		string(v1alpha1.UnusedStorageKeep),
+		"What happens to storage that is no longer in use at a terminal state: Keep or Delete. The copy the workload uses is always kept",
+	)
 }
 
 func (f *reserveFlags) workflow(

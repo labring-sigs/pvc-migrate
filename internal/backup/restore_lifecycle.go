@@ -199,9 +199,11 @@ func (r *RestoreExecutor) cleanup(
 	if plan := object.Status.Plan; plan != nil {
 		policy = plan.UnusedStoragePolicy
 	}
+
 	if options.UnusedStoragePolicy != "" {
 		policy = v1alpha1.UnusedStoragePolicy(options.UnusedStoragePolicy)
 	}
+
 	if err := domain.ValidateUnusedStoragePolicy(policy); err != nil {
 		return err
 	}

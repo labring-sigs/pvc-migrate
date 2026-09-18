@@ -17,7 +17,7 @@ type TransferOptions struct {
 	// Keep retains it (default); Delete removes it. The copy the workload
 	// actually uses is always kept, whatever the policy says.
 	// +kubebuilder:validation:Enum=Keep;Delete
-	UnusedStoragePolicy     UnusedStoragePolicy `json:"unusedStoragePolicy,omitempty" yaml:"unusedStoragePolicy,omitempty"`
+	UnusedStoragePolicy     UnusedStoragePolicy `json:"unusedStoragePolicy,omitempty"     yaml:"unusedStoragePolicy,omitempty"`
 	DestinationCapacity     string              `json:"destinationCapacity,omitempty"`
 	SourcePath              string              `json:"sourcePath,omitempty"`
 	DestinationPath         string              `json:"destinationPath,omitempty"`
@@ -74,7 +74,7 @@ type RetryPolicySpec struct {
 
 // +kubebuilder:validation:XValidation:rule="has(self.volumes) && size(self.volumes) > 0",message="at least one source PVC is required"
 type MigrationSpec struct {
-	TransferOptions `                json:",inline"`
+	TransferOptions `json:",inline"`
 	// +kubebuilder:validation:MaxItems=1024
 	Volumes []VolumeRequest `json:"volumes"`
 }

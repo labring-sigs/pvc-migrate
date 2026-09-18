@@ -145,7 +145,6 @@ func (r *rootState) runRestoreObject(
 	if err := validateRepositoryFlags(
 		cmd,
 		flags,
-		object.Namespace,
 		object.Spec.RepositoryRef.Name,
 		submit,
 	); err != nil {
@@ -208,7 +207,6 @@ func (r *rootState) runRestoreObject(
 
 	connection, err := r.inlineRepositoryConnection(
 		ctx,
-		runtime,
 		repository,
 		object.Spec.Name,
 		credentials,
@@ -347,7 +345,6 @@ func (r *rootState) validateRestoreInput(
 	if err := validateRepositoryFlags(
 		cmd,
 		flags,
-		object.Namespace,
 		object.Spec.RepositoryRef.Name,
 		requireReference,
 	); err != nil {

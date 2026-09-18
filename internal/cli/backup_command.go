@@ -120,7 +120,6 @@ func (r *rootState) runBackupObject(
 	if err := validateRepositoryFlags(
 		cmd,
 		flags,
-		object.Namespace,
 		object.Spec.RepositoryRef.Name,
 		submit,
 	); err != nil {
@@ -185,7 +184,6 @@ func (r *rootState) runBackupObject(
 
 	connection, err := r.inlineRepositoryConnection(
 		ctx,
-		runtime,
 		repository,
 		object.Spec.Name,
 		credentials,
@@ -335,7 +333,6 @@ func (r *rootState) validateBackupInput(
 	if err := validateRepositoryFlags(
 		cmd,
 		flags,
-		object.Namespace,
 		object.Spec.RepositoryRef.Name,
 		requireReference,
 	); err != nil {
