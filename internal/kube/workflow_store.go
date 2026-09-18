@@ -569,38 +569,57 @@ func (s *CRDWorkflowStore[T]) Delete(ctx context.Context, object T) error {
 		return err
 	}
 
-	previous, err := s.Load(ctx, crclient.ObjectKeyFromObject(object))
-	if apierrors.IsNotFound(err) {
-		return nil
+	// Terminal cleanup always converges: the executor has finished resource
+	// and Lease cleanup, so the session-protection finalizer must come off
+	// even when the caller's snapshot is stale — executor status writes
+	// between the reconcile load and this call are expected, and once the
+	// workflow is deleting no other writer exists. Retry on the live object.
+	for range 5 {
+		previous, err := s.Load(ctx, crclient.ObjectKeyFromObject(object))
+		if apierrors.IsNotFound(err) {
+			return nil
+		}
+
+		if err != nil {
+			return err
+		}
+
+		if previous.GetDeletionTimestamp() == nil {
+			// Not yet deleting: keep the strict storage-version contract for
+			// regular record removal.
+			if err := checkWorkflowStorageVersion(object, previous); err != nil {
+				return err
+			}
+		}
+
+		previous.SetFinalizers(removeSessionFinalizer(previous.GetFinalizers()))
+
+		if err := s.client.Update(ctx, previous); err != nil {
+			if apierrors.IsConflict(err) {
+				continue
+			}
+
+			return err
+		}
+
+		copyWorkflowStorageVersion(object, previous)
+
+		if previous.GetDeletionTimestamp() != nil {
+			return nil
+		}
+
+		uid, version := previous.GetUID(), previous.GetResourceVersion()
+		err = s.client.Delete(ctx, previous, &crclient.DeleteOptions{
+			Preconditions: &metav1.Preconditions{UID: &uid, ResourceVersion: &version},
+		})
+
+		return crclient.IgnoreNotFound(err)
 	}
 
-	if err != nil {
-		return err
-	}
-
-	if err := checkWorkflowStorageVersion(object, previous); err != nil {
-		return err
-	}
-	// Callers finish resource and Lease cleanup before releasing protection.
-	// A failed metadata update therefore leaves a recoverable workflow.
-	previous.SetFinalizers(removeSessionFinalizer(previous.GetFinalizers()))
-
-	if err := s.client.Update(ctx, previous); err != nil {
-		return err
-	}
-
-	copyWorkflowStorageVersion(object, previous)
-
-	if previous.GetDeletionTimestamp() != nil {
-		return nil
-	}
-
-	uid, version := previous.GetUID(), previous.GetResourceVersion()
-	err = s.client.Delete(ctx, previous, &crclient.DeleteOptions{
-		Preconditions: &metav1.Preconditions{UID: &uid, ResourceVersion: &version},
-	})
-
-	return crclient.IgnoreNotFound(err)
+	return workflowStoreConflict(
+		"write",
+		"workflow deletion kept conflicting with concurrent writers; retry",
+	)
 }
 
 func copyWorkflowStorageVersion(object, storage metav1.Object) {

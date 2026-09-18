@@ -9,6 +9,7 @@ import (
 	v1alpha1 "github.com/labring-sigs/pvc-migrate/api/v1alpha1"
 	"github.com/labring-sigs/pvc-migrate/internal/domain"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
@@ -389,5 +390,46 @@ func TestCRDWorkflowProtectionPreservesStatusAndRejectsStaleIdentity(t *testing.
 
 	if err := store.EnsureProtection(t.Context(), deleting); err == nil {
 		t.Fatal("deleting workflow accepted for execution protection")
+	}
+}
+
+func TestCRDWorkflowStoreDeleteConvergesDeletingWorkflowWithStaleSnapshot(t *testing.T) {
+	scheme := runtime.NewScheme()
+	if err := v1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+
+	record := storedRename()
+	record.Finalizers = []string{SessionFinalizer}
+	now := metav1.Now()
+	record.DeletionTimestamp = &now
+
+	client := crfake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(record.DeepCopy()).
+		Build()
+
+	store, err := NewCRDWorkflowStore(client, func() *v1alpha1.Rename {
+		return &v1alpha1.Rename{}
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// The caller's snapshot predates the server-side Deleting condition and
+	// status writes that terminal cleanup performed, so its resourceVersion
+	// is stale. Deletion convergence must still release the finalizer.
+	stale := record.DeepCopy()
+	stale.ResourceVersion = "1"
+
+	if err := store.Delete(t.Context(), stale); err != nil {
+		t.Fatalf("delete converging deleting workflow: %v", err)
+	}
+
+	live := &v1alpha1.Rename{}
+	if err := client.Get(t.Context(), crclient.ObjectKey{
+		Namespace: record.Namespace, Name: record.Name,
+	}, live); !apierrors.IsNotFound(err) {
+		t.Fatalf("deleting workflow still exists: %v (err=%v)", live, err)
 	}
 }
