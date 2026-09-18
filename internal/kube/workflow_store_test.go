@@ -433,3 +433,59 @@ func TestCRDWorkflowStoreDeleteConvergesDeletingWorkflowWithStaleSnapshot(t *tes
 		t.Fatalf("deleting workflow still exists: %v (err=%v)", live, err)
 	}
 }
+
+type failingSessionLocker struct{}
+
+func (failingSessionLocker) AcquireSessionLock(
+	context.Context, string, string,
+) (SessionLock, error) {
+	return nil, errors.New("lock unavailable")
+}
+
+func TestWithWorkflowLeaseDeletingObjectConvergesWhenLockUnavailable(t *testing.T) {
+	scheme := runtime.NewScheme()
+	if err := v1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+
+	now := metav1.Now()
+	record := storedRename()
+	record.Finalizers = []string{SessionFinalizer}
+	record.DeletionTimestamp = &now
+
+	client := crfake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(record.DeepCopy()).
+		Build()
+
+	store, err := NewCRDWorkflowStore(client, func() *v1alpha1.Rename {
+		return &v1alpha1.Rename{}
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	locker := failingSessionLocker{}
+	live := record.DeepCopy()
+	if err := client.Get(t.Context(), crclient.ObjectKeyFromObject(live), live); err != nil {
+		t.Fatal(err)
+	}
+
+	ran := false
+	err = WithWorkflowLease(t.Context(), store, locker, record.Namespace, live, true,
+		func(context.Context, SessionLock) error {
+			ran = true
+			return nil
+		})
+	if err != nil {
+		t.Fatalf("deleting workflow must converge without a lock: %v", err)
+	}
+	if ran {
+		t.Fatal("convergence must not run the operation body")
+	}
+
+	final := &v1alpha1.Rename{}
+	if err := client.Get(t.Context(), crclient.ObjectKeyFromObject(record), final); !apierrors.IsNotFound(err) {
+		t.Fatalf("deleting workflow still exists: %v (err=%v)", final, err)
+	}
+}
