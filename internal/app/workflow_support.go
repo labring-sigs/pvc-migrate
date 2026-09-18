@@ -86,6 +86,10 @@ func withHeldSessionLock(ctx context.Context, held heldSessionLock) context.Cont
 // deletion convergence, which may re-enter workflows already being deleted.
 type workflowDeletionContextKey struct{}
 
+// workflowFinalizeContextKey marks a terminal finalize cleanup pass
+// (not deletion): the same convergence guarantees apply.
+type workflowFinalizeContextKey struct{}
+
 func deletionRequiresConvergence(phase v1alpha1.WorkflowPhase) bool {
 	switch phase {
 	case domain.PhaseActivating,

@@ -33,6 +33,10 @@ func (r *ClusterCopyExecutor) Cleanup(
 		return err
 	}
 
+	if options.Finalize {
+		ctx = context.WithValue(ctx, workflowFinalizeContextKey{}, true)
+	}
+
 	return withStoredWorkflowLock(ctx, r.store, r.locker, r.storageNamespace, object,
 		func(ctx context.Context) error { return r.cleanup(ctx, object, options) })
 }

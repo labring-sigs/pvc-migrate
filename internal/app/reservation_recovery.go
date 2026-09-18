@@ -64,16 +64,21 @@ func recoverReservationVolume(
 	knownPVC := destination.UID != "" ||
 		(checkpoint.DestinationPVC != nil && checkpoint.DestinationPVC.UID != "")
 	if !reservationPVCRecoveryOwned(pvc, id, string(source.UID), knownPVC) {
-		// Terminal deletion must always converge. An earlier finalize pass
-		// may have already stripped the PVC's ownership metadata; a PVC with
-		// no pvc-migrate metadata at all is ours being finalized, not a
-		// foreign claim — recover it so the reclaim can finish.
-		deleting := ctx.Value(workflowDeletionContextKey{}) != nil
+		// A terminal pass (deletion convergence or finalize cleanup) must
+		// always converge. An earlier finalize pass may have already
+		// stripped the PVC's ownership metadata; a PVC with no pvc-migrate
+		// metadata at all is ours being finalized, not a foreign claim —
+		// report it as already reclaimed so the session can close.
+		terminal := ctx.Value(workflowDeletionContextKey{}) != nil ||
+			ctx.Value(workflowFinalizeContextKey{}) != nil
 		unowned := pvc.Labels[kube.ManagedByLabel] == "" &&
 			pvc.Labels[kube.SessionKey] == "" &&
 			pvc.Labels[kube.ResourceRoleLabel] == "" &&
 			pvc.Annotations[kube.SessionKey] == ""
-		if !(deleting && unowned) {
+		if terminal && unowned {
+			return result, nil
+		}
+		if !terminal || !unowned {
 			return conflict("destination PVC ownership changed")
 		}
 	}
