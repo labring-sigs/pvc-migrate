@@ -1089,6 +1089,8 @@ spec:
                     pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
                     type: string
                   destinationPVCReclaimPolicy:
+                    description: PersistentVolumeReclaimPolicy describes a policy
+                      for end-of-life maintenance of persistent volumes.
                     enum:
                     - Retain
                     - Delete
@@ -2080,6 +2082,8 @@ spec:
                     pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
                     type: string
                   destinationPVCReclaimPolicy:
+                    description: PersistentVolumeReclaimPolicy describes a policy
+                      for end-of-life maintenance of persistent volumes.
                     enum:
                     - Retain
                     - Delete
@@ -2105,6 +2109,8 @@ spec:
                   sourceNode:
                     type: string
                   sourcePVReclaimPolicy:
+                    description: PersistentVolumeReclaimPolicy describes a policy
+                      for end-of-life maintenance of persistent volumes.
                     enum:
                     - Retain
                     - Delete
@@ -3241,6 +3247,8 @@ spec:
                   deleteExtraneous:
                     type: boolean
                   destinationPVCReclaimPolicy:
+                    description: PersistentVolumeReclaimPolicy describes a policy
+                      for end-of-life maintenance of persistent volumes.
                     enum:
                     - Retain
                     - Delete
@@ -3270,6 +3278,8 @@ spec:
                   sourceNode:
                     type: string
                   sourcePVReclaimPolicy:
+                    description: PersistentVolumeReclaimPolicy describes a policy
+                      for end-of-life maintenance of persistent volumes.
                     enum:
                     - Retain
                     - Delete
@@ -4686,6 +4696,8 @@ spec:
                     pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
                     type: string
                   destinationPVCReclaimPolicy:
+                    description: PersistentVolumeReclaimPolicy describes a policy
+                      for end-of-life maintenance of persistent volumes.
                     enum:
                     - Retain
                     - Delete
@@ -5639,6 +5651,8 @@ spec:
                   deleteExtraneous:
                     type: boolean
                   destinationPVCReclaimPolicy:
+                    description: PersistentVolumeReclaimPolicy describes a policy
+                      for end-of-life maintenance of persistent volumes.
                     enum:
                     - Retain
                     - Delete
@@ -6582,6 +6596,8 @@ spec:
                   deleteExtraneous:
                     type: boolean
                   destinationPVCReclaimPolicy:
+                    description: PersistentVolumeReclaimPolicy describes a policy
+                      for end-of-life maintenance of persistent volumes.
                     enum:
                     - Retain
                     - Delete
@@ -6591,6 +6607,8 @@ spec:
                   sourceNode:
                     type: string
                   sourcePVReclaimPolicy:
+                    description: PersistentVolumeReclaimPolicy describes a policy
+                      for end-of-life maintenance of persistent volumes.
                     enum:
                     - Retain
                     - Delete
@@ -8440,6 +8458,8 @@ spec:
                   deleteExtraneous:
                     type: boolean
                   destinationPVCReclaimPolicy:
+                    description: PersistentVolumeReclaimPolicy describes a policy
+                      for end-of-life maintenance of persistent volumes.
                     enum:
                     - Retain
                     - Delete
@@ -8453,6 +8473,8 @@ spec:
                   sourceNode:
                     type: string
                   sourcePVReclaimPolicy:
+                    description: PersistentVolumeReclaimPolicy describes a policy
+                      for end-of-life maintenance of persistent volumes.
                     enum:
                     - Retain
                     - Delete
@@ -10514,6 +10536,8 @@ spec:
                   deleteExtraneous:
                     type: boolean
                   destinationPVCReclaimPolicy:
+                    description: PersistentVolumeReclaimPolicy describes a policy
+                      for end-of-life maintenance of persistent volumes.
                     enum:
                     - Retain
                     - Delete
