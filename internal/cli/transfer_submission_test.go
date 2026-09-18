@@ -39,7 +39,7 @@ func TestTransferSubmissionPersistsConcreteSpecs(t *testing.T) {
 			}
 
 			options := v1alpha1.TransferOptions{
-				DestinationPVCReclaimPolicy: "Delete", Strategies: []string{"mount"},
+				UnusedStoragePolicy: "Delete", Strategies: []string{"mount"},
 				SourceNode: "worker", TargetNode: "auto", SourcePath: "logs", DestinationPath: ".",
 				VerifyChecksum: true, DeleteExtraneous: true,
 			}
@@ -65,9 +65,8 @@ func TestTransferSubmissionPersistsConcreteSpecs(t *testing.T) {
 					TemporaryNamespace: destination,
 					SessionNamespace:   sessionNamespace,
 					MigrationSpec: v1alpha1.MigrationSpec{
-						Volumes:               volumes,
-						TransferOptions:       options,
-						SourcePVReclaimPolicy: "Delete",
+						Volumes:         volumes,
+						TransferOptions: options,
 					},
 				},
 			}
@@ -78,9 +77,8 @@ func TestTransferSubmissionPersistsConcreteSpecs(t *testing.T) {
 					TemporaryNamespace: destination,
 					SessionNamespace:   sessionNamespace,
 					PodMigrationSpec: v1alpha1.PodMigrationSpec{
-						Volumes:               volumes,
-						TransferOptions:       options,
-						SourcePVReclaimPolicy: "Delete",
+						Volumes:         volumes,
+						TransferOptions: options,
 						Pod: v1alpha1.LocalResourceReference{
 							Name: "database",
 							UID:  "pod-uid",

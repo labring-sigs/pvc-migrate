@@ -44,14 +44,11 @@ func validateClusterReservationObject(object *v1alpha1.ClusterReservation) error
 		return invalid("reservation plan namespaces must match its spec")
 	}
 
-	if err := domain.ValidateReclaimPolicies(
-		"",
-		object.Spec.DestinationPVCReclaimPolicy,
-	); err != nil {
+	if err := domain.ValidateUnusedStoragePolicy(object.Spec.UnusedStoragePolicy); err != nil {
 		return err
 	}
 
-	if err := domain.ValidateReclaimPolicies("", plan.DestinationPVCReclaimPolicy); err != nil {
+	if err := domain.ValidateUnusedStoragePolicy(plan.UnusedStoragePolicy); err != nil {
 		return err
 	}
 

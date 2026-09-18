@@ -12,6 +12,10 @@ import (
 
 // prepareMigrationReclaimVolume resolves storage ownership for one terminal
 // migration volume. The caller owns operation policy and checkpoint persistence.
+//
+// The in-use copy is always kept: the destination after Completed, the source
+// after a rollback, and — with a source-identity safety check — the source
+// after an abort. deleteUnused opts into deleting the other copy.
 func prepareMigrationReclaimVolume(
 	ctx context.Context,
 	client kubernetes.Interface,
@@ -21,14 +25,13 @@ func prepareMigrationReclaimVolume(
 	planned v1alpha1.VolumeSpec,
 	checkpoint v1alpha1.ClusterVolumeReservationStatus,
 	activePVC *v1alpha1.ObjectReference,
-	sourcePolicy, destinationPolicy v1alpha1.PVReclaimPolicy,
+	deleteUnused bool,
 ) (v1alpha1.ClusterVolumeReservationStatus, []reclaimVolume, error) {
 	source := qualifiedResourceReference(planned.SourcePVC, sourceNamespace)
 
 	destination := reclaimVolume{
 		role:   kube.ResourceRoleDestination,
 		policy: checkpoint.DestinationPolicy,
-		delete: destinationPolicy == "Delete",
 	}
 	if checkpoint.DestinationPVC != nil {
 		destination.pvc = *checkpoint.DestinationPVC
@@ -45,7 +48,7 @@ func prepareMigrationReclaimVolume(
 		recovered, destination, err = prepareReservedDestination(
 			ctx, client, owner, source,
 			qualifiedResourceReference(planned.DestinationPVC, temporaryNamespace),
-			planned.SourcePV.UID, checkpoint, destinationPolicy == "Delete",
+			planned.SourcePV.UID, checkpoint, deleteUnused,
 		)
 		if err != nil {
 			return checkpoint, nil, err
@@ -61,18 +64,24 @@ func prepareMigrationReclaimVolume(
 	if phase == domain.PhaseCompleted {
 		src.role = kube.ResourceRoleRollback
 
-		src.delete = sourcePolicy == "Delete"
+		// The migrated destination is the in-use copy; the old source PV is
+		// the unused one.
+		src.delete = deleteUnused
 		if !src.delete {
 			src.policy = corev1.PersistentVolumeReclaimRetain
 		}
 
 		destination.role = kube.ResourceRoleActive
+		destination.delete = false
 
 		destination.metadata = planned.SourcePVCMetadata
 		if activePVC != nil {
 			destination.pvc = *activePVC
 		}
 	} else {
+		// Failed, aborted, and rolled-back workflows keep the source: it is
+		// the copy the workload can actually run on.
+		src.delete = false
 		src.pvc = source
 		if activePVC != nil {
 			src.pvc = *activePVC
@@ -85,6 +94,11 @@ func prepareMigrationReclaimVolume(
 
 	var volumes []reclaimVolume
 	if phase == domain.PhaseAborted && !checkpoint.Reserved && activePVC == nil {
+		// The source identity is gone or unverifiable — the staged
+		// destination may be the only surviving copy, so it is retained
+		// whatever the policy says.
+		destination.delete = false
+
 		if err := validateSourceOwnershipRelease(
 			ctx,
 			client,

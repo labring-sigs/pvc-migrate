@@ -31,17 +31,11 @@ func validateReservationObject(object *v1alpha1.Reservation) error {
 		return invalid("planned reservation requires a lifecycle phase and volumes")
 	}
 
-	if err := domain.ValidateReclaimPolicies(
-		"",
-		object.Spec.DestinationPVCReclaimPolicy,
-	); err != nil {
+	if err := domain.ValidateUnusedStoragePolicy(object.Spec.UnusedStoragePolicy); err != nil {
 		return err
 	}
 
-	if err := domain.ValidateReclaimPolicies(
-		"",
-		plan.DestinationPVCReclaimPolicy,
-	); err != nil {
+	if err := domain.ValidateUnusedStoragePolicy(plan.UnusedStoragePolicy); err != nil {
 		return err
 	}
 

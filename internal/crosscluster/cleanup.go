@@ -15,33 +15,34 @@ import (
 func (s *Service) Cleanup(
 	ctx context.Context,
 	session *Session,
-	destinationPolicy string,
+	unusedStoragePolicy string,
 	deleteSession bool,
 ) error {
 	if s.locker != nil {
 		return s.withLock(ctx, session, func(locked context.Context) error {
-			return s.cleanup(locked, session, destinationPolicy, deleteSession)
+			return s.cleanup(locked, session, unusedStoragePolicy, deleteSession)
 		})
 	}
 
-	return s.cleanup(ctx, session, destinationPolicy, deleteSession)
+	return s.cleanup(ctx, session, unusedStoragePolicy, deleteSession)
 }
 
 func (s *Service) cleanup(
 	ctx context.Context,
 	session *Session,
-	destinationPolicy string,
+	unusedStoragePolicy string,
 	deleteSession bool,
 ) error {
-	if err := s.ValidateCleanup(ctx, session, destinationPolicy); err != nil {
+	if err := s.ValidateCleanup(ctx, session, unusedStoragePolicy); err != nil {
 		return err
 	}
 
-	if destinationPolicy == "" {
-		destinationPolicy = session.Spec.DestinationPVCReclaimPolicy
+	policy := session.Spec.UnusedStoragePolicy
+	if unusedStoragePolicy != "" {
+		policy = v1alpha1.UnusedStoragePolicy(unusedStoragePolicy)
 	}
 
-	deleteDestination := destinationPolicy == "Delete"
+	deleteDestination := domain.DeletesUnusedStorage(policy)
 
 	session.Status.Phase = PhaseCleaning
 	session.Status.Message = "cleaning cross-cluster resources"
@@ -97,26 +98,29 @@ func (s *Service) cleanup(
 }
 
 // ValidateCleanup checks policy, identities and consumers without changing the session.
-func (s *Service) ValidateCleanup(ctx context.Context, session *Session, policy string) error {
+func (s *Service) ValidateCleanup(ctx context.Context, session *Session, unusedStoragePolicy string) error {
 	if err := s.validateSession(ctx, session); err != nil {
 		return err
 	}
 
-	if policy == "" {
-		policy = session.Spec.DestinationPVCReclaimPolicy
+	policy := session.Spec.UnusedStoragePolicy
+	if unusedStoragePolicy != "" {
+		policy = v1alpha1.UnusedStoragePolicy(unusedStoragePolicy)
 	}
 
-	if err := domain.ValidateReclaimPolicies("", v1alpha1.PVReclaimPolicy(policy)); err != nil {
+	if err := domain.ValidateUnusedStoragePolicy(policy); err != nil {
 		return err
 	}
 
+	deleteDestination := domain.DeletesUnusedStorage(policy)
+
 	for i := range session.Spec.Volumes {
-		pvc, _, err := s.inspectCleanupDestination(ctx, session, i, policy == "Delete")
+		pvc, _, err := s.inspectCleanupDestination(ctx, session, i, deleteDestination)
 		if err != nil {
 			return err
 		}
 
-		if policy == "Delete" && pvc != nil {
+		if deleteDestination && pvc != nil {
 			if err := s.validateCleanupConsumers(ctx, session, i, pvc); err != nil {
 				return err
 			}

@@ -154,17 +154,62 @@ func TestNamespacedPodMigrationCleanupUsesCutoverIdentityAndExplicitPolicies(t *
 	}
 }
 
-func TestNamespacedPodMigrationCleanupRejectsActiveSourceDeletion(t *testing.T) {
+func TestNamespacedPodMigrationCleanupAbortedDeletesStagedDestinationButNeverTheSource(t *testing.T) {
 	executor, object, _, _ := namespacedPodMigrationFixture(t)
-	object.Status.Phase = domain.PhaseAborted
 
-	executor.client = nil
-	if err := executor.ValidateCleanup(
+	object.Status.Phase = domain.PhaseAborted
+	for _, volume := range object.Status.Plan.Volumes {
+		object.Status.Volumes = append(object.Status.Volumes,
+			v1alpha1.PodMigrationVolumeStatus{
+				VolumeReservationStatus: v1alpha1.VolumeReservationStatus{
+					SourcePVCName:     volume.SourcePVC.Name,
+					Reserved:          true,
+					DestinationPolicy: corev1.PersistentVolumeReclaimRetain,
+					DestinationPVC: &v1alpha1.LocalResourceReference{
+						Kind: "PersistentVolumeClaim",
+						Name: "reserved-" + volume.SourcePVC.Name,
+						UID:  types.UID("reserved-" + volume.SourcePVC.Name),
+					},
+					DestinationPV: &v1alpha1.LocalResourceReference{
+						Kind: "PersistentVolume",
+						Name: "reserved-pv-" + volume.SourcePVC.Name,
+						UID:  types.UID("reserved-pv-" + volume.SourcePVC.Name),
+					},
+				},
+			},
+		)
+	}
+
+	_, volumes, _, err := executor.prepareCleanup(
 		t.Context(),
 		object,
-		MigrationCleanupOptions{SourcePVReclaimPolicy: "Delete"},
-	); err == nil {
-		t.Fatal("active source deletion accepted")
+		MigrationCleanupOptions{UnusedStoragePolicy: "Delete"},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	sourcePVs := map[string]bool{}
+	for _, volume := range object.Status.Plan.Volumes {
+		sourcePVs[volume.SourcePV.Name] = true
+	}
+
+	deleted := 0
+	for _, volume := range volumes {
+		if sourcePVs[volume.pv.Name] && volume.delete {
+			t.Fatalf("aborted cleanup authorized deleting the source PV: %+v", volume)
+		}
+
+		if volume.delete {
+			deleted++
+		}
+	}
+
+	if deleted != len(object.Status.Plan.Volumes) {
+		t.Fatalf(
+			"aborted cleanup deleted %d volumes, want only the staged destinations",
+			deleted,
+		)
 	}
 }
 

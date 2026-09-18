@@ -16,26 +16,26 @@ import (
 // independent from reserveFlags so adding a copy mode cannot silently expose
 // a new reserve parameter.
 type copyFlags struct {
-	sessionID                   string
-	sourceNamespace             string
-	destinationNamespace        string
-	sourcePVCs                  []string
-	destinationPVCs             []string
-	destinationCapacities       []string
-	sourcePaths                 []string
-	destinationPaths            []string
-	allowVolumeShrink           bool
-	skipSourceUsageCheck        bool
-	sourceNode                  string
-	targetNode                  string
-	destinationClass            string
-	capacityAwareness           string
-	strategies                  []string
-	online                      bool
-	verifyChecksum              bool
-	deleteExtraneous            bool
-	podName                     string
-	destinationPVCReclaimPolicy string
+	sessionID             string
+	sourceNamespace       string
+	destinationNamespace  string
+	sourcePVCs            []string
+	destinationPVCs       []string
+	destinationCapacities []string
+	sourcePaths           []string
+	destinationPaths      []string
+	allowVolumeShrink     bool
+	skipSourceUsageCheck  bool
+	sourceNode            string
+	targetNode            string
+	destinationClass      string
+	capacityAwareness     string
+	strategies            []string
+	online                bool
+	verifyChecksum        bool
+	deleteExtraneous      bool
+	podName               string
+	unusedStoragePolicy   string
 }
 
 func (f *copyFlags) bind(command *cobra.Command) {
@@ -139,12 +139,7 @@ func (f *copyFlags) bind(command *cobra.Command) {
 		"Delete destination files absent from the source",
 	)
 	flags.StringVar(&f.podName, "pod", "", "Pod whose PVCs define the copy set")
-	flags.StringVar(
-		&f.destinationPVCReclaimPolicy,
-		"destination-pvc-reclaim-policy",
-		string(domain.DestinationPVCReclaimRetain),
-		"Policy for the destination PVC during cleanup: Retain or Delete",
-	)
+	flags.StringVar(&f.unusedStoragePolicy, "unused-storage-policy", string(v1alpha1.UnusedStorageKeep), "What happens to storage that is no longer in use at a terminal state: Keep or Delete. The copy the workload uses is always kept")
 }
 
 func (f *copyFlags) workflow(
@@ -187,8 +182,8 @@ func (f *copyFlags) workflow(
 			CopySpec: v1alpha1.CopySpec{
 				Online: f.online,
 				TransferOptions: v1alpha1.TransferOptions{
-					DestinationPVCReclaimPolicy: v1alpha1.PVReclaimPolicy(
-						f.destinationPVCReclaimPolicy,
+					UnusedStoragePolicy: v1alpha1.UnusedStoragePolicy(
+						f.unusedStoragePolicy,
 					),
 					DestinationStorageClass: f.destinationClass,
 					CapacityAwareness:       f.capacityAwareness,

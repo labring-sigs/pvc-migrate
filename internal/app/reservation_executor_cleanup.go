@@ -10,9 +10,9 @@ import (
 
 // ReservationCleanupOptions cannot request deletion of source storage.
 type ReservationCleanupOptions struct {
-	DestinationPVCReclaimPolicy string
-	Finalize                    bool
-	DeleteSession               bool
+	UnusedStoragePolicy string
+	Finalize            bool
+	DeleteSession       bool
 }
 
 func (r *ClusterReservationExecutor) ValidateCleanup(
@@ -46,9 +46,8 @@ func (r *ClusterReservationExecutor) prepareCleanup(
 		return nil, nil, nil, err
 	}
 
-	if err := domain.ValidateReclaimPolicies(
-		"",
-		v1alpha1.PVReclaimPolicy(options.DestinationPVCReclaimPolicy),
+	if err := domain.ValidateUnusedStoragePolicy(
+		v1alpha1.UnusedStoragePolicy(options.UnusedStoragePolicy),
 	); err != nil {
 		return nil, nil, nil, err
 	}
@@ -86,10 +85,11 @@ func (r *ClusterReservationExecutor) prepareCleanup(
 		}
 	}
 
-	policy := preview.Spec.DestinationPVCReclaimPolicy
-	if options.DestinationPVCReclaimPolicy != "" {
-		policy = v1alpha1.PVReclaimPolicy(options.DestinationPVCReclaimPolicy)
-	}
+	// A held reservation keeps its deliverable; only an aborted reservation
+	// has an unused staged destination to reclaim.
+	deleteUnused := domain.DeletesUnusedStorage(
+		v1alpha1.UnusedStoragePolicy(options.UnusedStoragePolicy),
+	) && object.Status.Phase == domain.PhaseAborted
 
 	indexes := clusterReservationVolumeIndexes(preview.Status.Volumes)
 
@@ -120,7 +120,7 @@ func (r *ClusterReservationExecutor) prepareCleanup(
 			qualifiedResourceReference(volume.DestinationPVC, string(plan.DestinationNamespace)),
 			volume.SourcePV.UID,
 			preview.Status.Volumes[index].ClusterVolumeReservationStatus,
-			policy == "Delete",
+			deleteUnused,
 		)
 		if err != nil {
 			return nil, nil, nil, err

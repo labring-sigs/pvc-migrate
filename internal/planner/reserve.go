@@ -124,7 +124,7 @@ func (p *Planner) resolveReservation(
 		operationKind:        domain.OperationReserve,
 	}
 
-	if err := domain.ValidateReclaimPolicies("", spec.DestinationPVCReclaimPolicy); err != nil {
+	if err := domain.ValidateUnusedStoragePolicy(spec.UnusedStoragePolicy); err != nil {
 		return nil, nil, err
 	}
 
@@ -163,15 +163,15 @@ func (p *Planner) resolveReservation(
 	))
 
 	resolved := v1alpha1.ReservationPlan{
-		DestinationPVCReclaimPolicy: state.options.DestinationPVCReclaimPolicy,
-		Volumes:                     state.volumeSpecs,
-		SourceNode:                  state.options.SourceNode,
-		TargetNode:                  state.options.TargetNode,
-		ToolImage:                   state.options.ToolImage,
-		Strategies:                  state.options.Strategies,
-		VerifyChecksum:              state.options.VerifyChecksum,
-		DeleteExtraneous:            state.options.DeleteExtraneous,
-		SkipSourceUsageCheck:        state.options.SkipSourceUsageCheck,
+		UnusedStoragePolicy:  state.options.UnusedStoragePolicy,
+		Volumes:              state.volumeSpecs,
+		SourceNode:           state.options.SourceNode,
+		TargetNode:           state.options.TargetNode,
+		ToolImage:            state.options.ToolImage,
+		Strategies:           state.options.Strategies,
+		VerifyChecksum:       state.options.VerifyChecksum,
+		DeleteExtraneous:     state.options.DeleteExtraneous,
+		SkipSourceUsageCheck: state.options.SkipSourceUsageCheck,
 	}
 	if len(resolved.Volumes) > 0 {
 		p.checkReservationPermissions(

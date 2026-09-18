@@ -13,20 +13,16 @@ import (
 func TestExecutionFingerprintTracksOnlyExecutionInputs(t *testing.T) {
 	assertExecutionFingerprint(t, &v1alpha1.Migration{},
 		func(o *v1alpha1.Migration) { o.Spec.SourceNode = "worker" },
-		func(o *v1alpha1.Migration) {
-			o.Spec.SourcePVReclaimPolicy, o.Spec.DestinationPVCReclaimPolicy = "Delete", "Retain"
-		},
+		func(o *v1alpha1.Migration) { o.Spec.UnusedStoragePolicy = "Delete" },
 	)
 	assertExecutionFingerprint(t, &v1alpha1.ClusterMigration{},
 		func(o *v1alpha1.ClusterMigration) { o.Spec.SourceNamespace = "other" },
-		func(o *v1alpha1.ClusterMigration) {
-			o.Spec.SourcePVReclaimPolicy, o.Spec.DestinationPVCReclaimPolicy = "Delete", "Retain"
-		},
+		func(o *v1alpha1.ClusterMigration) { o.Spec.UnusedStoragePolicy = "Delete" },
 	)
 	assertExecutionFingerprint(t, &v1alpha1.PodMigration{},
 		func(o *v1alpha1.PodMigration) { o.Spec.PrecopyPasses = 1 },
 		func(o *v1alpha1.PodMigration) {
-			o.Spec.SourcePVReclaimPolicy, o.Spec.DestinationPVCReclaimPolicy = "Delete", "Retain"
+			o.Spec.UnusedStoragePolicy = "Delete"
 			o.Status.Plan = &v1alpha1.PodMigrationPlan{
 				Workload: v1alpha1.WorkloadSpec{
 					OriginalObject: &apiextensionsv1.JSON{Raw: []byte(`{invalid snapshot`)},
@@ -36,25 +32,23 @@ func TestExecutionFingerprintTracksOnlyExecutionInputs(t *testing.T) {
 	)
 	assertExecutionFingerprint(t, &v1alpha1.ClusterPodMigration{},
 		func(o *v1alpha1.ClusterPodMigration) { o.Spec.TemporaryNamespace = "other" },
-		func(o *v1alpha1.ClusterPodMigration) {
-			o.Spec.SourcePVReclaimPolicy, o.Spec.DestinationPVCReclaimPolicy = "Delete", "Retain"
-		},
+		func(o *v1alpha1.ClusterPodMigration) { o.Spec.UnusedStoragePolicy = "Delete" },
 	)
 	assertExecutionFingerprint(t, &v1alpha1.Copy{},
 		func(o *v1alpha1.Copy) { o.Spec.Online = true },
-		func(o *v1alpha1.Copy) { o.Spec.DestinationPVCReclaimPolicy = "Delete" },
+		func(o *v1alpha1.Copy) { o.Spec.UnusedStoragePolicy = "Delete" },
 	)
 	assertExecutionFingerprint(t, &v1alpha1.ClusterCopy{},
 		func(o *v1alpha1.ClusterCopy) { o.Spec.DestinationNamespace = "other" },
-		func(o *v1alpha1.ClusterCopy) { o.Spec.DestinationPVCReclaimPolicy = "Delete" },
+		func(o *v1alpha1.ClusterCopy) { o.Spec.UnusedStoragePolicy = "Delete" },
 	)
 	assertExecutionFingerprint(t, &v1alpha1.Reservation{},
 		func(o *v1alpha1.Reservation) { o.Spec.TargetNode = "worker" },
-		func(o *v1alpha1.Reservation) { o.Spec.DestinationPVCReclaimPolicy = "Delete" },
+		func(o *v1alpha1.Reservation) { o.Spec.UnusedStoragePolicy = "Delete" },
 	)
 	assertExecutionFingerprint(t, &v1alpha1.ClusterReservation{},
 		func(o *v1alpha1.ClusterReservation) { o.Spec.SessionNamespace = "other" },
-		func(o *v1alpha1.ClusterReservation) { o.Spec.DestinationPVCReclaimPolicy = "Delete" },
+		func(o *v1alpha1.ClusterReservation) { o.Spec.UnusedStoragePolicy = "Delete" },
 	)
 	assertExecutionFingerprint(t, &v1alpha1.Backup{},
 		func(o *v1alpha1.Backup) { o.Spec.RepositoryRef.Name = "other" }, nil,

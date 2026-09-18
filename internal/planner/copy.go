@@ -115,7 +115,7 @@ func (p *Planner) resolveCopy(ctx context.Context, name string, spec v1alpha1.Co
 		operationKind:        domain.OperationCopy,
 	}
 
-	if err := domain.ValidateReclaimPolicies("", spec.DestinationPVCReclaimPolicy); err != nil {
+	if err := domain.ValidateUnusedStoragePolicy(spec.UnusedStoragePolicy); err != nil {
 		return nil, nil, err
 	}
 
@@ -160,16 +160,16 @@ func (p *Planner) resolveCopy(ctx context.Context, name string, spec v1alpha1.Co
 	))
 
 	resolved := v1alpha1.CopyPlan{
-		DestinationPVCReclaimPolicy: state.options.DestinationPVCReclaimPolicy,
-		Volumes:                     state.volumeSpecs,
-		SourceNode:                  state.options.SourceNode,
-		TargetNode:                  state.options.TargetNode,
-		ToolImage:                   state.options.ToolImage,
-		Strategies:                  state.options.Strategies,
-		VerifyChecksum:              state.options.VerifyChecksum,
-		DeleteExtraneous:            state.options.DeleteExtraneous,
-		SkipSourceUsageCheck:        state.options.SkipSourceUsageCheck,
-		Online:                      spec.Online,
+		UnusedStoragePolicy:  state.options.UnusedStoragePolicy,
+		Volumes:              state.volumeSpecs,
+		SourceNode:           state.options.SourceNode,
+		TargetNode:           state.options.TargetNode,
+		ToolImage:            state.options.ToolImage,
+		Strategies:           state.options.Strategies,
+		VerifyChecksum:       state.options.VerifyChecksum,
+		DeleteExtraneous:     state.options.DeleteExtraneous,
+		SkipSourceUsageCheck: state.options.SkipSourceUsageCheck,
+		Online:               spec.Online,
 	}
 	if len(resolved.Volumes) > 0 {
 		p.checkCopyPermissions(

@@ -10,30 +10,29 @@ import (
 )
 
 type podMigrationFlags struct {
-	sessionID                   string
-	sourceNamespace             string
-	temporaryNamespace          string
-	destinationCapacities       []string
-	sourcePaths                 []string
-	destinationPaths            []string
-	allowVolumeShrink           bool
-	skipSourceUsageCheck        bool
-	sourceNode                  string
-	targetNode                  string
-	destinationClass            string
-	capacityAwareness           string
-	strategies                  []string
-	verifyChecksum              bool
-	deleteExtraneous            bool
-	podName                     string
-	switchoverCandidate         string
-	allowLeaderDowntime         bool
-	forceReprovision            bool
-	allowPlacementViolation     bool
-	precopyPasses               int
-	openEBSLVMEnableShared      bool
-	sourcePVReclaimPolicy       string
-	destinationPVCReclaimPolicy string
+	sessionID               string
+	sourceNamespace         string
+	temporaryNamespace      string
+	destinationCapacities   []string
+	sourcePaths             []string
+	destinationPaths        []string
+	allowVolumeShrink       bool
+	skipSourceUsageCheck    bool
+	sourceNode              string
+	targetNode              string
+	destinationClass        string
+	capacityAwareness       string
+	strategies              []string
+	verifyChecksum          bool
+	deleteExtraneous        bool
+	podName                 string
+	switchoverCandidate     string
+	allowLeaderDowntime     bool
+	forceReprovision        bool
+	allowPlacementViolation bool
+	precopyPasses           int
+	openEBSLVMEnableShared  bool
+	unusedStoragePolicy     string
 }
 
 func (f *podMigrationFlags) bind(command *cobra.Command) {
@@ -71,16 +70,10 @@ func (f *podMigrationFlags) bind(command *cobra.Command) {
 		"Allow destination capacity below the source PV capacity; only use when copied data is known to fit",
 	)
 	flags.StringVar(
-		&f.sourcePVReclaimPolicy,
-		"source-pv-reclaim-policy",
-		string(domain.SourcePVReclaimRetain),
-		"Policy for the old source PV after migration: Retain or Delete",
-	)
-	flags.StringVar(
-		&f.destinationPVCReclaimPolicy,
-		"destination-pvc-reclaim-policy",
-		string(domain.DestinationPVCReclaimRetain),
-		"Destination storage policy on cleanup, including after rollback: Retain or Delete",
+		&f.unusedStoragePolicy,
+		"unused-storage-policy",
+		string(v1alpha1.UnusedStorageKeep),
+		"What happens to storage that is no longer in use at a terminal state: Keep or Delete. The copy the workload uses is always kept",
 	)
 	flags.BoolVar(
 		&f.skipSourceUsageCheck,
@@ -210,7 +203,6 @@ func (f *podMigrationFlags) workflow(
 			SessionNamespace:   v1alpha1.NamespaceName(sessionNamespace),
 			PodMigrationSpec: v1alpha1.PodMigrationSpec{
 				Pod:                     v1alpha1.LocalResourceReference{Name: f.podName},
-				SourcePVReclaimPolicy:   v1alpha1.PVReclaimPolicy(f.sourcePVReclaimPolicy),
 				PrecopyPasses:           f.precopyPasses,
 				ForceReprovision:        f.forceReprovision,
 				OpenEBSLVMEnableShared:  f.openEBSLVMEnableShared,
@@ -218,8 +210,8 @@ func (f *podMigrationFlags) workflow(
 				AllowLeaderDowntime:     f.allowLeaderDowntime,
 				AllowPlacementViolation: f.allowPlacementViolation,
 				TransferOptions: v1alpha1.TransferOptions{
-					DestinationPVCReclaimPolicy: v1alpha1.PVReclaimPolicy(
-						f.destinationPVCReclaimPolicy,
+					UnusedStoragePolicy: v1alpha1.UnusedStoragePolicy(
+						f.unusedStoragePolicy,
 					),
 					DestinationStorageClass: f.destinationClass,
 					CapacityAwareness:       f.capacityAwareness,

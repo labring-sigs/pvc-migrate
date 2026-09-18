@@ -108,13 +108,13 @@ func applyCopyOverrides(cmd *cobra.Command, spec *v1alpha1.CopySpec, flags *copy
 		spec.DeleteExtraneous = flags.deleteExtraneous
 	}
 
-	if cmd.Flags().Changed("destination-pvc-reclaim-policy") {
-		spec.DestinationPVCReclaimPolicy = v1alpha1.PVReclaimPolicy(
-			flags.destinationPVCReclaimPolicy,
+	if cmd.Flags().Changed("unused-storage-policy") {
+		spec.UnusedStoragePolicy = v1alpha1.UnusedStoragePolicy(
+			flags.unusedStoragePolicy,
 		)
 	}
 
-	return domain.ValidateReclaimPolicies("", spec.DestinationPVCReclaimPolicy)
+	return domain.ValidateUnusedStoragePolicy(spec.UnusedStoragePolicy)
 }
 
 func validateCopyOverrides(cmd *cobra.Command, spec v1alpha1.CopySpec, flags *copyFlags) error {

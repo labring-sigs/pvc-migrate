@@ -155,7 +155,7 @@ func printCopyDryRunResult(
 		sessionCommandPrefixForCommand(cmd, namespace),
 		"copy", "--session", shellQuote(object.GetName()),
 	}
-	for _, name := range []string{"online", "source-node", "strategy", "verify-checksum", "delete-extraneous", "destination-pvc-reclaim-policy"} {
+	for _, name := range []string{"online", "source-node", "strategy", "verify-checksum", "delete-extraneous", "unused-storage-policy"} {
 		if flag := cmd.Flags().Lookup(name); flag != nil && flag.Changed {
 			if flag.Value.Type() == "bool" {
 				args = append(args, "--"+name+"="+flag.Value.String())

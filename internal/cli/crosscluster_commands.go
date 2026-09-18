@@ -5,6 +5,7 @@ import (
 	"strings"
 	"time"
 
+	v1alpha1 "github.com/labring-sigs/pvc-migrate/api/v1alpha1"
 	"github.com/labring-sigs/pvc-migrate/internal/copyengine"
 	"github.com/labring-sigs/pvc-migrate/internal/crosscluster"
 	"github.com/labring-sigs/pvc-migrate/internal/domain"
@@ -27,25 +28,25 @@ type crossClusterConnectionFlags struct {
 
 type crossClusterCopyFlags struct {
 	crossClusterConnectionFlags
-	sessionID                   string
-	sourceNamespace             string
-	destinationNamespace        string
-	sourcePVCs                  []string
-	destinationPVCs             []string
-	destinationCapacities       []string
-	sourcePaths                 []string
-	destinationPaths            []string
-	destinationStorageClass     string
-	allowVolumeShrink           bool
-	skipSourceUsageCheck        bool
-	online                      bool
-	verifyChecksum              bool
-	deleteExtraneous            bool
-	targetNode                  string
-	toolImage                   string
-	strategies                  []string
-	destinationPVCReclaimPolicy string
-	deleteSession               bool
+	sessionID               string
+	sourceNamespace         string
+	destinationNamespace    string
+	sourcePVCs              []string
+	destinationPVCs         []string
+	destinationCapacities   []string
+	sourcePaths             []string
+	destinationPaths        []string
+	destinationStorageClass string
+	allowVolumeShrink       bool
+	skipSourceUsageCheck    bool
+	online                  bool
+	verifyChecksum          bool
+	deleteExtraneous        bool
+	targetNode              string
+	toolImage               string
+	strategies              []string
+	unusedStoragePolicy     string
+	deleteSession           bool
 }
 
 func (r *rootState) newCrossClusterCopyCommand() *cobra.Command {
@@ -310,7 +311,7 @@ func (r *rootState) newCrossClusterCopyCleanupCommand() *cobra.Command {
 				if err := service.ValidateCleanup(
 					ctx,
 					session,
-					flags.destinationPVCReclaimPolicy,
+					flags.unusedStoragePolicy,
 				); err != nil {
 					return err
 				}
@@ -329,7 +330,7 @@ func (r *rootState) newCrossClusterCopyCleanupCommand() *cobra.Command {
 			if err := service.Cleanup(
 				ctx,
 				session,
-				flags.destinationPVCReclaimPolicy,
+				flags.unusedStoragePolicy,
 				flags.deleteSession,
 			); err != nil {
 				return err
@@ -346,7 +347,7 @@ func (r *rootState) newCrossClusterCopyCleanupCommand() *cobra.Command {
 	}
 	flags.bindConnections(command, r)
 	command.Flags().
-		StringVar(&flags.destinationPVCReclaimPolicy, "destination-pvc-reclaim-policy", "", "Destination storage policy: Retain or Delete; defaults to the recorded policy")
+		StringVar(&flags.unusedStoragePolicy, "unused-storage-policy", "", "What happens to storage that is no longer in use at a terminal state: Keep or Delete; defaults to the recorded policy")
 	command.Flags().
 		BoolVar(&flags.deleteSession, "delete-session", false, "Delete the source-cluster session record")
 	bindDryRun(command, &dryRun)
@@ -358,10 +359,10 @@ func (f *crossClusterCopyFlags) bind(command *cobra.Command, r *rootState) {
 	f.bindConnections(command, r)
 	flags := command.Flags()
 	flags.StringVar(
-		&f.destinationPVCReclaimPolicy,
-		"destination-pvc-reclaim-policy",
-		"Retain",
-		"Destination storage policy on cleanup: Retain or Delete",
+		&f.unusedStoragePolicy,
+		"unused-storage-policy",
+		string(v1alpha1.UnusedStorageKeep),
+		"What happens to storage that is no longer in use at a terminal state: Keep or Delete. The copy the workload uses is always kept",
 	)
 	flags.StringVarP(&f.sourceNamespace, "source-namespace", "n", "default", "Source PVC namespace")
 	flags.StringVar(
@@ -530,25 +531,25 @@ func (f *crossClusterCopyFlags) options(r *rootState) (crosscluster.Options, err
 	}
 
 	return crosscluster.Options{
-		DestinationPVCReclaimPolicy: f.destinationPVCReclaimPolicy,
-		SessionID:                   id,
-		SessionNamespace:            f.sessionNamespace,
-		SourceNamespace:             f.sourceNamespace,
-		DestinationNamespace:        f.destinationNamespace,
-		SourcePVCs:                  f.sourcePVCs,
-		DestinationPVCs:             f.destinationPVCs,
-		DestinationCapacities:       f.destinationCapacities,
-		SourcePaths:                 f.sourcePaths,
-		DestinationPaths:            f.destinationPaths,
-		DestinationStorageClass:     f.destinationStorageClass,
-		AllowVolumeShrink:           f.allowVolumeShrink,
-		SkipSourceUsageCheck:        f.skipSourceUsageCheck,
-		Online:                      f.online,
-		VerifyChecksum:              f.verifyChecksum,
-		DeleteExtraneous:            f.deleteExtraneous,
-		TargetNode:                  f.targetNode,
-		ToolImage:                   f.toolImage,
-		Strategies:                  f.strategies,
+		UnusedStoragePolicy:     v1alpha1.UnusedStoragePolicy(f.unusedStoragePolicy),
+		SessionID:               id,
+		SessionNamespace:        f.sessionNamespace,
+		SourceNamespace:         f.sourceNamespace,
+		DestinationNamespace:    f.destinationNamespace,
+		SourcePVCs:              f.sourcePVCs,
+		DestinationPVCs:         f.destinationPVCs,
+		DestinationCapacities:   f.destinationCapacities,
+		SourcePaths:             f.sourcePaths,
+		DestinationPaths:        f.destinationPaths,
+		DestinationStorageClass: f.destinationStorageClass,
+		AllowVolumeShrink:       f.allowVolumeShrink,
+		SkipSourceUsageCheck:    f.skipSourceUsageCheck,
+		Online:                  f.online,
+		VerifyChecksum:          f.verifyChecksum,
+		DeleteExtraneous:        f.deleteExtraneous,
+		TargetNode:              f.targetNode,
+		ToolImage:               f.toolImage,
+		Strategies:              f.strategies,
 	}, nil
 }
 
@@ -640,7 +641,7 @@ func crossClusterCopyCleanupCommand(flags *crossClusterCopyFlags, sessionID stri
 
 	args = append(
 		args,
-		"--destination-pvc-reclaim-policy",
+		"--unused-storage-policy",
 		"Delete",
 		"--delete-session",
 		"--yes",

@@ -63,22 +63,21 @@ func (p *Planner) PlanPodMigration(
 	}
 
 	clusterPlan := v1alpha1.ClusterPodMigrationPlan{
-		SourceNamespace:             spec.SourceNamespace,
-		TemporaryNamespace:          spec.TemporaryNamespace,
-		SessionNamespace:            spec.SessionNamespace,
-		SourcePVReclaimPolicy:       resolved.SourcePVReclaimPolicy,
-		DestinationPVCReclaimPolicy: resolved.DestinationPVCReclaimPolicy,
-		Volumes:                     resolved.Volumes,
-		SourceNode:                  resolved.SourceNode,
-		TargetNode:                  resolved.TargetNode,
-		ToolImage:                   resolved.ToolImage,
-		Strategies:                  resolved.Strategies,
-		VerifyChecksum:              resolved.VerifyChecksum,
-		DeleteExtraneous:            resolved.DeleteExtraneous,
-		SkipSourceUsageCheck:        resolved.SkipSourceUsageCheck,
-		Workload:                    resolved.Workload,
-		PrecopyPasses:               resolved.PrecopyPasses,
-		OpenEBSLVMEnableShared:      resolved.OpenEBSLVMEnableShared,
+		SourceNamespace:        spec.SourceNamespace,
+		TemporaryNamespace:     spec.TemporaryNamespace,
+		SessionNamespace:       spec.SessionNamespace,
+		UnusedStoragePolicy:    resolved.UnusedStoragePolicy,
+		Volumes:                resolved.Volumes,
+		SourceNode:             resolved.SourceNode,
+		TargetNode:             resolved.TargetNode,
+		ToolImage:              resolved.ToolImage,
+		Strategies:             resolved.Strategies,
+		VerifyChecksum:         resolved.VerifyChecksum,
+		DeleteExtraneous:       resolved.DeleteExtraneous,
+		SkipSourceUsageCheck:   resolved.SkipSourceUsageCheck,
+		Workload:               resolved.Workload,
+		PrecopyPasses:          resolved.PrecopyPasses,
+		OpenEBSLVMEnableShared: resolved.OpenEBSLVMEnableShared,
 	}
 	if report.Ready {
 		object.Status.Plan = clusterPlan.DeepCopy()
@@ -165,10 +164,7 @@ func (p *Planner) resolvePodMigration(
 		operationKind:        domain.OperationMigratePod,
 	}
 
-	if err := domain.ValidateReclaimPolicies(
-		spec.SourcePVReclaimPolicy,
-		spec.DestinationPVCReclaimPolicy,
-	); err != nil {
+	if err := domain.ValidateUnusedStoragePolicy(spec.UnusedStoragePolicy); err != nil {
 		return nil, nil, err
 	}
 
@@ -314,19 +310,18 @@ func (p *Planner) resolvePodMigration(
 	))
 
 	resolved := v1alpha1.PodMigrationPlan{
-		DestinationPVCReclaimPolicy: state.options.DestinationPVCReclaimPolicy,
-		Volumes:                     state.volumeSpecs,
-		SourceNode:                  state.options.SourceNode,
-		TargetNode:                  state.options.TargetNode,
-		ToolImage:                   state.options.ToolImage,
-		Strategies:                  state.options.Strategies,
-		VerifyChecksum:              state.options.VerifyChecksum,
-		DeleteExtraneous:            state.options.DeleteExtraneous,
-		SkipSourceUsageCheck:        state.options.SkipSourceUsageCheck,
-		SourcePVReclaimPolicy:       spec.SourcePVReclaimPolicy,
-		Workload:                    *state.plan.Workload.DeepCopy(),
-		PrecopyPasses:               spec.PrecopyPasses,
-		OpenEBSLVMEnableShared:      spec.OpenEBSLVMEnableShared,
+		UnusedStoragePolicy:    state.options.UnusedStoragePolicy,
+		Volumes:                state.volumeSpecs,
+		SourceNode:             state.options.SourceNode,
+		TargetNode:             state.options.TargetNode,
+		ToolImage:              state.options.ToolImage,
+		Strategies:             state.options.Strategies,
+		VerifyChecksum:         state.options.VerifyChecksum,
+		DeleteExtraneous:       state.options.DeleteExtraneous,
+		SkipSourceUsageCheck:   state.options.SkipSourceUsageCheck,
+		Workload:               *state.plan.Workload.DeepCopy(),
+		PrecopyPasses:          spec.PrecopyPasses,
+		OpenEBSLVMEnableShared: spec.OpenEBSLVMEnableShared,
 	}
 	if len(resolved.Volumes) > 0 {
 		p.checkPodMigrationPermissions(

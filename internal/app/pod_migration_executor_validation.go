@@ -60,9 +60,7 @@ func validateClusterPodMigrationObject(object *v1alpha1.ClusterPodMigration) err
 		return err
 	}
 
-	if err := domain.ValidateReclaimPolicies(
-		object.Spec.SourcePVReclaimPolicy, object.Spec.DestinationPVCReclaimPolicy,
-	); err != nil {
+	if err := domain.ValidateUnusedStoragePolicy(object.Spec.UnusedStoragePolicy); err != nil {
 		return err
 	}
 
@@ -99,9 +97,7 @@ func validateClusterPodMigrationObject(object *v1alpha1.ClusterPodMigration) err
 		return invalid("pod migration plan must preserve the requested precopy passes")
 	}
 
-	if err := domain.ValidateReclaimPolicies(
-		plan.SourcePVReclaimPolicy, plan.DestinationPVCReclaimPolicy,
-	); err != nil {
+	if err := domain.ValidateUnusedStoragePolicy(plan.UnusedStoragePolicy); err != nil {
 		return err
 	}
 

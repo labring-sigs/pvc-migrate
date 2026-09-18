@@ -15,10 +15,7 @@ func validateMigrationObject(object *v1alpha1.Migration) error {
 		return err
 	}
 
-	if err := domain.ValidateReclaimPolicies(
-		object.Spec.SourcePVReclaimPolicy,
-		object.Spec.DestinationPVCReclaimPolicy,
-	); err != nil {
+	if err := domain.ValidateUnusedStoragePolicy(object.Spec.UnusedStoragePolicy); err != nil {
 		return err
 	}
 
@@ -38,10 +35,7 @@ func validateMigrationObject(object *v1alpha1.Migration) error {
 		return invalid("migration plan requires volumes and a lifecycle phase")
 	}
 
-	if err := domain.ValidateReclaimPolicies(
-		plan.SourcePVReclaimPolicy,
-		plan.DestinationPVCReclaimPolicy,
-	); err != nil {
+	if err := domain.ValidateUnusedStoragePolicy(plan.UnusedStoragePolicy); err != nil {
 		return err
 	}
 

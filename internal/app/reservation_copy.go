@@ -186,19 +186,19 @@ func CopyFromReservation(
 		Status: v1alpha1.ClusterCopyStatus{
 			WorkflowStatus: *reservation.Status.WorkflowStatus.DeepCopy(),
 			Plan: &v1alpha1.ClusterCopyPlan{
-				SourceNamespace:             plan.SourceNamespace,
-				DestinationNamespace:        plan.DestinationNamespace,
-				SessionNamespace:            plan.SessionNamespace,
-				Volumes:                     plan.Volumes,
-				SourceNode:                  plan.SourceNode,
-				TargetNode:                  plan.TargetNode,
-				ToolImage:                   plan.ToolImage,
-				Strategies:                  plan.Strategies,
-				VerifyChecksum:              spec.VerifyChecksum,
-				DeleteExtraneous:            spec.DeleteExtraneous,
-				SkipSourceUsageCheck:        plan.SkipSourceUsageCheck,
-				DestinationPVCReclaimPolicy: spec.DestinationPVCReclaimPolicy,
-				Online:                      spec.Online,
+				SourceNamespace:      plan.SourceNamespace,
+				DestinationNamespace: plan.DestinationNamespace,
+				SessionNamespace:     plan.SessionNamespace,
+				Volumes:              plan.Volumes,
+				SourceNode:           plan.SourceNode,
+				TargetNode:           plan.TargetNode,
+				ToolImage:            plan.ToolImage,
+				Strategies:           plan.Strategies,
+				VerifyChecksum:       spec.VerifyChecksum,
+				DeleteExtraneous:     spec.DeleteExtraneous,
+				SkipSourceUsageCheck: plan.SkipSourceUsageCheck,
+				UnusedStoragePolicy:  spec.UnusedStoragePolicy,
+				Online:               spec.Online,
 			},
 		},
 	}
@@ -223,9 +223,8 @@ func validateReservedCopyInput(
 	source v1alpha1.ClusterReservationSpec,
 	destination v1alpha1.ClusterCopySpec,
 ) error {
-	if err := domain.ValidateReclaimPolicies(
-		"",
-		destination.DestinationPVCReclaimPolicy,
+	if err := domain.ValidateUnusedStoragePolicy(
+		destination.UnusedStoragePolicy,
 	); err != nil {
 		return err
 	}
@@ -238,7 +237,7 @@ func validateReservedCopyInput(
 	storage.VerifyChecksum = expected.VerifyChecksum
 	storage.DeleteExtraneous = expected.DeleteExtraneous
 
-	storage.DestinationPVCReclaimPolicy = expected.DestinationPVCReclaimPolicy
+	storage.UnusedStoragePolicy = expected.UnusedStoragePolicy
 	if !apiequality.Semantic.DeepEqual(*storage, expected) {
 		return domain.NewError(
 			domain.ErrorPrecondition,

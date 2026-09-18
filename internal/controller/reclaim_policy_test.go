@@ -7,14 +7,16 @@ import (
 	"github.com/labring-sigs/pvc-migrate/internal/kube"
 )
 
-func TestOnlyReclaimPoliciesCanChangeAfterExecutionStarts(t *testing.T) {
+func TestOnlyUnusedStoragePolicyCanChangeAfterExecutionStarts(t *testing.T) {
 	original := &v1alpha1.ClusterMigration{
 		Spec: v1alpha1.ClusterMigrationSpec{
 			MigrationSpec: v1alpha1.MigrationSpec{
 				Volumes: []v1alpha1.VolumeRequest{
 					{SourcePVC: v1alpha1.LocalResourceReference{Name: "data"}},
 				},
-				SourcePVReclaimPolicy: "Retain",
+				TransferOptions: v1alpha1.TransferOptions{
+					UnusedStoragePolicy: v1alpha1.UnusedStorageKeep,
+				},
 			},
 		},
 	}
@@ -30,8 +32,7 @@ func TestOnlyReclaimPoliciesCanChangeAfterExecutionStarts(t *testing.T) {
 	}{{"data", true}, {"other", false}} {
 		current := original.DeepCopy()
 		current.Spec.Volumes[0].SourcePVC.Name = tc.sourcePVC
-		current.Spec.SourcePVReclaimPolicy = "Delete"
-		current.Spec.DestinationPVCReclaimPolicy = "Retain"
+		current.Spec.UnusedStoragePolicy = v1alpha1.UnusedStorageDelete
 
 		currentHash, err := kube.WorkflowExecutionIntentHash(current)
 		if err != nil {

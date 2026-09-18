@@ -750,13 +750,6 @@ spec:
                 minLength: 1
                 pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
                 type: string
-              destinationPVCReclaimPolicy:
-                description: DestinationPVCReclaimPolicy controls workflow-owned destination
-                  storage during cleanup.
-                enum:
-                - Retain
-                - Delete
-                type: string
               destinationPath:
                 type: string
               destinationStorageClass:
@@ -848,6 +841,17 @@ spec:
                 maxItems: 32
                 type: array
               targetNode:
+                type: string
+              unusedStoragePolicy:
+                description: |-
+                  UnusedStoragePolicy decides the fate of workflow storage that is no
+                  longer in use at a terminal state — for example the staged destination
+                  after a rollback, or the old source PV after a successful cutover.
+                  Keep retains it (default); Delete removes it. The copy the workload
+                  actually uses is always kept, whatever the policy says.
+                enum:
+                - Keep
+                - Delete
                 type: string
               verifyChecksum:
                 type: boolean
@@ -1096,13 +1100,6 @@ spec:
                     minLength: 1
                     pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
                     type: string
-                  destinationPVCReclaimPolicy:
-                    description: PersistentVolumeReclaimPolicy describes a policy
-                      for end-of-life maintenance of persistent volumes.
-                    enum:
-                    - Retain
-                    - Delete
-                    type: string
                   online:
                     type: boolean
                   sessionNamespace:
@@ -1133,6 +1130,14 @@ spec:
                   targetNode:
                     type: string
                   toolImage:
+                    type: string
+                  unusedStoragePolicy:
+                    description: |-
+                      UnusedStoragePolicy controls storage identities that are no longer in
+                      use at a terminal state. The in-use copy is always kept.
+                    enum:
+                    - Keep
+                    - Delete
                     type: string
                   verifyChecksum:
                     description: |-
@@ -1768,13 +1773,6 @@ spec:
                 type: boolean
               destinationCapacity:
                 type: string
-              destinationPVCReclaimPolicy:
-                description: DestinationPVCReclaimPolicy controls workflow-owned destination
-                  storage during cleanup.
-                enum:
-                - Retain
-                - Delete
-                type: string
               destinationPath:
                 type: string
               destinationStorageClass:
@@ -1827,13 +1825,6 @@ spec:
                 type: string
               sourceNode:
                 type: string
-              sourcePVReclaimPolicy:
-                description: The inactive source PV is retained by default. Mutable
-                  until cleanup.
-                enum:
-                - Retain
-                - Delete
-                type: string
               sourcePath:
                 type: string
               strategies:
@@ -1850,6 +1841,17 @@ spec:
                 maxLength: 63
                 minLength: 1
                 pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
+                type: string
+              unusedStoragePolicy:
+                description: |-
+                  UnusedStoragePolicy decides the fate of workflow storage that is no
+                  longer in use at a terminal state — for example the staged destination
+                  after a rollback, or the old source PV after a successful cutover.
+                  Keep retains it (default); Delete removes it. The copy the workload
+                  actually uses is always kept, whatever the policy says.
+                enum:
+                - Keep
+                - Delete
                 type: string
               verifyChecksum:
                 type: boolean
@@ -2097,13 +2099,6 @@ spec:
                     minLength: 1
                     pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
                     type: string
-                  destinationPVCReclaimPolicy:
-                    description: PersistentVolumeReclaimPolicy describes a policy
-                      for end-of-life maintenance of persistent volumes.
-                    enum:
-                    - Retain
-                    - Delete
-                    type: string
                   sessionNamespace:
                     description: |-
                       NamespaceName is a Kubernetes namespace name used by a cluster-scoped
@@ -2124,13 +2119,6 @@ spec:
                     type: string
                   sourceNode:
                     type: string
-                  sourcePVReclaimPolicy:
-                    description: PersistentVolumeReclaimPolicy describes a policy
-                      for end-of-life maintenance of persistent volumes.
-                    enum:
-                    - Retain
-                    - Delete
-                    type: string
                   strategies:
                     items:
                       type: string
@@ -2147,6 +2135,17 @@ spec:
                     pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
                     type: string
                   toolImage:
+                    type: string
+                  unusedStoragePolicy:
+                    description: |-
+                      UnusedStoragePolicy decides what happens to storage identities that are
+                      no longer in use when a workflow reaches a terminal state. The workflow
+                      always keeps the copy its workload actually uses — the source after a
+                      failure or rollback, the destination after a successful cutover — so a
+                      policy can never delete the only usable copy.
+                    enum:
+                    - Keep
+                    - Delete
                     type: string
                   verifyChecksum:
                     type: boolean
@@ -2838,13 +2837,6 @@ spec:
                 type: boolean
               destinationCapacity:
                 type: string
-              destinationPVCReclaimPolicy:
-                description: DestinationPVCReclaimPolicy controls workflow-owned destination
-                  storage during cleanup.
-                enum:
-                - Retain
-                - Delete
-                type: string
               destinationPath:
                 type: string
               destinationStorageClass:
@@ -2934,13 +2926,6 @@ spec:
                 type: string
               sourceNode:
                 type: string
-              sourcePVReclaimPolicy:
-                description: The inactive source PV is retained by default. Mutable
-                  until cleanup.
-                enum:
-                - Retain
-                - Delete
-                type: string
               sourcePath:
                 type: string
               strategies:
@@ -2959,6 +2944,17 @@ spec:
                 maxLength: 63
                 minLength: 1
                 pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
+                type: string
+              unusedStoragePolicy:
+                description: |-
+                  UnusedStoragePolicy decides the fate of workflow storage that is no
+                  longer in use at a terminal state — for example the staged destination
+                  after a rollback, or the old source PV after a successful cutover.
+                  Keep retains it (default); Delete removes it. The copy the workload
+                  actually uses is always kept, whatever the policy says.
+                enum:
+                - Keep
+                - Delete
                 type: string
               verifyChecksum:
                 type: boolean
@@ -3270,13 +3266,6 @@ spec:
                 properties:
                   deleteExtraneous:
                     type: boolean
-                  destinationPVCReclaimPolicy:
-                    description: PersistentVolumeReclaimPolicy describes a policy
-                      for end-of-life maintenance of persistent volumes.
-                    enum:
-                    - Retain
-                    - Delete
-                    type: string
                   openebsLvmEnableShared:
                     type: boolean
                   precopyPasses:
@@ -3301,13 +3290,6 @@ spec:
                     type: string
                   sourceNode:
                     type: string
-                  sourcePVReclaimPolicy:
-                    description: PersistentVolumeReclaimPolicy describes a policy
-                      for end-of-life maintenance of persistent volumes.
-                    enum:
-                    - Retain
-                    - Delete
-                    type: string
                   strategies:
                     items:
                       type: string
@@ -3324,6 +3306,17 @@ spec:
                     pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
                     type: string
                   toolImage:
+                    type: string
+                  unusedStoragePolicy:
+                    description: |-
+                      UnusedStoragePolicy decides what happens to storage identities that are
+                      no longer in use when a workflow reaches a terminal state. The workflow
+                      always keeps the copy its workload actually uses — the source after a
+                      failure or rollback, the destination after a successful cutover — so a
+                      policy can never delete the only usable copy.
+                    enum:
+                    - Keep
+                    - Delete
                     type: string
                   verifyChecksum:
                     type: boolean
@@ -4383,13 +4376,6 @@ spec:
                 minLength: 1
                 pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
                 type: string
-              destinationPVCReclaimPolicy:
-                description: DestinationPVCReclaimPolicy controls workflow-owned destination
-                  storage during cleanup.
-                enum:
-                - Retain
-                - Delete
-                type: string
               destinationPath:
                 type: string
               destinationStorageClass:
@@ -4479,6 +4465,17 @@ spec:
                 maxItems: 32
                 type: array
               targetNode:
+                type: string
+              unusedStoragePolicy:
+                description: |-
+                  UnusedStoragePolicy decides the fate of workflow storage that is no
+                  longer in use at a terminal state — for example the staged destination
+                  after a rollback, or the old source PV after a successful cutover.
+                  Keep retains it (default); Delete removes it. The copy the workload
+                  actually uses is always kept, whatever the policy says.
+                enum:
+                - Keep
+                - Delete
                 type: string
               verifyChecksum:
                 type: boolean
@@ -4727,13 +4724,6 @@ spec:
                     minLength: 1
                     pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
                     type: string
-                  destinationPVCReclaimPolicy:
-                    description: PersistentVolumeReclaimPolicy describes a policy
-                      for end-of-life maintenance of persistent volumes.
-                    enum:
-                    - Retain
-                    - Delete
-                    type: string
                   sessionNamespace:
                     description: |-
                       NamespaceName is a Kubernetes namespace name used by a cluster-scoped
@@ -4762,6 +4752,14 @@ spec:
                   targetNode:
                     type: string
                   toolImage:
+                    type: string
+                  unusedStoragePolicy:
+                    description: |-
+                      UnusedStoragePolicy controls storage identities that are no longer in
+                      use at a terminal state. The in-use copy is always kept.
+                    enum:
+                    - Keep
+                    - Delete
                     type: string
                   verifyChecksum:
                     type: boolean
@@ -5371,13 +5369,6 @@ spec:
                 type: boolean
               destinationCapacity:
                 type: string
-              destinationPVCReclaimPolicy:
-                description: DestinationPVCReclaimPolicy controls workflow-owned destination
-                  storage during cleanup.
-                enum:
-                - Retain
-                - Delete
-                type: string
               destinationPath:
                 type: string
               destinationStorageClass:
@@ -5453,6 +5444,17 @@ spec:
                 maxItems: 32
                 type: array
               targetNode:
+                type: string
+              unusedStoragePolicy:
+                description: |-
+                  UnusedStoragePolicy decides the fate of workflow storage that is no
+                  longer in use at a terminal state — for example the staged destination
+                  after a rollback, or the old source PV after a successful cutover.
+                  Keep retains it (default); Delete removes it. The copy the workload
+                  actually uses is always kept, whatever the policy says.
+                enum:
+                - Keep
+                - Delete
                 type: string
               verifyChecksum:
                 type: boolean
@@ -5690,13 +5692,6 @@ spec:
                 properties:
                   deleteExtraneous:
                     type: boolean
-                  destinationPVCReclaimPolicy:
-                    description: PersistentVolumeReclaimPolicy describes a policy
-                      for end-of-life maintenance of persistent volumes.
-                    enum:
-                    - Retain
-                    - Delete
-                    type: string
                   online:
                     type: boolean
                   skipSourceUsageCheck:
@@ -5711,6 +5706,14 @@ spec:
                   targetNode:
                     type: string
                   toolImage:
+                    type: string
+                  unusedStoragePolicy:
+                    description: |-
+                      UnusedStoragePolicy controls storage identities that are no longer in
+                      use at a terminal state. The in-use copy is always kept.
+                    enum:
+                    - Keep
+                    - Delete
                     type: string
                   verifyChecksum:
                     description: |-
@@ -6345,13 +6348,6 @@ spec:
                 type: boolean
               destinationCapacity:
                 type: string
-              destinationPVCReclaimPolicy:
-                description: DestinationPVCReclaimPolicy controls workflow-owned destination
-                  storage during cleanup.
-                enum:
-                - Retain
-                - Delete
-                type: string
               destinationPath:
                 type: string
               destinationStorageClass:
@@ -6388,13 +6384,6 @@ spec:
                 type: boolean
               sourceNode:
                 type: string
-              sourcePVReclaimPolicy:
-                description: The inactive source PV is retained by default. Mutable
-                  until cleanup.
-                enum:
-                - Retain
-                - Delete
-                type: string
               sourcePath:
                 type: string
               strategies:
@@ -6403,6 +6392,17 @@ spec:
                 maxItems: 32
                 type: array
               targetNode:
+                type: string
+              unusedStoragePolicy:
+                description: |-
+                  UnusedStoragePolicy decides the fate of workflow storage that is no
+                  longer in use at a terminal state — for example the staged destination
+                  after a rollback, or the old source PV after a successful cutover.
+                  Keep retains it (default); Delete removes it. The copy the workload
+                  actually uses is always kept, whatever the policy says.
+                enum:
+                - Keep
+                - Delete
                 type: string
               verifyChecksum:
                 type: boolean
@@ -6643,23 +6643,9 @@ spec:
                 properties:
                   deleteExtraneous:
                     type: boolean
-                  destinationPVCReclaimPolicy:
-                    description: PersistentVolumeReclaimPolicy describes a policy
-                      for end-of-life maintenance of persistent volumes.
-                    enum:
-                    - Retain
-                    - Delete
-                    type: string
                   skipSourceUsageCheck:
                     type: boolean
                   sourceNode:
-                    type: string
-                  sourcePVReclaimPolicy:
-                    description: PersistentVolumeReclaimPolicy describes a policy
-                      for end-of-life maintenance of persistent volumes.
-                    enum:
-                    - Retain
-                    - Delete
                     type: string
                   strategies:
                     items:
@@ -6669,6 +6655,14 @@ spec:
                   targetNode:
                     type: string
                   toolImage:
+                    type: string
+                  unusedStoragePolicy:
+                    description: |-
+                      UnusedStoragePolicy controls storage identities that are no longer in
+                      use at a terminal state. The in-use copy is always kept.
+                    enum:
+                    - Keep
+                    - Delete
                     type: string
                   verifyChecksum:
                     type: boolean
@@ -8100,13 +8094,6 @@ spec:
                 type: boolean
               destinationCapacity:
                 type: string
-              destinationPVCReclaimPolicy:
-                description: DestinationPVCReclaimPolicy controls workflow-owned destination
-                  storage during cleanup.
-                enum:
-                - Retain
-                - Delete
-                type: string
               destinationPath:
                 type: string
               destinationStorageClass:
@@ -8180,13 +8167,6 @@ spec:
                 type: boolean
               sourceNode:
                 type: string
-              sourcePVReclaimPolicy:
-                description: The inactive source PV is retained by default. Mutable
-                  until cleanup.
-                enum:
-                - Retain
-                - Delete
-                type: string
               sourcePath:
                 type: string
               strategies:
@@ -8197,6 +8177,17 @@ spec:
               switchoverCandidate:
                 type: string
               targetNode:
+                type: string
+              unusedStoragePolicy:
+                description: |-
+                  UnusedStoragePolicy decides the fate of workflow storage that is no
+                  longer in use at a terminal state — for example the staged destination
+                  after a rollback, or the old source PV after a successful cutover.
+                  Keep retains it (default); Delete removes it. The copy the workload
+                  actually uses is always kept, whatever the policy says.
+                enum:
+                - Keep
+                - Delete
                 type: string
               verifyChecksum:
                 type: boolean
@@ -8513,13 +8504,6 @@ spec:
                 properties:
                   deleteExtraneous:
                     type: boolean
-                  destinationPVCReclaimPolicy:
-                    description: PersistentVolumeReclaimPolicy describes a policy
-                      for end-of-life maintenance of persistent volumes.
-                    enum:
-                    - Retain
-                    - Delete
-                    type: string
                   openebsLvmEnableShared:
                     type: boolean
                   precopyPasses:
@@ -8527,13 +8511,6 @@ spec:
                   skipSourceUsageCheck:
                     type: boolean
                   sourceNode:
-                    type: string
-                  sourcePVReclaimPolicy:
-                    description: PersistentVolumeReclaimPolicy describes a policy
-                      for end-of-life maintenance of persistent volumes.
-                    enum:
-                    - Retain
-                    - Delete
                     type: string
                   strategies:
                     items:
@@ -8543,6 +8520,14 @@ spec:
                   targetNode:
                     type: string
                   toolImage:
+                    type: string
+                  unusedStoragePolicy:
+                    description: |-
+                      UnusedStoragePolicy controls storage identities that are no longer in
+                      use at a terminal state. The in-use copy is always kept.
+                    enum:
+                    - Keep
+                    - Delete
                     type: string
                   verifyChecksum:
                     type: boolean
@@ -10282,13 +10267,6 @@ spec:
                 type: boolean
               destinationCapacity:
                 type: string
-              destinationPVCReclaimPolicy:
-                description: DestinationPVCReclaimPolicy controls workflow-owned destination
-                  storage during cleanup.
-                enum:
-                - Retain
-                - Delete
-                type: string
               destinationPath:
                 type: string
               destinationStorageClass:
@@ -10362,6 +10340,17 @@ spec:
                 maxItems: 32
                 type: array
               targetNode:
+                type: string
+              unusedStoragePolicy:
+                description: |-
+                  UnusedStoragePolicy decides the fate of workflow storage that is no
+                  longer in use at a terminal state — for example the staged destination
+                  after a rollback, or the old source PV after a successful cutover.
+                  Keep retains it (default); Delete removes it. The copy the workload
+                  actually uses is always kept, whatever the policy says.
+                enum:
+                - Keep
+                - Delete
                 type: string
               verifyChecksum:
                 type: boolean
@@ -10599,13 +10588,6 @@ spec:
                 properties:
                   deleteExtraneous:
                     type: boolean
-                  destinationPVCReclaimPolicy:
-                    description: PersistentVolumeReclaimPolicy describes a policy
-                      for end-of-life maintenance of persistent volumes.
-                    enum:
-                    - Retain
-                    - Delete
-                    type: string
                   skipSourceUsageCheck:
                     type: boolean
                   sourceNode:
@@ -10618,6 +10600,14 @@ spec:
                   targetNode:
                     type: string
                   toolImage:
+                    type: string
+                  unusedStoragePolicy:
+                    description: |-
+                      UnusedStoragePolicy controls storage identities that are no longer in
+                      use at a terminal state. The in-use copy is always kept.
+                    enum:
+                    - Keep
+                    - Delete
                     type: string
                   verifyChecksum:
                     type: boolean
@@ -11259,6 +11249,15 @@ spec:
                 type: object
               targetNode:
                 type: string
+              unusedStoragePolicy:
+                description: |-
+                  UnusedStoragePolicy decides the fate of a destination this workflow
+                  created but that is no longer in use, for example after a failed
+                  restore. Keep retains it (default); Delete removes it.
+                enum:
+                - Keep
+                - Delete
+                type: string
             required:
             - destinationPVC
             - name
@@ -11505,6 +11504,14 @@ spec:
                   targetNode:
                     type: string
                   toolImage:
+                    type: string
+                  unusedStoragePolicy:
+                    description: |-
+                      UnusedStoragePolicy controls storage identities that are no longer in
+                      use at a terminal state. The in-use copy is always kept.
+                    enum:
+                    - Keep
+                    - Delete
                     type: string
                 required:
                 - destinationPVC

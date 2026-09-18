@@ -25,7 +25,7 @@ func TestNamespacedReservedCopyPreservesStorageAndOwnsItsInput(t *testing.T) {
 	spec.DeleteExtraneous = true
 	spec.SourceNode = "copy-source"
 	spec.Strategies = []string{domain.StrategyClusterIP}
-	spec.DestinationPVCReclaimPolicy = "Delete"
+	spec.UnusedStoragePolicy = "Delete"
 
 	object, err := NamespacedCopyFromReservation(reservation, spec)
 	if err != nil {
@@ -35,7 +35,7 @@ func TestNamespacedReservedCopyPreservesStorageAndOwnsItsInput(t *testing.T) {
 	if object.UID != "" || object.ResourceVersion != "" || object.Name != reservation.Name ||
 		object.Status.Phase != domain.PhaseReserved || !object.Status.Plan.Online ||
 		!object.Status.Plan.VerifyChecksum || !object.Status.Plan.DeleteExtraneous ||
-		object.Status.Plan.SourceNode != "copy-source" || object.Status.Plan.DestinationPVCReclaimPolicy != "Delete" {
+		object.Status.Plan.SourceNode != "copy-source" || object.Status.Plan.UnusedStoragePolicy != "Delete" {
 		t.Fatalf("unexpected copy: %+v", object)
 	}
 

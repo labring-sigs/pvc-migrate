@@ -97,16 +97,9 @@ func (m *ClusterPodMigrationExecutor) prepareCleanup(
 			)
 		}
 
-		policy := migrationSourceCleanupPolicy(
-			phase,
-			plan.SourcePVReclaimPolicy,
-			v1alpha1.PVReclaimPolicy(options.SourcePVReclaimPolicy),
+		deleteUnused := domain.DeletesUnusedStorage(
+			v1alpha1.UnusedStoragePolicy(options.UnusedStoragePolicy),
 		)
-
-		destinationPolicy := plan.DestinationPVCReclaimPolicy
-		if options.DestinationPVCReclaimPolicy != "" {
-			destinationPolicy = v1alpha1.PVReclaimPolicy(options.DestinationPVCReclaimPolicy)
-		}
 
 		recovered, reclaimed, err := prepareMigrationReclaimVolume(
 			ctx,
@@ -118,8 +111,7 @@ func (m *ClusterPodMigrationExecutor) prepareCleanup(
 			planned,
 			preview.Status.Volumes[index].ClusterVolumeReservationStatus,
 			preview.Status.Volumes[index].Activation.ActivePVC,
-			policy,
-			destinationPolicy,
+			deleteUnused,
 		)
 		if err != nil {
 			return nil, nil, nil, err

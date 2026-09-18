@@ -64,20 +64,19 @@ func (p *Planner) PlanOfflineMigration(
 	}
 
 	clusterPlan := v1alpha1.ClusterMigrationPlan{
-		SourceNamespace:             spec.SourceNamespace,
-		DestinationNamespace:        spec.SourceNamespace,
-		TemporaryNamespace:          spec.TemporaryNamespace,
-		SessionNamespace:            spec.SessionNamespace,
-		SourcePVReclaimPolicy:       resolved.SourcePVReclaimPolicy,
-		DestinationPVCReclaimPolicy: resolved.DestinationPVCReclaimPolicy,
-		Volumes:                     resolved.Volumes,
-		SourceNode:                  resolved.SourceNode,
-		TargetNode:                  resolved.TargetNode,
-		ToolImage:                   resolved.ToolImage,
-		Strategies:                  resolved.Strategies,
-		VerifyChecksum:              resolved.VerifyChecksum,
-		DeleteExtraneous:            resolved.DeleteExtraneous,
-		SkipSourceUsageCheck:        resolved.SkipSourceUsageCheck,
+		SourceNamespace:      spec.SourceNamespace,
+		DestinationNamespace: spec.SourceNamespace,
+		TemporaryNamespace:   spec.TemporaryNamespace,
+		SessionNamespace:     spec.SessionNamespace,
+		UnusedStoragePolicy:  resolved.UnusedStoragePolicy,
+		Volumes:              resolved.Volumes,
+		SourceNode:           resolved.SourceNode,
+		TargetNode:           resolved.TargetNode,
+		ToolImage:            resolved.ToolImage,
+		Strategies:           resolved.Strategies,
+		VerifyChecksum:       resolved.VerifyChecksum,
+		DeleteExtraneous:     resolved.DeleteExtraneous,
+		SkipSourceUsageCheck: resolved.SkipSourceUsageCheck,
 	}
 	if plan.Ready {
 		object.Status.Plan = clusterPlan.DeepCopy()
@@ -158,10 +157,7 @@ func (p *Planner) resolveMigration(ctx context.Context, name string, spec v1alph
 		operationKind:        domain.OperationMigrate,
 	}
 
-	if err := domain.ValidateReclaimPolicies(
-		spec.SourcePVReclaimPolicy,
-		spec.DestinationPVCReclaimPolicy,
-	); err != nil {
+	if err := domain.ValidateUnusedStoragePolicy(spec.UnusedStoragePolicy); err != nil {
 		return nil, nil, err
 	}
 
@@ -209,16 +205,15 @@ func (p *Planner) resolveMigration(ctx context.Context, name string, spec v1alph
 	))
 
 	resolved := v1alpha1.MigrationPlan{
-		DestinationPVCReclaimPolicy: state.options.DestinationPVCReclaimPolicy,
-		Volumes:                     state.volumeSpecs,
-		SourceNode:                  state.options.SourceNode,
-		TargetNode:                  state.options.TargetNode,
-		ToolImage:                   state.options.ToolImage,
-		Strategies:                  state.options.Strategies,
-		VerifyChecksum:              state.options.VerifyChecksum,
-		DeleteExtraneous:            state.options.DeleteExtraneous,
-		SkipSourceUsageCheck:        state.options.SkipSourceUsageCheck,
-		SourcePVReclaimPolicy:       spec.SourcePVReclaimPolicy,
+		UnusedStoragePolicy:  state.options.UnusedStoragePolicy,
+		Volumes:              state.volumeSpecs,
+		SourceNode:           state.options.SourceNode,
+		TargetNode:           state.options.TargetNode,
+		ToolImage:            state.options.ToolImage,
+		Strategies:           state.options.Strategies,
+		VerifyChecksum:       state.options.VerifyChecksum,
+		DeleteExtraneous:     state.options.DeleteExtraneous,
+		SkipSourceUsageCheck: state.options.SkipSourceUsageCheck,
 	}
 	if len(resolved.Volumes) > 0 {
 		p.checkMigrationPermissions(

@@ -8,6 +8,7 @@ import (
 	"github.com/labring-sigs/pvc-migrate/internal/domain"
 	"github.com/labring-sigs/pvc-migrate/internal/kube"
 	"github.com/spf13/cobra"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	crclient "sigs.k8s.io/controller-runtime/pkg/client"
 )
 
@@ -45,7 +46,31 @@ func submitControllerObject[T crclient.Object](
 	}
 
 	if err := store.Create(ctx, object); err != nil {
-		return reportSessionCreationError(cmd, object.GetNamespace(), object.GetName(), err)
+		// A retry after an unconfirmed create can collide with the workflow
+		// the previous attempt actually created (cached collision checks lag
+		// the API server). Adopt it when the identity matches ours.
+		if !apierrors.IsAlreadyExists(err) {
+			return reportSessionCreationError(cmd, object.GetNamespace(), object.GetName(), err)
+		}
+
+		existing := newObject()
+		if err := runtime.clients.Runtime.Get(
+			ctx,
+			crclient.ObjectKey{Namespace: object.GetNamespace(), Name: object.GetName()},
+			existing,
+		); err != nil {
+			return reportSessionCreationError(cmd, object.GetNamespace(), object.GetName(), err)
+		}
+
+		if existing.GetLabels()[kube.ManagedByLabel] != kube.ManagedByValue ||
+			existing.GetLabels()[kube.SessionKey] != object.GetName() {
+			return reportSessionCreationError(cmd, object.GetNamespace(), object.GetName(), err)
+		}
+
+		// Continue with the server-side state; the workflow is already owned.
+		if err := kube.CopyWorkflowObject(existing, object); err != nil {
+			return reportSessionCreationError(cmd, object.GetNamespace(), object.GetName(), err)
+		}
 	}
 
 	return waitForControllerObject(

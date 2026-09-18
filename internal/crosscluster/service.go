@@ -7,30 +7,31 @@ import (
 	"sync"
 	"time"
 
+	v1alpha1 "github.com/labring-sigs/pvc-migrate/api/v1alpha1"
 	"github.com/labring-sigs/pvc-migrate/internal/copyengine"
 	"github.com/labring-sigs/pvc-migrate/internal/kube"
 )
 
 type Options struct {
-	DestinationPVCReclaimPolicy string
-	SessionID                   string
-	SessionNamespace            string
-	SourceNamespace             string
-	DestinationNamespace        string
-	SourcePVCs                  []string
-	DestinationPVCs             []string
-	DestinationCapacities       []string
-	SourcePaths                 []string
-	DestinationPaths            []string
-	DestinationStorageClass     string
-	AllowVolumeShrink           bool
-	SkipSourceUsageCheck        bool
-	Online                      bool
-	VerifyChecksum              bool
-	DeleteExtraneous            bool
-	TargetNode                  string
-	ToolImage                   string
-	Strategies                  []string
+	UnusedStoragePolicy     v1alpha1.UnusedStoragePolicy
+	SessionID               string
+	SessionNamespace        string
+	SourceNamespace         string
+	DestinationNamespace    string
+	SourcePVCs              []string
+	DestinationPVCs         []string
+	DestinationCapacities   []string
+	SourcePaths             []string
+	DestinationPaths        []string
+	DestinationStorageClass string
+	AllowVolumeShrink       bool
+	SkipSourceUsageCheck    bool
+	Online                  bool
+	VerifyChecksum          bool
+	DeleteExtraneous        bool
+	TargetNode              string
+	ToolImage               string
+	Strategies              []string
 }
 
 type Service struct {

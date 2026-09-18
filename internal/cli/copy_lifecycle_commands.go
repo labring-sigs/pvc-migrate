@@ -370,7 +370,7 @@ func (r *rootState) newCopyCleanupCommand() *cobra.Command {
 		return runtime.printer.Print(object)
 	}
 	command.Flags().
-		StringVar(&options.DestinationPVCReclaimPolicy, "destination-pvc-reclaim-policy", "", "Destination PVC policy: Retain or Delete; defaults to the recorded policy")
+		StringVar(&options.UnusedStoragePolicy, "unused-storage-policy", "", "What happens to storage that is no longer in use at a terminal state: Keep or Delete; defaults to the recorded policy")
 	command.Flags().
 		BoolVar(&options.Finalize, "finalize", false, "Release ownership of retained storage and close the recovery window")
 	command.Flags().
@@ -412,9 +412,9 @@ func reportCopyCleanupError(
 	prefix := guidancePrefixesForCommand(cmd, namespace).pvcMigrate
 
 	retry := "copy cleanup " + shellQuote(name)
-	if options.DestinationPVCReclaimPolicy != "" {
-		retry += " --destination-pvc-reclaim-policy " + shellQuote(
-			options.DestinationPVCReclaimPolicy,
+	if options.UnusedStoragePolicy != "" {
+		retry += " --unused-storage-policy " + shellQuote(
+			options.UnusedStoragePolicy,
 		)
 	}
 

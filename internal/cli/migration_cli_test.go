@@ -239,7 +239,7 @@ func TestMigrationCLICleanupDryRunPreservesPolicyGuidance(t *testing.T) {
 					"migrate",
 					"cleanup",
 					object.GetName(),
-					"--destination-pvc-reclaim-policy",
+					"--unused-storage-policy",
 					"Delete",
 					"--finalize",
 					"--dry-run",
@@ -250,7 +250,7 @@ func TestMigrationCLICleanupDryRunPreservesPolicyGuidance(t *testing.T) {
 				t.Fatalf("error = %v", err)
 			}
 
-			for _, want := range []string{"Revalidate cleanup before retrying:", "--destination-pvc-reclaim-policy Delete", "--finalize"} {
+			for _, want := range []string{"Revalidate cleanup before retrying:", "--unused-storage-policy Delete", "--finalize"} {
 				if !strings.Contains(stderr.String(), want) {
 					t.Fatalf("missing %q in %q", want, stderr.String())
 				}

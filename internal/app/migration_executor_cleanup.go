@@ -6,15 +6,13 @@ import (
 
 	v1alpha1 "github.com/labring-sigs/pvc-migrate/api/v1alpha1"
 	"github.com/labring-sigs/pvc-migrate/internal/domain"
-	corev1 "k8s.io/api/core/v1"
 )
 
 // MigrationCleanupOptions contains only policies that belong to migration.
 type MigrationCleanupOptions struct {
-	SourcePVReclaimPolicy       string
-	DestinationPVCReclaimPolicy string
-	Finalize                    bool
-	DeleteSession               bool
+	UnusedStoragePolicy string
+	Finalize            bool
+	DeleteSession       bool
 }
 
 func (m *ClusterMigrationExecutor) ValidateCleanup(
@@ -52,9 +50,8 @@ func validateMigrationCleanupOptions(
 	planned bool,
 	options MigrationCleanupOptions,
 ) error {
-	if err := domain.ValidateReclaimPolicies(
-		v1alpha1.PVReclaimPolicy(options.SourcePVReclaimPolicy),
-		v1alpha1.PVReclaimPolicy(options.DestinationPVCReclaimPolicy),
+	if err := domain.ValidateUnusedStoragePolicy(
+		v1alpha1.UnusedStoragePolicy(options.UnusedStoragePolicy),
 	); err != nil {
 		return err
 	}
@@ -64,14 +61,6 @@ func validateMigrationCleanupOptions(
 			domain.ErrorPrecondition,
 			"migration cleanup",
 			"deleting the session requires finalization",
-		)
-	}
-
-	if options.SourcePVReclaimPolicy == "Delete" && phase != domain.PhaseCompleted {
-		return domain.NewError(
-			domain.ErrorPrecondition,
-			"migration cleanup",
-			"source PV is still active; only a completed migration has an old source PV to delete",
 		)
 	}
 
@@ -139,16 +128,9 @@ func (m *ClusterMigrationExecutor) prepareCleanup(
 			)
 		}
 
-		policy := migrationSourceCleanupPolicy(
-			phase,
-			plan.SourcePVReclaimPolicy,
-			v1alpha1.PVReclaimPolicy(options.SourcePVReclaimPolicy),
+		deleteUnused := domain.DeletesUnusedStorage(
+			v1alpha1.UnusedStoragePolicy(options.UnusedStoragePolicy),
 		)
-
-		destinationPolicy := plan.DestinationPVCReclaimPolicy
-		if options.DestinationPVCReclaimPolicy != "" {
-			destinationPolicy = v1alpha1.PVReclaimPolicy(options.DestinationPVCReclaimPolicy)
-		}
 
 		recovered, reclaimed, err := prepareMigrationReclaimVolume(
 			ctx,
@@ -160,8 +142,7 @@ func (m *ClusterMigrationExecutor) prepareCleanup(
 			planned,
 			preview.Status.Volumes[index].ClusterVolumeReservationStatus,
 			preview.Status.Volumes[index].Activation.ActivePVC,
-			policy,
-			destinationPolicy,
+			deleteUnused,
 		)
 		if err != nil {
 			return nil, nil, nil, err
@@ -199,21 +180,6 @@ func (m *ClusterMigrationExecutor) prepareCleanup(
 	}
 
 	return preview, volumes, pods, nil
-}
-
-func migrationSourceCleanupPolicy(
-	phase v1alpha1.WorkflowPhase,
-	configured, override v1alpha1.PVReclaimPolicy,
-) v1alpha1.PVReclaimPolicy {
-	if override != "" {
-		configured = override
-	}
-
-	if phase != domain.PhaseCompleted {
-		return corev1.PersistentVolumeReclaimRetain
-	}
-
-	return configured
 }
 
 func (m *ClusterMigrationExecutor) cleanup(

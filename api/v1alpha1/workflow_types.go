@@ -76,6 +76,20 @@ type (
 	PVReclaimPolicy = corev1.PersistentVolumeReclaimPolicy
 )
 
+// UnusedStoragePolicy decides what happens to storage identities that are
+// no longer in use when a workflow reaches a terminal state. The workflow
+// always keeps the copy its workload actually uses — the source after a
+// failure or rollback, the destination after a successful cutover — so a
+// policy can never delete the only usable copy.
+type UnusedStoragePolicy string
+
+const (
+	// UnusedStorageKeep retains unused storage identities (default).
+	UnusedStorageKeep UnusedStoragePolicy = "Keep"
+	// UnusedStorageDelete deletes unused storage identities at terminal states.
+	UnusedStorageDelete UnusedStoragePolicy = "Delete"
+)
+
 // +kubebuilder:validation:XValidation:rule="has(self.sourcePVC.uid) && size(self.sourcePVC.uid) > 0 && has(self.sourcePV.uid) && size(self.sourcePV.uid) > 0",message="sourcePVC.uid and sourcePV.uid are required planning identities"
 // VolumeSpec is planning output required to resume a PVC transfer. It is an
 // API-owned type with only the fields needed by transfer workflows.
@@ -178,20 +192,20 @@ type GrafanaSpec struct {
 // +kubebuilder:validation:XValidation:rule="has(self.volumes) && size(self.volumes) > 0",message="volumes must contain at least one source PVC"
 // MigrationPlan is an offline PVC migration. It has no workload controls.
 type MigrationPlan struct {
-	// +kubebuilder:validation:Enum=Retain;Delete
-	SourcePVReclaimPolicy PVReclaimPolicy `json:"sourcePVReclaimPolicy,omitempty" yaml:"sourcePVReclaimPolicy,omitempty"`
-	// +kubebuilder:validation:Enum=Retain;Delete
-	DestinationPVCReclaimPolicy PVReclaimPolicy `json:"destinationPVCReclaimPolicy,omitempty" yaml:"destinationPVCReclaimPolicy,omitempty"`
 	// +kubebuilder:validation:MaxItems=1024
 	Volumes    []VolumeSpec `json:"volumes,omitempty"    yaml:"volumes,omitempty"`
 	SourceNode string       `json:"sourceNode,omitempty" yaml:"sourceNode,omitempty"`
 	TargetNode string       `json:"targetNode,omitempty" yaml:"targetNode,omitempty"`
 	ToolImage  string       `json:"toolImage,omitempty"  yaml:"toolImage,omitempty"`
 	// +kubebuilder:validation:MaxItems=32
-	Strategies           []string `json:"strategies,omitempty"           yaml:"strategies,omitempty"`
-	VerifyChecksum       bool     `json:"verifyChecksum,omitempty"       yaml:"verifyChecksum,omitempty"`
-	DeleteExtraneous     bool     `json:"deleteExtraneous,omitempty"     yaml:"deleteExtraneous,omitempty"`
-	SkipSourceUsageCheck bool     `json:"skipSourceUsageCheck,omitempty" yaml:"skipSourceUsageCheck,omitempty"`
+	Strategies     []string `json:"strategies,omitempty"           yaml:"strategies,omitempty"`
+	VerifyChecksum bool     `json:"verifyChecksum,omitempty"       yaml:"verifyChecksum,omitempty"`
+	// UnusedStoragePolicy controls storage identities that are no longer in
+	// use at a terminal state. The in-use copy is always kept.
+	// +kubebuilder:validation:Enum=Keep;Delete
+	UnusedStoragePolicy  UnusedStoragePolicy `json:"unusedStoragePolicy,omitempty" yaml:"unusedStoragePolicy,omitempty"`
+	DeleteExtraneous     bool                `json:"deleteExtraneous,omitempty"     yaml:"deleteExtraneous,omitempty"`
+	SkipSourceUsageCheck bool                `json:"skipSourceUsageCheck,omitempty" yaml:"skipSourceUsageCheck,omitempty"`
 }
 
 // +kubebuilder:validation:XValidation:rule="has(self.volumes) && size(self.volumes) > 0",message="volumes must contain at least one source PVC"
@@ -199,10 +213,10 @@ type MigrationPlan struct {
 // PodMigrationPlan is a workload-aware migration. Workload and precopy
 // controls are exclusive to this operation.
 type PodMigrationPlan struct {
-	// +kubebuilder:validation:Enum=Retain;Delete
-	SourcePVReclaimPolicy PVReclaimPolicy `json:"sourcePVReclaimPolicy,omitempty" yaml:"sourcePVReclaimPolicy,omitempty"`
-	// +kubebuilder:validation:Enum=Retain;Delete
-	DestinationPVCReclaimPolicy PVReclaimPolicy `json:"destinationPVCReclaimPolicy,omitempty" yaml:"destinationPVCReclaimPolicy,omitempty"`
+	// UnusedStoragePolicy controls storage identities that are no longer in
+	// use at a terminal state. The in-use copy is always kept.
+	// +kubebuilder:validation:Enum=Keep;Delete
+	UnusedStoragePolicy UnusedStoragePolicy `json:"unusedStoragePolicy,omitempty" yaml:"unusedStoragePolicy,omitempty"`
 	// +kubebuilder:validation:MaxItems=1024
 	Volumes    []VolumeSpec `json:"volumes,omitempty"    yaml:"volumes,omitempty"`
 	SourceNode string       `json:"sourceNode,omitempty" yaml:"sourceNode,omitempty"`
@@ -220,24 +234,24 @@ type PodMigrationPlan struct {
 
 // +kubebuilder:validation:XValidation:rule="has(self.volumes) && size(self.volumes) > 0",message="volumes must contain at least one source PVC"
 type ReservationPlan struct {
-	// +kubebuilder:validation:Enum=Retain;Delete
-	DestinationPVCReclaimPolicy PVReclaimPolicy `json:"destinationPVCReclaimPolicy,omitempty" yaml:"destinationPVCReclaimPolicy,omitempty"`
 	// +kubebuilder:validation:MaxItems=1024
 	Volumes    []VolumeSpec `json:"volumes,omitempty"    yaml:"volumes,omitempty"`
 	SourceNode string       `json:"sourceNode,omitempty" yaml:"sourceNode,omitempty"`
 	TargetNode string       `json:"targetNode,omitempty" yaml:"targetNode,omitempty"`
 	ToolImage  string       `json:"toolImage,omitempty"  yaml:"toolImage,omitempty"`
 	// +kubebuilder:validation:MaxItems=32
-	Strategies           []string `json:"strategies,omitempty"           yaml:"strategies,omitempty"`
-	VerifyChecksum       bool     `json:"verifyChecksum,omitempty"       yaml:"verifyChecksum,omitempty"`
-	DeleteExtraneous     bool     `json:"deleteExtraneous,omitempty"     yaml:"deleteExtraneous,omitempty"`
-	SkipSourceUsageCheck bool     `json:"skipSourceUsageCheck,omitempty" yaml:"skipSourceUsageCheck,omitempty"`
+	Strategies     []string `json:"strategies,omitempty"           yaml:"strategies,omitempty"`
+	VerifyChecksum bool     `json:"verifyChecksum,omitempty"       yaml:"verifyChecksum,omitempty"`
+	// UnusedStoragePolicy controls storage identities that are no longer in
+	// use at a terminal state. The in-use copy is always kept.
+	// +kubebuilder:validation:Enum=Keep;Delete
+	UnusedStoragePolicy  UnusedStoragePolicy `json:"unusedStoragePolicy,omitempty" yaml:"unusedStoragePolicy,omitempty"`
+	DeleteExtraneous     bool                `json:"deleteExtraneous,omitempty"     yaml:"deleteExtraneous,omitempty"`
+	SkipSourceUsageCheck bool                `json:"skipSourceUsageCheck,omitempty" yaml:"skipSourceUsageCheck,omitempty"`
 }
 
 // +kubebuilder:validation:XValidation:rule="has(self.volumes) && size(self.volumes) > 0",message="volumes must contain at least one source PVC"
 type CopyPlan struct {
-	// +kubebuilder:validation:Enum=Retain;Delete
-	DestinationPVCReclaimPolicy PVReclaimPolicy `json:"destinationPVCReclaimPolicy,omitempty" yaml:"destinationPVCReclaimPolicy,omitempty"`
 	// +kubebuilder:validation:MaxItems=1024
 	Volumes    []VolumeSpec `json:"volumes,omitempty"    yaml:"volumes,omitempty"`
 	SourceNode string       `json:"sourceNode,omitempty" yaml:"sourceNode,omitempty"`
@@ -247,10 +261,14 @@ type CopyPlan struct {
 	Strategies []string `json:"strategies,omitempty" yaml:"strategies,omitempty"`
 	// VerifyChecksum enables rsync checksum comparison during final sync. It
 	// defaults to false when omitted.
-	VerifyChecksum       bool `json:"verifyChecksum,omitempty"       yaml:"verifyChecksum,omitempty"`
-	DeleteExtraneous     bool `json:"deleteExtraneous,omitempty"     yaml:"deleteExtraneous,omitempty"`
-	SkipSourceUsageCheck bool `json:"skipSourceUsageCheck,omitempty" yaml:"skipSourceUsageCheck,omitempty"`
-	Online               bool `json:"online,omitempty"               yaml:"online,omitempty"`
+	VerifyChecksum   bool `json:"verifyChecksum,omitempty"       yaml:"verifyChecksum,omitempty"`
+	DeleteExtraneous bool `json:"deleteExtraneous,omitempty"     yaml:"deleteExtraneous,omitempty"`
+	// UnusedStoragePolicy controls storage identities that are no longer in
+	// use at a terminal state. The in-use copy is always kept.
+	// +kubebuilder:validation:Enum=Keep;Delete
+	UnusedStoragePolicy  UnusedStoragePolicy `json:"unusedStoragePolicy,omitempty" yaml:"unusedStoragePolicy,omitempty"`
+	SkipSourceUsageCheck bool                `json:"skipSourceUsageCheck,omitempty" yaml:"skipSourceUsageCheck,omitempty"`
+	Online               bool                `json:"online,omitempty"               yaml:"online,omitempty"`
 }
 
 // +kubebuilder:validation:XValidation:rule="has(self.sourcePVC.uid) && size(self.sourcePVC.uid) > 0 && has(self.sourcePV.uid) && size(self.sourcePV.uid) > 0",message="sourcePVC.uid and sourcePV.uid are required planning identities"
@@ -288,6 +306,10 @@ type RestorePlan struct {
 	TargetNode              string               `json:"targetNode,omitempty"              yaml:"targetNode,omitempty"`
 	ToolImage               string               `json:"toolImage,omitempty"               yaml:"toolImage,omitempty"`
 	DeleteExtraneous        bool                 `json:"deleteExtraneous,omitempty"        yaml:"deleteExtraneous,omitempty"`
+	// UnusedStoragePolicy controls storage identities that are no longer in
+	// use at a terminal state. The in-use copy is always kept.
+	// +kubebuilder:validation:Enum=Keep;Delete
+	UnusedStoragePolicy UnusedStoragePolicy `json:"unusedStoragePolicy,omitempty" yaml:"unusedStoragePolicy,omitempty"`
 }
 
 type PVCSourceTemplate struct {

@@ -146,12 +146,9 @@ func (p *Planner) checkSessionOwnership(
 
 func retainedCleanupArgs(session *kube.WorkflowOwner, workflow string) string {
 	args := fmt.Sprintf("%s cleanup %s", workflow, session.ID)
-	switch session.Resource.Type {
-	case domain.SessionTypeMigrate, domain.SessionTypeMigratePod:
-		args += " --source-pv-reclaim-policy Retain --destination-pvc-reclaim-policy Retain"
-	case domain.SessionTypeCopy, domain.SessionTypeReserve:
-		args += " --destination-pvc-reclaim-policy Retain"
-	}
+	// Keep is spelled out so the retained copies survive the cleanup even if
+	// the recorded policy asked for deletion.
+	args += " --unused-storage-policy Keep"
 
 	return args + " --finalize --delete-session"
 }

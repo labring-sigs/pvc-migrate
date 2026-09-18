@@ -187,16 +187,16 @@ func NamespacedCopyFromReservation(
 		Status: v1alpha1.CopyStatus{
 			WorkflowStatus: *reservation.Status.WorkflowStatus.DeepCopy(),
 			Plan: &v1alpha1.CopyPlan{
-				Volumes:                     plan.Volumes,
-				SourceNode:                  plan.SourceNode,
-				TargetNode:                  plan.TargetNode,
-				ToolImage:                   plan.ToolImage,
-				Strategies:                  plan.Strategies,
-				VerifyChecksum:              spec.VerifyChecksum,
-				DeleteExtraneous:            spec.DeleteExtraneous,
-				SkipSourceUsageCheck:        plan.SkipSourceUsageCheck,
-				DestinationPVCReclaimPolicy: spec.DestinationPVCReclaimPolicy,
-				Online:                      spec.Online,
+				Volumes:              plan.Volumes,
+				SourceNode:           plan.SourceNode,
+				TargetNode:           plan.TargetNode,
+				ToolImage:            plan.ToolImage,
+				Strategies:           plan.Strategies,
+				VerifyChecksum:       spec.VerifyChecksum,
+				DeleteExtraneous:     spec.DeleteExtraneous,
+				SkipSourceUsageCheck: plan.SkipSourceUsageCheck,
+				UnusedStoragePolicy:  spec.UnusedStoragePolicy,
+				Online:               spec.Online,
 			},
 		},
 	}
@@ -221,9 +221,8 @@ func validateNamespacedReservedCopyInput(
 	source v1alpha1.ReservationSpec,
 	destination v1alpha1.CopySpec,
 ) error {
-	if err := domain.ValidateReclaimPolicies(
-		"",
-		destination.DestinationPVCReclaimPolicy,
+	if err := domain.ValidateUnusedStoragePolicy(
+		destination.UnusedStoragePolicy,
 	); err != nil {
 		return err
 	}
@@ -236,7 +235,7 @@ func validateNamespacedReservedCopyInput(
 	storage.VerifyChecksum = expected.VerifyChecksum
 	storage.DeleteExtraneous = expected.DeleteExtraneous
 
-	storage.DestinationPVCReclaimPolicy = expected.DestinationPVCReclaimPolicy
+	storage.UnusedStoragePolicy = expected.UnusedStoragePolicy
 	if !apiequality.Semantic.DeepEqual(*storage, expected) {
 		return domain.NewError(
 			domain.ErrorPrecondition,

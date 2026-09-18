@@ -12,24 +12,24 @@ import (
 // reserveFlags is the CLI contract for storage reservation. It deliberately
 // excludes copy-only controls such as --online.
 type reserveFlags struct {
-	sessionID                   string
-	sourceNamespace             string
-	destinationNamespace        string
-	sourcePVCs                  []string
-	destinationPVCs             []string
-	destinationCapacities       []string
-	sourcePaths                 []string
-	destinationPaths            []string
-	allowVolumeShrink           bool
-	skipSourceUsageCheck        bool
-	targetNode                  string
-	destinationClass            string
-	capacityAwareness           string
-	strategies                  []string
-	verifyChecksum              bool
-	deleteExtraneous            bool
-	podName                     string
-	destinationPVCReclaimPolicy string
+	sessionID             string
+	sourceNamespace       string
+	destinationNamespace  string
+	sourcePVCs            []string
+	destinationPVCs       []string
+	destinationCapacities []string
+	sourcePaths           []string
+	destinationPaths      []string
+	allowVolumeShrink     bool
+	skipSourceUsageCheck  bool
+	targetNode            string
+	destinationClass      string
+	capacityAwareness     string
+	strategies            []string
+	verifyChecksum        bool
+	deleteExtraneous      bool
+	podName               string
+	unusedStoragePolicy   string
 }
 
 func (f *reserveFlags) bind(command *cobra.Command) {
@@ -121,12 +121,7 @@ func (f *reserveFlags) bind(command *cobra.Command) {
 		"Delete destination files absent from the source",
 	)
 	flags.StringVar(&f.podName, "pod", "", "Pod whose PVCs define the reservation set")
-	flags.StringVar(
-		&f.destinationPVCReclaimPolicy,
-		"destination-pvc-reclaim-policy",
-		string(domain.DestinationPVCReclaimRetain),
-		"Policy for the reserved destination PVC: Retain or Delete",
-	)
+	flags.StringVar(&f.unusedStoragePolicy, "unused-storage-policy", string(v1alpha1.UnusedStorageKeep), "What happens to storage that is no longer in use at a terminal state: Keep or Delete. The copy the workload uses is always kept")
 }
 
 func (f *reserveFlags) workflow(
@@ -161,8 +156,8 @@ func (f *reserveFlags) workflow(
 			SessionNamespace:     v1alpha1.NamespaceName(sessionNamespace),
 			ReservationSpec: v1alpha1.ReservationSpec{
 				TransferOptions: v1alpha1.TransferOptions{
-					DestinationPVCReclaimPolicy: v1alpha1.PVReclaimPolicy(
-						f.destinationPVCReclaimPolicy,
+					UnusedStoragePolicy: v1alpha1.UnusedStoragePolicy(
+						f.unusedStoragePolicy,
 					),
 					DestinationStorageClass: f.destinationClass,
 					CapacityAwareness:       f.capacityAwareness,

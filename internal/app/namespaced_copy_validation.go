@@ -34,13 +34,12 @@ func validateCopyObject(object *v1alpha1.Copy) error {
 		return invalid("copy plan must match its spec and contain resolved volumes")
 	}
 
-	if err := domain.ValidateReclaimPolicies("", plan.DestinationPVCReclaimPolicy); err != nil {
+	if err := domain.ValidateUnusedStoragePolicy(plan.UnusedStoragePolicy); err != nil {
 		return err
 	}
 
-	if err := domain.ValidateReclaimPolicies(
-		"",
-		object.Spec.DestinationPVCReclaimPolicy,
+	if err := domain.ValidateUnusedStoragePolicy(
+		object.Spec.UnusedStoragePolicy,
 	); err != nil {
 		return err
 	}

@@ -24,10 +24,7 @@ func submitMigration(
 		spec.SessionNamespace = spec.SourceNamespace
 	}
 
-	if err := domain.ValidateReclaimPolicies(
-		spec.SourcePVReclaimPolicy,
-		spec.DestinationPVCReclaimPolicy,
-	); err != nil {
+	if err := domain.ValidateUnusedStoragePolicy(spec.UnusedStoragePolicy); err != nil {
 		return err
 	}
 
@@ -94,10 +91,7 @@ func submitPodMigration(
 		spec.SessionNamespace = spec.SourceNamespace
 	}
 
-	if err := domain.ValidateReclaimPolicies(
-		spec.SourcePVReclaimPolicy,
-		spec.DestinationPVCReclaimPolicy,
-	); err != nil {
+	if err := domain.ValidateUnusedStoragePolicy(spec.UnusedStoragePolicy); err != nil {
 		return err
 	}
 
@@ -159,7 +153,7 @@ func submitCopy(
 		spec.SessionNamespace = spec.SourceNamespace
 	}
 
-	if err := domain.ValidateReclaimPolicies("", spec.DestinationPVCReclaimPolicy); err != nil {
+	if err := domain.ValidateUnusedStoragePolicy(spec.UnusedStoragePolicy); err != nil {
 		return err
 	}
 
@@ -223,7 +217,7 @@ func submitReservation(
 		spec.SessionNamespace = spec.SourceNamespace
 	}
 
-	if err := domain.ValidateReclaimPolicies("", spec.DestinationPVCReclaimPolicy); err != nil {
+	if err := domain.ValidateUnusedStoragePolicy(spec.UnusedStoragePolicy); err != nil {
 		return err
 	}
 

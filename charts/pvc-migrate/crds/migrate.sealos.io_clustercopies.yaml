@@ -79,13 +79,6 @@ spec:
                 minLength: 1
                 pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
                 type: string
-              destinationPVCReclaimPolicy:
-                description: DestinationPVCReclaimPolicy controls workflow-owned destination
-                  storage during cleanup.
-                enum:
-                - Retain
-                - Delete
-                type: string
               destinationPath:
                 type: string
               destinationStorageClass:
@@ -177,6 +170,17 @@ spec:
                 maxItems: 32
                 type: array
               targetNode:
+                type: string
+              unusedStoragePolicy:
+                description: |-
+                  UnusedStoragePolicy decides the fate of workflow storage that is no
+                  longer in use at a terminal state — for example the staged destination
+                  after a rollback, or the old source PV after a successful cutover.
+                  Keep retains it (default); Delete removes it. The copy the workload
+                  actually uses is always kept, whatever the policy says.
+                enum:
+                - Keep
+                - Delete
                 type: string
               verifyChecksum:
                 type: boolean
@@ -425,13 +429,6 @@ spec:
                     minLength: 1
                     pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
                     type: string
-                  destinationPVCReclaimPolicy:
-                    description: PersistentVolumeReclaimPolicy describes a policy
-                      for end-of-life maintenance of persistent volumes.
-                    enum:
-                    - Retain
-                    - Delete
-                    type: string
                   online:
                     type: boolean
                   sessionNamespace:
@@ -462,6 +459,14 @@ spec:
                   targetNode:
                     type: string
                   toolImage:
+                    type: string
+                  unusedStoragePolicy:
+                    description: |-
+                      UnusedStoragePolicy controls storage identities that are no longer in
+                      use at a terminal state. The in-use copy is always kept.
+                    enum:
+                    - Keep
+                    - Delete
                     type: string
                   verifyChecksum:
                     description: |-

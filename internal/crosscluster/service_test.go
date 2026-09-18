@@ -1770,7 +1770,7 @@ func TestCleanupRetainDeletesSessionWithMissingRecordedDestination(t *testing.T)
 		t.Fatal(err)
 	}
 
-	if err := service.Cleanup(context.Background(), session, "Retain", true); err != nil {
+	if err := service.Cleanup(context.Background(), session, "Keep", true); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -1810,7 +1810,7 @@ func TestCleanupRetainsUnrecordedOwnedDestinationPVC(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := service.Cleanup(context.Background(), session, "Retain", true); err != nil {
+	if err := service.Cleanup(context.Background(), session, "Keep", true); err != nil {
 		t.Fatal(err)
 	}
 

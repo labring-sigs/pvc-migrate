@@ -266,9 +266,7 @@ func (r *rootState) newPodMigrationCleanupCommand() *cobra.Command {
 
 func bindMigrationCleanupFlags(command *cobra.Command, options *app.MigrationCleanupOptions) {
 	command.Flags().
-		StringVar(&options.SourcePVReclaimPolicy, "source-pv-reclaim-policy", "", "Source PV reclaim policy")
-	command.Flags().
-		StringVar(&options.DestinationPVCReclaimPolicy, "destination-pvc-reclaim-policy", "", "Destination PVC reclaim policy")
+		StringVar(&options.UnusedStoragePolicy, "unused-storage-policy", "", "What happens to storage that is no longer in use at a terminal state: Keep or Delete; defaults to the recorded policy")
 	command.Flags().BoolVar(&options.Finalize, "finalize", false, "Finalize cleanup")
 	command.Flags().
 		BoolVar(&options.DeleteSession, "delete-session", false, "Delete the workflow after cleanup")

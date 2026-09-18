@@ -375,9 +375,7 @@ func (r *rootState) newOfflineMigrationCleanupCommand() *cobra.Command {
 		},
 	}
 	command.Flags().
-		StringVar(&options.SourcePVReclaimPolicy, "source-pv-reclaim-policy", "", "Old source PV policy: Retain or Delete; defaults to the recorded policy")
-	command.Flags().
-		StringVar(&options.DestinationPVCReclaimPolicy, "destination-pvc-reclaim-policy", "", "Destination PVC policy: Retain or Delete; defaults to the recorded policy")
+		StringVar(&options.UnusedStoragePolicy, "unused-storage-policy", "", "What happens to storage that is no longer in use at a terminal state: Keep or Delete; defaults to the recorded policy")
 	command.Flags().
 		BoolVar(&options.Finalize, "finalize", false, "Release retained storage ownership and close the rollback window")
 	command.Flags().
@@ -402,13 +400,9 @@ func reportMigrationCleanupError(
 	prefix := guidancePrefixesForCommand(cmd, namespace).pvcMigrate
 
 	retry := "migrate cleanup " + shellQuote(name)
-	if options.SourcePVReclaimPolicy != "" {
-		retry += " --source-pv-reclaim-policy " + shellQuote(options.SourcePVReclaimPolicy)
-	}
-
-	if options.DestinationPVCReclaimPolicy != "" {
-		retry += " --destination-pvc-reclaim-policy " + shellQuote(
-			options.DestinationPVCReclaimPolicy,
+	if options.UnusedStoragePolicy != "" {
+		retry += " --unused-storage-policy " + shellQuote(
+			options.UnusedStoragePolicy,
 		)
 	}
 

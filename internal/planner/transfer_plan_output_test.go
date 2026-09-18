@@ -18,10 +18,9 @@ func TestMigrationPlannerOwnsConcreteOutput(t *testing.T) {
 		Spec: v1alpha1.ClusterMigrationSpec{
 			SourceNamespace: "app", TemporaryNamespace: "system", SessionNamespace: "system",
 			MigrationSpec: v1alpha1.MigrationSpec{
-				SourcePVReclaimPolicy: "Delete",
 				TransferOptions: v1alpha1.TransferOptions{
 					TargetNode: "node-b", Strategies: []string{"auto"},
-					DestinationPVCReclaimPolicy: "Retain", SourcePath: "data",
+					UnusedStoragePolicy: "Delete", SourcePath: "data",
 				},
 				Volumes: []v1alpha1.VolumeRequest{
 					{SourcePVC: v1alpha1.LocalResourceReference{Name: "data"}},
@@ -43,7 +42,7 @@ func TestMigrationPlannerOwnsConcreteOutput(t *testing.T) {
 
 	if !reflect.DeepEqual(object.Spec, *before) || plan.SourceNamespace != "app" ||
 		plan.TemporaryNamespace != "system" || plan.DestinationNamespace != "app" ||
-		plan.SourcePVReclaimPolicy != "Delete" || plan.DestinationPVCReclaimPolicy != "Retain" ||
+		plan.UnusedStoragePolicy != "Delete" ||
 		!hasPassedCheck(report.Checks, "strategy-selection") {
 		t.Fatalf("spec=%+v plan=%+v checks=%+v", object.Spec, plan, report.Checks)
 	}
@@ -116,8 +115,8 @@ func TestReservationPlannerWritesConcretePlan(t *testing.T) {
 			SourceNamespace: "app", DestinationNamespace: "system",
 			ReservationSpec: v1alpha1.ReservationSpec{
 				TransferOptions: v1alpha1.TransferOptions{
-					TargetNode:                  "node-b",
-					DestinationPVCReclaimPolicy: "Retain",
+					TargetNode:          "node-b",
+					UnusedStoragePolicy: "Keep",
 				},
 				Volumes: []v1alpha1.VolumeRequest{
 					{SourcePVC: v1alpha1.LocalResourceReference{Name: "data"}},
@@ -138,7 +137,7 @@ func TestReservationPlannerWritesConcretePlan(t *testing.T) {
 	plan := object.Status.Plan
 
 	if !reflect.DeepEqual(object.Spec, *before) || plan.SessionNamespace != "app" ||
-		plan.DestinationNamespace != "system" || plan.DestinationPVCReclaimPolicy != "Retain" {
+		plan.DestinationNamespace != "system" || plan.UnusedStoragePolicy != "Keep" {
 		t.Fatalf("spec=%+v plan=%+v", object.Spec, plan)
 	}
 

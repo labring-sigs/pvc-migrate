@@ -11,15 +11,19 @@ type VolumeRequest struct {
 }
 
 type TransferOptions struct {
-	// DestinationPVCReclaimPolicy controls workflow-owned destination storage during cleanup.
-	// +kubebuilder:validation:Enum=Retain;Delete
-	DestinationPVCReclaimPolicy PVReclaimPolicy `json:"destinationPVCReclaimPolicy,omitempty" yaml:"destinationPVCReclaimPolicy,omitempty"`
-	DestinationCapacity         string          `json:"destinationCapacity,omitempty"`
-	SourcePath                  string          `json:"sourcePath,omitempty"`
-	DestinationPath             string          `json:"destinationPath,omitempty"`
-	DestinationStorageClass     string          `json:"destinationStorageClass,omitempty"`
-	SourceNode                  string          `json:"sourceNode,omitempty"`
-	TargetNode                  string          `json:"targetNode,omitempty"`
+	// UnusedStoragePolicy decides the fate of workflow storage that is no
+	// longer in use at a terminal state — for example the staged destination
+	// after a rollback, or the old source PV after a successful cutover.
+	// Keep retains it (default); Delete removes it. The copy the workload
+	// actually uses is always kept, whatever the policy says.
+	// +kubebuilder:validation:Enum=Keep;Delete
+	UnusedStoragePolicy     UnusedStoragePolicy `json:"unusedStoragePolicy,omitempty" yaml:"unusedStoragePolicy,omitempty"`
+	DestinationCapacity     string              `json:"destinationCapacity,omitempty"`
+	SourcePath              string              `json:"sourcePath,omitempty"`
+	DestinationPath         string              `json:"destinationPath,omitempty"`
+	DestinationStorageClass string              `json:"destinationStorageClass,omitempty"`
+	SourceNode              string              `json:"sourceNode,omitempty"`
+	TargetNode              string              `json:"targetNode,omitempty"`
 	// +kubebuilder:validation:Enum=auto;require;off
 	CapacityAwareness string `json:"capacityAwareness,omitempty"`
 	// +kubebuilder:validation:MaxItems=32
@@ -70,10 +74,7 @@ type RetryPolicySpec struct {
 
 // +kubebuilder:validation:XValidation:rule="has(self.volumes) && size(self.volumes) > 0",message="at least one source PVC is required"
 type MigrationSpec struct {
-	// The inactive source PV is retained by default. Mutable until cleanup.
-	// +kubebuilder:validation:Enum=Retain;Delete
-	SourcePVReclaimPolicy PVReclaimPolicy `json:"sourcePVReclaimPolicy,omitempty"`
-	TransferOptions       `                json:",inline"`
+	TransferOptions `                json:",inline"`
 	// +kubebuilder:validation:MaxItems=1024
 	Volumes []VolumeRequest `json:"volumes"`
 }
@@ -97,11 +98,8 @@ type ReservationSpec struct {
 }
 
 type PodMigrationSpec struct {
-	// The inactive source PV is retained by default. Mutable until cleanup.
-	// +kubebuilder:validation:Enum=Retain;Delete
-	SourcePVReclaimPolicy PVReclaimPolicy `json:"sourcePVReclaimPolicy,omitempty"`
-	TransferOptions       `                       json:",inline"`
-	Pod                   LocalResourceReference `json:"pod"`
+	TransferOptions `                       json:",inline"`
+	Pod             LocalResourceReference `json:"pod"`
 	// +kubebuilder:validation:Minimum=0
 	// +kubebuilder:default=1
 	// +optional
@@ -191,4 +189,9 @@ type RestoreSpec struct {
 	AllowMounted            bool                 `json:"allowMounted,omitempty"            yaml:"allowMounted,omitempty"`
 	TargetNode              string               `json:"targetNode,omitempty"              yaml:"targetNode,omitempty"`
 	DeleteExtraneous        bool                 `json:"deleteExtraneous,omitempty"        yaml:"deleteExtraneous,omitempty"`
+	// UnusedStoragePolicy decides the fate of a destination this workflow
+	// created but that is no longer in use, for example after a failed
+	// restore. Keep retains it (default); Delete removes it.
+	// +kubebuilder:validation:Enum=Keep;Delete
+	UnusedStoragePolicy UnusedStoragePolicy `json:"unusedStoragePolicy,omitempty" yaml:"unusedStoragePolicy,omitempty"`
 }

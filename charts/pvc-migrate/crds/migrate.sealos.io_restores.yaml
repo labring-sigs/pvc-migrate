@@ -108,6 +108,15 @@ spec:
                 type: object
               targetNode:
                 type: string
+              unusedStoragePolicy:
+                description: |-
+                  UnusedStoragePolicy decides the fate of a destination this workflow
+                  created but that is no longer in use, for example after a failed
+                  restore. Keep retains it (default); Delete removes it.
+                enum:
+                - Keep
+                - Delete
+                type: string
             required:
             - destinationPVC
             - name
@@ -354,6 +363,14 @@ spec:
                   targetNode:
                     type: string
                   toolImage:
+                    type: string
+                  unusedStoragePolicy:
+                    description: |-
+                      UnusedStoragePolicy controls storage identities that are no longer in
+                      use at a terminal state. The in-use copy is always kept.
+                    enum:
+                    - Keep
+                    - Delete
                     type: string
                 required:
                 - destinationPVC

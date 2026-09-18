@@ -418,7 +418,7 @@ func (s *CRDWorkflowStore[T]) Create(ctx context.Context, object T) error {
 	}
 
 	snapshot := s.newObject()
-	if err := copyWorkflowObject(object, snapshot); err != nil {
+	if err := CopyWorkflowObject(object, snapshot); err != nil {
 		return err
 	}
 
@@ -440,7 +440,7 @@ func (s *CRDWorkflowStore[T]) Create(ctx context.Context, object T) error {
 	snapshot.GetObjectKind().SetGroupVersionKind(s.gvk)
 	// API admission may default spec fields. Keep those exact values for
 	// subsequent immutable-spec checks and execution-intent fingerprints.
-	return copyWorkflowObject(snapshot, object)
+	return CopyWorkflowObject(snapshot, object)
 }
 
 // EnsureProtection protects declaratively submitted workflows before planning
@@ -547,7 +547,7 @@ func (s *CRDWorkflowStore[T]) Save(ctx context.Context, object T) error {
 	}
 
 	snapshot := s.newObject()
-	if err := copyWorkflowObject(object, snapshot); err != nil {
+	if err := CopyWorkflowObject(object, snapshot); err != nil {
 		return err
 	}
 
@@ -643,7 +643,7 @@ func unchangedWorkflowDefinition(previous, next crclient.Object) error {
 	return nil
 }
 
-func copyWorkflowObject(source, destination crclient.Object) error {
+func CopyWorkflowObject(source, destination crclient.Object) error {
 	data, err := runtime.DefaultUnstructuredConverter.ToUnstructured(source)
 	if err != nil {
 		return err

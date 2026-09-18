@@ -28,35 +28,35 @@ func WorkflowExecutionIntentHash(object crclient.Object) (string, error) {
 	switch current := object.(type) {
 	case *v1alpha1.Migration:
 		input := current.Spec.DeepCopy()
-		input.SourcePVReclaimPolicy, input.DestinationPVCReclaimPolicy = "", ""
+		input.UnusedStoragePolicy = ""
 		spec = input
 	case *v1alpha1.ClusterMigration:
 		input := current.Spec.DeepCopy()
-		input.SourcePVReclaimPolicy, input.DestinationPVCReclaimPolicy = "", ""
+		input.UnusedStoragePolicy = ""
 		spec = input
 	case *v1alpha1.PodMigration:
 		input := current.Spec.DeepCopy()
-		input.SourcePVReclaimPolicy, input.DestinationPVCReclaimPolicy = "", ""
+		input.UnusedStoragePolicy = ""
 		spec = input
 	case *v1alpha1.ClusterPodMigration:
 		input := current.Spec.DeepCopy()
-		input.SourcePVReclaimPolicy, input.DestinationPVCReclaimPolicy = "", ""
+		input.UnusedStoragePolicy = ""
 		spec = input
 	case *v1alpha1.Copy:
 		input := current.Spec.DeepCopy()
-		input.DestinationPVCReclaimPolicy = ""
+		input.UnusedStoragePolicy = ""
 		spec = input
 	case *v1alpha1.ClusterCopy:
 		input := current.Spec.DeepCopy()
-		input.DestinationPVCReclaimPolicy = ""
+		input.UnusedStoragePolicy = ""
 		spec = input
 	case *v1alpha1.Reservation:
 		input := current.Spec.DeepCopy()
-		input.DestinationPVCReclaimPolicy = ""
+		input.UnusedStoragePolicy = ""
 		spec = input
 	case *v1alpha1.ClusterReservation:
 		input := current.Spec.DeepCopy()
-		input.DestinationPVCReclaimPolicy = ""
+		input.UnusedStoragePolicy = ""
 		spec = input
 	case *v1alpha1.Backup:
 		spec = current.Spec

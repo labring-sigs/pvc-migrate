@@ -340,7 +340,8 @@ func TestReservationCleanupDeletesOnlyDestinationStorage(t *testing.T) {
 		},
 	)
 
-	options := ReservationCleanupOptions{Finalize: true, DestinationPVCReclaimPolicy: "Delete"}
+	object.Status.Phase = domain.PhaseAborted
+	options := ReservationCleanupOptions{Finalize: true, UnusedStoragePolicy: "Delete"}
 
 	if err := executor.Cleanup(t.Context(), object, options); err != nil {
 		t.Fatal(err)
