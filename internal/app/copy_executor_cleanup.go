@@ -90,10 +90,14 @@ func (r *ClusterCopyExecutor) prepareCleanup(
 	}
 
 	// A completed copy keeps its deliverable; only an aborted copy has an
-	// unused staged destination to reclaim.
-	deleteUnused := domain.DeletesUnusedStorage(
-		v1alpha1.UnusedStoragePolicy(options.UnusedStoragePolicy),
-	) && object.Status.Phase == domain.PhaseAborted
+	// unused staged destination to reclaim. The recorded plan policy applies
+	// unless the cleanup command overrides it.
+	policy := plan.UnusedStoragePolicy
+	if options.UnusedStoragePolicy != "" {
+		policy = v1alpha1.UnusedStoragePolicy(options.UnusedStoragePolicy)
+	}
+	deleteUnused := domain.DeletesUnusedStorage(policy) &&
+		object.Status.Phase == domain.PhaseAborted
 
 	indexes := clusterCopyVolumeIndexes(preview.Status.Volumes)
 

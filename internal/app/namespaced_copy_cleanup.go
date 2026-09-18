@@ -80,9 +80,12 @@ func (r *CopyExecutor) prepareCleanup(
 
 	// A completed copy keeps its deliverable; only an aborted copy has an
 	// unused staged destination to reclaim.
-	deleteUnused := domain.DeletesUnusedStorage(
-		v1alpha1.UnusedStoragePolicy(options.UnusedStoragePolicy),
-	) && object.Status.Phase == domain.PhaseAborted
+	policy := plan.UnusedStoragePolicy
+	if options.UnusedStoragePolicy != "" {
+		policy = v1alpha1.UnusedStoragePolicy(options.UnusedStoragePolicy)
+	}
+	deleteUnused := domain.DeletesUnusedStorage(policy) &&
+		object.Status.Phase == domain.PhaseAborted
 
 	indexes := copyVolumeIndexes(preview.Status.Volumes)
 

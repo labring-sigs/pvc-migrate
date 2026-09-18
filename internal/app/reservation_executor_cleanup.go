@@ -87,9 +87,12 @@ func (r *ClusterReservationExecutor) prepareCleanup(
 
 	// A held reservation keeps its deliverable; only an aborted reservation
 	// has an unused staged destination to reclaim.
-	deleteUnused := domain.DeletesUnusedStorage(
-		v1alpha1.UnusedStoragePolicy(options.UnusedStoragePolicy),
-	) && object.Status.Phase == domain.PhaseAborted
+	policy := plan.UnusedStoragePolicy
+	if options.UnusedStoragePolicy != "" {
+		policy = v1alpha1.UnusedStoragePolicy(options.UnusedStoragePolicy)
+	}
+	deleteUnused := domain.DeletesUnusedStorage(policy) &&
+		object.Status.Phase == domain.PhaseAborted
 
 	indexes := clusterReservationVolumeIndexes(preview.Status.Volumes)
 
