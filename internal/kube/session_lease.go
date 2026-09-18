@@ -330,7 +330,24 @@ func (l *sessionLease) renewLoop(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			if err := l.renew(ctx); err != nil {
+			// Transient API errors must not abandon a live workflow: retry
+			// until the lease itself would expire (read failures are usually
+			// momentary), and only a definite loss — the lock disappeared or
+			// was fenced — gives up immediately.
+			var err error
+			deadline := time.Now().Add(l.duration)
+			for {
+				err = l.renew(ctx)
+				if err == nil || ctx.Err() != nil {
+					break
+				}
+				if domain.CategoryOf(err) == domain.ErrorConflict || time.Now().After(deadline) {
+					break
+				}
+
+				time.Sleep(time.Second)
+			}
+			if err != nil {
 				if ctx.Err() != nil {
 					return
 				}
