@@ -335,18 +335,21 @@ func (l *sessionLease) renewLoop(ctx context.Context) {
 			// momentary), and only a definite loss — the lock disappeared or
 			// was fenced — gives up immediately.
 			var err error
+
 			deadline := time.Now().Add(l.duration)
 			for {
 				err = l.renew(ctx)
 				if err == nil || ctx.Err() != nil {
 					break
 				}
+
 				if domain.CategoryOf(err) == domain.ErrorConflict || time.Now().After(deadline) {
 					break
 				}
 
 				time.Sleep(time.Second)
 			}
+
 			if err != nil {
 				if ctx.Err() != nil {
 					return

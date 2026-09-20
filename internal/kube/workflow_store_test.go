@@ -466,12 +466,14 @@ func TestWithWorkflowLeaseDeletingObjectConvergesWhenLockUnavailable(t *testing.
 	}
 
 	locker := failingSessionLocker{}
+
 	live := record.DeepCopy()
 	if err := client.Get(t.Context(), crclient.ObjectKeyFromObject(live), live); err != nil {
 		t.Fatal(err)
 	}
 
 	ran := false
+
 	err = WithWorkflowLease(t.Context(), store, locker, record.Namespace, live, true,
 		func(context.Context, SessionLock) error {
 			ran = true
@@ -480,12 +482,19 @@ func TestWithWorkflowLeaseDeletingObjectConvergesWhenLockUnavailable(t *testing.
 	if err != nil {
 		t.Fatalf("deleting workflow must converge without a lock: %v", err)
 	}
+
 	if ran {
 		t.Fatal("convergence must not run the operation body")
 	}
 
 	final := &v1alpha1.Rename{}
-	if err := client.Get(t.Context(), crclient.ObjectKeyFromObject(record), final); !apierrors.IsNotFound(err) {
+	if err := client.Get(
+		t.Context(),
+		crclient.ObjectKeyFromObject(record),
+		final,
+	); !apierrors.IsNotFound(
+		err,
+	) {
 		t.Fatalf("deleting workflow still exists: %v (err=%v)", final, err)
 	}
 }

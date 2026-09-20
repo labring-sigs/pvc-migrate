@@ -17,7 +17,9 @@ func TestRollbackDestinationConsumed(t *testing.T) {
 			Spec: corev1.PodSpec{Volumes: []corev1.Volume{{
 				Name: "d",
 				VolumeSource: corev1.VolumeSource{
-					PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: "data"},
+					PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
+						ClaimName: "data",
+					},
 				},
 			}}},
 		}

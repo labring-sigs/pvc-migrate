@@ -71,6 +71,7 @@ func recoverReservationVolume(
 		// report it as already reclaimed so the session can close.
 		terminal := ctx.Value(workflowDeletionContextKey{}) != nil ||
 			ctx.Value(workflowFinalizeContextKey{}) != nil
+
 		unowned := pvc.Labels[kube.ManagedByLabel] == "" &&
 			pvc.Labels[kube.SessionKey] == "" &&
 			pvc.Labels[kube.ResourceRoleLabel] == "" &&
@@ -78,6 +79,7 @@ func recoverReservationVolume(
 		if terminal && unowned {
 			return result, nil
 		}
+
 		if !terminal || !unowned {
 			return conflict("destination PVC ownership changed")
 		}

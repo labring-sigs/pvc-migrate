@@ -36,10 +36,12 @@ func rollbackDestinationConsumed(
 		if pod.Status.Phase != corev1.PodRunning && pod.Status.Phase != corev1.PodPending {
 			continue
 		}
+
 		if pod.Labels["app.kubernetes.io/managed-by"] == "pvc-migrate" &&
 			pod.Labels["migrate.sealos.io/session"] == sessionID {
 			continue
 		}
+
 		for _, volume := range pod.Spec.Volumes {
 			if volume.PersistentVolumeClaim != nil &&
 				volume.PersistentVolumeClaim.ClaimName == pvcName {

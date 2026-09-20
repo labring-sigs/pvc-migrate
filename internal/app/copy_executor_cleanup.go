@@ -96,6 +96,7 @@ func (r *ClusterCopyExecutor) prepareCleanup(
 	if options.UnusedStoragePolicy != "" {
 		policy = v1alpha1.UnusedStoragePolicy(options.UnusedStoragePolicy)
 	}
+
 	deleteUnused := domain.DeletesUnusedStorage(policy) &&
 		object.Status.Phase == domain.PhaseAborted
 
