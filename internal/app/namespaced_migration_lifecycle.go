@@ -519,6 +519,22 @@ func (m *MigrationExecutor) rollback(
 		return nil
 	}
 
+	if object.Status.Phase == domain.PhaseCompleted ||
+		object.Status.Phase == domain.PhaseActivated {
+		if plan := object.Status.Plan; plan != nil {
+			for _, volume := range plan.Volumes {
+				if err := rollbackDestinationConsumed(
+					ctx, m.client,
+					object.Namespace,
+					volume.SourcePVC.Name,
+					object.Name,
+				); err != nil {
+					return err
+				}
+			}
+		}
+	}
+
 	if err := m.transition(
 		ctx,
 		object,

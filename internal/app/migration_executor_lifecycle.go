@@ -519,6 +519,25 @@ func (m *ClusterMigrationExecutor) rollback(
 		return nil
 	}
 
+	// After cutover the destination PVC carries live data; refuse to roll
+	// back while consumers are still using it. The rollback would swap the
+	// backing PV and silently disrupt them.
+	if object.Status.Phase == domain.PhaseCompleted ||
+		object.Status.Phase == domain.PhaseActivated {
+		if plan := object.Status.Plan; plan != nil {
+			for _, volume := range plan.Volumes {
+				if err := rollbackDestinationConsumed(
+					ctx, m.client,
+					string(plan.SourceNamespace),
+					volume.SourcePVC.Name,
+					object.Name,
+				); err != nil {
+					return err
+				}
+			}
+		}
+	}
+
 	if err := m.transition(
 		ctx,
 		object,
