@@ -61,3 +61,56 @@ func TestPVCOwnershipRejectsFenceLossAfterRead(t *testing.T) {
 		})
 	}
 }
+
+func TestPVCOwnershipRejectsFenceLossAfterUpdate(t *testing.T) {
+	for _, operation := range []string{"acquire", "release", "finalize"} {
+		t.Run(operation, func(t *testing.T) {
+			pvc := &corev1.PersistentVolumeClaim{ObjectMeta: metav1.ObjectMeta{
+				Namespace: "data", Name: "volume", UID: "pvc",
+				Annotations: map[string]string{SessionKey: "workflow"},
+			}}
+			if operation == "acquire" {
+				pvc.Annotations = nil
+			}
+
+			client := fake.NewClientset(pvc)
+			lost := errors.New("lease lost after PVC update")
+			fence := &testLeaseFence{}
+			client.PrependReactor(
+				"update",
+				"persistentvolumeclaims",
+				func(k8stesting.Action) (bool, runtime.Object, error) {
+					fence.err = lost
+					return false, nil, nil
+				},
+			)
+
+			ctx := WithLeaseFence(context.Background(), fence)
+			ref := PVCReference(pvc)
+
+			var err error
+			switch operation {
+			case "acquire":
+				err = AcquirePVC(ctx, client, ref, "workflow")
+			case "release":
+				err = ReleasePVC(ctx, client, ref, "workflow")
+			case "finalize":
+				err = FinalizePVC(ctx, client, ref, "workflow", v1alpha1.PVCMetadata{})
+			}
+
+			if !errors.Is(err, lost) {
+				t.Fatalf("error = %v", err)
+			}
+
+			updated := false
+			for _, action := range client.Actions() {
+				if action.GetVerb() == "update" {
+					updated = true
+				}
+			}
+			if !updated {
+				t.Fatal("expected PVC update before reporting lease loss")
+			}
+		})
+	}
+}

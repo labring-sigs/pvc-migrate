@@ -22,7 +22,19 @@ func (s *Service) touch(
 const sessionPrefix = "pvc-migrate-cross-cluster-"
 
 func sessionName(id string) string { return sessionPrefix + id }
+
+// requireSessionLease is the common write fence for cross-cluster execution.
+// The session store is also used without a lock by planning, so it must check
+// both cancellation and the optional enclosing lease at every mutation edge.
+func requireSessionLease(ctx context.Context) error {
+	return errors.Join(ctx.Err(), kube.LeaseFenceError(ctx))
+}
+
 func (s *Service) save(ctx context.Context, session *Session, create bool) error {
+	if err := requireSessionLease(ctx); err != nil {
+		return err
+	}
+
 	if err := session.Validate(); err != nil {
 		return err
 	}
@@ -50,7 +62,7 @@ func (s *Service) save(ctx context.Context, session *Session, create bool) error
 			session.ResourceVersion = created.ResourceVersion
 		}
 
-		err = createErr
+		err = errors.Join(createErr, ctx.Err(), kube.LeaseFenceError(ctx))
 
 		return err
 	}
@@ -68,6 +80,10 @@ func (s *Service) save(ctx context.Context, session *Session, create bool) error
 		return errors.New("cross-cluster session ConfigMap ownership changed")
 	}
 
+	if err := errors.Join(ctx.Err(), kube.LeaseFenceError(ctx)); err != nil {
+		return err
+	}
+
 	cm.Data = map[string]string{"session.json": string(raw)}
 
 	updated, err := cmClient.Update(ctx, cm, metav1.UpdateOptions{})
@@ -75,7 +91,7 @@ func (s *Service) save(ctx context.Context, session *Session, create bool) error
 		session.ResourceVersion = updated.ResourceVersion
 	}
 
-	return err
+	return errors.Join(err, ctx.Err(), kube.LeaseFenceError(ctx))
 }
 
 func (s *Service) Get(ctx context.Context, namespace, id string) (*Session, error) {
@@ -151,9 +167,18 @@ func (s *Service) delete(ctx context.Context, session *Session) error {
 		return errors.New("cross-cluster session changed while deleting")
 	}
 
-	return s.source.Kubernetes.CoreV1().
+	if err := requireSessionLease(ctx); err != nil {
+		return err
+	}
+
+	err = s.source.Kubernetes.CoreV1().
 		ConfigMaps(cm.Namespace).
 		Delete(ctx, cm.Name, metav1.DeleteOptions{Preconditions: &metav1.Preconditions{UID: &cm.UID}})
+	if err != nil {
+		return err
+	}
+
+	return requireSessionLease(ctx)
 }
 
 func (s *Service) withLock(
@@ -180,6 +205,7 @@ func (s *Service) withLock(
 	}
 
 	operationCtx, cancelOperation := lock.Bind(ctx)
+	operationCtx = kube.WithLeaseFence(operationCtx, lock)
 	operationErr := fn(operationCtx)
 
 	cancelOperation()

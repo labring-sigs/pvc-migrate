@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 
 	v1alpha1 "github.com/labring-sigs/pvc-migrate/api/v1alpha1"
@@ -59,6 +60,10 @@ func CreateBackupCredentialsSecret(
 		secret.OwnerReferences = append([]metav1.OwnerReference(nil), owners...)
 	}
 
+	if err := errors.Join(ctx.Err(), LeaseFenceError(ctx)); err != nil {
+		return nil, err
+	}
+
 	created, err := client.CoreV1().Secrets(namespace).Create(ctx, secret, metav1.CreateOptions{})
 	if apierrors.IsAlreadyExists(err) {
 		return nil, domain.WrapError(
@@ -78,7 +83,7 @@ func CreateBackupCredentialsSecret(
 		)
 	}
 
-	return created, nil
+	return created, errors.Join(ctx.Err(), LeaseFenceError(ctx))
 }
 
 func DeleteBackupCredentialsSecret(
@@ -96,6 +101,9 @@ func DeleteBackupCredentialsSecret(
 	if ref.UID != "" {
 		options.Preconditions = &metav1.Preconditions{UID: &ref.UID}
 	}
+	if err := errors.Join(ctx.Err(), LeaseFenceError(ctx)); err != nil {
+		return err
+	}
 
 	if err := client.CoreV1().
 		Secrets(ref.Namespace).
@@ -109,7 +117,7 @@ func DeleteBackupCredentialsSecret(
 		)
 	}
 
-	return nil
+	return errors.Join(ctx.Err(), LeaseFenceError(ctx))
 }
 
 // ValidateBackupCredentialsSecretCleanup verifies cleanup ownership without

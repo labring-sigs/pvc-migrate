@@ -87,7 +87,15 @@ func (s *Service) cleanup(
 	s.touch(session)
 
 	if deleteSession {
+		if err := requireSessionLease(ctx); err != nil {
+			return err
+		}
+
 		if err := s.delete(ctx, session); err != nil {
+			return err
+		}
+
+		if err := requireSessionLease(ctx); err != nil {
 			return err
 		}
 
@@ -200,11 +208,18 @@ func (s *Service) cleanupDestinationVolume(ctx context.Context, session *Session
 	}
 
 	uid := pvc.UID
+	if err := requireSessionLease(ctx); err != nil {
+		return err
+	}
+
 	if err := client.CoreV1().
 		PersistentVolumeClaims(pvc.Namespace).
 		Delete(ctx, pvc.Name, metav1.DeleteOptions{Preconditions: &metav1.Preconditions{UID: &uid}}); err != nil &&
 		!apierrors.IsNotFound(err) {
 		return fmt.Errorf("delete destination PVC %s/%s: %w", pvc.Namespace, pvc.Name, err)
+	}
+	if err := requireSessionLease(ctx); err != nil {
+		return err
 	}
 
 	return s.cleanupDestinationPV(ctx, volume, pvName)
@@ -271,12 +286,20 @@ func (s *Service) cleanupDestinationPV(
 				preconditions.ResourceVersion = &resourceVersion
 			}
 
+			if err := requireSessionLease(waitCtx); err != nil {
+				return false, err
+			}
+
 			if err := client.Delete(
 				waitCtx,
 				pv.Name,
 				metav1.DeleteOptions{Preconditions: preconditions},
 			); err != nil &&
 				!apierrors.IsNotFound(err) {
+				return false, err
+			}
+
+			if err := requireSessionLease(waitCtx); err != nil {
 				return false, err
 			}
 
@@ -312,12 +335,19 @@ func (s *Service) deleteReservationConsumer(
 	}
 
 	uid := pod.UID
+	if err := requireSessionLease(ctx); err != nil {
+		return err
+	}
+
 	if err := pods.Delete(
 		ctx,
 		pod.Name,
 		metav1.DeleteOptions{Preconditions: &metav1.Preconditions{UID: &uid}},
 	); err != nil &&
 		!apierrors.IsNotFound(err) {
+		return err
+	}
+	if err := requireSessionLease(ctx); err != nil {
 		return err
 	}
 

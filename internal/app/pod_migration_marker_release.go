@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
 	v1alpha1 "github.com/labring-sigs/pvc-migrate/api/v1alpha1"
@@ -50,7 +51,7 @@ func releaseStandalonePodMarker(
 			Pods(pod.Namespace).
 			Update(ctx, current, metav1.UpdateOptions{})
 
-		return updateErr
+		return errors.Join(updateErr, checkpointFenceError(ctx))
 	})
 	if err != nil {
 		return domain.WrapError(

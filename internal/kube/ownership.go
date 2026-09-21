@@ -86,7 +86,7 @@ func AcquirePVC(
 			PersistentVolumeClaims(ref.Namespace).
 			Update(ctx, pvc, metav1.UpdateOptions{})
 
-		return err
+		return errors.Join(err, ctx.Err(), LeaseFenceError(ctx))
 	})
 	if err == nil {
 		return nil
@@ -161,7 +161,7 @@ func ReleasePVC(
 			PersistentVolumeClaims(ref.Namespace).
 			Update(ctx, pvc, metav1.UpdateOptions{})
 
-		return err
+		return errors.Join(err, ctx.Err(), LeaseFenceError(ctx))
 	})
 	if err != nil {
 		if domain.CategoryOf(err) == domain.ErrorConflict {
@@ -255,7 +255,7 @@ func FinalizePVC(
 			PersistentVolumeClaims(ref.Namespace).
 			Update(ctx, pvc, metav1.UpdateOptions{})
 
-		return err
+		return errors.Join(err, ctx.Err(), LeaseFenceError(ctx))
 	})
 	if err != nil {
 		if domain.CategoryOf(err) == domain.ErrorConflict {

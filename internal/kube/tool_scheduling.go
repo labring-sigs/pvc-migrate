@@ -146,6 +146,10 @@ func EnsureTransferServiceAccount(
 	accounts := client.CoreV1().ServiceAccounts(namespace)
 
 	err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		if err := errors.Join(ctx.Err(), LeaseFenceError(ctx)); err != nil {
+			return err
+		}
+
 		account, getErr := accounts.Get(ctx, TransferServiceAccountName, metav1.GetOptions{})
 		if apierrors.IsNotFound(getErr) {
 			automount := false
@@ -188,6 +192,10 @@ func EnsureTransferServiceAccount(
 		}
 
 		if account.AutomountServiceAccountToken == nil || *account.AutomountServiceAccountToken {
+			if err := errors.Join(ctx.Err(), LeaseFenceError(ctx)); err != nil {
+				return err
+			}
+
 			fixed := account.DeepCopy()
 			automount := false
 
@@ -195,7 +203,7 @@ func EnsureTransferServiceAccount(
 			_, getErr = accounts.Update(ctx, fixed, metav1.UpdateOptions{})
 		}
 
-		return getErr
+		return errors.Join(getErr, ctx.Err(), LeaseFenceError(ctx))
 	})
 	if err != nil {
 		if domain.CategoryOf(err) == domain.ErrorConflict {

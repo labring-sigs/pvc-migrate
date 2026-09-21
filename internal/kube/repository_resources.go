@@ -98,6 +98,9 @@ func (s *ConfigMapRepositoryStore) CleanupOwned(
 			!apierrors.IsNotFound(err) {
 			return err
 		}
+		if err := errors.Join(ctx.Err(), LeaseFenceError(ctx)); err != nil {
+			return err
+		}
 	}
 
 	if repository != nil {

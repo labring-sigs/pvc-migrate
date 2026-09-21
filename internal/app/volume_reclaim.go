@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"time"
@@ -70,6 +71,9 @@ func deleteManagedPVC(
 			fmt.Sprintf("delete PVC %s/%s", ref.Namespace, ref.Name),
 			err,
 		)
+	}
+	if err := checkpointFenceError(ctx); err != nil {
+		return err
 	}
 
 	return nil
@@ -162,6 +166,9 @@ func deleteReclaimedPV(
 			err,
 		)
 	}
+	if err := checkpointFenceError(ctx); err != nil {
+		return err
+	}
 
 	return waitForPVDeletion(ctx, client, ref)
 }
@@ -233,7 +240,7 @@ func restoreReclaimedPVPolicy(
 			metav1.UpdateOptions{},
 		)
 
-		return err
+		return errors.Join(err, checkpointFenceError(ctx))
 	})
 	if err != nil {
 		if domain.CategoryOf(err) == domain.ErrorConflict {

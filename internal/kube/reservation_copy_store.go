@@ -106,6 +106,10 @@ func HandoffConfigMapReservationToCopy(
 		return err
 	}
 
+	if err := errors.Join(ctx.Err(), LeaseFenceError(ctx)); err != nil {
+		return err
+	}
+
 	snapshot.GetObjectKind().SetGroupVersionKind(target.gvk)
 	copyWorkflowStorageVersion(snapshot, updated)
 	*destination = *snapshot

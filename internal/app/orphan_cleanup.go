@@ -104,11 +104,15 @@ func (s *OrphanCleaner) withSessionIDLock(
 	)
 
 	operationErr := fn(lockedCtx)
-	if leaseErr := kube.LeaseFenceError(lockedCtx); leaseErr != nil {
-		operationErr = errors.Join(operationErr, leaseErr)
-	}
+	operationErr = errors.Join(operationErr, kube.LeaseFenceError(lockedCtx))
 
-	return operationErr
+	releaseCtx, cancelRelease := context.WithTimeout(
+		context.WithoutCancel(ctx),
+		10*time.Second,
+	)
+	defer cancelRelease()
+
+	return errors.Join(operationErr, lock.Release(releaseCtx))
 }
 
 func (s *OrphanCleaner) PlanOrphanCleanup(
@@ -995,6 +999,10 @@ func (s *OrphanCleaner) CleanupOrphan(
 			}
 
 			if !remaining {
+				if err := checkpointFenceError(lockedCtx); err != nil {
+					return err
+				}
+
 				if held, ok := lockedCtx.Value(sessionLockContextKey{}).(heldSessionLock); ok {
 					deleteCtx, cancelDelete := context.WithTimeout(
 						context.Background(),
@@ -1154,6 +1162,10 @@ func (s *OrphanCleaner) deleteOrphanDestinationPVC(
 	}
 
 	uid, resourceVersion := pvc.UID, pvc.ResourceVersion
+	if err := checkpointFenceError(ctx); err != nil {
+		return err
+	}
+
 	if err := s.client.CoreV1().
 		PersistentVolumeClaims(ref.Namespace).
 		Delete(ctx, ref.Name, metav1.DeleteOptions{Preconditions: &metav1.Preconditions{UID: &uid, ResourceVersion: &resourceVersion}}); err != nil &&
@@ -1164,6 +1176,10 @@ func (s *OrphanCleaner) deleteOrphanDestinationPVC(
 			fmt.Sprintf("delete destination PVC %s/%s", ref.Namespace, ref.Name),
 			err,
 		)
+	}
+
+	if err := checkpointFenceError(ctx); err != nil {
+		return err
 	}
 
 	return nil
@@ -1325,6 +1341,10 @@ func (s *OrphanCleaner) deleteOrphanRollbackPV(
 	}
 
 	if pv.Spec.PersistentVolumeReclaimPolicy != policy {
+		if err := checkpointFenceError(ctx); err != nil {
+			return err
+		}
+
 		pv.Spec.PersistentVolumeReclaimPolicy = policy
 
 		pv, err = s.client.CoreV1().PersistentVolumes().Update(
@@ -1342,6 +1362,10 @@ func (s *OrphanCleaner) deleteOrphanRollbackPV(
 		}
 	}
 
+	if err := checkpointFenceError(ctx); err != nil {
+		return err
+	}
+
 	uid, resourceVersion := pv.UID, pv.ResourceVersion
 	if err := s.client.CoreV1().
 		PersistentVolumes().
@@ -1353,6 +1377,10 @@ func (s *OrphanCleaner) deleteOrphanRollbackPV(
 			"delete rollback PV "+pv.Name,
 			err,
 		)
+	}
+
+	if err := checkpointFenceError(ctx); err != nil {
+		return err
 	}
 
 	return waitForPVDeletion(ctx, s.client, ref)
@@ -1418,6 +1446,10 @@ func (s *OrphanCleaner) finalizeOrphanPVC(
 	delete(pvc.Annotations, kube.SourcePVAnnotation)
 	delete(pvc.Annotations, kube.SourcePVCUIDAnnotation)
 
+	if err := checkpointFenceError(ctx); err != nil {
+		return err
+	}
+
 	_, err = s.client.CoreV1().
 		PersistentVolumeClaims(ref.Namespace).
 		Update(ctx, pvc, metav1.UpdateOptions{})
@@ -1428,6 +1460,10 @@ func (s *OrphanCleaner) finalizeOrphanPVC(
 			fmt.Sprintf("finalize source PVC %s/%s", ref.Namespace, ref.Name),
 			err,
 		)
+	}
+
+	if err := checkpointFenceError(ctx); err != nil {
+		return err
 	}
 
 	return nil
@@ -1477,6 +1513,10 @@ func (s *OrphanCleaner) finalizeOrphanPV(
 	delete(pv.Annotations, kube.OriginalPolicyAnnotation)
 	delete(pv.Annotations, kube.PairedPVAnnotation)
 
+	if err := checkpointFenceError(ctx); err != nil {
+		return err
+	}
+
 	_, err = s.client.CoreV1().PersistentVolumes().Update(ctx, pv, metav1.UpdateOptions{})
 	if err != nil {
 		return domain.WrapError(
@@ -1485,6 +1525,10 @@ func (s *OrphanCleaner) finalizeOrphanPV(
 			fmt.Sprintf("finalize %s PV %s", role, ref.Name),
 			err,
 		)
+	}
+
+	if err := checkpointFenceError(ctx); err != nil {
+		return err
 	}
 
 	return nil

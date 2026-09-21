@@ -2,6 +2,7 @@ package kube
 
 import (
 	"context"
+	"errors"
 
 	v1alpha1 "github.com/labring-sigs/pvc-migrate/api/v1alpha1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -65,6 +66,10 @@ func NamespacedCancelCRDReservationCopyHandoff(
 		return err
 	}
 
+	if err := handoffFenceError(ctx); err != nil {
+		return err
+	}
+
 	*reservation = *restored.DeepCopy()
 
 	if apierrors.IsNotFound(targetErr) {
@@ -92,7 +97,7 @@ func NamespacedCancelCRDReservationCopyHandoff(
 		Preconditions: &metav1.Preconditions{UID: &uid, ResourceVersion: &version},
 	})
 
-	return crclient.IgnoreNotFound(err)
+	return errors.Join(crclient.IgnoreNotFound(err), ctx.Err(), LeaseFenceError(ctx))
 }
 
 // NamespacedValidatePendingReservationCopy verifies that both records belong to the

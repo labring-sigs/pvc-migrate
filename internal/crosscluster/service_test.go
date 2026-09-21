@@ -34,6 +34,10 @@ type fakeCopier struct {
 	failures int
 }
 
+type failingLeaseFence struct{ err error }
+
+func (f failingLeaseFence) Err() error { return f.err }
+
 func (*fakeCopier) Cleanup(context.Context, copyengine.CleanupRequest) error { return nil }
 
 func (f *fakeCopier) Copy(
@@ -242,6 +246,43 @@ func TestPlanAndCreateSessionKeepClustersSeparate(t *testing.T) {
 			"storage class identity missing: %#v",
 			session.Spec.Volumes[0].Destination.StorageClass,
 		)
+	}
+}
+
+func TestSaveRejectsLostLeaseBeforeWritingCheckpoint(t *testing.T) {
+	service, options, _ := crossFixture()
+
+	plan, err := service.Plan(context.Background(), options)
+	if err != nil || !plan.Ready {
+		t.Fatalf("plan ready=%v err=%v checks=%#v", plan.Ready, err, plan.Checks)
+	}
+
+	session, err := service.CreateSession(context.Background(), options, plan)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	source, ok := service.SourceClientForTest().(*fake.Clientset)
+	if !ok {
+		t.Fatalf("source client type=%T", service.SourceClientForTest())
+	}
+	source.ClearActions()
+
+	lost := errors.New("session lease was lost")
+	ctx := kube.WithLeaseFence(
+		context.Background(),
+		failingLeaseFence{err: lost},
+	)
+	session.Status.Message = "must not be persisted"
+
+	if err := service.SaveForTest(ctx, session, false); !errors.Is(err, lost) {
+		t.Fatalf("save error=%v, want lease loss", err)
+	}
+
+	for _, action := range source.Actions() {
+		if action.GetVerb() == "create" || action.GetVerb() == "update" || action.GetVerb() == "patch" || action.GetVerb() == "delete" {
+			t.Fatalf("lost lease caused a write: %#v", action)
+		}
 	}
 }
 

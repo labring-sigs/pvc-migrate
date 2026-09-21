@@ -250,6 +250,9 @@ func (p *KubernetesToolImageProber) probeTarget(
 			retErr = errors.Join(retErr, cleanupErr)
 		}
 	}()
+	if err := LeaseFenceError(ctx); err != nil {
+		return result, err
+	}
 
 	observedTarget := target
 	imagePullSecrets := slices.Clone(created.Spec.ImagePullSecrets)
@@ -584,6 +587,10 @@ func CleanupSessionToolProbePods(
 			}
 
 			uid := pod.UID
+			if err := errors.Join(ctx.Err(), LeaseFenceError(ctx)); err != nil {
+				return err
+			}
+
 			if err := client.CoreV1().
 				Pods(namespace).
 				Delete(ctx, pod.Name, metav1.DeleteOptions{Preconditions: &metav1.Preconditions{UID: &uid}}); err != nil &&
@@ -594,6 +601,9 @@ func CleanupSessionToolProbePods(
 					fmt.Sprintf("delete probe Pod %s/%s", namespace, pod.Name),
 					err,
 				)
+			}
+			if err := errors.Join(ctx.Err(), LeaseFenceError(ctx)); err != nil {
+				return err
 			}
 
 			if err := WaitFor(

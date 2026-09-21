@@ -2,6 +2,7 @@ package kube
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"slices"
@@ -484,6 +485,9 @@ func (r *Reserver) reserveVolumeLive(
 		); err != nil {
 			return err
 		}
+		if err := errors.Join(ctx.Err(), LeaseFenceError(ctx)); err != nil {
+			return err
+		}
 
 		existing, err = r.client.CoreV1().
 			PersistentVolumeClaims(pvc.Namespace).
@@ -497,6 +501,9 @@ func (r *Reserver) reserveVolumeLive(
 			fmt.Sprintf("create PVC %s/%s", pvc.Namespace, pvc.Name),
 			err,
 		)
+	}
+	if err := errors.Join(ctx.Err(), LeaseFenceError(ctx)); err != nil {
+		return err
 	}
 
 	if err := validateDestinationPVC(existing, pvc, destinationPVC.UID); err != nil {
@@ -1073,6 +1080,10 @@ func (r *Reserver) provisionOnTarget(
 
 	existing, err := r.client.CoreV1().Pods(pod.Namespace).Get(ctx, pod.Name, metav1.GetOptions{})
 	if apierrors.IsNotFound(err) {
+		if err := errors.Join(ctx.Err(), LeaseFenceError(ctx)); err != nil {
+			return err
+		}
+
 		existing, err = r.client.CoreV1().
 			Pods(pod.Namespace).
 			Create(ctx, pod, metav1.CreateOptions{})
@@ -1090,6 +1101,9 @@ func (r *Reserver) provisionOnTarget(
 			fmt.Sprintf("create tool Pod %s/%s", pod.Namespace, pod.Name),
 			err,
 		)
+	}
+	if err := errors.Join(ctx.Err(), LeaseFenceError(ctx)); err != nil {
+		return err
 	}
 
 	if err := validateReservationPod(
@@ -1209,6 +1223,9 @@ func (r *Reserver) cleanupReservationPod(
 			fmt.Sprintf("delete tool Pod %s/%s", namespace, name),
 			err,
 		)
+	}
+	if err := errors.Join(ctx.Err(), LeaseFenceError(ctx)); err != nil {
+		return err
 	}
 
 	return r.waitFor(
@@ -1333,9 +1350,13 @@ func (r *Reserver) retainPV(
 			return nil
 		}
 
+		if err := errors.Join(ctx.Err(), LeaseFenceError(ctx)); err != nil {
+			return err
+		}
+
 		_, err = r.client.CoreV1().PersistentVolumes().Update(ctx, pv, metav1.UpdateOptions{})
 
-		return err
+		return errors.Join(err, ctx.Err(), LeaseFenceError(ctx))
 	})
 	if err != nil {
 		if domain.CategoryOf(err) == domain.ErrorConflict {

@@ -151,6 +151,10 @@ func (s *ConfigMapWorkflowStore[T]) Create(ctx context.Context, object T) error 
 		return err
 	}
 
+	if err := errors.Join(ctx.Err(), LeaseFenceError(ctx)); err != nil {
+		return err
+	}
+
 	created, err := s.client.CoreV1().ConfigMaps(s.namespace).Create(ctx, &corev1.ConfigMap{
 		ObjectMeta: metav1.ObjectMeta{
 			Namespace: s.namespace,
@@ -160,6 +164,10 @@ func (s *ConfigMapWorkflowStore[T]) Create(ctx context.Context, object T) error 
 		Data: map[string]string{SessionDataKey: string(data)},
 	}, metav1.CreateOptions{})
 	if err != nil {
+		return err
+	}
+
+	if err := errors.Join(ctx.Err(), LeaseFenceError(ctx)); err != nil {
 		return err
 	}
 
@@ -230,6 +238,10 @@ func (s *ConfigMapWorkflowStore[T]) Save(ctx context.Context, object T) error {
 		return err
 	}
 
+	if err := errors.Join(ctx.Err(), LeaseFenceError(ctx)); err != nil {
+		return err
+	}
+
 	copyWorkflowStorageVersion(object, updated)
 
 	return nil
@@ -282,6 +294,10 @@ func (s *ConfigMapWorkflowStore[T]) Delete(ctx context.Context, object T) error 
 		}
 
 		if len(withoutProtection) != len(existing.Finalizers) {
+			if err := errors.Join(ctx.Err(), LeaseFenceError(ctx)); err != nil {
+				return err
+			}
+
 			existing.Finalizers = withoutProtection
 
 			existing, err = s.client.CoreV1().
@@ -290,7 +306,15 @@ func (s *ConfigMapWorkflowStore[T]) Delete(ctx context.Context, object T) error 
 			if err != nil {
 				return err
 			}
+
+			if err := errors.Join(ctx.Err(), LeaseFenceError(ctx)); err != nil {
+				return err
+			}
 		}
+	}
+
+	if err := errors.Join(ctx.Err(), LeaseFenceError(ctx)); err != nil {
+		return err
 	}
 
 	uid, version := existing.GetUID(), existing.GetResourceVersion()
@@ -298,7 +322,7 @@ func (s *ConfigMapWorkflowStore[T]) Delete(ctx context.Context, object T) error 
 		Preconditions: &metav1.Preconditions{UID: &uid, ResourceVersion: &version},
 	})
 
-	return crclient.IgnoreNotFound(err)
+	return errors.Join(crclient.IgnoreNotFound(err), ctx.Err(), LeaseFenceError(ctx))
 }
 
 func (s *ConfigMapWorkflowStore[T]) encode(object T) ([]byte, error) {
@@ -431,7 +455,15 @@ func (s *CRDWorkflowStore[T]) Create(ctx context.Context, object T) error {
 	labels[ManagedByLabel], labels[SessionKey] = ManagedByValue, object.GetName()
 	snapshot.SetLabels(labels)
 
+	if err := errors.Join(ctx.Err(), LeaseFenceError(ctx)); err != nil {
+		return err
+	}
+
 	if err := s.client.Create(ctx, snapshot); err != nil {
+		return err
+	}
+
+	if err := errors.Join(ctx.Err(), LeaseFenceError(ctx)); err != nil {
 		return err
 	}
 
@@ -445,6 +477,9 @@ func (s *CRDWorkflowStore[T]) Create(ctx context.Context, object T) error {
 // can mutate storage. Only metadata is updated; the caller's status is retained.
 func (s *CRDWorkflowStore[T]) EnsureProtection(ctx context.Context, object T) error {
 	if err := requireWorkflowStorageVersion(object); err != nil {
+		return err
+	}
+	if err := errors.Join(ctx.Err(), LeaseFenceError(ctx)); err != nil {
 		return err
 	}
 
@@ -463,9 +498,16 @@ func (s *CRDWorkflowStore[T]) EnsureProtection(ctx context.Context, object T) er
 
 	finalizers := ensureSessionFinalizer(current.GetFinalizers())
 	if !reflect.DeepEqual(finalizers, current.GetFinalizers()) {
+		if err := errors.Join(ctx.Err(), LeaseFenceError(ctx)); err != nil {
+			return err
+		}
+
 		current.SetFinalizers(finalizers)
 
 		if err := s.client.Update(ctx, current); err != nil {
+			return err
+		}
+		if err := errors.Join(ctx.Err(), LeaseFenceError(ctx)); err != nil {
 			return err
 		}
 	}
@@ -557,6 +599,10 @@ func (s *CRDWorkflowStore[T]) Save(ctx context.Context, object T) error {
 		return err
 	}
 
+	if err := errors.Join(ctx.Err(), LeaseFenceError(ctx)); err != nil {
+		return err
+	}
+
 	copyWorkflowStorageVersion(object, snapshot)
 
 	return nil
@@ -592,11 +638,19 @@ func (s *CRDWorkflowStore[T]) Delete(ctx context.Context, object T) error {
 
 		previous.SetFinalizers(removeSessionFinalizer(previous.GetFinalizers()))
 
+		if err := errors.Join(ctx.Err(), LeaseFenceError(ctx)); err != nil {
+			return err
+		}
+
 		if err := s.client.Update(ctx, previous); err != nil {
 			if apierrors.IsConflict(err) {
 				continue
 			}
 
+			return err
+		}
+
+		if err := errors.Join(ctx.Err(), LeaseFenceError(ctx)); err != nil {
 			return err
 		}
 
@@ -606,12 +660,16 @@ func (s *CRDWorkflowStore[T]) Delete(ctx context.Context, object T) error {
 			return nil
 		}
 
+		if err := errors.Join(ctx.Err(), LeaseFenceError(ctx)); err != nil {
+			return err
+		}
+
 		uid, version := previous.GetUID(), previous.GetResourceVersion()
 		err = s.client.Delete(ctx, previous, &crclient.DeleteOptions{
 			Preconditions: &metav1.Preconditions{UID: &uid, ResourceVersion: &version},
 		})
 
-		return crclient.IgnoreNotFound(err)
+		return errors.Join(crclient.IgnoreNotFound(err), ctx.Err(), LeaseFenceError(ctx))
 	}
 
 	return workflowStoreConflict(

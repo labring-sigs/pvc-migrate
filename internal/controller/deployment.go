@@ -926,6 +926,9 @@ func (m *Manager) updateDeploymentReplicas(
 			),
 		)
 	}
+	if err := kube.LeaseFenceError(ctx); err != nil {
+		return err
+	}
 
 	return err
 }

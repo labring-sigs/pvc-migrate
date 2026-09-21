@@ -127,6 +127,38 @@ func TestNamespacedConfigMapReservationHandoffCommitsCompleteCopyAtomically(t *t
 	}
 }
 
+func TestNamespacedConfigMapReservationHandoffRejectsLeaseLossAfterUpdate(t *testing.T) {
+	client, source, destination := namespacedConfigMapHandoffFixture(t)
+	lost := errors.New("lease lost after handoff update")
+	fence := &testLeaseFence{}
+	client.PrependReactor("update", "configmaps", func(ktesting.Action) (bool, runtime.Object, error) {
+		fence.err = lost
+		return false, nil, nil
+	})
+
+	err := NamespacedHandoffConfigMapReservationToCopy(
+		WithLeaseFence(t.Context(), fence),
+		client,
+		source,
+		destination,
+	)
+	if !errors.Is(err, lost) {
+		t.Fatalf("error = %v, want lease loss after update", err)
+	}
+
+	store, err := NewConfigMapWorkflowStore(
+		client,
+		"data",
+		func() *v1alpha1.Copy { return &v1alpha1.Copy{} },
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Load(t.Context(), crclient.ObjectKey{Namespace: source.Namespace, Name: source.Name}); err != nil {
+		t.Fatalf("successful update was not durable: %v", err)
+	}
+}
+
 func TestNamespacedConfigMapReservationHandoffFailurePreservesBothInputs(t *testing.T) {
 	for _, mode := range []string{"save", "fence", "stale"} {
 		t.Run(mode, func(t *testing.T) {

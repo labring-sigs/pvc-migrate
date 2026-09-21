@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
 	v1alpha1 "github.com/labring-sigs/pvc-migrate/api/v1alpha1"
@@ -252,7 +253,7 @@ func finalizeActivePV(
 
 		_, err = client.CoreV1().PersistentVolumes().Update(ctx, pv, metav1.UpdateOptions{})
 
-		return err
+		return errors.Join(err, checkpointFenceError(ctx))
 	})
 	if err != nil {
 		if domain.CategoryOf(err) == domain.ErrorConflict {

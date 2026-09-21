@@ -144,20 +144,35 @@ func (s *Service) retainDestinationVolume(ctx context.Context, session *Session,
 
 	if pv != nil && (pvc == nil || pvc.DeletionTimestamp != nil) &&
 		pv.Spec.PersistentVolumeReclaimPolicy != corev1.PersistentVolumeReclaimRetain {
+		if err := requireSessionLease(ctx); err != nil {
+			return err
+		}
+
 		pv.Spec.PersistentVolumeReclaimPolicy = corev1.PersistentVolumeReclaimRetain
 		if _, err := s.destination.Kubernetes.CoreV1().
 			PersistentVolumes().
 			Update(ctx, pv, metav1.UpdateOptions{}); err != nil {
 			return err
 		}
+
+		if err := requireSessionLease(ctx); err != nil {
+			return err
+		}
 	}
 
 	if pvc != nil {
+		if err := requireSessionLease(ctx); err != nil {
+			return err
+		}
+
 		delete(pvc.Labels, SessionKey)
 		delete(pvc.Labels, ManagedByLabel)
 		_, err = s.destination.Kubernetes.CoreV1().
 			PersistentVolumeClaims(pvc.Namespace).
 			Update(ctx, pvc, metav1.UpdateOptions{})
+		if err == nil {
+			err = requireSessionLease(ctx)
+		}
 	}
 
 	return err

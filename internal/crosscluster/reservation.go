@@ -53,6 +53,10 @@ func (s *Service) reserveVolume(ctx context.Context, session *Session, index int
 		PersistentVolumeClaims(v.Destination.PVC.Namespace).
 		Get(ctx, v.Destination.PVC.Name, metav1.GetOptions{})
 	if apierrors.IsNotFound(err) {
+		if err := requireSessionLease(ctx); err != nil {
+			return err
+		}
+
 		storageClass := v.Destination.StorageClass.Name
 		pvc = &corev1.PersistentVolumeClaim{
 			ObjectMeta: metav1.ObjectMeta{
@@ -76,6 +80,9 @@ func (s *Service) reserveVolume(ctx context.Context, session *Session, index int
 		pvc, err = clients.CoreV1().
 			PersistentVolumeClaims(v.Destination.PVC.Namespace).
 			Create(ctx, pvc, metav1.CreateOptions{})
+		if err == nil {
+			err = requireSessionLease(ctx)
+		}
 	}
 
 	if err != nil {
@@ -115,6 +122,10 @@ func (s *Service) reserveVolume(ctx context.Context, session *Session, index int
 	if storageClass.VolumeBindingMode != nil &&
 		*storageClass.VolumeBindingMode == storagev1.VolumeBindingWaitForFirstConsumer &&
 		v.Destination.PV.UID == "" {
+		if err := requireSessionLease(ctx); err != nil {
+			return err
+		}
+
 		if err := s.createReservationConsumer(ctx, session, v); err != nil {
 			return err
 		}
@@ -318,11 +329,22 @@ func (s *Service) createReservationConsumer(
 
 	existing, err := client.Get(ctx, name, metav1.GetOptions{})
 	if apierrors.IsNotFound(err) {
+		if err := requireSessionLease(ctx); err != nil {
+			return err
+		}
+
 		existing, err = client.Create(ctx, pod, metav1.CreateOptions{})
+		if err == nil {
+			err = requireSessionLease(ctx)
+		}
 	}
 
 	if err != nil {
 		return fmt.Errorf("create reservation Pod %s/%s: %w", pod.Namespace, name, err)
+	}
+
+	if err := requireSessionLease(ctx); err != nil {
+		return err
 	}
 
 	if existing.Labels[ManagedByLabel] != ManagedBy || existing.Labels[SessionKey] != session.ID {

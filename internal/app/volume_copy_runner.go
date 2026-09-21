@@ -221,6 +221,9 @@ func (s *volumeCopyRunner) deleteCopyToolPods(
 				deleteErr,
 			)
 		}
+		if err := checkpointFenceError(ctx); err != nil {
+			return err
+		}
 	}
 
 	return nil

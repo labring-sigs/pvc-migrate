@@ -126,6 +126,28 @@ func TestCRDReservationHandoffRecoversEachPersistenceFailure(t *testing.T) {
 	}
 }
 
+func TestCRDReservationHandoffRejectsLeaseLossAfterEachWrite(t *testing.T) {
+	lost := errors.New("lease lost after handoff write")
+
+	for _, step := range []string{"freeze", "create", "checkpoint", "delete", "activate"} {
+		t.Run(step, func(t *testing.T) {
+			base, source, destination := crdHandoffFixture(t)
+			fence := &testLeaseFence{}
+			client := fenceAfterHandoffClient(base, step, fence, lost)
+
+			err := HandoffCRDReservationToCopy(
+				WithLeaseFence(t.Context(), fence),
+				client,
+				source,
+				destination,
+			)
+			if !errors.Is(err, lost) {
+				t.Fatalf("error = %v, want lease loss after %s", err, step)
+			}
+		})
+	}
+}
+
 func failingHandoffClient(
 	base crclient.WithWatch,
 	step string,
@@ -171,6 +193,58 @@ func failingHandoffClient(
 				return failure
 			}
 			return client.Delete(ctx, object, options...)
+		},
+	})
+}
+
+func fenceAfterHandoffClient(
+	base crclient.WithWatch,
+	step string,
+	fence *testLeaseFence,
+	lost error,
+) crclient.WithWatch {
+	return interceptor.NewClient(base, interceptor.Funcs{
+		Create: func(ctx context.Context, client crclient.WithWatch, object crclient.Object, options ...crclient.CreateOption) error {
+			if object.GetUID() == "" {
+				object.SetUID("copy-uid")
+			}
+			err := client.Create(ctx, object, options...)
+			if err == nil && step == "create" {
+				fence.err = lost
+			}
+			return err
+		},
+		Update: func(ctx context.Context, client crclient.WithWatch, object crclient.Object, options ...crclient.UpdateOption) error {
+			err := client.Update(ctx, object, options...)
+			if err == nil {
+				switch object := object.(type) {
+				case *v1alpha1.ClusterReservation:
+					protected := slices.Contains(object.Finalizers, SessionFinalizer)
+					pending := object.Annotations[reservationCopyPendingAnnotation] != ""
+					if step == "freeze" && protected && pending {
+						fence.err = lost
+					}
+				case *v1alpha1.ClusterCopy:
+					if step == "activate" {
+						fence.err = lost
+					}
+				}
+			}
+			return err
+		},
+		SubResourceUpdate: func(ctx context.Context, client crclient.Client, subresource string, object crclient.Object, options ...crclient.SubResourceUpdateOption) error {
+			err := client.SubResource(subresource).Update(ctx, object, options...)
+			if err == nil && step == "checkpoint" {
+				fence.err = lost
+			}
+			return err
+		},
+		Delete: func(ctx context.Context, client crclient.WithWatch, object crclient.Object, options ...crclient.DeleteOption) error {
+			err := client.Delete(ctx, object, options...)
+			if err == nil && step == "delete" {
+				fence.err = lost
+			}
+			return err
 		},
 	})
 }

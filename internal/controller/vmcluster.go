@@ -1010,6 +1010,9 @@ func (m *Manager) restoreVMClusterPause(
 				updateErr,
 			)
 		}
+		if err := kube.LeaseFenceError(ctx); err != nil {
+			return err
+		}
 
 		return nil
 	})
@@ -1287,6 +1290,9 @@ func (m *Manager) setVMClusterReplicaCount(
 				updateErr,
 			)
 		}
+		if err := kube.LeaseFenceError(ctx); err != nil {
+			return err
+		}
 
 		return nil
 	})
@@ -1477,6 +1483,9 @@ func (m *Manager) setVMClusterPaused(
 				"update component paused state",
 				updateErr,
 			)
+		}
+		if err := kube.LeaseFenceError(ctx); err != nil {
+			return err
 		}
 
 		// Older VMCluster CRDs prune the per-component paused field with only

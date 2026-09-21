@@ -750,6 +750,9 @@ func (m *Manager) restoreGrafanaPause(
 				updateErr,
 			)
 		}
+		if err := kube.LeaseFenceError(ctx); err != nil {
+			return err
+		}
 
 		return nil
 	})
@@ -872,6 +875,9 @@ func (m *Manager) setGrafanaPaused(
 				"update reconciliation suspend state",
 				updateErr,
 			)
+		}
+		if err := kube.LeaseFenceError(ctx); err != nil {
+			return err
 		}
 
 		return nil

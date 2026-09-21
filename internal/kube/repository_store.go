@@ -161,6 +161,9 @@ func (s *ConfigMapRepositoryStore) Create(
 	if err != nil {
 		return err
 	}
+	if err := errors.Join(ctx.Err(), LeaseFenceError(ctx)); err != nil {
+		return err
+	}
 
 	object.TypeMeta, object.Generation = snapshot.TypeMeta, snapshot.Generation
 	copyWorkflowStorageVersion(object, created)
@@ -245,5 +248,5 @@ func (s *ConfigMapRepositoryStore) Delete(
 		ConfigMaps(object.Namespace).
 		Delete(ctx, cm.Name, metav1.DeleteOptions{Preconditions: &metav1.Preconditions{UID: &object.UID, ResourceVersion: &object.ResourceVersion}})
 
-	return crclient.IgnoreNotFound(err)
+	return errors.Join(crclient.IgnoreNotFound(err), ctx.Err(), LeaseFenceError(ctx))
 }

@@ -82,6 +82,9 @@ func (s *Switcher) deletePVC(ctx context.Context, ref v1alpha1.ObjectReference) 
 			err,
 		)
 	}
+	if err := errors.Join(ctx.Err(), LeaseFenceError(ctx)); err != nil {
+		return err
+	}
 
 	return s.waitFor(
 		ctx,
@@ -276,7 +279,7 @@ func (s *Switcher) updatePVReservation(
 
 	_, err = s.client.CoreV1().PersistentVolumes().Update(ctx, pv, metav1.UpdateOptions{})
 
-	return err
+	return errors.Join(err, ctx.Err(), LeaseFenceError(ctx))
 }
 
 func (s *Switcher) ensureRetain(
@@ -343,7 +346,7 @@ func (s *Switcher) ensureRetain(
 
 		_, err = s.client.CoreV1().PersistentVolumes().Update(ctx, pv, metav1.UpdateOptions{})
 
-		return err
+		return errors.Join(err, ctx.Err(), LeaseFenceError(ctx))
 	})
 	if err != nil {
 		if domain.CategoryOf(err) == domain.ErrorConflict {
@@ -647,7 +650,7 @@ func (s *Switcher) markPVPair(
 
 			_, err = s.client.CoreV1().PersistentVolumes().Update(ctx, pv, metav1.UpdateOptions{})
 
-			return err
+			return errors.Join(err, ctx.Err(), LeaseFenceError(ctx))
 		})
 		if err != nil {
 			if domain.CategoryOf(err) == domain.ErrorConflict {

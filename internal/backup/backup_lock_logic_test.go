@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/labring-sigs/pvc-migrate/internal/domain"
+	"github.com/labring-sigs/pvc-migrate/internal/kube"
 )
 
 type fakeRepositoryLocation struct {
@@ -97,5 +98,35 @@ func TestClassifyLeaseError(t *testing.T) {
 				got,
 			)
 		}
+	}
+}
+
+type testBackupSessionLocker struct{ lock kube.SessionLock }
+
+func (l testBackupSessionLocker) AcquireSessionLock(
+	context.Context,
+	string,
+	string,
+) (kube.SessionLock, error) {
+	return l.lock, nil
+}
+
+func TestAcquireBackupTargetLockExposesSessionLeaseFence(t *testing.T) {
+	lost := errors.New("session lease lost")
+	lock := &recordingBackupSessionLock{err: lost}
+	ctx, _, cancel, err := acquireBackupTargetLock(
+		context.Background(),
+		testBackupSessionLocker{lock: lock},
+		"sessions",
+		fakeRepositoryLocation{backend: "s3", destination: "endpoint/bucket/rp-1"},
+		nil,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cancel()
+
+	if err := kube.LeaseFenceError(ctx); !errors.Is(err, lost) {
+		t.Fatalf("backup context fence = %v, want lease loss", err)
 	}
 }

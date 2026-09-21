@@ -174,6 +174,7 @@ func (r *MoveReconciler) plan(ctx context.Context, object *v1alpha1.Move) (resul
 
 	ctx, cancel := lock.Bind(ctx)
 	defer cancel()
+	ctx = kube.WithLeaseFence(ctx, lock)
 
 	latest, err := r.store.Load(ctx, crclient.ObjectKeyFromObject(object))
 	if apierrors.IsNotFound(err) {

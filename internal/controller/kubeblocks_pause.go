@@ -363,6 +363,9 @@ func (m *Manager) createAndWaitOps(
 					err,
 				)
 			}
+			if err := kube.LeaseFenceError(ctx); err != nil {
+				return err
+			}
 
 			if err := m.waitFor(
 				ctx,
@@ -445,6 +448,9 @@ func (m *Manager) createAndWaitOps(
 			}
 
 			expectedUID = created.GetUID()
+		}
+		if err := kube.LeaseFenceError(ctx); err != nil {
+			return err
 		}
 	} else if getErr != nil {
 		return domain.WrapError(
@@ -1576,6 +1582,9 @@ func (m *Manager) replaceLegacyKubeBlocksPod(
 			err,
 		)
 	}
+	if err := kube.LeaseFenceError(ctx); err != nil {
+		return v1alpha1.ObjectReference{}, err
+	}
 
 	var replacement *corev1.Pod
 	if err := m.waitFor(
@@ -1715,6 +1724,9 @@ func (m *Manager) updateKubeBlocksPauseOwner(
 				"update Cluster pause owner",
 				err,
 			)
+		}
+		if err := kube.LeaseFenceError(ctx); err != nil {
+			return err
 		}
 
 		return nil
@@ -1978,6 +1990,9 @@ func (m *Manager) updateKubeBlocksInstanceSet(
 			"update InstanceSet paused state",
 			err,
 		)
+	}
+	if err := kube.LeaseFenceError(ctx); err != nil {
+		return err
 	}
 
 	actual, configured, err := unstructured.NestedBool(

@@ -93,6 +93,10 @@ func HandoffCRDReservationToCopy(
 		return err
 	}
 
+	if err := handoffFenceError(ctx); err != nil {
+		return err
+	}
+
 	if err := ActivateCRDCopyHandoff(ctx, client, target); err != nil {
 		return err
 	}
@@ -169,6 +173,10 @@ func prepareCRDCopyHandoff(
 			return nil, err
 		}
 
+		if err := handoffFenceError(ctx); err != nil {
+			return nil, err
+		}
+
 		*source = *marked
 	}
 
@@ -189,6 +197,10 @@ func prepareCRDCopyHandoff(
 	}
 
 	if err := client.Create(ctx, target); err != nil {
+		return nil, err
+	}
+
+	if err := handoffFenceError(ctx); err != nil {
 		return nil, err
 	}
 
@@ -235,6 +247,10 @@ func initializeCRDCopyHandoff(
 	}
 
 	if err := client.Status().Update(ctx, next); err != nil {
+		return err
+	}
+
+	if err := handoffFenceError(ctx); err != nil {
 		return err
 	}
 
@@ -297,6 +313,10 @@ func ActivateCRDCopyHandoff(
 	}
 
 	if err := client.Update(ctx, previous); err != nil {
+		return err
+	}
+
+	if err := handoffFenceError(ctx); err != nil {
 		return err
 	}
 

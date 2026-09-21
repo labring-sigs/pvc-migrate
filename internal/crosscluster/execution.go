@@ -243,6 +243,10 @@ func (s *Service) Reserve(ctx context.Context, session *Session) error {
 }
 
 func (s *Service) reserve(ctx context.Context, session *Session) error {
+	if err := requireSessionLease(ctx); err != nil {
+		return err
+	}
+
 	if err := s.validateSession(ctx, session); err != nil {
 		return err
 	}
@@ -309,6 +313,10 @@ func (s *Service) Copy(ctx context.Context, session *Session, retries int, noCom
 }
 
 func (s *Service) copy(ctx context.Context, session *Session, retries int, noCompress bool) error {
+	if err := requireSessionLease(ctx); err != nil {
+		return err
+	}
+
 	if err := s.validateSession(ctx, session); err != nil {
 		return err
 	}
@@ -346,12 +354,20 @@ func (s *Service) copy(ctx context.Context, session *Session, retries int, noCom
 			continue
 		}
 
+		if err := requireSessionLease(ctx); err != nil {
+			return err
+		}
+
 		if err := kube.EnsureTransferServiceAccount(
 			ctx,
 			target.client.Kubernetes,
 			target.namespace,
 		); err != nil {
 			return s.fail(ctx, session, err)
+		}
+
+		if err := requireSessionLease(ctx); err != nil {
+			return err
 		}
 
 		seen[key] = struct{}{}
@@ -409,6 +425,10 @@ func (s *Service) copy(ctx context.Context, session *Session, retries int, noCom
 
 		previousAttempts := status.Transfer.Attempts
 		for retry := 1; retry <= retries; retry++ {
+			if err := requireSessionLease(ctx); err != nil {
+				return err
+			}
+
 			attempt := previousAttempts + retry
 			status.Transfer.Attempts = attempt
 			req := copyengine.Request{
@@ -440,6 +460,9 @@ func (s *Service) copy(ctx context.Context, session *Session, retries int, noCom
 			}
 
 			last = s.copier.Copy(ctx, req, nil)
+			if last == nil {
+				last = requireSessionLease(ctx)
+			}
 			if last == nil {
 				break
 			}

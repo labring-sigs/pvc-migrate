@@ -83,6 +83,7 @@ func acquireBackupTargetLock(
 	}
 
 	boundCtx, cancel := lock.Bind(ctx)
+	boundCtx = kube.WithLeaseFence(boundCtx, lock)
 
 	logOperation(
 		logger,

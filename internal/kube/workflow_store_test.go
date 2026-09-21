@@ -18,6 +18,7 @@ import (
 	ktesting "k8s.io/client-go/testing"
 	crclient "sigs.k8s.io/controller-runtime/pkg/client"
 	crfake "sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 )
 
 func storedRename() *v1alpha1.Rename {
@@ -200,6 +201,346 @@ func TestWorkflowStoresPreserveConcreteStatusAndRejectStaleWrites(t *testing.T) 
 				err,
 			) != domain.ErrorConflict {
 				t.Fatalf("replacement UID accepted: %v", err)
+			}
+		})
+	}
+}
+
+func TestWorkflowStoreDeleteRejectsLostLeaseBeforeFinalizerMutation(t *testing.T) {
+	lost := errors.New("lease lost before finalizer cleanup")
+
+	t.Run("configmap", func(t *testing.T) {
+		object := storedRename()
+		data, err := json.Marshal(object)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		client := fake.NewClientset(&corev1.ConfigMap{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:            SessionConfigMapName(object.Name),
+				Namespace:       "sessions",
+				UID:             object.UID,
+				ResourceVersion: object.ResourceVersion,
+				Finalizers:      []string{SessionFinalizer},
+				Labels:          sessionLabels(object.Name),
+			},
+			Data: map[string]string{SessionDataKey: string(data)},
+		})
+		store, err := NewConfigMapWorkflowStore(
+			client,
+			"sessions",
+			func() *v1alpha1.Rename { return &v1alpha1.Rename{} },
+		)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		loaded, err := store.Load(t.Context(), crclient.ObjectKeyFromObject(object))
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		err = store.Delete(
+			WithLeaseFence(t.Context(), &testLeaseFence{err: lost}),
+			loaded,
+		)
+		if !errors.Is(err, lost) {
+			t.Fatalf("delete error = %v, want lease loss", err)
+		}
+
+		current, err := client.CoreV1().ConfigMaps("sessions").Get(
+			t.Context(),
+			SessionConfigMapName(object.Name),
+			metav1.GetOptions{},
+		)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !slices.Equal(current.Finalizers, []string{SessionFinalizer}) {
+			t.Fatalf("lost lease mutated ConfigMap finalizers: %v", current.Finalizers)
+		}
+	})
+
+	t.Run("crd", func(t *testing.T) {
+		scheme := runtime.NewScheme()
+		if err := v1alpha1.AddToScheme(scheme); err != nil {
+			t.Fatal(err)
+		}
+
+		object := storedRename()
+		object.Finalizers = []string{SessionFinalizer}
+		client := crfake.NewClientBuilder().
+			WithScheme(scheme).
+			WithObjects(object.DeepCopy()).
+			Build()
+		store, err := NewCRDWorkflowStore(
+			client,
+			func() *v1alpha1.Rename { return &v1alpha1.Rename{} },
+		)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		loaded, err := store.Load(t.Context(), crclient.ObjectKeyFromObject(object))
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		err = store.Delete(
+			WithLeaseFence(t.Context(), &testLeaseFence{err: lost}),
+			loaded,
+		)
+		if !errors.Is(err, lost) {
+			t.Fatalf("delete error = %v, want lease loss", err)
+		}
+
+		current := &v1alpha1.Rename{}
+		if err := client.Get(t.Context(), crclient.ObjectKeyFromObject(object), current); err != nil {
+			t.Fatal(err)
+		}
+		if !slices.Equal(current.Finalizers, []string{SessionFinalizer}) {
+			t.Fatalf("lost lease mutated CRD finalizers: %v", current.Finalizers)
+		}
+	})
+}
+
+func TestWorkflowStoresRejectLeaseLossAfterDurableWrite(t *testing.T) {
+	lost := errors.New("lease lost after workflow write")
+
+	for _, backend := range []string{"configmap", "crd"} {
+		t.Run(backend+"-create", func(t *testing.T) {
+			object := storedRename()
+			object.Name = "create-after-write"
+			object.UID = ""
+			object.ResourceVersion = ""
+			fence := &testLeaseFence{}
+			var store WorkflowStore[*v1alpha1.Rename]
+
+			if backend == "configmap" {
+				client := fake.NewClientset()
+				client.PrependReactor("create", "*", func(ktesting.Action) (bool, runtime.Object, error) {
+					fence.err = lost
+					return false, nil, nil
+				})
+				var err error
+				store, err = NewConfigMapWorkflowStore(
+					client,
+					"sessions",
+					func() *v1alpha1.Rename { return &v1alpha1.Rename{} },
+				)
+				if err != nil {
+					t.Fatal(err)
+				}
+			} else {
+				scheme := runtime.NewScheme()
+				if err := v1alpha1.AddToScheme(scheme); err != nil {
+					t.Fatal(err)
+				}
+
+				client := crfake.NewClientBuilder().
+					WithScheme(scheme).
+					WithInterceptorFuncs(interceptor.Funcs{
+						Create: func(
+							ctx context.Context,
+							client crclient.WithWatch,
+							object crclient.Object,
+							opts ...crclient.CreateOption,
+						) error {
+							err := client.Create(ctx, object, opts...)
+							fence.err = lost
+							return err
+						},
+					}).
+					Build()
+				var err error
+				store, err = NewCRDWorkflowStore(
+					client,
+					func() *v1alpha1.Rename { return &v1alpha1.Rename{} },
+				)
+				if err != nil {
+					t.Fatal(err)
+				}
+			}
+
+			if err := store.Create(WithLeaseFence(t.Context(), fence), object); !errors.Is(err, lost) {
+				t.Fatalf("create error = %v, want lease loss after create", err)
+			}
+
+			if _, err := store.Load(t.Context(), crclient.ObjectKey{
+				Namespace: object.Namespace,
+				Name:      object.Name,
+			}); err != nil {
+				t.Fatalf("durable workflow was not created: %v", err)
+			}
+		})
+	}
+
+	for _, backend := range []string{"configmap", "crd"} {
+		t.Run(backend+"-save", func(t *testing.T) {
+			original := storedRename()
+			fence := &testLeaseFence{}
+			var store WorkflowStore[*v1alpha1.Rename]
+
+			if backend == "configmap" {
+				data, marshalErr := json.Marshal(original)
+				if marshalErr != nil {
+					t.Fatal(marshalErr)
+				}
+
+				client := fake.NewClientset(&corev1.ConfigMap{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:            SessionConfigMapName(original.Name),
+						Namespace:       "sessions",
+						UID:             original.UID,
+						ResourceVersion: original.ResourceVersion,
+						Labels:          sessionLabels(original.Name),
+					},
+					Data: map[string]string{SessionDataKey: string(data)},
+				})
+				client.PrependReactor("update", "*", func(ktesting.Action) (bool, runtime.Object, error) {
+					fence.err = lost
+					return false, nil, nil
+				})
+				var err error
+				store, err = NewConfigMapWorkflowStore(
+					client,
+					"sessions",
+					func() *v1alpha1.Rename { return &v1alpha1.Rename{} },
+				)
+				if err != nil {
+					t.Fatal(err)
+				}
+			} else {
+				scheme := runtime.NewScheme()
+				if err := v1alpha1.AddToScheme(scheme); err != nil {
+					t.Fatal(err)
+				}
+
+				client := crfake.NewClientBuilder().
+					WithScheme(scheme).
+					WithStatusSubresource(&v1alpha1.Rename{}).
+					WithObjects(original.DeepCopy()).
+					WithInterceptorFuncs(interceptor.Funcs{
+						SubResourceUpdate: func(
+							ctx context.Context,
+							client crclient.Client,
+							subResource string,
+							object crclient.Object,
+							opts ...crclient.SubResourceUpdateOption,
+						) error {
+							err := client.SubResource(subResource).Update(ctx, object, opts...)
+							fence.err = lost
+							return err
+						},
+					}).
+					Build()
+				var err error
+				store, err = NewCRDWorkflowStore(
+					client,
+					func() *v1alpha1.Rename { return &v1alpha1.Rename{} },
+				)
+				if err != nil {
+					t.Fatal(err)
+				}
+			}
+
+			loaded, err := store.Load(t.Context(), crclient.ObjectKeyFromObject(original))
+			if err != nil {
+				t.Fatal(err)
+			}
+			loaded.Status.Message = "durable checkpoint"
+
+			if err := store.Save(WithLeaseFence(t.Context(), fence), loaded); !errors.Is(err, lost) {
+				t.Fatalf("save error = %v, want lease loss after write", err)
+			}
+
+			persisted, err := store.Load(t.Context(), crclient.ObjectKeyFromObject(original))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if persisted.Status.Message != "durable checkpoint" {
+				t.Fatalf("durable status was lost after reported lease error: %q", persisted.Status.Message)
+			}
+		})
+
+		t.Run(backend+"-delete", func(t *testing.T) {
+			original := storedRename()
+			original.Name = "delete-after-write"
+			fence := &testLeaseFence{}
+			var store WorkflowStore[*v1alpha1.Rename]
+
+			if backend == "configmap" {
+				data, marshalErr := json.Marshal(original)
+				if marshalErr != nil {
+					t.Fatal(marshalErr)
+				}
+
+				client := fake.NewClientset(&corev1.ConfigMap{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:            SessionConfigMapName(original.Name),
+						Namespace:       "sessions",
+						UID:             original.UID,
+						ResourceVersion: original.ResourceVersion,
+						Labels:          sessionLabels(original.Name),
+					},
+					Data: map[string]string{SessionDataKey: string(data)},
+				})
+				client.PrependReactor("delete", "*", func(ktesting.Action) (bool, runtime.Object, error) {
+					fence.err = lost
+					return false, nil, nil
+				})
+				var err error
+				store, err = NewConfigMapWorkflowStore(
+					client,
+					"sessions",
+					func() *v1alpha1.Rename { return &v1alpha1.Rename{} },
+				)
+				if err != nil {
+					t.Fatal(err)
+				}
+			} else {
+				scheme := runtime.NewScheme()
+				if err := v1alpha1.AddToScheme(scheme); err != nil {
+					t.Fatal(err)
+				}
+
+				client := crfake.NewClientBuilder().
+					WithScheme(scheme).
+					WithObjects(original.DeepCopy()).
+					WithInterceptorFuncs(interceptor.Funcs{
+						Delete: func(
+							ctx context.Context,
+							client crclient.WithWatch,
+							object crclient.Object,
+							opts ...crclient.DeleteOption,
+						) error {
+							err := client.Delete(ctx, object, opts...)
+							fence.err = lost
+							return err
+						},
+					}).
+					Build()
+				var err error
+				store, err = NewCRDWorkflowStore(
+					client,
+					func() *v1alpha1.Rename { return &v1alpha1.Rename{} },
+				)
+				if err != nil {
+					t.Fatal(err)
+				}
+			}
+
+			loaded, err := store.Load(t.Context(), crclient.ObjectKeyFromObject(original))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := store.Delete(WithLeaseFence(t.Context(), fence), loaded); !errors.Is(err, lost) {
+				t.Fatalf("delete error = %v, want lease loss after delete", err)
+			}
+
+			if _, err := store.Load(t.Context(), crclient.ObjectKeyFromObject(original)); !apierrors.IsNotFound(err) {
+				t.Fatalf("durable workflow survived delete: %v", err)
 			}
 		})
 	}
@@ -496,6 +837,52 @@ func TestCRDWorkflowProtectionPreservesStatusAndRejectsStaleIdentity(t *testing.
 	}
 }
 
+func TestCRDWorkflowProtectionReportsFenceLossAfterFinalizerWrite(t *testing.T) {
+	scheme := runtime.NewScheme()
+	if err := v1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+
+	original := storedRename()
+	fence := &testLeaseFence{}
+	lost := errors.New("lease lost after protection update")
+	var updatedFinalizers []string
+	client := crfake.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(original).
+		WithObjects(original.DeepCopy()).
+		WithInterceptorFuncs(interceptor.Funcs{
+			Update: func(
+				ctx context.Context,
+				client crclient.WithWatch,
+				object crclient.Object,
+				opts ...crclient.UpdateOption,
+			) error {
+				err := client.Update(ctx, object, opts...)
+				updatedFinalizers = slices.Clone(object.GetFinalizers())
+				fence.err = lost
+				return err
+			},
+		}).
+		Build()
+
+	store, err := NewCRDWorkflowStore(client, func() *v1alpha1.Rename { return &v1alpha1.Rename{} })
+	if err != nil {
+		t.Fatal(err)
+	}
+	object, err := store.Load(t.Context(), crclient.ObjectKeyFromObject(original))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if err := store.EnsureProtection(WithLeaseFence(t.Context(), fence), object); !errors.Is(err, lost) {
+		t.Fatalf("protection error = %v, want lease loss after finalizer write", err)
+	}
+	if !slices.Contains(updatedFinalizers, SessionFinalizer) {
+		t.Fatal("protection finalizer was not persisted before reporting lease loss")
+	}
+}
+
 func TestCRDWorkflowStoreDeleteConvergesDeletingWorkflowWithStaleSnapshot(t *testing.T) {
 	scheme := runtime.NewScheme()
 	if err := v1alpha1.AddToScheme(scheme); err != nil {
@@ -534,6 +921,58 @@ func TestCRDWorkflowStoreDeleteConvergesDeletingWorkflowWithStaleSnapshot(t *tes
 		Namespace: record.Namespace, Name: record.Name,
 	}, live); !apierrors.IsNotFound(err) {
 		t.Fatalf("deleting workflow still exists: %v (err=%v)", live, err)
+	}
+}
+
+func TestCRDWorkflowStoreDeleteReportsFenceLossAfterFinalizerWrite(t *testing.T) {
+	scheme := runtime.NewScheme()
+	if err := v1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+
+	record := storedRename()
+	record.Finalizers = []string{SessionFinalizer}
+	now := metav1.Now()
+	record.DeletionTimestamp = &now
+
+	fence := &testLeaseFence{}
+	lost := errors.New("lease lost after finalizer update")
+	var updatedFinalizers []string
+	client := crfake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(record.DeepCopy()).
+		WithInterceptorFuncs(interceptor.Funcs{
+			Update: func(
+				ctx context.Context,
+				client crclient.WithWatch,
+				object crclient.Object,
+				opts ...crclient.UpdateOption,
+			) error {
+				err := client.Update(ctx, object, opts...)
+				updatedFinalizers = slices.Clone(object.GetFinalizers())
+				fence.err = lost
+				return err
+			},
+		}).
+		Build()
+
+	store, err := NewCRDWorkflowStore(client, func() *v1alpha1.Rename {
+		return &v1alpha1.Rename{}
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	loaded, err := store.Load(t.Context(), crclient.ObjectKeyFromObject(record))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Delete(WithLeaseFence(t.Context(), fence), loaded); !errors.Is(err, lost) {
+		t.Fatalf("delete error = %v, want lease loss after finalizer write", err)
+	}
+
+	if slices.Contains(updatedFinalizers, SessionFinalizer) {
+		t.Fatal("finalizer update was not persisted before reporting lease loss")
 	}
 }
 
