@@ -104,6 +104,11 @@ func TestWorkflowCacheSyncsBeforeStandbyReady(t *testing.T) {
 	reconciler := NewWorkflowReconciler().WithSupportedKinds([]domain.ControllerKind{
 		domain.ControllerKindCopy, domain.ControllerKindClusterCopy,
 	})
+	// SetupWithManager validates every served kind before registering queues.
+	// This test exercises cache startup only, so concrete empty reconcilers are
+	// sufficient and keep the dispatch contract explicit.
+	reconciler.namespacedCopy = &CopyReconciler{}
+	reconciler.copy = &ClusterCopyReconciler{}
 	if err := reconciler.SetupWithManager(manager); err != nil {
 		t.Fatal(err)
 	}

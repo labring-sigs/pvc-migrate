@@ -210,7 +210,10 @@ func ensureSessionFinalizer(finalizers []string) []string {
 func removeSessionFinalizer(values []string) []string {
 	result := values[:0]
 	for _, item := range values {
-		if item != SessionFinalizer {
+		// Remove both names owned by this project. Older workflow records can
+		// retain the legacy key, and leaving it behind keeps a deleting object
+		// permanently stuck even though the current controller has converged.
+		if item != SessionFinalizer && item != LegacySessionFinalizer {
 			result = append(result, item)
 		}
 	}

@@ -628,6 +628,14 @@ func (s *CRDWorkflowStore[T]) Delete(ctx context.Context, object T) error {
 			return err
 		}
 
+		// A delayed cleanup callback must never act on a different workflow
+		// that reused the same name after the original object disappeared.
+		// Deletion tolerates a newer resourceVersion, but UID identity remains
+		// mandatory in every state.
+		if previous.GetUID() != object.GetUID() {
+			return workflowStoreConflict("write", "workflow UID changed before deletion")
+		}
+
 		if previous.GetDeletionTimestamp() == nil {
 			// Not yet deleting: keep the strict storage-version contract for
 			// regular record removal.

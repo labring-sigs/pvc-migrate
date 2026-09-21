@@ -924,6 +924,77 @@ func TestCRDWorkflowStoreDeleteConvergesDeletingWorkflowWithStaleSnapshot(t *tes
 	}
 }
 
+func TestCRDWorkflowStoreDeleteRejectsDifferentUIDWhileDeleting(t *testing.T) {
+	scheme := runtime.NewScheme()
+	if err := v1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+
+	record := storedRename()
+	record.Finalizers = []string{SessionFinalizer}
+	now := metav1.Now()
+	record.DeletionTimestamp = &now
+
+	client := crfake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(record.DeepCopy()).
+		Build()
+
+	store, err := NewCRDWorkflowStore(client, func() *v1alpha1.Rename {
+		return &v1alpha1.Rename{}
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	stale := record.DeepCopy()
+	stale.UID = "replacement"
+	if err := store.Delete(t.Context(), stale); domain.CategoryOf(err) != domain.ErrorConflict {
+		t.Fatalf("different deleting workflow UID accepted: %v", err)
+	}
+
+	live := &v1alpha1.Rename{}
+	if err := client.Get(t.Context(), crclient.ObjectKeyFromObject(record), live); err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Contains(live.Finalizers, SessionFinalizer) {
+		t.Fatal("UID-mismatched cleanup removed the live workflow finalizer")
+	}
+}
+
+func TestCRDWorkflowStoreDeleteRemovesLegacySessionFinalizer(t *testing.T) {
+	scheme := runtime.NewScheme()
+	if err := v1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+
+	record := storedRename()
+	record.Finalizers = []string{LegacySessionFinalizer}
+	now := metav1.Now()
+	record.DeletionTimestamp = &now
+
+	client := crfake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(record.DeepCopy()).
+		Build()
+
+	store, err := NewCRDWorkflowStore(client, func() *v1alpha1.Rename {
+		return &v1alpha1.Rename{}
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if err := store.Delete(t.Context(), record.DeepCopy()); err != nil {
+		t.Fatalf("legacy finalizer did not converge: %v", err)
+	}
+
+	live := &v1alpha1.Rename{}
+	if err := client.Get(t.Context(), crclient.ObjectKeyFromObject(record), live); !apierrors.IsNotFound(err) {
+		t.Fatalf("legacy-finalizer workflow still exists: %v (err=%v)", live, err)
+	}
+}
+
 func TestCRDWorkflowStoreDeleteReportsFenceLossAfterFinalizerWrite(t *testing.T) {
 	scheme := runtime.NewScheme()
 	if err := v1alpha1.AddToScheme(scheme); err != nil {

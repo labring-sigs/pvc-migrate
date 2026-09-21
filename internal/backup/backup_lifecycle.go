@@ -232,11 +232,11 @@ func (b *BackupExecutor) cleanup(
 			return err
 		}
 
-		if err := lock.Delete(ctx); err != nil {
+		if err := b.store.Delete(ctx, object); err != nil {
 			return err
 		}
 
-		return b.store.Delete(ctx, object)
+		return lock.Delete(ctx)
 	}
 
 	return nil

@@ -247,12 +247,16 @@ func (r *kindWorkflowReconciler) Reconcile(
 // dispatch unambiguous; the shared collision guard prevents unsafe concurrent
 // execution when different Kinds use the same data-plane session identity.
 func (r *WorkflowReconciler) SetupWithManager(manager ctrl.Manager) error {
-	if r.supportsKind(domain.ControllerKindMove) && r.move == nil {
-		return errors.New("move reconciler is required")
-	}
+	for _, workflow := range domain.ControllerWorkflows() {
+		for _, kind := range []domain.ControllerKind{workflow.Kind, workflow.ClusterKind} {
+			if kind == "" || !r.supportsKind(kind) {
+				continue
+			}
 
-	if r.supportsKind(domain.ControllerKindRename) && r.rename == nil {
-		return errors.New("rename reconciler is required")
+			if err := r.requireReconciler(kind); err != nil {
+				return err
+			}
+		}
 	}
 
 	r.recorder = manager.GetEventRecorder("pvc-migrate-controller")
@@ -359,6 +363,44 @@ func (r *WorkflowReconciler) SetupWithManager(manager ctrl.Manager) error {
 
 	if served == 0 {
 		return errors.New("no workflow CRDs are served by the target cluster")
+	}
+
+	return nil
+}
+
+func (r *WorkflowReconciler) requireReconciler(kind domain.ControllerKind) error {
+	configured := false
+	switch kind {
+	case domain.ControllerKindBackup:
+		configured = r.backup != nil
+	case domain.ControllerKindRestore:
+		configured = r.restore != nil
+	case domain.ControllerKindRename:
+		configured = r.rename != nil
+	case domain.ControllerKindMove:
+		configured = r.move != nil
+	case domain.ControllerKindReservation:
+		configured = r.namespacedReservation != nil
+	case domain.ControllerKindClusterReservation:
+		configured = r.reservation != nil
+	case domain.ControllerKindCopy:
+		configured = r.namespacedCopy != nil
+	case domain.ControllerKindClusterCopy:
+		configured = r.copy != nil
+	case domain.ControllerKindMigration:
+		configured = r.namespacedMigration != nil
+	case domain.ControllerKindClusterMigration:
+		configured = r.migration != nil
+	case domain.ControllerKindPodMigration:
+		configured = r.namespacedPodMigration != nil
+	case domain.ControllerKindClusterPodMigration:
+		configured = r.podMigration != nil
+	default:
+		return fmt.Errorf("workflow kind %q is not registered", kind)
+	}
+
+	if !configured {
+		return fmt.Errorf("%s reconciler is required", kind)
 	}
 
 	return nil

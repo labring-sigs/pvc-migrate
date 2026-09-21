@@ -10,6 +10,7 @@ import (
 	"github.com/labring-sigs/pvc-migrate/internal/domain"
 	"github.com/labring-sigs/pvc-migrate/internal/kube"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/kubernetes/fake"
@@ -176,7 +177,7 @@ func TestNamespacedReservationRejectsForeignResourceCheckpoint(t *testing.T) {
 	}
 }
 
-func TestNamespacedReservationCleanupDeletesMetadataAfterLease(t *testing.T) {
+func TestNamespacedReservationCleanupDeletesMetadataBeforeLease(t *testing.T) {
 	executor, object, _ := namespacedReservationFixture(t, interceptor.Funcs{})
 	object.Status.Plan = nil
 
@@ -203,7 +204,7 @@ func TestNamespacedReservationCleanupDeletesMetadataAfterLease(t *testing.T) {
 	if _, err := executor.store.Load(
 		t.Context(),
 		crclient.ObjectKeyFromObject(object),
-	); err != nil {
-		t.Fatalf("metadata removed before lease: %v", err)
+	); !apierrors.IsNotFound(err) {
+		t.Fatalf("metadata was not removed before lease cleanup: %v", err)
 	}
 }

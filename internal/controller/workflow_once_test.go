@@ -40,6 +40,79 @@ func TestReconcileUntilStableConsumesRequeue(t *testing.T) {
 	}
 }
 
+func TestReconcileUntilStableRejectsPermanentRequeue(t *testing.T) {
+	passes := 0
+
+	err := reconcileUntilStable(
+		t.Context(),
+		reconcile.Request{},
+		func(context.Context, reconcile.Request) (reconcile.Result, error) {
+			passes++
+			return reconcile.Result{Requeue: true}, nil
+		},
+	)
+	if err == nil || !strings.Contains(err.Error(), "exceeded") {
+		t.Fatalf("permanent requeue error=%v", err)
+	}
+
+	if passes != maxOneShotReconciliations {
+		t.Fatalf("reconcile passes=%d, want %d", passes, maxOneShotReconciliations)
+	}
+}
+
+func TestReconcileUntilStableRejectsUnboundedDelay(t *testing.T) {
+	err := reconcileUntilStable(
+		t.Context(),
+		reconcile.Request{},
+		func(context.Context, reconcile.Request) (reconcile.Result, error) {
+			return reconcile.Result{RequeueAfter: maxOneShotRequeueDelay + time.Second}, nil
+		},
+	)
+	if err == nil || !strings.Contains(err.Error(), "exceeding") {
+		t.Fatalf("unbounded delay error=%v", err)
+	}
+}
+
+func TestRequireReconcilerCoversEveryWorkflowKind(t *testing.T) {
+	tests := []struct {
+		kind  domain.ControllerKind
+		setup func(*WorkflowReconciler)
+	}{
+		{domain.ControllerKindBackup, func(r *WorkflowReconciler) { r.backup = &BackupReconciler{} }},
+		{domain.ControllerKindRestore, func(r *WorkflowReconciler) { r.restore = &RestoreReconciler{} }},
+		{domain.ControllerKindRename, func(r *WorkflowReconciler) { r.rename = &RenameReconciler{} }},
+		{domain.ControllerKindMove, func(r *WorkflowReconciler) { r.move = &MoveReconciler{} }},
+		{domain.ControllerKindReservation, func(r *WorkflowReconciler) { r.namespacedReservation = &ReservationReconciler{} }},
+		{domain.ControllerKindClusterReservation, func(r *WorkflowReconciler) { r.reservation = &ClusterReservationReconciler{} }},
+		{domain.ControllerKindCopy, func(r *WorkflowReconciler) { r.namespacedCopy = &CopyReconciler{} }},
+		{domain.ControllerKindClusterCopy, func(r *WorkflowReconciler) { r.copy = &ClusterCopyReconciler{} }},
+		{domain.ControllerKindMigration, func(r *WorkflowReconciler) { r.namespacedMigration = &MigrationReconciler{} }},
+		{domain.ControllerKindClusterMigration, func(r *WorkflowReconciler) { r.migration = &ClusterMigrationReconciler{} }},
+		{domain.ControllerKindPodMigration, func(r *WorkflowReconciler) { r.namespacedPodMigration = &PodMigrationReconciler{} }},
+		{domain.ControllerKindClusterPodMigration, func(r *WorkflowReconciler) { r.podMigration = &ClusterPodMigrationReconciler{} }},
+	}
+
+	for _, test := range tests {
+		t.Run(string(test.kind), func(t *testing.T) {
+			reconciler := NewWorkflowReconciler()
+			if err := reconciler.requireReconciler(test.kind); err == nil {
+				t.Fatal("unconfigured reconciler was accepted")
+			}
+
+			test.setup(reconciler)
+			if err := reconciler.requireReconciler(test.kind); err != nil {
+				t.Fatalf("configured reconciler rejected: %v", err)
+			}
+		})
+	}
+}
+
+func TestRequireReconcilerRejectsUnknownKind(t *testing.T) {
+	if err := NewWorkflowReconciler().requireReconciler("Unknown"); err == nil {
+		t.Fatal("unknown workflow kind was accepted")
+	}
+}
+
 func TestOneShotInventoryUsesConcreteControllersAndContinuesAfterFailure(t *testing.T) {
 	reservation := &v1alpha1.ClusterReservation{
 		ObjectMeta: metav1.ObjectMeta{Name: "unavailable", UID: "reservation"},

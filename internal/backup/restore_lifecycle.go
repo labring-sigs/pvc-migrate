@@ -258,11 +258,11 @@ func (r *RestoreExecutor) cleanup(
 			return err
 		}
 
-		if err := lock.Delete(ctx); err != nil {
+		if err := r.store.Delete(ctx, object); err != nil {
 			return err
 		}
 
-		return r.store.Delete(ctx, object)
+		return lock.Delete(ctx)
 	}
 
 	return nil

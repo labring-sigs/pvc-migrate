@@ -16,6 +16,15 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 )
 
+const (
+	// One-shot reconciliation is an administrative command. A broken or
+	// permanently unavailable dependency must not keep the command alive
+	// forever while the normal manager continues to use controller-runtime's
+	// queue backoff.
+	maxOneShotReconciliations = 64
+	maxOneShotRequeueDelay    = 30 * time.Second
+)
+
 // ReconcileWorkflowsOnce routes a single inventory pass through the same
 // operation reconcilers as the manager, including deletion and handoff recovery.
 func ReconcileWorkflowsOnce(
@@ -139,7 +148,7 @@ func reconcileUntilStable(
 	request reconcile.Request,
 	reconcileOne func(context.Context, reconcile.Request) (reconcile.Result, error),
 ) error {
-	for {
+	for pass := 1; ; pass++ {
 		result, err := reconcileOne(ctx, request)
 		if err != nil {
 			return err
@@ -156,9 +165,23 @@ func reconcileUntilStable(
 			return nil
 		}
 
+		if pass >= maxOneShotReconciliations {
+			return fmt.Errorf(
+				"one-shot reconciliation exceeded %d passes without becoming stable",
+				maxOneShotReconciliations,
+			)
+		}
+
 		delay := result.RequeueAfter
 		if delay <= 0 {
 			delay = time.Millisecond
+		}
+		if delay > maxOneShotRequeueDelay {
+			return fmt.Errorf(
+				"one-shot reconciliation requested a requeue delay of %s, exceeding the %s limit",
+				delay,
+				maxOneShotRequeueDelay,
+			)
 		}
 
 		timer := time.NewTimer(delay)

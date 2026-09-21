@@ -249,7 +249,7 @@ func TestReservationCleanupRetainsSourcePVAfterSourcePVCDisappears(t *testing.T)
 	}
 }
 
-func TestReservationDeletionRetriesLeaseCleanupBeforeRemovingMetadata(t *testing.T) {
+func TestReservationDeletionRemovesMetadataBeforeLeaseCleanup(t *testing.T) {
 	executor, object, store, _ := reservationCleanupFixture(t)
 	object.DeletionTimestamp = &metav1.Time{Time: executor.now()}
 	store.object = object.DeepCopy()
@@ -261,18 +261,11 @@ func TestReservationDeletionRetriesLeaseCleanupBeforeRemovingMetadata(t *testing
 		t.Fatalf("error = %v", err)
 	}
 
-	if store.object == nil {
-		t.Fatal("lease failure removed workflow metadata")
+	if store.object != nil {
+		t.Fatal("workflow metadata remained after the protected delete")
 	}
-
-	lock.deleteErr = nil
-
-	if err := executor.FinalizeDeleted(t.Context(), object); err != nil {
-		t.Fatal(err)
-	}
-
-	if store.object != nil || lock.deletes != 2 {
-		t.Fatal("deletion retry did not finish")
+	if lock.deletes != 1 {
+		t.Fatalf("lease cleanup was not attempted after metadata deletion: %d", lock.deletes)
 	}
 }
 
