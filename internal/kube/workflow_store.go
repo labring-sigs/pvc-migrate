@@ -155,7 +155,7 @@ func (s *ConfigMapWorkflowStore[T]) Create(ctx context.Context, object T) error 
 		ObjectMeta: metav1.ObjectMeta{
 			Namespace: s.namespace,
 			Name:      SessionConfigMapName(object.GetName()),
-			Labels:    sessionLabels(object.GetName()),
+			Labels:    sessionLabels(object.GetName(), s.gvk.Kind),
 		},
 		Data: map[string]string{SessionDataKey: string(data)},
 	}, metav1.CreateOptions{})
@@ -261,12 +261,10 @@ func (s *ConfigMapWorkflowStore[T]) Delete(ctx context.Context, object T) error 
 		)
 	}
 
-	if _, err := s.decode(existing, crclient.ObjectKeyFromObject(object)); err == nil {
-		// A decodable record enforces the caller's fencing identity. Legacy
-		// or corrupt payloads skip the check so deletion still converges.
-		if err := checkWorkflowStorageVersion(object, existing); err != nil {
-			return err
-		}
+	// Fencing is independent of payload decoding. A corrupt record must not
+	// allow a stale object to delete a replacement workflow.
+	if err := checkWorkflowStorageVersion(object, existing); err != nil {
+		return err
 	}
 
 	// Records written by pre-refactor releases carry session-protection
@@ -350,7 +348,7 @@ func (s *ConfigMapWorkflowStore[T]) decode(
 func (s *ConfigMapWorkflowStore[T]) List(ctx context.Context, namespace string) ([]T, error) {
 	items, err := s.client.CoreV1().
 		ConfigMaps(s.namespace).
-		List(ctx, metav1.ListOptions{LabelSelector: ManagedByLabel + "=" + ManagedByValue + "," + SessionKey})
+		List(ctx, metav1.ListOptions{LabelSelector: ManagedByLabel + "=" + ManagedByValue + "," + WorkflowKindLabel + "=" + s.gvk.Kind})
 	if err != nil {
 		return nil, err
 	}

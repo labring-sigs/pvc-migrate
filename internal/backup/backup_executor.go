@@ -121,6 +121,14 @@ func (b *BackupExecutor) run(ctx context.Context, object *v1alpha1.Backup) (resu
 		)
 	}()
 
+	return b.runTransfer(ctx, object, save)
+}
+
+func (b *BackupExecutor) runTransfer(
+	ctx context.Context,
+	object *v1alpha1.Backup,
+	save func(context.Context) error,
+) error {
 	repository, binding, err := resolveTransferRepository(
 		ctx, b.config.Repository,
 		object.Namespace,

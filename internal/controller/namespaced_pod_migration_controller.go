@@ -154,7 +154,11 @@ func (r *PodMigrationReconciler) executor(object *v1alpha1.PodMigration) *app.Po
 		r.store,
 		r.locker,
 		r.engine,
-		r.config,
+		app.PodMigrationExecutorConfig{
+			Storage:       config,
+			SharedVolumes: r.config.SharedVolumes,
+			Workloads:     r.config.Workloads,
+		},
 	)
 }
 

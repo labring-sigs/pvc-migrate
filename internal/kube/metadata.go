@@ -20,6 +20,7 @@ const (
 	PVCProtectionFinalizer      = "kubernetes.io/pvc-protection"
 	PVCStorageResizerAnnotation = "volume.kubernetes.io/storage-resizer"
 	SessionKey                  = MetadataDomain + "/session"
+	WorkflowKindLabel           = MetadataDomain + "/workflow-kind"
 	ResourceRoleLabel           = MetadataDomain + "/role"
 	SessionFinalizer            = MetadataDomain + "/session-protection"
 	LegacySessionFinalizer      = LegacyMetadataDomain + "/session-protection"

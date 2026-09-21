@@ -28,21 +28,8 @@ func recoverReservationVolume(
 		return checkpoint, domain.NewError(domain.ErrorConflict, "reservation recovery", message)
 	}
 
-	if destination.Name == "" || destination.Namespace == "" || source.UID == "" || id == "" {
-		return checkpoint, domain.NewError(
-			domain.ErrorValidation,
-			"reservation recovery",
-			"workflow, source identity and destination PVC are required",
-		)
-	}
-
-	if source.Namespace == destination.Namespace && source.Name == destination.Name {
-		return conflict("destination PVC aliases the source")
-	}
-
-	if checkpoint.DestinationPVC != nil &&
-		(checkpoint.DestinationPVC.Name != destination.Name || checkpoint.DestinationPVC.Namespace != destination.Namespace) {
-		return conflict("checkpoint destination differs from the planned PVC")
+	if err := validateReservationRecoveryRequest(id, source, destination, checkpoint); err != nil {
+		return checkpoint, err
 	}
 
 	pvc, err := client.CoreV1().
@@ -56,33 +43,14 @@ func recoverReservationVolume(
 		return checkpoint, err
 	}
 
-	if (destination.UID != "" && destination.UID != pvc.UID) ||
-		(checkpoint.DestinationPVC != nil && checkpoint.DestinationPVC.UID != "" && checkpoint.DestinationPVC.UID != pvc.UID) {
+	if !reservationPVCRecoveryIdentityMatches(destination, checkpoint.DestinationPVC, pvc) {
 		return conflict("destination PVC was replaced")
 	}
 
 	knownPVC := destination.UID != "" ||
 		(checkpoint.DestinationPVC != nil && checkpoint.DestinationPVC.UID != "")
-	if !reservationPVCRecoveryOwned(pvc, id, string(source.UID), knownPVC) {
-		// A terminal pass (deletion convergence or finalize cleanup) must
-		// always converge. An earlier finalize pass may have already
-		// stripped the PVC's ownership metadata; a PVC with no pvc-migrate
-		// metadata at all is ours being finalized, not a foreign claim —
-		// report it as already reclaimed so the session can close.
-		terminal := ctx.Value(workflowDeletionContextKey{}) != nil ||
-			ctx.Value(workflowFinalizeContextKey{}) != nil
-
-		unowned := pvc.Labels[kube.ManagedByLabel] == "" &&
-			pvc.Labels[kube.SessionKey] == "" &&
-			pvc.Labels[kube.ResourceRoleLabel] == "" &&
-			pvc.Annotations[kube.SessionKey] == ""
-		if terminal && unowned {
-			return result, nil
-		}
-
-		if !terminal || !unowned {
-			return conflict("destination PVC ownership changed")
-		}
+	if !reservationPVCRecoveryAllowed(ctx, pvc, id, string(source.UID), knownPVC) {
+		return conflict("destination PVC ownership changed")
 	}
 
 	ref := kube.PVCReference(pvc)
@@ -112,6 +80,70 @@ func recoverReservationVolume(
 	}
 
 	return result, nil
+}
+
+func validateReservationRecoveryRequest(
+	id string,
+	source, destination v1alpha1.ObjectReference,
+	checkpoint v1alpha1.ClusterVolumeReservationStatus,
+) error {
+	if destination.Name == "" || destination.Namespace == "" || source.UID == "" || id == "" {
+		return domain.NewError(
+			domain.ErrorValidation,
+			"reservation recovery",
+			"workflow, source identity and destination PVC are required",
+		)
+	}
+
+	if source.Namespace == destination.Namespace && source.Name == destination.Name {
+		return domain.NewError(
+			domain.ErrorConflict,
+			"reservation recovery",
+			"destination PVC aliases the source",
+		)
+	}
+
+	if checkpoint.DestinationPVC != nil &&
+		(checkpoint.DestinationPVC.Name != destination.Name || checkpoint.DestinationPVC.Namespace != destination.Namespace) {
+		return domain.NewError(
+			domain.ErrorConflict,
+			"reservation recovery",
+			"checkpoint destination differs from the planned PVC",
+		)
+	}
+
+	return nil
+}
+
+func reservationPVCRecoveryIdentityMatches(
+	destination v1alpha1.ObjectReference,
+	checkpoint *v1alpha1.ObjectReference,
+	pvc *corev1.PersistentVolumeClaim,
+) bool {
+	return (destination.UID == "" || destination.UID == pvc.UID) &&
+		(checkpoint == nil || checkpoint.UID == "" || checkpoint.UID == pvc.UID)
+}
+
+func reservationPVCRecoveryAllowed(
+	ctx context.Context,
+	pvc *corev1.PersistentVolumeClaim,
+	id, sourceUID string,
+	known bool,
+) bool {
+	if reservationPVCRecoveryOwned(pvc, id, sourceUID, known) {
+		return true
+	}
+
+	// Terminal cleanup may encounter a PVC after an earlier pass stripped all
+	// ownership metadata. Treat that exact unowned state as converged.
+	terminal := ctx.Value(workflowDeletionContextKey{}) != nil ||
+		ctx.Value(workflowFinalizeContextKey{}) != nil
+	unowned := pvc.Labels[kube.ManagedByLabel] == "" &&
+		pvc.Labels[kube.SessionKey] == "" &&
+		pvc.Labels[kube.ResourceRoleLabel] == "" &&
+		pvc.Annotations[kube.SessionKey] == ""
+
+	return terminal && unowned
 }
 
 func recoverReservationPV(

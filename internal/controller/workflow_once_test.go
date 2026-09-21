@@ -1,8 +1,10 @@
 package controller
 
 import (
+	"context"
 	"strings"
 	"testing"
+	"time"
 
 	v1alpha1 "github.com/labring-sigs/pvc-migrate/api/v1alpha1"
 	"github.com/labring-sigs/pvc-migrate/internal/domain"
@@ -11,7 +13,32 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	crclient "sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/event"
+	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 )
+
+func TestReconcileUntilStableConsumesRequeue(t *testing.T) {
+	passes := 0
+
+	err := reconcileUntilStable(
+		t.Context(),
+		reconcile.Request{},
+		func(context.Context, reconcile.Request) (reconcile.Result, error) {
+			passes++
+			if passes == 1 {
+				return reconcile.Result{RequeueAfter: time.Millisecond}, nil
+			}
+
+			return reconcile.Result{}, nil
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if passes != 2 {
+		t.Fatalf("reconcile passes=%d, want 2", passes)
+	}
+}
 
 func TestOneShotInventoryUsesConcreteControllersAndContinuesAfterFailure(t *testing.T) {
 	reservation := &v1alpha1.ClusterReservation{

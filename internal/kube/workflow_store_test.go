@@ -235,6 +235,108 @@ func TestConfigMapWorkflowStoreRejectsDifferentOperation(t *testing.T) {
 	}
 }
 
+func TestConfigMapWorkflowListIsolatesOperationKinds(t *testing.T) {
+	copyObject := &v1alpha1.Copy{
+		TypeMeta:   metav1.TypeMeta{APIVersion: v1alpha1.GroupVersion.String(), Kind: "Copy"},
+		ObjectMeta: metav1.ObjectMeta{Name: "copy", Namespace: "data"},
+	}
+
+	copyData, err := json.Marshal(copyObject)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	client := fake.NewClientset(
+		&corev1.ConfigMap{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      SessionConfigMapName("copy"),
+				Namespace: "sessions",
+				Labels:    sessionLabels("copy", "Copy"),
+			},
+			Data: map[string]string{SessionDataKey: string(copyData)},
+		},
+		&corev1.ConfigMap{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      SessionConfigMapName("backup"),
+				Namespace: "sessions",
+				Labels:    sessionLabels("backup", "Backup"),
+			},
+			Data: map[string]string{SessionDataKey: "{broken"},
+		},
+	)
+
+	store, err := NewConfigMapWorkflowStore(
+		client,
+		"sessions",
+		func() *v1alpha1.Copy { return &v1alpha1.Copy{} },
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	items, err := store.List(t.Context(), "data")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if len(items) != 1 || items[0].Name != "copy" {
+		t.Fatalf("operation list was blocked or mixed by another kind: %+v", items)
+	}
+
+	badCopy := &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      SessionConfigMapName("bad-copy"),
+			Namespace: "sessions",
+			Labels:    sessionLabels("bad-copy", "Copy"),
+		},
+		Data: map[string]string{SessionDataKey: "{broken"},
+	}
+	if _, err := client.CoreV1().ConfigMaps("sessions").Create(
+		t.Context(),
+		badCopy,
+		metav1.CreateOptions{},
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := store.List(t.Context(), ""); err == nil {
+		t.Fatal("corrupt record for the requested operation was silently ignored")
+	}
+}
+
+func TestConfigMapWorkflowDeleteFencesCorruptPayload(t *testing.T) {
+	object := storedRename()
+	client := fake.NewClientset(&corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:            SessionConfigMapName(object.Name),
+			Namespace:       "sessions",
+			UID:             types.UID("replacement"),
+			ResourceVersion: "2",
+			Labels:          sessionLabels(object.Name, "Rename"),
+		},
+		Data: map[string]string{SessionDataKey: "{broken"},
+	})
+
+	store, err := NewConfigMapWorkflowStore(
+		client,
+		"sessions",
+		func() *v1alpha1.Rename { return &v1alpha1.Rename{} },
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if err := store.Delete(t.Context(), object); domain.CategoryOf(err) != domain.ErrorConflict {
+		t.Fatalf("corrupt payload bypassed storage fencing: %v", err)
+	}
+
+	if _, err := client.CoreV1().ConfigMaps("sessions").Get(
+		t.Context(), SessionConfigMapName(object.Name), metav1.GetOptions{},
+	); err != nil {
+		t.Fatalf("fenced record was deleted: %v", err)
+	}
+}
+
 func TestConfigMapWorkflowFailedWritePreservesCallerVersion(t *testing.T) {
 	object := storedRename()
 

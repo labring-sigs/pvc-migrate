@@ -1646,7 +1646,7 @@ func TestGetRejectsSessionNamespaceMismatch(t *testing.T) {
 	}
 }
 
-func TestCleanupDeletesOnlyOwnedDestinationPVCAndReleasedPV(t *testing.T) {
+func TestCleanupRetainsCompletedDestinationPVCAndReleasedPV(t *testing.T) {
 	service, options, _ := crossFixture()
 
 	plan, err := service.Plan(context.Background(), options)
@@ -1727,18 +1727,14 @@ func TestCleanupDeletesOnlyOwnedDestinationPVCAndReleasedPV(t *testing.T) {
 
 	if _, err := destination.CoreV1().
 		PersistentVolumeClaims("app").
-		Get(context.Background(), "data-copy", metav1.GetOptions{}); !apierrors.IsNotFound(
-		err,
-	) {
-		t.Fatalf("destination PVC still exists: %v", err)
+		Get(context.Background(), "data-copy", metav1.GetOptions{}); err != nil {
+		t.Fatalf("completed destination PVC was removed: %v", err)
 	}
 
 	if _, err := destination.CoreV1().
 		PersistentVolumes().
-		Get(context.Background(), "pv-copy", metav1.GetOptions{}); !apierrors.IsNotFound(
-		err,
-	) {
-		t.Fatalf("destination PV still exists: %v", err)
+		Get(context.Background(), "pv-copy", metav1.GetOptions{}); err != nil {
+		t.Fatalf("completed destination PV was removed: %v", err)
 	}
 
 	if _, err := service.Get(

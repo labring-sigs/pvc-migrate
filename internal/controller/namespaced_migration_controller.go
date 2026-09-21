@@ -154,7 +154,7 @@ func (r *MigrationReconciler) executor(object *v1alpha1.Migration) *app.Migratio
 		r.store,
 		r.locker,
 		r.engine,
-		r.config,
+		config,
 	)
 }
 

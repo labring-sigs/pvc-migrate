@@ -222,11 +222,16 @@ func containsString(values []string, value string) bool {
 	return slices.Contains(values, value)
 }
 
-func sessionLabels(id string) map[string]string {
-	return map[string]string{
+func sessionLabels(id string, kind ...string) map[string]string {
+	labels := map[string]string{
 		ManagedByLabel: ManagedByValue,
 		SessionKey:     id,
 	}
+	if len(kind) > 0 && kind[0] != "" {
+		labels[WorkflowKindLabel] = kind[0]
+	}
+
+	return labels
 }
 
 func controllerWaitError(ctx context.Context, action string, err error) error {

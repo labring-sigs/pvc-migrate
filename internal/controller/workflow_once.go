@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"time"
 
 	v1alpha1 "github.com/labring-sigs/pvc-migrate/api/v1alpha1"
 	"github.com/labring-sigs/pvc-migrate/internal/domain"
@@ -108,9 +109,12 @@ func (r *WorkflowReconciler) reconcileKindInventory(
 	var failures []error
 	for index := range list.Items {
 		key := crclient.ObjectKeyFromObject(&list.Items[index])
-		if _, err := entry.Reconcile(ctx, reconcile.Request{NamespacedName: key}); err != nil {
+		if err := reconcileUntilStable(
+			ctx,
+			reconcile.Request{NamespacedName: key},
+			entry.Reconcile,
+		); err != nil {
 			failures = append(failures, fmt.Errorf("%s: %w", key, err))
-			continue
 		}
 
 		current := kube.WorkflowObjectForKind(kind)
@@ -128,4 +132,43 @@ func (r *WorkflowReconciler) reconcileKindInventory(
 	}
 
 	return errors.Join(failures...)
+}
+
+func reconcileUntilStable(
+	ctx context.Context,
+	request reconcile.Request,
+	reconcileOne func(context.Context, reconcile.Request) (reconcile.Result, error),
+) error {
+	for {
+		result, err := reconcileOne(ctx, request)
+		if err != nil {
+			return err
+		}
+
+		needsRequeue := result.RequeueAfter > 0
+
+		if !needsRequeue {
+			//nolint:staticcheck // one-shot must honor legacy Requeue results too
+			needsRequeue = result.Requeue
+		}
+
+		if !needsRequeue {
+			return nil
+		}
+
+		delay := result.RequeueAfter
+		if delay <= 0 {
+			delay = time.Millisecond
+		}
+
+		timer := time.NewTimer(delay)
+		select {
+		case <-ctx.Done():
+			if !timer.Stop() {
+				<-timer.C
+			}
+			return fmt.Errorf("one-shot reconciliation stopped: %w", ctx.Err())
+		case <-timer.C:
+		}
+	}
 }

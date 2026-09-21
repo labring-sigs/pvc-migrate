@@ -42,7 +42,7 @@ func (s *Service) cleanup(
 		policy = v1alpha1.UnusedStoragePolicy(unusedStoragePolicy)
 	}
 
-	deleteDestination := domain.DeletesUnusedStorage(policy)
+	deleteDestination := cleanupDeletesDestination(session, policy)
 
 	session.Status.Phase = PhaseCleaning
 	session.Status.Message = "cleaning cross-cluster resources"
@@ -116,7 +116,7 @@ func (s *Service) ValidateCleanup(
 		return err
 	}
 
-	deleteDestination := domain.DeletesUnusedStorage(policy)
+	deleteDestination := cleanupDeletesDestination(session, policy)
 
 	for i := range session.Spec.Volumes {
 		pvc, _, err := s.inspectCleanupDestination(ctx, session, i, deleteDestination)
@@ -132,6 +132,19 @@ func (s *Service) ValidateCleanup(
 	}
 
 	return nil
+}
+
+// A completed cross-cluster copy has delivered its destination PVC. The
+// destination is the result of the operation, so cleanup must retain it even
+// when the requested policy is Delete.
+func cleanupDeletesDestination(session *Session, policy v1alpha1.UnusedStoragePolicy) bool {
+	if session == nil ||
+		session.Status.Phase == PhaseCompleted ||
+		session.Status.CompletedAt != nil {
+		return false
+	}
+
+	return domain.DeletesUnusedStorage(policy)
 }
 
 func (s *Service) cleanupDestinationVolume(ctx context.Context, session *Session, index int) error {
