@@ -53,6 +53,14 @@ func (c *ClusterCopyExecutor) FinalizeDeleted(
 	ctx context.Context,
 	object *v1alpha1.ClusterCopy,
 ) error {
+	if object == nil {
+		return domain.NewError(
+			domain.ErrorPrecondition,
+			"finalize copy",
+			"workflow deletion is required",
+		)
+	}
+
 	// Statuses written by older releases can carry Failed without a resume
 	// checkpoint. Deletion is the final convergence pass and must not be
 	// wedged by that era's validation gap.

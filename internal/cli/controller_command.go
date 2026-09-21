@@ -41,6 +41,13 @@ func (r *rootState) newControllerCommand() *cobra.Command {
 			if err != nil {
 				return err
 			}
+			if runtime.controllerDiscoveryComplete && len(runtime.controllerKinds) == 0 {
+				return domain.NewError(
+					domain.ErrorPrecondition,
+					"controller mode",
+					"controller mode requires at least one migrate.sealos.io/v1alpha1 workflow CRD; install deploy/crd.yaml",
+				)
+			}
 
 			options := controller.ManagerOptions{
 				BackupPlanner:                 runtime.planner.ForController().PlanBackup,
@@ -100,7 +107,7 @@ func (r *rootState) newControllerCommand() *cobra.Command {
 		"pvc-migrate-system",
 		"Namespace where the controller runs and holds its leader Lease",
 	)
-	command.Flags().BoolVar(&once, "once", false, "Run one reconciliation pass and exit")
+	command.Flags().BoolVar(&once, "once", false, "Reconcile current workflows until stable and exit")
 	command.Flags().StringVar(
 		&healthProbeBindAddress,
 		"health-probe-bind-address",

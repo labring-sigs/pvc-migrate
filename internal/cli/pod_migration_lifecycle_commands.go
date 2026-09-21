@@ -37,14 +37,15 @@ func (r *rootState) newPodMigrationStatusCommand() *cobra.Command {
 				return runtime.printer.Print(object)
 			}
 
-			namespace := workflowNamespaceForCommand(r, cmd)
-
-			sessions, err := runtime.clusterPodMigrationSessionStore.List(ctx, namespace)
+			// ClusterPodMigration is cluster-scoped. Its ConfigMap-backed
+			// session object has no resource namespace; the configured namespace
+			// is only the ConfigMap storage location and must not filter objects.
+			sessions, err := runtime.clusterPodMigrationSessionStore.List(ctx, "")
 			if err != nil {
 				return err
 			}
 
-			objects, err := runtime.clusterPodMigrationStore.List(ctx, namespace)
+			objects, err := runtime.clusterPodMigrationStore.List(ctx, "")
 			if err != nil {
 				return err
 			}

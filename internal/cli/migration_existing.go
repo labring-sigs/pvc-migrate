@@ -100,7 +100,7 @@ func (r *rootState) migrationExecutor(
 	return app.NewMigrationExecutor(
 		runtime.clients.Kubernetes,
 		store,
-		cliWorkflowLocker(runtime),
+		cliWorkflowLockerForBackend(runtime, backend),
 		copyengine.NewPVMigrate(),
 		r.migrationConfig(runtime),
 	), nil
@@ -161,19 +161,28 @@ func (r *rootState) clusterMigrationExecutor(
 		return nil, err
 	}
 
-	namespace := string(object.Spec.SessionNamespace)
-	if namespace == "" {
-		namespace = string(object.Spec.SourceNamespace)
-	}
+	namespace := clusterMigrationStorageNamespace(object)
 
 	return app.NewClusterMigrationExecutor(
 		runtime.clients.Kubernetes,
 		store,
-		cliWorkflowLocker(runtime),
+		cliWorkflowLockerForBackend(runtime, backend),
 		namespace,
 		copyengine.NewPVMigrate(),
 		r.migrationConfig(runtime),
 	), nil
+}
+
+func clusterMigrationStorageNamespace(object *v1alpha1.ClusterMigration) string {
+	if object == nil {
+		return ""
+	}
+
+	if object.Spec.SessionNamespace != "" {
+		return string(object.Spec.SessionNamespace)
+	}
+
+	return string(object.Spec.SourceNamespace)
 }
 
 func (r *rootState) executeClusterMigration(

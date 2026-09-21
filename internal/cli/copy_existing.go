@@ -227,7 +227,7 @@ func (r *rootState) executeCopy(
 	executor := app.NewCopyExecutor(
 		runtime.clients.Kubernetes,
 		store,
-		cliWorkflowLocker(runtime),
+		cliWorkflowLockerForBackend(runtime, backend),
 		copyengine.NewPVMigrate(),
 		r.copyConfig(runtime),
 	)
@@ -240,7 +240,12 @@ func (r *rootState) executeCopy(
 			return runtime.printer.Print(object)
 		}
 
-		return printCopyDryRunResult(cmd, runtime, object, r.workflowStorageNamespace(cmd))
+		return printCopyDryRunResult(
+			cmd,
+			runtime,
+			object,
+			workflowLeaseNamespace(backend, r.workflowStorageNamespace(cmd), object),
+		)
 	}
 
 	if !repeat && requiresResumeApproval(copyResumePhase(object.Status.WorkflowStatus)) {
@@ -291,7 +296,7 @@ func (r *rootState) executeClusterCopy(
 	executor := app.NewClusterCopyExecutor(
 		runtime.clients.Kubernetes,
 		store,
-		cliWorkflowLocker(runtime),
+		cliWorkflowLockerForBackend(runtime, backend),
 		namespace,
 		copyengine.NewPVMigrate(),
 		r.copyConfig(runtime),
@@ -305,7 +310,7 @@ func (r *rootState) executeClusterCopy(
 			return runtime.printer.Print(object)
 		}
 
-		return printCopyDryRunResult(cmd, runtime, object, r.workflowStorageNamespace(cmd))
+		return printCopyDryRunResult(cmd, runtime, object, namespace)
 	}
 
 	if !repeat && requiresResumeApproval(copyResumePhase(object.Status.WorkflowStatus)) {

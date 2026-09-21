@@ -461,6 +461,14 @@ func (r *RenameExecutor) cleanup(
 // FinalizeDeleted converges the persisted PVC plan under one Lease before
 // releasing protection. A later spec edit cannot redirect deletion recovery.
 func (r *RenameExecutor) FinalizeDeleted(ctx context.Context, object *v1alpha1.Rename) error {
+	if object == nil {
+		return domain.NewError(
+			domain.ErrorPrecondition,
+			"finalize rename",
+			"workflow deletion is required",
+		)
+	}
+
 	// Statuses written by older releases can carry Failed without a resume
 	// checkpoint. Deletion is the final convergence pass and must not be
 	// wedged by that era's validation gap.
@@ -470,16 +478,7 @@ func (r *RenameExecutor) FinalizeDeleted(ctx context.Context, object *v1alpha1.R
 		object.Status.ResumeFrom = domain.PhasePlanned
 	}
 
-	if object.DeletionTimestamp != nil &&
-		object.Status.Phase == domain.PhaseFailed &&
-		object.Status.ResumeFrom == "" {
-		// Statuses written by older releases can carry Failed without a
-		// resume checkpoint. Deletion is the final convergence pass and must
-		// not be wedged by that era's validation gap.
-		object.Status.ResumeFrom = domain.PhasePlanned
-	}
-
-	if object == nil || object.DeletionTimestamp == nil {
+	if object.DeletionTimestamp == nil {
 		return domain.NewError(
 			domain.ErrorPrecondition,
 			"finalize rename",

@@ -69,14 +69,19 @@ type rootState struct {
 }
 
 type commandRuntime struct {
-	clients                            *kube.Clients
-	planner                            *planner.Planner
-	printer                            output.Printer
-	logger                             *slog.Logger
-	controllerLogger                   *slog.Logger
-	controllers                        *controller.Manager
-	openEBSLVMSharedVolumeManager      kube.OpenEBSLVMSharedVolumeManager
-	controllerKinds                    []domain.ControllerKind
+	clients                       *kube.Clients
+	planner                       *planner.Planner
+	printer                       output.Printer
+	logger                        *slog.Logger
+	controllerLogger              *slog.Logger
+	controllers                   *controller.Manager
+	openEBSLVMSharedVolumeManager kube.OpenEBSLVMSharedVolumeManager
+	controllerKinds               []domain.ControllerKind
+	// controllerDiscoveryComplete distinguishes an actual empty discovery
+	// result from test and injected runtimes that do not provide discovery
+	// metadata. Session-backed commands remain usable when no workflow CRD is
+	// installed; controller-backed commands still require an advertised kind.
+	controllerDiscoveryComplete        bool
 	waitForController                  bool
 	clusterPodMigrationStore           kube.WorkflowStore[*v1alpha1.ClusterPodMigration]
 	clusterPodMigrationExecutor        *app.ClusterPodMigrationExecutor
@@ -309,13 +314,6 @@ func (r *rootState) runtime() (*commandRuntime, error) {
 	}
 
 	controllerKinds := kube.AvailableControllerWorkflowKinds(clients.Discovery)
-	if len(controllerKinds) == 0 {
-		return nil, domain.NewError(
-			domain.ErrorPrecondition,
-			"controller mode",
-			"controller mode requires at least one migrate.sealos.io/v1alpha1 workflow CRD; install deploy/crd.yaml",
-		)
-	}
 
 	clusterPodMigrationStore, err := kube.NewCRDWorkflowStore(
 		clients.Runtime,
@@ -444,6 +442,7 @@ func (r *rootState) runtime() (*commandRuntime, error) {
 		controllers:                        controllers,
 		openEBSLVMSharedVolumeManager:      openEBSLVMSharedVolumeManager,
 		controllerKinds:                    slices.Clone(controllerKinds),
+		controllerDiscoveryComplete:        true,
 		waitForController:                  true,
 		clusterPodMigrationStore:           clusterPodMigrationStore,
 		clusterPodMigrationExecutor:        clusterPodMigrationExecutor,
@@ -548,13 +547,14 @@ func printerFor(r *rootState) output.Printer {
 // default would kill legitimate large copies mid-transfer.
 const dataTransferOperationTimeout = 24 * time.Hour
 
-// dataTransferRootCommands are the root operations that transfer payload
-// data (copy, migrate, migrate-pod, backup, restore) or resume it from a
-// checkpoint. Metadata-only operations (rename, move, reserve) keep the
-// short default.
+// dataTransferRootCommands are root operations that can execute payload data
+// transfers (copy, migrate, migrate-pod, backup, restore, controller --once)
+// or resume them from a checkpoint. The controller one-shot command must use
+// the long bound because its inventory is not known until it lists the CRDs.
+// Metadata-only operations (rename, move, reserve) keep the short default.
 var dataTransferRootCommands = map[string]bool{
 	"copy": true, "migrate": true, "migrate-pod": true,
-	"backup": true, "restore": true,
+	"backup": true, "restore": true, "controller": true,
 }
 
 // effectiveTimeout resolves the operation timeout: an explicit --timeout

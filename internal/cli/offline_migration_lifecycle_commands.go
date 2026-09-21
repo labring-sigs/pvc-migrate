@@ -331,7 +331,7 @@ func (r *rootState) newOfflineMigrationCleanupCommand() *cobra.Command {
 				if err != nil {
 					return reportMigrationCleanupError(
 						cmd,
-						r.workflowStorageNamespace(cmd),
+						workflowLeaseNamespace(backend, r.workflowStorageNamespace(cmd), current),
 						current.Name,
 						options,
 						err,
@@ -353,7 +353,7 @@ func (r *rootState) newOfflineMigrationCleanupCommand() *cobra.Command {
 				if err != nil {
 					return reportMigrationCleanupError(
 						cmd,
-						r.workflowStorageNamespace(cmd),
+						clusterMigrationStorageNamespace(current),
 						current.Name,
 						options,
 						err,

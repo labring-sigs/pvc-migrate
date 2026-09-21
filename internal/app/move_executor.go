@@ -414,6 +414,14 @@ func (m *MoveExecutor) cleanup(
 }
 
 func (m *MoveExecutor) FinalizeDeleted(ctx context.Context, object *v1alpha1.Move) error {
+	if object == nil {
+		return domain.NewError(
+			domain.ErrorPrecondition,
+			"finalize move",
+			"workflow deletion is required",
+		)
+	}
+
 	// Statuses written by older releases can carry Failed without a resume
 	// checkpoint. Deletion is the final convergence pass and must not be
 	// wedged by that era's validation gap.
@@ -423,16 +431,7 @@ func (m *MoveExecutor) FinalizeDeleted(ctx context.Context, object *v1alpha1.Mov
 		object.Status.ResumeFrom = domain.PhasePlanned
 	}
 
-	if object.DeletionTimestamp != nil &&
-		object.Status.Phase == domain.PhaseFailed &&
-		object.Status.ResumeFrom == "" {
-		// Statuses written by older releases can carry Failed without a
-		// resume checkpoint. Deletion is the final convergence pass and must
-		// not be wedged by that era's validation gap.
-		object.Status.ResumeFrom = domain.PhasePlanned
-	}
-
-	if object == nil || object.DeletionTimestamp == nil {
+	if object.DeletionTimestamp == nil {
 		return domain.NewError(
 			domain.ErrorPrecondition,
 			"finalize move",

@@ -279,15 +279,16 @@ func (r *rootState) reserveExisting(
 	id string,
 	dryRun bool,
 ) error {
-	object, err := r.loadReservation(ctx, cmd, runtime, id)
+	object, backend, err := r.loadReservationWithBackend(ctx, cmd, runtime, id)
 	if err != nil {
 		return err
 	}
 
 	switch current := object.(type) {
 	case *v1alpha1.Reservation:
-		store, err := cliWorkflowStore(
+		store, err := cliWorkflowStoreForBackend(
 			runtime,
+			backend,
 			r.workflowStorageNamespace(cmd),
 			func() *v1alpha1.Reservation { return &v1alpha1.Reservation{} },
 		)
@@ -298,7 +299,7 @@ func (r *rootState) reserveExisting(
 		executor := app.NewReservationExecutor(
 			runtime.clients.Kubernetes,
 			store,
-			cliWorkflowLocker(runtime),
+			cliWorkflowLockerForBackend(runtime, backend),
 			r.reservationConfig(runtime),
 		)
 		if dryRun {
@@ -323,8 +324,9 @@ func (r *rootState) reserveExisting(
 			namespace = string(current.Spec.SourceNamespace)
 		}
 
-		store, err := cliWorkflowStore(
+		store, err := cliWorkflowStoreForBackend(
 			runtime,
+			backend,
 			r.workflowStorageNamespace(cmd),
 			func() *v1alpha1.ClusterReservation { return &v1alpha1.ClusterReservation{} },
 		)
@@ -335,7 +337,7 @@ func (r *rootState) reserveExisting(
 		executor := app.NewClusterReservationExecutor(
 			runtime.clients.Kubernetes,
 			store,
-			cliWorkflowLocker(runtime),
+			cliWorkflowLockerForBackend(runtime, backend),
 			namespace,
 			r.reservationConfig(runtime),
 		)

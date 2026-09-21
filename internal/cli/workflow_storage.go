@@ -6,6 +6,7 @@ import (
 	"slices"
 	"strings"
 
+	v1alpha1 "github.com/labring-sigs/pvc-migrate/api/v1alpha1"
 	"github.com/labring-sigs/pvc-migrate/internal/domain"
 	"github.com/labring-sigs/pvc-migrate/internal/kube"
 	"github.com/spf13/cobra"
@@ -13,6 +14,32 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	crclient "sigs.k8s.io/controller-runtime/pkg/client"
 )
+
+// saveCLIPlannedWorkflow freezes the same execution intent that the controller
+// records before it starts a planned CRD. Lifecycle commands can drive a CRD
+// directly during recovery, so they must leave the same tamper-evident status.
+func saveCLIPlannedWorkflow[T crclient.Object](
+	ctx context.Context,
+	store kube.WorkflowStore[T],
+	object T,
+	status *v1alpha1.WorkflowStatus,
+) error {
+	if status == nil {
+		return domain.NewError(
+			domain.ErrorValidation,
+			"plan workflow",
+			"workflow status is required",
+		)
+	}
+
+	hash, err := kube.WorkflowExecutionIntentHash(object)
+	if err != nil {
+		return err
+	}
+	status.ExecutionIntentHash = hash
+
+	return store.Save(ctx, object)
+}
 
 func (r *rootState) workflowStorageNamespace(cmd *cobra.Command) string {
 	return workflowNamespaceForCommand(r, cmd)
@@ -38,6 +65,36 @@ func cliWorkflowStore[T crclient.Object](
 
 func cliWorkflowLocker(runtime *commandRuntime) kube.SessionLocker {
 	return kube.NewConfigMapWorkflowLocker(runtime.clients.Kubernetes)
+}
+
+// cliWorkflowLockerForBackend keeps the fencing protocol paired with the
+// persistence backend that owns the workflow. CRD workflows must re-check
+// ConfigMap identity collisions while acquiring their Lease; session
+// workflows must be allowed to lock the ConfigMap-backed record itself.
+func cliWorkflowLockerForBackend(
+	runtime *commandRuntime,
+	backend string,
+) kube.SessionLocker {
+	if backend == backendCRD {
+		return kube.NewCRDWorkflowLocker(runtime.clients.Kubernetes)
+	}
+
+	return cliWorkflowLocker(runtime)
+}
+
+// workflowLeaseNamespace resolves the namespace in which a workflow's Lease
+// belongs. ConfigMap sessions use their configured storage namespace; a
+// namespaced CRD uses the namespace carried by the API object.
+func workflowLeaseNamespace(
+	backend string,
+	fallback string,
+	object crclient.Object,
+) string {
+	if backend == backendCRD && object != nil && object.GetNamespace() != "" {
+		return object.GetNamespace()
+	}
+
+	return fallback
 }
 
 // cliCRDWorkflowStore persists workflows as API-server CRs for the declarative
@@ -100,6 +157,13 @@ func (r *rootState) loadWorkflowWithBackend(
 		return nil, "", err
 	}
 
+	// A session-only runtime may intentionally omit the controller-runtime
+	// client. Once ConfigMap storage misses, there is no CRD backend to probe;
+	// return the original not-found instead of dereferencing a nil client.
+	if !crdListable(runtime) {
+		return nil, "", err
+	}
+
 	probes := []string{namespace}
 	if extra := r.crdProbeNamespaces(cmd); len(extra) != 0 {
 		probes = append(probes, extra...)
@@ -138,17 +202,22 @@ func (r *rootState) crdProbeNamespaces(cmd *cobra.Command) []string {
 			}
 
 			value, err := cmd.Flags().GetString(name)
-			if err != nil || strings.TrimSpace(value) == "" ||
-				value == "default" {
+			if err != nil || strings.TrimSpace(value) == "" {
 				continue
 			}
 
-			namespaces = append(namespaces, strings.TrimSpace(value))
+			value = strings.TrimSpace(value)
+			if !slices.Contains(namespaces, value) {
+				namespaces = append(namespaces, value)
+			}
 		}
 	}
 
 	if r != nil && strings.TrimSpace(r.global.workflowNamespace) != "" {
-		namespaces = append(namespaces, strings.TrimSpace(r.global.workflowNamespace))
+		value := strings.TrimSpace(r.global.workflowNamespace)
+		if !slices.Contains(namespaces, value) {
+			namespaces = append(namespaces, value)
+		}
 	}
 
 	return namespaces
@@ -161,10 +230,11 @@ const (
 )
 
 // crdListable reports whether the runtime can enumerate workflow CRs. A
-// session-only runtime (no controller-runtime client) still lists ConfigMap
-// sessions; it simply has no CRD records to add.
+// session-only runtime (no client or no discovered workflow CRD) still lists
+// ConfigMap sessions; it simply has no CRD records to add.
 func crdListable(runtime *commandRuntime) bool {
-	return runtime != nil && runtime.clients != nil && runtime.clients.Runtime != nil
+	return runtime != nil && runtime.clients != nil && runtime.clients.Runtime != nil &&
+		(!runtime.controllerDiscoveryComplete || len(runtime.controllerKinds) != 0)
 }
 
 // lookupControllerObjects is an input boundary. It detects ambiguity before an

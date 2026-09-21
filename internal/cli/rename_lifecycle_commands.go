@@ -6,9 +6,9 @@ import (
 
 	v1alpha1 "github.com/labring-sigs/pvc-migrate/api/v1alpha1"
 	"github.com/labring-sigs/pvc-migrate/internal/app"
+	"github.com/labring-sigs/pvc-migrate/internal/domain"
 	"github.com/labring-sigs/pvc-migrate/internal/kube"
 	"github.com/spf13/cobra"
-	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	crclient "sigs.k8s.io/controller-runtime/pkg/client"
 )
 
@@ -31,39 +31,42 @@ func (r *rootState) loadRename(
 	cmd *cobra.Command,
 	runtime *commandRuntime,
 	id string,
-) (*v1alpha1.Rename, kube.WorkflowStore[*v1alpha1.Rename], error) {
+) (*v1alpha1.Rename, kube.WorkflowStore[*v1alpha1.Rename], string, error) {
 	storageNamespace := r.renameStorageNamespace(cmd)
-
-	store, err := renameStore(runtime, storageNamespace)
-	if err != nil {
-		return nil, nil, err
-	}
-
-	key := crclient.ObjectKey{Name: id, Namespace: storageNamespace}
-
-	object, err := store.Load(ctx, key)
-	if err == nil {
-		return object, store, nil
-	}
-
-	if !apierrors.IsNotFound(err) {
-		return nil, nil, err
-	}
-
-	crdStore, err := cliCRDWorkflowStore(
+	object, backend, err := r.loadWorkflowWithBackend(
+		ctx,
+		cmd,
 		runtime,
+		storageNamespace,
+		id,
+		map[domain.ControllerKind]crclient.Object{
+			domain.ControllerKindRename: &v1alpha1.Rename{},
+		},
+	)
+	if err != nil {
+		return nil, nil, "", reportSessionLookupError(cmd, storageNamespace, id, err)
+	}
+
+	rename, ok := object.(*v1alpha1.Rename)
+	if !ok {
+		return nil, nil, "", domain.NewError(
+			domain.ErrorValidation,
+			"rename",
+			"stored workflow is not a rename",
+		)
+	}
+
+	store, err := cliWorkflowStoreForBackend(
+		runtime,
+		backend,
+		storageNamespace,
 		func() *v1alpha1.Rename { return &v1alpha1.Rename{} },
 	)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, "", err
 	}
 
-	object, err = crdStore.Load(ctx, key)
-	if err != nil {
-		return nil, nil, reportSessionLookupError(cmd, storageNamespace, id, err)
-	}
-
-	return object, crdStore, nil
+	return rename, store, backend, nil
 }
 
 func (r *rootState) newRenameStatusCommand() *cobra.Command {
@@ -81,7 +84,7 @@ func (r *rootState) newRenameStatusCommand() *cobra.Command {
 			defer cancel()
 
 			if len(args) == 1 {
-				object, _, err := r.loadRename(ctx, cmd, runtime, args[0])
+				object, _, _, err := r.loadRename(ctx, cmd, runtime, args[0])
 				if err != nil {
 					return err
 				}
@@ -124,16 +127,17 @@ func (r *rootState) renameLifecycleCommand(
 		ctx, cancel := r.context(cmd.Context())
 		defer cancel()
 
-		object, store, err := r.loadRename(ctx, cmd, runtime, args[0])
+		object, store, backend, err := r.loadRename(ctx, cmd, runtime, args[0])
 		if err != nil {
 			return err
 		}
 
+		namespace := workflowLeaseNamespace(backend, r.renameStorageNamespace(cmd), object)
 		executor := app.NewRenameExecutor(
 			runtime.clients.Kubernetes,
 			store,
-			cliWorkflowLocker(runtime),
-			r.renameStorageNamespace(cmd),
+			cliWorkflowLockerForBackend(runtime, backend),
+			namespace,
 		)
 		if dryRun {
 			if err := validate(ctx, executor, object); err != nil {
@@ -174,16 +178,17 @@ func (r *rootState) newRenameResumeCommand() *cobra.Command {
 		ctx, cancel := r.context(cmd.Context())
 		defer cancel()
 
-		object, store, err := r.loadRename(ctx, cmd, runtime, args[0])
+		object, store, backend, err := r.loadRename(ctx, cmd, runtime, args[0])
 		if err != nil {
 			return err
 		}
 
+		namespace := workflowLeaseNamespace(backend, r.renameStorageNamespace(cmd), object)
 		executor := app.NewRenameExecutor(
 			runtime.clients.Kubernetes,
 			store,
-			cliWorkflowLocker(runtime),
-			r.renameStorageNamespace(cmd),
+			cliWorkflowLockerForBackend(runtime, backend),
+			namespace,
 		)
 		if dryRun {
 			if err := executor.ValidateResume(ctx, object); err != nil {
@@ -257,16 +262,17 @@ func (r *rootState) newRenameCleanupCommand() *cobra.Command {
 		ctx, cancel := r.context(cmd.Context())
 		defer cancel()
 
-		object, store, err := r.loadRename(ctx, cmd, runtime, args[0])
+		object, store, backend, err := r.loadRename(ctx, cmd, runtime, args[0])
 		if err != nil {
 			return err
 		}
 
+		namespace := workflowLeaseNamespace(backend, r.renameStorageNamespace(cmd), object)
 		executor := app.NewRenameExecutor(
 			runtime.clients.Kubernetes,
 			store,
-			cliWorkflowLocker(runtime),
-			r.renameStorageNamespace(cmd),
+			cliWorkflowLockerForBackend(runtime, backend),
+			namespace,
 		)
 		if dryRun {
 			if err := executor.ValidateCleanup(ctx, object, options); err != nil {

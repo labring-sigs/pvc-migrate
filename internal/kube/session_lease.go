@@ -4,7 +4,9 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
@@ -25,6 +27,25 @@ const (
 	leaseAPIStopTimeout           = 15 * time.Second
 	maxLeaseDurationSeconds       = int64(1<<31 - 1)
 )
+
+// ErrSessionNamespaceTerminating marks the Kubernetes admission failure that
+// occurs when a namespace is terminating and cannot create new Lease objects.
+// Deletion convergence may bypass a workflow Lease only for this condition;
+// lock contention and unrelated API failures must keep the finalizer.
+var ErrSessionNamespaceTerminating = errors.New("session namespace is terminating")
+
+func isSessionNamespaceTerminating(err error) bool {
+	if err == nil {
+		return false
+	}
+
+	if errors.Is(err, ErrSessionNamespaceTerminating) {
+		return true
+	}
+
+	message := strings.ToLower(err.Error())
+	return apierrors.IsForbidden(err) && strings.Contains(message, "being terminated")
+}
 
 func leaseDurationSeconds(duration time.Duration) int32 {
 	if duration <= 0 {
@@ -144,6 +165,16 @@ func acquireWorkflowLease(
 
 			if apierrors.IsAlreadyExists(createErr) {
 				continue
+			}
+
+			if apierrors.IsForbidden(createErr) &&
+				strings.Contains(strings.ToLower(createErr.Error()), "being terminated") {
+				return nil, domain.WrapError(
+					domain.ErrorKubernetes,
+					"acquire session lock",
+					fmt.Sprintf("create Lease %s/%s", namespace, name),
+					ErrSessionNamespaceTerminating,
+				)
 			}
 
 			return nil, domain.WrapError(

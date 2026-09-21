@@ -255,7 +255,7 @@ func (r *rootState) newReserveAbortCommand() *cobra.Command {
 			executor := app.NewReservationExecutor(
 				runtime.clients.Kubernetes,
 				store,
-				cliWorkflowLocker(runtime),
+				cliWorkflowLockerForBackend(runtime, backend),
 				r.reservationConfig(runtime),
 			)
 			if dryRun {
@@ -286,7 +286,7 @@ func (r *rootState) newReserveAbortCommand() *cobra.Command {
 			executor := app.NewClusterReservationExecutor(
 				runtime.clients.Kubernetes,
 				store,
-				cliWorkflowLocker(runtime),
+				cliWorkflowLockerForBackend(runtime, backend),
 				namespace,
 				r.reservationConfig(runtime),
 			)
@@ -354,7 +354,7 @@ func (r *rootState) newReserveCleanupCommand() *cobra.Command {
 			executor := app.NewReservationExecutor(
 				runtime.clients.Kubernetes,
 				store,
-				cliWorkflowLocker(runtime),
+				cliWorkflowLockerForBackend(runtime, backend),
 				r.reservationConfig(runtime),
 			)
 			if dryRun {
@@ -366,7 +366,7 @@ func (r *rootState) newReserveCleanupCommand() *cobra.Command {
 			if err != nil {
 				return reportReservationCleanupError(
 					cmd,
-					r.workflowStorageNamespace(cmd),
+					workflowLeaseNamespace(backend, r.workflowStorageNamespace(cmd), current),
 					current.Name,
 					options,
 					err,
@@ -391,7 +391,7 @@ func (r *rootState) newReserveCleanupCommand() *cobra.Command {
 			executor := app.NewClusterReservationExecutor(
 				runtime.clients.Kubernetes,
 				store,
-				cliWorkflowLocker(runtime),
+				cliWorkflowLockerForBackend(runtime, backend),
 				namespace,
 				r.reservationConfig(runtime),
 			)
@@ -404,7 +404,7 @@ func (r *rootState) newReserveCleanupCommand() *cobra.Command {
 			if err != nil {
 				return reportReservationCleanupError(
 					cmd,
-					r.workflowStorageNamespace(cmd),
+					namespace,
 					current.Name,
 					options,
 					err,

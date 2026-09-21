@@ -27,6 +27,10 @@ func TestEffectiveTimeout(t *testing.T) {
 			want: dataTransferOperationTimeout,
 		},
 		{
+			name: "controller one-shot defaults to the transfer bound", command: "controller",
+			want: dataTransferOperationTimeout,
+		},
+		{
 			name: "rename keeps the metadata default", command: "rename",
 			want: 30 * time.Minute,
 		},
@@ -49,6 +53,10 @@ func TestEffectiveTimeout(t *testing.T) {
 		{
 			name: "explicit flag wins on metadata operations", command: "rename",
 			changed: true, set: 1 * time.Hour, want: 1 * time.Hour,
+		},
+		{
+			name: "explicit flag wins on controller one-shot", command: "controller",
+			changed: true, set: 5 * time.Minute, want: 5 * time.Minute,
 		},
 	}
 

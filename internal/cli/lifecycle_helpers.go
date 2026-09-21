@@ -31,7 +31,7 @@ func controllerWorkflowAvailable(runtime *commandRuntime, sessionType domain.Ses
 	}
 
 	if len(runtime.controllerKinds) == 0 {
-		return true
+		return !runtime.controllerDiscoveryComplete
 	}
 
 	return slices.Contains(runtime.controllerKinds, kind)

@@ -10,7 +10,6 @@ import (
 	"github.com/labring-sigs/pvc-migrate/internal/domain"
 	"github.com/labring-sigs/pvc-migrate/internal/kube"
 	"github.com/spf13/cobra"
-	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	crclient "sigs.k8s.io/controller-runtime/pkg/client"
 )
 
@@ -19,41 +18,42 @@ func (r *rootState) loadBackup(
 	cmd *cobra.Command,
 	runtime *commandRuntime,
 	name string,
-) (*v1alpha1.Backup, kube.WorkflowStore[*v1alpha1.Backup], error) {
+) (*v1alpha1.Backup, kube.WorkflowStore[*v1alpha1.Backup], string, error) {
 	namespace := r.workflowStorageNamespace(cmd)
-
-	store, err := cliWorkflowStore(
+	object, backend, err := r.loadWorkflowWithBackend(
+		ctx,
+		cmd,
 		runtime,
+		namespace,
+		name,
+		map[domain.ControllerKind]crclient.Object{
+			domain.ControllerKindBackup: &v1alpha1.Backup{},
+		},
+	)
+	if err != nil {
+		return nil, nil, "", reportSessionLookupError(cmd, namespace, name, err)
+	}
+
+	backup, ok := object.(*v1alpha1.Backup)
+	if !ok {
+		return nil, nil, "", domain.NewError(
+			domain.ErrorValidation,
+			"backup",
+			"stored workflow is not a backup",
+		)
+	}
+
+	store, err := cliWorkflowStoreForBackend(
+		runtime,
+		backend,
 		namespace,
 		func() *v1alpha1.Backup { return &v1alpha1.Backup{} },
 	)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, "", err
 	}
 
-	key := crclient.ObjectKey{Name: name}
-	key.Namespace = namespace
-
-	object, err := store.Load(ctx, key)
-	if err == nil {
-		return object, store, nil
-	}
-
-	if !apierrors.IsNotFound(err) {
-		return nil, nil, err
-	}
-
-	crdStore, err := cliCRDWorkflowStore(
-		runtime,
-		func() *v1alpha1.Backup { return &v1alpha1.Backup{} },
-	)
-	if err != nil {
-		return nil, nil, err
-	}
-
-	object, err = crdStore.Load(ctx, key)
-
-	return object, crdStore, err
+	return backup, store, backend, nil
 }
 
 func (r *rootState) newBackupStatusCommand() *cobra.Command {
@@ -71,7 +71,7 @@ func (r *rootState) newBackupStatusCommand() *cobra.Command {
 			defer cancel()
 
 			if len(args) == 1 {
-				object, _, err := r.loadBackup(ctx, cmd, runtime, args[0])
+				object, _, backend, err := r.loadBackup(ctx, cmd, runtime, args[0])
 				if err != nil {
 					return err
 				}
@@ -81,7 +81,7 @@ func (r *rootState) newBackupStatusCommand() *cobra.Command {
 					runtime,
 					object,
 					"backup",
-					r.workflowStorageNamespace(cmd),
+					workflowLeaseNamespace(backend, r.workflowStorageNamespace(cmd), object),
 				)
 			}
 
@@ -148,14 +148,14 @@ func (r *rootState) newBackupResumeCommand() *cobra.Command {
 		ctx, cancel := r.context(cmd.Context())
 		defer cancel()
 
-		object, store, err := r.loadBackup(ctx, cmd, runtime, args[0])
+		object, store, backend, err := r.loadBackup(ctx, cmd, runtime, args[0])
 		if err != nil {
 			return err
 		}
 
-		namespace := r.workflowStorageNamespace(cmd)
+		namespace := workflowLeaseNamespace(backend, r.workflowStorageNamespace(cmd), object)
 
-		executor := r.backupExecutor(runtime, namespace, store)
+		executor := r.backupExecutor(runtime, namespace, store, backend)
 		if object.Status.Phase == domain.PhaseCompleted ||
 			object.Status.Phase == domain.PhaseAborted {
 			return printRepositoryWorkflowResult(cmd, runtime, object, "backup", namespace)
@@ -180,7 +180,7 @@ func (r *rootState) newBackupResumeCommand() *cobra.Command {
 				runtime,
 				object,
 				"backup",
-				r.workflowStorageNamespace(cmd),
+				namespace,
 			)
 		}
 
@@ -203,7 +203,7 @@ func (r *rootState) newBackupResumeCommand() *cobra.Command {
 			err = kube.WithWorkflowLease(
 				ctx,
 				store,
-				cliWorkflowLocker(runtime),
+				cliWorkflowLockerForBackend(runtime, backend),
 				namespace,
 				object,
 				false,
@@ -223,7 +223,12 @@ func (r *rootState) newBackupResumeCommand() *cobra.Command {
 						return err
 					}
 
-					if err := store.Save(ctx, object); err != nil {
+					if err := saveCLIPlannedWorkflow(
+						ctx,
+						store,
+						object,
+						&object.Status.WorkflowStatus,
+					); err != nil {
 						object.Status = *before
 						return err
 					}
@@ -259,7 +264,7 @@ func (r *rootState) newBackupResumeCommand() *cobra.Command {
 			runtime,
 			object,
 			"backup",
-			r.workflowStorageNamespace(cmd),
+			namespace,
 		)
 	}
 	bindDryRun(command, &dryRun)
@@ -284,12 +289,13 @@ func (r *rootState) newBackupAbortCommand() *cobra.Command {
 		ctx, cancel := r.context(cmd.Context())
 		defer cancel()
 
-		object, store, err := r.loadBackup(ctx, cmd, runtime, args[0])
+		object, store, backend, err := r.loadBackup(ctx, cmd, runtime, args[0])
 		if err != nil {
 			return err
 		}
 
-		executor := r.backupExecutor(runtime, r.workflowStorageNamespace(cmd), store)
+		namespace := workflowLeaseNamespace(backend, r.workflowStorageNamespace(cmd), object)
+		executor := r.backupExecutor(runtime, namespace, store, backend)
 		if dryRun {
 			err = executor.ValidateAbort(ctx, object)
 		} else {
@@ -316,7 +322,7 @@ func (r *rootState) newBackupAbortCommand() *cobra.Command {
 			runtime,
 			object,
 			"backup",
-			r.workflowStorageNamespace(cmd),
+			namespace,
 		)
 	}
 	bindDryRun(command, &dryRun)
@@ -343,12 +349,13 @@ func (r *rootState) newBackupCleanupCommand() *cobra.Command {
 		ctx, cancel := r.context(cmd.Context())
 		defer cancel()
 
-		object, store, err := r.loadBackup(ctx, cmd, runtime, args[0])
+		object, store, backend, err := r.loadBackup(ctx, cmd, runtime, args[0])
 		if err != nil {
 			return err
 		}
 
-		executor := r.backupExecutor(runtime, r.workflowStorageNamespace(cmd), store)
+		namespace := workflowLeaseNamespace(backend, r.workflowStorageNamespace(cmd), object)
+		executor := r.backupExecutor(runtime, namespace, store, backend)
 		if dryRun {
 			err = executor.ValidateCleanup(ctx, object, options)
 		} else {

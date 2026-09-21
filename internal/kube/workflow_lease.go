@@ -42,7 +42,8 @@ func WithWorkflowLease[T crclient.Object](
 		// Deletion convergence must survive its own namespace terminating:
 		// lease creation is forbidden there, and no concurrent writer exists
 		// for a deleting workflow. Release the finalizer directly.
-		if allowDeleting && object.GetDeletionTimestamp() != nil {
+		if allowDeleting && object.GetDeletionTimestamp() != nil &&
+			isSessionNamespaceTerminating(err) {
 			return store.Delete(ctx, object)
 		}
 

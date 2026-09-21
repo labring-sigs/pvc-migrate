@@ -47,6 +47,14 @@ func (c *CopyExecutor) RequestResume(ctx context.Context, object *v1alpha1.Copy)
 }
 
 func (c *CopyExecutor) FinalizeDeleted(ctx context.Context, object *v1alpha1.Copy) error {
+	if object == nil {
+		return domain.NewError(
+			domain.ErrorPrecondition,
+			"finalize copy",
+			"workflow deletion is required",
+		)
+	}
+
 	// Statuses written by older releases can carry Failed without a resume
 	// checkpoint. Deletion is the final convergence pass and must not be
 	// wedged by that era's validation gap.
@@ -66,15 +74,6 @@ func (c *CopyExecutor) FinalizeDeleted(ctx context.Context, object *v1alpha1.Cop
 			"finalize copy",
 			"workflow deletion is required",
 		)
-	}
-
-	if object.DeletionTimestamp != nil &&
-		object.Status.Phase == domain.PhaseFailed &&
-		object.Status.ResumeFrom == "" {
-		// Statuses written by older releases can carry Failed without a
-		// resume checkpoint. Deletion is the final convergence pass and must
-		// not be wedged by that era's validation gap.
-		object.Status.ResumeFrom = domain.PhasePlanned
 	}
 
 	ctx = context.WithValue(ctx, workflowDeletionContextKey{}, true)

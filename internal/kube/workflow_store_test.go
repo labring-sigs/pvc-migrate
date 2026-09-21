@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"slices"
 	"testing"
 
 	v1alpha1 "github.com/labring-sigs/pvc-migrate/api/v1alpha1"
@@ -541,7 +542,7 @@ type failingSessionLocker struct{}
 func (failingSessionLocker) AcquireSessionLock(
 	context.Context, string, string,
 ) (SessionLock, error) {
-	return nil, errors.New("lock unavailable")
+	return nil, ErrSessionNamespaceTerminating
 }
 
 func TestWithWorkflowLeaseDeletingObjectConvergesWhenLockUnavailable(t *testing.T) {
@@ -598,5 +599,114 @@ func TestWithWorkflowLeaseDeletingObjectConvergesWhenLockUnavailable(t *testing.
 		err,
 	) {
 		t.Fatalf("deleting workflow still exists: %v (err=%v)", final, err)
+	}
+}
+
+func TestWithWorkflowLeaseClusterScopedDeletionConvergesWhenLockNamespaceTerminates(t *testing.T) {
+	scheme := runtime.NewScheme()
+	if err := v1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+
+	now := metav1.Now()
+	record := &v1alpha1.ClusterCopy{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:              "cluster-copy",
+			UID:               types.UID("copy-uid"),
+			ResourceVersion:   "1",
+			Finalizers:        []string{SessionFinalizer},
+			DeletionTimestamp: &now,
+		},
+	}
+
+	client := crfake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(record.DeepCopy()).
+		Build()
+
+	store, err := NewCRDWorkflowStore(client, func() *v1alpha1.ClusterCopy {
+		return &v1alpha1.ClusterCopy{}
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	err = WithWorkflowLease(
+		t.Context(),
+		store,
+		failingSessionLocker{},
+		"sessions",
+		record,
+		true,
+		func(context.Context, SessionLock) error { return nil },
+	)
+	if err != nil {
+		t.Fatalf("cluster-scoped deletion error = %v, want nil", err)
+	}
+
+	final := &v1alpha1.ClusterCopy{}
+	if err := client.Get(t.Context(), crclient.ObjectKey{Name: record.Name}, final); err == nil {
+		if slices.Contains(final.Finalizers, SessionFinalizer) {
+			t.Fatal("cluster-scoped workflow finalizer was not removed")
+		}
+	} else if !apierrors.IsNotFound(err) {
+		t.Fatal(err)
+	}
+}
+
+type contendedSessionLocker struct{}
+
+func (contendedSessionLocker) AcquireSessionLock(
+	context.Context, string, string,
+) (SessionLock, error) {
+	return nil, domain.WrapError(
+		domain.ErrorConflict,
+		"acquire session lock",
+		"workflow is already being changed",
+		ErrSessionLockContention,
+	)
+}
+
+func TestWithWorkflowLeaseDeletingObjectRetainsFinalizerOnLockContention(t *testing.T) {
+	scheme := runtime.NewScheme()
+	if err := v1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+
+	now := metav1.Now()
+	record := storedRename()
+	record.Finalizers = []string{SessionFinalizer}
+	record.DeletionTimestamp = &now
+
+	client := crfake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(record.DeepCopy()).
+		Build()
+
+	store, err := NewCRDWorkflowStore(client, func() *v1alpha1.Rename {
+		return &v1alpha1.Rename{}
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	live := record.DeepCopy()
+	if err := client.Get(t.Context(), crclient.ObjectKeyFromObject(live), live); err != nil {
+		t.Fatal(err)
+	}
+
+	err = WithWorkflowLease(t.Context(), store, contendedSessionLocker{}, record.Namespace, live, true,
+		func(context.Context, SessionLock) error { return nil })
+	if !errors.Is(err, ErrSessionLockContention) {
+		t.Fatalf("lock contention error = %v, want contention", err)
+	}
+
+	final := &v1alpha1.Rename{}
+	if err := client.Get(t.Context(), crclient.ObjectKeyFromObject(record), final); err != nil {
+		t.Fatal(err)
+	}
+
+	if !slices.Contains(final.Finalizers, SessionFinalizer) {
+		t.Fatal("lock contention removed the workflow finalizer")
 	}
 }

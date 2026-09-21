@@ -179,7 +179,7 @@ func (r *rootState) runRestoreObject(
 		return err
 	}
 
-	executor := r.restoreExecutor(runtime, storageNamespace, store)
+	executor := r.restoreExecutor(runtime, storageNamespace, store, backendConfigMap)
 
 	repository, credentials, err := prepareInlineRepository(
 		ctx,
@@ -298,7 +298,7 @@ func (r *rootState) runRestoreObject(
 		runtime,
 		object,
 		"restore",
-		r.workflowStorageNamespace(cmd),
+		storageNamespace,
 	)
 }
 

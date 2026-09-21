@@ -55,6 +55,7 @@ func (r *rootState) backupExecutor(
 	runtime *commandRuntime,
 	namespace string,
 	store kube.WorkflowStore[*v1alpha1.Backup],
+	backend string,
 ) *backup.BackupExecutor {
 	config := backup.BackupExecutorConfig{
 		Tools:               r.repositoryTools(runtime),
@@ -66,7 +67,7 @@ func (r *rootState) backupExecutor(
 	return backup.NewBackupExecutor(
 		runtime.clients.Kubernetes,
 		store,
-		cliWorkflowLocker(runtime),
+		cliWorkflowLockerForBackend(runtime, backend),
 		namespace,
 		config,
 	)
@@ -76,6 +77,7 @@ func (r *rootState) restoreExecutor(
 	runtime *commandRuntime,
 	namespace string,
 	store kube.WorkflowStore[*v1alpha1.Restore],
+	backend string,
 ) *backup.RestoreExecutor {
 	config := backup.RestoreExecutorConfig{
 		Tools:      r.repositoryTools(runtime),
@@ -86,7 +88,7 @@ func (r *rootState) restoreExecutor(
 	return backup.NewRestoreExecutor(
 		runtime.clients.Kubernetes,
 		store,
-		cliWorkflowLocker(runtime),
+		cliWorkflowLockerForBackend(runtime, backend),
 		namespace,
 		config,
 	)

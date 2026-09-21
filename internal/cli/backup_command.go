@@ -156,7 +156,7 @@ func (r *rootState) runBackupObject(
 		return err
 	}
 
-	executor := r.backupExecutor(runtime, storageNamespace, store)
+	executor := r.backupExecutor(runtime, storageNamespace, store, backendConfigMap)
 
 	repository, credentials, err := prepareInlineRepository(
 		ctx,
@@ -275,7 +275,7 @@ func (r *rootState) runBackupObject(
 		runtime,
 		object,
 		"backup",
-		r.workflowStorageNamespace(cmd),
+		storageNamespace,
 	)
 }
 

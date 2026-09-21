@@ -3,15 +3,12 @@ package cli
 import (
 	"context"
 	"fmt"
-	"slices"
-	"strings"
 
 	v1alpha1 "github.com/labring-sigs/pvc-migrate/api/v1alpha1"
 	"github.com/labring-sigs/pvc-migrate/internal/app"
+	"github.com/labring-sigs/pvc-migrate/internal/domain"
 	"github.com/labring-sigs/pvc-migrate/internal/kube"
 	"github.com/spf13/cobra"
-	apierrors "k8s.io/apimachinery/pkg/api/errors"
-	"k8s.io/apimachinery/pkg/runtime/schema"
 	crclient "sigs.k8s.io/controller-runtime/pkg/client"
 )
 
@@ -53,91 +50,42 @@ func (r *rootState) loadMove(
 	cmd *cobra.Command,
 	runtime *commandRuntime,
 	id string,
-) (*v1alpha1.Move, kube.WorkflowStore[*v1alpha1.Move], error) {
-	store, err := moveStore(runtime, r.global.sessionNamespace)
-	if err != nil {
-		return nil, nil, err
-	}
-
-	// Session records carry no namespace of their own; the ConfigMap location
-	// is the session namespace, not a workload namespace.
-	object, err := store.Load(ctx, crclient.ObjectKey{Name: id})
-	if err == nil {
-		return object, store, nil
-	}
-
-	if !apierrors.IsNotFound(err) {
-		return nil, nil, err
-	}
-
-	// Controller-submitted Move CRs live in the source namespace. Probe the
-	// namespaces a caller could have addressed.
-	crdStore, err := cliCRDWorkflowStore(
+) (*v1alpha1.Move, kube.WorkflowStore[*v1alpha1.Move], string, error) {
+	namespace := r.global.sessionNamespace
+	object, backend, err := r.loadWorkflowWithBackend(
+		ctx,
+		cmd,
 		runtime,
-		func() *v1alpha1.Move { return &v1alpha1.Move{} },
+		namespace,
+		id,
+		map[domain.ControllerKind]crclient.Object{
+			domain.ControllerKindMove: &v1alpha1.Move{},
+		},
 	)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, "", reportSessionLookupError(cmd, namespace, id, err)
 	}
 
-	var lastErr error
-	for _, namespace := range r.moveProbeNamespaces(cmd) {
-		object, err := crdStore.Load(ctx, crclient.ObjectKey{Name: id, Namespace: namespace})
-		if apierrors.IsNotFound(err) {
-			lastErr = err
-			continue
-		}
-
-		if err != nil {
-			return nil, nil, err
-		}
-
-		return object, crdStore, nil
-	}
-
-	if lastErr == nil {
-		lastErr = apierrors.NewNotFound(
-			schema.GroupResource{Group: v1alpha1.GroupVersion.Group, Resource: "moves"}, id,
+	move, ok := object.(*v1alpha1.Move)
+	if !ok {
+		return nil, nil, "", domain.NewError(
+			domain.ErrorValidation,
+			"move",
+			"stored workflow is not a move",
 		)
 	}
 
-	return nil, nil, reportSessionLookupError(cmd, r.global.sessionNamespace, id, lastErr)
-}
-
-// moveProbeNamespaces lists the tenant namespaces a controller-submitted Move
-// CR lookup must cover.
-func (r *rootState) moveProbeNamespaces(cmd *cobra.Command) []string {
-	namespaces := make([]string, 0, 3)
-
-	if cmd != nil {
-		for _, name := range []string{"source-namespace", "namespace", "workflow-namespace"} {
-			flag := cmd.Flags().Lookup(name)
-			if flag == nil {
-				continue
-			}
-
-			value, err := cmd.Flags().GetString(name)
-			if err != nil || strings.TrimSpace(value) == "" || value == "default" {
-				continue
-			}
-
-			if !slices.Contains(namespaces, strings.TrimSpace(value)) {
-				namespaces = append(namespaces, strings.TrimSpace(value))
-			}
-		}
+	store, err := cliWorkflowStoreForBackend(
+		runtime,
+		backend,
+		namespace,
+		func() *v1alpha1.Move { return &v1alpha1.Move{} },
+	)
+	if err != nil {
+		return nil, nil, "", err
 	}
 
-	if candidate := strings.TrimSpace(r.global.workflowNamespace); candidate != "" &&
-		!slices.Contains(namespaces, candidate) {
-		namespaces = append(namespaces, candidate)
-	}
-
-	if candidate := strings.TrimSpace(r.global.sessionNamespace); candidate != "" &&
-		!slices.Contains(namespaces, candidate) {
-		namespaces = append(namespaces, candidate)
-	}
-
-	return namespaces
+	return move, store, backend, nil
 }
 
 func (r *rootState) newMoveStatusCommand() *cobra.Command {
@@ -155,7 +103,7 @@ func (r *rootState) newMoveStatusCommand() *cobra.Command {
 			defer cancel()
 
 			if len(args) == 1 {
-				object, _, err := r.loadMove(ctx, cmd, runtime, args[0])
+				object, _, _, err := r.loadMove(ctx, cmd, runtime, args[0])
 				if err != nil {
 					return err
 				}
@@ -196,7 +144,7 @@ func (r *rootState) moveLifecycleCommand(
 		ctx, cancel := r.context(cmd.Context())
 		defer cancel()
 
-		object, store, err := r.loadMove(ctx, cmd, runtime, args[0])
+		object, store, backend, err := r.loadMove(ctx, cmd, runtime, args[0])
 		if err != nil {
 			return err
 		}
@@ -204,7 +152,7 @@ func (r *rootState) moveLifecycleCommand(
 		executor := app.NewMoveExecutor(
 			runtime.clients.Kubernetes,
 			store,
-			cliWorkflowLocker(runtime),
+			cliWorkflowLockerForBackend(runtime, backend),
 			moveStorageNamespace(object),
 		)
 		if dryRun {
@@ -266,7 +214,7 @@ func (r *rootState) newMoveResumeCommand() *cobra.Command {
 		ctx, cancel := r.context(cmd.Context())
 		defer cancel()
 
-		object, store, err := r.loadMove(ctx, cmd, runtime, args[0])
+		object, store, backend, err := r.loadMove(ctx, cmd, runtime, args[0])
 		if err != nil {
 			return err
 		}
@@ -274,7 +222,7 @@ func (r *rootState) newMoveResumeCommand() *cobra.Command {
 		executor := app.NewMoveExecutor(
 			runtime.clients.Kubernetes,
 			store,
-			cliWorkflowLocker(runtime),
+			cliWorkflowLockerForBackend(runtime, backend),
 			moveStorageNamespace(object),
 		)
 		if dryRun {
@@ -323,7 +271,7 @@ func (r *rootState) newMoveCleanupCommand() *cobra.Command {
 		ctx, cancel := r.context(cmd.Context())
 		defer cancel()
 
-		object, store, err := r.loadMove(ctx, cmd, runtime, args[0])
+		object, store, backend, err := r.loadMove(ctx, cmd, runtime, args[0])
 		if err != nil {
 			return err
 		}
@@ -331,7 +279,7 @@ func (r *rootState) newMoveCleanupCommand() *cobra.Command {
 		executor := app.NewMoveExecutor(
 			runtime.clients.Kubernetes,
 			store,
-			cliWorkflowLocker(runtime),
+			cliWorkflowLockerForBackend(runtime, backend),
 			moveStorageNamespace(object),
 		)
 		if dryRun {

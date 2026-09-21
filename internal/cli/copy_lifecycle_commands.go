@@ -196,7 +196,7 @@ func (r *rootState) newCopyAbortCommand() *cobra.Command {
 			executor := app.NewCopyExecutor(
 				runtime.clients.Kubernetes,
 				store,
-				cliWorkflowLocker(runtime),
+				cliWorkflowLockerForBackend(runtime, backend),
 				copyengine.NewPVMigrate(),
 				r.copyConfig(runtime),
 			)
@@ -228,7 +228,7 @@ func (r *rootState) newCopyAbortCommand() *cobra.Command {
 			executor := app.NewClusterCopyExecutor(
 				runtime.clients.Kubernetes,
 				store,
-				cliWorkflowLocker(runtime),
+				cliWorkflowLockerForBackend(runtime, backend),
 				namespace,
 				copyengine.NewPVMigrate(),
 				r.copyConfig(runtime),
@@ -297,7 +297,7 @@ func (r *rootState) newCopyCleanupCommand() *cobra.Command {
 			executor := app.NewCopyExecutor(
 				runtime.clients.Kubernetes,
 				store,
-				cliWorkflowLocker(runtime),
+				cliWorkflowLockerForBackend(runtime, backend),
 				copyengine.NewPVMigrate(),
 				r.copyConfig(runtime),
 			)
@@ -310,7 +310,7 @@ func (r *rootState) newCopyCleanupCommand() *cobra.Command {
 			if err != nil {
 				return reportCopyCleanupError(
 					cmd,
-					r.workflowStorageNamespace(cmd),
+					workflowLeaseNamespace(backend, r.workflowStorageNamespace(cmd), current),
 					current.Name,
 					options,
 					err,
@@ -335,7 +335,7 @@ func (r *rootState) newCopyCleanupCommand() *cobra.Command {
 			executor := app.NewClusterCopyExecutor(
 				runtime.clients.Kubernetes,
 				store,
-				cliWorkflowLocker(runtime),
+				cliWorkflowLockerForBackend(runtime, backend),
 				namespace,
 				copyengine.NewPVMigrate(),
 				r.copyConfig(runtime),
@@ -349,7 +349,7 @@ func (r *rootState) newCopyCleanupCommand() *cobra.Command {
 			if err != nil {
 				return reportCopyCleanupError(
 					cmd,
-					r.workflowStorageNamespace(cmd),
+					namespace,
 					current.Name,
 					options,
 					err,

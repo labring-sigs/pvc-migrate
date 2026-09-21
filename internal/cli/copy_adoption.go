@@ -46,7 +46,7 @@ func (r *rootState) adoptCRDReservation(
 	executor := app.NewCopyExecutor(
 		runtime.clients.Kubernetes,
 		copyStore,
-		cliWorkflowLocker(runtime),
+		cliWorkflowLockerForBackend(runtime, backendCRD),
 		copyengine.NewPVMigrate(),
 		r.copyConfig(runtime),
 	)
@@ -123,7 +123,7 @@ func (r *rootState) adoptCRDClusterReservation(
 	executor := app.NewClusterCopyExecutor(
 		runtime.clients.Kubernetes,
 		copyStore,
-		cliWorkflowLocker(runtime),
+		cliWorkflowLockerForBackend(runtime, backendCRD),
 		lockNamespace,
 		copyengine.NewPVMigrate(),
 		r.copyConfig(runtime),
@@ -143,7 +143,7 @@ func (r *rootState) adoptCRDClusterReservation(
 			cmd,
 			runtime,
 			preview,
-			r.workflowStorageNamespace(cmd),
+			lockNamespace,
 		)
 	}
 
@@ -200,7 +200,7 @@ func (r *rootState) adoptReservation(
 	executor := app.NewCopyExecutor(
 		runtime.clients.Kubernetes,
 		store,
-		cliWorkflowLocker(runtime),
+		cliWorkflowLockerForBackend(runtime, backend),
 		copyengine.NewPVMigrate(),
 		r.copyConfig(runtime),
 	)
@@ -288,7 +288,7 @@ func (r *rootState) adoptClusterReservation(
 	executor := app.NewClusterCopyExecutor(
 		runtime.clients.Kubernetes,
 		store,
-		cliWorkflowLocker(runtime),
+		cliWorkflowLockerForBackend(runtime, backend),
 		lockNamespace,
 		copyengine.NewPVMigrate(),
 		r.copyConfig(runtime),
