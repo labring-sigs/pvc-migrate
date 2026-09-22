@@ -1993,7 +1993,9 @@ func warmCopyMountFallback(operation domain.Operation) string {
 	if operation == domain.OperationCopy {
 		return "stop all active PVC consumers and rerun without --online"
 	}
-	return "use --precopy-passes 0 for offline final sync"
+	// Zero precopy passes do not avoid the co-mount: the final-sync tool
+	// probe still mounts the source before the workload pauses.
+	return "the final-sync tool probe co-mounts the source before the workload pauses, whatever the precopy pass count"
 }
 
 func sourcePodReadMessage(namespace, name string, err error) string {

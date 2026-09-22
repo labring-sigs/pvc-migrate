@@ -158,6 +158,22 @@ func (r *rootState) volumeCopyConfig(runtime *commandRuntime) app.VolumeCopyConf
 	return config
 }
 
+// copyApprovalTarget picks the value the operator must retype to approve the
+// protected action. A Pod-selected copy leaves Spec.Volumes empty — the
+// controller derives the volume set from the Pod — so the Pod name carries
+// the approval instead.
+func copyApprovalTarget(spec v1alpha1.CopySpec, workflowName string) string {
+	if len(spec.Volumes) > 0 {
+		return spec.Volumes[0].SourcePVC.Name
+	}
+
+	if spec.Pod != nil {
+		return spec.Pod.Name
+	}
+
+	return workflowName
+}
+
 func (r *rootState) createCopy(
 	ctx context.Context,
 	cmd *cobra.Command,
@@ -186,7 +202,7 @@ func (r *rootState) createCopy(
 		return err
 	}
 
-	if err := r.confirm(ctx, cmd, object.Spec.Volumes[0].SourcePVC.Name); err != nil {
+	if err := r.confirm(ctx, cmd, copyApprovalTarget(object.Spec, object.Name)); err != nil {
 		return reportApprovalError(cmd, err)
 	}
 
@@ -252,7 +268,11 @@ func (r *rootState) createClusterCopy(
 		return err
 	}
 
-	if err := r.confirm(ctx, cmd, object.Spec.Volumes[0].SourcePVC.Name); err != nil {
+	if err := r.confirm(
+		ctx,
+		cmd,
+		copyApprovalTarget(object.Spec.CopySpec, object.Name),
+	); err != nil {
 		return reportApprovalError(cmd, err)
 	}
 

@@ -428,7 +428,7 @@ func TestCheckWarmCopyMountCompatibility(t *testing.T) {
 		{
 			name:      "OpenEBS LVM without shared blocks warm copy",
 			class:     &storagev1.StorageClass{ObjectMeta: metav1.ObjectMeta{Name: "openebs-lvmpv"}, Provisioner: "local.csi.openebs.io", Parameters: map[string]string{"volgroup": "lvmvg"}},
-			consumers: []*corev1.Pod{consumer}, wantText: "--precopy-passes 0", wantLevel: domain.SeverityError, wantChecks: 1, wantInspect: true,
+			consumers: []*corev1.Pod{consumer}, wantText: "co-mounts the source", wantLevel: domain.SeverityError, wantChecks: 1, wantInspect: true,
 		},
 		{
 			name:         "OpenEBS LVM explicit enable permits warm-copy probe",
@@ -648,7 +648,7 @@ func TestPlanReportsOpenEBSWarmCopyMountCheck(t *testing.T) {
 	}
 
 	if !hasFailedCheckContaining(
-		plan.Checks, "warm-copy-mount", "--precopy-passes 0",
+		plan.Checks, "warm-copy-mount", "co-mounts the source",
 	) {
 		t.Fatalf("warm-copy mount check missing: %#v", plan.Checks)
 	}
@@ -668,10 +668,13 @@ func TestPlanReportsOpenEBSWarmCopyMountCheck(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if hasFailedCheck(
-		cutoverPlan.Checks, "warm-copy-mount",
+	// The cutover's final-sync tool probe co-mounts the source before the
+	// workload pauses, so a zero-pass plan must keep the shared-mount check
+	// instead of failing mid-execution with a busy mount.
+	if !hasFailedCheckContaining(
+		cutoverPlan.Checks, "warm-copy-mount", "--openebs-lvm-enable-shared",
 	) {
-		t.Fatalf("zero-pass Pod migration includes warm-copy mount check: %#v", cutoverPlan.Checks)
+		t.Fatalf("zero-pass Pod migration lost the cutover co-mount check: %#v", cutoverPlan.Checks)
 	}
 }
 
@@ -866,7 +869,6 @@ func TestPlanVolumeConsumersModelsConcurrentRWODestinationByVolume(t *testing.T)
 				workload.Adapter,
 				workload.AffectedPods,
 				[]planVolumeInput{{pvc: solo}, {pvc: pvc}},
-				0,
 				test.enableShared,
 			)
 

@@ -231,7 +231,6 @@ func (p *Planner) resolvePodMigration(
 		workload.Adapter,
 		workload.AffectedPods,
 		inputs,
-		spec.PrecopyPasses,
 		spec.OpenEBSLVMEnableShared,
 	)
 
@@ -363,7 +362,6 @@ func (p *Planner) checkPodMigrationPlanConsumers(
 	workloadKind v1alpha1.WorkloadKind,
 	affectedPods []v1alpha1.LocalResourceReference,
 	inputs []planVolumeInput,
-	precopyPasses int,
 	enableShared bool,
 ) (bool, bool) {
 	inspectShared, patchShared := false, false
@@ -394,22 +392,24 @@ func (p *Planner) checkPodMigrationPlanConsumers(
 		state.plannedVolumes[index].ConcurrentConsumers = concurrentConsumers
 		state.volumeSpecs[index].ConcurrentConsumers = concurrentConsumers
 
-		if precopyPasses > 0 {
-			inspect, patch := p.checkWarmCopyMountCompatibility(
-				ctx,
-				state.plan,
-				domain.OperationMigratePod,
-				enableShared,
-				input.pvc,
-				input.pv,
-				input.sourceClass,
-				state.storageClasses[input.sourceClass],
-				state.storageClassErrors[input.sourceClass],
-				consumers,
-			)
-			inspectShared = inspectShared || inspect
-			patchShared = patchShared || patch
-		}
+		// The cutover co-mounts the source for the final-sync tool probe
+		// while the workload still runs, whatever the precopy pass count, so
+		// the shared-mount compatibility check cannot be skipped for
+		// zero-pass plans.
+		inspect, patch := p.checkWarmCopyMountCompatibility(
+			ctx,
+			state.plan,
+			domain.OperationMigratePod,
+			enableShared,
+			input.pvc,
+			input.pv,
+			input.sourceClass,
+			state.storageClasses[input.sourceClass],
+			state.storageClassErrors[input.sourceClass],
+			consumers,
+		)
+		inspectShared = inspectShared || inspect
+		patchShared = patchShared || patch
 
 		volume := state.volumeSpecs[index]
 		if concurrentConsumers > 1 && slices.Contains(volume.AccessModes, corev1.ReadWriteOnce) &&

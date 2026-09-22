@@ -818,64 +818,12 @@ func (m *Manager) legacyKubeBlocksPauseNotStarted(
 		return false, nil
 	}
 
-	phase, found, err := unstructured.NestedString(cluster.Object, "status", "phase")
-	if err != nil || !found || kubeBlocksPhase(phase) != kubeBlocksPhaseRunning {
-		return false, nil
-	}
-
-	components, found, err := unstructured.NestedSlice(
-		cluster.Object,
-		"spec",
-		kubeBlocksFieldComponentSpecs,
-	)
-	if err != nil || !found {
-		return false, nil
-	}
-
-	componentFound := false
-	for index := range components {
-		component, ok := components[index].(map[string]any)
-		if !ok {
-			return false, nil
-		}
-
-		name, _, _ := unstructured.NestedString(component, "name")
-		if name != kb.Component {
-			continue
-		}
-
-		componentFound = true
-
-		break
-	}
-
-	if !componentFound {
-		return false, nil
-	}
-
-	pod, err := m.typed.CoreV1().Pods(podRef.Namespace).
-		Get(ctx, podRef.Name, metav1.GetOptions{})
-	if err != nil {
-		if apierrors.IsNotFound(err) {
-			return false, nil
-		}
-
-		return false, domain.WrapError(
-			domain.ErrorKubernetes,
-			"resume KubeBlocks",
-			"read original Pod",
-			err,
-		)
-	}
-
-	if pod.UID != podRef.UID || !kube.PodReady(pod) {
-		return false, nil
-	}
-
-	if err := validatePodController(pod, controller, "resume KubeBlocks"); err != nil {
-		return false, err
-	}
-
+	// The pause flow writes this session's ownership annotation before it
+	// creates the stop operation, so an absent annotation means this session
+	// never started the pause — a stop or failure by anyone else is not this
+	// session's to resume. Treating a not-Running cluster as pause-started
+	// wedges abort: the resume verification then demands exactly the
+	// ownership annotation the failed pause never wrote.
 	return true, nil
 }
 
@@ -1496,7 +1444,7 @@ func (m *Manager) recoverLegacyKubeBlocksStoppedWithPod(
 			domain.ErrorConflict,
 			"pause KubeBlocks",
 			fmt.Sprintf(
-				"Cluster %s/%s is stopped while its instance Pod is still present without this session's ownership",
+				"Cluster %s/%s is stopped or failed while its instance Pod is still present without this session's ownership",
 				cluster.GetNamespace(),
 				cluster.GetName(),
 			),
