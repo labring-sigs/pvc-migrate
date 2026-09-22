@@ -1,6 +1,8 @@
 package cli
 
 import (
+	"errors"
+	"fmt"
 	"time"
 
 	v1alpha1 "github.com/labring-sigs/pvc-migrate/api/v1alpha1"
@@ -466,10 +468,27 @@ func (r *rootState) runPodMigrateCommand(
 	}
 
 	if err := runtime.clusterPodMigrationSessionExecutor.Run(ctx, object); err != nil {
-		return reportPlanningError(cmd, err)
+		return reportPodMigrationError(cmd, object.Name, object.Status.Phase, err)
 	}
 
 	return runtime.printer.Print(object)
+}
+
+func reportPodMigrationError(
+	cmd *cobra.Command,
+	name string,
+	phase v1alpha1.WorkflowPhase,
+	cause error,
+) error {
+	_, err := fmt.Fprintf(
+		cmd.ErrOrStderr(),
+		"Pod migration %s stopped in phase %s. Inspect migrate-pod status %s before resume, abort or cleanup.\n",
+		name,
+		phase,
+		name,
+	)
+
+	return errors.Join(cause, err)
 }
 
 func podApprovalIdentity(flags *podMigrationFlags) string {
