@@ -124,7 +124,8 @@ func (r *rootState) newCrossClusterCopyResumeCommand() *cobra.Command {
 				ctx,
 				session,
 				r.global.retries,
-				r.global.noCompress,
+				crossClusterCompressDefault(cmd, r.global.compress),
+				r.global.copyBandwidth,
 			); err != nil {
 				return err
 			}
@@ -263,7 +264,8 @@ func (r *rootState) newCrossClusterCopyRunCommand() *cobra.Command {
 				ctx,
 				session,
 				r.global.retries,
-				r.global.noCompress,
+				crossClusterCompressDefault(cmd, r.global.compress),
+				r.global.copyBandwidth,
 			); err != nil {
 				return err
 			}
@@ -654,4 +656,16 @@ func crossClusterCopyCleanupCommand(flags *crossClusterCopyFlags, sessionID stri
 	)
 
 	return strings.Join(args, " ")
+}
+
+// crossClusterCompressDefault resolves the compression policy for
+// cross-cluster transfers: compression is off by default elsewhere, but a
+// WAN hop pays for itself, so an unset flag means enabled here.
+func crossClusterCompressDefault(cmd *cobra.Command, compress bool) bool {
+	if cmd != nil && cmd.Flags().Lookup("compress") != nil &&
+		cmd.Flags().Changed("compress") {
+		return compress
+	}
+
+	return true
 }

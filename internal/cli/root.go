@@ -48,7 +48,8 @@ type globals struct {
 	logLevel          string
 	color             string
 	streamToolLogs    bool
-	noCompress        bool
+	compress          bool
+	copyBandwidth     string
 	assumeYes         bool
 	toolImage         string
 }
@@ -124,6 +125,14 @@ func NewRoot(options Options) *cobra.Command {
 			state.timeoutExplicit = cmd.Flags().Changed("timeout")
 
 			if err := state.validateCopyTimeout(cmd); err != nil {
+				return err
+			}
+
+			if err := state.validateCopyBandwidth(cmd); err != nil {
+				return err
+			}
+
+			if err := state.validateTransferTuningFlags(cmd); err != nil {
 				return err
 			}
 
@@ -206,7 +215,18 @@ func NewRoot(options Options) *cobra.Command {
 		true,
 		"Stream generated tool Pod logs to stderr",
 	)
-	flags.BoolVar(&state.global.noCompress, "no-compress", false, "Disable rsync compression")
+	flags.BoolVar(
+		&state.global.compress,
+		"compress",
+		false,
+		"Compress rsync transfer data; off by default — cross-cluster copy enables it unless set explicitly",
+	)
+	flags.StringVar(
+		&state.global.copyBandwidth,
+		"copy-bandwidth-limit",
+		"",
+		"Cap rsync transfer rate in KiB/s unless a K/M/G suffix is given (for example 10m); empty is unlimited",
+	)
 	flags.BoolVarP(
 		&state.global.assumeYes,
 		"yes",
@@ -345,7 +365,8 @@ func (r *rootState) runtime() (*commandRuntime, error) {
 		// this field the direct-session executors silently ran unbounded
 		// attempts while the copy command honored the bound.
 		CopyTimeout:    r.global.copyTimeout,
-		NoCompress:     r.global.noCompress,
+		Compress:       r.global.compress,
+		BandwidthLimit: r.global.copyBandwidth,
 		StreamToolLogs: r.global.streamToolLogs,
 		StructuredLogs: structuredLogs,
 		Writer:         serviceWriter,
@@ -576,6 +597,92 @@ func (r *rootState) effectiveTimeout() time.Duration {
 	}
 
 	return r.global.timeout
+}
+
+// transferCommandPath resolves the root transfer operation a command belongs
+// to and the executed subcommand name (for example copy/create).
+func transferCommandPath(cmd *cobra.Command) (root, sub string) {
+	if cmd == nil {
+		return "", ""
+	}
+
+	sub = cmd.Name()
+	for c := cmd; c != nil; c = c.Parent() {
+		if dataTransferRootCommands[c.Name()] {
+			return c.Name(), sub
+		}
+	}
+
+	return "", sub
+}
+
+// submissionMessage explains why a transfer-tuning flag cannot apply to a
+// controller-submitted workflow: the submitting process never runs rsync.
+const submissionMessage = "this command submits the workflow and the controller executes its transfers with its own flags; run the operation directly, or set the flag on the controller process"
+
+// validateCopyBandwidth turns a malformed rate into an admission error
+// instead of a failed tool job far into execution. The limit drives rsync
+// transfers executed by this process; backup and restore move data through
+// rclone instead, and create submissions hand execution to the controller,
+// so the flag is refused there rather than accepted and silently ignored.
+func (r *rootState) validateCopyBandwidth(cmd *cobra.Command) error {
+	if r.global.copyBandwidth == "" {
+		return nil
+	}
+
+	root, sub := transferCommandPath(cmd)
+
+	if rejectsTransferTuning(root, sub) {
+		return domain.NewError(
+			domain.ErrorValidation,
+			"flags",
+			"--copy-bandwidth-limit "+transferTuningRejection(root),
+		)
+	}
+
+	if root == "copy" || root == "migrate" || root == "migrate-pod" || root == "controller" {
+		return copyengine.ValidateBandwidthLimit(r.global.copyBandwidth)
+	}
+
+	return nil
+}
+
+// validateTransferTuningFlags refuses an explicitly set --compress on paths
+// that never consume it: rclone-based operations and controller submissions.
+// Compression stays available wherever this process runs the rsync transfer.
+func (r *rootState) validateTransferTuningFlags(cmd *cobra.Command) error {
+	compress := cmd.Flags().Lookup("compress")
+	if compress == nil || !cmd.Flags().Changed("compress") {
+		return nil
+	}
+
+	root, sub := transferCommandPath(cmd)
+
+	if rejectsTransferTuning(root, sub) {
+		return domain.NewError(
+			domain.ErrorValidation,
+			"flags",
+			"--compress "+transferTuningRejection(root),
+		)
+	}
+
+	return nil
+}
+
+func rejectsTransferTuning(root, sub string) bool {
+	if root == "backup" || root == "restore" {
+		return true
+	}
+
+	return (root == "copy" || root == "migrate" || root == "migrate-pod") && sub == "create"
+}
+
+func transferTuningRejection(root string) string {
+	if root == "backup" || root == "restore" {
+		return "tunes rsync transfers; backup and restore use rclone and do not consume it"
+	}
+
+	return "tunes transfers executed by this process; " + submissionMessage
 }
 
 // validateCopyTimeout rejects a per-attempt copy bound that can never fire:

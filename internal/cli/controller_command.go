@@ -66,8 +66,9 @@ func (r *rootState) newControllerCommand() *cobra.Command {
 				NamespacedCopyPlanner:         runtime.planner.ForController().PlanNamespacedCopy,
 				TransferExecution: app.VolumeCopyConfig{
 					Retries: r.global.retries, RetryBackoff: r.global.retryBackoff,
-					HelmTimeout: r.global.helmTimeout, NoCompress: r.global.noCompress,
-					CopyTimeout: r.global.copyTimeout,
+					HelmTimeout: r.global.helmTimeout, Compress: r.global.compress,
+					BandwidthLimit: r.global.copyBandwidth,
+					CopyTimeout:    r.global.copyTimeout,
 				},
 				Namespace:                     controllerNamespace,
 				KubernetesClient:              runtime.clients.Kubernetes,

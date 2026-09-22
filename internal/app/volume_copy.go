@@ -70,7 +70,7 @@ func (s *volumeCopyRunner) copyWithRetry(
 	request.Runtime.ToolImage = s.toolImage(request.Runtime.ToolImage)
 	request.Source.KubeconfigPath = s.config.KubeconfigPath
 	request.Source.Context = s.config.Context
-	request.Policy.NoCompress = s.config.NoCompress
+	request.Policy.Compress = s.config.Compress
 	request.Runtime.HelmTimeout = s.config.HelmTimeout
 	request.Runtime.Writer = s.config.Writer
 	request.Runtime.Logger = s.config.Logger
@@ -108,6 +108,7 @@ func (s *volumeCopyRunner) copyWithRetry(
 		request.Attempt = *attempts
 		request.Source.MountReadWrite = mountReadWrite
 		request.Policy.RsyncMaxRetries = s.config.RsyncMaxRetries
+		request.Policy.BandwidthLimit = s.config.BandwidthLimit
 
 		s.logInfo(
 			"copy started",

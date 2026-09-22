@@ -34,8 +34,11 @@ type VolumeCopyConfig struct {
 	CopyTimeout time.Duration
 	// RsyncMaxRetries overrides the rsync job's internal retry count within
 	// one transfer attempt. Zero keeps the upstream default (10).
-	RsyncMaxRetries  int
-	NoCompress       bool
+	RsyncMaxRetries int
+	Compress        bool
+	// BandwidthLimit caps the rsync transfer rate (rsync --bwlimit syntax).
+	// Empty is unlimited.
+	BandwidthLimit   string
 	StreamToolLogs   bool
 	StructuredLogs   bool
 	Writer           io.Writer
