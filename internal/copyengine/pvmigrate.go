@@ -41,6 +41,14 @@ func (p *PVMigrate) Copy(ctx context.Context, request CopyRequest, progress Prog
 		rsyncArgs += " --mkpath"
 	}
 
+	if request.Policy.BandwidthLimit != "" {
+		if err := ValidateBandwidthLimit(request.Policy.BandwidthLimit); err != nil {
+			return err
+		}
+
+		rsyncArgs += " --bwlimit=" + request.Policy.BandwidthLimit
+	}
+
 	operationID := OperationID(request.AttemptIdentity)
 
 	imageValues, err := kube.ToolImageHelmValues(request.Runtime.ToolImage)

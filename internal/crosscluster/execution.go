@@ -499,6 +499,7 @@ func (s *Service) Copy(
 	session *CopySession,
 	retries int,
 	noCompress bool,
+	bandwidthLimit string,
 ) error {
 	if err := s.validateSession(ctx, session); err != nil {
 		return err
@@ -508,11 +509,13 @@ func (s *Service) Copy(
 		return s.withLock(
 			ctx,
 			session,
-			func(locked context.Context) error { return s.copy(locked, session, retries, noCompress) },
+			func(locked context.Context) error {
+				return s.copy(locked, session, retries, noCompress, bandwidthLimit)
+			},
 		)
 	}
 
-	return s.copy(ctx, session, retries, noCompress)
+	return s.copy(ctx, session, retries, noCompress, bandwidthLimit)
 }
 
 func (s *Service) copy(
@@ -520,6 +523,7 @@ func (s *Service) copy(
 	session *CopySession,
 	retries int,
 	noCompress bool,
+	bandwidthLimit string,
 ) error {
 	if err := requireSessionLease(ctx); err != nil {
 		return err
@@ -665,7 +669,8 @@ func (s *Service) copy(
 						volume.Destination.Capacity,
 						volume.Source.Capacity,
 					),
-					NoCompress: noCompress,
+					NoCompress:     noCompress,
+					BandwidthLimit: bandwidthLimit,
 				},
 				Runtime: copyengine.CopyRuntime{
 					ToolImage:        session.Spec.ToolImage,

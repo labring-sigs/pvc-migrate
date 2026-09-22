@@ -1083,7 +1083,7 @@ func TestCopyUsesBothConnectionsAndPersistsTransferState(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := service.Copy(context.Background(), session, 1, false); err != nil {
+	if err := service.Copy(context.Background(), session, 1, false, ""); err != nil {
 		t.Fatal(err)
 	}
 
@@ -1223,7 +1223,7 @@ func TestCopyMergesHardTaintsAcrossSourceAndDestinationNodes(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := service.Copy(context.Background(), session, 1, false); err != nil {
+	if err := service.Copy(context.Background(), session, 1, false, ""); err != nil {
 		t.Fatal(err)
 	}
 
@@ -1269,7 +1269,7 @@ func TestCopyPersistsTargetNodeLookupFailure(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := service.Copy(context.Background(), session, 1, false); err == nil {
+	if err := service.Copy(context.Background(), session, 1, false, ""); err == nil {
 		t.Fatal("copy unexpectedly proceeded after the planned target node disappeared")
 	}
 
@@ -1332,7 +1332,7 @@ func TestCopyReturnsFailureCheckpointError(t *testing.T) {
 		},
 	)
 
-	err = service.Copy(context.Background(), session, 1, false)
+	err = service.Copy(context.Background(), session, 1, false, "")
 	if err == nil || !strings.Contains(err.Error(), "read destination target node") ||
 		!strings.Contains(err.Error(), "failure checkpoint unavailable") {
 		t.Fatalf("copy error=%v, want operation and checkpoint failures", err)
@@ -1485,7 +1485,7 @@ func TestCopyResumeContinuesTransferAttemptCount(t *testing.T) {
 
 	copier.failures = 1
 
-	if err := service.Copy(context.Background(), session, 1, false); err == nil {
+	if err := service.Copy(context.Background(), session, 1, false, ""); err == nil {
 		t.Fatal("first copy unexpectedly succeeded")
 	}
 
@@ -1493,7 +1493,7 @@ func TestCopyResumeContinuesTransferAttemptCount(t *testing.T) {
 		t.Fatalf("first attempt count=%d", session.Status.Volumes[0].Transfer.Attempts)
 	}
 
-	if err := service.Copy(context.Background(), session, 1, false); err != nil {
+	if err := service.Copy(context.Background(), session, 1, false, ""); err != nil {
 		t.Fatal(err)
 	}
 
@@ -1517,7 +1517,7 @@ func TestCopyResumeRejectsCompletedDestinationReplacement(t *testing.T) {
 
 	createBoundDestination(t, service, session)
 
-	if err := service.Copy(context.Background(), session, 1, false); err != nil {
+	if err := service.Copy(context.Background(), session, 1, false, ""); err != nil {
 		t.Fatal(err)
 	}
 
@@ -1551,7 +1551,7 @@ func TestCopyResumeRejectsCompletedDestinationReplacement(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := service.Copy(context.Background(), session, 1, false); err == nil {
+	if err := service.Copy(context.Background(), session, 1, false, ""); err == nil {
 		t.Fatal("resume accepted a replacement for a completed destination PVC")
 	}
 
@@ -1777,7 +1777,7 @@ func TestCopyRejectsSourcePVCReplacementAfterReservation(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := service.Copy(context.Background(), session, 1, false); err == nil {
+	if err := service.Copy(context.Background(), session, 1, false, ""); err == nil {
 		t.Fatal("copy proceeded after source PVC replacement")
 	}
 

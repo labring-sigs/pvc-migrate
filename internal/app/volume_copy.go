@@ -108,6 +108,7 @@ func (s *volumeCopyRunner) copyWithRetry(
 		request.Attempt = *attempts
 		request.Source.MountReadWrite = mountReadWrite
 		request.Policy.RsyncMaxRetries = s.config.RsyncMaxRetries
+		request.Policy.BandwidthLimit = s.config.BandwidthLimit
 
 		s.logInfo(
 			"copy started",

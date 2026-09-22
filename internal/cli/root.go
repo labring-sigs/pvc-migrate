@@ -48,7 +48,8 @@ type globals struct {
 	logLevel          string
 	color             string
 	streamToolLogs    bool
-	noCompress        bool
+	compress          bool
+	copyBandwidth     string
 	assumeYes         bool
 	toolImage         string
 }
@@ -124,6 +125,10 @@ func NewRoot(options Options) *cobra.Command {
 			state.timeoutExplicit = cmd.Flags().Changed("timeout")
 
 			if err := state.validateCopyTimeout(cmd); err != nil {
+				return err
+			}
+
+			if err := state.validateCopyBandwidth(cmd); err != nil {
 				return err
 			}
 
@@ -206,7 +211,18 @@ func NewRoot(options Options) *cobra.Command {
 		true,
 		"Stream generated tool Pod logs to stderr",
 	)
-	flags.BoolVar(&state.global.noCompress, "no-compress", false, "Disable rsync compression")
+	flags.BoolVar(
+		&state.global.compress,
+		"compress",
+		false,
+		"Compress rsync transfer data; off by default — cross-cluster copy enables it unless set explicitly",
+	)
+	flags.StringVar(
+		&state.global.copyBandwidth,
+		"copy-bandwidth-limit",
+		"",
+		"Cap rsync transfer rate in KiB/s unless a K/M/G suffix is given (for example 10m); empty is unlimited",
+	)
 	flags.BoolVarP(
 		&state.global.assumeYes,
 		"yes",
@@ -345,7 +361,8 @@ func (r *rootState) runtime() (*commandRuntime, error) {
 		// this field the direct-session executors silently ran unbounded
 		// attempts while the copy command honored the bound.
 		CopyTimeout:    r.global.copyTimeout,
-		NoCompress:     r.global.noCompress,
+		NoCompress:     !r.global.compress,
+		BandwidthLimit: r.global.copyBandwidth,
 		StreamToolLogs: r.global.streamToolLogs,
 		StructuredLogs: structuredLogs,
 		Writer:         serviceWriter,
@@ -576,6 +593,22 @@ func (r *rootState) effectiveTimeout() time.Duration {
 	}
 
 	return r.global.timeout
+}
+
+// validateCopyBandwidth turns a malformed rate into an admission error
+// instead of a failed tool job far into execution.
+func (r *rootState) validateCopyBandwidth(cmd *cobra.Command) error {
+	if r.global.copyBandwidth == "" {
+		return nil
+	}
+
+	for c := cmd; c != nil; c = c.Parent() {
+		if dataTransferRootCommands[c.Name()] {
+			return copyengine.ValidateBandwidthLimit(r.global.copyBandwidth)
+		}
+	}
+
+	return nil
 }
 
 // validateCopyTimeout rejects a per-attempt copy bound that can never fire:

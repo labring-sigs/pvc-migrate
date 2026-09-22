@@ -24,7 +24,7 @@ func sessionCommandPrefixForCommand(value any, namespace string) string {
 			}
 		}
 
-		for _, name := range []string{"timeout", "retries", "retry-backoff", "helm-timeout", "stream-tool-logs", "no-compress"} {
+		for _, name := range []string{"timeout", "retries", "retry-backoff", "helm-timeout", "stream-tool-logs", "compress", "copy-bandwidth-limit"} {
 			if flag := rootFlags.Lookup(name); flag != nil && flag.Changed {
 				args = append(args, "--"+name+"="+shellQuote(flag.Value.String()))
 			}

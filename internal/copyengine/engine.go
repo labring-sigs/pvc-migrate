@@ -45,11 +45,14 @@ type CopyDestination struct {
 // CopyPolicy contains data convergence and retry behavior. It is independent
 // of Kubernetes connection details and process output.
 type CopyPolicy struct {
-	Strategies              []string
-	DeleteExtraneousFiles   bool
-	VerifyChecksum          bool
-	IgnoreSizes             bool
-	NoCompress              bool
+	Strategies            []string
+	DeleteExtraneousFiles bool
+	VerifyChecksum        bool
+	IgnoreSizes           bool
+	NoCompress            bool
+	// BandwidthLimit caps the rsync transfer rate in rsync --bwlimit syntax
+	// (KiB/s for a bare number, or a K/M/G suffix). Empty is unlimited.
+	BandwidthLimit          string
 	RsyncMaxRetries         int
 	TolerateLiveSourceChurn bool
 }
