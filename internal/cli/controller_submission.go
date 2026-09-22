@@ -8,7 +8,9 @@ import (
 	"github.com/labring-sigs/pvc-migrate/internal/domain"
 	"github.com/labring-sigs/pvc-migrate/internal/kube"
 	"github.com/spf13/cobra"
+	apiequality "k8s.io/apimachinery/pkg/api/equality"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/runtime"
 	crclient "sigs.k8s.io/controller-runtime/pkg/client"
 )
 
@@ -65,6 +67,32 @@ func submitControllerObject[T crclient.Object](
 		if existing.GetLabels()[kube.ManagedByLabel] != kube.ManagedByValue ||
 			existing.GetLabels()[kube.SessionKey] != object.GetName() {
 			return reportSessionCreationError(cmd, object.GetNamespace(), object.GetName(), err)
+		}
+
+		// Adoption exists for a retry after an unconfirmed create. It must not
+		// silently replay a different request: a failed workflow resubmitted
+		// with new flags would otherwise keep executing the old spec while the
+		// operator believes the new flags took effect.
+		specsMatch, specErr := workflowSpecsMatch(existing, object)
+		if specErr != nil {
+			return reportSessionCreationError(cmd, object.GetNamespace(), object.GetName(), specErr)
+		}
+
+		if !specsMatch {
+			return reportSessionCreationError(
+				cmd,
+				object.GetNamespace(),
+				object.GetName(),
+				domain.NewError(
+					domain.ErrorConflict,
+					"submit workflow",
+					fmt.Sprintf(
+						"workflow %s/%s already exists with a different spec; delete it or submit under a new --id",
+						object.GetNamespace(),
+						object.GetName(),
+					),
+				),
+			)
 		}
 
 		// Continue with the server-side state; the workflow is already owned.
@@ -187,4 +215,34 @@ func waitForControllerObject[T crclient.Object](
 	}
 
 	return nil
+}
+
+// workflowSpecsMatch compares the spec of two workflow objects through their
+// unstructured form so every operation type shares one adoption rule.
+func workflowSpecsMatch(left, right crclient.Object) (bool, error) {
+	leftSpec, err := workflowObjectSpec(left)
+	if err != nil {
+		return false, err
+	}
+
+	rightSpec, err := workflowObjectSpec(right)
+	if err != nil {
+		return false, err
+	}
+
+	return apiequality.Semantic.DeepEqual(leftSpec, rightSpec), nil
+}
+
+func workflowObjectSpec(object crclient.Object) (map[string]any, error) {
+	data, err := runtime.DefaultUnstructuredConverter.ToUnstructured(object)
+	if err != nil {
+		return nil, err
+	}
+
+	spec, _ := data["spec"].(map[string]any)
+	if spec == nil {
+		spec = map[string]any{}
+	}
+
+	return spec, nil
 }
