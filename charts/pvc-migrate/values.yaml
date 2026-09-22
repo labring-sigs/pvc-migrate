@@ -30,7 +30,6 @@ rbac:
 controller:
   logLevel: info
   logFormat: json
-  operationTimeout: 30m
 podAnnotations: {}
 # Chart identity and selector labels are reserved.
 podLabels: {}

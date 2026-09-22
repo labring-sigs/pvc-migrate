@@ -61,7 +61,6 @@ spec:
             - --health-probe-bind-address=:8081
             - --log-level={{ .Values.controller.logLevel }}
             - --log-format={{ .Values.controller.logFormat }}
-            - --timeout={{ .Values.controller.operationTimeout }}
           securityContext:
             {{- toYaml .Values.securityContext | nindent 12 }}
           ports:

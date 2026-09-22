@@ -25,6 +25,19 @@ func (r *rootState) newControllerCommand() *cobra.Command {
 		Short: "Run the workflow CRD reconciliation loop",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
+			// --timeout bounds one command run; the daemon runs until its
+			// process signal and never consumes it. Refusing the explicit
+			// flag keeps an accepted flag effective (it also made the
+			// per-attempt --copy-timeout validation compare against a
+			// deadline nothing enforces).
+			if !once && cmd.Flags().Changed("timeout") {
+				return domain.NewError(
+					domain.ErrorValidation,
+					"flags",
+					"--timeout bounds a single command run and is consumed by --once; the daemon runs until its process signal",
+				)
+			}
+
 			if problems := validation.IsDNS1123Label(controllerNamespace); len(problems) > 0 {
 				return domain.NewError(
 					domain.ErrorValidation,
