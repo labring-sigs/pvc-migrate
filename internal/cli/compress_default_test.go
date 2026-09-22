@@ -125,3 +125,100 @@ func findSubCommandT(t *testing.T, root *cobra.Command, path ...string) *cobra.C
 
 	return current
 }
+
+// TestTransferTuningFlagsRefusedWhereUnused pins the honest-flag surface:
+// --compress and --copy-bandwidth-limit are refused on rclone operations
+// and on controller submissions (whose transfers run in the controller
+// process with its own flags), and stay available wherever this process
+// executes the rsync transfer.
+func TestTransferTuningFlagsRefusedWhereUnused(t *testing.T) {
+	root := NewRoot(Options{Version: "test"})
+	state := &rootState{}
+	state.global.copyBandwidth = "10m"
+
+	cases := []struct {
+		path       []string
+		compress   string // "" = leave unset
+		bandwidth  bool
+		wantSubstr string
+	}{
+		{
+			path:       []string{"backup"},
+			compress:   "true",
+			wantSubstr: "backup and restore use rclone",
+		},
+		{
+			path:       []string{"restore"},
+			compress:   "false",
+			wantSubstr: "backup and restore use rclone",
+		},
+		{
+			path:       []string{"backup"},
+			bandwidth:  true,
+			wantSubstr: "backup and restore use rclone",
+		},
+		{
+			path:       []string{"copy", "create"},
+			compress:   "true",
+			wantSubstr: "controller executes its transfers",
+		},
+		{
+			path:       []string{"copy", "create"},
+			bandwidth:  true,
+			wantSubstr: "controller executes its transfers",
+		},
+		{
+			path:       []string{"migrate-pod", "create"},
+			compress:   "true",
+			wantSubstr: "controller executes its transfers",
+		},
+		{
+			path:       []string{"migrate", "create"},
+			bandwidth:  true,
+			wantSubstr: "controller executes its transfers",
+		},
+	}
+
+	for _, testCase := range cases {
+		t.Run(strings.Join(testCase.path, " ")+" "+testCase.wantSubstr[:20], func(t *testing.T) {
+			command := findSubCommandT(t, root, testCase.path...)
+
+			state.global.copyBandwidth = ""
+			if testCase.bandwidth {
+				state.global.copyBandwidth = "10m"
+			}
+
+			var err error
+			if testCase.compress != "" {
+				// ParseFlags merges inherited persistent flags into the
+				// command set, mirroring what cobra does before the real
+				// persistent pre-run validators execute.
+				if parseErr := command.ParseFlags([]string{
+					"--compress=" + testCase.compress,
+				}); parseErr != nil {
+					t.Fatal(parseErr)
+				}
+
+				err = state.validateTransferTuningFlags(command)
+			} else {
+				err = state.validateCopyBandwidth(command)
+			}
+
+			if err == nil || !strings.Contains(err.Error(), testCase.wantSubstr) {
+				t.Fatalf("error=%v, want %q", err, testCase.wantSubstr)
+			}
+		})
+	}
+
+	// Direct execution paths keep both flags.
+	direct := findSubCommandT(t, root, "copy")
+
+	state.global.copyBandwidth = "10m"
+	if err := state.validateCopyBandwidth(direct); err != nil {
+		t.Fatalf("direct copy rejected valid bandwidth: %v", err)
+	}
+
+	if err := state.validateTransferTuningFlags(direct); err != nil {
+		t.Fatalf("direct copy rejected --compress: %v", err)
+	}
+}
