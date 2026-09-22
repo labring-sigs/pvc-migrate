@@ -218,6 +218,17 @@ func (p *KubernetesToolImageProber) probeTarget(
 
 	pod := toolProbePod(image, operationID, target, node, timeout)
 
+	// A scheduler-selected probe that mounts a PVC is still pinned by the
+	// volume's node affinity. Without the topology nodes' tolerations the
+	// probe cannot start on tainted storage nodes and the failure surfaces
+	// as an unschedulable Pod instead of a probe verdict.
+	if node == nil && target.PVCName != "" && !target.SkipPVCMount {
+		pod.Spec.Tolerations = append(
+			pod.Spec.Tolerations,
+			p.pvcTopologyTolerations(ctx, target.Namespace, target.PVCName)...,
+		)
+	}
+
 	created, err := p.client.CoreV1().
 		Pods(target.Namespace).
 		Create(ctx, pod, metav1.CreateOptions{})
@@ -1243,6 +1254,49 @@ func joinProbeFailure(parts ...string) string {
 	}
 
 	return strings.Join(filtered, "; ")
+}
+
+// pvcTopologyTolerations returns the taint tolerations of every Ready,
+// schedulable node the claim's PV node affinity permits. It is best-effort:
+// read failures leave the probe without extra tolerations, matching the
+// behavior of an affinity-less volume, and the probe itself reports the
+// scheduling outcome.
+func (p *KubernetesToolImageProber) pvcTopologyTolerations(
+	ctx context.Context,
+	namespace, pvcName string,
+) []corev1.Toleration {
+	pvc, err := p.client.CoreV1().
+		PersistentVolumeClaims(namespace).
+		Get(ctx, pvcName, metav1.GetOptions{})
+	if err != nil || pvc.Spec.VolumeName == "" {
+		return nil
+	}
+
+	pv, err := p.client.CoreV1().
+		PersistentVolumes().
+		Get(ctx, pvc.Spec.VolumeName, metav1.GetOptions{})
+	if err != nil || pv.Spec.NodeAffinity == nil || pv.Spec.NodeAffinity.Required == nil ||
+		len(pv.Spec.NodeAffinity.Required.NodeSelectorTerms) == 0 {
+		return nil
+	}
+
+	nodes, err := p.client.CoreV1().Nodes().List(ctx, metav1.ListOptions{})
+	if err != nil {
+		return nil
+	}
+
+	var tolerations []corev1.Toleration
+
+	for index := range nodes.Items {
+		node := &nodes.Items[index]
+		if !PVSupportsNode(pv, node) || !NodeReadyAndSchedulable(node) {
+			continue
+		}
+
+		tolerations = append(tolerations, nodeTolerations(node)...)
+	}
+
+	return tolerations
 }
 
 func logProbeStart(
