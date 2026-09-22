@@ -13,6 +13,10 @@ type NamespaceName string
 
 // +kubebuilder:validation:XValidation:rule="has(self.volumes) && size(self.volumes) > 0",message="volumes must contain at least one source PVC"
 type ClusterMigrationPlan struct {
+	// UnusedStoragePolicy decides the fate of replaced migration storage.
+	// Delete removes the old source PV after a completed cutover, or the
+	// staged destination after a rollback or abort. The PVC the workload
+	// runs on is always kept, whatever the policy says.
 	// +kubebuilder:validation:Enum=Keep;Delete
 	UnusedStoragePolicy  UnusedStoragePolicy `json:"unusedStoragePolicy,omitempty" yaml:"unusedStoragePolicy,omitempty"`
 	SourceNamespace      NamespaceName       `json:"sourceNamespace"               yaml:"sourceNamespace"`
@@ -34,6 +38,10 @@ type ClusterMigrationPlan struct {
 // +kubebuilder:validation:XValidation:rule="has(self.volumes) && size(self.volumes) > 0",message="volumes must contain at least one source PVC"
 // +kubebuilder:validation:XValidation:rule="self.workload.adapter != 'None'",message="ClusterPodMigration workload.adapter must identify a supported workload"
 type ClusterPodMigrationPlan struct {
+	// UnusedStoragePolicy decides the fate of replaced migration storage.
+	// Delete removes the old source PV after a completed cutover, or the
+	// staged destination after a rollback or abort. The PVC the workload
+	// runs on is always kept, whatever the policy says.
 	// +kubebuilder:validation:Enum=Keep;Delete
 	UnusedStoragePolicy UnusedStoragePolicy `json:"unusedStoragePolicy,omitempty" yaml:"unusedStoragePolicy,omitempty"`
 	// Pod migration preserves workload and PVC identities in SourceNamespace.

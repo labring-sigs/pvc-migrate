@@ -395,8 +395,12 @@ func (r *rootState) newBackupCleanupCommand() *cobra.Command {
 			r.workflowStorageNamespace(cmd),
 		)
 	}
-	command.Flags().
-		BoolVar(&options.Finalize, "finalize", false, "Release session-owned repository and credential resources")
+	command.Flags().BoolVar(
+		&options.Finalize,
+		"finalize",
+		false,
+		"Release session-owned repository and credential resources. Published recovery points and the source PVC are never deleted; remove recovery points with your object-store tooling",
+	)
 	command.Flags().
 		BoolVar(&options.DeleteSession, "delete-session", false, "Delete workflow metadata after finalization")
 	bindDryRun(command, &dryRun)

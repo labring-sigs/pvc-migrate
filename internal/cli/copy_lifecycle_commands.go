@@ -370,7 +370,7 @@ func (r *rootState) newCopyCleanupCommand() *cobra.Command {
 		return runtime.printer.Print(object)
 	}
 	command.Flags().
-		StringVar(&options.UnusedStoragePolicy, "unused-storage-policy", "", "What happens to storage that is no longer in use at a terminal state: Keep or Delete; defaults to the recorded policy")
+		StringVar(&options.UnusedStoragePolicy, "unused-storage-policy", "", "Keep or Delete an undelivered destination; defaults to the recorded policy. Delete removes the destination PVC only when the copy aborted before completing; a completed copy's destination and the source are always kept")
 	command.Flags().
 		BoolVar(&options.Finalize, "finalize", false, "Release ownership of retained storage and close the recovery window")
 	command.Flags().

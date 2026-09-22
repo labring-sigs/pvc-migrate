@@ -200,8 +200,10 @@ type MigrationPlan struct {
 	// +kubebuilder:validation:MaxItems=32
 	Strategies     []string `json:"strategies,omitempty"     yaml:"strategies,omitempty"`
 	VerifyChecksum bool     `json:"verifyChecksum,omitempty" yaml:"verifyChecksum,omitempty"`
-	// UnusedStoragePolicy controls storage identities that are no longer in
-	// use at a terminal state. The in-use copy is always kept.
+	// UnusedStoragePolicy decides the fate of replaced migration storage.
+	// Delete removes the old source PV after a completed cutover, or the
+	// staged destination after a rollback or abort. The PVC the workload
+	// runs on is always kept, whatever the policy says.
 	// +kubebuilder:validation:Enum=Keep;Delete
 	UnusedStoragePolicy  UnusedStoragePolicy `json:"unusedStoragePolicy,omitempty"  yaml:"unusedStoragePolicy,omitempty"`
 	DeleteExtraneous     bool                `json:"deleteExtraneous,omitempty"     yaml:"deleteExtraneous,omitempty"`
@@ -213,8 +215,10 @@ type MigrationPlan struct {
 // PodMigrationPlan is a workload-aware migration. Workload and precopy
 // controls are exclusive to this operation.
 type PodMigrationPlan struct {
-	// UnusedStoragePolicy controls storage identities that are no longer in
-	// use at a terminal state. The in-use copy is always kept.
+	// UnusedStoragePolicy decides the fate of replaced migration storage.
+	// Delete removes the old source PV after a completed cutover, or the
+	// staged destination after a rollback or abort. The PVC the workload
+	// runs on is always kept, whatever the policy says.
 	// +kubebuilder:validation:Enum=Keep;Delete
 	UnusedStoragePolicy UnusedStoragePolicy `json:"unusedStoragePolicy,omitempty" yaml:"unusedStoragePolicy,omitempty"`
 	// +kubebuilder:validation:MaxItems=1024
@@ -242,8 +246,10 @@ type ReservationPlan struct {
 	// +kubebuilder:validation:MaxItems=32
 	Strategies     []string `json:"strategies,omitempty"     yaml:"strategies,omitempty"`
 	VerifyChecksum bool     `json:"verifyChecksum,omitempty" yaml:"verifyChecksum,omitempty"`
-	// UnusedStoragePolicy controls storage identities that are no longer in
-	// use at a terminal state. The in-use copy is always kept.
+	// UnusedStoragePolicy decides the fate of reserved destination PVCs this
+	// reservation created and never promoted to a copy. Delete removes them
+	// on abort or cleanup; once promoted, the destination belongs to the copy
+	// workflow. The source PVC is never deleted.
 	// +kubebuilder:validation:Enum=Keep;Delete
 	UnusedStoragePolicy  UnusedStoragePolicy `json:"unusedStoragePolicy,omitempty"  yaml:"unusedStoragePolicy,omitempty"`
 	DeleteExtraneous     bool                `json:"deleteExtraneous,omitempty"     yaml:"deleteExtraneous,omitempty"`
@@ -263,8 +269,10 @@ type CopyPlan struct {
 	// defaults to false when omitted.
 	VerifyChecksum   bool `json:"verifyChecksum,omitempty"   yaml:"verifyChecksum,omitempty"`
 	DeleteExtraneous bool `json:"deleteExtraneous,omitempty" yaml:"deleteExtraneous,omitempty"`
-	// UnusedStoragePolicy controls storage identities that are no longer in
-	// use at a terminal state. The in-use copy is always kept.
+	// UnusedStoragePolicy decides the fate of an undelivered destination.
+	// Delete removes the destination PVC this workflow created only when the
+	// copy aborted before completing; a completed copy's destination and the
+	// source PVC are always kept.
 	// +kubebuilder:validation:Enum=Keep;Delete
 	UnusedStoragePolicy  UnusedStoragePolicy `json:"unusedStoragePolicy,omitempty"  yaml:"unusedStoragePolicy,omitempty"`
 	SkipSourceUsageCheck bool                `json:"skipSourceUsageCheck,omitempty" yaml:"skipSourceUsageCheck,omitempty"`

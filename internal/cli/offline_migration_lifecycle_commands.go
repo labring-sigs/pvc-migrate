@@ -375,7 +375,7 @@ func (r *rootState) newOfflineMigrationCleanupCommand() *cobra.Command {
 		},
 	}
 	command.Flags().
-		StringVar(&options.UnusedStoragePolicy, "unused-storage-policy", "", "What happens to storage that is no longer in use at a terminal state: Keep or Delete; defaults to the recorded policy")
+		StringVar(&options.UnusedStoragePolicy, "unused-storage-policy", "", "Keep or Delete replaced storage; defaults to the recorded policy. Delete removes the old source PV after a completed cutover, or the staged destination after a rollback or abort; the PVC the workload runs on is always kept")
 	command.Flags().
 		BoolVar(&options.Finalize, "finalize", false, "Release retained storage ownership and close the rollback window")
 	command.Flags().

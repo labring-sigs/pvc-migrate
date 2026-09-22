@@ -82,7 +82,7 @@ func (f *offlineMigrationFlags) bind(command *cobra.Command) {
 		&f.unusedStoragePolicy,
 		"unused-storage-policy",
 		string(v1alpha1.UnusedStorageKeep),
-		"What happens to storage that is no longer in use at a terminal state: Keep or Delete. The copy the workload uses is always kept",
+		"Keep or Delete replaced storage: Delete removes the old source PV after a completed cutover, or the staged destination after a rollback or abort; the PVC the workload runs on is always kept (default Keep)",
 	)
 	flags.BoolVar(
 		&f.skipSourceUsageCheck,

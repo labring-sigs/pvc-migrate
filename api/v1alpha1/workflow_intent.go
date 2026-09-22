@@ -11,11 +11,15 @@ type VolumeRequest struct {
 }
 
 type TransferOptions struct {
-	// UnusedStoragePolicy decides the fate of workflow storage that is no
-	// longer in use at a terminal state — for example the staged destination
-	// after a rollback, or the old source PV after a successful cutover.
-	// Keep retains it (default); Delete removes it. The copy the workload
-	// actually uses is always kept, whatever the policy says.
+	// UnusedStoragePolicy decides the fate of workflow-created storage that
+	// was never delivered to a workload, and its meaning differs per
+	// operation: migration and pod migration delete the old source PV after
+	// a completed cutover, or the staged destination after a rollback or
+	// abort; copy deletes the destination PVC only when the copy aborted
+	// before completing; reservation deletes destination PVCs that were
+	// never promoted to a copy. Keep retains it (default); Delete removes
+	// it. The storage a workload actually runs on, and every source PVC, is
+	// always kept, whatever the policy says.
 	// +kubebuilder:validation:Enum=Keep;Delete
 	UnusedStoragePolicy     UnusedStoragePolicy `json:"unusedStoragePolicy,omitempty"     yaml:"unusedStoragePolicy,omitempty"`
 	DestinationCapacity     string              `json:"destinationCapacity,omitempty"`

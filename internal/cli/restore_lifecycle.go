@@ -406,8 +406,12 @@ func (r *rootState) newRestoreCleanupCommand() *cobra.Command {
 			r.workflowStorageNamespace(cmd),
 		)
 	}
-	command.Flags().
-		BoolVar(&options.Finalize, "finalize", false, "Release session-owned repository and credential resources")
+	command.Flags().BoolVar(
+		&options.Finalize,
+		"finalize",
+		false,
+		"Release session-owned repository and credential resources. A completed restore's destination PVC is always kept; a failed restore keeps its created destination unless the workflow's recorded unusedStoragePolicy is Delete",
+	)
 	command.Flags().
 		BoolVar(&options.DeleteSession, "delete-session", false, "Delete workflow metadata after finalization")
 	bindDryRun(command, &dryRun)

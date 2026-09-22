@@ -175,11 +175,15 @@ spec:
                 type: string
               unusedStoragePolicy:
                 description: |-
-                  UnusedStoragePolicy decides the fate of workflow storage that is no
-                  longer in use at a terminal state — for example the staged destination
-                  after a rollback, or the old source PV after a successful cutover.
-                  Keep retains it (default); Delete removes it. The copy the workload
-                  actually uses is always kept, whatever the policy says.
+                  UnusedStoragePolicy decides the fate of workflow-created storage that
+                  was never delivered to a workload, and its meaning differs per
+                  operation: migration and pod migration delete the old source PV after
+                  a completed cutover, or the staged destination after a rollback or
+                  abort; copy deletes the destination PVC only when the copy aborted
+                  before completing; reservation deletes destination PVCs that were
+                  never promoted to a copy. Keep retains it (default); Delete removes
+                  it. The storage a workload actually runs on, and every source PVC, is
+                  always kept, whatever the policy says.
                 enum:
                 - Keep
                 - Delete
@@ -464,8 +468,10 @@ spec:
                     type: string
                   unusedStoragePolicy:
                     description: |-
-                      UnusedStoragePolicy controls storage identities that are no longer in
-                      use at a terminal state. The in-use copy is always kept.
+                      UnusedStoragePolicy decides the fate of an undelivered destination.
+                      Delete removes the destination PVC this workflow created only when the
+                      copy aborted before completing; a completed copy's destination and the
+                      source PVC are always kept.
                     enum:
                     - Keep
                     - Delete

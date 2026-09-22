@@ -125,7 +125,7 @@ func (f *reserveFlags) bind(command *cobra.Command) {
 		&f.unusedStoragePolicy,
 		"unused-storage-policy",
 		string(v1alpha1.UnusedStorageKeep),
-		"What happens to storage that is no longer in use at a terminal state: Keep or Delete. The copy the workload uses is always kept",
+		"Keep or Delete reserved storage: Delete removes destination PVCs this reservation created and never promoted to a copy; promoted destinations belong to the copy workflow and the source is always kept (default Keep)",
 	)
 }
 

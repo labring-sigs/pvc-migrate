@@ -41,7 +41,7 @@ func (f *crossClusterReserveFlags) bind(command *cobra.Command, r *rootState) {
 		&f.unusedStoragePolicy,
 		"unused-storage-policy",
 		string(v1alpha1.UnusedStorageKeep),
-		"What happens to storage that is no longer in use at a terminal state: Keep or Delete. The copy the workload uses is always kept",
+		"Keep or Delete reserved storage: Delete removes destination PVCs this reservation created and never promoted to a copy; promoted destinations belong to the copy workflow and the source is always kept (default Keep)",
 	)
 	flags.StringVarP(&f.sourceNamespace, "source-namespace", "n", "default", "Source PVC namespace")
 	flags.StringVar(
@@ -326,7 +326,7 @@ func (r *rootState) newCrossClusterReserveCleanupCommand() *cobra.Command {
 	}
 	flags.bindConnections(command, r)
 	command.Flags().
-		StringVar(&flags.unusedStoragePolicy, "unused-storage-policy", "", "What happens to storage that is no longer in use at a terminal state: Keep or Delete; defaults to the recorded policy")
+		StringVar(&flags.unusedStoragePolicy, "unused-storage-policy", "", "Keep or Delete reserved storage; defaults to the recorded policy. Delete removes destination PVCs this reservation created and never promoted to a copy; the source is always kept")
 	command.Flags().
 		BoolVar(&flags.deleteSession, "delete-session", false, "Delete the source-cluster session record")
 	bindDryRun(command, &dryRun)
