@@ -3,15 +3,15 @@ package kube
 import (
 	"context"
 
-	"github.com/labring-sigs/pvc-migrate/internal/domain"
+	v1alpha1 "github.com/labring-sigs/pvc-migrate/api/v1alpha1"
 )
 
 // VolumeUsageReadOptions identifies a source volume whose used bytes can be
 // read from trusted storage-backend metadata. Implementations must not mount
 // the volume or create a Pod.
 type VolumeUsageReadOptions struct {
-	SourcePVC domain.ObjectReference
-	SourcePV  domain.ObjectReference
+	SourcePVC v1alpha1.ObjectReference
+	SourcePV  v1alpha1.ObjectReference
 }
 
 // VolumeUsageReadResult reports a conservative upper bound for the source

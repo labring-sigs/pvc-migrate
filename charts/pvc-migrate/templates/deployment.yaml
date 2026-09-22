@@ -55,7 +55,6 @@ spec:
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           args:
             - controller
-            - --mode=controller
             - --controller-namespace={{ .Release.Namespace }}
             - --session-namespace={{ .Release.Namespace }}
             - --tool-image={{ include "pvc-migrate.toolImage" . }}

@@ -3,7 +3,7 @@ package planner
 import (
 	"testing"
 
-	"github.com/labring-sigs/pvc-migrate/internal/domain"
+	v1alpha1 "github.com/labring-sigs/pvc-migrate/api/v1alpha1"
 	"github.com/labring-sigs/pvc-migrate/internal/kube"
 	corev1 "k8s.io/api/core/v1"
 	storagev1 "k8s.io/api/storage/v1"
@@ -220,7 +220,7 @@ func TestSchedulingIgnoresObservedNodeNameForManagedWorkload(t *testing.T) {
 
 	issues := schedulingIssuesForTarget(
 		spec,
-		domain.WorkloadSpec{Adapter: domain.WorkloadStatefulSet},
+		v1alpha1.WorkloadStatefulSet,
 		&corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "node-b"}},
 	)
 	if len(issues) != 0 {
@@ -310,13 +310,10 @@ func TestPodMigrationIssuesRejectsUnverifiablePlacementAndNodeLocalData(t *testi
 				VolumeSource: corev1.VolumeSource{Ephemeral: &corev1.EphemeralVolumeSource{}},
 			},
 		},
-		TopologySpreadConstraints: []corev1.TopologySpreadConstraint{
-			{TopologyKey: "topology.kubernetes.io/zone", WhenUnsatisfiable: corev1.DoNotSchedule},
-		},
 	}
 
 	issues := podMigrationIssues(spec, "node-a", "node-b")
-	if len(issues) != 4 {
+	if len(issues) != 3 {
 		t.Fatalf("issues=%v", issues)
 	}
 }

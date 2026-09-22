@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/labring-sigs/pvc-migrate/internal/domain"
+	v1alpha1 "github.com/labring-sigs/pvc-migrate/api/v1alpha1"
 	corev1 "k8s.io/api/core/v1"
 	storagev1 "k8s.io/api/storage/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -16,9 +16,9 @@ import (
 func TestPVCRebindRecoveryFencesInterruptedIdentity(t *testing.T) {
 	for _, scenario := range []string{"deleted", "reserved", "created", "source-recreated", "pv-uid", "owner", "policy", "claim", "nil-claim", "deleting", "foreign-target", "target-uid", "target-binding", "target-deleting", "source-consumer", "target-consumer", "attached"} {
 		t.Run(scenario, func(t *testing.T) {
-			from := domain.ObjectReference{Namespace: "source", Name: "data", UID: "source-uid"}
-			to := domain.ObjectReference{Namespace: "target", Name: "data"}
-			pvRef := domain.ObjectReference{Name: "pv", UID: "pv-uid"}
+			from := v1alpha1.ObjectReference{Namespace: "source", Name: "data", UID: "source-uid"}
+			to := v1alpha1.ObjectReference{Namespace: "target", Name: "data"}
+			pvRef := v1alpha1.ObjectReference{Name: "pv", UID: "pv-uid"}
 			pv := &corev1.PersistentVolume{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:   pvRef.Name,

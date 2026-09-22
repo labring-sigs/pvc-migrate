@@ -30,23 +30,21 @@ type storageClassReadResult struct {
 }
 
 type planInventory struct {
-	pvcs               []pvcReadResult
-	pvs                []pvReadResult
-	storageClasses     map[string]*storagev1.StorageClass
-	storageClassError  map[string]error
-	namespacePods      []corev1.Pod
-	namespacePodsErr   error
-	sourceNamespace    *corev1.Namespace
-	sourceNamespaceErr error
-	targetNode         *corev1.Node
-	targetNodeErr      error
-	sourceNode         *corev1.Node
-	sourceNodeErr      error
-	nodes              []corev1.Node
-	nodesErr           error
-	csiNode            *storagev1.CSINode
-	csiNodeErr         error
-	capacity           *storageCapacityInventory
+	pvcs              []pvcReadResult
+	pvs               []pvReadResult
+	storageClasses    map[string]*storagev1.StorageClass
+	storageClassError map[string]error
+	namespacePods     []corev1.Pod
+	namespacePodsErr  error
+	targetNode        *corev1.Node
+	targetNodeErr     error
+	sourceNode        *corev1.Node
+	sourceNodeErr     error
+	nodes             []corev1.Node
+	nodesErr          error
+	csiNode           *storagev1.CSINode
+	csiNodeErr        error
+	capacity          *storageCapacityInventory
 }
 
 // loadPlanInventory reads independent Kubernetes objects in parallel, then
@@ -54,14 +52,18 @@ type planInventory struct {
 // their input indexes so callers can preserve deterministic checks and plans.
 func (p *Planner) loadPlanInventory(
 	ctx context.Context,
-	options planOptions,
+	sourceNamespace string,
 	pvcNames []string,
+	sourceNode string,
+	targetNode string,
+	destinationStorageClass string,
+	capacityAwareness domain.CapacityAwareness,
 	autoTargetNode bool,
 ) planInventory {
 	p.logInfo(
 		"loading PVC and Pod inventory",
 		"namespace",
-		options.SourceNamespace,
+		sourceNamespace,
 		"pvcs",
 		len(pvcNames),
 	)
@@ -77,7 +79,7 @@ func (p *Planner) loadPlanInventory(
 		parallel.For(len(pvcNames), func(index int) {
 			name := pvcNames[index]
 			inventory.pvcs[index].pvc, inventory.pvcs[index].err = p.client.CoreV1().
-				PersistentVolumeClaims(options.SourceNamespace).
+				PersistentVolumeClaims(sourceNamespace).
 				Get(ctx, name, metav1.GetOptions{})
 		})
 	})
@@ -85,7 +87,7 @@ func (p *Planner) loadPlanInventory(
 	if len(pvcNames) > 0 {
 		wg.Go(func() {
 			pods, err := p.client.CoreV1().
-				Pods(options.SourceNamespace).
+				Pods(sourceNamespace).
 				List(ctx, metav1.ListOptions{})
 			if err != nil {
 				inventory.namespacePodsErr = err
@@ -95,7 +97,7 @@ func (p *Planner) loadPlanInventory(
 			if pods == nil {
 				inventory.namespacePodsErr = fmt.Errorf(
 					"list Pods in %s returned an empty object",
-					options.SourceNamespace,
+					sourceNamespace,
 				)
 
 				return
@@ -104,43 +106,38 @@ func (p *Planner) loadPlanInventory(
 			inventory.namespacePods = pods.Items
 		})
 		wg.Go(func() {
-			inventory.capacity = p.loadStorageCapacity(ctx, options.CapacityAwareness)
+			inventory.capacity = p.loadStorageCapacity(
+				ctx,
+				capacityAwareness,
+			)
 		})
 	}
 
-	if options.TargetNode != "" {
+	if targetNode != "" {
 		wg.Go(func() {
 			inventory.targetNode, inventory.targetNodeErr = p.client.CoreV1().
 				Nodes().
-				Get(ctx, options.TargetNode, metav1.GetOptions{})
+				Get(ctx, targetNode, metav1.GetOptions{})
 		})
 
 		if len(pvcNames) > 0 {
 			wg.Go(func() {
 				inventory.csiNode, inventory.csiNodeErr = p.client.StorageV1().
 					CSINodes().
-					Get(ctx, options.TargetNode, metav1.GetOptions{})
+					Get(ctx, targetNode, metav1.GetOptions{})
 			})
 		}
 	}
 
-	if options.SourceNode != "" && options.SourceNode != options.TargetNode {
+	if sourceNode != "" && sourceNode != targetNode {
 		wg.Go(func() {
 			inventory.sourceNode, inventory.sourceNodeErr = p.client.CoreV1().
 				Nodes().
-				Get(ctx, options.SourceNode, metav1.GetOptions{})
+				Get(ctx, sourceNode, metav1.GetOptions{})
 		})
 	}
 
-	if options.Operation == domain.OperationMigratePod && len(pvcNames) > 0 {
-		wg.Go(func() {
-			inventory.sourceNamespace, inventory.sourceNamespaceErr = p.client.CoreV1().
-				Namespaces().
-				Get(ctx, options.SourceNamespace, metav1.GetOptions{})
-		})
-	}
-
-	if (autoTargetNode || options.Operation == domain.OperationMigratePod) && len(pvcNames) > 0 {
+	if autoTargetNode && len(pvcNames) > 0 {
 		wg.Go(func() {
 			nodes, err := p.client.CoreV1().Nodes().List(ctx, metav1.ListOptions{})
 			if nodes != nil {
@@ -153,7 +150,7 @@ func (p *Planner) loadPlanInventory(
 
 	wg.Wait()
 
-	if options.SourceNode != "" && options.SourceNode == options.TargetNode {
+	if sourceNode != "" && sourceNode == targetNode {
 		inventory.sourceNode = inventory.targetNode
 		inventory.sourceNodeErr = inventory.targetNodeErr
 	}
@@ -177,8 +174,8 @@ func (p *Planner) loadPlanInventory(
 		}
 
 		className := sourceClassName
-		if options.DestinationClass != "" {
-			className = options.DestinationClass
+		if destinationStorageClass != "" {
+			className = destinationStorageClass
 		}
 
 		if className != "" {
@@ -218,7 +215,7 @@ func (p *Planner) loadPlanInventory(
 	p.logInfo(
 		"loading dependent PV and StorageClass inventory",
 		"namespace",
-		options.SourceNamespace,
+		sourceNamespace,
 		"pvcs",
 		len(pvIndexes),
 		"storageClasses",

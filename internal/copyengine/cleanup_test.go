@@ -6,7 +6,7 @@ import (
 	"io"
 	"testing"
 
-	"github.com/labring-sigs/pvc-migrate/internal/domain"
+	v1alpha1 "github.com/labring-sigs/pvc-migrate/api/v1alpha1"
 	"helm.sh/helm/v4/pkg/action"
 	helmkube "helm.sh/helm/v4/pkg/kube/fake"
 	"helm.sh/helm/v4/pkg/release/common"
@@ -16,9 +16,9 @@ import (
 )
 
 func TestCleanupRemovesOnlyInterruptedAttemptReleases(t *testing.T) {
-	request := Request{
+	request := CleanupRequest{
 		SessionID: "recovery",
-		Source:    domain.ObjectReference{Namespace: "tenant", Name: "data"},
+		Source:    v1alpha1.ObjectReference{Namespace: "tenant", Name: "data"},
 		Mode:      ModeFinal,
 		Attempt:   2,
 	}
@@ -27,7 +27,7 @@ func TestCleanupRemovesOnlyInterruptedAttemptReleases(t *testing.T) {
 		KubeClient: &helmkube.PrintingKubeClient{Out: io.Discard},
 	}
 
-	name := "pv-migrate-" + OperationID(request) + "-clusterip"
+	name := "pv-migrate-" + OperationID(request.AttemptIdentity) + "-clusterip"
 	for _, releaseName := range []string{name, "other-workload"} {
 		if err := config.Releases.Create(&release.Release{
 			Name: releaseName, Namespace: "tenant", Version: 1,
@@ -59,7 +59,7 @@ func TestCleanupStopsBeforeMutationOnCancellation(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 
-	if err := cleanupReleases(ctx, nil, Request{}); !errors.Is(err, context.Canceled) {
+	if err := cleanupReleases(ctx, nil, CleanupRequest{}); !errors.Is(err, context.Canceled) {
 		t.Fatalf("error=%v", err)
 	}
 }

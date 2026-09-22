@@ -19,7 +19,7 @@ const (
 )
 
 func (p *Planner) checkLimitRanges(
-	plan *domain.MigrationPlan,
+	plan checkRecorder,
 	namespace string,
 	volumes []domain.PlannedVolume,
 	toolPods int,
@@ -132,7 +132,7 @@ func (p *Planner) checkLimitRanges(
 }
 
 func (p *Planner) checkQuotas(
-	plan *domain.MigrationPlan,
+	plan checkRecorder,
 	namespace string,
 	estimate domain.ResourceEstimate,
 	policies kube.NamespaceResourcePolicies,
@@ -227,7 +227,7 @@ func (p *Planner) checkQuotas(
 
 func (p *Planner) checkNamespaceResourcePolicies(
 	ctx context.Context,
-	plan *domain.MigrationPlan,
+	plan checkRecorder,
 	namespace string,
 	volumes []domain.PlannedVolume,
 	estimate domain.ResourceEstimate,
@@ -249,7 +249,7 @@ func (p *Planner) checkNamespaceResourcePolicies(
 
 func (p *Planner) checkNetworkPolicies(
 	ctx context.Context,
-	plan *domain.MigrationPlan,
+	plan checkRecorder,
 	namespaces ...string,
 ) {
 	p.logInfo("checking NetworkPolicies", "namespaces", namespaces)

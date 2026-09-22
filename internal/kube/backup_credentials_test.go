@@ -4,6 +4,7 @@ import (
 	"context"
 	"testing"
 
+	v1alpha1 "github.com/labring-sigs/pvc-migrate/api/v1alpha1"
 	"github.com/labring-sigs/pvc-migrate/internal/domain"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes/fake"
@@ -30,7 +31,7 @@ func TestBackupCredentialsSecretLifecycle(t *testing.T) {
 		t.Fatalf("credentials Secret metadata = %#v", secret)
 	}
 
-	ref := domain.ObjectReference{Namespace: secret.Namespace, Name: secret.Name, UID: secret.UID}
+	ref := v1alpha1.ObjectReference{Namespace: secret.Namespace, Name: secret.Name, UID: secret.UID}
 
 	loaded, err := GetBackupCredentialsSecret(context.Background(), client, ref, "backup-test")
 	if err != nil {
@@ -75,7 +76,7 @@ func TestBackupCredentialsSecretRejectsReplacementAndWrongName(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	ref := domain.ObjectReference{Namespace: secret.Namespace, Name: secret.Name, UID: secret.UID}
+	ref := v1alpha1.ObjectReference{Namespace: secret.Namespace, Name: secret.Name, UID: secret.UID}
 
 	secret.Labels[SessionKey] = "replacement"
 	if _, err := client.CoreV1().
@@ -133,7 +134,7 @@ func TestBackupCredentialsSecretRejectsReplacementAndWrongName(t *testing.T) {
 func TestBackupCredentialsSecretMissingIsActionable(t *testing.T) {
 	client := fake.NewClientset()
 
-	ref := domain.ObjectReference{
+	ref := v1alpha1.ObjectReference{
 		Namespace: "sessions",
 		Name:      BackupCredentialsSecretName("backup-test"),
 	}

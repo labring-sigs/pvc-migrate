@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"strings"
 
+	v1alpha1 "github.com/labring-sigs/pvc-migrate/api/v1alpha1"
 	"github.com/labring-sigs/pvc-migrate/internal/domain"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -28,24 +29,28 @@ const (
 // OpenEBSLVMSharedVolumeManager reads and explicitly enables the same-node
 // concurrent mount setting maintained by the OpenEBS LVM CSI driver.
 type OpenEBSLVMSharedVolumeManager interface {
-	Shared(ctx context.Context, pvc, pv domain.ObjectReference, sessionID string) (bool, error)
-	PrepareShared(ctx context.Context, pv domain.ObjectReference) (OpenEBSLVMSharedResult, error)
+	Shared(
+		ctx context.Context,
+		sourcePV, expectedLVMVolume v1alpha1.ObjectReference,
+		sessionID string,
+	) (bool, error)
+	PrepareShared(ctx context.Context, pv v1alpha1.ObjectReference) (OpenEBSLVMSharedResult, error)
 	EnsureShared(
 		ctx context.Context,
-		pvc, pv domain.ObjectReference,
+		pvc, pv v1alpha1.ObjectReference,
 	) (OpenEBSLVMSharedResult, error)
-	EnableShared(ctx context.Context, sessionID string, mount domain.OpenEBSLVMSharedMount) error
+	EnableShared(ctx context.Context, sessionID string, mount v1alpha1.SharedMountStatus) error
 	ValidateRestoreShared(
 		ctx context.Context,
 		sessionID string,
-		mount domain.OpenEBSLVMSharedMount,
+		mount v1alpha1.SharedMountStatus,
 	) error
-	RestoreShared(ctx context.Context, sessionID string, mount domain.OpenEBSLVMSharedMount) error
+	RestoreShared(ctx context.Context, sessionID string, mount v1alpha1.SharedMountStatus) error
 }
 
 type OpenEBSLVMSharedResult struct {
 	Reference         string
-	LVMVolume         domain.ObjectReference
+	LVMVolume         v1alpha1.ObjectReference
 	PreviousShared    string
 	PreviousSharedSet bool
 	NeedsChange       bool
@@ -80,10 +85,10 @@ func NewOpenEBSLVMSharedVolumeManager(
 
 func (m *openEBSLVMSharedVolumeManager) Shared(
 	ctx context.Context,
-	sourcePV, expectedLVMVolume domain.ObjectReference,
+	sourcePV, expectedLVMVolume v1alpha1.ObjectReference,
 	sessionID string,
 ) (bool, error) {
-	volume, err := m.volume(ctx, domain.ObjectReference{}, sourcePV, expectedLVMVolume)
+	volume, err := m.volume(ctx, v1alpha1.ObjectReference{}, sourcePV, expectedLVMVolume)
 	if err != nil {
 		return false, err
 	}
@@ -141,13 +146,13 @@ func (m *openEBSLVMSharedVolumeManager) Shared(
 
 func (m *openEBSLVMSharedVolumeManager) PrepareShared(
 	ctx context.Context,
-	sourcePV domain.ObjectReference,
+	sourcePV v1alpha1.ObjectReference,
 ) (OpenEBSLVMSharedResult, error) {
 	volume, err := m.volume(
 		ctx,
-		domain.ObjectReference{},
+		v1alpha1.ObjectReference{},
 		sourcePV,
-		domain.ObjectReference{},
+		v1alpha1.ObjectReference{},
 	)
 	if err != nil {
 		return OpenEBSLVMSharedResult{}, err
@@ -158,7 +163,7 @@ func (m *openEBSLVMSharedVolumeManager) PrepareShared(
 
 func (m *openEBSLVMSharedVolumeManager) EnsureShared(
 	ctx context.Context,
-	pvc, pv domain.ObjectReference,
+	pvc, pv v1alpha1.ObjectReference,
 ) (OpenEBSLVMSharedResult, error) {
 	if pvc.Namespace == "" || pvc.Name == "" || pvc.UID == "" {
 		return OpenEBSLVMSharedResult{}, domain.NewError(
@@ -168,7 +173,7 @@ func (m *openEBSLVMSharedVolumeManager) EnsureShared(
 		)
 	}
 
-	volume, err := m.volume(ctx, pvc, pv, domain.ObjectReference{})
+	volume, err := m.volume(ctx, pvc, pv, v1alpha1.ObjectReference{})
 	if err != nil {
 		return OpenEBSLVMSharedResult{}, err
 	}
@@ -234,7 +239,7 @@ func prepareOpenEBSLVMShared(
 func (m *openEBSLVMSharedVolumeManager) EnableShared(
 	ctx context.Context,
 	sessionID string,
-	state domain.OpenEBSLVMSharedMount,
+	state v1alpha1.SharedMountStatus,
 ) error {
 	if strings.TrimSpace(sessionID) == "" {
 		return domain.NewError(
@@ -246,8 +251,8 @@ func (m *openEBSLVMSharedVolumeManager) EnableShared(
 
 	volume, err := m.volume(
 		ctx,
-		domain.ObjectReference{},
-		state.SourcePV,
+		v1alpha1.ObjectReference{},
+		v1alpha1.ObjectReference{Name: state.SourcePV.Name, UID: state.SourcePV.UID},
 		state.LVMVolume,
 	)
 	if err != nil {
@@ -269,12 +274,12 @@ func (m *openEBSLVMSharedVolumeManager) EnableShared(
 func (m *openEBSLVMSharedVolumeManager) RestoreShared(
 	ctx context.Context,
 	sessionID string,
-	state domain.OpenEBSLVMSharedMount,
+	state v1alpha1.SharedMountStatus,
 ) error {
 	volume, err := m.volume(
 		ctx,
-		domain.ObjectReference{},
-		state.SourcePV,
+		v1alpha1.ObjectReference{},
+		v1alpha1.ObjectReference{Name: state.SourcePV.Name, UID: state.SourcePV.UID},
 		state.LVMVolume,
 	)
 	if err != nil {
@@ -306,12 +311,12 @@ func (m *openEBSLVMSharedVolumeManager) RestoreShared(
 func (m *openEBSLVMSharedVolumeManager) ValidateRestoreShared(
 	ctx context.Context,
 	sessionID string,
-	state domain.OpenEBSLVMSharedMount,
+	state v1alpha1.SharedMountStatus,
 ) error {
 	volume, err := m.volume(
 		ctx,
-		domain.ObjectReference{},
-		state.SourcePV,
+		v1alpha1.ObjectReference{},
+		v1alpha1.ObjectReference{Name: state.SourcePV.Name, UID: state.SourcePV.UID},
 		state.LVMVolume,
 	)
 	if err != nil {
@@ -438,7 +443,7 @@ func (m *openEBSLVMSharedVolumeManager) patchShared(
 
 func (m *openEBSLVMSharedVolumeManager) volume(
 	ctx context.Context,
-	expectedPVC, sourcePV, expectedLVMVolume domain.ObjectReference,
+	expectedPVC, sourcePV, expectedLVMVolume v1alpha1.ObjectReference,
 ) (openEBSLVMVolume, error) {
 	if m == nil || m.typed == nil || m.dynamic == nil {
 		return openEBSLVMVolume{}, domain.NewError(
@@ -591,8 +596,8 @@ func (m *openEBSLVMSharedVolumeManager) volume(
 	return *match, nil
 }
 
-func lvmVolumeReference(volume openEBSLVMVolume) domain.ObjectReference {
-	return domain.ObjectReference{
+func lvmVolumeReference(volume openEBSLVMVolume) v1alpha1.ObjectReference {
+	return v1alpha1.ObjectReference{
 		APIVersion:      openEBSLVMVolumeGVR.Group + "/" + openEBSLVMVolumeGVR.Version,
 		Kind:            "LVMVolume",
 		Namespace:       volume.namespace,

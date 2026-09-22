@@ -1,6 +1,8 @@
 package cli
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"slices"
 	"strings"
@@ -8,7 +10,33 @@ import (
 	"github.com/labring-sigs/pvc-migrate/internal/crosscluster"
 	"github.com/labring-sigs/pvc-migrate/internal/domain"
 	"github.com/spf13/cobra"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 )
+
+func loadCrossClusterCopy(
+	ctx context.Context,
+	service *crosscluster.Service,
+	namespace, id string,
+) (*crosscluster.CopySession, error) {
+	session, err := service.Get(ctx, namespace, id)
+	if err == nil {
+		return session, nil
+	}
+
+	if !apierrors.IsNotFound(err) && !errors.Is(err, crosscluster.ErrReservationSession) {
+		return nil, err
+	}
+
+	reservation, reservationErr := service.GetReservation(ctx, namespace, id)
+	if reservationErr != nil {
+		if apierrors.IsNotFound(reservationErr) && apierrors.IsNotFound(err) {
+			return nil, err
+		}
+		return nil, reservationErr
+	}
+
+	return service.PromoteReservation(ctx, reservation)
+}
 
 func validateExistingCrossClusterFlags(cmd *cobra.Command, additional ...string) error {
 	names := slices.Concat(additional, []string{
@@ -42,7 +70,7 @@ func validateExistingCrossClusterFlags(cmd *cobra.Command, additional ...string)
 // and consistency settings associated with already completed volumes.
 func configureExistingCrossClusterCopy(
 	cmd *cobra.Command,
-	session *crosscluster.Session,
+	session *crosscluster.CopySession,
 	flags *crossClusterCopyFlags,
 ) error {
 	if err := validateExistingCrossClusterFlags(cmd); err != nil {

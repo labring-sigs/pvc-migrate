@@ -18,7 +18,7 @@ import (
 
 // Cleanup removes the chart releases for one persisted copy attempt, including
 // pending installations left behind by an interrupted controller process.
-func (*PVMigrate) Cleanup(ctx context.Context, request Request) error {
+func (*PVMigrate) Cleanup(ctx context.Context, request CleanupRequest) error {
 	type target struct{ config, context, namespace string }
 
 	targets := []target{{request.KubeconfigPath, request.Context, request.Source.Namespace}}
@@ -26,7 +26,7 @@ func (*PVMigrate) Cleanup(ctx context.Context, request Request) error {
 	destination := target{
 		request.DestinationKubeconfigPath,
 		request.DestinationContext,
-		request.Destination.Namespace,
+		request.DestinationNamespace,
 	}
 	if destination.config == "" {
 		destination.config = request.KubeconfigPath
@@ -70,7 +70,11 @@ func (*PVMigrate) Cleanup(ctx context.Context, request Request) error {
 	return nil
 }
 
-func cleanupReleases(ctx context.Context, config *action.Configuration, request Request) error {
+func cleanupReleases(
+	ctx context.Context,
+	config *action.Configuration,
+	request CleanupRequest,
+) error {
 	for _, name := range copyReleaseNames(request) {
 		if err := ctx.Err(); err != nil {
 			return err
@@ -90,7 +94,7 @@ func cleanupReleases(ctx context.Context, config *action.Configuration, request 
 	return nil
 }
 
-func copyReleaseNames(request Request) []string {
+func copyReleaseNames(request CleanupRequest) []string {
 	var names []string
 
 	strategies := request.Strategies
@@ -99,7 +103,7 @@ func copyReleaseNames(request Request) []string {
 	}
 
 	for _, strategy := range strategies {
-		prefix := "pv-migrate-" + OperationID(request) + "-" + strategy
+		prefix := "pv-migrate-" + OperationID(request.AttemptIdentity) + "-" + strategy
 		switch strategy {
 		case "local", "nodeport", "loadbalancer":
 			names = append(names, prefix+"-src", prefix+"-dest")

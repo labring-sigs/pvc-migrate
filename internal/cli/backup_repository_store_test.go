@@ -6,8 +6,10 @@ import (
 
 	v1alpha1 "github.com/labring-sigs/pvc-migrate/api/v1alpha1"
 	"github.com/labring-sigs/pvc-migrate/internal/kube"
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	kubefake "k8s.io/client-go/kubernetes/fake"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 )
 
@@ -38,12 +40,17 @@ func TestNewControllerRepositoryStoreUsesRoutingFieldsWithoutCredentials(t *test
 
 	client := fake.NewClientBuilder().WithScheme(scheme).WithObjects(repository).Build()
 	r := &rootState{}
-	commandRuntime := &commandRuntime{clients: &kube.Clients{Runtime: client}}
+	commandRuntime := &commandRuntime{clients: &kube.Clients{
+		Runtime: client,
+		Kubernetes: kubefake.NewClientset(&corev1.Namespace{
+			ObjectMeta: metav1.ObjectMeta{Name: "kube-system", UID: "cluster-uid"},
+		}),
+	}}
 
 	store, err := r.newControllerRepositoryStore(
 		t.Context(),
 		commandRuntime,
-		&bucketFlags{namespace: "application", backupRepository: "archive", name: "daily"},
+		"application", "archive", "daily",
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -51,7 +58,7 @@ func TestNewControllerRepositoryStoreUsesRoutingFieldsWithoutCredentials(t *test
 
 	cfg := store.Config()
 
-	if cfg.Bucket != "backups" || cfg.Prefix != "controller" || cfg.Name != "daily" ||
+	if cfg.Bucket != "backups" || cfg.Name != "daily" ||
 		cfg.Provider != "Minio" || cfg.Endpoint != "https://object-store.example" ||
 		cfg.Region != "us-east-1" || !cfg.ForcePathStyle {
 		t.Fatalf("repository routing config = %#v", cfg)
@@ -86,10 +93,15 @@ func TestNewControllerRepositoryStoreRejectsUnsupportedBackend(t *testing.T) {
 
 	_, err := r.newControllerRepositoryStore(
 		t.Context(),
-		&commandRuntime{clients: &kube.Clients{Runtime: client}},
-		&bucketFlags{namespace: "application", backupRepository: "archive", name: "daily"},
+		&commandRuntime{clients: &kube.Clients{
+			Runtime: client,
+			Kubernetes: kubefake.NewClientset(&corev1.Namespace{
+				ObjectMeta: metav1.ObjectMeta{Name: "kube-system", UID: "cluster-uid"},
+			}),
+		}},
+		"application", "archive", "daily",
 	)
-	if err == nil || !containsError(err, "only S3 BackupRepository") {
+	if err == nil || !containsError(err, "backend pvc is not supported") {
 		t.Fatalf("unsupported backend error = %v", err)
 	}
 }

@@ -60,8 +60,7 @@ every upgrade. Unknown values and unsafe common mistakes fail schema validation.
 | `toolImage.repository/tag` | Controller repository/tag | Trusted tagged image for transfer Pods; digest references are not supported by the transfer integration |
 | `imagePullSecrets` | `[]` | Existing pull secrets in the release namespace |
 | `serviceAccount.create/name` | `true` / generated | Dedicated operator identity; an explicit name is required for an external account |
-| `rbac.create` | `true` | Install the existing controller permission contract |
-| `rbac.kubeBlocksMongoDBNamespaces` | `[]` | Namespace-local Pod exec Roles and bindings for MongoDB native switchover |
+| `rbac.create` | `true` | Install the existing controller permission contract. The chart grants no pod exec anywhere; without it MongoDB automatic switchover reports the operator choices (grant a pods/exec Role yourself, switch the primary manually, or accept leader downtime) |
 | `controller.logLevel/logFormat` | `info` / `json` | Structured controller logs |
 | `controller.operationTimeout` | `30m` | Application operation timeout; independent of Helm's rollout timeout |
 | `resources` | 100m CPU/128Mi requests; 512Mi memory limit | Baseline for controller memory/cache use; tune to workflow count and object volume |

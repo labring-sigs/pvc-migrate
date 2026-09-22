@@ -6,6 +6,7 @@ import (
 	"math"
 	"strings"
 
+	v1alpha1 "github.com/labring-sigs/pvc-migrate/api/v1alpha1"
 	"github.com/labring-sigs/pvc-migrate/internal/domain"
 	"github.com/labring-sigs/pvc-migrate/internal/kube"
 	appsv1 "k8s.io/api/apps/v1"
@@ -14,6 +15,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/util/retry"
 )
 
@@ -27,10 +29,11 @@ const (
 
 func (m *Manager) verifyVMClusterPaused(
 	ctx context.Context,
-	session *domain.Session,
-	workload domain.WorkloadSpec,
+	workflowID, namespace string,
+	controller v1alpha1.ObjectReference,
+	ordinal *int32,
+	vm *v1alpha1.VMClusterSpec,
 ) error {
-	vm := workload.VMCluster
 	if vm == nil {
 		return domain.NewError(
 			domain.ErrorInternal,
@@ -41,9 +44,9 @@ func (m *Manager) verifyVMClusterPaused(
 
 	if err := m.rejectHorizontalPodAutoscaler(
 		ctx,
-		workload.Controller.Namespace,
+		controller.Namespace,
 		domain.KindStatefulSet,
-		workload.Controller.Name,
+		controller.Name,
 		"verify paused",
 	); err != nil {
 		return err
@@ -63,7 +66,7 @@ func (m *Manager) verifyVMClusterPaused(
 	}
 
 	object, err := m.dynamic.Resource(gvr).
-		Namespace(workload.Pod.Namespace).
+		Namespace(namespace).
 		Get(ctx, vm.Name, metav1.GetOptions{})
 	if err != nil {
 		return domain.WrapError(domain.ErrorKubernetes, "verify paused", "read VMCluster", err)
@@ -77,7 +80,7 @@ func (m *Manager) verifyVMClusterPaused(
 		)
 	}
 
-	if object.GetAnnotations()[pauseSessionAnnotation] != session.ID {
+	if object.GetAnnotations()[pauseSessionAnnotation] != workflowID {
 		return domain.NewError(
 			domain.ErrorConflict,
 			"verify paused",
@@ -94,6 +97,42 @@ func (m *Manager) verifyVMClusterPaused(
 		return nestedErr
 	}
 
+	if !vm.ComponentPausedSupported {
+		// The CRD pruned the paused write: the hold is the reduced
+		// replicaCount, which keeps the migrated ordinal beyond the
+		// component's replica set while the session owns the pause.
+		if ordinal == nil {
+			return domain.NewError(
+				domain.ErrorInternal,
+				"verify paused",
+				"session lacks StatefulSet replica state",
+			)
+		}
+
+		replicas, found, err := unstructured.NestedInt64(
+			component,
+			vmClusterFieldReplicaCount,
+		)
+		if err != nil {
+			return err
+		}
+
+		if !found || replicas > int64(*ordinal) {
+			return domain.NewError(
+				domain.ErrorPrecondition,
+				"verify paused",
+				fmt.Sprintf(
+					"VMCluster component %s replicaCount %d exceeds migration ordinal %d; the operator may restore the migrated Pod",
+					vm.Component,
+					replicas,
+					*ordinal,
+				),
+			)
+		}
+
+		return nil
+	}
+
 	paused, _, _ := unstructured.NestedBool(component, vmClusterFieldPaused)
 	if !paused {
 		return domain.NewError(
@@ -108,11 +147,11 @@ func (m *Manager) verifyVMClusterPaused(
 
 func (m *Manager) validateVMClusterResume(
 	ctx context.Context,
-	session *domain.Session,
+	workflowID, namespace string,
+	controller v1alpha1.ObjectReference,
+	originalReplicas, ordinal *int32,
+	vm *v1alpha1.VMClusterSpec,
 ) error {
-	workload := session.Spec.Workload()
-
-	vm := workload.VMCluster
 	if vm == nil {
 		return domain.NewError(
 			domain.ErrorInternal,
@@ -121,7 +160,7 @@ func (m *Manager) validateVMClusterResume(
 		)
 	}
 
-	if workload.OriginalReplicas == nil || workload.Ordinal == nil {
+	if originalReplicas == nil || ordinal == nil {
 		return domain.NewError(
 			domain.ErrorInternal,
 			"resume VMCluster",
@@ -131,7 +170,9 @@ func (m *Manager) validateVMClusterResume(
 
 	if err := m.validateStatefulSetTransitionReplicas(
 		ctx,
-		session,
+		controller,
+		originalReplicas,
+		ordinal,
 		"resume VMCluster",
 	); err != nil {
 		return err
@@ -151,7 +192,7 @@ func (m *Manager) validateVMClusterResume(
 	}
 
 	object, err := m.dynamic.Resource(gvr).
-		Namespace(workload.Pod.Namespace).
+		Namespace(namespace).
 		Get(ctx, vm.Name, metav1.GetOptions{})
 	if err != nil {
 		return domain.WrapError(domain.ErrorKubernetes, "resume VMCluster", "read VMCluster", err)
@@ -207,7 +248,7 @@ func (m *Manager) validateVMClusterResume(
 	}
 
 	owner := object.GetAnnotations()[pauseSessionAnnotation]
-	if vm.OriginalReplicasConfigured && owner != session.ID {
+	if vm.OriginalReplicasConfigured && owner != workflowID {
 		return domain.NewError(
 			domain.ErrorConflict,
 			"resume VMCluster",
@@ -220,7 +261,8 @@ func (m *Manager) validateVMClusterResume(
 	}
 
 	if _, err := validateVMClusterPauseRestoreState(
-		session,
+		workflowID,
+		ordinal,
 		vm,
 		object,
 		owner,
@@ -277,19 +319,19 @@ func (m *Manager) vmClusterWorkload(
 	pod *corev1.Pod,
 	parent *metav1.OwnerReference,
 	sts *appsv1.StatefulSet,
-	options DiscoverOptions,
-) (domain.WorkloadSpec, error) {
+	allowLeaderDowntime bool,
+) (v1alpha1.WorkloadSpec, error) {
 	if sts == nil {
-		return domain.WorkloadSpec{}, domain.NewError(
+		return v1alpha1.WorkloadSpec{}, domain.NewError(
 			domain.ErrorInternal,
 			"discover VMCluster",
 			"StatefulSet is required",
 		)
 	}
 
-	base, err := m.statefulSetWorkload(ctx, pod, sts, options)
+	base, err := m.statefulSetWorkload(ctx, pod, sts, allowLeaderDowntime)
 	if err != nil {
-		return domain.WorkloadSpec{}, err
+		return v1alpha1.WorkloadSpec{}, err
 	}
 
 	component := ""
@@ -305,7 +347,7 @@ func (m *Manager) vmClusterWorkload(
 	}
 
 	if component != "vmstorage" && component != "vmselect" && component != "vminsert" {
-		return domain.WorkloadSpec{}, domain.NewError(
+		return v1alpha1.WorkloadSpec{}, domain.NewError(
 			domain.ErrorPrecondition,
 			"discover VMCluster",
 			fmt.Sprintf(
@@ -327,14 +369,14 @@ func (m *Manager) vmClusterWorkload(
 	if m.dynamic != nil {
 		gvr, parseErr := kube.ParseGroupVersionResource(vmClusterAPIVersion, vmClusterResource)
 		if parseErr != nil {
-			return domain.WorkloadSpec{}, parseErr
+			return v1alpha1.WorkloadSpec{}, parseErr
 		}
 
 		vm, getErr := m.dynamic.Resource(gvr).
 			Namespace(pod.Namespace).
 			Get(ctx, parent.Name, metav1.GetOptions{})
 		if getErr != nil {
-			return domain.WorkloadSpec{}, domain.WrapError(
+			return v1alpha1.WorkloadSpec{}, domain.WrapError(
 				domain.ErrorKubernetes,
 				"discover VMCluster",
 				"read VMCluster",
@@ -343,7 +385,7 @@ func (m *Manager) vmClusterWorkload(
 		}
 
 		if vm.GetUID() == "" || vm.GetUID() != parent.UID {
-			return domain.WorkloadSpec{}, domain.NewError(
+			return v1alpha1.WorkloadSpec{}, domain.NewError(
 				domain.ErrorConflict,
 				"discover VMCluster",
 				fmt.Sprintf(
@@ -358,7 +400,7 @@ func (m *Manager) vmClusterWorkload(
 
 		componentObject, found, nestedErr := unstructured.NestedMap(vm.Object, "spec", component)
 		if nestedErr != nil {
-			return domain.WorkloadSpec{}, domain.WrapError(
+			return v1alpha1.WorkloadSpec{}, domain.WrapError(
 				domain.ErrorPrecondition,
 				"discover VMCluster",
 				"read component state",
@@ -367,7 +409,7 @@ func (m *Manager) vmClusterWorkload(
 		}
 
 		if !found {
-			return domain.WorkloadSpec{}, domain.NewError(
+			return v1alpha1.WorkloadSpec{}, domain.NewError(
 				domain.ErrorPrecondition,
 				"discover VMCluster",
 				fmt.Sprintf("VMCluster component %s is absent", component),
@@ -379,7 +421,7 @@ func (m *Manager) vmClusterWorkload(
 			vmClusterFieldPaused,
 		)
 		if nestedErr != nil {
-			return domain.WorkloadSpec{}, domain.WrapError(
+			return v1alpha1.WorkloadSpec{}, domain.WrapError(
 				domain.ErrorPrecondition,
 				"discover VMCluster",
 				"read component pause state",
@@ -392,7 +434,7 @@ func (m *Manager) vmClusterWorkload(
 			vmClusterFieldReplicaCount,
 		)
 		if replicasErr != nil {
-			return domain.WorkloadSpec{}, domain.WrapError(
+			return v1alpha1.WorkloadSpec{}, domain.WrapError(
 				domain.ErrorPrecondition,
 				"discover VMCluster",
 				"read component replica count",
@@ -402,7 +444,7 @@ func (m *Manager) vmClusterWorkload(
 
 		if replicasFound {
 			if configuredReplicas <= 0 || configuredReplicas > math.MaxInt32 {
-				return domain.WorkloadSpec{}, domain.NewError(
+				return v1alpha1.WorkloadSpec{}, domain.NewError(
 					domain.ErrorPrecondition,
 					"discover VMCluster",
 					fmt.Sprintf(
@@ -414,7 +456,7 @@ func (m *Manager) vmClusterWorkload(
 			}
 
 			if configuredReplicas != int64(*base.OriginalReplicas) {
-				return domain.WorkloadSpec{}, domain.NewError(
+				return v1alpha1.WorkloadSpec{}, domain.NewError(
 					domain.ErrorPrecondition,
 					"discover VMCluster",
 					fmt.Sprintf(
@@ -436,7 +478,7 @@ func (m *Manager) vmClusterWorkload(
 			vmClusterFieldPaused,
 		)
 		if nestedErr != nil {
-			return domain.WorkloadSpec{}, domain.WrapError(
+			return v1alpha1.WorkloadSpec{}, domain.WrapError(
 				domain.ErrorPrecondition,
 				"discover VMCluster",
 				"read top-level pause state",
@@ -445,14 +487,14 @@ func (m *Manager) vmClusterWorkload(
 		}
 	}
 
-	return domain.WorkloadSpec{
-		Adapter:          domain.WorkloadVMCluster,
+	return v1alpha1.WorkloadSpec{
+		Adapter:          v1alpha1.WorkloadVMCluster,
 		Pod:              base.Pod,
 		Controller:       base.Controller,
 		OriginalReplicas: base.OriginalReplicas,
 		Ordinal:          base.Ordinal,
 		AffectedPods:     base.AffectedPods,
-		VMCluster: &domain.VMClusterSpec{
+		VMCluster: &v1alpha1.VMClusterSpec{
 			APIVersion:                      vmClusterAPIVersion,
 			Name:                            parent.Name,
 			UID:                             vmUID,
@@ -467,8 +509,14 @@ func (m *Manager) vmClusterWorkload(
 	}, nil
 }
 
-func (m *Manager) pauseVMCluster(ctx context.Context, session *domain.Session) error {
-	vm := session.Spec.Workload().VMCluster
+func (m *Manager) pauseVMCluster(
+	ctx context.Context,
+	workflowID, namespace string,
+	controller v1alpha1.ObjectReference,
+	originalReplicas, ordinal *int32,
+	affectedPods []v1alpha1.ObjectReference,
+	vm *v1alpha1.VMClusterSpec,
+) error {
 	if vm == nil {
 		return domain.NewError(
 			domain.ErrorInternal,
@@ -477,8 +525,7 @@ func (m *Manager) pauseVMCluster(ctx context.Context, session *domain.Session) e
 		)
 	}
 
-	workload := session.Spec.Workload()
-	if workload.Ordinal == nil || workload.OriginalReplicas == nil {
+	if ordinal == nil || originalReplicas == nil {
 		return domain.NewError(
 			domain.ErrorInternal,
 			"pause VMCluster",
@@ -488,26 +535,34 @@ func (m *Manager) pauseVMCluster(ctx context.Context, session *domain.Session) e
 
 	if err := m.rejectHorizontalPodAutoscaler(
 		ctx,
-		workload.Controller.Namespace,
+		controller.Namespace,
 		domain.KindStatefulSet,
-		workload.Controller.Name,
+		controller.Name,
 		"pause VMCluster",
 	); err != nil {
 		return err
 	}
 
-	if err := m.setVMClusterPaused(ctx, session); err != nil {
+	if err := m.setVMClusterPaused(ctx, workflowID, namespace, vm); err != nil {
 		return err
 	}
 	// Keep lower ordinals available while preventing the operator from
 	// restoring the StatefulSet to its original replica count.
 	if err := m.setVMClusterReplicaCount(
 		ctx,
-		session,
-		*workload.Ordinal,
+		workflowID,
+		namespace,
+		vm,
+		*ordinal,
 		vm.OriginalReplicas,
 	); err != nil {
-		if restoreErr := m.restoreVMClusterPause(ctx, session); restoreErr != nil {
+		if restoreErr := m.restoreVMClusterPause(
+			ctx,
+			workflowID,
+			namespace,
+			ordinal,
+			vm,
+		); restoreErr != nil {
 			return domain.WrapError(
 				domain.ErrorKubernetes,
 				"pause VMCluster",
@@ -521,11 +576,17 @@ func (m *Manager) pauseVMCluster(ctx context.Context, session *domain.Session) e
 
 	if err := m.patchStatefulSetReplicas(
 		ctx,
-		workload.Controller,
-		*workload.Ordinal,
-		*workload.OriginalReplicas,
+		controller,
+		*ordinal,
+		*originalReplicas,
 	); err != nil {
-		if restoreErr := m.restoreVMClusterPause(ctx, session); restoreErr != nil {
+		if restoreErr := m.restoreVMClusterPause(
+			ctx,
+			workflowID,
+			namespace,
+			ordinal,
+			vm,
+		); restoreErr != nil {
 			return domain.WrapError(
 				domain.ErrorKubernetes,
 				"pause VMCluster",
@@ -537,7 +598,7 @@ func (m *Manager) pauseVMCluster(ctx context.Context, session *domain.Session) e
 		return workloadScaleError("pause VMCluster", "scale component StatefulSet", err)
 	}
 
-	for _, pod := range workload.AffectedPods {
+	for _, pod := range affectedPods {
 		if err := m.waitForPodDeletion(ctx, pod, "pause VMCluster"); err != nil {
 			return err
 		}
@@ -546,19 +607,24 @@ func (m *Manager) pauseVMCluster(ctx context.Context, session *domain.Session) e
 	return nil
 }
 
-func (m *Manager) resumeVMCluster(ctx context.Context, session *domain.Session) error {
-	vm := session.Spec.Workload().VMCluster
+func (m *Manager) resumeVMCluster(
+	ctx context.Context,
+	workflowID, namespace string,
+	controller v1alpha1.ObjectReference,
+	originalReplicas, ordinal *int32,
+	affectedPods []v1alpha1.ObjectReference,
+	vm *v1alpha1.VMClusterSpec,
+) ([]v1alpha1.ObjectReference, error) {
 	if vm == nil {
-		return domain.NewError(
+		return nil, domain.NewError(
 			domain.ErrorInternal,
 			"resume VMCluster",
 			"session lacks VMCluster state",
 		)
 	}
 
-	workload := session.Spec.Workload()
-	if workload.OriginalReplicas == nil || workload.Ordinal == nil {
-		return domain.NewError(
+	if originalReplicas == nil || ordinal == nil {
+		return nil, domain.NewError(
 			domain.ErrorInternal,
 			"resume VMCluster",
 			"session lacks StatefulSet replica state",
@@ -567,61 +633,69 @@ func (m *Manager) resumeVMCluster(ctx context.Context, session *domain.Session) 
 
 	if err := m.rejectHorizontalPodAutoscaler(
 		ctx,
-		workload.Controller.Namespace,
+		controller.Namespace,
 		domain.KindStatefulSet,
-		workload.Controller.Name,
+		controller.Name,
 		"resume VMCluster",
 	); err != nil {
-		return err
+		return nil, err
 	}
 
 	if err := m.setVMClusterReplicaCount(
 		ctx,
-		session,
+		workflowID,
+		namespace,
+		vm,
 		vm.OriginalReplicas,
-		*workload.Ordinal,
+		*ordinal,
 	); err != nil {
-		return err
+		return nil, err
 	}
 
 	if err := m.patchStatefulSetReplicas(
 		ctx,
-		workload.Controller,
-		*workload.OriginalReplicas,
-		*workload.Ordinal,
+		controller,
+		*originalReplicas,
+		*ordinal,
 	); err != nil {
-		return workloadScaleError("resume VMCluster", "restore component StatefulSet", err)
+		return nil, workloadScaleError("resume VMCluster", "restore component StatefulSet", err)
 	}
 
-	for _, ref := range workload.AffectedPods {
-		if err := m.waitForResumedPod(
-			ctx,
-			session,
-			ref,
-			workload.Controller,
-			"resume VMCluster",
-		); err != nil {
-			return err
-		}
+	observed, err := m.waitForResumedPods(ctx, affectedPods, controller, "resume VMCluster")
+	if err != nil {
+		return observed, err
 	}
 
-	if err := m.validateStatefulSetResumed(ctx, workload, "resume VMCluster"); err != nil {
-		return err
+	if err := m.validateStatefulSetResumed(
+		ctx,
+		controller,
+		originalReplicas,
+		"resume VMCluster",
+	); err != nil {
+		return observed, err
 	}
 
-	if err := m.restoreVMClusterPause(ctx, session); err != nil {
-		return err
+	if err := m.restoreVMClusterPause(ctx, workflowID, namespace, ordinal, vm); err != nil {
+		return observed, err
 	}
 
-	if err := m.waitForVMClusterOperational(ctx, session); err != nil {
-		return err
+	if err := m.waitForVMClusterOperational(ctx, namespace, vm); err != nil {
+		return observed, err
 	}
 
-	return m.validateStatefulSetResumed(ctx, workload, "resume VMCluster")
+	return observed, m.validateStatefulSetResumed(
+		ctx,
+		controller,
+		originalReplicas,
+		"resume VMCluster",
+	)
 }
 
-func (m *Manager) waitForVMClusterOperational(ctx context.Context, session *domain.Session) error {
-	vm := session.Spec.Workload().VMCluster
+func (m *Manager) waitForVMClusterOperational(
+	ctx context.Context,
+	namespace string,
+	vm *v1alpha1.VMClusterSpec,
+) error {
 	if vm == nil {
 		return domain.NewError(
 			domain.ErrorInternal,
@@ -643,11 +717,11 @@ func (m *Manager) waitForVMClusterOperational(ctx context.Context, session *doma
 		return err
 	}
 
-	resource := m.dynamic.Resource(gvr).Namespace(session.Spec.Workload().Pod.Namespace)
+	resource := m.dynamic.Resource(gvr).Namespace(namespace)
 
 	return m.waitFor(
 		ctx,
-		fmt.Sprintf("VMCluster %s/%s convergence", session.Spec.Workload().Pod.Namespace, vm.Name),
+		fmt.Sprintf("VMCluster %s/%s convergence", namespace, vm.Name),
 		func(waitCtx context.Context) (bool, error) {
 			object, getErr := resource.Get(waitCtx, vm.Name, metav1.GetOptions{})
 			if getErr != nil {
@@ -770,8 +844,12 @@ func (m *Manager) waitForVMClusterOperational(ctx context.Context, session *doma
 	)
 }
 
-func (m *Manager) restoreVMClusterPause(ctx context.Context, session *domain.Session) error {
-	vm := session.Spec.Workload().VMCluster
+func (m *Manager) restoreVMClusterPause(
+	ctx context.Context,
+	workflowID, namespace string,
+	ordinal *int32,
+	vm *v1alpha1.VMClusterSpec,
+) error {
 	if vm == nil {
 		return domain.NewError(
 			domain.ErrorInternal,
@@ -793,159 +871,176 @@ func (m *Manager) restoreVMClusterPause(ctx context.Context, session *domain.Ses
 		return err
 	}
 
+	resource := m.dynamic.Resource(gvr).Namespace(namespace)
+
 	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
-		resource := m.dynamic.Resource(gvr).Namespace(session.Spec.Workload().Pod.Namespace)
-
-		object, getErr := resource.Get(ctx, vm.Name, metav1.GetOptions{})
-		if getErr != nil {
-			return domain.WrapError(
-				domain.ErrorKubernetes,
-				"restore VMCluster pause",
-				"read VMCluster",
-				getErr,
-			)
-		}
-
-		if object.GetUID() != vm.UID {
-			return domain.NewError(
-				domain.ErrorConflict,
-				"restore VMCluster pause",
-				fmt.Sprintf("VMCluster %s/%s UID changed", object.GetNamespace(), object.GetName()),
-			)
-		}
-
-		componentObject, ok, nestedErr := unstructured.NestedMap(
-			object.Object,
-			"spec",
-			vm.Component,
-		)
-		if nestedErr != nil {
-			return domain.WrapError(
-				domain.ErrorPrecondition,
-				"restore VMCluster pause",
-				"read component pause state",
-				nestedErr,
-			)
-		}
-
-		if !ok {
-			return domain.NewError(
-				domain.ErrorPrecondition,
-				"restore VMCluster pause",
-				fmt.Sprintf("VMCluster component %s is absent", vm.Component),
-			)
-		}
-
-		current, _, nestedErr := unstructured.NestedBool(componentObject, vmClusterFieldPaused)
-		if nestedErr != nil {
-			return domain.WrapError(
-				domain.ErrorPrecondition,
-				"restore VMCluster pause",
-				"read component pause state",
-				nestedErr,
-			)
-		}
-
-		annotations := object.GetAnnotations()
-
-		pauseOwner := annotations[pauseSessionAnnotation]
-
-		currentReplicas, replicasFound, nestedErr := unstructured.NestedInt64(
-			componentObject,
-			vmClusterFieldReplicaCount,
-		)
-		if nestedErr != nil {
-			return domain.WrapError(
-				domain.ErrorPrecondition,
-				"restore VMCluster pause",
-				"read component replica count",
-				nestedErr,
-			)
-		}
-
-		restoreRequired, validateErr := validateVMClusterPauseRestoreState(
-			session,
-			vm,
-			object,
-			pauseOwner,
-			current,
-			currentReplicas,
-			replicasFound,
-		)
-		if validateErr != nil || !restoreRequired {
-			return validateErr
-		}
-
-		if current != vm.OriginalPaused {
-			if err := unstructured.SetNestedField(
-				componentObject,
-				vm.OriginalPaused,
-				vmClusterFieldPaused,
-			); err != nil {
-				return err
-			}
-
-			if err := unstructured.SetNestedField(
-				object.Object,
-				componentObject,
-				"spec",
-				vm.Component,
-			); err != nil {
-				return err
-			}
-		}
-
-		if vm.OriginalReplicasConfigured && replicasFound &&
-			session.Spec.Workload().Ordinal != nil &&
-			currentReplicas == int64(*session.Spec.Workload().Ordinal) {
-			if err := unstructured.SetNestedField(
-				componentObject,
-				int64(vm.OriginalReplicas),
-				vmClusterFieldReplicaCount,
-			); err != nil {
-				return err
-			}
-
-			if err := unstructured.SetNestedField(
-				object.Object,
-				componentObject,
-				"spec",
-				vm.Component,
-			); err != nil {
-				return err
-			}
-		}
-
-		delete(annotations, pauseSessionAnnotation)
-		object.SetAnnotations(annotations)
-
-		if _, updateErr := resource.Update(ctx, object, metav1.UpdateOptions{}); updateErr != nil {
-			if apierrors.IsConflict(updateErr) {
-				return updateErr
-			}
-
-			return domain.WrapError(
-				domain.ErrorKubernetes,
-				"restore VMCluster pause",
-				"clear component pause owner",
-				updateErr,
-			)
-		}
-
-		return nil
+		return m.restoreVMClusterPauseOnce(ctx, resource, workflowID, ordinal, vm)
 	})
 }
 
+func (m *Manager) restoreVMClusterPauseOnce(
+	ctx context.Context,
+	resource dynamic.ResourceInterface,
+	workflowID string,
+	ordinal *int32,
+	vm *v1alpha1.VMClusterSpec,
+) error {
+	object, getErr := resource.Get(ctx, vm.Name, metav1.GetOptions{})
+	if getErr != nil {
+		return domain.WrapError(
+			domain.ErrorKubernetes,
+			"restore VMCluster pause",
+			"read VMCluster",
+			getErr,
+		)
+	}
+
+	if object.GetUID() != vm.UID {
+		return domain.NewError(
+			domain.ErrorConflict,
+			"restore VMCluster pause",
+			fmt.Sprintf("VMCluster %s/%s UID changed", object.GetNamespace(), object.GetName()),
+		)
+	}
+
+	componentObject, ok, nestedErr := unstructured.NestedMap(
+		object.Object,
+		"spec",
+		vm.Component,
+	)
+	if nestedErr != nil {
+		return domain.WrapError(
+			domain.ErrorPrecondition,
+			"restore VMCluster pause",
+			"read component pause state",
+			nestedErr,
+		)
+	}
+
+	if !ok {
+		return domain.NewError(
+			domain.ErrorPrecondition,
+			"restore VMCluster pause",
+			fmt.Sprintf("VMCluster component %s is absent", vm.Component),
+		)
+	}
+
+	current, _, nestedErr := unstructured.NestedBool(componentObject, vmClusterFieldPaused)
+	if nestedErr != nil {
+		return domain.WrapError(
+			domain.ErrorPrecondition,
+			"restore VMCluster pause",
+			"read component pause state",
+			nestedErr,
+		)
+	}
+
+	annotations := object.GetAnnotations()
+
+	pauseOwner := annotations[pauseSessionAnnotation]
+
+	currentReplicas, replicasFound, nestedErr := unstructured.NestedInt64(
+		componentObject,
+		vmClusterFieldReplicaCount,
+	)
+	if nestedErr != nil {
+		return domain.WrapError(
+			domain.ErrorPrecondition,
+			"restore VMCluster pause",
+			"read component replica count",
+			nestedErr,
+		)
+	}
+
+	restoreRequired, validateErr := validateVMClusterPauseRestoreState(
+		workflowID,
+		ordinal,
+		vm,
+		object,
+		pauseOwner,
+		current,
+		currentReplicas,
+		replicasFound,
+	)
+	if validateErr != nil || !restoreRequired {
+		return validateErr
+	}
+
+	// On CRDs that prune the component paused field the write-back is a
+	// no-op at the API server; skipping it avoids a pointless update.
+	if current != vm.OriginalPaused && vm.ComponentPausedSupported {
+		if err := unstructured.SetNestedField(
+			componentObject,
+			vm.OriginalPaused,
+			vmClusterFieldPaused,
+		); err != nil {
+			return err
+		}
+
+		if err := unstructured.SetNestedField(
+			object.Object,
+			componentObject,
+			"spec",
+			vm.Component,
+		); err != nil {
+			return err
+		}
+	}
+
+	if vm.OriginalReplicasConfigured && replicasFound &&
+		ordinal != nil && currentReplicas == int64(*ordinal) {
+		if err := unstructured.SetNestedField(
+			componentObject,
+			int64(vm.OriginalReplicas),
+			vmClusterFieldReplicaCount,
+		); err != nil {
+			return err
+		}
+
+		if err := unstructured.SetNestedField(
+			object.Object,
+			componentObject,
+			"spec",
+			vm.Component,
+		); err != nil {
+			return err
+		}
+	}
+
+	delete(annotations, pauseSessionAnnotation)
+	object.SetAnnotations(annotations)
+
+	if _, updateErr := resource.Update(ctx, object, metav1.UpdateOptions{}); updateErr != nil {
+		if apierrors.IsConflict(updateErr) {
+			return updateErr
+		}
+
+		return domain.WrapError(
+			domain.ErrorKubernetes,
+			"restore VMCluster pause",
+			"clear component pause owner",
+			updateErr,
+		)
+	}
+
+	if err := kube.LeaseFenceError(ctx); err != nil {
+		return err
+	}
+
+	return nil
+}
+
 func validateVMClusterPauseRestoreState(
-	session *domain.Session,
-	vm *domain.VMClusterSpec,
+	workflowID string,
+	ordinal *int32,
+	vm *v1alpha1.VMClusterSpec,
 	object *unstructured.Unstructured,
 	pauseOwner string,
 	current bool,
 	currentReplicas int64,
 	replicasFound bool,
 ) (bool, error) {
-	if pauseOwner != "" && pauseOwner != session.ID {
+	if pauseOwner != "" && pauseOwner != workflowID {
 		return false, domain.NewError(
 			domain.ErrorConflict,
 			"restore VMCluster pause",
@@ -959,7 +1054,7 @@ func validateVMClusterPauseRestoreState(
 	}
 
 	if pauseOwner == "" {
-		if current != vm.OriginalPaused {
+		if vm.ComponentPausedSupported && current != vm.OriginalPaused {
 			return false, domain.NewError(
 				domain.ErrorConflict,
 				"restore VMCluster pause",
@@ -987,7 +1082,7 @@ func validateVMClusterPauseRestoreState(
 		return false, nil
 	}
 
-	if !current {
+	if !current && vm.ComponentPausedSupported {
 		return false, domain.NewError(
 			domain.ErrorConflict,
 			"restore VMCluster pause",
@@ -1028,8 +1123,7 @@ func validateVMClusterPauseRestoreState(
 		return true, nil
 	}
 
-	workload := session.Spec.Workload()
-	if workload.Ordinal == nil || currentReplicas != int64(*workload.Ordinal) {
+	if ordinal == nil || currentReplicas != int64(*ordinal) {
 		return false, domain.NewError(
 			domain.ErrorConflict,
 			"restore VMCluster pause",
@@ -1045,11 +1139,11 @@ func validateVMClusterPauseRestoreState(
 
 func (m *Manager) setVMClusterReplicaCount(
 	ctx context.Context,
-	session *domain.Session,
+	workflowID, namespace string,
+	vm *v1alpha1.VMClusterSpec,
 	replicas int32,
 	allowedCurrent ...int32,
 ) error {
-	vm := session.Spec.Workload().VMCluster
 	if vm == nil {
 		return domain.NewError(
 			domain.ErrorInternal,
@@ -1072,7 +1166,7 @@ func (m *Manager) setVMClusterReplicaCount(
 	}
 
 	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
-		resource := m.dynamic.Resource(gvr).Namespace(session.Spec.Workload().Pod.Namespace)
+		resource := m.dynamic.Resource(gvr).Namespace(namespace)
 
 		object, getErr := resource.Get(ctx, vm.Name, metav1.GetOptions{})
 		if getErr != nil {
@@ -1143,7 +1237,7 @@ func (m *Manager) setVMClusterReplicaCount(
 		}
 
 		annotations := object.GetAnnotations()
-		if owner := annotations[pauseSessionAnnotation]; owner != session.ID {
+		if owner := annotations[pauseSessionAnnotation]; owner != workflowID {
 			return domain.NewError(
 				domain.ErrorConflict,
 				"set VMCluster replicas",
@@ -1209,16 +1303,19 @@ func (m *Manager) setVMClusterReplicaCount(
 			)
 		}
 
+		if err := kube.LeaseFenceError(ctx); err != nil {
+			return err
+		}
+
 		return nil
 	})
 }
 
 func (m *Manager) setVMClusterPaused(
 	ctx context.Context,
-	session *domain.Session,
+	workflowID, namespace string,
+	vm *v1alpha1.VMClusterSpec,
 ) error {
-	vm := session.Spec.Workload().VMCluster
-
 	if m.dynamic == nil {
 		return domain.NewError(
 			domain.ErrorPrecondition,
@@ -1232,169 +1329,206 @@ func (m *Manager) setVMClusterPaused(
 		return err
 	}
 
+	resource := m.dynamic.Resource(gvr).Namespace(namespace)
+
 	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
-		resource := m.dynamic.Resource(gvr).Namespace(session.Spec.Workload().Pod.Namespace)
+		return m.setVMClusterPausedOnce(ctx, resource, workflowID, vm)
+	})
+}
 
-		object, getErr := resource.Get(ctx, vm.Name, metav1.GetOptions{})
-		if getErr != nil {
-			return domain.WrapError(
-				domain.ErrorKubernetes,
-				"VMCluster pause",
-				"read VMCluster",
-				getErr,
-			)
-		}
-
-		if object.GetUID() != vm.UID {
-			return domain.NewError(
-				domain.ErrorConflict,
-				"VMCluster pause",
-				fmt.Sprintf("VMCluster %s/%s UID changed", object.GetNamespace(), object.GetName()),
-			)
-		}
-
-		componentObject, ok, nestedErr := unstructured.NestedMap(
-			object.Object,
-			"spec",
-			vm.Component,
+func (m *Manager) setVMClusterPausedOnce(
+	ctx context.Context,
+	resource dynamic.ResourceInterface,
+	workflowID string,
+	vm *v1alpha1.VMClusterSpec,
+) error {
+	object, getErr := resource.Get(ctx, vm.Name, metav1.GetOptions{})
+	if getErr != nil {
+		return domain.WrapError(
+			domain.ErrorKubernetes,
+			"VMCluster pause",
+			"read VMCluster",
+			getErr,
 		)
-		if nestedErr != nil {
-			return domain.WrapError(
-				domain.ErrorPrecondition,
-				"VMCluster pause",
-				"read component pause state",
-				nestedErr,
-			)
-		}
+	}
 
-		if !ok {
-			return domain.NewError(
-				domain.ErrorPrecondition,
-				"VMCluster pause",
-				fmt.Sprintf("VMCluster component %s is absent", vm.Component),
-			)
-		}
+	if object.GetUID() != vm.UID {
+		return domain.NewError(
+			domain.ErrorConflict,
+			"VMCluster pause",
+			fmt.Sprintf("VMCluster %s/%s UID changed", object.GetNamespace(), object.GetName()),
+		)
+	}
 
-		current, _, nestedErr := unstructured.NestedBool(componentObject, vmClusterFieldPaused)
-		if nestedErr != nil {
-			return domain.WrapError(
-				domain.ErrorPrecondition,
-				"VMCluster pause",
-				"read component pause state",
-				nestedErr,
-			)
-		}
+	componentObject, ok, nestedErr := unstructured.NestedMap(
+		object.Object,
+		"spec",
+		vm.Component,
+	)
+	if nestedErr != nil {
+		return domain.WrapError(
+			domain.ErrorPrecondition,
+			"VMCluster pause",
+			"read component pause state",
+			nestedErr,
+		)
+	}
 
-		annotations := object.GetAnnotations()
+	if !ok {
+		return domain.NewError(
+			domain.ErrorPrecondition,
+			"VMCluster pause",
+			fmt.Sprintf("VMCluster component %s is absent", vm.Component),
+		)
+	}
 
-		pauseOwner := annotations[pauseSessionAnnotation]
-		if pauseOwner != "" && pauseOwner != session.ID {
-			return domain.NewError(
-				domain.ErrorConflict,
-				"VMCluster pause",
-				fmt.Sprintf(
-					"VMCluster %s/%s pause is owned by session %s",
-					object.GetNamespace(),
-					object.GetName(),
-					pauseOwner,
-				),
-			)
-		}
+	current, _, nestedErr := unstructured.NestedBool(componentObject, vmClusterFieldPaused)
+	if nestedErr != nil {
+		return domain.WrapError(
+			domain.ErrorPrecondition,
+			"VMCluster pause",
+			"read component pause state",
+			nestedErr,
+		)
+	}
 
-		if pauseOwner == "" && current != vm.OriginalPaused {
-			return domain.NewError(
-				domain.ErrorConflict,
-				"VMCluster pause",
-				fmt.Sprintf(
-					"VMCluster component %s paused changed from expected %t to %t",
-					vm.Component,
-					vm.OriginalPaused,
-					current,
-				),
-			)
-		}
+	annotations := object.GetAnnotations()
 
-		if pauseOwner == "" {
-			currentReplicas, replicasFound, replicasErr := unstructured.NestedInt64(
-				componentObject,
-				vmClusterFieldReplicaCount,
-			)
-			if replicasErr != nil {
-				return domain.WrapError(
-					domain.ErrorPrecondition,
-					"VMCluster pause",
-					"read component replica count",
-					replicasErr,
-				)
-			}
+	pauseOwner := annotations[pauseSessionAnnotation]
+	if pauseOwner != "" && pauseOwner != workflowID {
+		return domain.NewError(
+			domain.ErrorConflict,
+			"VMCluster pause",
+			fmt.Sprintf(
+				"VMCluster %s/%s pause is owned by session %s",
+				object.GetNamespace(),
+				object.GetName(),
+				pauseOwner,
+			),
+		)
+	}
 
-			if replicasFound != vm.OriginalReplicasConfigured ||
-				(replicasFound && currentReplicas != int64(vm.OriginalReplicas)) {
-				return domain.NewError(
-					domain.ErrorConflict,
-					"VMCluster pause",
-					fmt.Sprintf(
-						"VMCluster component %s replicaCount changed after discovery",
-						vm.Component,
-					),
-				)
-			}
-		}
+	if pauseOwner == "" && current != vm.OriginalPaused {
+		return domain.NewError(
+			domain.ErrorConflict,
+			"VMCluster pause",
+			fmt.Sprintf(
+				"VMCluster component %s paused changed from expected %t to %t",
+				vm.Component,
+				vm.OriginalPaused,
+				current,
+			),
+		)
+	}
 
-		if pauseOwner == session.ID && current {
-			return nil
-		}
-
-		if pauseOwner == session.ID && !current {
-			return domain.NewError(
-				domain.ErrorConflict,
-				"VMCluster pause",
-				fmt.Sprintf(
-					"VMCluster component %s paused changed while session was active",
-					vm.Component,
-				),
-			)
-		}
-
-		if err := unstructured.SetNestedField(
+	if pauseOwner == "" {
+		currentReplicas, replicasFound, replicasErr := unstructured.NestedInt64(
 			componentObject,
-			true,
-			vmClusterFieldPaused,
-		); err != nil {
-			return err
-		}
-
-		if err := unstructured.SetNestedField(
-			object.Object,
-			componentObject,
-			"spec",
-			vm.Component,
-		); err != nil {
-			return err
-		}
-
-		if annotations == nil {
-			annotations = map[string]string{}
-		}
-
-		annotations[pauseSessionAnnotation] = session.ID
-
-		object.SetAnnotations(annotations)
-
-		_, updateErr := resource.Update(ctx, object, metav1.UpdateOptions{})
-		if apierrors.IsConflict(updateErr) {
-			return updateErr
-		}
-
-		if updateErr != nil {
+			vmClusterFieldReplicaCount,
+		)
+		if replicasErr != nil {
 			return domain.WrapError(
-				domain.ErrorKubernetes,
+				domain.ErrorPrecondition,
 				"VMCluster pause",
-				"update component paused state",
-				updateErr,
+				"read component replica count",
+				replicasErr,
 			)
 		}
+
+		if replicasFound != vm.OriginalReplicasConfigured ||
+			(replicasFound && currentReplicas != int64(vm.OriginalReplicas)) {
+			return domain.NewError(
+				domain.ErrorConflict,
+				"VMCluster pause",
+				fmt.Sprintf(
+					"VMCluster component %s replicaCount changed after discovery",
+					vm.Component,
+				),
+			)
+		}
+	}
+
+	if pauseOwner == workflowID && current {
+		vm.ComponentPausedSupported = true
 
 		return nil
-	})
+	}
+
+	if pauseOwner == workflowID && !current && vm.ComponentPausedSupported {
+		return domain.NewError(
+			domain.ErrorConflict,
+			"VMCluster pause",
+			fmt.Sprintf(
+				"VMCluster component %s paused changed while session was active",
+				vm.Component,
+			),
+		)
+	}
+
+	// pauseOwner == workflowID && !current on an unsupported CRD falls
+	// through: the paused write below is pruned again, and the post-update
+	// probe keeps recording support.
+
+	if err := unstructured.SetNestedField(
+		componentObject,
+		true,
+		vmClusterFieldPaused,
+	); err != nil {
+		return err
+	}
+
+	if err := unstructured.SetNestedField(
+		object.Object,
+		componentObject,
+		"spec",
+		vm.Component,
+	); err != nil {
+		return err
+	}
+
+	if annotations == nil {
+		annotations = map[string]string{}
+	}
+
+	annotations[pauseSessionAnnotation] = workflowID
+
+	object.SetAnnotations(annotations)
+
+	_, updateErr := resource.Update(ctx, object, metav1.UpdateOptions{})
+	if apierrors.IsConflict(updateErr) {
+		return updateErr
+	}
+
+	if updateErr != nil {
+		return domain.WrapError(
+			domain.ErrorKubernetes,
+			"VMCluster pause",
+			"update component paused state",
+			updateErr,
+		)
+	}
+
+	if err := kube.LeaseFenceError(ctx); err != nil {
+		return err
+	}
+
+	// Older VMCluster CRDs prune the per-component paused field with only
+	// a warning, so a successful update says nothing about whether the
+	// pause took. Re-read and record the outcome: when the field did not
+	// persist, pause semantics degrade to holding the component at the
+	// reduced replicaCount instead of relying on the paused flag.
+	stored, readErr := resource.Get(ctx, vm.Name, metav1.GetOptions{})
+	if readErr == nil {
+		if component, ok, _ := unstructured.NestedMap(
+			stored.Object,
+			"spec",
+			vm.Component,
+		); ok &&
+			component != nil {
+			stuck, _, _ := unstructured.NestedBool(component, vmClusterFieldPaused)
+			vm.ComponentPausedSupported = stuck
+		}
+	}
+
+	return nil
 }

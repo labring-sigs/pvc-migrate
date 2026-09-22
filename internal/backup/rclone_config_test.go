@@ -3,6 +3,7 @@ package backup
 import (
 	"testing"
 
+	v1alpha1 "github.com/labring-sigs/pvc-migrate/api/v1alpha1"
 	"github.com/labring-sigs/pvc-migrate/internal/objectstore"
 	"helm.sh/helm/v4/pkg/strvals"
 )
@@ -53,10 +54,14 @@ func TestPVMigrateBackupRequestKeepsCredentialsOutOfUpstreamFields(t *testing.T)
 		t.Fatal(err)
 	}
 
-	request := Request{Namespace: "default", PVCName: "data", Store: store}
-
-	got, err := pvmigrateBackupRequest(
-		request,
+	got, err := backupToolRequestFixture(
+		"default",
+		"daily",
+		v1alpha1.BackupPlan{
+			SourcePVC: v1alpha1.LocalResourceReference{Name: "data"},
+		},
+		false,
+		store,
 		store.RcloneConfig(),
 		nil,
 	)

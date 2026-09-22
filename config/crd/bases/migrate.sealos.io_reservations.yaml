@@ -54,16 +54,24 @@ spec:
                 - require
                 - "off"
                 type: string
+              copyTimeout:
+                description: |-
+                  CopyTimeout bounds one data-transfer attempt (warm copy, final sync, or
+                  copy pass). Unset keeps the operation-level bound only. The pattern
+                  requires at least one unit-suffixed component ("30m", "1h30m", "90s")
+                  so empty or unitless values are rejected at admission instead of
+                  silently falling back to the default during planning.
+                pattern: ^([0-9]+(h|m|s))+$
+                type: string
               deleteExtraneous:
+                default: true
+                description: |-
+                  DeleteExtraneous defaults to true so a raw workflow CR means the same
+                  thing as the CLI default: the destination mirrors the source exactly.
+                  A pointer preserves the distinction between an omitted value (the API
+                  default is true) and an explicit false from a typed client.
                 type: boolean
               destinationCapacity:
-                type: string
-              destinationPVCReclaimPolicy:
-                description: DestinationPVCReclaimPolicy controls workflow-owned destination
-                  storage during cleanup.
-                enum:
-                - Retain
-                - Delete
                 type: string
               destinationPath:
                 type: string
@@ -98,6 +106,34 @@ spec:
                 required:
                 - name
                 type: object
+              retryPolicy:
+                description: |-
+                  RetryPolicy overrides the retry behavior of the data-transfer attempts
+                  for this workflow. Zero values keep the controller defaults. Only
+                  copy-bearing workflows consume it.
+                properties:
+                  retries:
+                    description: Retries overrides the number of data-transfer attempts.
+                    format: int32
+                    maximum: 100
+                    minimum: 0
+                    type: integer
+                  retryBackoff:
+                    description: |-
+                      RetryBackoff is the delay before the first retry; it doubles on every
+                      further attempt. The pattern requires at least one unit-suffixed
+                      component ("2s", "1m30s").
+                    pattern: ^([0-9]+(h|m|s))+$
+                    type: string
+                type: object
+              rsyncMaxRetries:
+                description: |-
+                  RsyncMaxRetries overrides how many times the rsync job re-runs on a
+                  failed attempt within one transfer. Unset keeps the upstream default.
+                format: int32
+                maximum: 100
+                minimum: 0
+                type: integer
               skipSourceUsageCheck:
                 type: boolean
               sourceNode:
@@ -110,6 +146,21 @@ spec:
                 maxItems: 32
                 type: array
               targetNode:
+                type: string
+              unusedStoragePolicy:
+                description: |-
+                  UnusedStoragePolicy decides the fate of workflow-created storage that
+                  was never delivered to a workload, and its meaning differs per
+                  operation: migration and pod migration delete the old source PV after
+                  a completed cutover, or the staged destination after a rollback or
+                  abort; copy deletes the destination PVC only when the copy aborted
+                  before completing; reservation deletes destination PVCs that were
+                  never promoted to a copy. Keep retains it (default); Delete removes
+                  it. The storage a workload actually runs on, and every source PVC, is
+                  always kept, whatever the policy says.
+                enum:
+                - Keep
+                - Delete
                 type: string
               verifyChecksum:
                 type: boolean
@@ -347,11 +398,6 @@ spec:
                 properties:
                   deleteExtraneous:
                     type: boolean
-                  destinationPVCReclaimPolicy:
-                    enum:
-                    - Retain
-                    - Delete
-                    type: string
                   skipSourceUsageCheck:
                     type: boolean
                   sourceNode:
@@ -365,6 +411,16 @@ spec:
                     type: string
                   toolImage:
                     type: string
+                  unusedStoragePolicy:
+                    description: |-
+                      UnusedStoragePolicy decides the fate of reserved destination PVCs this
+                      reservation created and never promoted to a copy. Delete removes them
+                      on abort or cleanup; once promoted, the destination belongs to the copy
+                      workflow. The source PVC is never deleted.
+                    enum:
+                    - Keep
+                    - Delete
+                    type: string
                   verifyChecksum:
                     type: boolean
                   volumes:
@@ -372,6 +428,8 @@ spec:
                       description: |-
                         VolumeSpec is planning output required to resume a PVC transfer. It is an
                         API-owned type with only the fields needed by transfer workflows.
+                        PVC references are relative to the workflow's source and destination
+                        namespace roles; PV references are always cluster-scoped.
                       properties:
                         accessModes:
                           items:
@@ -885,11 +943,6 @@ spec:
                   - sourcePVCName
                   type: object
                 type: array
-            required:
-            - phase
-            - startedAt
-            - updatedAt
-            - volumes
             type: object
         required:
         - spec

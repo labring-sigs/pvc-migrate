@@ -139,6 +139,47 @@ spec:
             type: object
           status:
             properties:
+              activation:
+                description: |-
+                  RenameActivationStatus is the checkpoint needed to roll back a Rename.
+                  Temporary-volume cleanup fields do not apply to identity operations.
+                properties:
+                  activatedAt:
+                    format: date-time
+                    type: string
+                  activePVC:
+                    description: |-
+                      LocalResourceReference identifies a resource whose namespace is established
+                      by the containing workflow, or a cluster-scoped resource such as a PV.
+                      Namespaced workflow APIs derive their boundary from metadata.namespace.
+                    properties:
+                      apiVersion:
+                        maxLength: 253
+                        type: string
+                      kind:
+                        maxLength: 253
+                        type: string
+                      name:
+                        maxLength: 253
+                        minLength: 1
+                        pattern: ^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$
+                        type: string
+                      resourceVersion:
+                        maxLength: 256
+                        type: string
+                      uid:
+                        description: |-
+                          UID is a type that holds unique ID values, including UUIDs.  Because we
+                          don't ONLY use UUIDs, this is an alias to string.  Being a type captures
+                          intent and helps make sure that UIDs and names do not get conflated.
+                        type: string
+                    required:
+                    - name
+                    type: object
+                  rolledBackAt:
+                    format: date-time
+                    type: string
+                type: object
               completedAt:
                 format: date-time
                 type: string
@@ -644,65 +685,8 @@ spec:
               updatedAt:
                 format: date-time
                 type: string
-              volumes:
-                items:
-                  description: |-
-                    PVCIdentityVolumeStatus is the namespaced Rename checkpoint. Rename changes
-                    PVC identity and never runs a data-copy phase.
-                  properties:
-                    activation:
-                      description: |-
-                        PVCIdentityActivationStatus is the checkpoint needed to roll back a Rename.
-                        Temporary-volume cleanup fields do not apply to identity operations.
-                      properties:
-                        activatedAt:
-                          format: date-time
-                          type: string
-                        activePVC:
-                          description: |-
-                            LocalResourceReference identifies a resource whose namespace is established
-                            by the containing workflow, or a cluster-scoped resource such as a PV.
-                            Namespaced workflow APIs derive their boundary from metadata.namespace.
-                          properties:
-                            apiVersion:
-                              maxLength: 253
-                              type: string
-                            kind:
-                              maxLength: 253
-                              type: string
-                            name:
-                              maxLength: 253
-                              minLength: 1
-                              pattern: ^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$
-                              type: string
-                            resourceVersion:
-                              maxLength: 256
-                              type: string
-                            uid:
-                              description: |-
-                                UID is a type that holds unique ID values, including UUIDs.  Because we
-                                don't ONLY use UUIDs, this is an alias to string.  Being a type captures
-                                intent and helps make sure that UIDs and names do not get conflated.
-                              type: string
-                          required:
-                          - name
-                          type: object
-                        rolledBackAt:
-                          format: date-time
-                          type: string
-                      type: object
-                    sourcePVCName:
-                      type: string
-                  required:
-                  - activation
-                  - sourcePVCName
-                  type: object
-                type: array
             required:
-            - phase
-            - startedAt
-            - updatedAt
-            - volumes
+            - activation
             type: object
         required:
         - spec

@@ -2,151 +2,90 @@ package app
 
 import (
 	"context"
-	"time"
+	"fmt"
 
+	v1alpha1 "github.com/labring-sigs/pvc-migrate/api/v1alpha1"
 	"github.com/labring-sigs/pvc-migrate/internal/domain"
-	"github.com/labring-sigs/pvc-migrate/internal/kube"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/client-go/kubernetes"
 )
 
-// FinalizeDeletedWorkflow converges storage before releasing CR protection.
-// The same Lease covers recovery and cleanup so CLI lifecycle operations cannot
-// intervene between the two steps.
-func (s *Service) FinalizeDeletedWorkflow(ctx context.Context, session *domain.Session) error {
-	ctx = context.WithValue(ctx, workflowDeletionContextKey{}, true)
-
-	return s.withSessionLock(ctx, session, func(ctx context.Context) error {
-		store, ok := s.store.(kube.ControllerSessionStore)
-		if !ok {
-			return domain.NewError(
-				domain.ErrorPrecondition,
-				"finalize workflow",
-				"controller session store is required",
-			)
-		}
-
-		latest, err := store.GetByKind(
-			ctx,
-			session.Spec.SessionNamespace,
-			session.ID,
-			session.BackendResource,
-		)
-		if kube.IsSessionNotFound(err) {
-			// Another deletion worker can finish before this worker acquires
-			// the Lease. Remove the lock it just recreated for the absent CR.
-			held, ok := ctx.Value(sessionLockContextKey{}).(heldSessionLock)
-			if !ok {
-				return err
-			}
-
-			deleteCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
-			defer cancel()
-
-			return held.lock.Delete(deleteCtx)
-		}
-
-		if err != nil {
-			return err
-		}
-
-		if latest.BackendUID != session.BackendUID || !latest.Deleting {
-			return domain.NewError(
-				domain.ErrorConflict,
-				"finalize workflow",
-				"workflow identity or deletion intent changed",
-			)
-		}
-
-		// The caller validated this generation before acquiring the Lease.
-		// Keep its snapshot on conflict so error reporting cannot acknowledge
-		// a concurrently changed spec using the newly read resourceVersion.
-		if latest.Generation != session.Generation ||
-			latest.Spec.SessionNamespace != session.Spec.SessionNamespace {
-			return domain.NewError(
-				domain.ErrorConflict,
-				"finalize workflow",
-				"workflow spec changed while acquiring its lock; retry reconciliation",
-			)
-		}
-
-		*session = *latest
-		if err := s.verifyBackupToolsStopped(ctx, session); err != nil {
-			return err
-		}
-
-		phase := session.Status.Phase
-		if phase == domain.PhaseFailed {
-			phase = session.Status.ResumeFrom
-		}
-
-		reason := "Cancelling"
-		if deletionRequiresConvergence(phase) {
-			reason = "ConvergingStorage"
-		} else if cleanupPhaseAllowed(session) {
-			reason = "CleaningUp"
-		}
-
-		session.SetCondition(domain.Condition{
-			Type:               "Deleting",
-			Status:             metav1.ConditionTrue,
-			Reason:             reason,
-			Message:            "Recovering workload and cleaning workflow resources before deletion",
-			LastTransitionTime: metav1.Now(),
-		})
-
-		if err := s.persist(ctx, session); err != nil {
-			return err
-		}
-
-		if !cleanupPhaseAllowed(session) {
-			if err := s.cleanupInterruptedCopy(ctx, session, phase); err != nil {
-				return err
-			}
-
-			if deletionRequiresConvergence(phase) {
-				switch session.Spec.Type {
-				case domain.SessionTypeMigrate:
-					err = s.ResumeOfflineMigration(ctx, session)
-				case domain.SessionTypeMigratePod:
-					err = s.ResumePodMigration(ctx, session)
-				case domain.SessionTypeRename:
-					err = s.ResumeRename(ctx, session)
-				case domain.SessionTypeMove:
-					err = s.ResumeMove(ctx, session)
-				default:
-					err = domain.NewError(
-						domain.ErrorPrecondition,
-						"finalize workflow",
-						"workflow requires recovery before deletion",
-					)
-				}
-			} else {
-				err = s.abort(ctx, session)
-			}
-
-			if err != nil {
-				return err
-			}
-		}
-
-		options := CleanupOptions{Finalize: true, DeleteSession: true}
-
-		return s.cleanup(ctx, session, options)
-	})
+// workflowDeletionInProgress reports whether the current execution finalizes a
+// deleted workflow. Deletion is the last convergence pass, so preconditions
+// that would restore live state are relaxed when that state is already gone.
+func workflowDeletionInProgress(ctx context.Context) bool {
+	return ctx.Value(workflowDeletionContextKey{}) == true
 }
 
-type workflowDeletionContextKey struct{}
-
-func deletionRequiresConvergence(phase domain.Phase) bool {
-	switch phase {
-	case domain.PhaseActivating,
-		domain.PhaseActivated,
-		domain.PhaseResuming,
-		domain.PhaseRenaming,
-		domain.PhaseMoving,
-		domain.PhaseRollingBack:
-		return true
-	default:
-		return false
+// sourcePVCDeleted reports whether one recorded source PVC no longer exists.
+func sourcePVCDeleted(
+	ctx context.Context,
+	client kubernetes.Interface,
+	sourcePVC v1alpha1.ObjectReference,
+) (bool, error) {
+	_, err := client.CoreV1().
+		PersistentVolumeClaims(sourcePVC.Namespace).
+		Get(ctx, sourcePVC.Name, metav1.GetOptions{})
+	if apierrors.IsNotFound(err) {
+		return true, nil
 	}
+
+	if err != nil {
+		return false, domain.WrapError(
+			domain.ErrorKubernetes,
+			verifySourceStoragePhase,
+			fmt.Sprintf("read source PVC %s/%s", sourcePVC.Namespace, sourcePVC.Name),
+			err,
+		)
+	}
+
+	return false, nil
+}
+
+// deletedPlannedSourcePVC reports whether any planned source volume lost its
+// PVC. A deletion pass that would re-verify or resume onto it can only fail:
+// abort converges without the resume and cleanup releases the storage instead.
+func deletedPlannedSourcePVC(
+	ctx context.Context,
+	client kubernetes.Interface,
+	sourceNamespace string,
+	volumes []v1alpha1.VolumeSpec,
+) (bool, error) {
+	for _, volume := range volumes {
+		if volume.SourcePVC.Name == "" {
+			continue
+		}
+
+		deleted, err := sourcePVCDeleted(
+			ctx,
+			client,
+			qualifiedResourceReference(volume.SourcePVC, sourceNamespace),
+		)
+		if err != nil || deleted {
+			return deleted, err
+		}
+	}
+
+	return false, nil
+}
+
+// deletionSourceMissing reports whether a planned volume's source PVC is gone
+// while finalizing a deleted workflow. Only a deletion pass may skip the
+// validations that re-verify the live source identity.
+func deletionSourceMissing(
+	ctx context.Context,
+	client kubernetes.Interface,
+	sourceNamespace string,
+	volume v1alpha1.VolumeSpec,
+) (bool, error) {
+	if !workflowDeletionInProgress(ctx) || volume.SourcePVC.Name == "" {
+		return false, nil
+	}
+
+	return sourcePVCDeleted(
+		ctx,
+		client,
+		qualifiedResourceReference(volume.SourcePVC, sourceNamespace),
+	)
 }

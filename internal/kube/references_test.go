@@ -3,6 +3,7 @@ package kube
 import (
 	"testing"
 
+	v1alpha1 "github.com/labring-sigs/pvc-migrate/api/v1alpha1"
 	"github.com/labring-sigs/pvc-migrate/internal/domain"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -22,7 +23,7 @@ func TestVolumeReferences(t *testing.T) {
 		ResourceVersion: "34",
 	}}
 
-	if got := PVCReference(pvc); got != (domain.ObjectReference{
+	if got := PVCReference(pvc); got != (v1alpha1.ObjectReference{
 		APIVersion:      domain.CoreAPIVersion,
 		Kind:            domain.KindPersistentVolumeClaim,
 		Namespace:       "application",
@@ -33,7 +34,7 @@ func TestVolumeReferences(t *testing.T) {
 		t.Fatalf("PVC reference = %#v", got)
 	}
 
-	if got := PVReference(pv); got != (domain.ObjectReference{
+	if got := PVReference(pv); got != (v1alpha1.ObjectReference{
 		APIVersion:      domain.CoreAPIVersion,
 		Kind:            domain.KindPersistentVolume,
 		Name:            "pv-data",
@@ -43,8 +44,8 @@ func TestVolumeReferences(t *testing.T) {
 		t.Fatalf("PV reference = %#v", got)
 	}
 
-	if PVCReference(nil) != (domain.ObjectReference{}) ||
-		PVReference(nil) != (domain.ObjectReference{}) {
+	if PVCReference(nil) != (v1alpha1.ObjectReference{}) ||
+		PVReference(nil) != (v1alpha1.ObjectReference{}) {
 		t.Fatal("nil volume objects should produce empty references")
 	}
 }

@@ -6,78 +6,100 @@ import (
 	v1alpha1 "github.com/labring-sigs/pvc-migrate/api/v1alpha1"
 	"github.com/labring-sigs/pvc-migrate/internal/domain"
 	"github.com/labring-sigs/pvc-migrate/internal/kube"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/kubernetes/fake"
+	crclient "sigs.k8s.io/controller-runtime/pkg/client"
+	crfake "sigs.k8s.io/controller-runtime/pkg/client/fake"
 )
 
-func pendingCopy(t *testing.T) *domain.Session {
+func pendingCopy(
+	t *testing.T,
+	phase v1alpha1.WorkflowPhase,
+) (*CopyExecutor, *v1alpha1.Copy, *fake.Clientset) {
 	t.Helper()
 
-	session, err := kube.DecodeWorkflow(&v1alpha1.Copy{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:            "pending",
-			Namespace:       "app",
-			UID:             "workflow",
-			ResourceVersion: "1",
-		},
-		Spec: v1alpha1.CopySpec{
-			Volumes: []v1alpha1.VolumeRequest{
-				{SourcePVC: v1alpha1.LocalResourceReference{Name: "data"}},
-			},
-		},
-	})
+	object := &v1alpha1.Copy{
+		ObjectMeta: metav1.ObjectMeta{Name: "pending", Namespace: "app", UID: "workflow"},
+		Spec: v1alpha1.CopySpec{Volumes: []v1alpha1.VolumeRequest{
+			{SourcePVC: v1alpha1.LocalResourceReference{Name: "data"}},
+		}},
+		Status: v1alpha1.CopyStatus{WorkflowStatus: v1alpha1.WorkflowStatus{
+			Phase: phase, ResumeFrom: domain.PhasePlanned,
+		}},
+	}
+
+	scheme := runtime.NewScheme()
+	if err := v1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+
+	client := crfake.NewClientBuilder().WithScheme(scheme).
+		WithStatusSubresource(object).WithObjects(object).Build()
+
+	store, err := kube.NewCRDWorkflowStore(
+		client,
+		func() *v1alpha1.Copy { return &v1alpha1.Copy{} },
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	return session
+	object, err = store.Load(t.Context(), crclient.ObjectKeyFromObject(object))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	resources := fake.NewClientset()
+	executor := NewCopyExecutor(resources, store,
+		&fakeSessionLocker{lock: &fakeSessionLock{}}, nil, CopyExecutorConfig{})
+
+	return executor, object, resources
 }
 
 func TestUnplannedLifecycleNeverTouchesStorage(t *testing.T) {
-	for _, phase := range []domain.Phase{domain.PhasePlanned, domain.PhaseFailed, domain.PhaseAborted} {
+	for _, phase := range []v1alpha1.WorkflowPhase{domain.PhasePlanned, domain.PhaseFailed, domain.PhaseAborted} {
 		t.Run(string(phase), func(t *testing.T) {
-			session := pendingCopy(t)
-			session.Status.Phase = phase
-			session.Status.ResumeFrom = domain.PhasePlanned
-			store := &deletionStore{latest: session}
-			client := fake.NewClientset()
-
-			service := NewService(client, store, nil, nil, nil, nil, Config{})
-			if phase != domain.PhaseAborted {
-				if err := service.ValidateCopyResume(t.Context(), session); err != nil {
-					t.Fatal(err)
-				}
+			executor, object, resources := pendingCopy(t, phase)
+			if err := executor.Validate(t.Context(), object); err != nil {
+				t.Fatal(err)
 			}
 
 			for range 2 {
-				if err := service.ValidateCopyAbort(t.Context(), session); err != nil {
+				if err := executor.ValidateAbort(object); err != nil {
 					t.Fatal(err)
 				}
 
-				if err := service.AbortCopy(t.Context(), session); err != nil {
+				if err := executor.Abort(t.Context(), object); err != nil {
 					t.Fatal(err)
 				}
 			}
 
-			if session.Status.Phase != domain.PhaseAborted {
+			if object.Status.Phase != domain.PhaseAborted {
 				t.Fatal("abort did not stop request")
 			}
 
-			if err := service.ValidateCopyResume(t.Context(), session); err == nil {
-				t.Fatal("aborted request can resume")
-			}
-
-			options := CleanupOptions{DeleteSession: true}
-			if err := service.ValidateCopyCleanup(t.Context(), session, options); err != nil {
+			options := CopyCleanupOptions{Finalize: true, DeleteSession: true}
+			if err := executor.ValidateCleanup(t.Context(), object, options); err != nil {
 				t.Fatal(err)
 			}
 
-			if err := service.CleanupCopy(t.Context(), session, options); err != nil {
+			if err := executor.Cleanup(t.Context(), object, options); err != nil {
 				t.Fatal(err)
 			}
 
-			if store.deletes != 1 || len(client.Actions()) != 0 {
-				t.Fatalf("deletes=%d actions=%v", store.deletes, client.Actions())
+			if _, err := executor.store.Load(
+				t.Context(),
+				crclient.ObjectKeyFromObject(object),
+			); !apierrors.IsNotFound(
+				err,
+			) {
+				t.Fatalf("workflow was not deleted: %v", err)
+			}
+
+			if len(resources.Actions()) != 0 {
+				t.Fatalf("unplanned operation touched resources: %v", resources.Actions())
 			}
 		})
 	}
@@ -85,24 +107,30 @@ func TestUnplannedLifecycleNeverTouchesStorage(t *testing.T) {
 
 func TestUnplannedLifecycleRejectsPlanningRace(t *testing.T) {
 	for _, planned := range []bool{false, true} {
-		session := pendingCopy(t)
-		latest := *session
-		latest.ResourceVersion = "2"
-		latest.PlanPending = !planned
-		store := &deletionStore{latest: &latest}
+		executor, object, resources := pendingCopy(t, domain.PhasePlanned)
 
-		service := NewService(fake.NewClientset(), store, nil, nil, nil, nil, Config{})
+		latest := object.DeepCopy()
+		if planned {
+			latest.Status.Plan = &v1alpha1.CopyPlan{TargetNode: "node"}
+		} else {
+			latest.Status.Phase = domain.PhaseAborted
+		}
+
+		if err := executor.store.Save(t.Context(), latest); err != nil {
+			t.Fatal(err)
+		}
+
 		for _, err := range []error{
-			service.AbortCopy(t.Context(), session),
-			service.CleanupCopy(t.Context(), session, CleanupOptions{DeleteSession: true}),
+			executor.Abort(t.Context(), object),
+			executor.Cleanup(t.Context(), object, CopyCleanupOptions{Finalize: true, DeleteSession: true}),
 		} {
 			if domain.CategoryOf(err) != domain.ErrorConflict {
 				t.Fatalf("expected conflict, got %v", err)
 			}
 		}
 
-		if store.updates != 0 || store.deletes != 0 {
-			t.Fatal("stale request mutated workflow")
+		if len(resources.Actions()) != 0 {
+			t.Fatal("stale request touched resources")
 		}
 	}
 }

@@ -7,18 +7,13 @@ import (
 	"slices"
 	"strings"
 	"unicode"
+
+	v1alpha1 "github.com/labring-sigs/pvc-migrate/api/v1alpha1"
 )
 
 const VolumeRootPath = "."
 
-// TransferScope selects directory contents inside one source and destination PVC.
-// A nil scope represents the full volume root on both sides.
-type TransferScope struct {
-	SourcePath      string `json:"sourcePath"      yaml:"sourcePath"`
-	DestinationPath string `json:"destinationPath" yaml:"destinationPath"`
-}
-
-func NewTransferScope(sourcePath, destinationPath string) (*TransferScope, error) {
+func NewTransferScope(sourcePath, destinationPath string) (*v1alpha1.TransferScope, error) {
 	source, err := NormalizeTransferPath(sourcePath)
 	if err != nil {
 		return nil, fmt.Errorf("source path: %w", err)
@@ -33,7 +28,7 @@ func NewTransferScope(sourcePath, destinationPath string) (*TransferScope, error
 		return nil, nil
 	}
 
-	return &TransferScope{SourcePath: source, DestinationPath: destination}, nil
+	return &v1alpha1.TransferScope{SourcePath: source, DestinationPath: destination}, nil
 }
 
 func NormalizeTransferPath(value string) (string, error) {
@@ -72,7 +67,7 @@ func NormalizeTransferPath(value string) (string, error) {
 	return cleaned, nil
 }
 
-func ValidateTransferScope(scope *TransferScope) error {
+func ValidateTransferScope(scope *v1alpha1.TransferScope) error {
 	if scope == nil {
 		return nil
 	}
@@ -98,24 +93,14 @@ func ValidateTransferScope(scope *TransferScope) error {
 	return nil
 }
 
-func CloneTransferScope(scope *TransferScope) *TransferScope {
-	if scope == nil {
-		return nil
-	}
-
-	cloned := *scope
-
-	return &cloned
-}
-
-func SourceTransferPath(scope *TransferScope) string {
+func SourceTransferPath(scope *v1alpha1.TransferScope) string {
 	if scope == nil {
 		return VolumeRootPath
 	}
 	return scope.SourcePath
 }
 
-func DestinationTransferPath(scope *TransferScope) string {
+func DestinationTransferPath(scope *v1alpha1.TransferScope) string {
 	if scope == nil {
 		return VolumeRootPath
 	}

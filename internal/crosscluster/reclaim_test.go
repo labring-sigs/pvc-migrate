@@ -10,14 +10,14 @@ import (
 
 func TestCleanupRetainReleasesOwnedOutputWithConsumerAndIsRepeatable(t *testing.T) {
 	service, options, _ := crossFixture()
-	options.DestinationPVCReclaimPolicy = "Delete"
+	options.UnusedStoragePolicy = "Delete"
 
-	plan, err := service.Plan(t.Context(), options)
+	plan, err := service.PlanCopy(t.Context(), options)
 	if err != nil || !plan.Ready {
 		t.Fatalf("plan=%+v err=%v", plan, err)
 	}
 
-	session, err := service.CreateSession(t.Context(), options, plan)
+	session, err := service.CreateCopySession(t.Context(), options, plan)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -81,15 +81,15 @@ func TestCleanupRetainReleasesOwnedOutputWithConsumerAndIsRepeatable(t *testing.
 		t.Fatal("recorded Delete policy ignored active consumer")
 	}
 
-	if err := service.ValidateCleanup(t.Context(), session, "Retain"); err != nil {
+	if err := service.ValidateCleanup(t.Context(), session, "Keep"); err != nil {
 		t.Fatal(err)
 	}
 
-	if err := service.Cleanup(t.Context(), session, "Retain", false); err != nil {
+	if err := service.Cleanup(t.Context(), session, "Keep", false); err != nil {
 		t.Fatal(err)
 	}
 
-	if err := service.Cleanup(t.Context(), session, "Retain", true); err != nil {
+	if err := service.Cleanup(t.Context(), session, "Keep", true); err != nil {
 		t.Fatal(err)
 	}
 

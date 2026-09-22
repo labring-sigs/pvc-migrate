@@ -5,6 +5,7 @@ import (
 	"errors"
 	"testing"
 
+	v1alpha1 "github.com/labring-sigs/pvc-migrate/api/v1alpha1"
 	"github.com/labring-sigs/pvc-migrate/internal/domain"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -181,9 +182,14 @@ func testOpenEBSLVMPatchConflict(t *testing.T) {
 		},
 	)
 
-	mount := domain.OpenEBSLVMSharedMount{
-		SourcePV: openEBSLVMSourcePV, LVMVolume: result.LVMVolume,
-		PreviousShared: result.PreviousShared, PreviousSharedSet: result.PreviousSharedSet,
+	mount := v1alpha1.SharedMountStatus{
+		SourcePV: v1alpha1.LocalResourceReference{
+			Name: openEBSLVMSourcePV.Name,
+			UID:  openEBSLVMSourcePV.UID,
+		},
+		LVMVolume:         result.LVMVolume,
+		PreviousShared:    result.PreviousShared,
+		PreviousSharedSet: result.PreviousSharedSet,
 	}
 	if err := manager.EnableShared(
 		context.Background(),
@@ -197,12 +203,12 @@ func testOpenEBSLVMPatchConflict(t *testing.T) {
 }
 
 var (
-	openEBSLVMClaim = domain.ObjectReference{
+	openEBSLVMClaim = v1alpha1.ObjectReference{
 		Namespace: "app",
 		Name:      "data",
 		UID:       "pvc-uid",
 	}
-	openEBSLVMSourcePV = domain.ObjectReference{Name: "pv-source", UID: "pv-uid"}
+	openEBSLVMSourcePV = v1alpha1.ObjectReference{Name: "pv-source", UID: "pv-uid"}
 )
 
 func newOpenEBSLVMTestManager(
@@ -301,7 +307,7 @@ func testOpenEBSLVMEnsureRejectsClaimRefChange(t *testing.T) {
 func prepareOpenEBSLVMTest(
 	t *testing.T,
 	manager OpenEBSLVMSharedVolumeManager,
-) (domain.OpenEBSLVMSharedMount, OpenEBSLVMSharedResult) {
+) (v1alpha1.SharedMountStatus, OpenEBSLVMSharedResult) {
 	t.Helper()
 
 	result, err := manager.PrepareShared(context.Background(), openEBSLVMSourcePV)
@@ -309,8 +315,11 @@ func prepareOpenEBSLVMTest(
 		t.Fatal(err)
 	}
 
-	state := domain.OpenEBSLVMSharedMount{
-		SourcePV:          openEBSLVMSourcePV,
+	state := v1alpha1.SharedMountStatus{
+		SourcePV: v1alpha1.LocalResourceReference{
+			Name: openEBSLVMSourcePV.Name,
+			UID:  openEBSLVMSourcePV.UID,
+		},
 		LVMVolume:         result.LVMVolume,
 		PreviousShared:    result.PreviousShared,
 		PreviousSharedSet: result.PreviousSharedSet,
@@ -421,7 +430,7 @@ func testOpenEBSLVMAlreadyShared(t *testing.T) {
 	shared, err := manager.Shared(
 		context.Background(),
 		openEBSLVMSourcePV,
-		domain.ObjectReference{},
+		v1alpha1.ObjectReference{},
 		"",
 	)
 	if err != nil || !shared {
@@ -431,7 +440,7 @@ func testOpenEBSLVMAlreadyShared(t *testing.T) {
 	if _, err := manager.Shared(
 		context.Background(),
 		openEBSLVMSourcePV,
-		domain.ObjectReference{},
+		v1alpha1.ObjectReference{},
 		"session-1",
 	); domain.CategoryOf(err) != domain.ErrorConflict {
 		t.Fatalf("session-owned read category=%s error=%v", domain.CategoryOf(err), err)
@@ -463,7 +472,7 @@ func testOpenEBSLVMRejectsMissingOwnership(t *testing.T) {
 	if _, err := manager.Shared(
 		context.Background(),
 		openEBSLVMSourcePV,
-		domain.ObjectReference{},
+		v1alpha1.ObjectReference{},
 		"session-1",
 	); domain.CategoryOf(err) != domain.ErrorConflict {
 		t.Fatalf("category=%s error=%v", domain.CategoryOf(err), err)
@@ -505,8 +514,11 @@ func testOpenEBSLVMPreparedBeforePatch(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	state := domain.OpenEBSLVMSharedMount{
-		SourcePV:          openEBSLVMSourcePV,
+	state := v1alpha1.SharedMountStatus{
+		SourcePV: v1alpha1.LocalResourceReference{
+			Name: openEBSLVMSourcePV.Name,
+			UID:  openEBSLVMSourcePV.UID,
+		},
 		LVMVolume:         result.LVMVolume,
 		PreviousShared:    result.PreviousShared,
 		PreviousSharedSet: result.PreviousSharedSet,
@@ -595,7 +607,7 @@ func testOpenEBSLVMRejectsReplacementShared(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	_, err := manager.Shared(context.Background(), state.SourcePV, state.LVMVolume, "session-1")
+	_, err := manager.Shared(context.Background(), openEBSLVMSourcePV, state.LVMVolume, "session-1")
 	if domain.CategoryOf(err) != domain.ErrorConflict {
 		t.Fatalf("category=%s error=%v", domain.CategoryOf(err), err)
 	}
@@ -605,7 +617,7 @@ func testOpenEBSLVMRequiresSourceIdentity(t *testing.T) {
 	manager, _ := newOpenEBSLVMTestManager(t, "no")
 	if _, err := manager.PrepareShared(
 		context.Background(),
-		domain.ObjectReference{Name: openEBSLVMSourcePV.Name},
+		v1alpha1.ObjectReference{Name: openEBSLVMSourcePV.Name},
 	); domain.CategoryOf(err) != domain.ErrorValidation {
 		t.Fatalf("category=%s error=%v", domain.CategoryOf(err), err)
 	}
@@ -636,7 +648,7 @@ func TestOpenEBSLVMSharedVolumeManagerRejectsReplacedSourcePV(t *testing.T) {
 
 	_, err := manager.PrepareShared(
 		context.Background(),
-		domain.ObjectReference{Name: "pv-source", UID: "replaced-pv-uid"},
+		v1alpha1.ObjectReference{Name: "pv-source", UID: "replaced-pv-uid"},
 	)
 	if domain.CategoryOf(err) != domain.ErrorConflict {
 		t.Fatalf("category=%s error=%v", domain.CategoryOf(err), err)

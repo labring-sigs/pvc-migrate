@@ -90,13 +90,28 @@ Use `--tool-image registry.example/pvc-migrate:0.1.0` when cluster nodes pull th
 
 ## Execution Modes
 
-The CLI supports two durable execution backends:
+The CLI separates the two durable execution backends by subcommand instead of a
+mode flag:
 
-The default mode is `session`. Use `--mode=controller` when the controller and
-the required workflow CRDs are installed.
-
-- `--mode=session` always stores sessions in ConfigMaps and executes the workflow in the invoking process.
-- `--mode=controller` stores local sessions as operation-specific `migrate.sealos.io/v1alpha1` CRs. The CLI defaults to namespaced kinds for tenant-local work and selects a `Cluster*` kind when namespace roles differ. Cluster-scoped kinds also accept same-namespace roles, which is useful for an administrator submitting a workflow with cluster-level authority. Pod migration with administrator-selected temporary or session namespaces uses `ClusterPodMigration` while keeping the workload and PVC identities in the source namespace. PVC identity moves always use the cluster-scoped `Move`. Backup, restore, and rename intentionally have no cluster-scoped form. Cross-cluster workflows remain on the ConfigMap/session backend. The controller uses leader election, watches every installed workflow kind, and reuses the same resumable app.Service state machine. The CLI watches that CR and waits for completion by default; use `--wait=false` for detached submission. A command fails clearly when its matching CRD is absent.
+- Top-level commands (`migrate`, `copy`, `reserve`, `backup`, `restore`,
+  `rename`, `move`, `migrate-pod`) run the session backend: sessions persist in
+  ConfigMaps and the invoking process executes the workflow.
+- `<command> create` (for example `migrate create`) submits declarative intent
+  as operation-specific `migrate.sealos.io/v1alpha1` CRs for the elected
+  controller. The CLI defaults to namespaced kinds for tenant-local work and
+  selects a `Cluster*` kind when namespace roles differ. Cluster-scoped kinds
+  also accept same-namespace roles, which is useful for an administrator
+  submitting a workflow with cluster-level authority. Pod migration with
+  administrator-selected temporary or session namespaces uses
+  `ClusterPodMigration` while keeping the workload and PVC identities in the
+  source namespace. PVC identity moves always use the cluster-scoped `Move`.
+  Backup, restore, and rename intentionally have no cluster-scoped form.
+  Cross-cluster workflows remain on the ConfigMap/session backend. The
+  controller uses leader election, watches every installed workflow kind, and
+  reuses the same resumable state machine. `create` defaults to printing the
+  workflow it would submit; pass `--dry-run=false` to submit. A command fails
+  clearly when its matching CRD is absent.
+- `<command> plan` validates either backend without mutations.
 
 Install the controller backend using the Helm command above. The `config/`
 Kubebuilder files and `deploy/` reference manifests remain available for
@@ -117,7 +132,8 @@ repository namespaces from metadata. Cluster workflow specs declare each
 operational namespace once at the top level and keep nested references local
 to the relevant source or destination namespace.
 
-Submit declarative intent directly, or use `--mode=controller` in the CLI:
+Submit declarative intent directly, or use `migrate create`-style subcommands
+in the CLI:
 
 ```yaml
 apiVersion: migrate.sealos.io/v1alpha1
@@ -196,9 +212,9 @@ require that operator identity in controller mode.
 Submit a supported migration and wait for its CR status to reach completion:
 
 ```bash
-pvc-migrate --mode=controller --yes migrate \
+pvc-migrate --yes migrate create \
   --source-namespace application --source-pvc data \
-  --destination-pvc data --dry-run=false
+  --destination-pvc data
 kubectl -n application get migrations
 ```
 
@@ -245,32 +261,6 @@ Released Helm charts default both images to
 to controller Pods; workflow transfer Pod configuration is managed by the
 application.
 
-### Real-cluster E2E
-
-The E2E suite defaults to the synchronous ConfigMap backend. It creates an
-isolated namespace per test, writes real PVC data, verifies migration and
-rollback digests, and removes its workflow records, Leases, PVCs, and PVs:
-
-```bash
-PVC_MIGRATE_E2E_KUBECONFIG=/path/to/kubeconfig \
-PVC_MIGRATE_E2E_TOOL_IMAGE=registry.example/pvc-migrate:0.1.0 \
-make e2e
-```
-
-Run the same suite through operation-specific CRDs with:
-
-```bash
-PVC_MIGRATE_E2E_KUBECONFIG=/path/to/kubeconfig \
-PVC_MIGRATE_E2E_TOOL_IMAGE=registry.example/pvc-migrate:0.1.0 \
-make e2e PVC_MIGRATE_E2E_MODE=controller
-```
-
-Controller-mode tests start a real controller-runtime manager in the test
-namespace, wait for its leader-election Lease, submit the workflow CR, and
-verify the operation-specific terminal status. Both source and
-destination StorageClasses must be available; override them with
-`PVC_MIGRATE_E2E_SOURCE_CLASS` and `PVC_MIGRATE_E2E_DESTINATION_CLASS`.
-
 ## Quick Start
 
 Every mutating command defaults to `--dry-run=true`. Execution requires an explicit `--dry-run=false`; workload pause and storage identity changes also require `--yes` or interactive approval.
@@ -299,7 +289,7 @@ accept `--pod` and does not inspect workload ownership or KubeBlocks metadata:
 pvc-migrate migrate plan \
   --source-namespace application \
   --source-pvc database-data \
-  --destination-namespace archive \
+  --temporary-namespace pvc-migrate-system \
   --destination-pvc database-data
 ```
 
@@ -419,7 +409,7 @@ The destination PVCs are provisioned before downtime. Warm-copy passes run while
 | CockroachDB | Use drain, decommission, and CockroachDB recovery procedures | Rejected during planning |
 | Backup archive-WAL workload | Use the owning backup controller workflow | Rejected during planning |
 
-For a KubeBlocks primary, `--kubeblocks-candidate` requests an automated switchover. Non-MongoDB components use the served KubeBlocks Switchover action and receive matching `kbcli` and OpsRequest guidance. MongoDB InstanceSet migrations validate and call the native candidate script directly without probing an OpsRequest API; choose a Ready, caught-up secondary as the candidate. Failure guidance includes the fully resolved equivalent command. The native command has this form:
+For a KubeBlocks primary, `--switchover-candidate` requests an automated switchover. Non-MongoDB components use the served KubeBlocks Switchover action and receive matching `kbcli` and OpsRequest guidance. MongoDB InstanceSet migrations validate and call the native candidate script directly without probing an OpsRequest API; choose a Ready, caught-up secondary as the candidate. Failure guidance includes the fully resolved equivalent command. The native command has this form:
 
 ```sh
 kubectl --namespace <namespace> exec <current-primary-pod> -c mongodb -- env \
@@ -430,7 +420,7 @@ kubectl --namespace <namespace> exec <current-primary-pod> -c mongodb -- env \
 
 `--allow-leader-downtime` acknowledges a direct primary restart when the application can tolerate it.
 
-InstanceSet-backed components use the served `spec.paused` field to suspend InstanceSet reconciliation while the selected Pod is migrated. The adapter deletes that Pod with a UID precondition and verifies the InstanceSet pause owner before final sync. Legacy StatefulSet-backed components use Stop/Start OpsRequests: the apps API pauses the complete Cluster, while the operations API can target the selected component. Legacy workloads reject `--kubeblocks-candidate` because the pause operation affects every instance in its scope. The `kubeblocks.io/reconcile` annotation triggers reconciliation and has no pause semantics.
+InstanceSet-backed components use the served `spec.paused` field to suspend InstanceSet reconciliation while the selected Pod is migrated. The adapter deletes that Pod with a UID precondition and verifies the InstanceSet pause owner before final sync. Legacy StatefulSet-backed components use Stop/Start OpsRequests: the apps API pauses the complete Cluster, while the operations API can target the selected component. Legacy workloads reject `--switchover-candidate` because the pause operation affects every instance in its scope. The `kubeblocks.io/reconcile` annotation triggers reconciliation and has no pause semantics.
 
 Controller ownership outside the supported adapters causes the plan to fail. PVCs that are already offline can use `migrate`, `copy`, `rename`, or `move` directly.
 

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"testing"
 
+	v1alpha1 "github.com/labring-sigs/pvc-migrate/api/v1alpha1"
 	"github.com/labring-sigs/pvc-migrate/internal/domain"
 	. "github.com/labring-sigs/pvc-migrate/internal/kube"
 	corev1 "k8s.io/api/core/v1"
@@ -19,7 +20,7 @@ import (
 
 func TestAcquirePVCHandlesOwnershipAndRetriesConflicts(t *testing.T) {
 	ctx := context.Background()
-	ref := domain.ObjectReference{Namespace: "app", Name: "data", UID: types.UID("pvc-uid")}
+	ref := v1alpha1.ObjectReference{Namespace: "app", Name: "data", UID: types.UID("pvc-uid")}
 	client := fake.NewClientset(&corev1.PersistentVolumeClaim{
 		ObjectMeta: metav1.ObjectMeta{Namespace: ref.Namespace, Name: ref.Name, UID: ref.UID},
 	})
@@ -68,12 +69,12 @@ func TestAcquirePVCHandlesOwnershipAndRetriesConflicts(t *testing.T) {
 func TestAcquirePVCRejectsUIDAndOwnerConflicts(t *testing.T) {
 	tests := []struct {
 		name string
-		ref  domain.ObjectReference
+		ref  v1alpha1.ObjectReference
 		pvc  *corev1.PersistentVolumeClaim
 	}{
 		{
 			name: "uid changed",
-			ref: domain.ObjectReference{
+			ref: v1alpha1.ObjectReference{
 				Namespace: "app",
 				Name:      "data",
 				UID:       types.UID("expected"),
@@ -88,7 +89,7 @@ func TestAcquirePVCRejectsUIDAndOwnerConflicts(t *testing.T) {
 		},
 		{
 			name: "foreign owner",
-			ref: domain.ObjectReference{
+			ref: v1alpha1.ObjectReference{
 				Namespace: "app",
 				Name:      "data",
 				UID:       types.UID("expected"),
@@ -114,7 +115,7 @@ func TestAcquirePVCRejectsUIDAndOwnerConflicts(t *testing.T) {
 func TestReleasePVCIsOwnershipSafeAndIdempotent(t *testing.T) {
 	ctx := context.Background()
 	uid := types.UID("pvc-uid")
-	ref := domain.ObjectReference{Namespace: "app", Name: "data", UID: uid}
+	ref := v1alpha1.ObjectReference{Namespace: "app", Name: "data", UID: uid}
 
 	client := fake.NewClientset(&corev1.PersistentVolumeClaim{ObjectMeta: metav1.ObjectMeta{
 		Namespace: "app", Name: "data", UID: uid,
@@ -157,7 +158,7 @@ func TestReleasePVCIsOwnershipSafeAndIdempotent(t *testing.T) {
 	if err := ReleasePVC(
 		ctx,
 		client,
-		domain.ObjectReference{Namespace: "app", Name: "missing", UID: "missing-uid"},
+		v1alpha1.ObjectReference{Namespace: "app", Name: "missing", UID: "missing-uid"},
 		"session",
 	); err != nil {
 		t.Fatalf("release missing PVC: %v", err)
@@ -165,7 +166,7 @@ func TestReleasePVCIsOwnershipSafeAndIdempotent(t *testing.T) {
 }
 
 func TestPVCOwnershipMutationsRequireStableIdentity(t *testing.T) {
-	ref := domain.ObjectReference{Namespace: "app", Name: "data"}
+	ref := v1alpha1.ObjectReference{Namespace: "app", Name: "data"}
 
 	client := fake.NewClientset()
 	for _, test := range []struct {
@@ -174,7 +175,7 @@ func TestPVCOwnershipMutationsRequireStableIdentity(t *testing.T) {
 	}{
 		{name: "acquire", run: func() error { return AcquirePVC(context.Background(), client, ref, "session") }},
 		{name: "release", run: func() error { return ReleasePVC(context.Background(), client, ref, "session") }},
-		{name: "finalize", run: func() error { return FinalizePVC(context.Background(), client, ref, "session", domain.PVCMetadata{}) }},
+		{name: "finalize", run: func() error { return FinalizePVC(context.Background(), client, ref, "session", v1alpha1.PVCMetadata{}) }},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			if err := test.run(); domain.CategoryOf(err) != domain.ErrorValidation {
@@ -190,7 +191,7 @@ func TestReleasePVCRejectsReusedName(t *testing.T) {
 		Annotations: map[string]string{SessionKey: "session"},
 	}})
 
-	err := ReleasePVC(context.Background(), client, domain.ObjectReference{
+	err := ReleasePVC(context.Background(), client, v1alpha1.ObjectReference{
 		Namespace: "app", Name: "data", UID: types.UID("original"),
 	}, "session")
 	if domain.CategoryOf(err) != domain.ErrorConflict {
@@ -200,7 +201,7 @@ func TestReleasePVCRejectsReusedName(t *testing.T) {
 
 func TestFinalizePVCRestoresOriginalMetadataAndPreservesBindingAnnotations(t *testing.T) {
 	ctx := context.Background()
-	ref := domain.ObjectReference{Namespace: "app", Name: "data", UID: types.UID("pvc-uid")}
+	ref := v1alpha1.ObjectReference{Namespace: "app", Name: "data", UID: types.UID("pvc-uid")}
 	originalOwner := metav1.OwnerReference{
 		APIVersion: "apps/v1",
 		Kind:       "StatefulSet",
@@ -221,7 +222,7 @@ func TestFinalizePVCRestoresOriginalMetadataAndPreservesBindingAnnotations(t *te
 		},
 	}})
 
-	original := domain.PVCMetadata{
+	original := v1alpha1.PVCMetadata{
 		Labels: map[string]string{
 			ManagedByLabel:           "database-operator",
 			"original.example/label": "value",
@@ -264,13 +265,13 @@ func TestFinalizePVCRestoresOriginalMetadataAndPreservesBindingAnnotations(t *te
 }
 
 func TestFinalizePVCRejectsForeignOwnership(t *testing.T) {
-	ref := domain.ObjectReference{Namespace: "app", Name: "data", UID: types.UID("pvc-uid")}
+	ref := v1alpha1.ObjectReference{Namespace: "app", Name: "data", UID: types.UID("pvc-uid")}
 	client := fake.NewClientset(&corev1.PersistentVolumeClaim{ObjectMeta: metav1.ObjectMeta{
 		Namespace: ref.Namespace, Name: ref.Name, UID: ref.UID,
 		Labels: map[string]string{SessionKey: "foreign-session"},
 	}})
 
-	err := FinalizePVC(context.Background(), client, ref, "session", domain.PVCMetadata{})
+	err := FinalizePVC(context.Background(), client, ref, "session", v1alpha1.PVCMetadata{})
 	if domain.CategoryOf(err) != domain.ErrorConflict {
 		t.Fatalf("category=%s error=%v", domain.CategoryOf(err), err)
 	}

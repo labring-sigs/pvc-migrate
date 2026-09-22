@@ -6,117 +6,30 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
-	"io"
 	"log/slog"
 	"slices"
 	"strings"
 	"sync"
 	"time"
 
+	v1alpha1 "github.com/labring-sigs/pvc-migrate/api/v1alpha1"
 	"github.com/labring-sigs/pvc-migrate/internal/domain"
 	"github.com/labring-sigs/pvc-migrate/internal/kube"
 	"github.com/labring-sigs/pvc-migrate/internal/objectstore"
 	corev1 "k8s.io/api/core/v1"
-	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes"
 )
 
 const (
-	rclonePreserveLinksArgs = "--links"
+	// --links keeps symbolic links through the S3 round trip; --metadata
+	// carries POSIX mode bits in object metadata, which plain rclone copy
+	// otherwise normalizes away (e.g. 0640 source becomes 0644 on restore).
+	rclonePreserveLinksArgs = "--links --metadata"
 	lockReleaseTimeout      = 10 * time.Second
 )
-
-type Mode string
-
-const (
-	ModeOffline Mode = "offline"
-	ModeOnline  Mode = "online"
-	ModeRestore Mode = "restore"
-)
-
-type Request struct {
-	ID                      string
-	ToolImage               string
-	Namespace               string
-	PVCName                 string
-	CreatePVC               bool
-	DestinationStorageClass string
-	DestinationAccessMode   string
-	DestinationCapacity     string
-	TargetNode              string
-	Path                    string
-	Online                  bool
-	AllowMounted            bool
-	DeleteExtraneousFiles   bool
-	HelmTimeout             time.Duration
-	KubeconfigPath          string
-	KubeContext             string
-	StreamToolLogs          bool
-	StructuredLogs          bool
-	Store                   S3RepositoryStore
-	// SkipManifestCheck defers remote recovery-point validation to the
-	// controller. The controller is the only component that can resolve a
-	// repository's credentials when the submitting user cannot read its Secret.
-	SkipManifestCheck bool
-	// BackupRepository selects a user-owned namespaced repository containing
-	// the complete object-store location and credentials reference.
-	BackupRepository          string
-	BackupRepositoryNamespace string
-	BackupRepositoryBinding   *domain.BackupRepositoryBindingStatus
-	ToolServiceAccountName    string
-	Writer                    io.Writer
-	Logger                    *slog.Logger
-	ToolImageProber           kube.ToolImageProber
-	SessionStore              kube.LockingSessionStore
-	SessionNamespace          string
-	OpenEBSLVMEnableShared    bool
-	OpenEBSLVMManager         kube.OpenEBSLVMSharedVolumeManager
-	WritablePVCMount          bool
-	BackupSession             *domain.Session
-	ObjectStoreFactory        func(context.Context, objectstore.Config) (*objectstore.Store, error)
-}
-
-type Plan struct {
-	Operation        string   `json:"operation"                  yaml:"operation"`
-	ToolImage        string   `json:"toolImage"                  yaml:"toolImage"`
-	Namespace        string   `json:"namespace"                  yaml:"namespace"`
-	PVC              string   `json:"pvc"                        yaml:"pvc"`
-	Path             string   `json:"path"                       yaml:"path"`
-	Mode             Mode     `json:"mode"                       yaml:"mode"`
-	Consistency      string   `json:"consistency"                yaml:"consistency"`
-	Destination      string   `json:"destination"                yaml:"destination"`
-	ManifestPresent  bool     `json:"manifestPresent"            yaml:"manifestPresent"`
-	MountedPods      []string `json:"mountedPods,omitempty"      yaml:"mountedPods,omitempty"`
-	Capacity         string   `json:"capacity"                   yaml:"capacity"`
-	VolumeMode       string   `json:"volumeMode"                 yaml:"volumeMode"`
-	ToolNode         string   `json:"toolNode,omitempty"         yaml:"toolNode,omitempty"`
-	PVCUID           string   `json:"pvcUID,omitempty"           yaml:"pvcUID,omitempty"`
-	PVUID            string   `json:"pvUID,omitempty"            yaml:"pvUID,omitempty"`
-	ObjectCount      int64    `json:"objectCount,omitempty"      yaml:"objectCount,omitempty"`
-	TotalBytes       int64    `json:"totalBytes,omitempty"       yaml:"totalBytes,omitempty"`
-	InventorySHA256  string   `json:"inventorySHA256,omitempty"  yaml:"inventorySHA256,omitempty"`
-	DeleteExtraneous bool     `json:"deleteExtraneous,omitempty" yaml:"deleteExtraneous,omitempty"`
-	CreatePVC        bool     `json:"createPVC,omitempty"        yaml:"createPVC,omitempty"`
-	StorageClass     string   `json:"storageClass,omitempty"     yaml:"storageClass,omitempty"`
-	AccessMode       string   `json:"accessMode,omitempty"       yaml:"accessMode,omitempty"`
-	Compression      string   `json:"compression"                yaml:"compression"`
-	Warnings         []string `json:"warnings,omitempty"         yaml:"warnings,omitempty"`
-}
-
-type Result struct {
-	Operation   string `json:"operation"             yaml:"operation"`
-	OperationID string `json:"operationID,omitempty" yaml:"operationID,omitempty"`
-	SessionID   string `json:"sessionID,omitempty"   yaml:"sessionID,omitempty"`
-	Namespace   string `json:"namespace"             yaml:"namespace"`
-	PVC         string `json:"pvc"                   yaml:"pvc"`
-	Path        string `json:"path"                  yaml:"path"`
-	Name        string `json:"name"                  yaml:"name"`
-	Destination string `json:"destination"           yaml:"destination"`
-	Mode        Mode   `json:"mode"                  yaml:"mode"`
-	Status      string `json:"status"                yaml:"status"`
-}
 
 type PVCInfo struct {
 	PVC       *corev1.PersistentVolumeClaim
@@ -125,275 +38,6 @@ type PVCInfo struct {
 	Mode      corev1.PersistentVolumeMode
 	Consumers []string
 	Nodes     []string
-}
-
-func Preflight(
-	ctx context.Context,
-	client kubernetes.Interface,
-	req Request,
-	restore bool,
-) (*Plan, error) {
-	return preflight(ctx, client, req, restore, "preflight")
-}
-
-func preflight(
-	ctx context.Context,
-	client kubernetes.Interface,
-	req Request,
-	restore bool,
-	stage string,
-) (*Plan, error) {
-	operation := "backup"
-	if restore {
-		operation = "restore"
-	}
-
-	logOperation(
-		req,
-		operation+" "+stage+" started",
-		"namespace",
-		req.Namespace,
-		"pvc",
-		req.PVCName,
-		"path",
-		req.Path,
-	)
-
-	if client == nil || req.Store == nil {
-		return nil, domain.NewError(
-			domain.ErrorInternal,
-			operation+" preflight",
-			"Kubernetes client and S3 store are required",
-		)
-	}
-
-	normalizedPath, err := normalizeObjectTransferPath(req.Path)
-	if err != nil {
-		return nil, err
-	}
-
-	req.Path = normalizedPath
-	if err := objectstore.ValidatePath(req.Path); err != nil {
-		return nil, err
-	}
-
-	toolImage, err := kube.NormalizeToolImage(req.ToolImage)
-	if err != nil {
-		return nil, err
-	}
-
-	if restore && req.CreatePVC {
-		existing, getErr := client.CoreV1().PersistentVolumeClaims(req.Namespace).
-			Get(ctx, req.PVCName, metav1.GetOptions{})
-		if apierrors.IsNotFound(getErr) {
-			return preflightRestorePVCCreation(ctx, client, req, toolImage, nil)
-		}
-
-		if getErr != nil {
-			return nil, domain.WrapError(
-				domain.ErrorKubernetes,
-				restorePreflightPhase,
-				"read destination PVC",
-				getErr,
-			)
-		}
-
-		creationPlan, creationErr := preflightRestorePVCCreation(
-			ctx,
-			client,
-			req,
-			toolImage,
-			existing,
-		)
-		if creationErr != nil {
-			return nil, creationErr
-		}
-
-		if creationPlan != nil {
-			return creationPlan, nil
-		}
-	}
-
-	var (
-		info        *PVCInfo
-		infoErr     error
-		quotaErr    error
-		manifest    *objectstore.Manifest
-		manifestErr error
-		wg          sync.WaitGroup
-	)
-	wg.Go(func() {
-		logOperation(
-			req,
-			operation+" "+stage+" inspecting PVC",
-			"namespace",
-			req.Namespace,
-			"pvc",
-			req.PVCName,
-		)
-		info, infoErr = inspectPVC(
-			ctx,
-			client,
-			req.Namespace,
-			req.PVCName,
-			req.Online,
-			req.AllowMounted,
-			restore,
-		)
-	})
-	wg.Go(func() {
-		logOperation(
-			req,
-			operation+" "+stage+" checking tool quota",
-			"namespace",
-			req.Namespace,
-			"pvc",
-			req.PVCName,
-		)
-		quotaErr = checkObjectTransferQuota(ctx, client, req, operation)
-	})
-	wg.Go(func() {
-		if req.SkipManifestCheck {
-			return
-		}
-
-		logOperation(
-			req,
-			operation+" "+stage+" checking object-store manifest",
-			"namespace",
-			req.Namespace,
-			"pvc",
-			req.PVCName,
-		)
-		manifest, manifestErr = req.Store.Manifest(ctx)
-	})
-	wg.Wait()
-
-	if infoErr != nil {
-		return nil, infoErr
-	}
-
-	if !restore && manifest == nil {
-		if err := validateBackupOpenEBSState(ctx, req, info); err != nil {
-			return nil, err
-		}
-	}
-
-	if quotaErr != nil {
-		return nil, quotaErr
-	}
-
-	if manifestErr != nil {
-		return nil, manifestErr
-	}
-
-	toolNode, err := preflightToolNode(ctx, client, req, operation, info)
-	if err != nil {
-		return nil, err
-	}
-
-	plan := &Plan{
-		Operation:        "backup",
-		ToolImage:        toolImage,
-		Namespace:        req.Namespace,
-		PVC:              req.PVCName,
-		Path:             transferDisplayPath(req.Path),
-		Mode:             ModeOffline,
-		Consistency:      backupConsistency(req.Online),
-		Destination:      req.Store.Destination(),
-		ManifestPresent:  manifest != nil,
-		Capacity:         info.Capacity.String(),
-		VolumeMode:       string(info.Mode),
-		PVCUID:           string(info.PVC.UID),
-		PVUID:            string(info.PV.UID),
-		MountedPods:      append([]string(nil), info.Consumers...),
-		ToolNode:         toolNode,
-		DeleteExtraneous: restore && req.DeleteExtraneousFiles,
-		Compression:      "none",
-	}
-	if req.SkipManifestCheck {
-		plan.Warnings = append(
-			plan.Warnings,
-			"object-store manifest check deferred to the controller",
-		)
-	}
-
-	if req.Online {
-		plan.Mode = ModeOnline
-
-		plan.Consistency = "best-effort crash-consistent file copy"
-		if node, nodeErr := rwoConsumerNode(info, "online backup scheduling"); nodeErr != nil {
-			return nil, nodeErr
-		} else if node != "" {
-			plan.ToolNode = node
-			plan.Warnings = append(
-				plan.Warnings,
-				"RWO online tool will be pinned to consumer node "+node,
-			)
-		}
-	}
-
-	if restore {
-		return prepareRestorePlan(ctx, req, info, manifest, plan, stage)
-	}
-
-	if manifest != nil {
-		if req.BackupSession != nil {
-			if err := validatePublishedBackupSession(ctx, req, manifest); err != nil {
-				return nil, err
-			}
-
-			plan.ObjectCount = manifest.ObjectCount
-			plan.TotalBytes = manifest.TotalBytes
-			plan.InventorySHA256 = manifest.InventorySHA256
-
-			return plan, nil
-		}
-
-		return nil, domain.NewError(
-			domain.ErrorConflict,
-			backupPreflightPhase,
-			"S3 completion manifest already exists; use a new backup name to preserve the published recovery point",
-		)
-	}
-
-	return plan, nil
-}
-
-func preflightToolNode(
-	ctx context.Context,
-	client kubernetes.Interface,
-	req Request,
-	operation string,
-	info *PVCInfo,
-) (string, error) {
-	if !req.Online && !strings.EqualFold(operation, "restore") {
-		return uniquePVToolNode(ctx, client, info.PV, operation+" preflight")
-	}
-
-	consumerNode, err := rwoConsumerNode(info, operation+" scheduling")
-	if err != nil {
-		return "", err
-	}
-
-	if strings.EqualFold(operation, "restore") && consumerNode != "" && req.TargetNode != "" {
-		if _, err := selectRestoreToolNode(req.TargetNode, consumerNode, ""); err != nil {
-			return "", err
-		}
-	}
-
-	if consumerNode != "" && (!strings.EqualFold(operation, "restore") || req.TargetNode == "") {
-		return "", nil
-	}
-
-	return uniquePVToolNode(ctx, client, info.PV, operation+" preflight")
-}
-
-func transferDisplayPath(value string) string {
-	if value == "" {
-		return domain.VolumeRootPath
-	}
-	return value
 }
 
 func normalizeObjectTransferPath(value string) (string, error) {
@@ -438,224 +82,24 @@ func uniquePVToolNode(
 	return kube.PVUniqueNodeName(pv, nodes.Items), nil
 }
 
-func Run(ctx context.Context, client kubernetes.Interface, req Request, restore bool) error {
-	operation := "backup"
-	if restore {
-		operation = "restore"
-	}
-
-	normalizedPath, err := normalizeObjectTransferPath(req.Path)
-	if err != nil {
-		return err
-	}
-
-	req.Path = normalizedPath
-
-	plan, err := preflight(ctx, client, req, restore, "execution revalidation")
-	if err != nil {
-		return err
-	}
-
-	if restore {
-		if err := validateRestoreDestinationIdentity(plan, req.BackupSession); err != nil {
-			return err
-		}
-	}
-
-	if restore && plan.CreatePVC {
-		manifest, manifestErr := req.Store.Manifest(ctx)
-		if manifestErr != nil {
-			return manifestErr
-		}
-
-		if manifest == nil {
-			return domain.NewError(
-				domain.ErrorPrecondition,
-				"restore",
-				"S3 completion manifest disappeared before destination PVC creation",
-			)
-		}
-
-		if err := createRestorePVC(ctx, client, req, *manifest); err != nil {
-			return err
-		}
-
-		plan, err = preflight(ctx, client, req, restore, "post-create revalidation")
-		if err != nil {
-			return err
-		}
-
-		if err := validateRestoreDestinationIdentity(plan, req.BackupSession); err != nil {
-			return err
-		}
-	}
-
-	if restore {
-		if err := checkpointRestoreDestinationIdentity(ctx, client, req, plan); err != nil {
-			return err
-		}
-	}
-
-	logOperation(
-		req,
-		operation+" execution started",
-		"namespace",
-		req.Namespace,
-		"pvc",
-		req.PVCName,
-		"toolNode",
-		plan.ToolNode,
-	)
-
-	if restore {
-		return runRestore(
-			ctx,
-			client,
-			req,
-			plan.PVCUID,
-			plan.PVUID,
-			plan.ObjectCount,
-			plan.TotalBytes,
-			plan.InventorySHA256,
-		)
-	}
-
-	return runBackupWithSession(ctx, client, req, plan.PVCUID, plan.PVUID)
-}
-
-func validateRestoreDestinationIdentity(plan *Plan, session *domain.Session) error {
-	if plan == nil || session == nil || session.Spec.Restore == nil {
-		return nil
-	}
-
-	destination := session.Spec.Restore
-	if destination.DestinationPVC.UID != "" &&
-		string(destination.DestinationPVC.UID) != plan.PVCUID {
-		return domain.NewError(
-			domain.ErrorConflict,
-			"restore destination identity",
-			"destination PVC identity changed since the restore checkpoint",
-		)
-	}
-
-	if destination.DestinationPV.UID != "" &&
-		string(destination.DestinationPV.UID) != plan.PVUID {
-		return domain.NewError(
-			domain.ErrorConflict,
-			"restore destination identity",
-			"destination PV identity changed since the restore checkpoint",
-		)
-	}
-
-	return nil
-}
-
-func checkpointRestoreDestinationIdentity(
+func probeRcloneToolImage(
 	ctx context.Context,
-	client kubernetes.Interface,
-	req Request,
-	plan *Plan,
-) error {
-	session := req.BackupSession
-	if session == nil || session.Spec.Restore == nil {
-		return nil
-	}
-
-	if req.SessionStore == nil {
-		return domain.NewError(
-			domain.ErrorInternal,
-			"restore destination identity",
-			"session store is required to persist the destination checkpoint",
-		)
-	}
-
-	pvc, pv, err := verifyPVCIdentity(
-		ctx,
-		client,
-		req.Namespace,
-		req.PVCName,
-		plan.PVCUID,
-		plan.PVUID,
-	)
-	if err != nil {
-		return err
-	}
-
-	payload := session.Spec.Restore
-	pvcRef := domain.ObjectReference{
-		APIVersion:      "v1",
-		Kind:            "PersistentVolumeClaim",
-		Namespace:       pvc.Namespace,
-		Name:            pvc.Name,
-		UID:             pvc.UID,
-		ResourceVersion: pvc.ResourceVersion,
-	}
-
-	pvRef := domain.ObjectReference{
-		APIVersion:      "v1",
-		Kind:            "PersistentVolume",
-		Name:            pv.Name,
-		UID:             pv.UID,
-		ResourceVersion: pv.ResourceVersion,
-	}
-	if payload.DestinationPVC == pvcRef && payload.DestinationPV == pvRef {
-		return nil
-	}
-
-	previousPVC := payload.DestinationPVC
-	previousPV := payload.DestinationPV
-	payload.DestinationPVC = pvcRef
-
-	payload.DestinationPV = pvRef
-	if err := req.SessionStore.Update(ctx, session); err != nil {
-		payload.DestinationPVC = previousPVC
-		payload.DestinationPV = previousPV
-
-		return domain.WrapError(
-			domain.ErrorKubernetes,
-			"restore destination identity",
-			"persist destination PVC and PV checkpoint",
-			err,
-		)
-	}
-
-	return nil
-}
-
-func probeTransferToolImage(
-	ctx context.Context,
-	req Request,
-	nodeName string,
-	restore bool,
+	prober kube.ToolImageProber,
+	options kube.ToolImageProbeOptions,
 ) (kube.ToolImageProbeResult, error) {
-	if req.ToolImageProber == nil {
-		return kube.ToolImageProbeResult{NodeName: nodeName}, nil
+	if len(options.Targets) != 1 {
+		return kube.ToolImageProbeResult{}, domain.NewError(
+			domain.ErrorInternal,
+			"tool image probe",
+			"rclone probe requires exactly one target",
+		)
 	}
 
-	pvcName := ""
-	if nodeName == "" || req.Path != "" || req.Online || req.WritablePVCMount {
-		// Let the scheduler resolve the same storage topology as the real rclone
-		// Pod when preflight cannot identify one unique node. A selected path
-		// must also be checked through the real PVC mount before rclone starts.
-		pvcName = req.PVCName
+	if prober == nil {
+		return kube.ToolImageProbeResult{NodeName: options.Targets[0].NodeName}, nil
 	}
 
-	results, err := req.ToolImageProber.Probe(ctx, kube.ToolImageProbeOptions{
-		OperationID: req.ID,
-		Image:       req.ToolImage,
-		Targets: []kube.ToolProbeTarget{{
-			Namespace:        req.Namespace,
-			NodeName:         nodeName,
-			PVCName:          pvcName,
-			RequiredPath:     req.Path,
-			CreatePath:       restore && req.Path != "",
-			WritablePVCMount: req.WritablePVCMount,
-			Components:       []string{kube.ToolComponentRclone},
-		}},
-		Timeout: toolHelmTimeout(req.HelmTimeout),
-		Writer:  req.Writer,
-		Logger:  req.Logger,
-	})
+	results, err := prober.Probe(ctx, options)
 	if err != nil {
 		return kube.ToolImageProbeResult{}, err
 	}
@@ -728,22 +172,20 @@ func transferToolHelmValues(
 	}, nil
 }
 
-func validateTransferToolLaunch(
+func validateBackupToolLaunch(
 	ctx context.Context,
 	client kubernetes.Interface,
-	req Request,
-	expectedPVCUID, expectedPVUID string,
-	probe kube.ToolImageProbeResult,
-	restore bool,
+	source v1alpha1.ObjectReference,
+	expectedPVUID types.UID,
+	online bool,
+	probedNode string,
 ) error {
-	info, err := inspectPVC(
+	info, err := inspectBackupPVC(
 		ctx,
 		client,
-		req.Namespace,
-		req.PVCName,
-		req.Online,
-		req.AllowMounted,
-		restore,
+		source.Namespace,
+		source.Name,
+		online,
 	)
 	if err != nil {
 		return err
@@ -752,10 +194,10 @@ func validateTransferToolLaunch(
 	pvc, pv, err := verifyPVCIdentity(
 		ctx,
 		client,
-		req.Namespace,
-		req.PVCName,
-		expectedPVCUID,
-		expectedPVUID,
+		source.Namespace,
+		source.Name,
+		string(source.UID),
+		string(expectedPVUID),
 	)
 	if err != nil {
 		return err
@@ -770,17 +212,85 @@ func validateTransferToolLaunch(
 	}
 
 	operation := "backup scheduling"
-	if restore {
-		operation = restoreSchedulingPhase
-	}
 
 	consumerNode, err := rwoConsumerNode(info, operation)
 	if err != nil {
 		return err
 	}
 
-	if restore && consumerNode != "" && req.TargetNode != "" {
-		if _, err := selectRestoreToolNode(req.TargetNode, consumerNode, ""); err != nil {
+	requiredNode := consumerNode
+
+	if requiredNode == "" {
+		operation := "backup"
+
+		requiredNode, err = uniquePVToolNode(ctx, client, pv, operation+" preflight")
+		if err != nil {
+			return err
+		}
+	}
+
+	if requiredNode != "" && requiredNode != probedNode {
+		return domain.NewError(
+			domain.ErrorConflict,
+			toolSchedulingPhase,
+			fmt.Sprintf(
+				"required tool node changed from %s to %s during image probe",
+				probedNode,
+				requiredNode,
+			),
+		)
+	}
+
+	return nil
+}
+
+func validateRestoreToolLaunch(
+	ctx context.Context,
+	client kubernetes.Interface,
+	destination v1alpha1.ObjectReference,
+	expectedPVUID types.UID,
+	allowMounted bool,
+	targetNode, probedNode string,
+) error {
+	info, err := inspectRestorePVC(
+		ctx,
+		client,
+		destination.Namespace,
+		destination.Name, allowMounted,
+	)
+	if err != nil {
+		return err
+	}
+
+	pvc, pv, err := verifyPVCIdentity(
+		ctx,
+		client,
+		destination.Namespace,
+		destination.Name,
+		string(destination.UID),
+		string(expectedPVUID),
+	)
+	if err != nil {
+		return err
+	}
+
+	if info.PVC.UID != pvc.UID || info.PV.UID != pv.UID {
+		return domain.NewError(
+			domain.ErrorConflict,
+			toolSchedulingPhase,
+			"PVC or PV identity changed during final tool launch validation",
+		)
+	}
+
+	operation := restoreSchedulingPhase
+
+	consumerNode, err := rwoConsumerNode(info, operation)
+	if err != nil {
+		return err
+	}
+
+	if consumerNode != "" && targetNode != "" {
+		if _, err := selectRestoreToolNode(targetNode, consumerNode, ""); err != nil {
 			return err
 		}
 	}
@@ -788,11 +298,8 @@ func validateTransferToolLaunch(
 	requiredNode := consumerNode
 
 	var pvNode string
-	if requiredNode == "" || (restore && req.TargetNode != "") {
-		operation := "backup"
-		if restore {
-			operation = "restore"
-		}
+	if requiredNode == "" || targetNode != "" {
+		operation := "restore"
 
 		pvNode, err = uniquePVToolNode(ctx, client, pv, operation+" preflight")
 		if err != nil {
@@ -800,22 +307,18 @@ func validateTransferToolLaunch(
 		}
 	}
 
-	if restore {
-		requiredNode, err = selectRestoreToolNode(req.TargetNode, consumerNode, pvNode)
-		if err != nil {
-			return err
-		}
-	} else if requiredNode == "" {
-		requiredNode = pvNode
+	requiredNode, err = selectRestoreToolNode(targetNode, consumerNode, pvNode)
+	if err != nil {
+		return err
 	}
 
-	if requiredNode != "" && requiredNode != probe.NodeName {
+	if requiredNode != "" && requiredNode != probedNode {
 		return domain.NewError(
 			domain.ErrorConflict,
 			toolSchedulingPhase,
 			fmt.Sprintf(
 				"required tool node changed from %s to %s during image probe",
-				probe.NodeName,
+				probedNode,
 				requiredNode,
 			),
 		)
@@ -845,9 +348,7 @@ func operationLockHolder(operationID string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	// The request ID identifies the logical recovery point and may be reused
-	// for a retry. The lock holder identifies this process attempt, so every
-	// invocation gets a distinct holder even when --id is the same.
+
 	if operationID != "" {
 		attempt = operationID + "/" + attempt
 	}
@@ -857,8 +358,7 @@ func operationLockHolder(operationID string) (string, error) {
 
 func toolOperationID(holder string) string {
 	digest := sha256.Sum256([]byte(holder))
-	// pv-migrate embeds this value in Helm and Kubernetes names. Keep it
-	// lowercase, DNS-safe, and below its 24-character identifier limit.
+
 	return "pm-" + hex.EncodeToString(digest[:8])
 }
 
@@ -905,9 +405,9 @@ func rwoConsumerNode(info *PVCInfo, operation string) (string, error) {
 	return node, nil
 }
 
-func logOperation(req Request, message string, args ...any) {
-	if req.Logger != nil {
-		req.Logger.Info(message, args...)
+func logOperation(logger *slog.Logger, message string, args ...any) {
+	if logger != nil {
+		logger.Info(message, args...)
 	}
 }
 
@@ -979,37 +479,48 @@ func classifyToolAndLeaseError(
 	}
 }
 
-func startToolLogs(
-	ctx context.Context,
-	client kubernetes.Interface,
-	req Request,
-) *kube.ToolLogStream {
-	if !req.StreamToolLogs {
-		return nil
-	}
-
-	return kube.StartPVMigrateToolLogs(ctx, client, kube.ToolLogOptions{
-		Namespaces:  []string{req.Namespace},
-		OperationID: req.ID,
-		Writer:      req.Writer,
-		Logger:      req.Logger,
-		Structured:  req.StructuredLogs,
-	})
-}
-
-func inspectPVC(
+func inspectBackupPVC(
 	ctx context.Context,
 	client kubernetes.Interface,
 	namespace, name string,
-	online, allowMounted, restore bool,
+	online bool,
 ) (*PVCInfo, error) {
-	operation := "backup"
-	if restore {
-		operation = "restore"
+	info, err := inspectBoundPVC(ctx, client, namespace, name, backupPreflightPhase)
+	if err != nil {
+		return nil, err
 	}
 
-	phase := operation + " preflight"
+	if err := validateBackupConsumers(info.PVC, info.Consumers, online); err != nil {
+		return nil, err
+	}
 
+	return info, nil
+}
+
+func inspectRestorePVC(
+	ctx context.Context,
+	client kubernetes.Interface,
+	namespace, name string,
+	allowMounted bool,
+) (*PVCInfo, error) {
+	info, err := inspectBoundPVC(ctx, client, namespace, name, restorePreflightPhase)
+	if err != nil {
+		return nil, err
+	}
+
+	if err := validateRestoreConsumers(info.PVC, info.Consumers, allowMounted); err != nil {
+		return nil, err
+	}
+
+	return info, nil
+}
+
+func inspectBoundPVC(
+	ctx context.Context,
+	client kubernetes.Interface,
+	namespace, name string,
+	phase string,
+) (*PVCInfo, error) {
 	var (
 		pvc                          *corev1.PersistentVolumeClaim
 		pvcErr                       error
@@ -1053,16 +564,6 @@ func inspectPVC(
 
 	if consumerErr != nil {
 		return nil, consumerErr
-	}
-
-	if err := validateInspectionConsumers(
-		pvc,
-		consumerNames,
-		online,
-		allowMounted,
-		restore,
-	); err != nil {
-		return nil, err
 	}
 
 	return &PVCInfo{
@@ -1183,39 +684,43 @@ func validateInspectedPV(
 	return capacity, nil
 }
 
-func validateInspectionConsumers(
+func validateRestoreConsumers(
 	pvc *corev1.PersistentVolumeClaim,
 	consumerNames []string,
-	online, allowMounted, restore bool,
+	allowMounted bool,
 ) error {
-	if restore {
-		if !kube.HasWritableAccessMode(pvc.Spec.AccessModes) {
-			return domain.NewError(
-				domain.ErrorPrecondition,
-				restorePreflightPhase,
-				"destination PVC has no writable access mode",
-			)
-		}
-
-		if len(consumerNames) > 0 && !allowMounted {
-			return domain.NewError(
-				domain.ErrorPrecondition,
-				restorePreflightPhase,
-				"destination PVC is referenced by Pod(s) "+strings.Join(consumerNames, ","),
-			)
-		}
-
-		if len(consumerNames) > 0 && hasRWOP(pvc) {
-			return domain.NewError(
-				domain.ErrorPrecondition,
-				restorePreflightPhase,
-				"restore cannot mount an active ReadWriteOncePod PVC",
-			)
-		}
-
-		return nil
+	if !kube.HasWritableAccessMode(pvc.Spec.AccessModes) {
+		return domain.NewError(
+			domain.ErrorPrecondition,
+			restorePreflightPhase,
+			"destination PVC has no writable access mode",
+		)
 	}
 
+	if len(consumerNames) > 0 && !allowMounted {
+		return domain.NewError(
+			domain.ErrorPrecondition,
+			restorePreflightPhase,
+			"destination PVC is referenced by Pod(s) "+strings.Join(consumerNames, ","),
+		)
+	}
+
+	if len(consumerNames) > 0 && hasRWOP(pvc) {
+		return domain.NewError(
+			domain.ErrorPrecondition,
+			restorePreflightPhase,
+			"restore cannot mount an active ReadWriteOncePod PVC",
+		)
+	}
+
+	return nil
+}
+
+func validateBackupConsumers(
+	pvc *corev1.PersistentVolumeClaim,
+	consumerNames []string,
+	online bool,
+) error {
 	if !online && len(consumerNames) > 0 {
 		return domain.NewError(
 			domain.ErrorPrecondition,

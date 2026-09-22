@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 
+	v1alpha1 "github.com/labring-sigs/pvc-migrate/api/v1alpha1"
 	"github.com/labring-sigs/pvc-migrate/internal/domain"
 	"github.com/labring-sigs/pvc-migrate/internal/kube"
 	appsv1 "k8s.io/api/apps/v1"
@@ -18,10 +19,11 @@ const grafanaFieldSuspend = "suspend"
 
 func (m *Manager) verifyGrafanaPaused(
 	ctx context.Context,
-	session *domain.Session,
-	workload domain.WorkloadSpec,
+	workflowID string,
+	controller v1alpha1.ObjectReference,
+	pod v1alpha1.ObjectReference,
+	grafana *v1alpha1.GrafanaSpec,
 ) error {
-	grafana := workload.Grafana
 	if grafana == nil {
 		return domain.NewError(domain.ErrorInternal, "verify paused", "session lacks Grafana state")
 	}
@@ -40,7 +42,7 @@ func (m *Manager) verifyGrafanaPaused(
 	}
 
 	object, err := m.dynamic.Resource(gvr).
-		Namespace(workload.Pod.Namespace).
+		Namespace(pod.Namespace).
 		Get(ctx, grafana.Name, metav1.GetOptions{})
 	if err != nil {
 		return domain.WrapError(domain.ErrorKubernetes, "verify paused", "read Grafana", err)
@@ -54,7 +56,7 @@ func (m *Manager) verifyGrafanaPaused(
 		)
 	}
 
-	if object.GetAnnotations()[pauseSessionAnnotation] != session.ID {
+	if object.GetAnnotations()[pauseSessionAnnotation] != workflowID {
 		return domain.NewError(
 			domain.ErrorConflict,
 			"verify paused",
@@ -75,7 +77,7 @@ func (m *Manager) verifyGrafanaPaused(
 		)
 	}
 
-	if workload.Controller.Kind != domain.KindDeployment {
+	if controller.Kind != domain.KindDeployment {
 		return domain.NewError(
 			domain.ErrorInternal,
 			"verify paused",
@@ -83,7 +85,7 @@ func (m *Manager) verifyGrafanaPaused(
 		)
 	}
 
-	deployment, err := m.readGrafanaDeployment(ctx, session, "verify paused")
+	deployment, err := m.readGrafanaDeploymentFor(ctx, controller, grafana, "verify paused")
 	if err != nil {
 		return err
 	}
@@ -104,14 +106,60 @@ func (m *Manager) verifyGrafanaPaused(
 	return nil
 }
 
+func (m *Manager) readGrafanaDeploymentFor(
+	ctx context.Context,
+	controller v1alpha1.ObjectReference,
+	grafana *v1alpha1.GrafanaSpec,
+	operation string,
+) (*appsv1.Deployment, error) {
+	if grafana == nil {
+		return nil, domain.NewError(domain.ErrorInternal, operation, "Grafana state is required")
+	}
+
+	deployment, err := m.readDeployment(ctx, controller, operation)
+	if err != nil {
+		return nil, err
+	}
+
+	expectedOwner := &metav1.OwnerReference{
+		APIVersion: grafana.APIVersion,
+		Kind:       domain.KindGrafana,
+		Name:       grafana.Name,
+		UID:        grafana.UID,
+	}
+	if !sameControllerOwner(controllerOwner(deployment.OwnerReferences), expectedOwner) {
+		return nil, domain.NewError(
+			domain.ErrorConflict,
+			operation,
+			fmt.Sprintf(
+				"Deployment %s/%s Grafana controller identity changed",
+				deployment.Namespace,
+				deployment.Name,
+			),
+		)
+	}
+
+	if err := m.rejectHorizontalPodAutoscaler(
+		ctx,
+		deployment.Namespace,
+		domain.KindDeployment,
+		deployment.Name,
+		operation,
+	); err != nil {
+		return nil, err
+	}
+
+	return deployment, nil
+}
+
 func (m *Manager) grafanaWorkload(
 	ctx context.Context,
 	pod *corev1.Pod,
 	deployment *appsv1.Deployment,
 	owner *metav1.OwnerReference,
-) (domain.WorkloadSpec, error) {
+) (v1alpha1.WorkloadSpec, error) {
 	if deployment.Spec.Replicas == nil || *deployment.Spec.Replicas <= 0 {
-		return domain.WorkloadSpec{}, domain.NewError(
+		return v1alpha1.WorkloadSpec{}, domain.NewError(
 			domain.ErrorPrecondition,
 			"discover Grafana",
 			fmt.Sprintf(
@@ -129,11 +177,11 @@ func (m *Manager) grafanaWorkload(
 		deployment.Name,
 		"discover Grafana",
 	); err != nil {
-		return domain.WorkloadSpec{}, err
+		return v1alpha1.WorkloadSpec{}, err
 	}
 
 	if m.dynamic == nil {
-		return domain.WorkloadSpec{}, domain.NewError(
+		return v1alpha1.WorkloadSpec{}, domain.NewError(
 			domain.ErrorPrecondition,
 			"discover Grafana",
 			"dynamic client is required for Grafana pause control",
@@ -142,14 +190,14 @@ func (m *Manager) grafanaWorkload(
 
 	gvr, err := kube.ParseGroupVersionResource(grafanaAPIVersion, grafanaResource)
 	if err != nil {
-		return domain.WorkloadSpec{}, err
+		return v1alpha1.WorkloadSpec{}, err
 	}
 
 	grafana, err := m.dynamic.Resource(gvr).
 		Namespace(pod.Namespace).
 		Get(ctx, owner.Name, metav1.GetOptions{})
 	if err != nil {
-		return domain.WorkloadSpec{}, domain.WrapError(
+		return v1alpha1.WorkloadSpec{}, domain.WrapError(
 			domain.ErrorKubernetes,
 			"discover Grafana",
 			"read Grafana",
@@ -158,7 +206,7 @@ func (m *Manager) grafanaWorkload(
 	}
 
 	if grafana.GetUID() == "" || grafana.GetUID() != owner.UID {
-		return domain.WorkloadSpec{}, domain.NewError(
+		return v1alpha1.WorkloadSpec{}, domain.NewError(
 			domain.ErrorConflict,
 			"discover Grafana",
 			fmt.Sprintf(
@@ -175,7 +223,7 @@ func (m *Manager) grafanaWorkload(
 		grafanaFieldSuspend,
 	)
 	if nestedErr != nil {
-		return domain.WorkloadSpec{}, domain.WrapError(
+		return v1alpha1.WorkloadSpec{}, domain.WrapError(
 			domain.ErrorPrecondition,
 			"discover Grafana",
 			"read reconciliation suspend state",
@@ -183,20 +231,19 @@ func (m *Manager) grafanaWorkload(
 		)
 	}
 
-	return domain.WorkloadSpec{
-		Adapter: domain.WorkloadGrafana,
-		Pod:     podReference(pod),
-		Controller: objectReference(
+	return v1alpha1.WorkloadSpec{
+		Adapter: v1alpha1.WorkloadGrafana,
+		Pod:     workloadPodReference(pod),
+		Controller: workloadObjectReference(
 			domain.AppsAPIVersion,
 			domain.KindDeployment,
-			deployment.Namespace,
 			deployment.Name,
 			deployment.UID,
 			deployment.ResourceVersion,
 		),
 		OriginalReplicas: deployment.Spec.Replicas,
-		AffectedPods:     []domain.ObjectReference{podReference(pod)},
-		Grafana: &domain.GrafanaSpec{
+		AffectedPods:     []v1alpha1.LocalResourceReference{*workloadPodReference(pod)},
+		Grafana: &v1alpha1.GrafanaSpec{
 			APIVersion:                grafanaAPIVersion,
 			Name:                      owner.Name,
 			UID:                       grafana.GetUID(),
@@ -207,29 +254,40 @@ func (m *Manager) grafanaWorkload(
 	}, nil
 }
 
-func (m *Manager) pauseGrafana(ctx context.Context, session *domain.Session) error {
-	grafana := session.Spec.Workload().Grafana
-	if grafana == nil || session.Spec.Workload().OriginalReplicas == nil {
+func (m *Manager) pauseGrafana(
+	ctx context.Context,
+	workflowID, namespace string,
+	controller v1alpha1.ObjectReference,
+	originalReplicas *int32,
+	affectedPods []v1alpha1.ObjectReference,
+	grafana *v1alpha1.GrafanaSpec,
+) error {
+	if grafana == nil || originalReplicas == nil {
 		return domain.NewError(domain.ErrorInternal, "pause Grafana", "session lacks Grafana state")
 	}
 
 	if err := m.rejectHorizontalPodAutoscaler(
 		ctx,
-		session.Spec.Workload().Controller.Namespace,
+		controller.Namespace,
 		domain.KindDeployment,
-		session.Spec.Workload().Controller.Name,
+		controller.Name,
 		"pause Grafana",
 	); err != nil {
 		return err
 	}
 
-	if err := m.setGrafanaPaused(ctx, session); err != nil {
+	if err := m.setGrafanaPaused(ctx, workflowID, namespace, grafana); err != nil {
 		return err
 	}
 
-	deployment, err := m.readGrafanaDeployment(ctx, session, "pause Grafana")
+	deployment, err := m.readGrafanaDeploymentFor(ctx, controller, grafana, "pause Grafana")
 	if err != nil {
-		if restoreErr := m.restoreGrafanaPause(ctx, session); restoreErr != nil {
+		if restoreErr := m.restoreGrafanaPause(
+			ctx,
+			workflowID,
+			namespace,
+			grafana,
+		); restoreErr != nil {
 			return domain.WrapError(
 				domain.ErrorKubernetes,
 				"pause Grafana",
@@ -246,9 +304,14 @@ func (m *Manager) pauseGrafana(ctx context.Context, session *domain.Session) err
 		deployment,
 		"pause Grafana",
 		0,
-		*session.Spec.Workload().OriginalReplicas,
+		*originalReplicas,
 	); err != nil {
-		if restoreErr := m.restoreGrafanaPause(ctx, session); restoreErr != nil {
+		if restoreErr := m.restoreGrafanaPause(
+			ctx,
+			workflowID,
+			namespace,
+			grafana,
+		); restoreErr != nil {
 			return domain.WrapError(
 				domain.ErrorKubernetes,
 				"pause Grafana",
@@ -260,7 +323,7 @@ func (m *Manager) pauseGrafana(ctx context.Context, session *domain.Session) err
 		return workloadScaleError("pause Grafana", "scale Deployment", err)
 	}
 
-	for _, ref := range session.Spec.Workload().AffectedPods {
+	for _, ref := range affectedPods {
 		if err := m.waitForPodDeletion(ctx, ref, "pause Grafana"); err != nil {
 			return err
 		}
@@ -269,10 +332,15 @@ func (m *Manager) pauseGrafana(ctx context.Context, session *domain.Session) err
 	return nil
 }
 
-func (m *Manager) resumeGrafana(ctx context.Context, session *domain.Session) error {
-	grafana := session.Spec.Workload().Grafana
-	if grafana == nil || session.Spec.Workload().OriginalReplicas == nil {
-		return domain.NewError(
+func (m *Manager) resumeGrafana(
+	ctx context.Context,
+	workflowID, namespace string,
+	controller v1alpha1.ObjectReference,
+	originalReplicas *int32,
+	grafana *v1alpha1.GrafanaSpec,
+) (v1alpha1.ObjectReference, error) {
+	if grafana == nil || originalReplicas == nil {
+		return v1alpha1.ObjectReference{}, domain.NewError(
 			domain.ErrorInternal,
 			"resume Grafana",
 			"session lacks Grafana state",
@@ -281,48 +349,57 @@ func (m *Manager) resumeGrafana(ctx context.Context, session *domain.Session) er
 
 	if err := m.rejectHorizontalPodAutoscaler(
 		ctx,
-		session.Spec.Workload().Controller.Namespace,
+		controller.Namespace,
 		domain.KindDeployment,
-		session.Spec.Workload().Controller.Name,
+		controller.Name,
 		"resume Grafana",
 	); err != nil {
-		return err
+		return v1alpha1.ObjectReference{}, err
 	}
 
-	deployment, err := m.readGrafanaDeployment(ctx, session, "resume Grafana")
+	deployment, err := m.readGrafanaDeploymentFor(ctx, controller, grafana, "resume Grafana")
 	if err != nil {
-		return err
+		return v1alpha1.ObjectReference{}, err
 	}
 
 	if err := m.updateDeploymentReplicas(
 		ctx,
 		deployment,
 		"resume Grafana",
-		*session.Spec.Workload().OriginalReplicas,
+		*originalReplicas,
 		0,
 	); err != nil {
-		return workloadScaleError("resume Grafana", "restore Deployment replicas", err)
+		return v1alpha1.ObjectReference{}, workloadScaleError(
+			"resume Grafana",
+			"restore Deployment replicas",
+			err,
+		)
 	}
 
-	if err := m.restoreGrafanaPause(ctx, session); err != nil {
-		return err
+	if err := m.restoreGrafanaPause(ctx, workflowID, namespace, grafana); err != nil {
+		return v1alpha1.ObjectReference{}, err
 	}
 
-	var ready domain.ObjectReference
+	var ready v1alpha1.ObjectReference
 	if err := m.waitFor(
 		ctx,
 		fmt.Sprintf(
 			"Grafana Deployment %s/%s readiness",
-			session.Spec.Workload().Controller.Namespace,
-			session.Spec.Workload().Controller.Name,
+			controller.Namespace,
+			controller.Name,
 		),
 		func(waitCtx context.Context) (bool, error) {
-			deployment, err := m.readGrafanaDeployment(waitCtx, session, "resume Grafana")
+			deployment, err := m.readGrafanaDeploymentFor(
+				waitCtx,
+				controller,
+				grafana,
+				"resume Grafana",
+			)
 			if err != nil {
 				return false, err
 			}
 
-			expectedReplicas := *session.Spec.Workload().OriginalReplicas
+			expectedReplicas := *originalReplicas
 			if replicas := deploymentReplicas(deployment); replicas != expectedReplicas {
 				return false, domain.NewError(
 					domain.ErrorConflict,
@@ -357,29 +434,20 @@ func (m *Manager) resumeGrafana(ctx context.Context, session *domain.Session) er
 			return true, nil
 		},
 	); err != nil {
-		return err
+		return v1alpha1.ObjectReference{}, err
 	}
 
-	if ready.UID != "" {
-		workload := session.Spec.WorkloadPtr()
-		workload.Pod = ready
-		// Grafana discovery records one representative Deployment Pod. A new
-		// ReplicaSet can change its generated name, so refresh that single
-		// affected reference even when the name no longer matches.
-		if len(workload.AffectedPods) == 1 {
-			workload.AffectedPods[0] = ready
-		}
-	}
-
-	return nil
+	return ready, nil
 }
 
 func (m *Manager) validateGrafanaResume(
 	ctx context.Context,
-	session *domain.Session,
+	workflowID, namespace string,
+	controller v1alpha1.ObjectReference,
+	originalReplicas *int32,
+	grafana *v1alpha1.GrafanaSpec,
 ) error {
-	workload := session.Spec.Workload()
-	if workload.Grafana == nil || workload.OriginalReplicas == nil {
+	if grafana == nil || originalReplicas == nil {
 		return domain.NewError(
 			domain.ErrorInternal,
 			"resume Grafana",
@@ -387,11 +455,17 @@ func (m *Manager) validateGrafanaResume(
 		)
 	}
 
-	if err := m.validateGrafanaSuspendState(ctx, session, "resume Grafana"); err != nil {
+	if err := m.validateGrafanaSuspendState(
+		ctx,
+		workflowID,
+		namespace,
+		grafana,
+		"resume Grafana",
+	); err != nil {
 		return err
 	}
 
-	deployment, err := m.readGrafanaDeployment(ctx, session, "resume Grafana")
+	deployment, err := m.readGrafanaDeploymentFor(ctx, controller, grafana, "resume Grafana")
 	if err != nil {
 		return err
 	}
@@ -410,7 +484,7 @@ func (m *Manager) validateGrafanaResume(
 		deployment.Namespace,
 		deployment.Name,
 		deploymentReplicas(deployment),
-		*workload.OriginalReplicas,
+		*originalReplicas,
 		0,
 		"resume Grafana",
 		domain.KindDeployment,
@@ -422,10 +496,10 @@ func (m *Manager) validateGrafanaResume(
 // reject before touching the Deployment.
 func (m *Manager) validateGrafanaSuspendState(
 	ctx context.Context,
-	session *domain.Session,
+	workflowID, namespace string,
+	grafana *v1alpha1.GrafanaSpec,
 	operation string,
 ) error {
-	grafana := session.Spec.Workload().Grafana
 	if grafana == nil {
 		return domain.NewError(domain.ErrorInternal, operation, "session lacks Grafana state")
 	}
@@ -444,7 +518,7 @@ func (m *Manager) validateGrafanaSuspendState(
 	}
 
 	object, err := m.dynamic.Resource(gvr).
-		Namespace(session.Spec.Workload().Pod.Namespace).
+		Namespace(namespace).
 		Get(ctx, grafana.Name, metav1.GetOptions{})
 	if err != nil {
 		return domain.WrapError(domain.ErrorKubernetes, operation, "read Grafana", err)
@@ -461,7 +535,7 @@ func (m *Manager) validateGrafanaSuspendState(
 	annotations := object.GetAnnotations()
 
 	owner := annotations[pauseSessionAnnotation]
-	if owner != "" && owner != session.ID {
+	if owner != "" && owner != workflowID {
 		return domain.NewError(
 			domain.ErrorConflict,
 			operation,
@@ -513,12 +587,13 @@ func (m *Manager) validateGrafanaSuspendState(
 
 func (m *Manager) currentGrafanaRollbackPods(
 	ctx context.Context,
-	session *domain.Session,
-) ([]domain.ObjectReference, error) {
+	controller v1alpha1.ObjectReference,
+	originalReplicas *int32,
+	grafana *v1alpha1.GrafanaSpec,
+) ([]v1alpha1.ObjectReference, error) {
 	const operation = validateRollbackConsumers
 
-	workload := session.Spec.Workload()
-	if workload.OriginalReplicas == nil {
+	if originalReplicas == nil {
 		return nil, domain.NewError(
 			domain.ErrorInternal,
 			operation,
@@ -526,7 +601,7 @@ func (m *Manager) currentGrafanaRollbackPods(
 		)
 	}
 
-	deployment, err := m.readGrafanaDeployment(ctx, session, operation)
+	deployment, err := m.readGrafanaDeploymentFor(ctx, controller, grafana, operation)
 	if err != nil {
 		return nil, err
 	}
@@ -535,7 +610,7 @@ func (m *Manager) currentGrafanaRollbackPods(
 		deployment.Namespace,
 		deployment.Name,
 		deploymentReplicas(deployment),
-		*workload.OriginalReplicas,
+		*originalReplicas,
 		0,
 		operation,
 		domain.KindDeployment,
@@ -548,56 +623,11 @@ func (m *Manager) currentGrafanaRollbackPods(
 	return current, err
 }
 
-func (m *Manager) readGrafanaDeployment(
+func (m *Manager) restoreGrafanaPause(
 	ctx context.Context,
-	session *domain.Session,
-	operation string,
-) (*appsv1.Deployment, error) {
-	workload := session.Spec.Workload()
-
-	grafana := workload.Grafana
-	if grafana == nil {
-		return nil, domain.NewError(domain.ErrorInternal, operation, "session lacks Grafana state")
-	}
-
-	deployment, err := m.readDeployment(ctx, workload.Controller, operation)
-	if err != nil {
-		return nil, err
-	}
-
-	expectedOwner := &metav1.OwnerReference{
-		APIVersion: grafana.APIVersion,
-		Kind:       domain.KindGrafana,
-		Name:       grafana.Name,
-		UID:        grafana.UID,
-	}
-	if !sameControllerOwner(controllerOwner(deployment.OwnerReferences), expectedOwner) {
-		return nil, domain.NewError(
-			domain.ErrorConflict,
-			operation,
-			fmt.Sprintf(
-				"Deployment %s/%s Grafana controller identity changed",
-				deployment.Namespace,
-				deployment.Name,
-			),
-		)
-	}
-
-	if err := m.rejectHorizontalPodAutoscaler(
-		ctx,
-		deployment.Namespace,
-		domain.KindDeployment,
-		deployment.Name,
-		operation,
-	); err != nil {
-		return nil, err
-	}
-
-	return deployment, nil
-}
-
-func (m *Manager) restoreGrafanaPause(ctx context.Context, session *domain.Session) error {
-	grafana := session.Spec.Workload().Grafana
+	workflowID, namespace string,
+	grafana *v1alpha1.GrafanaSpec,
+) error {
 	if grafana == nil {
 		return domain.NewError(
 			domain.ErrorInternal,
@@ -620,7 +650,7 @@ func (m *Manager) restoreGrafanaPause(ctx context.Context, session *domain.Sessi
 	}
 
 	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
-		resource := m.dynamic.Resource(gvr).Namespace(session.Spec.Workload().Pod.Namespace)
+		resource := m.dynamic.Resource(gvr).Namespace(namespace)
 
 		object, getErr := resource.Get(ctx, grafana.Name, metav1.GetOptions{})
 		if getErr != nil {
@@ -653,7 +683,7 @@ func (m *Manager) restoreGrafanaPause(ctx context.Context, session *domain.Sessi
 		annotations := object.GetAnnotations()
 
 		pauseOwner := annotations[pauseSessionAnnotation]
-		if pauseOwner != "" && pauseOwner != session.ID {
+		if pauseOwner != "" && pauseOwner != workflowID {
 			return domain.NewError(
 				domain.ErrorConflict,
 				"restore Grafana suspend",
@@ -721,16 +751,19 @@ func (m *Manager) restoreGrafanaPause(ctx context.Context, session *domain.Sessi
 			)
 		}
 
+		if err := kube.LeaseFenceError(ctx); err != nil {
+			return err
+		}
+
 		return nil
 	})
 }
 
 func (m *Manager) setGrafanaPaused(
 	ctx context.Context,
-	session *domain.Session,
+	workflowID, namespace string,
+	grafana *v1alpha1.GrafanaSpec,
 ) error {
-	grafana := session.Spec.Workload().Grafana
-
 	if m.dynamic == nil {
 		return domain.NewError(
 			domain.ErrorPrecondition,
@@ -745,7 +778,7 @@ func (m *Manager) setGrafanaPaused(
 	}
 
 	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
-		resource := m.dynamic.Resource(gvr).Namespace(session.Spec.Workload().Pod.Namespace)
+		resource := m.dynamic.Resource(gvr).Namespace(namespace)
 
 		object, getErr := resource.Get(ctx, grafana.Name, metav1.GetOptions{})
 		if getErr != nil {
@@ -778,7 +811,7 @@ func (m *Manager) setGrafanaPaused(
 		annotations := object.GetAnnotations()
 
 		pauseOwner := annotations[pauseSessionAnnotation]
-		if pauseOwner != "" && pauseOwner != session.ID {
+		if pauseOwner != "" && pauseOwner != workflowID {
 			return domain.NewError(
 				domain.ErrorConflict,
 				"Grafana suspend",
@@ -803,11 +836,11 @@ func (m *Manager) setGrafanaPaused(
 			)
 		}
 
-		if pauseOwner == session.ID && current {
+		if pauseOwner == workflowID && current {
 			return nil
 		}
 
-		if pauseOwner == session.ID && !current {
+		if pauseOwner == workflowID && !current {
 			return domain.NewError(
 				domain.ErrorConflict,
 				"Grafana suspend",
@@ -828,7 +861,7 @@ func (m *Manager) setGrafanaPaused(
 			annotations = map[string]string{}
 		}
 
-		annotations[pauseSessionAnnotation] = session.ID
+		annotations[pauseSessionAnnotation] = workflowID
 
 		object.SetAnnotations(annotations)
 
@@ -843,6 +876,10 @@ func (m *Manager) setGrafanaPaused(
 				"update reconciliation suspend state",
 				updateErr,
 			)
+		}
+
+		if err := kube.LeaseFenceError(ctx); err != nil {
+			return err
 		}
 
 		return nil

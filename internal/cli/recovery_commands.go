@@ -59,7 +59,7 @@ func (r *rootState) newOrphanCleanupCommand() *cobra.Command {
 				sourcePVC,
 			)
 
-			plan, err := runtime.service.PlanOrphanCleanup(ctx, options)
+			plan, err := runtime.orphanCleaner.PlanOrphanCleanup(ctx, options)
 			if err != nil {
 				_, _ = fmt.Fprintln(
 					cmd.ErrOrStderr(),
@@ -106,7 +106,7 @@ func (r *rootState) newOrphanCleanupCommand() *cobra.Command {
 				return reportApprovalError(cmd, err)
 			}
 
-			plan, err = runtime.service.CleanupOrphan(ctx, options)
+			plan, err = runtime.orphanCleaner.CleanupOrphan(ctx, options)
 			if err != nil {
 				if plan != nil {
 					_ = runtime.printer.Print(plan)

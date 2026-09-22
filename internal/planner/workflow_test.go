@@ -1,48 +1,70 @@
 package planner
 
 import (
-	"encoding/json"
-	"strings"
 	"testing"
 
 	v1alpha1 "github.com/labring-sigs/pvc-migrate/api/v1alpha1"
 	"github.com/labring-sigs/pvc-migrate/internal/domain"
-	"github.com/labring-sigs/pvc-migrate/internal/kube"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/types"
 )
 
 func TestWorkflowPlansMinimalVolumeIntent(t *testing.T) {
 	for _, kind := range []domain.ControllerKind{domain.ControllerKindCopy, domain.ControllerKindMigration, domain.ControllerKindReservation} {
 		t.Run(string(kind), func(t *testing.T) {
-			request, err := intentPlanForKind(
-				"minimal",
-				"app",
-				kind,
-				map[string]any{
-					"volumes": []map[string]any{{"sourcePVC": map[string]string{"name": "data"}}},
-				},
-			)
-			if err != nil {
-				t.Fatal(err)
+			volumes := []v1alpha1.VolumeRequest{
+				{SourcePVC: v1alpha1.LocalResourceReference{Name: "data"}},
 			}
+			metadata := metav1.ObjectMeta{Name: "minimal", Namespace: "app"}
 
 			client := plannerClient(plannerObjects("2Gi")...)
-			p := New(client, nil)
-			session := domain.NewSession(request.SessionID, request.SessionSpec, metav1.Now().Time)
-			session.Intent = request.Intent
+			p := New(client, nil).ForController()
 
-			spec, err := p.PlanWorkflow(t.Context(), session, "example/tool:v1")
+			var (
+				resolved []v1alpha1.VolumeSpec
+				image    string
+				err      error
+			)
+			switch kind {
+			case domain.ControllerKindCopy:
+				object := &v1alpha1.Copy{
+					ObjectMeta: metadata,
+					Spec:       v1alpha1.CopySpec{Volumes: volumes},
+				}
+
+				_, err = p.PlanNamespacedCopy(t.Context(), object, "example/tool:v1")
+				if object.Status.Plan != nil {
+					resolved, image = object.Status.Plan.Volumes, object.Status.Plan.ToolImage
+				}
+			case domain.ControllerKindMigration:
+				object := &v1alpha1.Migration{
+					ObjectMeta: metadata,
+					Spec:       v1alpha1.MigrationSpec{Volumes: volumes},
+				}
+
+				_, err = p.PlanNamespacedMigration(t.Context(), object, "example/tool:v1")
+				if object.Status.Plan != nil {
+					resolved, image = object.Status.Plan.Volumes, object.Status.Plan.ToolImage
+				}
+			case domain.ControllerKindReservation:
+				object := &v1alpha1.Reservation{
+					ObjectMeta: metadata,
+					Spec:       v1alpha1.ReservationSpec{Volumes: volumes},
+				}
+
+				_, err = p.PlanReservation(t.Context(), object, "example/tool:v1")
+				if object.Status.Plan != nil {
+					resolved, image = object.Status.Plan.Volumes, object.Status.Plan.ToolImage
+				}
+			}
+
 			if err != nil {
 				t.Fatal(err)
 			}
 
-			if len(spec.Volumes) != 1 || spec.Volumes[0].SourcePVC.UID != "pvc-uid" ||
-				spec.Volumes[0].SourcePV.UID != "pv-uid" ||
-				spec.Volumes[0].Capacity != "2Gi" ||
-				spec.WorkflowOptions().ToolImage != "example/tool:v1" {
-				t.Fatalf("incomplete resolved plan: %+v", spec)
+			if len(resolved) != 1 || resolved[0].SourcePVC.UID != "pvc-uid" ||
+				resolved[0].SourcePV.UID != "pv-uid" || resolved[0].Capacity != "2Gi" || image != "example/tool:v1" {
+				t.Fatalf("incomplete resolved plan: %+v image=%s", resolved, image)
 			}
 
 			for _, action := range client.Actions() {
@@ -71,23 +93,15 @@ func TestWorkflowHonorsIdentityConstraints(t *testing.T) {
 				volume.SourcePV = &test.pv
 			}
 
-			request, err := intentPlanForKind(
-				"identity",
-				"app",
-				domain.ControllerKindCopy,
-				v1alpha1.CopySpec{Volumes: []v1alpha1.VolumeRequest{volume}},
-			)
-			if err != nil {
-				t.Fatal(err)
+			object := &v1alpha1.Copy{
+				ObjectMeta: metav1.ObjectMeta{Name: "identity", Namespace: "app"},
+				Spec:       v1alpha1.CopySpec{Volumes: []v1alpha1.VolumeRequest{volume}},
 			}
 
-			session := domain.NewSession(request.SessionID, request.SessionSpec, metav1.Now().Time)
-			session.Intent = request.Intent
-
-			_, err = New(
+			_, err := New(
 				plannerClient(plannerObjects("2Gi")...),
 				nil,
-			).PlanWorkflow(t.Context(), session, "example/tool:v1")
+			).ForController().PlanNamespacedCopy(t.Context(), object, "example/tool:v1")
 			if test.wantError {
 				if domain.CategoryOf(err) != domain.ErrorConflict {
 					t.Fatalf("expected identity conflict, got %v", err)
@@ -126,11 +140,9 @@ func TestWorkflowPodSelectionAllowsPartialOverrides(t *testing.T) {
 		},
 	)
 
-	request, err := intentPlanForKind(
-		"partial",
-		"app",
-		domain.ControllerKindCopy,
-		v1alpha1.CopySpec{
+	object := &v1alpha1.Copy{
+		ObjectMeta: metav1.ObjectMeta{Name: "partial", Namespace: "app"},
+		Spec: v1alpha1.CopySpec{
 			Pod:    &v1alpha1.LocalResourceReference{Name: "writer", UID: "pod-uid"},
 			Online: true,
 			Volumes: []v1alpha1.VolumeRequest{
@@ -145,21 +157,17 @@ func TestWorkflowPodSelectionAllowsPartialOverrides(t *testing.T) {
 				},
 			},
 		},
-	)
-	if err != nil {
-		t.Fatal(err)
 	}
 
-	session := domain.NewSession(request.SessionID, request.SessionSpec, metav1.Now().Time)
-	session.Intent = request.Intent
-
-	spec, err := New(
+	report, err := New(
 		plannerClient(objects...),
 		nil,
-	).PlanWorkflow(t.Context(), session, "example/tool:v1")
-	if err != nil {
-		t.Fatal(err)
+	).ForController().PlanNamespacedCopy(t.Context(), object, "example/tool:v1")
+	if err != nil || object.Status.Plan == nil {
+		t.Fatalf("plan=%+v err=%v", report, err)
 	}
+
+	spec := object.Status.Plan
 
 	if len(spec.Volumes) != 2 {
 		t.Fatalf("selected %d volumes", len(spec.Volumes))
@@ -177,184 +185,33 @@ func TestWorkflowPodSelectionAllowsPartialOverrides(t *testing.T) {
 	}
 }
 
-func TestControllerSubmissionDoesNotReadSource(t *testing.T) {
-	client := plannerClient()
-
-	request, err := New(
-		client,
-		nil,
-	).ForSubmission(true).
-		PlanCopy(t.Context(), CopyOptions{SessionID: "request", SourceNamespace: "app", SourcePVCs: []string{"missing"}})
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	if len(client.Actions()) != 0 {
-		t.Fatalf("submission discovered resources: %v", client.Actions())
-	}
-
-	if len(request.Intent) == 0 || strings.Contains(string(request.Intent), `"sourcePV":`) {
-		t.Fatalf("unexpected request: %s", request.Intent)
-	}
-
-	object := &v1alpha1.Copy{ObjectMeta: metav1.ObjectMeta{Name: "request", Namespace: "app"}}
-	if err := json.Unmarshal(request.Intent, &object.Spec); err != nil {
-		t.Fatal(err)
-	}
-
-	session, err := kube.DecodeWorkflow(object)
-	if err != nil || !session.PlanPending {
-		t.Fatalf("unplanned workflow: %+v %v", session, err)
-	}
-}
-
-func TestReservationSubmissionPreservesFutureCopyScopeAndSettings(t *testing.T) {
-	for _, destination := range []string{"app", "system"} {
-		t.Run(destination, func(t *testing.T) {
-			request, err := New(
-				plannerClient(),
-				nil,
-			).ForSubmission(true).
-				PlanReserve(t.Context(), ReserveOptions{
-					SessionID:            "reserved",
-					SourceNamespace:      "app",
-					DestinationNamespace: destination,
-					TemporaryNamespace:   destination,
-					SessionNamespace:     "app",
-					SourcePVCs: []string{
-						"data",
-					},
-					SourcePaths:      []string{"sub"},
-					DestinationPaths: []string{"archive"},
-					SourceNode:       "node-a",
-					Strategies:       []string{domain.StrategyMount},
-					VerifyChecksum:   true,
-					DeleteExtraneous: true,
-				})
-			if err != nil {
-				t.Fatal(err)
-			}
-
-			var body map[string]any
-			if err := json.Unmarshal(request.Intent, &body); err != nil {
-				t.Fatal(err)
-			}
-
-			if body["sourcePath"] != "sub" || body["destinationPath"] != "archive" ||
-				body["sourceNode"] != "node-a" ||
-				body["verifyChecksum"] != true ||
-				body["deleteExtraneous"] != true {
-				t.Fatalf("reservation lost future copy intent: %s", request.Intent)
-			}
-
-			if got, ok := body["strategies"].([]any); !ok || len(got) != 1 ||
-				got[0] != domain.StrategyMount {
-				t.Fatalf("reservation lost copy strategy: %s", request.Intent)
-			}
-		})
-	}
-}
-
-func TestControllerSubmissionRejectsAmbiguousMappings(t *testing.T) {
-	for _, capacities := range [][]string{{"1Gi", "2Gi"}, {"1Gi", "data=2Gi"}, {"data=1Gi", "data=2Gi"}, {"data="}} {
-		_, err := New(plannerClient(), nil).ForSubmission(true).PlanCopy(t.Context(), CopyOptions{
-			SessionID:             "request",
-			SourceNamespace:       "app",
-			SourcePVCs:            []string{"data"},
-			DestinationCapacities: capacities,
-		})
-		if err == nil {
-			t.Fatalf("accepted ambiguous mapping %v", capacities)
-		}
-	}
-}
-
 func TestControllerSubmissionSinglePathDefaultsToVolumeRoot(t *testing.T) {
-	request, err := New(plannerClient(), nil).ForSubmission(true).PlanCopy(t.Context(), CopyOptions{
-		SessionID:          "request",
-		SourceNamespace:    "app",
-		SourcePVCs:         []string{"data"},
-		SourcePaths:        []string{"data=logs"},
-		SessionNamespace:   "app",
-		TemporaryNamespace: "app",
-	})
-	if err != nil {
-		t.Fatal(err)
+	object := &v1alpha1.ClusterCopy{
+		ObjectMeta: metav1.ObjectMeta{Name: "request"}, Spec: v1alpha1.ClusterCopySpec{
+			SourceNamespace: "app", DestinationNamespace: "app", SessionNamespace: "app",
+			CopySpec: v1alpha1.CopySpec{Volumes: []v1alpha1.VolumeRequest{
+				{
+					SourcePVC: v1alpha1.LocalResourceReference{Name: "data"},
+					TransferScope: &v1alpha1.TransferScope{
+						SourcePath:      "logs",
+						DestinationPath: ".",
+					},
+				},
+			}},
+		},
 	}
 
-	session := domain.NewSession(request.SessionID, request.SessionSpec, metav1.Now().Time)
-	session.Intent = request.Intent
-
-	spec, err := New(
+	report, err := New(
 		plannerClient(plannerObjects("2Gi")...),
 		nil,
-	).PlanWorkflow(t.Context(), session, "example/tool:v1")
-	if err != nil {
-		t.Fatal(err)
+	).ForController().PlanCopy(t.Context(), object, "example/tool:v1")
+	if err != nil || object.Status.Plan == nil {
+		t.Fatalf("plan=%+v err=%v", report, err)
 	}
 
-	if scope := spec.Volumes[0].TransferScope; scope == nil || scope.SourcePath != "logs" ||
+	if scope := object.Status.Plan.Volumes[0].TransferScope; scope == nil ||
+		scope.SourcePath != "logs" ||
 		scope.DestinationPath != domain.VolumeRootPath {
 		t.Fatalf("unexpected scope: %+v", scope)
-	}
-}
-
-func TestRestorePlanningPinsExistingDestinationAndHonorsConstraints(t *testing.T) {
-	for _, test := range []struct {
-		name             string
-		existing, create bool
-		uid              string
-		fail             bool
-	}{
-		{"existing", true, false, "", false},
-		{"existing create", true, true, "pvc-uid", false},
-		{"wrong uid", true, true, "replaced", true},
-		{"create missing", false, true, "", false},
-		{"pinned missing", false, true, "pvc-uid", true},
-		{"missing", false, false, "", true},
-	} {
-		t.Run(test.name, func(t *testing.T) {
-			request, err := intentPlanForKind(
-				"restore",
-				"app",
-				domain.ControllerKindRestore,
-				v1alpha1.RestoreSpec{
-					DestinationPVC: v1alpha1.LocalResourceReference{
-						Name: "data",
-						UID:  types.UID(test.uid),
-					},
-					RepositoryRef: v1alpha1.LocalObjectReference{
-						Name: "repository",
-					},
-					Name:      "archive",
-					CreatePVC: test.create,
-				},
-			)
-			if err != nil {
-				t.Fatal(err)
-			}
-
-			session := domain.NewSession(request.SessionID, request.SessionSpec, metav1.Now().Time)
-			session.Intent = request.Intent
-
-			client := plannerClient()
-			if test.existing {
-				client = plannerClient(plannerObjects("2Gi")...)
-			}
-
-			spec, err := New(client, nil).PlanWorkflow(t.Context(), session, "example/tool:v1")
-			if (err != nil) != test.fail {
-				t.Fatalf("error=%v want failure=%v", err, test.fail)
-			}
-
-			if err == nil && test.existing && spec.Restore.DestinationPVC.UID != "pvc-uid" {
-				t.Fatal("resolved UID not pinned")
-			}
-
-			if err == nil && test.create &&
-				spec.Restore.DestinationAccessMode != string(corev1.ReadWriteOnce) {
-				t.Fatal("restore PVC creation did not resolve the default access mode")
-			}
-		})
 	}
 }

@@ -5,78 +5,32 @@ import (
 	"strings"
 	"testing"
 
+	v1alpha1 "github.com/labring-sigs/pvc-migrate/api/v1alpha1"
 	"github.com/labring-sigs/pvc-migrate/internal/domain"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
-func TestResolveTransferScopesSupportsSingleAndNamedPartialMappings(t *testing.T) {
-	single, err := resolveTransferScopes([]string{"data/mysql"}, []string{"."}, []string{"data"})
-	if err != nil || len(single) != 1 || single[0] == nil || single[0].SourcePath != "data/mysql" ||
-		single[0].DestinationPath != "." {
-		t.Fatalf("single scopes=%#v error=%v", single, err)
-	}
-
-	multiple, err := resolveTransferScopes(
-		[]string{"logs=archive/current"},
-		[]string{"data=restored/data", "logs=."},
-		[]string{"data", "logs", "cache"},
-	)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	if len(multiple) != 3 || multiple[0] == nil ||
-		multiple[0].SourcePath != domain.VolumeRootPath ||
-		multiple[0].DestinationPath != "restored/data" ||
-		multiple[1] == nil ||
-		multiple[1].SourcePath != "archive/current" ||
-		multiple[1].DestinationPath != domain.VolumeRootPath ||
-		multiple[2] != nil {
-		t.Fatalf("multiple scopes=%#v", multiple)
-	}
-}
-
-func TestResolveTransferScopesRejectsAmbiguousAndUnsafeMappings(t *testing.T) {
-	for _, test := range []struct {
-		name        string
-		source      []string
-		destination []string
-		want        string
-	}{
-		{name: "bare multi PVC", source: []string{"data/mysql"}, want: "bare --source-path"},
-		{name: "unknown", source: []string{"other=data"}, want: "unknown source PVC"},
-		{name: "duplicate", source: []string{"data=a", "data=b"}, want: "more than once"},
-		{name: "empty", destination: []string{"data="}, want: "use source-pvc-name=relative-path"},
-		{name: "traversal", source: []string{"data=../secret"}, want: "parent traversal"},
-	} {
-		t.Run(test.name, func(t *testing.T) {
-			_, err := resolveTransferScopes(test.source, test.destination, []string{"data", "logs"})
-			if err == nil || !strings.Contains(err.Error(), test.want) {
-				t.Fatalf("error=%v, want %q", err, test.want)
-			}
-		})
-	}
-}
-
 func TestPlanPersistsTransferScopeAndWarnsForOrchestratedMigration(t *testing.T) {
+	object := &v1alpha1.ClusterMigration{
+		ObjectMeta: metav1.ObjectMeta{Name: "partial-path"},
+		Spec: v1alpha1.ClusterMigrationSpec{
+			SourceNamespace: "app", TemporaryNamespace: "system", SessionNamespace: "system",
+			MigrationSpec: v1alpha1.MigrationSpec{
+				Volumes: testSourceVolumes("data"),
+				TransferOptions: v1alpha1.TransferOptions{
+					SourcePath:              "mysql/current",
+					DestinationPath:         "restore/mysql",
+					TargetNode:              "node-b",
+					DestinationStorageClass: "fast",
+				},
+			},
+		},
+	}
+
 	plan, err := New(
 		plannerClient(plannerObjects("2Gi")...),
 		nil,
-	).plan(context.Background(), planOptions{
-		SessionID:            "partial-path",
-		Operation:            domain.OperationMigrate,
-		SourceNamespace:      "app",
-		TemporaryNamespace:   "system",
-		DestinationNamespace: "app",
-		StagingNamespace:     "system",
-		SessionNamespace:     "system",
-		SourcePVCs: []string{
-			"data",
-		},
-		SourcePaths:      []string{"data=mysql/current"},
-		DestinationPaths: []string{"data=restore/mysql"},
-		TargetNode:       "node-b",
-		DestinationClass: "fast",
-	})
+	).PlanOfflineMigration(context.Background(), object, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -87,9 +41,14 @@ func TestPlanPersistsTransferScopeAndWarnsForOrchestratedMigration(t *testing.T)
 		t.Fatalf("planned volumes=%#v", plan.Volumes)
 	}
 
-	if len(plan.SessionSpec.Volumes) != 1 || plan.SessionSpec.Volumes[0].TransferScope == nil ||
-		plan.SessionSpec.Volumes[0].TransferScope == plan.Volumes[0].TransferScope {
-		t.Fatalf("session scope=%#v plan scope=%#v", plan.SessionSpec.Volumes, plan.Volumes)
+	if len(object.Status.Plan.Volumes) != 1 ||
+		object.Status.Plan.Volumes[0].TransferScope == nil ||
+		object.Status.Plan.Volumes[0].TransferScope == plan.Volumes[0].TransferScope {
+		t.Fatalf(
+			"session scope=%#v plan scope=%#v",
+			object.Status.Plan.Volumes,
+			plan.Volumes,
+		)
 	}
 
 	foundWarning := false
@@ -106,36 +65,38 @@ func TestPlanPersistsTransferScopeAndWarnsForOrchestratedMigration(t *testing.T)
 }
 
 func TestPartialSourceShrinkTreatsWholeVolumeUsageAsInconclusive(t *testing.T) {
-	options := planOptions{
-		SessionID:            "partial-shrink",
-		Operation:            domain.OperationCopy,
+	options := transferInput{
+		Volumes: testSourceVolumes(
+			"data",
+		), SessionID: "partial-shrink",
+
 		SourceNamespace:      "app",
 		TemporaryNamespace:   "system",
 		DestinationNamespace: "system",
 		StagingNamespace:     "system",
 		SessionNamespace:     "system",
-		SourcePVCs: []string{
-			"data",
+
+		TransferOptions: v1alpha1.TransferOptions{
+			SourcePath:              "selected",
+			DestinationCapacity:     "1Gi",
+			AllowVolumeShrink:       true,
+			TargetNode:              "node-b",
+			DestinationStorageClass: "fast",
 		},
-		SourcePaths:           []string{"data=selected"},
-		DestinationCapacities: []string{"1Gi"},
-		AllowVolumeShrink:     true,
-		TargetNode:            "node-b",
-		DestinationClass:      "fast",
 	}
 
 	plan, err := New(
 		plannerClient(plannerObjects("2Gi")...),
 		nil,
 	).WithVolumeUsageReader(staticUsageReader{bytes: 1536 << 20}).
-		plan(context.Background(), options)
+		plan(context.Background(), domain.OperationCopy, options)
 	if err != nil {
 		t.Fatal(err)
 	}
 
 	if plan.Ready ||
 		!hasFailedCheckContaining(
-			plan,
+			plan.Checks,
 			"source-usage",
 			"cannot prove that selected source directory",
 		) {
@@ -148,7 +109,7 @@ func TestPartialSourceShrinkTreatsWholeVolumeUsageAsInconclusive(t *testing.T) {
 		plannerClient(plannerObjects("2Gi")...),
 		nil,
 	).WithVolumeUsageReader(staticUsageReader{bytes: 1536 << 20}).
-		plan(context.Background(), options)
+		plan(context.Background(), domain.OperationCopy, options)
 	if err != nil || !plan.Ready {
 		t.Fatalf("explicit skip plan ready=%t error=%v checks=%#v", plan.Ready, err, plan.Checks)
 	}

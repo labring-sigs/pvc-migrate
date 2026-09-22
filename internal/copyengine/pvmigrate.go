@@ -21,9 +21,9 @@ type PVMigrate struct {
 
 func NewPVMigrate() *PVMigrate { return &PVMigrate{run: pvmigrate.Run} }
 
-func (p *PVMigrate) Copy(ctx context.Context, request Request, progress ProgressFunc) error {
-	strategies := make([]pvmigrate.Strategy, 0, len(request.Strategies))
-	for _, strategy := range request.Strategies {
+func (p *PVMigrate) Copy(ctx context.Context, request CopyRequest, progress ProgressFunc) error {
+	strategies := make([]pvmigrate.Strategy, 0, len(request.Policy.Strategies))
+	for _, strategy := range request.Policy.Strategies {
 		converted, err := strategyValue(strategy)
 		if err != nil {
 			return err
@@ -33,17 +33,17 @@ func (p *PVMigrate) Copy(ctx context.Context, request Request, progress Progress
 	}
 
 	rsyncArgs := "-HAXS --numeric-ids"
-	if request.VerifyChecksum {
+	if request.Policy.VerifyChecksum {
 		rsyncArgs += " --checksum"
 	}
 
-	if request.DestinationPath != "" && request.DestinationPath != domain.VolumeRootPath {
+	if request.Destination.Path != "" && request.Destination.Path != domain.VolumeRootPath {
 		rsyncArgs += " --mkpath"
 	}
 
-	operationID := OperationID(request)
+	operationID := OperationID(request.AttemptIdentity)
 
-	imageValues, err := kube.ToolImageHelmValues(request.ToolImage)
+	imageValues, err := kube.ToolImageHelmValues(request.Runtime.ToolImage)
 	if err != nil {
 		return err
 	}
@@ -59,8 +59,13 @@ func (p *PVMigrate) Copy(ctx context.Context, request Request, progress Progress
 		)
 	}
 
-	helmValues := append(kube.ToolSecurityContextHelmValues(), request.HelmValues...)
-	if request.IgnoreSizes {
+	helmValues := append(kube.ToolSecurityContextHelmValues(), request.Runtime.HelmValues...)
+	if request.Policy.RsyncMaxRetries > 0 {
+		helmValues = append(helmValues,
+			fmt.Sprintf("rsync.maxRetries=%d", request.Policy.RsyncMaxRetries))
+	}
+
+	if request.Policy.IgnoreSizes {
 		// A smaller destination can deterministically exhaust its filesystem.
 		// Let the session-level retry policy handle transient failures so an
 		// ENOSPC result is surfaced without repeated in-Job attempts.
@@ -75,39 +80,42 @@ func (p *PVMigrate) Copy(ctx context.Context, request Request, progress Progress
 	migration := pvmigrate.Migration{
 		ID: operationID,
 		Source: pvmigrate.PVC{
-			KubeconfigPath: request.KubeconfigPath,
-			Context:        request.Context,
-			Namespace:      request.Source.Namespace,
-			Name:           request.Source.Name,
-			Path:           transferEnginePath(request.SourcePath),
+			KubeconfigPath: request.Source.KubeconfigPath,
+			Context:        request.Source.Context,
+			Namespace:      request.AttemptIdentity.Source.Namespace,
+			Name:           request.AttemptIdentity.Source.Name,
+			Path:           transferEnginePath(request.Source.Path),
 		},
 		Dest: pvmigrate.PVC{
-			KubeconfigPath: request.DestinationKubeconfigPath,
-			Context:        request.DestinationContext,
-			Namespace:      request.Destination.Namespace,
-			Name:           request.Destination.Name,
-			Path:           transferEnginePath(request.DestinationPath),
+			KubeconfigPath: request.Destination.KubeconfigPath,
+			Context:        request.Destination.Context,
+			Namespace:      request.Destination.Reference.Namespace,
+			Name:           request.Destination.Reference.Name,
+			Path:           transferEnginePath(request.Destination.Path),
 		},
-		DeleteExtraneousFiles: request.DeleteExtraneousFiles,
+		DeleteExtraneousFiles: request.Policy.DeleteExtraneousFiles,
 		IgnoreMounted:         request.Mode == ModeWarm,
-		SourceMountReadWrite:  request.SourceMountReadWrite,
-		NoCompress:            request.NoCompress,
+		SourceMountReadWrite:  request.Source.MountReadWrite,
+		NoCompress:            request.Policy.NoCompress,
 		NoCleanupOnFailure:    false,
-		IgnoreSizes:           request.IgnoreSizes,
+		IgnoreSizes:           request.Policy.IgnoreSizes,
 		ShowProgressBar:       false,
 		RsyncExtraArgs:        rsyncArgs,
 		Strategies:            strategies,
-		HelmTimeout:           request.HelmTimeout,
+		HelmTimeout:           request.Runtime.HelmTimeout,
 		HelmValues:            helmValues,
-		HelmStringValues:      append(imageValues, request.HelmStringValues...),
-		Writer:                request.Writer,
-		Logger:                loggerWithDestinationNoSpaceDetection(request.Logger, detector),
-		StructuredLogs:        true,
+		HelmStringValues:      append(imageValues, request.Runtime.HelmStringValues...),
+		Writer:                request.Runtime.Writer,
+		Logger: loggerWithDestinationNoSpaceDetection(
+			request.Runtime.Logger,
+			detector,
+		),
+		StructuredLogs: true,
 	}
 	if migration.Dest.KubeconfigPath == "" {
-		migration.Dest.KubeconfigPath = request.KubeconfigPath
+		migration.Dest.KubeconfigPath = request.Source.KubeconfigPath
 		if migration.Dest.Context == "" {
-			migration.Dest.Context = request.Context
+			migration.Dest.Context = request.Source.Context
 		}
 	}
 
@@ -133,6 +141,34 @@ func (p *PVMigrate) Copy(ctx context.Context, request Request, progress Progress
 			)
 		}
 
+		// A warm pass against a live workload is best effort: when the source
+		// rewrites files faster than the pass transfers them, rsync ends with
+		// code 23 on every retry and the pre-copy can never finish. The
+		// paused final sync converges the remainder, so record the churn and
+		// report success instead of failing the migration.
+		if request.Policy.TolerateLiveSourceChurn && isRsyncPartialTransferError(classified) {
+			if logger := request.Runtime.Logger; logger != nil {
+				logger.Warn(
+					"warm copy ended with live-source churn; the paused final sync will converge",
+					"operation", operationID,
+					"error", classified.Error(),
+				)
+			}
+
+			if progress != nil {
+				progress(
+					Progress{
+						Mode:    request.Mode,
+						Attempt: request.Attempt,
+						State:   "completed",
+						Message: operationID,
+					},
+				)
+			}
+
+			return nil
+		}
+
 		return classified
 	}
 
@@ -148,6 +184,20 @@ func (p *PVMigrate) Copy(ctx context.Context, request Request, progress Progress
 	}
 
 	return nil
+}
+
+// isRsyncPartialTransferError reports whether the data mover exited with
+// rsync's partial-transfer status (code 23): the source rewrote or removed
+// files while they were being transferred. The rsync job's own script already
+// treats the vanished-files code 24 as success.
+func isRsyncPartialTransferError(err error) bool {
+	for e := err; e != nil; e = errors.Unwrap(e) {
+		if strings.Contains(e.Error(), "the data mover exited with code 23") {
+			return true
+		}
+	}
+
+	return false
 }
 
 func transferEnginePath(value string) string {
@@ -317,7 +367,7 @@ func strategyValue(value string) (pvmigrate.Strategy, error) {
 
 // OperationID returns the stable upstream operation identity used in Helm
 // release names and tool Pod labels.
-func OperationID(request Request) string {
+func OperationID(request AttemptIdentity) string {
 	value := fmt.Sprintf(
 		"%s/%s/%s/%s/%d",
 		request.SessionID,

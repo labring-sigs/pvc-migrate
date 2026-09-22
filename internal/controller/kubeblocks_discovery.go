@@ -7,6 +7,7 @@ import (
 	"sort"
 	"strings"
 
+	v1alpha1 "github.com/labring-sigs/pvc-migrate/api/v1alpha1"
 	"github.com/labring-sigs/pvc-migrate/internal/domain"
 	"github.com/labring-sigs/pvc-migrate/internal/kube"
 	corev1 "k8s.io/api/core/v1"
@@ -20,29 +21,36 @@ func (m *Manager) kubeBlocksWorkload(
 	ctx context.Context,
 	pod *corev1.Pod,
 	owner *metav1.OwnerReference,
-	options DiscoverOptions,
-) (domain.WorkloadSpec, error) {
-	state, err := m.prepareKubeBlocksDiscovery(ctx, pod, owner, options)
+	candidateName string,
+	allowLeaderDowntime bool,
+) (v1alpha1.WorkloadSpec, error) {
+	state, err := m.prepareKubeBlocksDiscovery(ctx, pod, owner, candidateName, allowLeaderDowntime)
 	if err != nil {
-		return domain.WorkloadSpec{}, err
+		return v1alpha1.WorkloadSpec{}, err
 	}
 
 	instanceSet, err := m.discoverKubeBlocksInstanceSet(ctx, pod.Namespace, owner, pod.Name)
 	if err != nil {
-		return domain.WorkloadSpec{}, err
+		return v1alpha1.WorkloadSpec{}, err
 	}
 
-	role, roleIsLeader, err := resolveKubeBlocksRole(pod, owner, options, state.role, instanceSet)
+	role, roleIsLeader, err := resolveKubeBlocksRole(
+		pod,
+		owner,
+		allowLeaderDowntime,
+		state.role,
+		instanceSet,
+	)
 	if err != nil {
-		return domain.WorkloadSpec{}, err
+		return v1alpha1.WorkloadSpec{}, err
 	}
 
 	if state.switchoverCandidate != nil && !roleIsLeader {
-		return domain.WorkloadSpec{}, domain.NewError(
+		return v1alpha1.WorkloadSpec{}, domain.NewError(
 			domain.ErrorPrecondition,
 			"discover KubeBlocks",
 			fmt.Sprintf(
-				"--kubeblocks-candidate applies only when the selected InstanceSet Pod has a leader role; Pod %s/%s has role %s, so omit the candidate",
+				"--switchover-candidate applies only when the selected InstanceSet Pod has a leader role; Pod %s/%s has role %s, so omit the candidate",
 				pod.Namespace,
 				pod.Name,
 				role,
@@ -51,8 +59,8 @@ func (m *Manager) kubeBlocksWorkload(
 	}
 
 	if owner.Kind == domain.KindInstanceSet && roleIsLeader && state.switchoverCandidate == nil &&
-		!options.AllowLeaderDowntime {
-		return domain.WorkloadSpec{}, domain.NewError(
+		!allowLeaderDowntime {
+		return v1alpha1.WorkloadSpec{}, domain.NewError(
 			domain.ErrorPrecondition,
 			"discover KubeBlocks",
 			m.kubeBlocksLeaderGuidance(
@@ -66,7 +74,7 @@ func (m *Manager) kubeBlocksWorkload(
 		)
 	}
 
-	var switchoverStrategy domain.KubeBlocksSwitchoverStrategy
+	var switchoverStrategy v1alpha1.KubeBlocksSwitchoverStrategy
 
 	switchoverContainer := ""
 	if state.switchoverCandidate != nil {
@@ -79,12 +87,12 @@ func (m *Manager) kubeBlocksWorkload(
 			roleIsLeader,
 		)
 		if err != nil {
-			return domain.WorkloadSpec{}, err
+			return v1alpha1.WorkloadSpec{}, err
 		}
 	}
 
 	if owner.Kind == domain.KindInstanceSet && instanceSet.Paused {
-		return domain.WorkloadSpec{}, domain.NewError(
+		return v1alpha1.WorkloadSpec{}, domain.NewError(
 			domain.ErrorPrecondition,
 			"discover KubeBlocks",
 			fmt.Sprintf(
@@ -102,23 +110,22 @@ func (m *Manager) kubeBlocksWorkload(
 		controllerUID = instanceSet.UID
 	}
 
-	return domain.WorkloadSpec{
-		Adapter: domain.WorkloadKubeBlocks,
-		Pod:     podReference(pod),
-		Controller: objectReference(
+	return v1alpha1.WorkloadSpec{
+		Adapter: v1alpha1.WorkloadKubeBlocks,
+		Pod:     workloadPodReference(pod),
+		Controller: workloadObjectReference(
 			owner.APIVersion,
 			owner.Kind,
-			pod.Namespace,
 			owner.Name,
 			controllerUID,
 			"",
 		),
-		KubeBlocks: &domain.KubeBlocksSpec{
+		KubeBlocks: &v1alpha1.KubeBlocksSpec{
 			Cluster:                  state.cluster,
 			Component:                state.component,
 			Instance:                 pod.Name,
 			Role:                     role,
-			SwitchoverCandidate:      options.SwitchoverCandidate,
+			SwitchoverCandidate:      candidateName,
 			SwitchoverStrategy:       switchoverStrategy,
 			SwitchoverContainer:      switchoverContainer,
 			OpsAPIVersion:            state.opsAPIVersion,
@@ -142,7 +149,8 @@ func (m *Manager) prepareKubeBlocksDiscovery(
 	ctx context.Context,
 	pod *corev1.Pod,
 	owner *metav1.OwnerReference,
-	options DiscoverOptions,
+	candidateName string,
+	allowLeaderDowntime bool,
 ) (kubeBlocksDiscoveryState, error) {
 	state := kubeBlocksDiscoveryState{
 		cluster:   pod.Labels[kube.AppInstanceLabel],
@@ -163,7 +171,7 @@ func (m *Manager) prepareKubeBlocksDiscovery(
 
 	if err := validateKubeBlocksSwitchoverCandidate(
 		owner,
-		options.SwitchoverCandidate,
+		candidateName,
 	); err != nil {
 		return state, err
 	}
@@ -171,11 +179,11 @@ func (m *Manager) prepareKubeBlocksDiscovery(
 	// Redis has no supported switchover action. Reject the candidate before
 	// discovering the OpsRequest API so an unsupported parameter cannot cause
 	// unrelated API probing or mask the actionable Redis guidance.
-	if options.SwitchoverCandidate != "" && isKubeBlocksRedis(pod) {
+	if candidateName != "" && isKubeBlocksRedis(pod) {
 		return state, domain.NewError(
 			domain.ErrorPrecondition,
 			"discover KubeBlocks",
-			"the KubeBlocks Redis addon does not provide a Switchover action; omit --kubeblocks-candidate",
+			"the KubeBlocks Redis addon does not provide a Switchover action; omit --switchover-candidate",
 		)
 	}
 
@@ -194,7 +202,7 @@ func (m *Manager) prepareKubeBlocksDiscovery(
 		}
 	}
 
-	candidate, err := m.discoverKubeBlocksCandidate(ctx, pod, owner, options, state)
+	candidate, err := m.discoverKubeBlocksCandidate(ctx, pod, owner, candidateName, state)
 	if err != nil {
 		return state, err
 	}
@@ -209,7 +217,7 @@ func (m *Manager) prepareKubeBlocksDiscovery(
 	}
 
 	if owner.Kind == domain.KindInstanceSet && isLeaderRole(state.role) &&
-		!options.AllowLeaderDowntime && candidate == nil {
+		!allowLeaderDowntime && candidate == nil {
 		return state, domain.NewError(
 			domain.ErrorPrecondition,
 			"discover KubeBlocks",
@@ -249,7 +257,7 @@ func validateKubeBlocksSwitchoverCandidate(
 	return domain.NewError(
 		domain.ErrorPrecondition,
 		"discover KubeBlocks",
-		"--kubeblocks-candidate is supported only for InstanceSet-backed KubeBlocks components; Stop OpsRequests pause the complete legacy Cluster or component",
+		"--switchover-candidate is supported only for InstanceSet-backed KubeBlocks components; Stop OpsRequests pause the complete legacy Cluster or component",
 	)
 }
 
@@ -267,19 +275,19 @@ func (m *Manager) discoverKubeBlocksCandidate(
 	ctx context.Context,
 	pod *corev1.Pod,
 	owner *metav1.OwnerReference,
-	options DiscoverOptions,
+	candidateName string,
 	state kubeBlocksDiscoveryState,
 ) (*corev1.Pod, error) {
-	if options.SwitchoverCandidate == "" {
+	if candidateName == "" {
 		return nil, nil
 	}
 
-	if options.SwitchoverCandidate == pod.Name {
+	if candidateName == pod.Name {
 		return nil, domain.NewError(
 			domain.ErrorPrecondition,
 			"discover KubeBlocks",
 			fmt.Sprintf(
-				"--kubeblocks-candidate %s refers to the selected source Pod; choose a different Ready non-leader Pod in cluster %s component %s%s",
+				"--switchover-candidate %s refers to the selected source Pod; choose a different Ready non-leader Pod in cluster %s component %s%s",
 				pod.Name,
 				state.cluster,
 				state.component,
@@ -290,21 +298,21 @@ func (m *Manager) discoverKubeBlocksCandidate(
 
 	candidate, err := m.typed.CoreV1().Pods(pod.Namespace).Get(
 		ctx,
-		options.SwitchoverCandidate,
+		candidateName,
 		metav1.GetOptions{},
 	)
 	if err != nil {
 		message := fmt.Sprintf(
 			"read switchover candidate Pod %s/%s: %v",
 			pod.Namespace,
-			options.SwitchoverCandidate,
+			candidateName,
 			err,
 		)
 		if apierrors.IsNotFound(err) {
 			message = fmt.Sprintf(
-				"switchover candidate Pod %s/%s does not exist; verify --kubeblocks-candidate%s",
+				"switchover candidate Pod %s/%s does not exist; verify --switchover-candidate%s",
 				pod.Namespace,
-				options.SwitchoverCandidate,
+				candidateName,
 				m.kubeBlocksCandidateSuggestion(ctx, pod, state.cluster, state.component),
 			)
 		}
@@ -461,7 +469,7 @@ func validateKubeBlocksComponents(components []any, selected string) error {
 func resolveKubeBlocksRole(
 	pod *corev1.Pod,
 	owner *metav1.OwnerReference,
-	options DiscoverOptions,
+	allowLeaderDowntime bool,
 	role string,
 	instanceSet kubeBlocksInstanceSetState,
 ) (string, bool, error) {
@@ -487,7 +495,7 @@ func resolveKubeBlocksRole(
 	}
 
 	if role == "" {
-		if !options.AllowLeaderDowntime {
+		if !allowLeaderDowntime {
 			return "", false, domain.NewError(
 				domain.ErrorPrecondition,
 				"discover KubeBlocks",
@@ -506,7 +514,7 @@ func resolveKubeBlocksRole(
 		return role, knownLeader, nil
 	}
 
-	if !options.AllowLeaderDowntime {
+	if !allowLeaderDowntime {
 		return "", false, domain.NewError(
 			domain.ErrorPrecondition,
 			"discover KubeBlocks",
@@ -529,7 +537,7 @@ func (m *Manager) resolveKubeBlocksSwitchover(
 	state kubeBlocksDiscoveryState,
 	instanceSet kubeBlocksInstanceSetState,
 	roleIsLeader bool,
-) (domain.KubeBlocksSwitchoverStrategy, string, error) {
+) (v1alpha1.KubeBlocksSwitchoverStrategy, string, error) {
 	if roleIsLeader && instanceSet.HasLeaderRole {
 		candidateRole := podRole(state.switchoverCandidate)
 
@@ -807,7 +815,7 @@ func (m *Manager) kubeBlocksLeaderGuidance(
 		}
 
 		return fmt.Sprintf(
-			"selected MongoDB instance %s has role %s; use --kubeblocks-candidate %s and pvc-migrate will validate and run the native switchover script. Manual MongoDB switchover: %s. The candidate must remain Ready and caught up; --allow-leader-downtime acknowledges a leader outage",
+			"selected MongoDB instance %s has role %s; use --switchover-candidate %s and pvc-migrate will validate and run the native switchover script. Manual MongoDB switchover: %s. The candidate must remain Ready and caught up; --allow-leader-downtime acknowledges a leader outage",
 			selected.Name,
 			role,
 			candidate,
@@ -823,7 +831,7 @@ func (m *Manager) kubeBlocksLeaderGuidance(
 
 	if isKubeBlocksRedis(selected) {
 		return fmt.Sprintf(
-			"selected instance %s has role %s; the KubeBlocks Redis addon does not provide a Switchover action. Rerun without --kubeblocks-candidate and use --allow-leader-downtime to acknowledge the leader outage",
+			"selected instance %s has role %s; the KubeBlocks Redis addon does not provide a Switchover action. Rerun without --switchover-candidate and use --allow-leader-downtime to acknowledge the leader outage",
 			selected.Name,
 			role,
 		)
@@ -855,7 +863,7 @@ func (m *Manager) kubeBlocksLeaderGuidance(
 	}
 
 	return fmt.Sprintf(
-		"selected instance %s has role %s; use --kubeblocks-candidate %s for an automatic switchover, or complete a native switchover first and rerun the plan. Use --allow-leader-downtime to acknowledge the leader outage. KubeBlocks commands: kbcli cluster promote %s --namespace %s --instance %s --candidate %s; or %s",
+		"selected instance %s has role %s; use --switchover-candidate %s for an automatic switchover, or complete a native switchover first and rerun the plan. Use --allow-leader-downtime to acknowledge the leader outage. KubeBlocks commands: kbcli cluster promote %s --namespace %s --instance %s --candidate %s; or %s",
 		selected.Name,
 		role,
 		candidate,
@@ -919,7 +927,7 @@ func (m *Manager) kubeBlocksCandidateSuggestion(
 		return ""
 	}
 
-	return "; available Ready non-leader candidate: --kubeblocks-candidate " + candidate
+	return "; available Ready non-leader candidate: --switchover-candidate " + candidate
 }
 
 func kubeBlocksSwitchoverCommand(
@@ -996,15 +1004,21 @@ func (m *Manager) kubeBlocksSwitchoverStrategy(
 	ctx context.Context,
 	selected *corev1.Pod,
 	cluster, component, candidate, opsAPIVersion string,
-) (domain.KubeBlocksSwitchoverStrategy, string, error) {
+) (v1alpha1.KubeBlocksSwitchoverStrategy, string, error) {
 	if isKubeBlocksRedis(selected) {
 		return "", "", errors.New(
-			"the KubeBlocks Redis addon does not provide a Switchover action; omit --kubeblocks-candidate",
+			"the KubeBlocks Redis addon does not provide a Switchover action; omit --switchover-candidate",
 		)
 	}
 
 	if isKubeBlocksMongoDB(selected) {
-		container, err := m.preflightMongoDBNativeSwitchover(ctx, selected)
+		container, err := m.preflightMongoDBNativeSwitchover(
+			ctx,
+			selected,
+			cluster,
+			component,
+			candidate,
+		)
 		if err != nil {
 			return "", "", fmt.Errorf(
 				"MongoDB native switchover script preflight failed: %w; use --allow-leader-downtime to acknowledge the leader outage",
@@ -1012,7 +1026,7 @@ func (m *Manager) kubeBlocksSwitchoverStrategy(
 			)
 		}
 
-		return domain.KubeBlocksSwitchoverMongoDBNative, container, nil
+		return v1alpha1.KubeBlocksSwitchoverMongoDBNative, container, nil
 	}
 
 	err := m.validateKubeBlocksSwitchover(
@@ -1025,7 +1039,7 @@ func (m *Manager) kubeBlocksSwitchoverStrategy(
 		opsAPIVersion,
 	)
 	if err == nil {
-		return domain.KubeBlocksSwitchoverOpsRequest, "", nil
+		return v1alpha1.KubeBlocksSwitchoverOpsRequest, "", nil
 	}
 
 	return "", "", fmt.Errorf(

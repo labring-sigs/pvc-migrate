@@ -4,8 +4,10 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 
+	v1alpha1 "github.com/labring-sigs/pvc-migrate/api/v1alpha1"
 	"github.com/labring-sigs/pvc-migrate/internal/domain"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -58,6 +60,10 @@ func CreateBackupCredentialsSecret(
 		secret.OwnerReferences = append([]metav1.OwnerReference(nil), owners...)
 	}
 
+	if err := errors.Join(ctx.Err(), LeaseFenceError(ctx)); err != nil {
+		return nil, err
+	}
+
 	created, err := client.CoreV1().Secrets(namespace).Create(ctx, secret, metav1.CreateOptions{})
 	if apierrors.IsAlreadyExists(err) {
 		return nil, domain.WrapError(
@@ -77,13 +83,13 @@ func CreateBackupCredentialsSecret(
 		)
 	}
 
-	return created, nil
+	return created, errors.Join(ctx.Err(), LeaseFenceError(ctx))
 }
 
 func DeleteBackupCredentialsSecret(
 	ctx context.Context,
 	client kubernetes.Interface,
-	ref domain.ObjectReference,
+	ref v1alpha1.ObjectReference,
 	sessionID string,
 ) error {
 	secret, err := backupCredentialsSecretForCleanup(ctx, client, ref, sessionID)
@@ -94,6 +100,10 @@ func DeleteBackupCredentialsSecret(
 	options := metav1.DeleteOptions{}
 	if ref.UID != "" {
 		options.Preconditions = &metav1.Preconditions{UID: &ref.UID}
+	}
+
+	if err := errors.Join(ctx.Err(), LeaseFenceError(ctx)); err != nil {
+		return err
 	}
 
 	if err := client.CoreV1().
@@ -108,7 +118,7 @@ func DeleteBackupCredentialsSecret(
 		)
 	}
 
-	return nil
+	return errors.Join(ctx.Err(), LeaseFenceError(ctx))
 }
 
 // ValidateBackupCredentialsSecretCleanup verifies cleanup ownership without
@@ -116,7 +126,7 @@ func DeleteBackupCredentialsSecret(
 func ValidateBackupCredentialsSecretCleanup(
 	ctx context.Context,
 	client kubernetes.Interface,
-	ref domain.ObjectReference,
+	ref v1alpha1.ObjectReference,
 	sessionID string,
 ) error {
 	_, err := backupCredentialsSecretForCleanup(ctx, client, ref, sessionID)
@@ -126,7 +136,7 @@ func ValidateBackupCredentialsSecretCleanup(
 func backupCredentialsSecretForCleanup(
 	ctx context.Context,
 	client kubernetes.Interface,
-	ref domain.ObjectReference,
+	ref v1alpha1.ObjectReference,
 	sessionID string,
 ) (*corev1.Secret, error) {
 	if client == nil || ref.Namespace == "" || ref.Name == "" {
@@ -177,7 +187,7 @@ func backupCredentialsSecretForCleanup(
 func GetBackupCredentialsSecret(
 	ctx context.Context,
 	client kubernetes.Interface,
-	ref domain.ObjectReference,
+	ref v1alpha1.ObjectReference,
 	sessionID string,
 ) (*corev1.Secret, error) {
 	if client == nil || ref.Namespace == "" || ref.Name == "" || sessionID == "" {

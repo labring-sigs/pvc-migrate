@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"strings"
 
+	v1alpha1 "github.com/labring-sigs/pvc-migrate/api/v1alpha1"
 	"github.com/labring-sigs/pvc-migrate/internal/domain"
 	"github.com/labring-sigs/pvc-migrate/internal/kube"
 	corev1 "k8s.io/api/core/v1"
@@ -67,6 +68,7 @@ func mongoDBContainer(pod *corev1.Pod) string {
 func (m *Manager) preflightMongoDBNativeSwitchover(
 	ctx context.Context,
 	pod *corev1.Pod,
+	cluster, component, candidate string,
 ) (string, error) {
 	container := mongoDBContainer(pod)
 	if container == "" {
@@ -76,6 +78,22 @@ func (m *Manager) preflightMongoDBNativeSwitchover(
 	if m.commandExecutor == nil {
 		return "", errors.New(
 			"pod exec is unavailable; configure Kubernetes REST access for the MongoDB native switchover",
+		)
+	}
+
+	allowed, reason, err := m.podExecAllowed(ctx, pod.Namespace)
+	if err != nil {
+		return "", err
+	}
+
+	if !allowed {
+		return "", mongoDBSwitchoverWithoutExec(
+			pod.Namespace,
+			pod.Name,
+			reason,
+			kubeBlocksMongoDBNativeSwitchoverCommand(
+				pod.Namespace, cluster, component, pod.Name, candidate,
+			),
 		)
 	}
 
@@ -107,8 +125,11 @@ func (m *Manager) preflightMongoDBNativeSwitchover(
 // runMongoDBNativeSwitchover is intentionally kept with the database adapter.
 // KubeBlocks pause orchestration selects this strategy, while this method owns
 // the MongoDB script invocation and role-convergence check.
-func (m *Manager) runMongoDBNativeSwitchover(ctx context.Context, session *domain.Session) error {
-	kb := session.Spec.Workload().KubeBlocks
+func (m *Manager) runMongoDBNativeSwitchover(
+	ctx context.Context,
+	pod, controller v1alpha1.ObjectReference,
+	kb *v1alpha1.KubeBlocksSpec,
+) error {
 	if kb == nil {
 		return domain.NewError(
 			domain.ErrorInternal,
@@ -130,7 +151,7 @@ func (m *Manager) runMongoDBNativeSwitchover(ctx context.Context, session *domai
 			domain.ErrorPrecondition,
 			"pause KubeBlocks",
 			"Pod exec is unavailable for the MongoDB native switchover; manual MongoDB switchover: "+kubeBlocksMongoDBNativeSwitchoverCommand(
-				session.Spec.Workload().Pod.Namespace,
+				pod.Namespace,
 				kb.Cluster,
 				kb.Component,
 				kb.Instance,
@@ -139,7 +160,24 @@ func (m *Manager) runMongoDBNativeSwitchover(ctx context.Context, session *domai
 		)
 	}
 
-	namespace := session.Spec.Workload().Pod.Namespace
+	if allowed, reason, err := m.podExecAllowed(ctx, pod.Namespace); err != nil {
+		return err
+	} else if !allowed {
+		return mongoDBSwitchoverWithoutExec(
+			pod.Namespace,
+			kb.Instance,
+			reason,
+			kubeBlocksMongoDBNativeSwitchoverCommand(
+				pod.Namespace,
+				kb.Cluster,
+				kb.Component,
+				kb.Instance,
+				kb.SwitchoverCandidate,
+			),
+		)
+	}
+
+	namespace := pod.Namespace
 
 	selected, err := m.typed.CoreV1().Pods(namespace).Get(ctx, kb.Instance, metav1.GetOptions{})
 	if err != nil {
@@ -151,7 +189,7 @@ func (m *Manager) runMongoDBNativeSwitchover(ctx context.Context, session *domai
 		)
 	}
 
-	if selected.UID != session.Spec.Workload().Pod.UID {
+	if selected.UID != pod.UID {
 		return domain.NewError(
 			domain.ErrorConflict,
 			"pause KubeBlocks",
@@ -161,7 +199,7 @@ func (m *Manager) runMongoDBNativeSwitchover(ctx context.Context, session *domai
 
 	if err := validatePodController(
 		selected,
-		session.Spec.Workload().Controller,
+		controller,
 		"pause KubeBlocks",
 	); err != nil {
 		return err
@@ -231,7 +269,7 @@ func (m *Manager) runMongoDBNativeSwitchover(ctx context.Context, session *domai
 
 			if err := validatePodController(
 				leader,
-				session.Spec.Workload().Controller,
+				controller,
 				"pause KubeBlocks",
 			); err != nil {
 				return false, err
@@ -246,7 +284,7 @@ func (m *Manager) runMongoDBNativeSwitchover(ctx context.Context, session *domai
 
 			if err := validatePodController(
 				candidate,
-				session.Spec.Workload().Controller,
+				controller,
 				"pause KubeBlocks",
 			); err != nil {
 				return false, err

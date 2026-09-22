@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	v1alpha1 "github.com/labring-sigs/pvc-migrate/api/v1alpha1"
 	"github.com/labring-sigs/pvc-migrate/internal/domain"
 	"github.com/labring-sigs/pvc-migrate/internal/kube"
 	"github.com/labring-sigs/pvc-migrate/internal/testutil"
@@ -27,7 +28,7 @@ func rbacTestClient() *kubernetesfake.Clientset {
 }
 
 func TestCheckRBACIncludesToolAndVolumePermissions(t *testing.T) {
-	seen := collectAllowedAccessReviews(t, domain.WorkloadSpec{}, false, false)
+	seen := collectAllowedAccessReviews(t, v1alpha1.WorkloadSpec{}, false, false)
 	for _, verb := range []string{"get", "list", "create", "update", "patch", "delete"} {
 		if !hasAccessReview(seen, authorizationv1.ResourceAttributes{
 			Namespace: "app", Verb: verb, Resource: "secrets",
@@ -83,12 +84,12 @@ func TestCheckRBACIncludesOpenEBSLVMVolumePermissionsWhenNeeded(t *testing.T) {
 		Resource: "lvmvolumes",
 	}
 
-	inspectOnly := collectAllowedAccessReviews(t, domain.WorkloadSpec{}, true, false)
+	inspectOnly := collectAllowedAccessReviews(t, v1alpha1.WorkloadSpec{}, true, false)
 	if !hasAccessReview(inspectOnly, list) || hasAccessReview(inspectOnly, patch) {
 		t.Fatalf("inspect-only access reviews=%#v", inspectOnly)
 	}
 
-	withAutoEnable := collectAllowedAccessReviews(t, domain.WorkloadSpec{}, true, true)
+	withAutoEnable := collectAllowedAccessReviews(t, v1alpha1.WorkloadSpec{}, true, true)
 	if !hasAccessReview(withAutoEnable, list) || !hasAccessReview(withAutoEnable, patch) {
 		t.Fatalf("auto-enable access reviews=%#v", withAutoEnable)
 	}
@@ -114,11 +115,11 @@ func TestCheckRBACRejectsMissingSessionLeasePermission(t *testing.T) {
 		},
 	)
 
-	plan := &domain.MigrationPlan{Ready: true}
+	plan := &domain.TransferPlan{PlanSummary: domain.PlanSummary{Ready: true}}
 	New(
 		client,
 		nil,
-	).checkRBAC(context.Background(), plan, rbacTestSpec("stage", domain.WorkloadSpec{}), false, false)
+	).checkPodMigrationPermissions(context.Background(), plan, plan.SessionID, "app", "stage", "system", []string{domain.StrategyLocal}, v1alpha1.WorkloadSpec{}, false, false)
 
 	if plan.Ready || len(plan.Checks) != 1 ||
 		!strings.Contains(plan.Checks[0].Message, "create system/leases") {
@@ -129,15 +130,15 @@ func TestCheckRBACRejectsMissingSessionLeasePermission(t *testing.T) {
 func TestCheckRBACIncludesControllerSpecificPermissions(t *testing.T) {
 	tests := []struct {
 		name     string
-		workload domain.WorkloadSpec
+		workload v1alpha1.WorkloadSpec
 		want     []authorizationv1.ResourceAttributes
 		exclude  []authorizationv1.ResourceAttributes
 	}{
 		{
 			name: "StatefulSet",
-			workload: domain.WorkloadSpec{
-				Adapter:    domain.WorkloadStatefulSet,
-				Controller: domain.ObjectReference{Namespace: "app", Name: "db"},
+			workload: v1alpha1.WorkloadSpec{
+				Adapter:    v1alpha1.WorkloadStatefulSet,
+				Controller: &v1alpha1.LocalResourceReference{Name: "db"},
 			},
 			want: []authorizationv1.ResourceAttributes{
 				{Namespace: "app", Verb: "update", Group: "apps", Resource: "statefulsets"},
@@ -151,9 +152,9 @@ func TestCheckRBACIncludesControllerSpecificPermissions(t *testing.T) {
 		},
 		{
 			name: "KubeBlocks alternate API group",
-			workload: domain.WorkloadSpec{
-				Adapter: domain.WorkloadKubeBlocks,
-				KubeBlocks: &domain.KubeBlocksSpec{
+			workload: v1alpha1.WorkloadSpec{
+				Adapter: v1alpha1.WorkloadKubeBlocks,
+				KubeBlocks: &v1alpha1.KubeBlocksSpec{
 					OpsAPIVersion: "operations.kubeblocks.io/v1alpha1",
 				},
 			},
@@ -175,15 +176,14 @@ func TestCheckRBACIncludesControllerSpecificPermissions(t *testing.T) {
 		},
 		{
 			name: "KubeBlocks InstanceSet",
-			workload: domain.WorkloadSpec{
-				Adapter: domain.WorkloadKubeBlocks,
-				Controller: domain.ObjectReference{
+			workload: v1alpha1.WorkloadSpec{
+				Adapter: v1alpha1.WorkloadKubeBlocks,
+				Controller: &v1alpha1.LocalResourceReference{
 					APIVersion: "workloads.kubeblocks.io/v1alpha1",
 					Kind:       "InstanceSet",
-					Namespace:  "app",
 					Name:       "cluster-db",
 				},
-				KubeBlocks: &domain.KubeBlocksSpec{
+				KubeBlocks: &v1alpha1.KubeBlocksSpec{
 					OpsAPIVersion: "operations.kubeblocks.io/v1alpha1",
 				},
 			},
@@ -224,16 +224,16 @@ func TestCheckRBACIncludesControllerSpecificPermissions(t *testing.T) {
 		},
 		{
 			name: "KubeBlocks MongoDB native switchover",
-			workload: domain.WorkloadSpec{
-				Adapter: domain.WorkloadKubeBlocks,
-				Controller: domain.ObjectReference{
+			workload: v1alpha1.WorkloadSpec{
+				Adapter: v1alpha1.WorkloadKubeBlocks,
+				Controller: &v1alpha1.LocalResourceReference{
 					APIVersion: "workloads.kubeblocks.io/v1alpha1",
 					Kind:       domain.KindInstanceSet,
 				},
-				KubeBlocks: &domain.KubeBlocksSpec{
+				KubeBlocks: &v1alpha1.KubeBlocksSpec{
 					OpsAPIVersion:       "apps.kubeblocks.io/v1alpha1",
 					SwitchoverCandidate: "cluster-db-1",
-					SwitchoverStrategy:  domain.KubeBlocksSwitchoverMongoDBNative,
+					SwitchoverStrategy:  v1alpha1.KubeBlocksSwitchoverMongoDBNative,
 				},
 			},
 			want: []authorizationv1.ResourceAttributes{
@@ -250,16 +250,16 @@ func TestCheckRBACIncludesControllerSpecificPermissions(t *testing.T) {
 		},
 		{
 			name: "KubeBlocks InstanceSet OpsRequest switchover",
-			workload: domain.WorkloadSpec{
-				Adapter: domain.WorkloadKubeBlocks,
-				Controller: domain.ObjectReference{
+			workload: v1alpha1.WorkloadSpec{
+				Adapter: v1alpha1.WorkloadKubeBlocks,
+				Controller: &v1alpha1.LocalResourceReference{
 					APIVersion: "workloads.kubeblocks.io/v1alpha1",
 					Kind:       domain.KindInstanceSet,
 				},
-				KubeBlocks: &domain.KubeBlocksSpec{
+				KubeBlocks: &v1alpha1.KubeBlocksSpec{
 					OpsAPIVersion:       "operations.kubeblocks.io/v1alpha1",
 					SwitchoverCandidate: "cluster-db-1",
-					SwitchoverStrategy:  domain.KubeBlocksSwitchoverOpsRequest,
+					SwitchoverStrategy:  v1alpha1.KubeBlocksSwitchoverOpsRequest,
 				},
 			},
 			want: []authorizationv1.ResourceAttributes{
@@ -273,12 +273,12 @@ func TestCheckRBACIncludesControllerSpecificPermissions(t *testing.T) {
 		},
 		{
 			name: "legacy KubeBlocks ignores stale native switchover",
-			workload: domain.WorkloadSpec{
-				Adapter:    domain.WorkloadKubeBlocks,
-				Controller: domain.ObjectReference{Kind: domain.KindStatefulSet},
-				KubeBlocks: &domain.KubeBlocksSpec{
+			workload: v1alpha1.WorkloadSpec{
+				Adapter:    v1alpha1.WorkloadKubeBlocks,
+				Controller: &v1alpha1.LocalResourceReference{Kind: domain.KindStatefulSet},
+				KubeBlocks: &v1alpha1.KubeBlocksSpec{
 					OpsAPIVersion:      "apps.kubeblocks.io/v1alpha1",
-					SwitchoverStrategy: domain.KubeBlocksSwitchoverMongoDBNative,
+					SwitchoverStrategy: v1alpha1.KubeBlocksSwitchoverMongoDBNative,
 				},
 			},
 			exclude: []authorizationv1.ResourceAttributes{
@@ -287,10 +287,10 @@ func TestCheckRBACIncludesControllerSpecificPermissions(t *testing.T) {
 		},
 		{
 			name: "VMCluster",
-			workload: domain.WorkloadSpec{
-				Adapter:    domain.WorkloadVMCluster,
-				Controller: domain.ObjectReference{Namespace: "app", Name: "metrics"},
-				VMCluster: &domain.VMClusterSpec{
+			workload: v1alpha1.WorkloadSpec{
+				Adapter:    v1alpha1.WorkloadVMCluster,
+				Controller: &v1alpha1.LocalResourceReference{Name: "metrics"},
+				VMCluster: &v1alpha1.VMClusterSpec{
 					APIVersion: "operator.victoriametrics.com/v1beta1",
 				},
 			},
@@ -312,10 +312,10 @@ func TestCheckRBACIncludesControllerSpecificPermissions(t *testing.T) {
 		},
 		{
 			name: "Grafana",
-			workload: domain.WorkloadSpec{
-				Adapter:    domain.WorkloadGrafana,
-				Controller: domain.ObjectReference{Namespace: "app", Name: "grafana"},
-				Grafana:    &domain.GrafanaSpec{APIVersion: "grafana.integreatly.org/v1beta1"},
+			workload: v1alpha1.WorkloadSpec{
+				Adapter:    v1alpha1.WorkloadGrafana,
+				Controller: &v1alpha1.LocalResourceReference{Name: "grafana"},
+				Grafana:    &v1alpha1.GrafanaSpec{APIVersion: "grafana.integreatly.org/v1beta1"},
 			},
 			want: []authorizationv1.ResourceAttributes{
 				{Namespace: "app", Verb: "update", Group: "apps", Resource: "deployments"},
@@ -341,9 +341,9 @@ func TestCheckRBACIncludesControllerSpecificPermissions(t *testing.T) {
 		},
 		{
 			name: "Deployment",
-			workload: domain.WorkloadSpec{
-				Adapter:    domain.WorkloadDeployment,
-				Controller: domain.ObjectReference{Namespace: "app", Name: "web"},
+			workload: v1alpha1.WorkloadSpec{
+				Adapter:    v1alpha1.WorkloadDeployment,
+				Controller: &v1alpha1.LocalResourceReference{Name: "web"},
 			},
 			want: []authorizationv1.ResourceAttributes{
 				{Namespace: "app", Verb: "get", Group: "apps", Resource: "deployments"},
@@ -358,9 +358,9 @@ func TestCheckRBACIncludesControllerSpecificPermissions(t *testing.T) {
 		},
 		{
 			name: "Victoria Logs",
-			workload: domain.WorkloadSpec{
-				Adapter:    domain.WorkloadVictoriaLogs,
-				Controller: domain.ObjectReference{Namespace: "app", Name: "logs"},
+			workload: v1alpha1.WorkloadSpec{
+				Adapter:    v1alpha1.WorkloadVictoriaLogs,
+				Controller: &v1alpha1.LocalResourceReference{Name: "logs"},
 			},
 			want: []authorizationv1.ResourceAttributes{
 				{Namespace: "app", Verb: "get", Group: "apps", Resource: "statefulsets"},
@@ -393,11 +393,11 @@ func TestCheckRBACIncludesControllerSpecificPermissions(t *testing.T) {
 				},
 			)
 
-			plan := &domain.MigrationPlan{Ready: true}
+			plan := &domain.TransferPlan{PlanSummary: domain.PlanSummary{Ready: true}}
 			New(
 				client,
 				nil,
-			).checkRBAC(context.Background(), plan, rbacTestSpec("stage", tt.workload), false, false)
+			).checkPodMigrationPermissions(context.Background(), plan, plan.SessionID, "app", "stage", "system", []string{domain.StrategyLocal}, tt.workload, false, false)
 
 			if !plan.Ready || len(plan.Checks) != 1 || !plan.Checks[0].Passed {
 				t.Fatalf("RBAC result: %#v", plan.Checks)
@@ -442,11 +442,11 @@ func TestCheckRBACDeduplicatesEqualSourceAndStagingNamespace(t *testing.T) {
 		},
 	)
 
-	plan := &domain.MigrationPlan{Ready: true}
+	plan := &domain.TransferPlan{PlanSummary: domain.PlanSummary{Ready: true}}
 	New(
 		client,
 		nil,
-	).checkRBAC(context.Background(), plan, rbacTestSpec("app", domain.WorkloadSpec{}), false, false)
+	).checkPodMigrationPermissions(context.Background(), plan, plan.SessionID, "app", "app", "system", []string{domain.StrategyLocal}, v1alpha1.WorkloadSpec{}, false, false)
 
 	if podGets != 1 {
 		t.Fatalf("Pod get reviews=%d want=1", podGets)
@@ -482,11 +482,11 @@ func TestCheckRBACAggregatesDeniedPermissionsAndReasons(t *testing.T) {
 		},
 	)
 
-	plan := &domain.MigrationPlan{Ready: true}
+	plan := &domain.TransferPlan{PlanSummary: domain.PlanSummary{Ready: true}}
 	New(
 		client,
 		nil,
-	).checkRBAC(context.Background(), plan, rbacTestSpec("stage", domain.WorkloadSpec{}), false, false)
+	).checkPodMigrationPermissions(context.Background(), plan, plan.SessionID, "app", "stage", "system", []string{domain.StrategyLocal}, v1alpha1.WorkloadSpec{}, false, false)
 
 	if plan.Ready || len(plan.Checks) != 1 {
 		t.Fatalf("RBAC result: %#v", plan.Checks)
@@ -511,11 +511,11 @@ func TestCheckRBACStopsOnReviewError(t *testing.T) {
 		},
 	)
 
-	plan := &domain.MigrationPlan{Ready: true}
+	plan := &domain.TransferPlan{PlanSummary: domain.PlanSummary{Ready: true}}
 	New(
 		client,
 		nil,
-	).checkRBAC(context.Background(), plan, rbacTestSpec("stage", domain.WorkloadSpec{}), false, false)
+	).checkPodMigrationPermissions(context.Background(), plan, plan.SessionID, "app", "stage", "system", []string{domain.StrategyLocal}, v1alpha1.WorkloadSpec{}, false, false)
 
 	if calls != 1 || plan.Ready || len(plan.Checks) != 1 ||
 		!strings.Contains(plan.Checks[0].Message, "authorization API unavailable") {
@@ -545,7 +545,7 @@ func hasAccessReview(
 
 func collectAllowedAccessReviews(
 	t *testing.T,
-	workload domain.WorkloadSpec,
+	workload v1alpha1.WorkloadSpec,
 	inspectOpenEBSLVMShared, enableOpenEBSLVMShared bool,
 ) []authorizationv1.ResourceAttributes {
 	t.Helper()
@@ -567,22 +567,15 @@ func collectAllowedAccessReviews(
 		},
 	)
 
-	plan := &domain.MigrationPlan{Ready: true}
+	plan := &domain.TransferPlan{PlanSummary: domain.PlanSummary{Ready: true}}
 	New(
 		client,
 		nil,
-	).checkRBAC(context.Background(), plan, rbacTestSpec("stage", workload), inspectOpenEBSLVMShared, enableOpenEBSLVMShared)
+	).checkPodMigrationPermissions(context.Background(), plan, plan.SessionID, "app", "stage", "system", []string{domain.StrategyLocal}, workload, inspectOpenEBSLVMShared, enableOpenEBSLVMShared)
 
 	if !plan.Ready || len(plan.Checks) != 1 || !plan.Checks[0].Passed {
 		t.Fatalf("RBAC result: %#v", plan.Checks)
 	}
 
 	return seen
-}
-
-func rbacTestSpec(staging string, workload domain.WorkloadSpec) domain.SessionSpec {
-	return domain.NewPodMigrationSessionSpec(domain.SessionCommon{
-		SourceNamespace: "app", TemporaryNamespace: staging,
-		DestinationNamespace: "app", SessionNamespace: "system",
-	}, workload, domain.SessionWorkflowOptions{Strategies: []string{domain.StrategyLocal}}, 1, false)
 }

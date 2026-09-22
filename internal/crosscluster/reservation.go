@@ -39,9 +39,14 @@ func ensureNoActiveConsumers(
 	return nil
 }
 
-func (s *Service) reserveVolume(ctx context.Context, session *Session, index int) error {
-	v := &session.Spec.Volumes[index]
+type reservationState struct {
+	ID     string
+	Spec   *SessionContext
+	Status *ReservationStatus
+	Save   func(context.Context) error
+}
 
+func (s *Service) reserveVolume(ctx context.Context, state reservationState, v *VolumeSpec) error {
 	capacity, err := resource.ParseQuantity(v.Destination.Capacity)
 	if err != nil {
 		return err
@@ -53,13 +58,17 @@ func (s *Service) reserveVolume(ctx context.Context, session *Session, index int
 		PersistentVolumeClaims(v.Destination.PVC.Namespace).
 		Get(ctx, v.Destination.PVC.Name, metav1.GetOptions{})
 	if apierrors.IsNotFound(err) {
+		if err := requireSessionLease(ctx); err != nil {
+			return err
+		}
+
 		storageClass := v.Destination.StorageClass.Name
 		pvc = &corev1.PersistentVolumeClaim{
 			ObjectMeta: metav1.ObjectMeta{
 				Name:        v.Destination.PVC.Name,
 				Namespace:   v.Destination.PVC.Namespace,
-				Labels:      map[string]string{ManagedByLabel: ManagedBy, SessionKey: session.ID},
-				Annotations: map[string]string{SessionKey: session.ID},
+				Labels:      map[string]string{ManagedByLabel: ManagedBy, SessionKey: state.ID},
+				Annotations: map[string]string{SessionKey: state.ID},
 			},
 			Spec: corev1.PersistentVolumeClaimSpec{
 				AccessModes: append(
@@ -73,9 +82,13 @@ func (s *Service) reserveVolume(ctx context.Context, session *Session, index int
 				VolumeMode:       &v.Destination.VolumeMode,
 			},
 		}
+
 		pvc, err = clients.CoreV1().
 			PersistentVolumeClaims(v.Destination.PVC.Namespace).
 			Create(ctx, pvc, metav1.CreateOptions{})
+		if err == nil {
+			err = requireSessionLease(ctx)
+		}
 	}
 
 	if err != nil {
@@ -87,7 +100,7 @@ func (s *Service) reserveVolume(ctx context.Context, session *Session, index int
 		)
 	}
 
-	if pvc.Labels[ManagedByLabel] != ManagedBy || pvc.Labels[SessionKey] != session.ID {
+	if pvc.Labels[ManagedByLabel] != ManagedBy || pvc.Labels[SessionKey] != state.ID {
 		return fmt.Errorf("destination PVC %s/%s is not owned by session", pvc.Namespace, pvc.Name)
 	}
 
@@ -115,11 +128,15 @@ func (s *Service) reserveVolume(ctx context.Context, session *Session, index int
 	if storageClass.VolumeBindingMode != nil &&
 		*storageClass.VolumeBindingMode == storagev1.VolumeBindingWaitForFirstConsumer &&
 		v.Destination.PV.UID == "" {
-		if err := s.createReservationConsumer(ctx, session, v); err != nil {
+		if err := requireSessionLease(ctx); err != nil {
 			return err
 		}
 
-		if err := s.save(ctx, session, false); err != nil {
+		if err := s.createReservationConsumer(ctx, state, v); err != nil {
+			return err
+		}
+
+		if err := state.Save(ctx); err != nil {
 			return fmt.Errorf("persist reservation Pod ownership: %w", err)
 		}
 	}
@@ -159,25 +176,23 @@ func (s *Service) reserveVolume(ctx context.Context, session *Session, index int
 			}
 
 			v.Destination.PV = ClusterResourceRef{
-				ClusterID:  session.Spec.DestinationCluster.ID,
+				ClusterID:  state.Spec.DestinationCluster.ID,
 				APIVersion: "v1",
 				Kind:       "PersistentVolume",
 				Name:       pv.Name,
 				UID:        pv.UID,
 			}
 
-			status := &session.Status.Volumes[index]
-			if ref := status.Reservation.ConsumerPod; ref.UID != "" {
+			if ref := state.Status.ConsumerPod; ref.UID != "" {
 				if deleteErr := s.deleteReservationConsumer(
 					waitCtx,
-					session,
-					index,
+					state,
 				); deleteErr != nil {
 					return false, deleteErr
 				}
 
 				now := metav1.NewTime(s.now().UTC())
-				status.Reservation.CompletedAt = &now
+				state.Status.CompletedAt = &now
 			}
 
 			return true, nil
@@ -255,12 +270,12 @@ func sameAccessModes(left, right []corev1.PersistentVolumeAccessMode) bool {
 
 func (s *Service) createReservationConsumer(
 	ctx context.Context,
-	session *Session,
+	state reservationState,
 	volume *VolumeSpec,
 ) error {
-	name := reservationConsumerName(session.ID, volume.Source.PVC.Name)
+	name := reservationConsumerName(state.ID, volume.Source.PVC.Name)
 
-	node := session.Spec.TargetNode
+	node := state.Spec.TargetNode
 	if node == "" || node == domain.AutoValue {
 		return fmt.Errorf(
 			"WFFC destination PVC %s/%s requires a resolved target node",
@@ -285,7 +300,7 @@ func (s *Service) createReservationConsumer(
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      name,
 			Namespace: volume.Destination.PVC.Namespace,
-			Labels:    map[string]string{ManagedByLabel: ManagedBy, SessionKey: session.ID},
+			Labels:    map[string]string{ManagedByLabel: ManagedBy, SessionKey: state.ID},
 		},
 		Spec: corev1.PodSpec{
 			RestartPolicy:                corev1.RestartPolicyNever,
@@ -295,7 +310,7 @@ func (s *Service) createReservationConsumer(
 			Containers: []corev1.Container{
 				{
 					Name:            "reserve",
-					Image:           session.Spec.ToolImage,
+					Image:           state.Spec.ToolImage,
 					Command:         []string{"sh", "-c", "test -d /data && sleep 3600"},
 					Resources:       kube.ZeroResourceRequirements(),
 					SecurityContext: &corev1.SecurityContext{RunAsUser: &runAs, RunAsGroup: &runAs},
@@ -318,14 +333,25 @@ func (s *Service) createReservationConsumer(
 
 	existing, err := client.Get(ctx, name, metav1.GetOptions{})
 	if apierrors.IsNotFound(err) {
+		if err := requireSessionLease(ctx); err != nil {
+			return err
+		}
+
 		existing, err = client.Create(ctx, pod, metav1.CreateOptions{})
+		if err == nil {
+			err = requireSessionLease(ctx)
+		}
 	}
 
 	if err != nil {
 		return fmt.Errorf("create reservation Pod %s/%s: %w", pod.Namespace, name, err)
 	}
 
-	if existing.Labels[ManagedByLabel] != ManagedBy || existing.Labels[SessionKey] != session.ID {
+	if err := requireSessionLease(ctx); err != nil {
+		return err
+	}
+
+	if existing.Labels[ManagedByLabel] != ManagedBy || existing.Labels[SessionKey] != state.ID {
 		return fmt.Errorf(
 			"reservation Pod %s/%s is not owned by session",
 			existing.Namespace,
@@ -333,9 +359,8 @@ func (s *Service) createReservationConsumer(
 		)
 	}
 
-	volumeStatus := &session.Status.Volumes[volumeIndex(session, volume.Source.PVC.Name)]
-	volumeStatus.Reservation.ConsumerPod = ClusterResourceRef{
-		ClusterID:  session.Spec.DestinationCluster.ID,
+	state.Status.ConsumerPod = ClusterResourceRef{
+		ClusterID:  state.Spec.DestinationCluster.ID,
 		APIVersion: "v1",
 		Kind:       "Pod",
 		Namespace:  existing.Namespace,
@@ -388,16 +413,6 @@ func reservationConsumerName(sessionID, pvc string) string {
 	prefix := strings.TrimRight(name[:63-len(suffix)], "-")
 
 	return prefix + suffix
-}
-
-func volumeIndex(session *Session, name string) int {
-	for i, v := range session.Spec.Volumes {
-		if v.Source.PVC.Name == name {
-			return i
-		}
-	}
-
-	return 0
 }
 
 func nodeTolerations(node *corev1.Node) []corev1.Toleration {

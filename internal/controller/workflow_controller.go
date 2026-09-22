@@ -6,17 +6,17 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"reflect"
 	"strings"
 	"sync"
 	"sync/atomic"
-	"time"
 
 	"github.com/go-logr/logr"
 	v1alpha1 "github.com/labring-sigs/pvc-migrate/api/v1alpha1"
 	"github.com/labring-sigs/pvc-migrate/internal/app"
+	"github.com/labring-sigs/pvc-migrate/internal/copyengine"
 	"github.com/labring-sigs/pvc-migrate/internal/domain"
 	"github.com/labring-sigs/pvc-migrate/internal/kube"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
@@ -34,37 +34,34 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 )
 
-// WorkflowReconciler bridges every operation-specific workflow Kind to the
-// existing service state machine.
+// WorkflowReconciler wires the per-kind reconcilers into one manager: shared
+// recorders, queue predicates, and the trusted execution environment. Every
+// queue routes to an operation-specific reconciler that operates directly on
+// its concrete CRD type.
 type WorkflowReconciler struct {
-	planner          WorkflowPlanner
-	store            kube.ControllerSessionStore
-	service          workflowResumer
-	kubeClient       kubernetes.Interface
-	controllerClient crclient.Reader
-	openEBS          kube.OpenEBSLVMSharedVolumeManager
-	namespace        string
-	clusterIdentity  string
-	trustedToolImage string
-	kubeconfigPath   string
-	kubeContext      string
-	requeueAfter     time.Duration
-	supportedKinds   map[domain.ControllerKind]struct{}
-	logger           *slog.Logger
-	activeWorkflows  sync.Map // CR UID -> context.CancelFunc
-	recorder         events.EventRecorder
+	backup                 *BackupReconciler
+	restore                *RestoreReconciler
+	rename                 *RenameReconciler
+	move                   *MoveReconciler
+	reservation            *ClusterReservationReconciler
+	namespacedReservation  *ReservationReconciler
+	namespacedCopy         *CopyReconciler
+	copy                   *ClusterCopyReconciler
+	migration              *ClusterMigrationReconciler
+	namespacedMigration    *MigrationReconciler
+	podMigration           *ClusterPodMigrationReconciler
+	namespacedPodMigration *PodMigrationReconciler
+	kubeClient             kubernetes.Interface
+	clusterIdentity        string
+	trustedToolImage       string
+	supportedKinds         map[domain.ControllerKind]struct{}
+	logger                 *slog.Logger
+	activeWorkflows        sync.Map // CR UID -> context.CancelFunc
+	recorder               events.EventRecorder
 }
 
-func NewWorkflowReconciler(
-	service workflowResumer,
-	store kube.ControllerSessionStore,
-) *WorkflowReconciler {
-	return &WorkflowReconciler{
-		service:      service,
-		store:        store,
-		requeueAfter: 5 * time.Second,
-		logger:       slog.Default(),
-	}
+func NewWorkflowReconciler() *WorkflowReconciler {
+	return &WorkflowReconciler{logger: slog.Default()}
 }
 
 // WithLogger supplies the structured logger owned by the controller process.
@@ -73,17 +70,6 @@ func NewWorkflowReconciler(
 func (r *WorkflowReconciler) WithLogger(logger *slog.Logger) *WorkflowReconciler {
 	if r != nil && logger != nil {
 		r.logger = logger
-	}
-
-	return r
-}
-
-// WithNamespace optionally limits reconciliation to one durable session
-// namespace. Production managers leave it unset so every namespaced workflow
-// and cluster workflow is watched.
-func (r *WorkflowReconciler) WithNamespace(namespace string) *WorkflowReconciler {
-	if r != nil {
-		r.namespace = namespace
 	}
 
 	return r
@@ -124,15 +110,6 @@ func (r *WorkflowReconciler) WithKubernetesClient(
 	return r
 }
 
-// WithControllerClient supplies the typed client used for repository
-// configuration and other controller-owned resources.
-func (r *WorkflowReconciler) WithControllerClient(client crclient.Reader) *WorkflowReconciler {
-	if r != nil {
-		r.controllerClient = client
-	}
-	return r
-}
-
 // WithClusterIdentity scopes controller-backed object-store paths to the
 // cluster serving this manager. StartManagerWithKinds populates it from
 // kube-system's stable namespace UID.
@@ -153,38 +130,6 @@ func (r *WorkflowReconciler) WithTrustedToolImage(image string) *WorkflowReconci
 	return r
 }
 
-// WithKubeconfig supplies the connection used by pv-migrate's Helm-backed
-// backup and restore runners. An empty path keeps the in-cluster client
-// behavior used by controller deployments.
-func (r *WorkflowReconciler) WithKubeconfig(path, context string) *WorkflowReconciler {
-	if r != nil {
-		r.kubeconfigPath = strings.TrimSpace(path)
-		r.kubeContext = strings.TrimSpace(context)
-	}
-
-	return r
-}
-
-func (r *WorkflowReconciler) WithOpenEBSLVMSharedVolumeManager(
-	manager kube.OpenEBSLVMSharedVolumeManager,
-) *WorkflowReconciler {
-	if r != nil {
-		r.openEBS = manager
-	}
-	return r
-}
-
-func (r *WorkflowReconciler) runner(namespace string) *Runner {
-	return NewRunner(r.service, r.store, namespace).
-		WithLogger(r.logger).
-		WithKubernetesClient(r.kubeClient).
-		WithControllerClient(r.controllerClient).
-		WithClusterIdentity(r.clusterIdentity).
-		WithTrustedToolImage(r.trustedToolImage).
-		WithKubeconfig(r.kubeconfigPath, r.kubeContext).
-		WithOpenEBSLVMSharedVolumeManager(r.openEBS)
-}
-
 type kindWorkflowReconciler struct {
 	parent *WorkflowReconciler
 	kind   domain.ControllerKind
@@ -198,331 +143,104 @@ func (r *kindWorkflowReconciler) Reconcile(
 		return reconcile.Result{}, errors.New("workflow reconciler is not configured")
 	}
 
-	return r.parent.reconcile(ctx, request, r.kind)
-}
-
-func (r *WorkflowReconciler) reconcile(
-	ctx context.Context,
-	request reconcile.Request,
-	kind domain.ControllerKind,
-) (result reconcile.Result, resultErr error) {
-	if r == nil || r.store == nil || r.service == nil {
-		return reconcile.Result{}, errors.New("workflow reconciler is not configured")
+	if r.kind == domain.ControllerKindRestore {
+		if r.parent.restore == nil {
+			return reconcile.Result{}, errors.New("restore reconciler is not configured")
+		}
+		return r.parent.restore.Reconcile(ctx, request)
 	}
 
-	if kind == "" {
-		return reconcile.Result{}, errors.New("workflow kind is required")
+	if r.kind == domain.ControllerKindBackup {
+		if r.parent.backup == nil {
+			return reconcile.Result{}, errors.New("backup reconciler is not configured")
+		}
+		return r.parent.backup.Reconcile(ctx, request)
 	}
 
-	if r.namespace != "" && request.Namespace != r.namespace {
-		return reconcile.Result{}, nil
+	if r.kind == domain.ControllerKindRename {
+		if r.parent.rename == nil {
+			return reconcile.Result{}, errors.New("rename reconciler is not configured")
+		}
+
+		return r.parent.rename.Reconcile(ctx, request)
 	}
 
-	session, err := r.store.GetByKind(
-		ctx,
-		request.Namespace,
-		request.Name,
-		kind,
+	if r.kind == domain.ControllerKindMove {
+		if r.parent.move == nil {
+			return reconcile.Result{}, errors.New("move reconciler is not configured")
+		}
+		return r.parent.move.Reconcile(ctx, request)
+	}
+
+	if r.kind == domain.ControllerKindClusterReservation {
+		if r.parent.reservation == nil {
+			return reconcile.Result{}, errors.New("reservation reconciler is not configured")
+		}
+		return r.parent.reservation.Reconcile(ctx, request)
+	}
+
+	if r.kind == domain.ControllerKindReservation {
+		if r.parent.namespacedReservation == nil {
+			return reconcile.Result{}, errors.New(
+				"namespaced reservation reconciler is not configured",
+			)
+		}
+
+		return r.parent.namespacedReservation.Reconcile(ctx, request)
+	}
+
+	if r.kind == domain.ControllerKindMigration {
+		if r.parent.namespacedMigration == nil {
+			return reconcile.Result{}, errors.New(
+				"namespaced migration reconciler is not configured",
+			)
+		}
+
+		return r.parent.namespacedMigration.Reconcile(ctx, request)
+	}
+
+	if r.kind == domain.ControllerKindClusterMigration {
+		if r.parent.migration == nil {
+			return reconcile.Result{}, errors.New("migration reconciler is not configured")
+		}
+		return r.parent.migration.Reconcile(ctx, request)
+	}
+
+	if r.kind == domain.ControllerKindClusterPodMigration {
+		if r.parent.podMigration == nil {
+			return reconcile.Result{}, errors.New("pod migration reconciler is not configured")
+		}
+		return r.parent.podMigration.Reconcile(ctx, request)
+	}
+
+	if r.kind == domain.ControllerKindPodMigration {
+		if r.parent.namespacedPodMigration == nil {
+			return reconcile.Result{}, errors.New(
+				"namespaced pod migration reconciler is not configured",
+			)
+		}
+
+		return r.parent.namespacedPodMigration.Reconcile(ctx, request)
+	}
+
+	if r.kind == domain.ControllerKindClusterCopy {
+		if r.parent.copy == nil {
+			return reconcile.Result{}, errors.New("copy reconciler is not configured")
+		}
+		return r.parent.copy.Reconcile(ctx, request)
+	}
+
+	if r.kind == domain.ControllerKindCopy {
+		if r.parent.namespacedCopy == nil {
+			return reconcile.Result{}, errors.New("namespaced copy reconciler is not configured")
+		}
+		return r.parent.namespacedCopy.Reconcile(ctx, request)
+	}
+
+	return reconcile.Result{}, fmt.Errorf(
+		"workflow kind %q has no operation-specific reconciler",
+		r.kind,
 	)
-	if err != nil {
-		// The SessionStore classifies a missing CRD object as validation; the
-		// controller should treat that as a normal delete event as well.
-		if kube.IsSessionNotFound(err) {
-			return reconcile.Result{}, nil
-		}
-		return reconcile.Result{}, err
-	}
-
-	if session.Deleting {
-		err := r.reconcileDeletingWorkflow(ctx, request, session)
-		if kube.IsSessionLockContention(err) {
-			return reconcile.Result{RequeueAfter: r.requeueAfter}, nil
-		}
-
-		return reconcile.Result{}, err
-	}
-
-	ctx, cancel := context.WithCancel(ctx)
-
-	// Separate queues may observe the same workflow during a phase or spec
-	// change. Keep the running worker's cancellation handle until it exits.
-	if _, running := r.activeWorkflows.LoadOrStore(session.BackendUID, cancel); running {
-		cancel()
-		return reconcile.Result{RequeueAfter: r.requeueAfter}, nil
-	}
-	defer func() {
-		interrupted := errors.Is(ctx.Err(), context.Canceled)
-
-		cancel()
-		r.activeWorkflows.Delete(session.BackendUID)
-
-		if interrupted {
-			result, resultErr = reconcile.Result{}, nil
-		}
-	}()
-	// Close the gap between the first read and registering cancellation. The
-	// queue cannot interrupt an already-running reconcile for the same key.
-	latest, err := r.store.GetByKind(ctx, request.Namespace, request.Name, kind)
-	if err != nil {
-		if kube.IsSessionNotFound(err) {
-			return reconcile.Result{}, nil
-		}
-		return reconcile.Result{}, err
-	}
-
-	if latest.BackendUID != session.BackendUID || latest.Deleting {
-		return reconcile.Result{RequeueAfter: time.Millisecond}, nil
-	}
-
-	session = latest
-
-	if err := r.store.CheckWorkflowNameCollision(ctx, session); err != nil {
-		if domain.CategoryOf(err) == domain.ErrorConflict {
-			ctrl.LoggerFrom(ctx).Info(
-				"workflow is waiting for a same-name resource conflict to be removed",
-				"workflow",
-				request.NamespacedName,
-				"error",
-				err,
-			)
-
-			return reconcile.Result{RequeueAfter: r.requeueAfter}, nil
-		}
-
-		return reconcile.Result{}, err
-	}
-
-	if session.PlanPending {
-		return r.reconcilePlanning(ctx, session)
-	}
-
-	// A workflow's spec is the authorization and execution input. Once the
-	// controller has observed a generation, changing that input would let a
-	// tenant retarget an in-flight operation (for example to another recovery
-	// point or backup repository). CRD status updates do not change
-	// generation, so this check does not interfere with normal progress.
-	if err := workflowSpecMutationError(session); err != nil {
-		return r.reconcileChangedSpec(ctx, session, err, request)
-	}
-
-	// Declarative CRs do not pass through CRDSessionStore.Create, so they may
-	// arrive without the session-protection finalizer. Add it before any
-	// execution or terminal-state handling to preserve the explicit cleanup
-	// contract for every controller-backed workflow.
-	if err := r.store.EnsureSessionProtection(ctx, session); err != nil {
-		return reconcile.Result{}, err
-	}
-
-	// Persist the controller-owned initial checkpoint before business execution.
-	if session.Status.ObservedGeneration == 0 {
-		return r.reconcileInitialCheckpoint(ctx, session)
-	}
-
-	if terminalSession(session) {
-		return r.reconcileTerminal(ctx, session)
-	}
-
-	if boundaryErr := kube.ControllerNamespaceBoundaryError(session); boundaryErr != nil {
-		runner := r.runner(request.Namespace)
-		return r.checkpointBusinessFailure(ctx, runner, session, boundaryErr, request)
-	}
-
-	if err := r.validateDeclarativeSourceVolumes(ctx, session); err != nil {
-		runner := r.runner(request.Namespace)
-		return r.checkpointBusinessFailure(ctx, runner, session, err, request)
-	}
-
-	if err := r.ensureStandalonePodSnapshot(ctx, session); err != nil {
-		runner := r.runner(request.Namespace)
-		return r.checkpointBusinessFailure(ctx, runner, session, err, request)
-	}
-
-	runner := r.runner(request.Namespace)
-	if err := runner.reconcileSession(ctx, session); err != nil {
-		if kube.IsSessionLockContention(err) {
-			r.logger.Info(
-				"workflow is waiting for a concurrent session update",
-				"workflow",
-				request.NamespacedName,
-				"requeueAfter",
-				r.requeueAfter,
-			)
-
-			return reconcile.Result{RequeueAfter: r.requeueAfter}, nil
-		}
-
-		return r.checkpointBusinessFailure(ctx, runner, session, err, request)
-	}
-
-	return reconcile.Result{RequeueAfter: r.requeueAfter}, nil
-}
-
-func (r *WorkflowReconciler) reconcileTerminal(
-	ctx context.Context,
-	session *domain.Session,
-) (reconcile.Result, error) {
-	// Policy edits are observed without scheduling business execution again.
-	if session.Generation != session.Status.ObservedGeneration {
-		return reconcile.Result{}, r.store.Update(ctx, session)
-	}
-	return reconcile.Result{}, nil
-}
-
-func (r *WorkflowReconciler) reconcileInitialCheckpoint(
-	ctx context.Context,
-	session *domain.Session,
-) (reconcile.Result, error) {
-	if err := initializeUnobservedStatus(ctx, r.store, session); err != nil {
-		if domain.CategoryOf(err) == domain.ErrorConflict {
-			return reconcile.Result{RequeueAfter: time.Second}, nil
-		}
-
-		return reconcile.Result{}, err
-	}
-
-	return reconcile.Result{RequeueAfter: r.requeueAfter}, nil
-}
-
-func (r *WorkflowReconciler) reconcileChangedSpec(
-	ctx context.Context,
-	session *domain.Session,
-	cause error,
-	request reconcile.Request,
-) (reconcile.Result, error) {
-	if !terminalSession(session) {
-		return r.checkpointBusinessFailure(
-			ctx,
-			r.runner(request.Namespace),
-			session,
-			cause,
-			request,
-		)
-	}
-
-	ctrl.LoggerFrom(ctx).
-		Info("ignored spec change for terminal workflow", "workflow", request.NamespacedName, "reason", cause)
-
-	return reconcile.Result{}, nil
-}
-
-func (r *WorkflowReconciler) checkpointBusinessFailure(
-	ctx context.Context,
-	runner *Runner,
-	session *domain.Session,
-	cause error,
-	request reconcile.Request,
-) (reconcile.Result, error) {
-	if errors.Is(ctx.Err(), context.Canceled) {
-		r.logger.Info(
-			"workflow interrupted; preserving checkpoint for reconciliation",
-			"workflow",
-			request.NamespacedName,
-			"phase",
-			session.Status.Phase,
-		)
-
-		return reconcile.Result{}, nil
-	}
-
-	if err := runner.checkpointFailureForController(ctx, session, cause); err != nil {
-		if kube.IsSessionLockContention(err) {
-			r.logger.Info(
-				"workflow is waiting for a concurrent session update",
-				"workflow",
-				request.NamespacedName,
-				"requeueAfter",
-				r.requeueAfter,
-			)
-
-			return reconcile.Result{RequeueAfter: r.requeueAfter}, nil
-		}
-
-		return reconcile.Result{}, err
-	}
-
-	return reconcile.Result{}, nil
-}
-
-func (r *WorkflowReconciler) reconcileDeletingWorkflow(
-	ctx context.Context,
-	request reconcile.Request,
-	session *domain.Session,
-) error {
-	// Execution cannot start before the controller persists its first trusted
-	// checkpoint. Such objects need neither a Lease nor data-plane cleanup.
-	if session.PlanPending {
-		return r.deleteUnplannedWorkflow(ctx, session)
-	}
-
-	if session.Status.ObservedGeneration == 0 {
-		return r.store.Delete(ctx, session)
-	}
-
-	finalizer, ok := r.service.(interface {
-		FinalizeDeletedWorkflow(ctx context.Context, session *domain.Session) error
-	})
-	if !ok {
-		return errors.New("workflow service does not support safe deletion")
-	}
-
-	if err := kube.ControllerNamespaceBoundaryError(session); err != nil {
-		return err
-	}
-
-	// DecodeWorkflow uses the controller-owned status.plan once planning has
-	// completed. Later intent edits cannot retarget cleanup and must not strand
-	// the finalizer. The finalizer still revalidates identity and generation
-	// under its Lease before touching storage.
-	err := finalizer.FinalizeDeletedWorkflow(ctx, session)
-	if err == nil || kube.IsSessionLockContention(err) || ctx.Err() != nil {
-		return err
-	}
-
-	ctrl.LoggerFrom(ctx).
-		Error(err, "workflow deletion blocked; protection retained", "workflow", request.NamespacedName)
-
-	if r.recorder != nil {
-		object := kube.WorkflowObjectForKind(session.BackendResource)
-		object.SetName(request.Name)
-		object.SetNamespace(request.Namespace)
-		object.SetUID(session.BackendUID)
-		r.recorder.Eventf(
-			object,
-			nil,
-			"Warning",
-			"DeletionBlocked",
-			"Finalize",
-			"%s",
-			domain.BoundWorkflowMessage(err.Error()),
-		)
-	}
-
-	session.SetCondition(domain.Condition{
-		Type: "DeletionBlocked", Status: metav1.ConditionTrue,
-		Reason: "RecoveryOrCleanupFailed", Message: err.Error(), LastTransitionTime: metav1.Now(),
-	})
-
-	return errors.Join(err, r.store.Update(ctx, session))
-}
-
-func initializeUnobservedStatus(
-	ctx context.Context,
-	store kube.ControllerSessionStore,
-	session *domain.Session,
-) error {
-	if session == nil || session.Status.ObservedGeneration != 0 || store == nil {
-		return nil
-	}
-
-	planned := domain.NewSession(session.ID, session.Spec, time.Now())
-	planned.Generation = session.Generation
-	planned.ResourceVersion = session.ResourceVersion
-	planned.Backend = session.Backend
-	planned.BackendResource = session.BackendResource
-	planned.BackendUID = session.BackendUID
-	session.Status = planned.Status
-
-	return store.Update(ctx, session)
 }
 
 // SetupWithManager installs one kind-aware controller for every served
@@ -530,7 +248,66 @@ func initializeUnobservedStatus(
 // dispatch unambiguous; the shared collision guard prevents unsafe concurrent
 // execution when different Kinds use the same data-plane session identity.
 func (r *WorkflowReconciler) SetupWithManager(manager ctrl.Manager) error {
+	for _, workflow := range domain.ControllerWorkflows() {
+		for _, kind := range []domain.ControllerKind{workflow.Kind, workflow.ClusterKind} {
+			if kind == "" || !r.supportsKind(kind) {
+				continue
+			}
+
+			if err := r.requireReconciler(kind); err != nil {
+				return err
+			}
+		}
+	}
+
 	r.recorder = manager.GetEventRecorder("pvc-migrate-controller")
+	if r.backup != nil {
+		r.backup.recorder = r.recorder
+	}
+
+	if r.restore != nil {
+		r.restore.recorder = r.recorder
+	}
+
+	if r.rename != nil {
+		r.rename.recorder = r.recorder
+	}
+
+	if r.move != nil {
+		r.move.recorder = r.recorder
+	}
+
+	if r.reservation != nil {
+		r.reservation.recorder = r.recorder
+	}
+
+	if r.namespacedReservation != nil {
+		r.namespacedReservation.recorder = r.recorder
+	}
+
+	if r.namespacedCopy != nil {
+		r.namespacedCopy.recorder = r.recorder
+	}
+
+	if r.copy != nil {
+		r.copy.recorder = r.recorder
+	}
+
+	if r.migration != nil {
+		r.migration.recorder = r.recorder
+	}
+
+	if r.namespacedMigration != nil {
+		r.namespacedMigration.recorder = r.recorder
+	}
+
+	if r.podMigration != nil {
+		r.podMigration.recorder = r.recorder
+	}
+
+	if r.namespacedPodMigration != nil {
+		r.namespacedPodMigration.recorder = r.recorder
+	}
 
 	kinds := make([]domain.ControllerKind, 0, len(domain.ControllerWorkflows())*2)
 	for _, workflow := range domain.ControllerWorkflows() {
@@ -592,6 +369,44 @@ func (r *WorkflowReconciler) SetupWithManager(manager ctrl.Manager) error {
 	return nil
 }
 
+func (r *WorkflowReconciler) requireReconciler(kind domain.ControllerKind) error {
+	var configured bool
+	switch kind {
+	case domain.ControllerKindBackup:
+		configured = r.backup != nil
+	case domain.ControllerKindRestore:
+		configured = r.restore != nil
+	case domain.ControllerKindRename:
+		configured = r.rename != nil
+	case domain.ControllerKindMove:
+		configured = r.move != nil
+	case domain.ControllerKindReservation:
+		configured = r.namespacedReservation != nil
+	case domain.ControllerKindClusterReservation:
+		configured = r.reservation != nil
+	case domain.ControllerKindCopy:
+		configured = r.namespacedCopy != nil
+	case domain.ControllerKindClusterCopy:
+		configured = r.copy != nil
+	case domain.ControllerKindMigration:
+		configured = r.namespacedMigration != nil
+	case domain.ControllerKindClusterMigration:
+		configured = r.migration != nil
+	case domain.ControllerKindPodMigration:
+		configured = r.namespacedPodMigration != nil
+	case domain.ControllerKindClusterPodMigration:
+		configured = r.podMigration != nil
+	default:
+		return fmt.Errorf("workflow kind %q is not registered", kind)
+	}
+
+	if !configured {
+		return fmt.Errorf("%s reconciler is required", kind)
+	}
+
+	return nil
+}
+
 func (r *WorkflowReconciler) cancelWorkflow(object crclient.Object) {
 	if cancel, ok := r.activeWorkflows.Load(object.GetUID()); ok {
 		if cancelFunc, ok := cancel.(context.CancelFunc); ok {
@@ -622,13 +437,17 @@ func workflowRecoveryQueuePredicate(onDelete func(crclient.Object)) predicate.Pr
 }
 
 func workflowNeedsRecovery(object crclient.Object) bool {
+	if kube.RequireWorkflowHandoffComplete(object) != nil {
+		return true
+	}
+
 	status := workflowStatus(object)
 
-	phase := domain.Phase(status.Phase)
+	phase := status.Phase
 	if phase == domain.PhaseFailed {
 		// Failed workflows still require explicit resume. Routing their spec
 		// changes here also keeps workload restoration out of the transfer queue.
-		phase = domain.Phase(status.ResumeFrom)
+		phase = status.ResumeFrom
 	}
 
 	switch phase {
@@ -653,9 +472,12 @@ func workflowEventPredicate(onDelete ...func(crclient.Object)) predicate.Predica
 			}
 
 			return e.ObjectNew.GetGeneration() != e.ObjectOld.GetGeneration() ||
+				kube.WorkflowHandoffChanged(e.ObjectOld, e.ObjectNew) ||
 				e.ObjectOld.GetDeletionTimestamp() == nil &&
 					e.ObjectNew.GetDeletionTimestamp() != nil ||
-				workflowResumeStatusChanged(e.ObjectOld, e.ObjectNew)
+				workflowResumeStatusChanged(e.ObjectOld, e.ObjectNew) ||
+				workflowExecutionPhaseChanged(e.ObjectOld, e.ObjectNew) ||
+				workflowExecutionProgressChanged(e.ObjectOld, e.ObjectNew)
 		},
 		DeleteFunc: func(e event.DeleteEvent) bool {
 			for _, cancel := range onDelete {
@@ -667,24 +489,115 @@ func workflowEventPredicate(onDelete ...func(crclient.Object)) predicate.Predica
 	}
 }
 
-// workflowResumeStatusChanged admits the one status-only update that must
-// wake a controller: an explicit resume moves a failed workflow back to an
-// active checkpoint. Ordinary controller status writes remain filtered so
-// they cannot create a reconcile feedback loop.
+// workflowExecutionPhaseChanged admits the durable phase checkpoint that
+// follows a successful transition. A reconcile can be interrupted after that
+// checkpoint and before it returns its explicit requeue; admitting the phase
+// event lets the queue recover without treating a durable business failure as
+// an implicit resume request.
+func workflowExecutionPhaseChanged(oldObject, newObject crclient.Object) bool {
+	oldPhase := workflowStatusPhase(oldObject)
+	newPhase := workflowStatusPhase(newObject)
+
+	return oldPhase != newPhase && newPhase != domain.PhaseFailed
+}
+
+// workflowExecutionProgressChanged admits durable operation-specific
+// checkpoints even when the workflow phase is unchanged. Executors save a
+// progress checkpoint before returning their explicit requeue; if cancellation
+// or process loss happens in that window, the status event is the only recovery
+// signal left. Shared WorkflowStatus metadata is intentionally excluded so
+// ordinary heartbeat/status bookkeeping cannot create a feedback loop.
+func workflowExecutionProgressChanged(oldObject, newObject crclient.Object) bool {
+	oldProgress, newProgress := workflowExecutionProgress(
+		oldObject,
+	), workflowExecutionProgress(
+		newObject,
+	)
+	if oldProgress == nil || newProgress == nil {
+		return false
+	}
+
+	return !reflect.DeepEqual(oldProgress, newProgress)
+}
+
+func workflowExecutionProgress(object crclient.Object) any {
+	switch typed := object.(type) {
+	case *v1alpha1.Migration:
+		status := typed.Status.DeepCopy()
+		status.WorkflowStatus = v1alpha1.WorkflowStatus{}
+		return status
+	case *v1alpha1.PodMigration:
+		status := typed.Status.DeepCopy()
+		status.WorkflowStatus = v1alpha1.WorkflowStatus{}
+		return status
+	case *v1alpha1.Reservation:
+		status := typed.Status.DeepCopy()
+		status.WorkflowStatus = v1alpha1.WorkflowStatus{}
+		return status
+	case *v1alpha1.Copy:
+		status := typed.Status.DeepCopy()
+		status.WorkflowStatus = v1alpha1.WorkflowStatus{}
+		return status
+	case *v1alpha1.Backup:
+		status := typed.Status.DeepCopy()
+		status.WorkflowStatus = v1alpha1.WorkflowStatus{}
+		return status
+	case *v1alpha1.Restore:
+		status := typed.Status.DeepCopy()
+		status.WorkflowStatus = v1alpha1.WorkflowStatus{}
+		return status
+	case *v1alpha1.Rename:
+		status := typed.Status.DeepCopy()
+		status.WorkflowStatus = v1alpha1.WorkflowStatus{}
+		return status
+	case *v1alpha1.ClusterMigration:
+		status := typed.Status.DeepCopy()
+		status.WorkflowStatus = v1alpha1.WorkflowStatus{}
+		return status
+	case *v1alpha1.ClusterPodMigration:
+		status := typed.Status.DeepCopy()
+		status.WorkflowStatus = v1alpha1.WorkflowStatus{}
+		return status
+	case *v1alpha1.ClusterReservation:
+		status := typed.Status.DeepCopy()
+		status.WorkflowStatus = v1alpha1.WorkflowStatus{}
+		return status
+	case *v1alpha1.ClusterCopy:
+		status := typed.Status.DeepCopy()
+		status.WorkflowStatus = v1alpha1.WorkflowStatus{}
+		return status
+	case *v1alpha1.Move:
+		status := typed.Status.DeepCopy()
+		status.WorkflowStatus = v1alpha1.WorkflowStatus{}
+		return status
+	default:
+		return nil
+	}
+}
+
+// workflowResumeStatusChanged admits explicit resume and repeated Copy passes.
+// Ordinary controller checkpoints stay filtered to avoid a feedback loop.
 func workflowResumeStatusChanged(oldObject, newObject crclient.Object) bool {
 	oldStatus, newStatus := workflowStatus(oldObject), workflowStatus(newObject)
 
-	resumeFrom := oldStatus.ResumeFrom
-	if resumeFrom == "" {
-		resumeFrom = v1alpha1.WorkflowPhase(domain.PhasePlanned)
+	switch newObject.(type) {
+	case *v1alpha1.Copy, *v1alpha1.ClusterCopy:
+		if oldStatus.Phase == domain.PhaseWarmCopied && newStatus.Phase == domain.PhaseWarmCopying {
+			return true
+		}
 	}
 
-	return oldStatus.Phase == v1alpha1.WorkflowPhase(domain.PhaseFailed) &&
+	resumeFrom := oldStatus.ResumeFrom
+	if resumeFrom == "" {
+		resumeFrom = domain.PhasePlanned
+	}
+
+	return oldStatus.Phase == domain.PhaseFailed &&
 		newStatus.Phase == resumeFrom
 }
 
-func workflowStatusPhase(object crclient.Object) domain.Phase {
-	return domain.Phase(workflowStatus(object).Phase)
+func workflowStatusPhase(object crclient.Object) v1alpha1.WorkflowPhase {
+	return workflowStatus(object).Phase
 }
 
 func workflowStatus(object crclient.Object) v1alpha1.WorkflowStatus {
@@ -719,12 +632,26 @@ func workflowStatus(object crclient.Object) v1alpha1.WorkflowStatus {
 }
 
 type ManagerOptions struct {
-	Planner                       WorkflowPlanner
+	BackupPlanner                 BackupPlanner
+	RestorePlanner                RestorePlanner
+	RenamePlanner                 RenamePlanner
+	MovePlanner                   MovePlanner
+	ReservationPlanner            ReservationPlanner
+	NamespacedReservationPlanner  NamespacedReservationPlanner
+	CopyPlanner                   CopyPlanner
+	MigrationPlanner              MigrationPlanner
+	NamespacedMigrationPlanner    NamespacedMigrationPlanner
+	PodMigrationPlanner           PodMigrationPlanner
+	NamespacedPodMigrationPlanner NamespacedPodMigrationPlanner
+	PodMigrationExecution         app.PodMigrationExecutorConfig
+	NamespacedCopyPlanner         NamespacedCopyPlanner
+	TransferExecution             app.VolumeCopyConfig
 	Namespace                     string
 	KubernetesClient              kubernetes.Interface
 	OpenEBSLVMSharedVolumeManager kube.OpenEBSLVMSharedVolumeManager
 	KubeconfigPath                string
 	KubeContext                   string
+	WorkloadManager               *Manager
 	SupportedKinds                []domain.ControllerKind
 	TrustedToolImage              string
 	Logger                        *slog.Logger
@@ -772,8 +699,6 @@ func (r *cacheReadiness) Check(*http.Request) error {
 func StartManager(
 	ctx context.Context,
 	config *rest.Config,
-	service *app.Service,
-	store kube.ControllerSessionStore,
 	options ManagerOptions,
 ) error {
 	if config == nil {
@@ -854,24 +779,467 @@ func StartManager(
 		return err
 	}
 
-	reconciler := NewWorkflowReconciler(service, store).
-		WithPlanner(options.Planner).
+	reconciler := NewWorkflowReconciler().
 		WithLogger(logger.With("component", "workflow-controller")).
-		// Repository reads use the uncached API reader so deletion, replacement,
-		// and credential changes fail closed immediately.
-		WithControllerClient(manager.GetAPIReader()).
 		WithClusterIdentity(cluster.ID).
 		WithTrustedToolImage(normalizedTrustedImage).
-		WithKubeconfig(options.KubeconfigPath, options.KubeContext).
 		WithSupportedKinds(options.SupportedKinds)
-	reconciler.WithKubernetesClient(options.KubernetesClient).
-		WithOpenEBSLVMSharedVolumeManager(options.OpenEBSLVMSharedVolumeManager)
+	reconciler.WithKubernetesClient(options.KubernetesClient)
+
+	// Uncached reads keep the Lease identity check independent of informer lag.
+	directClient, err := crclient.New(config, crclient.Options{Scheme: scheme})
+	if err != nil {
+		return err
+	}
+
+	locker := kube.NewCRDWorkflowLocker(options.KubernetesClient)
+	if err := reconciler.configureBackupController(directClient, options, locker); err != nil {
+		return err
+	}
+
+	if err := reconciler.configureRestoreController(directClient, options, locker); err != nil {
+		return err
+	}
+
+	if err := reconciler.configureIdentityControllers(directClient, options, locker); err != nil {
+		return err
+	}
+
+	if err := reconciler.configureTransferControllers(
+		directClient,
+		options,
+		locker,
+		normalizedTrustedImage,
+		logger,
+	); err != nil {
+		return err
+	}
 
 	if err := reconciler.SetupWithManager(manager); err != nil {
 		return err
 	}
 
 	return manager.Start(ctx)
+}
+
+func (reconciler *WorkflowReconciler) configureIdentityControllers(
+	directClient crclient.Client,
+	options ManagerOptions,
+	locker kube.SessionLocker,
+) error {
+	if reconciler.supportsKind(domain.ControllerKindRename) {
+		if options.RenamePlanner == nil {
+			return errors.New("rename planner is required")
+		}
+
+		renameStore, err := kube.NewCRDWorkflowStore(
+			directClient,
+			func() *v1alpha1.Rename { return &v1alpha1.Rename{} },
+		)
+		if err != nil {
+			return err
+		}
+
+		reconciler.rename = &RenameReconciler{
+			store: renameStore, client: options.KubernetesClient, planner: options.RenamePlanner,
+			locker: locker, active: &reconciler.activeWorkflows,
+			checkCollision: func(ctx context.Context, namespace, name string) error {
+				return kube.CheckWorkflowIdentityCollision(
+					ctx,
+					directClient,
+					options.KubernetesClient,
+					options.SupportedKinds,
+					name,
+					domain.ControllerKindRename,
+					[]string{namespace},
+					true,
+				)
+			},
+		}
+	}
+
+	if reconciler.supportsKind(domain.ControllerKindMove) {
+		if options.MovePlanner == nil {
+			return errors.New("move planner is required")
+		}
+
+		moveStore, err := kube.NewCRDWorkflowStore(
+			directClient,
+			func() *v1alpha1.Move { return &v1alpha1.Move{} },
+		)
+		if err != nil {
+			return err
+		}
+
+		reconciler.move = &MoveReconciler{
+			store: moveStore, client: options.KubernetesClient, planner: options.MovePlanner,
+			locker: locker, active: &reconciler.activeWorkflows,
+			checkCollision: func(ctx context.Context, name string, namespaces []string) error {
+				return kube.CheckWorkflowIdentityCollision(
+					ctx,
+					directClient,
+					options.KubernetesClient,
+					options.SupportedKinds,
+					name,
+					domain.ControllerKindMove,
+					namespaces,
+					true,
+				)
+			},
+		}
+	}
+
+	return nil
+}
+
+func (r *WorkflowReconciler) configureTransferControllers(
+	client crclient.Client,
+	options ManagerOptions,
+	locker kube.SessionLocker,
+	image string,
+	logger *slog.Logger,
+) error {
+	transfer := options.TransferExecution
+	transfer.KubeconfigPath = options.KubeconfigPath
+	transfer.Context = options.KubeContext
+	transfer.TrustedToolImage = image
+	transfer.Logger = logger
+	transfer.StructuredLogs = true
+	transfer.StreamToolLogs = false
+	transfer.Writer = nil
+
+	copyConfig := app.CopyExecutorConfig{
+		Transfer:            transfer,
+		ToolImageProber:     kube.NewToolImageProber(options.KubernetesClient),
+		SharedVolumeManager: options.OpenEBSLVMSharedVolumeManager,
+	}
+
+	engine := copyengine.NewPVMigrate()
+	if r.supportsKind(domain.ControllerKindMigration) {
+		if options.NamespacedMigrationPlanner == nil {
+			return errors.New("namespaced migration planner is required")
+		}
+
+		store, err := kube.NewCRDWorkflowStore(
+			client,
+			func() *v1alpha1.Migration { return &v1alpha1.Migration{} },
+		)
+		if err != nil {
+			return err
+		}
+
+		r.namespacedMigration = &MigrationReconciler{
+			store:   store,
+			client:  options.KubernetesClient,
+			planner: options.NamespacedMigrationPlanner,
+			locker:  locker,
+			active:  &r.activeWorkflows,
+			engine:  engine,
+			config: app.MigrationExecutorConfig{
+				Transfer:        transfer,
+				ToolImageProber: kube.NewToolImageProber(options.KubernetesClient),
+			},
+			checkCollision: func(ctx context.Context, name string, namespaces []string) error {
+				return kube.CheckWorkflowIdentityCollision(
+					ctx,
+					client,
+					options.KubernetesClient,
+					options.SupportedKinds,
+					name,
+					domain.ControllerKindMigration,
+					namespaces,
+					true,
+				)
+			},
+		}
+	}
+
+	if r.supportsKind(domain.ControllerKindClusterMigration) {
+		if options.MigrationPlanner == nil {
+			return errors.New("migration planner is required")
+		}
+
+		store, err := kube.NewCRDWorkflowStore(
+			client,
+			func() *v1alpha1.ClusterMigration { return &v1alpha1.ClusterMigration{} },
+		)
+		if err != nil {
+			return err
+		}
+
+		r.migration = &ClusterMigrationReconciler{
+			store:   store,
+			client:  options.KubernetesClient,
+			planner: options.MigrationPlanner,
+			locker:  locker,
+			active:  &r.activeWorkflows,
+			engine:  engine,
+			config: app.MigrationExecutorConfig{
+				Transfer:        transfer,
+				ToolImageProber: kube.NewToolImageProber(options.KubernetesClient),
+			},
+			checkCollision: func(ctx context.Context, name string, namespaces []string) error {
+				return kube.CheckWorkflowIdentityCollision(
+					ctx,
+					client,
+					options.KubernetesClient,
+					options.SupportedKinds,
+					name,
+					domain.ControllerKindClusterMigration,
+					namespaces,
+					true,
+				)
+			},
+		}
+	}
+
+	podConfig := app.PodMigrationExecutorConfig{
+		Storage: app.MigrationExecutorConfig{
+			Transfer:        transfer,
+			ToolImageProber: kube.NewToolImageProber(options.KubernetesClient),
+			ProbeTimeout:    transfer.HelmTimeout,
+		},
+		SharedVolumes: options.OpenEBSLVMSharedVolumeManager,
+		Workloads:     options.WorkloadManager,
+	}
+
+	if r.supportsKind(domain.ControllerKindClusterPodMigration) {
+		if options.PodMigrationPlanner == nil {
+			return errors.New("pod migration planner is required")
+		}
+
+		store, err := kube.NewCRDWorkflowStore(
+			client,
+			func() *v1alpha1.ClusterPodMigration { return &v1alpha1.ClusterPodMigration{} },
+		)
+		if err != nil {
+			return err
+		}
+
+		r.podMigration = &ClusterPodMigrationReconciler{
+			store:   store,
+			client:  options.KubernetesClient,
+			planner: options.PodMigrationPlanner,
+			locker:  locker,
+			active:  &r.activeWorkflows,
+			engine:  engine,
+			config:  podConfig,
+			checkCollision: func(ctx context.Context, name string, namespaces []string) error {
+				return kube.CheckWorkflowIdentityCollision(
+					ctx,
+					client,
+					options.KubernetesClient,
+					options.SupportedKinds,
+					name,
+					domain.ControllerKindClusterPodMigration,
+					namespaces,
+					true,
+				)
+			},
+		}
+	}
+
+	if r.supportsKind(domain.ControllerKindPodMigration) {
+		if options.NamespacedPodMigrationPlanner == nil {
+			return errors.New("namespaced pod migration planner is required")
+		}
+
+		store, err := kube.NewCRDWorkflowStore(
+			client,
+			func() *v1alpha1.PodMigration { return &v1alpha1.PodMigration{} },
+		)
+		if err != nil {
+			return err
+		}
+
+		r.namespacedPodMigration = &PodMigrationReconciler{
+			store:   store,
+			client:  options.KubernetesClient,
+			planner: options.NamespacedPodMigrationPlanner,
+			locker:  locker,
+			active:  &r.activeWorkflows,
+			engine:  engine,
+			config:  podConfig,
+			checkCollision: func(ctx context.Context, name string, namespaces []string) error {
+				return kube.CheckWorkflowIdentityCollision(
+					ctx,
+					client,
+					options.KubernetesClient,
+					options.SupportedKinds,
+					name,
+					domain.ControllerKindPodMigration,
+					namespaces,
+					true,
+				)
+			},
+		}
+	}
+
+	if r.supportsKind(domain.ControllerKindReservation) {
+		if options.NamespacedReservationPlanner == nil {
+			return errors.New("namespaced reservation planner is required")
+		}
+
+		store, err := kube.NewCRDWorkflowStore(
+			client,
+			func() *v1alpha1.Reservation { return &v1alpha1.Reservation{} },
+		)
+		if err != nil {
+			return err
+		}
+
+		r.namespacedReservation = &ReservationReconciler{
+			store:   store,
+			client:  options.KubernetesClient,
+			planner: options.NamespacedReservationPlanner,
+			locker:  locker,
+			active:  &r.activeWorkflows,
+			config: app.ReservationExecutorConfig{
+				TrustedToolImage: image,
+				Logger:           logger,
+				ToolImageProber:  copyConfig.ToolImageProber,
+			},
+			checkCollision: func(ctx context.Context, name string, namespaces []string) error {
+				return kube.CheckWorkflowIdentityCollision(
+					ctx,
+					client,
+					options.KubernetesClient,
+					options.SupportedKinds,
+					name,
+					domain.ControllerKindReservation,
+					namespaces,
+					true,
+				)
+			},
+		}
+	}
+
+	if r.supportsKind(domain.ControllerKindClusterReservation) {
+		if options.ReservationPlanner == nil {
+			return errors.New("reservation planner is required")
+		}
+
+		store, err := kube.NewCRDWorkflowStore(
+			client,
+			func() *v1alpha1.ClusterReservation { return &v1alpha1.ClusterReservation{} },
+		)
+		if err != nil {
+			return err
+		}
+
+		r.reservation = &ClusterReservationReconciler{
+			store:   store,
+			client:  options.KubernetesClient,
+			planner: options.ReservationPlanner,
+			locker:  locker,
+			active:  &r.activeWorkflows,
+			config: app.ReservationExecutorConfig{
+				TrustedToolImage: image,
+				Logger:           logger,
+				ToolImageProber:  copyConfig.ToolImageProber,
+			},
+			checkCollision: func(ctx context.Context, name string, namespaces []string) error {
+				return kube.CheckWorkflowIdentityCollision(
+					ctx,
+					client,
+					options.KubernetesClient,
+					options.SupportedKinds,
+					name,
+					domain.ControllerKindClusterReservation,
+					namespaces,
+					true,
+				)
+			},
+		}
+	}
+
+	if r.supportsKind(domain.ControllerKindCopy) {
+		if options.NamespacedCopyPlanner == nil {
+			return errors.New("namespaced copy planner is required")
+		}
+
+		store, err := kube.NewCRDWorkflowStore(
+			client,
+			func() *v1alpha1.Copy { return &v1alpha1.Copy{} },
+		)
+		if err != nil {
+			return err
+		}
+
+		r.namespacedCopy = &CopyReconciler{
+			store: store, client: options.KubernetesClient, planner: options.NamespacedCopyPlanner,
+			locker: locker, active: &r.activeWorkflows, engine: engine, config: copyConfig,
+			checkCollision: func(ctx context.Context, name string, namespaces []string) error {
+				return kube.CheckWorkflowIdentityCollision(
+					ctx,
+					client,
+					options.KubernetesClient,
+					options.SupportedKinds,
+					name,
+					domain.ControllerKindCopy,
+					namespaces,
+					true,
+				)
+			},
+		}
+	}
+
+	if r.supportsKind(domain.ControllerKindClusterCopy) {
+		if options.CopyPlanner == nil {
+			return errors.New("copy planner is required")
+		}
+
+		store, err := kube.NewCRDWorkflowStore(
+			client,
+			func() *v1alpha1.ClusterCopy { return &v1alpha1.ClusterCopy{} },
+		)
+		if err != nil {
+			return err
+		}
+
+		r.copy = &ClusterCopyReconciler{
+			store: store, client: options.KubernetesClient, planner: options.CopyPlanner,
+			locker: locker, active: &r.activeWorkflows, engine: engine, config: copyConfig,
+			checkCollision: func(ctx context.Context, name string, namespaces []string) error {
+				return kube.CheckWorkflowIdentityCollision(
+					ctx,
+					client,
+					options.KubernetesClient,
+					options.SupportedKinds,
+					name,
+					domain.ControllerKindClusterCopy,
+					namespaces,
+					true,
+				)
+			},
+		}
+	}
+
+	if r.namespacedReservation != nil && r.namespacedCopy != nil {
+		handoff := &namespacedReservationCopyRecovery{
+			client: client, kubernetes: options.KubernetesClient, locker: locker,
+			reservations: r.namespacedReservation.store, copies: r.namespacedCopy.store,
+			engine: engine, copyConfig: copyConfig,
+		}
+		r.namespacedReservation.handoff = handoff
+		r.namespacedCopy.handoff = handoff
+	}
+
+	if r.reservation != nil && r.copy != nil {
+		handoff := &reservationCopyRecovery{
+			client:       client,
+			kubernetes:   options.KubernetesClient,
+			locker:       locker,
+			reservations: r.reservation.store,
+			copies:       r.copy.store,
+			engine:       engine,
+			copyConfig:   copyConfig,
+		}
+		r.reservation.handoff = handoff
+		r.copy.handoff = handoff
+	}
+
+	return nil
 }
 
 // ValidateTrustedToolImage checks the administrator-selected image before a
@@ -901,24 +1269,28 @@ var (
 	_ crmanager.LeaderElectionRunnable = (*cacheReadiness)(nil)
 )
 
-func workflowSpecMutationError(session *domain.Session) error {
-	if session != nil && session.Status.ExecutionIntentHash != "" {
-		if session.Status.ExecutionIntentHash == domain.ExecutionIntentHash(session.Intent) {
+func workflowSpecMutationError(
+	observedHash, currentHash string,
+	generation, observedGeneration int64,
+	deleting bool,
+	conditions []v1alpha1.WorkflowCondition,
+) error {
+	if observedHash != "" {
+		if observedHash == currentHash {
 			return nil
 		}
-		return changedWorkflowSpecError()
+		return changedWorkflowDefinitionError()
 	}
 
-	if session == nil || session.Status.ObservedGeneration == 0 ||
-		session.Generation == session.Status.ObservedGeneration {
+	if observedGeneration == 0 || generation == observedGeneration {
 		return nil
 	}
 	// The API server increments generation when it first sets deletionTimestamp,
 	// even though spec is unchanged. Accept that single increment only until a
 	// deletion checkpoint has been observed; later spec changes remain fenced.
-	if session.Deleting && session.Generation == session.Status.ObservedGeneration+1 {
+	if deleting && generation == observedGeneration+1 {
 		observedDeletion := false
-		for _, condition := range session.Status.Conditions {
+		for _, condition := range conditions {
 			if condition.Type == "Deleting" || condition.Type == "DeletionBlocked" {
 				observedDeletion = true
 				break
@@ -930,36 +1302,13 @@ func workflowSpecMutationError(session *domain.Session) error {
 		}
 	}
 
-	return changedWorkflowSpecError()
+	return changedWorkflowDefinitionError()
 }
 
-func changedWorkflowSpecError() error {
+func changedWorkflowDefinitionError() error {
 	return domain.NewError(
 		domain.ErrorConflict,
 		"controller reconcile",
 		"workflow spec changed after execution started; create a new workflow instead",
 	)
-}
-
-func (r *WorkflowReconciler) reconcilePlanning(
-	ctx context.Context,
-	session *domain.Session,
-) (reconcile.Result, error) {
-	if session.Status.Phase == domain.PhaseAborted ||
-		(terminalSession(session) && session.Status.ObservedGeneration == session.Generation) {
-		return reconcile.Result{}, nil
-	}
-
-	if err := r.store.EnsureSessionProtection(ctx, session); err != nil {
-		return reconcile.Result{}, err
-	}
-
-	if err := r.planWorkflow(ctx, session); err != nil {
-		if kube.IsSessionLockContention(err) {
-			return reconcile.Result{RequeueAfter: r.requeueAfter}, nil
-		}
-		return reconcile.Result{}, err
-	}
-
-	return reconcile.Result{RequeueAfter: r.requeueAfter}, nil
 }

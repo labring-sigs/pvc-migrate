@@ -14,13 +14,24 @@ func (s *Service) SourceClientForTest() kubernetes.Interface {
 	return s.source.Kubernetes
 }
 
-func (s *Service) SaveForTest(ctx context.Context, session *Session, create bool) error {
+func (s *Service) SaveForTest(ctx context.Context, session *CopySession, create bool) error {
 	return s.save(ctx, session, create)
+}
+
+func (s *Service) DeleteSessionRecordForTest(ctx context.Context, session *CopySession) error {
+	return s.delete(ctx, session)
+}
+
+func (s *Service) DeleteReservationRecordForTest(
+	ctx context.Context,
+	session *ReservationSession,
+) error {
+	return s.deleteReservation(ctx, session)
 }
 
 func (s *Service) CleanupDestinationVolumeForTest(
 	ctx context.Context,
-	session *Session,
+	session *CopySession,
 	index int,
 ) error {
 	return s.cleanupDestinationVolume(ctx, session, index)
@@ -44,8 +55,24 @@ func ReservationConsumerNameForTest(sessionID, pvc string) string {
 
 func (s *Service) CreateReservationConsumerForTest(
 	ctx context.Context,
-	session *Session,
+	session *CopySession,
 	volume *VolumeSpec,
 ) error {
-	return s.createReservationConsumer(ctx, session, volume)
+	index := volumeIndexForTest(session, volume.Source.PVC.Name)
+
+	return s.createReservationConsumer(ctx, reservationState{
+		ID:     session.ID,
+		Spec:   &session.Spec.SessionContext,
+		Status: &session.Status.Volumes[index].Reservation,
+	}, volume)
+}
+
+func volumeIndexForTest(session *CopySession, name string) int {
+	for i, volume := range session.Spec.Volumes {
+		if volume.Source.PVC.Name == name {
+			return i
+		}
+	}
+
+	return 0
 }

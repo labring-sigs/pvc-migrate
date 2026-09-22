@@ -5,6 +5,7 @@ import (
 	"strings"
 	"testing"
 
+	v1alpha1 "github.com/labring-sigs/pvc-migrate/api/v1alpha1"
 	"github.com/labring-sigs/pvc-migrate/internal/domain"
 	"github.com/labring-sigs/pvc-migrate/internal/kube"
 	"github.com/labring-sigs/pvc-migrate/internal/testutil"
@@ -19,11 +20,11 @@ import (
 )
 
 func TestSessionNamespaceChecksRejectMissingNamespacesWithoutCreatePermission(t *testing.T) {
-	for _, operation := range []domain.Operation{domain.OperationCopy, domain.OperationRename} {
+	for _, operation := range []domain.Operation{domain.OperationMigrate, domain.OperationRename} {
 		for _, missing := range []string{"", "sessions", "staging", "destination"} {
 			t.Run(string(operation)+"/missing="+missing, func(t *testing.T) {
 				objects := []runtime.Object{}
-				for _, name := range []string{"sessions", "staging", "destination"} {
+				for _, name := range []string{"source", "sessions", "staging", "destination"} {
 					if name != missing {
 						objects = append(
 							objects,
@@ -49,20 +50,27 @@ func TestSessionNamespaceChecksRejectMissingNamespacesWithoutCreatePermission(t 
 					},
 				)
 
-				spec := domain.NewSessionSpec(operation, domain.SessionCommon{
-					SourceNamespace: "source", SessionNamespace: "sessions",
-					TemporaryNamespace: "staging", DestinationNamespace: "destination",
-				}, false, domain.SessionWorkflowOptions{})
-				plan := &domain.MigrationPlan{Ready: true}
+				plan := &domain.TransferPlan{PlanSummary: domain.PlanSummary{Ready: true}}
 
 				planner := New(client, nil)
 				if operation == domain.OperationRename {
-					planner.checkRenameRBAC(context.Background(), plan, spec)
+					planner.checkRenameRBAC(
+						context.Background(),
+						plan,
+						"source",
+						"destination",
+						"sessions",
+					)
 				} else {
-					planner.checkRBAC(context.Background(), plan, spec, false, false)
+					planner.checkMigrationPermissions(
+						context.Background(),
+						plan,
+						plan.SessionID,
+						"source", "staging", "sessions", nil,
+					)
 				}
 
-				if plan.Ready != (missing == "") {
+				if plan.Ready != (missing == "" || operation == domain.OperationRename && missing == "staging" || operation == domain.OperationMigrate && missing == "destination") {
 					t.Fatalf("missing=%q checks=%#v", missing, plan.Checks)
 				}
 
@@ -101,11 +109,12 @@ func TestNamespacePermissionCheckFailsClosedOnReadError(t *testing.T) {
 		},
 	)
 
-	plan := &domain.MigrationPlan{Ready: true}
+	plan := &domain.TransferPlan{PlanSummary: domain.PlanSummary{Ready: true}}
 
-	checks := New(client, nil).namespaceRBAC(context.Background(), plan, domain.SessionSpec{
-		SessionCommon: domain.SessionCommon{SessionNamespace: "app", TemporaryNamespace: "app"},
-	})
+	checks := New(
+		client,
+		nil,
+	).checkNamespaceAccess(context.Background(), plan, []string{"app"})
 	if plan.Ready || len(checks) != 1 || checks[0].verb != "get" {
 		t.Fatalf("checks=%#v plan=%#v", checks, plan.Checks)
 	}
@@ -116,14 +125,13 @@ func TestControllerSubmissionChecksOnlySelectedWorkflow(t *testing.T) {
 		t.Run(map[bool]string{false: "namespaced", true: "cluster"}[cluster], func(t *testing.T) {
 			resource, namespace := "copies", "app"
 
-			spec := domain.NewSessionSpec(domain.OperationCopy, domain.SessionCommon{
-				SourceNamespace:      "app",
-				TemporaryNamespace:   "app",
-				DestinationNamespace: "app",
+			resolved := v1alpha1.ClusterCopyPlan{
 				SessionNamespace:     "app",
-			}, false, domain.SessionWorkflowOptions{})
+				SourceNamespace:      "app",
+				DestinationNamespace: "app",
+			}
 			if cluster {
-				spec.TemporaryNamespace = "destination"
+				resolved.DestinationNamespace = "destination"
 				resource, namespace = "clustercopies", ""
 			}
 
@@ -151,12 +159,14 @@ func TestControllerSubmissionChecksOnlySelectedWorkflow(t *testing.T) {
 				},
 			)
 
-			plan := &domain.MigrationPlan{Ready: true, SessionID: "transfer"}
+			plan := &domain.TransferPlan{
+				PlanSummary: domain.PlanSummary{Ready: true, SessionID: "transfer"},
+			}
 			New(
 				client,
 				nil,
 			).WithControllerSubmission(true).
-				checkRBAC(context.Background(), plan, spec, false, false)
+				checkCopyPermissions(context.Background(), plan, plan.SessionID, string(resolved.SourceNamespace), string(resolved.DestinationNamespace), string(resolved.SessionNamespace), resolved.Strategies, false)
 
 			if !plan.Ready || calls != 3 {
 				t.Fatalf("submission checks=%#v calls=%d", plan.Checks, calls)
@@ -200,18 +210,18 @@ func TestControllerSubmissionNamespacePreflight(t *testing.T) {
 			},
 		)
 
-		spec := domain.NewSessionSpec(
-			domain.OperationCopy,
-			domain.SessionCommon{
-				SessionNamespace:     "missing",
-				TemporaryNamespace:   "missing",
-				DestinationNamespace: "missing",
-			},
-			false,
-			domain.SessionWorkflowOptions{},
-		)
-		plan := &domain.MigrationPlan{Ready: true, SessionID: "preflight"}
-		New(client, nil).checkControllerSubmissionRBAC(t.Context(), plan, spec)
+		resolved := v1alpha1.ClusterCopyPlan{
+			SessionNamespace:     "missing",
+			DestinationNamespace: "missing",
+		}
+		plan := &domain.TransferPlan{
+			PlanSummary: domain.PlanSummary{Ready: true, SessionID: "preflight"},
+		}
+		New(
+			client,
+			nil,
+		).WithControllerSubmission(true).
+			checkCopyPermissions(t.Context(), plan, plan.SessionID, string(resolved.SourceNamespace), string(resolved.DestinationNamespace), string(resolved.SessionNamespace), resolved.Strategies, false)
 
 		if plan.Ready != forbidden {
 			t.Fatalf("forbidden=%v ready=%v checks=%v", forbidden, plan.Ready, plan.Checks)
@@ -251,14 +261,11 @@ func TestReservationDoesNotRequireTransferOrSourceDeletionPermissions(t *testing
 		},
 	)
 
-	spec := domain.NewSessionSpec(domain.OperationReserve, domain.SessionCommon{
-		SourceNamespace:      "app",
-		TemporaryNamespace:   "destination",
-		DestinationNamespace: "destination",
-		SessionNamespace:     "system",
-	}, false, domain.SessionWorkflowOptions{})
-	plan := &domain.MigrationPlan{Ready: true}
-	New(client, nil).checkRBAC(context.Background(), plan, spec, false, false)
+	plan := &domain.TransferPlan{PlanSummary: domain.PlanSummary{Ready: true}}
+	New(
+		client,
+		nil,
+	).checkReservationPermissions(context.Background(), plan, plan.SessionID, "app", "destination", "system")
 
 	if !plan.Ready {
 		t.Fatalf("reservation requires unrelated permissions: %#v", plan.Checks)
@@ -285,7 +292,7 @@ func TestAccessReviewsPreserveSubresourcesAndResourceNames(t *testing.T) {
 		},
 	)
 
-	plan := &domain.MigrationPlan{Ready: true}
+	plan := &domain.TransferPlan{PlanSummary: domain.PlanSummary{Ready: true}}
 	New(client, nil).checkAccessReviews(context.Background(), plan, []rbacAccess{
 		{namespace: "app", resource: "pods/log", verb: "get"},
 		{

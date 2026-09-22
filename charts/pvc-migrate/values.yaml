@@ -23,9 +23,10 @@ serviceAccount:
   name: ""
 rbac:
   create: true
-  # Grant pods/exec only in approved, existing source namespaces for
-  # KubeBlocks MongoDB native switchover. Empty by default.
-  kubeBlocksMongoDBNamespaces: []
+  # The chart grants no pod exec anywhere. KubeBlocks MongoDB automatic
+  # switchover is disabled without it and reports the operator choices
+  # (grant a pods/exec Role yourself, switch the primary manually, or accept
+  # leader downtime); see the MongoDB switchover error for details.
 controller:
   logLevel: info
   logFormat: json

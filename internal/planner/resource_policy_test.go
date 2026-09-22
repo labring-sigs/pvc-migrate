@@ -4,6 +4,7 @@ import (
 	"context"
 	"testing"
 
+	v1alpha1 "github.com/labring-sigs/pvc-migrate/api/v1alpha1"
 	"github.com/labring-sigs/pvc-migrate/internal/domain"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
@@ -15,25 +16,26 @@ func TestMigrationNamespaceResourceEstimatesUseSerializedChartAndConcurrentProbe
 ) {
 	t.Setenv("HELM_DRIVER", "secret")
 
-	scope := &domain.TransferScope{SourcePath: "source", DestinationPath: "destination"}
+	scope := &v1alpha1.TransferScope{SourcePath: "source", DestinationPath: "destination"}
 	state := &planState{
-		options: planOptions{
-			Operation:        domain.OperationCopy,
+		options: transferInput{
 			SourceNamespace:  "application",
 			StagingNamespace: "application",
 			SessionNamespace: "application",
-			TargetNode:       "worker",
-			Strategies:       []string{domain.StrategyClusterIP},
+			TransferOptions: v1alpha1.TransferOptions{
+				TargetNode: "worker",
+				Strategies: []string{domain.StrategyClusterIP},
+			},
 		},
 		plannedVolumes: []domain.PlannedVolume{
 			{
-				SourcePVC:      domain.ObjectReference{Namespace: "application", Name: "data-a"},
-				DestinationPVC: domain.ObjectReference{Namespace: "application", Name: "copy-a"},
+				SourcePVC:      v1alpha1.ObjectReference{Namespace: "application", Name: "data-a"},
+				DestinationPVC: v1alpha1.ObjectReference{Namespace: "application", Name: "copy-a"},
 				TransferScope:  scope,
 			},
 			{
-				SourcePVC:      domain.ObjectReference{Namespace: "application", Name: "data-b"},
-				DestinationPVC: domain.ObjectReference{Namespace: "application", Name: "copy-b"},
+				SourcePVC:      v1alpha1.ObjectReference{Namespace: "application", Name: "data-b"},
+				DestinationPVC: v1alpha1.ObjectReference{Namespace: "application", Name: "copy-b"},
 				TransferScope:  scope,
 			},
 		},
@@ -42,7 +44,10 @@ func TestMigrationNamespaceResourceEstimatesUseSerializedChartAndConcurrentProbe
 		pvcsByClass:    map[string]int{"fast": 2},
 	}
 
-	estimate := migrationNamespaceResourceEstimates(state)["application"]
+	estimate := migrationNamespaceResourceEstimates(state,
+		transferChartResourceEstimates("application", "application", state.options.Strategies, 2),
+		transferProbePods(state.options.TargetNode, state.options.Strategies, state.plannedVolumes, true),
+	)["application"]
 	if estimate.PVCs != 2 || estimate.StorageRequests != "4Gi" ||
 		estimate.PVCsByStorageClass["fast"] != 2 {
 		t.Fatalf("persistent resource estimate=%#v", estimate)
@@ -64,34 +69,26 @@ func TestMigrationNamespaceResourceEstimatesUseSerializedChartAndConcurrentProbe
 }
 
 func TestMigrationProbePodPeaksTrackNamespacesAndWorkflowStages(t *testing.T) {
-	scope := &domain.TransferScope{SourcePath: "source", DestinationPath: "destination"}
+	scope := &v1alpha1.TransferScope{SourcePath: "source", DestinationPath: "destination"}
 	volumes := []domain.PlannedVolume{
 		{
-			SourcePVC:      domain.ObjectReference{Namespace: "source", Name: "data-a"},
-			DestinationPVC: domain.ObjectReference{Namespace: "stage", Name: "copy-a"},
+			SourcePVC:      v1alpha1.ObjectReference{Namespace: "source", Name: "data-a"},
+			DestinationPVC: v1alpha1.ObjectReference{Namespace: "stage", Name: "copy-a"},
 			TransferScope:  scope,
 		},
 		{
-			SourcePVC:      domain.ObjectReference{Namespace: "source", Name: "data-b"},
-			DestinationPVC: domain.ObjectReference{Namespace: "stage", Name: "copy-b"},
+			SourcePVC:      v1alpha1.ObjectReference{Namespace: "source", Name: "data-b"},
+			DestinationPVC: v1alpha1.ObjectReference{Namespace: "stage", Name: "copy-b"},
 			TransferScope:  scope,
 		},
 	}
 
-	copyPeaks := migrationProbePodPeaks(planOptions{
-		Operation:  domain.OperationCopy,
-		TargetNode: "worker",
-		Strategies: []string{domain.StrategyClusterIP},
-	}, volumes)
+	copyPeaks := transferProbePods("worker", []string{domain.StrategyClusterIP}, volumes, true)
 	if copyPeaks["source"] != 2 || copyPeaks["stage"] != 3 {
 		t.Fatalf("copy probe peaks=%v, want source/stage=2/3", copyPeaks)
 	}
 
-	localPeaks := migrationProbePodPeaks(planOptions{
-		Operation:  domain.OperationCopy,
-		TargetNode: "worker",
-		Strategies: []string{domain.StrategyLocal},
-	}, volumes)
+	localPeaks := transferProbePods("worker", []string{domain.StrategyLocal}, volumes, true)
 	if localPeaks["source"] != 2 || localPeaks["stage"] != 3 {
 		t.Fatalf("local probe peaks=%v, want source/stage=2/3", localPeaks)
 	}
@@ -103,11 +100,12 @@ func TestMigrationProbePodPeaksTrackNamespacesAndWorkflowStages(t *testing.T) {
 		localSameNamespace[index].DestinationPVC.Namespace = "application"
 	}
 
-	localSameNamespacePeaks := migrationProbePodPeaks(planOptions{
-		Operation:  domain.OperationCopy,
-		TargetNode: "worker",
-		Strategies: []string{domain.StrategyLocal},
-	}, localSameNamespace)
+	localSameNamespacePeaks := transferProbePods(
+		"worker",
+		[]string{domain.StrategyLocal},
+		localSameNamespace,
+		true,
+	)
 	if localSameNamespacePeaks["application"] != 5 {
 		t.Fatalf(
 			"same-namespace local probe peak=%v, want 5",
@@ -115,11 +113,7 @@ func TestMigrationProbePodPeaksTrackNamespacesAndWorkflowStages(t *testing.T) {
 		)
 	}
 
-	offlineMountPeaks := migrationProbePodPeaks(planOptions{
-		Operation:  domain.OperationMigrate,
-		TargetNode: "worker",
-		Strategies: []string{domain.StrategyMount},
-	}, volumes)
+	offlineMountPeaks := migrationProbePodPeaks("worker", []string{domain.StrategyMount}, volumes)
 	if offlineMountPeaks["source"] != 2 || offlineMountPeaks["stage"] != 3 {
 		t.Fatalf("offline mount probe peaks=%v, want source/stage=2/3", offlineMountPeaks)
 	}
@@ -131,12 +125,12 @@ func TestMigrationProbePodPeaksTrackNamespacesAndWorkflowStages(t *testing.T) {
 		warmSameNamespace[index].DestinationPVC.Namespace = "application"
 	}
 
-	warmPeaks := migrationProbePodPeaks(planOptions{
-		Operation:     domain.OperationMigratePod,
-		TargetNode:    "worker",
-		Strategies:    []string{domain.StrategyMount},
-		PrecopyPasses: 1,
-	}, warmSameNamespace)
+	warmPeaks := podMigrationProbePodPeaks(
+		"worker",
+		[]string{domain.StrategyMount},
+		warmSameNamespace,
+		1,
+	)
 	if warmPeaks["application"] != 5 {
 		t.Fatalf("warm same-namespace probe peak=%v, want 5", warmPeaks)
 	}
@@ -144,22 +138,25 @@ func TestMigrationProbePodPeaksTrackNamespacesAndWorkflowStages(t *testing.T) {
 
 func TestReserveResourceEstimateExcludesCopyChart(t *testing.T) {
 	state := &planState{
-		options: planOptions{
-			Operation:        domain.OperationReserve,
+		options: transferInput{
 			SourceNamespace:  "application",
 			StagingNamespace: "staging",
 			SessionNamespace: "staging",
-			TargetNode:       "worker",
-			Strategies:       []string{domain.StrategyClusterIP},
+			TransferOptions: v1alpha1.TransferOptions{
+				TargetNode: "worker",
+				Strategies: []string{domain.StrategyClusterIP},
+			},
 		},
 		plannedVolumes: []domain.PlannedVolume{{
-			SourcePVC:      domain.ObjectReference{Namespace: "application", Name: "data"},
-			DestinationPVC: domain.ObjectReference{Namespace: "staging", Name: "copy"},
+			SourcePVC:      v1alpha1.ObjectReference{Namespace: "application", Name: "data"},
+			DestinationPVC: v1alpha1.ObjectReference{Namespace: "staging", Name: "copy"},
 		}},
 		totalStorage: resource.MustParse("1Gi"),
 	}
 
-	estimate := migrationNamespaceResourceEstimates(state)["staging"]
+	estimate := migrationNamespaceResourceEstimates(state, nil,
+		destinationToolProbePods(state.options.TargetNode, state.plannedVolumes),
+	)["staging"]
 	if estimate.Pods != 1 || estimate.TerminatingPods != 1 ||
 		estimate.NotTerminatingPods != 1 {
 		t.Fatalf("reserve Pod peaks=%#v", estimate)
@@ -194,17 +191,22 @@ func TestPlanFiltersStrategiesBeforeQuotaEstimation(t *testing.T) {
 		}},
 	})
 
-	plan, err := New(plannerClient(objects...), nil).plan(context.Background(), planOptions{
-		Operation:          domain.OperationCopy,
+	plan, err := New(
+		plannerClient(objects...),
+		nil,
+	).plan(context.Background(), domain.OperationCopy, transferInput{
+		Volumes:            testSourceVolumes("data"),
 		SessionID:          "filtered-quota",
 		SourceNamespace:    "app",
 		TemporaryNamespace: "app",
 		StagingNamespace:   "app",
 		SessionNamespace:   "system",
-		SourcePVCs:         []string{"data"},
-		TargetNode:         "node-b",
-		DestinationClass:   "fast",
-		Strategies:         []string{domain.StrategyMount, domain.StrategyLocal},
+
+		TransferOptions: v1alpha1.TransferOptions{
+			TargetNode:              "node-b",
+			DestinationStorageClass: "fast",
+			Strategies:              []string{domain.StrategyMount, domain.StrategyLocal},
+		},
 	})
 	if err != nil {
 		t.Fatal(err)

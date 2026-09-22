@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 
+	v1alpha1 "github.com/labring-sigs/pvc-migrate/api/v1alpha1"
 	"github.com/labring-sigs/pvc-migrate/internal/domain"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -15,7 +16,7 @@ import (
 func (s *Switcher) VerifyPVCRebindRecovery(
 	ctx context.Context,
 	sessionID string,
-	from, to, pvRef domain.ObjectReference,
+	from, to, pvRef v1alpha1.ObjectReference,
 ) error {
 	if sessionID == "" || from.Namespace == "" || from.Name == "" || from.UID == "" ||
 		to.Namespace == "" || to.Name == "" || pvRef.Name == "" || pvRef.UID == "" {
@@ -102,7 +103,7 @@ func (s *Switcher) VerifyPVCRebindRecovery(
 		}
 	}
 
-	for _, ref := range []domain.ObjectReference{from, to} {
+	for _, ref := range []v1alpha1.ObjectReference{from, to} {
 		if err := s.ensureNoConsumers(ctx, ref.Namespace, ref.Name); err != nil {
 			return err
 		}

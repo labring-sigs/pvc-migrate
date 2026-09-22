@@ -1,0 +1,189 @@
+package app
+
+import (
+	"context"
+	"errors"
+	"io"
+	"strings"
+	"testing"
+	"time"
+
+	v1alpha1 "github.com/labring-sigs/pvc-migrate/api/v1alpha1"
+	"github.com/labring-sigs/pvc-migrate/internal/copyengine"
+	"github.com/labring-sigs/pvc-migrate/internal/kube"
+	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/client-go/kubernetes/fake"
+)
+
+// hangingEngine fails a copy attempt only when its attempt context expires.
+type hangingEngine struct {
+	cancelled int
+}
+
+func (e *hangingEngine) Copy(
+	ctx context.Context,
+	_ copyengine.CopyRequest,
+	_ copyengine.ProgressFunc,
+) error {
+	<-ctx.Done()
+
+	e.cancelled++
+
+	return ctx.Err()
+}
+
+func (e *hangingEngine) Cleanup(context.Context, copyengine.CleanupRequest) error {
+	return nil
+}
+
+func TestCopyWithRetryHonorsPerAttemptCopyTimeout(t *testing.T) {
+	engine := &hangingEngine{}
+	client := fake.NewClientset(
+		&corev1.Node{ObjectMeta: metav1.ObjectMeta{
+			Name:   "node-a",
+			Labels: map[string]string{"kubernetes.io/hostname": "node-a"},
+		}},
+		&corev1.Node{ObjectMeta: metav1.ObjectMeta{
+			Name:   "node-b",
+			Labels: map[string]string{"kubernetes.io/hostname": "node-b"},
+		}},
+	)
+
+	runner := newVolumeCopyRunner(client, engine, VolumeCopyConfig{
+		Retries:      2,
+		RetryBackoff: time.Millisecond,
+		HelmTimeout:  time.Second,
+		CopyTimeout:  30 * time.Millisecond,
+		Writer:       io.Discard,
+	})
+	runner.sleep = func(context.Context, time.Duration) error { return nil }
+
+	request := copyengine.CopyRequest{
+		AttemptIdentity: copyengine.AttemptIdentity{
+			SessionID: "copy-timeout-test",
+			Mode:      copyengine.ModeWarm,
+			Source: v1alpha1.ObjectReference{
+				Kind: "PersistentVolumeClaim", Namespace: "source", Name: "a", UID: "a",
+			},
+		},
+		Destination: copyengine.CopyDestination{Reference: v1alpha1.ObjectReference{
+			Kind: "PersistentVolumeClaim", Namespace: "destination", Name: "b", UID: "b",
+		}},
+	}
+
+	attempts := 0
+	lastError := ""
+
+	err := runner.copyWithRetry(
+		context.Background(),
+		request,
+		"node-a", "node-b", "",
+		&attempts,
+		&lastError,
+		[]kube.ToolImageProbeResult{},
+		func(context.Context) error { return nil },
+		func(context.Context) error { return nil },
+		func(context.Context) (bool, error) { return false, nil },
+	)
+	if err == nil {
+		t.Fatal("expected the exhausted retries to surface the timeout failure")
+	}
+
+	if !strings.Contains(err.Error(), "--copy-timeout") {
+		t.Fatalf("error should attribute the failure to --copy-timeout: %v", err)
+	}
+
+	if attempts != 2 {
+		t.Fatalf("attempts = %d, want 2 (one per retry)", attempts)
+	}
+
+	if engine.cancelled != 2 {
+		t.Fatalf("copier attempts = %d, want 2", engine.cancelled)
+	}
+}
+
+// A live source (e.g. MongoDB's WiredTiger files being rewritten) makes rsync
+// fail with partial-transfer errors mid-warm-copy. Those are transient by
+// design: the retry must re-run the delta rsync, and a later successful pass
+// converges the destination without treating the error as fatal.
+func TestCopyWithRetryRetriesTransientRsyncPartialTransfers(t *testing.T) {
+	engine := &flakyRsyncEngine{failuresLeft: 2}
+	client := fake.NewClientset(
+		&corev1.Node{ObjectMeta: metav1.ObjectMeta{
+			Name:   "node-a",
+			Labels: map[string]string{"kubernetes.io/hostname": "node-a"},
+		}},
+		&corev1.Node{ObjectMeta: metav1.ObjectMeta{
+			Name:   "node-b",
+			Labels: map[string]string{"kubernetes.io/hostname": "node-b"},
+		}},
+	)
+
+	runner := newVolumeCopyRunner(client, engine, VolumeCopyConfig{
+		Retries:      3,
+		RetryBackoff: time.Millisecond,
+		HelmTimeout:  time.Second,
+		Writer:       io.Discard,
+	})
+	runner.sleep = func(context.Context, time.Duration) error { return nil }
+
+	request := copyengine.CopyRequest{
+		AttemptIdentity: copyengine.AttemptIdentity{
+			SessionID: "rsync-partial-test",
+			Source: v1alpha1.ObjectReference{
+				Kind: "PersistentVolumeClaim", Namespace: "source", Name: "a", UID: "a",
+			},
+		},
+		Destination: copyengine.CopyDestination{Reference: v1alpha1.ObjectReference{
+			Kind: "PersistentVolumeClaim", Namespace: "destination", Name: "b", UID: "b",
+		}},
+	}
+
+	attempts := 0
+	lastError := ""
+
+	err := runner.copyWithRetry(
+		context.Background(),
+		request,
+		"node-a", "node-b", "",
+		&attempts,
+		&lastError,
+		[]kube.ToolImageProbeResult{},
+		func(context.Context) error { return nil },
+		func(context.Context) error { return nil },
+		func(context.Context) (bool, error) { return false, nil },
+	)
+	if err != nil {
+		t.Fatalf("a transient rsync partial transfer must converge on retry: %v", err)
+	}
+
+	if attempts != 3 || engine.calls != 3 {
+		t.Fatalf("attempts=%d copierCalls=%d, want 3/3", attempts, engine.calls)
+	}
+}
+
+type flakyRsyncEngine struct {
+	failuresLeft int
+	calls        int
+}
+
+func (e *flakyRsyncEngine) Copy(
+	_ context.Context,
+	_ copyengine.CopyRequest,
+	_ copyengine.ProgressFunc,
+) error {
+	e.calls++
+	if e.failuresLeft > 0 {
+		e.failuresLeft--
+		return errors.New(
+			"rsync error: some files/attrs were not transferred (see previous errors) (code 23)",
+		)
+	}
+
+	return nil
+}
+
+func (e *flakyRsyncEngine) Cleanup(context.Context, copyengine.CleanupRequest) error {
+	return nil
+}

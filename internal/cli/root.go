@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	v1alpha1 "github.com/labring-sigs/pvc-migrate/api/v1alpha1"
 	"github.com/labring-sigs/pvc-migrate/internal/app"
 	"github.com/labring-sigs/pvc-migrate/internal/controller"
 	"github.com/labring-sigs/pvc-migrate/internal/copyengine"
@@ -33,33 +34,24 @@ type Options struct {
 }
 
 type globals struct {
-	kubeconfig          string
-	kubeContext         string
-	sessionNamespace    string
-	controllerNamespace string
-	workflowNamespace   string
-	timeout             time.Duration
-	retries             int
-	retryBackoff        time.Duration
-	helmTimeout         time.Duration
-	output              string
-	logFormat           string
-	logLevel            string
-	color               string
-	streamToolLogs      bool
-	wait                bool
-	noCompress          bool
-	assumeYes           bool
-	toolImage           string
-	mode                string
+	kubeconfig        string
+	kubeContext       string
+	sessionNamespace  string
+	workflowNamespace string
+	timeout           time.Duration
+	copyTimeout       time.Duration
+	retries           int
+	retryBackoff      time.Duration
+	helmTimeout       time.Duration
+	output            string
+	logFormat         string
+	logLevel          string
+	color             string
+	streamToolLogs    bool
+	noCompress        bool
+	assumeYes         bool
+	toolImage         string
 }
-
-type executionMode string
-
-const (
-	executionModeSession    executionMode = "session"
-	executionModeController executionMode = "controller"
-)
 
 type logFormat string
 
@@ -69,26 +61,35 @@ const (
 )
 
 type rootState struct {
-	options Options
-	global  globals
-	errOut  io.Writer
+	options         Options
+	global          globals
+	errOut          io.Writer
+	currentCommand  *cobra.Command
+	timeoutExplicit bool
 }
 
 type commandRuntime struct {
 	clients                       *kube.Clients
-	store                         kube.LockingSessionStore
 	planner                       *planner.Planner
-	service                       *app.Service
 	printer                       output.Printer
 	logger                        *slog.Logger
 	controllerLogger              *slog.Logger
 	controllers                   *controller.Manager
 	openEBSLVMSharedVolumeManager kube.OpenEBSLVMSharedVolumeManager
-	mode                          executionMode
-	controllerStore               kube.ControllerSessionStore
 	controllerKinds               []domain.ControllerKind
-	waitForController             bool
-	controllerWaiter              controllerSessionWaiter
+	// controllerDiscoveryComplete distinguishes an actual empty discovery
+	// result from test and injected runtimes that do not provide discovery
+	// metadata. Session-backed commands remain usable when no workflow CRD is
+	// installed; controller-backed commands still require an advertised kind.
+	controllerDiscoveryComplete        bool
+	waitForController                  bool
+	clusterPodMigrationStore           kube.WorkflowStore[*v1alpha1.ClusterPodMigration]
+	clusterPodMigrationExecutor        *app.ClusterPodMigrationExecutor
+	clusterPodMigrationSessionStore    kube.WorkflowStore[*v1alpha1.ClusterPodMigration]
+	clusterPodMigrationSessionExecutor *app.ClusterPodMigrationExecutor
+	podMigrationStore                  kube.WorkflowStore[*v1alpha1.PodMigration]
+	podMigrationExecutor               *app.PodMigrationExecutor
+	orphanCleaner                      *app.OrphanCleaner
 }
 
 func NewRoot(options Options) *cobra.Command {
@@ -118,8 +119,16 @@ func NewRoot(options Options) *cobra.Command {
 		Short:         "Resumable Kubernetes PVC migration",
 		SilenceUsage:  true,
 		SilenceErrors: true,
-		PersistentPreRunE: func(*cobra.Command, []string) error {
+		PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
+			state.currentCommand = cmd
+			state.timeoutExplicit = cmd.Flags().Changed("timeout")
+
+			if err := state.validateCopyTimeout(cmd); err != nil {
+				return err
+			}
+
 			_, err := parseColorMode(state.global.color)
+
 			return err
 		},
 	}
@@ -136,18 +145,23 @@ func NewRoot(options Options) *cobra.Command {
 		"Namespace for persistent migration sessions",
 	)
 	flags.StringVar(
-		&state.global.controllerNamespace,
-		"controller-namespace",
-		"pvc-migrate-system",
-		"Namespace where the controller is installed",
-	)
-	flags.StringVar(
 		&state.global.workflowNamespace,
 		"workflow-namespace",
 		"",
 		"Tenant namespace containing a controller workflow for lifecycle/status commands",
 	)
-	flags.DurationVar(&state.global.timeout, "timeout", 30*time.Minute, "Operation timeout")
+	flags.DurationVar(
+		&state.global.timeout,
+		"timeout",
+		30*time.Minute,
+		"Whole-operation context timeout; data-transfer operations (copy, migrate, migrate-pod, backup, restore) run under 24h when this flag keeps its 30m default",
+	)
+	flags.DurationVar(
+		&state.global.copyTimeout,
+		"copy-timeout",
+		0,
+		"Per-attempt data transfer timeout for copy, migrate, and migrate-pod; 0 disables. Must be shorter than --timeout when both are set",
+	)
 	flags.IntVar(&state.global.retries, "retries", 3, "Copy retry attempts")
 	flags.DurationVar(
 		&state.global.retryBackoff,
@@ -192,12 +206,6 @@ func NewRoot(options Options) *cobra.Command {
 		true,
 		"Stream generated tool Pod logs to stderr",
 	)
-	flags.BoolVar(
-		&state.global.wait,
-		"wait",
-		true,
-		"Wait for controller-backed workflows to finish",
-	)
 	flags.BoolVar(&state.global.noCompress, "no-compress", false, "Disable rsync compression")
 	flags.BoolVarP(
 		&state.global.assumeYes,
@@ -211,12 +219,6 @@ func NewRoot(options Options) *cobra.Command {
 		"tool-image",
 		kube.DefaultToolImage(options.ToolImageRepository, options.Version),
 		"Tool image used by PVC reservation, copy, SSHD, and backup tools",
-	)
-	flags.StringVar(
-		&state.global.mode,
-		"mode",
-		string(executionModeSession),
-		"Persistence mode: session uses ConfigMaps, controller uses workflow CRDs",
 	)
 
 	command.AddCommand(
@@ -232,7 +234,10 @@ func NewRoot(options Options) *cobra.Command {
 		state.newControllerCommand(),
 		newVersionCommand(options.Version),
 	)
-	// Cross-cluster workflows have an independent session and resource model.
+	command.AddCommand(newCompletionCommand(command))
+
+	// Cross-cluster workflows run against two explicit API-server connections
+	// in the submitting process; they hang off copy/reserve as subcommands.
 	for _, parent := range command.Commands() {
 		switch parent.Name() {
 		case "copy":
@@ -242,14 +247,27 @@ func NewRoot(options Options) *cobra.Command {
 		}
 	}
 
-	command.AddCommand(newCompletionCommand(command))
-
 	return command
 }
 
 func bindDryRun(command *cobra.Command, target *bool) {
 	command.Flags().
 		BoolVar(target, "dry-run", true, "Validate and print the plan without mutations; use --dry-run=false to execute")
+}
+
+// bindCreateDryRun defaults to preview: every write operation — including
+// controller submission — requires an explicit --dry-run=false to execute.
+func bindCreateDryRun(command *cobra.Command, target *bool) {
+	command.Flags().
+		BoolVar(target, "dry-run", true, "Print the workflow that would be submitted without creating it; use --dry-run=false to submit")
+}
+
+// bindCreateWait keeps controller-wait semantics on the submission commands
+// that can actually observe a controller-backed workflow. Session commands
+// execute in-process and must not offer it.
+func bindCreateWait(command *cobra.Command, target *bool) {
+	command.Flags().
+		BoolVar(target, "wait", true, "Wait for the controller to finish the submitted workflow; use --wait=false to return immediately after submission")
 }
 
 func (r *rootState) runtime() (*commandRuntime, error) {
@@ -286,134 +304,161 @@ func (r *rootState) runtime() (*commandRuntime, error) {
 		WithRESTConfig(clients.RESTConfig).
 		WithLogger(logger.With("component", "controller"))
 
-	requestedMode, err := parseExecutionMode(r.global.mode)
+	if _, err := kube.NormalizeToolImage(r.global.toolImage); err != nil {
+		return nil, domain.WrapError(
+			domain.ErrorPrecondition,
+			"controller mode",
+			"controller trusted tool image is invalid",
+			err,
+		)
+	}
+
+	controllerKinds := kube.AvailableControllerWorkflowKinds(clients.Discovery)
+
+	clusterPodMigrationStore, err := kube.NewCRDWorkflowStore(
+		clients.Runtime,
+		func() *v1alpha1.ClusterPodMigration { return &v1alpha1.ClusterPodMigration{} },
+	)
 	if err != nil {
 		return nil, err
 	}
 
-	trustedToolImage := ""
-	if requestedMode == executionModeController {
-		trustedToolImage, err = kube.NormalizeToolImage(r.global.toolImage)
-		if err != nil {
-			return nil, domain.WrapError(
-				domain.ErrorPrecondition,
-				"controller mode",
-				"controller trusted tool image is invalid",
-				err,
-			)
-		}
-	}
+	clusterPodMigrationLocker := kube.NewCRDWorkflowLocker(clients.Kubernetes)
 
-	configMapStore := kube.NewConfigMapSessionStore(clients.Kubernetes)
-	sessionRecords := kube.NewSessionRecords(clients.Kubernetes, clients.Dynamic)
-
-	var (
-		store           kube.LockingSessionStore = configMapStore
-		controllerStore kube.ControllerSessionStore
-		controllerKinds []domain.ControllerKind
-	)
-
-	if requestedMode == executionModeController {
-		controllerKinds = kube.AvailableControllerWorkflowKinds(clients.Discovery)
-		if len(controllerKinds) == 0 {
-			return nil, domain.NewError(
-				domain.ErrorPrecondition,
-				"controller mode",
-				"controller mode requires at least one migrate.sealos.io/v1alpha1 workflow CRD; install deploy/crd.yaml or use --mode=session",
-			)
-		}
-
-		crdStore := kube.NewCRDSessionStore(clients.Runtime).
-			WithLeaseClient(clients.Kubernetes).
-			WithSupportedKinds(controllerKinds)
-		store = crdStore
-		controllerStore = crdStore
-	}
-
-	reserver := kube.NewReserver(clients.Kubernetes).
-		WithTrustedToolImage(trustedToolImage).
-		WithLogger(logger.With("component", "reserver"))
 	openEBSLVMSharedVolumeManager := kube.NewOpenEBSLVMSharedVolumeManager(
 		clients.Kubernetes,
 		clients.Dynamic,
 	)
 
-	controllerMode := requestedMode == executionModeController
-	streamToolLogs := r.global.streamToolLogs && !controllerMode
-	structuredLogs := controllerMode || r.global.logFormat == string(logFormatJSON)
+	structuredLogs := r.global.logFormat == string(logFormatJSON)
 	serviceWriter := r.errWriter()
 
-	serviceLogger := logger.With("component", "migration")
-	if controllerMode {
-		// Controller reconciliation is an API-driven worker. Raw tool output is
-		// neither a command result nor a terminal stream and must stay out of the
-		// controller process output.
-		serviceWriter = io.Discard
-		serviceLogger = controller.NewControllerLogger(serviceLogger)
+	serviceLogger := controller.NewControllerLogger(logger.With("component", "migration"))
+
+	transferConfig := app.VolumeCopyConfig{
+		KubeconfigPath: r.global.kubeconfig,
+		Context:        r.global.kubeContext,
+		Retries:        r.global.retries,
+		RetryBackoff:   r.global.retryBackoff,
+		HelmTimeout:    r.global.helmTimeout,
+		// The flag is documented for copy, migrate, and migrate-pod; without
+		// this field the direct-session executors silently ran unbounded
+		// attempts while the copy command honored the bound.
+		CopyTimeout:    r.global.copyTimeout,
+		NoCompress:     r.global.noCompress,
+		StreamToolLogs: r.global.streamToolLogs,
+		StructuredLogs: structuredLogs,
+		Writer:         serviceWriter,
+		Logger:         serviceLogger,
+		// No TrustedToolImage pin on the session side: the plan records the
+		// requested tool image and every executor stage must use exactly that
+		// image. The controller pins its own trusted image separately.
+	}
+	// podMigrationExecutorConfig is the one place the pod-migration executor
+	// dependencies are described; the cluster, session, and namespaced
+	// executors differ only in store and locker.
+	podMigrationExecutorConfig := func() app.PodMigrationExecutorConfig {
+		return app.PodMigrationExecutorConfig{
+			Storage: app.MigrationExecutorConfig{
+				Transfer:        transferConfig,
+				ToolImageProber: kube.NewToolImageProber(clients.Kubernetes),
+				ProbeTimeout:    r.global.helmTimeout,
+			},
+			SharedVolumes: openEBSLVMSharedVolumeManager,
+			Workloads:     controllers,
+		}
 	}
 
-	if streamToolLogs {
-		reserver = reserver.WithToolLogs(kube.ToolLogOptions{
-			Writer:     r.errWriter(),
-			Logger:     logger.With("component", "tool"),
-			Structured: structuredLogs,
-		})
-	}
-
-	service := app.NewService(
+	clusterPodMigrationExecutor := app.NewClusterPodMigrationExecutor(
 		clients.Kubernetes,
-		store,
-		reserver,
+		clusterPodMigrationStore,
+		clusterPodMigrationLocker,
+		r.global.sessionNamespace,
 		copyengine.NewPVMigrate(),
-		controllers,
-		kube.NewSwitcher(clients.Kubernetes).WithLogger(logger.With("component", "switcher")),
-		app.Config{
-			KubeconfigPath:                r.global.kubeconfig,
-			Context:                       r.global.kubeContext,
-			Retries:                       r.global.retries,
-			RetryBackoff:                  r.global.retryBackoff,
-			HelmTimeout:                   r.global.helmTimeout,
-			NoCompress:                    r.global.noCompress,
-			StreamToolLogs:                streamToolLogs,
-			StructuredLogs:                structuredLogs,
-			Writer:                        serviceWriter,
-			Logger:                        serviceLogger,
-			ToolImageProber:               kube.NewToolImageProber(clients.Kubernetes),
-			TrustedToolImage:              trustedToolImage,
-			OpenEBSLVMSharedVolumeManager: openEBSLVMSharedVolumeManager,
-			SessionRecords:                sessionRecords,
-		},
+		podMigrationExecutorConfig(),
+	)
+
+	// Session-side migrate-pod persists the concrete CRD in a ConfigMap: the
+	// CLI session path never creates workflow CRs, so the executor is bound to
+	// the ConfigMap store with the matching locker.
+	clusterPodMigrationSessionStore, err := kube.NewConfigMapWorkflowStore(
+		clients.Kubernetes,
+		r.global.sessionNamespace,
+		func() *v1alpha1.ClusterPodMigration { return &v1alpha1.ClusterPodMigration{} },
+	)
+	if err != nil {
+		return nil, err
+	}
+
+	clusterPodMigrationSessionExecutor := app.NewClusterPodMigrationExecutor(
+		clients.Kubernetes,
+		clusterPodMigrationSessionStore,
+		kube.NewConfigMapWorkflowLocker(clients.Kubernetes),
+		r.global.sessionNamespace,
+		copyengine.NewPVMigrate(),
+		podMigrationExecutorConfig(),
+	)
+
+	// Controller-submitted namespaced PodMigrations live as CRs in the tenant
+	// namespace; lifecycle commands drive them through the namespaced executor.
+	podMigrationStore, err := kube.NewCRDWorkflowStore(
+		clients.Runtime,
+		func() *v1alpha1.PodMigration { return &v1alpha1.PodMigration{} },
+	)
+	if err != nil {
+		return nil, err
+	}
+
+	podMigrationExecutor := app.NewPodMigrationExecutor(
+		clients.Kubernetes,
+		podMigrationStore,
+		clusterPodMigrationLocker,
+		copyengine.NewPVMigrate(),
+		podMigrationExecutorConfig(),
+	)
+
+	orphanCleaner := app.NewOrphanCleaner(
+		clients.Kubernetes,
+		clusterPodMigrationLocker,
+		kube.NewCRDWorkflowLeaseCleaner(clients.Kubernetes),
+		kube.NewCompositeWorkflowOwnerFinder(
+			kube.NewCRDWorkflowOwnerFinder(clients.Dynamic),
+			kube.NewConfigMapWorkflowOwnerFinder(clients.Kubernetes),
+		),
+		logger.With("component", "recovery"),
 	)
 
 	return &commandRuntime{
 		clients: clients,
-		store:   store,
 		planner: planner.New(clients.Kubernetes, controllers).
-			WithSessionRecords(sessionRecords).
-			WithControllerSubmission(controllerMode).
+			WithWorkflowOwnerFinder(kube.NewCompositeWorkflowOwnerFinder(
+				kube.NewCRDWorkflowOwnerFinder(clients.Dynamic),
+				kube.NewConfigMapWorkflowOwnerFinder(clients.Kubernetes),
+			)).
+			WithControllerSubmission(false).
 			WithOpenEBSLVMSharedVolumeManager(openEBSLVMSharedVolumeManager).
 			WithLogger(logger.With("component", "planner")),
-		service: service,
 		printer: output.Printer{Writer: r.options.Out, Format: format},
 		logger:  logger.With("component", "backup"),
 		controllerLogger: controller.NewControllerLogger(
 			logger.With("component", "workflow-controller"),
 		),
-		controllers:                   controllers,
-		openEBSLVMSharedVolumeManager: openEBSLVMSharedVolumeManager,
-		mode:                          requestedMode,
-		controllerStore:               controllerStore,
-		controllerKinds:               slices.Clone(controllerKinds),
-		waitForController:             r.global.wait,
-		controllerWaiter:              kube.NewControllerSessionWaiter(clients.Dynamic),
+		controllers:                        controllers,
+		openEBSLVMSharedVolumeManager:      openEBSLVMSharedVolumeManager,
+		controllerKinds:                    slices.Clone(controllerKinds),
+		controllerDiscoveryComplete:        true,
+		waitForController:                  true,
+		clusterPodMigrationStore:           clusterPodMigrationStore,
+		clusterPodMigrationExecutor:        clusterPodMigrationExecutor,
+		clusterPodMigrationSessionStore:    clusterPodMigrationSessionStore,
+		clusterPodMigrationSessionExecutor: clusterPodMigrationSessionExecutor,
+		podMigrationStore:                  podMigrationStore,
+		podMigrationExecutor:               podMigrationExecutor,
+		orphanCleaner:                      orphanCleaner,
 	}, nil
 }
 
 func (r *rootState) validateGlobalFlags() error {
-	if _, err := parseExecutionMode(r.global.mode); err != nil {
-		return err
-	}
-
 	switch {
 	case r.global.retries < 1:
 		return domain.NewError(domain.ErrorValidation, "flags", "--retries must be at least 1")
@@ -443,18 +488,6 @@ func (r *rootState) validateGlobalFlags() error {
 		)
 	}
 
-	if problems := validation.IsDNS1123Label(r.global.controllerNamespace); len(problems) > 0 {
-		return domain.NewError(
-			domain.ErrorValidation,
-			"flags",
-			fmt.Sprintf(
-				"--controller-namespace %q is invalid: %s",
-				r.global.controllerNamespace,
-				strings.Join(problems, "; "),
-			),
-		)
-	}
-
 	if r.global.workflowNamespace != "" {
 		if problems := validation.IsDNS1123Label(r.global.workflowNamespace); len(problems) > 0 {
 			return domain.NewError(
@@ -470,20 +503,6 @@ func (r *rootState) validateGlobalFlags() error {
 	}
 
 	return nil
-}
-
-func parseExecutionMode(value string) (executionMode, error) {
-	mode := executionMode(strings.ToLower(strings.TrimSpace(value)))
-	switch mode {
-	case executionModeSession, executionModeController:
-		return mode, nil
-	default:
-		return "", domain.NewError(
-			domain.ErrorValidation,
-			"flags",
-			"--mode must be session or controller",
-		)
-	}
 }
 
 func configureKubernetesLogger(logger *slog.Logger) {
@@ -527,11 +546,80 @@ func printerFor(r *rootState) output.Printer {
 	return output.Printer{Writer: r.options.Out, Format: output.Format(r.global.output)}
 }
 
+// dataTransferOperationTimeout bounds operations that move payload data.
+// Datasets have no natural upper size, so the short metadata-operation
+// default would kill legitimate large copies mid-transfer.
+const dataTransferOperationTimeout = 24 * time.Hour
+
+// dataTransferRootCommands are root operations that can execute payload data
+// transfers (copy, migrate, migrate-pod, backup, restore, controller --once)
+// or resume them from a checkpoint. The controller one-shot command must use
+// the long bound because its inventory is not known until it lists the CRDs.
+// Metadata-only operations (rename, move, reserve) keep the short default.
+var dataTransferRootCommands = map[string]bool{
+	"copy": true, "migrate": true, "migrate-pod": true,
+	"backup": true, "restore": true, "controller": true,
+}
+
+// effectiveTimeout resolves the operation timeout: an explicit --timeout
+// always wins; otherwise data-transferring operations default to the long
+// transfer bound while everything else keeps the metadata default.
+func (r *rootState) effectiveTimeout() time.Duration {
+	if r.timeoutExplicit {
+		return r.global.timeout
+	}
+
+	for c := r.currentCommand; c != nil; c = c.Parent() {
+		if dataTransferRootCommands[c.Name()] {
+			return dataTransferOperationTimeout
+		}
+	}
+
+	return r.global.timeout
+}
+
+// validateCopyTimeout rejects a per-attempt copy bound that can never fire:
+// when both bounds are positive and the copy bound is not shorter than the
+// effective operation timeout, the copy timeout would be silently ignored.
+// Commands without data transfers do not consume the copy timeout and are
+// not validated.
+func (r *rootState) validateCopyTimeout(cmd *cobra.Command) error {
+	if r.global.copyTimeout <= 0 {
+		return nil
+	}
+
+	for c := cmd; c != nil; c = c.Parent() {
+		if !dataTransferRootCommands[c.Name()] {
+			continue
+		}
+
+		effective := r.effectiveTimeout()
+		if effective > 0 && r.global.copyTimeout >= effective {
+			return domain.NewError(
+				domain.ErrorValidation,
+				"flags",
+				fmt.Sprintf(
+					"--copy-timeout %s must be shorter than the effective --timeout %s for %s",
+					r.global.copyTimeout,
+					effective,
+					c.Name(),
+				),
+			)
+		}
+
+		break
+	}
+
+	return nil
+}
+
 func (r *rootState) context(parent context.Context) (context.Context, context.CancelFunc) {
-	if r.global.timeout <= 0 {
+	timeout := r.effectiveTimeout()
+	if timeout <= 0 {
 		return context.WithCancel(parent)
 	}
-	return context.WithTimeout(parent, r.global.timeout)
+
+	return context.WithTimeout(parent, timeout)
 }
 
 func parseLogLevel(value string) (slog.Level, error) {

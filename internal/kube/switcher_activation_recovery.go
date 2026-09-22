@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 
+	v1alpha1 "github.com/labring-sigs/pvc-migrate/api/v1alpha1"
 	"github.com/labring-sigs/pvc-migrate/internal/domain"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -12,7 +13,7 @@ import (
 func (s *Switcher) verifyRetainedActivationPV(
 	ctx context.Context,
 	sessionID string,
-	pvcRef, pvRef, reservation domain.ObjectReference,
+	pvcRef, pvRef, reservation v1alpha1.ObjectReference,
 ) error {
 	pv, err := s.client.CoreV1().PersistentVolumes().Get(ctx, pvRef.Name, metav1.GetOptions{})
 	if err != nil {

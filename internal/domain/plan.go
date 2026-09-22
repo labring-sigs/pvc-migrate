@@ -1,14 +1,13 @@
 package domain
 
 import (
-	"encoding/json"
-
+	v1alpha1 "github.com/labring-sigs/pvc-migrate/api/v1alpha1"
 	corev1 "k8s.io/api/core/v1"
 	storagev1 "k8s.io/api/storage/v1"
 )
 
 const (
-	MigrationPlanKind     = "MigrationPlan"
+	TransferPlanKind      = "TransferPlan"
 	OrphanCleanupPlanKind = "OrphanCleanupPlan"
 )
 
@@ -59,7 +58,7 @@ const (
 	CheckNameControllerAdapter   CheckName = "controller-adapter"
 	CheckNameDatabasePauseScope  CheckName = "database-pause-scope"
 	CheckNameDatabaseRole        CheckName = "database-role"
-	CheckNameKubeBlocksCandidate CheckName = "kubeblocks-candidate"
+	CheckNameKubeBlocksCandidate CheckName = "switchover-candidate"
 	CheckNameLimitRange          CheckName = "limit-range"
 	CheckNameNetworkPolicy       CheckName = "network-policy"
 	CheckNamePod                 CheckName = "pod"
@@ -176,9 +175,9 @@ type ResourceEstimate struct {
 }
 
 type PlannedVolume struct {
-	SourcePVC           ObjectReference                     `json:"sourcePVC"                     yaml:"sourcePVC"`
-	SourcePV            ObjectReference                     `json:"sourcePV"                      yaml:"sourcePV"`
-	DestinationPVC      ObjectReference                     `json:"destinationPVC"                yaml:"destinationPVC"`
+	SourcePVC           v1alpha1.ObjectReference            `json:"sourcePVC"                     yaml:"sourcePVC"`
+	SourcePV            v1alpha1.ObjectReference            `json:"sourcePV"                      yaml:"sourcePV"`
+	DestinationPVC      v1alpha1.ObjectReference            `json:"destinationPVC"                yaml:"destinationPVC"`
 	Capacity            string                              `json:"capacity"                      yaml:"capacity"`
 	SourceCapacity      string                              `json:"sourceCapacity"                yaml:"sourceCapacity"`
 	SourceUsedBytes     int64                               `json:"sourceUsedBytes,omitempty"     yaml:"sourceUsedBytes,omitempty"`
@@ -189,7 +188,7 @@ type PlannedVolume struct {
 	BindingMode         storagev1.VolumeBindingMode         `json:"bindingMode"                   yaml:"bindingMode"`
 	CSIProvisioner      string                              `json:"csiProvisioner"                yaml:"csiProvisioner"`
 	ConcurrentConsumers int                                 `json:"concurrentConsumers,omitempty" yaml:"concurrentConsumers,omitempty"`
-	TransferScope       *TransferScope                      `json:"transferScope,omitempty"       yaml:"transferScope,omitempty"`
+	TransferScope       *v1alpha1.TransferScope             `json:"transferScope,omitempty"       yaml:"transferScope,omitempty"`
 }
 
 type StorageCapacityReport struct {
@@ -206,28 +205,38 @@ type StorageCapacityReport struct {
 	Message           string                `json:"message"                     yaml:"message"`
 }
 
-type MigrationPlan struct {
-	Intent               json.RawMessage         `json:"-"                         yaml:"-"`
-	APIVersion           string                  `json:"apiVersion"                yaml:"apiVersion"`
-	Kind                 string                  `json:"kind"                      yaml:"kind"`
-	SessionID            string                  `json:"sessionID"                 yaml:"sessionID"`
+// PlanSummary is the result of validation shared by all plan families.
+type PlanSummary struct {
+	APIVersion       string  `json:"apiVersion"       yaml:"apiVersion"`
+	Kind             string  `json:"kind"             yaml:"kind"`
+	SessionID        string  `json:"sessionID"        yaml:"sessionID"`
+	SessionNamespace string  `json:"sessionNamespace" yaml:"sessionNamespace"`
+	Checks           []Check `json:"checks"           yaml:"checks"`
+	Ready            bool    `json:"ready"            yaml:"ready"`
+}
+
+// PlanSummaryReader is the narrow planning contract used by callers that only
+// need validation outcome. Operation-specific plan details stay behind the
+// concrete report type that produced them.
+type PlanSummaryReader interface {
+	Summary() *PlanSummary
+}
+
+type TransferPlan struct {
+	PlanSummary          `json:",inline" yaml:",inline"`
 	SourceNamespace      string                  `json:"sourceNamespace"           yaml:"sourceNamespace"`
 	TemporaryNamespace   string                  `json:"temporaryNamespace"        yaml:"temporaryNamespace"`
 	DestinationNamespace string                  `json:"destinationNamespace"      yaml:"destinationNamespace"`
-	SessionNamespace     string                  `json:"sessionNamespace"          yaml:"sessionNamespace"`
 	ToolImage            string                  `json:"toolImage"                 yaml:"toolImage"`
 	CapacityAwareness    CapacityAwareness       `json:"capacityAwareness"         yaml:"capacityAwareness"`
 	SourceNode           string                  `json:"sourceNode,omitempty"      yaml:"sourceNode,omitempty"`
 	TargetNode           string                  `json:"targetNode,omitempty"      yaml:"targetNode,omitempty"`
 	Strategies           []string                `json:"strategies,omitempty"      yaml:"strategies,omitempty"`
-	Workload             WorkloadSpec            `json:"workload"                  yaml:"workload"`
+	Workload             v1alpha1.WorkloadSpec   `json:"workload"                  yaml:"workload"`
 	Volumes              []PlannedVolume         `json:"volumes"                   yaml:"volumes"`
-	Checks               []Check                 `json:"checks"                    yaml:"checks"`
 	StorageCapacity      []StorageCapacityReport `json:"storageCapacity,omitempty" yaml:"storageCapacity,omitempty"`
 	TemporaryUsage       ResourceEstimate        `json:"temporaryUsage"            yaml:"temporaryUsage"`
 	RollbackRetention    ResourceEstimate        `json:"rollbackRetention"         yaml:"rollbackRetention"`
-	Ready                bool                    `json:"ready"                     yaml:"ready"`
-	SessionSpec          SessionSpec             `json:"-"                         yaml:"-"`
 }
 
 // OrphanCleanupPlan describes a session ownership record whose ConfigMap is
@@ -246,17 +255,17 @@ type OrphanCleanupPlan struct {
 }
 
 type OrphanPreActivationCleanup struct {
-	SourcePVC         ObjectReference                      `json:"sourcePVC"                   yaml:"sourcePVC"`
-	SourcePV          ObjectReference                      `json:"sourcePV"                    yaml:"sourcePV"`
-	DestinationPVC    ObjectReference                      `json:"destinationPVC,omitempty"    yaml:"destinationPVC,omitempty"`
-	DestinationPV     ObjectReference                      `json:"destinationPV,omitempty"     yaml:"destinationPV,omitempty"`
+	SourcePVC         v1alpha1.ObjectReference             `json:"sourcePVC"                   yaml:"sourcePVC"`
+	SourcePV          v1alpha1.ObjectReference             `json:"sourcePV"                    yaml:"sourcePV"`
+	DestinationPVC    v1alpha1.ObjectReference             `json:"destinationPVC,omitempty"    yaml:"destinationPVC,omitempty"`
+	DestinationPV     v1alpha1.ObjectReference             `json:"destinationPV,omitempty"     yaml:"destinationPV,omitempty"`
 	DestinationPolicy corev1.PersistentVolumeReclaimPolicy `json:"destinationPolicy,omitempty" yaml:"destinationPolicy,omitempty"`
 }
 
 type OrphanPostActivationCleanup struct {
-	SourcePVC      ObjectReference                      `json:"sourcePVC"      yaml:"sourcePVC"`
-	ActivePV       ObjectReference                      `json:"activePV"       yaml:"activePV"`
-	RollbackPV     ObjectReference                      `json:"rollbackPV"     yaml:"rollbackPV"`
+	SourcePVC      v1alpha1.ObjectReference             `json:"sourcePVC"      yaml:"sourcePVC"`
+	ActivePV       v1alpha1.ObjectReference             `json:"activePV"       yaml:"activePV"`
+	RollbackPV     v1alpha1.ObjectReference             `json:"rollbackPV"     yaml:"rollbackPV"`
 	RollbackPolicy corev1.PersistentVolumeReclaimPolicy `json:"rollbackPolicy" yaml:"rollbackPolicy"`
 }
 
@@ -267,9 +276,28 @@ func (p *OrphanCleanupPlan) AddCheck(check Check) {
 	}
 }
 
-func (p *MigrationPlan) AddCheck(check Check) {
+func (p *PlanSummary) AddCheck(check Check) {
 	p.Checks = append(p.Checks, check)
 	if check.Severity == SeverityError && !check.Passed {
 		p.Ready = false
 	}
+}
+
+// PVCIdentityReport describes the storage checks for rebinding a claim.
+// It contains no execution payload or operation selection.
+type PVCIdentityReport struct {
+	PlanSummary          `                 json:",inline"              yaml:",inline"`
+	SourceNamespace      string           `json:"sourceNamespace"      yaml:"sourceNamespace"`
+	DestinationNamespace string           `json:"destinationNamespace" yaml:"destinationNamespace"`
+	Volumes              []PlannedVolume  `json:"volumes"              yaml:"volumes"`
+	TemporaryUsage       ResourceEstimate `json:"temporaryUsage"       yaml:"temporaryUsage"`
+}
+
+func (p *PlanSummary) Summary() *PlanSummary { return p }
+
+func (p *TransferPlan) Summary() *PlanSummary {
+	if p == nil {
+		return nil
+	}
+	return &p.PlanSummary
 }

@@ -1,38 +1,40 @@
 package cli
 
 import (
+	"errors"
+	"fmt"
 	"time"
 
+	v1alpha1 "github.com/labring-sigs/pvc-migrate/api/v1alpha1"
 	"github.com/labring-sigs/pvc-migrate/internal/domain"
-	"github.com/labring-sigs/pvc-migrate/internal/kube"
-	"github.com/labring-sigs/pvc-migrate/internal/planner"
 	"github.com/spf13/cobra"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
 type podMigrationFlags struct {
-	sessionID                   string
-	sourceNamespace             string
-	temporaryNamespace          string
-	destinationCapacities       []string
-	sourcePaths                 []string
-	destinationPaths            []string
-	allowVolumeShrink           bool
-	skipSourceUsageCheck        bool
-	sourceNode                  string
-	targetNode                  string
-	destinationClass            string
-	capacityAwareness           string
-	strategies                  []string
-	verifyChecksum              bool
-	deleteExtraneous            bool
-	podName                     string
-	switchoverCandidate         string
-	allowLeaderDowntime         bool
-	forceReprovision            bool
-	precopyPasses               int
-	openEBSLVMEnableShared      bool
-	sourcePVReclaimPolicy       string
-	destinationPVCReclaimPolicy string
+	sessionID               string
+	sourceNamespace         string
+	temporaryNamespace      string
+	destinationCapacities   []string
+	sourcePaths             []string
+	destinationPaths        []string
+	allowVolumeShrink       bool
+	skipSourceUsageCheck    bool
+	sourceNode              string
+	targetNode              string
+	destinationClass        string
+	capacityAwareness       string
+	strategies              []string
+	verifyChecksum          bool
+	deleteExtraneous        bool
+	podName                 string
+	switchoverCandidate     string
+	allowLeaderDowntime     bool
+	forceReprovision        bool
+	allowPlacementViolation bool
+	precopyPasses           int
+	openEBSLVMEnableShared  bool
+	unusedStoragePolicy     string
 }
 
 func (f *podMigrationFlags) bind(command *cobra.Command) {
@@ -70,16 +72,10 @@ func (f *podMigrationFlags) bind(command *cobra.Command) {
 		"Allow destination capacity below the source PV capacity; only use when copied data is known to fit",
 	)
 	flags.StringVar(
-		&f.sourcePVReclaimPolicy,
-		"source-pv-reclaim-policy",
-		string(domain.SourcePVReclaimRetain),
-		"Policy for the old source PV after migration: Retain or Delete",
-	)
-	flags.StringVar(
-		&f.destinationPVCReclaimPolicy,
-		"destination-pvc-reclaim-policy",
-		string(domain.DestinationPVCReclaimRetain),
-		"Destination storage policy on cleanup, including after rollback: Retain or Delete",
+		&f.unusedStoragePolicy,
+		"unused-storage-policy",
+		string(v1alpha1.UnusedStorageKeep),
+		"Keep or Delete replaced storage: Delete removes the old source PV after a completed cutover, or the staged destination after a rollback or abort; the PVC the workload runs on is always kept (default Keep)",
 	)
 	flags.BoolVar(
 		&f.skipSourceUsageCheck,
@@ -136,10 +132,16 @@ func (f *podMigrationFlags) bind(command *cobra.Command) {
 		false,
 		"Enable same-node shared mounts for OpenEBS LVM warm copy and multi-consumer RWO destinations",
 	)
+	flags.BoolVar(
+		&f.allowPlacementViolation,
+		"allow-placement-violation",
+		false,
+		"Proceed when the recreated Pod may violate required podAntiAffinity or topologySpread constraints on the target node",
+	)
 	flags.StringVar(&f.podName, "pod", "", "Stateful Pod migration unit")
 	flags.StringVar(
 		&f.switchoverCandidate,
-		"kubeblocks-candidate",
+		"switchover-candidate",
 		"",
 		"Switchover target for a supported InstanceSet-backed KubeBlocks primary",
 	)
@@ -156,10 +158,12 @@ func (f *podMigrationFlags) bindForceReprovision(command *cobra.Command) {
 		BoolVar(&f.forceReprovision, "force-reprovision", false, "Replace backing PVs when the Pod already uses the target node and StorageClass")
 }
 
-func (f *podMigrationFlags) planOptions(
+func (f *podMigrationFlags) workflow(
 	state *rootState,
-	useTemporary bool,
-) (planner.PodMigrationOptions, error) {
+	runtime *commandRuntime,
+	temporaryExplicit bool,
+	submit bool,
+) (*v1alpha1.ClusterPodMigration, error) {
 	if err := validateDestinationCapacityFlags(
 		domain.OperationMigratePod,
 		false,
@@ -169,56 +173,67 @@ func (f *podMigrationFlags) planOptions(
 		f.sourcePaths,
 		f.destinationPaths,
 	); err != nil {
-		return planner.PodMigrationOptions{}, err
+		return nil, err
 	}
 
 	id := f.sessionID
 	if id == "" {
 		generated, err := domain.NewSessionID(time.Now())
 		if err != nil {
-			return planner.PodMigrationOptions{}, err
+			return nil, err
 		}
 
 		id = generated
 		f.sessionID = id
 	}
 
-	stagingNamespace := f.sourceNamespace
+	sessionNamespace, temporaryNamespace := state.controllerPlanNamespaces(
+		runtime,
+		domain.SessionTypeMigratePod,
+		f.sourceNamespace,
+		f.sourceNamespace,
+		f.temporaryNamespace,
+		temporaryExplicit,
+		submit,
+	)
 
-	temporaryNamespace := f.sourceNamespace
-	if useTemporary {
-		stagingNamespace = f.temporaryNamespace
-		temporaryNamespace = f.temporaryNamespace
+	object := &v1alpha1.ClusterPodMigration{
+		ObjectMeta: metav1.ObjectMeta{Name: id},
+		Spec: v1alpha1.ClusterPodMigrationSpec{
+			SourceNamespace:    v1alpha1.NamespaceName(f.sourceNamespace),
+			TemporaryNamespace: v1alpha1.NamespaceName(temporaryNamespace),
+			SessionNamespace:   v1alpha1.NamespaceName(sessionNamespace),
+			PodMigrationSpec: v1alpha1.PodMigrationSpec{
+				Pod:                     v1alpha1.LocalResourceReference{Name: f.podName},
+				PrecopyPasses:           f.precopyPasses,
+				ForceReprovision:        f.forceReprovision,
+				OpenEBSLVMEnableShared:  f.openEBSLVMEnableShared,
+				SwitchoverCandidate:     f.switchoverCandidate,
+				AllowLeaderDowntime:     f.allowLeaderDowntime,
+				AllowPlacementViolation: f.allowPlacementViolation,
+				TransferOptions: v1alpha1.TransferOptions{
+					UnusedStoragePolicy: v1alpha1.UnusedStoragePolicy(
+						f.unusedStoragePolicy,
+					),
+					DestinationStorageClass: f.destinationClass,
+					CapacityAwareness:       f.capacityAwareness,
+					SourceNode:              f.sourceNode,
+					TargetNode:              f.targetNode,
+					Strategies:              append([]string(nil), f.strategies...),
+					VerifyChecksum:          f.verifyChecksum,
+					DeleteExtraneous:        new(f.deleteExtraneous),
+					AllowVolumeShrink:       f.allowVolumeShrink,
+					SkipSourceUsageCheck:    f.skipSourceUsageCheck,
+				},
+			},
+		},
+	}
+	if err := applyVolumeMappings(&object.Spec.TransferOptions, &object.Spec.Volumes, true,
+		f.destinationCapacities, nil, f.sourcePaths, f.destinationPaths); err != nil {
+		return nil, err
 	}
 
-	return planner.PodMigrationOptions{
-		SessionID:                   id,
-		SourceNamespace:             f.sourceNamespace,
-		TemporaryNamespace:          temporaryNamespace,
-		SessionNamespace:            state.global.sessionNamespace,
-		StagingNamespace:            stagingNamespace,
-		ToolImage:                   state.global.toolImage,
-		DestinationCapacities:       append([]string(nil), f.destinationCapacities...),
-		SourcePaths:                 append([]string(nil), f.sourcePaths...),
-		DestinationPaths:            append([]string(nil), f.destinationPaths...),
-		AllowVolumeShrink:           f.allowVolumeShrink,
-		SkipSourceUsageCheck:        f.skipSourceUsageCheck,
-		PodName:                     f.podName,
-		SourceNode:                  f.sourceNode,
-		TargetNode:                  f.targetNode,
-		DestinationClass:            f.destinationClass,
-		CapacityAwareness:           domain.CapacityAwareness(f.capacityAwareness),
-		Strategies:                  append([]string(nil), f.strategies...),
-		VerifyChecksum:              f.verifyChecksum,
-		DeleteExtraneous:            f.deleteExtraneous,
-		SwitchoverCandidate:         f.switchoverCandidate,
-		AllowLeaderDowntime:         f.allowLeaderDowntime,
-		ForceReprovision:            f.forceReprovision,
-		PrecopyPasses:               f.precopyPasses,
-		OpenEBSLVMEnableShared:      f.openEBSLVMEnableShared,
-		SourcePVReclaimPolicy:       f.sourcePVReclaimPolicy,
-		DestinationPVCReclaimPolicy: f.destinationPVCReclaimPolicy,
-	}, nil
+	return object, nil
 }
 
 func (r *rootState) newMigratePodCommand() *cobra.Command {
@@ -228,7 +243,7 @@ func (r *rootState) newMigratePodCommand() *cobra.Command {
 
 	command := &cobra.Command{
 		Use:   "migrate-pod",
-		Short: "Run a real-time Pod migration with warm copy and workload cutover",
+		Short: "Run a real-time Pod migration with warm copy and workload cutover in this session",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			if err := validateDestinationCapacityFlags(
@@ -255,7 +270,7 @@ func (r *rootState) newMigratePodCommand() *cobra.Command {
 				)
 			}
 
-			return r.runPodMigrateCommand(cmd, flags, dryRun)
+			return r.runPodMigrateCommand(cmd, flags, dryRun, false, false)
 		},
 	}
 	flags.bind(command)
@@ -263,6 +278,7 @@ func (r *rootState) newMigratePodCommand() *cobra.Command {
 	bindDryRun(command, &dryRun)
 	command.AddCommand(
 		r.newPodMigrationPlanCommand(),
+		r.newPodMigrationCreateCommand(),
 		r.newPodMigrationStatusCommand(),
 		r.newPodMigrationResumeCommand(),
 		r.newPodMigrationAbortCommand(),
@@ -273,27 +289,34 @@ func (r *rootState) newMigratePodCommand() *cobra.Command {
 	return command
 }
 
+// newPodMigrationCreateCommand submits a declarative PodMigration workflow
+// for controller reconciliation.
+// newPodMigrationPlanCommand validates a Pod migration without mutations.
+// Planning lives in the main dry-run path; this subcommand keeps the
+// subcommand symmetry with the other operations.
 func (r *rootState) newPodMigrationPlanCommand() *cobra.Command {
 	flags := &podMigrationFlags{}
+
+	var dryRun bool
+
 	command := &cobra.Command{
 		Use:   "plan",
-		Short: "Inventory resources and validate this real-time Pod migration",
+		Short: "Inventory resources and validate this Pod migration",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			existing := flags.sessionID != "" && flags.podName == ""
 			if err := validateDestinationCapacityFlags(
 				domain.OperationMigratePod,
-				existing,
+				false,
 				flags.destinationCapacities,
 				flags.allowVolumeShrink,
 				flags.skipSourceUsageCheck,
 				flags.sourcePaths,
 				flags.destinationPaths,
 			); err != nil {
-				return err
+				return reportPreSessionError(cmd, err)
 			}
 
-			if flags.podName == "" && !existing {
+			if flags.podName == "" {
 				return domain.NewError(
 					domain.ErrorValidation,
 					"migrate-pod plan",
@@ -309,77 +332,63 @@ func (r *rootState) newPodMigrationPlanCommand() *cobra.Command {
 				)
 			}
 
-			runtime, err := r.runtime()
-			if err != nil {
-				return err
+			return r.runPodMigrateCommand(cmd, flags, true, false, false)
+		},
+	}
+	flags.bind(command)
+	bindDryRun(command, &dryRun)
+
+	return command
+}
+
+func (r *rootState) newPodMigrationCreateCommand() *cobra.Command {
+	flags := &podMigrationFlags{}
+
+	var (
+		dryRun bool
+		wait   bool
+	)
+
+	command := &cobra.Command{
+		Use:   "create",
+		Short: "Submit a PodMigration workflow for controller reconciliation",
+		Args:  cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			if err := validateDestinationCapacityFlags(
+				domain.OperationMigratePod,
+				false,
+				flags.destinationCapacities,
+				flags.allowVolumeShrink,
+				flags.skipSourceUsageCheck,
+				flags.sourcePaths,
+				flags.destinationPaths,
+			); err != nil {
+				return reportPreSessionError(cmd, err)
 			}
 
-			ctx, cancel := r.context(cmd.Context())
-			defer cancel()
-
-			if existing {
-				namespace := workflowNamespaceForCommand(r, cmd)
-
-				session, err := kube.GetSessionByType(
-					ctx, runtime.store, namespace, flags.sessionID, domain.SessionTypeMigratePod,
+			if flags.podName == "" {
+				return domain.NewError(
+					domain.ErrorValidation,
+					"migrate-pod create",
+					"--pod is required",
 				)
-				if err != nil {
-					return reportSessionLookupError(
-						cmd,
-						namespace,
-						flags.sessionID,
-						err,
-					)
-				}
-
-				if session.Spec.Operation() != domain.OperationMigratePod {
-					return reportSessionError(
-						cmd,
-						session,
-						domain.NewError(
-							domain.ErrorPrecondition,
-							"migrate-pod plan",
-							"migrate-pod plan requires a MigratePod session",
-						),
-					)
-				}
-
-				if err := runtime.service.ValidateReservation(ctx, session); err != nil {
-					return reportSessionError(cmd, session, err)
-				}
-
-				return printSessionResult(cmd, runtime, session)
 			}
 
-			options, err := flags.planOptions(r, true)
-			if err != nil {
-				return err
+			if flags.precopyPasses < 0 {
+				return domain.NewError(
+					domain.ErrorValidation,
+					"migrate-pod create",
+					"--precopy-passes cannot be negative",
+				)
 			}
 
-			options.SessionNamespace, options.TemporaryNamespace = r.controllerPlanNamespaces(
-				runtime,
-				domain.SessionTypeMigratePod,
-				options.SourceNamespace,
-				options.SourceNamespace,
-				options.TemporaryNamespace,
-				cmd.Flags().Changed("temporary-namespace"),
-			)
-			options.StagingNamespace = options.TemporaryNamespace
-
-			plan, err := runtime.planner.PlanPodMigration(ctx, options)
-			if err != nil {
-				return reportPlanningError(cmd, err)
-			}
-
-			if err := printPlanResult(cmd, runtime, plan); err != nil {
-				return err
-			}
-
-			return requireReady(plan)
+			return r.runPodMigrateCommand(cmd, flags, dryRun, true, wait)
 		},
 	}
 	flags.bind(command)
 	flags.bindForceReprovision(command)
+	bindCreateDryRun(command, &dryRun)
+	bindCreateWait(command, &wait)
 
 	return command
 }
@@ -388,6 +397,8 @@ func (r *rootState) runPodMigrateCommand(
 	cmd *cobra.Command,
 	flags *podMigrationFlags,
 	dryRun bool,
+	submit bool,
+	wait bool,
 ) error {
 	runtime, err := r.runtime()
 	if err != nil {
@@ -397,53 +408,87 @@ func (r *rootState) runPodMigrateCommand(
 	ctx, cancel := r.context(cmd.Context())
 	defer cancel()
 
-	options, err := flags.planOptions(r, true)
+	object, err := flags.workflow(r, runtime, cmd.Flags().Changed("temporary-namespace"), submit)
 	if err != nil {
 		return err
 	}
 
-	options.SessionNamespace, options.TemporaryNamespace = r.controllerPlanNamespaces(
-		runtime,
-		domain.SessionTypeMigratePod,
-		options.SourceNamespace,
-		options.SourceNamespace,
-		options.TemporaryNamespace,
-		cmd.Flags().Changed("temporary-namespace"),
-	)
-	options.StagingNamespace = options.TemporaryNamespace
+	// Submission previews plan with controller semantics: submission RBAC and
+	// CR-backed estimates, not the data-plane permissions local runs need.
+	if submit && runtime.planner != nil {
+		runtime.planner = runtime.planner.ForController()
+	}
 
-	plan, err := runtime.planner.ForSubmission(runtime.mode == executionModeController && !dryRun).
-		PlanPodMigration(ctx, options)
+	// Only controller submission depends on the workflow CRDs being served.
+	if submit {
+		if err := requireControllerWorkflow(runtime, domain.SessionTypeMigratePod); err != nil {
+			return err
+		}
+	}
+
+	if err != nil {
+		return err
+	}
+
+	if submit && !dryRun {
+		if err := r.confirm(ctx, cmd, podApprovalIdentity(flags)); err != nil {
+			return reportApprovalError(cmd, err)
+		}
+
+		runtime.waitForController = wait
+
+		return submitPodMigration(ctx, cmd, runtime, object)
+	}
+
+	plan, err := runtime.planner.PlanPodMigration(ctx, object, r.global.toolImage)
 	if err != nil {
 		return reportPlanningError(cmd, err)
 	}
 
-	if err := requireReadyWithOutput(runtime, plan, cmd.ErrOrStderr()); err != nil {
+	if err := requireReadyWithOutput(
+		runtime,
+		plan,
+		cmd.ErrOrStderr(),
+		podMigrationPlanAdvice(plan.Workload.KubeBlocks),
+	); err != nil {
 		return err
 	}
 
 	if dryRun {
-		return printPlanResult(cmd, runtime, plan)
+		return printPlanResult(cmd, runtime, plan, podMigrationPlanAdvice(plan.Workload.KubeBlocks))
 	}
 
 	if err := r.confirm(ctx, cmd, podApprovalIdentity(flags)); err != nil {
 		return reportApprovalError(cmd, err)
 	}
 
-	session, err := runtime.service.CreateSession(ctx, plan, false)
-	if err != nil {
-		return reportSessionCreationError(cmd, plan.SessionNamespace, plan.SessionID, err)
+	object.Status.Phase = domain.PhasePlanned
+	if err := runtime.clusterPodMigrationSessionStore.Create(ctx, object); err != nil {
+		return reportPlanningError(cmd, err)
 	}
 
-	if deferred, err := deferControllerExecution(ctx, cmd, runtime, session); deferred {
-		return err
+	if err := runtime.clusterPodMigrationSessionExecutor.Run(ctx, object); err != nil {
+		return reportPodMigrationError(cmd, object.Name, object.Status.Phase, err)
 	}
 
-	if err := runtime.service.MigratePod(ctx, session); err != nil {
-		return reportSessionError(cmd, session, err)
-	}
+	return runtime.printer.Print(object)
+}
 
-	return printSessionResult(cmd, runtime, session)
+func reportPodMigrationError(
+	cmd *cobra.Command,
+	name string,
+	phase v1alpha1.WorkflowPhase,
+	cause error,
+) error {
+	_, err := fmt.Fprintf(
+		cmd.ErrOrStderr(),
+		"Pod migration %s stopped in phase %s. Inspect migrate-pod status %s before resume, abort or cleanup.\n",
+		name,
+		phase,
+		name,
+	)
+
+	return errors.Join(cause, err)
 }
 
 func podApprovalIdentity(flags *podMigrationFlags) string {

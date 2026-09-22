@@ -3,10 +3,10 @@ package planner
 import (
 	"context"
 	"fmt"
-	"os"
 	"slices"
 	"strings"
 
+	v1alpha1 "github.com/labring-sigs/pvc-migrate/api/v1alpha1"
 	"github.com/labring-sigs/pvc-migrate/internal/domain"
 	"github.com/labring-sigs/pvc-migrate/internal/kube"
 	"github.com/labring-sigs/pvc-migrate/internal/parallel"
@@ -34,46 +34,58 @@ func (checks *rbacChecks) add(namespace, group, resource string, verbs ...string
 	}
 }
 
-func (p *Planner) checkRBAC(
-	ctx context.Context,
-	plan *domain.MigrationPlan,
-	spec domain.SessionSpec,
-	inspectOpenEBSLVMShared, enableOpenEBSLVMShared bool,
-) {
-	if p.controllerSubmission {
-		p.checkControllerSubmissionRBAC(ctx, plan, spec)
-		return
-	}
-
-	sourceNamespace, stagingNamespace, sessionNamespace := spec.SourceNamespace, spec.TemporaryNamespace, spec.SessionNamespace
-	workload := spec.Workload()
-	transfer := spec.Operation() != domain.OperationReserve
-
-	p.logInfo(
-		"checking migration RBAC permissions",
-		"sourceNamespace",
-		sourceNamespace,
-		"stagingNamespace",
-		stagingNamespace,
-		"sessionNamespace",
-		sessionNamespace,
-	)
-
-	checks := p.namespaceRBAC(ctx, plan, spec)
-
+func reservationResourceAccess(
+	sourceNamespace, stagingNamespace, sessionNamespace string,
+) rbacChecks {
+	checks := rbacChecks{}
 	add := checks.add
+
 	for _, namespace := range uniqueSorted([]string{sourceNamespace, stagingNamespace}) {
 		add(namespace, "", "pods", "get", "list", "create", "delete")
 		add(namespace, "", "pods/log", "get")
 		add(namespace, "", "events", "list")
+	}
 
-		if !transfer {
-			continue
+	add(
+		sessionNamespace,
+		"",
+		"configmaps",
+		"get",
+		"list",
+		"create",
+		"update",
+		"delete",
+	)
+	add(sessionNamespace, "coordination.k8s.io", "leases", "get", "create", "update", "delete")
+
+	for _, namespace := range uniqueSorted([]string{sourceNamespace, stagingNamespace}) {
+		add(namespace, "", "persistentvolumeclaims", "get", "update")
+
+		if namespace == stagingNamespace {
+			add(namespace, "", "persistentvolumeclaims", "create", "update", "delete")
 		}
 
+		add(namespace, "", "resourcequotas", "list")
+		add(namespace, "", "limitranges", "list")
+	}
+
+	add("", "", "nodes", "get", "list")
+	add("", "", "persistentvolumes", "get", "update", "delete")
+	add("", "storage.k8s.io", "storageclasses", "get")
+	add("", "storage.k8s.io", "csinodes", "get")
+	add("", "storage.k8s.io", "volumeattachments", "list")
+
+	return checks
+}
+
+func transferToolAccess(namespaces, strategies []string) rbacChecks {
+	checks := make(rbacChecks, 0, 40*len(namespaces))
+	add := checks.add
+
+	for _, namespace := range uniqueSorted(namespaces) {
 		add(namespace, "", "pods", "watch")
 
-		if slices.Contains(spec.WorkflowOptions().Strategies, domain.StrategyLocal) {
+		if slices.Contains(strategies, domain.StrategyLocal) {
 			add(namespace, "", "pods/portforward", "create")
 		}
 
@@ -92,7 +104,7 @@ func (p *Planner) checkRBAC(
 		add(namespace, "", "secrets", "get", "create", "patch", "delete")
 
 		releaseResource := "secrets"
-		if driver := os.Getenv("HELM_DRIVER"); driver == "configmap" || driver == "configmaps" {
+		if kube.HelmReleaseStorageFromEnv() == kube.HelmReleaseStorageConfigMap {
 			releaseResource = "configmaps"
 		}
 
@@ -131,91 +143,55 @@ func (p *Planner) checkRBAC(
 		add(namespace, "networking.k8s.io", "networkpolicies", "list")
 	}
 
-	add(
-		sessionNamespace,
-		"",
-		"configmaps",
-		"get",
-		"list",
-		"create",
-		"update",
-		"delete",
-	)
-	add(sessionNamespace, "coordination.k8s.io", "leases", "get", "create", "update", "delete")
-
-	for _, namespace := range uniqueSorted([]string{sourceNamespace, stagingNamespace}) {
-		add(namespace, "", "persistentvolumeclaims", "get", "update")
-
-		if namespace == stagingNamespace || spec.Operation() == domain.OperationMigrate ||
-			spec.Operation() == domain.OperationMigratePod {
-			add(namespace, "", "persistentvolumeclaims", "create", "update", "delete")
-		}
-
-		add(namespace, "", "resourcequotas", "list")
-		add(namespace, "", "limitranges", "list")
-	}
-
-	add("", "", "nodes", "get", "list")
-	add("", "", "persistentvolumes", "get", "update", "delete")
-	add("", "storage.k8s.io", "storageclasses", "get")
-	add("", "storage.k8s.io", "csinodes", "get")
-	add("", "storage.k8s.io", "volumeattachments", "list")
-
-	if spec.Operation() == domain.OperationMigrate ||
-		spec.Operation() == domain.OperationMigratePod {
-		for _, namespace := range uniqueSorted([]string{sourceNamespace, spec.DestinationNamespace}) {
-			add(namespace, "", "persistentvolumeclaims", "get", "create", "update", "delete")
-			add(namespace, "", "pods", "list")
-		}
-	}
-
-	if spec.Operation() == domain.OperationMigratePod {
-		add(sourceNamespace, "", "pods", "update")
-	}
-
-	if inspectOpenEBSLVMShared {
-		add("", "local.openebs.io", "lvmvolumes", "list")
-	}
-
-	if enableOpenEBSLVMShared {
-		add("", "local.openebs.io", "lvmvolumes", "patch")
-	}
-
-	checks = append(checks, workloadRBAC(sourceNamespace, workload)...)
-	p.checkAccessReviews(ctx, plan, checks)
+	return checks
 }
 
-func workloadRBAC(sourceNamespace string, workload domain.WorkloadSpec) rbacChecks {
+func activationResourceAccess(sourceNamespace, destinationNamespace string) rbacChecks {
+	checks := rbacChecks{}
+	for _, namespace := range uniqueSorted([]string{sourceNamespace, destinationNamespace}) {
+		checks.add(namespace, "", "persistentvolumeclaims", "get", "create", "update", "delete")
+		checks.add(namespace, "", "pods", "list")
+	}
+
+	return checks
+}
+
+func workloadRBAC(sourceNamespace string, workload v1alpha1.WorkloadSpec) rbacChecks {
 	checks := rbacChecks{}
 	add := checks.add
 
-	switch workload.Adapter {
-	case domain.WorkloadStatefulSet, domain.WorkloadVictoriaLogs, domain.WorkloadVMCluster:
-		add(workload.Controller.Namespace, "apps", "statefulsets", "get", "update")
-	case domain.WorkloadDeployment, domain.WorkloadGrafana:
-		add(workload.Controller.Namespace, "apps", "deployments", "get", "update")
+	controller := v1alpha1.LocalResourceReference{}
+	if workload.Controller != nil {
+		controller = *workload.Controller
 	}
 
 	switch workload.Adapter {
-	case domain.WorkloadDeployment,
-		domain.WorkloadGrafana,
-		domain.WorkloadStatefulSet,
-		domain.WorkloadVictoriaLogs,
-		domain.WorkloadVMCluster:
-		add(workload.Controller.Namespace, "autoscaling", "horizontalpodautoscalers", "list")
+	case v1alpha1.WorkloadStatefulSet, v1alpha1.WorkloadVictoriaLogs, v1alpha1.WorkloadVMCluster:
+		add(sourceNamespace, "apps", "statefulsets", "get", "update")
+	case v1alpha1.WorkloadDeployment, v1alpha1.WorkloadGrafana:
+		add(sourceNamespace, "apps", "deployments", "get", "update")
+	}
+
+	switch workload.Adapter {
+	case v1alpha1.WorkloadDeployment,
+		v1alpha1.WorkloadGrafana,
+		v1alpha1.WorkloadStatefulSet,
+		v1alpha1.WorkloadVictoriaLogs,
+		v1alpha1.WorkloadVMCluster:
+		add(sourceNamespace, "autoscaling", "horizontalpodautoscalers", "list")
 	}
 
 	if workload.KubeBlocks != nil {
-		instanceSetSwitchover := workload.Controller.Kind == domain.KindInstanceSet &&
+		instanceSetSwitchover := controller.Kind == domain.KindInstanceSet &&
 			workload.KubeBlocks.SwitchoverCandidate != ""
 		if instanceSetSwitchover &&
-			workload.KubeBlocks.SwitchoverStrategy == domain.KubeBlocksSwitchoverMongoDBNative {
+			workload.KubeBlocks.SwitchoverStrategy == v1alpha1.KubeBlocksSwitchoverMongoDBNative {
 			add(sourceNamespace, "", "pods/exec", "create")
 		}
 
-		if workload.Controller.Kind != domain.KindInstanceSet ||
+		if controller.Kind != domain.KindInstanceSet ||
 			(instanceSetSwitchover &&
-				workload.KubeBlocks.SwitchoverStrategy == domain.KubeBlocksSwitchoverOpsRequest) {
+				workload.KubeBlocks.SwitchoverStrategy == v1alpha1.KubeBlocksSwitchoverOpsRequest) {
 			group, _, _ := strings.Cut(workload.KubeBlocks.OpsAPIVersion, "/")
 			add(sourceNamespace, group, "opsrequests", "get", "create", "delete")
 		}
@@ -223,8 +199,8 @@ func workloadRBAC(sourceNamespace string, workload domain.WorkloadSpec) rbacChec
 		clusterGroup := domain.KubeBlocksAppsGroup
 		add(sourceNamespace, clusterGroup, "clusters", "get")
 
-		if workload.Controller.Kind == domain.KindInstanceSet {
-			instanceSetGroup, _, _ := strings.Cut(workload.Controller.APIVersion, "/")
+		if controller.Kind == domain.KindInstanceSet {
+			instanceSetGroup, _, _ := strings.Cut(controller.APIVersion, "/")
 			add(sourceNamespace, instanceSetGroup, "instancesets", "get", "update")
 		} else {
 			add(sourceNamespace, clusterGroup, "clusters", "update")
@@ -246,16 +222,15 @@ func workloadRBAC(sourceNamespace string, workload domain.WorkloadSpec) rbacChec
 
 func (p *Planner) checkRenameRBAC(
 	ctx context.Context,
-	plan *domain.MigrationPlan,
-	spec domain.SessionSpec,
+	plan checkRecorder,
+	sourceNamespace, destinationNamespace, sessionNamespace string,
 ) {
 	if p.controllerSubmission {
-		p.checkControllerSubmissionRBAC(ctx, plan, spec)
+		p.checkSubmissionNamespaces(ctx, plan, []string{destinationNamespace, sessionNamespace})
 		return
 	}
 
-	sourceNamespace, destinationNamespace, sessionNamespace := spec.SourceNamespace, spec.DestinationNamespace, spec.SessionNamespace
-	checks := p.namespaceRBAC(ctx, plan, spec)
+	checks := p.checkNamespaceAccess(ctx, plan, []string{destinationNamespace, sessionNamespace})
 	add := checks.add
 	add(sourceNamespace, "", "pods", "list")
 	add(destinationNamespace, "", "pods", "list")
@@ -269,22 +244,11 @@ func (p *Planner) checkRenameRBAC(
 	p.checkAccessReviews(ctx, plan, checks)
 }
 
-func (p *Planner) namespaceRBAC(
+func (p *Planner) checkNamespaceAccess(
 	ctx context.Context,
-	plan *domain.MigrationPlan,
-	spec domain.SessionSpec,
+	plan checkRecorder,
+	namespaces []string,
 ) rbacChecks {
-	namespaces := make([]string, 0, 3+len(spec.Volumes))
-
-	namespaces = append(namespaces,
-		spec.SessionNamespace,
-		spec.TemporaryNamespace,
-		spec.DestinationNamespace,
-	)
-	for _, volume := range spec.Volumes {
-		namespaces = append(namespaces, volume.DestinationPVC.Namespace)
-	}
-
 	checks := rbacChecks{}
 	for _, namespace := range uniqueSorted(namespaces) {
 		if namespace == "" {
@@ -303,22 +267,11 @@ func (p *Planner) namespaceRBAC(
 	return checks
 }
 
-func (p *Planner) checkControllerSubmissionRBAC(
+func (p *Planner) checkSubmissionNamespaces(
 	ctx context.Context,
-	plan *domain.MigrationPlan,
-	spec domain.SessionSpec,
+	plan checkRecorder,
+	namespaces []string,
 ) {
-	namespaces := make([]string, 0, 3+len(spec.Volumes))
-
-	namespaces = append(namespaces,
-		spec.SessionNamespace,
-		spec.TemporaryNamespace,
-		spec.DestinationNamespace,
-	)
-	for _, volume := range spec.Volumes {
-		namespaces = append(namespaces, volume.DestinationPVC.Namespace)
-	}
-
 	for _, namespace := range uniqueSorted(namespaces) {
 		if namespace == "" {
 			continue
@@ -337,42 +290,33 @@ func (p *Planner) checkControllerSubmissionRBAC(
 			}
 		}
 	}
+}
 
-	resource, ok := domain.ControllerResourceForSpec(spec)
-
-	if p.planningWorkflow {
-		return
-	}
-
-	if !ok {
-		plan.AddCheck(failed(domain.CheckNameRBAC, "workflow has no controller resource"))
-		return
-	}
-
-	namespace := spec.SessionNamespace
-	if resource.Cluster {
-		namespace = ""
-	}
-
+func (p *Planner) checkWorkflowSubmissionAccess(
+	ctx context.Context,
+	plan checkRecorder,
+	name, namespace string,
+	resource string,
+) {
 	checks := []rbacAccess{
 		{
 			namespace: namespace,
 			group:     "migrate.sealos.io",
-			resource:  resource.Resource,
+			resource:  resource,
 			verb:      "create",
 		},
 		{
 			namespace: namespace,
 			group:     "migrate.sealos.io",
-			resource:  resource.Resource,
-			name:      plan.SessionID,
+			resource:  resource,
+			name:      name,
 			verb:      "get",
 		},
 		{
 			namespace: namespace,
 			group:     "migrate.sealos.io",
-			resource:  resource.Resource,
-			name:      plan.SessionID,
+			resource:  resource,
+			name:      name,
 			verb:      "watch",
 		},
 	}
@@ -381,7 +325,7 @@ func (p *Planner) checkControllerSubmissionRBAC(
 
 func (p *Planner) checkAccessReviews(
 	ctx context.Context,
-	plan *domain.MigrationPlan,
+	plan checkRecorder,
 	checks []rbacAccess,
 ) {
 	seen := make(map[rbacAccess]struct{}, len(checks))

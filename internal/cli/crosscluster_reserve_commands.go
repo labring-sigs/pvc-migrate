@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"time"
 
+	v1alpha1 "github.com/labring-sigs/pvc-migrate/api/v1alpha1"
 	"github.com/labring-sigs/pvc-migrate/internal/crosscluster"
 	"github.com/labring-sigs/pvc-migrate/internal/domain"
 	"github.com/spf13/cobra"
@@ -12,22 +13,22 @@ import (
 
 type crossClusterReserveFlags struct {
 	crossClusterConnectionFlags
-	sessionID                   string
-	sourceNamespace             string
-	destinationNamespace        string
-	sourcePVCs                  []string
-	destinationPVCs             []string
-	destinationCapacities       []string
-	sourcePaths                 []string
-	destinationPaths            []string
-	destinationStorageClass     string
-	allowVolumeShrink           bool
-	skipSourceUsageCheck        bool
-	targetNode                  string
-	toolImage                   string
-	strategies                  []string
-	destinationPVCReclaimPolicy string
-	deleteSession               bool
+	sessionID               string
+	sourceNamespace         string
+	destinationNamespace    string
+	sourcePVCs              []string
+	destinationPVCs         []string
+	destinationCapacities   []string
+	sourcePaths             []string
+	destinationPaths        []string
+	destinationStorageClass string
+	allowVolumeShrink       bool
+	skipSourceUsageCheck    bool
+	targetNode              string
+	toolImage               string
+	strategies              []string
+	unusedStoragePolicy     string
+	deleteSession           bool
 }
 
 // bind exposes only the connection, identity, capacity, and
@@ -37,10 +38,10 @@ func (f *crossClusterReserveFlags) bind(command *cobra.Command, r *rootState) {
 	f.bindConnections(command, r)
 	flags := command.Flags()
 	flags.StringVar(
-		&f.destinationPVCReclaimPolicy,
-		"destination-pvc-reclaim-policy",
-		"Retain",
-		"Destination storage policy on cleanup: Retain or Delete",
+		&f.unusedStoragePolicy,
+		"unused-storage-policy",
+		string(v1alpha1.UnusedStorageKeep),
+		"Keep or Delete reserved storage: Delete removes destination PVCs this reservation created and never promoted to a copy; promoted destinations belong to the copy workflow and the source is always kept (default Keep)",
 	)
 	flags.StringVarP(&f.sourceNamespace, "source-namespace", "n", "default", "Source PVC namespace")
 	flags.StringVar(
@@ -108,9 +109,9 @@ func (f *crossClusterReserveFlags) bind(command *cobra.Command, r *rootState) {
 	)
 }
 
-func (f *crossClusterReserveFlags) options(r *rootState) (crosscluster.Options, error) {
+func (f *crossClusterReserveFlags) options(r *rootState) (crosscluster.ReservationOptions, error) {
 	if f.destinationKubeconfig == "" {
-		return crosscluster.Options{}, domain.NewError(
+		return crosscluster.ReservationOptions{}, domain.NewError(
 			domain.ErrorValidation,
 			"cross-cluster reserve flags",
 			"--destination-kubeconfig is required",
@@ -130,7 +131,7 @@ func (f *crossClusterReserveFlags) options(r *rootState) (crosscluster.Options, 
 	}
 
 	if f.sourceNamespace == "" || f.destinationNamespace == "" {
-		return crosscluster.Options{}, domain.NewError(
+		return crosscluster.ReservationOptions{}, domain.NewError(
 			domain.ErrorValidation,
 			"cross-cluster reserve flags",
 			"source and destination namespaces are required",
@@ -141,7 +142,7 @@ func (f *crossClusterReserveFlags) options(r *rootState) (crosscluster.Options, 
 	if id == "" {
 		generated, err := domain.NewSessionID(time.Now())
 		if err != nil {
-			return crosscluster.Options{}, err
+			return crosscluster.ReservationOptions{}, err
 		}
 
 		id = generated
@@ -149,30 +150,30 @@ func (f *crossClusterReserveFlags) options(r *rootState) (crosscluster.Options, 
 	}
 
 	if err := crosscluster.ValidateSessionID(id); err != nil {
-		return crosscluster.Options{}, domain.NewError(
+		return crosscluster.ReservationOptions{}, domain.NewError(
 			domain.ErrorValidation,
 			"cross-cluster reserve flags",
 			err.Error(),
 		)
 	}
 
-	return crosscluster.Options{
-		DestinationPVCReclaimPolicy: f.destinationPVCReclaimPolicy,
-		SessionID:                   id,
-		SessionNamespace:            f.sessionNamespace,
-		SourceNamespace:             f.sourceNamespace,
-		DestinationNamespace:        f.destinationNamespace,
-		SourcePVCs:                  f.sourcePVCs,
-		DestinationPVCs:             f.destinationPVCs,
-		DestinationCapacities:       f.destinationCapacities,
-		SourcePaths:                 f.sourcePaths,
-		DestinationPaths:            f.destinationPaths,
-		DestinationStorageClass:     f.destinationStorageClass,
-		AllowVolumeShrink:           f.allowVolumeShrink,
-		SkipSourceUsageCheck:        f.skipSourceUsageCheck,
-		TargetNode:                  f.targetNode,
-		ToolImage:                   f.toolImage,
-		Strategies:                  f.strategies,
+	return crosscluster.ReservationOptions{
+		UnusedStoragePolicy:     v1alpha1.UnusedStoragePolicy(f.unusedStoragePolicy),
+		SessionID:               id,
+		SessionNamespace:        f.sessionNamespace,
+		SourceNamespace:         f.sourceNamespace,
+		DestinationNamespace:    f.destinationNamespace,
+		SourcePVCs:              f.sourcePVCs,
+		DestinationPVCs:         f.destinationPVCs,
+		DestinationCapacities:   f.destinationCapacities,
+		SourcePaths:             f.sourcePaths,
+		DestinationPaths:        f.destinationPaths,
+		DestinationStorageClass: f.destinationStorageClass,
+		AllowVolumeShrink:       f.allowVolumeShrink,
+		SkipSourceUsageCheck:    f.skipSourceUsageCheck,
+		TargetNode:              f.targetNode,
+		ToolImage:               f.toolImage,
+		Strategies:              f.strategies,
 	}, nil
 }
 
@@ -212,7 +213,7 @@ func (r *rootState) newCrossClusterReserveResumeCommand() *cobra.Command {
 			ctx, cancel := r.context(cmd.Context())
 			defer cancel()
 
-			session, err := service.Get(ctx, flags.sessionNamespace, args[0])
+			session, err := service.GetReservation(ctx, flags.sessionNamespace, args[0])
 			if err != nil {
 				return err
 			}
@@ -249,7 +250,7 @@ func (r *rootState) newCrossClusterReserveStatusCommand() *cobra.Command {
 			ctx, cancel := r.context(cmd.Context())
 			defer cancel()
 
-			session, err := service.Get(ctx, flags.sessionNamespace, args[0])
+			session, err := service.GetReservation(ctx, flags.sessionNamespace, args[0])
 			if err != nil {
 				return err
 			}
@@ -280,16 +281,16 @@ func (r *rootState) newCrossClusterReserveCleanupCommand() *cobra.Command {
 			ctx, cancel := r.context(cmd.Context())
 			defer cancel()
 
-			session, err := service.Get(ctx, flags.sessionNamespace, args[0])
+			session, err := service.GetReservation(ctx, flags.sessionNamespace, args[0])
 			if err != nil {
 				return err
 			}
 
 			if dryRun {
-				if err := service.ValidateCleanup(
+				if err := service.ValidateReservationCleanup(
 					ctx,
 					session,
-					flags.destinationPVCReclaimPolicy,
+					flags.unusedStoragePolicy,
 				); err != nil {
 					return err
 				}
@@ -305,10 +306,10 @@ func (r *rootState) newCrossClusterReserveCleanupCommand() *cobra.Command {
 				)
 			}
 
-			if err := service.Cleanup(
+			if err := service.CleanupReservation(
 				ctx,
 				session,
-				flags.destinationPVCReclaimPolicy,
+				flags.unusedStoragePolicy,
 				flags.deleteSession,
 			); err != nil {
 				return err
@@ -325,7 +326,7 @@ func (r *rootState) newCrossClusterReserveCleanupCommand() *cobra.Command {
 	}
 	flags.bindConnections(command, r)
 	command.Flags().
-		StringVar(&flags.destinationPVCReclaimPolicy, "destination-pvc-reclaim-policy", "", "Destination storage policy: Retain or Delete; defaults to the recorded policy")
+		StringVar(&flags.unusedStoragePolicy, "unused-storage-policy", "", "Keep or Delete reserved storage; defaults to the recorded policy. Delete removes destination PVCs this reservation created and never promoted to a copy; the source is always kept")
 	command.Flags().
 		BoolVar(&flags.deleteSession, "delete-session", false, "Delete the source-cluster session record")
 	bindDryRun(command, &dryRun)
@@ -353,7 +354,7 @@ func (r *rootState) newCrossClusterReservePlanCommand() *cobra.Command {
 				return err
 			}
 
-			plan, err := service.Plan(ctx, options)
+			plan, err := service.PlanReservation(ctx, options)
 			if err != nil {
 				return err
 			}
@@ -401,9 +402,13 @@ func (r *rootState) newCrossClusterReserveRunCommand() *cobra.Command {
 				return err
 			}
 
-			var session *crosscluster.Session
+			var session *crosscluster.ReservationSession
 			if flags.sessionID != "" {
-				session, err = service.Get(ctx, options.SessionNamespace, flags.sessionID)
+				session, err = service.GetReservation(
+					ctx,
+					options.SessionNamespace,
+					flags.sessionID,
+				)
 				if apierrors.IsNotFound(err) {
 					session, err = nil, nil
 				} else if err == nil {
@@ -412,7 +417,7 @@ func (r *rootState) newCrossClusterReserveRunCommand() *cobra.Command {
 			}
 
 			if session == nil && err == nil {
-				plan, planErr := service.Plan(ctx, options)
+				plan, planErr := service.PlanReservation(ctx, options)
 				if planErr != nil {
 					return planErr
 				}
@@ -433,7 +438,7 @@ func (r *rootState) newCrossClusterReserveRunCommand() *cobra.Command {
 					return nil
 				}
 
-				session, err = service.CreateSession(ctx, options, plan)
+				session, err = service.CreateReservationSession(ctx, options, plan)
 			}
 
 			if err != nil {

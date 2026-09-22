@@ -20,7 +20,7 @@ func TestCrossClusterCleanupGuidanceIsExecutable(t *testing.T) {
 		"--destination-kubeconfig '/tmp/destination config'",
 		"--destination-context destination",
 		"--session-namespace migration-control",
-		"--destination-pvc-reclaim-policy Delete --delete-session --yes --dry-run=false",
+		"--unused-storage-policy Delete --delete-session --yes --dry-run=false",
 	} {
 		if !strings.Contains(command, required) {
 			t.Fatalf("cleanup guidance %q does not contain %q", command, required)

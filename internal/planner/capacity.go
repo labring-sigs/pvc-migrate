@@ -314,7 +314,11 @@ func matchingCapacityObjects(
 
 	invalidTopology := 0
 	for _, item := range objects {
+		// A capacity object without node topology applies to the whole
+		// cluster -- the same semantics the Kubernetes scheduler uses when
+		// filtering capacities for a node.
 		if item.NodeTopology == nil {
+			matching = append(matching, item)
 			continue
 		}
 
@@ -378,7 +382,8 @@ func evaluateCapacityMatches(
 }
 
 func (p *Planner) checkStorageCapacity(
-	plan *domain.MigrationPlan,
+	plan checkRecorder,
+	reports *[]domain.StorageCapacityReport,
 	node *corev1.Node,
 	volumes []domain.PlannedVolume,
 	inventory *storageCapacityInventory,
@@ -415,7 +420,9 @@ func (p *Planner) checkStorageCapacity(
 
 	for _, class := range classes {
 		evaluation := inventory.evaluate(node, demands[class])
-		plan.StorageCapacity = append(plan.StorageCapacity, evaluation.report)
+		if reports != nil {
+			*reports = append(*reports, evaluation.report)
+		}
 
 		check := domain.Check{
 			Name:     domain.CheckNameStorageCapacity,

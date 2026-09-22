@@ -8,42 +8,30 @@ import (
 	"github.com/labring-sigs/pvc-migrate/internal/kube"
 	"github.com/labring-sigs/pvc-migrate/internal/parallel"
 	corev1 "k8s.io/api/core/v1"
-	apierrors "k8s.io/apimachinery/pkg/api/errors"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
 )
 
-func checkObjectTransferQuota(
+func checkBackupQuota(
 	ctx context.Context,
 	client kubernetes.Interface,
-	req Request,
-	operation string,
+	namespace string,
+	sessionNamespace string,
+	sessionResources domain.ResourceEstimate,
 ) error {
+	operation := "backup"
+
 	toolResources := objectTransferToolResourceEstimate()
-	if operation != "backup" || req.SessionStore == nil {
+	if sessionNamespace == "" {
 		return checkNamespaceAdmissionPolicies(
 			ctx,
 			client,
-			req.Namespace,
+			namespace,
 			operation,
 			toolResources,
 		)
 	}
 
-	if strings.TrimSpace(req.SessionNamespace) == "" {
-		return domain.NewError(
-			domain.ErrorValidation,
-			backupPreflightPhase,
-			"session namespace is required when backup sessions are enabled",
-		)
-	}
-
-	sessionResources, err := backupSessionResourceEstimate(ctx, client, req)
-	if err != nil {
-		return err
-	}
-
-	if req.SessionNamespace == req.Namespace {
+	if sessionNamespace == namespace {
 		toolResources.Secrets += sessionResources.Secrets
 		toolResources.ConfigMaps += sessionResources.ConfigMaps
 		toolResources.Leases += sessionResources.Leases
@@ -51,7 +39,7 @@ func checkObjectTransferQuota(
 		return checkNamespaceAdmissionPolicies(
 			ctx,
 			client,
-			req.Namespace,
+			namespace,
 			operation,
 			toolResources,
 		)
@@ -62,8 +50,8 @@ func checkObjectTransferQuota(
 		estimate  domain.ResourceEstimate
 		err       error
 	}{
-		{namespace: req.Namespace, estimate: toolResources},
-		{namespace: req.SessionNamespace, estimate: sessionResources},
+		{namespace: namespace, estimate: toolResources},
+		{namespace: sessionNamespace, estimate: sessionResources},
 	}
 
 	parallel.For(2, func(index int) {
@@ -179,117 +167,4 @@ func objectTransferToolResourceEstimate() domain.ResourceEstimate {
 	kube.AddHelmReleaseObjectEstimate(&estimate, 1)
 
 	return estimate
-}
-
-func backupSessionResourceEstimate(
-	ctx context.Context,
-	client kubernetes.Interface,
-	req Request,
-) (domain.ResourceEstimate, error) {
-	estimate := domain.ResourceEstimate{Secrets: 1}
-	if req.SessionStore != nil {
-		estimate.Leases = 2
-		switch req.SessionStore.StorageBackend() {
-		case kube.SessionBackendConfigMap:
-			estimate.ConfigMaps = 1
-		case kube.SessionBackendCRD:
-		default:
-			return domain.ResourceEstimate{}, domain.NewError(
-				domain.ErrorInternal,
-				backupPreflightPhase,
-				"session store returned an unsupported storage backend",
-			)
-		}
-	}
-
-	if req.BackupSession == nil {
-		return estimate, nil
-	}
-
-	sessionID := req.BackupSession.ID
-	if estimate.ConfigMaps > 0 {
-		exists, err := backupResourceExists(func() error {
-			_, getErr := client.CoreV1().ConfigMaps(req.SessionNamespace).Get(
-				ctx,
-				kube.SessionConfigMapName(sessionID),
-				metav1.GetOptions{},
-			)
-
-			return getErr
-		})
-		if err != nil {
-			return domain.ResourceEstimate{}, err
-		}
-
-		if exists {
-			estimate.ConfigMaps--
-		}
-	}
-
-	exists, err := backupResourceExists(func() error {
-		_, getErr := client.CoreV1().Secrets(req.SessionNamespace).Get(
-			ctx,
-			kube.BackupCredentialsSecretName(sessionID),
-			metav1.GetOptions{},
-		)
-
-		return getErr
-	})
-	if err != nil {
-		return domain.ResourceEstimate{}, err
-	}
-
-	if exists {
-		estimate.Secrets--
-	}
-
-	if estimate.Leases > 0 {
-		leaseIDs := []string{sessionID, backupTargetLockID(req.Store)}
-		leaseResults := make([]bool, len(leaseIDs))
-		leaseErrors := make([]error, len(leaseIDs))
-		parallel.For(len(leaseIDs), func(index int) {
-			leaseID := leaseIDs[index]
-			exists, err := backupResourceExists(func() error {
-				_, getErr := client.CoordinationV1().Leases(req.SessionNamespace).Get(
-					ctx,
-					kube.SessionLockName(leaseID),
-					metav1.GetOptions{},
-				)
-
-				return getErr
-			})
-			leaseResults[index] = exists
-			leaseErrors[index] = err
-		})
-
-		for index, exists := range leaseResults {
-			if leaseErrors[index] != nil {
-				return domain.ResourceEstimate{}, leaseErrors[index]
-			}
-
-			if exists {
-				estimate.Leases--
-			}
-		}
-	}
-
-	return estimate, nil
-}
-
-func backupResourceExists(get func() error) (bool, error) {
-	err := get()
-	if apierrors.IsNotFound(err) {
-		return false, nil
-	}
-
-	if err != nil {
-		return false, domain.WrapError(
-			domain.ErrorKubernetes,
-			backupPreflightPhase,
-			"read session resource for quota evaluation",
-			err,
-		)
-	}
-
-	return true, nil
 }

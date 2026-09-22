@@ -3,33 +3,33 @@ package cli
 import (
 	"time"
 
+	v1alpha1 "github.com/labring-sigs/pvc-migrate/api/v1alpha1"
+	"github.com/labring-sigs/pvc-migrate/internal/app"
+	"github.com/labring-sigs/pvc-migrate/internal/copyengine"
 	"github.com/labring-sigs/pvc-migrate/internal/domain"
-	"github.com/labring-sigs/pvc-migrate/internal/kube"
-	"github.com/labring-sigs/pvc-migrate/internal/planner"
 	"github.com/spf13/cobra"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
 type offlineMigrationFlags struct {
-	sessionID                   string
-	sourceNamespace             string
-	temporaryNamespace          string
-	destinationNamespace        string
-	sourcePVCs                  []string
-	destinationPVCs             []string
-	destinationCapacities       []string
-	sourcePaths                 []string
-	destinationPaths            []string
-	allowVolumeShrink           bool
-	skipSourceUsageCheck        bool
-	sourceNode                  string
-	targetNode                  string
-	destinationClass            string
-	capacityAwareness           string
-	strategies                  []string
-	verifyChecksum              bool
-	deleteExtraneous            bool
-	sourcePVReclaimPolicy       string
-	destinationPVCReclaimPolicy string
+	sessionID             string
+	sourceNamespace       string
+	temporaryNamespace    string
+	sourcePVCs            []string
+	destinationPVCs       []string
+	destinationCapacities []string
+	sourcePaths           []string
+	destinationPaths      []string
+	allowVolumeShrink     bool
+	skipSourceUsageCheck  bool
+	sourceNode            string
+	targetNode            string
+	destinationClass      string
+	capacityAwareness     string
+	strategies            []string
+	verifyChecksum        bool
+	deleteExtraneous      bool
+	unusedStoragePolicy   string
 }
 
 func (f *offlineMigrationFlags) bind(command *cobra.Command) {
@@ -41,12 +41,6 @@ func (f *offlineMigrationFlags) bind(command *cobra.Command) {
 		"temporary-namespace",
 		"pvc-migrate-system",
 		"Namespace for staged destination PVCs",
-	)
-	flags.StringVar(
-		&f.destinationNamespace,
-		"destination-namespace",
-		"",
-		"Destination namespace; defaults to source namespace",
 	)
 	flags.StringSliceVar(
 		&f.sourcePVCs,
@@ -85,16 +79,10 @@ func (f *offlineMigrationFlags) bind(command *cobra.Command) {
 		"Allow destination capacity below the source PV capacity; only use when copied data is known to fit",
 	)
 	flags.StringVar(
-		&f.sourcePVReclaimPolicy,
-		"source-pv-reclaim-policy",
-		string(domain.SourcePVReclaimRetain),
-		"Policy for the old source PV after migration: Retain or Delete",
-	)
-	flags.StringVar(
-		&f.destinationPVCReclaimPolicy,
-		"destination-pvc-reclaim-policy",
-		string(domain.DestinationPVCReclaimRetain),
-		"Destination storage policy on cleanup, including after rollback: Retain or Delete",
+		&f.unusedStoragePolicy,
+		"unused-storage-policy",
+		string(v1alpha1.UnusedStorageKeep),
+		"Keep or Delete replaced storage: Delete removes the old source PV after a completed cutover, or the staged destination after a rollback or abort; the PVC the workload runs on is always kept (default Keep)",
 	)
 	flags.BoolVar(
 		&f.skipSourceUsageCheck,
@@ -146,10 +134,12 @@ func (f *offlineMigrationFlags) bind(command *cobra.Command) {
 	)
 }
 
-func (f *offlineMigrationFlags) planOptions(
+func (f *offlineMigrationFlags) workflow(
 	state *rootState,
-	useTemporary bool,
-) (planner.OfflineMigrationOptions, error) {
+	runtime *commandRuntime,
+	temporaryExplicit bool,
+	submit bool,
+) (*v1alpha1.ClusterMigration, error) {
 	if err := validateDestinationCapacityFlags(
 		domain.OperationMigrate,
 		false,
@@ -159,58 +149,65 @@ func (f *offlineMigrationFlags) planOptions(
 		f.sourcePaths,
 		f.destinationPaths,
 	); err != nil {
-		return planner.OfflineMigrationOptions{}, err
+		return nil, err
 	}
 
 	id := f.sessionID
 	if id == "" {
 		generated, err := domain.NewSessionID(time.Now())
 		if err != nil {
-			return planner.OfflineMigrationOptions{}, err
+			return nil, err
 		}
 
 		id = generated
 		f.sessionID = id
 	}
 
-	destinationNamespace := f.destinationNamespace
-	if destinationNamespace == "" {
-		destinationNamespace = f.sourceNamespace
+	sessionNamespace, temporaryNamespace := state.controllerPlanNamespaces(
+		runtime,
+		domain.SessionTypeMigrate,
+		f.sourceNamespace,
+		f.sourceNamespace,
+		f.temporaryNamespace,
+		temporaryExplicit,
+		submit,
+	)
+
+	object := &v1alpha1.ClusterMigration{
+		ObjectMeta: metav1.ObjectMeta{Name: id},
+		Spec: v1alpha1.ClusterMigrationSpec{
+			SourceNamespace:    v1alpha1.NamespaceName(f.sourceNamespace),
+			TemporaryNamespace: v1alpha1.NamespaceName(temporaryNamespace),
+			SessionNamespace:   v1alpha1.NamespaceName(sessionNamespace),
+			MigrationSpec: v1alpha1.MigrationSpec{
+				TransferOptions: v1alpha1.TransferOptions{
+					UnusedStoragePolicy: v1alpha1.UnusedStoragePolicy(
+						f.unusedStoragePolicy,
+					),
+					DestinationStorageClass: f.destinationClass,
+					CapacityAwareness:       f.capacityAwareness,
+					SourceNode:              f.sourceNode,
+					TargetNode:              f.targetNode,
+					Strategies:              append([]string(nil), f.strategies...),
+					VerifyChecksum:          f.verifyChecksum,
+					DeleteExtraneous:        new(f.deleteExtraneous),
+					AllowVolumeShrink:       f.allowVolumeShrink,
+					SkipSourceUsageCheck:    f.skipSourceUsageCheck,
+				},
+			},
+		},
+	}
+	for _, name := range f.sourcePVCs {
+		object.Spec.Volumes = append(object.Spec.Volumes,
+			v1alpha1.VolumeRequest{SourcePVC: v1alpha1.LocalResourceReference{Name: name}})
 	}
 
-	stagingNamespace := destinationNamespace
-
-	temporaryNamespace := destinationNamespace
-	if useTemporary {
-		stagingNamespace = f.temporaryNamespace
-		temporaryNamespace = f.temporaryNamespace
+	if err := applyVolumeMappings(&object.Spec.TransferOptions, &object.Spec.Volumes, false,
+		f.destinationCapacities, f.destinationPVCs, f.sourcePaths, f.destinationPaths); err != nil {
+		return nil, err
 	}
 
-	return planner.OfflineMigrationOptions{
-		SessionID:                   id,
-		SourceNamespace:             f.sourceNamespace,
-		TemporaryNamespace:          temporaryNamespace,
-		DestinationNamespace:        destinationNamespace,
-		SessionNamespace:            state.global.sessionNamespace,
-		StagingNamespace:            stagingNamespace,
-		ToolImage:                   state.global.toolImage,
-		SourcePVCs:                  append([]string(nil), f.sourcePVCs...),
-		DestinationPVCs:             append([]string(nil), f.destinationPVCs...),
-		DestinationCapacities:       append([]string(nil), f.destinationCapacities...),
-		SourcePaths:                 append([]string(nil), f.sourcePaths...),
-		DestinationPaths:            append([]string(nil), f.destinationPaths...),
-		AllowVolumeShrink:           f.allowVolumeShrink,
-		SkipSourceUsageCheck:        f.skipSourceUsageCheck,
-		SourceNode:                  f.sourceNode,
-		TargetNode:                  f.targetNode,
-		DestinationClass:            f.destinationClass,
-		CapacityAwareness:           domain.CapacityAwareness(f.capacityAwareness),
-		Strategies:                  append([]string(nil), f.strategies...),
-		VerifyChecksum:              f.verifyChecksum,
-		DeleteExtraneous:            f.deleteExtraneous,
-		SourcePVReclaimPolicy:       f.sourcePVReclaimPolicy,
-		DestinationPVCReclaimPolicy: f.destinationPVCReclaimPolicy,
-	}, nil
+	return object, nil
 }
 
 func (r *rootState) newMigrateCommand() *cobra.Command {
@@ -220,7 +217,7 @@ func (r *rootState) newMigrateCommand() *cobra.Command {
 
 	command := &cobra.Command{
 		Use:   "migrate",
-		Short: "Run a complete offline PVC migration",
+		Short: "Run a complete offline PVC migration in this session",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			if err := validateDestinationCapacityFlags(
@@ -235,12 +232,13 @@ func (r *rootState) newMigrateCommand() *cobra.Command {
 				return reportPreSessionError(cmd, err)
 			}
 
-			return r.runOfflineMigrateCommand(cmd, flags, dryRun)
+			return r.runOfflineMigrateCommand(cmd, flags, dryRun, false, false)
 		},
 	}
 	flags.bind(command)
 	bindDryRun(command, &dryRun)
 	command.AddCommand(
+		r.newOfflineMigrationCreateCommand(),
 		r.newOfflineMigrationPlanCommand(),
 		r.newOfflineMigrationStatusCommand(),
 		r.newOfflineMigrationResumeCommand(),
@@ -248,6 +246,43 @@ func (r *rootState) newMigrateCommand() *cobra.Command {
 		r.newOfflineMigrationRollbackCommand(),
 		r.newOfflineMigrationCleanupCommand(),
 	)
+
+	return command
+}
+
+// newOfflineMigrationCreateCommand submits a declarative Migration workflow
+// for controller reconciliation.
+func (r *rootState) newOfflineMigrationCreateCommand() *cobra.Command {
+	flags := &offlineMigrationFlags{}
+
+	var (
+		dryRun bool
+		wait   bool
+	)
+
+	command := &cobra.Command{
+		Use:   "create",
+		Short: "Submit a Migration workflow for controller reconciliation",
+		Args:  cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			if err := validateDestinationCapacityFlags(
+				domain.OperationMigrate,
+				false,
+				flags.destinationCapacities,
+				flags.allowVolumeShrink,
+				flags.skipSourceUsageCheck,
+				flags.sourcePaths,
+				flags.destinationPaths,
+			); err != nil {
+				return reportPreSessionError(cmd, err)
+			}
+
+			return r.runOfflineMigrateCommand(cmd, flags, dryRun, true, wait)
+		},
+	}
+	flags.bind(command)
+	bindCreateDryRun(command, &dryRun)
+	bindCreateWait(command, &wait)
 
 	return command
 }
@@ -281,60 +316,30 @@ func (r *rootState) newOfflineMigrationPlanCommand() *cobra.Command {
 			defer cancel()
 
 			if existing {
-				namespace := workflowNamespaceForCommand(r, cmd)
-
-				session, err := kube.GetSessionByType(
-					ctx, runtime.store, namespace, flags.sessionID, domain.SessionTypeMigrate,
-				)
-				if err != nil {
-					return reportSessionLookupError(
-						cmd,
-						namespace,
-						flags.sessionID,
-						err,
-					)
-				}
-
-				if session.Spec.Operation() != domain.OperationMigrate {
-					return reportSessionError(
-						cmd,
-						session,
-						domain.NewError(
-							domain.ErrorPrecondition,
-							"migrate plan",
-							"offline migrate plan requires an offline Migrate session",
-						),
-					)
-				}
-
-				if err := runtime.service.ValidateReservation(ctx, session); err != nil {
-					return reportSessionError(cmd, session, err)
-				}
-
-				return printSessionResult(cmd, runtime, session)
+				return r.validateMigrationReservation(ctx, cmd, runtime, flags.sessionID)
 			}
 
-			options, err := flags.planOptions(r, true)
+			object, err := flags.workflow(
+				r,
+				runtime,
+				cmd.Flags().Changed("temporary-namespace"),
+				false,
+			)
 			if err != nil {
 				return err
 			}
 
-			options.SessionNamespace, options.TemporaryNamespace = r.controllerPlanNamespaces(
-				runtime,
-				domain.SessionTypeMigrate,
-				options.SourceNamespace,
-				options.DestinationNamespace,
-				options.TemporaryNamespace,
-				cmd.Flags().Changed("temporary-namespace"),
-			)
-			options.StagingNamespace = options.TemporaryNamespace
-
-			plan, err := runtime.planner.PlanOfflineMigration(ctx, options)
+			plan, err := runtime.planner.PlanOfflineMigration(ctx, object, r.global.toolImage)
 			if err != nil {
 				return reportPlanningError(cmd, err)
 			}
 
-			if err := printPlanResult(cmd, runtime, plan); err != nil {
+			if err := printPlanResult(
+				cmd,
+				runtime,
+				plan,
+				offlineMigrationPlanFailureAdvice,
+			); err != nil {
 				return err
 			}
 
@@ -350,6 +355,8 @@ func (r *rootState) runOfflineMigrateCommand(
 	cmd *cobra.Command,
 	flags *offlineMigrationFlags,
 	dryRun bool,
+	submit bool,
+	wait bool,
 ) error {
 	runtime, err := r.runtime()
 	if err != nil {
@@ -359,53 +366,92 @@ func (r *rootState) runOfflineMigrateCommand(
 	ctx, cancel := r.context(cmd.Context())
 	defer cancel()
 
-	options, err := flags.planOptions(r, true)
+	object, err := flags.workflow(r, runtime, cmd.Flags().Changed("temporary-namespace"), submit)
 	if err != nil {
 		return err
 	}
 
-	options.SessionNamespace, options.TemporaryNamespace = r.controllerPlanNamespaces(
-		runtime,
-		domain.SessionTypeMigrate,
-		options.SourceNamespace,
-		options.DestinationNamespace,
-		options.TemporaryNamespace,
-		cmd.Flags().Changed("temporary-namespace"),
-	)
-	options.StagingNamespace = options.TemporaryNamespace
+	// Submission previews plan with controller semantics: submission RBAC and
+	// CR-backed estimates, not the data-plane permissions local runs need.
+	if submit && runtime.planner != nil {
+		runtime.planner = runtime.planner.ForController()
+	}
 
-	plan, err := runtime.planner.ForSubmission(runtime.mode == executionModeController && !dryRun).
-		PlanOfflineMigration(ctx, options)
+	// Only controller submission depends on the workflow CRDs being served;
+	// session execution is CRD-independent.
+	if submit {
+		if err := requireControllerWorkflow(runtime, domain.SessionTypeMigrate); err != nil {
+			return err
+		}
+	}
+
+	if err != nil {
+		return err
+	}
+
+	if submit && !dryRun {
+		if err := r.confirm(ctx, cmd, offlineApprovalIdentity(flags)); err != nil {
+			return reportApprovalError(cmd, err)
+		}
+
+		runtime.waitForController = wait
+
+		return submitMigration(ctx, cmd, runtime, object)
+	}
+
+	plan, err := runtime.planner.PlanOfflineMigration(ctx, object, r.global.toolImage)
 	if err != nil {
 		return reportPlanningError(cmd, err)
 	}
 
-	if err := requireReadyWithOutput(runtime, plan, cmd.ErrOrStderr()); err != nil {
+	if err := requireReadyWithOutput(
+		runtime,
+		plan,
+		cmd.ErrOrStderr(),
+		offlineMigrationPlanFailureAdvice,
+	); err != nil {
 		return err
 	}
 
 	if dryRun {
-		return printPlanResult(cmd, runtime, plan)
+		return printPlanResult(cmd, runtime, plan, offlineMigrationPlanFailureAdvice)
 	}
 
 	if err := r.confirm(ctx, cmd, offlineApprovalIdentity(flags)); err != nil {
 		return reportApprovalError(cmd, err)
 	}
 
-	session, err := runtime.service.CreateSession(ctx, plan, false)
-	if err != nil {
-		return reportSessionCreationError(cmd, plan.SessionNamespace, plan.SessionID, err)
+	now := metav1.Now()
+	object.Status.WorkflowStatus = v1alpha1.WorkflowStatus{
+		Phase: domain.PhasePlanned, StartedAt: now, UpdatedAt: now,
 	}
+	namespace := string(object.Spec.SessionNamespace)
 
-	if deferred, err := deferControllerExecution(ctx, cmd, runtime, session); deferred {
+	store, err := cliWorkflowStore(runtime, namespace,
+		func() *v1alpha1.ClusterMigration { return &v1alpha1.ClusterMigration{} })
+	if err != nil {
 		return err
 	}
 
-	if err := runtime.service.OfflineMigrate(ctx, session); err != nil {
-		return reportSessionError(cmd, session, err)
+	if err := store.Create(ctx, object); err != nil {
+		return reportSessionCreationError(cmd, namespace, object.Name, err)
 	}
 
-	return printSessionResult(cmd, runtime, session)
+	executor := app.NewClusterMigrationExecutor(
+		runtime.clients.Kubernetes,
+		store,
+		cliWorkflowLocker(
+			runtime,
+		),
+		namespace,
+		copyengine.NewPVMigrate(),
+		r.migrationConfig(runtime),
+	)
+	if err := executor.Run(ctx, object); err != nil {
+		return reportMigrationError(cmd, object.Name, object.Status.Phase, err)
+	}
+
+	return runtime.printer.Print(object)
 }
 
 func offlineApprovalIdentity(flags *offlineMigrationFlags) string {

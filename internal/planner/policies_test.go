@@ -5,6 +5,7 @@ import (
 	"strings"
 	"testing"
 
+	v1alpha1 "github.com/labring-sigs/pvc-migrate/api/v1alpha1"
 	"github.com/labring-sigs/pvc-migrate/internal/domain"
 	"github.com/labring-sigs/pvc-migrate/internal/kube"
 	corev1 "k8s.io/api/core/v1"
@@ -16,7 +17,7 @@ import (
 func checkQuotasForTest(
 	ctx context.Context,
 	planner *Planner,
-	plan *domain.MigrationPlan,
+	plan *domain.TransferPlan,
 	namespace string,
 	estimate domain.ResourceEstimate,
 ) {
@@ -32,7 +33,7 @@ func checkQuotasForTest(
 func checkLimitRangesForTest(
 	ctx context.Context,
 	planner *Planner,
-	plan *domain.MigrationPlan,
+	plan *domain.TransferPlan,
 	volumes []domain.PlannedVolume,
 	toolPods int,
 ) {
@@ -43,7 +44,7 @@ func checkLimitRangesForTest(
 func TestCheckNamespaceResourcePoliciesReadsOneSnapshot(t *testing.T) {
 	client := kubernetesfake.NewClientset()
 	planner := New(client, nil)
-	plan := &domain.MigrationPlan{Ready: true}
+	plan := &domain.TransferPlan{PlanSummary: domain.PlanSummary{Ready: true}}
 
 	planner.checkNamespaceResourcePolicies(
 		context.Background(),
@@ -76,7 +77,7 @@ func TestCheckNamespaceResourcePoliciesReadsOneSnapshot(t *testing.T) {
 
 func TestNamespacePolicyCheckMessagesDistinguishNamespaces(t *testing.T) {
 	planner := New(kubernetesfake.NewClientset(), nil)
-	plan := &domain.MigrationPlan{Ready: true}
+	plan := &domain.TransferPlan{PlanSummary: domain.PlanSummary{Ready: true}}
 	estimate := domain.ResourceEstimate{
 		StorageRequests:    "0",
 		Pods:               1,
@@ -137,7 +138,7 @@ func TestCheckQuotasAllowsExactCapacityAndReportsAllExcess(t *testing.T) {
 		}},
 	}
 	planner := New(kubernetesfake.NewClientset(quota), nil)
-	plan := &domain.MigrationPlan{Ready: true}
+	plan := &domain.TransferPlan{PlanSummary: domain.PlanSummary{Ready: true}}
 	checkQuotasForTest(
 		context.Background(),
 		planner,
@@ -154,7 +155,7 @@ func TestCheckQuotasAllowsExactCapacityAndReportsAllExcess(t *testing.T) {
 		t.Fatalf("exact capacity check: %#v", plan.Checks)
 	}
 
-	plan = &domain.MigrationPlan{Ready: true}
+	plan = &domain.TransferPlan{PlanSummary: domain.PlanSummary{Ready: true}}
 	checkQuotasForTest(
 		context.Background(),
 		planner,
@@ -195,7 +196,7 @@ func TestCheckQuotasAccountsForDefaultedToolResources(t *testing.T) {
 		}}},
 	}
 	planner := New(plannerClient(quota, limitRange), nil)
-	plan := &domain.MigrationPlan{Ready: true}
+	plan := &domain.TransferPlan{PlanSummary: domain.PlanSummary{Ready: true}}
 	checkQuotasForTest(context.Background(), planner, plan, "stage", domain.ResourceEstimate{
 		StorageRequests:    "0",
 		Pods:               2,
@@ -221,7 +222,7 @@ func TestCheckQuotasIgnoresNonmatchingToolScope(t *testing.T) {
 		},
 	}
 	planner := New(plannerClient(quota), nil)
-	plan := &domain.MigrationPlan{Ready: true}
+	plan := &domain.TransferPlan{PlanSummary: domain.PlanSummary{Ready: true}}
 	checkQuotasForTest(context.Background(), planner, plan, "stage", domain.ResourceEstimate{
 		StorageRequests:    "0",
 		Pods:               1,
@@ -251,7 +252,7 @@ func TestCheckQuotasEnforcesToolObjectCounts(t *testing.T) {
 		},
 	}
 	planner := New(plannerClient(quota), nil)
-	plan := &domain.MigrationPlan{Ready: true}
+	plan := &domain.TransferPlan{PlanSummary: domain.PlanSummary{Ready: true}}
 	checkQuotasForTest(context.Background(), planner, plan, "stage", domain.ResourceEstimate{
 		StorageRequests:    "0",
 		Pods:               2,
@@ -290,7 +291,7 @@ func TestCheckQuotasSkipsLimitRangesWithoutPods(t *testing.T) {
 	}
 	client := kubernetesfake.NewClientset(quota)
 	planner := New(client, nil)
-	plan := &domain.MigrationPlan{Ready: true}
+	plan := &domain.TransferPlan{PlanSummary: domain.PlanSummary{Ready: true}}
 	checkQuotasForTest(context.Background(), planner, plan, "session", domain.ResourceEstimate{
 		StorageRequests:    "0",
 		ConfigMaps:         1,
@@ -319,21 +320,21 @@ func TestCheckLimitRangesValidatesMinimumMaximumAndMalformedCapacity(t *testing.
 		}}},
 	}
 	planner := New(kubernetesfake.NewClientset(limitRange), nil)
-	plan := &domain.MigrationPlan{Ready: true}
+	plan := &domain.TransferPlan{PlanSummary: domain.PlanSummary{Ready: true}}
 	checkLimitRangesForTest(context.Background(), planner, plan, []domain.PlannedVolume{
 		{
-			SourcePVC:      domain.ObjectReference{Name: "small"},
-			DestinationPVC: domain.ObjectReference{Name: "small-target"},
+			SourcePVC:      v1alpha1.ObjectReference{Name: "small"},
+			DestinationPVC: v1alpha1.ObjectReference{Name: "small-target"},
 			Capacity:       "512Mi",
 		},
 		{
-			SourcePVC:      domain.ObjectReference{Name: "large"},
-			DestinationPVC: domain.ObjectReference{Name: "large-target"},
+			SourcePVC:      v1alpha1.ObjectReference{Name: "large"},
+			DestinationPVC: v1alpha1.ObjectReference{Name: "large-target"},
 			Capacity:       "3Gi",
 		},
 		{
-			SourcePVC:      domain.ObjectReference{Name: "broken"},
-			DestinationPVC: domain.ObjectReference{Name: "broken-target"},
+			SourcePVC:      v1alpha1.ObjectReference{Name: "broken"},
+			DestinationPVC: v1alpha1.ObjectReference{Name: "broken-target"},
 			Capacity:       "invalid",
 		},
 	}, 0)
@@ -358,7 +359,7 @@ func TestCheckLimitRangesRejectsPositiveToolPodMinimums(t *testing.T) {
 		}}},
 	}
 	planner := New(kubernetesfake.NewClientset(limitRange), nil)
-	plan := &domain.MigrationPlan{Ready: true}
+	plan := &domain.TransferPlan{PlanSummary: domain.PlanSummary{Ready: true}}
 	checkLimitRangesForTest(
 		context.Background(),
 		planner,
@@ -382,7 +383,7 @@ func TestCheckLimitRangesRejectsPositiveToolContainerMinimums(t *testing.T) {
 		}}},
 	}
 	planner := New(kubernetesfake.NewClientset(limitRange), nil)
-	plan := &domain.MigrationPlan{Ready: true}
+	plan := &domain.TransferPlan{PlanSummary: domain.PlanSummary{Ready: true}}
 	checkLimitRangesForTest(
 		context.Background(),
 		planner,
@@ -423,7 +424,7 @@ func TestCheckLimitRangesModelsToolDefaultsAndMaxRequestRatio(t *testing.T) {
 	}
 
 	t.Run("defaults and max permit explicit zero", func(t *testing.T) {
-		plan := &domain.MigrationPlan{Ready: true}
+		plan := &domain.TransferPlan{PlanSummary: domain.PlanSummary{Ready: true}}
 		planner := New(
 			kubernetesfake.NewClientset(newLimitRange(nil)),
 			nil,
@@ -442,7 +443,7 @@ func TestCheckLimitRangesModelsToolDefaultsAndMaxRequestRatio(t *testing.T) {
 	})
 
 	t.Run("max request ratio rejects zero pair", func(t *testing.T) {
-		plan := &domain.MigrationPlan{Ready: true}
+		plan := &domain.TransferPlan{PlanSummary: domain.PlanSummary{Ready: true}}
 		planner := New(
 			kubernetesfake.NewClientset(
 				newLimitRange(corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("2")}),

@@ -5,18 +5,20 @@ import (
 	"encoding/json"
 	"fmt"
 
+	v1alpha1 "github.com/labring-sigs/pvc-migrate/api/v1alpha1"
 	"github.com/labring-sigs/pvc-migrate/internal/domain"
 	"github.com/labring-sigs/pvc-migrate/internal/kube"
 	corev1 "k8s.io/api/core/v1"
+	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 )
 
-func standaloneWorkload(pod *corev1.Pod) (domain.WorkloadSpec, error) {
+func standaloneWorkload(pod *corev1.Pod) (v1alpha1.WorkloadSpec, error) {
 	raw, err := json.Marshal(pod)
 	if err != nil {
-		return domain.WorkloadSpec{}, domain.WrapError(
+		return v1alpha1.WorkloadSpec{}, domain.WrapError(
 			domain.ErrorInternal,
 			"discover standalone Pod",
 			"encode Pod",
@@ -24,16 +26,14 @@ func standaloneWorkload(pod *corev1.Pod) (domain.WorkloadSpec, error) {
 		)
 	}
 
-	return domain.WorkloadSpec{
-		Adapter:        domain.WorkloadStandalone,
-		Pod:            podReference(pod),
-		OriginalObject: raw,
+	return v1alpha1.WorkloadSpec{
+		Adapter:        v1alpha1.WorkloadStandalone,
+		Pod:            workloadPodReference(pod),
+		OriginalObject: &apiextensionsv1.JSON{Raw: raw},
 	}, nil
 }
 
-func (m *Manager) pauseStandalone(ctx context.Context, session *domain.Session) error {
-	ref := session.Spec.Workload().Pod
-
+func (m *Manager) pauseStandalone(ctx context.Context, ref v1alpha1.ObjectReference) error {
 	pod, err := m.typed.CoreV1().Pods(ref.Namespace).Get(ctx, ref.Name, metav1.GetOptions{})
 	if apierrors.IsNotFound(err) {
 		return nil
@@ -57,6 +57,10 @@ func (m *Manager) pauseStandalone(ctx context.Context, session *domain.Session) 
 		Delete(ctx, ref.Name, options); err != nil &&
 		!apierrors.IsNotFound(err) {
 		return domain.WrapError(domain.ErrorKubernetes, "pause standalone Pod", "delete Pod", err)
+	}
+
+	if err := kube.LeaseFenceError(ctx); err != nil {
+		return err
 	}
 
 	return m.waitFor(
@@ -87,15 +91,20 @@ func (m *Manager) pauseStandalone(ctx context.Context, session *domain.Session) 
 	)
 }
 
-func (m *Manager) resumeStandalone(ctx context.Context, session *domain.Session) error {
-	workload := session.Spec.Workload()
+func (m *Manager) resumeStandalone(
+	ctx context.Context,
+	workflowID string,
+	ref *v1alpha1.ObjectReference,
+	snapshot *apiextensionsv1.JSON,
+	resumeNode string,
+) error {
 	existing, err := m.typed.CoreV1().
-		Pods(workload.Pod.Namespace).
-		Get(ctx, workload.Pod.Name, metav1.GetOptions{})
+		Pods(ref.Namespace).
+		Get(ctx, ref.Name, metav1.GetOptions{})
 
 	var expectedUID types.UID
 	if err == nil {
-		if existing.Annotations[kube.SessionKey] != session.ID {
+		if existing.Annotations[kube.SessionKey] != workflowID {
 			return domain.NewError(
 				domain.ErrorConflict,
 				"resume standalone Pod",
@@ -109,15 +118,21 @@ func (m *Manager) resumeStandalone(ctx context.Context, session *domain.Session)
 
 		expectedUID = existing.UID
 		if kube.PodReady(existing) {
-			session.Spec.WorkloadPtr().Pod = podReference(existing)
+			*ref = podReference(existing)
 			return nil
 		}
 	} else if !apierrors.IsNotFound(err) {
 		return domain.WrapError(domain.ErrorKubernetes, "resume standalone Pod", "read Pod", err)
 	}
 
+	if snapshot == nil {
+		return domain.NewError(
+			domain.ErrorPrecondition, "resume standalone Pod", "saved Pod snapshot is required",
+		)
+	}
+
 	var pod corev1.Pod
-	if err := json.Unmarshal(workload.OriginalObject, &pod); err != nil {
+	if err := json.Unmarshal(snapshot.Raw, &pod); err != nil {
 		return domain.WrapError(
 			domain.ErrorInternal,
 			"resume standalone Pod",
@@ -129,8 +144,8 @@ func (m *Manager) resumeStandalone(ctx context.Context, session *domain.Session)
 	// The snapshot is controller-validated before this path runs. Reassert the
 	// live workflow identity here as defense in depth so a stale or malformed
 	// snapshot can never redirect Pod creation to another namespace or name.
-	pod.Namespace = workload.Pod.Namespace
-	pod.Name = workload.Pod.Name
+	pod.Namespace = ref.Namespace
+	pod.Name = ref.Name
 
 	pod.ResourceVersion = ""
 	pod.UID = ""
@@ -149,14 +164,7 @@ func (m *Manager) resumeStandalone(ctx context.Context, session *domain.Session)
 		pod.Annotations = map[string]string{}
 	}
 
-	pod.Annotations[kube.SessionKey] = session.ID
-	options := session.Spec.WorkflowOptions()
-
-	resumeNode := options.TargetNode
-	if session.Status.Phase == domain.PhaseRollingBack ||
-		session.Status.Phase == domain.PhaseAborting {
-		resumeNode = options.SourceNode
-	}
+	pod.Annotations[kube.SessionKey] = workflowID
 
 	if resumeNode != "" {
 		node, getErr := m.typed.CoreV1().Nodes().Get(ctx, resumeNode, metav1.GetOptions{})
@@ -209,7 +217,7 @@ func (m *Manager) resumeStandalone(ctx context.Context, session *domain.Session)
 			)
 		}
 
-		if existing.Annotations[kube.SessionKey] != session.ID {
+		if existing.Annotations[kube.SessionKey] != workflowID {
 			return domain.NewError(
 				domain.ErrorConflict,
 				"resume standalone Pod",
@@ -232,7 +240,12 @@ func (m *Manager) resumeStandalone(ctx context.Context, session *domain.Session)
 		)
 	}
 
+	if err := kube.LeaseFenceError(ctx); err != nil {
+		return err
+	}
+
 	expectedUID = created.UID
+	*ref = podReference(created)
 
 	var ready *corev1.Pod
 	if err := m.waitFor(
@@ -246,7 +259,7 @@ func (m *Manager) resumeStandalone(ctx context.Context, session *domain.Session)
 				return false, getErr
 			}
 
-			if current.Annotations[kube.SessionKey] != session.ID {
+			if current.Annotations[kube.SessionKey] != workflowID {
 				return false, domain.NewError(
 					domain.ErrorConflict,
 					"resume standalone Pod",
@@ -281,20 +294,19 @@ func (m *Manager) resumeStandalone(ctx context.Context, session *domain.Session)
 		return err
 	}
 
-	session.Spec.WorkloadPtr().Pod = podReference(ready)
+	*ref = podReference(ready)
 
 	return nil
 }
 
 func (m *Manager) validateStandaloneResume(
 	ctx context.Context,
-	session *domain.Session,
+	workflowID string,
+	ref v1alpha1.ObjectReference,
 ) error {
-	workload := session.Spec.Workload()
-
 	pod, err := m.typed.CoreV1().
-		Pods(workload.Pod.Namespace).
-		Get(ctx, workload.Pod.Name, metav1.GetOptions{})
+		Pods(ref.Namespace).
+		Get(ctx, ref.Name, metav1.GetOptions{})
 	if apierrors.IsNotFound(err) {
 		return nil
 	}
@@ -308,7 +320,7 @@ func (m *Manager) validateStandaloneResume(
 		)
 	}
 
-	if pod.Annotations[kube.SessionKey] != session.ID {
+	if pod.Annotations[kube.SessionKey] != workflowID {
 		return domain.NewError(
 			domain.ErrorConflict,
 			"resume standalone Pod",
@@ -325,11 +337,10 @@ func (m *Manager) validateStandaloneResume(
 
 func (m *Manager) currentStandaloneRollbackPods(
 	ctx context.Context,
-	session *domain.Session,
-) ([]domain.ObjectReference, error) {
+	workflowID string,
+	ref v1alpha1.ObjectReference,
+) ([]v1alpha1.ObjectReference, error) {
 	const operation = validateRollbackConsumers
-
-	ref := session.Spec.Workload().Pod
 
 	pod, err := m.typed.CoreV1().Pods(ref.Namespace).Get(ctx, ref.Name, metav1.GetOptions{})
 	if apierrors.IsNotFound(err) {
@@ -340,7 +351,7 @@ func (m *Manager) currentStandaloneRollbackPods(
 		return nil, domain.WrapError(domain.ErrorKubernetes, operation, "read standalone Pod", err)
 	}
 
-	if pod.Annotations[kube.SessionKey] != session.ID {
+	if pod.Annotations[kube.SessionKey] != workflowID {
 		return nil, domain.NewError(
 			domain.ErrorConflict,
 			operation,
@@ -348,5 +359,5 @@ func (m *Manager) currentStandaloneRollbackPods(
 		)
 	}
 
-	return []domain.ObjectReference{podReference(pod)}, nil
+	return []v1alpha1.ObjectReference{podReference(pod)}, nil
 }

@@ -28,15 +28,6 @@ type podCommandExecutor interface {
 	Execute(ctx context.Context, request podCommandRequest) (podCommandResult, error)
 }
 
-type podCommandExecutorFunc func(context.Context, podCommandRequest) (podCommandResult, error)
-
-func (f podCommandExecutorFunc) Execute(
-	ctx context.Context,
-	request podCommandRequest,
-) (podCommandResult, error) {
-	return f(ctx, request)
-}
-
 type kubernetesPodCommandExecutor struct {
 	client kubernetes.Interface
 	config *rest.Config

@@ -3,16 +3,20 @@ package cli
 import (
 	"context"
 	"errors"
+	"fmt"
+	"strings"
 
+	"github.com/labring-sigs/pvc-migrate/internal/app"
 	"github.com/labring-sigs/pvc-migrate/internal/controller"
 	"github.com/labring-sigs/pvc-migrate/internal/domain"
-	"github.com/labring-sigs/pvc-migrate/internal/kube"
 	"github.com/spf13/cobra"
+	"k8s.io/apimachinery/pkg/util/validation"
 )
 
 func (r *rootState) newControllerCommand() *cobra.Command {
 	var (
 		once                   bool
+		controllerNamespace    string
 		healthProbeBindAddress string
 	)
 
@@ -21,76 +25,75 @@ func (r *rootState) newControllerCommand() *cobra.Command {
 		Short: "Run the workflow CRD reconciliation loop",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
+			if problems := validation.IsDNS1123Label(controllerNamespace); len(problems) > 0 {
+				return domain.NewError(
+					domain.ErrorValidation,
+					"flags",
+					fmt.Sprintf(
+						"--controller-namespace %q is invalid: %s",
+						controllerNamespace,
+						strings.Join(problems, "; "),
+					),
+				)
+			}
+
 			runtime, err := r.runtime()
 			if err != nil {
 				return err
 			}
 
-			if runtime.mode != executionModeController {
+			if runtime.controllerDiscoveryComplete && len(runtime.controllerKinds) == 0 {
 				return domain.NewError(
 					domain.ErrorPrecondition,
-					"controller",
-					"workflow CRDs are not installed; use --mode=controller after installing deploy/crd.yaml",
+					"controller mode",
+					"controller mode requires at least one migrate.sealos.io/v1alpha1 workflow CRD; install deploy/crd.yaml",
 				)
 			}
 
-			if runtime.controllerStore == nil {
-				return domain.NewError(
-					domain.ErrorInternal,
-					"controller",
-					"controller session store is not configured",
-				)
+			options := controller.ManagerOptions{
+				BackupPlanner:                 runtime.planner.ForController().PlanBackup,
+				RestorePlanner:                runtime.planner.ForController().PlanRestore,
+				RenamePlanner:                 runtime.planner.ForController().PlanRename,
+				MovePlanner:                   runtime.planner.ForController().PlanMove,
+				ReservationPlanner:            runtime.planner.ForController().PlanReserve,
+				NamespacedReservationPlanner:  runtime.planner.ForController().PlanReservation,
+				CopyPlanner:                   runtime.planner.ForController().PlanCopy,
+				MigrationPlanner:              runtime.planner.ForController().PlanOfflineMigration,
+				NamespacedMigrationPlanner:    runtime.planner.ForController().PlanNamespacedMigration,
+				PodMigrationPlanner:           runtime.planner.ForController().PlanPodMigration,
+				NamespacedPodMigrationPlanner: runtime.planner.ForController().PlanNamespacedPodMigration,
+				WorkloadManager:               runtime.controllers,
+				NamespacedCopyPlanner:         runtime.planner.ForController().PlanNamespacedCopy,
+				TransferExecution: app.VolumeCopyConfig{
+					Retries: r.global.retries, RetryBackoff: r.global.retryBackoff,
+					HelmTimeout: r.global.helmTimeout, NoCompress: r.global.noCompress,
+					CopyTimeout: r.global.copyTimeout,
+				},
+				Namespace:                     controllerNamespace,
+				KubernetesClient:              runtime.clients.Kubernetes,
+				OpenEBSLVMSharedVolumeManager: runtime.openEBSLVMSharedVolumeManager,
+				KubeconfigPath:                r.global.kubeconfig,
+				KubeContext:                   r.global.kubeContext,
+				SupportedKinds:                runtime.controllerKinds,
+				TrustedToolImage:              r.global.toolImage,
+				Logger:                        runtime.controllerLogger,
+				HealthProbeBindAddress:        healthProbeBindAddress,
 			}
-
 			if once {
 				ctx, cancel := r.context(cmd.Context())
 				defer cancel()
 
-				if err := controller.ValidateTrustedToolImage(r.global.toolImage); err != nil {
-					return err
-				}
-
-				cluster, err := kube.Identity(ctx, runtime.clients)
-				if err != nil {
-					return domain.WrapError(
-						domain.ErrorPrecondition,
-						"controller",
-						"resolve cluster identity",
-						err,
-					)
-				}
-				// A one-shot controller pass is an operator operation and must
-				// inspect every tenant namespace. The normal manager path receives
-				// namespace/name directly from controller-runtime events.
-				return controller.NewRunner(runtime.service, runtime.controllerStore, "").
-					WithPlanner(runtime.planner.PlanWorkflow).
-					WithKubernetesClient(runtime.clients.Kubernetes).
-					WithControllerClient(runtime.clients.Runtime).
-					WithClusterIdentity(cluster.ID).
-					WithTrustedToolImage(r.global.toolImage).
-					WithKubeconfig(r.global.kubeconfig, r.global.kubeContext).
-					WithOpenEBSLVMSharedVolumeManager(runtime.openEBSLVMSharedVolumeManager).
-					WithLogger(runtime.controllerLogger).
-					ReconcileOnce(ctx)
+				return controller.ReconcileWorkflowsOnce(
+					ctx,
+					runtime.clients.Runtime,
+					options,
+				)
 			}
 
 			err = controller.StartManager(
 				cmd.Context(),
 				runtime.clients.RESTConfig,
-				runtime.service,
-				runtime.controllerStore,
-				controller.ManagerOptions{
-					Planner:                       runtime.planner.PlanWorkflow,
-					Namespace:                     r.global.controllerNamespace,
-					KubernetesClient:              runtime.clients.Kubernetes,
-					OpenEBSLVMSharedVolumeManager: runtime.openEBSLVMSharedVolumeManager,
-					KubeconfigPath:                r.global.kubeconfig,
-					KubeContext:                   r.global.kubeContext,
-					SupportedKinds:                runtime.controllerKinds,
-					TrustedToolImage:              r.global.toolImage,
-					Logger:                        runtime.controllerLogger,
-					HealthProbeBindAddress:        healthProbeBindAddress,
-				},
+				options,
 			)
 			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 				return nil
@@ -99,7 +102,14 @@ func (r *rootState) newControllerCommand() *cobra.Command {
 			return err
 		},
 	}
-	command.Flags().BoolVar(&once, "once", false, "Run one reconciliation pass and exit")
+	command.Flags().StringVar(
+		&controllerNamespace,
+		"controller-namespace",
+		"pvc-migrate-system",
+		"Namespace where the controller runs and holds its leader Lease",
+	)
+	command.Flags().
+		BoolVar(&once, "once", false, "Reconcile current workflows until stable and exit")
 	command.Flags().StringVar(
 		&healthProbeBindAddress,
 		"health-probe-bind-address",

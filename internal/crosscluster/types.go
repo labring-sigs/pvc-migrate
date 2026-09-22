@@ -6,6 +6,7 @@ import (
 	"strings"
 	"time"
 
+	v1alpha1 "github.com/labring-sigs/pvc-migrate/api/v1alpha1"
 	"github.com/labring-sigs/pvc-migrate/internal/domain"
 	"github.com/labring-sigs/pvc-migrate/internal/kube"
 	corev1 "k8s.io/api/core/v1"
@@ -16,11 +17,13 @@ import (
 )
 
 const (
-	APIVersion     = domain.SessionAPIVersion
-	Kind           = "CrossClusterCopySession"
-	ManagedByLabel = kube.MetadataDomain + "/managed-by"
-	ManagedBy      = "pvc-migrate-cross-cluster"
-	SessionKey     = kube.MetadataDomain + "/cross-cluster-session"
+	APIVersion      = domain.SessionAPIVersion
+	CopyKind        = "CrossClusterCopySession"
+	ReservationKind = "CrossClusterReservationSession"
+	Kind            = CopyKind
+	ManagedByLabel  = kube.MetadataDomain + "/managed-by"
+	ManagedBy       = "pvc-migrate-cross-cluster"
+	SessionKey      = kube.MetadataDomain + "/cross-cluster-session"
 )
 
 type Phase string
@@ -72,22 +75,33 @@ type VolumeSpec struct {
 	Transfer    TransferSpec          `json:"transfer"    yaml:"transfer"`
 }
 
-type Spec struct {
-	DestinationPVCReclaimPolicy string               `json:"destinationPVCReclaimPolicy,omitempty" yaml:"destinationPVCReclaimPolicy,omitempty"`
-	SessionNamespace            string               `json:"sessionNamespace"                      yaml:"sessionNamespace"`
-	SourceCluster               kube.ClusterIdentity `json:"sourceCluster"                         yaml:"sourceCluster"`
-	DestinationCluster          kube.ClusterIdentity `json:"destinationCluster"                    yaml:"destinationCluster"`
-	SourceNamespace             string               `json:"sourceNamespace"                       yaml:"sourceNamespace"`
-	DestinationNamespace        string               `json:"destinationNamespace"                  yaml:"destinationNamespace"`
-	ToolImage                   string               `json:"toolImage"                             yaml:"toolImage"`
-	Strategies                  []string             `json:"strategies"                            yaml:"strategies"`
-	Online                      bool                 `json:"online,omitempty"                      yaml:"online,omitempty"`
-	VerifyChecksum              bool                 `json:"verifyChecksum"                        yaml:"verifyChecksum"`
-	DeleteExtraneous            bool                 `json:"deleteExtraneous"                      yaml:"deleteExtraneous"`
-	AllowVolumeShrink           bool                 `json:"allowVolumeShrink,omitempty"           yaml:"allowVolumeShrink,omitempty"`
-	SkipSourceUsageCheck        bool                 `json:"skipSourceUsageCheck,omitempty"        yaml:"skipSourceUsageCheck,omitempty"`
-	TargetNode                  string               `json:"targetNode,omitempty"                  yaml:"targetNode,omitempty"`
-	Volumes                     []VolumeSpec         `json:"volumes"                               yaml:"volumes"`
+// SessionContext is the resource identity and reservation context shared by
+// the two cross-cluster commands. Operation-specific execution controls live
+// in CopySpec and are unavailable to reservations.
+type SessionContext struct {
+	UnusedStoragePolicy  v1alpha1.UnusedStoragePolicy `json:"unusedStoragePolicy,omitempty"  yaml:"unusedStoragePolicy,omitempty"`
+	SessionNamespace     string                       `json:"sessionNamespace"               yaml:"sessionNamespace"`
+	SourceCluster        kube.ClusterIdentity         `json:"sourceCluster"                  yaml:"sourceCluster"`
+	DestinationCluster   kube.ClusterIdentity         `json:"destinationCluster"             yaml:"destinationCluster"`
+	SourceNamespace      string                       `json:"sourceNamespace"                yaml:"sourceNamespace"`
+	DestinationNamespace string                       `json:"destinationNamespace"           yaml:"destinationNamespace"`
+	ToolImage            string                       `json:"toolImage"                      yaml:"toolImage"`
+	Strategies           []string                     `json:"strategies"                     yaml:"strategies"`
+	AllowVolumeShrink    bool                         `json:"allowVolumeShrink,omitempty"    yaml:"allowVolumeShrink,omitempty"`
+	SkipSourceUsageCheck bool                         `json:"skipSourceUsageCheck,omitempty" yaml:"skipSourceUsageCheck,omitempty"`
+	TargetNode           string                       `json:"targetNode,omitempty"           yaml:"targetNode,omitempty"`
+	Volumes              []VolumeSpec                 `json:"volumes"                        yaml:"volumes"`
+}
+
+type CopySpec struct {
+	SessionContext   `     json:",inline"          yaml:",inline"`
+	Online           bool `json:"online,omitempty" yaml:"online,omitempty"`
+	VerifyChecksum   bool `json:"verifyChecksum"   yaml:"verifyChecksum"`
+	DeleteExtraneous bool `json:"deleteExtraneous" yaml:"deleteExtraneous"`
+}
+
+type ReservationSpec struct {
+	SessionContext `json:",inline" yaml:",inline"`
 }
 
 type ReservationStatus struct {
@@ -104,28 +118,64 @@ type TransferStatus struct {
 	BytesCopied int64        `json:"bytesCopied,omitempty" yaml:"bytesCopied,omitempty"`
 }
 
-type VolumeStatus struct {
+type ReservationVolumeStatus struct {
 	SourcePVCName string            `json:"sourcePVCName" yaml:"sourcePVCName"`
 	Reservation   ReservationStatus `json:"reservation"   yaml:"reservation"`
-	Transfer      TransferStatus    `json:"transfer"      yaml:"transfer"`
 }
 
-type Status struct {
-	Phase       Phase          `json:"phase"                 yaml:"phase"`
-	StartedAt   metav1.Time    `json:"startedAt"             yaml:"startedAt"`
-	UpdatedAt   metav1.Time    `json:"updatedAt"             yaml:"updatedAt"`
-	CompletedAt *metav1.Time   `json:"completedAt,omitempty" yaml:"completedAt,omitempty"`
-	Message     string         `json:"message,omitempty"     yaml:"message,omitempty"`
-	Volumes     []VolumeStatus `json:"volumes"               yaml:"volumes"`
+type CopyVolumeStatus struct {
+	ReservationVolumeStatus `               json:",inline"  yaml:",inline"`
+	Transfer                TransferStatus `json:"transfer" yaml:"transfer"`
 }
 
-type Session struct {
+type SessionLifecycleStatus struct {
+	Phase       Phase        `json:"phase"                 yaml:"phase"`
+	StartedAt   metav1.Time  `json:"startedAt"             yaml:"startedAt"`
+	UpdatedAt   metav1.Time  `json:"updatedAt"             yaml:"updatedAt"`
+	CompletedAt *metav1.Time `json:"completedAt,omitempty" yaml:"completedAt,omitempty"`
+	Message     string       `json:"message,omitempty"     yaml:"message,omitempty"`
+}
+
+type CopyStatus struct {
+	SessionLifecycleStatus `                   json:",inline" yaml:",inline"`
+	Volumes                []CopyVolumeStatus `json:"volumes" yaml:"volumes"`
+}
+
+type ReservationSessionStatus struct {
+	SessionLifecycleStatus `                          json:",inline" yaml:",inline"`
+	Volumes                []ReservationVolumeStatus `json:"volumes" yaml:"volumes"`
+}
+
+type SessionEnvelope struct {
 	APIVersion      string `json:"apiVersion" yaml:"apiVersion"`
 	Kind            string `json:"kind"       yaml:"kind"`
 	ID              string `json:"id"         yaml:"id"`
 	ResourceVersion string `json:"-"          yaml:"-"`
-	Spec            Spec   `json:"spec"       yaml:"spec"`
-	Status          Status `json:"status"     yaml:"status"`
+}
+
+type CopySession struct {
+	SessionEnvelope `           json:",inline" yaml:",inline"`
+	Spec            CopySpec   `json:"spec"    yaml:"spec"`
+	Status          CopyStatus `json:"status"  yaml:"status"`
+}
+
+type ReservationSession struct {
+	SessionEnvelope `                         json:",inline" yaml:",inline"`
+	Spec            ReservationSpec          `json:"spec"    yaml:"spec"`
+	Status          ReservationSessionStatus `json:"status"  yaml:"status"`
+}
+
+func copyReservationStatuses(statuses []CopyVolumeStatus) []ReservationVolumeStatus {
+	result := make([]ReservationVolumeStatus, len(statuses))
+	for i := range statuses {
+		result[i] = statuses[i].ReservationVolumeStatus
+	}
+
+	return result
+}
+
+func reservationVolumeStatuses(statuses []ReservationVolumeStatus) []ReservationVolumeStatus {
+	return statuses
 }
 
 type VolumePlan struct {
@@ -150,18 +200,27 @@ type Check struct {
 }
 
 type Plan struct {
-	APIVersion           string               `json:"apiVersion"           yaml:"apiVersion"`
-	Kind                 string               `json:"kind"                 yaml:"kind"`
-	SessionID            string               `json:"sessionID"            yaml:"sessionID"`
-	SourceCluster        kube.ClusterIdentity `json:"sourceCluster"        yaml:"sourceCluster"`
-	DestinationCluster   kube.ClusterIdentity `json:"destinationCluster"   yaml:"destinationCluster"`
-	SourceNamespace      string               `json:"sourceNamespace"      yaml:"sourceNamespace"`
-	DestinationNamespace string               `json:"destinationNamespace" yaml:"destinationNamespace"`
-	Strategies           []string             `json:"strategies"           yaml:"strategies"`
-	TargetNode           string               `json:"targetNode"           yaml:"targetNode"`
-	Volumes              []VolumePlan         `json:"volumes"              yaml:"volumes"`
-	Checks               []Check              `json:"checks"               yaml:"checks"`
-	Ready                bool                 `json:"ready"                yaml:"ready"`
+	APIVersion           string                       `json:"apiVersion"           yaml:"apiVersion"`
+	Kind                 string                       `json:"kind"                 yaml:"kind"`
+	SessionID            string                       `json:"sessionID"            yaml:"sessionID"`
+	SessionNamespace     string                       `json:"sessionNamespace"     yaml:"sessionNamespace"`
+	SourceCluster        kube.ClusterIdentity         `json:"sourceCluster"        yaml:"sourceCluster"`
+	DestinationCluster   kube.ClusterIdentity         `json:"destinationCluster"   yaml:"destinationCluster"`
+	SourceNamespace      string                       `json:"sourceNamespace"      yaml:"sourceNamespace"`
+	DestinationNamespace string                       `json:"destinationNamespace" yaml:"destinationNamespace"`
+	UnusedStoragePolicy  v1alpha1.UnusedStoragePolicy `json:"unusedStoragePolicy"  yaml:"unusedStoragePolicy"`
+	AllowVolumeShrink    bool                         `json:"allowVolumeShrink"    yaml:"allowVolumeShrink"`
+	SkipSourceUsageCheck bool                         `json:"skipSourceUsageCheck" yaml:"skipSourceUsageCheck"`
+	RequestedTargetNode  string                       `json:"requestedTargetNode"  yaml:"requestedTargetNode"`
+	Strategies           []string                     `json:"strategies"           yaml:"strategies"`
+	TargetNode           string                       `json:"targetNode"           yaml:"targetNode"`
+	ToolImage            string                       `json:"toolImage"            yaml:"toolImage"`
+	Online               bool                         `json:"online"               yaml:"online"`
+	VerifyChecksum       bool                         `json:"verifyChecksum"       yaml:"verifyChecksum"`
+	DeleteExtraneous     bool                         `json:"deleteExtraneous"     yaml:"deleteExtraneous"`
+	Volumes              []VolumePlan                 `json:"volumes"              yaml:"volumes"`
+	Checks               []Check                      `json:"checks"               yaml:"checks"`
+	Ready                bool                         `json:"ready"                yaml:"ready"`
 }
 
 func (p *Plan) AddCheck(name domain.CheckName, passed bool, message string) {
@@ -171,12 +230,12 @@ func (p *Plan) AddCheck(name domain.CheckName, passed bool, message string) {
 	}
 }
 
-func (s *Session) Validate() error {
+func (s *CopySession) Validate() error {
 	if err := validateCrossClusterHeader(s); err != nil {
 		return err
 	}
 
-	if err := domain.ValidateReclaimPolicies("", s.Spec.DestinationPVCReclaimPolicy); err != nil {
+	if err := domain.ValidateUnusedStoragePolicy(s.Spec.UnusedStoragePolicy); err != nil {
 		return err
 	}
 
@@ -187,43 +246,93 @@ func (s *Session) Validate() error {
 	return validateCrossClusterVolumes(s)
 }
 
-func validateCrossClusterHeader(s *Session) error {
-	if s == nil || s.APIVersion != APIVersion || s.Kind != Kind || ValidateSessionID(s.ID) != nil {
-		return errors.New("invalid cross-cluster session identity")
+func (s *ReservationSession) Validate() error {
+	if s == nil || s.APIVersion != APIVersion || s.Kind != ReservationKind ||
+		ValidateSessionID(s.ID) != nil {
+		return errors.New("invalid cross-cluster reservation session identity")
 	}
 
-	if s.Spec.SessionNamespace == "" || s.Spec.SourceNamespace == "" ||
-		s.Spec.DestinationNamespace == "" ||
-		len(s.Spec.Volumes) == 0 ||
-		s.Spec.SourceCluster.ID == "" ||
-		s.Spec.DestinationCluster.ID == "" ||
-		s.Spec.SourceCluster.ID == s.Spec.DestinationCluster.ID {
-		return errors.New("cross-cluster session has incomplete spec")
-	}
-
-	if _, err := kube.NormalizeToolImage(s.Spec.ToolImage); err != nil {
+	if err := validateCrossClusterContext(s.ID, s.Spec.SessionContext); err != nil {
 		return err
 	}
 
-	if len(s.Spec.Strategies) == 0 {
+	if err := domain.ValidateUnusedStoragePolicy(s.Spec.UnusedStoragePolicy); err != nil {
+		return err
+	}
+
+	if err := validateCrossClusterPhase(s.Status.Phase); err != nil {
+		return err
+	}
+
+	if s.Status.Phase == PhaseReserved {
+		if err := validateReservationCheckpoints(s); err != nil {
+			return err
+		}
+	}
+
+	if len(s.Spec.Volumes) != len(s.Status.Volumes) {
+		return errors.New("cross-cluster reservation volume status is misaligned")
+	}
+
+	return validateCrossClusterVolumeList(
+		s.Spec.SessionContext,
+		s.Spec.Volumes,
+		reservationVolumeStatuses(s.Status.Volumes),
+	)
+}
+
+func validateReservationCheckpoints(s *ReservationSession) error {
+	for index, volume := range s.Spec.Volumes {
+		checkpoint := s.Status.Volumes[index].Reservation
+		if volume.Destination.PV.Name == "" || volume.Destination.PV.UID == "" ||
+			checkpoint.PVC.Name != volume.Destination.PVC.Name ||
+			checkpoint.PVC.Namespace != volume.Destination.PVC.Namespace ||
+			checkpoint.PVC.ClusterID != volume.Destination.PVC.ClusterID ||
+			checkpoint.PVC.UID == "" || checkpoint.PVC.UID != volume.Destination.PVC.UID ||
+			checkpoint.PV.Name != volume.Destination.PV.Name ||
+			checkpoint.PV.ClusterID != volume.Destination.PV.ClusterID ||
+			checkpoint.PV.UID == "" || checkpoint.PV.UID != volume.Destination.PV.UID {
+			return fmt.Errorf(
+				"cross-cluster reservation volume %d has incomplete destination checkpoint",
+				index,
+			)
+		}
+	}
+
+	return nil
+}
+
+func validateCrossClusterHeader(s *CopySession) error {
+	if s == nil || s.APIVersion != APIVersion || s.Kind != CopyKind ||
+		ValidateSessionID(s.ID) != nil {
+		return errors.New("invalid cross-cluster session identity")
+	}
+
+	return validateCrossClusterContext(s.ID, s.Spec.SessionContext)
+}
+
+func validateCrossClusterContext(id string, spec SessionContext) error {
+	if ValidateSessionID(id) != nil || spec.SessionNamespace == "" ||
+		spec.SourceNamespace == "" || spec.DestinationNamespace == "" ||
+		len(spec.Volumes) == 0 || spec.SourceCluster.ID == "" ||
+		spec.DestinationCluster.ID == "" || spec.SourceCluster.ID == spec.DestinationCluster.ID {
+		return errors.New("cross-cluster session has incomplete spec")
+	}
+
+	if _, err := kube.NormalizeToolImage(spec.ToolImage); err != nil {
+		return err
+	}
+
+	if len(spec.Strategies) == 0 {
 		return errors.New("cross-cluster session requires a transfer strategy")
 	}
 
-	return validateStrategies(s.Spec.Strategies)
+	return validateStrategies(spec.Strategies)
 }
 
-func validateCrossClusterStatus(s *Session) error {
-	switch s.Status.Phase {
-	case PhasePlanned,
-		PhaseReserving,
-		PhaseReserved,
-		PhaseTransferring,
-		PhaseCompleted,
-		PhaseFailed,
-		PhaseCleaning,
-		PhaseCleaned:
-	default:
-		return fmt.Errorf("cross-cluster session has unknown phase %q", s.Status.Phase)
+func validateCrossClusterStatus(s *CopySession) error {
+	if err := validateCrossClusterPhase(s.Status.Phase); err != nil {
+		return err
 	}
 
 	if len(s.Spec.Volumes) != len(s.Status.Volumes) {
@@ -233,16 +342,45 @@ func validateCrossClusterStatus(s *Session) error {
 	return nil
 }
 
-func validateCrossClusterVolumes(s *Session) error {
-	seenSources := make(map[string]struct{}, len(s.Spec.Volumes))
+func validateCrossClusterPhase(phase Phase) error {
+	switch phase {
+	case PhasePlanned,
+		PhaseReserving,
+		PhaseReserved,
+		PhaseTransferring,
+		PhaseCompleted,
+		PhaseFailed,
+		PhaseCleaning,
+		PhaseCleaned:
+	default:
+		return fmt.Errorf("cross-cluster session has unknown phase %q", phase)
+	}
 
-	seenDestinations := make(map[string]struct{}, len(s.Spec.Volumes))
-	for i, v := range s.Spec.Volumes {
-		if err := validateCrossClusterVolume(s, i, v); err != nil {
+	return nil
+}
+
+func validateCrossClusterVolumes(s *CopySession) error {
+	return validateCrossClusterVolumeList(
+		s.Spec.SessionContext,
+		s.Spec.Volumes,
+		copyReservationStatuses(s.Status.Volumes),
+	)
+}
+
+func validateCrossClusterVolumeList(
+	spec SessionContext,
+	volumes []VolumeSpec,
+	statuses []ReservationVolumeStatus,
+) error {
+	seenSources := make(map[string]struct{}, len(volumes))
+
+	seenDestinations := make(map[string]struct{}, len(volumes))
+	for i, v := range volumes {
+		if err := validateCrossClusterVolume(spec, i, v); err != nil {
 			return err
 		}
 
-		if s.Status.Volumes[i].SourcePVCName != v.Source.PVC.Name {
+		if statuses[i].SourcePVCName != v.Source.PVC.Name {
 			return fmt.Errorf("cross-cluster volume %d status mismatch", i)
 		}
 
@@ -269,12 +407,12 @@ func validateCrossClusterVolumes(s *Session) error {
 	return nil
 }
 
-func validateCrossClusterVolume(s *Session, i int, v VolumeSpec) error {
-	if crossClusterVolumeIdentityIncomplete(s, v) {
+func validateCrossClusterVolume(spec SessionContext, i int, v VolumeSpec) error {
+	if crossClusterVolumeIdentityIncomplete(spec, v) {
 		return fmt.Errorf("cross-cluster volume %d has incomplete identities", i)
 	}
 
-	if err := validateCrossClusterCapacity(s, i, v); err != nil {
+	if err := validateCrossClusterCapacity(spec, i, v); err != nil {
 		return err
 	}
 
@@ -287,31 +425,31 @@ func validateCrossClusterVolume(s *Session, i int, v VolumeSpec) error {
 	}
 
 	if (v.Destination.PV.Name == "") != (v.Destination.PV.UID == "") ||
-		(v.Destination.PV.Name != "" && v.Destination.PV.ClusterID != s.Spec.DestinationCluster.ID) {
+		(v.Destination.PV.Name != "" && v.Destination.PV.ClusterID != spec.DestinationCluster.ID) {
 		return fmt.Errorf("cross-cluster volume %d destination PV identity is incomplete", i)
 	}
 
 	return nil
 }
 
-func crossClusterVolumeIdentityIncomplete(s *Session, v VolumeSpec) bool {
-	return v.Source.PVC.ClusterID != s.Spec.SourceCluster.ID ||
-		v.Source.PV.ClusterID != s.Spec.SourceCluster.ID ||
-		v.Destination.PVC.ClusterID != s.Spec.DestinationCluster.ID ||
-		v.Destination.StorageClass.ClusterID != s.Spec.DestinationCluster.ID ||
+func crossClusterVolumeIdentityIncomplete(spec SessionContext, v VolumeSpec) bool {
+	return v.Source.PVC.ClusterID != spec.SourceCluster.ID ||
+		v.Source.PV.ClusterID != spec.SourceCluster.ID ||
+		v.Destination.PVC.ClusterID != spec.DestinationCluster.ID ||
+		v.Destination.StorageClass.ClusterID != spec.DestinationCluster.ID ||
 		v.Source.PVC.Name == "" ||
-		v.Source.PVC.Namespace != s.Spec.SourceNamespace ||
+		v.Source.PVC.Namespace != spec.SourceNamespace ||
 		v.Source.PVC.UID == "" ||
 		v.Source.PV.Name == "" ||
 		v.Source.PV.UID == "" ||
 		v.Destination.PVC.Name == "" ||
-		v.Destination.PVC.Namespace != s.Spec.DestinationNamespace ||
+		v.Destination.PVC.Namespace != spec.DestinationNamespace ||
 		v.Destination.StorageClass.Name == "" ||
 		v.Destination.StorageClass.UID == "" ||
 		v.Destination.StorageClass.Namespace != ""
 }
 
-func validateCrossClusterCapacity(s *Session, i int, v VolumeSpec) error {
+func validateCrossClusterCapacity(spec SessionContext, i int, v VolumeSpec) error {
 	sourceCapacity, err := resource.ParseQuantity(v.Source.Capacity)
 	if err != nil || sourceCapacity.Sign() <= 0 {
 		return fmt.Errorf("cross-cluster volume %d source capacity is invalid", i)
@@ -323,7 +461,7 @@ func validateCrossClusterCapacity(s *Session, i int, v VolumeSpec) error {
 	}
 
 	if destinationCapacity.Cmp(sourceCapacity) < 0 &&
-		(!s.Spec.AllowVolumeShrink || !s.Spec.SkipSourceUsageCheck) {
+		(!spec.AllowVolumeShrink || !spec.SkipSourceUsageCheck) {
 		return fmt.Errorf("cross-cluster volume %d shrink approval is incomplete", i)
 	}
 
@@ -399,19 +537,48 @@ func ValidateSessionID(id string) error {
 	return nil
 }
 
-func NewSession(id string, spec Spec, now time.Time) *Session {
-	statuses := make([]VolumeStatus, len(spec.Volumes))
+func NewCopySession(id string, spec CopySpec, now time.Time) *CopySession {
+	statuses := make([]CopyVolumeStatus, len(spec.Volumes))
 	for i, v := range spec.Volumes {
 		statuses[i].SourcePVCName = v.Source.PVC.Name
 	}
 
 	t := metav1.NewTime(now.UTC())
 
-	return &Session{
+	return &CopySession{
 		APIVersion: APIVersion,
-		Kind:       Kind,
+		Kind:       CopyKind,
 		ID:         id,
 		Spec:       spec,
-		Status:     Status{Phase: PhasePlanned, StartedAt: t, UpdatedAt: t, Volumes: statuses},
+		Status: CopyStatus{
+			SessionLifecycleStatus: SessionLifecycleStatus{
+				Phase:     PhasePlanned,
+				StartedAt: t,
+				UpdatedAt: t,
+			},
+			Volumes: statuses,
+		},
+	}
+}
+
+func NewReservationSession(id string, spec ReservationSpec, now time.Time) *ReservationSession {
+	statuses := make([]ReservationVolumeStatus, len(spec.Volumes))
+	for i, v := range spec.Volumes {
+		statuses[i].SourcePVCName = v.Source.PVC.Name
+	}
+
+	t := metav1.NewTime(now.UTC())
+
+	return &ReservationSession{
+		SessionEnvelope: SessionEnvelope{APIVersion: APIVersion, Kind: ReservationKind, ID: id},
+		Spec:            spec,
+		Status: ReservationSessionStatus{
+			SessionLifecycleStatus: SessionLifecycleStatus{
+				Phase:     PhasePlanned,
+				StartedAt: t,
+				UpdatedAt: t,
+			},
+			Volumes: statuses,
+		},
 	}
 }

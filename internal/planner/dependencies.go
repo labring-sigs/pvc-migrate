@@ -145,7 +145,7 @@ func collectContainerDependencies(
 
 func (p *Planner) checkPodDependencies(
 	ctx context.Context,
-	plan *domain.MigrationPlan,
+	plan checkRecorder,
 	pod *corev1.Pod,
 ) {
 	if pod != nil {

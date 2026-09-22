@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 
+	v1alpha1 "github.com/labring-sigs/pvc-migrate/api/v1alpha1"
 	"github.com/labring-sigs/pvc-migrate/internal/domain"
 	"github.com/labring-sigs/pvc-migrate/internal/kube"
 	corev1 "k8s.io/api/core/v1"
@@ -13,34 +14,35 @@ import (
 
 func (s *Service) Cleanup(
 	ctx context.Context,
-	session *Session,
-	destinationPolicy string,
+	session *CopySession,
+	unusedStoragePolicy string,
 	deleteSession bool,
 ) error {
-	if s.store != nil {
+	if s.locker != nil {
 		return s.withLock(ctx, session, func(locked context.Context) error {
-			return s.cleanup(locked, session, destinationPolicy, deleteSession)
+			return s.cleanup(locked, session, unusedStoragePolicy, deleteSession)
 		})
 	}
 
-	return s.cleanup(ctx, session, destinationPolicy, deleteSession)
+	return s.cleanup(ctx, session, unusedStoragePolicy, deleteSession)
 }
 
 func (s *Service) cleanup(
 	ctx context.Context,
-	session *Session,
-	destinationPolicy string,
+	session *CopySession,
+	unusedStoragePolicy string,
 	deleteSession bool,
 ) error {
-	if err := s.ValidateCleanup(ctx, session, destinationPolicy); err != nil {
+	if err := s.ValidateCleanup(ctx, session, unusedStoragePolicy); err != nil {
 		return err
 	}
 
-	if destinationPolicy == "" {
-		destinationPolicy = session.Spec.DestinationPVCReclaimPolicy
+	policy := session.Spec.UnusedStoragePolicy
+	if unusedStoragePolicy != "" {
+		policy = v1alpha1.UnusedStoragePolicy(unusedStoragePolicy)
 	}
 
-	deleteDestination := destinationPolicy == "Delete"
+	deleteDestination := cleanupDeletesDestination(session, policy)
 
 	session.Status.Phase = PhaseCleaning
 	session.Status.Message = "cleaning cross-cluster resources"
@@ -85,37 +87,63 @@ func (s *Service) cleanup(
 	s.touch(session)
 
 	if deleteSession {
-		if err := s.delete(ctx, session); err != nil {
-			return err
-		}
-
-		return s.store.DeleteSessionLease(ctx, session.Spec.SessionNamespace, session.ID)
+		return s.deleteSession(ctx, session.Spec.SessionNamespace, session.ID, func() error {
+			return s.delete(ctx, session)
+		})
 	}
 
 	return s.save(ctx, session, false)
 }
 
+// deleteSession removes the fencing Lease before the persisted session. A
+// failed Lease deletion must leave the session available for a retry; deleting
+// the record first would strand a same-ID operation behind the old Lease.
+func (s *Service) deleteSession(
+	ctx context.Context,
+	namespace, id string,
+	deleteRecord func() error,
+) error {
+	if lock, ok := sessionLockFromContext(ctx); ok {
+		if err := lock.Delete(ctx); err != nil {
+			return err
+		}
+	} else if s.leases != nil {
+		if err := s.leases.DeleteSessionLease(ctx, namespace, id); err != nil {
+			return err
+		}
+	}
+
+	return deleteRecord()
+}
+
 // ValidateCleanup checks policy, identities and consumers without changing the session.
-func (s *Service) ValidateCleanup(ctx context.Context, session *Session, policy string) error {
+func (s *Service) ValidateCleanup(
+	ctx context.Context,
+	session *CopySession,
+	unusedStoragePolicy string,
+) error {
 	if err := s.validateSession(ctx, session); err != nil {
 		return err
 	}
 
-	if policy == "" {
-		policy = session.Spec.DestinationPVCReclaimPolicy
+	policy := session.Spec.UnusedStoragePolicy
+	if unusedStoragePolicy != "" {
+		policy = v1alpha1.UnusedStoragePolicy(unusedStoragePolicy)
 	}
 
-	if err := domain.ValidateReclaimPolicies("", policy); err != nil {
+	if err := domain.ValidateUnusedStoragePolicy(policy); err != nil {
 		return err
 	}
 
+	deleteDestination := cleanupDeletesDestination(session, policy)
+
 	for i := range session.Spec.Volumes {
-		pvc, _, err := s.inspectCleanupDestination(ctx, session, i, policy == "Delete")
+		pvc, _, err := s.inspectCleanupDestination(ctx, session, i, deleteDestination)
 		if err != nil {
 			return err
 		}
 
-		if policy == "Delete" && pvc != nil {
+		if deleteDestination && pvc != nil {
 			if err := s.validateCleanupConsumers(ctx, session, i, pvc); err != nil {
 				return err
 			}
@@ -125,11 +153,36 @@ func (s *Service) ValidateCleanup(ctx context.Context, session *Session, policy 
 	return nil
 }
 
-func (s *Service) cleanupDestinationVolume(ctx context.Context, session *Session, index int) error {
+// A completed cross-cluster copy has delivered its destination PVC. The
+// destination is the result of the operation, so cleanup must retain it even
+// when the requested policy is Delete.
+func cleanupDeletesDestination(session *CopySession, policy v1alpha1.UnusedStoragePolicy) bool {
+	if session == nil ||
+		session.Status.Phase == PhaseCompleted ||
+		session.Status.CompletedAt != nil {
+		return false
+	}
+
+	return domain.DeletesUnusedStorage(policy)
+}
+
+func (s *Service) cleanupDestinationVolume(
+	ctx context.Context,
+	session *CopySession,
+	index int,
+) error {
 	volume := &session.Spec.Volumes[index]
+	state := reservationState{
+		ID:     session.ID,
+		Spec:   &session.Spec.SessionContext,
+		Status: &session.Status.Volumes[index].Reservation,
+		Save: func(saveCtx context.Context) error {
+			return s.save(saveCtx, session, false)
+		},
+	}
 
 	client := s.destination.Kubernetes
-	if err := s.deleteReservationConsumer(ctx, session, index); err != nil {
+	if err := s.deleteReservationConsumer(ctx, state); err != nil {
 		return err
 	}
 
@@ -178,11 +231,20 @@ func (s *Service) cleanupDestinationVolume(ctx context.Context, session *Session
 	}
 
 	uid := pvc.UID
+
+	if err := requireSessionLease(ctx); err != nil {
+		return err
+	}
+
 	if err := client.CoreV1().
 		PersistentVolumeClaims(pvc.Namespace).
 		Delete(ctx, pvc.Name, metav1.DeleteOptions{Preconditions: &metav1.Preconditions{UID: &uid}}); err != nil &&
 		!apierrors.IsNotFound(err) {
 		return fmt.Errorf("delete destination PVC %s/%s: %w", pvc.Namespace, pvc.Name, err)
+	}
+
+	if err := requireSessionLease(ctx); err != nil {
+		return err
 	}
 
 	return s.cleanupDestinationPV(ctx, volume, pvName)
@@ -249,12 +311,20 @@ func (s *Service) cleanupDestinationPV(
 				preconditions.ResourceVersion = &resourceVersion
 			}
 
+			if err := requireSessionLease(waitCtx); err != nil {
+				return false, err
+			}
+
 			if err := client.Delete(
 				waitCtx,
 				pv.Name,
 				metav1.DeleteOptions{Preconditions: preconditions},
 			); err != nil &&
 				!apierrors.IsNotFound(err) {
+				return false, err
+			}
+
+			if err := requireSessionLease(waitCtx); err != nil {
 				return false, err
 			}
 
@@ -265,10 +335,9 @@ func (s *Service) cleanupDestinationPV(
 
 func (s *Service) deleteReservationConsumer(
 	ctx context.Context,
-	session *Session,
-	index int,
+	state reservationState,
 ) error {
-	ref := session.Status.Volumes[index].Reservation.ConsumerPod
+	ref := state.Status.ConsumerPod
 	if ref.Name == "" {
 		return nil
 	}
@@ -284,18 +353,27 @@ func (s *Service) deleteReservationConsumer(
 		return err
 	}
 
-	if (ref.UID != "" && pod.UID != ref.UID) || pod.Labels[SessionKey] != session.ID ||
+	if (ref.UID != "" && pod.UID != ref.UID) || pod.Labels[SessionKey] != state.ID ||
 		pod.Labels[ManagedByLabel] != ManagedBy {
 		return fmt.Errorf("reservation Pod %s/%s ownership or UID changed", pod.Namespace, pod.Name)
 	}
 
 	uid := pod.UID
+
+	if err := requireSessionLease(ctx); err != nil {
+		return err
+	}
+
 	if err := pods.Delete(
 		ctx,
 		pod.Name,
 		metav1.DeleteOptions{Preconditions: &metav1.Preconditions{UID: &uid}},
 	); err != nil &&
 		!apierrors.IsNotFound(err) {
+		return err
+	}
+
+	if err := requireSessionLease(ctx); err != nil {
 		return err
 	}
 

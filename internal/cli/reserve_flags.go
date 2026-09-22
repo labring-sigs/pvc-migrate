@@ -3,45 +3,39 @@ package cli
 import (
 	"time"
 
+	v1alpha1 "github.com/labring-sigs/pvc-migrate/api/v1alpha1"
 	"github.com/labring-sigs/pvc-migrate/internal/domain"
-	"github.com/labring-sigs/pvc-migrate/internal/planner"
 	"github.com/spf13/cobra"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
 // reserveFlags is the CLI contract for storage reservation. It deliberately
 // excludes copy-only controls such as --online.
 type reserveFlags struct {
-	sessionID                   string
-	sourceNamespace             string
-	temporaryNamespace          string
-	destinationNamespace        string
-	sourcePVCs                  []string
-	destinationPVCs             []string
-	destinationCapacities       []string
-	sourcePaths                 []string
-	destinationPaths            []string
-	allowVolumeShrink           bool
-	skipSourceUsageCheck        bool
-	targetNode                  string
-	destinationClass            string
-	capacityAwareness           string
-	strategies                  []string
-	verifyChecksum              bool
-	deleteExtraneous            bool
-	podName                     string
-	destinationPVCReclaimPolicy string
+	sessionID             string
+	sourceNamespace       string
+	destinationNamespace  string
+	sourcePVCs            []string
+	destinationPVCs       []string
+	destinationCapacities []string
+	sourcePaths           []string
+	destinationPaths      []string
+	allowVolumeShrink     bool
+	skipSourceUsageCheck  bool
+	targetNode            string
+	destinationClass      string
+	capacityAwareness     string
+	strategies            []string
+	verifyChecksum        bool
+	deleteExtraneous      bool
+	podName               string
+	unusedStoragePolicy   string
 }
 
 func (f *reserveFlags) bind(command *cobra.Command) {
 	flags := command.Flags()
 	flags.StringVar(&f.sessionID, "session", "", "Migration session ID")
 	flags.StringVarP(&f.sourceNamespace, "source-namespace", "n", "default", "Source PVC namespace")
-	flags.StringVar(
-		&f.temporaryNamespace,
-		"temporary-namespace",
-		"pvc-migrate-system",
-		"Namespace for staged destination PVCs",
-	)
 	flags.StringVar(
 		&f.destinationNamespace,
 		"destination-namespace",
@@ -128,19 +122,23 @@ func (f *reserveFlags) bind(command *cobra.Command) {
 	)
 	flags.StringVar(&f.podName, "pod", "", "Pod whose PVCs define the reservation set")
 	flags.StringVar(
-		&f.destinationPVCReclaimPolicy,
-		"destination-pvc-reclaim-policy",
-		string(domain.DestinationPVCReclaimRetain),
-		"Policy for the reserved destination PVC: Retain or Delete",
+		&f.unusedStoragePolicy,
+		"unused-storage-policy",
+		string(v1alpha1.UnusedStorageKeep),
+		"Keep or Delete reserved storage: Delete removes destination PVCs this reservation created and never promoted to a copy; promoted destinations belong to the copy workflow and the source is always kept (default Keep)",
 	)
 }
 
-func (f *reserveFlags) planOptions(state *rootState) (planner.ReserveOptions, error) {
+func (f *reserveFlags) workflow(
+	state *rootState,
+	runtime *commandRuntime,
+	submit bool,
+) (*v1alpha1.ClusterReservation, error) {
 	id := f.sessionID
 	if id == "" {
 		generated, err := domain.NewSessionID(time.Now())
 		if err != nil {
-			return planner.ReserveOptions{}, err
+			return nil, err
 		}
 
 		id = generated
@@ -152,28 +150,52 @@ func (f *reserveFlags) planOptions(state *rootState) (planner.ReserveOptions, er
 		destinationNamespace = f.sourceNamespace
 	}
 
-	return planner.ReserveOptions{
-		SessionID:                   id,
-		SourceNamespace:             f.sourceNamespace,
-		TemporaryNamespace:          f.temporaryNamespace,
-		DestinationNamespace:        destinationNamespace,
-		SessionNamespace:            state.global.sessionNamespace,
-		StagingNamespace:            f.temporaryNamespace,
-		ToolImage:                   state.global.toolImage,
-		SourcePVCs:                  append([]string(nil), f.sourcePVCs...),
-		DestinationPVCs:             append([]string(nil), f.destinationPVCs...),
-		DestinationCapacities:       append([]string(nil), f.destinationCapacities...),
-		SourcePaths:                 append([]string(nil), f.sourcePaths...),
-		DestinationPaths:            append([]string(nil), f.destinationPaths...),
-		AllowVolumeShrink:           f.allowVolumeShrink,
-		SkipSourceUsageCheck:        f.skipSourceUsageCheck,
-		PodName:                     f.podName,
-		TargetNode:                  f.targetNode,
-		DestinationClass:            f.destinationClass,
-		CapacityAwareness:           domain.CapacityAwareness(f.capacityAwareness),
-		Strategies:                  append([]string(nil), f.strategies...),
-		VerifyChecksum:              f.verifyChecksum,
-		DeleteExtraneous:            f.deleteExtraneous,
-		DestinationPVCReclaimPolicy: f.destinationPVCReclaimPolicy,
-	}, nil
+	sessionNamespace, _ := state.controllerPlanNamespaces(runtime, domain.SessionTypeReserve,
+		f.sourceNamespace, destinationNamespace, destinationNamespace, false, submit)
+
+	object := &v1alpha1.ClusterReservation{
+		ObjectMeta: metav1.ObjectMeta{Name: id},
+		Spec: v1alpha1.ClusterReservationSpec{
+			SourceNamespace:      v1alpha1.NamespaceName(f.sourceNamespace),
+			DestinationNamespace: v1alpha1.NamespaceName(destinationNamespace),
+			SessionNamespace:     v1alpha1.NamespaceName(sessionNamespace),
+			ReservationSpec: v1alpha1.ReservationSpec{
+				TransferOptions: v1alpha1.TransferOptions{
+					UnusedStoragePolicy: v1alpha1.UnusedStoragePolicy(
+						f.unusedStoragePolicy,
+					),
+					DestinationStorageClass: f.destinationClass,
+					CapacityAwareness:       f.capacityAwareness,
+					TargetNode:              f.targetNode,
+					Strategies:              append([]string(nil), f.strategies...),
+					VerifyChecksum:          f.verifyChecksum,
+					DeleteExtraneous:        new(f.deleteExtraneous),
+					AllowVolumeShrink:       f.allowVolumeShrink,
+					SkipSourceUsageCheck:    f.skipSourceUsageCheck,
+				},
+			},
+		},
+	}
+	if f.podName != "" {
+		object.Spec.Pod = &v1alpha1.LocalResourceReference{Name: f.podName}
+	}
+
+	for _, name := range f.sourcePVCs {
+		object.Spec.Volumes = append(object.Spec.Volumes,
+			v1alpha1.VolumeRequest{SourcePVC: v1alpha1.LocalResourceReference{Name: name}})
+	}
+
+	if err := applyVolumeMappings(
+		&object.Spec.TransferOptions,
+		&object.Spec.Volumes,
+		object.Spec.Pod != nil,
+		f.destinationCapacities,
+		f.destinationPVCs,
+		f.sourcePaths,
+		f.destinationPaths,
+	); err != nil {
+		return nil, err
+	}
+
+	return object, nil
 }

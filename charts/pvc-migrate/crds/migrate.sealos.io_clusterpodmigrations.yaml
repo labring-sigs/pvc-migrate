@@ -48,6 +48,13 @@ spec:
             properties:
               allowLeaderDowntime:
                 type: boolean
+              allowPlacementViolation:
+                description: |-
+                  AllowPlacementViolation proceeds when the recreated Pod may violate
+                  required podAffinity, required podAntiAffinity, or DoNotSchedule
+                  topologySpread constraints on the target node — for topologies where
+                  the operator will re-balance the remaining replicas afterwards.
+                type: boolean
               allowVolumeShrink:
                 type: boolean
               capacityAwareness:
@@ -56,16 +63,24 @@ spec:
                 - require
                 - "off"
                 type: string
+              copyTimeout:
+                description: |-
+                  CopyTimeout bounds one data-transfer attempt (warm copy, final sync, or
+                  copy pass). Unset keeps the operation-level bound only. The pattern
+                  requires at least one unit-suffixed component ("30m", "1h30m", "90s")
+                  so empty or unitless values are rejected at admission instead of
+                  silently falling back to the default during planning.
+                pattern: ^([0-9]+(h|m|s))+$
+                type: string
               deleteExtraneous:
+                default: true
+                description: |-
+                  DeleteExtraneous defaults to true so a raw workflow CR means the same
+                  thing as the CLI default: the destination mirrors the source exactly.
+                  A pointer preserves the distinction between an omitted value (the API
+                  default is true) and an explicit false from a typed client.
                 type: boolean
               destinationCapacity:
-                type: string
-              destinationPVCReclaimPolicy:
-                description: DestinationPVCReclaimPolicy controls workflow-owned destination
-                  storage during cleanup.
-                enum:
-                - Retain
-                - Delete
                 type: string
               destinationPath:
                 type: string
@@ -108,6 +123,34 @@ spec:
                 default: 1
                 minimum: 0
                 type: integer
+              retryPolicy:
+                description: |-
+                  RetryPolicy overrides the retry behavior of the data-transfer attempts
+                  for this workflow. Zero values keep the controller defaults. Only
+                  copy-bearing workflows consume it.
+                properties:
+                  retries:
+                    description: Retries overrides the number of data-transfer attempts.
+                    format: int32
+                    maximum: 100
+                    minimum: 0
+                    type: integer
+                  retryBackoff:
+                    description: |-
+                      RetryBackoff is the delay before the first retry; it doubles on every
+                      further attempt. The pattern requires at least one unit-suffixed
+                      component ("2s", "1m30s").
+                    pattern: ^([0-9]+(h|m|s))+$
+                    type: string
+                type: object
+              rsyncMaxRetries:
+                description: |-
+                  RsyncMaxRetries overrides how many times the rsync job re-runs on a
+                  failed attempt within one transfer. Unset keeps the upstream default.
+                format: int32
+                maximum: 100
+                minimum: 0
+                type: integer
               sessionNamespace:
                 description: |-
                   NamespaceName is a Kubernetes namespace name used by a cluster-scoped
@@ -128,13 +171,6 @@ spec:
                 type: string
               sourceNode:
                 type: string
-              sourcePVReclaimPolicy:
-                description: The inactive source PV is retained by default. Mutable
-                  until cleanup.
-                enum:
-                - Retain
-                - Delete
-                type: string
               sourcePath:
                 type: string
               strategies:
@@ -153,6 +189,21 @@ spec:
                 maxLength: 63
                 minLength: 1
                 pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
+                type: string
+              unusedStoragePolicy:
+                description: |-
+                  UnusedStoragePolicy decides the fate of workflow-created storage that
+                  was never delivered to a workload, and its meaning differs per
+                  operation: migration and pod migration delete the old source PV after
+                  a completed cutover, or the staged destination after a rollback or
+                  abort; copy deletes the destination PVC only when the copy aborted
+                  before completing; reservation deletes destination PVCs that were
+                  never promoted to a copy. Keep retains it (default); Delete removes
+                  it. The storage a workload actually runs on, and every source PVC, is
+                  always kept, whatever the policy says.
+                enum:
+                - Keep
+                - Delete
                 type: string
               verifyChecksum:
                 type: boolean
@@ -367,9 +418,7 @@ spec:
                 items:
                   properties:
                     lvmVolume:
-                      description: |-
-                        LVMVolume is namespaced and must retain its namespace for controller
-                        recovery when a cluster PodMigration spans namespaces.
+                      description: LVMVolume can live outside the workflow namespace.
                       properties:
                         apiVersion:
                           maxLength: 253
@@ -403,8 +452,10 @@ spec:
                     previousSharedSet:
                       type: boolean
                     sourcePV:
-                      description: SourcePV is cluster-scoped and therefore normally
-                        has no namespace.
+                      description: |-
+                        LocalResourceReference identifies a resource whose namespace is established
+                        by the containing workflow, or a cluster-scoped resource such as a PV.
+                        Namespaced workflow APIs derive their boundary from metadata.namespace.
                       properties:
                         apiVersion:
                           maxLength: 253
@@ -464,11 +515,6 @@ spec:
                 properties:
                   deleteExtraneous:
                     type: boolean
-                  destinationPVCReclaimPolicy:
-                    enum:
-                    - Retain
-                    - Delete
-                    type: string
                   openebsLvmEnableShared:
                     type: boolean
                   precopyPasses:
@@ -493,11 +539,6 @@ spec:
                     type: string
                   sourceNode:
                     type: string
-                  sourcePVReclaimPolicy:
-                    enum:
-                    - Retain
-                    - Delete
-                    type: string
                   strategies:
                     items:
                       type: string
@@ -515,14 +556,25 @@ spec:
                     type: string
                   toolImage:
                     type: string
+                  unusedStoragePolicy:
+                    description: |-
+                      UnusedStoragePolicy decides the fate of replaced migration storage.
+                      Delete removes the old source PV after a completed cutover, or the
+                      staged destination after a rollback or abort. The PVC the workload
+                      runs on is always kept, whatever the policy says.
+                    enum:
+                    - Keep
+                    - Delete
+                    type: string
                   verifyChecksum:
                     type: boolean
                   volumes:
                     items:
                       description: |-
-                        ClusterVolumeSpec is the cluster-workflow planning contract. PVC names are
-                        relative to the source and destination-storage namespace roles declared by
-                        the parent workflow. PV references remain cluster-scoped.
+                        VolumeSpec is planning output required to resume a PVC transfer. It is an
+                        API-owned type with only the fields needed by transfer workflows.
+                        PVC references are relative to the workflow's source and destination
+                        namespace roles; PV references are always cluster-scoped.
                       properties:
                         accessModes:
                           items:
@@ -918,12 +970,18 @@ spec:
                       - storageClass
                       - volumeMode
                       type: object
+                      x-kubernetes-validations:
+                      - message: sourcePVC.uid and sourcePV.uid are required planning
+                          identities
+                        rule: has(self.sourcePVC.uid) && size(self.sourcePVC.uid)
+                          > 0 && has(self.sourcePV.uid) && size(self.sourcePV.uid)
+                          > 0
                     maxItems: 1024
                     type: array
                   workload:
                     description: |-
-                      ClusterWorkloadSpec is the workload snapshot owned by ClusterPodMigration.
-                      Workload references are relative to spec.sourceNamespace.
+                      WorkloadSpec is specific to PodMigration and records workload ownership
+                      and restoration data needed by that operation.
                     properties:
                       adapter:
                         enum:
@@ -1050,6 +1108,8 @@ spec:
                           switchoverContainer:
                             type: string
                           switchoverStrategy:
+                            description: KubeBlocksSwitchoverStrategy identifies the
+                              planned leader handoff mechanism.
                             type: string
                         required:
                         - cluster
@@ -1062,6 +1122,9 @@ spec:
                         format: int32
                         type: integer
                       originalObject:
+                        description: |-
+                          The serialized byte-size limit is enforced by the controller/domain
+                          boundary because OpenAPI cannot express a byte limit for opaque JSON.
                         x-kubernetes-preserve-unknown-fields: true
                       originalReplicas:
                         format: int32
@@ -1101,6 +1164,13 @@ spec:
                             type: string
                           component:
                             type: string
+                          componentPausedSupported:
+                            description: |-
+                              ComponentPausedSupported records whether the VMCluster CRD kept the
+                              per-component paused write. Older operator versions prune the unknown
+                              field, so pause semantics degrade to holding the component at a reduced
+                              replicaCount instead of relying on the paused flag.
+                            type: boolean
                           name:
                             type: string
                           originalClusterPaused:
@@ -1413,12 +1483,57 @@ spec:
                     required:
                     - name
                     type: object
+                  vmCluster:
+                    description: |-
+                      VMCluster carries the controller's pause-probe outcomes (such as
+                      whether the CRD kept the per-component paused field) so resume and
+                      restore reuse the semantics recorded during the pause.
+                    properties:
+                      apiVersion:
+                        type: string
+                      component:
+                        type: string
+                      componentPausedSupported:
+                        description: |-
+                          ComponentPausedSupported records whether the VMCluster CRD kept the
+                          per-component paused write. Older operator versions prune the unknown
+                          field, so pause semantics degrade to holding the component at a reduced
+                          replicaCount instead of relying on the paused flag.
+                        type: boolean
+                      name:
+                        type: string
+                      originalClusterPaused:
+                        type: boolean
+                      originalClusterPausedConfigured:
+                        type: boolean
+                      originalPaused:
+                        type: boolean
+                      originalPausedConfigured:
+                        type: boolean
+                      originalReplicas:
+                        format: int32
+                        type: integer
+                      originalReplicasConfigured:
+                        type: boolean
+                      uid:
+                        description: |-
+                          UID is a type that holds unique ID values, including UUIDs.  Because we
+                          don't ONLY use UUIDs, this is an alias to string.  Being a type captures
+                          intent and helps make sure that UIDs and names do not get conflated.
+                        type: string
+                    required:
+                    - apiVersion
+                    - component
+                    - name
+                    - originalClusterPaused
+                    - originalClusterPausedConfigured
+                    - originalPaused
+                    - originalPausedConfigured
+                    - originalReplicas
+                    - originalReplicasConfigured
+                    type: object
                 type: object
             required:
-            - phase
-            - startedAt
-            - updatedAt
-            - volumes
             - warmPassesCompleted
             type: object
         required:

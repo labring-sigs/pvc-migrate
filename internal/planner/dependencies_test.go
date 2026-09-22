@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	v1alpha1 "github.com/labring-sigs/pvc-migrate/api/v1alpha1"
 	"github.com/labring-sigs/pvc-migrate/internal/domain"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -131,7 +132,7 @@ func TestCheckPodDependenciesCollectsAllReferenceForms(t *testing.T) {
 		)
 	}
 
-	plan := &domain.MigrationPlan{Ready: true}
+	plan := &domain.TransferPlan{PlanSummary: domain.PlanSummary{Ready: true}}
 	New(
 		kubernetesfake.NewClientset(objects...),
 		nil,
@@ -163,7 +164,7 @@ func TestCheckPodDependenciesReportsSortedMissingDefaults(t *testing.T) {
 			},
 		},
 	}
-	plan := &domain.MigrationPlan{Ready: true}
+	plan := &domain.TransferPlan{PlanSummary: domain.PlanSummary{Ready: true}}
 	New(kubernetesfake.NewClientset(), nil).checkPodDependencies(context.Background(), plan, pod)
 
 	want := "missing dependencies: ConfigMap/a-config, Secret/z-secret, ServiceAccount/default"
@@ -186,7 +187,7 @@ func TestCheckPodDependenciesStopsOnKubernetesError(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{Namespace: "app", Name: "worker"},
 		Spec:       corev1.PodSpec{ImagePullSecrets: []corev1.LocalObjectReference{{Name: "pull"}}},
 	}
-	plan := &domain.MigrationPlan{Ready: true}
+	plan := &domain.TransferPlan{PlanSummary: domain.PlanSummary{Ready: true}}
 	New(client, nil).checkPodDependencies(context.Background(), plan, pod)
 
 	if plan.Ready || len(plan.Checks) != 1 ||
@@ -213,44 +214,44 @@ func TestKubeBlocksRoleWarningDescribesTheSelectedSafetyPath(t *testing.T) {
 	tests := []struct {
 		name           string
 		controllerKind string
-		spec           domain.KubeBlocksSpec
+		spec           v1alpha1.KubeBlocksSpec
 		want           string
 		forbidden      string
 	}{
 		{
 			name:      "unknown role with accepted downtime",
-			spec:      domain.KubeBlocksSpec{Role: "unknown"},
+			spec:      v1alpha1.KubeBlocksSpec{Role: "unknown"},
 			want:      "possible leader downtime was explicitly acknowledged",
 			forbidden: "target=",
 		},
 		{
 			name:      "known leader with accepted downtime",
-			spec:      domain.KubeBlocksSpec{Role: "primary"},
+			spec:      v1alpha1.KubeBlocksSpec{Role: "primary"},
 			want:      "leader downtime was explicitly acknowledged",
 			forbidden: "target=",
 		},
 		{
 			name: "automatic switchover",
-			spec: domain.KubeBlocksSpec{Role: "primary", SwitchoverCandidate: "db-1"},
+			spec: v1alpha1.KubeBlocksSpec{Role: "primary", SwitchoverCandidate: "db-1"},
 			want: "switchover target=db-1",
 		},
 		{
 			name: "MongoDB native switchover",
-			spec: domain.KubeBlocksSpec{
+			spec: v1alpha1.KubeBlocksSpec{
 				Role:                "primary",
 				SwitchoverCandidate: "db-1",
-				SwitchoverStrategy:  domain.KubeBlocksSwitchoverMongoDBNative,
+				SwitchoverStrategy:  v1alpha1.KubeBlocksSwitchoverMongoDBNative,
 			},
 			want: "native candidate switchover targets=db-1",
 		},
 		{
 			name:           "legacy primary",
 			controllerKind: domain.KindStatefulSet,
-			spec:           domain.KubeBlocksSpec{Role: "primary"},
+			spec:           v1alpha1.KubeBlocksSpec{Role: "primary"},
 		},
 		{
 			name: "InstanceSet secondary",
-			spec: domain.KubeBlocksSpec{Role: "secondary"},
+			spec: v1alpha1.KubeBlocksSpec{Role: "secondary"},
 		},
 	}
 	for _, test := range tests {
@@ -260,10 +261,7 @@ func TestKubeBlocksRoleWarningDescribesTheSelectedSafetyPath(t *testing.T) {
 				controllerKind = domain.KindInstanceSet
 			}
 
-			message := kubeBlocksRoleWarning(domain.WorkloadSpec{
-				Controller: domain.ObjectReference{Kind: controllerKind},
-				KubeBlocks: &test.spec,
-			})
+			message := kubeBlocksRoleWarning(controllerKind, &test.spec)
 			if test.want == "" {
 				if message != "" {
 					t.Fatalf("message=%q want empty", message)

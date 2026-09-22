@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	v1alpha1 "github.com/labring-sigs/pvc-migrate/api/v1alpha1"
 	"github.com/labring-sigs/pvc-migrate/internal/domain"
 	"github.com/labring-sigs/pvc-migrate/internal/kube"
 	"github.com/labring-sigs/pvc-migrate/internal/testutil"
@@ -19,16 +20,16 @@ import (
 
 func planWithDestinationCapacity(
 	t *testing.T,
-	capacities []string,
+	capacity string,
 	allowShrink bool,
-) *domain.MigrationPlan {
+) *domain.TransferPlan {
 	t.Helper()
 
 	return planWithDestinationCapacityObjects(
 		t,
 		plannerObjects("2Gi"),
 		[]string{"data"},
-		capacities,
+		capacity,
 		allowShrink,
 	)
 }
@@ -36,31 +37,46 @@ func planWithDestinationCapacity(
 func planWithDestinationCapacityObjects(
 	t *testing.T,
 	objects []runtime.Object,
-	sourcePVCs, capacities []string,
+	sourcePVCs []string,
+	capacity string,
 	allowShrink bool,
-) *domain.MigrationPlan {
+) *domain.TransferPlan {
 	t.Helper()
+
+	object := &v1alpha1.ClusterCopy{
+		ObjectMeta: metav1.ObjectMeta{Name: "capacity-test"},
+		Spec: v1alpha1.ClusterCopySpec{
+			SourceNamespace: "app", DestinationNamespace: "system", SessionNamespace: "system",
+			CopySpec: v1alpha1.CopySpec{
+				Volumes: testSourceVolumes(sourcePVCs...),
+				TransferOptions: v1alpha1.TransferOptions{
+					TargetNode: "node-b", DestinationStorageClass: "fast",
+					DestinationCapacity: capacity, AllowVolumeShrink: allowShrink,
+				},
+			},
+		},
+	}
 
 	plan, err := New(
 		plannerClient(objects...),
 		nil,
 	).WithVolumeUsageReader(staticUsageReader{bytes: 1024}).
-		plan(context.Background(), planOptions{
-			SessionID:             "capacity-test",
-			Operation:             domain.OperationCopy,
-			SourceNamespace:       "app",
-			TemporaryNamespace:    "system",
-			DestinationNamespace:  "system",
-			StagingNamespace:      "system",
-			SessionNamespace:      "system",
-			SourcePVCs:            sourcePVCs,
-			TargetNode:            "node-b",
-			DestinationClass:      "fast",
-			DestinationCapacities: capacities,
-			AllowVolumeShrink:     allowShrink,
-		})
+		PlanCopy(t.Context(), object, "")
 	if err != nil {
 		t.Fatal(err)
+	}
+
+	if plan.Ready {
+		if object.Status.Plan == nil || len(object.Status.Plan.Volumes) != len(plan.Volumes) {
+			t.Fatalf("execution plan missing volumes: %+v", object.Status.Plan)
+		}
+
+		for i, volume := range object.Status.Plan.Volumes {
+			if volume.SourceCapacity != plan.Volumes[i].SourceCapacity ||
+				volume.Capacity != plan.Volumes[i].Capacity {
+				t.Fatalf("execution capacity differs from report: %+v", volume)
+			}
+		}
 	}
 
 	return plan
@@ -76,7 +92,7 @@ func (p staticUsageReader) Read(
 }
 
 func TestPlanUsesRequestedDestinationCapacity(t *testing.T) {
-	plan := planWithDestinationCapacity(t, []string{"3Gi"}, false)
+	plan := planWithDestinationCapacity(t, "3Gi", false)
 	if !plan.Ready {
 		t.Fatalf("checks=%#v", plan.Checks)
 	}
@@ -84,11 +100,6 @@ func TestPlanUsesRequestedDestinationCapacity(t *testing.T) {
 	if len(plan.Volumes) != 1 || plan.Volumes[0].SourceCapacity != "2Gi" ||
 		plan.Volumes[0].Capacity != "3Gi" {
 		t.Fatalf("planned volumes=%#v", plan.Volumes)
-	}
-
-	volume := plan.SessionSpec.Volumes[0]
-	if volume.SourceCapacity != "2Gi" || volume.Capacity != "3Gi" {
-		t.Fatalf("session volume=%#v", volume)
 	}
 
 	if plan.TemporaryUsage.StorageRequests != "3Gi" ||
@@ -114,7 +125,7 @@ func TestPlanInitialLargerDestinationDoesNotRequireVolumeExpansion(t *testing.T)
 		t,
 		objects,
 		[]string{"data"},
-		[]string{"3Gi"},
+		"3Gi",
 		false,
 	)
 	if !plan.Ready || len(plan.Volumes) != 1 || plan.Volumes[0].Capacity != "3Gi" {
@@ -137,11 +148,11 @@ func TestPlanRejectsIncompleteSourceVolumeExpansion(t *testing.T) {
 		t,
 		objects,
 		[]string{"data"},
-		nil,
+		"",
 		false,
 	)
 	if plan.Ready || !hasFailedCheckContaining(
-		plan,
+		plan.Checks,
 		domain.CheckNameCapacity,
 		"volume expansion is incomplete",
 	) {
@@ -150,7 +161,7 @@ func TestPlanRejectsIncompleteSourceVolumeExpansion(t *testing.T) {
 }
 
 func TestPlanDefaultsDestinationCapacityToSourcePVCapacity(t *testing.T) {
-	plan := planWithDestinationCapacity(t, nil, false)
+	plan := planWithDestinationCapacity(t, "", false)
 	if !plan.Ready || len(plan.Volumes) != 1 {
 		t.Fatalf("plan=%#v", plan)
 	}
@@ -158,16 +169,13 @@ func TestPlanDefaultsDestinationCapacityToSourcePVCapacity(t *testing.T) {
 	if plan.Volumes[0].SourceCapacity != "2Gi" || plan.Volumes[0].Capacity != "2Gi" {
 		t.Fatalf("planned volume=%#v", plan.Volumes[0])
 	}
-
-	if plan.SessionSpec.Volumes[0].SourceCapacity != "2Gi" ||
-		plan.SessionSpec.Volumes[0].Capacity != "2Gi" {
-		t.Fatalf("session volume=%#v", plan.SessionSpec.Volumes[0])
-	}
 }
 
 func TestPlanRejectsDestinationShrinkWithoutExplicitApproval(t *testing.T) {
-	plan := planWithDestinationCapacity(t, []string{"1Gi"}, false)
-	if plan.Ready || !hasFailedCheck(plan, "destination-capacity") {
+	plan := planWithDestinationCapacity(t, "1Gi", false)
+	if plan.Ready || !hasFailedCheck(
+		plan.Checks, "destination-capacity",
+	) {
 		t.Fatalf("plan=%#v", plan)
 	}
 
@@ -177,7 +185,7 @@ func TestPlanRejectsDestinationShrinkWithoutExplicitApproval(t *testing.T) {
 }
 
 func TestPlanAllowsExplicitDestinationShrinkWithWarning(t *testing.T) {
-	plan := planWithDestinationCapacity(t, []string{"1Gi"}, true)
+	plan := planWithDestinationCapacity(t, "1Gi", true)
 	if !plan.Ready {
 		t.Fatalf("checks=%#v", plan.Checks)
 	}
@@ -215,55 +223,65 @@ func TestPlanRejectsBackendUsageAboveShrinkTarget(t *testing.T) {
 		plannerClient(plannerObjects("2Gi")...),
 		nil,
 	).WithVolumeUsageReader(staticUsageReader{bytes: 2 << 30}).
-		plan(context.Background(), planOptions{
-			SessionID:             "capacity-overflow",
-			Operation:             domain.OperationCopy,
-			SourceNamespace:       "app",
-			TemporaryNamespace:    "system",
-			DestinationNamespace:  "system",
-			StagingNamespace:      "system",
-			SessionNamespace:      "system",
-			SourcePVCs:            []string{"data"},
-			TargetNode:            "node-b",
-			DestinationClass:      "fast",
-			DestinationCapacities: []string{"1Gi"},
-			AllowVolumeShrink:     true,
+		plan(context.Background(), domain.OperationCopy, transferInput{
+			Volumes:   testSourceVolumes("data"),
+			SessionID: "capacity-overflow",
+
+			SourceNamespace:      "app",
+			TemporaryNamespace:   "system",
+			DestinationNamespace: "system",
+			StagingNamespace:     "system",
+			SessionNamespace:     "system",
+
+			TransferOptions: v1alpha1.TransferOptions{
+				TargetNode:              "node-b",
+				DestinationStorageClass: "fast",
+				DestinationCapacity:     "1Gi",
+				AllowVolumeShrink:       true,
+			},
 		})
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	if plan.Ready || !hasFailedCheck(plan, "source-usage") {
+	if plan.Ready || !hasFailedCheck(
+		plan.Checks, "source-usage",
+	) {
 		t.Fatalf("expected measured overflow failure: %#v", plan.Checks)
 	}
 }
 
 func TestPlanRequiresExplicitSourceUsageSkip(t *testing.T) {
-	base := planOptions{
-		SessionID:             "capacity-unknown",
-		Operation:             domain.OperationCopy,
-		SourceNamespace:       "app",
-		TemporaryNamespace:    "system",
-		DestinationNamespace:  "system",
-		StagingNamespace:      "system",
-		SessionNamespace:      "system",
-		SourcePVCs:            []string{"data"},
-		TargetNode:            "node-b",
-		DestinationClass:      "fast",
-		DestinationCapacities: []string{"1Gi"},
-		AllowVolumeShrink:     true,
+	base := transferInput{
+		Volumes:   testSourceVolumes("data"),
+		SessionID: "capacity-unknown",
+
+		SourceNamespace:      "app",
+		TemporaryNamespace:   "system",
+		DestinationNamespace: "system",
+		StagingNamespace:     "system",
+		SessionNamespace:     "system",
+
+		TransferOptions: v1alpha1.TransferOptions{
+			TargetNode:              "node-b",
+			DestinationStorageClass: "fast",
+			DestinationCapacity:     "1Gi",
+			AllowVolumeShrink:       true,
+		},
 	}
 
 	plan, err := New(
 		plannerClient(plannerObjects("2Gi")...),
 		nil,
 	).WithVolumeUsageReader(errorUsageReader{}).
-		plan(context.Background(), base)
+		plan(context.Background(), domain.OperationCopy, base)
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	if plan.Ready || !hasFailedCheck(plan, "source-usage") {
+	if plan.Ready || !hasFailedCheck(
+		plan.Checks, "source-usage",
+	) {
 		t.Fatalf("expected unknown usage failure: %#v", plan.Checks)
 	}
 
@@ -273,7 +291,7 @@ func TestPlanRequiresExplicitSourceUsageSkip(t *testing.T) {
 		plannerClient(plannerObjects("2Gi")...),
 		nil,
 	).WithVolumeUsageReader(errorUsageReader{}).
-		plan(context.Background(), base)
+		plan(context.Background(), domain.OperationCopy, base)
 	if err != nil || !plan.Ready {
 		t.Fatalf("expected explicit source-usage skip: err=%v checks=%#v", err, plan.Checks)
 	}
@@ -283,32 +301,39 @@ func TestPlanRequiresTrustedReaderByDefault(t *testing.T) {
 	plan, err := New(
 		plannerClient(plannerObjects("2Gi")...),
 		nil,
-	).plan(context.Background(), planOptions{
-		SessionID:             "capacity-no-reader",
-		Operation:             domain.OperationCopy,
-		SourceNamespace:       "app",
-		TemporaryNamespace:    "system",
-		DestinationNamespace:  "system",
-		StagingNamespace:      "system",
-		SessionNamespace:      "system",
-		SourcePVCs:            []string{"data"},
-		TargetNode:            "node-b",
-		DestinationClass:      "fast",
-		DestinationCapacities: []string{"1Gi"},
-		AllowVolumeShrink:     true,
+	).plan(context.Background(), domain.OperationCopy, transferInput{
+		Volumes:   testSourceVolumes("data"),
+		SessionID: "capacity-no-reader",
+
+		SourceNamespace:      "app",
+		TemporaryNamespace:   "system",
+		DestinationNamespace: "system",
+		StagingNamespace:     "system",
+		SessionNamespace:     "system",
+
+		TransferOptions: v1alpha1.TransferOptions{
+			TargetNode:              "node-b",
+			DestinationStorageClass: "fast",
+			DestinationCapacity:     "1Gi",
+			AllowVolumeShrink:       true,
+		},
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	if plan.Ready || !hasFailedCheck(plan, "source-usage") {
+	if plan.Ready || !hasFailedCheck(
+		plan.Checks, "source-usage",
+	) {
 		t.Fatalf("expected missing trusted reader failure: %#v", plan.Checks)
 	}
 }
 
 func TestPlanKeepsCompleteDiagnosticsForInvalidCapacity(t *testing.T) {
-	plan := planWithDestinationCapacity(t, []string{"invalid"}, false)
-	if plan.Ready || !hasFailedCheck(plan, "destination-capacity") {
+	plan := planWithDestinationCapacity(t, "invalid", false)
+	if plan.Ready || !hasFailedCheck(
+		plan.Checks, "destination-capacity",
+	) {
 		t.Fatalf("plan=%#v", plan)
 	}
 
@@ -318,7 +343,7 @@ func TestPlanKeepsCompleteDiagnosticsForInvalidCapacity(t *testing.T) {
 	}
 }
 
-func TestPlanRejectsCapacityCountMismatchWithoutDroppingVolumes(t *testing.T) {
+func TestPlanPreservesPartialCapacityOverrides(t *testing.T) {
 	objects := plannerObjects("2Gi")
 	dataPVC := testutil.MustType[*corev1.PersistentVolumeClaim](t, objects[5])
 	dataPV := testutil.MustType[*corev1.PersistentVolume](t, objects[6])
@@ -334,20 +359,33 @@ func TestPlanRejectsCapacityCountMismatchWithoutDroppingVolumes(t *testing.T) {
 	logsPV.Spec.ClaimRef = &corev1.ObjectReference{Namespace: "app", Name: "logs", UID: logsPVC.UID}
 	objects = append(objects, logsPVC, logsPV)
 
-	plan := planWithDestinationCapacityObjects(
-		t,
-		objects,
-		[]string{"data", "logs"},
-		[]string{"data=3Gi"},
-		false,
-	)
-	if plan.Ready ||
-		!hasFailedCheckContaining(plan, "destination-capacity", "missing source PVC mapping") {
+	plan, err := New(plannerClient(objects...), nil).PlanCopy(t.Context(), &v1alpha1.ClusterCopy{
+		ObjectMeta: metav1.ObjectMeta{Name: "partial-capacity"},
+		Spec: v1alpha1.ClusterCopySpec{
+			SourceNamespace: "app", DestinationNamespace: "system", SessionNamespace: "system",
+			CopySpec: v1alpha1.CopySpec{
+				TransferOptions: v1alpha1.TransferOptions{
+					TargetNode:              "node-b",
+					DestinationStorageClass: "fast",
+				},
+				Volumes: []v1alpha1.VolumeRequest{
+					{SourcePVC: v1alpha1.LocalResourceReference{Name: "data"}, Capacity: "3Gi"},
+					{SourcePVC: v1alpha1.LocalResourceReference{Name: "logs"}},
+				},
+			},
+		},
+	}, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if !plan.Ready {
 		t.Fatalf("checks=%#v", plan.Checks)
 	}
 
-	if len(plan.Volumes) != 2 || plan.TemporaryUsage.StorageRequests != "4Gi" {
-		t.Fatalf("failed plan lost volume diagnostics: %#v", plan)
+	if len(plan.Volumes) != 2 || plan.TemporaryUsage.StorageRequests != "5Gi" ||
+		plan.Volumes[0].Capacity != "3Gi" || plan.Volumes[1].Capacity != "2Gi" {
+		t.Fatalf("partial override lost volume defaults: %#v", plan)
 	}
 }
 
@@ -361,7 +399,7 @@ func TestPlanSeparatesDestinationUsageFromSourceRollbackRetention(t *testing.T) 
 		Provisioner: "source.example.io",
 	})
 
-	plan := planWithDestinationCapacityObjects(t, objects, []string{"data"}, []string{"3Gi"}, false)
+	plan := planWithDestinationCapacityObjects(t, objects, []string{"data"}, "3Gi", false)
 	if !plan.Ready {
 		t.Fatalf("checks=%#v", plan.Checks)
 	}
@@ -381,59 +419,7 @@ func TestPlanSeparatesDestinationUsageFromSourceRollbackRetention(t *testing.T) 
 	}
 }
 
-func TestResolveDestinationCapacitiesBroadcastsOrMatchesExplicitPVCNames(t *testing.T) {
-	for _, test := range []struct {
-		name   string
-		values []string
-		pvcs   []string
-		want   []string
-	}{
-		{name: "defaults", pvcs: []string{"data", "logs"}, want: []string{"", ""}},
-		{name: "broadcast", values: []string{" 3Gi "}, pvcs: []string{"data", "logs"}, want: []string{"3Gi", "3Gi"}},
-		{name: "named", values: []string{"logs=4Gi", "data=3Gi"}, pvcs: []string{"data", "logs"}, want: []string{"3Gi", "4Gi"}},
-	} {
-		t.Run(test.name, func(t *testing.T) {
-			got, err := resolveDestinationCapacities(test.values, test.pvcs)
-			if err != nil || strings.Join(got, ",") != strings.Join(test.want, ",") {
-				t.Fatalf("got=%v error=%v want=%v", got, err, test.want)
-			}
-		})
-	}
-
-	if _, err := resolveDestinationCapacities(
-		[]string{"1Gi", "2Gi"},
-		[]string{"data", "logs"},
-	); err == nil ||
-		!strings.Contains(err.Error(), "pvc-name=capacity") {
-		t.Fatalf("mismatch error=%v", err)
-	}
-}
-
-func TestResolveDestinationPVCsRequiresCompleteExplicitMappings(t *testing.T) {
-	got, err := resolveDestinationPVCs(
-		[]string{"logs=logs-new", "data=data-new"},
-		[]string{"data", "logs"},
-	)
-	if err != nil || strings.Join(got, ",") != "data-new,logs-new" {
-		t.Fatalf("got=%v error=%v", got, err)
-	}
-
-	for _, values := range [][]string{
-		{"data=data-new"},
-		{"unknown=logs-new", "data=data-new"},
-		{"data=data-new", "data=data-other"},
-	} {
-		if got, err := resolveDestinationPVCs(
-			values,
-			[]string{"data", "logs"},
-		); err == nil ||
-			got != nil {
-			t.Fatalf("expected mapping error for %v: values=%v error=%v", values, got, err)
-		}
-	}
-}
-
-func planCheckMessage(plan *domain.MigrationPlan, name domain.CheckName) string {
+func planCheckMessage(plan *domain.TransferPlan, name domain.CheckName) string {
 	for _, check := range plan.Checks {
 		if check.Name == name {
 			return check.Message

@@ -53,6 +53,11 @@ func NewClients(kubeconfigPath, kubeContext string) (*Clients, error) {
 	config.UserAgent = "pvc-migrate/dev"
 	config.QPS = 30
 	config.Burst = 60
+	// A per-request deadline keeps one unresponsive API-server connection
+	// (stale TCP, load-balancer black hole) from wedging a reconcile worker
+	// forever. Watches hit this too, but controller-runtime re-establishes
+	// them, so the cost is periodic re-watch churn rather than missed events.
+	config.Timeout = 10 * time.Minute
 
 	typed, err := kubernetes.NewForConfig(config)
 	if err != nil {

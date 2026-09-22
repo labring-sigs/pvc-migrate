@@ -5,6 +5,7 @@ import (
 	"strings"
 	"testing"
 
+	v1alpha1 "github.com/labring-sigs/pvc-migrate/api/v1alpha1"
 	"github.com/labring-sigs/pvc-migrate/internal/domain"
 	corev1 "k8s.io/api/core/v1"
 )
@@ -42,20 +43,25 @@ func TestPlanChecksSourceNodeAgainstEveryPV(t *testing.T) {
 				}}
 			}
 
-			plan, err := New(plannerClient(objects...), nil).plan(context.Background(), planOptions{
-				SessionID:          "copy",
-				Operation:          domain.OperationCopy,
+			plan, err := New(
+				plannerClient(objects...),
+				nil,
+			).plan(context.Background(), domain.OperationCopy, transferInput{
+				Volumes: testSourceVolumes(
+					"data",
+					"logs",
+				), SessionID: "copy",
+
 				SourceNamespace:    "app",
 				TemporaryNamespace: "system",
 				StagingNamespace:   "system",
 				SessionNamespace:   "system",
-				SourcePVCs: []string{
-					"data",
-					"logs",
+
+				TransferOptions: v1alpha1.TransferOptions{
+					SourceNode:              "node-b",
+					TargetNode:              "node-b",
+					DestinationStorageClass: "fast",
 				},
-				SourceNode:       "node-b",
-				TargetNode:       "node-b",
-				DestinationClass: "fast",
 			})
 			if err != nil {
 				t.Fatal(err)

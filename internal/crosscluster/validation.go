@@ -31,7 +31,7 @@ func (s *Service) validateClients() error {
 	return nil
 }
 
-func (s *Service) validateSession(ctx context.Context, session *Session) error {
+func (s *Service) validateSession(ctx context.Context, session *CopySession) error {
 	if err := session.Validate(); err != nil {
 		return err
 	}
@@ -53,7 +53,36 @@ func (s *Service) validateSession(ctx context.Context, session *Session) error {
 	return nil
 }
 
-func (s *Service) validateTransferVolume(ctx context.Context, session *Session, index int) error {
+func (s *Service) validateReservationSession(
+	ctx context.Context,
+	session *ReservationSession,
+) error {
+	if err := session.Validate(); err != nil {
+		return err
+	}
+
+	src, err := kube.Identity(ctx, s.source)
+	if err != nil {
+		return err
+	}
+
+	dst, err := kube.Identity(ctx, s.destination)
+	if err != nil {
+		return err
+	}
+
+	if src.ID != session.Spec.SourceCluster.ID || dst.ID != session.Spec.DestinationCluster.ID {
+		return errors.New("connected cluster identity does not match reservation session")
+	}
+
+	return nil
+}
+
+func (s *Service) validateTransferVolume(
+	ctx context.Context,
+	session *CopySession,
+	index int,
+) error {
 	if index < 0 || index >= len(session.Spec.Volumes) {
 		return fmt.Errorf("cross-cluster volume index %d is invalid", index)
 	}
@@ -143,7 +172,7 @@ func (s *Service) validateTransferVolume(ctx context.Context, session *Session, 
 
 func (s *Service) validateDestinationVolume(
 	ctx context.Context,
-	session *Session,
+	session *CopySession,
 	index int,
 ) error {
 	if index < 0 || index >= len(session.Spec.Volumes) {
