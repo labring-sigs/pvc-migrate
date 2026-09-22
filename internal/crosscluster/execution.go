@@ -16,13 +16,40 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
-func (s *Service) CreateSession(
+func (s *Service) CreateCopySession(
 	ctx context.Context,
-	options Options,
+	options CopyOptions,
 	plan *Plan,
-) (*Session, error) {
+) (*CopySession, error) {
+	return s.createCopySession(ctx, options, plan)
+}
+
+func (s *Service) createCopySession(
+	ctx context.Context,
+	options CopyOptions,
+	plan *Plan,
+) (*CopySession, error) {
 	if plan == nil || !plan.Ready {
 		return nil, errors.New("cross-cluster plan contains failed checks")
+	}
+
+	if plan.Kind != CopyKind ||
+		plan.SessionID != options.SessionID ||
+		plan.SessionNamespace != options.SessionNamespace ||
+		plan.SourceNamespace != options.SourceNamespace ||
+		plan.DestinationNamespace != options.DestinationNamespace ||
+		plan.UnusedStoragePolicy != options.UnusedStoragePolicy ||
+		plan.AllowVolumeShrink != options.AllowVolumeShrink ||
+		plan.SkipSourceUsageCheck != options.SkipSourceUsageCheck ||
+		plan.RequestedTargetNode != options.TargetNode ||
+		plan.ToolImage != options.ToolImage ||
+		plan.Online != options.Online ||
+		plan.VerifyChecksum != options.VerifyChecksum ||
+		plan.DeleteExtraneous != options.DeleteExtraneous ||
+		!slices.Equal(plan.Strategies, normalizeStrategies(options.Strategies)) {
+		return nil, errors.New(
+			"cross-cluster copy options changed after planning; generate a new plan",
+		)
 	}
 
 	sourceID, destID, err := s.clusterIdentities(ctx)
@@ -45,49 +72,31 @@ func (s *Service) CreateSession(
 		return nil, err
 	}
 
-	type volumeResult struct {
-		volume VolumeSpec
-		err    error
+	volumes, err := s.buildSessionVolumes(ctx, plan, sourceID, destID, destinationClass)
+	if err != nil {
+		return nil, err
 	}
 
-	results := make([]volumeResult, len(plan.Volumes))
-	parallel.For(len(plan.Volumes), func(index int) {
-		results[index].volume, results[index].err = s.buildSessionVolume(
-			ctx,
-			plan.Volumes[index],
-			sourceID,
-			destID,
-			destinationClass,
-		)
-	})
-
-	volumes := make([]VolumeSpec, 0, len(results))
-	for _, result := range results {
-		if result.err != nil {
-			return nil, result.err
-		}
-
-		volumes = append(volumes, result.volume)
-	}
-
-	session := NewSession(
+	session := NewCopySession(
 		options.SessionID,
-		Spec{
-			UnusedStoragePolicy:  options.UnusedStoragePolicy,
-			SessionNamespace:     options.SessionNamespace,
-			SourceCluster:        sourceID,
-			DestinationCluster:   destID,
-			SourceNamespace:      options.SourceNamespace,
-			DestinationNamespace: options.DestinationNamespace,
-			ToolImage:            options.ToolImage,
-			Strategies:           normalizeStrategies(options.Strategies),
-			Online:               options.Online,
-			VerifyChecksum:       options.VerifyChecksum,
-			DeleteExtraneous:     options.DeleteExtraneous,
-			AllowVolumeShrink:    options.AllowVolumeShrink,
-			SkipSourceUsageCheck: options.SkipSourceUsageCheck,
-			TargetNode:           plan.TargetNode,
-			Volumes:              volumes,
+		CopySpec{
+			SessionContext: SessionContext{
+				UnusedStoragePolicy:  options.UnusedStoragePolicy,
+				SessionNamespace:     options.SessionNamespace,
+				SourceCluster:        sourceID,
+				DestinationCluster:   destID,
+				SourceNamespace:      options.SourceNamespace,
+				DestinationNamespace: options.DestinationNamespace,
+				ToolImage:            options.ToolImage,
+				Strategies:           normalizeStrategies(options.Strategies),
+				AllowVolumeShrink:    options.AllowVolumeShrink,
+				SkipSourceUsageCheck: options.SkipSourceUsageCheck,
+				TargetNode:           plan.TargetNode,
+				Volumes:              volumes,
+			},
+			Online:           options.Online,
+			VerifyChecksum:   options.VerifyChecksum,
+			DeleteExtraneous: options.DeleteExtraneous,
 		},
 		s.now(),
 	)
@@ -116,6 +125,187 @@ func (s *Service) CreateSession(
 	}
 
 	return session, nil
+}
+
+// CreateReservationSession persists the operation-specific reservation
+// session. Reservation options intentionally cannot carry copy-only flags.
+func (s *Service) CreateReservationSession(
+	ctx context.Context,
+	options ReservationOptions,
+	plan *Plan,
+) (*ReservationSession, error) {
+	if plan == nil || !plan.Ready {
+		return nil, errors.New("cross-cluster reservation plan contains failed checks")
+	}
+
+	if plan.Kind != ReservationKind ||
+		plan.SessionID != options.SessionID ||
+		plan.SessionNamespace != options.SessionNamespace ||
+		plan.SourceNamespace != options.SourceNamespace ||
+		plan.DestinationNamespace != options.DestinationNamespace ||
+		plan.UnusedStoragePolicy != options.UnusedStoragePolicy ||
+		plan.AllowVolumeShrink != options.AllowVolumeShrink ||
+		plan.SkipSourceUsageCheck != options.SkipSourceUsageCheck ||
+		plan.RequestedTargetNode != options.TargetNode ||
+		plan.ToolImage != options.ToolImage ||
+		!slices.Equal(plan.Strategies, normalizeStrategies(options.Strategies)) {
+		return nil, errors.New(
+			"cross-cluster reservation options changed after planning; generate a new plan",
+		)
+	}
+
+	sourceID, destID, err := s.clusterIdentities(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	if sourceID.ID != plan.SourceCluster.ID || destID.ID != plan.DestinationCluster.ID {
+		return nil, errors.New(
+			"cluster identity changed after planning; generate a new cross-cluster plan",
+		)
+	}
+
+	destinationClass, err := s.destination.Kubernetes.StorageV1().StorageClasses().Get(
+		ctx, options.DestinationStorageClass, metav1.GetOptions{},
+	)
+	if err != nil {
+		return nil, err
+	}
+
+	volumes, err := s.buildSessionVolumes(ctx, plan, sourceID, destID, destinationClass)
+	if err != nil {
+		return nil, err
+	}
+
+	session := NewReservationSession(
+		options.SessionID,
+		ReservationSpec{SessionContext: SessionContext{
+			UnusedStoragePolicy:  options.UnusedStoragePolicy,
+			SessionNamespace:     options.SessionNamespace,
+			SourceCluster:        sourceID,
+			DestinationCluster:   destID,
+			SourceNamespace:      options.SourceNamespace,
+			DestinationNamespace: options.DestinationNamespace,
+			ToolImage:            options.ToolImage,
+			Strategies:           normalizeStrategies(options.Strategies),
+			AllowVolumeShrink:    options.AllowVolumeShrink,
+			SkipSourceUsageCheck: options.SkipSourceUsageCheck,
+			TargetNode:           plan.TargetNode,
+			Volumes:              volumes,
+		}},
+		s.now(),
+	)
+	if err := kube.RequireNamespace(
+		ctx,
+		s.source.Kubernetes,
+		session.Spec.SessionNamespace,
+	); err != nil {
+		return nil, err
+	}
+
+	if err := kube.RequireNamespace(
+		ctx,
+		s.destination.Kubernetes,
+		session.Spec.DestinationNamespace,
+	); err != nil {
+		return nil, err
+	}
+
+	if err := s.saveReservation(ctx, session, true); err != nil {
+		return nil, err
+	}
+
+	return session, nil
+}
+
+// PromoteReservation changes the persisted operation after destination PVCs
+// are bound. The reservation payload is copied into a copy payload once, so
+// transfer-only status can never appear on a reservation session.
+func (s *Service) PromoteReservation(
+	ctx context.Context,
+	reservation *ReservationSession,
+) (*CopySession, error) {
+	if reservation == nil {
+		return nil, errors.New("cross-cluster reservation session is required")
+	}
+
+	if reservation.Status.Phase != PhaseReserved {
+		return nil, fmt.Errorf(
+			"cross-cluster reservation session is %s; reserve all destination PVCs before copying",
+			reservation.Status.Phase,
+		)
+	}
+
+	var promoted *CopySession
+
+	convert := func(operationCtx context.Context) error {
+		if err := s.validateReservationSession(operationCtx, reservation); err != nil {
+			return err
+		}
+
+		volumes := make([]CopyVolumeStatus, len(reservation.Status.Volumes))
+		for i := range reservation.Status.Volumes {
+			volumes[i].ReservationVolumeStatus = reservation.Status.Volumes[i]
+		}
+
+		promoted = &CopySession{
+			SessionEnvelope: reservation.SessionEnvelope,
+			Spec:            CopySpec{SessionContext: reservation.Spec.SessionContext},
+			Status: CopyStatus{
+				SessionLifecycleStatus: reservation.Status.SessionLifecycleStatus,
+				Volumes:                volumes,
+			},
+		}
+		promoted.Kind = CopyKind
+		promoted.Status.Message = "destination PVCs reserved; ready to copy"
+		s.touch(promoted)
+
+		if err := s.save(operationCtx, promoted, false); err != nil {
+			return err
+		}
+
+		return nil
+	}
+
+	if s.locker != nil {
+		if err := s.withReservationLock(ctx, reservation, convert); err != nil {
+			return nil, err
+		}
+	} else if err := convert(ctx); err != nil {
+		return nil, err
+	}
+
+	return promoted, nil
+}
+
+func (s *Service) buildSessionVolumes(
+	ctx context.Context,
+	plan *Plan,
+	sourceID, destinationID kube.ClusterIdentity,
+	destinationClass *storagev1.StorageClass,
+) ([]VolumeSpec, error) {
+	type volumeResult struct {
+		volume VolumeSpec
+		err    error
+	}
+
+	results := make([]volumeResult, len(plan.Volumes))
+	parallel.For(len(plan.Volumes), func(index int) {
+		results[index].volume, results[index].err = s.buildSessionVolume(
+			ctx, plan.Volumes[index], sourceID, destinationID, destinationClass,
+		)
+	})
+
+	volumes := make([]VolumeSpec, 0, len(results))
+	for _, result := range results {
+		if result.err != nil {
+			return nil, result.err
+		}
+
+		volumes = append(volumes, result.volume)
+	}
+
+	return volumes, nil
 }
 
 func (s *Service) buildSessionVolume(
@@ -230,9 +420,9 @@ func (s *Service) buildSessionVolume(
 	}, nil
 }
 
-func (s *Service) Reserve(ctx context.Context, session *Session) error {
+func (s *Service) Reserve(ctx context.Context, session *ReservationSession) error {
 	if s.locker != nil {
-		return s.withLock(
+		return s.withReservationLock(
 			ctx,
 			session,
 			func(locked context.Context) error { return s.reserve(locked, session) },
@@ -242,12 +432,12 @@ func (s *Service) Reserve(ctx context.Context, session *Session) error {
 	return s.reserve(ctx, session)
 }
 
-func (s *Service) reserve(ctx context.Context, session *Session) error {
+func (s *Service) reserve(ctx context.Context, session *ReservationSession) error {
 	if err := requireSessionLease(ctx); err != nil {
 		return err
 	}
 
-	if err := s.validateSession(ctx, session); err != nil {
+	if err := s.validateReservationSession(ctx, session); err != nil {
 		return err
 	}
 
@@ -262,7 +452,7 @@ func (s *Service) reserve(ctx context.Context, session *Session) error {
 
 	session.Status.Phase = PhaseReserving
 	session.Status.Message = "creating destination PVCs"
-	s.touch(session)
+	s.touchReservation(session)
 
 	if err := kube.RequireNamespace(
 		ctx,
@@ -277,26 +467,39 @@ func (s *Service) reserve(ctx context.Context, session *Session) error {
 			continue
 		}
 
-		if err := s.reserveVolume(ctx, session, i); err != nil {
-			return s.fail(ctx, session, err)
+		state := reservationState{
+			ID:     session.ID,
+			Spec:   &session.Spec.SessionContext,
+			Status: &session.Status.Volumes[i].Reservation,
+			Save: func(saveCtx context.Context) error {
+				return s.saveReservation(saveCtx, session, false)
+			},
+		}
+		if err := s.reserveVolume(ctx, state, &session.Spec.Volumes[i]); err != nil {
+			return s.failReservation(ctx, session, err)
 		}
 
 		session.Status.Volumes[i].Reservation.PV = session.Spec.Volumes[i].Destination.PV
 
 		session.Status.Volumes[i].Reservation.PVC = session.Spec.Volumes[i].Destination.PVC
-		if err := s.save(ctx, session, false); err != nil {
+		if err := s.saveReservation(ctx, session, false); err != nil {
 			return err
 		}
 	}
 
 	session.Status.Phase = PhaseReserved
 	session.Status.Message = "destination PVCs are bound"
-	s.touch(session)
+	s.touchReservation(session)
 
-	return s.save(ctx, session, false)
+	return s.saveReservation(ctx, session, false)
 }
 
-func (s *Service) Copy(ctx context.Context, session *Session, retries int, noCompress bool) error {
+func (s *Service) Copy(
+	ctx context.Context,
+	session *CopySession,
+	retries int,
+	noCompress bool,
+) error {
 	if err := s.validateSession(ctx, session); err != nil {
 		return err
 	}
@@ -312,7 +515,12 @@ func (s *Service) Copy(ctx context.Context, session *Session, retries int, noCom
 	return s.copy(ctx, session, retries, noCompress)
 }
 
-func (s *Service) copy(ctx context.Context, session *Session, retries int, noCompress bool) error {
+func (s *Service) copy(
+	ctx context.Context,
+	session *CopySession,
+	retries int,
+	noCompress bool,
+) error {
 	if err := requireSessionLease(ctx); err != nil {
 		return err
 	}
@@ -325,7 +533,7 @@ func (s *Service) copy(ctx context.Context, session *Session, retries int, noCom
 		return errors.New("cross-cluster session is already being cleaned or has been cleaned")
 	}
 
-	if err := s.reserve(ctx, session); err != nil {
+	if err := s.reserveCopy(ctx, session); err != nil {
 		return err
 	}
 
@@ -431,38 +639,49 @@ func (s *Service) copy(ctx context.Context, session *Session, retries int, noCom
 
 			attempt := previousAttempts + retry
 			status.Transfer.Attempts = attempt
-			req := copyengine.Request{
-				SessionID:                 session.ID + "-" + volume.Source.PVC.Name,
-				ToolImage:                 session.Spec.ToolImage,
-				Source:                    objectRef(volume.Source.PVC),
-				Destination:               objectRef(volume.Destination.PVC),
-				SourcePath:                volume.Transfer.SourcePath,
-				DestinationPath:           volume.Transfer.DestinationPath,
-				Mode:                      copyengine.ModeFinal,
-				Attempt:                   attempt,
-				KubeconfigPath:            s.sourceKubeconfig,
-				Context:                   s.sourceContext,
-				DestinationKubeconfigPath: s.destinationKubeconfig,
-				DestinationContext:        s.destinationContext,
-				Strategies:                session.Spec.Strategies,
-				DeleteExtraneousFiles:     session.Spec.DeleteExtraneous,
-				VerifyChecksum:            session.Spec.VerifyChecksum,
-				IgnoreSizes: capacitySmaller(
-					volume.Destination.Capacity,
-					volume.Source.Capacity,
-				),
-				NoCompress:       noCompress,
-				HelmTimeout:      s.helmTimeout,
-				HelmValues:       append([]string(nil), identityValues.Values...),
-				HelmStringValues: append([]string(nil), schedulingValues...),
-				Writer:           s.writer,
-				Logger:           s.logger,
+			req := copyengine.CopyRequest{
+				AttemptIdentity: copyengine.AttemptIdentity{
+					SessionID: session.ID + "-" + volume.Source.PVC.Name,
+					Source:    objectRef(volume.Source.PVC),
+					Mode:      copyengine.ModeFinal,
+					Attempt:   attempt,
+				},
+				Source: copyengine.CopySource{
+					KubeconfigPath: s.sourceKubeconfig,
+					Context:        s.sourceContext,
+					Path:           volume.Transfer.SourcePath,
+				},
+				Destination: copyengine.CopyDestination{
+					Reference:      objectRef(volume.Destination.PVC),
+					KubeconfigPath: s.destinationKubeconfig,
+					Context:        s.destinationContext,
+					Path:           volume.Transfer.DestinationPath,
+				},
+				Policy: copyengine.CopyPolicy{
+					Strategies:            append([]string(nil), session.Spec.Strategies...),
+					DeleteExtraneousFiles: session.Spec.DeleteExtraneous,
+					VerifyChecksum:        session.Spec.VerifyChecksum,
+					IgnoreSizes: capacitySmaller(
+						volume.Destination.Capacity,
+						volume.Source.Capacity,
+					),
+					NoCompress: noCompress,
+				},
+				Runtime: copyengine.CopyRuntime{
+					ToolImage:        session.Spec.ToolImage,
+					HelmTimeout:      s.helmTimeout,
+					HelmValues:       append([]string(nil), identityValues.Values...),
+					HelmStringValues: append([]string(nil), schedulingValues...),
+					Writer:           s.writer,
+					Logger:           s.logger,
+				},
 			}
 
 			last = s.copier.Copy(ctx, req, nil)
 			if last == nil {
 				last = requireSessionLease(ctx)
 			}
+
 			if last == nil {
 				break
 			}
@@ -491,9 +710,83 @@ func (s *Service) copy(ctx context.Context, session *Session, retries int, noCom
 	return s.save(ctx, session, false)
 }
 
+func (s *Service) reserveCopy(ctx context.Context, session *CopySession) error {
+	if err := requireSessionLease(ctx); err != nil {
+		return err
+	}
+
+	if err := s.validateSession(ctx, session); err != nil {
+		return err
+	}
+
+	if session.Status.Phase == PhaseCleaned || session.Status.Phase == PhaseCleaning {
+		return errors.New("cross-cluster session is already being cleaned or has been cleaned")
+	}
+
+	if session.Status.Phase == PhaseReserved || session.Status.Phase == PhaseTransferring ||
+		session.Status.Phase == PhaseCompleted {
+		return nil
+	}
+
+	session.Status.Phase = PhaseReserving
+	session.Status.Message = "creating destination PVCs"
+	s.touch(session)
+
+	if err := s.save(ctx, session, false); err != nil {
+		return err
+	}
+
+	for i := range session.Spec.Volumes {
+		if session.Status.Volumes[i].Reservation.PV.UID != "" {
+			continue
+		}
+
+		state := reservationState{
+			ID:     session.ID,
+			Spec:   &session.Spec.SessionContext,
+			Status: &session.Status.Volumes[i].Reservation,
+			Save: func(saveCtx context.Context) error {
+				return s.save(saveCtx, session, false)
+			},
+		}
+		if err := s.reserveVolume(ctx, state, &session.Spec.Volumes[i]); err != nil {
+			return s.fail(ctx, session, err)
+		}
+
+		session.Status.Volumes[i].Reservation.PV = session.Spec.Volumes[i].Destination.PV
+
+		session.Status.Volumes[i].Reservation.PVC = session.Spec.Volumes[i].Destination.PVC
+		if err := s.save(ctx, session, false); err != nil {
+			return err
+		}
+	}
+
+	session.Status.Phase = PhaseReserved
+	session.Status.Message = "destination PVCs are bound"
+	s.touch(session)
+
+	return s.save(ctx, session, false)
+}
+
+func (s *Service) failReservation(
+	ctx context.Context,
+	session *ReservationSession,
+	cause error,
+) error {
+	session.Status.Phase = PhaseFailed
+	session.Status.Message = cause.Error()
+	s.touchReservation(session)
+
+	if err := s.saveReservation(ctx, session, false); err != nil {
+		return errors.Join(cause, err)
+	}
+
+	return cause
+}
+
 // fail records a recoverable cross-cluster failure and preserves a persistence
 // error when the checkpoint itself cannot be written.
-func (s *Service) fail(ctx context.Context, session *Session, cause error) error {
+func (s *Service) fail(ctx context.Context, session *CopySession, cause error) error {
 	session.Status.Phase = PhaseFailed
 	session.Status.Message = cause.Error()
 	s.touch(session)
@@ -511,7 +804,7 @@ func (s *Service) fail(ctx context.Context, session *Session, cause error) error
 // servers before launching a transfer.
 func (s *Service) toolSchedulingValues(
 	ctx context.Context,
-	session *Session,
+	session *CopySession,
 ) ([]string, error) {
 	if session == nil {
 		return nil, errors.New("cross-cluster session is required")

@@ -33,6 +33,7 @@ func (r *rootState) loadRename(
 	id string,
 ) (*v1alpha1.Rename, kube.WorkflowStore[*v1alpha1.Rename], string, error) {
 	storageNamespace := r.renameStorageNamespace(cmd)
+
 	object, backend, err := r.loadWorkflowWithBackend(
 		ctx,
 		cmd,
@@ -133,6 +134,7 @@ func (r *rootState) renameLifecycleCommand(
 		}
 
 		namespace := workflowLeaseNamespace(backend, r.renameStorageNamespace(cmd), object)
+
 		executor := app.NewRenameExecutor(
 			runtime.clients.Kubernetes,
 			store,
@@ -184,6 +186,7 @@ func (r *rootState) newRenameResumeCommand() *cobra.Command {
 		}
 
 		namespace := workflowLeaseNamespace(backend, r.renameStorageNamespace(cmd), object)
+
 		executor := app.NewRenameExecutor(
 			runtime.clients.Kubernetes,
 			store,
@@ -268,6 +271,7 @@ func (r *rootState) newRenameCleanupCommand() *cobra.Command {
 		}
 
 		namespace := workflowLeaseNamespace(backend, r.renameStorageNamespace(cmd), object)
+
 		executor := app.NewRenameExecutor(
 			runtime.clients.Kubernetes,
 			store,

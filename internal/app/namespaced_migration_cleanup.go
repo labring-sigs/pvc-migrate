@@ -217,15 +217,13 @@ func (m *MigrationExecutor) cleanup(
 	}
 
 	if options.DeleteSession {
-		if err := m.store.Delete(ctx, object); err != nil {
-			return err
-		}
-
 		if held, ok := ctx.Value(sessionLockContextKey{}).(heldSessionLock); ok {
 			if err := held.lock.Delete(ctx); err != nil {
 				return err
 			}
 		}
+
+		return m.store.Delete(ctx, object)
 	}
 
 	return nil

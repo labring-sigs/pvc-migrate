@@ -131,10 +131,14 @@ func TestConfigMapReservationHandoffRejectsLeaseLossAfterUpdate(t *testing.T) {
 	client, source, destination := configMapHandoffFixture(t)
 	lost := errors.New("lease lost after handoff update")
 	fence := &testLeaseFence{}
-	client.PrependReactor("update", "configmaps", func(ktesting.Action) (bool, runtime.Object, error) {
-		fence.err = lost
-		return false, nil, nil
-	})
+	client.PrependReactor(
+		"update",
+		"configmaps",
+		func(ktesting.Action) (bool, runtime.Object, error) {
+			fence.err = lost
+			return false, nil, nil
+		},
+	)
 
 	err := HandoffConfigMapReservationToCopy(
 		WithLeaseFence(t.Context(), fence),
@@ -155,6 +159,7 @@ func TestConfigMapReservationHandoffRejectsLeaseLossAfterUpdate(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	if _, err := store.Load(t.Context(), crclient.ObjectKey{Name: source.Name}); err != nil {
 		t.Fatalf("successful update was not durable: %v", err)
 	}

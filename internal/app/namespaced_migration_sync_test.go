@@ -23,8 +23,8 @@ func TestNamespacedMigrationFinalSyncResumesOnlyIncompleteVolumes(t *testing.T) 
 
 	before := object.DeepCopy()
 	failure := errors.New("transfer interrupted")
-	engine.copy = func(request copyengine.Request) error {
-		if request.Source.Name == "b" {
+	engine.copy = func(request copyengine.CopyRequest) error {
+		if request.AttemptIdentity.Source.Name == "b" {
 			return failure
 		}
 		return nil
@@ -46,8 +46,9 @@ func TestNamespacedMigrationFinalSyncResumesOnlyIncompleteVolumes(t *testing.T) 
 	}
 
 	for _, request := range engine.requests {
-		if request.Mode != copyengine.ModeFinal || request.Source.Namespace != object.Namespace ||
-			request.Destination.Namespace != object.Namespace {
+		if request.Mode != copyengine.ModeFinal ||
+			request.AttemptIdentity.Source.Namespace != object.Namespace ||
+			request.Destination.Reference.Namespace != object.Namespace {
 			t.Fatalf("wrong migration transfer: %+v", request)
 		}
 	}
@@ -64,7 +65,7 @@ func TestNamespacedMigrationFinalSyncResumesOnlyIncompleteVolumes(t *testing.T) 
 	}
 
 	if object.Status.Phase != domain.PhaseFinalSynced || len(engine.requests) != 3 ||
-		engine.requests[2].Source.Name != "b" ||
+		engine.requests[2].AttemptIdentity.Source.Name != "b" ||
 		engine.requests[2].Attempt != 2 ||
 		len(engine.cleanups) != 1 ||
 		engine.cleanups[0].Source.Name != "b" {

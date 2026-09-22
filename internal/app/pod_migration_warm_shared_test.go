@@ -106,8 +106,8 @@ func TestPodMigrationSharedPreparationSavesBeforeMutation(t *testing.T) {
 			t.Fatal("shared setting changed before recording compensation")
 		}
 	}
-	engine.copy = func(request copyengine.Request) error {
-		if !request.SourceMountReadWrite || len(object.Status.OpenEBSLVMSharedMounts) != 2 {
+	engine.copy = func(request copyengine.CopyRequest) error {
+		if !request.Source.MountReadWrite || len(object.Status.OpenEBSLVMSharedMounts) != 2 {
 			t.Fatal("copy did not use checkpointed writable source mounts")
 		}
 		return nil
@@ -232,7 +232,7 @@ func TestPodMigrationSharedPreparationStopsOnFenceLoss(t *testing.T) {
 
 func TestPodMigrationSharedRestoreFailurePreservesCapacityFailure(t *testing.T) {
 	executor, object, _, engine, manager := podMigrationSharedWarmFixture(t)
-	engine.copy = func(copyengine.Request) error { return errors.New("No space left on device") }
+	engine.copy = func(copyengine.CopyRequest) error { return errors.New("No space left on device") }
 	restoreFailure := errors.New("shared mount restoration unavailable")
 
 	manager.restoreErr = restoreFailure

@@ -215,6 +215,13 @@ type PlanSummary struct {
 	Ready            bool    `json:"ready"            yaml:"ready"`
 }
 
+// PlanSummaryReader is the narrow planning contract used by callers that only
+// need validation outcome. Operation-specific plan details stay behind the
+// concrete report type that produced them.
+type PlanSummaryReader interface {
+	Summary() *PlanSummary
+}
+
 type TransferPlan struct {
 	PlanSummary          `json:",inline" yaml:",inline"`
 	SourceNamespace      string                  `json:"sourceNamespace"           yaml:"sourceNamespace"`

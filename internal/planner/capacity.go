@@ -382,7 +382,8 @@ func evaluateCapacityMatches(
 }
 
 func (p *Planner) checkStorageCapacity(
-	plan *domain.TransferPlan,
+	plan checkRecorder,
+	reports *[]domain.StorageCapacityReport,
 	node *corev1.Node,
 	volumes []domain.PlannedVolume,
 	inventory *storageCapacityInventory,
@@ -419,7 +420,9 @@ func (p *Planner) checkStorageCapacity(
 
 	for _, class := range classes {
 		evaluation := inventory.evaluate(node, demands[class])
-		plan.StorageCapacity = append(plan.StorageCapacity, evaluation.report)
+		if reports != nil {
+			*reports = append(*reports, evaluation.report)
+		}
 
 		check := domain.Check{
 			Name:     domain.CheckNameStorageCapacity,

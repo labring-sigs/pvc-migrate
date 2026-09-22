@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"reflect"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -369,7 +370,7 @@ func (r *WorkflowReconciler) SetupWithManager(manager ctrl.Manager) error {
 }
 
 func (r *WorkflowReconciler) requireReconciler(kind domain.ControllerKind) error {
-	configured := false
+	var configured bool
 	switch kind {
 	case domain.ControllerKindBackup:
 		configured = r.backup != nil
@@ -474,7 +475,9 @@ func workflowEventPredicate(onDelete ...func(crclient.Object)) predicate.Predica
 				kube.WorkflowHandoffChanged(e.ObjectOld, e.ObjectNew) ||
 				e.ObjectOld.GetDeletionTimestamp() == nil &&
 					e.ObjectNew.GetDeletionTimestamp() != nil ||
-				workflowResumeStatusChanged(e.ObjectOld, e.ObjectNew)
+				workflowResumeStatusChanged(e.ObjectOld, e.ObjectNew) ||
+				workflowExecutionPhaseChanged(e.ObjectOld, e.ObjectNew) ||
+				workflowExecutionProgressChanged(e.ObjectOld, e.ObjectNew)
 		},
 		DeleteFunc: func(e event.DeleteEvent) bool {
 			for _, cancel := range onDelete {
@@ -483,6 +486,92 @@ func workflowEventPredicate(onDelete ...func(crclient.Object)) predicate.Predica
 			return false
 		},
 		GenericFunc: func(event.GenericEvent) bool { return true },
+	}
+}
+
+// workflowExecutionPhaseChanged admits the durable phase checkpoint that
+// follows a successful transition. A reconcile can be interrupted after that
+// checkpoint and before it returns its explicit requeue; admitting the phase
+// event lets the queue recover without treating a durable business failure as
+// an implicit resume request.
+func workflowExecutionPhaseChanged(oldObject, newObject crclient.Object) bool {
+	oldPhase := workflowStatusPhase(oldObject)
+	newPhase := workflowStatusPhase(newObject)
+
+	return oldPhase != newPhase && newPhase != domain.PhaseFailed
+}
+
+// workflowExecutionProgressChanged admits durable operation-specific
+// checkpoints even when the workflow phase is unchanged. Executors save a
+// progress checkpoint before returning their explicit requeue; if cancellation
+// or process loss happens in that window, the status event is the only recovery
+// signal left. Shared WorkflowStatus metadata is intentionally excluded so
+// ordinary heartbeat/status bookkeeping cannot create a feedback loop.
+func workflowExecutionProgressChanged(oldObject, newObject crclient.Object) bool {
+	oldProgress, newProgress := workflowExecutionProgress(
+		oldObject,
+	), workflowExecutionProgress(
+		newObject,
+	)
+	if oldProgress == nil || newProgress == nil {
+		return false
+	}
+
+	return !reflect.DeepEqual(oldProgress, newProgress)
+}
+
+func workflowExecutionProgress(object crclient.Object) any {
+	switch typed := object.(type) {
+	case *v1alpha1.Migration:
+		status := typed.Status.DeepCopy()
+		status.WorkflowStatus = v1alpha1.WorkflowStatus{}
+		return status
+	case *v1alpha1.PodMigration:
+		status := typed.Status.DeepCopy()
+		status.WorkflowStatus = v1alpha1.WorkflowStatus{}
+		return status
+	case *v1alpha1.Reservation:
+		status := typed.Status.DeepCopy()
+		status.WorkflowStatus = v1alpha1.WorkflowStatus{}
+		return status
+	case *v1alpha1.Copy:
+		status := typed.Status.DeepCopy()
+		status.WorkflowStatus = v1alpha1.WorkflowStatus{}
+		return status
+	case *v1alpha1.Backup:
+		status := typed.Status.DeepCopy()
+		status.WorkflowStatus = v1alpha1.WorkflowStatus{}
+		return status
+	case *v1alpha1.Restore:
+		status := typed.Status.DeepCopy()
+		status.WorkflowStatus = v1alpha1.WorkflowStatus{}
+		return status
+	case *v1alpha1.Rename:
+		status := typed.Status.DeepCopy()
+		status.WorkflowStatus = v1alpha1.WorkflowStatus{}
+		return status
+	case *v1alpha1.ClusterMigration:
+		status := typed.Status.DeepCopy()
+		status.WorkflowStatus = v1alpha1.WorkflowStatus{}
+		return status
+	case *v1alpha1.ClusterPodMigration:
+		status := typed.Status.DeepCopy()
+		status.WorkflowStatus = v1alpha1.WorkflowStatus{}
+		return status
+	case *v1alpha1.ClusterReservation:
+		status := typed.Status.DeepCopy()
+		status.WorkflowStatus = v1alpha1.WorkflowStatus{}
+		return status
+	case *v1alpha1.ClusterCopy:
+		status := typed.Status.DeepCopy()
+		status.WorkflowStatus = v1alpha1.WorkflowStatus{}
+		return status
+	case *v1alpha1.Move:
+		status := typed.Status.DeepCopy()
+		status.WorkflowStatus = v1alpha1.WorkflowStatus{}
+		return status
+	default:
+		return nil
 	}
 }
 

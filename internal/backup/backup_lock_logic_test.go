@@ -114,6 +114,7 @@ func (l testBackupSessionLocker) AcquireSessionLock(
 func TestAcquireBackupTargetLockExposesSessionLeaseFence(t *testing.T) {
 	lost := errors.New("session lease lost")
 	lock := &recordingBackupSessionLock{err: lost}
+
 	ctx, _, cancel, err := acquireBackupTargetLock(
 		context.Background(),
 		testBackupSessionLocker{lock: lock},

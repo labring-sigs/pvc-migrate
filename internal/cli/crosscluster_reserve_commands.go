@@ -109,9 +109,9 @@ func (f *crossClusterReserveFlags) bind(command *cobra.Command, r *rootState) {
 	)
 }
 
-func (f *crossClusterReserveFlags) options(r *rootState) (crosscluster.Options, error) {
+func (f *crossClusterReserveFlags) options(r *rootState) (crosscluster.ReservationOptions, error) {
 	if f.destinationKubeconfig == "" {
-		return crosscluster.Options{}, domain.NewError(
+		return crosscluster.ReservationOptions{}, domain.NewError(
 			domain.ErrorValidation,
 			"cross-cluster reserve flags",
 			"--destination-kubeconfig is required",
@@ -131,7 +131,7 @@ func (f *crossClusterReserveFlags) options(r *rootState) (crosscluster.Options, 
 	}
 
 	if f.sourceNamespace == "" || f.destinationNamespace == "" {
-		return crosscluster.Options{}, domain.NewError(
+		return crosscluster.ReservationOptions{}, domain.NewError(
 			domain.ErrorValidation,
 			"cross-cluster reserve flags",
 			"source and destination namespaces are required",
@@ -142,7 +142,7 @@ func (f *crossClusterReserveFlags) options(r *rootState) (crosscluster.Options, 
 	if id == "" {
 		generated, err := domain.NewSessionID(time.Now())
 		if err != nil {
-			return crosscluster.Options{}, err
+			return crosscluster.ReservationOptions{}, err
 		}
 
 		id = generated
@@ -150,14 +150,14 @@ func (f *crossClusterReserveFlags) options(r *rootState) (crosscluster.Options, 
 	}
 
 	if err := crosscluster.ValidateSessionID(id); err != nil {
-		return crosscluster.Options{}, domain.NewError(
+		return crosscluster.ReservationOptions{}, domain.NewError(
 			domain.ErrorValidation,
 			"cross-cluster reserve flags",
 			err.Error(),
 		)
 	}
 
-	return crosscluster.Options{
+	return crosscluster.ReservationOptions{
 		UnusedStoragePolicy:     v1alpha1.UnusedStoragePolicy(f.unusedStoragePolicy),
 		SessionID:               id,
 		SessionNamespace:        f.sessionNamespace,
@@ -213,7 +213,7 @@ func (r *rootState) newCrossClusterReserveResumeCommand() *cobra.Command {
 			ctx, cancel := r.context(cmd.Context())
 			defer cancel()
 
-			session, err := service.Get(ctx, flags.sessionNamespace, args[0])
+			session, err := service.GetReservation(ctx, flags.sessionNamespace, args[0])
 			if err != nil {
 				return err
 			}
@@ -250,7 +250,7 @@ func (r *rootState) newCrossClusterReserveStatusCommand() *cobra.Command {
 			ctx, cancel := r.context(cmd.Context())
 			defer cancel()
 
-			session, err := service.Get(ctx, flags.sessionNamespace, args[0])
+			session, err := service.GetReservation(ctx, flags.sessionNamespace, args[0])
 			if err != nil {
 				return err
 			}
@@ -281,13 +281,13 @@ func (r *rootState) newCrossClusterReserveCleanupCommand() *cobra.Command {
 			ctx, cancel := r.context(cmd.Context())
 			defer cancel()
 
-			session, err := service.Get(ctx, flags.sessionNamespace, args[0])
+			session, err := service.GetReservation(ctx, flags.sessionNamespace, args[0])
 			if err != nil {
 				return err
 			}
 
 			if dryRun {
-				if err := service.ValidateCleanup(
+				if err := service.ValidateReservationCleanup(
 					ctx,
 					session,
 					flags.unusedStoragePolicy,
@@ -306,7 +306,7 @@ func (r *rootState) newCrossClusterReserveCleanupCommand() *cobra.Command {
 				)
 			}
 
-			if err := service.Cleanup(
+			if err := service.CleanupReservation(
 				ctx,
 				session,
 				flags.unusedStoragePolicy,
@@ -354,7 +354,7 @@ func (r *rootState) newCrossClusterReservePlanCommand() *cobra.Command {
 				return err
 			}
 
-			plan, err := service.Plan(ctx, options)
+			plan, err := service.PlanReservation(ctx, options)
 			if err != nil {
 				return err
 			}
@@ -402,9 +402,13 @@ func (r *rootState) newCrossClusterReserveRunCommand() *cobra.Command {
 				return err
 			}
 
-			var session *crosscluster.Session
+			var session *crosscluster.ReservationSession
 			if flags.sessionID != "" {
-				session, err = service.Get(ctx, options.SessionNamespace, flags.sessionID)
+				session, err = service.GetReservation(
+					ctx,
+					options.SessionNamespace,
+					flags.sessionID,
+				)
 				if apierrors.IsNotFound(err) {
 					session, err = nil, nil
 				} else if err == nil {
@@ -413,7 +417,7 @@ func (r *rootState) newCrossClusterReserveRunCommand() *cobra.Command {
 			}
 
 			if session == nil && err == nil {
-				plan, planErr := service.Plan(ctx, options)
+				plan, planErr := service.PlanReservation(ctx, options)
 				if planErr != nil {
 					return planErr
 				}
@@ -434,7 +438,7 @@ func (r *rootState) newCrossClusterReserveRunCommand() *cobra.Command {
 					return nil
 				}
 
-				session, err = service.CreateSession(ctx, options, plan)
+				session, err = service.CreateReservationSession(ctx, options, plan)
 			}
 
 			if err != nil {

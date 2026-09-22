@@ -23,8 +23,8 @@ func TestMigrationFinalSyncResumesOnlyIncompleteVolumes(t *testing.T) {
 
 	before := object.DeepCopy()
 	failure := errors.New("transfer interrupted")
-	engine.copy = func(request copyengine.Request) error {
-		if request.Source.Name == "b" {
+	engine.copy = func(request copyengine.CopyRequest) error {
+		if request.AttemptIdentity.Source.Name == "b" {
 			return failure
 		}
 		return nil
@@ -46,8 +46,9 @@ func TestMigrationFinalSyncResumesOnlyIncompleteVolumes(t *testing.T) {
 	}
 
 	for _, request := range engine.requests {
-		if request.Mode != copyengine.ModeFinal || request.Source.Namespace != "source" ||
-			request.Destination.Namespace != "temporary" {
+		if request.Mode != copyengine.ModeFinal ||
+			request.AttemptIdentity.Source.Namespace != "source" ||
+			request.Destination.Reference.Namespace != "temporary" {
 			t.Fatalf("wrong migration transfer: %+v", request)
 		}
 	}
@@ -64,7 +65,7 @@ func TestMigrationFinalSyncResumesOnlyIncompleteVolumes(t *testing.T) {
 	}
 
 	if object.Status.Phase != domain.PhaseFinalSynced || len(engine.requests) != 3 ||
-		engine.requests[2].Source.Name != "b" ||
+		engine.requests[2].AttemptIdentity.Source.Name != "b" ||
 		engine.requests[2].Attempt != 2 ||
 		len(engine.cleanups) != 1 ||
 		engine.cleanups[0].Source.Name != "b" {

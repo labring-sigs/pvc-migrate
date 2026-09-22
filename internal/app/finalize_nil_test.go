@@ -7,7 +7,10 @@ func TestFinalizeDeletedRejectsNilWorkflow(t *testing.T) {
 		name string
 		run  func() error
 	}{
-		{name: "copy", run: func() error { return (&CopyExecutor{}).FinalizeDeleted(t.Context(), nil) }},
+		{
+			name: "copy",
+			run:  func() error { return (&CopyExecutor{}).FinalizeDeleted(t.Context(), nil) },
+		},
 		{name: "cluster copy", run: func() error {
 			return (&ClusterCopyExecutor{}).FinalizeDeleted(t.Context(), nil)
 		}},
@@ -29,7 +32,10 @@ func TestFinalizeDeletedRejectsNilWorkflow(t *testing.T) {
 		{name: "cluster reservation", run: func() error {
 			return (&ClusterReservationExecutor{}).FinalizeDeleted(t.Context(), nil)
 		}},
-		{name: "move", run: func() error { return (&MoveExecutor{}).FinalizeDeleted(t.Context(), nil) }},
+		{
+			name: "move",
+			run:  func() error { return (&MoveExecutor{}).FinalizeDeleted(t.Context(), nil) },
+		},
 		{name: "rename", run: func() error {
 			return (&RenameExecutor{}).FinalizeDeleted(t.Context(), nil)
 		}},

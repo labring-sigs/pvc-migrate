@@ -125,18 +125,19 @@ func withPlanningLease[T crclient.Object](
 	return errors.Join(plan(ctx), lock.Err())
 }
 
-func transferPlanningError(report *domain.TransferPlan, hasPlan bool, cause error) error {
+func transferPlanningError(report domain.PlanSummaryReader, hasPlan bool, cause error) error {
 	if cause != nil {
 		return cause
 	}
 
-	if report != nil && report.Ready && hasPlan {
+	summary := planSummary(report)
+	if summary != nil && summary.Ready && hasPlan {
 		return nil
 	}
 
 	messages := []string{"planning checks failed"}
-	if report != nil {
-		for _, check := range report.Checks {
+	if summary != nil {
+		for _, check := range summary.Checks {
 			if !check.Passed {
 				messages = append(messages, check.Message)
 			}
@@ -144,6 +145,14 @@ func transferPlanningError(report *domain.TransferPlan, hasPlan bool, cause erro
 	}
 
 	return domain.NewError(domain.ErrorPrecondition, "plan workflow", strings.Join(messages, "; "))
+}
+
+func planSummary(report domain.PlanSummaryReader) *domain.PlanSummary {
+	if report == nil {
+		return nil
+	}
+
+	return report.Summary()
 }
 
 func retryCorrectedPlanning(

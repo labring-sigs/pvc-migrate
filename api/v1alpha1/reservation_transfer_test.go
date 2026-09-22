@@ -16,7 +16,7 @@ func TestReservationTransferSettingsSurviveSerialization(t *testing.T) {
 				TransferOptions: v1alpha1.TransferOptions{
 					SourceNode: "source-node", TargetNode: "target-node",
 					Strategies:     []string{"mount", "clusterip"},
-					VerifyChecksum: true, DeleteExtraneous: remove, SkipSourceUsageCheck: true,
+					VerifyChecksum: true, DeleteExtraneous: new(remove), SkipSourceUsageCheck: true,
 				},
 				Volumes: []v1alpha1.VolumeRequest{
 					{SourcePVC: v1alpha1.LocalResourceReference{Name: "data"}},

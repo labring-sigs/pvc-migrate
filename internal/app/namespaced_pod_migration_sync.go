@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"slices"
 
 	v1alpha1 "github.com/labring-sigs/pvc-migrate/api/v1alpha1"
 	"github.com/labring-sigs/pvc-migrate/internal/copyengine"
@@ -181,21 +182,25 @@ func (m *PodMigrationExecutor) finalSyncWithProbes(
 		)
 		binding := plannedMigrationBindings(object.Namespace, volume, checkpoint)
 
-		request := copyengine.Request{
-			SessionID:       object.Name,
-			ToolImage:       plan.ToolImage,
-			Source:          binding.SourcePVC,
-			Destination:     binding.DestinationPVC,
-			SourcePath:      domain.SourceTransferPath(volume.TransferScope),
-			DestinationPath: domain.DestinationTransferPath(volume.TransferScope),
-			IgnoreSizes: destinationCapacityIsSmaller(
-				volume.SourceCapacity,
-				volume.Capacity,
-			),
-			Strategies:            plan.Strategies,
-			VerifyChecksum:        plan.VerifyChecksum,
-			DeleteExtraneousFiles: plan.DeleteExtraneous,
-			Mode:                  copyengine.ModeFinal,
+		request := copyengine.CopyRequest{
+			AttemptIdentity: copyengine.AttemptIdentity{
+				SessionID: object.Name, Source: binding.SourcePVC, Mode: copyengine.ModeFinal,
+			},
+			Source: copyengine.CopySource{Path: domain.SourceTransferPath(volume.TransferScope)},
+			Destination: copyengine.CopyDestination{
+				Reference: binding.DestinationPVC,
+				Path:      domain.DestinationTransferPath(volume.TransferScope),
+			},
+			Policy: copyengine.CopyPolicy{
+				IgnoreSizes: destinationCapacityIsSmaller(
+					volume.SourceCapacity,
+					volume.Capacity,
+				),
+				Strategies:            slices.Clone(plan.Strategies),
+				VerifyChecksum:        plan.VerifyChecksum,
+				DeleteExtraneousFiles: plan.DeleteExtraneous,
+			},
+			Runtime: copyengine.CopyRuntime{ToolImage: plan.ToolImage},
 		}
 		if err := m.transfer.copyWithRetry(ctx, request, plan.SourceNode, plan.TargetNode, "",
 			&status.Sync.Attempts, &status.Sync.LastError, probes, save,

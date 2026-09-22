@@ -146,7 +146,7 @@ func migrationCanPlan(
 func (p *Planner) resolveMigration(ctx context.Context, name string, spec v1alpha1.MigrationSpec,
 	sourceNamespace, temporaryNamespace, sessionNamespace, image string,
 ) (*domain.TransferPlan, *v1alpha1.MigrationPlan, error) {
-	options := planOptions{
+	options := transferInput{
 		SessionID:            name,
 		SourceNamespace:      sourceNamespace,
 		DestinationNamespace: sourceNamespace,
@@ -154,14 +154,18 @@ func (p *Planner) resolveMigration(ctx context.Context, name string, spec v1alph
 		StagingNamespace:     temporaryNamespace,
 		SessionNamespace:     sessionNamespace,
 		ToolImage:            image,
-		operationKind:        domain.OperationMigrate,
 	}
 
 	if err := domain.ValidateUnusedStoragePolicy(spec.UnusedStoragePolicy); err != nil {
 		return nil, nil, err
 	}
 
-	state := p.newTransferPlanState(options, spec.TransferOptions, spec.Volumes)
+	state := p.newTransferPlanState(
+		options,
+		domain.OperationMigrate,
+		spec.TransferOptions,
+		spec.Volumes,
+	)
 	if _, err := p.selectPlanVolumes(ctx, &state, spec.Volumes, nil); err != nil {
 		return nil, nil, err
 	}
@@ -212,7 +216,7 @@ func (p *Planner) resolveMigration(ctx context.Context, name string, spec v1alph
 		ToolImage:            state.options.ToolImage,
 		Strategies:           state.options.Strategies,
 		VerifyChecksum:       state.options.VerifyChecksum,
-		DeleteExtraneous:     state.options.DeleteExtraneous,
+		DeleteExtraneous:     state.options.DeleteExtraneousValue(),
 		SkipSourceUsageCheck: state.options.SkipSourceUsageCheck,
 	}
 	if len(resolved.Volumes) > 0 {

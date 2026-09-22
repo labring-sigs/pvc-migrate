@@ -80,13 +80,13 @@ func TestNamespacedCopyResumesByIdentityWithinNamespace(t *testing.T) {
 	executor, object, engine := namespacedCopyFixture(t, interceptor.Funcs{})
 	before := object.DeepCopy()
 	failure := errors.New("transport interrupted")
-	engine.copy = func(request copyengine.Request) error {
-		if request.Source.Namespace != object.Namespace ||
-			request.Destination.Namespace != object.Namespace {
+	engine.copy = func(request copyengine.CopyRequest) error {
+		if request.AttemptIdentity.Source.Namespace != object.Namespace ||
+			request.Destination.Reference.Namespace != object.Namespace {
 			t.Fatal("copy escaped metadata.namespace")
 		}
 
-		if request.Source.Name == "b" {
+		if request.AttemptIdentity.Source.Name == "b" {
 			return failure
 		}
 
@@ -119,7 +119,7 @@ func TestNamespacedCopyResumesByIdentityWithinNamespace(t *testing.T) {
 	}
 
 	if object.Status.Phase != domain.PhaseWarmCopied || len(engine.requests) != 3 ||
-		engine.requests[2].Source.Name != "b" ||
+		engine.requests[2].AttemptIdentity.Source.Name != "b" ||
 		engine.requests[2].Attempt != 2 ||
 		len(engine.cleanups) != 1 {
 		t.Fatal("resume replayed completed work or reused an attempt")
@@ -127,7 +127,7 @@ func TestNamespacedCopyResumesByIdentityWithinNamespace(t *testing.T) {
 
 	if !reflect.DeepEqual(object.Spec, before.Spec) ||
 		!reflect.DeepEqual(object.Status.Plan, before.Status.Plan) ||
-		!engine.requests[0].VerifyChecksum {
+		!engine.requests[0].Policy.VerifyChecksum {
 		t.Fatal("copy changed input or lost checksum verification")
 	}
 

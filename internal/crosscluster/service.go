@@ -12,7 +12,10 @@ import (
 	"github.com/labring-sigs/pvc-migrate/internal/kube"
 )
 
-type Options struct {
+// CopyOptions describes the complete cross-cluster copy workflow. Reservation
+// uses its own input type below so copy-only consistency flags cannot leak into
+// the reservation command.
+type CopyOptions struct {
 	UnusedStoragePolicy     v1alpha1.UnusedStoragePolicy
 	SessionID               string
 	SessionNamespace        string
@@ -29,6 +32,27 @@ type Options struct {
 	Online                  bool
 	VerifyChecksum          bool
 	DeleteExtraneous        bool
+	TargetNode              string
+	ToolImage               string
+	Strategies              []string
+}
+
+// ReservationOptions describes the destination reservation workflow. A
+// reservation does not accept copy consistency or online transfer controls.
+type ReservationOptions struct {
+	UnusedStoragePolicy     v1alpha1.UnusedStoragePolicy
+	SessionID               string
+	SessionNamespace        string
+	SourceNamespace         string
+	DestinationNamespace    string
+	SourcePVCs              []string
+	DestinationPVCs         []string
+	DestinationCapacities   []string
+	SourcePaths             []string
+	DestinationPaths        []string
+	DestinationStorageClass string
+	AllowVolumeShrink       bool
+	SkipSourceUsageCheck    bool
 	TargetNode              string
 	ToolImage               string
 	Strategies              []string

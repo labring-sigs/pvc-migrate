@@ -24,6 +24,46 @@ type AttemptIdentity struct {
 	Attempt   int
 }
 
+// CopySource contains source-side transport settings. The source identity is
+// part of AttemptIdentity because it also participates in the stable attempt
+// ID used by cleanup and recovery.
+type CopySource struct {
+	KubeconfigPath string
+	Context        string
+	Path           string
+	MountReadWrite bool
+}
+
+// CopyDestination contains the destination identity and transport settings.
+type CopyDestination struct {
+	Reference      v1alpha1.ObjectReference
+	KubeconfigPath string
+	Context        string
+	Path           string
+}
+
+// CopyPolicy contains data convergence and retry behavior. It is independent
+// of Kubernetes connection details and process output.
+type CopyPolicy struct {
+	Strategies              []string
+	DeleteExtraneousFiles   bool
+	VerifyChecksum          bool
+	IgnoreSizes             bool
+	NoCompress              bool
+	RsyncMaxRetries         int
+	TolerateLiveSourceChurn bool
+}
+
+// CopyRuntime contains the trusted tool and process-level execution options.
+type CopyRuntime struct {
+	ToolImage        string
+	HelmTimeout      time.Duration
+	HelmValues       []string
+	HelmStringValues []string
+	Writer           io.Writer
+	Logger           *slog.Logger
+}
+
 // CleanupRequest contains release ownership and cluster locations only.
 type CleanupRequest struct {
 	AttemptIdentity
@@ -37,41 +77,14 @@ type CleanupRequest struct {
 	Strategies                []string
 }
 
-// Request is one copy attempt: identity, transfer target, transport policy,
-// and tool runtime. Presentation (Writer/Logger) stays with the runner that
-// owns the process output.
-type Request struct {
+// CopyRequest is one copy attempt assembled from focused identity, endpoint,
+// policy, and runtime values.
+type CopyRequest struct {
 	AttemptIdentity
-	ToolImage       string
-	Destination     v1alpha1.ObjectReference
-	SourcePath      string
-	DestinationPath string
-	KubeconfigPath  string
-	Context         string
-	// Destination connection overrides for cross-cluster transfer. Empty
-	// values reuse the source connection.
-	DestinationKubeconfigPath string
-	DestinationContext        string
-	Strategies                []string
-	DeleteExtraneousFiles     bool
-	VerifyChecksum            bool
-	SourceMountReadWrite      bool
-	IgnoreSizes               bool
-	NoCompress                bool
-	// RsyncMaxRetries overrides how many times the rsync job re-runs on a
-	// failed attempt within one transfer. Zero keeps the upstream default.
-	RsyncMaxRetries int
-	// TolerateLiveSourceChurn marks a warm-copy pass whose destination will
-	// be converged by a later paused final sync. With it set, a transfer that
-	// fails because the live source rewrote files mid-pass (rsync code 23)
-	// is treated as done: the pre-copy is best effort by definition. Never
-	// set it for final-sync or standalone copies, which must be exact.
-	TolerateLiveSourceChurn bool
-	HelmTimeout             time.Duration
-	HelmValues              []string
-	HelmStringValues        []string
-	Writer                  io.Writer
-	Logger                  *slog.Logger
+	Source      CopySource
+	Destination CopyDestination
+	Policy      CopyPolicy
+	Runtime     CopyRuntime
 }
 
 type Progress struct {
@@ -85,6 +98,6 @@ type Progress struct {
 type ProgressFunc func(Progress)
 
 type Engine interface {
-	Copy(ctx context.Context, request Request, progress ProgressFunc) error
+	Copy(ctx context.Context, request CopyRequest, progress ProgressFunc) error
 	Cleanup(ctx context.Context, request CleanupRequest) error
 }

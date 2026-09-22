@@ -288,7 +288,7 @@ func (l *renameDeletionLock) Delete(context.Context) error {
 	return l.deleteErr
 }
 
-func TestRenameDeletionRemovesWorkflowBeforeLeaseCleanup(t *testing.T) {
+func TestRenameDeletionRetainsWorkflowWhenLeaseCleanupFails(t *testing.T) {
 	object := plannedRenameObject()
 	object.DeletionTimestamp = &metav1.Time{Time: time.Now()}
 	object.Status = v1alpha1.RenameStatus{}
@@ -301,11 +301,22 @@ func TestRenameDeletionRemovesWorkflowBeforeLeaseCleanup(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if !store.deleted || object.Status.Phase != domain.PhaseAborted {
-		t.Fatal("protected workflow delete did not complete before lease cleanup")
+	if store.deleted || object.Status.Phase != domain.PhaseAborted {
+		t.Fatal("workflow deletion protection was lost before lease cleanup succeeded")
 	}
+
 	if lock.deletes != 1 {
-		t.Fatalf("lease cleanup was not attempted after workflow deletion: %d", lock.deletes)
+		t.Fatalf("lease cleanup was not attempted: %d", lock.deletes)
+	}
+
+	lock.deleteErr = nil
+
+	if err := executor.FinalizeDeleted(t.Context(), object); err != nil {
+		t.Fatal(err)
+	}
+
+	if !store.deleted || lock.deletes != 2 {
+		t.Fatal("workflow did not converge after lease cleanup recovered")
 	}
 }
 

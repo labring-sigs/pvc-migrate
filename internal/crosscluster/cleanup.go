@@ -14,7 +14,7 @@ import (
 
 func (s *Service) Cleanup(
 	ctx context.Context,
-	session *Session,
+	session *CopySession,
 	unusedStoragePolicy string,
 	deleteSession bool,
 ) error {
@@ -29,7 +29,7 @@ func (s *Service) Cleanup(
 
 func (s *Service) cleanup(
 	ctx context.Context,
-	session *Session,
+	session *CopySession,
 	unusedStoragePolicy string,
 	deleteSession bool,
 ) error {
@@ -87,28 +87,39 @@ func (s *Service) cleanup(
 	s.touch(session)
 
 	if deleteSession {
-		if err := requireSessionLease(ctx); err != nil {
-			return err
-		}
-
-		if err := s.delete(ctx, session); err != nil {
-			return err
-		}
-
-		if err := requireSessionLease(ctx); err != nil {
-			return err
-		}
-
-		return s.leases.DeleteSessionLease(ctx, session.Spec.SessionNamespace, session.ID)
+		return s.deleteSession(ctx, session.Spec.SessionNamespace, session.ID, func() error {
+			return s.delete(ctx, session)
+		})
 	}
 
 	return s.save(ctx, session, false)
 }
 
+// deleteSession removes the fencing Lease before the persisted session. A
+// failed Lease deletion must leave the session available for a retry; deleting
+// the record first would strand a same-ID operation behind the old Lease.
+func (s *Service) deleteSession(
+	ctx context.Context,
+	namespace, id string,
+	deleteRecord func() error,
+) error {
+	if lock, ok := sessionLockFromContext(ctx); ok {
+		if err := lock.Delete(ctx); err != nil {
+			return err
+		}
+	} else if s.leases != nil {
+		if err := s.leases.DeleteSessionLease(ctx, namespace, id); err != nil {
+			return err
+		}
+	}
+
+	return deleteRecord()
+}
+
 // ValidateCleanup checks policy, identities and consumers without changing the session.
 func (s *Service) ValidateCleanup(
 	ctx context.Context,
-	session *Session,
+	session *CopySession,
 	unusedStoragePolicy string,
 ) error {
 	if err := s.validateSession(ctx, session); err != nil {
@@ -145,7 +156,7 @@ func (s *Service) ValidateCleanup(
 // A completed cross-cluster copy has delivered its destination PVC. The
 // destination is the result of the operation, so cleanup must retain it even
 // when the requested policy is Delete.
-func cleanupDeletesDestination(session *Session, policy v1alpha1.UnusedStoragePolicy) bool {
+func cleanupDeletesDestination(session *CopySession, policy v1alpha1.UnusedStoragePolicy) bool {
 	if session == nil ||
 		session.Status.Phase == PhaseCompleted ||
 		session.Status.CompletedAt != nil {
@@ -155,11 +166,23 @@ func cleanupDeletesDestination(session *Session, policy v1alpha1.UnusedStoragePo
 	return domain.DeletesUnusedStorage(policy)
 }
 
-func (s *Service) cleanupDestinationVolume(ctx context.Context, session *Session, index int) error {
+func (s *Service) cleanupDestinationVolume(
+	ctx context.Context,
+	session *CopySession,
+	index int,
+) error {
 	volume := &session.Spec.Volumes[index]
+	state := reservationState{
+		ID:     session.ID,
+		Spec:   &session.Spec.SessionContext,
+		Status: &session.Status.Volumes[index].Reservation,
+		Save: func(saveCtx context.Context) error {
+			return s.save(saveCtx, session, false)
+		},
+	}
 
 	client := s.destination.Kubernetes
-	if err := s.deleteReservationConsumer(ctx, session, index); err != nil {
+	if err := s.deleteReservationConsumer(ctx, state); err != nil {
 		return err
 	}
 
@@ -208,6 +231,7 @@ func (s *Service) cleanupDestinationVolume(ctx context.Context, session *Session
 	}
 
 	uid := pvc.UID
+
 	if err := requireSessionLease(ctx); err != nil {
 		return err
 	}
@@ -218,6 +242,7 @@ func (s *Service) cleanupDestinationVolume(ctx context.Context, session *Session
 		!apierrors.IsNotFound(err) {
 		return fmt.Errorf("delete destination PVC %s/%s: %w", pvc.Namespace, pvc.Name, err)
 	}
+
 	if err := requireSessionLease(ctx); err != nil {
 		return err
 	}
@@ -310,10 +335,9 @@ func (s *Service) cleanupDestinationPV(
 
 func (s *Service) deleteReservationConsumer(
 	ctx context.Context,
-	session *Session,
-	index int,
+	state reservationState,
 ) error {
-	ref := session.Status.Volumes[index].Reservation.ConsumerPod
+	ref := state.Status.ConsumerPod
 	if ref.Name == "" {
 		return nil
 	}
@@ -329,12 +353,13 @@ func (s *Service) deleteReservationConsumer(
 		return err
 	}
 
-	if (ref.UID != "" && pod.UID != ref.UID) || pod.Labels[SessionKey] != session.ID ||
+	if (ref.UID != "" && pod.UID != ref.UID) || pod.Labels[SessionKey] != state.ID ||
 		pod.Labels[ManagedByLabel] != ManagedBy {
 		return fmt.Errorf("reservation Pod %s/%s ownership or UID changed", pod.Namespace, pod.Name)
 	}
 
 	uid := pod.UID
+
 	if err := requireSessionLease(ctx); err != nil {
 		return err
 	}
@@ -347,6 +372,7 @@ func (s *Service) deleteReservationConsumer(
 		!apierrors.IsNotFound(err) {
 		return err
 	}
+
 	if err := requireSessionLease(ctx); err != nil {
 		return err
 	}

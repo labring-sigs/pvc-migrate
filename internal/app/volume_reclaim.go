@@ -72,6 +72,7 @@ func deleteManagedPVC(
 			err,
 		)
 	}
+
 	if err := checkpointFenceError(ctx); err != nil {
 		return err
 	}
@@ -166,6 +167,7 @@ func deleteReclaimedPV(
 			err,
 		)
 	}
+
 	if err := checkpointFenceError(ctx); err != nil {
 		return err
 	}

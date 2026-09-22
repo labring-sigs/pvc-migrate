@@ -23,7 +23,7 @@ type hangingEngine struct {
 
 func (e *hangingEngine) Copy(
 	ctx context.Context,
-	_ copyengine.Request,
+	_ copyengine.CopyRequest,
 	_ copyengine.ProgressFunc,
 ) error {
 	<-ctx.Done()
@@ -59,15 +59,17 @@ func TestCopyWithRetryHonorsPerAttemptCopyTimeout(t *testing.T) {
 	})
 	runner.sleep = func(context.Context, time.Duration) error { return nil }
 
-	request := copyengine.Request{
-		SessionID: "copy-timeout-test",
-		Mode:      copyengine.ModeWarm,
-		Source: v1alpha1.ObjectReference{
-			Kind: "PersistentVolumeClaim", Namespace: "source", Name: "a", UID: "a",
+	request := copyengine.CopyRequest{
+		AttemptIdentity: copyengine.AttemptIdentity{
+			SessionID: "copy-timeout-test",
+			Mode:      copyengine.ModeWarm,
+			Source: v1alpha1.ObjectReference{
+				Kind: "PersistentVolumeClaim", Namespace: "source", Name: "a", UID: "a",
+			},
 		},
-		Destination: v1alpha1.ObjectReference{
+		Destination: copyengine.CopyDestination{Reference: v1alpha1.ObjectReference{
 			Kind: "PersistentVolumeClaim", Namespace: "destination", Name: "b", UID: "b",
-		},
+		}},
 	}
 
 	attempts := 0
@@ -126,14 +128,16 @@ func TestCopyWithRetryRetriesTransientRsyncPartialTransfers(t *testing.T) {
 	})
 	runner.sleep = func(context.Context, time.Duration) error { return nil }
 
-	request := copyengine.Request{
-		SessionID: "rsync-partial-test",
-		Source: v1alpha1.ObjectReference{
-			Kind: "PersistentVolumeClaim", Namespace: "source", Name: "a", UID: "a",
+	request := copyengine.CopyRequest{
+		AttemptIdentity: copyengine.AttemptIdentity{
+			SessionID: "rsync-partial-test",
+			Source: v1alpha1.ObjectReference{
+				Kind: "PersistentVolumeClaim", Namespace: "source", Name: "a", UID: "a",
+			},
 		},
-		Destination: v1alpha1.ObjectReference{
+		Destination: copyengine.CopyDestination{Reference: v1alpha1.ObjectReference{
 			Kind: "PersistentVolumeClaim", Namespace: "destination", Name: "b", UID: "b",
-		},
+		}},
 	}
 
 	attempts := 0
@@ -166,7 +170,7 @@ type flakyRsyncEngine struct {
 
 func (e *flakyRsyncEngine) Copy(
 	_ context.Context,
-	_ copyengine.Request,
+	_ copyengine.CopyRequest,
 	_ copyengine.ProgressFunc,
 ) error {
 	e.calls++

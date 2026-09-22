@@ -175,7 +175,7 @@ func TestPodMigrationAbortStopsToolsBeforeWorkloadResume(t *testing.T) {
 	executor.workloads = controller
 	executor.switcher = &scriptedSwitcher{client: executor.client}
 	engine := &concreteCopyEngine{
-		copy: func(copyengine.Request) error { return errors.New("copy interrupted") },
+		copy: func(copyengine.CopyRequest) error { return errors.New("copy interrupted") },
 	}
 	executor.transfer.copier = engine
 
@@ -344,7 +344,7 @@ func TestNamespacedPodMigrationAbortStopsToolsBeforeWorkloadResume(t *testing.T)
 	executor.workloads = controller
 	executor.switcher = &scriptedSwitcher{client: executor.client}
 	engine := &concreteCopyEngine{
-		copy: func(copyengine.Request) error { return errors.New("copy interrupted") },
+		copy: func(copyengine.CopyRequest) error { return errors.New("copy interrupted") },
 	}
 	executor.transfer.copier = engine
 

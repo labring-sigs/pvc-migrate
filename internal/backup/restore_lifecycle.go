@@ -258,11 +258,11 @@ func (r *RestoreExecutor) cleanup(
 			return err
 		}
 
-		if err := r.store.Delete(ctx, object); err != nil {
+		if err := lock.Delete(ctx); err != nil {
 			return err
 		}
 
-		return lock.Delete(ctx)
+		return r.store.Delete(ctx, object)
 	}
 
 	return nil
@@ -376,6 +376,8 @@ func (r *RestoreExecutor) FinalizeDeleted(ctx context.Context, object *v1alpha1.
 			"workflow deletion is required",
 		)
 	}
+
+	normalizeDeletedRepositoryStatus(&object.Status.WorkflowStatus)
 
 	if err := validateRestoreObject(object); err != nil {
 		return err

@@ -101,6 +101,7 @@ func DeleteBackupCredentialsSecret(
 	if ref.UID != "" {
 		options.Preconditions = &metav1.Preconditions{UID: &ref.UID}
 	}
+
 	if err := errors.Join(ctx.Err(), LeaseFenceError(ctx)); err != nil {
 		return err
 	}

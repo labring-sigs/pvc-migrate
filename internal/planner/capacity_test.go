@@ -104,7 +104,10 @@ func TestStorageCapacityRejectsCapacityAndMaximumVolumeLimits(t *testing.T) {
 
 func TestStorageCapacityMissingObjectsFollowPolicy(t *testing.T) {
 	node := &corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "node-b"}}
-	plan := &domain.TransferPlan{PlanSummary: domain.PlanSummary{Ready: true}}
+	plan := &domain.PlanSummary{Ready: true}
+
+	var reports []domain.StorageCapacityReport
+
 	inventory := New(
 		plannerClient(),
 		nil,
@@ -113,18 +116,18 @@ func TestStorageCapacityMissingObjectsFollowPolicy(t *testing.T) {
 	New(
 		nil,
 		nil,
-	).checkStorageCapacity(plan, node, []domain.PlannedVolume{volume}, inventory, domain.CapacityAwarenessAuto)
+	).checkStorageCapacity(plan, &reports, node, []domain.PlannedVolume{volume}, inventory, domain.CapacityAwarenessAuto)
 
 	if !plan.Ready || len(plan.Checks) != 1 || plan.Checks[0].Severity != domain.SeverityWarning ||
-		plan.StorageCapacity[0].Status != domain.StorageCapacityUnknown {
+		len(reports) != 1 || reports[0].Status != domain.StorageCapacityUnknown {
 		t.Fatalf("auto plan=%#v", plan)
 	}
 
-	required := &domain.TransferPlan{PlanSummary: domain.PlanSummary{Ready: true}}
+	required := &domain.PlanSummary{Ready: true}
 	New(
 		nil,
 		nil,
-	).checkStorageCapacity(required, node, []domain.PlannedVolume{volume}, inventory, domain.CapacityAwarenessRequire)
+	).checkStorageCapacity(required, nil, node, []domain.PlannedVolume{volume}, inventory, domain.CapacityAwarenessRequire)
 
 	if required.Ready || len(required.Checks) != 1 ||
 		required.Checks[0].Severity != domain.SeverityError {
@@ -146,11 +149,11 @@ func TestStorageCapacityCheckRejectsMalformedDemandByPolicy(t *testing.T) {
 		{name: "require error", mode: domain.CapacityAwarenessRequire, wantReady: false, severity: domain.SeverityError},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			plan := &domain.TransferPlan{PlanSummary: domain.PlanSummary{Ready: true}}
+			plan := &domain.PlanSummary{Ready: true}
 			New(
 				nil,
 				nil,
-			).checkStorageCapacity(plan, node, []domain.PlannedVolume{volume}, &storageCapacityInventory{mode: tt.mode}, tt.mode)
+			).checkStorageCapacity(plan, nil, node, []domain.PlannedVolume{volume}, &storageCapacityInventory{mode: tt.mode}, tt.mode)
 
 			if plan.Ready != tt.wantReady || len(plan.Checks) != 1 ||
 				plan.Checks[0].Severity != tt.severity {
@@ -161,7 +164,10 @@ func TestStorageCapacityCheckRejectsMalformedDemandByPolicy(t *testing.T) {
 }
 
 func TestStorageCapacityCheckSortsMultipleStorageClassesAndKeepsReadyWarnings(t *testing.T) {
-	plan := &domain.TransferPlan{PlanSummary: domain.PlanSummary{Ready: true}}
+	plan := &domain.PlanSummary{Ready: true}
+
+	var reports []domain.StorageCapacityReport
+
 	volumes := []domain.PlannedVolume{
 		plannedCapacityVolume("z-data", "z-class", "2Gi"),
 		plannedCapacityVolume("a-data", "a-class", "1Gi"),
@@ -176,12 +182,12 @@ func TestStorageCapacityCheckSortsMultipleStorageClassesAndKeepsReadyWarnings(t 
 	New(
 		nil,
 		nil,
-	).checkStorageCapacity(plan, &corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "node-b"}}, volumes, inventory, domain.CapacityAwarenessAuto)
+	).checkStorageCapacity(plan, &reports, &corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "node-b"}}, volumes, inventory, domain.CapacityAwarenessAuto)
 
-	if !plan.Ready || len(plan.StorageCapacity) != 2 ||
-		plan.StorageCapacity[0].StorageClass != "a-class" ||
-		plan.StorageCapacity[0].Status != domain.StorageCapacityUnknown ||
-		plan.StorageCapacity[1].Status != domain.StorageCapacitySufficient {
+	if !plan.Ready || len(reports) != 2 ||
+		reports[0].StorageClass != "a-class" ||
+		reports[0].Status != domain.StorageCapacityUnknown ||
+		reports[1].Status != domain.StorageCapacitySufficient {
 		t.Fatalf("plan=%#v", plan)
 	}
 
@@ -852,9 +858,11 @@ func TestPlanAutoTargetPrefersGreaterReportedCapacity(t *testing.T) {
 		),
 	)
 
-	plan, err := New(plannerClient(objects...), nil).plan(context.Background(), planOptions{
-		operationKind: domain.OperationMigrate,
-		Volumes:       testSourceVolumes("data"), SessionID: "capacity-target",
+	plan, err := New(
+		plannerClient(objects...),
+		nil,
+	).plan(context.Background(), domain.OperationMigrate, transferInput{
+		Volumes: testSourceVolumes("data"), SessionID: "capacity-target",
 		SourceNamespace:    "app",
 		TemporaryNamespace: "system",
 		StagingNamespace:   "system",
@@ -881,9 +889,8 @@ func TestPlanAutoTargetPrefersGreaterReportedCapacity(t *testing.T) {
 }
 
 func TestPlanCapacityAwarenessPolicies(t *testing.T) {
-	base := planOptions{
-		operationKind: domain.OperationMigrate,
-		Volumes:       testSourceVolumes("data"), SessionID: "capacity-policy",
+	base := transferInput{
+		Volumes: testSourceVolumes("data"), SessionID: "capacity-policy",
 		SourceNamespace:    "app",
 		TemporaryNamespace: "system",
 		StagingNamespace:   "system",
@@ -955,7 +962,10 @@ func TestPlanCapacityAwarenessPolicies(t *testing.T) {
 			options := base
 			options.CapacityAwareness = string(tt.mode)
 
-			plan, err := New(plannerClient(objects...), nil).plan(context.Background(), options)
+			plan, err := New(
+				plannerClient(objects...),
+				nil,
+			).plan(context.Background(), domain.OperationMigrate, options)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -1018,11 +1028,11 @@ func TestStorageCapacityListErrorIsUnknownOrRequired(t *testing.T) {
 		{mode: domain.CapacityAwarenessAuto, wantReady: true},
 		{mode: domain.CapacityAwarenessRequire, wantReady: false},
 	} {
-		plan := &domain.TransferPlan{PlanSummary: domain.PlanSummary{Ready: true}}
+		plan := &domain.PlanSummary{Ready: true}
 		New(
 			nil,
 			nil,
-		).checkStorageCapacity(plan, &corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "node-b"}}, []domain.PlannedVolume{plannedCapacityVolume("data", "fast", "1Gi")}, inventory, tt.mode)
+		).checkStorageCapacity(plan, nil, &corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "node-b"}}, []domain.PlannedVolume{plannedCapacityVolume("data", "fast", "1Gi")}, inventory, tt.mode)
 
 		if plan.Ready != tt.wantReady {
 			t.Fatalf("mode=%s ready=%t checks=%#v", tt.mode, plan.Ready, plan.Checks)
@@ -1041,8 +1051,7 @@ func TestCapacityAwarenessModes(t *testing.T) {
 		t.Fatal("unsupported mode accepted")
 	}
 
-	options := planOptions{
-		operationKind: domain.OperationMigrate,
+	options := transferInput{
 		Volumes: testSourceVolumes(
 			"data",
 		), SessionID: "invalid-capacity-mode",
@@ -1061,7 +1070,7 @@ func TestCapacityAwarenessModes(t *testing.T) {
 	plan, err := New(
 		plannerClient(plannerObjects("1Gi")...),
 		nil,
-	).plan(context.Background(), options)
+	).plan(context.Background(), domain.OperationMigrate, options)
 	if err != nil {
 		t.Fatal(err)
 	}

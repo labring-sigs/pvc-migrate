@@ -108,6 +108,7 @@ func TestPVCOwnershipRejectsFenceLossAfterUpdate(t *testing.T) {
 					updated = true
 				}
 			}
+
 			if !updated {
 				t.Fatal("expected PVC update before reporting lease loss")
 			}

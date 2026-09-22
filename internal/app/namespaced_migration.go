@@ -202,7 +202,9 @@ func (m *MigrationExecutor) reserve(ctx context.Context, object *v1alpha1.Migrat
 				previous := status.DeepCopy()
 
 				*status = local
-				if err := m.store.Save(ctx, object); err != nil {
+				if err := persistCheckpoint(ctx, func(ctx context.Context) error {
+					return m.store.Save(ctx, object)
+				}); err != nil {
 					*status = *previous
 					return err
 				}

@@ -474,34 +474,17 @@ func (r *Reserver) reserveVolumeLive(
 	destinationPolicy *corev1.PersistentVolumeReclaimPolicy,
 	reserved *bool,
 ) error {
-	existing, err := r.client.CoreV1().
-		PersistentVolumeClaims(pvc.Namespace).
-		Get(ctx, pvc.Name, metav1.GetOptions{})
-	if apierrors.IsNotFound(err) {
-		if err := validateMissingReservationDestination(
-			*destinationPVC,
-			*destinationPV,
-			*reserved,
-		); err != nil {
-			return err
-		}
-		if err := errors.Join(ctx.Err(), LeaseFenceError(ctx)); err != nil {
-			return err
-		}
-
-		existing, err = r.client.CoreV1().
-			PersistentVolumeClaims(pvc.Namespace).
-			Create(ctx, pvc, metav1.CreateOptions{})
-	}
-
+	existing, err := r.loadOrCreateReservationPVC(
+		ctx,
+		pvc,
+		*destinationPVC,
+		*destinationPV,
+		*reserved,
+	)
 	if err != nil {
-		return domain.WrapError(
-			domain.ErrorKubernetes,
-			"reserve volume",
-			fmt.Sprintf("create PVC %s/%s", pvc.Namespace, pvc.Name),
-			err,
-		)
+		return err
 	}
+
 	if err := errors.Join(ctx.Err(), LeaseFenceError(ctx)); err != nil {
 		return err
 	}
@@ -550,6 +533,65 @@ func (r *Reserver) reserveVolumeLive(
 		)
 	}
 
+	return r.finalizeLiveReservation(
+		ctx,
+		request,
+		pvc,
+		bound,
+		destinationPVC,
+		destinationPV,
+		destinationPolicy,
+		reserved,
+	)
+}
+
+func (r *Reserver) loadOrCreateReservationPVC(
+	ctx context.Context,
+	pvc *corev1.PersistentVolumeClaim,
+	destinationPVC, destinationPV v1alpha1.ObjectReference,
+	reserved bool,
+) (*corev1.PersistentVolumeClaim, error) {
+	existing, err := r.client.CoreV1().
+		PersistentVolumeClaims(pvc.Namespace).
+		Get(ctx, pvc.Name, metav1.GetOptions{})
+	if apierrors.IsNotFound(err) {
+		if err := validateMissingReservationDestination(
+			destinationPVC,
+			destinationPV,
+			reserved,
+		); err != nil {
+			return nil, err
+		}
+
+		if err := errors.Join(ctx.Err(), LeaseFenceError(ctx)); err != nil {
+			return nil, err
+		}
+
+		existing, err = r.client.CoreV1().
+			PersistentVolumeClaims(pvc.Namespace).
+			Create(ctx, pvc, metav1.CreateOptions{})
+	}
+
+	if err != nil {
+		return nil, domain.WrapError(
+			domain.ErrorKubernetes,
+			"reserve volume",
+			fmt.Sprintf("create PVC %s/%s", pvc.Namespace, pvc.Name),
+			err,
+		)
+	}
+
+	return existing, nil
+}
+
+func (r *Reserver) finalizeLiveReservation(
+	ctx context.Context,
+	request ReservationRequest,
+	pvc, bound *corev1.PersistentVolumeClaim,
+	destinationPVC, destinationPV *v1alpha1.ObjectReference,
+	destinationPolicy *corev1.PersistentVolumeReclaimPolicy,
+	reserved *bool,
+) error {
 	destinationPVC.UID = bound.UID
 	destinationPVC.ResourceVersion = bound.ResourceVersion
 
@@ -562,9 +604,11 @@ func (r *Reserver) reserveVolumeLive(
 		)
 	}
 
-	pv, err := r.client.CoreV1().
-		PersistentVolumes().
-		Get(ctx, bound.Spec.VolumeName, metav1.GetOptions{})
+	pv, err := r.client.CoreV1().PersistentVolumes().Get(
+		ctx,
+		bound.Spec.VolumeName,
+		metav1.GetOptions{},
+	)
 	if err != nil {
 		return domain.WrapError(
 			domain.ErrorKubernetes,
@@ -1102,6 +1146,7 @@ func (r *Reserver) provisionOnTarget(
 			err,
 		)
 	}
+
 	if err := errors.Join(ctx.Err(), LeaseFenceError(ctx)); err != nil {
 		return err
 	}
@@ -1224,6 +1269,7 @@ func (r *Reserver) cleanupReservationPod(
 			err,
 		)
 	}
+
 	if err := errors.Join(ctx.Err(), LeaseFenceError(ctx)); err != nil {
 		return err
 	}

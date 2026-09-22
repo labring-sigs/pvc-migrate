@@ -60,15 +60,15 @@ func (s *copyCheckpointStore) Delete(context.Context, *v1alpha1.ClusterCopy) err
 }
 
 type concreteCopyEngine struct {
-	requests   []copyengine.Request
+	requests   []copyengine.CopyRequest
 	cleanups   []copyengine.CleanupRequest
-	copy       func(copyengine.Request) error
+	copy       func(copyengine.CopyRequest) error
 	cleanupErr error
 }
 
 func (e *concreteCopyEngine) Copy(
 	_ context.Context,
-	request copyengine.Request,
+	request copyengine.CopyRequest,
 	_ copyengine.ProgressFunc,
 ) error {
 	e.requests = append(e.requests, request)
@@ -133,8 +133,8 @@ func TestCopyExecutorResumesBySourceIdentityAndPreservesPlan(t *testing.T) {
 	executor, object, store, engine := copyExecutorFixture(t)
 	before := object.DeepCopy()
 	failure := errors.New("copy transport unavailable")
-	engine.copy = func(request copyengine.Request) error {
-		if request.Source.Name == "b" {
+	engine.copy = func(request copyengine.CopyRequest) error {
+		if request.AttemptIdentity.Source.Name == "b" {
 			return failure
 		}
 
@@ -161,7 +161,7 @@ func TestCopyExecutorResumesBySourceIdentityAndPreservesPlan(t *testing.T) {
 	}
 
 	if object.Status.Phase != domain.PhaseWarmCopied || len(engine.requests) != 3 ||
-		engine.requests[2].Source.Name != "b" || engine.requests[2].Attempt != 2 ||
+		engine.requests[2].AttemptIdentity.Source.Name != "b" || engine.requests[2].Attempt != 2 ||
 		len(engine.cleanups) != 1 || engine.cleanups[0].Source.Name != "b" {
 		t.Fatalf(
 			"copy recovery replayed completed work: requests=%+v, cleanups=%+v",
@@ -170,7 +170,7 @@ func TestCopyExecutorResumesBySourceIdentityAndPreservesPlan(t *testing.T) {
 		)
 	}
 
-	if !engine.requests[0].VerifyChecksum {
+	if !engine.requests[0].Policy.VerifyChecksum {
 		t.Fatal("copy checksum request did not reach the engine")
 	}
 
@@ -218,7 +218,7 @@ func TestCopyExecutorAttemptCheckpointFailureDoesNotStartEngine(t *testing.T) {
 
 func TestCopyExecutorAbortRetriesToolCleanup(t *testing.T) {
 	executor, object, _, engine := copyExecutorFixture(t)
-	engine.copy = func(copyengine.Request) error { return errors.New("interrupted transfer") }
+	engine.copy = func(copyengine.CopyRequest) error { return errors.New("interrupted transfer") }
 
 	if err := executor.Run(t.Context(), object); err == nil {
 		t.Fatal("expected interrupted transfer")
@@ -272,9 +272,9 @@ func TestCopyExecutorCompletionCheckpointFailureReplaysOnlyUncommittedWork(t *te
 		t.Fatal(err)
 	}
 
-	if len(engine.requests) != 3 || engine.requests[1].Source.Name != "a" ||
+	if len(engine.requests) != 3 || engine.requests[1].AttemptIdentity.Source.Name != "a" ||
 		engine.requests[1].Attempt != 2 ||
-		engine.requests[2].Source.Name != "b" {
+		engine.requests[2].AttemptIdentity.Source.Name != "b" {
 		t.Fatal("retry did not recover the uncommitted copy attempt")
 	}
 }
@@ -316,8 +316,8 @@ func TestCopyExecutorCheckpointsConsumerPlacementWithoutChangingPlan(t *testing.
 	}
 
 	failure := errors.New("transfer unavailable")
-	engine.copy = func(request copyengine.Request) error {
-		if request.Source.Name == "b" {
+	engine.copy = func(request copyengine.CopyRequest) error {
+		if request.AttemptIdentity.Source.Name == "b" {
 			return failure
 		}
 		return nil
@@ -397,7 +397,7 @@ func TestCopyExecutorRetryRejectsNewOfflineConsumer(t *testing.T) {
 	executor, object, _, engine := copyExecutorFixture(t)
 	executor.transfer.config.Retries = 2
 	executor.transfer.sleep = func(context.Context, time.Duration) error { return nil }
-	engine.copy = func(copyengine.Request) error {
+	engine.copy = func(copyengine.CopyRequest) error {
 		_, err := executor.client.CoreV1().Pods("source").Create(t.Context(), &corev1.Pod{
 			ObjectMeta: metav1.ObjectMeta{Namespace: "source", Name: "consumer", UID: "consumer"},
 			Spec: corev1.PodSpec{NodeName: "node-a", Volumes: []corev1.Volume{{

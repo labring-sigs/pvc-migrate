@@ -56,8 +56,8 @@ func TestPodMigrationWarmCopyResumesIncompleteVolumes(t *testing.T) {
 	executor, object, store, engine := podMigrationWarmFixture(t)
 	before := object.DeepCopy()
 	failure := errors.New("copy interrupted")
-	engine.copy = func(request copyengine.Request) error {
-		if request.Source.Name == "b" {
+	engine.copy = func(request copyengine.CopyRequest) error {
+		if request.AttemptIdentity.Source.Name == "b" {
 			return failure
 		}
 		return nil
@@ -94,7 +94,7 @@ func TestPodMigrationWarmCopyResumesIncompleteVolumes(t *testing.T) {
 	if loaded.Status.Phase != domain.PhaseWarmCopied || loaded.Status.WarmPassesCompleted != 1 ||
 		len(
 			engine.requests,
-		) != 3 || engine.requests[2].Source.Name != "b" || engine.requests[2].Attempt != 2 ||
+		) != 3 || engine.requests[2].AttemptIdentity.Source.Name != "b" || engine.requests[2].Attempt != 2 ||
 		len(
 			engine.cleanups,
 		) != 1 || engine.cleanups[0].Source.Name != "b" || engine.cleanups[0].Mode != copyengine.ModeWarm {
@@ -107,8 +107,9 @@ func TestPodMigrationWarmCopyResumesIncompleteVolumes(t *testing.T) {
 	}
 
 	for _, request := range engine.requests {
-		if request.Mode != copyengine.ModeWarm || request.Source.Namespace != "source" ||
-			request.Destination.Namespace != "temporary" {
+		if request.Mode != copyengine.ModeWarm ||
+			request.AttemptIdentity.Source.Namespace != "source" ||
+			request.Destination.Reference.Namespace != "temporary" {
 			t.Fatalf("incorrect transfer scope: %+v", request)
 		}
 	}
@@ -175,7 +176,7 @@ func TestPodMigrationWarmRestartSaveFailurePreservesCompletedPass(t *testing.T) 
 
 func TestPodMigrationWarmCopyCapacityFailureBlocksRetry(t *testing.T) {
 	executor, object, _, engine := podMigrationWarmFixture(t)
-	engine.copy = func(copyengine.Request) error { return errors.New("No space left on device") }
+	engine.copy = func(copyengine.CopyRequest) error { return errors.New("No space left on device") }
 
 	if err := executor.WarmCopy(t.Context(), object); err == nil {
 		t.Fatal("capacity failure ignored")
@@ -223,7 +224,7 @@ func TestPodMigrationWarmCopyStopsOnFenceLoss(t *testing.T) {
 	lost := errors.New("lease lost")
 	lock := &fakeSessionLock{}
 	executor.locker = &fakeSessionLocker{lock: lock}
-	engine.copy = func(copyengine.Request) error { lock.err = lost; return nil }
+	engine.copy = func(copyengine.CopyRequest) error { lock.err = lost; return nil }
 
 	if err := executor.WarmCopy(t.Context(), object); !errors.Is(err, lost) {
 		t.Fatal(err)

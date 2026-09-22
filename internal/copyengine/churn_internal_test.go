@@ -11,11 +11,13 @@ import (
 )
 
 func TestOperationIDIsStableAndValid(t *testing.T) {
-	request := Request{
-		SessionID: "migration-123",
-		Source:    v1alpha1.ObjectReference{Namespace: "app", Name: "data"},
-		Mode:      ModeFinal,
-		Attempt:   2,
+	request := CopyRequest{
+		AttemptIdentity: AttemptIdentity{
+			SessionID: "migration-123",
+			Source:    v1alpha1.ObjectReference{Namespace: "app", Name: "data"},
+			Mode:      ModeFinal,
+			Attempt:   2,
+		},
 	}
 	first := OperationID(request.AttemptIdentity)
 
@@ -63,15 +65,19 @@ func TestCopyToleratesLiveSourceChurnOnlyWhenRequested(t *testing.T) {
 				return churnErr
 			}
 
-			err := p.Copy(context.Background(), Request{
-				Mode:                    ModeWarm,
-				TolerateLiveSourceChurn: tc.tolerat,
-				Source: v1alpha1.ObjectReference{
-					Kind: "PersistentVolumeClaim", Namespace: "source", Name: "a", UID: "a",
+			err := p.Copy(context.Background(), CopyRequest{
+				AttemptIdentity: AttemptIdentity{
+					Mode: ModeWarm,
+					Source: v1alpha1.ObjectReference{
+						Kind: "PersistentVolumeClaim", Namespace: "source", Name: "a", UID: "a",
+					},
 				},
-				Destination: v1alpha1.ObjectReference{
-					Kind: "PersistentVolumeClaim", Namespace: "dest", Name: "b", UID: "b",
+				Destination: CopyDestination{
+					Reference: v1alpha1.ObjectReference{
+						Kind: "PersistentVolumeClaim", Namespace: "dest", Name: "b", UID: "b",
+					},
 				},
+				Policy: CopyPolicy{TolerateLiveSourceChurn: tc.tolerat},
 			}, nil)
 
 			if tc.wantErr && err == nil {

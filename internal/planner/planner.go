@@ -26,9 +26,11 @@ import (
 	"sigs.k8s.io/yaml"
 )
 
-type planOptions struct {
+// transferInput contains only context shared by the four PVC transfer
+// operations. The operation itself is supplied by each typed planner entry
+// point, so an input cannot silently select a different workflow family.
+type transferInput struct {
 	v1alpha1.TransferOptions
-	operationKind        domain.Operation
 	SessionID            string
 	SourceNamespace      string
 	TemporaryNamespace   string
@@ -37,13 +39,6 @@ type planOptions struct {
 	StagingNamespace     string
 	ToolImage            string
 	Volumes              []v1alpha1.VolumeRequest
-}
-
-func (o planOptions) operation() domain.Operation {
-	if o.operationKind == "" {
-		return domain.OperationMigrate
-	}
-	return o.operationKind
 }
 
 // PodWorkloadDiscoverer resolves the workload adapter for a Pod. Defined here
@@ -78,7 +73,7 @@ type workflowOwnerFinder interface {
 }
 
 type planState struct {
-	options               planOptions
+	options               transferInput
 	autoStrategyRequested bool
 	autoTargetNode        bool
 	plan                  *domain.TransferPlan
@@ -158,14 +153,14 @@ func (p *Planner) logInfo(message string, args ...any) {
 	}
 }
 
-func newPlanState(p *Planner, input planOptions) planState {
+func newPlanState(p *Planner, input transferInput, operation domain.Operation) planState {
 	autoStrategyRequested := len(input.Strategies) == 0 ||
 		(len(input.Strategies) == 1 && containsStrategy(input.Strategies, domain.StrategyAuto))
 	autoTargetNode := isAutoNode(input.TargetNode)
 	options := applyDefaults(input)
 	p.logInfo(
 		"migration planning started",
-		"operation", options.operation(),
+		"operation", operation,
 		"session", options.SessionID,
 		"namespace", options.SourceNamespace,
 		"volumeOverrides", len(options.Volumes),
@@ -218,7 +213,7 @@ func newPlanState(p *Planner, input planOptions) planState {
 	}
 }
 
-func (p *Planner) validateStorageInputs(plan checkRecorder, options planOptions) {
+func (p *Planner) validateStorageInputs(plan checkRecorder, options transferInput) {
 	p.validateCommonPlanInputs(plan, options)
 	validateDestinationCapacityInputs(
 		plan, options.DestinationCapacity, options.Volumes,
@@ -226,7 +221,7 @@ func (p *Planner) validateStorageInputs(plan checkRecorder, options planOptions)
 	)
 }
 
-func (p *Planner) validateCommonPlanInputs(plan checkRecorder, options planOptions) {
+func (p *Planner) validateCommonPlanInputs(plan checkRecorder, options transferInput) {
 	if _, err := kube.NormalizeToolImage(options.ToolImage); err != nil {
 		plan.AddCheck(failed(domain.CheckNameToolImage, err.Error()))
 	}
@@ -610,6 +605,7 @@ func (p *Planner) finalizePlanTarget(
 		state.options.CapacityAwareness != string(domain.CapacityAwarenessOff) {
 		p.checkStorageCapacity(
 			state.plan,
+			&state.plan.StorageCapacity,
 			state.targetNode,
 			state.plannedVolumes,
 			capacityInventory,
@@ -1299,11 +1295,7 @@ func sourceBindingMatches(pvc *corev1.PersistentVolumeClaim, pv *corev1.Persiste
 		pv.Spec.ClaimRef.UID == pvc.UID
 }
 
-func applyDefaults(options planOptions) planOptions {
-	if options.operationKind == "" {
-		options.operationKind = domain.OperationMigrate
-	}
-
+func applyDefaults(options transferInput) transferInput {
 	if options.SourceNamespace == "" {
 		options.SourceNamespace = "default"
 	}

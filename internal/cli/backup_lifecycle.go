@@ -20,6 +20,7 @@ func (r *rootState) loadBackup(
 	name string,
 ) (*v1alpha1.Backup, kube.WorkflowStore[*v1alpha1.Backup], string, error) {
 	namespace := r.workflowStorageNamespace(cmd)
+
 	object, backend, err := r.loadWorkflowWithBackend(
 		ctx,
 		cmd,
@@ -295,6 +296,7 @@ func (r *rootState) newBackupAbortCommand() *cobra.Command {
 		}
 
 		namespace := workflowLeaseNamespace(backend, r.workflowStorageNamespace(cmd), object)
+
 		executor := r.backupExecutor(runtime, namespace, store, backend)
 		if dryRun {
 			err = executor.ValidateAbort(ctx, object)
@@ -355,6 +357,7 @@ func (r *rootState) newBackupCleanupCommand() *cobra.Command {
 		}
 
 		namespace := workflowLeaseNamespace(backend, r.workflowStorageNamespace(cmd), object)
+
 		executor := r.backupExecutor(runtime, namespace, store, backend)
 		if dryRun {
 			err = executor.ValidateCleanup(ctx, object, options)

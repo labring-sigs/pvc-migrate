@@ -15,7 +15,7 @@ import (
 
 func (s *volumeCopyRunner) copyWithRetry(
 	ctx context.Context,
-	request copyengine.Request,
+	request copyengine.CopyRequest,
 	sourceNode, targetNode, capacityRecovery string,
 	attempts *int,
 	lastError *string,
@@ -28,11 +28,11 @@ func (s *volumeCopyRunner) copyWithRetry(
 		ctx,
 		probedSourceNode(
 			sourceNode,
-			request.Source,
+			request.AttemptIdentity.Source,
 			probeResults,
 		),
 		targetNode,
-		request.Strategies,
+		request.Policy.Strategies,
 	)
 	if err != nil {
 		return err
@@ -50,8 +50,8 @@ func (s *volumeCopyRunner) copyWithRetry(
 	// explicitly disabled for sshd/rsync transfer Pods.
 	seenNamespaces := map[string]struct{}{}
 	for _, namespace := range []string{
-		request.Source.Namespace,
-		request.Destination.Namespace,
+		request.AttemptIdentity.Source.Namespace,
+		request.Destination.Reference.Namespace,
 	} {
 		if _, seen := seenNamespaces[namespace]; seen {
 			continue
@@ -67,16 +67,22 @@ func (s *volumeCopyRunner) copyWithRetry(
 	identityValues := kube.TransferServiceAccountHelmValues()
 	values = append(values, identityValues.StringValues...)
 
-	request.ToolImage = s.toolImage(request.ToolImage)
-	request.KubeconfigPath = s.config.KubeconfigPath
-	request.Context = s.config.Context
-	request.NoCompress = s.config.NoCompress
-	request.HelmTimeout = s.config.HelmTimeout
-	request.Writer = s.config.Writer
-	request.Logger = s.config.Logger
-	request.Strategies = slices.Clone(request.Strategies)
-	request.HelmValues = append(slices.Clone(request.HelmValues), identityValues.Values...)
-	request.HelmStringValues = append(slices.Clone(request.HelmStringValues), values...)
+	request.Runtime.ToolImage = s.toolImage(request.Runtime.ToolImage)
+	request.Source.KubeconfigPath = s.config.KubeconfigPath
+	request.Source.Context = s.config.Context
+	request.Policy.NoCompress = s.config.NoCompress
+	request.Runtime.HelmTimeout = s.config.HelmTimeout
+	request.Runtime.Writer = s.config.Writer
+	request.Runtime.Logger = s.config.Logger
+	request.Policy.Strategies = slices.Clone(request.Policy.Strategies)
+	request.Runtime.HelmValues = append(
+		slices.Clone(request.Runtime.HelmValues),
+		identityValues.Values...,
+	)
+	request.Runtime.HelmStringValues = append(
+		slices.Clone(request.Runtime.HelmStringValues),
+		values...,
+	)
 
 	var last error
 
@@ -100,39 +106,39 @@ func (s *volumeCopyRunner) copyWithRetry(
 		}
 
 		request.Attempt = *attempts
-		request.SourceMountReadWrite = mountReadWrite
-		request.RsyncMaxRetries = s.config.RsyncMaxRetries
+		request.Source.MountReadWrite = mountReadWrite
+		request.Policy.RsyncMaxRetries = s.config.RsyncMaxRetries
 
 		s.logInfo(
 			"copy started",
 			"session",
 			request.SessionID,
 			"pvc",
-			request.Source.Name,
+			request.AttemptIdentity.Source.Name,
 			"mode",
 			request.Mode,
 			"attempt",
 			*attempts,
 			"source",
-			request.Source.Namespace+"/"+request.Source.Name,
+			request.AttemptIdentity.Source.Namespace+"/"+request.AttemptIdentity.Source.Name,
 			"sourcePath",
-			request.SourcePath,
+			request.Source.Path,
 			"destination",
-			request.Destination.Namespace+"/"+request.Destination.Name,
+			request.Destination.Reference.Namespace+"/"+request.Destination.Reference.Name,
 			"destinationPath",
-			request.DestinationPath,
+			request.Destination.Path,
 		)
 
 		toolLogs := s.startCopyToolLogs(
 			ctx,
-			request.Source.Namespace,
-			request.Destination.Namespace,
+			request.AttemptIdentity.Source.Namespace,
+			request.Destination.Reference.Namespace,
 			copyengine.OperationID(request.AttemptIdentity),
 		)
 		attemptRequest := request
-		attemptRequest.Strategies = slices.Clone(request.Strategies)
-		attemptRequest.HelmValues = slices.Clone(request.HelmValues)
-		attemptRequest.HelmStringValues = slices.Clone(request.HelmStringValues)
+		attemptRequest.Policy.Strategies = slices.Clone(request.Policy.Strategies)
+		attemptRequest.Runtime.HelmValues = slices.Clone(request.Runtime.HelmValues)
+		attemptRequest.Runtime.HelmStringValues = slices.Clone(request.Runtime.HelmStringValues)
 
 		// A per-attempt bound turns a hung transfer into a retryable failure
 		// instead of burning the whole operation budget. Tool cleanup below
@@ -148,7 +154,7 @@ func (s *volumeCopyRunner) copyWithRetry(
 				"session",
 				request.SessionID,
 				"pvc",
-				request.Source.Name,
+				request.AttemptIdentity.Source.Name,
 				"mode",
 				progress.Mode,
 				"attempt",
@@ -183,14 +189,19 @@ func (s *volumeCopyRunner) copyWithRetry(
 			"session",
 			request.SessionID,
 			"pvc",
-			request.Source.Name,
+			request.AttemptIdentity.Source.Name,
 		)
 
 		operationID := copyengine.OperationID(request.AttemptIdentity)
 
 		last = errors.Join(
 			copyErr,
-			s.cleanupCopyToolPods(ctx, request.Source, request.Destination, operationID),
+			s.cleanupCopyToolPods(
+				ctx,
+				request.AttemptIdentity.Source,
+				request.Destination.Reference,
+				operationID,
+			),
 		)
 		if last == nil {
 			return nil
@@ -214,14 +225,14 @@ func (s *volumeCopyRunner) copyWithRetry(
 		if isDestinationNoSpaceError(last) {
 			message := fmt.Sprintf(
 				"destination PVC %s/%s ran out of space; abort and clean up this session, then create a new session with a larger --destination-capacity",
-				request.Destination.Namespace,
-				request.Destination.Name,
+				request.Destination.Reference.Namespace,
+				request.Destination.Reference.Name,
 			)
 			if capacityRecovery != "" {
 				message = fmt.Sprintf(
 					"destination PVC %s/%s ran out of space; %s",
-					request.Destination.Namespace,
-					request.Destination.Name,
+					request.Destination.Reference.Namespace,
+					request.Destination.Reference.Name,
 					capacityRecovery,
 				)
 			}
@@ -241,7 +252,7 @@ func (s *volumeCopyRunner) copyWithRetry(
 				"session",
 				request.SessionID,
 				"pvc",
-				request.Source.Name,
+				request.AttemptIdentity.Source.Name,
 				"mode",
 				request.Mode,
 				"attempt",

@@ -479,6 +479,7 @@ func (s *CRDWorkflowStore[T]) EnsureProtection(ctx context.Context, object T) er
 	if err := requireWorkflowStorageVersion(object); err != nil {
 		return err
 	}
+
 	if err := errors.Join(ctx.Err(), LeaseFenceError(ctx)); err != nil {
 		return err
 	}
@@ -507,6 +508,7 @@ func (s *CRDWorkflowStore[T]) EnsureProtection(ctx context.Context, object T) er
 		if err := s.client.Update(ctx, current); err != nil {
 			return err
 		}
+
 		if err := errors.Join(ctx.Err(), LeaseFenceError(ctx)); err != nil {
 			return err
 		}

@@ -79,6 +79,7 @@ func (s *Switcher) createBoundPVC(
 			err,
 		)
 	}
+
 	if err := errors.Join(ctx.Err(), LeaseFenceError(ctx)); err != nil {
 		return nil, err
 	}

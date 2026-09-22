@@ -153,7 +153,7 @@ func (p *Planner) resolvePodMigration(
 	spec v1alpha1.PodMigrationSpec,
 	sourceNamespace, temporaryNamespace, sessionNamespace, image string,
 ) (*domain.TransferPlan, *v1alpha1.PodMigrationPlan, error) {
-	options := planOptions{
+	options := transferInput{
 		SessionID:            name,
 		SourceNamespace:      sourceNamespace,
 		TemporaryNamespace:   temporaryNamespace,
@@ -161,7 +161,6 @@ func (p *Planner) resolvePodMigration(
 		DestinationNamespace: sourceNamespace,
 		StagingNamespace:     temporaryNamespace,
 		ToolImage:            image,
-		operationKind:        domain.OperationMigratePod,
 	}
 
 	if err := domain.ValidateUnusedStoragePolicy(spec.UnusedStoragePolicy); err != nil {
@@ -176,7 +175,12 @@ func (p *Planner) resolvePodMigration(
 		)
 	}
 
-	state := p.newTransferPlanState(options, spec.TransferOptions, spec.Volumes)
+	state := p.newTransferPlanState(
+		options,
+		domain.OperationMigratePod,
+		spec.TransferOptions,
+		spec.Volumes,
+	)
 
 	sourcePod, err := p.selectPlanVolumes(ctx, &state, spec.Volumes, &spec.Pod)
 	if err != nil {
@@ -317,7 +321,7 @@ func (p *Planner) resolvePodMigration(
 		ToolImage:              state.options.ToolImage,
 		Strategies:             state.options.Strategies,
 		VerifyChecksum:         state.options.VerifyChecksum,
-		DeleteExtraneous:       state.options.DeleteExtraneous,
+		DeleteExtraneous:       state.options.DeleteExtraneousValue(),
 		SkipSourceUsageCheck:   state.options.SkipSourceUsageCheck,
 		Workload:               *state.plan.Workload.DeepCopy(),
 		PrecopyPasses:          spec.PrecopyPasses,

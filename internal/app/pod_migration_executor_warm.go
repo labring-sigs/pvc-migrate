@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 
 	v1alpha1 "github.com/labring-sigs/pvc-migrate/api/v1alpha1"
 	"github.com/labring-sigs/pvc-migrate/internal/copyengine"
@@ -198,24 +199,25 @@ func (m *ClusterPodMigrationExecutor) warmCopy(
 
 		checkpoint := status.ClusterVolumeReservationStatus
 		binding := plannedMigrationBindings(string(plan.SourceNamespace), volume, checkpoint)
-		request := copyengine.Request{
-			SessionID:   object.Name,
-			ToolImage:   plan.ToolImage,
-			Source:      binding.SourcePVC,
-			Destination: binding.DestinationPVC,
-			SourcePath: domain.SourceTransferPath(
-				volume.TransferScope,
-			),
-			DestinationPath: domain.DestinationTransferPath(volume.TransferScope),
-			IgnoreSizes: destinationCapacityIsSmaller(
-				volume.SourceCapacity,
-				volume.Capacity,
-			),
-			Strategies:            plan.Strategies,
-			DeleteExtraneousFiles: plan.DeleteExtraneous,
-			Mode:                  copyengine.ModeWarm,
-
-			TolerateLiveSourceChurn: true,
+		request := copyengine.CopyRequest{
+			AttemptIdentity: copyengine.AttemptIdentity{
+				SessionID: object.Name, Source: binding.SourcePVC, Mode: copyengine.ModeWarm,
+			},
+			Source: copyengine.CopySource{Path: domain.SourceTransferPath(volume.TransferScope)},
+			Destination: copyengine.CopyDestination{
+				Reference: binding.DestinationPVC,
+				Path:      domain.DestinationTransferPath(volume.TransferScope),
+			},
+			Policy: copyengine.CopyPolicy{
+				IgnoreSizes: destinationCapacityIsSmaller(
+					volume.SourceCapacity,
+					volume.Capacity,
+				),
+				Strategies:              slices.Clone(plan.Strategies),
+				DeleteExtraneousFiles:   plan.DeleteExtraneous,
+				TolerateLiveSourceChurn: true,
+			},
+			Runtime: copyengine.CopyRuntime{ToolImage: plan.ToolImage},
 		}
 
 		recovery := ""

@@ -12,12 +12,12 @@ func TestCleanupRetainReleasesOwnedOutputWithConsumerAndIsRepeatable(t *testing.
 	service, options, _ := crossFixture()
 	options.UnusedStoragePolicy = "Delete"
 
-	plan, err := service.Plan(t.Context(), options)
+	plan, err := service.PlanCopy(t.Context(), options)
 	if err != nil || !plan.Ready {
 		t.Fatalf("plan=%+v err=%v", plan, err)
 	}
 
-	session, err := service.CreateSession(t.Context(), options, plan)
+	session, err := service.CreateCopySession(t.Context(), options, plan)
 	if err != nil {
 		t.Fatal(err)
 	}

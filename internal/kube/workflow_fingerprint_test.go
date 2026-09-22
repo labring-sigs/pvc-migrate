@@ -117,3 +117,38 @@ func TestExecutionFingerprintRejectsMissingOrUnsupportedObjects(t *testing.T) {
 		}
 	}
 }
+
+func TestExecutionFingerprintNormalizesDefaultDeleteExtraneous(t *testing.T) {
+	omitted := &v1alpha1.Copy{}
+	explicit := omitted.DeepCopy()
+	explicit.Spec.DeleteExtraneous = new(true)
+
+	omittedHash, err := WorkflowExecutionIntentHash(omitted)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	explicitHash, err := WorkflowExecutionIntentHash(explicit)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if omittedHash != explicitHash {
+		t.Fatalf(
+			"default-equivalent transfer specs have different fingerprints: %q != %q",
+			omittedHash,
+			explicitHash,
+		)
+	}
+
+	explicit.Spec.DeleteExtraneous = new(false)
+
+	falseHash, err := WorkflowExecutionIntentHash(explicit)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if falseHash == omittedHash {
+		t.Fatal("explicit false unexpectedly matched the default true fingerprint")
+	}
+}

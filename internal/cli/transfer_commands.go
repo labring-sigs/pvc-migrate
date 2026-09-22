@@ -246,8 +246,9 @@ func (r *rootState) confirm(ctx context.Context, command *cobra.Command, expecte
 	return nil
 }
 
-func requireReady(plan *domain.TransferPlan) error {
-	if plan.Summary().Ready {
+func requireReady(plan domain.PlanSummaryReader) error {
+	summary := plan.Summary()
+	if summary != nil && summary.Ready {
 		return nil
 	}
 

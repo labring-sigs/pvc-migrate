@@ -8,10 +8,7 @@ CONTROLLER_GEN ?= $(LOCALBIN)/controller-gen
 CONTROLLER_GEN_VERSION ?= v0.19.0
 HELM ?= helm
 CHART := charts/pvc-migrate
-PVC_MIGRATE_E2E_MODE ?= session
-E2E_TIMEOUT ?= 90m
-
-.PHONY: all build test test-race vet lint check e2e manifests chart-sync chart-lint chart-package clean
+.PHONY: all build test test-race vet lint check manifests chart-sync chart-lint chart-package clean
 
 all: check build
 
@@ -51,10 +48,6 @@ chart-package: chart-lint
 
 $(LOCALBIN)/controller-gen:
 	GOBIN=$(LOCALBIN) go install sigs.k8s.io/controller-tools/cmd/controller-gen@$(CONTROLLER_GEN_VERSION)
-
-e2e:
-	PVC_MIGRATE_E2E=1 PVC_MIGRATE_E2E_MODE=$(PVC_MIGRATE_E2E_MODE) \
-		go test -tags=e2e -v -count=1 -timeout=$(E2E_TIMEOUT) ./test/e2e
 
 clean:
 	rm -f $(BINARY) coverage.out

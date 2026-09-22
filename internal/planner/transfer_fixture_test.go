@@ -9,7 +9,11 @@ import (
 )
 
 // Existing storage fixtures exercise the same concrete entrypoints as callers.
-func (p *Planner) plan(ctx context.Context, input planOptions) (*domain.TransferPlan, error) {
+func (p *Planner) plan(
+	ctx context.Context,
+	operation domain.Operation,
+	input transferInput,
+) (*domain.TransferPlan, error) {
 	options := applyDefaults(input)
 	transfer := options.TransferOptions
 	transfer.Strategies = input.Strategies
@@ -22,7 +26,7 @@ func (p *Planner) plan(ctx context.Context, input planOptions) (*domain.Transfer
 	temporary := v1alpha1.NamespaceName(options.TemporaryNamespace)
 	session := v1alpha1.NamespaceName(options.SessionNamespace)
 
-	switch options.operation() {
+	switch operation {
 	case domain.OperationMigrate:
 		return p.PlanOfflineMigration(ctx, &v1alpha1.ClusterMigration{
 			ObjectMeta: metadata,

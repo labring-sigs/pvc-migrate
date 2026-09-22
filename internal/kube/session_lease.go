@@ -44,6 +44,7 @@ func isSessionNamespaceTerminating(err error) bool {
 	}
 
 	message := strings.ToLower(err.Error())
+
 	return apierrors.IsForbidden(err) && strings.Contains(message, "being terminated")
 }
 

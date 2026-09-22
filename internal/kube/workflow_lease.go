@@ -10,6 +10,23 @@ import (
 	crclient "sigs.k8s.io/controller-runtime/pkg/client"
 )
 
+// deletingWorkflowLock is used only after Kubernetes has rejected Lease
+// creation because the lock namespace is terminating. The workflow is already
+// in deletion and no new Lease can be admitted, so cleanup still needs the
+// lock-shaped callback contract while its resource mutations rely on their
+// own UID and ownership checks.
+type deletingWorkflowLock struct{}
+
+func (deletingWorkflowLock) Bind(ctx context.Context) (context.Context, context.CancelFunc) {
+	return ctx, func() {}
+}
+
+func (deletingWorkflowLock) Err() error { return nil }
+
+func (deletingWorkflowLock) Release(context.Context) error { return nil }
+
+func (deletingWorkflowLock) Delete(context.Context) error { return nil }
+
 // WithWorkflowLease fences a concrete workflow against its stored UID and
 // resourceVersion. The caller owns operation admission and resource changes.
 func WithWorkflowLease[T crclient.Object](
@@ -44,6 +61,10 @@ func WithWorkflowLease[T crclient.Object](
 		// for a deleting workflow. Release the finalizer directly.
 		if allowDeleting && object.GetDeletionTimestamp() != nil &&
 			isSessionNamespaceTerminating(err) {
+			if cleanupErr := run(ctx, deletingWorkflowLock{}); cleanupErr != nil {
+				return cleanupErr
+			}
+
 			return store.Delete(ctx, object)
 		}
 

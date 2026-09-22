@@ -52,6 +52,7 @@ func (r *rootState) loadMove(
 	id string,
 ) (*v1alpha1.Move, kube.WorkflowStore[*v1alpha1.Move], string, error) {
 	namespace := r.global.sessionNamespace
+
 	object, backend, err := r.loadWorkflowWithBackend(
 		ctx,
 		cmd,

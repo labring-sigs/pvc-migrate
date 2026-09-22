@@ -206,10 +206,12 @@ func namespacedFenceAfterHandoffClient(
 			if object.GetUID() == "" {
 				object.SetUID("copy-uid")
 			}
+
 			err := client.Create(ctx, object, options...)
 			if err == nil && step == "create" {
 				fence.err = lost
 			}
+
 			return err
 		},
 		Update: func(ctx context.Context, client crclient.WithWatch, object crclient.Object, options ...crclient.UpdateOption) error {
@@ -218,6 +220,7 @@ func namespacedFenceAfterHandoffClient(
 				switch object := object.(type) {
 				case *v1alpha1.Reservation:
 					protected := slices.Contains(object.Finalizers, SessionFinalizer)
+
 					pending := object.Annotations[reservationCopyPendingAnnotation] != ""
 					if step == "freeze" && protected && pending {
 						fence.err = lost
@@ -228,6 +231,7 @@ func namespacedFenceAfterHandoffClient(
 					}
 				}
 			}
+
 			return err
 		},
 		SubResourceUpdate: func(ctx context.Context, client crclient.Client, subresource string, object crclient.Object, options ...crclient.SubResourceUpdateOption) error {
@@ -235,6 +239,7 @@ func namespacedFenceAfterHandoffClient(
 			if err == nil && step == "checkpoint" {
 				fence.err = lost
 			}
+
 			return err
 		},
 		Delete: func(ctx context.Context, client crclient.WithWatch, object crclient.Object, options ...crclient.DeleteOption) error {
@@ -242,6 +247,7 @@ func namespacedFenceAfterHandoffClient(
 			if err == nil && step == "delete" {
 				fence.err = lost
 			}
+
 			return err
 		},
 	})

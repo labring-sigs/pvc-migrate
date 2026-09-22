@@ -189,23 +189,25 @@ func (m *ClusterMigrationExecutor) finalSync(
 			volume,
 			status.ClusterVolumeReservationStatus,
 		)
-		request := copyengine.Request{
-			SessionID:   object.Name,
-			ToolImage:   plan.ToolImage,
-			Source:      binding.SourcePVC,
-			Destination: binding.DestinationPVC,
-			SourcePath: domain.SourceTransferPath(
-				volume.TransferScope,
-			),
-			DestinationPath: domain.DestinationTransferPath(volume.TransferScope),
-			IgnoreSizes: destinationCapacityIsSmaller(
-				volume.SourceCapacity,
-				volume.Capacity,
-			),
-			Strategies:            plan.Strategies,
-			VerifyChecksum:        plan.VerifyChecksum,
-			DeleteExtraneousFiles: plan.DeleteExtraneous,
-			Mode:                  copyengine.ModeFinal,
+		request := copyengine.CopyRequest{
+			AttemptIdentity: copyengine.AttemptIdentity{
+				SessionID: object.Name, Source: binding.SourcePVC, Mode: copyengine.ModeFinal,
+			},
+			Source: copyengine.CopySource{Path: domain.SourceTransferPath(volume.TransferScope)},
+			Destination: copyengine.CopyDestination{
+				Reference: binding.DestinationPVC,
+				Path:      domain.DestinationTransferPath(volume.TransferScope),
+			},
+			Policy: copyengine.CopyPolicy{
+				IgnoreSizes: destinationCapacityIsSmaller(
+					volume.SourceCapacity,
+					volume.Capacity,
+				),
+				Strategies:            slices.Clone(plan.Strategies),
+				VerifyChecksum:        plan.VerifyChecksum,
+				DeleteExtraneousFiles: plan.DeleteExtraneous,
+			},
+			Runtime: copyengine.CopyRuntime{ToolImage: plan.ToolImage},
 		}
 
 		save := func(ctx context.Context) error { return m.store.Save(ctx, object) }

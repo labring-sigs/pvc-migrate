@@ -594,7 +594,9 @@ func (m *MigrationExecutor) rollback(
 				previous := status.Activation.DeepCopy()
 
 				status.Activation = local
-				if err := m.store.Save(ctx, object); err != nil {
+				if err := persistCheckpoint(ctx, func(ctx context.Context) error {
+					return m.store.Save(ctx, object)
+				}); err != nil {
 					status.Activation = *previous
 					return err
 				}

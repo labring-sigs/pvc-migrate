@@ -43,7 +43,7 @@ func TestPodMigrationRequestResumeSaveFailurePreservesFailure(t *testing.T) {
 
 func TestPodMigrationRequestResumeRetainsCapacityFailure(t *testing.T) {
 	executor, object, store, engine := podMigrationWarmFixture(t)
-	engine.copy = func(copyengine.Request) error { return errors.New("No space left on device") }
+	engine.copy = func(copyengine.CopyRequest) error { return errors.New("No space left on device") }
 
 	if err := executor.WarmCopy(t.Context(), object); err == nil {
 		t.Fatal("capacity failure ignored")
@@ -93,7 +93,7 @@ func TestNamespacedPodMigrationRequestResumeSaveFailurePreservesFailure(t *testi
 
 func TestNamespacedPodMigrationRequestResumeRetainsCapacityFailure(t *testing.T) {
 	executor, object, store, engine := namespacedPodMigrationWarmFixture(t)
-	engine.copy = func(copyengine.Request) error { return errors.New("No space left on device") }
+	engine.copy = func(copyengine.CopyRequest) error { return errors.New("No space left on device") }
 
 	if err := executor.WarmCopy(t.Context(), object); err == nil {
 		t.Fatal("capacity failure ignored")

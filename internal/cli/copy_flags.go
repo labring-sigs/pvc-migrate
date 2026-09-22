@@ -196,7 +196,7 @@ func (f *copyFlags) workflow(
 					TargetNode:              f.targetNode,
 					Strategies:              append([]string(nil), f.strategies...),
 					VerifyChecksum:          f.verifyChecksum,
-					DeleteExtraneous:        f.deleteExtraneous,
+					DeleteExtraneous:        new(f.deleteExtraneous),
 					AllowVolumeShrink:       f.allowVolumeShrink,
 					SkipSourceUsageCheck:    f.skipSourceUsageCheck,
 				},

@@ -17,7 +17,47 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
-func (s *Service) Plan(ctx context.Context, options Options) (*Plan, error) {
+func (s *Service) PlanCopy(ctx context.Context, options CopyOptions) (*Plan, error) {
+	return s.planCopy(ctx, options)
+}
+
+// PlanReservation validates only the inputs needed to reserve destination
+// PVCs. The reservation workflow has no online or copy consistency settings.
+func (s *Service) PlanReservation(ctx context.Context, options ReservationOptions) (*Plan, error) {
+	return s.planReservation(ctx, CopyOptions{
+		UnusedStoragePolicy:     options.UnusedStoragePolicy,
+		SessionID:               options.SessionID,
+		SessionNamespace:        options.SessionNamespace,
+		SourceNamespace:         options.SourceNamespace,
+		DestinationNamespace:    options.DestinationNamespace,
+		SourcePVCs:              options.SourcePVCs,
+		DestinationPVCs:         options.DestinationPVCs,
+		DestinationCapacities:   options.DestinationCapacities,
+		SourcePaths:             options.SourcePaths,
+		DestinationPaths:        options.DestinationPaths,
+		DestinationStorageClass: options.DestinationStorageClass,
+		AllowVolumeShrink:       options.AllowVolumeShrink,
+		SkipSourceUsageCheck:    options.SkipSourceUsageCheck,
+		TargetNode:              options.TargetNode,
+		ToolImage:               options.ToolImage,
+		Strategies:              options.Strategies,
+	})
+}
+
+func (s *Service) planCopy(ctx context.Context, options CopyOptions) (*Plan, error) {
+	return s.planCrossCluster(ctx, options, false, true)
+}
+
+func (s *Service) planReservation(ctx context.Context, options CopyOptions) (*Plan, error) {
+	return s.planCrossCluster(ctx, options, true, false)
+}
+
+func (s *Service) planCrossCluster(
+	ctx context.Context,
+	options CopyOptions,
+	allowActiveConsumers bool,
+	includeTransferPolicies bool,
+) (*Plan, error) {
 	if err := domain.ValidateUnusedStoragePolicy(options.UnusedStoragePolicy); err != nil {
 		return nil, err
 	}
@@ -38,9 +78,14 @@ func (s *Service) Plan(ctx context.Context, options Options) (*Plan, error) {
 		return nil, err
 	}
 
-	plan := newCrossClusterPlan(options, sourceID, destID)
+	kind := CopyKind
+	if !includeTransferPolicies {
+		kind = ReservationKind
+	}
 
-	destinationClass := s.planCrossClusterEnvironment(ctx, plan, options)
+	plan := newCrossClusterPlan(options, sourceID, destID, kind)
+
+	destinationClass := s.planCrossClusterEnvironment(ctx, plan, options, includeTransferPolicies)
 	if destinationClass == nil {
 		return plan, nil
 	}
@@ -50,9 +95,9 @@ func (s *Service) Plan(ctx context.Context, options Options) (*Plan, error) {
 		return plan, nil
 	}
 
-	s.planCrossClusterVolumes(ctx, plan, options, destinationClass, inputs)
+	s.planCrossClusterVolumes(ctx, plan, options, destinationClass, inputs, allowActiveConsumers)
 
-	if len(plan.Volumes) == len(options.SourcePVCs) {
+	if includeTransferPolicies && len(plan.Volumes) == len(options.SourcePVCs) {
 		s.planCrossClusterPolicies(ctx, plan, options, destinationClass)
 	}
 
@@ -66,16 +111,29 @@ type crossClusterPlanInputs struct {
 	destPaths    []string
 }
 
-func newCrossClusterPlan(options Options, sourceID, destinationID kube.ClusterIdentity) *Plan {
+func newCrossClusterPlan(
+	options CopyOptions,
+	sourceID, destinationID kube.ClusterIdentity,
+	kind string,
+) *Plan {
 	return &Plan{
 		APIVersion:           APIVersion,
-		Kind:                 Kind,
+		Kind:                 kind,
 		SessionID:            options.SessionID,
+		SessionNamespace:     options.SessionNamespace,
 		SourceCluster:        sourceID,
 		DestinationCluster:   destinationID,
 		SourceNamespace:      options.SourceNamespace,
 		DestinationNamespace: options.DestinationNamespace,
+		UnusedStoragePolicy:  options.UnusedStoragePolicy,
+		AllowVolumeShrink:    options.AllowVolumeShrink,
+		SkipSourceUsageCheck: options.SkipSourceUsageCheck,
+		RequestedTargetNode:  options.TargetNode,
 		Strategies:           normalizeStrategies(options.Strategies),
+		ToolImage:            options.ToolImage,
+		Online:               options.Online,
+		VerifyChecksum:       options.VerifyChecksum,
+		DeleteExtraneous:     options.DeleteExtraneous,
 		Ready:                true,
 	}
 }
@@ -83,7 +141,8 @@ func newCrossClusterPlan(options Options, sourceID, destinationID kube.ClusterId
 func (s *Service) planCrossClusterEnvironment(
 	ctx context.Context,
 	plan *Plan,
-	options Options,
+	options CopyOptions,
+	requireTransferNode bool,
 ) *storagev1.StorageClass {
 	if err := ValidateSessionID(options.SessionID); err != nil {
 		plan.AddCheck(domain.CheckNameSessionID, false, err.Error())
@@ -179,6 +238,19 @@ func (s *Service) planCrossClusterEnvironment(
 	}
 
 	if destinationClass != nil {
+		needsTargetNode := requireTransferNode ||
+			(destinationClass.VolumeBindingMode != nil &&
+				*destinationClass.VolumeBindingMode == storagev1.VolumeBindingWaitForFirstConsumer)
+		if !needsTargetNode {
+			plan.AddCheck(
+				domain.CheckNameTargetNode,
+				true,
+				"destination StorageClass binds immediately; a reservation target node is not required",
+			)
+
+			return destinationClass
+		}
+
 		node, selectErr := s.selectTargetNode(ctx, options.TargetNode, destinationClass)
 		if selectErr != nil {
 			plan.AddCheck(domain.CheckNameTargetNode, false, selectErr.Error())
@@ -208,7 +280,7 @@ func (s *Service) planCrossClusterEnvironment(
 	return destinationClass
 }
 
-func resolveCrossClusterInputs(plan *Plan, options Options) (crossClusterPlanInputs, bool) {
+func resolveCrossClusterInputs(plan *Plan, options CopyOptions) (crossClusterPlanInputs, bool) {
 	if len(options.SourcePVCs) == 0 {
 		plan.AddCheck(domain.CheckNameSourcePVC, false, "at least one --source-pvc is required")
 		return crossClusterPlanInputs{}, false
@@ -286,9 +358,10 @@ func resolveCrossClusterInputs(plan *Plan, options Options) (crossClusterPlanInp
 func (s *Service) planCrossClusterVolumes(
 	ctx context.Context,
 	plan *Plan,
-	options Options,
+	options CopyOptions,
 	destinationClass *storagev1.StorageClass,
 	inputs crossClusterPlanInputs,
+	allowActiveConsumers bool,
 ) {
 	type result struct {
 		volume VolumePlan
@@ -314,6 +387,7 @@ func (s *Service) planCrossClusterVolumes(
 			inputs,
 			index,
 			options.SourcePVCs[index],
+			allowActiveConsumers,
 		)
 		results[index] = result{
 			volume: volume,
@@ -348,11 +422,12 @@ func (s *Service) planCrossClusterVolumes(
 func (s *Service) planCrossClusterVolume(
 	ctx context.Context,
 	plan *Plan,
-	options Options,
+	options CopyOptions,
 	destinationClass *storagev1.StorageClass,
 	inputs crossClusterPlanInputs,
 	index int,
 	name string,
+	allowActiveConsumers bool,
 ) (VolumePlan, bool) {
 	sourcePath, err := domain.NormalizeTransferPath(inputs.sourcePaths[index])
 	if err != nil {
@@ -530,7 +605,7 @@ func (s *Service) planCrossClusterVolume(
 		return VolumePlan{}, false
 	}
 
-	s.checkCrossClusterConsumers(ctx, plan, options, pvc)
+	s.checkCrossClusterConsumers(ctx, plan, options, pvc, allowActiveConsumers)
 
 	if pvc.Spec.VolumeMode != nil && *pvc.Spec.VolumeMode != corev1.PersistentVolumeFilesystem {
 		plan.AddCheck(
@@ -560,7 +635,7 @@ func (s *Service) planCrossClusterVolume(
 
 func resolveCrossClusterCapacity(
 	plan *Plan,
-	options Options,
+	options CopyOptions,
 	name string,
 	sourceCapacity resource.Quantity,
 	requested string,
@@ -616,10 +691,30 @@ func resolveCrossClusterCapacity(
 func (s *Service) checkCrossClusterConsumers(
 	ctx context.Context,
 	plan *Plan,
-	options Options,
+	options CopyOptions,
 	pvc *corev1.PersistentVolumeClaim,
+	allowActiveConsumers bool,
 ) {
 	consumers, err := activeConsumers(ctx, s.source.Kubernetes, pvc.Namespace, pvc.Name)
+	if allowActiveConsumers {
+		if err != nil {
+			plan.AddCheck(domain.CheckNameSourceConsumers, false, err.Error())
+			return
+		}
+
+		plan.AddCheck(
+			domain.CheckNameSourceConsumers,
+			true,
+			fmt.Sprintf(
+				"source PVC %s/%s may remain in use while destination storage is reserved",
+				pvc.Namespace,
+				pvc.Name,
+			),
+		)
+
+		return
+	}
+
 	switch {
 	case err != nil:
 		plan.AddCheck(domain.CheckNameSourceConsumers, false, err.Error())

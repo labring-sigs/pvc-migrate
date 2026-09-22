@@ -18,8 +18,8 @@ func TestMigrationNamespaceResourceEstimatesUseSerializedChartAndConcurrentProbe
 
 	scope := &v1alpha1.TransferScope{SourcePath: "source", DestinationPath: "destination"}
 	state := &planState{
-		options: planOptions{
-			operationKind: domain.OperationCopy, SourceNamespace: "application",
+		options: transferInput{
+			SourceNamespace:  "application",
 			StagingNamespace: "application",
 			SessionNamespace: "application",
 			TransferOptions: v1alpha1.TransferOptions{
@@ -138,8 +138,8 @@ func TestMigrationProbePodPeaksTrackNamespacesAndWorkflowStages(t *testing.T) {
 
 func TestReserveResourceEstimateExcludesCopyChart(t *testing.T) {
 	state := &planState{
-		options: planOptions{
-			operationKind: domain.OperationReserve, SourceNamespace: "application",
+		options: transferInput{
+			SourceNamespace:  "application",
 			StagingNamespace: "staging",
 			SessionNamespace: "staging",
 			TransferOptions: v1alpha1.TransferOptions{
@@ -191,8 +191,10 @@ func TestPlanFiltersStrategiesBeforeQuotaEstimation(t *testing.T) {
 		}},
 	})
 
-	plan, err := New(plannerClient(objects...), nil).plan(context.Background(), planOptions{
-		operationKind:      domain.OperationCopy,
+	plan, err := New(
+		plannerClient(objects...),
+		nil,
+	).plan(context.Background(), domain.OperationCopy, transferInput{
 		Volumes:            testSourceVolumes("data"),
 		SessionID:          "filtered-quota",
 		SourceNamespace:    "app",

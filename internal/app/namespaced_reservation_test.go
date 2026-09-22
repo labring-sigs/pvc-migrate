@@ -177,7 +177,7 @@ func TestNamespacedReservationRejectsForeignResourceCheckpoint(t *testing.T) {
 	}
 }
 
-func TestNamespacedReservationCleanupDeletesMetadataBeforeLease(t *testing.T) {
+func TestNamespacedReservationCleanupRetainsMetadataWhenLeaseCleanupFails(t *testing.T) {
 	executor, object, _ := namespacedReservationFixture(t, interceptor.Funcs{})
 	object.Status.Plan = nil
 
@@ -204,7 +204,24 @@ func TestNamespacedReservationCleanupDeletesMetadataBeforeLease(t *testing.T) {
 	if _, err := executor.store.Load(
 		t.Context(),
 		crclient.ObjectKeyFromObject(object),
+	); err != nil {
+		t.Fatalf("metadata was removed before lease cleanup succeeded: %v", err)
+	}
+
+	lock.deleteErr = nil
+
+	if err := executor.Cleanup(
+		t.Context(),
+		object,
+		ReservationCleanupOptions{Finalize: true, DeleteSession: true},
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := executor.store.Load(
+		t.Context(),
+		crclient.ObjectKeyFromObject(object),
 	); !apierrors.IsNotFound(err) {
-		t.Fatalf("metadata was not removed before lease cleanup: %v", err)
+		t.Fatalf("metadata remained after lease cleanup recovered: %v", err)
 	}
 }

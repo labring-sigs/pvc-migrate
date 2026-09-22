@@ -105,7 +105,7 @@ func applyCopyOverrides(cmd *cobra.Command, spec *v1alpha1.CopySpec, flags *copy
 	}
 
 	if cmd.Flags().Changed("delete-extraneous") {
-		spec.DeleteExtraneous = flags.deleteExtraneous
+		spec.DeleteExtraneous = new(flags.deleteExtraneous)
 	}
 
 	if cmd.Flags().Changed("unused-storage-policy") {

@@ -23,8 +23,8 @@ func TestPodMigrationFinalSyncResumesIncompleteVolumes(t *testing.T) {
 
 	before := object.Status.Plan.DeepCopy()
 	cause := errors.New("final copy interrupted")
-	engine.copy = func(request copyengine.Request) error {
-		if request.Source.Name == "b" {
+	engine.copy = func(request copyengine.CopyRequest) error {
+		if request.AttemptIdentity.Source.Name == "b" {
 			return cause
 		}
 		return nil
@@ -58,7 +58,7 @@ func TestPodMigrationFinalSyncResumesIncompleteVolumes(t *testing.T) {
 	}
 
 	if loaded.Status.Phase != domain.PhaseFinalSynced || len(engine.requests) != 3 ||
-		engine.requests[2].Source.Name != "b" || engine.requests[2].Attempt != 2 ||
+		engine.requests[2].AttemptIdentity.Source.Name != "b" || engine.requests[2].Attempt != 2 ||
 		len(
 			engine.cleanups,
 		) != 1 || engine.cleanups[0].Source.Name != "b" || engine.cleanups[0].Mode != copyengine.ModeFinal {
@@ -153,7 +153,7 @@ func TestPodMigrationFinalSyncStopsOnFenceLoss(t *testing.T) {
 	lost := errors.New("lease lost")
 	lock := &fakeSessionLock{}
 	executor.locker = &fakeSessionLocker{lock: lock}
-	engine.copy = func(copyengine.Request) error { lock.err = lost; return nil }
+	engine.copy = func(copyengine.CopyRequest) error { lock.err = lost; return nil }
 
 	if err := executor.FinalSync(t.Context(), object); !errors.Is(err, lost) {
 		t.Fatalf("error = %v", err)
@@ -174,8 +174,8 @@ func TestNamespacedPodMigrationFinalSyncResumesIncompleteVolumes(t *testing.T) {
 
 	before := object.Status.Plan.DeepCopy()
 	cause := errors.New("final copy interrupted")
-	engine.copy = func(request copyengine.Request) error {
-		if request.Source.Name == "b" {
+	engine.copy = func(request copyengine.CopyRequest) error {
+		if request.AttemptIdentity.Source.Name == "b" {
 			return cause
 		}
 		return nil
@@ -209,7 +209,7 @@ func TestNamespacedPodMigrationFinalSyncResumesIncompleteVolumes(t *testing.T) {
 	}
 
 	if loaded.Status.Phase != domain.PhaseFinalSynced || len(engine.requests) != 3 ||
-		engine.requests[2].Source.Name != "b" || engine.requests[2].Attempt != 2 ||
+		engine.requests[2].AttemptIdentity.Source.Name != "b" || engine.requests[2].Attempt != 2 ||
 		len(
 			engine.cleanups,
 		) != 1 || engine.cleanups[0].Source.Name != "b" || engine.cleanups[0].Mode != copyengine.ModeFinal {
@@ -301,7 +301,7 @@ func TestNamespacedPodMigrationFinalSyncStopsOnFenceLoss(t *testing.T) {
 	lost := errors.New("lease lost")
 	lock := &fakeSessionLock{}
 	executor.locker = &fakeSessionLocker{lock: lock}
-	engine.copy = func(copyengine.Request) error { lock.err = lost; return nil }
+	engine.copy = func(copyengine.CopyRequest) error { lock.err = lost; return nil }
 
 	if err := executor.FinalSync(t.Context(), object); !errors.Is(err, lost) {
 		t.Fatalf("error = %v", err)

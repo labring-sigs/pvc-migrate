@@ -739,6 +739,8 @@ spec:
                 description: |-
                   DeleteExtraneous defaults to true so a raw workflow CR means the same
                   thing as the CLI default: the destination mirrors the source exactly.
+                  A pointer preserves the distinction between an omitted value (the API
+                  default is true) and an explicit false from a typed client.
                 type: boolean
               destinationCapacity:
                 type: string
@@ -1770,6 +1772,8 @@ spec:
                 description: |-
                   DeleteExtraneous defaults to true so a raw workflow CR means the same
                   thing as the CLI default: the destination mirrors the source exactly.
+                  A pointer preserves the distinction between an omitted value (the API
+                  default is true) and an explicit false from a typed client.
                 type: boolean
               destinationCapacity:
                 type: string
@@ -2834,6 +2838,8 @@ spec:
                 description: |-
                   DeleteExtraneous defaults to true so a raw workflow CR means the same
                   thing as the CLI default: the destination mirrors the source exactly.
+                  A pointer preserves the distinction between an omitted value (the API
+                  default is true) and an explicit false from a typed client.
                 type: boolean
               destinationCapacity:
                 type: string
@@ -4365,6 +4371,8 @@ spec:
                 description: |-
                   DeleteExtraneous defaults to true so a raw workflow CR means the same
                   thing as the CLI default: the destination mirrors the source exactly.
+                  A pointer preserves the distinction between an omitted value (the API
+                  default is true) and an explicit false from a typed client.
                 type: boolean
               destinationCapacity:
                 type: string
@@ -5366,6 +5374,8 @@ spec:
                 description: |-
                   DeleteExtraneous defaults to true so a raw workflow CR means the same
                   thing as the CLI default: the destination mirrors the source exactly.
+                  A pointer preserves the distinction between an omitted value (the API
+                  default is true) and an explicit false from a typed client.
                 type: boolean
               destinationCapacity:
                 type: string
@@ -6345,6 +6355,8 @@ spec:
                 description: |-
                   DeleteExtraneous defaults to true so a raw workflow CR means the same
                   thing as the CLI default: the destination mirrors the source exactly.
+                  A pointer preserves the distinction between an omitted value (the API
+                  default is true) and an explicit false from a typed client.
                 type: boolean
               destinationCapacity:
                 type: string
@@ -8091,6 +8103,8 @@ spec:
                 description: |-
                   DeleteExtraneous defaults to true so a raw workflow CR means the same
                   thing as the CLI default: the destination mirrors the source exactly.
+                  A pointer preserves the distinction between an omitted value (the API
+                  default is true) and an explicit false from a typed client.
                 type: boolean
               destinationCapacity:
                 type: string
@@ -10264,6 +10278,8 @@ spec:
                 description: |-
                   DeleteExtraneous defaults to true so a raw workflow CR means the same
                   thing as the CLI default: the destination mirrors the source exactly.
+                  A pointer preserves the distinction between an omitted value (the API
+                  default is true) and an explicit false from a typed client.
                 type: boolean
               destinationCapacity:
                 type: string

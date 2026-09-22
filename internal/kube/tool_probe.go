@@ -250,6 +250,7 @@ func (p *KubernetesToolImageProber) probeTarget(
 			retErr = errors.Join(retErr, cleanupErr)
 		}
 	}()
+
 	if err := LeaseFenceError(ctx); err != nil {
 		return result, err
 	}
@@ -587,6 +588,7 @@ func CleanupSessionToolProbePods(
 			}
 
 			uid := pod.UID
+
 			if err := errors.Join(ctx.Err(), LeaseFenceError(ctx)); err != nil {
 				return err
 			}
@@ -602,6 +604,7 @@ func CleanupSessionToolProbePods(
 					err,
 				)
 			}
+
 			if err := errors.Join(ctx.Err(), LeaseFenceError(ctx)); err != nil {
 				return err
 			}

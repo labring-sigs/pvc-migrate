@@ -12,7 +12,7 @@ import (
 
 func (s *Service) validateCleanupConsumers(
 	ctx context.Context,
-	session *Session,
+	session *CopySession,
 	index int,
 	pvc *corev1.PersistentVolumeClaim,
 ) error {
@@ -48,7 +48,7 @@ func (s *Service) validateCleanupConsumers(
 
 func (s *Service) inspectCleanupDestination(
 	ctx context.Context,
-	session *Session,
+	session *CopySession,
 	index int,
 	deleting bool,
 ) (*corev1.PersistentVolumeClaim, *corev1.PersistentVolume, error) {
@@ -117,8 +117,20 @@ func (s *Service) inspectCleanupDestination(
 	return pvc, pv, nil
 }
 
-func (s *Service) retainDestinationVolume(ctx context.Context, session *Session, index int) error {
-	if err := s.deleteReservationConsumer(ctx, session, index); err != nil {
+func (s *Service) retainDestinationVolume(
+	ctx context.Context,
+	session *CopySession,
+	index int,
+) error {
+	state := reservationState{
+		ID:     session.ID,
+		Spec:   &session.Spec.SessionContext,
+		Status: &session.Status.Volumes[index].Reservation,
+		Save: func(saveCtx context.Context) error {
+			return s.save(saveCtx, session, false)
+		},
+	}
+	if err := s.deleteReservationConsumer(ctx, state); err != nil {
 		return err
 	}
 
@@ -167,6 +179,7 @@ func (s *Service) retainDestinationVolume(ctx context.Context, session *Session,
 
 		delete(pvc.Labels, SessionKey)
 		delete(pvc.Labels, ManagedByLabel)
+
 		_, err = s.destination.Kubernetes.CoreV1().
 			PersistentVolumeClaims(pvc.Namespace).
 			Update(ctx, pvc, metav1.UpdateOptions{})

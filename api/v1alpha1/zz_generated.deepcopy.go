@@ -2350,6 +2350,11 @@ func (in *TransferOptions) DeepCopyInto(out *TransferOptions) {
 		*out = make([]string, len(*in))
 		copy(*out, *in)
 	}
+	if in.DeleteExtraneous != nil {
+		in, out := &in.DeleteExtraneous, &out.DeleteExtraneous
+		*out = new(bool)
+		**out = **in
+	}
 	if in.CopyTimeout != nil {
 		in, out := &in.CopyTimeout, &out.CopyTimeout
 		*out = new(string)

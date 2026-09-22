@@ -87,7 +87,7 @@ func TestCopyExecutorCleanupRecoveryIsReadOnlyUntilCheckpointSaved(t *testing.T)
 	}
 }
 
-func TestCopyExecutorDeletionRemovesMetadataBeforeLeaseRemoval(t *testing.T) {
+func TestCopyExecutorDeletionRetainsMetadataWhenLeaseRemovalFails(t *testing.T) {
 	executor, object, store, _ := copyCleanupFixture(t)
 	object.DeletionTimestamp = &metav1.Time{Time: executor.now()}
 	store.object = object.DeepCopy()
@@ -99,11 +99,22 @@ func TestCopyExecutorDeletionRemovesMetadataBeforeLeaseRemoval(t *testing.T) {
 		t.Fatalf("error = %v", err)
 	}
 
-	if store.object != nil {
-		t.Fatal("workflow metadata remained after the protected delete")
+	if store.object == nil {
+		t.Fatal("workflow metadata was removed before lease cleanup succeeded")
 	}
+
 	if lock.deletes != 1 {
-		t.Fatalf("lease cleanup was not attempted after metadata deletion: %d", lock.deletes)
+		t.Fatalf("lease cleanup was not attempted: %d", lock.deletes)
+	}
+
+	lock.deleteErr = nil
+
+	if err := executor.FinalizeDeleted(t.Context(), object); err != nil {
+		t.Fatal(err)
+	}
+
+	if store.object != nil || lock.deletes != 2 {
+		t.Fatal("workflow did not converge after lease cleanup recovered")
 	}
 }
 

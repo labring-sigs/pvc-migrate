@@ -29,34 +29,42 @@ func WorkflowExecutionIntentHash(object crclient.Object) (string, error) {
 	case *v1alpha1.Migration:
 		input := current.Spec.DeepCopy()
 		input.UnusedStoragePolicy = ""
+		canonicalizeTransferDefaults(&input.TransferOptions)
 		spec = input
 	case *v1alpha1.ClusterMigration:
 		input := current.Spec.DeepCopy()
 		input.UnusedStoragePolicy = ""
+		canonicalizeTransferDefaults(&input.TransferOptions)
 		spec = input
 	case *v1alpha1.PodMigration:
 		input := current.Spec.DeepCopy()
 		input.UnusedStoragePolicy = ""
+		canonicalizeTransferDefaults(&input.TransferOptions)
 		spec = input
 	case *v1alpha1.ClusterPodMigration:
 		input := current.Spec.DeepCopy()
 		input.UnusedStoragePolicy = ""
+		canonicalizeTransferDefaults(&input.TransferOptions)
 		spec = input
 	case *v1alpha1.Copy:
 		input := current.Spec.DeepCopy()
 		input.UnusedStoragePolicy = ""
+		canonicalizeTransferDefaults(&input.TransferOptions)
 		spec = input
 	case *v1alpha1.ClusterCopy:
 		input := current.Spec.DeepCopy()
 		input.UnusedStoragePolicy = ""
+		canonicalizeTransferDefaults(&input.TransferOptions)
 		spec = input
 	case *v1alpha1.Reservation:
 		input := current.Spec.DeepCopy()
 		input.UnusedStoragePolicy = ""
+		canonicalizeTransferDefaults(&input.TransferOptions)
 		spec = input
 	case *v1alpha1.ClusterReservation:
 		input := current.Spec.DeepCopy()
 		input.UnusedStoragePolicy = ""
+		canonicalizeTransferDefaults(&input.TransferOptions)
 		spec = input
 	case *v1alpha1.Backup:
 		spec = current.Spec
@@ -85,4 +93,13 @@ func WorkflowExecutionIntentHash(object crclient.Object) (string, error) {
 	}
 
 	return fmt.Sprintf("%x", sha256.Sum256(data)), nil
+}
+
+// canonicalizeTransferDefaults makes the fingerprint represent effective API
+// intent. The CRD defaults an omitted deleteExtraneous field to true, so an
+// explicit true must not look like a retargeting change after admission.
+func canonicalizeTransferDefaults(options *v1alpha1.TransferOptions) {
+	if options != nil && options.DeleteExtraneous != nil && *options.DeleteExtraneous {
+		options.DeleteExtraneous = nil
+	}
 }

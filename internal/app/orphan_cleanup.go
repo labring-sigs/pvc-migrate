@@ -1162,6 +1162,7 @@ func (s *OrphanCleaner) deleteOrphanDestinationPVC(
 	}
 
 	uid, resourceVersion := pvc.UID, pvc.ResourceVersion
+
 	if err := checkpointFenceError(ctx); err != nil {
 		return err
 	}

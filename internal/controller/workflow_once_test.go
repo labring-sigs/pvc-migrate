@@ -48,7 +48,7 @@ func TestReconcileUntilStableRejectsPermanentRequeue(t *testing.T) {
 		reconcile.Request{},
 		func(context.Context, reconcile.Request) (reconcile.Result, error) {
 			passes++
-			return reconcile.Result{Requeue: true}, nil
+			return reconcile.Result{RequeueAfter: time.Nanosecond}, nil
 		},
 	)
 	if err == nil || !strings.Contains(err.Error(), "exceeded") {
@@ -78,18 +78,51 @@ func TestRequireReconcilerCoversEveryWorkflowKind(t *testing.T) {
 		kind  domain.ControllerKind
 		setup func(*WorkflowReconciler)
 	}{
-		{domain.ControllerKindBackup, func(r *WorkflowReconciler) { r.backup = &BackupReconciler{} }},
-		{domain.ControllerKindRestore, func(r *WorkflowReconciler) { r.restore = &RestoreReconciler{} }},
-		{domain.ControllerKindRename, func(r *WorkflowReconciler) { r.rename = &RenameReconciler{} }},
+		{
+			domain.ControllerKindBackup,
+			func(r *WorkflowReconciler) { r.backup = &BackupReconciler{} },
+		},
+		{
+			domain.ControllerKindRestore,
+			func(r *WorkflowReconciler) { r.restore = &RestoreReconciler{} },
+		},
+		{
+			domain.ControllerKindRename,
+			func(r *WorkflowReconciler) { r.rename = &RenameReconciler{} },
+		},
 		{domain.ControllerKindMove, func(r *WorkflowReconciler) { r.move = &MoveReconciler{} }},
-		{domain.ControllerKindReservation, func(r *WorkflowReconciler) { r.namespacedReservation = &ReservationReconciler{} }},
-		{domain.ControllerKindClusterReservation, func(r *WorkflowReconciler) { r.reservation = &ClusterReservationReconciler{} }},
-		{domain.ControllerKindCopy, func(r *WorkflowReconciler) { r.namespacedCopy = &CopyReconciler{} }},
-		{domain.ControllerKindClusterCopy, func(r *WorkflowReconciler) { r.copy = &ClusterCopyReconciler{} }},
-		{domain.ControllerKindMigration, func(r *WorkflowReconciler) { r.namespacedMigration = &MigrationReconciler{} }},
-		{domain.ControllerKindClusterMigration, func(r *WorkflowReconciler) { r.migration = &ClusterMigrationReconciler{} }},
-		{domain.ControllerKindPodMigration, func(r *WorkflowReconciler) { r.namespacedPodMigration = &PodMigrationReconciler{} }},
-		{domain.ControllerKindClusterPodMigration, func(r *WorkflowReconciler) { r.podMigration = &ClusterPodMigrationReconciler{} }},
+		{
+			domain.ControllerKindReservation,
+			func(r *WorkflowReconciler) { r.namespacedReservation = &ReservationReconciler{} },
+		},
+		{
+			domain.ControllerKindClusterReservation,
+			func(r *WorkflowReconciler) { r.reservation = &ClusterReservationReconciler{} },
+		},
+		{
+			domain.ControllerKindCopy,
+			func(r *WorkflowReconciler) { r.namespacedCopy = &CopyReconciler{} },
+		},
+		{
+			domain.ControllerKindClusterCopy,
+			func(r *WorkflowReconciler) { r.copy = &ClusterCopyReconciler{} },
+		},
+		{
+			domain.ControllerKindMigration,
+			func(r *WorkflowReconciler) { r.namespacedMigration = &MigrationReconciler{} },
+		},
+		{
+			domain.ControllerKindClusterMigration,
+			func(r *WorkflowReconciler) { r.migration = &ClusterMigrationReconciler{} },
+		},
+		{
+			domain.ControllerKindPodMigration,
+			func(r *WorkflowReconciler) { r.namespacedPodMigration = &PodMigrationReconciler{} },
+		},
+		{
+			domain.ControllerKindClusterPodMigration,
+			func(r *WorkflowReconciler) { r.podMigration = &ClusterPodMigrationReconciler{} },
+		},
 	}
 
 	for _, test := range tests {
@@ -100,6 +133,7 @@ func TestRequireReconcilerCoversEveryWorkflowKind(t *testing.T) {
 			}
 
 			test.setup(reconciler)
+
 			if err := reconciler.requireReconciler(test.kind); err != nil {
 				t.Fatalf("configured reconciler rejected: %v", err)
 			}
@@ -199,5 +233,121 @@ func TestWorkflowQueuesAdmitHandoffMetadataAndRepeatedCopyPass(t *testing.T) {
 	current.Annotations = map[string]string{"example.com/note": "unrelated"}
 	if workflowEventPredicate().Update(event.UpdateEvent{ObjectOld: previous, ObjectNew: current}) {
 		t.Fatal("unrelated annotation triggered execution")
+	}
+}
+
+func TestWorkflowQueuesAdmitDurablePhaseTransitions(t *testing.T) {
+	previous := &v1alpha1.ClusterMigration{
+		ObjectMeta: metav1.ObjectMeta{Name: "migration"},
+		Status: v1alpha1.ClusterMigrationStatus{
+			WorkflowStatus: v1alpha1.WorkflowStatus{Phase: domain.PhasePlanned},
+		},
+	}
+	current := previous.DeepCopy()
+	current.Status.Phase = domain.PhaseFinalSyncing
+
+	update := event.UpdateEvent{ObjectOld: previous, ObjectNew: current}
+	if !workflowEventPredicate().Update(update) {
+		t.Fatal("durable execution phase transition was filtered")
+	}
+
+	if workflowQueuePredicate(false, func(crclient.Object) {}).Update(update) {
+		t.Fatal("recovery phase transition entered ordinary execution queue")
+	}
+
+	if !workflowRecoveryQueuePredicate(func(crclient.Object) {}).Update(update) {
+		t.Fatal("recovery phase transition did not enter recovery queue")
+	}
+}
+
+func TestWorkflowQueuesDoNotAutoResumeDurableFailures(t *testing.T) {
+	previous := &v1alpha1.ClusterMigration{
+		ObjectMeta: metav1.ObjectMeta{Name: "migration"},
+		Status: v1alpha1.ClusterMigrationStatus{
+			WorkflowStatus: v1alpha1.WorkflowStatus{Phase: domain.PhaseFinalSyncing},
+		},
+	}
+	current := previous.DeepCopy()
+	current.Status.Phase = domain.PhaseFailed
+	current.Status.ResumeFrom = domain.PhaseFinalSyncing
+
+	if workflowEventPredicate().Update(event.UpdateEvent{
+		ObjectOld: previous,
+		ObjectNew: current,
+	}) {
+		t.Fatal("durable failure was admitted as an implicit resume")
+	}
+}
+
+func TestWorkflowQueuesAdmitOperationProgressWithoutPhaseChange(t *testing.T) {
+	previous := &v1alpha1.ClusterCopy{
+		ObjectMeta: metav1.ObjectMeta{Name: "copy"},
+		Status: v1alpha1.ClusterCopyStatus{
+			WorkflowStatus: v1alpha1.WorkflowStatus{Phase: domain.PhaseWarmCopying},
+			Volumes: []v1alpha1.ClusterCopyVolumeStatus{{
+				ClusterVolumeReservationStatus: v1alpha1.ClusterVolumeReservationStatus{
+					SourcePVCName: "source",
+				},
+			}},
+		},
+	}
+	current := previous.DeepCopy()
+	current.Status.Volumes[0].Sync.Attempts = 1
+	current.Status.Volumes[0].Sync.BytesCopied = 128
+
+	update := event.UpdateEvent{ObjectOld: previous, ObjectNew: current}
+	if !workflowEventPredicate().Update(update) {
+		t.Fatal("copy checkpoint-only update was filtered")
+	}
+
+	if !workflowQueuePredicate(false, func(crclient.Object) {}).Update(update) {
+		t.Fatal("ordinary copy checkpoint did not wake execution")
+	}
+}
+
+func TestWorkflowQueuesAdmitRecoveryProgressWithoutPhaseChange(t *testing.T) {
+	previous := &v1alpha1.ClusterPodMigration{
+		ObjectMeta: metav1.ObjectMeta{Name: "pod-migration"},
+		Status: v1alpha1.ClusterPodMigrationStatus{
+			WorkflowStatus: v1alpha1.WorkflowStatus{Phase: domain.PhaseFinalSyncing},
+			Volumes: []v1alpha1.ClusterPodMigrationVolumeStatus{{
+				ClusterVolumeReservationStatus: v1alpha1.ClusterVolumeReservationStatus{
+					SourcePVCName: "source",
+				},
+			}},
+		},
+	}
+	current := previous.DeepCopy()
+	current.Status.Volumes[0].Sync.Attempts = 1
+	current.Status.Volumes[0].Sync.FinalCompletedAt = new(metav1.Now())
+
+	update := event.UpdateEvent{ObjectOld: previous, ObjectNew: current}
+	if !workflowEventPredicate().Update(update) {
+		t.Fatal("pod migration checkpoint-only update was filtered")
+	}
+
+	if workflowQueuePredicate(false, func(crclient.Object) {}).Update(update) {
+		t.Fatal("recovery checkpoint entered ordinary execution queue")
+	}
+
+	if !workflowRecoveryQueuePredicate(func(crclient.Object) {}).Update(update) {
+		t.Fatal("recovery checkpoint did not wake recovery queue")
+	}
+}
+
+func TestWorkflowQueuesIgnoreCommonStatusMetadataOnly(t *testing.T) {
+	previous := &v1alpha1.Backup{
+		ObjectMeta: metav1.ObjectMeta{Name: "backup"},
+		Status: v1alpha1.BackupStatus{
+			WorkflowStatus: v1alpha1.WorkflowStatus{Phase: domain.PhasePlanned},
+		},
+	}
+	current := previous.DeepCopy()
+	current.Status.UpdatedAt = metav1.Now()
+	current.Status.Message = "status heartbeat"
+	current.Status.History = []v1alpha1.WorkflowHistoryEntry{{Phase: domain.PhasePlanned}}
+
+	if workflowEventPredicate().Update(event.UpdateEvent{ObjectOld: previous, ObjectNew: current}) {
+		t.Fatal("common status metadata-only update triggered execution")
 	}
 }

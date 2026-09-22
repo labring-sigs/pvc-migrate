@@ -125,6 +125,7 @@ func deleteReservationConsumers(
 				err,
 			)
 		}
+
 		if err := checkpointFenceError(ctx); err != nil {
 			return err
 		}

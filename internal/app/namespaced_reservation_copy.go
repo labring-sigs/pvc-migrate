@@ -193,7 +193,7 @@ func NamespacedCopyFromReservation(
 				ToolImage:            plan.ToolImage,
 				Strategies:           plan.Strategies,
 				VerifyChecksum:       spec.VerifyChecksum,
-				DeleteExtraneous:     spec.DeleteExtraneous,
+				DeleteExtraneous:     spec.DeleteExtraneousValue(),
 				SkipSourceUsageCheck: plan.SkipSourceUsageCheck,
 				UnusedStoragePolicy:  spec.UnusedStoragePolicy,
 				Online:               spec.Online,

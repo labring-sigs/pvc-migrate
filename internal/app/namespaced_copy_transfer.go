@@ -55,20 +55,27 @@ func (c *CopyExecutor) copyVolumes(ctx context.Context, object *v1alpha1.Copy) e
 
 		source := qualifiedResourceReference(volume.SourcePVC, object.Namespace)
 
-		request := copyengine.Request{
-			SessionID:       object.Name,
-			Source:          source,
-			Destination:     qualifiedResourceReference(*status.DestinationPVC, object.Namespace),
-			Mode:            copyengine.ModeWarm,
-			ToolImage:       plan.ToolImage,
-			SourcePath:      domain.SourceTransferPath(volume.TransferScope),
-			DestinationPath: domain.DestinationTransferPath(volume.TransferScope),
-			IgnoreSizes:     destinationCapacityIsSmaller(volume.SourceCapacity, volume.Capacity),
-			Strategies: slices.Clone(
-				plan.Strategies,
-			),
-			DeleteExtraneousFiles: plan.DeleteExtraneous,
-			VerifyChecksum:        plan.VerifyChecksum,
+		request := copyengine.CopyRequest{
+			AttemptIdentity: copyengine.AttemptIdentity{
+				SessionID: object.Name, Source: source, Mode: copyengine.ModeWarm,
+			},
+			Source: copyengine.CopySource{
+				Path: domain.SourceTransferPath(volume.TransferScope),
+			},
+			Destination: copyengine.CopyDestination{
+				Reference: qualifiedResourceReference(*status.DestinationPVC, object.Namespace),
+				Path:      domain.DestinationTransferPath(volume.TransferScope),
+			},
+			Policy: copyengine.CopyPolicy{
+				IgnoreSizes: destinationCapacityIsSmaller(
+					volume.SourceCapacity,
+					volume.Capacity,
+				),
+				Strategies:            slices.Clone(plan.Strategies),
+				DeleteExtraneousFiles: plan.DeleteExtraneous,
+				VerifyChecksum:        plan.VerifyChecksum,
+			},
+			Runtime: copyengine.CopyRuntime{ToolImage: plan.ToolImage},
 		}
 
 		err := c.transfer.copyWithRetry(ctx, request, object.Status.SourceNode, plan.TargetNode, "",

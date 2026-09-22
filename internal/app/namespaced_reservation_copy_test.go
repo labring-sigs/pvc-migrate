@@ -22,7 +22,7 @@ func TestNamespacedReservedCopyPreservesStorageAndOwnsItsInput(t *testing.T) {
 	spec := NamespacedCopySpecFromReservation(reservation.Spec)
 	spec.Online = true
 	spec.VerifyChecksum = true
-	spec.DeleteExtraneous = true
+	spec.DeleteExtraneous = new(true)
 	spec.SourceNode = "copy-source"
 	spec.Strategies = []string{domain.StrategyClusterIP}
 	spec.UnusedStoragePolicy = "Delete"

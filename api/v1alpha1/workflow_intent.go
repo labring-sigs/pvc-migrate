@@ -32,9 +32,11 @@ type TransferOptions struct {
 	// DeleteExtraneous defaults to true so a raw workflow CR means the same
 	// thing as the CLI default: the destination mirrors the source exactly.
 	// +kubebuilder:default=true
-	DeleteExtraneous     bool `json:"deleteExtraneous,omitempty"`
-	AllowVolumeShrink    bool `json:"allowVolumeShrink,omitempty"`
-	SkipSourceUsageCheck bool `json:"skipSourceUsageCheck,omitempty"`
+	// A pointer preserves the distinction between an omitted value (the API
+	// default is true) and an explicit false from a typed client.
+	DeleteExtraneous     *bool `json:"deleteExtraneous,omitempty"`
+	AllowVolumeShrink    bool  `json:"allowVolumeShrink,omitempty"`
+	SkipSourceUsageCheck bool  `json:"skipSourceUsageCheck,omitempty"`
 	// CopyTimeout bounds one data-transfer attempt (warm copy, final sync, or
 	// copy pass). Unset keeps the operation-level bound only. The pattern
 	// requires at least one unit-suffixed component ("30m", "1h30m", "90s")
@@ -54,6 +56,23 @@ type TransferOptions struct {
 	// copy-bearing workflows consume it.
 	// +optional
 	RetryPolicy *RetryPolicySpec `json:"retryPolicy,omitempty" yaml:"retryPolicy,omitempty"`
+}
+
+// BoolPtr returns a pointer suitable for optional boolean API fields.
+//
+//go:fix inline
+func BoolPtr(value bool) *bool {
+	return new(value)
+}
+
+// DeleteExtraneousValue resolves the API default for callers that need the
+// effective transfer policy after decoding a request.
+func (o TransferOptions) DeleteExtraneousValue() bool {
+	if o.DeleteExtraneous == nil {
+		return true
+	}
+
+	return *o.DeleteExtraneous
 }
 
 // RetryPolicySpec overrides the data-transfer retry defaults for one

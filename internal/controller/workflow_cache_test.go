@@ -108,6 +108,7 @@ func TestWorkflowCacheSyncsBeforeStandbyReady(t *testing.T) {
 	// This test exercises cache startup only, so concrete empty reconcilers are
 	// sufficient and keep the dispatch contract explicit.
 	reconciler.namespacedCopy = &CopyReconciler{}
+
 	reconciler.copy = &ClusterCopyReconciler{}
 	if err := reconciler.SetupWithManager(manager); err != nil {
 		t.Fatal(err)

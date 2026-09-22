@@ -223,10 +223,9 @@ func TestPlanRejectsBackendUsageAboveShrinkTarget(t *testing.T) {
 		plannerClient(plannerObjects("2Gi")...),
 		nil,
 	).WithVolumeUsageReader(staticUsageReader{bytes: 2 << 30}).
-		plan(context.Background(), planOptions{
-			operationKind: domain.OperationCopy,
-			Volumes:       testSourceVolumes("data"),
-			SessionID:     "capacity-overflow",
+		plan(context.Background(), domain.OperationCopy, transferInput{
+			Volumes:   testSourceVolumes("data"),
+			SessionID: "capacity-overflow",
 
 			SourceNamespace:      "app",
 			TemporaryNamespace:   "system",
@@ -253,10 +252,9 @@ func TestPlanRejectsBackendUsageAboveShrinkTarget(t *testing.T) {
 }
 
 func TestPlanRequiresExplicitSourceUsageSkip(t *testing.T) {
-	base := planOptions{
-		operationKind: domain.OperationCopy,
-		Volumes:       testSourceVolumes("data"),
-		SessionID:     "capacity-unknown",
+	base := transferInput{
+		Volumes:   testSourceVolumes("data"),
+		SessionID: "capacity-unknown",
 
 		SourceNamespace:      "app",
 		TemporaryNamespace:   "system",
@@ -276,7 +274,7 @@ func TestPlanRequiresExplicitSourceUsageSkip(t *testing.T) {
 		plannerClient(plannerObjects("2Gi")...),
 		nil,
 	).WithVolumeUsageReader(errorUsageReader{}).
-		plan(context.Background(), base)
+		plan(context.Background(), domain.OperationCopy, base)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -293,7 +291,7 @@ func TestPlanRequiresExplicitSourceUsageSkip(t *testing.T) {
 		plannerClient(plannerObjects("2Gi")...),
 		nil,
 	).WithVolumeUsageReader(errorUsageReader{}).
-		plan(context.Background(), base)
+		plan(context.Background(), domain.OperationCopy, base)
 	if err != nil || !plan.Ready {
 		t.Fatalf("expected explicit source-usage skip: err=%v checks=%#v", err, plan.Checks)
 	}
@@ -303,10 +301,9 @@ func TestPlanRequiresTrustedReaderByDefault(t *testing.T) {
 	plan, err := New(
 		plannerClient(plannerObjects("2Gi")...),
 		nil,
-	).plan(context.Background(), planOptions{
-		operationKind: domain.OperationCopy,
-		Volumes:       testSourceVolumes("data"),
-		SessionID:     "capacity-no-reader",
+	).plan(context.Background(), domain.OperationCopy, transferInput{
+		Volumes:   testSourceVolumes("data"),
+		SessionID: "capacity-no-reader",
 
 		SourceNamespace:      "app",
 		TemporaryNamespace:   "system",

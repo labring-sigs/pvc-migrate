@@ -232,11 +232,11 @@ func (b *BackupExecutor) cleanup(
 			return err
 		}
 
-		if err := b.store.Delete(ctx, object); err != nil {
+		if err := lock.Delete(ctx); err != nil {
 			return err
 		}
 
-		return lock.Delete(ctx)
+		return b.store.Delete(ctx, object)
 	}
 
 	return nil
@@ -250,6 +250,8 @@ func (b *BackupExecutor) FinalizeDeleted(ctx context.Context, object *v1alpha1.B
 			"workflow deletion is required",
 		)
 	}
+
+	normalizeDeletedRepositoryStatus(&object.Status.WorkflowStatus)
 
 	if err := validateBackupObject(object); err != nil {
 		return err

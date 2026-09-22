@@ -17,7 +17,7 @@ import (
 func (s *Service) planCrossClusterPolicies(
 	ctx context.Context,
 	plan *Plan,
-	options Options,
+	options CopyOptions,
 	destinationClass *storagev1.StorageClass,
 ) {
 	const pvcPolicyCheckName = domain.CheckNameDestinationPVCPolicy

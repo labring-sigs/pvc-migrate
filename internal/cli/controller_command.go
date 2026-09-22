@@ -41,6 +41,7 @@ func (r *rootState) newControllerCommand() *cobra.Command {
 			if err != nil {
 				return err
 			}
+
 			if runtime.controllerDiscoveryComplete && len(runtime.controllerKinds) == 0 {
 				return domain.NewError(
 					domain.ErrorPrecondition,
@@ -107,7 +108,8 @@ func (r *rootState) newControllerCommand() *cobra.Command {
 		"pvc-migrate-system",
 		"Namespace where the controller runs and holds its leader Lease",
 	)
-	command.Flags().BoolVar(&once, "once", false, "Reconcile current workflows until stable and exit")
+	command.Flags().
+		BoolVar(&once, "once", false, "Reconcile current workflows until stable and exit")
 	command.Flags().StringVar(
 		&healthProbeBindAddress,
 		"health-probe-bind-address",

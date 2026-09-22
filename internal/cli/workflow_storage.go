@@ -36,6 +36,7 @@ func saveCLIPlannedWorkflow[T crclient.Object](
 	if err != nil {
 		return err
 	}
+
 	status.ExecutionIntentHash = hash
 
 	return store.Save(ctx, object)

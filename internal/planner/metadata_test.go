@@ -18,9 +18,11 @@ func TestPlanRejectsCustomPVCFinalizerBeforeRecreate(t *testing.T) {
 		}
 	}
 
-	plan, err := New(plannerClient(objects...), nil).plan(context.Background(), planOptions{
-		operationKind: domain.OperationMigrate,
-		Volumes:       testSourceVolumes("data"), SessionID: "migration-finalizer",
+	plan, err := New(
+		plannerClient(objects...),
+		nil,
+	).plan(context.Background(), domain.OperationMigrate, transferInput{
+		Volumes: testSourceVolumes("data"), SessionID: "migration-finalizer",
 		SourceNamespace:    "app",
 		TemporaryNamespace: "system",
 		StagingNamespace:   "system",
@@ -70,9 +72,11 @@ func TestPlanAllowsPVCProtectionFinalizerAndCopyKeepsSource(t *testing.T) {
 				}
 			}
 
-			plan, err := New(plannerClient(objects...), nil).plan(context.Background(), planOptions{
-				operationKind: tt.operation,
-				Volumes:       testSourceVolumes("data"), SessionID: "metadata-finalizer",
+			plan, err := New(
+				plannerClient(objects...),
+				nil,
+			).plan(context.Background(), tt.operation, transferInput{
+				Volumes: testSourceVolumes("data"), SessionID: "metadata-finalizer",
 				SourceNamespace:    "app",
 				TemporaryNamespace: "system",
 				StagingNamespace:   "system",

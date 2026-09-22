@@ -111,7 +111,7 @@ func (r *rootState) newCrossClusterCopyResumeCommand() *cobra.Command {
 			ctx, cancel := r.context(cmd.Context())
 			defer cancel()
 
-			session, err := service.Get(ctx, flags.sessionNamespace, args[0])
+			session, err := loadCrossClusterCopy(ctx, service, flags.sessionNamespace, args[0])
 			if err != nil {
 				return err
 			}
@@ -158,7 +158,7 @@ func (r *rootState) newCrossClusterCopyPlanCommand() *cobra.Command {
 				return err
 			}
 
-			plan, err := service.Plan(ctx, options)
+			plan, err := service.PlanCopy(ctx, options)
 			if err != nil {
 				return err
 			}
@@ -211,9 +211,14 @@ func (r *rootState) newCrossClusterCopyRunCommand() *cobra.Command {
 				return err
 			}
 
-			var session *crosscluster.Session
+			var session *crosscluster.CopySession
 			if flags.sessionID != "" {
-				session, err = service.Get(ctx, options.SessionNamespace, flags.sessionID)
+				session, err = loadCrossClusterCopy(
+					ctx,
+					service,
+					options.SessionNamespace,
+					flags.sessionID,
+				)
 				if apierrors.IsNotFound(err) {
 					session, err = nil, nil
 				} else if err == nil {
@@ -222,7 +227,7 @@ func (r *rootState) newCrossClusterCopyRunCommand() *cobra.Command {
 			}
 
 			if session == nil && err == nil {
-				plan, planErr := service.Plan(ctx, options)
+				plan, planErr := service.PlanCopy(ctx, options)
 				if planErr != nil {
 					return planErr
 				}
@@ -243,7 +248,7 @@ func (r *rootState) newCrossClusterCopyRunCommand() *cobra.Command {
 					return nil
 				}
 
-				session, err = service.CreateSession(ctx, options, plan)
+				session, err = service.CreateCopySession(ctx, options, plan)
 			}
 
 			if err != nil {
@@ -482,9 +487,9 @@ func (f *crossClusterConnectionFlags) bindConnections(command *cobra.Command, r 
 	)
 }
 
-func (f *crossClusterCopyFlags) options(r *rootState) (crosscluster.Options, error) {
+func (f *crossClusterCopyFlags) options(r *rootState) (crosscluster.CopyOptions, error) {
 	if f.destinationKubeconfig == "" {
-		return crosscluster.Options{}, domain.NewError(
+		return crosscluster.CopyOptions{}, domain.NewError(
 			domain.ErrorValidation,
 			"cross-cluster flags",
 			"--destination-kubeconfig is required",
@@ -504,7 +509,7 @@ func (f *crossClusterCopyFlags) options(r *rootState) (crosscluster.Options, err
 	}
 
 	if f.sourceNamespace == "" || f.destinationNamespace == "" {
-		return crosscluster.Options{}, domain.NewError(
+		return crosscluster.CopyOptions{}, domain.NewError(
 			domain.ErrorValidation,
 			"cross-cluster flags",
 			"source and destination namespaces are required",
@@ -515,7 +520,7 @@ func (f *crossClusterCopyFlags) options(r *rootState) (crosscluster.Options, err
 	if id == "" {
 		generated, err := domain.NewSessionID(time.Now())
 		if err != nil {
-			return crosscluster.Options{}, err
+			return crosscluster.CopyOptions{}, err
 		}
 
 		id = generated
@@ -523,14 +528,14 @@ func (f *crossClusterCopyFlags) options(r *rootState) (crosscluster.Options, err
 	}
 
 	if err := crosscluster.ValidateSessionID(id); err != nil {
-		return crosscluster.Options{}, domain.NewError(
+		return crosscluster.CopyOptions{}, domain.NewError(
 			domain.ErrorValidation,
 			"cross-cluster flags",
 			err.Error(),
 		)
 	}
 
-	return crosscluster.Options{
+	return crosscluster.CopyOptions{
 		UnusedStoragePolicy:     v1alpha1.UnusedStoragePolicy(f.unusedStoragePolicy),
 		SessionID:               id,
 		SessionNamespace:        f.sessionNamespace,

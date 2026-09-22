@@ -363,6 +363,7 @@ func (m *Manager) createAndWaitOps(
 					err,
 				)
 			}
+
 			if err := kube.LeaseFenceError(ctx); err != nil {
 				return err
 			}
@@ -449,6 +450,7 @@ func (m *Manager) createAndWaitOps(
 
 			expectedUID = created.GetUID()
 		}
+
 		if err := kube.LeaseFenceError(ctx); err != nil {
 			return err
 		}
@@ -1582,6 +1584,7 @@ func (m *Manager) replaceLegacyKubeBlocksPod(
 			err,
 		)
 	}
+
 	if err := kube.LeaseFenceError(ctx); err != nil {
 		return v1alpha1.ObjectReference{}, err
 	}
@@ -1725,6 +1728,7 @@ func (m *Manager) updateKubeBlocksPauseOwner(
 				err,
 			)
 		}
+
 		if err := kube.LeaseFenceError(ctx); err != nil {
 			return err
 		}
@@ -1991,6 +1995,7 @@ func (m *Manager) updateKubeBlocksInstanceSet(
 			err,
 		)
 	}
+
 	if err := kube.LeaseFenceError(ctx); err != nil {
 		return err
 	}

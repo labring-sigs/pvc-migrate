@@ -54,11 +54,19 @@ func TestLoadBackupProbesWorkflowNamespaceForCRD(t *testing.T) {
 	}
 
 	if loaded.Namespace != object.Namespace || loaded.Name != object.Name {
-		t.Fatalf("loaded workflow = %s/%s, want %s/%s", loaded.Namespace, loaded.Name, object.Namespace, object.Name)
+		t.Fatalf(
+			"loaded workflow = %s/%s, want %s/%s",
+			loaded.Namespace,
+			loaded.Name,
+			object.Namespace,
+			object.Name,
+		)
 	}
+
 	if backend != backendCRD {
 		t.Fatalf("backend = %q, want %q", backend, backendCRD)
 	}
+
 	if _, ok := store.(*kube.CRDWorkflowStore[*v1alpha1.Backup]); !ok {
 		t.Fatalf("store = %T, want CRD store", store)
 	}
@@ -83,8 +91,15 @@ func TestLoadBackupProbesDefaultWorkflowNamespaceForCRD(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	if loaded.Namespace != "default" || backend != backendCRD {
-		t.Fatalf("loaded workflow = %s/%s from %q, want default/%s from CRD", loaded.Namespace, loaded.Name, backend, object.Name)
+		t.Fatalf(
+			"loaded workflow = %s/%s from %q, want default/%s from CRD",
+			loaded.Namespace,
+			loaded.Name,
+			backend,
+			object.Name,
+		)
 	}
 }
 
@@ -92,6 +107,7 @@ func TestCRDProbeNamespacesDeduplicatesAndKeepsDefault(t *testing.T) {
 	command := &cobra.Command{}
 	command.Flags().String("namespace", "default", "")
 	command.Flags().String("source-namespace", "default", "")
+
 	state := &rootState{global: globals{workflowNamespace: "default"}}
 
 	got := state.crdProbeNamespaces(command)
@@ -121,11 +137,19 @@ func TestLoadRestoreProbesWorkflowNamespaceForCRD(t *testing.T) {
 	}
 
 	if loaded.Namespace != object.Namespace || loaded.Name != object.Name {
-		t.Fatalf("loaded workflow = %s/%s, want %s/%s", loaded.Namespace, loaded.Name, object.Namespace, object.Name)
+		t.Fatalf(
+			"loaded workflow = %s/%s, want %s/%s",
+			loaded.Namespace,
+			loaded.Name,
+			object.Namespace,
+			object.Name,
+		)
 	}
+
 	if backend != backendCRD {
 		t.Fatalf("backend = %q, want %q", backend, backendCRD)
 	}
+
 	if _, ok := store.(*kube.CRDWorkflowStore[*v1alpha1.Restore]); !ok {
 		t.Fatalf("store = %T, want CRD store", store)
 	}
@@ -147,11 +171,17 @@ func TestLoadMoveUsesClusterScopedCRDKey(t *testing.T) {
 	}
 
 	if loaded.Name != object.Name || loaded.Namespace != "" {
-		t.Fatalf("loaded workflow = %q/%q, want cluster-scoped object", loaded.Namespace, loaded.Name)
+		t.Fatalf(
+			"loaded workflow = %q/%q, want cluster-scoped object",
+			loaded.Namespace,
+			loaded.Name,
+		)
 	}
+
 	if backend != backendCRD {
 		t.Fatalf("backend = %q, want %q", backend, backendCRD)
 	}
+
 	if _, ok := store.(*kube.CRDWorkflowStore[*v1alpha1.Move]); !ok {
 		t.Fatalf("store = %T, want CRD store", store)
 	}
@@ -195,6 +225,7 @@ func TestControllerWorkflowRequiresDiscoveredCRD(t *testing.T) {
 	if controllerWorkflowAvailable(runtime, domain.SessionTypeBackup) {
 		t.Fatal("controller workflow reported available without a discovered CRD")
 	}
+
 	if err := requireControllerWorkflow(runtime, domain.SessionTypeBackup); err == nil {
 		t.Fatal("controller workflow requirement unexpectedly passed without a CRD")
 	}
@@ -208,6 +239,7 @@ func TestWorkflowBackendHelpersPairLockerAndNamespace(t *testing.T) {
 	if got := workflowLeaseNamespace(backendCRD, "sessions", object); got != "tenant-a" {
 		t.Fatalf("CRD lease namespace = %q, want tenant-a", got)
 	}
+
 	if got := workflowLeaseNamespace(backendConfigMap, "sessions", object); got != "sessions" {
 		t.Fatalf("ConfigMap lease namespace = %q, want sessions", got)
 	}
@@ -215,6 +247,7 @@ func TestWorkflowBackendHelpersPairLockerAndNamespace(t *testing.T) {
 	if _, ok := cliWorkflowLockerForBackend(runtime, backendCRD).(*kube.CRDWorkflowLocker); !ok {
 		t.Fatal("CRD backend did not select CRD workflow locker")
 	}
+
 	if _, ok := cliWorkflowLockerForBackend(runtime, backendConfigMap).(*kube.ConfigMapWorkflowLocker); !ok {
 		t.Fatal("ConfigMap backend did not select ConfigMap workflow locker")
 	}
@@ -222,6 +255,7 @@ func TestWorkflowBackendHelpersPairLockerAndNamespace(t *testing.T) {
 
 func TestSaveCLIPlannedWorkflowFreezesExecutionIntent(t *testing.T) {
 	client := kubefake.NewClientset()
+
 	store, err := kube.NewConfigMapWorkflowStore(
 		client,
 		"sessions",
@@ -242,10 +276,12 @@ func TestSaveCLIPlannedWorkflowFreezesExecutionIntent(t *testing.T) {
 			WorkflowStatus: v1alpha1.WorkflowStatus{Phase: domain.PhasePlanned},
 		},
 	}
+
 	data, err := json.Marshal(object)
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	if _, err := client.CoreV1().ConfigMaps("sessions").Create(
 		t.Context(),
 		&corev1.ConfigMap{
@@ -266,6 +302,7 @@ func TestSaveCLIPlannedWorkflowFreezesExecutionIntent(t *testing.T) {
 	); err != nil {
 		t.Fatal(err)
 	}
+
 	object.UID = "backup-uid"
 	object.ResourceVersion = "1"
 
@@ -282,10 +319,12 @@ func TestSaveCLIPlannedWorkflowFreezesExecutionIntent(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	want, err := kube.WorkflowExecutionIntentHash(loaded)
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	if loaded.Status.ExecutionIntentHash != want || loaded.Status.ExecutionIntentHash == "" {
 		t.Fatalf("execution intent hash = %q, want %q", loaded.Status.ExecutionIntentHash, want)
 	}
@@ -309,6 +348,7 @@ func TestPodMigrationStatusListsClusterScopedSessionObjects(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	if err := sessionStore.Create(t.Context(), object); err != nil {
 		t.Fatal(err)
 	}
@@ -320,6 +360,7 @@ func TestPodMigrationStatusListsClusterScopedSessionObjects(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	namespacedStore, err := kube.NewCRDWorkflowStore(
 		clients.clients.Runtime,
 		func() *v1alpha1.PodMigration { return &v1alpha1.PodMigration{} },
@@ -329,6 +370,7 @@ func TestPodMigrationStatusListsClusterScopedSessionObjects(t *testing.T) {
 	}
 
 	var stdout bytes.Buffer
+
 	command := NewRoot(Options{
 		Out: &stdout, ErrOut: io.Discard,
 		runtimeFactory: func(state *rootState) (*commandRuntime, error) {
@@ -351,6 +393,7 @@ func TestPodMigrationStatusListsClusterScopedSessionObjects(t *testing.T) {
 	if err := json.Unmarshal(stdout.Bytes(), &listed); err != nil {
 		t.Fatal(err)
 	}
+
 	if len(listed) != 1 || listed[0].Name != object.Name {
 		t.Fatalf("status list = %#v, want one cluster session %q", listed, object.Name)
 	}

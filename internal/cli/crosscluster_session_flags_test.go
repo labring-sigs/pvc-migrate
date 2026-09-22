@@ -13,10 +13,10 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
-func reservedCrossClusterSession(t *testing.T) *crosscluster.Session {
+func reservedCrossClusterSession(t *testing.T) *crosscluster.CopySession {
 	t.Helper()
 
-	session := crosscluster.NewSession("reserved", crosscluster.Spec{
+	session := crosscluster.NewCopySession("reserved", crosscluster.CopySpec{
 		SessionNamespace:     "control",
 		SourceNamespace:      "source",
 		DestinationNamespace: "destination",
@@ -71,7 +71,7 @@ func reservedCrossClusterSession(t *testing.T) *crosscluster.Session {
 
 func configureCrossClusterCopyForTest(
 	t *testing.T,
-	session *crosscluster.Session,
+	session *crosscluster.CopySession,
 	args ...string,
 ) error {
 	t.Helper()

@@ -41,7 +41,7 @@ func TestTransferSubmissionPersistsConcreteSpecs(t *testing.T) {
 			options := v1alpha1.TransferOptions{
 				UnusedStoragePolicy: "Delete", Strategies: []string{"mount"},
 				SourceNode: "worker", TargetNode: "auto", SourcePath: "logs", DestinationPath: ".",
-				VerifyChecksum: true, DeleteExtraneous: true,
+				VerifyChecksum: true, DeleteExtraneous: new(true),
 			}
 			volumes := []v1alpha1.VolumeRequest{
 				{

@@ -105,21 +105,25 @@ func (p *Planner) PlanNamespacedCopy(
 func (p *Planner) resolveCopy(ctx context.Context, name string, spec v1alpha1.CopySpec,
 	sourceNamespace, destinationNamespace, sessionNamespace, image string,
 ) (*domain.TransferPlan, *v1alpha1.CopyPlan, error) {
-	options := planOptions{
+	options := transferInput{
 		SessionID:            name,
 		SourceNamespace:      sourceNamespace,
 		DestinationNamespace: destinationNamespace,
 		TemporaryNamespace:   destinationNamespace,
 		SessionNamespace:     sessionNamespace,
 		ToolImage:            image,
-		operationKind:        domain.OperationCopy,
 	}
 
 	if err := domain.ValidateUnusedStoragePolicy(spec.UnusedStoragePolicy); err != nil {
 		return nil, nil, err
 	}
 
-	state := p.newTransferPlanState(options, spec.TransferOptions, spec.Volumes)
+	state := p.newTransferPlanState(
+		options,
+		domain.OperationCopy,
+		spec.TransferOptions,
+		spec.Volumes,
+	)
 	if _, err := p.selectPlanVolumes(ctx, &state, spec.Volumes, spec.Pod); err != nil {
 		return nil, nil, err
 	}
@@ -167,7 +171,7 @@ func (p *Planner) resolveCopy(ctx context.Context, name string, spec v1alpha1.Co
 		ToolImage:            state.options.ToolImage,
 		Strategies:           state.options.Strategies,
 		VerifyChecksum:       state.options.VerifyChecksum,
-		DeleteExtraneous:     state.options.DeleteExtraneous,
+		DeleteExtraneous:     state.options.DeleteExtraneousValue(),
 		SkipSourceUsageCheck: state.options.SkipSourceUsageCheck,
 		Online:               spec.Online,
 	}

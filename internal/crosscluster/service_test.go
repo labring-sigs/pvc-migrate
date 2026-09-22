@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	v1alpha1 "github.com/labring-sigs/pvc-migrate/api/v1alpha1"
 	"github.com/labring-sigs/pvc-migrate/internal/copyengine"
 	. "github.com/labring-sigs/pvc-migrate/internal/crosscluster"
 	"github.com/labring-sigs/pvc-migrate/internal/domain"
@@ -30,7 +31,7 @@ import (
 )
 
 type fakeCopier struct {
-	requests []copyengine.Request
+	requests []copyengine.CopyRequest
 	failures int
 }
 
@@ -42,7 +43,7 @@ func (*fakeCopier) Cleanup(context.Context, copyengine.CleanupRequest) error { r
 
 func (f *fakeCopier) Copy(
 	_ context.Context,
-	request copyengine.Request,
+	request copyengine.CopyRequest,
 	_ copyengine.ProgressFunc,
 ) error {
 	f.requests = append(f.requests, request)
@@ -54,7 +55,7 @@ func (f *fakeCopier) Copy(
 	return nil
 }
 
-func crossFixture() (*Service, Options, *fakeCopier) {
+func crossFixture() (*Service, CopyOptions, *fakeCopier) {
 	source := fake.NewSimpleClientset(
 		&corev1.Namespace{
 			ObjectMeta: metav1.ObjectMeta{
@@ -155,7 +156,7 @@ func crossFixture() (*Service, Options, *fakeCopier) {
 		clientsDestination,
 		copier,
 	).WithConnections("source.yaml", "source", "destination.yaml", "destination")
-	options := Options{
+	options := CopyOptions{
 		SessionID:               "cross-test",
 		SessionNamespace:        "pvc-migrate-system",
 		SourceNamespace:         "app",
@@ -177,7 +178,7 @@ func TestCrossClusterMissingNamespacesRejectPlanningAndStalePlans(t *testing.T) 
 			service, options, _ := crossFixture()
 			ctx := context.Background()
 
-			stalePlan, err := service.Plan(ctx, options)
+			stalePlan, err := service.PlanCopy(ctx, options)
 			if err != nil || !stalePlan.Ready {
 				t.Fatalf("initial plan=%+v error=%v", stalePlan, err)
 			}
@@ -199,12 +200,12 @@ func TestCrossClusterMissingNamespacesRejectPlanningAndStalePlans(t *testing.T) 
 			source.ClearActions()
 			destination.ClearActions()
 
-			plan, err := service.Plan(ctx, options)
+			plan, err := service.PlanCopy(ctx, options)
 			if err != nil || plan.Ready {
 				t.Fatalf("missing namespace plan=%+v error=%v", plan, err)
 			}
 
-			_, err = service.CreateSession(ctx, options, stalePlan)
+			_, err = service.CreateCopySession(ctx, options, stalePlan)
 			if domain.CategoryOf(err) != domain.ErrorPrecondition ||
 				!strings.Contains(err.Error(), "namespace "+name+" does not exist") {
 				t.Fatalf("stale plan: %v", err)
@@ -219,10 +220,66 @@ func TestCrossClusterMissingNamespacesRejectPlanningAndStalePlans(t *testing.T) 
 	}
 }
 
+func TestTypedSessionLoadRecognizesReservationHandoff(t *testing.T) {
+	service, options, _ := crossFixture()
+	reservationOptions := ReservationOptions{
+		UnusedStoragePolicy:     options.UnusedStoragePolicy,
+		SessionID:               options.SessionID,
+		SessionNamespace:        options.SessionNamespace,
+		SourceNamespace:         options.SourceNamespace,
+		DestinationNamespace:    options.DestinationNamespace,
+		SourcePVCs:              options.SourcePVCs,
+		DestinationPVCs:         options.DestinationPVCs,
+		DestinationCapacities:   options.DestinationCapacities,
+		SourcePaths:             options.SourcePaths,
+		DestinationPaths:        options.DestinationPaths,
+		DestinationStorageClass: options.DestinationStorageClass,
+		AllowVolumeShrink:       options.AllowVolumeShrink,
+		SkipSourceUsageCheck:    options.SkipSourceUsageCheck,
+		TargetNode:              options.TargetNode,
+		ToolImage:               options.ToolImage,
+		Strategies:              options.Strategies,
+	}
+
+	plan, err := service.PlanReservation(context.Background(), reservationOptions)
+	if err != nil || !plan.Ready {
+		t.Fatalf("reservation plan ready=%v err=%v checks=%#v", plan.Ready, err, plan.Checks)
+	}
+
+	reservation, err := service.CreateReservationSession(
+		context.Background(), reservationOptions, plan,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := service.Get(
+		context.Background(),
+		options.SessionNamespace,
+		options.SessionID,
+	); !errors.Is(
+		err,
+		ErrReservationSession,
+	) {
+		t.Fatalf("typed copy loader error=%v, want reservation marker", err)
+	}
+
+	loaded, err := service.GetReservation(
+		context.Background(), options.SessionNamespace, options.SessionID,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if loaded.Kind != ReservationKind || loaded.ID != reservation.ID {
+		t.Fatalf("loaded reservation=%#v", loaded)
+	}
+}
+
 func TestPlanAndCreateSessionKeepClustersSeparate(t *testing.T) {
 	service, options, _ := crossFixture()
 
-	plan, err := service.Plan(context.Background(), options)
+	plan, err := service.PlanCopy(context.Background(), options)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -231,7 +288,7 @@ func TestPlanAndCreateSessionKeepClustersSeparate(t *testing.T) {
 		t.Fatalf("plan is not ready: %#v", plan.Checks)
 	}
 
-	session, err := service.CreateSession(context.Background(), options, plan)
+	session, err := service.CreateCopySession(context.Background(), options, plan)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -249,15 +306,95 @@ func TestPlanAndCreateSessionKeepClustersSeparate(t *testing.T) {
 	}
 }
 
-func TestSaveRejectsLostLeaseBeforeWritingCheckpoint(t *testing.T) {
+func TestCreateCopySessionRejectsOptionsChangedAfterPlanning(t *testing.T) {
 	service, options, _ := crossFixture()
 
-	plan, err := service.Plan(context.Background(), options)
+	plan, err := service.PlanCopy(context.Background(), options)
 	if err != nil || !plan.Ready {
 		t.Fatalf("plan ready=%v err=%v checks=%#v", plan.Ready, err, plan.Checks)
 	}
 
-	session, err := service.CreateSession(context.Background(), options, plan)
+	options.VerifyChecksum = !options.VerifyChecksum
+	if _, err := service.CreateCopySession(context.Background(), options, plan); err == nil ||
+		!strings.Contains(err.Error(), "options changed after planning") {
+		t.Fatalf("CreateCopySession error=%v, want changed-options rejection", err)
+	}
+}
+
+func TestCreateCopySessionBindsEveryPlanningInput(t *testing.T) {
+	service, options, _ := crossFixture()
+
+	plan, err := service.PlanCopy(context.Background(), options)
+	if err != nil || !plan.Ready {
+		t.Fatalf("plan ready=%v err=%v checks=%#v", plan.Ready, err, plan.Checks)
+	}
+
+	if plan.Kind != CopyKind {
+		t.Fatalf("copy plan kind=%q, want %q", plan.Kind, CopyKind)
+	}
+
+	cases := []struct {
+		name   string
+		mutate func(*CopyOptions)
+	}{
+		{
+			name:   "session id",
+			mutate: func(value *CopyOptions) { value.SessionID = "another-session" },
+		},
+		{
+			name:   "session namespace",
+			mutate: func(value *CopyOptions) { value.SessionNamespace = "another-namespace" },
+		},
+		{
+			name:   "source namespace",
+			mutate: func(value *CopyOptions) { value.SourceNamespace = "another-source" },
+		},
+		{
+			name:   "destination namespace",
+			mutate: func(value *CopyOptions) { value.DestinationNamespace = "another-destination" },
+		},
+		{name: "unused storage policy", mutate: func(value *CopyOptions) {
+			value.UnusedStoragePolicy = v1alpha1.UnusedStorageDelete
+		}},
+		{
+			name:   "volume shrink",
+			mutate: func(value *CopyOptions) { value.AllowVolumeShrink = !value.AllowVolumeShrink },
+		},
+		{name: "source usage check", mutate: func(value *CopyOptions) {
+			value.SkipSourceUsageCheck = !value.SkipSourceUsageCheck
+		}},
+		{
+			name:   "target node",
+			mutate: func(value *CopyOptions) { value.TargetNode = "destination-node" },
+		},
+	}
+
+	for _, testCase := range cases {
+		t.Run(testCase.name, func(t *testing.T) {
+			changed := options
+			testCase.mutate(&changed)
+
+			if _, err := service.CreateCopySession(
+				context.Background(),
+				changed,
+				plan,
+			); err == nil ||
+				!strings.Contains(err.Error(), "options changed after planning") {
+				t.Fatalf("CreateCopySession error=%v, want changed-options rejection", err)
+			}
+		})
+	}
+}
+
+func TestSaveRejectsLostLeaseBeforeWritingCheckpoint(t *testing.T) {
+	service, options, _ := crossFixture()
+
+	plan, err := service.PlanCopy(context.Background(), options)
+	if err != nil || !plan.Ready {
+		t.Fatalf("plan ready=%v err=%v checks=%#v", plan.Ready, err, plan.Checks)
+	}
+
+	session, err := service.CreateCopySession(context.Background(), options, plan)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -266,6 +403,7 @@ func TestSaveRejectsLostLeaseBeforeWritingCheckpoint(t *testing.T) {
 	if !ok {
 		t.Fatalf("source client type=%T", service.SourceClientForTest())
 	}
+
 	source.ClearActions()
 
 	lost := errors.New("session lease was lost")
@@ -280,7 +418,9 @@ func TestSaveRejectsLostLeaseBeforeWritingCheckpoint(t *testing.T) {
 	}
 
 	for _, action := range source.Actions() {
-		if action.GetVerb() == "create" || action.GetVerb() == "update" || action.GetVerb() == "patch" || action.GetVerb() == "delete" {
+		if action.GetVerb() == "create" || action.GetVerb() == "update" ||
+			action.GetVerb() == "patch" ||
+			action.GetVerb() == "delete" {
 			t.Fatalf("lost lease caused a write: %#v", action)
 		}
 	}
@@ -341,7 +481,7 @@ func TestCreateSessionReadsDestinationStorageClassOnceForMultipleVolumes(t *test
 		},
 	)
 
-	plan, err := service.Plan(context.Background(), options)
+	plan, err := service.PlanCopy(context.Background(), options)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -352,7 +492,7 @@ func TestCreateSessionReadsDestinationStorageClassOnceForMultipleVolumes(t *test
 
 	beforeCreate := storageClassGets.Load()
 
-	if _, err := service.CreateSession(context.Background(), options, plan); err != nil {
+	if _, err := service.CreateCopySession(context.Background(), options, plan); err != nil {
 		t.Fatal(err)
 	}
 
@@ -365,7 +505,7 @@ func TestCrossClusterPlanInitialLargerDestinationDoesNotRequireExpansion(t *test
 	service, options, _ := crossFixture()
 	options.DestinationCapacities = []string{"3Gi"}
 
-	plan, err := service.Plan(context.Background(), options)
+	plan, err := service.PlanCopy(context.Background(), options)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -390,7 +530,7 @@ func TestCrossClusterPlanRejectsIncompleteSourceExpansion(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	plan, err := service.Plan(context.Background(), options)
+	plan, err := service.PlanCopy(context.Background(), options)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -430,7 +570,7 @@ func TestCrossClusterPlanPropagatesPerVolumeConsumerFailure(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	plan, err := service.Plan(context.Background(), options)
+	plan, err := service.PlanCopy(context.Background(), options)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -455,7 +595,7 @@ func TestCrossClusterPlanPropagatesPerVolumeConsumerFailure(t *testing.T) {
 func TestCreateSessionRechecksDestinationAccessModes(t *testing.T) {
 	service, options, _ := crossFixture()
 
-	plan, err := service.Plan(context.Background(), options)
+	plan, err := service.PlanCopy(context.Background(), options)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -492,7 +632,7 @@ func TestCreateSessionRechecksDestinationAccessModes(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if _, err := service.CreateSession(context.Background(), options, plan); err == nil ||
+	if _, err := service.CreateCopySession(context.Background(), options, plan); err == nil ||
 		!strings.Contains(err.Error(), "cannot provide source PVC") {
 		t.Fatalf("CreateSession error=%v", err)
 	}
@@ -517,7 +657,7 @@ func TestPlanChecksDestinationPVCQuota(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	plan, err := service.Plan(context.Background(), options)
+	plan, err := service.PlanCopy(context.Background(), options)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -546,7 +686,7 @@ func TestPlanChecksSourceSessionQuota(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	plan, err := service.Plan(context.Background(), options)
+	plan, err := service.PlanCopy(context.Background(), options)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -575,7 +715,7 @@ func TestPlanChecksSourceToolQuota(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	plan, err := service.Plan(context.Background(), options)
+	plan, err := service.PlanCopy(context.Background(), options)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -623,7 +763,7 @@ func TestPlanAppliesCrossClusterToolPodQuotaToNotTerminatingScope(t *testing.T) 
 				t.Fatal(err)
 			}
 
-			plan, err := service.Plan(context.Background(), options)
+			plan, err := service.PlanCopy(context.Background(), options)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -673,7 +813,7 @@ func TestPlanAccountsForDestinationLimitRangeDefault(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	plan, err := service.Plan(context.Background(), options)
+	plan, err := service.PlanCopy(context.Background(), options)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -721,7 +861,7 @@ func TestPlanDoesNotTurnLimitRangeDefaultRequestIntoLimit(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	plan, err := service.Plan(context.Background(), options)
+	plan, err := service.PlanCopy(context.Background(), options)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -745,7 +885,7 @@ func TestPlanMissingDestinationStorageClassReturnsFailedPlan(t *testing.T) {
 	service, options, _ := crossFixture()
 	options.DestinationStorageClass = "missing"
 
-	plan, err := service.Plan(context.Background(), options)
+	plan, err := service.PlanCopy(context.Background(), options)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -772,7 +912,7 @@ func TestPlanRejectsMismatchedSourcePVClaimRef(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	plan, err := service.Plan(context.Background(), options)
+	plan, err := service.PlanCopy(context.Background(), options)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -807,7 +947,7 @@ func TestPlanRejectsReadOnlySourcePVC(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	plan, err := service.Plan(context.Background(), options)
+	plan, err := service.PlanCopy(context.Background(), options)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -856,7 +996,7 @@ func TestPlanRejectsKnownDestinationAccessModeMismatch(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	plan, err := service.Plan(context.Background(), options)
+	plan, err := service.PlanCopy(context.Background(), options)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -878,7 +1018,7 @@ func TestPlanRejectsTransferPathsThatEscapePVC(t *testing.T) {
 	service, options, _ := crossFixture()
 	options.SourcePaths = []string{"../outside"}
 
-	plan, err := service.Plan(context.Background(), options)
+	plan, err := service.PlanCopy(context.Background(), options)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -899,12 +1039,12 @@ func TestPlanRejectsTransferPathsThatEscapePVC(t *testing.T) {
 func TestCopyUsesBothConnectionsAndPersistsTransferState(t *testing.T) {
 	service, options, copier := crossFixture()
 
-	plan, err := service.Plan(context.Background(), options)
+	plan, err := service.PlanCopy(context.Background(), options)
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	session, err := service.CreateSession(context.Background(), options, plan)
+	session, err := service.CreateCopySession(context.Background(), options, plan)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -952,38 +1092,38 @@ func TestCopyUsesBothConnectionsAndPersistsTransferState(t *testing.T) {
 		t.Fatalf("transfer state not completed: %#v", session.Status)
 	}
 
-	if len(copier.requests) != 1 || copier.requests[0].KubeconfigPath != "source.yaml" ||
-		copier.requests[0].DestinationKubeconfigPath != "destination.yaml" {
+	if len(copier.requests) != 1 || copier.requests[0].Source.KubeconfigPath != "source.yaml" ||
+		copier.requests[0].Destination.KubeconfigPath != "destination.yaml" {
 		t.Fatalf("copy request did not preserve two connections: %#v", copier.requests)
 	}
 
 	for _, expected := range kube.ZeroResourceHelmValues() {
-		if !slices.Contains(copier.requests[0].HelmStringValues, expected) {
+		if !slices.Contains(copier.requests[0].Runtime.HelmStringValues, expected) {
 			t.Fatalf(
 				"copy request lacks zero resource value %q: %v",
 				expected,
-				copier.requests[0].HelmStringValues,
+				copier.requests[0].Runtime.HelmStringValues,
 			)
 		}
 	}
 
 	identityValues := kube.TransferServiceAccountHelmValues()
 	for _, expected := range identityValues.Values {
-		if !slices.Contains(copier.requests[0].HelmValues, expected) {
+		if !slices.Contains(copier.requests[0].Runtime.HelmValues, expected) {
 			t.Fatalf(
 				"copy request lacks typed transfer identity value %q: %v",
 				expected,
-				copier.requests[0].HelmValues,
+				copier.requests[0].Runtime.HelmValues,
 			)
 		}
 	}
 
 	for _, expected := range identityValues.StringValues {
-		if !slices.Contains(copier.requests[0].HelmStringValues, expected) {
+		if !slices.Contains(copier.requests[0].Runtime.HelmStringValues, expected) {
 			t.Fatalf(
 				"copy request lacks transfer identity value %q: %v",
 				expected,
-				copier.requests[0].HelmStringValues,
+				copier.requests[0].Runtime.HelmStringValues,
 			)
 		}
 	}
@@ -1021,12 +1161,12 @@ func TestCopyUsesBothConnectionsAndPersistsTransferState(t *testing.T) {
 func TestCopyMergesHardTaintsAcrossSourceAndDestinationNodes(t *testing.T) {
 	service, options, copier := crossFixture()
 
-	plan, err := service.Plan(context.Background(), options)
+	plan, err := service.PlanCopy(context.Background(), options)
 	if err != nil || !plan.Ready {
 		t.Fatalf("plan ready=%v err=%v checks=%#v", plan.Ready, err, plan.Checks)
 	}
 
-	session, err := service.CreateSession(context.Background(), options, plan)
+	session, err := service.CreateCopySession(context.Background(), options, plan)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1087,7 +1227,7 @@ func TestCopyMergesHardTaintsAcrossSourceAndDestinationNodes(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	values := copier.requests[0].HelmStringValues
+	values := copier.requests[0].Runtime.HelmStringValues
 	for _, expected := range []string{
 		"rsync.tolerations[0].key=destination-only",
 		"sshd.tolerations[0].key=destination-only",
@@ -1111,12 +1251,12 @@ func TestCopyMergesHardTaintsAcrossSourceAndDestinationNodes(t *testing.T) {
 func TestCopyPersistsTargetNodeLookupFailure(t *testing.T) {
 	service, options, copier := crossFixture()
 
-	plan, err := service.Plan(context.Background(), options)
+	plan, err := service.PlanCopy(context.Background(), options)
 	if err != nil || !plan.Ready {
 		t.Fatalf("plan ready=%v err=%v checks=%#v", plan.Ready, err, plan.Checks)
 	}
 
-	session, err := service.CreateSession(context.Background(), options, plan)
+	session, err := service.CreateCopySession(context.Background(), options, plan)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1156,12 +1296,12 @@ func TestCopyPersistsTargetNodeLookupFailure(t *testing.T) {
 func TestCopyReturnsFailureCheckpointError(t *testing.T) {
 	service, options, _ := crossFixture()
 
-	plan, err := service.Plan(context.Background(), options)
+	plan, err := service.PlanCopy(context.Background(), options)
 	if err != nil || !plan.Ready {
 		t.Fatalf("plan ready=%v err=%v checks=%#v", plan.Ready, err, plan.Checks)
 	}
 
-	session, err := service.CreateSession(context.Background(), options, plan)
+	session, err := service.CreateCopySession(context.Background(), options, plan)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1207,12 +1347,12 @@ func TestReservationConsumerUsesZeroToolResources(t *testing.T) {
 	service, options, _ := crossFixture()
 	options.TargetNode = "destination-node"
 
-	plan, err := service.Plan(context.Background(), options)
+	plan, err := service.PlanCopy(context.Background(), options)
 	if err != nil || !plan.Ready {
 		t.Fatalf("plan ready=%v err=%v checks=%#v", plan.Ready, err, plan.Checks)
 	}
 
-	session, err := service.CreateSession(context.Background(), options, plan)
+	session, err := service.CreateCopySession(context.Background(), options, plan)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1288,12 +1428,12 @@ func TestReservationConsumerUsesZeroToolResources(t *testing.T) {
 func TestCopyResumeContinuesTransferAttemptCount(t *testing.T) {
 	service, options, copier := crossFixture()
 
-	plan, err := service.Plan(context.Background(), options)
+	plan, err := service.PlanCopy(context.Background(), options)
 	if err != nil || !plan.Ready {
 		t.Fatalf("plan ready=%v err=%v", plan.Ready, err)
 	}
 
-	session, err := service.CreateSession(context.Background(), options, plan)
+	session, err := service.CreateCopySession(context.Background(), options, plan)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1365,12 +1505,12 @@ func TestCopyResumeContinuesTransferAttemptCount(t *testing.T) {
 func TestCopyResumeRejectsCompletedDestinationReplacement(t *testing.T) {
 	service, options, _ := crossFixture()
 
-	plan, err := service.Plan(context.Background(), options)
+	plan, err := service.PlanCopy(context.Background(), options)
 	if err != nil || !plan.Ready {
 		t.Fatalf("plan ready=%v err=%v", plan.Ready, err)
 	}
 
-	session, err := service.CreateSession(context.Background(), options, plan)
+	session, err := service.CreateCopySession(context.Background(), options, plan)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1504,12 +1644,12 @@ func TestReservationConsumerNamesDoNotCollideAfterDNSLengthLimit(t *testing.T) {
 func TestSessionValidationRejectsUnapprovedShrinkAndUnsafePath(t *testing.T) {
 	service, options, _ := crossFixture()
 
-	plan, err := service.Plan(context.Background(), options)
+	plan, err := service.PlanCopy(context.Background(), options)
 	if err != nil || !plan.Ready {
 		t.Fatalf("plan ready=%v err=%v", plan.Ready, err)
 	}
 
-	session, err := service.CreateSession(context.Background(), options, plan)
+	session, err := service.CreateCopySession(context.Background(), options, plan)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1535,12 +1675,12 @@ func TestSessionValidationRejectsUnapprovedShrinkAndUnsafePath(t *testing.T) {
 func TestSessionValidationRejectsDuplicateDestinationPVCs(t *testing.T) {
 	service, options, _ := crossFixture()
 
-	plan, err := service.Plan(context.Background(), options)
+	plan, err := service.PlanCopy(context.Background(), options)
 	if err != nil || !plan.Ready {
 		t.Fatalf("plan ready=%v err=%v", plan.Ready, err)
 	}
 
-	session, err := service.CreateSession(context.Background(), options, plan)
+	session, err := service.CreateCopySession(context.Background(), options, plan)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1554,7 +1694,11 @@ func TestSessionValidationRejectsDuplicateDestinationPVCs(t *testing.T) {
 
 	session.Status.Volumes = append(
 		session.Status.Volumes,
-		VolumeStatus{SourcePVCName: duplicate.Source.PVC.Name},
+		CopyVolumeStatus{
+			ReservationVolumeStatus: ReservationVolumeStatus{
+				SourcePVCName: duplicate.Source.PVC.Name,
+			},
+		},
 	)
 	if err := session.Validate(); err == nil {
 		t.Fatal("session accepted two source PVCs mapped to one destination PVC")
@@ -1564,12 +1708,12 @@ func TestSessionValidationRejectsDuplicateDestinationPVCs(t *testing.T) {
 func TestCopyRejectsSourcePVCReplacementAfterReservation(t *testing.T) {
 	service, options, _ := crossFixture()
 
-	plan, err := service.Plan(context.Background(), options)
+	plan, err := service.PlanCopy(context.Background(), options)
 	if err != nil || !plan.Ready {
 		t.Fatalf("plan ready=%v err=%v", plan.Ready, err)
 	}
 
-	session, err := service.CreateSession(context.Background(), options, plan)
+	session, err := service.CreateCopySession(context.Background(), options, plan)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1645,12 +1789,12 @@ func TestCopyRejectsSourcePVCReplacementAfterReservation(t *testing.T) {
 func TestGetRejectsSessionNamespaceMismatch(t *testing.T) {
 	service, options, _ := crossFixture()
 
-	plan, err := service.Plan(context.Background(), options)
+	plan, err := service.PlanCopy(context.Background(), options)
 	if err != nil || !plan.Ready {
 		t.Fatalf("plan ready=%v err=%v", plan.Ready, err)
 	}
 
-	session, err := service.CreateSession(context.Background(), options, plan)
+	session, err := service.CreateCopySession(context.Background(), options, plan)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1690,12 +1834,12 @@ func TestGetRejectsSessionNamespaceMismatch(t *testing.T) {
 func TestCleanupRetainsCompletedDestinationPVCAndReleasedPV(t *testing.T) {
 	service, options, _ := crossFixture()
 
-	plan, err := service.Plan(context.Background(), options)
+	plan, err := service.PlanCopy(context.Background(), options)
 	if err != nil || !plan.Ready {
 		t.Fatalf("plan ready=%v err=%v checks=%#v", plan.Ready, err, plan.Checks)
 	}
 
-	session, err := service.CreateSession(context.Background(), options, plan)
+	session, err := service.CreateCopySession(context.Background(), options, plan)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1792,12 +1936,12 @@ func TestCleanupRetainsCompletedDestinationPVCAndReleasedPV(t *testing.T) {
 func TestCleanupRetainDeletesSessionWithMissingRecordedDestination(t *testing.T) {
 	service, options, _ := crossFixture()
 
-	plan, err := service.Plan(context.Background(), options)
+	plan, err := service.PlanCopy(context.Background(), options)
 	if err != nil || !plan.Ready {
 		t.Fatalf("plan ready=%v err=%v", plan.Ready, err)
 	}
 
-	session, err := service.CreateSession(context.Background(), options, plan)
+	session, err := service.CreateCopySession(context.Background(), options, plan)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1815,12 +1959,12 @@ func TestCleanupRetainDeletesSessionWithMissingRecordedDestination(t *testing.T)
 func TestCleanupRetainsUnrecordedOwnedDestinationPVC(t *testing.T) {
 	service, options, _ := crossFixture()
 
-	plan, err := service.Plan(context.Background(), options)
+	plan, err := service.PlanCopy(context.Background(), options)
 	if err != nil || !plan.Ready {
 		t.Fatalf("plan ready=%v err=%v checks=%#v", plan.Ready, err, plan.Checks)
 	}
 
-	session, err := service.CreateSession(context.Background(), options, plan)
+	session, err := service.CreateCopySession(context.Background(), options, plan)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1871,12 +2015,12 @@ func TestCleanupRetainsUnrecordedOwnedDestinationPVC(t *testing.T) {
 func TestCleanupRemovesReservationPodWhenPVCIsAlreadyGone(t *testing.T) {
 	service, options, _ := crossFixture()
 
-	plan, err := service.Plan(context.Background(), options)
+	plan, err := service.PlanCopy(context.Background(), options)
 	if err != nil || !plan.Ready {
 		t.Fatalf("plan ready=%v err=%v", plan.Ready, err)
 	}
 
-	session, err := service.CreateSession(context.Background(), options, plan)
+	session, err := service.CreateCopySession(context.Background(), options, plan)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1920,7 +2064,7 @@ func TestCleanupRemovesReservationPodWhenPVCIsAlreadyGone(t *testing.T) {
 	}
 }
 
-func createBoundDestination(t *testing.T, service *Service, session *Session) {
+func createBoundDestination(t *testing.T, service *Service, session *CopySession) {
 	t.Helper()
 
 	destination := service.DestinationClientForTest()

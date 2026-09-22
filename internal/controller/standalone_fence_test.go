@@ -31,6 +31,7 @@ func TestPauseStandaloneReportsFenceLossAfterPodDelete(t *testing.T) {
 	)
 
 	manager := NewManager(client, nil, nil)
+
 	err := manager.pauseStandalone(
 		kube.WithLeaseFence(context.Background(), fence),
 		v1alpha1.ObjectReference{Namespace: pod.Namespace, Name: pod.Name, UID: pod.UID},

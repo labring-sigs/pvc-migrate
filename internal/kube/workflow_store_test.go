@@ -211,6 +211,7 @@ func TestWorkflowStoreDeleteRejectsLostLeaseBeforeFinalizerMutation(t *testing.T
 
 	t.Run("configmap", func(t *testing.T) {
 		object := storedRename()
+
 		data, err := json.Marshal(object)
 		if err != nil {
 			t.Fatal(err)
@@ -227,6 +228,7 @@ func TestWorkflowStoreDeleteRejectsLostLeaseBeforeFinalizerMutation(t *testing.T
 			},
 			Data: map[string]string{SessionDataKey: string(data)},
 		})
+
 		store, err := NewConfigMapWorkflowStore(
 			client,
 			"sessions",
@@ -257,6 +259,7 @@ func TestWorkflowStoreDeleteRejectsLostLeaseBeforeFinalizerMutation(t *testing.T
 		if err != nil {
 			t.Fatal(err)
 		}
+
 		if !slices.Equal(current.Finalizers, []string{SessionFinalizer}) {
 			t.Fatalf("lost lease mutated ConfigMap finalizers: %v", current.Finalizers)
 		}
@@ -274,6 +277,7 @@ func TestWorkflowStoreDeleteRejectsLostLeaseBeforeFinalizerMutation(t *testing.T
 			WithScheme(scheme).
 			WithObjects(object.DeepCopy()).
 			Build()
+
 		store, err := NewCRDWorkflowStore(
 			client,
 			func() *v1alpha1.Rename { return &v1alpha1.Rename{} },
@@ -296,9 +300,14 @@ func TestWorkflowStoreDeleteRejectsLostLeaseBeforeFinalizerMutation(t *testing.T
 		}
 
 		current := &v1alpha1.Rename{}
-		if err := client.Get(t.Context(), crclient.ObjectKeyFromObject(object), current); err != nil {
+		if err := client.Get(
+			t.Context(),
+			crclient.ObjectKeyFromObject(object),
+			current,
+		); err != nil {
 			t.Fatal(err)
 		}
+
 		if !slices.Equal(current.Finalizers, []string{SessionFinalizer}) {
 			t.Fatalf("lost lease mutated CRD finalizers: %v", current.Finalizers)
 		}
@@ -315,15 +324,22 @@ func TestWorkflowStoresRejectLeaseLossAfterDurableWrite(t *testing.T) {
 			object.UID = ""
 			object.ResourceVersion = ""
 			fence := &testLeaseFence{}
+
 			var store WorkflowStore[*v1alpha1.Rename]
 
 			if backend == "configmap" {
 				client := fake.NewClientset()
-				client.PrependReactor("create", "*", func(ktesting.Action) (bool, runtime.Object, error) {
-					fence.err = lost
-					return false, nil, nil
-				})
+				client.PrependReactor(
+					"create",
+					"*",
+					func(ktesting.Action) (bool, runtime.Object, error) {
+						fence.err = lost
+						return false, nil, nil
+					},
+				)
+
 				var err error
+
 				store, err = NewConfigMapWorkflowStore(
 					client,
 					"sessions",
@@ -353,7 +369,9 @@ func TestWorkflowStoresRejectLeaseLossAfterDurableWrite(t *testing.T) {
 						},
 					}).
 					Build()
+
 				var err error
+
 				store, err = NewCRDWorkflowStore(
 					client,
 					func() *v1alpha1.Rename { return &v1alpha1.Rename{} },
@@ -363,7 +381,13 @@ func TestWorkflowStoresRejectLeaseLossAfterDurableWrite(t *testing.T) {
 				}
 			}
 
-			if err := store.Create(WithLeaseFence(t.Context(), fence), object); !errors.Is(err, lost) {
+			if err := store.Create(
+				WithLeaseFence(t.Context(), fence),
+				object,
+			); !errors.Is(
+				err,
+				lost,
+			) {
 				t.Fatalf("create error = %v, want lease loss after create", err)
 			}
 
@@ -380,6 +404,7 @@ func TestWorkflowStoresRejectLeaseLossAfterDurableWrite(t *testing.T) {
 		t.Run(backend+"-save", func(t *testing.T) {
 			original := storedRename()
 			fence := &testLeaseFence{}
+
 			var store WorkflowStore[*v1alpha1.Rename]
 
 			if backend == "configmap" {
@@ -398,11 +423,17 @@ func TestWorkflowStoresRejectLeaseLossAfterDurableWrite(t *testing.T) {
 					},
 					Data: map[string]string{SessionDataKey: string(data)},
 				})
-				client.PrependReactor("update", "*", func(ktesting.Action) (bool, runtime.Object, error) {
-					fence.err = lost
-					return false, nil, nil
-				})
+				client.PrependReactor(
+					"update",
+					"*",
+					func(ktesting.Action) (bool, runtime.Object, error) {
+						fence.err = lost
+						return false, nil, nil
+					},
+				)
+
 				var err error
+
 				store, err = NewConfigMapWorkflowStore(
 					client,
 					"sessions",
@@ -435,7 +466,9 @@ func TestWorkflowStoresRejectLeaseLossAfterDurableWrite(t *testing.T) {
 						},
 					}).
 					Build()
+
 				var err error
+
 				store, err = NewCRDWorkflowStore(
 					client,
 					func() *v1alpha1.Rename { return &v1alpha1.Rename{} },
@@ -449,9 +482,16 @@ func TestWorkflowStoresRejectLeaseLossAfterDurableWrite(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
+
 			loaded.Status.Message = "durable checkpoint"
 
-			if err := store.Save(WithLeaseFence(t.Context(), fence), loaded); !errors.Is(err, lost) {
+			if err := store.Save(
+				WithLeaseFence(t.Context(), fence),
+				loaded,
+			); !errors.Is(
+				err,
+				lost,
+			) {
 				t.Fatalf("save error = %v, want lease loss after write", err)
 			}
 
@@ -459,8 +499,12 @@ func TestWorkflowStoresRejectLeaseLossAfterDurableWrite(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
+
 			if persisted.Status.Message != "durable checkpoint" {
-				t.Fatalf("durable status was lost after reported lease error: %q", persisted.Status.Message)
+				t.Fatalf(
+					"durable status was lost after reported lease error: %q",
+					persisted.Status.Message,
+				)
 			}
 		})
 
@@ -468,6 +512,7 @@ func TestWorkflowStoresRejectLeaseLossAfterDurableWrite(t *testing.T) {
 			original := storedRename()
 			original.Name = "delete-after-write"
 			fence := &testLeaseFence{}
+
 			var store WorkflowStore[*v1alpha1.Rename]
 
 			if backend == "configmap" {
@@ -486,11 +531,17 @@ func TestWorkflowStoresRejectLeaseLossAfterDurableWrite(t *testing.T) {
 					},
 					Data: map[string]string{SessionDataKey: string(data)},
 				})
-				client.PrependReactor("delete", "*", func(ktesting.Action) (bool, runtime.Object, error) {
-					fence.err = lost
-					return false, nil, nil
-				})
+				client.PrependReactor(
+					"delete",
+					"*",
+					func(ktesting.Action) (bool, runtime.Object, error) {
+						fence.err = lost
+						return false, nil, nil
+					},
+				)
+
 				var err error
+
 				store, err = NewConfigMapWorkflowStore(
 					client,
 					"sessions",
@@ -521,7 +572,9 @@ func TestWorkflowStoresRejectLeaseLossAfterDurableWrite(t *testing.T) {
 						},
 					}).
 					Build()
+
 				var err error
+
 				store, err = NewCRDWorkflowStore(
 					client,
 					func() *v1alpha1.Rename { return &v1alpha1.Rename{} },
@@ -535,11 +588,23 @@ func TestWorkflowStoresRejectLeaseLossAfterDurableWrite(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if err := store.Delete(WithLeaseFence(t.Context(), fence), loaded); !errors.Is(err, lost) {
+
+			if err := store.Delete(
+				WithLeaseFence(t.Context(), fence),
+				loaded,
+			); !errors.Is(
+				err,
+				lost,
+			) {
 				t.Fatalf("delete error = %v, want lease loss after delete", err)
 			}
 
-			if _, err := store.Load(t.Context(), crclient.ObjectKeyFromObject(original)); !apierrors.IsNotFound(err) {
+			if _, err := store.Load(
+				t.Context(),
+				crclient.ObjectKeyFromObject(original),
+			); !apierrors.IsNotFound(
+				err,
+			) {
 				t.Fatalf("durable workflow survived delete: %v", err)
 			}
 		})
@@ -846,7 +911,9 @@ func TestCRDWorkflowProtectionReportsFenceLossAfterFinalizerWrite(t *testing.T) 
 	original := storedRename()
 	fence := &testLeaseFence{}
 	lost := errors.New("lease lost after protection update")
+
 	var updatedFinalizers []string
+
 	client := crfake.NewClientBuilder().
 		WithScheme(scheme).
 		WithStatusSubresource(original).
@@ -870,14 +937,22 @@ func TestCRDWorkflowProtectionReportsFenceLossAfterFinalizerWrite(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	object, err := store.Load(t.Context(), crclient.ObjectKeyFromObject(original))
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	if err := store.EnsureProtection(WithLeaseFence(t.Context(), fence), object); !errors.Is(err, lost) {
+	if err := store.EnsureProtection(
+		WithLeaseFence(t.Context(), fence),
+		object,
+	); !errors.Is(
+		err,
+		lost,
+	) {
 		t.Fatalf("protection error = %v, want lease loss after finalizer write", err)
 	}
+
 	if !slices.Contains(updatedFinalizers, SessionFinalizer) {
 		t.Fatal("protection finalizer was not persisted before reporting lease loss")
 	}
@@ -948,6 +1023,7 @@ func TestCRDWorkflowStoreDeleteRejectsDifferentUIDWhileDeleting(t *testing.T) {
 	}
 
 	stale := record.DeepCopy()
+
 	stale.UID = "replacement"
 	if err := store.Delete(t.Context(), stale); domain.CategoryOf(err) != domain.ErrorConflict {
 		t.Fatalf("different deleting workflow UID accepted: %v", err)
@@ -957,6 +1033,7 @@ func TestCRDWorkflowStoreDeleteRejectsDifferentUIDWhileDeleting(t *testing.T) {
 	if err := client.Get(t.Context(), crclient.ObjectKeyFromObject(record), live); err != nil {
 		t.Fatal(err)
 	}
+
 	if !slices.Contains(live.Finalizers, SessionFinalizer) {
 		t.Fatal("UID-mismatched cleanup removed the live workflow finalizer")
 	}
@@ -990,7 +1067,13 @@ func TestCRDWorkflowStoreDeleteRemovesLegacySessionFinalizer(t *testing.T) {
 	}
 
 	live := &v1alpha1.Rename{}
-	if err := client.Get(t.Context(), crclient.ObjectKeyFromObject(record), live); !apierrors.IsNotFound(err) {
+	if err := client.Get(
+		t.Context(),
+		crclient.ObjectKeyFromObject(record),
+		live,
+	); !apierrors.IsNotFound(
+		err,
+	) {
 		t.Fatalf("legacy-finalizer workflow still exists: %v (err=%v)", live, err)
 	}
 }
@@ -1008,7 +1091,9 @@ func TestCRDWorkflowStoreDeleteReportsFenceLossAfterFinalizerWrite(t *testing.T)
 
 	fence := &testLeaseFence{}
 	lost := errors.New("lease lost after finalizer update")
+
 	var updatedFinalizers []string
+
 	client := crfake.NewClientBuilder().
 		WithScheme(scheme).
 		WithObjects(record.DeepCopy()).
@@ -1038,6 +1123,7 @@ func TestCRDWorkflowStoreDeleteReportsFenceLossAfterFinalizerWrite(t *testing.T)
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	if err := store.Delete(WithLeaseFence(t.Context(), fence), loaded); !errors.Is(err, lost) {
 		t.Fatalf("delete error = %v, want lease loss after finalizer write", err)
 	}
@@ -1096,8 +1182,8 @@ func TestWithWorkflowLeaseDeletingObjectConvergesWhenLockUnavailable(t *testing.
 		t.Fatalf("deleting workflow must converge without a lock: %v", err)
 	}
 
-	if ran {
-		t.Fatal("convergence must not run the operation body")
+	if !ran {
+		t.Fatal("terminating lock namespace skipped workflow cleanup")
 	}
 
 	final := &v1alpha1.Rename{}
@@ -1205,8 +1291,15 @@ func TestWithWorkflowLeaseDeletingObjectRetainsFinalizerOnLockContention(t *test
 		t.Fatal(err)
 	}
 
-	err = WithWorkflowLease(t.Context(), store, contendedSessionLocker{}, record.Namespace, live, true,
-		func(context.Context, SessionLock) error { return nil })
+	err = WithWorkflowLease(
+		t.Context(),
+		store,
+		contendedSessionLocker{},
+		record.Namespace,
+		live,
+		true,
+		func(context.Context, SessionLock) error { return nil },
+	)
 	if !errors.Is(err, ErrSessionLockContention) {
 		t.Fatalf("lock contention error = %v, want contention", err)
 	}

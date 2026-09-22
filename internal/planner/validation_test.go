@@ -167,12 +167,10 @@ func TestPlanVolumeCapacityHandlesKubeBlocksCapacityChangeByOperation(t *testing
 				workloadKind := v1alpha1.WorkloadKubeBlocks
 
 				state := &planState{
-					options: planOptions{
-						operationKind: operation, TransferOptions: v1alpha1.TransferOptions{
-							AllowVolumeShrink:    true,
-							SkipSourceUsageCheck: true,
-						},
-					},
+					options: transferInput{TransferOptions: v1alpha1.TransferOptions{
+						AllowVolumeShrink:    true,
+						SkipSourceUsageCheck: true,
+					}},
 					plan: &domain.TransferPlan{
 						PlanSummary: domain.PlanSummary{Ready: true},
 					},
@@ -229,7 +227,7 @@ func TestPodMigrationCapacityDetectsKubeBlocksSourcePVC(t *testing.T) {
 
 func TestPlanVolumeCapacityDoesNotTreatPvcMigratePVCAsKubeBlocks(t *testing.T) {
 	state := &planState{
-		options:             planOptions{operationKind: domain.OperationMigrate},
+		options:             transferInput{},
 		plan:                &domain.TransferPlan{PlanSummary: domain.PlanSummary{Ready: true}},
 		requestedCapacities: []string{"3Gi"},
 	}
@@ -682,9 +680,11 @@ func TestPlanRejectsSourcePVClaimRefDrift(t *testing.T) {
 	pv := testutil.MustType[*corev1.PersistentVolume](t, objects[6])
 	pv.Spec.ClaimRef.Name = "other"
 
-	plan, err := New(plannerClient(objects...), nil).plan(context.Background(), planOptions{
-		operationKind: domain.OperationMigrate,
-		Volumes:       testSourceVolumes("data"), SessionID: "binding-drift",
+	plan, err := New(
+		plannerClient(objects...),
+		nil,
+	).plan(context.Background(), domain.OperationMigrate, transferInput{
+		Volumes: testSourceVolumes("data"), SessionID: "binding-drift",
 
 		SourceNamespace:    "app",
 		TemporaryNamespace: "system",
@@ -1157,9 +1157,11 @@ func TestPlanRejectsUnschedulableTopologyAndBlockVolumes(t *testing.T) {
 		}
 	}
 
-	plan, err := New(plannerClient(objects...), nil).plan(context.Background(), planOptions{
-		operationKind: domain.OperationMigrate,
-		Volumes:       testSourceVolumes("data"), SessionID: "migration",
+	plan, err := New(
+		plannerClient(objects...),
+		nil,
+	).plan(context.Background(), domain.OperationMigrate, transferInput{
+		Volumes: testSourceVolumes("data"), SessionID: "migration",
 		SourceNamespace:    "app",
 		StagingNamespace:   "system",
 		SessionNamespace:   "system",

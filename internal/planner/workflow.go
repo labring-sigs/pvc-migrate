@@ -141,14 +141,15 @@ func checkReference(
 }
 
 func (p *Planner) newTransferPlanState(
-	options planOptions,
+	options transferInput,
+	operation domain.Operation,
 	transfer v1alpha1.TransferOptions,
 	volumes []v1alpha1.VolumeRequest,
 ) planState {
 	options.Volumes = volumes
 	options.TransferOptions = transfer
 
-	state := newPlanState(p, options)
+	state := newPlanState(p, options, operation)
 	p.validateStorageInputs(state.plan, state.options)
 
 	return state

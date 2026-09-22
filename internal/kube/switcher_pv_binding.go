@@ -82,6 +82,7 @@ func (s *Switcher) deletePVC(ctx context.Context, ref v1alpha1.ObjectReference) 
 			err,
 		)
 	}
+
 	if err := errors.Join(ctx.Err(), LeaseFenceError(ctx)); err != nil {
 		return err
 	}

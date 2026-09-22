@@ -184,6 +184,16 @@ func validateRepositoryStatus(status v1alpha1.WorkflowStatus, planned bool) erro
 	return nil
 }
 
+// normalizeDeletedRepositoryStatus makes deletion idempotent for objects
+// persisted by older or interrupted controllers. A failed repository
+// workflow without a resume phase cannot continue execution, but deletion
+// still needs a valid phase from which abort cleanup can converge.
+func normalizeDeletedRepositoryStatus(status *v1alpha1.WorkflowStatus) {
+	if status != nil && status.Phase == domain.PhaseFailed && status.ResumeFrom == "" {
+		status.ResumeFrom = domain.PhasePlanned
+	}
+}
+
 func (b *BackupExecutor) validateSharedRestore(
 	ctx context.Context,
 	id string,

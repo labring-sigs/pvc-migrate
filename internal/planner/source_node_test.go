@@ -43,8 +43,10 @@ func TestPlanChecksSourceNodeAgainstEveryPV(t *testing.T) {
 				}}
 			}
 
-			plan, err := New(plannerClient(objects...), nil).plan(context.Background(), planOptions{
-				operationKind: domain.OperationCopy,
+			plan, err := New(
+				plannerClient(objects...),
+				nil,
+			).plan(context.Background(), domain.OperationCopy, transferInput{
 				Volumes: testSourceVolumes(
 					"data",
 					"logs",

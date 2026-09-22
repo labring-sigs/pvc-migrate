@@ -153,6 +153,7 @@ func (r *RenameReconciler) plan(ctx context.Context, object *v1alpha1.Rename) (r
 
 	ctx, cancel := lock.Bind(ctx)
 	defer cancel()
+
 	ctx = kube.WithLeaseFence(ctx, lock)
 
 	latest, err := r.store.Load(ctx, crclient.ObjectKeyFromObject(object))

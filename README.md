@@ -261,32 +261,6 @@ Released Helm charts default both images to
 to controller Pods; workflow transfer Pod configuration is managed by the
 application.
 
-### Real-cluster E2E
-
-The E2E suite defaults to the synchronous ConfigMap backend. It creates an
-isolated namespace per test, writes real PVC data, verifies migration and
-rollback digests, and removes its workflow records, Leases, PVCs, and PVs:
-
-```bash
-PVC_MIGRATE_E2E_KUBECONFIG=/path/to/kubeconfig \
-PVC_MIGRATE_E2E_TOOL_IMAGE=registry.example/pvc-migrate:0.1.0 \
-make e2e
-```
-
-Run the same suite through operation-specific CRDs with:
-
-```bash
-PVC_MIGRATE_E2E_KUBECONFIG=/path/to/kubeconfig \
-PVC_MIGRATE_E2E_TOOL_IMAGE=registry.example/pvc-migrate:0.1.0 \
-make e2e PVC_MIGRATE_E2E_MODE=controller
-```
-
-Controller-mode tests start a real controller-runtime manager in the test
-namespace, wait for its leader-election Lease, submit the workflow CR, and
-verify the operation-specific terminal status. Both source and
-destination StorageClasses must be available; override them with
-`PVC_MIGRATE_E2E_SOURCE_CLASS` and `PVC_MIGRATE_E2E_DESTINATION_CLASS`.
-
 ## Quick Start
 
 Every mutating command defaults to `--dry-run=true`. Execution requires an explicit `--dry-run=false`; workload pause and storage identity changes also require `--yes` or interactive approval.

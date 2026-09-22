@@ -176,6 +176,7 @@ func reconcileUntilStable(
 		if delay <= 0 {
 			delay = time.Millisecond
 		}
+
 		if delay > maxOneShotRequeueDelay {
 			return fmt.Errorf(
 				"one-shot reconciliation requested a requeue delay of %s, exceeding the %s limit",

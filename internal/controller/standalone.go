@@ -58,6 +58,7 @@ func (m *Manager) pauseStandalone(ctx context.Context, ref v1alpha1.ObjectRefere
 		!apierrors.IsNotFound(err) {
 		return domain.WrapError(domain.ErrorKubernetes, "pause standalone Pod", "delete Pod", err)
 	}
+
 	if err := kube.LeaseFenceError(ctx); err != nil {
 		return err
 	}
@@ -238,6 +239,7 @@ func (m *Manager) resumeStandalone(
 			fmt.Sprintf("create Pod %s/%s returned an empty object", pod.Namespace, pod.Name),
 		)
 	}
+
 	if err := kube.LeaseFenceError(ctx); err != nil {
 		return err
 	}
