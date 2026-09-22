@@ -341,6 +341,10 @@ func (r *rootState) runtime() (*commandRuntime, error) {
 		Retries:        r.global.retries,
 		RetryBackoff:   r.global.retryBackoff,
 		HelmTimeout:    r.global.helmTimeout,
+		// The flag is documented for copy, migrate, and migrate-pod; without
+		// this field the direct-session executors silently ran unbounded
+		// attempts while the copy command honored the bound.
+		CopyTimeout:    r.global.copyTimeout,
 		NoCompress:     r.global.noCompress,
 		StreamToolLogs: r.global.streamToolLogs,
 		StructuredLogs: structuredLogs,
