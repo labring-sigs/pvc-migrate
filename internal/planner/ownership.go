@@ -147,10 +147,30 @@ func (p *Planner) checkSessionOwnership(
 func retainedCleanupArgs(session *kube.WorkflowOwner, workflow string) string {
 	args := fmt.Sprintf("%s cleanup %s", workflow, session.ID)
 	// Keep is spelled out so the retained copies survive the cleanup even if
-	// the recorded policy asked for deletion.
-	args += " --unused-storage-policy Keep"
+	// the recorded policy asked for deletion. Only the transfer workflows
+	// (copy, reserve, migrate, migrate-pod) accept a cleanup policy; rename,
+	// move, backup, and restore finalize without one and reject the flag.
+	if workflowAcceptsCleanupPolicy(session) {
+		args += " --unused-storage-policy Keep"
+	}
 
 	return args + " --finalize --delete-session"
+}
+
+func workflowAcceptsCleanupPolicy(session *kube.WorkflowOwner) bool {
+	if session == nil {
+		return false
+	}
+
+	switch session.Resource.Type {
+	case domain.SessionTypeMigrate,
+		domain.SessionTypeMigratePod,
+		domain.SessionTypeReserve,
+		domain.SessionTypeCopy:
+		return true
+	default:
+		return false
+	}
 }
 
 func persistedOwnerGuidance(session *kube.WorkflowOwner) string {
@@ -277,6 +297,8 @@ func workflowCommand(session *kube.WorkflowOwner) string {
 		return "copy"
 	case domain.SessionTypeBackup:
 		return "backup"
+	case domain.SessionTypeRestore:
+		return "restore"
 	case domain.SessionTypeRename:
 		return "rename"
 	case domain.SessionTypeMove:
