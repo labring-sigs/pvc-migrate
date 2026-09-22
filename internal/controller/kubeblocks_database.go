@@ -68,6 +68,7 @@ func mongoDBContainer(pod *corev1.Pod) string {
 func (m *Manager) preflightMongoDBNativeSwitchover(
 	ctx context.Context,
 	pod *corev1.Pod,
+	cluster, component, candidate string,
 ) (string, error) {
 	container := mongoDBContainer(pod)
 	if container == "" {
@@ -77,6 +78,22 @@ func (m *Manager) preflightMongoDBNativeSwitchover(
 	if m.commandExecutor == nil {
 		return "", errors.New(
 			"pod exec is unavailable; configure Kubernetes REST access for the MongoDB native switchover",
+		)
+	}
+
+	allowed, reason, err := m.podExecAllowed(ctx, pod.Namespace)
+	if err != nil {
+		return "", err
+	}
+
+	if !allowed {
+		return "", mongoDBSwitchoverWithoutExec(
+			pod.Namespace,
+			pod.Name,
+			reason,
+			kubeBlocksMongoDBNativeSwitchoverCommand(
+				pod.Namespace, cluster, component, pod.Name, candidate,
+			),
 		)
 	}
 
@@ -134,6 +151,23 @@ func (m *Manager) runMongoDBNativeSwitchover(
 			domain.ErrorPrecondition,
 			"pause KubeBlocks",
 			"Pod exec is unavailable for the MongoDB native switchover; manual MongoDB switchover: "+kubeBlocksMongoDBNativeSwitchoverCommand(
+				pod.Namespace,
+				kb.Cluster,
+				kb.Component,
+				kb.Instance,
+				kb.SwitchoverCandidate,
+			),
+		)
+	}
+
+	if allowed, reason, err := m.podExecAllowed(ctx, pod.Namespace); err != nil {
+		return err
+	} else if !allowed {
+		return mongoDBSwitchoverWithoutExec(
+			pod.Namespace,
+			kb.Instance,
+			reason,
+			kubeBlocksMongoDBNativeSwitchoverCommand(
 				pod.Namespace,
 				kb.Cluster,
 				kb.Component,

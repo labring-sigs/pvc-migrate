@@ -124,34 +124,4 @@ subjects:
   - kind: ServiceAccount
     name: {{ include "pvc-migrate.serviceAccountName" . }}
     namespace: {{ .Release.Namespace }}
-{{- range .Values.rbac.kubeBlocksMongoDBNamespaces }}
----
-apiVersion: rbac.authorization.k8s.io/v1
-kind: Role
-metadata:
-  name: {{ include "pvc-migrate.fullname" $ }}-kubeblocks-mongodb
-  namespace: {{ . }}
-  labels:
-    {{- include "pvc-migrate.labels" $ | nindent 4 }}
-rules:
-  - apiGroups: [""]
-    resources: ["pods/exec"]
-    verbs: ["create"]
----
-apiVersion: rbac.authorization.k8s.io/v1
-kind: RoleBinding
-metadata:
-  name: {{ include "pvc-migrate.fullname" $ }}-kubeblocks-mongodb
-  namespace: {{ . }}
-  labels:
-    {{- include "pvc-migrate.labels" $ | nindent 4 }}
-roleRef:
-  apiGroup: rbac.authorization.k8s.io
-  kind: Role
-  name: {{ include "pvc-migrate.fullname" $ }}-kubeblocks-mongodb
-subjects:
-  - kind: ServiceAccount
-    name: {{ include "pvc-migrate.serviceAccountName" $ }}
-    namespace: {{ $.Release.Namespace }}
-{{- end }}
 {{- end }}

@@ -35,11 +35,7 @@
     "rbac": {
       "type": "object", "additionalProperties": false,
       "properties": {
-        "create": {"type": "boolean"},
-        "kubeBlocksMongoDBNamespaces": {
-          "type": "array", "uniqueItems": true,
-          "items": {"type": "string", "minLength": 1, "maxLength": 63, "pattern": "^[a-z0-9]([-a-z0-9]*[a-z0-9])?$"}
-        }
+        "create": {"type": "boolean"}
       }
     },
     "controller": {

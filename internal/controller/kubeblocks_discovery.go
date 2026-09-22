@@ -1012,7 +1012,13 @@ func (m *Manager) kubeBlocksSwitchoverStrategy(
 	}
 
 	if isKubeBlocksMongoDB(selected) {
-		container, err := m.preflightMongoDBNativeSwitchover(ctx, selected)
+		container, err := m.preflightMongoDBNativeSwitchover(
+			ctx,
+			selected,
+			cluster,
+			component,
+			candidate,
+		)
 		if err != nil {
 			return "", "", fmt.Errorf(
 				"MongoDB native switchover script preflight failed: %w; use --allow-leader-downtime to acknowledge the leader outage",

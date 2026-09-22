@@ -117,9 +117,7 @@ func TestHelmDeploymentContract(t *testing.T) {
 }
 
 func TestHelmRBACMatchesControllerContract(t *testing.T) {
-	files, err := renderControllerChart(map[string]any{
-		"rbac": map[string]any{"kubeBlocksMongoDBNamespaces": []any{"database"}},
-	})
+	files, err := renderControllerChart(nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -138,6 +136,14 @@ func TestHelmRBACMatchesControllerContract(t *testing.T) {
 		t.Fatal("Helm ClusterRole differs from the controller permission contract")
 	}
 
+	for _, rule := range role.Rules {
+		for _, resource := range rule.Resources {
+			if resource == "pods/exec" {
+				t.Fatal("chart ClusterRole must not grant pod exec")
+			}
+		}
+	}
+
 	var binding rbacv1.ClusterRoleBinding
 	if err := decoder.Decode(&binding); err != nil {
 		t.Fatal(err)
@@ -147,14 +153,8 @@ func TestHelmRBACMatchesControllerContract(t *testing.T) {
 		t.Fatal("Helm role binding references the wrong operator identity")
 	}
 
-	var mongoRole rbacv1.Role
-	if err := decoder.Decode(&mongoRole); err != nil {
-		t.Fatal(err)
-	}
-
-	if mongoRole.Namespace != "database" || len(mongoRole.Rules) != 1 ||
-		!reflect.DeepEqual(mongoRole.Rules[0].Resources, []string{"pods/exec"}) {
-		t.Fatal("MongoDB exec permission must be confined to the approved namespace")
+	if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
+		t.Fatal("chart must render no additional RBAC objects such as a pod-exec Role")
 	}
 }
 
