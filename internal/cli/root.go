@@ -365,7 +365,7 @@ func (r *rootState) runtime() (*commandRuntime, error) {
 		// this field the direct-session executors silently ran unbounded
 		// attempts while the copy command honored the bound.
 		CopyTimeout:    r.global.copyTimeout,
-		NoCompress:     !r.global.compress,
+		Compress:       r.global.compress,
 		BandwidthLimit: r.global.copyBandwidth,
 		StreamToolLogs: r.global.streamToolLogs,
 		StructuredLogs: structuredLogs,

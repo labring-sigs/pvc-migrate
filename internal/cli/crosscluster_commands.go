@@ -124,7 +124,7 @@ func (r *rootState) newCrossClusterCopyResumeCommand() *cobra.Command {
 				ctx,
 				session,
 				r.global.retries,
-				!crossClusterCompressDefault(cmd, r.global.compress),
+				crossClusterCompressDefault(cmd, r.global.compress),
 				r.global.copyBandwidth,
 			); err != nil {
 				return err
@@ -264,7 +264,7 @@ func (r *rootState) newCrossClusterCopyRunCommand() *cobra.Command {
 				ctx,
 				session,
 				r.global.retries,
-				!crossClusterCompressDefault(cmd, r.global.compress),
+				crossClusterCompressDefault(cmd, r.global.compress),
 				r.global.copyBandwidth,
 			); err != nil {
 				return err

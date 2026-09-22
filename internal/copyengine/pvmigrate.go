@@ -104,7 +104,7 @@ func (p *PVMigrate) Copy(ctx context.Context, request CopyRequest, progress Prog
 		DeleteExtraneousFiles: request.Policy.DeleteExtraneousFiles,
 		IgnoreMounted:         request.Mode == ModeWarm,
 		SourceMountReadWrite:  request.Source.MountReadWrite,
-		NoCompress:            request.Policy.NoCompress,
+		NoCompress:            !request.Policy.Compress,
 		NoCleanupOnFailure:    false,
 		IgnoreSizes:           request.Policy.IgnoreSizes,
 		ShowProgressBar:       false,

@@ -66,7 +66,7 @@ func (r *rootState) newControllerCommand() *cobra.Command {
 				NamespacedCopyPlanner:         runtime.planner.ForController().PlanNamespacedCopy,
 				TransferExecution: app.VolumeCopyConfig{
 					Retries: r.global.retries, RetryBackoff: r.global.retryBackoff,
-					HelmTimeout: r.global.helmTimeout, NoCompress: !r.global.compress,
+					HelmTimeout: r.global.helmTimeout, Compress: r.global.compress,
 					BandwidthLimit: r.global.copyBandwidth,
 					CopyTimeout:    r.global.copyTimeout,
 				},

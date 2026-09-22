@@ -49,7 +49,9 @@ type CopyPolicy struct {
 	DeleteExtraneousFiles bool
 	VerifyChecksum        bool
 	IgnoreSizes           bool
-	NoCompress            bool
+	// Compress enables rsync/ssh compression for the transfer. Default
+	// off; the upstream adapter inverts it into Migration.NoCompress.
+	Compress bool
 	// BandwidthLimit caps the rsync transfer rate in rsync --bwlimit syntax
 	// (KiB/s for a bare number, or a K/M/G suffix). Empty is unlimited.
 	BandwidthLimit          string
