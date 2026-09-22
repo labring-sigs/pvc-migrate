@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/spf13/cobra"
@@ -71,4 +72,56 @@ func TestGlobalCompressFlagDefaultsOff(t *testing.T) {
 	if bandwidth.DefValue != "" {
 		t.Fatalf("--copy-bandwidth-limit default=%q, want empty (unlimited)", bandwidth.DefValue)
 	}
+}
+
+// TestValidateCopyBandwidthRejectsRcloneOperations pins that the rsync rate
+// limit is refused for backup and restore instead of being accepted and
+// silently ignored: those operations transfer through rclone.
+func TestValidateCopyBandwidthRejectsRcloneOperations(t *testing.T) {
+	root := NewRoot(Options{Version: "test"})
+	state := &rootState{}
+	state.global.copyBandwidth = "10m"
+
+	backup := findSubCommandT(t, root, "backup")
+	if err := state.validateCopyBandwidth(backup); err == nil ||
+		!strings.Contains(err.Error(), "backup and restore use rclone") {
+		t.Fatalf("backup error=%v", err)
+	}
+
+	restore := findSubCommandT(t, root, "restore")
+	if err := state.validateCopyBandwidth(restore); err == nil {
+		t.Fatal("restore accepted the rsync-only limit")
+	}
+
+	copyCmd := findSubCommandT(t, root, "copy")
+	if err := state.validateCopyBandwidth(copyCmd); err != nil {
+		t.Fatalf("copy rejected a valid limit: %v", err)
+	}
+
+	state.global.copyBandwidth = "wat"
+	if err := state.validateCopyBandwidth(copyCmd); err == nil ||
+		!strings.Contains(err.Error(), "10m") {
+		t.Fatalf("malformed limit error=%v", err)
+	}
+
+	state.global.copyBandwidth = ""
+	if err := state.validateCopyBandwidth(copyCmd); err != nil {
+		t.Fatalf("empty limit error=%v", err)
+	}
+}
+
+func findSubCommandT(t *testing.T, root *cobra.Command, path ...string) *cobra.Command {
+	t.Helper()
+
+	current := root
+	for _, segment := range path {
+		next, _, err := current.Find([]string{segment})
+		if err != nil || next == nil || next == current || next.Name() != segment {
+			t.Fatalf("command %v not found under %q", path, current.Name())
+		}
+
+		current = next
+	}
+
+	return current
 }

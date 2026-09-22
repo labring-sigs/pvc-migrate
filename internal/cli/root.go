@@ -596,19 +596,36 @@ func (r *rootState) effectiveTimeout() time.Duration {
 }
 
 // validateCopyBandwidth turns a malformed rate into an admission error
-// instead of a failed tool job far into execution.
+// instead of a failed tool job far into execution. The limit drives rsync
+// transfers; backup and restore move data through rclone instead, so the
+// flag is refused there rather than accepted and silently ignored.
 func (r *rootState) validateCopyBandwidth(cmd *cobra.Command) error {
 	if r.global.copyBandwidth == "" {
 		return nil
 	}
 
+	var root string
+
 	for c := cmd; c != nil; c = c.Parent() {
 		if dataTransferRootCommands[c.Name()] {
-			return copyengine.ValidateBandwidthLimit(r.global.copyBandwidth)
+			root = c.Name()
+
+			break
 		}
 	}
 
-	return nil
+	switch root {
+	case "backup", "restore":
+		return domain.NewError(
+			domain.ErrorValidation,
+			"flags",
+			"--copy-bandwidth-limit applies to rsync transfers; backup and restore use rclone and do not consume it",
+		)
+	case "copy", "migrate", "migrate-pod", "controller":
+		return copyengine.ValidateBandwidthLimit(r.global.copyBandwidth)
+	default:
+		return nil
+	}
 }
 
 // validateCopyTimeout rejects a per-attempt copy bound that can never fire:
