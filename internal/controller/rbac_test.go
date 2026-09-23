@@ -129,7 +129,15 @@ func controllerRolePermissions() map[permissionKey][]string {
 	add("migrate.sealos.io", []string{"backuprepositories"}, "get")
 	add("storage.k8s.io", []string{"csinodes"}, "get")
 	add("storage.k8s.io", []string{"csistoragecapacities"}, "list")
-	add("networking.k8s.io", []string{"networkpolicies"}, "list", "create")
+	add(
+		"networking.k8s.io",
+		[]string{"networkpolicies"},
+		"get",
+		"list",
+		"create",
+		"update",
+		"delete",
+	)
 
 	add("", []string{"namespaces"}, "get")
 	add("", []string{"configmaps"}, "get")

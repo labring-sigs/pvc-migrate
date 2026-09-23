@@ -92,7 +92,7 @@ rules:
     verbs: ["list"]
   - apiGroups: ["networking.k8s.io"]
     resources: ["networkpolicies"]
-    verbs: ["list", "create"]
+    verbs: ["get", "list", "create", "update", "delete"]
   - apiGroups: ["storage.k8s.io"]
     resources: ["volumeattachments"]
     verbs: ["list"]
