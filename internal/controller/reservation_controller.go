@@ -110,7 +110,9 @@ func (r *ClusterReservationReconciler) reconcile(
 			object.Status.Phase, object.Status.ResumeFrom,
 			object.Status.ObservedGeneration, object.Generation,
 		) {
-			return reconcile.Result{}, nil
+			if result, stop := planningFailureGate(ctx, r.store, r.recorder, object); stop {
+				return result, nil
+			}
 		}
 	case domain.PhaseReserved, domain.PhaseAborted:
 		return reconcile.Result{}, nil
@@ -123,6 +125,12 @@ func (r *ClusterReservationReconciler) reconcile(
 
 		if object.Status.Phase == domain.PhasePlanned {
 			return reconcile.Result{RequeueAfter: time.Millisecond}, nil
+		}
+
+		if delay, retry := requeuePlanningFailureDelay(
+			workflowStatusPtr(object), time.Now(),
+		); retry {
+			return reconcile.Result{RequeueAfter: delay}, nil
 		}
 
 		return reconcile.Result{}, nil

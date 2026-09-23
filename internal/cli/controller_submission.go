@@ -3,8 +3,10 @@ package cli
 import (
 	"context"
 	"fmt"
+	"time"
 
 	v1alpha1 "github.com/labring-sigs/pvc-migrate/api/v1alpha1"
+	"github.com/labring-sigs/pvc-migrate/internal/controller"
 	"github.com/labring-sigs/pvc-migrate/internal/domain"
 	"github.com/labring-sigs/pvc-migrate/internal/kube"
 	"github.com/spf13/cobra"
@@ -162,6 +164,7 @@ func waitForControllerObject[T crclient.Object](
 	resource := runtime.clients.Dynamic.Resource(v1alpha1.GroupVersion.WithResource(resourceName)).
 		Namespace(object.GetNamespace())
 	lastPhase := v1alpha1.WorkflowPhase("")
+	notedPlanningRetry := false
 
 	final, err := kube.WaitForWorkflow(
 		ctx,
@@ -187,9 +190,30 @@ func waitForControllerObject[T crclient.Object](
 			switch status.Phase {
 			case successPhase,
 				domain.PhaseCompleted,
-				domain.PhaseFailed,
 				domain.PhaseAborted,
 				domain.PhaseRolledBack:
+				return true, nil
+			case domain.PhaseFailed:
+				// A planning failure inside the bounded retry window may still
+				// clear on its own (workload appearing, transient API error);
+				// keep following until the controller terminalizes it.
+				if controller.PlanningRetryActive(&status, time.Now()) {
+					if !notedPlanningRetry {
+						notedPlanningRetry = true
+
+						if _, err := fmt.Fprintf(
+							cmd.ErrOrStderr(),
+							"%s %s: planning retries continue in the background; waiting for the outcome\n",
+							kind,
+							current.GetName(),
+						); err != nil {
+							return false, err
+						}
+					}
+
+					return false, nil
+				}
+
 				return true, nil
 			default:
 				return false, nil

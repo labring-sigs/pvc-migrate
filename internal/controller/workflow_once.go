@@ -185,6 +185,14 @@ func reconcileUntilStable(
 			)
 		}
 
+		// A bounded planning-retry backoff waits on wall-clock progress, not
+		// on reconciliation stability: record the state and let the manager's
+		// timer drive the retry. Flow-control requeues stay well below this
+		// floor, so a one-shot pass still drives them to completion.
+		if result.RequeueAfter >= planningRetryFloor {
+			return nil
+		}
+
 		timer := time.NewTimer(delay)
 		select {
 		case <-ctx.Done():

@@ -163,13 +163,204 @@ func retryCorrectedPlanning(
 		generation > observedGeneration
 }
 
+const (
+	// planningRetryWindow bounds how long the controller keeps retrying a
+	// workflow whose planning never succeeded, so a workflow applied together
+	// with (or slightly before) its workload survives the provisioning race
+	// instead of failing terminally on the first reconcile.
+	planningRetryWindow = 10 * time.Minute
+	planningRetryFloor  = 15 * time.Second
+	planningRetryCap    = 2 * time.Minute
+)
+
+// planningRetriesExhaustedReason marks the terminal planning condition after
+// the bounded retry window elapsed without success; DiscoveryFailed is still
+// inside that window.
+const planningRetriesExhaustedReason = "DiscoveryRetriesExhausted"
+
+type planningRetryDecision struct {
+	// retryable reports whether the failure category may clear on its own
+	// (missing source object, transient API error, late RBAC grant).
+	retryable bool
+	// expired reports that the retry window has elapsed.
+	expired bool
+	// due reports that the next planning attempt is due now.
+	due bool
+	// delay is the wait until the next attempt when it is not due yet.
+	delay time.Duration
+}
+
+// evaluatePlanningRetry schedules the bounded planning-retry loop shared by
+// every workflow controller. The interval grows with the workflow's age
+// (age/4, floored and capped) and is anchored on the persisted status, so
+// reconcile retries triggered by the controller's own status writes re-arm
+// the wait instead of hot-looping.
+func evaluatePlanningRetry(status *v1alpha1.WorkflowStatus, now time.Time) planningRetryDecision {
+	if status == nil || status.Phase != domain.PhaseFailed ||
+		status.ResumeFrom != domain.PhasePlanned || status.StartedAt.IsZero() {
+		return planningRetryDecision{}
+	}
+
+	switch domain.ErrorCategory(status.ErrorCategory) {
+	case domain.ErrorPrecondition, domain.ErrorKubernetes:
+	default:
+		return planningRetryDecision{}
+	}
+
+	age := max(now.Sub(status.StartedAt.Time), 0)
+
+	if age >= planningRetryWindow {
+		return planningRetryDecision{retryable: true, expired: true}
+	}
+
+	interval := max(age/4, planningRetryFloor)
+
+	if interval > planningRetryCap {
+		interval = planningRetryCap
+	}
+
+	if remaining := planningRetryWindow - age; interval > remaining {
+		interval = remaining
+	}
+
+	sinceAttempt := max(now.Sub(status.UpdatedAt.Time), 0)
+
+	decision := planningRetryDecision{retryable: true}
+	if sinceAttempt >= interval {
+		decision.due = true
+		return decision
+	}
+
+	decision.delay = interval - sinceAttempt
+
+	return decision
+}
+
+// PlanningRetryActive reports whether a Failed workflow is still inside the
+// bounded planning-retry window. The CLI wait loop uses it to keep following
+// a workflow whose planning failure may clear on its own.
+func PlanningRetryActive(status *v1alpha1.WorkflowStatus, now time.Time) bool {
+	decision := evaluatePlanningRetry(status, now)
+	return decision.retryable && !decision.expired
+}
+
+// planningFailureGate decides the next reconcile step for a Failed workflow
+// without a plan: wait for the retry backoff, retry planning now, or stop
+// (writing the terminal marker once when the retry window just elapsed).
+// stop=false means the caller must fall through and plan now.
+func planningFailureGate[T crclient.Object](
+	ctx context.Context,
+	store kube.WorkflowStore[T],
+	recorder events.EventRecorder,
+	object T,
+) (reconcile.Result, bool) {
+	status := workflowStatusPtr(object)
+	if status == nil {
+		return reconcile.Result{}, true
+	}
+
+	decision := evaluatePlanningRetry(status, time.Now())
+	switch {
+	case !decision.retryable:
+		return reconcile.Result{}, true
+	case decision.expired:
+		if err := markPlanningRetriesExhausted(ctx, store, recorder, object, status); err != nil {
+			result, resultErr := workflowReconcileResult(err)
+			if resultErr != nil {
+				slog.Error(
+					"planning retry terminal marker write failed",
+					"error",
+					resultErr.Error(),
+				)
+			}
+
+			return result, true
+		}
+
+		return reconcile.Result{}, true
+	case decision.due:
+		return reconcile.Result{}, false
+	default:
+		return reconcile.Result{RequeueAfter: decision.delay}, true
+	}
+}
+
+// markPlanningRetriesExhausted records the terminal planning condition once,
+// after the bounded retry window elapsed. The status write also wakes CLI
+// watchers that kept waiting through the retry window.
+func markPlanningRetriesExhausted[T crclient.Object](
+	ctx context.Context,
+	store kube.WorkflowStore[T],
+	recorder events.EventRecorder,
+	object T,
+	status *v1alpha1.WorkflowStatus,
+) error {
+	for index := range status.Conditions {
+		condition := &status.Conditions[index]
+		if condition.Type == "Planned" &&
+			condition.Reason == planningRetriesExhaustedReason {
+			return nil
+		}
+	}
+
+	now := metav1.Now()
+	terminal := domain.BoundWorkflowMessage(
+		status.Message + "; planning retry window elapsed without success",
+	)
+
+	status.UpdatedAt = now
+	status.Message = terminal
+
+	for index := range status.Conditions {
+		condition := &status.Conditions[index]
+		if condition.Type == "Planned" {
+			condition.Status = metav1.ConditionFalse
+			condition.Reason = planningRetriesExhaustedReason
+			condition.Message = terminal
+			condition.LastTransitionTime = now
+
+			break
+		}
+	}
+
+	if err := store.Save(ctx, object); err != nil {
+		return err
+	}
+
+	if recorder != nil {
+		recorder.Eventf(
+			object, nil, "Warning", planningRetriesExhaustedReason, "Plan", "%s", terminal,
+		)
+	}
+
+	return nil
+}
+
+// requeuePlanningFailureDelay reports the wait before the next planning
+// attempt after one just failed. The fresh UpdatedAt always yields a positive
+// bounded delay.
+func requeuePlanningFailureDelay(
+	status *v1alpha1.WorkflowStatus,
+	now time.Time,
+) (time.Duration, bool) {
+	decision := evaluatePlanningRetry(status, now)
+	if decision.retryable && !decision.expired && !decision.due {
+		return decision.delay, true
+	}
+
+	return 0, false
+}
+
 func recordPlanningOutcome(status *v1alpha1.WorkflowStatus, generation int64, cause error) {
 	now := metav1.Now()
 
-	status.UpdatedAt = now
-	if status.StartedAt.IsZero() {
+	// A corrected spec starts a fresh retry window: the operator fixed the
+	// request, not the race, so the bounded planning retries restart.
+	if status.ObservedGeneration != generation || status.StartedAt.IsZero() {
 		status.StartedAt = now
 	}
+
+	status.UpdatedAt = now
 
 	condition := v1alpha1.WorkflowCondition{
 		Type: "Planned", Status: metav1.ConditionTrue, Reason: "DiscoverySucceeded",
