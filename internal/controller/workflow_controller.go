@@ -643,7 +643,6 @@ type ManagerOptions struct {
 	NamespacedMigrationPlanner    NamespacedMigrationPlanner
 	PodMigrationPlanner           PodMigrationPlanner
 	NamespacedPodMigrationPlanner NamespacedPodMigrationPlanner
-	PodMigrationExecution         app.PodMigrationExecutorConfig
 	NamespacedCopyPlanner         NamespacedCopyPlanner
 	TransferExecution             app.VolumeCopyConfig
 	Namespace                     string

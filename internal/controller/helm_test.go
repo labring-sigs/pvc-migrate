@@ -167,7 +167,7 @@ func TestHelmValuesValidationAndOverrides(t *testing.T) {
 		{"serviceAccount": map[string]any{"name": "default"}},
 		{"podLabels": map[string]any{"app.kubernetes.io/name": "wrong"}},
 		{"podDisruptionBudget": map[string]any{"minAvailable": 2}},
-		{"controller": map[string]any{"operationTimeout": "0s"}},
+		{"controller": map[string]any{"logLevel": "trace"}},
 		{"createNamespace": true},
 	} {
 		if _, err := renderControllerChart(values); err == nil {
