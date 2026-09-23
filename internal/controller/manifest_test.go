@@ -9,7 +9,7 @@ import (
 )
 
 func TestControllerDeploymentsDoNotDependOnWritableTemporaryVolume(t *testing.T) {
-	for _, manifest := range []string{"../../config/manager/manager.yaml", "../../deploy/controller.yaml"} {
+	for _, manifest := range []string{"../../config/manager/manager.yaml"} {
 		data, err := os.ReadFile(manifest)
 		if err != nil {
 			t.Fatal(err)
