@@ -121,8 +121,8 @@ func TestCheckRBACRejectsMissingSessionLeasePermission(t *testing.T) {
 		nil,
 	).checkPodMigrationPermissions(context.Background(), plan, plan.SessionID, "app", "stage", "system", []string{domain.StrategyLocal}, v1alpha1.WorkloadSpec{}, false, false)
 
-	if plan.Ready || len(plan.Checks) != 1 ||
-		!strings.Contains(plan.Checks[0].Message, "create system/leases") {
+	if plan.Ready || len(plan.Checks) != 2 ||
+		!strings.Contains(plan.Checks[1].Message, "create system/leases") {
 		t.Fatalf("RBAC result=%#v", plan.Checks)
 	}
 }
@@ -399,7 +399,8 @@ func TestCheckRBACIncludesControllerSpecificPermissions(t *testing.T) {
 				nil,
 			).checkPodMigrationPermissions(context.Background(), plan, plan.SessionID, "app", "stage", "system", []string{domain.StrategyLocal}, tt.workload, false, false)
 
-			if !plan.Ready || len(plan.Checks) != 1 || !plan.Checks[0].Passed {
+			if !plan.Ready || len(plan.Checks) != 2 || !plan.Checks[0].Passed ||
+				!plan.Checks[1].Passed {
 				t.Fatalf("RBAC result: %#v", plan.Checks)
 			}
 
@@ -488,13 +489,13 @@ func TestCheckRBACAggregatesDeniedPermissionsAndReasons(t *testing.T) {
 		nil,
 	).checkPodMigrationPermissions(context.Background(), plan, plan.SessionID, "app", "stage", "system", []string{domain.StrategyLocal}, v1alpha1.WorkloadSpec{}, false, false)
 
-	if plan.Ready || len(plan.Checks) != 1 {
+	if plan.Ready || len(plan.Checks) != 2 {
 		t.Fatalf("RBAC result: %#v", plan.Checks)
 	}
 
 	for _, expected := range []string{"delete app/pods (policy denied)", "delete persistentvolumes (authorizer unavailable)"} {
-		if !strings.Contains(plan.Checks[0].Message, expected) {
-			t.Fatalf("RBAC message omits %q: %s", expected, plan.Checks[0].Message)
+		if !strings.Contains(plan.Checks[1].Message, expected) {
+			t.Fatalf("RBAC message omits %q: %s", expected, plan.Checks[1].Message)
 		}
 	}
 }
@@ -517,8 +518,8 @@ func TestCheckRBACStopsOnReviewError(t *testing.T) {
 		nil,
 	).checkPodMigrationPermissions(context.Background(), plan, plan.SessionID, "app", "stage", "system", []string{domain.StrategyLocal}, v1alpha1.WorkloadSpec{}, false, false)
 
-	if calls != 1 || plan.Ready || len(plan.Checks) != 1 ||
-		!strings.Contains(plan.Checks[0].Message, "authorization API unavailable") {
+	if calls != 2 || plan.Ready || len(plan.Checks) != 2 ||
+		!strings.Contains(plan.Checks[1].Message, "authorization API unavailable") {
 		t.Fatalf("calls=%d checks=%#v", calls, plan.Checks)
 	}
 }
@@ -573,7 +574,7 @@ func collectAllowedAccessReviews(
 		nil,
 	).checkPodMigrationPermissions(context.Background(), plan, plan.SessionID, "app", "stage", "system", []string{domain.StrategyLocal}, workload, inspectOpenEBSLVMShared, enableOpenEBSLVMShared)
 
-	if !plan.Ready || len(plan.Checks) != 1 || !plan.Checks[0].Passed {
+	if !plan.Ready || len(plan.Checks) != 2 || !plan.Checks[0].Passed || !plan.Checks[1].Passed {
 		t.Fatalf("RBAC result: %#v", plan.Checks)
 	}
 

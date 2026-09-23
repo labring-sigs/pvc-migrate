@@ -542,7 +542,9 @@ func alpineBaseVersion(content string) string {
 	for line := range strings.SplitSeq(content, "\n") {
 		fields := strings.Fields(line)
 		if len(fields) == 2 && fields[0] == "FROM" && strings.HasPrefix(fields[1], "alpine:") {
-			return strings.TrimPrefix(fields[1], "alpine:")
+			// Upstream pins the Alpine base by digest; this project tracks
+			// the tag only, so the comparison strips any digest suffix.
+			return strings.SplitN(strings.TrimPrefix(fields[1], "alpine:"), "@", 2)[0]
 		}
 	}
 

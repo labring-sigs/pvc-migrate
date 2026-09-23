@@ -140,10 +140,151 @@ func transferToolAccess(namespaces, strategies []string) rbacChecks {
 			"delete",
 		)
 		add(namespace, "apps", "replicasets", "get", "list")
-		add(namespace, "networking.k8s.io", "networkpolicies", "list")
 	}
 
 	return checks
+}
+
+// networkPolicyLifecycleVerbs are the permissions the transfer tool's helm
+// release needs to manage its own allow-all NetworkPolicies: upstream enables
+// the policies whenever create is permitted, and the release then reads,
+// server-side-applies, and removes them on every install and uninstall.
+var networkPolicyLifecycleVerbs = []string{"get", "list", "create", "update", "patch", "delete"}
+
+// networkPolicyReview records the lifecycle-verb grants of one namespace.
+type networkPolicyReview struct {
+	namespace string
+	allowed   map[string]bool
+	err       error
+}
+
+// checkNetworkPolicyLifecycle verifies the identity that runs the transfer
+// tools can manage the NetworkPolicies its helm releases install. A partial
+// grant is the one broken state: upstream enables its policies on create and
+// then fails mid-transfer without get, update, and delete, so planning fails
+// fast instead. Without create the policies are skipped entirely and transfers
+// only need namespaces that are not default-deny.
+func (p *Planner) checkNetworkPolicyLifecycle(
+	ctx context.Context,
+	plan checkRecorder,
+	namespaces []string,
+) {
+	if p.controllerSubmission {
+		return
+	}
+
+	unique := make([]string, 0, len(namespaces))
+	for _, namespace := range uniqueSorted(namespaces) {
+		if namespace != "" {
+			unique = append(unique, namespace)
+		}
+	}
+
+	if len(unique) == 0 {
+		return
+	}
+
+	reviews := make([]networkPolicyReview, len(unique))
+	for index, namespace := range unique {
+		// Fast-fail on an unavailable authorization endpoint, then continue
+		// with the remaining namespaces only when reviews succeed.
+		if index > 0 && reviews[index-1].err != nil {
+			break
+		}
+
+		allowed := make(map[string]bool, len(networkPolicyLifecycleVerbs))
+		for _, verb := range networkPolicyLifecycleVerbs {
+			review, err := p.client.AuthorizationV1().
+				SelfSubjectAccessReviews().
+				Create(ctx, &authorizationv1.SelfSubjectAccessReview{
+					Spec: authorizationv1.SelfSubjectAccessReviewSpec{
+						ResourceAttributes: &authorizationv1.ResourceAttributes{
+							Namespace: namespace,
+							Verb:      verb,
+							Group:     "networking.k8s.io",
+							Resource:  "networkpolicies",
+						},
+					},
+				}, metav1.CreateOptions{})
+			if err != nil {
+				reviews[index] = networkPolicyReview{namespace: namespace, err: err}
+				break
+			}
+
+			allowed[verb] = review.Status.Allowed
+		}
+
+		if reviews[index].err == nil {
+			reviews[index] = networkPolicyReview{namespace: namespace, allowed: allowed}
+		}
+	}
+
+	for index := range unique {
+		if reviews[index].err != nil {
+			plan.AddCheck(failed(domain.CheckNameRBAC, fmt.Sprintf(
+				"network policy permission review in %s failed: %v",
+				reviews[index].namespace, reviews[index].err,
+			)))
+
+			return
+		}
+	}
+
+	plan.AddCheck(classifyNetworkPolicyAccess(reviews))
+}
+
+// classifyNetworkPolicyAccess reduces the per-namespace grants to one check:
+// the weakest namespace decides. Partial grants (create without get, update,
+// or delete) fail because the tools would install policies they cannot
+// manage; namespaces without create keep working without the policies.
+func classifyNetworkPolicyAccess(reviews []networkPolicyReview) domain.Check {
+	managed, skipped := make([]string, 0, len(reviews)), make([]string, 0, len(reviews))
+
+	for _, result := range reviews {
+		if result.err != nil || result.allowed == nil {
+			break
+		}
+
+		missing := make([]string, 0, len(networkPolicyLifecycleVerbs))
+		for _, verb := range networkPolicyLifecycleVerbs {
+			if !result.allowed[verb] {
+				missing = append(missing, verb)
+			}
+		}
+
+		switch {
+		case !result.allowed["list"]:
+			return failed(domain.CheckNameRBAC, fmt.Sprintf(
+				"networkpolicies list in %s is required to verify namespace isolation before a transfer",
+				result.namespace,
+			))
+		case result.allowed["create"] && len(missing) > 0:
+			return failed(domain.CheckNameRBAC, fmt.Sprintf(
+				"partial network policy permissions in %s: create is allowed, so the transfer tools install their own NetworkPolicies, but %s is denied and their helm release cannot manage them; grant get, list, create, update, patch, and delete together or remove them all",
+				result.namespace,
+				strings.Join(missing, ", "),
+			))
+		case result.allowed["create"]:
+			managed = append(managed, result.namespace)
+		default:
+			skipped = append(skipped, result.namespace)
+		}
+	}
+
+	if len(skipped) > 0 {
+		return warned(domain.CheckNameRBAC, fmt.Sprintf(
+			"creating NetworkPolicies in %s is not permitted, so transfers there run without the tools' allow-all policies; those namespaces must not isolate Pods with a default-deny policy",
+			strings.Join(skipped, ", "),
+		))
+	}
+
+	return passed(
+		domain.CheckNameRBAC,
+		"transfer NetworkPolicy lifecycle (get, list, create, update, patch, delete) is allowed in "+strings.Join(
+			managed,
+			", ",
+		),
+	)
 }
 
 func activationResourceAccess(sourceNamespace, destinationNamespace string) rbacChecks {

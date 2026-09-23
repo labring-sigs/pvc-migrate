@@ -38,6 +38,8 @@ func (p *Planner) checkCopyPermissions(
 		checks.add("", "local.openebs.io", "lvmvolumes", "list")
 	}
 
+	p.checkNetworkPolicyLifecycle(ctx, result, []string{source, destination})
+
 	resource, namespace := scopedWorkflowResource("copies", session, source, destination)
 	p.checkWorkflowPermissions(
 		ctx,
@@ -59,6 +61,7 @@ func (p *Planner) checkMigrationPermissions(
 	checks := reservationResourceAccess(source, staging, session)
 	checks = append(checks, transferToolAccess([]string{source, staging}, strategies)...)
 	checks = append(checks, activationResourceAccess(source, source)...)
+	p.checkNetworkPolicyLifecycle(ctx, result, []string{source, staging})
 	resource, namespace := scopedWorkflowResource(
 		"migrations",
 		session,
@@ -88,6 +91,7 @@ func (p *Planner) checkPodMigrationPermissions(
 	checks := reservationResourceAccess(source, staging, session)
 	checks = append(checks, transferToolAccess([]string{source, staging}, strategies)...)
 	checks = append(checks, activationResourceAccess(source, source)...)
+	p.checkNetworkPolicyLifecycle(ctx, result, []string{source, staging})
 	checks.add(source, "", "pods", "update")
 
 	checks = append(checks, workloadRBAC(source, workload)...)
