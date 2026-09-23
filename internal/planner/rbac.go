@@ -148,8 +148,8 @@ func transferToolAccess(namespaces, strategies []string) rbacChecks {
 // networkPolicyLifecycleVerbs are the permissions the transfer tool's helm
 // release needs to manage its own allow-all NetworkPolicies: upstream enables
 // the policies whenever create is permitted, and the release then reads,
-// updates, and removes them on every install and uninstall.
-var networkPolicyLifecycleVerbs = []string{"get", "list", "create", "update", "delete"}
+// server-side-applies, and removes them on every install and uninstall.
+var networkPolicyLifecycleVerbs = []string{"get", "list", "create", "update", "patch", "delete"}
 
 // networkPolicyReview records the lifecycle-verb grants of one namespace.
 type networkPolicyReview struct {
@@ -260,7 +260,7 @@ func classifyNetworkPolicyAccess(reviews []networkPolicyReview) domain.Check {
 			))
 		case result.allowed["create"] && len(missing) > 0:
 			return failed(domain.CheckNameRBAC, fmt.Sprintf(
-				"partial network policy permissions in %s: create is allowed, so the transfer tools install their own NetworkPolicies, but %s is denied and their helm release cannot manage them; grant get, list, create, update, and delete together or remove them all",
+				"partial network policy permissions in %s: create is allowed, so the transfer tools install their own NetworkPolicies, but %s is denied and their helm release cannot manage them; grant get, list, create, update, patch, and delete together or remove them all",
 				result.namespace,
 				strings.Join(missing, ", "),
 			))
@@ -280,7 +280,7 @@ func classifyNetworkPolicyAccess(reviews []networkPolicyReview) domain.Check {
 
 	return passed(
 		domain.CheckNameRBAC,
-		"transfer NetworkPolicy lifecycle (get, list, create, update, delete) is allowed in "+strings.Join(
+		"transfer NetworkPolicy lifecycle (get, list, create, update, patch, delete) is allowed in "+strings.Join(
 			managed,
 			", ",
 		),

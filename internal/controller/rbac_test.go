@@ -136,6 +136,7 @@ func controllerRolePermissions() map[permissionKey][]string {
 		"list",
 		"create",
 		"update",
+		"patch",
 		"delete",
 	)
 

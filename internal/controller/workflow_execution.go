@@ -213,11 +213,7 @@ func evaluatePlanningRetry(status *v1alpha1.WorkflowStatus, now time.Time) plann
 		return planningRetryDecision{retryable: true, expired: true}
 	}
 
-	interval := max(age/4, planningRetryFloor)
-
-	if interval > planningRetryCap {
-		interval = planningRetryCap
-	}
+	interval := min(max(age/4, planningRetryFloor), planningRetryCap)
 
 	if remaining := planningRetryWindow - age; interval > remaining {
 		interval = remaining

@@ -38,7 +38,7 @@ func TestClassifyNetworkPolicyAccess(t *testing.T) {
 		{
 			name: "create without get fails fast",
 			reviews: []networkPolicyReview{
-				networkPolicyReviewFor("app", "list", "create", "update", "delete"),
+				networkPolicyReviewFor("app", "list", "create", "update", "patch", "delete"),
 				networkPolicyReviewFor("stage", networkPolicyLifecycleVerbs...),
 			},
 			wantFailed: true,
@@ -50,12 +50,12 @@ func TestClassifyNetworkPolicyAccess(t *testing.T) {
 				networkPolicyReviewFor("app", "list", "create"),
 			},
 			wantFailed: true,
-			contains:   "grant get, list, create, update, and delete together",
+			contains:   "grant get, list, create, update, patch, and delete together",
 		},
 		{
 			name: "no create skips the policies with a warning",
 			reviews: []networkPolicyReview{
-				networkPolicyReviewFor("app", "list", "get", "update", "delete"),
+				networkPolicyReviewFor("app", "list", "get", "update", "patch", "delete"),
 			},
 			wantPass: true,
 			contains: "must not isolate Pods with a default-deny policy",
@@ -63,7 +63,7 @@ func TestClassifyNetworkPolicyAccess(t *testing.T) {
 		{
 			name: "no list cannot verify isolation",
 			reviews: []networkPolicyReview{
-				networkPolicyReviewFor("app", "get", "create", "update", "delete"),
+				networkPolicyReviewFor("app", "get", "create", "update", "patch", "delete"),
 			},
 			wantFailed: true,
 			contains:   "required to verify namespace isolation",
