@@ -161,6 +161,18 @@ func (p Printer) printWorkflowInventory(objects []crclient.Object) error {
 			kind, status = "Migration", current.Status.WorkflowStatus
 		case *v1alpha1.ClusterMigration:
 			kind, status = "ClusterMigration", current.Status.WorkflowStatus
+		case *v1alpha1.PodMigration:
+			kind, status = "PodMigration", current.Status.WorkflowStatus
+		case *v1alpha1.ClusterPodMigration:
+			kind, status = "ClusterPodMigration", current.Status.WorkflowStatus
+		case *v1alpha1.Backup:
+			kind, status = "Backup", current.Status.WorkflowStatus
+		case *v1alpha1.Restore:
+			kind, status = "Restore", current.Status.WorkflowStatus
+		case *v1alpha1.Rename:
+			kind, status = "Rename", current.Status.WorkflowStatus
+		case *v1alpha1.Move:
+			kind, status = "Move", current.Status.WorkflowStatus
 		default:
 			return fmt.Errorf("unsupported workflow inventory object %T", object)
 		}
