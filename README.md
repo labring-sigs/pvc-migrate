@@ -113,15 +113,14 @@ mode flag:
   clearly when its matching CRD is absent.
 - `<command> plan` validates either backend without mutations.
 
-Install the controller backend using the Helm command above. The `config/`
-Kubebuilder files and `deploy/` reference manifests remain available for
-development and permission review; do not apply them over a Helm-managed
-installation. The legacy namespace manifest creates a namespace explicitly
-and is not part of the Helm chart.
+Install the controller backend using the Helm command above — it is the
+only supported installation path and ships the CRDs. The `config/`
+Kubebuilder files remain for development and permission review; do not
+apply them over a Helm-managed installation.
 
 Run `make manifests` after changing API markers. It regenerates the typed
 deep-copy code and the CRD under `config/crd/bases`, then synchronizes the
-single-installation `deploy/crd.yaml` file and chart `crds/` directory.
+chart `crds/` directory.
 `make chart-lint` checks templates and deployment contracts;
 `make chart-package` produces a versioned chart archive in `bin/`.
 

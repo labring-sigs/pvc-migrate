@@ -59,7 +59,7 @@ func (r *rootState) newControllerCommand() *cobra.Command {
 				return domain.NewError(
 					domain.ErrorPrecondition,
 					"controller mode",
-					"controller mode requires at least one migrate.sealos.io/v1alpha1 workflow CRD; install deploy/crd.yaml",
+					"controller mode requires at least one migrate.sealos.io/v1alpha1 workflow CRD; install the controller with its Helm chart (charts/pvc-migrate, or the published OCI chart)",
 				)
 			}
 

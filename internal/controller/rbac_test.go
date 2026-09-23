@@ -19,13 +19,13 @@ type permissionKey struct {
 }
 
 func TestControllerRolesMatchLeastPrivilegeContract(t *testing.T) {
-	paths := []string{"../../config/rbac/role.yaml", "../../deploy/rbac.yaml"}
+	paths := []string{"../../config/rbac/role.yaml"}
 	want := controllerRolePermissions()
 
 	var reference map[permissionKey][]string
 	for _, path := range paths {
 		t.Run(path, func(t *testing.T) {
-			role := readClusterRole(t, path, "pvc-migrate")
+			role := readControllerClusterRole(t, path)
 
 			got := rolePermissions(role)
 			if !reflect.DeepEqual(got, want) {
@@ -46,7 +46,7 @@ func TestControllerRolesMatchLeastPrivilegeContract(t *testing.T) {
 }
 
 func TestControllerRoleExcludesCallerSubmissionReviews(t *testing.T) {
-	role := readClusterRole(t, "../../deploy/rbac.yaml", "pvc-migrate")
+	role := readControllerClusterRole(t, "../../config/rbac/role.yaml")
 	permissions := rolePermissions(role)
 
 	for _, forbidden := range []permissionKey{
@@ -62,13 +62,8 @@ func TestControllerRoleExcludesCallerSubmissionReviews(t *testing.T) {
 	}
 }
 
-func TestControllerRoleKeepsMongoDBExecPermissionSeparate(t *testing.T) {
-	defaultRole := readClusterRole(t, "../../deploy/rbac.yaml", "pvc-migrate")
-	mongoDBRole := readClusterRole(
-		t,
-		"../../deploy/kubeblocks-mongodb-rbac.yaml",
-		"pvc-migrate-kubeblocks-mongodb",
-	)
+func TestControllerRoleGrantsNoPodExec(t *testing.T) {
+	defaultRole := readControllerClusterRole(t, "../../config/rbac/role.yaml")
 
 	if permissionAllowed(
 		rolePermissions(defaultRole),
@@ -77,23 +72,10 @@ func TestControllerRoleKeepsMongoDBExecPermissionSeparate(t *testing.T) {
 	) {
 		t.Fatal("default controller role grants Pod exec")
 	}
-
-	if !permissionAllowed(
-		rolePermissions(mongoDBRole),
-		permissionKey{resource: "pods/exec"},
-		"create",
-	) {
-		t.Fatal("KubeBlocks MongoDB role does not grant Pod exec")
-	}
-
-	if len(mongoDBRole.Rules) != 1 ||
-		permissionAllowed(rolePermissions(mongoDBRole), permissionKey{resource: "pods"}, "get") {
-		t.Fatalf("KubeBlocks MongoDB role grants unexpected permissions: %#v", mongoDBRole.Rules)
-	}
 }
 
 func TestControllerRoleScopesTransferServiceAccountUpdates(t *testing.T) {
-	role := readClusterRole(t, "../../deploy/rbac.yaml", "pvc-migrate")
+	role := readControllerClusterRole(t, "../../config/rbac/role.yaml")
 
 	var createRule, scopedRule bool
 	for _, rule := range role.Rules {
@@ -186,8 +168,10 @@ func controllerRolePermissions() map[permissionKey][]string {
 	return want
 }
 
-func readClusterRole(t *testing.T, path, name string) rbacv1.ClusterRole {
+func readControllerClusterRole(t *testing.T, path string) rbacv1.ClusterRole {
 	t.Helper()
+
+	const name = "pvc-migrate"
 
 	data, err := os.ReadFile(path)
 	if err != nil {

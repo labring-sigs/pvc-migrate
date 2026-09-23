@@ -23,7 +23,6 @@ import (
 	"sigs.k8s.io/yaml"
 )
 
-//nolint:gocyclo // Validates the rendered production contract end to end.
 func TestHelmDeploymentContract(t *testing.T) {
 	files, err := renderControllerChart(nil)
 	if err != nil {
@@ -37,17 +36,12 @@ func TestHelmDeploymentContract(t *testing.T) {
 		t.Fatalf("unexpected deployment identity: %s/%s", deployment.Namespace, deployment.Name)
 	}
 
-	legacy, err := os.ReadFile("../../deploy/controller.yaml")
-	if err != nil {
-		t.Fatal(err)
+	expectedSelector := map[string]string{
+		"app.kubernetes.io/name":      "pvc-migrate",
+		"app.kubernetes.io/component": "controller",
 	}
 
-	var existing appsv1.Deployment
-	if err := yaml.Unmarshal(legacy, &existing); err != nil {
-		t.Fatal(err)
-	}
-
-	if !reflect.DeepEqual(deployment.Spec.Selector, existing.Spec.Selector) {
+	if !reflect.DeepEqual(deployment.Spec.Selector.MatchLabels, expectedSelector) {
 		t.Fatal("Helm adoption would change the immutable Deployment selector")
 	}
 

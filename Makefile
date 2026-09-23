@@ -32,7 +32,6 @@ check: test vet lint
 manifests: $(CONTROLLER_GEN)
 	$(CONTROLLER_GEN) object paths=./api/... output:dir=api/v1alpha1
 	$(CONTROLLER_GEN) crd paths=./api/... output:crd:artifacts:config=config/crd/bases
-	$(CONTROLLER_GEN) crd paths=./api/... output:stdout > deploy/crd.yaml
 	$(MAKE) chart-sync
 
 chart-sync:

@@ -21,10 +21,7 @@ func TestShippedRBACGrantsStorageTopologyRead(t *testing.T) {
 		"csistoragecapacities": {"list"},
 	}
 
-	for _, manifest := range []string{
-		"../../deploy/rbac.yaml",
-		"../../config/rbac/role.yaml",
-	} {
+	for _, manifest := range []string{"../../config/rbac/role.yaml"} {
 		t.Run(manifest, func(t *testing.T) {
 			rules := decodeClusterRoleRules(t, manifest)
 
