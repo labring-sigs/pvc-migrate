@@ -15,26 +15,24 @@ import (
 	clienttesting "k8s.io/client-go/testing"
 )
 
-func orphanPVC(
-	name, namespace, sessionID, rollbackPV, boundPV string,
-) *corev1.PersistentVolumeClaim {
-	annotations := map[string]string{kube.SessionKey: sessionID}
-	if rollbackPV != "" {
-		annotations[kube.RollbackPVAnnotation] = rollbackPV
+func orphanPVC(rollback string) *corev1.PersistentVolumeClaim {
+	annotations := map[string]string{kube.SessionKey: "orphan-session"}
+	if rollback != "" {
+		annotations[kube.RollbackPVAnnotation] = rollback
 	}
 
 	pvc := &corev1.PersistentVolumeClaim{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:        name,
-			Namespace:   namespace,
+			Name:        "data",
+			Namespace:   "tenants",
 			UID:         types.UID("pvc-uid"),
 			Annotations: annotations,
 			Labels: map[string]string{
-				kube.SessionKey:     sessionID,
+				kube.SessionKey:     "orphan-session",
 				kube.ManagedByLabel: kube.ManagedByValue,
 			},
 		},
-		Spec: corev1.PersistentVolumeClaimSpec{VolumeName: boundPV},
+		Spec: corev1.PersistentVolumeClaimSpec{VolumeName: "active-pv"},
 		Status: corev1.PersistentVolumeClaimStatus{
 			Phase: corev1.ClaimBound,
 		},
@@ -88,7 +86,7 @@ func orphanRollbackPV(name, paired string) *corev1.PersistentVolume {
 // the plan must name the PVC's currently bound PV as active and the recorded
 // partner as the rollback volume.
 func TestPlanOrphanCleanupPostActivation(t *testing.T) {
-	pvc := orphanPVC("data", "tenants", "orphan-session", "rollback-pv", "active-pv")
+	pvc := orphanPVC("rollback-pv")
 	active := orphanPV("active-pv", "rollback-pv")
 	rollback := orphanRollbackPV("rollback-pv", "active-pv")
 
@@ -124,7 +122,7 @@ func TestPlanOrphanCleanupPostActivation(t *testing.T) {
 // when the active PV no longer points at the PVC's recorded rollback PV, the
 // plan must fail instead of guessing which side to release.
 func TestPlanOrphanCleanupPostActivationRejectsBrokenPairing(t *testing.T) {
-	pvc := orphanPVC("data", "tenants", "orphan-session", "other-pv", "active-pv")
+	pvc := orphanPVC("other-pv")
 	active := orphanPV("active-pv", "rollback-pv")
 	rollback := orphanPV("other-pv", "")
 
@@ -149,7 +147,7 @@ func TestPlanOrphanCleanupPostActivationRejectsBrokenPairing(t *testing.T) {
 // direction: cleanup removes the rollback PV and the session Lease while the
 // active PVC and its bound PV stay untouched.
 func TestCleanupOrphanPostActivationDeletesRollbackSide(t *testing.T) {
-	pvc := orphanPVC("data", "tenants", "orphan-session", "rollback-pv", "active-pv")
+	pvc := orphanPVC("rollback-pv")
 	active := orphanPV("active-pv", "rollback-pv")
 	rollback := orphanRollbackPV("rollback-pv", "active-pv")
 
@@ -230,3 +228,54 @@ func (orphanNoopLeaseCleaner) DeleteSessionLease(context.Context, string, string
 }
 
 var _ = apierrors.NewNotFound
+
+// TestPlanOrphanCleanupPostActivationAcceptsRestoredPolicy pins the recovery
+// of a legacy finalized state: a workflow record lost after an older release
+// already restored the active PV's reclaim policy to the recorded original
+// must remain recoverable. Only the mid-flight pin (Retain) and the restored
+// original are accepted; a foreign policy still fails.
+func TestPlanOrphanCleanupPostActivationAcceptsRestoredPolicy(t *testing.T) {
+	pvc := orphanPVC("rollback-pv")
+	active := orphanPV("active-pv", "rollback-pv")
+	// Simulate the legacy finalized state: policy already restored to the
+	// recorded original (Delete) while ownership markers remain.
+	active.Spec.PersistentVolumeReclaimPolicy = corev1.PersistentVolumeReclaimDelete
+	rollback := orphanRollbackPV("rollback-pv", "active-pv")
+
+	client := fake.NewClientset(pvc, active, rollback)
+	cleaner := NewOrphanCleaner(client, nil, nil, orphanNoRecordsFinder{}, nil)
+
+	plan, err := cleaner.PlanOrphanCleanup(context.Background(), OrphanCleanupOptions{
+		SessionID:        "orphan-session",
+		SessionNamespace: "sessions",
+		SourceNamespace:  "tenants",
+		SourcePVC:        "data",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if !plan.Ready {
+		t.Fatalf("restored-policy state must stay recoverable: %+v", plan.Checks)
+	}
+
+	// A policy that is neither the pin nor the recorded original must fail.
+	foreign := orphanPV("active-pv", "rollback-pv")
+	foreign.Spec.PersistentVolumeReclaimPolicy = corev1.PersistentVolumeReclaimRecycle
+	foreignClient := fake.NewClientset(pvc, foreign, rollback)
+	foreignCleaner := NewOrphanCleaner(foreignClient, nil, nil, orphanNoRecordsFinder{}, nil)
+
+	foreignPlan, err := foreignCleaner.PlanOrphanCleanup(context.Background(), OrphanCleanupOptions{
+		SessionID:        "orphan-session",
+		SessionNamespace: "sessions",
+		SourceNamespace:  "tenants",
+		SourcePVC:        "data",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if foreignPlan.Ready {
+		t.Fatalf("foreign policy must not be ready: %+v", foreignPlan.Checks)
+	}
+}

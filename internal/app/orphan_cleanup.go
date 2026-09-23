@@ -298,13 +298,20 @@ func (s *OrphanCleaner) PlanOrphanCleanup(
 		)
 	}
 
-	if current.Spec.PersistentVolumeReclaimPolicy != corev1.PersistentVolumeReclaimRetain {
+	// A workflow whose record was lost mid-flight keeps the active PV pinned
+	// to Retain; one finalized by an older release may already have restored
+	// the recorded original policy. Both states are recoverable — the guard
+	// mirrors the rollback-PV rule and accepts either. Anything else means an
+	// unknown hand touched the PV, and recovery must not guess.
+	if current.Spec.PersistentVolumeReclaimPolicy != corev1.PersistentVolumeReclaimRetain &&
+		current.Spec.PersistentVolumeReclaimPolicy != originalPolicy {
 		plan.AddCheck(
 			orphanFailed(
 				domain.CheckNameCurrentPolicy,
 				fmt.Sprintf(
-					"current PV %s reclaim policy must be Retain during orphan cleanup",
+					"current PV %s reclaim policy must be Retain or its recorded original policy %q during orphan cleanup",
 					current.Name,
+					originalPolicy,
 				),
 			),
 		)
