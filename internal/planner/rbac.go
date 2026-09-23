@@ -140,7 +140,7 @@ func transferToolAccess(namespaces, strategies []string) rbacChecks {
 			"delete",
 		)
 		add(namespace, "apps", "replicasets", "get", "list")
-		add(namespace, "networking.k8s.io", "networkpolicies", "list")
+		add(namespace, "networking.k8s.io", "networkpolicies", "list", "create")
 	}
 
 	return checks
