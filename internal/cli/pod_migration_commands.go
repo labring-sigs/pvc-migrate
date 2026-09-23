@@ -471,7 +471,28 @@ func (r *rootState) runPodMigrateCommand(
 		return reportPodMigrationError(cmd, object.Name, object.Status.Phase, err)
 	}
 
-	return runtime.printer.Print(object)
+	if err := runtime.printer.Print(object); err != nil {
+		return err
+	}
+
+	return writePodMigrationNextSteps(cmd, object.Name)
+}
+
+// writePodMigrationNextSteps prints the lifecycle follow-ups after a finished
+// migration, mirroring the guidance the other transfer commands print.
+func writePodMigrationNextSteps(cmd *cobra.Command, session string) error {
+	_, err := fmt.Fprintf(
+		cmd.ErrOrStderr(),
+		"\nPod migration %s finished. Inspect it with `migrate-pod status %s`.\n"+
+			"Roll back the cutover with `migrate-pod rollback %s`, or finalize reclaimed storage with "+
+			"`migrate-pod cleanup %s --finalize --delete-session`.\n",
+		session,
+		session,
+		session,
+		session,
+	)
+
+	return err
 }
 
 func reportPodMigrationError(

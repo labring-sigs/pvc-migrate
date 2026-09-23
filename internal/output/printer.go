@@ -77,6 +77,10 @@ func (p Printer) printTable(value any) error {
 		return p.printMigration(typed)
 	case *v1alpha1.ClusterMigration:
 		return p.printClusterMigration(typed)
+	case *v1alpha1.PodMigration:
+		return p.printPodMigration(typed)
+	case *v1alpha1.ClusterPodMigration:
+		return p.printClusterPodMigration(typed)
 	case []crclient.Object:
 		return p.printWorkflowInventory(typed)
 	case []*v1alpha1.Move:
