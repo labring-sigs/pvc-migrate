@@ -61,6 +61,7 @@ func (m *MigrationExecutor) ValidateActivation(
 				m.client,
 				object.Name,
 				binding.SourcePVC,
+				object.Namespace,
 				binding.DestinationPV,
 				qualifiedOptionalReference(status.Activation.ActivePVC, object.Namespace),
 			); err != nil {
@@ -87,6 +88,7 @@ func (m *MigrationExecutor) ValidateActivation(
 				m.client,
 				object.Name,
 				binding.SourcePVC,
+				object.Namespace,
 				binding.DestinationPV,
 				active,
 			); err != nil {
@@ -197,6 +199,7 @@ func (m *MigrationExecutor) activate(
 			m.client,
 			m.switcher,
 			object.Name,
+			object.Namespace,
 			binding,
 			desired,
 			&checkpoint,
@@ -246,6 +249,7 @@ func (m *MigrationExecutor) verifyActiveVolumes(
 			m.client,
 			object.Name,
 			binding.SourcePVC,
+			object.Namespace,
 			binding.DestinationPV,
 			qualifiedOptionalReference(status.Activation.ActivePVC, object.Namespace),
 		); err != nil {

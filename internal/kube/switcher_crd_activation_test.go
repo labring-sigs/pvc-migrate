@@ -9,6 +9,8 @@ import (
 	v1alpha1 "github.com/labring-sigs/pvc-migrate/api/v1alpha1"
 	"github.com/labring-sigs/pvc-migrate/internal/testutil"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/kubernetes/fake"
 	ktesting "k8s.io/client-go/testing"
@@ -28,6 +30,7 @@ func TestActivatePVCRecoversEveryCRDCheckpointFailure(t *testing.T) {
 			err := switcher.ActivatePVC(
 				t.Context(),
 				session.ID,
+				volume.SourcePVC.Namespace,
 				bindings,
 				desired,
 				checkpoint,
@@ -54,6 +57,7 @@ func TestActivatePVCRecoversEveryCRDCheckpointFailure(t *testing.T) {
 			if err := switcher.ActivatePVC(
 				t.Context(),
 				session.ID,
+				volume.SourcePVC.Namespace,
 				bindings,
 				desired,
 				checkpoint,
@@ -74,6 +78,7 @@ func TestActivatePVCRecoversEveryCRDCheckpointFailure(t *testing.T) {
 			if err := switcher.ActivatePVC(
 				t.Context(),
 				session.ID,
+				volume.SourcePVC.Namespace,
 				bindings,
 				desired,
 				checkpoint,
@@ -111,6 +116,7 @@ func TestActivatePVCRejectsInvalidManifestBeforeResourceAccess(t *testing.T) {
 			if err := switcher.ActivatePVC(
 				t.Context(),
 				session.ID,
+				volume.SourcePVC.Namespace,
 				testPVCTransferBindings(volume),
 				desired,
 				&v1alpha1.ClusterVolumeActivationStatus{},
@@ -145,6 +151,7 @@ func TestActivatePVCLostLeaseAfterDeleteStopsCutover(t *testing.T) {
 	err := switcher.ActivatePVC(
 		WithLeaseFence(t.Context(), fence),
 		session.ID,
+		volume.SourcePVC.Namespace,
 		testPVCTransferBindings(volume),
 		testMigrationPVCManifest(t, session.ID, volume),
 		checkpoint,
@@ -165,5 +172,83 @@ func TestActivatePVCLostLeaseAfterDeleteStopsCutover(t *testing.T) {
 			deletion.GetNamespace() == volume.SourcePVC.Namespace {
 			t.Fatal("source was deleted after loss of lease")
 		}
+	}
+}
+
+func TestActivatePVCCrossNamespaceCutover(t *testing.T) {
+	switcher, session, volume, _ := switcherFixture(t)
+
+	const destinationNamespace = "landing"
+
+	desired := testMigrationPVCManifest(t, session.ID, volume)
+	desired.Namespace = destinationNamespace
+
+	checkpoint := &v1alpha1.ClusterVolumeActivationStatus{}
+
+	if err := switcher.ActivatePVC(
+		t.Context(),
+		session.ID,
+		destinationNamespace,
+		testPVCTransferBindings(volume),
+		desired,
+		checkpoint,
+		nil,
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	if checkpoint.ActivePVC == nil || checkpoint.ActivePVC.Namespace != destinationNamespace ||
+		checkpoint.ActivePVC.Name != volume.SourcePVC.Name || checkpoint.ActivatedAt == nil {
+		t.Fatalf("cross-namespace activation not recorded: %+v", checkpoint)
+	}
+
+	active, err := switcher.client.CoreV1().
+		PersistentVolumeClaims(destinationNamespace).
+		Get(t.Context(), volume.SourcePVC.Name, metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("activated PVC missing from destination namespace: %v", err)
+	}
+
+	if active.Spec.VolumeName != volume.DestinationPV.Name ||
+		active.Labels[SessionKey] != session.ID {
+		t.Fatalf("activated PVC has the wrong binding: %+v", active)
+	}
+
+	pv, err := switcher.client.CoreV1().
+		PersistentVolumes().
+		Get(t.Context(), volume.DestinationPV.Name, metav1.GetOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if pv.Spec.ClaimRef == nil || pv.Spec.ClaimRef.Namespace != destinationNamespace ||
+		pv.Spec.ClaimRef.Name != volume.SourcePVC.Name {
+		t.Fatalf(
+			"destination PV claimRef was not reserved for the landing namespace: %+v",
+			pv.Spec.ClaimRef,
+		)
+	}
+
+	if _, err := switcher.client.CoreV1().
+		PersistentVolumeClaims(volume.DestinationPVC.Namespace).
+		Get(t.Context(), volume.DestinationPVC.Name, metav1.GetOptions{}); !apierrors.IsNotFound(err) {
+		t.Fatalf("temporary claim survived cutover: %v", err)
+	}
+
+	before := checkpoint.DeepCopy()
+	if err := switcher.ActivatePVC(
+		t.Context(),
+		session.ID,
+		destinationNamespace,
+		testPVCTransferBindings(volume),
+		desired,
+		checkpoint,
+		nil,
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	if checkpoint.ActivePVC.UID != before.ActivePVC.UID {
+		t.Fatal("repeated cross-namespace activation replaced the active PVC")
 	}
 }

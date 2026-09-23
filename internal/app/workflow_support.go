@@ -55,6 +55,7 @@ type volumeSwitcher interface {
 	ActivatePVC(
 		ctx context.Context,
 		sessionID string,
+		activateNamespace string,
 		volume kube.PVCTransferBindings,
 		desired *corev1.PersistentVolumeClaim,
 		status *v1alpha1.ClusterVolumeActivationStatus,
@@ -63,6 +64,7 @@ type volumeSwitcher interface {
 	RollbackPVC(
 		ctx context.Context,
 		sessionID string,
+		activateNamespace string,
 		volume kube.PVCTransferBindings,
 		desired *corev1.PersistentVolumeClaim,
 		status *v1alpha1.ClusterVolumeActivationStatus,

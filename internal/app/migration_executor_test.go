@@ -44,6 +44,15 @@ func migrationExecutorFixture(
 ) (*ClusterMigrationExecutor, *v1alpha1.ClusterMigration, *migrationCheckpointStore, *concreteReservationReserver) {
 	t.Helper()
 
+	return migrationExecutorFixtureWith(t, nil)
+}
+
+func migrationExecutorFixtureWith(
+	t *testing.T,
+	customize func(*v1alpha1.ClusterMigration),
+) (*ClusterMigrationExecutor, *v1alpha1.ClusterMigration, *migrationCheckpointStore, *concreteReservationReserver) {
+	t.Helper()
+
 	object := &v1alpha1.ClusterMigration{
 		ObjectMeta: metav1.ObjectMeta{Name: "migration"},
 		Spec: v1alpha1.ClusterMigrationSpec{
@@ -83,6 +92,10 @@ func migrationExecutorFixture(
 			VolumeMode:     corev1.PersistentVolumeFilesystem,
 			AccessModes:    []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce},
 		})
+	}
+
+	if customize != nil {
+		customize(object)
 	}
 
 	client := fake.NewClientset(&corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "temporary"}})

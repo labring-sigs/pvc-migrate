@@ -102,7 +102,7 @@ func validateClusterMigrationObject(object *v1alpha1.ClusterMigration) error {
 	return validateMigrationCheckpoints(
 		volumes,
 		object.Status.Volumes,
-		string(plan.SourceNamespace),
+		string(plan.DestinationNamespace),
 		string(plan.TemporaryNamespace),
 		phase,
 	)
@@ -167,7 +167,7 @@ func validateMigrationRequestedVolumes(
 func validateMigrationCheckpoints(
 	volumes map[string]v1alpha1.VolumeSpec,
 	checkpoints []v1alpha1.ClusterMigrationVolumeStatus,
-	sourceNamespace, temporaryNamespace string,
+	destinationNamespace, temporaryNamespace string,
 	phase v1alpha1.WorkflowPhase,
 ) error {
 	invalid := func(message string) error { return domain.NewError(domain.ErrorValidation, "migration", message) }
@@ -194,7 +194,7 @@ func validateMigrationCheckpoints(
 			checkpoint.ClusterVolumeReservationStatus,
 			checkpoint.Activation,
 			checkpoint.Sync.Attempts,
-			sourceNamespace,
+			destinationNamespace,
 			temporaryNamespace,
 		); err != nil {
 			return err
@@ -219,7 +219,7 @@ func validateMigrationVolumeCheckpoint(
 	checkpoint v1alpha1.ClusterVolumeReservationStatus,
 	activation v1alpha1.ClusterVolumeActivationStatus,
 	copyAttempts int,
-	sourceNamespace, temporaryNamespace string,
+	destinationNamespace, temporaryNamespace string,
 ) error {
 	invalid := func(message string) error { return domain.NewError(domain.ErrorValidation, "migration", message) }
 	if ref := checkpoint.DestinationPVC; ref != nil &&
@@ -238,8 +238,10 @@ func validateMigrationVolumeCheckpoint(
 	}
 
 	if ref := activation.ActivePVC; ref != nil &&
-		(ref.Name != volume.SourcePVC.Name || ref.Namespace != sourceNamespace || ref.UID == "") {
-		return invalid("migration active PVC must preserve the source identity name and namespace")
+		(ref.Name != volume.SourcePVC.Name || ref.Namespace != destinationNamespace || ref.UID == "") {
+		return invalid(
+			"migration active PVC must preserve the source name in the destination namespace",
+		)
 	}
 
 	if copyAttempts < 0 {

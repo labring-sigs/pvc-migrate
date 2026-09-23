@@ -17,6 +17,7 @@ type rollbackSteps func(*v1alpha1.ClusterVolumeActivationStatus, kube.ProgressFu
 func (f rollbackSteps) RollbackPVC(
 	_ context.Context,
 	_ string,
+	_ string,
 	_ kube.PVCTransferBindings,
 	_ *corev1.PersistentVolumeClaim,
 	status *v1alpha1.ClusterVolumeActivationStatus,
@@ -66,6 +67,7 @@ func TestMigrationRollbackRejectsUnsavedProgressAndRetries(t *testing.T) {
 		t.Context(),
 		steps,
 		"migration",
+		"app",
 		kube.PVCTransferBindings{},
 		nil,
 		&status,
@@ -79,6 +81,7 @@ func TestMigrationRollbackRejectsUnsavedProgressAndRetries(t *testing.T) {
 		t.Context(),
 		steps,
 		"migration",
+		"app",
 		kube.PVCTransferBindings{},
 		nil,
 		&status,

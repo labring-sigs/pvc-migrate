@@ -14,19 +14,22 @@ import (
 
 // ActivatePVC replaces the source claim with the prepared destination binding.
 // The operation must verify final synchronization before entering this resource step.
+// activateNamespace is the namespace the activated claim lands in; cross-namespace
+// migrations move it off the source namespace while keeping the claim name.
 func (s *Switcher) ActivatePVC(
 	ctx context.Context,
 	sessionID string,
+	activateNamespace string,
 	volume PVCTransferBindings,
 	desired *corev1.PersistentVolumeClaim,
 	status *v1alpha1.ClusterVolumeActivationStatus,
 	progress ProgressFunc,
 ) error {
-	if sessionID == "" || status == nil || desired == nil {
+	if sessionID == "" || activateNamespace == "" || status == nil || desired == nil {
 		return domain.NewError(
 			domain.ErrorValidation,
 			"activate PVC",
-			"workflow ID, desired PVC and activation checkpoint are required",
+			"workflow ID, activate namespace, desired PVC and activation checkpoint are required",
 		)
 	}
 
@@ -47,7 +50,7 @@ func (s *Switcher) ActivatePVC(
 		)
 	}
 
-	if desired.Namespace != volume.SourcePVC.Namespace ||
+	if desired.Namespace != activateNamespace ||
 		desired.Name != volume.SourcePVC.Name ||
 		desired.Spec.VolumeName != volume.DestinationPV.Name ||
 		desired.Labels[SessionKey] != sessionID ||
@@ -91,7 +94,15 @@ func (s *Switcher) ActivatePVC(
 		}
 	}
 
-	return s.activateVolumeResources(ctx, sessionID, volume, desired.DeepCopy(), status, progress)
+	return s.activateVolumeResources(
+		ctx,
+		sessionID,
+		activateNamespace,
+		volume,
+		desired.DeepCopy(),
+		status,
+		progress,
+	)
 }
 
 func (s *Switcher) validateTemporaryActivationPVC(
@@ -130,6 +141,7 @@ func (s *Switcher) validateTemporaryActivationPVC(
 func (s *Switcher) activateVolumeResources(
 	ctx context.Context,
 	sessionID string,
+	activateNamespace string,
 	volume PVCTransferBindings,
 	desired *corev1.PersistentVolumeClaim,
 	status *v1alpha1.ClusterVolumeActivationStatus,
@@ -162,6 +174,7 @@ func (s *Switcher) activateVolumeResources(
 	if active, err := s.activePVC(
 		ctx,
 		sessionID,
+		activateNamespace,
 		volume.SourcePVC,
 		volume.SourcePV,
 		volume.DestinationPV,
@@ -278,8 +291,8 @@ func (s *Switcher) reserveActivationDestination(
 	if err := s.reservePV(
 		ctx,
 		volume.DestinationPV,
-		volume.SourcePVC.Namespace,
-		volume.SourcePVC.Name,
+		desired.Namespace,
+		desired.Name,
 		sessionID,
 	); err != nil {
 		return err

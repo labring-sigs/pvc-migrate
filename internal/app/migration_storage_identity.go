@@ -237,10 +237,16 @@ func verifyRollbackStorageVolume(
 	return nil
 }
 
+// verifyActiveStorageVolume revalidates an activated volume. The activated claim
+// keeps the source PVC's name but may land in destinationNamespace (cross-
+// namespace migration); same-namespace callers pass the source namespace.
 func verifyActiveStorageVolume(
 	ctx context.Context,
 	client kubernetes.Interface,
-	sessionID string, sourcePVC, expectedPV v1alpha1.ObjectReference,
+	sessionID string,
+	sourcePVC v1alpha1.ObjectReference,
+	destinationNamespace string,
+	expectedPV v1alpha1.ObjectReference,
 	active *v1alpha1.ObjectReference,
 ) error {
 	if active == nil || active.Namespace == "" || active.Name == "" || active.UID == "" {
@@ -255,15 +261,15 @@ func verifyActiveStorageVolume(
 		)
 	}
 
-	if active.Namespace != sourcePVC.Namespace || active.Name != sourcePVC.Name {
+	if active.Namespace != destinationNamespace || active.Name != sourcePVC.Name {
 		return domain.NewError(
 			domain.ErrorConflict,
 			verifyMigrationPhase,
 			fmt.Sprintf(
-				"recorded active PVC %s/%s does not match application PVC %s/%s",
+				"recorded active PVC %s/%s does not match activated PVC %s/%s",
 				active.Namespace,
 				active.Name,
-				sourcePVC.Namespace,
+				destinationNamespace,
 				sourcePVC.Name,
 			),
 		)
@@ -282,13 +288,13 @@ func verifyActiveStorageVolume(
 	}
 
 	pvc, err := client.CoreV1().
-		PersistentVolumeClaims(sourcePVC.Namespace).
+		PersistentVolumeClaims(destinationNamespace).
 		Get(ctx, sourcePVC.Name, metav1.GetOptions{})
 	if err != nil {
 		return domain.WrapError(
 			domain.ErrorKubernetes,
 			verifyMigrationPhase,
-			fmt.Sprintf("read PVC %s/%s", sourcePVC.Namespace, sourcePVC.Name),
+			fmt.Sprintf("read PVC %s/%s", destinationNamespace, sourcePVC.Name),
 			err,
 		)
 	}
@@ -299,7 +305,7 @@ func verifyActiveStorageVolume(
 			verifyMigrationPhase,
 			fmt.Sprintf(
 				"read PVC %s/%s returned an empty object",
-				sourcePVC.Namespace,
+				destinationNamespace,
 				sourcePVC.Name,
 			),
 		)

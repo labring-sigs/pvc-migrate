@@ -469,6 +469,7 @@ func (m *ClusterMigrationExecutor) ValidateRollback(
 				m.client,
 				object.Name,
 				binding.SourcePVC,
+				string(plan.DestinationNamespace),
 				binding.DestinationPV,
 				status.Activation.ActivePVC,
 			); err != nil {
@@ -496,6 +497,7 @@ func (m *ClusterMigrationExecutor) ValidateRollback(
 					m.client,
 					object.Name,
 					binding.SourcePVC,
+					string(plan.DestinationNamespace),
 					binding.DestinationPV,
 					active,
 				); err != nil {
@@ -537,7 +539,7 @@ func (m *ClusterMigrationExecutor) rollback(
 			for _, volume := range plan.Volumes {
 				if err := rollbackDestinationConsumed(
 					ctx, m.client,
-					string(plan.SourceNamespace),
+					string(plan.DestinationNamespace),
 					volume.SourcePVC.Name,
 					object.Name,
 				); err != nil {
@@ -584,6 +586,7 @@ func (m *ClusterMigrationExecutor) rollback(
 			ctx,
 			m.switcher,
 			object.Name,
+			string(plan.DestinationNamespace),
 			binding,
 			desired,
 			&status.Activation,

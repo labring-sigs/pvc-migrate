@@ -61,6 +61,7 @@ func (m *ClusterMigrationExecutor) ValidateActivation(
 				m.client,
 				object.Name,
 				binding.SourcePVC,
+				string(plan.DestinationNamespace),
 				binding.DestinationPV,
 				status.Activation.ActivePVC,
 			); err != nil {
@@ -87,6 +88,7 @@ func (m *ClusterMigrationExecutor) ValidateActivation(
 				m.client,
 				object.Name,
 				binding.SourcePVC,
+				string(plan.DestinationNamespace),
 				binding.DestinationPV,
 				active,
 			); err != nil {
@@ -198,6 +200,7 @@ func (m *ClusterMigrationExecutor) activate(
 			m.client,
 			m.switcher,
 			object.Name,
+			string(plan.DestinationNamespace),
 			binding,
 			desired,
 			&status.Activation,
@@ -230,6 +233,7 @@ func (m *ClusterMigrationExecutor) verifyActiveVolumes(
 			m.client,
 			object.Name,
 			binding.SourcePVC,
+			string(plan.DestinationNamespace),
 			binding.DestinationPV,
 			status.Activation.ActivePVC,
 		); err != nil {

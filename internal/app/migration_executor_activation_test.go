@@ -5,6 +5,7 @@ import (
 	"reflect"
 	"testing"
 
+	v1alpha1 "github.com/labring-sigs/pvc-migrate/api/v1alpha1"
 	"github.com/labring-sigs/pvc-migrate/internal/domain"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
@@ -92,6 +93,56 @@ func TestMigrationActivationRecoversResourceChangeBeforeCheckpoint(t *testing.T)
 
 	if store.writes != writes {
 		t.Fatal("conflicting active identity advanced state")
+	}
+}
+
+func TestMigrationActivationMovesPVCAcrossNamespaces(t *testing.T) {
+	executor, object, store, _ := migrationExecutorFixtureWith(
+		t,
+		func(object *v1alpha1.ClusterMigration) {
+			object.Spec.DestinationNamespace = "landing"
+			object.Status.Plan.DestinationNamespace = "landing"
+		},
+	)
+	executor.transfer.copier = &concreteCopyEngine{}
+	switcher := &scriptedSwitcher{client: executor.client}
+	executor.switcher = switcher
+
+	if err := executor.Reserve(t.Context(), object); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := executor.FinalSync(t.Context(), object); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := executor.Activate(t.Context(), object); err != nil {
+		t.Fatal(err)
+	}
+
+	if object.Status.Phase != domain.PhaseActivated {
+		t.Fatalf("cross-namespace activation failed: phase=%s", object.Status.Phase)
+	}
+
+	active := object.Status.Volumes[0].Activation.ActivePVC
+	if active == nil || active.Namespace != "landing" || active.Name != "a" {
+		t.Fatalf("active identity not recorded in the landing namespace: %+v", active)
+	}
+
+	if _, err := executor.client.CoreV1().
+		PersistentVolumeClaims("landing").
+		Get(t.Context(), "a", metav1.GetOptions{}); err != nil {
+		t.Fatalf("activated PVC missing from landing namespace: %v", err)
+	}
+
+	writes := store.writes
+
+	if err := executor.Activate(t.Context(), object); err != nil {
+		t.Fatal(err)
+	}
+
+	if store.writes != writes || len(switcher.activateCalls) != 2 {
+		t.Fatal("revalidated cross-namespace activation repeated resource changes")
 	}
 }
 

@@ -10,17 +10,24 @@ import (
 )
 
 type migrationActivator interface {
-	ActivatePVC(ctx context.Context, workflowID string, bindings kube.PVCTransferBindings,
-		desired *corev1.PersistentVolumeClaim, status *v1alpha1.ClusterVolumeActivationStatus, progress kube.ProgressFunc) error
+	ActivatePVC(
+		ctx context.Context,
+		workflowID, activateNamespace string,
+		bindings kube.PVCTransferBindings,
+		desired *corev1.PersistentVolumeClaim,
+		status *v1alpha1.ClusterVolumeActivationStatus,
+		progress kube.ProgressFunc,
+	) error
 }
 
 // activateMigrationVolume checkpoints only activation state. The caller owns
 // operation transitions; the switcher owns resource fencing and cutover order.
+// activateNamespace is the namespace the activated claim lands in.
 func activateMigrationVolume(
 	ctx context.Context,
 	client kubernetes.Interface,
 	switcher migrationActivator,
-	workflowID string,
+	workflowID, activateNamespace string,
 	bindings kube.PVCTransferBindings,
 	desired *corev1.PersistentVolumeClaim,
 	status *v1alpha1.ClusterVolumeActivationStatus,
@@ -28,20 +35,28 @@ func activateMigrationVolume(
 ) error {
 	if status.ActivatedAt != nil {
 		return verifyActiveStorageVolume(ctx, client, workflowID,
-			bindings.SourcePVC, bindings.DestinationPV, status.ActivePVC)
+			bindings.SourcePVC, activateNamespace, bindings.DestinationPV, status.ActivePVC)
 	}
 
 	checkpoint := status.DeepCopy()
 
-	return switcher.ActivatePVC(ctx, workflowID, bindings, desired, checkpoint, func() error {
-		previous := status.DeepCopy()
+	return switcher.ActivatePVC(
+		ctx,
+		workflowID,
+		activateNamespace,
+		bindings,
+		desired,
+		checkpoint,
+		func() error {
+			previous := status.DeepCopy()
 
-		*status = *checkpoint.DeepCopy()
-		if err := persistCheckpoint(ctx, save); err != nil {
-			*status = *previous
-			return err
-		}
+			*status = *checkpoint.DeepCopy()
+			if err := persistCheckpoint(ctx, save); err != nil {
+				*status = *previous
+				return err
+			}
 
-		return nil
-	})
+			return nil
+		},
+	)
 }
