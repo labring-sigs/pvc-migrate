@@ -140,7 +140,11 @@ func transferToolAccess(namespaces, strategies []string) rbacChecks {
 			"delete",
 		)
 		add(namespace, "apps", "replicasets", "get", "list")
-		add(namespace, "networking.k8s.io", "networkpolicies", "list", "create")
+		// NetworkPolicy creation stays out of the required set: the upstream
+		// transfer engine probes the permission at install time and degrades
+		// to a warning when it is missing, and transfers in non-isolated
+		// namespaces (and the mount strategy) never need the policies.
+		add(namespace, "networking.k8s.io", "networkpolicies", "list")
 	}
 
 	return checks
