@@ -22,9 +22,9 @@ func podSharedMountFixture() v1alpha1.SharedMountStatus {
 }
 
 func TestPodMigrationReservationRestoresMountsBeforeProvisioning(t *testing.T) {
-	executor, object, store, reserver := podMigrationExecutorFixture(
+	executor, object, store, reserver := namespacedPodMigrationFixture(
 		t,
-		func(o *v1alpha1.ClusterPodMigration) {
+		func(o *v1alpha1.PodMigration) {
 			o.Status.OpenEBSLVMSharedMounts = []v1alpha1.SharedMountStatus{podSharedMountFixture()}
 		},
 	)
@@ -65,9 +65,9 @@ func TestPodMigrationReservationRestoresMountsBeforeProvisioning(t *testing.T) {
 }
 
 func TestPodMigrationReservationRetriesDestinationSharingWithoutReprovisioning(t *testing.T) {
-	executor, object, _, reserver := podMigrationExecutorFixture(
+	executor, object, _, reserver := namespacedPodMigrationFixture(
 		t,
-		func(o *v1alpha1.ClusterPodMigration) {
+		func(o *v1alpha1.PodMigration) {
 			o.Spec.OpenEBSLVMEnableShared = true
 
 			o.Status.Plan.OpenEBSLVMEnableShared = true
@@ -113,45 +113,30 @@ func TestPodMigrationReservationRetriesDestinationSharingWithoutReprovisioning(t
 	}
 
 	if object.Status.Phase != domain.PhaseReserved ||
-		!reflect.DeepEqual(reserver.calls, []string{"a", "b"}) ||
-		!reflect.DeepEqual(
-			manager.ensurePVCs,
-			[]string{"temporary/reserved-a", "temporary/reserved-a", "temporary/reserved-b"},
-		) {
+		!reflect.DeepEqual(reserver.calls, []string{"a", "b"}) {
 		t.Fatalf(
-			"sharing retry reprovisioned storage or used the wrong namespace: calls=%v mounts=%v",
+			"sharing retry reprovisioned storage: calls=%v",
 			reserver.calls,
-			manager.ensurePVCs,
 		)
 	}
 }
 
 func TestPodMigrationRejectsUnrelatedSharedMountsBeforeLock(t *testing.T) {
-	for _, cluster := range []bool{false, true} {
-		for _, mutation := range []func(*v1alpha1.SharedMountStatus){
-			func(m *v1alpha1.SharedMountStatus) { m.SourcePV.UID = "replaced" },
-			func(m *v1alpha1.SharedMountStatus) { m.SourcePV.Name = "unplanned" },
-			func(m *v1alpha1.SharedMountStatus) { m.LVMVolume.UID = "" },
-		} {
-			mount := podSharedMountFixture()
-			mutation(&mount)
+	for _, mutation := range []func(*v1alpha1.SharedMountStatus){
+		func(m *v1alpha1.SharedMountStatus) { m.SourcePV.UID = "replaced" },
+		func(m *v1alpha1.SharedMountStatus) { m.SourcePV.Name = "unplanned" },
+		func(m *v1alpha1.SharedMountStatus) { m.LVMVolume.UID = "" },
+	} {
+		mount := podSharedMountFixture()
+		mutation(&mount)
 
-			var err error
-			if cluster {
-				executor, object, _, _ := podMigrationExecutorFixture(t)
-				executor.locker = nil
-				object.Status.OpenEBSLVMSharedMounts = []v1alpha1.SharedMountStatus{mount}
-				err = executor.Reserve(t.Context(), object)
-			} else {
-				executor, object, _, _ := namespacedPodMigrationFixture(t)
-				executor.locker = nil
-				object.Status.OpenEBSLVMSharedMounts = []v1alpha1.SharedMountStatus{mount}
-				err = executor.Reserve(t.Context(), object)
-			}
+		executor, object, _, _ := namespacedPodMigrationFixture(t)
+		executor.locker = nil
+		object.Status.OpenEBSLVMSharedMounts = []v1alpha1.SharedMountStatus{mount}
+		err := executor.Reserve(t.Context(), object)
 
-			if domain.CategoryOf(err) != domain.ErrorValidation {
-				t.Fatalf("invalid shared mount reached execution: %v", err)
-			}
+		if domain.CategoryOf(err) != domain.ErrorValidation {
+			t.Fatalf("invalid shared mount reached execution: %v", err)
 		}
 	}
 }

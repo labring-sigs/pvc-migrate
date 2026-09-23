@@ -75,6 +75,7 @@ func (m *MigrationExecutor) ValidateActivation(
 			m.client,
 			binding.SourcePVC,
 			binding.SourcePV,
+			object.Namespace,
 		)
 		if err != nil {
 			return err
@@ -180,6 +181,7 @@ func (m *MigrationExecutor) activate(
 			binding.SourcePVC,
 			binding.SourcePV,
 			binding.DestinationPV,
+			object.Namespace,
 			volume.SourcePVCSpec,
 			volume.SourcePVCMetadata,
 			volume.StorageClass,

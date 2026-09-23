@@ -14,6 +14,7 @@ import (
 type offlineMigrationFlags struct {
 	sessionID             string
 	sourceNamespace       string
+	destinationNamespace  string
 	temporaryNamespace    string
 	sourcePVCs            []string
 	destinationPVCs       []string
@@ -36,6 +37,12 @@ func (f *offlineMigrationFlags) bind(command *cobra.Command) {
 	flags := command.Flags()
 	flags.StringVar(&f.sessionID, "session", "", "Migration session ID")
 	flags.StringVarP(&f.sourceNamespace, "source-namespace", "n", "default", "Source PVC namespace")
+	flags.StringVar(
+		&f.destinationNamespace,
+		"destination-namespace",
+		"",
+		"Namespace the migrated PVC lands in; empty keeps the source namespace",
+	)
 	flags.StringVar(
 		&f.temporaryNamespace,
 		"temporary-namespace",
@@ -176,9 +183,10 @@ func (f *offlineMigrationFlags) workflow(
 	object := &v1alpha1.ClusterMigration{
 		ObjectMeta: metav1.ObjectMeta{Name: id},
 		Spec: v1alpha1.ClusterMigrationSpec{
-			SourceNamespace:    v1alpha1.NamespaceName(f.sourceNamespace),
-			TemporaryNamespace: v1alpha1.NamespaceName(temporaryNamespace),
-			SessionNamespace:   v1alpha1.NamespaceName(sessionNamespace),
+			SourceNamespace:      v1alpha1.NamespaceName(f.sourceNamespace),
+			DestinationNamespace: v1alpha1.NamespaceName(f.destinationNamespace),
+			TemporaryNamespace:   v1alpha1.NamespaceName(temporaryNamespace),
+			SessionNamespace:     v1alpha1.NamespaceName(sessionNamespace),
 			MigrationSpec: v1alpha1.MigrationSpec{
 				TransferOptions: v1alpha1.TransferOptions{
 					UnusedStoragePolicy: v1alpha1.UnusedStoragePolicy(

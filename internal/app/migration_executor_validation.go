@@ -121,9 +121,14 @@ func validateMigrationPlanNamespaces(
 		sessionNamespace = spec.SourceNamespace
 	}
 
+	destinationNamespace := spec.DestinationNamespace
+	if destinationNamespace == "" {
+		destinationNamespace = spec.SourceNamespace
+	}
+
 	if plan.SourceNamespace == "" || plan.TemporaryNamespace == "" || plan.SessionNamespace == "" ||
-		plan.SourceNamespace != spec.SourceNamespace || plan.TemporaryNamespace != temporaryNamespace || plan.SessionNamespace != sessionNamespace ||
-		plan.DestinationNamespace != plan.SourceNamespace {
+		plan.SourceNamespace != spec.SourceNamespace || plan.TemporaryNamespace != temporaryNamespace ||
+		plan.SessionNamespace != sessionNamespace || plan.DestinationNamespace != destinationNamespace {
 		return domain.NewError(
 			domain.ErrorValidation,
 			"migration",

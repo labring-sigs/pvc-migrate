@@ -119,9 +119,13 @@ func podMigrationNamespacedPlanNamespaces(object *v1alpha1.PodMigration) []strin
 
 // Cross-namespace work is only expressible through cluster-scoped CRDs.
 func TestCrossNamespaceRequiresClusterKinds(t *testing.T) {
+	// Pod migration moves a running workload's storage inside its own
+	// namespace: workloads cannot be recreated in another namespace, so it
+	// deliberately stays namespaced-only.
 	for _, sessionType := range []domain.SessionType{
-		domain.SessionTypeMigrate, domain.SessionTypeMigratePod,
-		domain.SessionTypeReserve, domain.SessionTypeCopy,
+		domain.SessionTypeMigrate,
+		domain.SessionTypeReserve,
+		domain.SessionTypeCopy,
 	} {
 		workflow, ok := domain.ControllerWorkflowForType(sessionType)
 		if !ok {
@@ -139,6 +143,7 @@ func TestCrossNamespaceRequiresClusterKinds(t *testing.T) {
 
 	// Namespaced-only operations cannot cross namespaces at all.
 	for _, sessionType := range []domain.SessionType{
+		domain.SessionTypeMigratePod,
 		domain.SessionTypeBackup, domain.SessionTypeRestore, domain.SessionTypeRename,
 	} {
 		workflow, ok := domain.ControllerWorkflowForType(sessionType)

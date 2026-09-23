@@ -65,27 +65,6 @@ func failSourceDeleted(
 // FailSourceDeleted converges a live workflow whose planned source PVC was
 // deleted to Failed. Returns nil without mutating the workflow when the
 // source storage still exists or the phase is terminal.
-func (m *ClusterPodMigrationExecutor) FailSourceDeleted(
-	ctx context.Context,
-	object *v1alpha1.ClusterPodMigration,
-) error {
-	plan := object.Status.Plan
-	if plan == nil {
-		return nil
-	}
-
-	return failSourceDeleted(ctx, object.Status.WorkflowStatus,
-		plan.Volumes, string(plan.SourceNamespace), m.client,
-		func(ctx context.Context, run func(context.Context) error) error {
-			return withStoredWorkflowLock(ctx, m.store, m.locker, m.storageNamespace, object, run)
-		},
-		func(ctx context.Context, cause error) error {
-			return m.fail(ctx, object, cause)
-		}, "pod migration")
-}
-
-// FailSourceDeleted mirrors the cluster-scoped convergence for namespaced
-// PodMigration workflows.
 func (m *PodMigrationExecutor) FailSourceDeleted(
 	ctx context.Context,
 	object *v1alpha1.PodMigration,

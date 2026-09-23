@@ -157,17 +157,11 @@ type MoveSpec struct {
 }
 
 type ClusterMigrationSpec struct {
-	MigrationSpec      `              json:",inline"`
-	SourceNamespace    NamespaceName `json:"sourceNamespace"`
-	TemporaryNamespace NamespaceName `json:"temporaryNamespace,omitempty"`
-	SessionNamespace   NamespaceName `json:"sessionNamespace,omitempty"`
-}
-
-type ClusterPodMigrationSpec struct {
-	PodMigrationSpec   `              json:",inline"`
-	SourceNamespace    NamespaceName `json:"sourceNamespace"`
-	TemporaryNamespace NamespaceName `json:"temporaryNamespace,omitempty"`
-	SessionNamespace   NamespaceName `json:"sessionNamespace,omitempty"`
+	MigrationSpec        `              json:",inline"`
+	SourceNamespace      NamespaceName `json:"sourceNamespace"`
+	DestinationNamespace NamespaceName `json:"destinationNamespace,omitempty"`
+	TemporaryNamespace   NamespaceName `json:"temporaryNamespace,omitempty"`
+	SessionNamespace     NamespaceName `json:"sessionNamespace,omitempty"`
 }
 
 type ClusterCopySpec struct {

@@ -55,17 +55,18 @@ func (p *Planner) checkCopyPermissions(
 func (p *Planner) checkMigrationPermissions(
 	ctx context.Context,
 	result checkRecorder,
-	name, source, staging, session string,
+	name, source, destination, staging, session string,
 	strategies []string,
 ) {
 	checks := reservationResourceAccess(source, staging, session)
 	checks = append(checks, transferToolAccess([]string{source, staging}, strategies)...)
-	checks = append(checks, activationResourceAccess(source, source)...)
+	checks = append(checks, activationResourceAccess(source, destination)...)
 	p.checkNetworkPolicyLifecycle(ctx, result, []string{source, staging})
 	resource, namespace := scopedWorkflowResource(
 		"migrations",
 		session,
 		source,
+		destination,
 		staging,
 		source,
 	)
@@ -73,7 +74,7 @@ func (p *Planner) checkMigrationPermissions(
 		ctx,
 		result,
 		name,
-		[]string{session, source, staging},
+		[]string{session, source, destination, staging},
 		namespace,
 		resource,
 		checks,

@@ -484,6 +484,7 @@ func (m *ClusterMigrationExecutor) ValidateRollback(
 				m.client,
 				binding.SourcePVC,
 				binding.SourcePV,
+				string(plan.DestinationNamespace),
 			)
 			if err != nil {
 				return err

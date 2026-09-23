@@ -15,19 +15,18 @@ const (
 	SessionAPIVersion = SessionAPIGroup + "/v1alpha1"
 	// Workflow API specs and statuses are owned by api/v1alpha1; these names
 	// form the shared discovery, storage, watch, and CLI routing contract.
-	MigrationResource           = "migrations"
-	PodMigrationResource        = "podmigrations"
-	ReservationResource         = "reservations"
-	CopyResource                = "copies"
-	BackupResource              = "backups"
-	RestoreResource             = "restores"
-	RenameResource              = "renames"
-	ClusterMigrationResource    = "clustermigrations"
-	ClusterPodMigrationResource = "clusterpodmigrations"
-	ClusterReservationResource  = "clusterreservations"
-	ClusterCopyResource         = "clustercopies"
-	MoveResource                = "moves"
-	BackupRepositoryResource    = "backuprepositories"
+	MigrationResource          = "migrations"
+	PodMigrationResource       = "podmigrations"
+	ReservationResource        = "reservations"
+	CopyResource               = "copies"
+	BackupResource             = "backups"
+	RestoreResource            = "restores"
+	RenameResource             = "renames"
+	ClusterMigrationResource   = "clustermigrations"
+	ClusterReservationResource = "clusterreservations"
+	ClusterCopyResource        = "clustercopies"
+	MoveResource               = "moves"
+	BackupRepositoryResource   = "backuprepositories"
 	// Workflow status is user-visible and persisted in the API server. Keep
 	// controller-generated history and messages bounded even when a lower
 	// layer returns an unexpectedly large error string.
@@ -112,18 +111,17 @@ const (
 type ControllerKind string
 
 const (
-	ControllerKindMigration           ControllerKind = "Migration"
-	ControllerKindPodMigration        ControllerKind = "PodMigration"
-	ControllerKindReservation         ControllerKind = "Reservation"
-	ControllerKindCopy                ControllerKind = "Copy"
-	ControllerKindBackup              ControllerKind = "Backup"
-	ControllerKindRestore             ControllerKind = "Restore"
-	ControllerKindRename              ControllerKind = "Rename"
-	ControllerKindClusterMigration    ControllerKind = "ClusterMigration"
-	ControllerKindClusterPodMigration ControllerKind = "ClusterPodMigration"
-	ControllerKindClusterReservation  ControllerKind = "ClusterReservation"
-	ControllerKindClusterCopy         ControllerKind = "ClusterCopy"
-	ControllerKindMove                ControllerKind = "Move"
+	ControllerKindMigration          ControllerKind = "Migration"
+	ControllerKindPodMigration       ControllerKind = "PodMigration"
+	ControllerKindReservation        ControllerKind = "Reservation"
+	ControllerKindCopy               ControllerKind = "Copy"
+	ControllerKindBackup             ControllerKind = "Backup"
+	ControllerKindRestore            ControllerKind = "Restore"
+	ControllerKindRename             ControllerKind = "Rename"
+	ControllerKindClusterMigration   ControllerKind = "ClusterMigration"
+	ControllerKindClusterReservation ControllerKind = "ClusterReservation"
+	ControllerKindClusterCopy        ControllerKind = "ClusterCopy"
+	ControllerKindMove               ControllerKind = "Move"
 )
 
 // ControllerWorkflow identifies one operation-specific controller API. This
@@ -163,13 +161,13 @@ func controllerWorkflowRegistry() []ControllerWorkflow {
 			ClusterSingular: "clustermigration",
 		},
 		{
-			Type:            SessionTypeMigratePod,
-			Kind:            ControllerKindPodMigration,
-			Resource:        PodMigrationResource,
-			Singular:        "podmigration",
-			ClusterKind:     ControllerKindClusterPodMigration,
-			ClusterResource: ClusterPodMigrationResource,
-			ClusterSingular: "clusterpodmigration",
+			Type:     SessionTypeMigratePod,
+			Kind:     ControllerKindPodMigration,
+			Resource: PodMigrationResource,
+			Singular: "podmigration",
+			// Pod migration is a same-namespace operation by design: a
+			// workload cannot be recreated in another namespace, so there is
+			// no cluster-scoped form.
 		},
 		{
 			Type:            SessionTypeReserve,

@@ -35,6 +35,10 @@ func (p *Planner) PlanOfflineMigration(
 		spec.SessionNamespace = spec.SourceNamespace
 	}
 
+	if spec.DestinationNamespace == "" {
+		spec.DestinationNamespace = spec.SourceNamespace
+	}
+
 	if !migrationCanPlan(
 		object.Status.WorkflowStatus,
 		object.Status.Plan != nil,
@@ -55,6 +59,7 @@ func (p *Planner) PlanOfflineMigration(
 		string(
 			spec.SourceNamespace,
 		),
+		string(spec.DestinationNamespace),
 		string(spec.TemporaryNamespace),
 		string(spec.SessionNamespace),
 		image,
@@ -65,7 +70,7 @@ func (p *Planner) PlanOfflineMigration(
 
 	clusterPlan := v1alpha1.ClusterMigrationPlan{
 		SourceNamespace:      spec.SourceNamespace,
-		DestinationNamespace: spec.SourceNamespace,
+		DestinationNamespace: spec.DestinationNamespace,
 		TemporaryNamespace:   spec.TemporaryNamespace,
 		SessionNamespace:     spec.SessionNamespace,
 		UnusedStoragePolicy:  resolved.UnusedStoragePolicy,
@@ -119,6 +124,7 @@ func (p *Planner) PlanNamespacedMigration(
 		object.Namespace,
 		object.Namespace,
 		object.Namespace,
+		object.Namespace,
 		image,
 	)
 	if err != nil {
@@ -144,12 +150,12 @@ func migrationCanPlan(
 }
 
 func (p *Planner) resolveMigration(ctx context.Context, name string, spec v1alpha1.MigrationSpec,
-	sourceNamespace, temporaryNamespace, sessionNamespace, image string,
+	sourceNamespace, destinationNamespace, temporaryNamespace, sessionNamespace, image string,
 ) (*domain.TransferPlan, *v1alpha1.MigrationPlan, error) {
 	options := transferInput{
 		SessionID:            name,
 		SourceNamespace:      sourceNamespace,
-		DestinationNamespace: sourceNamespace,
+		DestinationNamespace: destinationNamespace,
 		TemporaryNamespace:   temporaryNamespace,
 		StagingNamespace:     temporaryNamespace,
 		SessionNamespace:     sessionNamespace,
@@ -200,7 +206,7 @@ func (p *Planner) resolveMigration(ctx context.Context, name string, spec v1alph
 		return nil, nil, err
 	}
 
-	p.checkActivationPVCPolicies(ctx, plan, state.options.SourceNamespace, state.volumeSpecs)
+	p.checkActivationPVCPolicies(ctx, plan, state.options.DestinationNamespace, state.volumeSpecs)
 	p.finalizePlanResources(ctx, &state, transferChartResourceEstimates(
 		state.options.SourceNamespace, state.options.StagingNamespace,
 		state.options.Strategies, len(state.plannedVolumes),
@@ -225,6 +231,7 @@ func (p *Planner) resolveMigration(ctx context.Context, name string, spec v1alph
 			plan,
 			name,
 			sourceNamespace,
+			destinationNamespace,
 			temporaryNamespace,
 			sessionNamespace,
 			resolved.Strategies,

@@ -418,20 +418,6 @@ spec:
                     format: int64
                     minimum: 1
                     type: integer
-                  pvc:
-                    properties:
-                      claimUID:
-                        description: |-
-                          UID is a type that holds unique ID values, including UUIDs.  Because we
-                          don't ONLY use UUIDs, this is an alias to string.  Being a type captures
-                          intent and helps make sure that UIDs and names do not get conflated.
-                        type: string
-                    required:
-                    - claimUID
-                    type: object
-                    x-kubernetes-validations:
-                    - message: claimUID must not be empty
-                      rule: size(self.claimUID) > 0
                   s3:
                     properties:
                       credentialsSecretUID:
@@ -453,7 +439,6 @@ spec:
                       so adding a backend does not create invalid cross-backend combinations.
                     enum:
                     - s3
-                    - pvc
                     type: string
                   uid:
                     description: |-
@@ -468,8 +453,7 @@ spec:
                 type: object
                 x-kubernetes-validations:
                 - message: exactly one backend status must match type
-                  rule: (self.type == 's3' && has(self.s3) && !has(self.pvc)) || (self.type
-                    == 'pvc' && has(self.pvc) && !has(self.s3))
+                  rule: self.type == 's3' && has(self.s3)
                 - message: uid must not be empty
                   rule: size(self.uid) > 0
               resumeFrom:

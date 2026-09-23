@@ -73,7 +73,7 @@ func TestNewControllerRepositoryStoreUsesRoutingFieldsWithoutCredentials(t *test
 	}
 }
 
-func TestNewControllerRepositoryStoreRejectsUnsupportedBackend(t *testing.T) {
+func TestNewControllerRepositoryStoreRejectsMissingS3Configuration(t *testing.T) {
 	scheme := runtime.NewScheme()
 	if err := v1alpha1.AddToScheme(scheme); err != nil {
 		t.Fatal(err)
@@ -81,12 +81,7 @@ func TestNewControllerRepositoryStoreRejectsUnsupportedBackend(t *testing.T) {
 
 	repository := &v1alpha1.BackupRepository{
 		ObjectMeta: metav1.ObjectMeta{Name: "archive", Namespace: "application"},
-		Spec: v1alpha1.BackupRepositorySpec{
-			Type: v1alpha1.BackupRepositoryTypePVC,
-			PVC: &v1alpha1.PVCBackupRepositorySpec{
-				ClaimRef: v1alpha1.LocalObjectReference{Name: "archive-pvc"},
-			},
-		},
+		Spec:       v1alpha1.BackupRepositorySpec{Type: v1alpha1.BackupRepositoryTypeS3},
 	}
 	client := fake.NewClientBuilder().WithScheme(scheme).WithObjects(repository).Build()
 	r := &rootState{}
@@ -101,8 +96,8 @@ func TestNewControllerRepositoryStoreRejectsUnsupportedBackend(t *testing.T) {
 		}},
 		"application", "archive", "daily",
 	)
-	if err == nil || !containsError(err, "backend pvc is not supported") {
-		t.Fatalf("unsupported backend error = %v", err)
+	if err == nil || !containsError(err, "requires type s3") {
+		t.Fatalf("missing s3 configuration error = %v", err)
 	}
 }
 

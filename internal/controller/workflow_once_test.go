@@ -119,10 +119,6 @@ func TestRequireReconcilerCoversEveryWorkflowKind(t *testing.T) {
 			domain.ControllerKindPodMigration,
 			func(r *WorkflowReconciler) { r.namespacedPodMigration = &PodMigrationReconciler{} },
 		},
-		{
-			domain.ControllerKindClusterPodMigration,
-			func(r *WorkflowReconciler) { r.podMigration = &ClusterPodMigrationReconciler{} },
-		},
 	}
 
 	for _, test := range tests {
@@ -306,11 +302,11 @@ func TestWorkflowQueuesAdmitOperationProgressWithoutPhaseChange(t *testing.T) {
 }
 
 func TestWorkflowQueuesAdmitRecoveryProgressWithoutPhaseChange(t *testing.T) {
-	previous := &v1alpha1.ClusterPodMigration{
+	previous := &v1alpha1.ClusterMigration{
 		ObjectMeta: metav1.ObjectMeta{Name: "pod-migration"},
-		Status: v1alpha1.ClusterPodMigrationStatus{
+		Status: v1alpha1.ClusterMigrationStatus{
 			WorkflowStatus: v1alpha1.WorkflowStatus{Phase: domain.PhaseFinalSyncing},
-			Volumes: []v1alpha1.ClusterPodMigrationVolumeStatus{{
+			Volumes: []v1alpha1.ClusterMigrationVolumeStatus{{
 				ClusterVolumeReservationStatus: v1alpha1.ClusterVolumeReservationStatus{
 					SourcePVCName: "source",
 				},
@@ -319,7 +315,7 @@ func TestWorkflowQueuesAdmitRecoveryProgressWithoutPhaseChange(t *testing.T) {
 	}
 	current := previous.DeepCopy()
 	current.Status.Volumes[0].Sync.Attempts = 1
-	current.Status.Volumes[0].Sync.FinalCompletedAt = new(metav1.Now())
+	current.Status.Volumes[0].Sync.FinalCompletedAt = &metav1.Time{}
 
 	update := event.UpdateEvent{ObjectOld: previous, ObjectNew: current}
 	if !workflowEventPredicate().Update(update) {

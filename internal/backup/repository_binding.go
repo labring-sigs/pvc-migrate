@@ -181,16 +181,7 @@ func S3RepositoryLocation(
 		)
 	}
 
-	if repository.Spec.Type == v1alpha1.BackupRepositoryTypePVC {
-		return objectstore.Config{}, domain.NewError(
-			domain.ErrorPrecondition,
-			"backup repository",
-			"BackupRepository backend pvc is not supported by the S3 data plane",
-		)
-	}
-
-	if repository.Spec.Type != v1alpha1.BackupRepositoryTypeS3 || repository.Spec.S3 == nil ||
-		repository.Spec.PVC != nil {
+	if repository.Spec.Type != v1alpha1.BackupRepositoryTypeS3 || repository.Spec.S3 == nil {
 		return objectstore.Config{}, domain.NewError(
 			domain.ErrorValidation,
 			"backup repository",
@@ -320,13 +311,10 @@ func validateRepositoryMatch(requested, current *v1alpha1.BackupRepositoryBindin
 				"BackupRepository credentials Secret was replaced while the workflow was running",
 			)
 		}
-	case v1alpha1.BackupRepositoryTypePVC:
-		if current.PVC == nil ||
-			current.PVC.ClaimUID != requested.PVC.ClaimUID {
-			return repositoryBindingConflict(
-				"BackupRepository PVC was replaced while the workflow was running",
-			)
-		}
+	default:
+		return repositoryBindingConflict(
+			fmt.Sprintf("resolved repository backend %q is unsupported", requested.Type),
+		)
 	}
 
 	return nil
@@ -343,19 +331,11 @@ func validateRepositoryBinding(binding *v1alpha1.BackupRepositoryBindingStatus) 
 
 	switch binding.Type {
 	case v1alpha1.BackupRepositoryTypeS3:
-		if binding.S3 == nil || binding.PVC != nil || binding.S3.CredentialsSecretUID == "" {
+		if binding.S3 == nil || binding.S3.CredentialsSecretUID == "" {
 			return domain.NewError(
 				domain.ErrorPrecondition,
 				"backup repository",
 				"resolved S3 repository requires a credentials Secret UID",
-			)
-		}
-	case v1alpha1.BackupRepositoryTypePVC:
-		if binding.PVC == nil || binding.S3 != nil || binding.PVC.ClaimUID == "" {
-			return domain.NewError(
-				domain.ErrorPrecondition,
-				"backup repository",
-				"resolved PVC repository requires a claim UID",
 			)
 		}
 	default:

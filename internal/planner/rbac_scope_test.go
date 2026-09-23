@@ -66,7 +66,7 @@ func TestSessionNamespaceChecksRejectMissingNamespacesWithoutCreatePermission(t 
 						context.Background(),
 						plan,
 						plan.SessionID,
-						"source", "staging", "sessions", nil,
+						"source", "source", "staging", "sessions", nil,
 					)
 				}
 

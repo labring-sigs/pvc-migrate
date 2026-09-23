@@ -37,13 +37,10 @@ type BackupRepositoryList struct {
 // BackupRepositoryType selects the storage backend used by a repository.
 // Backend-specific fields are isolated below dedicated configuration objects
 // so adding a backend does not create invalid cross-backend combinations.
-// +kubebuilder:validation:Enum=s3;pvc
+// +kubebuilder:validation:Enum=s3
 type BackupRepositoryType string
 
-const (
-	BackupRepositoryTypeS3  BackupRepositoryType = "s3"
-	BackupRepositoryTypePVC BackupRepositoryType = "pvc"
-)
+const BackupRepositoryTypeS3 BackupRepositoryType = "s3"
 
 // S3BackupRepositorySpec describes an S3-compatible object store. Credentials
 // are read from a Secret in the BackupRepository namespace.
@@ -72,22 +69,10 @@ type S3BackupRepositorySpec struct {
 	CredentialsSecret BackupRepositorySecretReference `json:"credentialsSecret"     yaml:"credentialsSecret"`
 }
 
-// PVCBackupRepositorySpec selects a PVC in the repository namespace. The
-// controller exposes the schema before its data-plane adapter is enabled so
-// clients can adopt one stable API while execution support is added.
-type PVCBackupRepositorySpec struct {
-	ClaimRef LocalObjectReference `json:"claimRef" yaml:"claimRef"`
-	// +kubebuilder:validation:MaxLength=1024
-	// +kubebuilder:validation:Pattern=`^$|^[A-Za-z0-9][A-Za-z0-9._-]*(/[A-Za-z0-9][A-Za-z0-9._-]*)*$`
-	// +kubebuilder:validation:XValidation:rule="self == '' || self.split('/').all(segment, segment != '.' && segment != '..')",message="subPath must be a normalized relative path and may not contain '.' or '..' segments"
-	SubPath string `json:"subPath,omitempty" yaml:"subPath,omitempty"`
-}
-
-// +kubebuilder:validation:XValidation:rule="(self.type == 's3' && has(self.s3) && !has(self.pvc)) || (self.type == 'pvc' && has(self.pvc) && !has(self.s3))",message="exactly one backend configuration must match type"
+// +kubebuilder:validation:XValidation:rule="self.type == 's3' && has(self.s3)",message="exactly one backend configuration must match type"
 type BackupRepositorySpec struct {
-	Type BackupRepositoryType     `json:"type"          yaml:"type"`
-	S3   *S3BackupRepositorySpec  `json:"s3,omitempty"  yaml:"s3,omitempty"`
-	PVC  *PVCBackupRepositorySpec `json:"pvc,omitempty" yaml:"pvc,omitempty"`
+	Type BackupRepositoryType    `json:"type"         yaml:"type"`
+	S3   *S3BackupRepositorySpec `json:"s3,omitempty" yaml:"s3,omitempty"`
 }
 
 // LocalObjectReference identifies a resource in the same namespace.

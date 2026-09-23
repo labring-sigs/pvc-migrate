@@ -35,35 +35,6 @@ type ClusterMigrationPlan struct {
 	SkipSourceUsageCheck bool     `json:"skipSourceUsageCheck,omitempty" yaml:"skipSourceUsageCheck,omitempty"`
 }
 
-// +kubebuilder:validation:XValidation:rule="has(self.volumes) && size(self.volumes) > 0",message="volumes must contain at least one source PVC"
-// +kubebuilder:validation:XValidation:rule="self.workload.adapter != 'None'",message="ClusterPodMigration workload.adapter must identify a supported workload"
-type ClusterPodMigrationPlan struct {
-	// UnusedStoragePolicy decides the fate of replaced migration storage.
-	// Delete removes the old source PV after a completed cutover, or the
-	// staged destination after a rollback or abort. The PVC the workload
-	// runs on is always kept, whatever the policy says.
-	// +kubebuilder:validation:Enum=Keep;Delete
-	UnusedStoragePolicy UnusedStoragePolicy `json:"unusedStoragePolicy,omitempty" yaml:"unusedStoragePolicy,omitempty"`
-	// Pod migration preserves workload and PVC identities in SourceNamespace.
-	// TemporaryNamespace and SessionNamespace are the only cross-namespace roles.
-	SourceNamespace    NamespaceName `json:"sourceNamespace"    yaml:"sourceNamespace"`
-	TemporaryNamespace NamespaceName `json:"temporaryNamespace" yaml:"temporaryNamespace"`
-	SessionNamespace   NamespaceName `json:"sessionNamespace"   yaml:"sessionNamespace"`
-	// +kubebuilder:validation:MaxItems=1024
-	Volumes    []VolumeSpec `json:"volumes,omitempty"    yaml:"volumes,omitempty"`
-	SourceNode string       `json:"sourceNode,omitempty" yaml:"sourceNode,omitempty"`
-	TargetNode string       `json:"targetNode,omitempty" yaml:"targetNode,omitempty"`
-	ToolImage  string       `json:"toolImage,omitempty"  yaml:"toolImage,omitempty"`
-	// +kubebuilder:validation:MaxItems=32
-	Strategies             []string     `json:"strategies,omitempty"             yaml:"strategies,omitempty"`
-	VerifyChecksum         bool         `json:"verifyChecksum,omitempty"         yaml:"verifyChecksum,omitempty"`
-	DeleteExtraneous       bool         `json:"deleteExtraneous,omitempty"       yaml:"deleteExtraneous,omitempty"`
-	SkipSourceUsageCheck   bool         `json:"skipSourceUsageCheck,omitempty"   yaml:"skipSourceUsageCheck,omitempty"`
-	Workload               WorkloadSpec `json:"workload"                         yaml:"workload"`
-	PrecopyPasses          int          `json:"precopyPasses"                    yaml:"precopyPasses"`
-	OpenEBSLVMEnableShared bool         `json:"openebsLvmEnableShared,omitempty" yaml:"openebsLvmEnableShared,omitempty"`
-}
-
 type ClusterReservationPlan struct {
 	ReservationPlan      `              json:",inline"              yaml:",inline"`
 	SourceNamespace      NamespaceName `json:"sourceNamespace"      yaml:"sourceNamespace"`
@@ -103,15 +74,6 @@ type ClusterVolumeActivationStatus struct {
 	RolledBackAt        *metav1.Time     `json:"rolledBackAt,omitempty"        yaml:"rolledBackAt,omitempty"`
 }
 
-type ClusterPodMigrationWorkloadStatus struct {
-	Pod          *ObjectReference  `json:"pod,omitempty"          yaml:"pod,omitempty"`
-	AffectedPods []ObjectReference `json:"affectedPods,omitempty" yaml:"affectedPods,omitempty"`
-	// VMCluster carries the controller's pause-probe outcomes (such as
-	// whether the CRD kept the per-component paused field) so resume and
-	// restore reuse the semantics recorded during the pause.
-	VMCluster *VMClusterSpec `json:"vmCluster,omitempty" yaml:"vmCluster,omitempty"`
-}
-
 // ClusterVolumeReservationStatus is the storage-provisioning checkpoint shared by
 // workflows that reserve a destination volume. Copy and activation progress
 // remain in their owning operation types.
@@ -126,12 +88,6 @@ type ClusterVolumeReservationStatus struct {
 type ClusterMigrationVolumeStatus struct {
 	ClusterVolumeReservationStatus `                              json:",inline"    yaml:",inline"`
 	Sync                           MigrationSyncStatus           `json:"sync"       yaml:"sync"`
-	Activation                     ClusterVolumeActivationStatus `json:"activation" yaml:"activation"`
-}
-
-type ClusterPodMigrationVolumeStatus struct {
-	ClusterVolumeReservationStatus `                              json:",inline"    yaml:",inline"`
-	Sync                           PodMigrationSyncStatus        `json:"sync"       yaml:"sync"`
 	Activation                     ClusterVolumeActivationStatus `json:"activation" yaml:"activation"`
 }
 
@@ -154,16 +110,6 @@ type ClusterMigrationStatus struct {
 	Plan           *ClusterMigrationPlan `json:"plan,omitempty"    yaml:"plan,omitempty"`
 	WorkflowStatus `                               json:",inline"           yaml:",inline"`
 	Volumes        []ClusterMigrationVolumeStatus `json:"volumes,omitempty" yaml:"volumes,omitempty"`
-}
-
-type ClusterPodMigrationStatus struct {
-	Plan                    *ClusterPodMigrationPlan `json:"plan,omitempty"                    yaml:"plan,omitempty"`
-	WorkflowStatus          `                                   json:",inline"                           yaml:",inline"`
-	WarmPassesCompleted     int                                `json:"warmPassesCompleted"               yaml:"warmPassesCompleted"`
-	OriginalPodSnapshotHash string                             `json:"originalPodSnapshotHash,omitempty" yaml:"originalPodSnapshotHash,omitempty"`
-	Workload                *ClusterPodMigrationWorkloadStatus `json:"workload,omitempty"                yaml:"workload,omitempty"`
-	Volumes                 []ClusterPodMigrationVolumeStatus  `json:"volumes,omitempty"                 yaml:"volumes,omitempty"`
-	OpenEBSLVMSharedMounts  []SharedMountStatus                `json:"openebsLvmSharedMounts,omitempty"  yaml:"openebsLvmSharedMounts,omitempty"`
 }
 
 type ClusterReservationStatus struct {
@@ -203,25 +149,6 @@ type ClusterMigrationList struct {
 	metav1.TypeMeta `                   json:",inline"`
 	metav1.ListMeta `                   json:"metadata,omitempty"`
 	Items           []ClusterMigration `json:"items"`
-}
-
-// +kubebuilder:object:root=true
-// +kubebuilder:resource:scope=Cluster,shortName=cpmig
-// +kubebuilder:subresource:status
-// +kubebuilder:printcolumn:name="Phase",type="string",JSONPath=".status.phase"
-// +kubebuilder:printcolumn:name="Age",type="date",JSONPath=".metadata.creationTimestamp"
-type ClusterPodMigration struct {
-	metav1.TypeMeta   `                          json:",inline"`
-	metav1.ObjectMeta `                          json:"metadata,omitempty"`
-	Spec              ClusterPodMigrationSpec   `json:"spec"`
-	Status            ClusterPodMigrationStatus `json:"status,omitempty"`
-}
-
-// +kubebuilder:object:root=true
-type ClusterPodMigrationList struct {
-	metav1.TypeMeta `                      json:",inline"`
-	metav1.ListMeta `                      json:"metadata,omitempty"`
-	Items           []ClusterPodMigration `json:"items"`
 }
 
 // +kubebuilder:object:root=true

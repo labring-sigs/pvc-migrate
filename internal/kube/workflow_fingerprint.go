@@ -41,11 +41,6 @@ func WorkflowExecutionIntentHash(object crclient.Object) (string, error) {
 		input.UnusedStoragePolicy = ""
 		canonicalizeTransferDefaults(&input.TransferOptions)
 		spec = input
-	case *v1alpha1.ClusterPodMigration:
-		input := current.Spec.DeepCopy()
-		input.UnusedStoragePolicy = ""
-		canonicalizeTransferDefaults(&input.TransferOptions)
-		spec = input
 	case *v1alpha1.Copy:
 		input := current.Spec.DeepCopy()
 		input.UnusedStoragePolicy = ""

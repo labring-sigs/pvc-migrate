@@ -49,7 +49,6 @@ type WorkflowReconciler struct {
 	copy                   *ClusterCopyReconciler
 	migration              *ClusterMigrationReconciler
 	namespacedMigration    *MigrationReconciler
-	podMigration           *ClusterPodMigrationReconciler
 	namespacedPodMigration *PodMigrationReconciler
 	kubeClient             kubernetes.Interface
 	clusterIdentity        string
@@ -206,13 +205,6 @@ func (r *kindWorkflowReconciler) Reconcile(
 		return r.parent.migration.Reconcile(ctx, request)
 	}
 
-	if r.kind == domain.ControllerKindClusterPodMigration {
-		if r.parent.podMigration == nil {
-			return reconcile.Result{}, errors.New("pod migration reconciler is not configured")
-		}
-		return r.parent.podMigration.Reconcile(ctx, request)
-	}
-
 	if r.kind == domain.ControllerKindPodMigration {
 		if r.parent.namespacedPodMigration == nil {
 			return reconcile.Result{}, errors.New(
@@ -299,10 +291,6 @@ func (r *WorkflowReconciler) SetupWithManager(manager ctrl.Manager) error {
 
 	if r.namespacedMigration != nil {
 		r.namespacedMigration.recorder = r.recorder
-	}
-
-	if r.podMigration != nil {
-		r.podMigration.recorder = r.recorder
 	}
 
 	if r.namespacedPodMigration != nil {
@@ -394,8 +382,6 @@ func (r *WorkflowReconciler) requireReconciler(kind domain.ControllerKind) error
 		configured = r.migration != nil
 	case domain.ControllerKindPodMigration:
 		configured = r.namespacedPodMigration != nil
-	case domain.ControllerKindClusterPodMigration:
-		configured = r.podMigration != nil
 	default:
 		return fmt.Errorf("workflow kind %q is not registered", kind)
 	}
@@ -554,10 +540,6 @@ func workflowExecutionProgress(object crclient.Object) any {
 		status := typed.Status.DeepCopy()
 		status.WorkflowStatus = v1alpha1.WorkflowStatus{}
 		return status
-	case *v1alpha1.ClusterPodMigration:
-		status := typed.Status.DeepCopy()
-		status.WorkflowStatus = v1alpha1.WorkflowStatus{}
-		return status
 	case *v1alpha1.ClusterReservation:
 		status := typed.Status.DeepCopy()
 		status.WorkflowStatus = v1alpha1.WorkflowStatus{}
@@ -618,8 +600,6 @@ func workflowStatus(object crclient.Object) v1alpha1.WorkflowStatus {
 		return typed.Status.WorkflowStatus
 	case *v1alpha1.ClusterMigration:
 		return typed.Status.WorkflowStatus
-	case *v1alpha1.ClusterPodMigration:
-		return typed.Status.WorkflowStatus
 	case *v1alpha1.ClusterReservation:
 		return typed.Status.WorkflowStatus
 	case *v1alpha1.ClusterCopy:
@@ -641,7 +621,6 @@ type ManagerOptions struct {
 	CopyPlanner                   CopyPlanner
 	MigrationPlanner              MigrationPlanner
 	NamespacedMigrationPlanner    NamespacedMigrationPlanner
-	PodMigrationPlanner           PodMigrationPlanner
 	NamespacedPodMigrationPlanner NamespacedPodMigrationPlanner
 	NamespacedCopyPlanner         NamespacedCopyPlanner
 	TransferExecution             app.VolumeCopyConfig
@@ -1000,42 +979,6 @@ func (r *WorkflowReconciler) configureTransferControllers(
 		},
 		SharedVolumes: options.OpenEBSLVMSharedVolumeManager,
 		Workloads:     options.WorkloadManager,
-	}
-
-	if r.supportsKind(domain.ControllerKindClusterPodMigration) {
-		if options.PodMigrationPlanner == nil {
-			return errors.New("pod migration planner is required")
-		}
-
-		store, err := kube.NewCRDWorkflowStore(
-			client,
-			func() *v1alpha1.ClusterPodMigration { return &v1alpha1.ClusterPodMigration{} },
-		)
-		if err != nil {
-			return err
-		}
-
-		r.podMigration = &ClusterPodMigrationReconciler{
-			store:   store,
-			client:  options.KubernetesClient,
-			planner: options.PodMigrationPlanner,
-			locker:  locker,
-			active:  &r.activeWorkflows,
-			engine:  engine,
-			config:  podConfig,
-			checkCollision: func(ctx context.Context, name string, namespaces []string) error {
-				return kube.CheckWorkflowIdentityCollision(
-					ctx,
-					client,
-					options.KubernetesClient,
-					options.SupportedKinds,
-					name,
-					domain.ControllerKindClusterPodMigration,
-					namespaces,
-					true,
-				)
-			},
-		}
 	}
 
 	if r.supportsKind(domain.ControllerKindPodMigration) {

@@ -29,7 +29,7 @@ func TestPodTargetConstraintsDoNotRestrictCopy(t *testing.T) {
 
 			migration.Spec.TargetNode = target
 
-			report, err := p.PlanPodMigration(t.Context(), migration, "")
+			report, err := p.PlanNamespacedPodMigration(t.Context(), migration, "")
 			if err != nil {
 				t.Fatal(err)
 			}

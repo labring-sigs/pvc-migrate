@@ -157,6 +157,7 @@ func (m *PodMigrationExecutor) ValidateRollback(
 				m.client,
 				binding.SourcePVC,
 				binding.SourcePV,
+				object.Namespace,
 			)
 			if err != nil {
 				return err

@@ -23,9 +23,6 @@ func TestFinalizeDeletedRejectsNilWorkflow(t *testing.T) {
 		{name: "pod migration", run: func() error {
 			return (&PodMigrationExecutor{}).FinalizeDeleted(t.Context(), nil)
 		}},
-		{name: "cluster pod migration", run: func() error {
-			return (&ClusterPodMigrationExecutor{}).FinalizeDeleted(t.Context(), nil)
-		}},
 		{name: "reservation", run: func() error {
 			return (&ReservationExecutor{}).FinalizeDeleted(t.Context(), nil)
 		}},

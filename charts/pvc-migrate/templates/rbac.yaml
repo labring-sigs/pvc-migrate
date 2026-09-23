@@ -7,10 +7,10 @@ metadata:
     {{- include "pvc-migrate.labels" . | nindent 4 }}
 rules:
   - apiGroups: ["migrate.sealos.io"]
-    resources: ["migrations", "podmigrations", "reservations", "copies", "backups", "restores", "renames", "clustermigrations", "clusterpodmigrations", "clusterreservations", "clustercopies", "moves"]
+    resources: ["migrations", "podmigrations", "reservations", "copies", "backups", "restores", "renames", "clustermigrations", "clusterreservations", "clustercopies", "moves"]
     verbs: ["get", "list", "watch", "update"]
   - apiGroups: ["migrate.sealos.io"]
-    resources: ["migrations/status", "podmigrations/status", "reservations/status", "copies/status", "backups/status", "restores/status", "renames/status", "clustermigrations/status", "clusterpodmigrations/status", "clusterreservations/status", "clustercopies/status", "moves/status"]
+    resources: ["migrations/status", "podmigrations/status", "reservations/status", "copies/status", "backups/status", "restores/status", "renames/status", "clustermigrations/status", "clusterreservations/status", "clustercopies/status", "moves/status"]
     verbs: ["update"]
   - apiGroups: ["migrate.sealos.io"]
     resources: ["backuprepositories"]

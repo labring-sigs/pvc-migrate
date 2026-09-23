@@ -484,6 +484,7 @@ func (m *MigrationExecutor) ValidateRollback(
 				m.client,
 				binding.SourcePVC,
 				binding.SourcePV,
+				object.Namespace,
 			)
 			if err != nil {
 				return err

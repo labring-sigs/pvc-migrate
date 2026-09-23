@@ -434,8 +434,9 @@ type SharedMountStatus struct {
 type PodMigrationWorkloadStatus struct {
 	Pod          *LocalResourceReference  `json:"pod,omitempty"          yaml:"pod,omitempty"`
 	AffectedPods []LocalResourceReference `json:"affectedPods,omitempty" yaml:"affectedPods,omitempty"`
-	// VMCluster carries the controller's pause-probe outcomes; see
-	// ClusterPodMigrationWorkloadStatus.VMCluster.
+	// VMCluster carries the controller's pause-probe outcomes (such as
+	// whether the CRD kept the per-component paused field) so resume and
+	// restore reuse the semantics recorded during the pause.
 	VMCluster *VMClusterSpec `json:"vmCluster,omitempty" yaml:"vmCluster,omitempty"`
 }
 
@@ -525,12 +526,7 @@ type S3BackupRepositoryBindingStatus struct {
 	CredentialsSecretUID types.UID `json:"credentialsSecretUID" yaml:"credentialsSecretUID"`
 }
 
-// +kubebuilder:validation:XValidation:rule="size(self.claimUID) > 0",message="claimUID must not be empty"
-type PVCBackupRepositoryBindingStatus struct {
-	ClaimUID types.UID `json:"claimUID" yaml:"claimUID"`
-}
-
-// +kubebuilder:validation:XValidation:rule="(self.type == 's3' && has(self.s3) && !has(self.pvc)) || (self.type == 'pvc' && has(self.pvc) && !has(self.s3))",message="exactly one backend status must match type"
+// +kubebuilder:validation:XValidation:rule="self.type == 's3' && has(self.s3)",message="exactly one backend status must match type"
 // +kubebuilder:validation:XValidation:rule="size(self.uid) > 0",message="uid must not be empty"
 type BackupRepositoryBindingStatus struct {
 	Type BackupRepositoryType `json:"type" yaml:"type"`
@@ -539,8 +535,7 @@ type BackupRepositoryBindingStatus struct {
 	// +kubebuilder:validation:Minimum=1
 	Generation int64 `json:"generation" yaml:"generation"`
 
-	S3  *S3BackupRepositoryBindingStatus  `json:"s3,omitempty"  yaml:"s3,omitempty"`
-	PVC *PVCBackupRepositoryBindingStatus `json:"pvc,omitempty" yaml:"pvc,omitempty"`
+	S3 *S3BackupRepositoryBindingStatus `json:"s3,omitempty" yaml:"s3,omitempty"`
 }
 
 type BackupStatus struct {

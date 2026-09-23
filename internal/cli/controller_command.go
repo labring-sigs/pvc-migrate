@@ -73,7 +73,6 @@ func (r *rootState) newControllerCommand() *cobra.Command {
 				CopyPlanner:                   runtime.planner.ForController().PlanCopy,
 				MigrationPlanner:              runtime.planner.ForController().PlanOfflineMigration,
 				NamespacedMigrationPlanner:    runtime.planner.ForController().PlanNamespacedMigration,
-				PodMigrationPlanner:           runtime.planner.ForController().PlanPodMigration,
 				NamespacedPodMigrationPlanner: runtime.planner.ForController().PlanNamespacedPodMigration,
 				WorkloadManager:               runtime.controllers,
 				NamespacedCopyPlanner:         runtime.planner.ForController().PlanNamespacedCopy,
