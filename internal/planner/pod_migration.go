@@ -75,13 +75,14 @@ func (p *Planner) resolvePodMigration(
 	sourceNamespace, temporaryNamespace, sessionNamespace, image string,
 ) (*domain.TransferPlan, *v1alpha1.PodMigrationPlan, error) {
 	options := transferInput{
-		SessionID:            name,
-		SourceNamespace:      sourceNamespace,
-		TemporaryNamespace:   temporaryNamespace,
-		SessionNamespace:     sessionNamespace,
-		DestinationNamespace: sourceNamespace,
-		StagingNamespace:     temporaryNamespace,
-		ToolImage:            image,
+		SessionID:              name,
+		ForceSourceReprovision: spec.ForceReprovision,
+		SourceNamespace:        sourceNamespace,
+		TemporaryNamespace:     temporaryNamespace,
+		SessionNamespace:       sessionNamespace,
+		DestinationNamespace:   sourceNamespace,
+		StagingNamespace:       temporaryNamespace,
+		ToolImage:              image,
 	}
 
 	if err := domain.ValidateUnusedStoragePolicy(spec.UnusedStoragePolicy); err != nil {

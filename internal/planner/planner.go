@@ -32,14 +32,18 @@ import (
 // point, so an input cannot silently select a different workflow family.
 type transferInput struct {
 	v1alpha1.TransferOptions
-	SessionID            string
-	SourceNamespace      string
-	TemporaryNamespace   string
-	DestinationNamespace string
-	SessionNamespace     string
-	StagingNamespace     string
-	ToolImage            string
-	Volumes              []v1alpha1.VolumeRequest
+	SessionID string
+	// ForceSourceReprovision marks an explicit opt-in to replace backing
+	// storage that is already terminating: the cutover would otherwise be
+	// fenced off as unsafe, leaving no in-place escape from a doomed volume.
+	ForceSourceReprovision bool
+	SourceNamespace        string
+	TemporaryNamespace     string
+	DestinationNamespace   string
+	SessionNamespace       string
+	StagingNamespace       string
+	ToolImage              string
+	Volumes                []v1alpha1.VolumeRequest
 }
 
 // PodWorkloadDiscoverer resolves the workload adapter for a Pod. Defined here
@@ -612,21 +616,24 @@ func (p *Planner) loadPlanVolumeInput(
 
 	// A requested deletion only waits on protection finalizers while the
 	// workload keeps mounting the claim; pausing the workload for a cutover
-	// would let it fire mid-transfer. Terminating storage is never a source.
+	// would let it fire mid-transfer. Terminating storage is never a source —
+	// unless the caller explicitly replaces the backing storage, the only
+	// escape from a volume whose deletion is already armed.
 	if pvc.DeletionTimestamp != nil {
-		state.plan.AddCheck(
-			failed(
-				domain.CheckNameSourcePVC,
-				fmt.Sprintf(
-					"PVC %s/%s is terminating (deletion requested at %s); wait for the deletion to settle or restore the claim before migrating",
-					pvc.Namespace,
-					pvc.Name,
-					pvc.DeletionTimestamp.UTC().Format(time.RFC3339),
-				),
-			),
+		message := fmt.Sprintf(
+			"PVC %s/%s is terminating (deletion requested at %s); wait for the deletion to settle, or replace the backing storage with migrate-pod --force-reprovision",
+			pvc.Namespace,
+			pvc.Name,
+			pvc.DeletionTimestamp.UTC().Format(time.RFC3339),
 		)
+		if state.options.ForceSourceReprovision {
+			state.plan.AddCheck(warned(domain.CheckNameSourcePVC, message+
+				" — continuing because --force-reprovision was requested; the deletion may complete when the workload pauses for the final sync, so verify backups before proceeding"))
+		} else {
+			state.plan.AddCheck(failed(domain.CheckNameSourcePVC, message))
 
-		return planVolumeInput{}, false
+			return planVolumeInput{}, false
+		}
 	}
 
 	mode := corev1.PersistentVolumeFilesystem
@@ -687,18 +694,19 @@ func (p *Planner) loadPlanVolumeInput(
 	}
 
 	if pv.DeletionTimestamp != nil {
-		state.plan.AddCheck(
-			failed(
-				domain.CheckNameSourcePV,
-				fmt.Sprintf(
-					"PV %s is terminating (deletion requested at %s); wait for the deletion to settle before migrating",
-					pv.Name,
-					pv.DeletionTimestamp.UTC().Format(time.RFC3339),
-				),
-			),
+		message := fmt.Sprintf(
+			"PV %s is terminating (deletion requested at %s); wait for the deletion to settle, or replace the backing storage with migrate-pod --force-reprovision",
+			pv.Name,
+			pv.DeletionTimestamp.UTC().Format(time.RFC3339),
 		)
+		if state.options.ForceSourceReprovision {
+			state.plan.AddCheck(warned(domain.CheckNameSourcePV, message+
+				" — continuing because --force-reprovision was requested"))
+		} else {
+			state.plan.AddCheck(failed(domain.CheckNameSourcePV, message))
 
-		return planVolumeInput{}, false
+			return planVolumeInput{}, false
+		}
 	}
 
 	p.checkSessionOwnership(ctx, state.plan, options.SessionNamespace, pvc, pv)
