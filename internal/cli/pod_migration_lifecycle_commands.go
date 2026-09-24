@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"fmt"
 
 	v1alpha1 "github.com/labring-sigs/pvc-migrate/api/v1alpha1"
 	"github.com/labring-sigs/pvc-migrate/internal/app"
@@ -290,8 +291,16 @@ func (r *rootState) newPodMigrationCleanupCommand(source workflowSource) *cobra.
 				return err
 			}
 
+			// The record is gone; print the same closing confirmation every
+			// other workflow family prints instead of exiting silently.
 			if options.DeleteSession {
-				return nil
+				_, err := fmt.Fprintf(
+					cmd.OutOrStdout(),
+					"Deleted pod migration workflow %s.\n",
+					object.GetName(),
+				)
+
+				return err
 			}
 
 			return runtime.printer.Print(object)
