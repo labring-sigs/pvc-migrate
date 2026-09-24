@@ -82,7 +82,8 @@ func workflowCommandNameForCommand(value any) string {
 	}
 
 	switch current.Name() {
-	case "migrate", "migrate-pod", "reserve", "copy", "backup", "restore", "rename", "move":
+	case "migrate", "migrate-pod", "reserve", "copy", "backup", "restore", "rename", "move",
+		"cluster-migrate", "cluster-copy", "cluster-reserve":
 		return current.Name()
 	default:
 		return "migrate"
@@ -94,9 +95,13 @@ func workflowCommandNameForCommand(value any) string {
 // session ConfigMap for session commands.
 func sessionRecordInspectionCommand(value any, namespace, id string) string {
 	prefix := kubectlCommandPrefixForCommand(value)
-	// Controller commands report their cr family path; strip it so the
-	// family matches the workflow table in both modes.
-	family := strings.TrimPrefix(workflowCommandNameForCommand(value), "cr ")
+	// Controller commands report their cr family path and cluster session
+	// families carry the cluster- prefix; strip both so the family matches
+	// the workflow table in every mode.
+	family := strings.TrimPrefix(
+		strings.TrimPrefix(workflowCommandNameForCommand(value), "cr "),
+		"cluster-",
+	)
 
 	if command, ok := value.(*cobra.Command); !ok || !isControllerCommand(command) {
 		return fmt.Sprintf(

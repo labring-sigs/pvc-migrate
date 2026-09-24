@@ -12,6 +12,10 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
+// newCopyCommand builds the namespaced session copy family: one tenant
+// namespace (-n) addresses every PVC the copy touches, while the session
+// record persists in the session storage namespace. Cross-namespace copies
+// belong to the cluster-copy family.
 func (r *rootState) newCopyCommand() *cobra.Command {
 	command := r.copySubmissionCommand(false)
 	command.AddCommand(r.newCopyPlanCommand())
@@ -21,12 +25,55 @@ func (r *rootState) newCopyCommand() *cobra.Command {
 
 func (r *rootState) newCopyPlanCommand() *cobra.Command { return r.copySubmissionCommand(true) }
 
-// copySubmissionCommand builds the session copy entrypoints: the bare run
-// command and its plan preview. Controller submissions live under the cr
-// command group instead.
+// newClusterCopyCommand builds the cluster-scoped session copy family: the
+// namespace roles its spec declares, cross-namespace transfers included.
+func (r *rootState) newClusterCopyCommand() *cobra.Command {
+	command := r.clusterCopySubmissionCommand(false)
+	command.AddCommand(r.newClusterCopyPlanCommand())
+	r.addClusterCopyLifecycle(command)
+	return command
+}
+
+func (r *rootState) newClusterCopyPlanCommand() *cobra.Command {
+	return r.clusterCopySubmissionCommand(true)
+}
+
+// validateCopySessionInput applies the admission checks every session copy
+// entrypoint shares, before any planning starts, and reports whether the
+// flags address an existing session.
+func validateCopySessionInput(cmd *cobra.Command, flags *copyFlags) (bool, error) {
+	existing := targetsExistingSession(flags.sessionID, flags.sourcePVCs, flags.podName)
+	if err := validateDestinationCapacityFlags(
+		domain.OperationCopy,
+		existing,
+		flags.destinationCapacities,
+		flags.allowVolumeShrink,
+		flags.skipSourceUsageCheck,
+		flags.sourcePaths,
+		flags.destinationPaths,
+	); err != nil {
+		return existing, reportPreSessionError(cmd, err)
+	}
+
+	if flags.podName != "" && len(flags.sourcePVCs) != 0 {
+		return existing, domain.NewError(
+			domain.ErrorValidation,
+			"copy",
+			"--source-pvc cannot be combined with --pod; the Pod PVC set is copied as one unit",
+		)
+	}
+
+	return existing, nil
+}
+
+// copySubmissionCommand builds the namespaced session copy entrypoints: the
+// bare run command and its plan preview. Controller submissions live under the
+// cr command group; cross-namespace sessions under cluster-copy.
 func (r *rootState) copySubmissionCommand(planOnly bool) *cobra.Command {
 	flags := &copyFlags{}
 	dryRun := planOnly
+
+	var namespace string
 
 	command := &cobra.Command{
 		Use:   "copy",
@@ -38,25 +85,13 @@ func (r *rootState) copySubmissionCommand(planOnly bool) *cobra.Command {
 	}
 
 	command.RunE = func(cmd *cobra.Command, _ []string) error {
-		existing := targetsExistingSession(flags.sessionID, flags.sourcePVCs, flags.podName)
-		if err := validateDestinationCapacityFlags(
-			domain.OperationCopy,
-			existing,
-			flags.destinationCapacities,
-			flags.allowVolumeShrink,
-			flags.skipSourceUsageCheck,
-			flags.sourcePaths,
-			flags.destinationPaths,
-		); err != nil {
-			return reportPreSessionError(cmd, err)
-		}
+		// A namespaced copy derives every namespace role from metadata.namespace;
+		// cross-namespace work belongs to the cluster-copy family.
+		flags.setSingleNamespace(namespace)
 
-		if flags.podName != "" && len(flags.sourcePVCs) != 0 {
-			return domain.NewError(
-				domain.ErrorValidation,
-				"copy",
-				"--source-pvc cannot be combined with --pod; the Pod PVC set is copied as one unit",
-			)
+		existing, err := validateCopySessionInput(cmd, flags)
+		if err != nil {
+			return err
 		}
 
 		runtime, err := r.runtime()
@@ -68,9 +103,10 @@ func (r *rootState) copySubmissionCommand(planOnly bool) *cobra.Command {
 		defer cancel()
 
 		if existing {
-			// An existing Reservation is adoptable: the handoff graduates the
-			// persisted reservation into the copy this session executes.
-			return r.copyExisting(ctx, cmd, runtime, flags, dryRun, false)
+			// An existing namespaced Reservation is adoptable: the handoff
+			// graduates the persisted reservation into the copy this session
+			// executes.
+			return r.copySessionExisting(ctx, cmd, runtime, flags, dryRun, namespacedRecords)
 		}
 
 		object, err := flags.workflow(r, runtime, false)
@@ -78,17 +114,72 @@ func (r *rootState) copySubmissionCommand(planOnly bool) *cobra.Command {
 			return err
 		}
 
-		if object.Spec.SourceNamespace == object.Spec.DestinationNamespace &&
-			object.Spec.DestinationNamespace == object.Spec.SessionNamespace {
-			local := &v1alpha1.Copy{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      object.Name,
-					Namespace: string(object.Spec.SourceNamespace),
-				},
-				Spec: *object.Spec.CopySpec.DeepCopy(),
-			}
+		local := &v1alpha1.Copy{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      object.Name,
+				Namespace: string(object.Spec.SourceNamespace),
+			},
+			Spec: *object.Spec.CopySpec.DeepCopy(),
+		}
 
-			return r.createCopy(ctx, cmd, runtime, local, dryRun)
+		return r.createCopy(ctx, cmd, runtime, local, dryRun)
+	}
+	flags.bindTransfer(command)
+	command.Flags().StringVarP(
+		&namespace,
+		"namespace",
+		"n",
+		"default",
+		"Tenant namespace of the copy and every PVC it addresses",
+	)
+
+	if !planOnly {
+		bindDryRun(command, &dryRun)
+	}
+
+	return command
+}
+
+// clusterCopySubmissionCommand builds the cluster-scoped session copy
+// entrypoints: the bare run command and its plan preview. Records persist as
+// ClusterCopy sessions addressed by the namespace roles the spec declares.
+func (r *rootState) clusterCopySubmissionCommand(planOnly bool) *cobra.Command {
+	flags := &copyFlags{}
+	dryRun := planOnly
+
+	command := &cobra.Command{
+		Use:   "cluster-copy",
+		Short: "Run a cross-namespace finite copy without workload cutover",
+		Args:  cobra.NoArgs,
+	}
+	if planOnly {
+		command.Use, command.Short = "plan", "Inspect cross-namespace copy checks without mutations"
+	}
+
+	command.RunE = func(cmd *cobra.Command, _ []string) error {
+		existing, err := validateCopySessionInput(cmd, flags)
+		if err != nil {
+			return err
+		}
+
+		runtime, err := r.runtime()
+		if err != nil {
+			return err
+		}
+
+		ctx, cancel := r.context(cmd.Context())
+		defer cancel()
+
+		if existing {
+			// An existing ClusterReservation is adoptable: the handoff
+			// graduates the persisted reservation into the cluster copy this
+			// session executes.
+			return r.copySessionExisting(ctx, cmd, runtime, flags, dryRun, clusterRecords)
+		}
+
+		object, err := flags.workflow(r, runtime, false)
+		if err != nil {
+			return err
 		}
 
 		return r.createClusterCopy(ctx, cmd, runtime, object, dryRun)
@@ -185,9 +276,14 @@ func (r *rootState) createCopy(
 		UpdatedAt: now,
 	}
 
+	// The session record ConfigMap lives in the session storage namespace,
+	// next to every other session family; the Copy object itself carries the
+	// tenant namespace in metadata.namespace.
+	namespace := r.migrationRecordNamespace()
+
 	store, err := cliWorkflowStore(
 		runtime,
-		object.Namespace,
+		namespace,
 		func() *v1alpha1.Copy { return &v1alpha1.Copy{} },
 	)
 	if err != nil {
@@ -195,7 +291,7 @@ func (r *rootState) createCopy(
 	}
 
 	if err := store.Create(ctx, object); err != nil {
-		return reportSessionCreationError(cmd, object.Namespace, object.Name, err)
+		return reportSessionCreationError(cmd, namespace, object.Name, err)
 	}
 
 	executor := app.NewCopyExecutor(
@@ -206,7 +302,7 @@ func (r *rootState) createCopy(
 		r.copyConfig(runtime),
 	)
 	if err := executor.Run(ctx, object); err != nil {
-		return reportCopyError(cmd, object.Name, object.Status.Phase, err)
+		return reportCopyError(cmd, "copy", object.Name, object.Status.Phase, err)
 	}
 
 	return runtime.printer.Print(object)
@@ -278,7 +374,7 @@ func (r *rootState) createClusterCopy(
 		r.copyConfig(runtime),
 	)
 	if err := executor.Run(ctx, object); err != nil {
-		return reportCopyError(cmd, object.Name, object.Status.Phase, err)
+		return reportCopyError(cmd, "cluster-copy", object.Name, object.Status.Phase, err)
 	}
 
 	return runtime.printer.Print(object)

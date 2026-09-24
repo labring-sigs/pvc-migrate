@@ -123,7 +123,11 @@ func (r *rootState) newCrossClusterCopyResumeCommand() *cobra.Command {
 
 				return writeDryRunNotice(
 					cmd.ErrOrStderr(),
-					crossClusterExecuteCommand(cmd, "copy cross-cluster resume", session.ID),
+					crossClusterExecuteCommand(
+						cmd,
+						"cluster-copy cross-cluster resume",
+						session.ID,
+					),
 				)
 			}
 
@@ -178,7 +182,7 @@ func (r *rootState) newCrossClusterCopyPlanCommand() *cobra.Command {
 			if !plan.Ready {
 				return domain.NewError(
 					domain.ErrorPrecondition,
-					"copy cross-cluster plan",
+					"cluster-copy cross-cluster plan",
 					"plan contains failed checks",
 				)
 			}
@@ -247,7 +251,7 @@ func (r *rootState) newCrossClusterCopyRunCommand() *cobra.Command {
 				if !plan.Ready {
 					return domain.NewError(
 						domain.ErrorPrecondition,
-						"copy cross-cluster",
+						"cluster-copy cross-cluster",
 						"plan contains failed checks",
 					)
 				}
@@ -340,14 +344,18 @@ func (r *rootState) newCrossClusterCopyCleanupCommand() *cobra.Command {
 
 				return writeDryRunNotice(
 					cmd.ErrOrStderr(),
-					crossClusterExecuteCommand(cmd, "copy cross-cluster cleanup", session.ID),
+					crossClusterExecuteCommand(
+						cmd,
+						"cluster-copy cross-cluster cleanup",
+						session.ID,
+					),
 				)
 			}
 
 			if !r.global.assumeYes {
 				return domain.NewError(
 					domain.ErrorPrecondition,
-					"copy cross-cluster cleanup",
+					"cluster-copy cross-cluster cleanup",
 					"re-run with --yes after reviewing the session",
 				)
 			}
@@ -648,7 +656,13 @@ func (r *rootState) crossPrinter() output.Printer {
 }
 
 func crossClusterCopyCleanupCommand(flags *crossClusterCopyFlags, sessionID string) string {
-	args := []string{"pvc-migrate", "copy", "cross-cluster", "cleanup", shellQuote(sessionID)}
+	args := []string{
+		"pvc-migrate",
+		"cluster-copy",
+		"cross-cluster",
+		"cleanup",
+		shellQuote(sessionID),
+	}
 	for _, connection := range []struct {
 		name  string
 		value string

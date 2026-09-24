@@ -33,9 +33,10 @@ type reserveFlags struct {
 }
 
 // bindTransfer binds the reservation inputs that shape the workflow spec.
-// Namespace roles bind separately through bindNamespaceRoles: session
-// commands take one flag per role, cr namespaced submits take a single -n,
-// and cr cluster submits take the roles their spec declares.
+// Namespace roles bind separately through bindNamespaceRoles: the namespaced
+// reserve command and the cr namespaced submits take a single -n, while the
+// cluster-reserve session family and the cr cluster submits take the roles
+// their spec declares.
 func (f *reserveFlags) bindTransfer(command *cobra.Command) {
 	flags := command.Flags()
 	flags.StringVar(&f.sessionID, "session", "", "Migration session ID")
@@ -126,8 +127,8 @@ func (f *reserveFlags) bindTransfer(command *cobra.Command) {
 	)
 }
 
-// bindNamespaceRoles binds the per-role namespace flags the session and
-// cluster-scoped reservation entrypoints expose.
+// bindNamespaceRoles binds the per-role namespace flags the cluster-scoped
+// reservation entrypoints expose.
 func (f *reserveFlags) bindNamespaceRoles(command *cobra.Command) {
 	flags := command.Flags()
 	flags.StringVarP(&f.sourceNamespace, "source-namespace", "n", "default", "Source PVC namespace")

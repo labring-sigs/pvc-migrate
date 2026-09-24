@@ -12,7 +12,57 @@ import (
 	crclient "sigs.k8s.io/controller-runtime/pkg/client"
 )
 
+// addOfflineMigrationLifecycle mounts the namespaced session family verbs:
+// they address only Migration records.
+func (r *rootState) addOfflineMigrationLifecycle(parent *cobra.Command) {
+	parent.AddCommand(
+		r.newScopedOfflineMigrationStatusCommand(sourceSession, namespacedRecords),
+		r.newScopedOfflineMigrationResumeCommand(sourceSession, namespacedRecords),
+		r.newScopedOfflineMigrationAbortCommand(sourceSession, namespacedRecords),
+		r.newScopedOfflineMigrationRollbackCommand(sourceSession, namespacedRecords),
+		r.newScopedOfflineMigrationCleanupCommand(sourceSession, namespacedRecords),
+	)
+}
+
+// addClusterOfflineMigrationLifecycle mounts the cluster-scoped session family
+// verbs: they address only ClusterMigration records.
+func (r *rootState) addClusterOfflineMigrationLifecycle(parent *cobra.Command) {
+	parent.AddCommand(
+		r.newScopedOfflineMigrationStatusCommand(sourceSession, clusterRecords),
+		r.newScopedOfflineMigrationResumeCommand(sourceSession, clusterRecords),
+		r.newScopedOfflineMigrationAbortCommand(sourceSession, clusterRecords),
+		r.newScopedOfflineMigrationRollbackCommand(sourceSession, clusterRecords),
+		r.newScopedOfflineMigrationCleanupCommand(sourceSession, clusterRecords),
+	)
+}
+
 func (r *rootState) newOfflineMigrationStatusCommand(source workflowSource) *cobra.Command {
+	return r.newScopedOfflineMigrationStatusCommand(source, recordScopeForSource(source))
+}
+
+func (r *rootState) newOfflineMigrationResumeCommand(source workflowSource) *cobra.Command {
+	return r.newScopedOfflineMigrationResumeCommand(source, recordScopeForSource(source))
+}
+
+func (r *rootState) newOfflineMigrationAbortCommand(source workflowSource) *cobra.Command {
+	return r.newScopedOfflineMigrationAbortCommand(source, recordScopeForSource(source))
+}
+
+func (r *rootState) newOfflineMigrationRollbackCommand(source workflowSource) *cobra.Command {
+	return r.newScopedOfflineMigrationRollbackCommand(source, recordScopeForSource(source))
+}
+
+func (r *rootState) newOfflineMigrationCleanupCommand(source workflowSource) *cobra.Command {
+	return r.newScopedOfflineMigrationCleanupCommand(source, recordScopeForSource(source))
+}
+
+// newScopedOfflineMigrationStatusCommand shows or lists the migrations of one
+// family scope: migrate lists Migration sessions, cluster-migrate lists
+// ClusterMigration sessions, and the cr families list their CRDs.
+func (r *rootState) newScopedOfflineMigrationStatusCommand(
+	source workflowSource,
+	scope recordScope,
+) *cobra.Command {
 	return &cobra.Command{
 		Use:   "status [" + workflowArgLabel(source) + "]",
 		Short: "Show one offline migration or list migrations",
@@ -33,6 +83,7 @@ func (r *rootState) newOfflineMigrationStatusCommand(source workflowSource) *cob
 					runtime,
 					args[0],
 					source,
+					scope,
 				)
 				if err != nil {
 					return err
@@ -42,7 +93,13 @@ func (r *rootState) newOfflineMigrationStatusCommand(source workflowSource) *cob
 					return err
 				}
 
-				return writeOfflineMigrationNextSteps(cmd, r, backend, object)
+				return writeOfflineMigrationNextSteps(
+					cmd,
+					r,
+					backend,
+					sessionFamilyCommand(scope, "migrate"),
+					object,
+				)
 			}
 
 			objects := []crclient.Object{}
@@ -53,7 +110,7 @@ func (r *rootState) newOfflineMigrationStatusCommand(source workflowSource) *cob
 				}
 
 				kind := domain.ControllerKindMigration
-				if source == sourceClusterController {
+				if scope == clusterRecords {
 					kind = domain.ControllerKindClusterMigration
 				}
 
@@ -72,7 +129,34 @@ func (r *rootState) newOfflineMigrationStatusCommand(source workflowSource) *cob
 				return runtime.printer.Print(objects)
 			}
 
+			// One session family lists only its own kind: migrate lists the
+			// namespaced Migration records, cluster-migrate the
+			// ClusterMigration records. The ConfigMap namespace is the storage
+			// location; the objects inside carry the tenant namespace, so the
+			// listing is not filtered by it.
 			namespace := r.workflowStorageNamespace(cmd)
+
+			if scope == clusterRecords {
+				clusterStore, err := cliWorkflowStore(
+					runtime,
+					namespace,
+					func() *v1alpha1.ClusterMigration { return &v1alpha1.ClusterMigration{} },
+				)
+				if err != nil {
+					return err
+				}
+
+				clusterItems, err := clusterStore.List(ctx, "")
+				if err != nil {
+					return err
+				}
+
+				for _, object := range clusterItems {
+					objects = append(objects, object)
+				}
+
+				return runtime.printer.Print(objects)
+			}
 
 			migrationStore, err := cliWorkflowStore(
 				runtime,
@@ -83,7 +167,7 @@ func (r *rootState) newOfflineMigrationStatusCommand(source workflowSource) *cob
 				return err
 			}
 
-			items, err := migrationStore.List(ctx, namespace)
+			items, err := migrationStore.List(ctx, "")
 			if err != nil {
 				return err
 			}
@@ -92,30 +176,15 @@ func (r *rootState) newOfflineMigrationStatusCommand(source workflowSource) *cob
 				objects = append(objects, object)
 			}
 
-			clusterStore, err := cliWorkflowStore(
-				runtime,
-				namespace,
-				func() *v1alpha1.ClusterMigration { return &v1alpha1.ClusterMigration{} },
-			)
-			if err != nil {
-				return err
-			}
-
-			clusterItems, err := clusterStore.List(ctx, "")
-			if err != nil {
-				return err
-			}
-
-			for _, object := range clusterItems {
-				objects = append(objects, object)
-			}
-
 			return runtime.printer.Print(objects)
 		},
 	}
 }
 
-func (r *rootState) newOfflineMigrationResumeCommand(source workflowSource) *cobra.Command {
+func (r *rootState) newScopedOfflineMigrationResumeCommand(
+	source workflowSource,
+	scope recordScope,
+) *cobra.Command {
 	var dryRun bool
 
 	command := &cobra.Command{
@@ -131,7 +200,7 @@ func (r *rootState) newOfflineMigrationResumeCommand(source workflowSource) *cob
 			ctx, cancel := r.context(cmd.Context())
 			defer cancel()
 
-			return r.resumeMigration(ctx, cmd, runtime, args[0], dryRun, source)
+			return r.resumeMigration(ctx, cmd, runtime, args[0], dryRun, source, scope)
 		},
 	}
 	bindDryRun(command, &dryRun)
@@ -139,7 +208,10 @@ func (r *rootState) newOfflineMigrationResumeCommand(source workflowSource) *cob
 	return command
 }
 
-func (r *rootState) newOfflineMigrationAbortCommand(source workflowSource) *cobra.Command {
+func (r *rootState) newScopedOfflineMigrationAbortCommand(
+	source workflowSource,
+	scope recordScope,
+) *cobra.Command {
 	var dryRun bool
 
 	command := &cobra.Command{
@@ -157,7 +229,14 @@ func (r *rootState) newOfflineMigrationAbortCommand(source workflowSource) *cobr
 			ctx, cancel := r.context(cmd.Context())
 			defer cancel()
 
-			object, backend, err := r.loadMigrationWithBackend(ctx, cmd, runtime, args[0], source)
+			object, backend, err := r.loadMigrationWithBackend(
+				ctx,
+				cmd,
+				runtime,
+				args[0],
+				source,
+				scope,
+			)
 			if err != nil {
 				return err
 			}
@@ -168,9 +247,11 @@ func (r *rootState) newOfflineMigrationAbortCommand(source workflowSource) *cobr
 				}
 			}
 
+			family := sessionFamilyCommand(scope, "migrate")
+
 			switch current := object.(type) {
 			case *v1alpha1.Migration:
-				executor, err := r.migrationExecutor(runtime, cmd, backend)
+				executor, err := r.migrationExecutor(runtime, backend)
 				if err != nil {
 					return err
 				}
@@ -182,7 +263,13 @@ func (r *rootState) newOfflineMigrationAbortCommand(source workflowSource) *cobr
 				}
 
 				if err != nil {
-					return reportMigrationError(cmd, current.Name, current.Status.Phase, err)
+					return reportMigrationError(
+						cmd,
+						family,
+						current.Name,
+						current.Status.Phase,
+						err,
+					)
 				}
 
 			case *v1alpha1.ClusterMigration:
@@ -198,7 +285,13 @@ func (r *rootState) newOfflineMigrationAbortCommand(source workflowSource) *cobr
 				}
 
 				if err != nil {
-					return reportMigrationError(cmd, current.Name, current.Status.Phase, err)
+					return reportMigrationError(
+						cmd,
+						family,
+						current.Name,
+						current.Status.Phase,
+						err,
+					)
 				}
 			}
 
@@ -207,10 +300,10 @@ func (r *rootState) newOfflineMigrationAbortCommand(source workflowSource) *cobr
 			}
 
 			if dryRun {
-				return writeOfflineMigrationDryRunNotice(cmd, r, backend, object, "abort")
+				return writeOfflineMigrationDryRunNotice(cmd, r, backend, family, object, "abort")
 			}
 
-			return writeOfflineMigrationNextSteps(cmd, r, backend, object)
+			return writeOfflineMigrationNextSteps(cmd, r, backend, family, object)
 		},
 	}
 
@@ -219,7 +312,10 @@ func (r *rootState) newOfflineMigrationAbortCommand(source workflowSource) *cobr
 	return command
 }
 
-func (r *rootState) newOfflineMigrationRollbackCommand(source workflowSource) *cobra.Command {
+func (r *rootState) newScopedOfflineMigrationRollbackCommand(
+	source workflowSource,
+	scope recordScope,
+) *cobra.Command {
 	var dryRun bool
 
 	command := &cobra.Command{
@@ -237,7 +333,14 @@ func (r *rootState) newOfflineMigrationRollbackCommand(source workflowSource) *c
 			ctx, cancel := r.context(cmd.Context())
 			defer cancel()
 
-			object, backend, err := r.loadMigrationWithBackend(ctx, cmd, runtime, args[0], source)
+			object, backend, err := r.loadMigrationWithBackend(
+				ctx,
+				cmd,
+				runtime,
+				args[0],
+				source,
+				scope,
+			)
 			if err != nil {
 				return err
 			}
@@ -248,9 +351,11 @@ func (r *rootState) newOfflineMigrationRollbackCommand(source workflowSource) *c
 				}
 			}
 
+			family := sessionFamilyCommand(scope, "migrate")
+
 			switch current := object.(type) {
 			case *v1alpha1.Migration:
-				executor, err := r.migrationExecutor(runtime, cmd, backend)
+				executor, err := r.migrationExecutor(runtime, backend)
 				if err != nil {
 					return err
 				}
@@ -262,7 +367,13 @@ func (r *rootState) newOfflineMigrationRollbackCommand(source workflowSource) *c
 				}
 
 				if err != nil {
-					return reportMigrationError(cmd, current.Name, current.Status.Phase, err)
+					return reportMigrationError(
+						cmd,
+						family,
+						current.Name,
+						current.Status.Phase,
+						err,
+					)
 				}
 
 			case *v1alpha1.ClusterMigration:
@@ -278,7 +389,13 @@ func (r *rootState) newOfflineMigrationRollbackCommand(source workflowSource) *c
 				}
 
 				if err != nil {
-					return reportMigrationError(cmd, current.Name, current.Status.Phase, err)
+					return reportMigrationError(
+						cmd,
+						family,
+						current.Name,
+						current.Status.Phase,
+						err,
+					)
 				}
 			}
 
@@ -287,10 +404,17 @@ func (r *rootState) newOfflineMigrationRollbackCommand(source workflowSource) *c
 			}
 
 			if dryRun {
-				return writeOfflineMigrationDryRunNotice(cmd, r, backend, object, "rollback")
+				return writeOfflineMigrationDryRunNotice(
+					cmd,
+					r,
+					backend,
+					family,
+					object,
+					"rollback",
+				)
 			}
 
-			return writeOfflineMigrationNextSteps(cmd, r, backend, object)
+			return writeOfflineMigrationNextSteps(cmd, r, backend, family, object)
 		},
 	}
 
@@ -299,7 +423,10 @@ func (r *rootState) newOfflineMigrationRollbackCommand(source workflowSource) *c
 	return command
 }
 
-func (r *rootState) newOfflineMigrationCleanupCommand(source workflowSource) *cobra.Command {
+func (r *rootState) newScopedOfflineMigrationCleanupCommand(
+	source workflowSource,
+	scope recordScope,
+) *cobra.Command {
 	var (
 		dryRun  bool
 		options app.MigrationCleanupOptions
@@ -320,7 +447,14 @@ func (r *rootState) newOfflineMigrationCleanupCommand(source workflowSource) *co
 			ctx, cancel := r.context(cmd.Context())
 			defer cancel()
 
-			object, backend, err := r.loadMigrationWithBackend(ctx, cmd, runtime, args[0], source)
+			object, backend, err := r.loadMigrationWithBackend(
+				ctx,
+				cmd,
+				runtime,
+				args[0],
+				source,
+				scope,
+			)
 			if err != nil {
 				return err
 			}
@@ -331,9 +465,11 @@ func (r *rootState) newOfflineMigrationCleanupCommand(source workflowSource) *co
 				}
 			}
 
+			family := sessionFamilyCommand(scope, "migrate")
+
 			switch current := object.(type) {
 			case *v1alpha1.Migration:
-				executor, err := r.migrationExecutor(runtime, cmd, backend)
+				executor, err := r.migrationExecutor(runtime, backend)
 				if err != nil {
 					return err
 				}
@@ -347,6 +483,7 @@ func (r *rootState) newOfflineMigrationCleanupCommand(source workflowSource) *co
 				if err != nil {
 					return reportMigrationCleanupError(
 						cmd,
+						family,
 						workflowLeaseNamespace(backend, r.workflowStorageNamespace(cmd), current),
 						current.Name,
 						options,
@@ -369,6 +506,7 @@ func (r *rootState) newOfflineMigrationCleanupCommand(source workflowSource) *co
 				if err != nil {
 					return reportMigrationCleanupError(
 						cmd,
+						family,
 						clusterMigrationStorageNamespace(current),
 						current.Name,
 						options,
@@ -394,7 +532,7 @@ func (r *rootState) newOfflineMigrationCleanupCommand(source workflowSource) *co
 							cmd,
 							workflowHintNamespace(backend, r, cmd, object),
 						).pvcMigrate,
-						"migrate",
+						family,
 						workflowHintNamespace(backend, r, cmd, object),
 						object.GetName(),
 						options.UnusedStoragePolicy,
@@ -422,6 +560,7 @@ func writeOfflineMigrationNextSteps(
 	cmd *cobra.Command,
 	r *rootState,
 	backend string,
+	family string,
 	object crclient.Object,
 ) error {
 	namespace := workflowHintNamespace(backend, r, cmd, object)
@@ -430,7 +569,7 @@ func writeOfflineMigrationNextSteps(
 		cmd.ErrOrStderr(),
 		cmd,
 		guidancePrefixesForCommand(cmd, namespace).pvcMigrate,
-		"migrate",
+		family,
 		namespace,
 		object.GetName(),
 		workflowObjectPhase(object),
@@ -442,6 +581,7 @@ func writeOfflineMigrationDryRunNotice(
 	cmd *cobra.Command,
 	r *rootState,
 	backend string,
+	family string,
 	object crclient.Object,
 	subcommand string,
 ) error {
@@ -452,7 +592,7 @@ func writeOfflineMigrationDryRunNotice(
 		lifecycleExecuteCommand(
 			cmd,
 			guidancePrefixesForCommand(cmd, namespace).pvcMigrate,
-			"migrate",
+			family,
 			subcommand,
 			namespace,
 			object.GetName(),
@@ -462,7 +602,7 @@ func writeOfflineMigrationDryRunNotice(
 
 func reportMigrationCleanupError(
 	cmd *cobra.Command,
-	namespace, name string,
+	family, namespace, name string,
 	options app.MigrationCleanupOptions,
 	cause error,
 ) error {
@@ -493,10 +633,10 @@ func reportMigrationCleanupError(
 		cmd.ErrOrStderr(),
 		"Cleanup stopped before confirmed completion. Inspect current state: %s %s status %s\nRevalidate cleanup before retrying: %s --yes %s %s --dry-run\n",
 		prefix,
-		workflowCommandPath(cmd, "migrate"),
+		workflowCommandPath(cmd, family),
 		workflowHintAddress(cmd, namespace, name),
 		prefix,
-		workflowCommandPath(cmd, "migrate"),
+		workflowCommandPath(cmd, family),
 		retry,
 	)
 

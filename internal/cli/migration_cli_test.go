@@ -75,6 +75,17 @@ func activeMigrationCLIObjects() []crclient.Object {
 	}
 }
 
+// migrationCLIFamily names the session command family that drives one stored
+// migration object: migrate for Migration records, cluster-migrate for
+// ClusterMigration records.
+func migrationCLIFamily(object crclient.Object) string {
+	if _, ok := object.(*v1alpha1.ClusterMigration); ok {
+		return "cluster-migrate"
+	}
+
+	return "migrate"
+}
+
 func TestMigrationCLIAbortAndCleanupUseConcreteStorage(t *testing.T) {
 	for _, object := range []crclient.Object{
 		&v1alpha1.Migration{
@@ -141,6 +152,8 @@ func TestMigrationCLIAbortAndCleanupUseConcreteStorage(t *testing.T) {
 				t.Fatal(err)
 			}
 
+			family := migrationCLIFamily(object)
+
 			execute := func(args ...string) {
 				t.Helper()
 
@@ -160,7 +173,7 @@ func TestMigrationCLIAbortAndCleanupUseConcreteStorage(t *testing.T) {
 				}
 			}
 
-			execute("--yes", "migrate", "abort", object.GetName(), "--dry-run=false")
+			execute("--yes", family, "abort", object.GetName(), "--dry-run=false")
 
 			loaded, err := store.Load(t.Context(), crclient.ObjectKey{Name: object.GetName()})
 			if err != nil {
@@ -180,10 +193,10 @@ func TestMigrationCLIAbortAndCleanupUseConcreteStorage(t *testing.T) {
 				t.Fatalf("unexpected stored type %T", loaded)
 			}
 
-			execute("migrate", "status")
+			execute(family, "status")
 			execute(
 				"--yes",
-				"migrate",
+				family,
 				"cleanup",
 				object.GetName(),
 				"--finalize",
@@ -236,7 +249,7 @@ func TestMigrationCLICleanupDryRunPreservesPolicyGuidance(t *testing.T) {
 			})
 			command.SetArgs(
 				[]string{
-					"migrate",
+					migrationCLIFamily(object),
 					"cleanup",
 					object.GetName(),
 					"--unused-storage-policy",
@@ -294,7 +307,12 @@ func TestMigrationCLIStatusReadsSessionWithoutLegacyService(t *testing.T) {
 					}, nil
 				},
 			})
-			command.SetArgs([]string{"--output", "json", "migrate", "status", object.GetName()})
+			command.SetArgs([]string{
+				"--output", "json",
+				migrationCLIFamily(object),
+				"status",
+				object.GetName(),
+			})
 
 			if err := command.Execute(); err != nil {
 				t.Fatal(err)
@@ -307,6 +325,55 @@ func TestMigrationCLIStatusReadsSessionWithoutLegacyService(t *testing.T) {
 
 			if header.Kind != object.GetObjectKind().GroupVersionKind().Kind {
 				t.Fatalf("status changed API kind: %s", stdout.String())
+			}
+		})
+	}
+}
+
+// TestMigrationCLISessionFamiliesRejectEachOthersRecords pins the split: the
+// migrate session family resolves only Migration records and cluster-migrate
+// only ClusterMigration records, each pointing the operator at the family that
+// owns the stored record.
+func TestMigrationCLISessionFamiliesRejectEachOthersRecords(t *testing.T) {
+	for _, object := range activeMigrationCLIObjects() {
+		t.Run(object.GetName(), func(t *testing.T) {
+			client := fake.NewClientset()
+
+			store, err := kube.NewConfigMapWorkflowStore(
+				client,
+				"pvc-migrate-system",
+				func() crclient.Object { return object },
+			)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			if err := store.Create(t.Context(), object); err != nil {
+				t.Fatal(err)
+			}
+
+			other := "cluster-migrate"
+			if migrationCLIFamily(object) == "cluster-migrate" {
+				other = "migrate"
+			}
+
+			want := "address it with " + migrationCLIFamily(object)
+
+			command := NewRoot(Options{
+				Out: io.Discard, ErrOut: io.Discard,
+				runtimeFactory: func(state *rootState) (*commandRuntime, error) {
+					return &commandRuntime{
+						clients: &kube.Clients{Kubernetes: client},
+						printer: printerFor(state),
+					}, nil
+				},
+			})
+			command.SetArgs([]string{other, "status", object.GetName()})
+
+			err = command.Execute()
+			if domain.CategoryOf(err) != domain.ErrorValidation ||
+				!strings.Contains(err.Error(), want) {
+				t.Fatalf("error = %v, want validation error %q", err, want)
 			}
 		})
 	}

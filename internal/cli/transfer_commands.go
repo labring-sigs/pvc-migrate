@@ -166,7 +166,9 @@ func printCopyDryRunResult(
 	} else {
 		args = []string{
 			sessionCommandPrefixForCommand(cmd, namespace),
-			"copy", "--session", shellQuote(object.GetName()),
+			// The split session families each graduate their own records, so
+			// the rerun hint must name the family the command belongs to.
+			workflowCommandNameForCommand(cmd), "--session", shellQuote(object.GetName()),
 		}
 	}
 

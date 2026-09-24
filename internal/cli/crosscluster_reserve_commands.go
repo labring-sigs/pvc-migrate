@@ -225,7 +225,11 @@ func (r *rootState) newCrossClusterReserveResumeCommand() *cobra.Command {
 
 				return writeDryRunNotice(
 					cmd.ErrOrStderr(),
-					crossClusterExecuteCommand(cmd, "reserve cross-cluster resume", session.ID),
+					crossClusterExecuteCommand(
+						cmd,
+						"cluster-reserve cross-cluster resume",
+						session.ID,
+					),
 				)
 			}
 
@@ -308,14 +312,18 @@ func (r *rootState) newCrossClusterReserveCleanupCommand() *cobra.Command {
 
 				return writeDryRunNotice(
 					cmd.ErrOrStderr(),
-					crossClusterExecuteCommand(cmd, "reserve cross-cluster cleanup", session.ID),
+					crossClusterExecuteCommand(
+						cmd,
+						"cluster-reserve cross-cluster cleanup",
+						session.ID,
+					),
 				)
 			}
 
 			if !r.global.assumeYes {
 				return domain.NewError(
 					domain.ErrorPrecondition,
-					"reserve cross-cluster cleanup",
+					"cluster-reserve cross-cluster cleanup",
 					"re-run with --yes after reviewing the session",
 				)
 			}
@@ -380,7 +388,7 @@ func (r *rootState) newCrossClusterReservePlanCommand() *cobra.Command {
 			if !plan.Ready {
 				return domain.NewError(
 					domain.ErrorPrecondition,
-					"reserve cross-cluster plan",
+					"cluster-reserve cross-cluster plan",
 					"plan contains failed checks",
 				)
 			}
@@ -443,7 +451,7 @@ func (r *rootState) newCrossClusterReserveRunCommand() *cobra.Command {
 				if !plan.Ready {
 					return domain.NewError(
 						domain.ErrorPrecondition,
-						"reserve cross-cluster",
+						"cluster-reserve cross-cluster",
 						"plan contains failed checks",
 					)
 				}
@@ -477,7 +485,7 @@ func (r *rootState) newCrossClusterReserveRunCommand() *cobra.Command {
 
 			_, err = fmt.Fprintf(
 				cmd.ErrOrStderr(),
-				"\nDestination PVC reservation completed. Continue with: pvc-migrate copy cross-cluster --session %s --dry-run=false (reuse the same source/destination connection flags).\n",
+				"\nDestination PVC reservation completed. Continue with: pvc-migrate cluster-copy cross-cluster --session %s --dry-run=false (reuse the same source/destination connection flags).\n",
 				session.ID,
 			)
 

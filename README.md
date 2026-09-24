@@ -93,11 +93,30 @@ Use `--tool-image registry.example/pvc-migrate:0.1.0` when cluster nodes pull th
 The CLI separates the two durable execution backends by command group instead
 of a mode flag; the two modes never read or write each other's storage:
 
-- Top-level commands (`migrate`, `copy`, `reserve`, `backup`, `restore`,
-  `rename`, `move`, `migrate-pod`) run the session backend: sessions persist in
-  ConfigMaps (`--session-namespace`) and the invoking process executes the
-  workflow. Their `plan`/`status`/`resume`/`abort`/`rollback`/`cleanup`
-  subcommands address session records only.
+- Top-level commands run the session backend: sessions persist as workflow
+  objects inside ConfigMaps and the invoking process executes the workflow.
+  Their `plan`/`status`/`resume`/`abort`/`rollback`/`cleanup` subcommands
+  address session records only. The session tree mirrors the cr split:
+  `migrate`, `copy`, and `reserve` are namespaced families that take a single
+  `-n/--namespace` — the one tenant namespace the workflow and every PVC it
+  addresses live in — while `cluster-migrate`, `cluster-copy`, and
+  `cluster-reserve` expose the role flags their spec declares
+  (`-n/--source-namespace`, `--destination-namespace`, plus
+  `--temporary-namespace` on `cluster-migrate`) and run cross-namespace work.
+  Same-namespace work uses the namespaced command and cannot express a
+  cross-namespace spec; cross-namespace work uses the cluster-* command — the
+  command boundary decides, not flag validation. The namespaced families
+  persist the namespaced workflow types (`Migration`, `Copy`, `Reservation`)
+  and the cluster families the `Cluster*` types: a `migrate` record lives in
+  the session storage namespace (`--session-namespace`, default
+  `pvc-migrate-system`) with its tenant namespace in `metadata.namespace`,
+  `copy` and `reserve` records live in the tenant namespace and their
+  `status`/`resume`/`abort`/`cleanup` verbs take `-n` to address the record,
+  and cluster-family records live in the session namespace their spec
+  declares. `migrate-pod`, `backup`, `restore`, and `rename` are
+  single-namespace commands, `move` keeps its cluster-scoped kind with role
+  flags, and cross-cluster work hangs under `cluster-copy cross-cluster` and
+  `cluster-reserve cross-cluster`.
 - `pvc-migrate cr <family>` operates on workflow CRs only: `cr migrate-pod`,
   `cr migrate`, `cr copy`, `cr reserve`, `cr rename`, `cr move`, `cr backup`,
   `cr restore`, plus the explicit cluster-scoped families `cr cluster-migrate`,
@@ -107,9 +126,10 @@ of a mode flag; the two modes never read or write each other's storage:
   `watch` (stream phase changes until a terminal phase), and the lifecycle
   verbs (`resume`, `abort`, `rollback`, `cleanup`). Namespaced families address
   a CR with `-n <tenant-namespace>`; on `create` that single flag is also the
-  spec's whole namespace story — the role flags (`--source-namespace`,
-  `--destination-namespace`, `--temporary-namespace`) exist only on the
-  cluster-scoped creates, whose specs genuinely declare those roles.
+  spec's whole namespace story — the role flags (`-n/--source-namespace`,
+  `--destination-namespace`, plus `--temporary-namespace` on
+  `cr cluster-migrate`) exist only on the cluster-scoped creates, whose specs
+  genuinely declare those roles.
   Cluster-scoped families need no namespace. Pod migration is a
   same-namespace operation
   by design — a workload cannot be recreated in another namespace — so
@@ -118,10 +138,10 @@ of a mode flag; the two modes never read or write each other's storage:
   switching its storage. PVC identity moves always use the cluster-scoped
   `Move` (`cr move`). Backup, restore, and rename intentionally have no
   cluster-scoped form. Cross-cluster workflows remain on the ConfigMap/session
-  backend (`copy cross-cluster`, `reserve cross-cluster`). The controller uses
-  leader election, watches every installed workflow kind, and reuses the same
-  resumable state machine. A command fails clearly when its matching CRD is
-  absent.
+  backend (`cluster-copy cross-cluster`, `cluster-reserve cross-cluster`).
+  The controller uses leader election, watches every installed workflow kind,
+  and reuses the same resumable state machine. A command fails clearly when
+  its matching CRD is absent.
 
 Install the controller backend using the Helm command above — it is the
 only supported installation path and ships the CRDs. The `config/`
@@ -228,10 +248,12 @@ kubectl -n application get migrations
 
 Controller progress is read from the CR's durable status and written to
 stderr; the final table, JSON, or YAML document is written once to stdout.
-Session commands address records through the global `--session-namespace`;
-`cr` commands address namespaced CRs with `-n` on each verb, and
-cluster-scoped families (`cr cluster-migrate`, `cr cluster-copy`,
-`cr cluster-reserve`, `cr move`) need no namespace.
+Session commands address records through the global `--session-namespace`:
+every session record — namespaced or cluster-scoped — persists there, with
+the tenant namespace carried in the record itself. `cr` commands address
+namespaced CRs with `-n` on each verb, and the cluster-scoped families
+(`cluster-migrate`, `cluster-copy`, `cluster-reserve`, `cr cluster-migrate`,
+`cr cluster-copy`, `cr cluster-reserve`, `cr move`) need no namespace.
 `--timeout` bounds planning, submission, and waiting. A failed or deleted CR
 returns a nonzero exit code. Use `--wait=false` when another process owns
 observation (`cr <family> watch` follows it live). The controller records
@@ -296,9 +318,8 @@ accept `--pod` and does not inspect workload ownership or KubeBlocks metadata:
 
 ```bash
 pvc-migrate migrate plan \
-  --source-namespace application \
+  --namespace application \
   --source-pvc database-data \
-  --temporary-namespace pvc-migrate-system \
   --destination-pvc database-data
 ```
 
@@ -387,8 +408,9 @@ Real-time Pod migrate:
 plan -> reserve -> warm copy -> pause -> final sync -> activate -> resume (one command)
 ```
 
-`migrate` is caller-quiesced: it accepts PVC identities and namespace/PVC
-destination overrides, never discovers or pauses a workload, and never runs a
+`migrate` is caller-quiesced: it accepts PVC identities and PVC destination
+overrides (`cluster-migrate` also moves the PVC into another namespace), never
+discovers or pauses a workload, and never runs a
 warm-copy pass. `migrate-pod` is the real-time Pod workflow: it derives the
 complete PVC set from `--pod`, keeps the application PVC identities in the
 source namespace, and owns workload pause/resume and cutover. Its workload
@@ -434,7 +456,7 @@ Controller ownership outside the supported adapters causes the plan to fail. PVC
 
 ## Safety and Recovery
 
-- Workflow commands print phase-aware next steps, verification commands, and validated dry-run/execute pairs on stderr. Suggested commands use the owning workflow (`migrate`, `migrate-pod`, `copy`, `backup`, `rename`, or `move`) and preserve the active kubeconfig, context, session namespace, and explicitly changed execution settings they need. JSON and YAML results remain a single structured document on stdout. With `--log-format=json`, stderr is JSON Lines for progress events, guidance, and failures.
+- Workflow commands print phase-aware next steps, verification commands, and validated dry-run/execute pairs on stderr. Suggested commands use the owning workflow (`migrate`/`cluster-migrate`, `migrate-pod`, `copy`/`cluster-copy`, `backup`, `rename`, or `move`) and preserve the active kubeconfig, context, session namespace, and explicitly changed execution settings they need. JSON and YAML results remain a single structured document on stdout. With `--log-format=json`, stderr is JSON Lines for progress events, guidance, and failures.
 - Text logs support `--color=auto|always|never`. `auto` colors interactive terminal output, `always` forces ANSI colors for terminal multiplexers, and `never` keeps stderr plain for text collectors. Levels use severity colors, component and tool prefixes use stable per-value colors, and guidance uses semantic colors for phases and actions while keeping command bodies plain. JSON logs remain ANSI-free.
 - `migrate-pod` stops with an already-satisfied check when the Pod uses the requested target node and every PVC keeps its current StorageClass. Use `--force-reprovision` for an intentional backing-PV replacement on the same node and StorageClass.
 - Tool Pod logs stream to stderr by default and remain available in the command output after short-lived Pods are removed. Use `--stream-tool-logs=false` for quiet automation.
@@ -458,20 +480,24 @@ Controller ownership outside the supported adapters causes the plan to fail. PVC
 | Command | Purpose |
 | --- | --- |
 | `<operation> plan` | Validate an operation and print its resource inventory |
-| `reserve` | Optionally provision and retain staged destination PVCs before a later copy or cutover |
-| `copy` | Run a resumable offline copy or one online warm-copy pass without cutover |
-| `copy cross-cluster` | Copy PVC data between two Kubernetes clusters with separate source and destination connections |
-| `reserve cross-cluster` | Provision destination PVCs in another cluster and persist a cross-cluster session |
-| `migrate` | Run an offline reserve, final sync, activation, and completion |
+| `reserve` | Optionally provision and retain staged destination PVCs in one tenant namespace before a later copy or cutover |
+| `cluster-reserve` | Provision and retain destination PVCs across namespaces |
+| `copy` | Run a resumable offline copy or one online warm-copy pass without cutover, in one tenant namespace |
+| `cluster-copy` | Run a cross-namespace finite copy without workload cutover |
+| `cluster-copy cross-cluster` | Copy PVC data between two Kubernetes clusters with separate source and destination connections |
+| `cluster-reserve cross-cluster` | Provision destination PVCs in another cluster and persist a cross-cluster session |
+| `migrate` | Run an offline reserve, final sync, activation, and completion in one tenant namespace |
+| `cluster-migrate` | Run a cross-namespace offline reserve, final sync, activation, and completion |
 | `migrate-pod` | Run real-time warm copy, workload pause, cutover, and resume for one Pod |
 | `rename` | Rename one offline PVC while retaining its PV |
 | `move` | Move one offline PVC identity within or across namespaces |
 | `backup` | Copy PVC files to S3-compatible object storage (`--online` keeps active consumers running) |
 | `restore` | Restore a published recovery point into a PVC |
-| `migrate status/resume/abort/rollback/cleanup` | Manage an offline migration session |
+| `migrate`/`cluster-migrate` status/resume/abort/rollback/cleanup | Manage offline migration sessions of one record scope |
 | `migrate-pod status/resume/abort/rollback/cleanup` | Manage a real-time Pod migration session |
 | `reserve/copy/backup/rename/move status/resume/abort/cleanup` | Manage the lifecycle actions supported by each workflow |
-| `copy cross-cluster` / `reserve cross-cluster` lifecycle commands | Inspect, continue, or clean up a cross-cluster session |
+| `cluster-reserve`/`cluster-copy` status/resume/abort/cleanup | Manage cross-namespace reservation and copy sessions |
+| `cluster-copy cross-cluster` / `cluster-reserve cross-cluster` lifecycle commands | Inspect, continue, or clean up a cross-cluster session |
 | `recovery cleanup-orphan` | Validate and clear ownership after a session record was lost |
 | `controller` | Run the controller-runtime reconciliation loop for the installed local workflow CRDs |
 | `completion` | Generate shell completion |
@@ -490,14 +516,14 @@ The planner infers the source tool node from active consumers and selects a Read
 `--capacity-awareness=auto` is the default. Matching `CSIStorageCapacity` objects enforce reported capacity and `maximumVolumeSize`; missing capacity information produces a warning and reservation performs the final provisioning check. `require` makes missing capacity information a failed plan, and `off` disables the API lookup.
 
 ```bash
-pvc-migrate copy --dry-run=false \
+pvc-migrate cluster-copy --dry-run=false \
   --source-namespace application \
   --destination-namespace archive \
   --source-pvc database-data \
   --destination-storage-class fast \
   --target-node worker-b
 
-pvc-migrate copy --dry-run=false --online \
+pvc-migrate cluster-copy --dry-run=false --online \
   --source-namespace application \
   --destination-namespace archive \
   --source-pvc database-data \
@@ -505,21 +531,22 @@ pvc-migrate copy --dry-run=false --online \
   --target-node worker-b
 ```
 
-Cross-namespace copies reuse the source PVC name by default. Same-namespace copies generate a session-suffixed destination name unless `--destination-pvc` is supplied.
+Cross-namespace copies select the `cluster-copy` family and reuse the source PVC name by default. Same-namespace copies use `copy -n <tenant-namespace>` and generate a session-suffixed destination name unless `--destination-pvc` is supplied.
 For multiple explicit destination names, pass `--destination-pvc source-pvc-name=destination-pvc-name` once per source PVC; mappings must be complete and unique.
 
 ### Partial Directory Transfers
 
 `reserve`, `copy`, `migrate`, and `migrate-pod` accept optional `--source-path` and `--destination-path` directory scopes. Omit both flags to copy the full PVC. Paths are relative to the PVC root, and `.` selects the root. A single-PVC operation accepts a bare path; multi-PVC operations use explicit `source-pvc-name=relative-path` mappings. Unmapped PVCs keep the full-volume scope.
 
-Continuing a reservation with `copy --session ID` retains its paths, source node,
+Continuing a reservation with `copy --session ID` (or `cluster-copy --session
+ID` for a cross-namespace reservation) retains its paths, source node,
 strategies, checksum setting, and deletion policy in both persistence modes.
 Explicit `--source-node`, `--strategy`, `--verify-checksum`, and
 `--delete-extraneous` flags override those transfer settings during the hand-off.
 
 ```bash
 pvc-migrate copy --dry-run=false \
-  --source-namespace application \
+  --namespace application \
   --source-pvc database-data \
   --source-path mysql/current \
   --destination-path restored/mysql
@@ -540,7 +567,7 @@ Each scope is persisted in the session and reused by warm copy, final sync, chec
 Cross-cluster workflows use explicit subcommands and keep their session state on the source cluster. The destination kubeconfig is required, and the source and destination cluster identities must differ. StorageClass objects are read-only inputs; their parameters are never changed.
 
 ```bash
-pvc-migrate copy cross-cluster plan \
+pvc-migrate cluster-copy cross-cluster plan \
   --source-kubeconfig ~/.kube/source \
   --destination-kubeconfig ~/.kube/destination \
   --source-namespace application \
@@ -549,7 +576,7 @@ pvc-migrate copy cross-cluster plan \
   --destination-pvc database-data \
   --destination-storage-class fast
 
-pvc-migrate copy cross-cluster \
+pvc-migrate cluster-copy cross-cluster \
   --source-kubeconfig ~/.kube/source \
   --destination-kubeconfig ~/.kube/destination \
   --source-namespace application \
@@ -560,9 +587,9 @@ pvc-migrate copy cross-cluster \
   --dry-run=false
 ```
 
-Use `reserve cross-cluster` to provision and inspect destination PVCs before copying. `reserve cross-cluster status/resume/cleanup` and `copy cross-cluster status/resume/cleanup` require both connections so resource identities can be verified on each cluster. Multiple PVCs use explicit `source=destination`, `source=capacity`, and `source=path` mappings. Cross-cluster shrink keeps the same safety defaults as local copy: `--allow-volume-shrink` and an explicit `--skip-source-usage-check` are required when no trusted usage reader exists.
+Use `cluster-reserve cross-cluster` to provision and inspect destination PVCs before copying. `cluster-reserve cross-cluster status/resume/cleanup` and `cluster-copy cross-cluster status/resume/cleanup` require both connections so resource identities can be verified on each cluster. Multiple PVCs use explicit `source=destination`, `source=capacity`, and `source=path` mappings. Cross-cluster shrink keeps the same safety defaults as local copy: `--allow-volume-shrink` and an explicit `--skip-source-usage-check` are required when no trusted usage reader exists.
 
-Set storage mappings and transfer paths when creating the reservation. Continuing with `copy cross-cluster --session ID` reuses that recorded plan and rejects planning flags. Before the first transfer, explicit `--verify-checksum`, `--delete-extraneous`, `--online`, `--strategy`, and `--tool-image` flags configure the copy; omitted flags preserve recorded settings. Once transfer starts, retries retain those settings. Use a new session to change them.
+Set storage mappings and transfer paths when creating the reservation. Continuing with `cluster-copy cross-cluster --session ID` reuses that recorded plan and rejects planning flags. Before the first transfer, explicit `--verify-checksum`, `--delete-extraneous`, `--online`, `--strategy`, and `--tool-image` flags configure the copy; omitted flags preserve recorded settings. Once transfer starts, retries retain those settings. Use a new session to change them.
 
 ### Destination Capacity
 
@@ -584,7 +611,7 @@ destination is too small. Other real-time workloads use the requested destinatio
 
 ```bash
 pvc-migrate copy --dry-run=false \
-  --source-namespace application \
+  --namespace application \
   --source-pvc database-data \
   --destination-capacity 200Gi
 
@@ -596,7 +623,7 @@ pvc-migrate migrate-pod plan \
   --destination-capacity logs=256Gi
 
 pvc-migrate copy --dry-run=false \
-  --source-namespace application \
+  --namespace application \
   --source-pvc database-data \
   --destination-capacity 32Gi \
   --allow-volume-shrink \

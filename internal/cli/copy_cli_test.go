@@ -24,9 +24,13 @@ func activeCopyCLIObjects() []crclient.Object {
 	}}}
 
 	return []crclient.Object{
+		// The namespaced record carries a tenant namespace that differs from
+		// the session storage namespace its ConfigMap lives in: the copy
+		// family stores records next to every other session family, exactly
+		// like migrate.
 		&v1alpha1.Copy{
 			TypeMeta:   metav1.TypeMeta{APIVersion: v1alpha1.GroupVersion.String(), Kind: "Copy"},
-			ObjectMeta: metav1.ObjectMeta{Name: "copy", Namespace: "pvc-migrate-system"},
+			ObjectMeta: metav1.ObjectMeta{Name: "copy", Namespace: "app"},
 			Status: v1alpha1.CopyStatus{
 				WorkflowStatus: v1alpha1.WorkflowStatus{Phase: domain.PhaseReserving},
 				Plan:           plan.DeepCopy(),
@@ -54,6 +58,17 @@ func activeCopyCLIObjects() []crclient.Object {
 			},
 		},
 	}
+}
+
+// copySessionFamilyCommand resolves the session command family that owns one
+// stored copy record: namespaced records hang under copy, cluster-scoped
+// records under cluster-copy.
+func copySessionFamilyCommand(object crclient.Object) string {
+	if _, cluster := object.(*v1alpha1.ClusterCopy); cluster {
+		return "cluster-copy"
+	}
+
+	return "copy"
 }
 
 func TestCopyCLICleanupDryRunPreservesPolicyGuidance(t *testing.T) {
@@ -94,7 +109,7 @@ func TestCopyCLICleanupDryRunPreservesPolicyGuidance(t *testing.T) {
 			})
 			command.SetArgs(
 				[]string{
-					"copy",
+					copySessionFamilyCommand(object),
 					"cleanup",
 					object.GetName(),
 					"--unused-storage-policy",
@@ -157,7 +172,14 @@ func TestCopyCLIStatusReadsSessionWithoutLegacyService(t *testing.T) {
 					}, nil
 				},
 			})
-			command.SetArgs([]string{"--output", "json", "copy", "status", object.GetName()})
+			command.SetArgs(
+				[]string{
+					"--output", "json",
+					copySessionFamilyCommand(object),
+					"status",
+					object.GetName(),
+				},
+			)
 
 			if err := command.Execute(); err != nil {
 				t.Fatal(err)
@@ -170,6 +192,83 @@ func TestCopyCLIStatusReadsSessionWithoutLegacyService(t *testing.T) {
 
 			if header.Kind != object.GetObjectKind().GroupVersionKind().Kind {
 				t.Fatalf("status changed API kind: %s", stdout.String())
+			}
+		})
+	}
+}
+
+// TestNamespacedSessionLifecycleHasNoRecordNamespace pins the unified record
+// convention: namespaced copy and reserve session records live in the session
+// storage namespace, so their lifecycle verbs take no -n/--namespace flag —
+// the same surface the migrate family exposes.
+func TestNamespacedSessionLifecycleHasNoRecordNamespace(t *testing.T) {
+	root := NewRoot(Options{Version: "test"})
+
+	for _, path := range [][]string{
+		{"copy", "status"},
+		{"copy", "resume"},
+		{"copy", "abort"},
+		{"copy", "cleanup"},
+		{"reserve", "status"},
+		{"reserve", "resume"},
+		{"reserve", "abort"},
+		{"reserve", "cleanup"},
+	} {
+		t.Run(strings.Join(path, " "), func(t *testing.T) {
+			command := findSubCommandT(t, root, path...)
+			if flag := command.Flags().Lookup("namespace"); flag != nil {
+				t.Fatalf("--namespace must not leak onto %s", command.CommandPath())
+			}
+		})
+	}
+}
+
+// TestSessionRunCommandLooksUpRecordsInSessionNamespace pins the run-command
+// side of the unified record convention: even with the tenant -n bound, the
+// copy and reserve entrypoints resolve existing records from the session
+// storage namespace, never from the tenant namespace.
+func TestSessionRunCommandLooksUpRecordsInSessionNamespace(t *testing.T) {
+	for _, test := range []struct {
+		family string
+		name   string
+	}{
+		{family: "copy", name: "copy"},
+		{family: "reserve", name: "reserve"},
+	} {
+		t.Run(test.family, func(t *testing.T) {
+			client := fake.NewClientset()
+
+			var stderr bytes.Buffer
+
+			command := NewRoot(Options{
+				Out: io.Discard, ErrOut: &stderr,
+				runtimeFactory: func(state *rootState) (*commandRuntime, error) {
+					return &commandRuntime{
+						clients: &kube.Clients{Kubernetes: client},
+						printer: printerFor(state),
+					}, nil
+				},
+			})
+			command.SetArgs(
+				[]string{
+					test.family,
+					"-n", "app",
+					"--session", test.name,
+					"--dry-run",
+				},
+			)
+
+			if err := command.Execute(); err == nil {
+				t.Fatal("lookup of a missing record must fail")
+			}
+
+			want := "--namespace pvc-migrate-system get configmap pvc-migrate-session-" + test.name
+			if !strings.Contains(stderr.String(), want) {
+				t.Fatalf(
+					"lookup must inspect the session storage namespace %q in: %s",
+					want,
+					stderr.String(),
+				)
 			}
 		})
 	}

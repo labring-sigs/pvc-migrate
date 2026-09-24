@@ -24,12 +24,16 @@ func activeReservationCLIObjects() []crclient.Object {
 	}}}
 
 	return []crclient.Object{
+		// The namespaced record carries a tenant namespace that differs from
+		// the session storage namespace its ConfigMap lives in: the reserve
+		// family stores records next to every other session family, exactly
+		// like migrate.
 		&v1alpha1.Reservation{
 			TypeMeta: metav1.TypeMeta{
 				APIVersion: v1alpha1.GroupVersion.String(),
 				Kind:       "Reservation",
 			},
-			ObjectMeta: metav1.ObjectMeta{Name: "reserve", Namespace: "pvc-migrate-system"},
+			ObjectMeta: metav1.ObjectMeta{Name: "reserve", Namespace: "app"},
 			Status: v1alpha1.ReservationStatus{
 				WorkflowStatus: v1alpha1.WorkflowStatus{Phase: domain.PhaseReserving},
 				Plan:           plan.DeepCopy(),
@@ -57,6 +61,17 @@ func activeReservationCLIObjects() []crclient.Object {
 			},
 		},
 	}
+}
+
+// reserveSessionFamilyCommand resolves the session command family that owns
+// one stored reservation record: namespaced records hang under reserve,
+// cluster-scoped records under cluster-reserve.
+func reserveSessionFamilyCommand(object crclient.Object) string {
+	if _, cluster := object.(*v1alpha1.ClusterReservation); cluster {
+		return "cluster-reserve"
+	}
+
+	return "reserve"
 }
 
 func TestReservationCLICleanupDryRunPreservesPolicyGuidance(t *testing.T) {
@@ -92,7 +107,7 @@ func TestReservationCLICleanupDryRunPreservesPolicyGuidance(t *testing.T) {
 			})
 			command.SetArgs(
 				[]string{
-					"reserve",
+					reserveSessionFamilyCommand(object),
 					"cleanup",
 					object.GetName(),
 					"--unused-storage-policy",
@@ -150,7 +165,14 @@ func TestReservationCLIStatusReadsSessionWithoutLegacyService(t *testing.T) {
 					}, nil
 				},
 			})
-			command.SetArgs([]string{"--output", "json", "reserve", "status", object.GetName()})
+			command.SetArgs(
+				[]string{
+					"--output", "json",
+					reserveSessionFamilyCommand(object),
+					"status",
+					object.GetName(),
+				},
+			)
 
 			if err := command.Execute(); err != nil {
 				t.Fatal(err)

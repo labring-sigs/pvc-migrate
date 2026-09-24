@@ -39,9 +39,10 @@ type copyFlags struct {
 }
 
 // bindTransfer binds the copy inputs that shape the workflow spec. Namespace
-// roles bind separately through bindNamespaceRoles: session commands take one
-// flag per role, cr namespaced submits take a single -n, and cr cluster
-// submits take the roles their spec declares.
+// roles bind separately through bindNamespaceRoles: the namespaced copy
+// command and the cr namespaced submits take a single -n, while the
+// cluster-copy session family and the cr cluster submits take the roles their
+// spec declares.
 func (f *copyFlags) bindTransfer(command *cobra.Command) {
 	flags := command.Flags()
 	flags.StringVar(&f.sessionID, "session", "", "Migration session ID")
@@ -144,8 +145,8 @@ func (f *copyFlags) bindTransfer(command *cobra.Command) {
 	)
 }
 
-// bindNamespaceRoles binds the per-role namespace flags the session and
-// cluster-scoped copy entrypoints expose.
+// bindNamespaceRoles binds the per-role namespace flags the cluster-scoped
+// copy entrypoints expose.
 func (f *copyFlags) bindNamespaceRoles(command *cobra.Command) {
 	flags := command.Flags()
 	flags.StringVarP(&f.sourceNamespace, "source-namespace", "n", "default", "Source PVC namespace")

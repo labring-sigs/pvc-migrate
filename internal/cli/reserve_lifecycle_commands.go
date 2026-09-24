@@ -13,13 +13,45 @@ import (
 	crclient "sigs.k8s.io/controller-runtime/pkg/client"
 )
 
+// addReserveLifecycle mounts the namespaced session family verbs: they address
+// only namespaced Reservation records. The records live in the session storage
+// namespace, so the verbs carry no namespace flag — the -n the run command
+// binds addresses the tenant namespace of the workflow, never the ConfigMap
+// storage location.
 func (r *rootState) addReserveLifecycle(parent *cobra.Command) {
 	parent.AddCommand(
-		r.newReserveStatusCommand(sourceSession),
-		r.newReserveResumeCommand(sourceSession),
-		r.newReserveAbortCommand(sourceSession),
-		r.newReserveCleanupCommand(sourceSession),
+		r.newScopedReserveStatusCommand(sourceSession, namespacedRecords),
+		r.newScopedReserveResumeCommand(sourceSession, namespacedRecords),
+		r.newScopedReserveAbortCommand(sourceSession, namespacedRecords),
+		r.newScopedReserveCleanupCommand(sourceSession, namespacedRecords),
 	)
+}
+
+// addClusterReserveLifecycle mounts the cluster-scoped session family verbs:
+// they address only ClusterReservation records.
+func (r *rootState) addClusterReserveLifecycle(parent *cobra.Command) {
+	parent.AddCommand(
+		r.newScopedReserveStatusCommand(sourceSession, clusterRecords),
+		r.newScopedReserveResumeCommand(sourceSession, clusterRecords),
+		r.newScopedReserveAbortCommand(sourceSession, clusterRecords),
+		r.newScopedReserveCleanupCommand(sourceSession, clusterRecords),
+	)
+}
+
+func (r *rootState) newReserveStatusCommand(source workflowSource) *cobra.Command {
+	return r.newScopedReserveStatusCommand(source, recordScopeForSource(source))
+}
+
+func (r *rootState) newReserveResumeCommand(source workflowSource) *cobra.Command {
+	return r.newScopedReserveResumeCommand(source, recordScopeForSource(source))
+}
+
+func (r *rootState) newReserveAbortCommand(source workflowSource) *cobra.Command {
+	return r.newScopedReserveAbortCommand(source, recordScopeForSource(source))
+}
+
+func (r *rootState) newReserveCleanupCommand(source workflowSource) *cobra.Command {
+	return r.newScopedReserveCleanupCommand(source, recordScopeForSource(source))
 }
 
 func (r *rootState) loadReservation(
@@ -28,17 +60,23 @@ func (r *rootState) loadReservation(
 	runtime *commandRuntime,
 	id string,
 	source workflowSource,
+	scope recordScope,
 ) (crclient.Object, error) {
-	object, _, err := r.loadReservationWithBackend(ctx, cmd, runtime, id, source)
+	object, _, err := r.loadReservationWithBackend(ctx, cmd, runtime, id, source, scope)
 	return object, err
 }
 
+// loadReservationWithBackend resolves one reservation identity from the single
+// backend its command family addresses — ConfigMap session records for the
+// session commands, workflow CRs for the cr commands — restricted to the one
+// record scope the family owns.
 func (r *rootState) loadReservationWithBackend(
 	ctx context.Context,
 	cmd *cobra.Command,
 	runtime *commandRuntime,
 	id string,
 	source workflowSource,
+	scope recordScope,
 ) (crclient.Object, string, error) {
 	if runtime.clients == nil {
 		return nil, "", domain.NewError(
@@ -48,17 +86,25 @@ func (r *rootState) loadReservationWithBackend(
 		)
 	}
 
+	// Session records persist in the session storage namespace whatever
+	// tenant namespace their object carries; cr commands address workflow CRs
+	// through their own -n instead.
 	namespace := r.workflowStorageNamespace(cmd)
-
-	candidates := map[domain.ControllerKind]crclient.Object{
-		domain.ControllerKindReservation:        &v1alpha1.Reservation{},
-		domain.ControllerKindClusterReservation: &v1alpha1.ClusterReservation{},
+	if source == sourceSession {
+		namespace = r.migrationRecordNamespace()
 	}
-	switch source {
-	case sourceController:
-		delete(candidates, domain.ControllerKindClusterReservation)
-	case sourceClusterController:
-		delete(candidates, domain.ControllerKindReservation)
+	// The scope owns both lookups: the CRD probe set for the cr commands, and
+	// — because a ConfigMap record decodes by its stored kind — the acceptance
+	// check below, so a family can never resolve the other scope's record.
+	var candidates map[domain.ControllerKind]crclient.Object
+	if scope == namespacedRecords {
+		candidates = map[domain.ControllerKind]crclient.Object{
+			domain.ControllerKindReservation: &v1alpha1.Reservation{},
+		}
+	} else {
+		candidates = map[domain.ControllerKind]crclient.Object{
+			domain.ControllerKindClusterReservation: &v1alpha1.ClusterReservation{},
+		}
 	}
 
 	object, backend, err := r.loadWorkflowWithBackend(
@@ -74,20 +120,30 @@ func (r *rootState) loadReservationWithBackend(
 		return nil, "", reportSessionLookupError(cmd, namespace, id, err)
 	}
 
+	accepted := false
 	switch object.(type) {
-	case *v1alpha1.Reservation, *v1alpha1.ClusterReservation:
-		return object, backend, nil
-	default:
+	case *v1alpha1.Reservation:
+		accepted = scope == namespacedRecords
+	case *v1alpha1.ClusterReservation:
+		accepted = scope == clusterRecords
+	}
+
+	if !accepted {
 		return nil, "", domain.NewError(
 			domain.ErrorValidation,
 			"reserve",
 			"stored workflow is not a reservation",
 		)
 	}
+
+	return object, backend, nil
 }
 
-func (r *rootState) newReserveStatusCommand(source workflowSource) *cobra.Command {
-	return &cobra.Command{
+func (r *rootState) newScopedReserveStatusCommand(
+	source workflowSource,
+	scope recordScope,
+) *cobra.Command {
+	command := &cobra.Command{
 		Use:   "status [" + workflowArgLabel(source) + "]",
 		Short: "Show one reservation or list reservations",
 		Args:  cobra.MaximumNArgs(1),
@@ -101,7 +157,7 @@ func (r *rootState) newReserveStatusCommand(source workflowSource) *cobra.Comman
 			defer cancel()
 
 			if len(args) == 1 {
-				object, err := r.loadReservation(ctx, cmd, runtime, args[0], source)
+				object, err := r.loadReservation(ctx, cmd, runtime, args[0], source, scope)
 				if err != nil {
 					return err
 				}
@@ -117,7 +173,7 @@ func (r *rootState) newReserveStatusCommand(source workflowSource) *cobra.Comman
 						cmd,
 						workflowHintNamespace("", r, cmd, object),
 					).pvcMigrate,
-					"reserve",
+					sessionFamilyCommand(scope, "reserve"),
 					workflowHintNamespace("", r, cmd, object),
 					object.GetName(),
 					workflowObjectPhase(object),
@@ -152,27 +208,36 @@ func (r *rootState) newReserveStatusCommand(source workflowSource) *cobra.Comman
 				return runtime.printer.Print(objects)
 			}
 
+			// One session family lists only its own kind: reserve lists the
+			// namespaced Reservation records, cluster-reserve the
+			// ClusterReservation records. The ConfigMap namespace is the
+			// storage location; the objects inside carry the tenant
+			// namespace, so the listing is not filtered by it.
 			namespace := r.workflowStorageNamespace(cmd)
 
-			if len(runtime.controllerKinds) == 0 ||
-				slices.Contains(runtime.controllerKinds, domain.ControllerKindReservation) {
-				store, err := cliWorkflowStore(
-					runtime,
-					namespace,
-					func() *v1alpha1.Reservation { return &v1alpha1.Reservation{} },
-				)
-				if err != nil {
-					return err
+			if scope == namespacedRecords {
+				if len(runtime.controllerKinds) == 0 ||
+					slices.Contains(runtime.controllerKinds, domain.ControllerKindReservation) {
+					store, err := cliWorkflowStore(
+						runtime,
+						namespace,
+						func() *v1alpha1.Reservation { return &v1alpha1.Reservation{} },
+					)
+					if err != nil {
+						return err
+					}
+
+					items, err := store.List(ctx, "")
+					if err != nil {
+						return err
+					}
+
+					for _, object := range items {
+						objects = append(objects, object)
+					}
 				}
 
-				items, err := store.List(ctx, namespace)
-				if err != nil {
-					return err
-				}
-
-				for _, object := range items {
-					objects = append(objects, object)
-				}
+				return runtime.printer.Print(objects)
 			}
 
 			if len(runtime.controllerKinds) == 0 ||
@@ -199,9 +264,14 @@ func (r *rootState) newReserveStatusCommand(source workflowSource) *cobra.Comman
 			return runtime.printer.Print(objects)
 		},
 	}
+
+	return command
 }
 
-func (r *rootState) newReserveResumeCommand(source workflowSource) *cobra.Command {
+func (r *rootState) newScopedReserveResumeCommand(
+	source workflowSource,
+	scope recordScope,
+) *cobra.Command {
 	var dryRun bool
 
 	command := &cobra.Command{
@@ -218,14 +288,17 @@ func (r *rootState) newReserveResumeCommand(source workflowSource) *cobra.Comman
 		ctx, cancel := r.context(cmd.Context())
 		defer cancel()
 
-		return r.reserveExisting(ctx, cmd, runtime, args[0], dryRun, source)
+		return r.reserveExisting(ctx, cmd, runtime, args[0], dryRun, source, scope)
 	}
 	bindDryRun(command, &dryRun)
 
 	return command
 }
 
-func (r *rootState) newReserveAbortCommand(source workflowSource) *cobra.Command {
+func (r *rootState) newScopedReserveAbortCommand(
+	source workflowSource,
+	scope recordScope,
+) *cobra.Command {
 	var dryRun bool
 
 	command := &cobra.Command{
@@ -242,7 +315,14 @@ func (r *rootState) newReserveAbortCommand(source workflowSource) *cobra.Command
 		ctx, cancel := r.context(cmd.Context())
 		defer cancel()
 
-		object, backend, err := r.loadReservationWithBackend(ctx, cmd, runtime, args[0], source)
+		object, backend, err := r.loadReservationWithBackend(
+			ctx,
+			cmd,
+			runtime,
+			args[0],
+			source,
+			scope,
+		)
 		if err != nil {
 			return err
 		}
@@ -255,10 +335,14 @@ func (r *rootState) newReserveAbortCommand(source workflowSource) *cobra.Command
 
 		switch current := object.(type) {
 		case *v1alpha1.Reservation:
+			// Session records persist in the session storage namespace
+			// whatever tenant namespace their object carries; a CRD record
+			// ignores the store namespace entirely, so one resolution serves
+			// both backends.
 			store, err := cliWorkflowStoreForBackend(
 				runtime,
 				backend,
-				r.workflowStorageNamespace(cmd),
+				r.migrationRecordNamespace(),
 				func() *v1alpha1.Reservation { return &v1alpha1.Reservation{} },
 			)
 			if err != nil {
@@ -278,7 +362,13 @@ func (r *rootState) newReserveAbortCommand(source workflowSource) *cobra.Command
 			}
 
 			if err != nil {
-				return reportReservationError(cmd, current.Name, current.Status.Phase, err)
+				return reportReservationError(
+					cmd,
+					"reserve",
+					current.Name,
+					current.Status.Phase,
+					err,
+				)
 			}
 		case *v1alpha1.ClusterReservation:
 			store, err := cliWorkflowStoreForBackend(
@@ -310,7 +400,13 @@ func (r *rootState) newReserveAbortCommand(source workflowSource) *cobra.Command
 			}
 
 			if err != nil {
-				return reportReservationError(cmd, current.Name, current.Status.Phase, err)
+				return reportReservationError(
+					cmd,
+					"cluster-reserve",
+					current.Name,
+					current.Status.Phase,
+					err,
+				)
 			}
 		}
 
@@ -319,6 +415,7 @@ func (r *rootState) newReserveAbortCommand(source workflowSource) *cobra.Command
 		}
 
 		namespace := workflowHintNamespace(backend, r, cmd, object)
+		family := sessionFamilyCommand(scope, "reserve")
 
 		if dryRun {
 			return writeDryRunNotice(
@@ -329,7 +426,7 @@ func (r *rootState) newReserveAbortCommand(source workflowSource) *cobra.Command
 						cmd,
 						namespace,
 					).pvcMigrate,
-					"reserve",
+					family,
 					"abort",
 					namespace,
 					object.GetName(),
@@ -344,7 +441,7 @@ func (r *rootState) newReserveAbortCommand(source workflowSource) *cobra.Command
 				cmd,
 				namespace,
 			).pvcMigrate,
-			"reserve",
+			family,
 			namespace,
 			object.GetName(),
 			workflowObjectPhase(object),
@@ -356,7 +453,10 @@ func (r *rootState) newReserveAbortCommand(source workflowSource) *cobra.Command
 	return command
 }
 
-func (r *rootState) newReserveCleanupCommand(source workflowSource) *cobra.Command {
+func (r *rootState) newScopedReserveCleanupCommand(
+	source workflowSource,
+	scope recordScope,
+) *cobra.Command {
 	var (
 		options app.ReservationCleanupOptions
 		dryRun  bool
@@ -376,7 +476,14 @@ func (r *rootState) newReserveCleanupCommand(source workflowSource) *cobra.Comma
 		ctx, cancel := r.context(cmd.Context())
 		defer cancel()
 
-		object, backend, err := r.loadReservationWithBackend(ctx, cmd, runtime, args[0], source)
+		object, backend, err := r.loadReservationWithBackend(
+			ctx,
+			cmd,
+			runtime,
+			args[0],
+			source,
+			scope,
+		)
 		if err != nil {
 			return err
 		}
@@ -387,12 +494,18 @@ func (r *rootState) newReserveCleanupCommand(source workflowSource) *cobra.Comma
 			}
 		}
 
+		family := sessionFamilyCommand(scope, "reserve")
+
 		switch current := object.(type) {
 		case *v1alpha1.Reservation:
+			// Session records persist in the session storage namespace
+			// whatever tenant namespace their object carries; a CRD record
+			// ignores the store namespace entirely, so one resolution serves
+			// both backends.
 			store, err := cliWorkflowStoreForBackend(
 				runtime,
 				backend,
-				r.workflowStorageNamespace(cmd),
+				r.migrationRecordNamespace(),
 				func() *v1alpha1.Reservation { return &v1alpha1.Reservation{} },
 			)
 			if err != nil {
@@ -414,6 +527,7 @@ func (r *rootState) newReserveCleanupCommand(source workflowSource) *cobra.Comma
 			if err != nil {
 				return reportReservationCleanupError(
 					cmd,
+					family,
 					workflowLeaseNamespace(backend, r.workflowStorageNamespace(cmd), current),
 					current.Name,
 					options,
@@ -452,6 +566,7 @@ func (r *rootState) newReserveCleanupCommand(source workflowSource) *cobra.Comma
 			if err != nil {
 				return reportReservationCleanupError(
 					cmd,
+					family,
 					namespace,
 					current.Name,
 					options,
@@ -477,7 +592,7 @@ func (r *rootState) newReserveCleanupCommand(source workflowSource) *cobra.Comma
 						cmd,
 						workflowHintNamespace(backend, r, cmd, object),
 					).pvcMigrate,
-					"reserve",
+					family,
 					workflowHintNamespace(backend, r, cmd, object),
 					object.GetName(),
 					options.UnusedStoragePolicy,
@@ -502,15 +617,16 @@ func (r *rootState) newReserveCleanupCommand(source workflowSource) *cobra.Comma
 
 func reportReservationError(
 	cmd *cobra.Command,
-	name string,
+	family, name string,
 	phase v1alpha1.WorkflowPhase,
 	cause error,
 ) error {
 	_, err := fmt.Fprintf(
 		cmd.ErrOrStderr(),
-		"Reservation %s stopped in phase %s. Inspect reserve status %s before resume or cleanup.\n",
+		"Reservation %s stopped in phase %s. Inspect %s status %s before resume or cleanup.\n",
 		name,
 		phase,
+		workflowCommandPath(cmd, family),
 		name,
 	)
 
@@ -519,7 +635,7 @@ func reportReservationError(
 
 func reportReservationCleanupError(
 	cmd *cobra.Command,
-	namespace, name string,
+	family, namespace, name string,
 	options app.ReservationCleanupOptions,
 	cause error,
 ) error {
@@ -530,8 +646,9 @@ func reportReservationCleanupError(
 	}
 
 	prefix := guidancePrefixesForCommand(cmd, namespace).pvcMigrate
+	path := workflowCommandPath(cmd, family)
 
-	retry := "reserve cleanup " + shellQuote(name)
+	retry := path + " cleanup " + shellQuote(name)
 	if options.UnusedStoragePolicy != "" {
 		retry += " --unused-storage-policy " + shellQuote(
 			options.UnusedStoragePolicy,
@@ -548,8 +665,9 @@ func reportReservationCleanupError(
 
 	_, err := fmt.Fprintf(
 		cmd.ErrOrStderr(),
-		"Cleanup stopped before confirmed completion. Inspect current state: %s reserve status %s\nRevalidate cleanup before retrying: %s %s --dry-run\n",
+		"Cleanup stopped before confirmed completion. Inspect current state: %s %s status %s\nRevalidate cleanup before retrying: %s %s --dry-run\n",
 		prefix,
+		path,
 		shellQuote(name),
 		prefix,
 		retry,
