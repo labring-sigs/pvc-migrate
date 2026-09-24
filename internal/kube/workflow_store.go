@@ -16,6 +16,7 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/kubernetes"
@@ -62,7 +63,15 @@ func LoadConfigMapWorkflow(
 
 	decoded, err := scheme.New(header.GroupVersionKind())
 	if err != nil {
-		return nil, fmt.Errorf("resolve stored workflow kind: %w", err)
+		// Records written by older binaries may use kinds this build removed.
+		// Ownership and recovery still need the summary, so decode generically;
+		// lifecycle commands reject unusable kinds through their own type checks.
+		generic := &unstructured.Unstructured{}
+		if jsonErr := json.Unmarshal([]byte(cm.Data[SessionDataKey]), generic); jsonErr != nil {
+			return nil, fmt.Errorf("resolve stored workflow kind: %w", err)
+		}
+
+		return generic, nil
 	}
 
 	object, ok := decoded.(crclient.Object)

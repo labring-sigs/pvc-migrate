@@ -439,6 +439,7 @@ func (r *rootState) runtime() (*commandRuntime, error) {
 				kube.NewConfigMapWorkflowOwnerFinder(clients.Kubernetes),
 			)).
 			WithControllerSubmission(false).
+			WithSessionRecordNamespace(r.global.sessionNamespace).
 			WithOpenEBSLVMSharedVolumeManager(openEBSLVMSharedVolumeManager).
 			WithLogger(logger.With("component", "planner")),
 		printer: output.Printer{Writer: r.options.Out, Format: format},
