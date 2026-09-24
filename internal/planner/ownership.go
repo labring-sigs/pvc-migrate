@@ -11,6 +11,28 @@ import (
 	corev1 "k8s.io/api/core/v1"
 )
 
+// guidanceAudience is the presentation context of a check message. CLI
+// planning may quote copy-paste commands; controller-planned messages are
+// recorded verbatim on workflow CRs and events, where CLI command text does
+// not belong. Go has no sum types, and the two audiences differ only in
+// prose, so a closed constant set stands in for a Rust-style enum; advice
+// that merely spells a spec field stays single-form because CLI flag names
+// map one-to-one onto spec fields.
+type guidanceAudience int
+
+const (
+	audienceCLI guidanceAudience = iota
+	audienceController
+)
+
+func (p *Planner) guidanceAudience() guidanceAudience {
+	if p.controllerSubmission {
+		return audienceController
+	}
+
+	return audienceCLI
+}
+
 // checkSessionOwnership stops a new session before approval or resource
 // creation when the source identity is already associated with a persisted or
 // orphaned session. PVC annotations and labels are checked together with the
@@ -105,7 +127,7 @@ func (p *Planner) checkSessionOwnership(
 					pv.Name,
 					owner,
 					ownerSession.Phase,
-					persistedOwnerGuidance(ownerSession, p.controllerSubmission),
+					persistedOwnerGuidance(ownerSession, p.guidanceAudience()),
 				),
 			),
 		)
@@ -114,7 +136,7 @@ func (p *Planner) checkSessionOwnership(
 	}
 
 	if err == nil {
-		if p.controllerSubmission {
+		if p.guidanceAudience() == audienceController {
 			// Check messages from controller planning land verbatim in
 			// workflow CR status, which must not carry CLI command text.
 			plan.AddCheck(
@@ -210,11 +232,11 @@ func workflowAcceptsCleanupPolicy(session *kube.WorkflowOwner) bool {
 	}
 }
 
-// persistedOwnerGuidance explains how to release the storage. The CLI forms
-// quote copy-paste commands; controller planning passes controller=true
-// because its check messages land verbatim in workflow CR status, which must
-// stay free of CLI command text.
-func persistedOwnerGuidance(session *kube.WorkflowOwner, controller bool) string {
+// persistedOwnerGuidance explains how to release the storage. The CLI
+// audience gets copy-paste commands; the controller audience gets a
+// description of the releasing action, because its check messages land
+// verbatim in workflow CR status.
+func persistedOwnerGuidance(session *kube.WorkflowOwner, audience guidanceAudience) string {
 	// Controller workflows are owned by the elected controller: the CLI
 	// lifecycle commands only manage ConfigMap-backed sessions. Deleting the
 	// CR converges storage through the controller's finalizer; kubectl is the
@@ -237,7 +259,7 @@ func persistedOwnerGuidance(session *kube.WorkflowOwner, controller bool) string
 		)
 	}
 
-	if controller {
+	if audience == audienceController {
 		return controllerOwnerGuidance(session)
 	}
 
