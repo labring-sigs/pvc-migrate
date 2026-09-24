@@ -7,9 +7,8 @@ import (
 	"github.com/labring-sigs/pvc-migrate/internal/domain"
 	"github.com/labring-sigs/pvc-migrate/internal/kube"
 	"github.com/spf13/cobra"
-	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	k8sruntime "k8s.io/apimachinery/pkg/runtime"
 	crclient "sigs.k8s.io/controller-runtime/pkg/client"
 )
 
@@ -18,10 +17,6 @@ type crWatchTarget struct {
 	kind     domain.ControllerKind
 	resource string
 	cluster  bool
-}
-
-func (t crWatchTarget) candidates() map[domain.ControllerKind]crclient.Object {
-	return map[domain.ControllerKind]crclient.Object{t.kind: newWorkflowObject(t.kind)}
 }
 
 // newCRWatchCommand streams workflow phase transitions until the workflow
@@ -66,14 +61,20 @@ func (r *rootState) newCRWatchCommand(target crWatchTarget) *cobra.Command {
 				return reportSessionLookupError(cmd, namespace, args[0], err)
 			}
 
-			lastPhase := ""
-			printTransition := func(current *unstructured.Unstructured) error {
-				status, _, err := unstructured.NestedMap(current.Object, "status", "workflowStatus")
-				if err != nil {
-					return err
-				}
+			// WaitForWorkflow decodes into typed workflow objects; seed it
+			// with the live object converted to this kind's typed form.
+			typed := newWorkflowObject(target.kind)
+			if err := k8sruntime.DefaultUnstructuredConverter.FromUnstructured(
+				initial.Object,
+				typed,
+			); err != nil {
+				return err
+			}
 
-				phase, _ := status["phase"].(string)
+			lastPhase := domain.Phase("")
+
+			printTransition := func(current crclient.Object) error {
+				phase := workflowObjectPhase(current)
 				if phase == "" || phase == lastPhase {
 					return nil
 				}
@@ -86,74 +87,45 @@ func (r *rootState) newCRWatchCommand(target crWatchTarget) *cobra.Command {
 					target.kind,
 					current.GetName(),
 					phase,
-					status["message"],
+					workflowObjectMessage(current),
 				)
 
 				return reportErr
 			}
 
-			if err := printTransition(initial); err != nil {
+			if err := printTransition(typed); err != nil {
 				return err
 			}
 
-			if _, err := kube.WaitForWorkflow(
+			final, err := kube.WaitForWorkflow(
 				ctx,
 				resource,
-				initial,
-				func() *unstructured.Unstructured { return &unstructured.Unstructured{} },
-				func(current *unstructured.Unstructured) (bool, error) {
+				typed,
+				func() crclient.Object { return newWorkflowObject(target.kind) },
+				func(current crclient.Object) (bool, error) {
 					if err := printTransition(current); err != nil {
 						return false, err
 					}
 
-					status, _, err := unstructured.NestedMap(
-						current.Object,
-						"status",
-						"workflowStatus",
-					)
-					if err != nil {
-						return false, err
-					}
-
-					phase, _ := status["phase"].(string)
-
-					return workflowTerminalPhase(v1alpha1.WorkflowPhase(phase)), nil
+					return workflowTerminalPhase(workflowObjectPhase(current)), nil
 				},
-			); err != nil {
-				return err
-			}
-
-			// Print the typed object so table, JSON, and YAML output stay
-			// consistent with the rest of the cr verbs.
-			object, err := lookupControllerObjects(
-				ctx,
-				runtime,
-				namespace,
-				args[0],
-				target.candidates(),
 			)
 			if err != nil {
-				if apierrors.IsNotFound(err) {
-					return nil
-				}
-
 				return err
 			}
 
-			if err := runtime.printer.Print(object); err != nil {
+			if err := runtime.printer.Print(final); err != nil {
 				return err
 			}
-
-			phase := workflowObjectPhase(object)
 
 			return writeControllerWorkflowNextSteps(
 				cmd.ErrOrStderr(),
 				cmd,
-				guidancePrefixesForCommand(cmd, object.GetNamespace()).pvcMigrate,
+				guidancePrefixesForCommand(cmd, final.GetNamespace()).pvcMigrate,
 				target.resource,
-				object.GetNamespace(),
-				object.GetName(),
-				phase,
+				final.GetNamespace(),
+				final.GetName(),
+				workflowObjectPhase(final),
 			)
 		},
 	}

@@ -34,7 +34,7 @@ func (r *rootState) newPodMigrationStatusCommand(source workflowSource) *cobra.C
 					return err
 				}
 
-				return writePodMigrationNextSteps(cmd, object)
+				return writePodMigrationNextSteps(cmd, r, object)
 			}
 
 			var list []crclient.Object
@@ -99,7 +99,7 @@ func (r *rootState) newPodMigrationResumeCommand(source workflowSource) *cobra.C
 					return err
 				}
 
-				return writePodMigrationDryRunNotice(cmd, object, "resume")
+				return writePodMigrationDryRunNotice(cmd, r, object, "resume")
 			}
 
 			if err := r.confirm(ctx, cmd, args[0]); err != nil {
@@ -118,7 +118,7 @@ func (r *rootState) newPodMigrationResumeCommand(source workflowSource) *cobra.C
 				return err
 			}
 
-			return writePodMigrationNextSteps(cmd, object)
+			return writePodMigrationNextSteps(cmd, r, object)
 		},
 	}
 	bindDryRun(command, &dryRun)
@@ -156,7 +156,7 @@ func (r *rootState) newPodMigrationAbortCommand(source workflowSource) *cobra.Co
 					return err
 				}
 
-				return writePodMigrationDryRunNotice(cmd, object, "abort")
+				return writePodMigrationDryRunNotice(cmd, r, object, "abort")
 			}
 
 			if err := r.confirm(ctx, cmd, args[0]); err != nil {
@@ -171,7 +171,7 @@ func (r *rootState) newPodMigrationAbortCommand(source workflowSource) *cobra.Co
 				return err
 			}
 
-			return writePodMigrationNextSteps(cmd, object)
+			return writePodMigrationNextSteps(cmd, r, object)
 		},
 	}
 	bindDryRun(command, &dryRun)
@@ -209,7 +209,7 @@ func (r *rootState) newPodMigrationRollbackCommand(source workflowSource) *cobra
 					return err
 				}
 
-				return writePodMigrationDryRunNotice(cmd, object, "rollback")
+				return writePodMigrationDryRunNotice(cmd, r, object, "rollback")
 			}
 
 			if err := r.confirm(ctx, cmd, args[0]); err != nil {
@@ -224,7 +224,7 @@ func (r *rootState) newPodMigrationRollbackCommand(source workflowSource) *cobra
 				return err
 			}
 
-			return writePodMigrationNextSteps(cmd, object)
+			return writePodMigrationNextSteps(cmd, r, object)
 		},
 	}
 	bindDryRun(command, &dryRun)
@@ -265,13 +265,15 @@ func (r *rootState) newPodMigrationCleanupCommand(source workflowSource) *cobra.
 					return err
 				}
 
+				namespace := podMigrationHintNamespace(cmd, r, object)
+
 				return writeDryRunNotice(
 					cmd.ErrOrStderr(),
 					cleanupExecuteCommand(
 						cmd,
-						guidancePrefixesForCommand(cmd, object.GetNamespace()).pvcMigrate,
+						guidancePrefixesForCommand(cmd, namespace).pvcMigrate,
 						"migrate-pod",
-						object.GetNamespace(),
+						namespace,
 						object.GetName(),
 						options.UnusedStoragePolicy,
 						options.Finalize,
@@ -302,20 +304,25 @@ func (r *rootState) newPodMigrationCleanupCommand(source workflowSource) *cobra.
 }
 
 // writePodMigrationDryRunNotice prints the execute form of the lifecycle
-// subcommand just previewed, resolved from the workflow's own namespace.
+// subcommand just previewed, resolved from the namespace the workflow record
+// lives in: the session storage namespace for session records, the tenant
+// namespace for CRs.
 func writePodMigrationDryRunNotice(
 	cmd *cobra.Command,
+	r *rootState,
 	object crclient.Object,
 	subcommand string,
 ) error {
+	namespace := podMigrationHintNamespace(cmd, r, object)
+
 	return writeDryRunNotice(
 		cmd.ErrOrStderr(),
 		lifecycleExecuteCommand(
 			cmd,
-			guidancePrefixesForCommand(cmd, object.GetNamespace()).pvcMigrate,
+			guidancePrefixesForCommand(cmd, namespace).pvcMigrate,
 			"migrate-pod",
 			subcommand,
-			object.GetNamespace(),
+			namespace,
 			object.GetName(),
 		),
 	)

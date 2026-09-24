@@ -240,6 +240,47 @@ func workflowObjectPhase(object crclient.Object) domain.Phase {
 		return current.Status.Phase
 	case *v1alpha1.ClusterCopy:
 		return current.Status.Phase
+	case *v1alpha1.PodMigration:
+		return current.Status.Phase
+	case *v1alpha1.Rename:
+		return current.Status.Phase
+	case *v1alpha1.Move:
+		return current.Status.Phase
+	case *v1alpha1.Backup:
+		return current.Status.Phase
+	case *v1alpha1.Restore:
+		return current.Status.Phase
+	default:
+		return ""
+	}
+}
+
+// workflowObjectMessage reads the workflow status message from any workflow
+// object shape; every workflow status embeds WorkflowStatus inline.
+func workflowObjectMessage(object crclient.Object) string {
+	switch current := object.(type) {
+	case *v1alpha1.Migration:
+		return current.Status.Message
+	case *v1alpha1.ClusterMigration:
+		return current.Status.Message
+	case *v1alpha1.Reservation:
+		return current.Status.Message
+	case *v1alpha1.ClusterReservation:
+		return current.Status.Message
+	case *v1alpha1.Copy:
+		return current.Status.Message
+	case *v1alpha1.ClusterCopy:
+		return current.Status.Message
+	case *v1alpha1.PodMigration:
+		return current.Status.Message
+	case *v1alpha1.Rename:
+		return current.Status.Message
+	case *v1alpha1.Move:
+		return current.Status.Message
+	case *v1alpha1.Backup:
+		return current.Status.Message
+	case *v1alpha1.Restore:
+		return current.Status.Message
 	default:
 		return ""
 	}

@@ -373,28 +373,49 @@ func (r *rootState) runPodMigrateCommand(
 		return err
 	}
 
-	return writePodMigrationNextSteps(cmd, object)
+	return writePodMigrationNextSteps(cmd, r, object)
 }
 
 // writePodMigrationNextSteps prints the lifecycle follow-ups after a finished
 // Pod migration: a terminal-phase block whose commands are copy-paste
-// executable, including the --yes and --dry-run=false approval flags.
-func writePodMigrationNextSteps(cmd *cobra.Command, object crclient.Object) error {
+// executable, including the --yes and --dry-run=false approval flags. Session
+// records live in the configured session namespace regardless of the tenant
+// namespace the PodMigration object carries, so that is the namespace the
+// suggested commands must address; cr commands address the tenant namespace
+// with -n instead.
+func writePodMigrationNextSteps(cmd *cobra.Command, r *rootState, object crclient.Object) error {
 	current, ok := object.(*v1alpha1.PodMigration)
 	if !ok {
 		return nil
 	}
 
+	namespace := podMigrationHintNamespace(cmd, r, current)
+
 	return writeWorkflowNextSteps(
 		cmd.ErrOrStderr(),
 		cmd,
-		guidancePrefixesForCommand(cmd, current.Namespace).pvcMigrate,
+		guidancePrefixesForCommand(cmd, namespace).pvcMigrate,
 		"migrate-pod",
-		current.Namespace,
+		namespace,
 		current.Name,
 		current.Status.Phase,
 		true,
 	)
+}
+
+// podMigrationHintNamespace resolves the namespace a PodMigration hint needs:
+// the tenant namespace for controller-owned CRs, the session storage
+// namespace for ConfigMap-backed records.
+func podMigrationHintNamespace(cmd *cobra.Command, r *rootState, object crclient.Object) string {
+	if isControllerCommand(cmd) {
+		return object.GetNamespace()
+	}
+
+	if r != nil {
+		return r.global.sessionNamespace
+	}
+
+	return "pvc-migrate-system"
 }
 
 func reportPodMigrationError(
