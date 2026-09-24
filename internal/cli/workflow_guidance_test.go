@@ -445,9 +445,9 @@ func TestCrossClusterExecuteCommandCarriesChangedFlags(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	got := crossClusterExecuteCommand(&command, "copy cross-cluster cleanup", "mig-1")
+	got := crossClusterExecuteCommand(&command, "cluster-copy cross cleanup", "mig-1")
 
-	want := "pvc-migrate --yes copy cross-cluster cleanup mig-1" +
+	want := "pvc-migrate --yes cluster-copy cross cleanup mig-1" +
 		" --source-kubeconfig='/etc/alt source' --delete-session=true --dry-run=false"
 	if got != want {
 		t.Fatalf("cross-cluster command mismatch: got %q want %q", got, want)

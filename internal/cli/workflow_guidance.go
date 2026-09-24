@@ -166,7 +166,7 @@ func writeDryRunApprovalNotice(w io.Writer) error {
 // crossClusterExecuteCommand renders the execute form of a cross-cluster
 // lifecycle invocation, carrying over the connection flags the operator
 // changed so the suggestion reaches the same two clusters. path is the
-// command path below the root, e.g. "copy cross-cluster resume".
+// command path below the root, e.g. "cluster-copy cross resume".
 func crossClusterExecuteCommand(cmd *cobra.Command, path, session string) string {
 	args := []string{"pvc-migrate", "--yes"}
 

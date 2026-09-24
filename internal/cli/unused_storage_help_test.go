@@ -54,7 +54,7 @@ func TestUnusedStoragePolicyHelpIsOperationSpecific(t *testing.T) {
 			mustSay: []string{"undelivered destination", "aborted before completing"},
 		},
 		{
-			path:    []string{"cluster-copy", "cross-cluster"},
+			path:    []string{"cluster-copy", "cross"},
 			mustSay: []string{"undelivered destination"},
 		},
 		{
@@ -82,7 +82,7 @@ func TestUnusedStoragePolicyHelpIsOperationSpecific(t *testing.T) {
 			mustSay: []string{"never promoted to a copy"},
 		},
 		{
-			path:    []string{"cluster-reserve", "cross-cluster"},
+			path:    []string{"cluster-reserve", "cross"},
 			mustSay: []string{"never promoted to a copy"},
 		},
 	}

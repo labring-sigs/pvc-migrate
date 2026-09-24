@@ -181,7 +181,7 @@ func (f *crossClusterReserveFlags) options(r *rootState) (crosscluster.Reservati
 // tree. Copy-specific commands remain in crosscluster_commands.go.
 func (r *rootState) newCrossClusterReserveCommand() *cobra.Command {
 	command := r.newCrossClusterReserveRunCommand()
-	command.Use = "cross-cluster"
+	command.Use = "cross"
 	command.Short = "Reserve destination PVCs in another Kubernetes cluster"
 	command.AddCommand(
 		r.newCrossClusterReservePlanCommand(),
@@ -227,7 +227,7 @@ func (r *rootState) newCrossClusterReserveResumeCommand() *cobra.Command {
 					cmd.ErrOrStderr(),
 					crossClusterExecuteCommand(
 						cmd,
-						"cluster-reserve cross-cluster resume",
+						"cluster-reserve cross resume",
 						session.ID,
 					),
 				)
@@ -314,7 +314,7 @@ func (r *rootState) newCrossClusterReserveCleanupCommand() *cobra.Command {
 					cmd.ErrOrStderr(),
 					crossClusterExecuteCommand(
 						cmd,
-						"cluster-reserve cross-cluster cleanup",
+						"cluster-reserve cross cleanup",
 						session.ID,
 					),
 				)
@@ -323,7 +323,7 @@ func (r *rootState) newCrossClusterReserveCleanupCommand() *cobra.Command {
 			if !r.global.assumeYes {
 				return domain.NewError(
 					domain.ErrorPrecondition,
-					"cluster-reserve cross-cluster cleanup",
+					"cluster-reserve cross cleanup",
 					"re-run with --yes after reviewing the session",
 				)
 			}
@@ -388,7 +388,7 @@ func (r *rootState) newCrossClusterReservePlanCommand() *cobra.Command {
 			if !plan.Ready {
 				return domain.NewError(
 					domain.ErrorPrecondition,
-					"cluster-reserve cross-cluster plan",
+					"cluster-reserve cross plan",
 					"plan contains failed checks",
 				)
 			}
@@ -451,7 +451,7 @@ func (r *rootState) newCrossClusterReserveRunCommand() *cobra.Command {
 				if !plan.Ready {
 					return domain.NewError(
 						domain.ErrorPrecondition,
-						"cluster-reserve cross-cluster",
+						"cluster-reserve cross",
 						"plan contains failed checks",
 					)
 				}
@@ -485,7 +485,7 @@ func (r *rootState) newCrossClusterReserveRunCommand() *cobra.Command {
 
 			_, err = fmt.Fprintf(
 				cmd.ErrOrStderr(),
-				"\nDestination PVC reservation completed. Continue with: pvc-migrate cluster-copy cross-cluster --session %s --dry-run=false (reuse the same source/destination connection flags).\n",
+				"\nDestination PVC reservation completed. Continue with: pvc-migrate cluster-copy cross --session %s --dry-run=false (reuse the same source/destination connection flags).\n",
 				session.ID,
 			)
 

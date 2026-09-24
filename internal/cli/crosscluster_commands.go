@@ -51,7 +51,7 @@ type crossClusterCopyFlags struct {
 
 func (r *rootState) newCrossClusterCopyCommand() *cobra.Command {
 	command := r.newCrossClusterCopyRunCommand()
-	command.Use = "cross-cluster"
+	command.Use = "cross"
 	command.Short = "Copy PVC data between two Kubernetes clusters"
 	command.AddCommand(
 		r.newCrossClusterCopyPlanCommand(),
@@ -125,7 +125,7 @@ func (r *rootState) newCrossClusterCopyResumeCommand() *cobra.Command {
 					cmd.ErrOrStderr(),
 					crossClusterExecuteCommand(
 						cmd,
-						"cluster-copy cross-cluster resume",
+						"cluster-copy cross resume",
 						session.ID,
 					),
 				)
@@ -182,7 +182,7 @@ func (r *rootState) newCrossClusterCopyPlanCommand() *cobra.Command {
 			if !plan.Ready {
 				return domain.NewError(
 					domain.ErrorPrecondition,
-					"cluster-copy cross-cluster plan",
+					"cluster-copy cross plan",
 					"plan contains failed checks",
 				)
 			}
@@ -251,7 +251,7 @@ func (r *rootState) newCrossClusterCopyRunCommand() *cobra.Command {
 				if !plan.Ready {
 					return domain.NewError(
 						domain.ErrorPrecondition,
-						"cluster-copy cross-cluster",
+						"cluster-copy cross",
 						"plan contains failed checks",
 					)
 				}
@@ -346,7 +346,7 @@ func (r *rootState) newCrossClusterCopyCleanupCommand() *cobra.Command {
 					cmd.ErrOrStderr(),
 					crossClusterExecuteCommand(
 						cmd,
-						"cluster-copy cross-cluster cleanup",
+						"cluster-copy cross cleanup",
 						session.ID,
 					),
 				)
@@ -355,7 +355,7 @@ func (r *rootState) newCrossClusterCopyCleanupCommand() *cobra.Command {
 			if !r.global.assumeYes {
 				return domain.NewError(
 					domain.ErrorPrecondition,
-					"cluster-copy cross-cluster cleanup",
+					"cluster-copy cross cleanup",
 					"re-run with --yes after reviewing the session",
 				)
 			}
@@ -659,7 +659,7 @@ func crossClusterCopyCleanupCommand(flags *crossClusterCopyFlags, sessionID stri
 	args := []string{
 		"pvc-migrate",
 		"cluster-copy",
-		"cross-cluster",
+		"cross",
 		"cleanup",
 		shellQuote(sessionID),
 	}

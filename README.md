@@ -115,8 +115,8 @@ of a mode flag; the two modes never read or write each other's storage:
   and cluster-family records live in the session namespace their spec
   declares. `migrate-pod`, `backup`, `restore`, and `rename` are
   single-namespace commands, `move` keeps its cluster-scoped kind with role
-  flags, and cross-cluster work hangs under `cluster-copy cross-cluster` and
-  `cluster-reserve cross-cluster`.
+  flags, and cross-cluster work hangs under `cluster-copy cross` and
+  `cluster-reserve cross`.
 - `pvc-migrate cr <family>` operates on workflow CRs only: `cr migrate-pod`,
   `cr migrate`, `cr copy`, `cr reserve`, `cr rename`, `cr move`, `cr backup`,
   `cr restore`, plus the explicit cluster-scoped families `cr cluster-migrate`,
@@ -138,7 +138,7 @@ of a mode flag; the two modes never read or write each other's storage:
   switching its storage. PVC identity moves always use the cluster-scoped
   `Move` (`cr move`). Backup, restore, and rename intentionally have no
   cluster-scoped form. Cross-cluster workflows remain on the ConfigMap/session
-  backend (`cluster-copy cross-cluster`, `cluster-reserve cross-cluster`).
+  backend (`cluster-copy cross`, `cluster-reserve cross`).
   The controller uses leader election, watches every installed workflow kind,
   and reuses the same resumable state machine. A command fails clearly when
   its matching CRD is absent.
@@ -484,8 +484,8 @@ Controller ownership outside the supported adapters causes the plan to fail. PVC
 | `cluster-reserve` | Provision and retain destination PVCs across namespaces |
 | `copy` | Run a resumable offline copy or one online warm-copy pass without cutover, in one tenant namespace |
 | `cluster-copy` | Run a cross-namespace finite copy without workload cutover |
-| `cluster-copy cross-cluster` | Copy PVC data between two Kubernetes clusters with separate source and destination connections |
-| `cluster-reserve cross-cluster` | Provision destination PVCs in another cluster and persist a cross-cluster session |
+| `cluster-copy cross` | Copy PVC data between two Kubernetes clusters with separate source and destination connections |
+| `cluster-reserve cross` | Provision destination PVCs in another cluster and persist a cross-cluster session |
 | `migrate` | Run an offline reserve, final sync, activation, and completion in one tenant namespace |
 | `cluster-migrate` | Run a cross-namespace offline reserve, final sync, activation, and completion |
 | `migrate-pod` | Run real-time warm copy, workload pause, cutover, and resume for one Pod |
@@ -497,7 +497,7 @@ Controller ownership outside the supported adapters causes the plan to fail. PVC
 | `migrate-pod status/resume/abort/rollback/cleanup` | Manage a real-time Pod migration session |
 | `reserve/copy/backup/rename/move status/resume/abort/cleanup` | Manage the lifecycle actions supported by each workflow |
 | `cluster-reserve`/`cluster-copy` status/resume/abort/cleanup | Manage cross-namespace reservation and copy sessions |
-| `cluster-copy cross-cluster` / `cluster-reserve cross-cluster` lifecycle commands | Inspect, continue, or clean up a cross-cluster session |
+| `cluster-copy cross` / `cluster-reserve cross` lifecycle commands | Inspect, continue, or clean up a cross-cluster session |
 | `recovery cleanup-orphan` | Validate and clear ownership after a session record was lost |
 | `controller` | Run the controller-runtime reconciliation loop for the installed local workflow CRDs |
 | `completion` | Generate shell completion |
@@ -567,7 +567,7 @@ Each scope is persisted in the session and reused by warm copy, final sync, chec
 Cross-cluster workflows use explicit subcommands and keep their session state on the source cluster. The destination kubeconfig is required, and the source and destination cluster identities must differ. StorageClass objects are read-only inputs; their parameters are never changed.
 
 ```bash
-pvc-migrate cluster-copy cross-cluster plan \
+pvc-migrate cluster-copy cross plan \
   --source-kubeconfig ~/.kube/source \
   --destination-kubeconfig ~/.kube/destination \
   --source-namespace application \
@@ -576,7 +576,7 @@ pvc-migrate cluster-copy cross-cluster plan \
   --destination-pvc database-data \
   --destination-storage-class fast
 
-pvc-migrate cluster-copy cross-cluster \
+pvc-migrate cluster-copy cross \
   --source-kubeconfig ~/.kube/source \
   --destination-kubeconfig ~/.kube/destination \
   --source-namespace application \
@@ -587,9 +587,9 @@ pvc-migrate cluster-copy cross-cluster \
   --dry-run=false
 ```
 
-Use `cluster-reserve cross-cluster` to provision and inspect destination PVCs before copying. `cluster-reserve cross-cluster status/resume/cleanup` and `cluster-copy cross-cluster status/resume/cleanup` require both connections so resource identities can be verified on each cluster. Multiple PVCs use explicit `source=destination`, `source=capacity`, and `source=path` mappings. Cross-cluster shrink keeps the same safety defaults as local copy: `--allow-volume-shrink` and an explicit `--skip-source-usage-check` are required when no trusted usage reader exists.
+Use `cluster-reserve cross` to provision and inspect destination PVCs before copying. `cluster-reserve cross status/resume/cleanup` and `cluster-copy cross status/resume/cleanup` require both connections so resource identities can be verified on each cluster. Multiple PVCs use explicit `source=destination`, `source=capacity`, and `source=path` mappings. Cross-cluster shrink keeps the same safety defaults as local copy: `--allow-volume-shrink` and an explicit `--skip-source-usage-check` are required when no trusted usage reader exists.
 
-Set storage mappings and transfer paths when creating the reservation. Continuing with `cluster-copy cross-cluster --session ID` reuses that recorded plan and rejects planning flags. Before the first transfer, explicit `--verify-checksum`, `--delete-extraneous`, `--online`, `--strategy`, and `--tool-image` flags configure the copy; omitted flags preserve recorded settings. Once transfer starts, retries retain those settings. Use a new session to change them.
+Set storage mappings and transfer paths when creating the reservation. Continuing with `cluster-copy cross --session ID` reuses that recorded plan and rejects planning flags. Before the first transfer, explicit `--verify-checksum`, `--delete-extraneous`, `--online`, `--strategy`, and `--tool-image` flags configure the copy; omitted flags preserve recorded settings. Once transfer starts, retries retain those settings. Use a new session to change them.
 
 ### Destination Capacity
 
