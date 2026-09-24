@@ -1,38 +1,40 @@
 # pvc-migrate
 
-`pvc-migrate` is a resumable Kubernetes CLI for moving filesystem PVC data between storage classes, namespaces, and nodes. It provides separate offline PVC migration and real-time Pod migration workflows, plus copy/backup/restore operations.
+`pvc-migrate` is a sealos/Kubernetes tool for moving filesystem PVC data and PVC identities between storage classes, namespaces, and clusters. It has two execution backends: CLI session commands run workflows in-process with resumable records, and controller CRDs (driven through `cr` commands) are reconciled by a deployed controller. It covers offline PVC migration, warm-copy Pod migration with cutover, copy and reservation, PVC rename/move, backup/restore through S3-compatible object storage, and cross-cluster copy.
 
-## Highlights
+## Key features
 
-- `migrate` performs an offline PVC migration and accepts explicit PVC and destination identities.
-- `migrate-pod` performs a real-time migration of every PVC attached to one supported Pod.
-- Reduce downtime with configurable warm-copy passes followed by a final offline sync in `migrate-pod`.
-- Validate topology, scheduling, quota, RBAC, dependencies, consumers, and controller ownership before execution.
-- Resume interrupted sessions from their persisted phase.
-- Follow generated reservation, rsync, SSHD, and rclone Pod logs in the active CLI.
-- Preserve the source PV for an explicit rollback window.
-- Move or rename offline PVC identities while retaining their PV.
-- Back up and restore PVC files through S3-compatible object storage.
+- Warm-copy Pod migration: configurable warm-copy passes while the workload stays available, followed by workload pause, final sync, cutover, and resume — one idempotent `migrate-pod` workflow.
+- Safety-first execution: every mutating command defaults to `--dry-run=true`, execution requires `--dry-run=false`, and workload pause plus storage identity changes also require `--yes` or interactive approval.
+- Storage-class and capacity-aware replatforming: destination PVCs can change StorageClass and capacity, with shrink guarded by explicit `--allow-volume-shrink`.
+- Same-namespace work (`migrate`, `copy`, `reserve` with a single `-n`) and cross-namespace work (`cluster-migrate`, `cluster-copy`, `cluster-reserve` with role flags) are separate command families.
+- Two execution modes: session commands execute in-process; `cr` commands submit workflow CRs that the controller reconciles. The two backends never share records.
+- Cross-cluster copy and reservation (`cluster-copy cross`, `cluster-reserve cross`) with separate source and destination kubeconfig connections.
+- Backup and restore of PVC files to S3-compatible object storage; controller mode reads its configuration from a namespaced `BackupRepository`.
+- Rename or move offline PVC identities while retaining their PV; the source PV stays retained for a rollback window after cutover.
 
-## Requirements
+## Supported workloads
 
-- A Kubernetes cluster with filesystem PVC support
-- Kubernetes credentials with the permissions validated by the relevant `plan` command
-- Pre-existing session, temporary, and destination namespaces; the CLI and controller report an error when a required namespace is missing and never create namespaces automatically
-- Network access for the temporary tool image on source and target nodes
-- Go 1.27.0 or a compatible newer toolchain when building from source
+`migrate-pod` coordinates one workload and pauses/resumes it safely around the final sync and cutover. The workload adapters are:
+
+| Workload | Pause/cutover behavior |
+| --- | --- |
+| Standalone Pod | Delete and recreate the recorded Pod on the target node |
+| Ordinary Deployment | Scale the Deployment to zero, switch PVCs, restore replicas |
+| Native StatefulSet | Scale from `N` to the selected ordinal, then restore `N` |
+| KubeBlocks InstanceSet | Optional primary switchover, pause reconciliation, delete the selected Pod |
+| KubeBlocks legacy StatefulSet | Stop/Start OpsRequest on the Cluster or component |
+| VMCluster component | Pause the component and reduce replicas to the selected ordinal |
+| Grafana | Pause the Grafana deployment and scale it to zero |
+| Victoria Logs `vlstorage` | Scale the `vlstorage` StatefulSet to zero under a session pause lock |
+
+MinIO tenants, CockroachDB, and backup archive-WAL workloads are rejected during planning; they require their own application-native procedures. Controller ownership outside the adapters above also fails the plan.
+
+Plain offline operations (`migrate`, `copy`, `rename`, `move`) never touch a workload and require zero active PVC consumers; `copy --online` allows one finite warm-copy pass with consumers running.
 
 ## Installation
 
-Build the CLI:
-
-```bash
-make build VERSION=0.1.0
-./bin/pvc-migrate version
-```
-
-Deploy a published OCI chart with Helm 4 into an existing namespace.
-Set `CHART_VERSION` to the release version without the `v` prefix:
+The Helm chart is the only supported installation path, and the workflow CRDs ship with the chart. Required namespaces (session, temporary, destination) must already exist; nothing is created automatically.
 
 ```bash
 CHART_VERSION=X.Y.Z
@@ -44,646 +46,90 @@ helm upgrade --install pvc-migrate \
 helm test pvc-migrate --namespace pvc-migrate-system --logs --timeout 10m
 ```
 
-The controller and tool image versions automatically match the selected chart
-version. No image overrides are required. The chart installs workflow CRDs
-and defaults to two controller replicas with leader election, restricted security
-contexts, health probes, resource requests/limits, and a disruption budget.
-It never creates namespaces. For Helm 3.17+, use `--atomic` instead of
-`--rollback-on-failure`. See [chart operations](charts/pvc-migrate/README.md)
-for source-chart installation, values, CRD upgrades, adoption of existing
-manifests, and rollback.
+Session-mode CLI runs use the kubeconfig identity and require equivalent permissions. `cr` commands require the installed controller and fail clearly when a workflow CRD is absent.
 
-Each workflow kind has separate execution, recovery, and deletion queues.
-After leader replacement, interrupted workload pauses and storage cutovers can
-resume while new transfers run. Failed workflows still require explicit resume;
-the same workflow remains fenced by its session Lease.
+## Command families
 
-The default ClusterRole excludes Pod exec. KubeBlocks MongoDB native
-switchover needs it only in approved source namespaces. Add to your values:
+| Command | Mode | Purpose |
+| --- | --- | --- |
+| `migrate` | session | Offline PVC migration in one namespace (`-n`) |
+| `cluster-migrate` | session | Cross-namespace offline migration (role flags) |
+| `copy` / `cluster-copy` | session | Resumable copy without cutover, single- or cross-namespace |
+| `cluster-copy cross` | session | Copy PVC data between two clusters |
+| `reserve` / `cluster-reserve` | session | Pre-provision and retain destination PVCs |
+| `cluster-reserve cross` | session | Provision destination PVCs in another cluster |
+| `migrate-pod` | session | Warm copy, pause, cutover, resume for one Pod (`-n`) |
+| `rename` | session | Rename one offline PVC, retaining its PV |
+| `move` | session | Move one offline PVC identity across namespaces (cluster-scoped kind) |
+| `backup` / `restore` | session | PVC backup/restore via S3-compatible object storage |
+| `recovery cleanup-orphan` | session | Clear stale session ownership after a session record was lost |
+| `cr <family>` | controller | Create and drive workflow CRs |
 
-```yaml
-rbac:
-  kubeBlocksMongoDBNamespaces:
-    - application
-```
+`cr` families mirror the workflow kinds: `cr migrate-pod`, `cr migrate`, `cr cluster-migrate`, `cr copy`, `cr cluster-copy`, `cr reserve`, `cr cluster-reserve`, `cr rename`, `cr move`, `cr backup`, `cr restore`. Each offers `create`, `status`, `watch`, and the lifecycle verbs (`resume`, `abort`, `rollback` where the kind supports it, `cleanup`).
 
-A locally executed CLI uses the identity from its kubeconfig and requires equivalent permissions.
+Session families expose the lifecycle verbs each workflow supports (`status`, `resume`, `abort`, `cleanup`, plus `rollback` on migration, Pod migration, rename, and move, and `plan` on the migrate and cross families). `controller` runs the reconciliation loop standalone; `version` and `completion` are utility commands.
 
-The bundled ClusterRole is a high-privilege controller identity. Bind it only
-to the controller ServiceAccount; tenant users should receive narrowly scoped
-namespaced permissions to submit and observe the workflow CRs they own.
-The role reads repository credentials by exact name and grants the controller
-the Secret verbs required by Helm's default release storage driver, including
-listing release history by label. Secret access remains limited to the
-controller/operator identity. Controller sessions use workflow CRDs and
-Kubernetes Leases. The role has only ConfigMap `get` permission to reject
-cross-backend session name collisions; it cannot write ConfigMap sessions.
+## Execution and scoping model
 
-Build the tool image. It runs the CLI by default and also supplies PVC reservation, rsync, SSHD, and rclone roles inside the cluster:
+- Session commands execute in the invoking process and persist records as ConfigMaps in `--session-namespace` (default `pvc-migrate-system`).
+- `cr` commands submit workflow CRs the controller reconciles; the two backends never read or write each other's records.
+- Namespaced commands take one `-n/--namespace` — the tenant namespace of the workflow and every PVC it addresses.
+- Cluster families take role flags: `-n/--source-namespace`, `--destination-namespace`, plus `--temporary-namespace` on `cluster-migrate`/`cr cluster-migrate`.
+- The command boundary decides scope: same-namespace work uses the namespaced command and cannot express a cross-namespace spec, and vice versa.
+- Every command's `--help` documents its exact flags; it is the reference — this README does not repeat them.
+
+## Quick start
+
+Offline migration in one namespace (every mutating command defaults to dry-run):
 
 ```bash
-docker build --build-arg VERSION=0.1.0 -t pvc-migrate:0.1.0 .
-docker run --rm pvc-migrate:0.1.0 version
+pvc-migrate --yes migrate --dry-run=false -n application \
+  --source-pvc database-data --destination-pvc database-data \
+  --destination-storage-class fast-local
 ```
 
-Use `--tool-image registry.example/pvc-migrate:0.1.0` when cluster nodes pull the image from an internal registry. New migration sessions persist this image reference and reuse it during resume.
+Real-time Pod migration with one warm-copy pass:
 
-## Execution Modes
-
-The CLI separates the two durable execution backends by command group instead
-of a mode flag; the two modes never read or write each other's storage:
-
-- Top-level commands run the session backend: sessions persist as workflow
-  objects inside ConfigMaps and the invoking process executes the workflow.
-  Their `plan`/`status`/`resume`/`abort`/`rollback`/`cleanup` subcommands
-  address session records only. The session tree mirrors the cr split:
-  `migrate`, `copy`, and `reserve` are namespaced families that take a single
-  `-n/--namespace` — the one tenant namespace the workflow and every PVC it
-  addresses live in — while `cluster-migrate`, `cluster-copy`, and
-  `cluster-reserve` expose the role flags their spec declares
-  (`-n/--source-namespace`, `--destination-namespace`, plus
-  `--temporary-namespace` on `cluster-migrate`) and run cross-namespace work.
-  Same-namespace work uses the namespaced command and cannot express a
-  cross-namespace spec; cross-namespace work uses the cluster-* command — the
-  command boundary decides, not flag validation. The namespaced families
-  persist the namespaced workflow types (`Migration`, `Copy`, `Reservation`)
-  and the cluster families the `Cluster*` types: a `migrate` record lives in
-  the session storage namespace (`--session-namespace`, default
-  `pvc-migrate-system`) with its tenant namespace in `metadata.namespace`,
-  `copy` and `reserve` records live in the tenant namespace and their
-  `status`/`resume`/`abort`/`cleanup` verbs take `-n` to address the record,
-  and cluster-family records live in the session namespace their spec
-  declares. `migrate-pod`, `backup`, `restore`, and `rename` are
-  single-namespace commands, `move` keeps its cluster-scoped kind with role
-  flags, and cross-cluster work hangs under `cluster-copy cross` and
-  `cluster-reserve cross`.
-- `pvc-migrate cr <family>` operates on workflow CRs only: `cr migrate-pod`,
-  `cr migrate`, `cr copy`, `cr reserve`, `cr rename`, `cr move`, `cr backup`,
-  `cr restore`, plus the explicit cluster-scoped families `cr cluster-migrate`,
-  `cr cluster-copy`, and `cr cluster-reserve`. Every family offers `create`
-  (submit for controller reconciliation; prints the workflow it would submit
-  until you pass `--dry-run=false`, then optionally `--wait`s), `status`,
-  `watch` (stream phase changes until a terminal phase), and the lifecycle
-  verbs (`resume`, `abort`, `rollback`, `cleanup`). Namespaced families address
-  a CR with `-n <tenant-namespace>`; on `create` that single flag is also the
-  spec's whole namespace story — the role flags (`-n/--source-namespace`,
-  `--destination-namespace`, plus `--temporary-namespace` on
-  `cr cluster-migrate`) exist only on the cluster-scoped creates, whose specs
-  genuinely declare those roles.
-  Cluster-scoped families need no namespace. Pod migration is a
-  same-namespace operation
-  by design — a workload cannot be recreated in another namespace — so
-  `PodMigration` has no cluster-scoped form. A `ClusterMigration` may set
-  `destinationNamespace` to move a quiesced PVC into another namespace while
-  switching its storage. PVC identity moves always use the cluster-scoped
-  `Move` (`cr move`). Backup, restore, and rename intentionally have no
-  cluster-scoped form. Cross-cluster workflows remain on the ConfigMap/session
-  backend (`cluster-copy cross`, `cluster-reserve cross`).
-  The controller uses leader election, watches every installed workflow kind,
-  and reuses the same resumable state machine. A command fails clearly when
-  its matching CRD is absent.
-
-Install the controller backend using the Helm command above — it is the
-only supported installation path and ships the CRDs. The `config/`
-Kubebuilder files remain for development and permission review; do not
-apply them over a Helm-managed installation.
-
-Run `make manifests` after changing API markers. It regenerates the typed
-deep-copy code and the CRD under `config/crd/bases`, then synchronizes the
-chart `crds/` directory.
-`make chart-lint` checks templates and deployment contracts;
-`make chart-package` produces a versioned chart archive in `bin/`.
-
-Namespaced workflow CRDs use `metadata.namespace` as their tenant boundary.
-Their specs and local object references expose no namespace fields; conversion
-to the execution model derives source, temporary, destination, session, and
-repository namespaces from metadata. Cluster workflow specs declare each
-operational namespace once at the top level and keep nested references local
-to the relevant source or destination namespace.
-
-Submit declarative intent directly, or use the `cr <family> create` commands
-
-```yaml
-apiVersion: migrate.sealos.io/v1alpha1
-kind: Copy
-metadata:
-  name: copy-data
-  namespace: application
-spec:
-  volumes:
-    - sourcePVC:
-        name: data
-  destinationStorageClass: fast
+```bash
+pvc-migrate --yes migrate-pod \
+  --session database-20260809 -n application \
+  --pod database-1 \
+  --destination-storage-class fast-local \
+  --precopy-passes 1 --verify-checksum \
+  --dry-run=false
 ```
 
-For `Migration`, the same volume selection migrates the original PVC in place.
-For `PodMigration`, replace `volumes` with `pod: {name: database-0}`; the
-controller discovers the workload adapter and every mounted PVC. `Copy` and
-`Reservation` also accept `pod`, with optional `volumes` entries overriding
-individual PVC capacity, destination name, or transfer paths. Omitted capacity
-and storage class inherit the source; omitted namespace roles inherit the
-source namespace. All selected namespaces must already exist.
-
-References require only `name`. Optional `uid` and `resourceVersion` constrain
-discovery to a specific resource identity or revision. The controller resolves
-PVC/PV identities, placement, workload snapshots, and its configured tool image
-under a Lease, then persists an immutable execution snapshot in `status.plan`
-before any data-plane action. Runtime checkpoints remain in the other status
-fields. The CLI submits the same concise spec; local discovery remains available
-through `plan`, `--dry-run`, and session mode.
-
-For `Restore` with `createPVC: true`, specify the destination storage class;
-capacity comes from the published backup manifest and access mode defaults to
-`ReadWriteOnce`. Set `destinationAccessMode` explicitly for a different mode.
-The controller records the resolved defaults in `status.plan`.
-
-A discovery failure records `Failed` and `Planned=False`, with a message and
-event. Correcting the spec retries discovery while no plan exists; an explicit
-CLI `resume` retries the same intent. Once `status.plan` exists, spec changes
-are rejected by the controller and require a new workflow. Abort before planning
-keeps the workflow stopped even if its spec changes; cleanup or CR deletion
-removes the unexecuted request without touching source storage. This API replaces
-the previous execution-snapshot spec format; existing requests must be completed
-and cleaned up before upgrading the CRDs.
-
-Deleting a planned workflow always uses its fixed `status.plan`, including
-after an unsupported spec edit. Cleanup cannot be redirected by that edit and
-still checks resource identities, consumers, and concurrent changes under a Lease.
-
-Backup and restore use a namespaced `BackupRepository` for a user-selected
-location. `spec.type` selects a structured backend configuration. `s3` is
-currently executable and reads its credentials from a Secret in the repository
-namespace. The API also defines a `pvc` backend for a future data-plane
-adapter; the current controller rejects it explicitly instead of treating it
-as S3. Creating a repository configures a location and does not grant access
-to other namespaces. Namespaced workflows use a name-only `repositoryRef`;
-the repository and its Secret must be in the workflow namespace. Backup and
-restore have no cluster-scoped workflow resource, preventing an operator API
-from becoming an indirect cross-namespace credential path. The controller
-scopes object keys by cluster and workload namespace and pins repository
-UID/generation in workflow status, so replacing a repository requires a new
-workflow while in-place Secret rotation remains possible. Repository configuration
-and credentials are validated before the execution plan is frozen. Missing or
-invalid dependencies leave the intent editable; correct the spec or fix the
-dependency and resume. The plan commit also pins the repository and credential
-Secret identities. Cross-cluster commands remain ConfigMap/session workflows
-because they require a second API
-server identity.
-
-The bundled ClusterRole is controller-only. Tenant bindings should grant
-namespaced workflow create/get/list/watch permissions and `/status` read only;
-`/status` update/patch, repository reads, and Secret access stay with the
-controller/operator identity. The current lifecycle commands that
-perform abort, rollback, cleanup, or failed-workflow reactivation therefore
-require that operator identity in controller mode.
-
-Submit a supported migration and wait for its CR status to reach completion:
+Controller workflow: create, observe, then finalize cleanup:
 
 ```bash
 pvc-migrate --yes cr migrate create -n application \
   --source-pvc data --destination-pvc data
 pvc-migrate cr migrate watch data-migration -n application
-kubectl -n application get migrations
+pvc-migrate --yes cr migrate cleanup data-migration -n application --dry-run=false
 ```
 
-Controller progress is read from the CR's durable status and written to
-stderr; the final table, JSON, or YAML document is written once to stdout.
-Session commands address records through the global `--session-namespace`:
-every session record — namespaced or cluster-scoped — persists there, with
-the tenant namespace carried in the record itself. `cr` commands address
-namespaced CRs with `-n` on each verb, and the cluster-scoped families
-(`cluster-migrate`, `cluster-copy`, `cluster-reserve`, `cr cluster-migrate`,
-`cr cluster-copy`, `cr cluster-reserve`, `cr move`) need no namespace.
-`--timeout` bounds planning, submission, and waiting. A failed or deleted CR
-returns a nonzero exit code. Use `--wait=false` when another process owns
-observation (`cr <family> watch` follows it live). The controller records
-business failures in the CR status and
-does not treat them as reconcile errors; inspect the controller Deployment logs
-for structured reconciliation and data-plane events. Raw tool Pod streams and
-command-oriented `Next steps` guidance remain CLI-only.
-
-Deleting a workflow CR requests cancellation and finalization. Before storage
-activation, the controller stops transfer tools and restores paused workloads.
-Once activation has started, it finishes the storage switch before cleanup;
-an in-progress rollback is completed instead. Cleanup then applies
-`sourcePVReclaimPolicy` and `destinationPVCReclaimPolicy`, both defaulting to
-`Retain`. The source policy can delete only the inactive original PV after a
-completed migration. After rollback the original PV is active and protected;
-the destination policy controls the remaining destination storage. Copy and
-Reservation expose only the destination policy. Deleting a CR closes its
-rollback window, even when both volumes are retained.
-
-Policies can be edited in `spec`, including while deletion is blocked. Retaining
-a PVC permits deleting the CR while consumers keep using it. Deleting destination
-storage requires consumers to release it first; changing its policy to `Retain`
-lets finalization continue without deleting the data.
-
-The protection finalizer remains until recovery and cleanup succeed, including
-Lease removal. Inspect the `Deleting` and `DeletionBlocked` conditions, Events and
-controller logs when deletion is waiting. Resource identity conflicts and missing
-or terminating session namespaces require operator intervention; namespaces are
-never recreated. Backup/Restore payload data is retained, and unattributable
-orphan transfer Jobs or Pods block deletion pending inspection. Do not force-remove
-the finalizer to stop a running transfer. Normal CLI lifecycle mutations are
-rejected once deletion has started.
-
-Released Helm charts default both images to
-`ghcr.io/labring-sigs/pvc-migrate:<chart-version>`. Explicit `image.tag`,
-`image.digest`, or `toolImage.tag` overrides are optional. Chart values apply
-to controller Pods; workflow transfer Pod configuration is managed by the
-application.
-
-## Quick Start
-
-Every mutating command defaults to `--dry-run=true`. Execution requires an explicit `--dry-run=false`; workload pause and storage identity changes also require `--yes` or interactive approval.
-
-### 1. Plan
-
-Inspect the Pod, automatically selected target node, CSI-reported storage capacity, topology, permissions, quotas, consumers, and workload adapter:
+Cross-cluster copy with two explicit connections:
 
 ```bash
-pvc-migrate \
-  --kubeconfig /path/to/kubeconfig \
-  --session-namespace pvc-migrate-system \
-  --output yaml \
-  migrate-pod plan \
-  --session database-20260809 \
-  --namespace application \
-  --pod database-1 \
-  --destination-storage-class fast-local
-```
-
-For an offline PVC migration, use `migrate plan` with `--source-pvc`. It does not
-accept `--pod` and does not inspect workload ownership or KubeBlocks metadata:
-
-```bash
-pvc-migrate migrate plan \
-  --namespace application \
-  --source-pvc database-data \
-  --destination-pvc database-data
-```
-
-### 2. Migrate
-
-Run the complete real-time migration. Warm copy, pause, final sync, activation, and workload resume are one idempotent workflow:
-
-```bash
-pvc-migrate \
-  --kubeconfig /path/to/kubeconfig \
-  --session-namespace pvc-migrate-system \
-  --timeout 45m \
-  --yes \
-  migrate-pod \
-  --session database-20260809 \
-  --namespace application \
-  --pod database-1 \
-  --destination-storage-class fast-local \
-  --precopy-passes 1 \
-  --verify-checksum \
-  --dry-run=false
-```
-
-### 3. Inspect or Resume
-
-```bash
-pvc-migrate --kubeconfig /path/to/kubeconfig \
-  --session-namespace pvc-migrate-system \
-  migrate-pod status database-20260809
-
-pvc-migrate --kubeconfig /path/to/kubeconfig \
-  --session-namespace pvc-migrate-system \
-  --yes migrate-pod resume database-20260809 --dry-run=false
-```
-
-### 4. Roll Back or Finalize
-
-Restore the original PVs during the rollback window:
-
-```bash
-pvc-migrate --kubeconfig /path/to/kubeconfig \
-  --session-namespace pvc-migrate-system \
-  --yes migrate-pod rollback database-20260809 --dry-run=false
-```
-
-Close the rollback window after validating the application:
-
-```bash
-pvc-migrate --kubeconfig /path/to/kubeconfig \
-  --session-namespace pvc-migrate-system \
-  --yes migrate-pod cleanup database-20260809 --dry-run=false \
-  --source-pv-reclaim-policy Delete --destination-pvc-reclaim-policy Retain \
-  --finalize --delete-session
-```
-
-`--source-pv-reclaim-policy Delete` reclaims only the inactive source PV after a completed migration. It restores the PV's recorded Kubernetes reclaim policy before deletion: `Delete` lets the CSI driver remove backend storage; `Retain` preserves backend storage. After rollback, the source is active and protected. To reclaim the remaining destination storage, use `--destination-pvc-reclaim-policy Delete`.
-
-Migration and PodMigration expose `spec.sourcePVReclaimPolicy` and `spec.destinationPVCReclaimPolicy`; both default to `Retain`. Copy and Reservation (including Cluster variants) expose only the destination policy and always preserve the source. Policies may be changed after execution; transfer inputs remain frozen. CLI creation and cleanup use the equivalent `--source-pv-reclaim-policy` and `--destination-pvc-reclaim-policy` flags. Cleanup overrides apply to that invocation; omitted flags use the recorded policies. Deleting a CR applies its current policies through the same cleanup implementation. A destination still referenced by a consumer blocks `Delete`; switch its policy to `Retain` to release the CR while preserving storage. No legacy deletion flags or field aliases are supported.
-
-Cleanup guidance includes explicit values for every applicable reclaim policy, including retry commands. After rollback or abort, migration guidance overrides a recorded source `Delete` with `Retain` and explains why the source is protected. Destination retention follows the current record or the explicit cleanup override; capacity-recovery instructions separately recommend discarding the undersized destination. Guidance does not modify the stored policies.
-
-A successful cleanup dry-run prints the policies validated for that invocation and an execution command preserving its overrides and finalization options. Structured output continues to show the stored session. Cleanup validation errors preserve those options in the retry command as well.
-
-If a PVC or PV still has session ownership after its session ConfigMap was lost, validate the reconstructed resource relationship and then clear it:
-
-```bash
-pvc-migrate --kubeconfig /path/to/kubeconfig \
-  --session-namespace pvc-migrate-system \
-  recovery cleanup-orphan database-20260809 \
-  -n application --source-pvc data-database-1
-
-pvc-migrate --kubeconfig /path/to/kubeconfig \
-  --session-namespace pvc-migrate-system \
-  --yes recovery cleanup-orphan database-20260809 \
-  -n application --source-pvc data-database-1 \
-  --dry-run=false
-```
-
-## Migration Workflow
-
-```text
-Offline migrate:
-plan -> reserve -> final sync -> activate -> completed (one command)
-
-Real-time Pod migrate:
-plan -> reserve -> warm copy -> pause -> final sync -> activate -> resume (one command)
-```
-
-`migrate` is caller-quiesced: it accepts PVC identities and PVC destination
-overrides (`cluster-migrate` also moves the PVC into another namespace), never
-discovers or pauses a workload, and never runs a
-warm-copy pass. `migrate-pod` is the real-time Pod workflow: it derives the
-complete PVC set from `--pod`, keeps the application PVC identities in the
-source namespace, and owns workload pause/resume and cutover. Its workload
-controls are limited to supported same-zone Pod migration; use `copy --online`
-for cross-zone replication. It coordinates one selected workload. Consumers
-from another workload make the plan fail; stop them or use offline `migrate`
-after quiescing every consumer instead of implicitly grouping independent
-workloads.
-
-The destination PVCs are provisioned before downtime. Warm-copy passes run while the workload remains available. The final sync begins after the selected workload adapter confirms that PVC consumers have stopped, and it establishes the cutover consistency point. The source PV remains retained until rollback or final cleanup.
-
-## Supported Workloads
-
-| Workload | Cutover behavior | Result |
-| --- | --- | --- |
-| Standalone Pod | Delete and recreate the recorded Pod on the target node | Supported with a Pod restart window |
-| Ordinary Deployment | Scale the complete Deployment to zero, switch all selected PVCs, then restore the original replica count | Supported when fully Ready, without an operator owner or HorizontalPodAutoscaler |
-| Native StatefulSet | Scale from `N` replicas to the selected ordinal `k`, then restore `N` | Supported when PVC retention and ordinal ownership checks pass, without a HorizontalPodAutoscaler |
-| KubeBlocks InstanceSet | Optionally switch the primary, pause InstanceSet reconciliation, delete the selected Pod, then restore the original pause state | Supported with selected-instance downtime; sibling Pods remain running |
-| KubeBlocks legacy StatefulSet | Stop the affected Cluster or component through a Stop/Start OpsRequest, then restore it | Supported with Cluster- or component-wide downtime |
-| VMCluster component | Pause the component and reduce its replica count to ordinal `k`, then restore it | Supported for managed VMCluster StatefulSets without a HorizontalPodAutoscaler |
-| Grafana | Pause the Grafana deployment and scale it to zero, then restore it | Supported without a HorizontalPodAutoscaler when recreation scheduling checks pass |
-| Victoria Logs `vlstorage` | Scale the complete `vlstorage` StatefulSet to zero under a session-owned pause lock | Supported without a HorizontalPodAutoscaler and with a shared `vlstorage` pause window |
-| RWX or multiple consumers | Run a file-level pass after consumer validation | Application quiescence defines transactional consistency |
-| MinIO Tenant | Use MinIO drive or pool maintenance | Rejected during planning |
-| CockroachDB | Use drain, decommission, and CockroachDB recovery procedures | Rejected during planning |
-| Backup archive-WAL workload | Use the owning backup controller workflow | Rejected during planning |
-
-For a KubeBlocks primary, `--switchover-candidate` requests an automated switchover. Non-MongoDB components use the served KubeBlocks Switchover action and receive matching `kbcli` and OpsRequest guidance. MongoDB InstanceSet migrations validate and call the native candidate script directly without probing an OpsRequest API; choose a Ready, caught-up secondary as the candidate. Failure guidance includes the fully resolved equivalent command. The native command has this form:
-
-```sh
-kubectl --namespace <namespace> exec <current-primary-pod> -c mongodb -- env \
-  KB_CONSENSUS_LEADER_POD_FQDN=<current-primary-pod>.<cluster>-<component>-headless \
-  KB_SWITCHOVER_CANDIDATE_FQDN=<ready-secondary-pod>.<cluster>-<component>-headless \
-  /scripts/switchover-with-candidate.sh
-```
-
-`--allow-leader-downtime` acknowledges a direct primary restart when the application can tolerate it.
-
-InstanceSet-backed components use the served `spec.paused` field to suspend InstanceSet reconciliation while the selected Pod is migrated. The adapter deletes that Pod with a UID precondition and verifies the InstanceSet pause owner before final sync. Legacy StatefulSet-backed components use Stop/Start OpsRequests: the apps API pauses the complete Cluster, while the operations API can target the selected component. Legacy workloads reject `--switchover-candidate` because the pause operation affects every instance in its scope. The `kubeblocks.io/reconcile` annotation triggers reconciliation and has no pause semantics.
-
-Controller ownership outside the supported adapters causes the plan to fail. PVCs that are already offline can use `migrate`, `copy`, `rename`, or `move` directly.
-
-## Safety and Recovery
-
-- Workflow commands print phase-aware next steps, verification commands, and validated dry-run/execute pairs on stderr. Suggested commands use the owning workflow (`migrate`/`cluster-migrate`, `migrate-pod`, `copy`/`cluster-copy`, `backup`, `rename`, or `move`) and preserve the active kubeconfig, context, session namespace, and explicitly changed execution settings they need. JSON and YAML results remain a single structured document on stdout. With `--log-format=json`, stderr is JSON Lines for progress events, guidance, and failures.
-- Text logs support `--color=auto|always|never`. `auto` colors interactive terminal output, `always` forces ANSI colors for terminal multiplexers, and `never` keeps stderr plain for text collectors. Levels use severity colors, component and tool prefixes use stable per-value colors, and guidance uses semantic colors for phases and actions while keeping command bodies plain. JSON logs remain ANSI-free.
-- `migrate-pod` stops with an already-satisfied check when the Pod uses the requested target node and every PVC keeps its current StorageClass. Use `--force-reprovision` for an intentional backing-PV replacement on the same node and StorageClass.
-- Tool Pod logs stream to stderr by default and remain available in the command output after short-lived Pods are removed. Use `--stream-tool-logs=false` for quiet automation.
-- Each tool-backed stage runs a short-lived probe Pod on every selected source and target node before starting the stage. Image pull, scheduling, security-context, shell, rsync, SSHD, and rclone failures retain the session record and surface before data transfer or workload mutation; backup and restore probes run while their operation lock is held.
-- For any active OpenEBS LVM LocalPV, warm copy reads the actual source PV and its `LVMVolume.spec.shared`; the workload adapter and StorageClass defaults do not determine this state. If the volume is unshared, use `migrate-pod --precopy-passes 0` to skip warm copy and proceed directly to controlled cutover and final sync, or explicitly pass `--openebs-lvm-enable-shared` to temporarily set `shared=yes` and verify a same-node second-Pod read-write mount. The original source setting is restored after every warm-copy attempt, including failures.
-- The planner separately counts each destination PVC's consumers inside the selected migration unit. When multiple Pods will mount one RWO PVC and the destination StorageClass predicts OpenEBS LVM, `--openebs-lvm-enable-shared` authorizes the operation. Execution verifies the provisioned destination PV and matching LVMVolume, then keeps `spec.shared=yes` for the resumed application. This behavior is independent of the workload adapter and provides same-node multi-mount capability, not cross-node RWX storage. The plan rejects matching required Pod anti-affinity and `DoNotSchedule` topology-spread rules when they prevent every consumer from running on that node.
-- Session state is stored in `pvc-migrate-session-<id>` ConfigMaps.
-- Session ConfigMaps carry a protection finalizer and are deleted through validated session cleanup.
-- Every mutating session command uses a renewable Kubernetes Lease for exclusive ownership.
-- PVC and PV mutations verify recorded UIDs, bindings, and session ownership.
-- Source and destination PVs use `Retain` throughout cutover and rollback.
-- Replacement PVCs receive API-server dry-run validation before activation.
-- Recreated PVC workflows reject unknown custom finalizers during planning; Kubernetes PVC protection remains controller-managed, stale CSI binding metadata is omitted, and the external resizer writes its annotation when a later expansion begins.
-- A failure after workload pause preserves the paused workload and its resumable session.
-- `<workflow> abort` restores a paused workload before activation and retains staged storage for cleanup.
-- `<workflow> rollback` restores application PVC identities to the retained source PVs when that workflow changes PVC identity.
-- `<workflow> cleanup --finalize` restores the active PV reclaim policy and releases session ownership.
-
-## Command Reference
-
-| Command | Purpose |
-| --- | --- |
-| `<operation> plan` | Validate an operation and print its resource inventory |
-| `reserve` | Optionally provision and retain staged destination PVCs in one tenant namespace before a later copy or cutover |
-| `cluster-reserve` | Provision and retain destination PVCs across namespaces |
-| `copy` | Run a resumable offline copy or one online warm-copy pass without cutover, in one tenant namespace |
-| `cluster-copy` | Run a cross-namespace finite copy without workload cutover |
-| `cluster-copy cross` | Copy PVC data between two Kubernetes clusters with separate source and destination connections |
-| `cluster-reserve cross` | Provision destination PVCs in another cluster and persist a cross-cluster session |
-| `migrate` | Run an offline reserve, final sync, activation, and completion in one tenant namespace |
-| `cluster-migrate` | Run a cross-namespace offline reserve, final sync, activation, and completion |
-| `migrate-pod` | Run real-time warm copy, workload pause, cutover, and resume for one Pod |
-| `rename` | Rename one offline PVC while retaining its PV |
-| `move` | Move one offline PVC identity within or across namespaces |
-| `backup` | Copy PVC files to S3-compatible object storage (`--online` keeps active consumers running) |
-| `restore` | Restore a published recovery point into a PVC |
-| `migrate`/`cluster-migrate` status/resume/abort/rollback/cleanup | Manage offline migration sessions of one record scope |
-| `migrate-pod status/resume/abort/rollback/cleanup` | Manage a real-time Pod migration session |
-| `reserve/copy/backup/rename/move status/resume/abort/cleanup` | Manage the lifecycle actions supported by each workflow |
-| `cluster-reserve`/`cluster-copy` status/resume/abort/cleanup | Manage cross-namespace reservation and copy sessions |
-| `cluster-copy cross` / `cluster-reserve cross` lifecycle commands | Inspect, continue, or clean up a cross-cluster session |
-| `recovery cleanup-orphan` | Validate and clear ownership after a session record was lost |
-| `controller` | Run the controller-runtime reconciliation loop for the installed local workflow CRDs |
-| `completion` | Generate shell completion |
-| `version` | Print version information |
-
-Read-only commands omit `--dry-run`. Mutating commands expose a local `--dry-run` flag that defaults to `true`. Table, JSON, and YAML output formats are available for automation.
-
-Stable exit codes are validation `2`, precondition `3`, conflict `4`, Kubernetes `5`, copy `6`, timeout `7`, and internal `1`.
-
-## Direct Copy
-
-The default `copy` mode requires zero active Pod consumers. `copy --online` allows active consumers for one finite warm-copy pass. Both modes finish after data copy and leave application PVC identities unchanged. `migrate` and `migrate-pod` provide managed final sync and cutover.
-
-The planner infers the source tool node from active consumers and selects a Ready, schedulable target node that satisfies Pod scheduling, StorageClass topology, and available CSI capacity signals. `--target-node` accepts a node name or `auto`; `auto` is the default and prefers nodes with sufficient reported capacity and then a node different from the source. `--source-node` supplies an explicit node when the storage backend requires one. RWOP consumers and consumers spread across multiple nodes require separate sessions or an application-specific workflow.
-
-`--capacity-awareness=auto` is the default. Matching `CSIStorageCapacity` objects enforce reported capacity and `maximumVolumeSize`; missing capacity information produces a warning and reservation performs the final provisioning check. `require` makes missing capacity information a failed plan, and `off` disables the API lookup.
-
-```bash
-pvc-migrate cluster-copy --dry-run=false \
-  --source-namespace application \
-  --destination-namespace archive \
-  --source-pvc database-data \
-  --destination-storage-class fast \
-  --target-node worker-b
-
-pvc-migrate cluster-copy --dry-run=false --online \
-  --source-namespace application \
-  --destination-namespace archive \
-  --source-pvc database-data \
-  --source-node worker-a \
-  --target-node worker-b
-```
-
-Cross-namespace copies select the `cluster-copy` family and reuse the source PVC name by default. Same-namespace copies use `copy -n <tenant-namespace>` and generate a session-suffixed destination name unless `--destination-pvc` is supplied.
-For multiple explicit destination names, pass `--destination-pvc source-pvc-name=destination-pvc-name` once per source PVC; mappings must be complete and unique.
-
-### Partial Directory Transfers
-
-`reserve`, `copy`, `migrate`, and `migrate-pod` accept optional `--source-path` and `--destination-path` directory scopes. Omit both flags to copy the full PVC. Paths are relative to the PVC root, and `.` selects the root. A single-PVC operation accepts a bare path; multi-PVC operations use explicit `source-pvc-name=relative-path` mappings. Unmapped PVCs keep the full-volume scope.
-
-Continuing a reservation with `copy --session ID` (or `cluster-copy --session
-ID` for a cross-namespace reservation) retains its paths, source node,
-strategies, checksum setting, and deletion policy in both persistence modes.
-Explicit `--source-node`, `--strategy`, `--verify-checksum`, and
-`--delete-extraneous` flags override those transfer settings during the hand-off.
-
-```bash
-pvc-migrate copy --dry-run=false \
-  --namespace application \
-  --source-pvc database-data \
-  --source-path mysql/current \
-  --destination-path restored/mysql
-
-pvc-migrate migrate-pod plan \
-  --namespace application \
-  --pod database-1 \
-  --source-path data=mysql/current \
-  --destination-path data=. \
-  --source-path logs=archive/current \
-  --destination-path logs=restored/logs
-```
-
-Each scope is persisted in the session and reused by warm copy, final sync, checksum verification, and resume. Execution verifies that source directories exist, creates nested destination directories, and rejects a selected path containing a symbolic-link component. `--delete-extraneous` remains confined to the selected destination directory. An orchestrated partial transfer still replaces the whole application PVC at cutover, so files outside each selected source directory are absent from the destination by explicit request.
-
-### Cross-Cluster Copy
-
-Cross-cluster workflows use explicit subcommands and keep their session state on the source cluster. The destination kubeconfig is required, and the source and destination cluster identities must differ. StorageClass objects are read-only inputs; their parameters are never changed.
-
-```bash
-pvc-migrate cluster-copy cross plan \
+pvc-migrate cluster-copy cross --dry-run=false \
   --source-kubeconfig ~/.kube/source \
   --destination-kubeconfig ~/.kube/destination \
-  --source-namespace application \
-  --source-pvc database-data \
-  --destination-namespace archive \
-  --destination-pvc database-data \
+  --source-namespace application --source-pvc database-data \
+  --destination-namespace archive --destination-pvc database-data \
   --destination-storage-class fast
-
-pvc-migrate cluster-copy cross \
-  --source-kubeconfig ~/.kube/source \
-  --destination-kubeconfig ~/.kube/destination \
-  --source-namespace application \
-  --source-pvc database-data \
-  --destination-namespace archive \
-  --destination-pvc database-data \
-  --destination-storage-class fast \
-  --dry-run=false
 ```
 
-Use `cluster-reserve cross` to provision and inspect destination PVCs before copying. `cluster-reserve cross status/resume/cleanup` and `cluster-copy cross status/resume/cleanup` require both connections so resource identities can be verified on each cluster. Multiple PVCs use explicit `source=destination`, `source=capacity`, and `source=path` mappings. Cross-cluster shrink keeps the same safety defaults as local copy: `--allow-volume-shrink` and an explicit `--skip-source-usage-check` are required when no trusted usage reader exists.
+## Safety
 
-Set storage mappings and transfer paths when creating the reservation. Continuing with `cluster-copy cross --session ID` reuses that recorded plan and rejects planning flags. Before the first transfer, explicit `--verify-checksum`, `--delete-extraneous`, `--online`, `--strategy`, and `--tool-image` flags configure the copy; omitted flags preserve recorded settings. Once transfer starts, retries retain those settings. Use a new session to change them.
+- Dry-run is the default everywhere: execution requires an explicit `--dry-run=false`, and workload pause and storage identity changes additionally require `--yes` or interactive approval.
+- Ownership fences: renewable Kubernetes Leases give one session exclusive ownership, and PVC/PV mutations verify recorded UIDs, bindings, and session ownership, preventing two workflows from touching the same PVC.
+- The source PV is retained after cutover for a rollback window; `<workflow> rollback` restores the original identities, and `<workflow> cleanup --finalize` applies the recorded reclaim policies and releases ownership.
+- Session commands resume from their persisted phase after interruption, and behavior against real clusters is covered by the unit test suite (`make test`).
 
-### Destination Capacity
-
-`reserve`, `copy`, `migrate`, and `migrate-pod` accept `--destination-capacity` because they create destination PVCs. Omit it to keep each source PV capacity. Pass one value to apply it to every source PVC, or use explicit `source-pvc-name=capacity` entries for multiple PVCs. Plans and workflow-specific `status` commands show both source and destination capacities.
-
-The planner rejects a destination smaller than its source PV by default. Add `--allow-volume-shrink` only after confirming that the copied data fits in every smaller PVC. pvc-migrate never mounts a source volume to measure usage during planning or execution. It accepts usage only from a trusted adapter for a known storage-backend CRD; provisioned capacity is not treated as used bytes. When no trusted adapter is available, the plan is blocked unless `--skip-source-usage-check` explicitly accepts the risk. The current release has no trusted usage adapter for OpenEBS LVM, OpenEBS HostPath, or S3 CSI because their CRDs do not expose per-volume filesystem usage. These flags apply only to a new session and cannot change an existing session. `rename` and `move` preserve PVC identity and do not expose capacity flags.
-
-Destination PVCs retain the source access modes. Plans enforce the known
-OpenEBS LocalPV contracts: `openebs.io/local` accepts `ReadWriteOnce`, while
-`local.csi.openebs.io` accepts `ReadWriteOnce` and `ReadWriteOncePod`. Choose a
-StorageClass whose driver supports the source modes. Capabilities of unknown
-CSI provisioners are validated by their own admission path.
-
-`copy`, `reserve`, and offline `migrate` can use a different destination capacity. Real-time
-`migrate-pod` keeps the Pod PVC identities in the source namespace and rejects destination
-namespace/PVC overrides. For a KubeBlocks `migrate-pod`, capacity is controlled by the Cluster
-component template; update that template and create a new session after cleanup when the
-destination is too small. Other real-time workloads use the requested destination capacity.
+## Development
 
 ```bash
-pvc-migrate copy --dry-run=false \
-  --namespace application \
-  --source-pvc database-data \
-  --destination-capacity 200Gi
-
-# For a Pod with two PVCs, map each source PVC by name.
-pvc-migrate migrate-pod plan \
-  --namespace application \
-  --pod database-1 \
-  --destination-capacity data=200Gi \
-  --destination-capacity logs=256Gi
-
-pvc-migrate copy --dry-run=false \
-  --namespace application \
-  --source-pvc database-data \
-  --destination-capacity 32Gi \
-  --allow-volume-shrink \
-  --skip-source-usage-check
+make test        # run the Go test suite
+make manifests   # regenerate deepcopy code and CRDs, sync them into the chart
+make chart-lint  # helm lint plus chart deployment-contract tests
 ```
-
-## Backup and Restore
-
-`backup` performs an offline file-consistent copy by default. Add `--online` for a best-effort crash-consistent file copy while source consumers remain active. Each completed backup publishes an immutable recovery point under a unique `--name`.
-
-The completion manifest records the source PVC identity, capacity, VolumeMode, path, consistency boundary, object count, total bytes, and inventory digest. Restore validates the manifest and inventory before and after synchronization. The requested `--path` must match the published path.
-
-Session-mode S3-compatible credentials can come from the AWS default credential
-chain, explicit credential flags, or a Kubernetes Secret selected with
-`--credentials-secret`. Controller-mode Backup and Restore require a
-namespaced `BackupRepository`; the selected backend configuration, endpoint,
-provider, region, bucket, prefix, and credentials are taken from that repository
-and cannot be overridden by the workflow. The current controller executes only
-the `s3` backend; `pvc` is reserved for a future data-plane adapter.
-
-```bash
-pvc-migrate --kubeconfig /path/to/kubeconfig \
-  backup --online --dry-run=false \
-  --namespace application \
-  --source-pvc database-data \
-  --backend s3 \
-  --bucket pvc-backups \
-  --endpoint https://s3.example.com \
-  --name database-20260809 \
-  --path mysql/current
-
-pvc-migrate --kubeconfig /path/to/kubeconfig \
-  restore --dry-run=false \
-  --namespace application \
-  --destination-pvc database-restore \
-  --backend s3 \
-  --bucket pvc-backups \
-  --endpoint https://s3.example.com \
-  --name database-20260809 \
-  --path mysql/current
-```
-
-By default, restore requires an existing destination PVC. To create the PVC, use `--create-pvc` and
-`--destination-storage-class`. Automatic creation uses the backup capacity and `ReadWriteOnce` by
-default; `--destination-access-mode` selects another mode. `--destination-capacity` can increase the capacity and cannot decrease it. Use
-`--target-node` when a local or `WaitForFirstConsumer` volume must bind on a selected node. A failed
-restore keeps its automatically created PVC for a retry with the same recovery-point parameters.
-Restore rejects a same-named PVC from another restore.
-
-`backup` and `restore` use `--path` for one PVC subdirectory. The restore path must match the path recorded in the immutable completion manifest. Omitting `--path` selects the full PVC.
-
-Online backup provides a best-effort crash-consistent file copy. Application-consistent database recovery requires quiescence, a filesystem snapshot, or a database-native backup. File contents and paths are preserved; POSIX ownership, permissions, ACLs, extended attributes, hard links, device files, and empty directories remain outside the backup contract.
-
-Offline backup and restore require the workload owner to remain quiesced for the complete operation because controllers can recreate PVC consumers after preflight.
-
-## Operational Boundaries
-
-- Filesystem PVCs define the persistent-data boundary.
-- Pod `emptyDir` volumes follow their Kubernetes ephemeral lifecycle.
-- Offline `migrate` uses one terminal sync after the caller stops PVC consumers.
-- `migrate-pod` uses finite warm-copy passes followed by a workload-controlled final sync.
-- Database-native CDC, WAL tailing, and continuous file watching remain application responsibilities.
-- Storage backend cleanup follows the active reclaim policy and CSI implementation.
