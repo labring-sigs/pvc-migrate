@@ -27,7 +27,7 @@ func (r *rootState) newOfflineMigrationStatusCommand() *cobra.Command {
 			defer cancel()
 
 			if len(args) == 1 {
-				object, _, err := r.loadMigrationWithBackend(ctx, cmd, runtime, args[0])
+				object, backend, err := r.loadMigrationWithBackend(ctx, cmd, runtime, args[0])
 				if err != nil {
 					return err
 				}
@@ -36,7 +36,7 @@ func (r *rootState) newOfflineMigrationStatusCommand() *cobra.Command {
 					return err
 				}
 
-				return writeOfflineMigrationNextSteps(cmd, object)
+				return writeOfflineMigrationNextSteps(cmd, r, backend, object)
 			}
 
 			namespace := r.workflowStorageNamespace(cmd)
@@ -219,10 +219,10 @@ func (r *rootState) newOfflineMigrationAbortCommand() *cobra.Command {
 			}
 
 			if dryRun {
-				return writeOfflineMigrationDryRunNotice(cmd, object, "abort")
+				return writeOfflineMigrationDryRunNotice(cmd, r, backend, object, "abort")
 			}
 
-			return writeOfflineMigrationNextSteps(cmd, object)
+			return writeOfflineMigrationNextSteps(cmd, r, backend, object)
 		},
 	}
 
@@ -295,10 +295,10 @@ func (r *rootState) newOfflineMigrationRollbackCommand() *cobra.Command {
 			}
 
 			if dryRun {
-				return writeOfflineMigrationDryRunNotice(cmd, object, "rollback")
+				return writeOfflineMigrationDryRunNotice(cmd, r, backend, object, "rollback")
 			}
 
-			return writeOfflineMigrationNextSteps(cmd, object)
+			return writeOfflineMigrationNextSteps(cmd, r, backend, object)
 		},
 	}
 
@@ -401,7 +401,7 @@ func (r *rootState) newOfflineMigrationCleanupCommand() *cobra.Command {
 					cleanupExecuteCommand(
 						guidancePrefixesForCommand(
 							cmd,
-							offlineMigrationHintNamespace(object),
+							workflowHintNamespace(backend, r, cmd, object),
 						).pvcMigrate,
 						"migrate",
 						object.GetName(),
@@ -426,53 +426,39 @@ func (r *rootState) newOfflineMigrationCleanupCommand() *cobra.Command {
 	return command
 }
 
-// offlineMigrationHintNamespace resolves the namespace a suggested migrate
-// command needs to find this workflow again, across both object shapes.
-func offlineMigrationHintNamespace(object crclient.Object) string {
-	switch current := object.(type) {
-	case *v1alpha1.ClusterMigration:
-		return clusterMigrationStorageNamespace(current)
-	case *v1alpha1.Migration:
-		return current.Namespace
-	default:
-		return ""
-	}
-}
-
-func offlineMigrationPhase(object crclient.Object) domain.Phase {
-	switch current := object.(type) {
-	case *v1alpha1.Migration:
-		return current.Status.Phase
-	case *v1alpha1.ClusterMigration:
-		return current.Status.Phase
-	default:
-		return ""
-	}
-}
-
 func writeOfflineMigrationNextSteps(
 	cmd *cobra.Command,
+	r *rootState,
+	backend string,
 	object crclient.Object,
 ) error {
 	return writeWorkflowNextSteps(
 		cmd.ErrOrStderr(),
-		guidancePrefixesForCommand(cmd, offlineMigrationHintNamespace(object)).pvcMigrate,
+		guidancePrefixesForCommand(
+			cmd,
+			workflowHintNamespace(backend, r, cmd, object),
+		).pvcMigrate,
 		"migrate",
 		object.GetName(),
-		offlineMigrationPhase(object),
+		workflowObjectPhase(object),
 		true,
 	)
 }
 
 func writeOfflineMigrationDryRunNotice(
 	cmd *cobra.Command,
+	r *rootState,
+	backend string,
 	object crclient.Object,
 	subcommand string,
 ) error {
 	return writeDryRunNotice(
 		cmd.ErrOrStderr(),
 		lifecycleExecuteCommand(
-			guidancePrefixesForCommand(cmd, offlineMigrationHintNamespace(object)).pvcMigrate,
+			guidancePrefixesForCommand(
+				cmd,
+				workflowHintNamespace(backend, r, cmd, object),
+			).pvcMigrate,
 			"migrate",
 			subcommand,
 			object.GetName(),

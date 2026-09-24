@@ -75,37 +75,6 @@ func (r *rootState) loadReservationWithBackend(
 	}
 }
 
-// reservationHintNamespace resolves the namespace a suggested reserve
-// command needs to find this workflow again, across both object shapes.
-func reservationHintNamespace(
-	backend string,
-	r *rootState,
-	cmd *cobra.Command,
-	object crclient.Object,
-) string {
-	if current, ok := object.(*v1alpha1.ClusterReservation); ok {
-		namespace := string(current.Spec.SessionNamespace)
-		if namespace == "" {
-			namespace = string(current.Spec.SourceNamespace)
-		}
-
-		return namespace
-	}
-
-	return workflowLeaseNamespace(backend, r.workflowStorageNamespace(cmd), object)
-}
-
-func reservationPhase(object crclient.Object) domain.Phase {
-	switch current := object.(type) {
-	case *v1alpha1.Reservation:
-		return current.Status.Phase
-	case *v1alpha1.ClusterReservation:
-		return current.Status.Phase
-	default:
-		return ""
-	}
-}
-
 func (r *rootState) newReserveStatusCommand() *cobra.Command {
 	return &cobra.Command{
 		Use:   "status [SESSION]",
@@ -134,11 +103,11 @@ func (r *rootState) newReserveStatusCommand() *cobra.Command {
 					cmd.ErrOrStderr(),
 					guidancePrefixesForCommand(
 						cmd,
-						reservationHintNamespace("", r, cmd, object),
+						workflowHintNamespace("", r, cmd, object),
 					).pvcMigrate,
 					"reserve",
 					object.GetName(),
-					reservationPhase(object),
+					workflowObjectPhase(object),
 					false,
 				)
 			}
@@ -356,7 +325,7 @@ func (r *rootState) newReserveAbortCommand() *cobra.Command {
 				lifecycleExecuteCommand(
 					guidancePrefixesForCommand(
 						cmd,
-						reservationHintNamespace(backend, r, cmd, object),
+						workflowHintNamespace(backend, r, cmd, object),
 					).pvcMigrate,
 					"reserve",
 					"abort",
@@ -369,11 +338,11 @@ func (r *rootState) newReserveAbortCommand() *cobra.Command {
 			cmd.ErrOrStderr(),
 			guidancePrefixesForCommand(
 				cmd,
-				reservationHintNamespace(backend, r, cmd, object),
+				workflowHintNamespace(backend, r, cmd, object),
 			).pvcMigrate,
 			"reserve",
 			object.GetName(),
-			reservationPhase(object),
+			workflowObjectPhase(object),
 			false,
 		)
 	}
@@ -506,7 +475,7 @@ func (r *rootState) newReserveCleanupCommand() *cobra.Command {
 				cleanupExecuteCommand(
 					guidancePrefixesForCommand(
 						cmd,
-						reservationHintNamespace(backend, r, cmd, object),
+						workflowHintNamespace(backend, r, cmd, object),
 					).pvcMigrate,
 					"reserve",
 					object.GetName(),

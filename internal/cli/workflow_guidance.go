@@ -5,8 +5,10 @@ import (
 	"io"
 	"strings"
 
+	v1alpha1 "github.com/labring-sigs/pvc-migrate/api/v1alpha1"
 	"github.com/labring-sigs/pvc-migrate/internal/domain"
 	"github.com/spf13/cobra"
+	crclient "sigs.k8s.io/controller-runtime/pkg/client"
 )
 
 // workflowTerminalPhase reports whether a workflow phase closes the lifecycle:
@@ -46,7 +48,7 @@ func writeWorkflowNextSteps(
 	}
 
 	lines := []string{
-		"  Inspect: " + workflowStatusCommand(prefix, workflow, session),
+		"  Inspect: " + prefix + " " + workflow + " status " + shellQuote(session),
 	}
 
 	if phase == domain.PhaseCompleted && rollback {
@@ -166,8 +168,61 @@ func crossClusterExecuteCommand(cmd *cobra.Command, path, session string) string
 	return strings.Join(args, " ")
 }
 
-func workflowStatusCommand(prefix, workflow, session string) string {
-	return prefix + " " + workflow + " status " + shellQuote(session)
+// workflowHintNamespace resolves the namespace a suggested command needs to
+// find this workflow again, across every workflow object shape: cluster
+// workflows carry their storage namespace in the spec, while namespaced and
+// session-backed records resolve through the lease namespace.
+func workflowHintNamespace(
+	backend string,
+	r *rootState,
+	cmd *cobra.Command,
+	object crclient.Object,
+) string {
+	switch current := object.(type) {
+	case *v1alpha1.ClusterMigration:
+		return clusterMigrationStorageNamespace(current)
+	case *v1alpha1.ClusterReservation:
+		return clusterWorkflowSpecNamespace(
+			string(current.Spec.SessionNamespace),
+			string(current.Spec.SourceNamespace),
+		)
+	case *v1alpha1.ClusterCopy:
+		return clusterWorkflowSpecNamespace(
+			string(current.Spec.SessionNamespace),
+			string(current.Spec.SourceNamespace),
+		)
+	default:
+		return workflowLeaseNamespace(backend, r.workflowStorageNamespace(cmd), object)
+	}
+}
+
+func clusterWorkflowSpecNamespace(sessionNamespace, sourceNamespace string) string {
+	if sessionNamespace != "" {
+		return sessionNamespace
+	}
+
+	return sourceNamespace
+}
+
+// workflowObjectPhase reads the workflow phase from any workflow object
+// shape; guidance renderers stay shape-agnostic.
+func workflowObjectPhase(object crclient.Object) domain.Phase {
+	switch current := object.(type) {
+	case *v1alpha1.Migration:
+		return current.Status.Phase
+	case *v1alpha1.ClusterMigration:
+		return current.Status.Phase
+	case *v1alpha1.Reservation:
+		return current.Status.Phase
+	case *v1alpha1.ClusterReservation:
+		return current.Status.Phase
+	case *v1alpha1.Copy:
+		return current.Status.Phase
+	case *v1alpha1.ClusterCopy:
+		return current.Status.Phase
+	default:
+		return ""
+	}
 }
 
 func lifecycleExecuteCommand(prefix, workflow, subcommand, session string) string {

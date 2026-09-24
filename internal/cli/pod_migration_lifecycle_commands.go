@@ -102,15 +102,7 @@ func (r *rootState) newPodMigrationResumeCommand() *cobra.Command {
 					return err
 				}
 
-				return writeDryRunNotice(
-					cmd.ErrOrStderr(),
-					lifecycleExecuteCommand(
-						guidancePrefixesForCommand(cmd, object.GetNamespace()).pvcMigrate,
-						"migrate-pod",
-						"resume",
-						object.GetName(),
-					),
-				)
+				return writePodMigrationDryRunNotice(cmd, object, "resume")
 			}
 
 			if err := r.confirm(ctx, cmd, args[0]); err != nil {
@@ -167,15 +159,7 @@ func (r *rootState) newPodMigrationAbortCommand() *cobra.Command {
 					return err
 				}
 
-				return writeDryRunNotice(
-					cmd.ErrOrStderr(),
-					lifecycleExecuteCommand(
-						guidancePrefixesForCommand(cmd, object.GetNamespace()).pvcMigrate,
-						"migrate-pod",
-						"abort",
-						object.GetName(),
-					),
-				)
+				return writePodMigrationDryRunNotice(cmd, object, "abort")
 			}
 
 			if err := r.confirm(ctx, cmd, args[0]); err != nil {
@@ -228,15 +212,7 @@ func (r *rootState) newPodMigrationRollbackCommand() *cobra.Command {
 					return err
 				}
 
-				return writeDryRunNotice(
-					cmd.ErrOrStderr(),
-					lifecycleExecuteCommand(
-						guidancePrefixesForCommand(cmd, object.GetNamespace()).pvcMigrate,
-						"migrate-pod",
-						"rollback",
-						object.GetName(),
-					),
-				)
+				return writePodMigrationDryRunNotice(cmd, object, "rollback")
 			}
 
 			if err := r.confirm(ctx, cmd, args[0]); err != nil {
@@ -324,6 +300,24 @@ func (r *rootState) newPodMigrationCleanupCommand() *cobra.Command {
 	bindDryRun(command, &dryRun)
 
 	return command
+}
+
+// writePodMigrationDryRunNotice prints the execute form of the lifecycle
+// subcommand just previewed, resolved from the workflow's own namespace.
+func writePodMigrationDryRunNotice(
+	cmd *cobra.Command,
+	object crclient.Object,
+	subcommand string,
+) error {
+	return writeDryRunNotice(
+		cmd.ErrOrStderr(),
+		lifecycleExecuteCommand(
+			guidancePrefixesForCommand(cmd, object.GetNamespace()).pvcMigrate,
+			"migrate-pod",
+			subcommand,
+			object.GetName(),
+		),
+	)
 }
 
 func bindMigrationCleanupFlags(command *cobra.Command, options *app.MigrationCleanupOptions) {
