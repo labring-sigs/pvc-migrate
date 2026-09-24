@@ -2,7 +2,6 @@ package cli
 
 import (
 	"context"
-	"time"
 
 	v1alpha1 "github.com/labring-sigs/pvc-migrate/api/v1alpha1"
 	"github.com/labring-sigs/pvc-migrate/internal/domain"
@@ -632,30 +631,9 @@ func (r *rootState) newCRRenameCreateCommand() *cobra.Command {
 		Short: "Submit a Rename workflow for controller reconciliation",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			if object.Spec.SourcePVC.Name == "" {
-				return domain.NewError(
-					domain.ErrorValidation,
-					"cr rename create",
-					"--source-pvc is required",
-				)
-			}
-
-			if object.Spec.DestinationPVC.Name == "" {
-				return domain.NewError(
-					domain.ErrorValidation,
-					"cr rename create",
-					"--destination-pvc is required",
-				)
-			}
-
-			current := object.DeepCopy()
-			if current.Name == "" {
-				id, err := domain.NewSessionID(time.Now())
-				if err != nil {
-					return err
-				}
-
-				current.Name = id
+			current, err := buildRenameWorkflow(object, "cr rename create")
+			if err != nil {
+				return err
 			}
 
 			runtime, err := r.runtime()
@@ -731,31 +709,15 @@ func (r *rootState) newCRMoveCreateCommand() *cobra.Command {
 		Short: "Submit a Move workflow for controller reconciliation",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			object.Spec.SourceNamespace = v1alpha1.NamespaceName(sourceNamespace)
-			object.Spec.DestinationNamespace = v1alpha1.NamespaceName(destinationNamespace)
-
-			if object.Spec.SourcePVC.Name == "" || object.Spec.DestinationNamespace == "" {
-				return domain.NewError(
-					domain.ErrorValidation,
-					"cr move create",
-					"--source-pvc and --destination-namespace are required",
-				)
-			}
-
-			current := object.DeepCopy()
-
-			current.Spec.SessionNamespace = v1alpha1.NamespaceName(r.global.sessionNamespace)
-			if current.Spec.DestinationPVC.Name == "" {
-				current.Spec.DestinationPVC = nil
-			}
-
-			if current.Name == "" {
-				id, err := domain.NewSessionID(time.Now())
-				if err != nil {
-					return err
-				}
-
-				current.Name = id
+			current, err := buildMoveWorkflow(
+				object,
+				sourceNamespace,
+				destinationNamespace,
+				r.global.sessionNamespace,
+				"cr move create",
+			)
+			if err != nil {
+				return err
 			}
 
 			runtime, err := r.runtime()

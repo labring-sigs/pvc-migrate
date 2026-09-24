@@ -378,13 +378,7 @@ func (r *rootState) newOfflineMigrationCleanupCommand(source workflowSource) *co
 			}
 
 			if options.DeleteSession && !dryRun {
-				_, err := fmt.Fprintf(
-					cmd.OutOrStdout(),
-					"Deleted migration workflow %s.\n",
-					object.GetName(),
-				)
-
-				return err
+				return writeDeletedWorkflow(cmd, "migration workflow", object.GetName())
 			}
 
 			if err := runtime.printer.Print(object); err != nil {

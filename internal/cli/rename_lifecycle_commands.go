@@ -2,7 +2,6 @@ package cli
 
 import (
 	"context"
-	"fmt"
 	"slices"
 
 	v1alpha1 "github.com/labring-sigs/pvc-migrate/api/v1alpha1"
@@ -397,8 +396,7 @@ func (r *rootState) newRenameCleanupCommand(source workflowSource) *cobra.Comman
 		}
 
 		if options.DeleteSession {
-			_, err = fmt.Fprintf(cmd.OutOrStdout(), "Deleted rename workflow %s.\n", object.Name)
-			return err
+			return writeDeletedWorkflow(cmd, "rename workflow", object.Name)
 		}
 
 		return runtime.printer.Print(object)

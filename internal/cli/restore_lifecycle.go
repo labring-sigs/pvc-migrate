@@ -2,7 +2,6 @@ package cli
 
 import (
 	"context"
-	"fmt"
 	"slices"
 
 	v1alpha1 "github.com/labring-sigs/pvc-migrate/api/v1alpha1"
@@ -433,8 +432,7 @@ func (r *rootState) newRestoreCleanupCommand(source workflowSource) *cobra.Comma
 		}
 
 		if options.DeleteSession && !dryRun {
-			_, err := fmt.Fprintf(cmd.OutOrStdout(), "Deleted restore workflow %s.\n", object.Name)
-			return err
+			return writeDeletedWorkflow(cmd, "restore workflow", object.Name)
 		}
 
 		if err := printRepositoryWorkflowResult(
