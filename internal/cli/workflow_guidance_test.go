@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/labring-sigs/pvc-migrate/internal/domain"
+	"github.com/spf13/cobra"
 )
 
 func TestWriteWorkflowNextStepsCompletedWithRollback(t *testing.T) {
@@ -206,6 +207,156 @@ func TestCleanupExecuteCommandMirrorsOptions(t *testing.T) {
 	minimal := cleanupExecuteCommand("pvc-migrate", "copy", "mig-1", "", false, false)
 	if minimal != "pvc-migrate --yes copy cleanup mig-1 --dry-run=false" {
 		t.Fatalf("minimal cleanup command mismatch: %q", minimal)
+	}
+}
+
+func TestWriteControllerWorkflowNextSteps(t *testing.T) {
+	var output bytes.Buffer
+
+	if err := writeControllerWorkflowNextSteps(
+		&output,
+		"kubectl",
+		"migrations.migrate.sealos.io",
+		"sealos",
+		"mig 1",
+		domain.PhaseCompleted,
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	guidance := output.String()
+
+	if !strings.Contains(
+		guidance,
+		"\nNext steps for workflow migrations.migrate.sealos.io/mig 1 (phase Completed):\n",
+	) {
+		t.Fatalf("controller guidance lacks the titled header: %q", guidance)
+	}
+
+	for _, want := range []string{
+		"  Inspect: kubectl -n sealos get migrations.migrate.sealos.io 'mig 1'\n",
+		"  Finalize: kubectl -n sealos delete migrations.migrate.sealos.io 'mig 1'" +
+			" (the finalizer converges storage per the spec reclaim policies)\n",
+	} {
+		if !strings.Contains(guidance, want) {
+			t.Fatalf("controller guidance lacks %q: %q", want, guidance)
+		}
+	}
+
+	var cluster bytes.Buffer
+
+	if err := writeControllerWorkflowNextSteps(
+		&cluster,
+		"kubectl",
+		"clustermigrations.migrate.sealos.io",
+		"",
+		"mig-1",
+		domain.PhaseCompleted,
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	if !strings.Contains(
+		cluster.String(),
+		"  Inspect: kubectl get clustermigrations.migrate.sealos.io mig-1\n",
+	) {
+		t.Fatalf("cluster-scoped guidance must omit the namespace flag: %q", cluster.String())
+	}
+}
+
+func TestWriteControllerWorkflowNextStepsSilentOutsideTerminalPhases(t *testing.T) {
+	for _, phase := range []domain.Phase{
+		domain.PhasePlanned, domain.PhaseReserved, domain.PhaseWarmCopying, domain.PhaseFailed,
+	} {
+		var output bytes.Buffer
+
+		if err := writeControllerWorkflowNextSteps(
+			&output,
+			"kubectl",
+			"migrations.migrate.sealos.io",
+			"sealos",
+			"mig-1",
+			phase,
+		); err != nil {
+			t.Fatal(err)
+		}
+
+		if output.Len() != 0 {
+			t.Fatalf("%s controller guidance must stay silent: %q", phase, output.String())
+		}
+	}
+}
+
+func TestWriteDryRunApprovalNotice(t *testing.T) {
+	var output bytes.Buffer
+
+	if err := writeDryRunApprovalNotice(&output); err != nil {
+		t.Fatal(err)
+	}
+
+	want := "Dry run: nothing was submitted or changed. " +
+		"Execute with the same command plus --yes and --dry-run=false.\n"
+
+	if output.String() != want {
+		t.Fatalf("approval notice mismatch: got %q want %q", output.String(), want)
+	}
+}
+
+func TestCrossClusterExecuteCommandCarriesChangedFlags(t *testing.T) {
+	command := cobra.Command{}
+	flags := command.Flags()
+	flags.String("source-kubeconfig", "/etc/source", "source")
+	flags.String("destination-kubeconfig", "", "destination")
+	flags.String("unused-storage-policy", "", "policy")
+	flags.Bool("delete-session", false, "delete")
+
+	if err := flags.Set("source-kubeconfig", "/etc/alt source"); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := flags.Set("delete-session", "true"); err != nil {
+		t.Fatal(err)
+	}
+
+	got := crossClusterExecuteCommand(&command, "copy cross-cluster cleanup", "mig-1")
+
+	want := "pvc-migrate --yes copy cross-cluster cleanup mig-1" +
+		" --source-kubeconfig='/etc/alt source' --delete-session=true --dry-run=false"
+	if got != want {
+		t.Fatalf("cross-cluster command mismatch: got %q want %q", got, want)
+	}
+}
+
+func TestControllerWorkflowGuidanceColorization(t *testing.T) {
+	var output bytes.Buffer
+
+	if err := writeControllerWorkflowNextSteps(
+		&output,
+		"kubectl",
+		"migrations.migrate.sealos.io",
+		"sealos",
+		"mig-1",
+		domain.PhaseCompleted,
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	colored := string(colorizeLogText(output.Bytes()))
+
+	for _, want := range []string{
+		"\x1b[1;36mNext steps for workflow migrations.migrate.sealos.io/mig-1 (phase \x1b[0m",
+		"\x1b[1;32mCompleted\x1b[0m",
+		"\x1b[36mInspect:\x1b[0m kubectl",
+		"\x1b[1;31mFinalize:\x1b[0m kubectl",
+	} {
+		if !strings.Contains(colored, want) {
+			t.Fatalf("colored controller guidance lacks %q: %q", want, colored)
+		}
+	}
+
+	plain := regexp.MustCompile(`\x1b\[[0-9;]*m`).ReplaceAllString(colored, "")
+	if plain != output.String() {
+		t.Fatalf("colorization changed controller guidance: got %q want %q", plain, output.String())
 	}
 }
 

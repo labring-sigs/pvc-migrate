@@ -25,7 +25,7 @@ var (
 	componentToken = regexp.MustCompile(`(^|[ \t])component=("[^"]*"|[^\s]+)`)
 	toolPrefix     = regexp.MustCompile(`\[tool [^\]\r\n]+\]`)
 	guidanceTitle  = regexp.MustCompile(
-		`^(\s*Next steps for session .+ \(phase )([^)]+)(\):\s*)$`,
+		`^(\s*Next steps for (?:session|workflow) .+ \(phase )([^)]+)(\):\s*)$`,
 	)
 	guidanceCompletedToken = regexp.MustCompile(`(?i)\bcompleted\b`)
 	componentColors        = map[string]string{

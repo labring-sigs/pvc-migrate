@@ -187,12 +187,24 @@ func (r *rootState) newRestoreResumeCommand() *cobra.Command {
 				return err
 			}
 
-			return printRepositoryWorkflowResult(
+			if err := printRepositoryWorkflowResult(
 				cmd,
 				runtime,
 				object,
 				"restore",
 				namespace,
+			); err != nil {
+				return err
+			}
+
+			return writeDryRunNotice(
+				cmd.ErrOrStderr(),
+				lifecycleExecuteCommand(
+					guidancePrefixesForCommand(cmd, namespace).pvcMigrate,
+					"restore",
+					"resume",
+					object.Name,
+				),
 			)
 		}
 
@@ -330,13 +342,29 @@ func (r *rootState) newRestoreAbortCommand() *cobra.Command {
 			)
 		}
 
-		return printRepositoryWorkflowResult(
+		if err := printRepositoryWorkflowResult(
 			cmd,
 			runtime,
 			object,
 			"restore",
 			namespace,
-		)
+		); err != nil {
+			return err
+		}
+
+		if dryRun {
+			return writeDryRunNotice(
+				cmd.ErrOrStderr(),
+				lifecycleExecuteCommand(
+					guidancePrefixesForCommand(cmd, namespace).pvcMigrate,
+					"restore",
+					"abort",
+					object.Name,
+				),
+			)
+		}
+
+		return nil
 	}
 	bindDryRun(command, &dryRun)
 
@@ -398,13 +426,31 @@ func (r *rootState) newRestoreCleanupCommand() *cobra.Command {
 			return err
 		}
 
-		return printRepositoryWorkflowResult(
+		if err := printRepositoryWorkflowResult(
 			cmd,
 			runtime,
 			object,
 			"restore",
 			r.workflowStorageNamespace(cmd),
-		)
+		); err != nil {
+			return err
+		}
+
+		if dryRun {
+			return writeDryRunNotice(
+				cmd.ErrOrStderr(),
+				cleanupExecuteCommand(
+					guidancePrefixesForCommand(cmd, r.workflowStorageNamespace(cmd)).pvcMigrate,
+					"restore",
+					object.Name,
+					"",
+					options.Finalize,
+					options.DeleteSession,
+				),
+			)
+		}
+
+		return nil
 	}
 	command.Flags().BoolVar(
 		&options.Finalize,

@@ -133,7 +133,11 @@ func (r *rootState) runBackupObject(
 	// reconciler. The submitting process never touches the data plane.
 	if submit {
 		if dryRun {
-			return runtime.printer.Print(object)
+			if err := runtime.printer.Print(object); err != nil {
+				return err
+			}
+
+			return writeDryRunApprovalNotice(cmd.ErrOrStderr())
 		}
 
 		if err := r.confirm(ctx, cmd, object.Spec.Name); err != nil {

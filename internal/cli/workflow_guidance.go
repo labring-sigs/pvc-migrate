@@ -3,8 +3,10 @@ package cli
 import (
 	"fmt"
 	"io"
+	"strings"
 
 	"github.com/labring-sigs/pvc-migrate/internal/domain"
+	"github.com/spf13/cobra"
 )
 
 // workflowTerminalPhase reports whether a workflow phase closes the lifecycle:
@@ -80,6 +82,88 @@ func writeDryRunNotice(w io.Writer, execute string) error {
 	)
 
 	return err
+}
+
+// writeControllerWorkflowNextSteps prints follow-ups for a workflow the
+// elected controller owns: inspection and finalization stay in kubectl,
+// because deleting the CR converges storage through the controller's
+// finalizer rather than a CLI lifecycle command.
+func writeControllerWorkflowNextSteps(
+	w io.Writer,
+	kubectlPrefix, resource, namespace, name string,
+	phase domain.Phase,
+) error {
+	if name == "" || !workflowTerminalPhase(phase) {
+		return nil
+	}
+
+	scope := ""
+	if namespace != "" {
+		scope = "-n " + namespace + " "
+	}
+
+	if _, err := fmt.Fprintf(
+		w,
+		"\nNext steps for workflow %s/%s (phase %s):\n",
+		resource,
+		name,
+		phase,
+	); err != nil {
+		return err
+	}
+
+	lines := []string{
+		"  Inspect: " + kubectlPrefix + " " + scope + "get " + resource + " " + shellQuote(name),
+		"  Finalize: " + kubectlPrefix + " " + scope + "delete " + resource + " " +
+			shellQuote(name) +
+			" (the finalizer converges storage per the spec reclaim policies)",
+	}
+
+	for _, line := range lines {
+		if _, err := fmt.Fprintln(w, line); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+// writeDryRunApprovalNotice explains a submission preview whose execute form
+// is the same invocation plus the approval flags; the operator's shell
+// history already carries the remaining inputs.
+func writeDryRunApprovalNotice(w io.Writer) error {
+	_, err := fmt.Fprintln(
+		w,
+		"Dry run: nothing was submitted or changed. "+
+			"Execute with the same command plus --yes and --dry-run=false.",
+	)
+
+	return err
+}
+
+// crossClusterExecuteCommand renders the execute form of a cross-cluster
+// lifecycle invocation, carrying over the connection flags the operator
+// changed so the suggestion reaches the same two clusters. path is the
+// command path below the root, e.g. "copy cross-cluster resume".
+func crossClusterExecuteCommand(cmd *cobra.Command, path, session string) string {
+	args := []string{"pvc-migrate", "--yes"}
+
+	args = append(args, strings.Fields(path)...)
+	args = append(args, shellQuote(session))
+
+	for _, name := range []string{
+		"source-kubeconfig", "source-context",
+		"destination-kubeconfig", "destination-context", "session-namespace",
+		"unused-storage-policy", "delete-session",
+	} {
+		if flag := cmd.Flags().Lookup(name); flag != nil && flag.Changed {
+			args = append(args, "--"+name+"="+shellQuote(flag.Value.String()))
+		}
+	}
+
+	args = append(args, "--dry-run=false")
+
+	return strings.Join(args, " ")
 }
 
 func workflowStatusCommand(prefix, workflow, session string) string {

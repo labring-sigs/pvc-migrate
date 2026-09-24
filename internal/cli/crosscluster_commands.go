@@ -117,7 +117,14 @@ func (r *rootState) newCrossClusterCopyResumeCommand() *cobra.Command {
 			}
 
 			if dryRun {
-				return r.crossPrinter().Print(session)
+				if err := r.crossPrinter().Print(session); err != nil {
+					return err
+				}
+
+				return writeDryRunNotice(
+					cmd.ErrOrStderr(),
+					crossClusterExecuteCommand(cmd, "copy cross-cluster resume", session.ID),
+				)
 			}
 
 			if err := service.Copy(
@@ -246,7 +253,7 @@ func (r *rootState) newCrossClusterCopyRunCommand() *cobra.Command {
 				}
 
 				if dryRun {
-					return nil
+					return writeDryRunApprovalNotice(cmd.ErrOrStderr())
 				}
 
 				session, err = service.CreateCopySession(ctx, options, plan)
@@ -257,7 +264,11 @@ func (r *rootState) newCrossClusterCopyRunCommand() *cobra.Command {
 			}
 
 			if dryRun {
-				return r.crossPrinter().Print(session)
+				if err := r.crossPrinter().Print(session); err != nil {
+					return err
+				}
+
+				return writeDryRunApprovalNotice(cmd.ErrOrStderr())
 			}
 
 			if err := service.Copy(
@@ -323,7 +334,14 @@ func (r *rootState) newCrossClusterCopyCleanupCommand() *cobra.Command {
 					return err
 				}
 
-				return r.crossPrinter().Print(session)
+				if err := r.crossPrinter().Print(session); err != nil {
+					return err
+				}
+
+				return writeDryRunNotice(
+					cmd.ErrOrStderr(),
+					crossClusterExecuteCommand(cmd, "copy cross-cluster cleanup", session.ID),
+				)
 			}
 
 			if !r.global.assumeYes {
