@@ -27,12 +27,16 @@ func (r *rootState) newOfflineMigrationStatusCommand() *cobra.Command {
 			defer cancel()
 
 			if len(args) == 1 {
-				object, _, err := r.loadMigrationWithBackend(ctx, cmd, runtime, args[0])
+				object, backend, err := r.loadMigrationWithBackend(ctx, cmd, runtime, args[0])
 				if err != nil {
 					return err
 				}
 
-				return runtime.printer.Print(object)
+				if err := runtime.printer.Print(object); err != nil {
+					return err
+				}
+
+				return writeOfflineMigrationNextSteps(cmd, r, backend, object)
 			}
 
 			namespace := r.workflowStorageNamespace(cmd)
@@ -210,7 +214,15 @@ func (r *rootState) newOfflineMigrationAbortCommand() *cobra.Command {
 				}
 			}
 
-			return runtime.printer.Print(object)
+			if err := runtime.printer.Print(object); err != nil {
+				return err
+			}
+
+			if dryRun {
+				return writeOfflineMigrationDryRunNotice(cmd, r, backend, object, "abort")
+			}
+
+			return writeOfflineMigrationNextSteps(cmd, r, backend, object)
 		},
 	}
 
@@ -278,7 +290,15 @@ func (r *rootState) newOfflineMigrationRollbackCommand() *cobra.Command {
 				}
 			}
 
-			return runtime.printer.Print(object)
+			if err := runtime.printer.Print(object); err != nil {
+				return err
+			}
+
+			if dryRun {
+				return writeOfflineMigrationDryRunNotice(cmd, r, backend, object, "rollback")
+			}
+
+			return writeOfflineMigrationNextSteps(cmd, r, backend, object)
 		},
 	}
 
@@ -371,7 +391,28 @@ func (r *rootState) newOfflineMigrationCleanupCommand() *cobra.Command {
 				return err
 			}
 
-			return runtime.printer.Print(object)
+			if err := runtime.printer.Print(object); err != nil {
+				return err
+			}
+
+			if dryRun {
+				return writeDryRunNotice(
+					cmd.ErrOrStderr(),
+					cleanupExecuteCommand(
+						guidancePrefixesForCommand(
+							cmd,
+							workflowHintNamespace(backend, r, cmd, object),
+						).pvcMigrate,
+						"migrate",
+						object.GetName(),
+						options.UnusedStoragePolicy,
+						options.Finalize,
+						options.DeleteSession,
+					),
+				)
+			}
+
+			return nil
 		},
 	}
 	command.Flags().
@@ -383,6 +424,46 @@ func (r *rootState) newOfflineMigrationCleanupCommand() *cobra.Command {
 	bindDryRun(command, &dryRun)
 
 	return command
+}
+
+func writeOfflineMigrationNextSteps(
+	cmd *cobra.Command,
+	r *rootState,
+	backend string,
+	object crclient.Object,
+) error {
+	return writeWorkflowNextSteps(
+		cmd.ErrOrStderr(),
+		guidancePrefixesForCommand(
+			cmd,
+			workflowHintNamespace(backend, r, cmd, object),
+		).pvcMigrate,
+		"migrate",
+		object.GetName(),
+		workflowObjectPhase(object),
+		true,
+	)
+}
+
+func writeOfflineMigrationDryRunNotice(
+	cmd *cobra.Command,
+	r *rootState,
+	backend string,
+	object crclient.Object,
+	subcommand string,
+) error {
+	return writeDryRunNotice(
+		cmd.ErrOrStderr(),
+		lifecycleExecuteCommand(
+			guidancePrefixesForCommand(
+				cmd,
+				workflowHintNamespace(backend, r, cmd, object),
+			).pvcMigrate,
+			"migrate",
+			subcommand,
+			object.GetName(),
+		),
+	)
 }
 
 func reportMigrationCleanupError(

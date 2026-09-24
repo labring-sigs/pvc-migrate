@@ -176,7 +176,7 @@ func writeTransferDryRunGuidance(
 ) error {
 	_, err := fmt.Fprintf(
 		w,
-		"\n%s dry-run completed without cluster mutations. Inspect the PVC with %s --namespace %s get pvc %s, then run the write command with --dry-run=false.\n",
+		"\n%s dry-run completed without cluster mutations. Inspect the PVC with %s --namespace %s get pvc %s, then rerun the same command with --dry-run=false and --yes (or typed approval) to execute.\n",
 		operation,
 		kubectlPrefix,
 		namespace,

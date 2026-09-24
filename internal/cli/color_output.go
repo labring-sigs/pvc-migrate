@@ -25,7 +25,7 @@ var (
 	componentToken = regexp.MustCompile(`(^|[ \t])component=("[^"]*"|[^\s]+)`)
 	toolPrefix     = regexp.MustCompile(`\[tool [^\]\r\n]+\]`)
 	guidanceTitle  = regexp.MustCompile(
-		`^(\s*Next steps for session .+ \(phase )([^)]+)(\):\s*)$`,
+		`^(\s*Next steps for (?:session|workflow) .+ \(phase )([^)]+)(\):\s*)$`,
 	)
 	guidanceCompletedToken = regexp.MustCompile(`(?i)\bcompleted\b`)
 	componentColors        = map[string]string{
@@ -227,7 +227,9 @@ func guidanceLabelColor(label string) string {
 		strings.HasPrefix(normalized, "inspect"),
 		strings.HasPrefix(normalized, "verify"):
 		return "36"
-	case strings.HasPrefix(normalized, "validate"), strings.HasPrefix(normalized, "cleanup action"):
+	case strings.HasPrefix(normalized, "validate"),
+		strings.HasPrefix(normalized, "cleanup action"),
+		strings.HasPrefix(normalized, "dry run"):
 		return "1;33"
 	case strings.HasPrefix(normalized, "continue"),
 		strings.HasPrefix(normalized, "resume"),

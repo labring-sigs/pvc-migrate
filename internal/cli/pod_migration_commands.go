@@ -9,6 +9,7 @@ import (
 	"github.com/labring-sigs/pvc-migrate/internal/domain"
 	"github.com/spf13/cobra"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	crclient "sigs.k8s.io/controller-runtime/pkg/client"
 )
 
 type podMigrationFlags struct {
@@ -452,24 +453,26 @@ func (r *rootState) runPodMigrateCommand(
 		return err
 	}
 
-	return writePodMigrationNextSteps(cmd, object.Name)
+	return writePodMigrationNextSteps(cmd, object)
 }
 
 // writePodMigrationNextSteps prints the lifecycle follow-ups after a finished
-// migration, mirroring the guidance the other transfer commands print.
-func writePodMigrationNextSteps(cmd *cobra.Command, session string) error {
-	_, err := fmt.Fprintf(
-		cmd.ErrOrStderr(),
-		"\nPod migration %s finished. Inspect it with `migrate-pod status %s`.\n"+
-			"Roll back the cutover with `migrate-pod rollback %s`, or finalize reclaimed storage with "+
-			"`migrate-pod cleanup %s --finalize --delete-session`.\n",
-		session,
-		session,
-		session,
-		session,
-	)
+// Pod migration: a terminal-phase block whose commands are copy-paste
+// executable, including the --yes and --dry-run=false approval flags.
+func writePodMigrationNextSteps(cmd *cobra.Command, object crclient.Object) error {
+	current, ok := object.(*v1alpha1.PodMigration)
+	if !ok {
+		return nil
+	}
 
-	return err
+	return writeWorkflowNextSteps(
+		cmd.ErrOrStderr(),
+		guidancePrefixesForCommand(cmd, current.Namespace).pvcMigrate,
+		"migrate-pod",
+		current.Name,
+		current.Status.Phase,
+		true,
+	)
 }
 
 func reportPodMigrationError(

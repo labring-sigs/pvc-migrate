@@ -219,7 +219,14 @@ func (r *rootState) newCrossClusterReserveResumeCommand() *cobra.Command {
 			}
 
 			if dryRun {
-				return r.crossPrinter().Print(session)
+				if err := r.crossPrinter().Print(session); err != nil {
+					return err
+				}
+
+				return writeDryRunNotice(
+					cmd.ErrOrStderr(),
+					crossClusterExecuteCommand(cmd, "reserve cross-cluster resume", session.ID),
+				)
 			}
 
 			if err := service.Reserve(ctx, session); err != nil {
@@ -295,7 +302,14 @@ func (r *rootState) newCrossClusterReserveCleanupCommand() *cobra.Command {
 					return err
 				}
 
-				return r.crossPrinter().Print(session)
+				if err := r.crossPrinter().Print(session); err != nil {
+					return err
+				}
+
+				return writeDryRunNotice(
+					cmd.ErrOrStderr(),
+					crossClusterExecuteCommand(cmd, "reserve cross-cluster cleanup", session.ID),
+				)
 			}
 
 			if !r.global.assumeYes {
@@ -435,7 +449,7 @@ func (r *rootState) newCrossClusterReserveRunCommand() *cobra.Command {
 				}
 
 				if dryRun {
-					return nil
+					return writeDryRunApprovalNotice(cmd.ErrOrStderr())
 				}
 
 				session, err = service.CreateReservationSession(ctx, options, plan)
@@ -446,7 +460,11 @@ func (r *rootState) newCrossClusterReserveRunCommand() *cobra.Command {
 			}
 
 			if dryRun {
-				return r.crossPrinter().Print(session)
+				if err := r.crossPrinter().Print(session); err != nil {
+					return err
+				}
+
+				return writeDryRunApprovalNotice(cmd.ErrOrStderr())
 			}
 
 			if err := service.Reserve(ctx, session); err != nil {

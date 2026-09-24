@@ -146,7 +146,11 @@ func (r *rootState) moveSubmissionCommand(planOnly, submit bool) *cobra.Command 
 			}
 
 			if dryRun {
-				return runtime.printer.Print(current)
+				if err := runtime.printer.Print(current); err != nil {
+					return err
+				}
+
+				return writeDryRunApprovalNotice(cmd.ErrOrStderr())
 			}
 
 			if err := r.confirm(ctx, cmd, current.Spec.SourcePVC.Name); err != nil {

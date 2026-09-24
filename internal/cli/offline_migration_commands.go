@@ -459,7 +459,18 @@ func (r *rootState) runOfflineMigrateCommand(
 		return reportMigrationError(cmd, object.Name, object.Status.Phase, err)
 	}
 
-	return runtime.printer.Print(object)
+	if err := runtime.printer.Print(object); err != nil {
+		return err
+	}
+
+	return writeWorkflowNextSteps(
+		cmd.ErrOrStderr(),
+		guidancePrefixesForCommand(cmd, namespace).pvcMigrate,
+		"migrate",
+		object.Name,
+		object.Status.Phase,
+		true,
+	)
 }
 
 func offlineApprovalIdentity(flags *offlineMigrationFlags) string {

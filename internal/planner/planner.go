@@ -45,6 +45,8 @@ type transferInput struct {
 // PodWorkloadDiscoverer resolves the workload adapter for a Pod. Defined here
 // to invert the dependency: the planner layer must not import the controller
 // package, which implements this on top of its k8s reconciliation machinery.
+// The presentation argument selects how field-spelling guidance renders, so
+// CLI planning quotes flags while controller planning records spec fields.
 type PodWorkloadDiscoverer interface {
 	DiscoverPod(
 		ctx context.Context,
@@ -53,6 +55,7 @@ type PodWorkloadDiscoverer interface {
 		expected v1alpha1.LocalResourceReference,
 		switchoverCandidate string,
 		allowLeaderDowntime bool,
+		presentation domain.Presentation,
 	) (v1alpha1.WorkloadSpec, error)
 }
 
@@ -230,6 +233,7 @@ func (p *Planner) validateStorageInputs(plan checkRecorder, options transferInpu
 	validateDestinationCapacityInputs(
 		plan, options.DestinationCapacity, options.Volumes,
 		options.AllowVolumeShrink, options.SkipSourceUsageCheck,
+		p.presentation(),
 	)
 }
 
@@ -295,6 +299,7 @@ func validateDestinationCapacityInputs(
 	destinationCapacity string,
 	volumes []v1alpha1.VolumeRequest,
 	allowVolumeShrink, skipSourceUsageCheck bool,
+	presentation domain.Presentation,
 ) {
 	capacities := make([]string, 0, len(volumes)+1)
 	if destinationCapacity != "" {
@@ -311,7 +316,8 @@ func validateDestinationCapacityInputs(
 		plan.AddCheck(
 			failed(
 				domain.CheckNameDestinationCapacity,
-				"--allow-volume-shrink requires --destination-capacity",
+				presentation.FieldRef("allowVolumeShrink")+" requires "+
+					presentation.FieldRef("destinationCapacity"),
 			),
 		)
 	}
@@ -320,7 +326,8 @@ func validateDestinationCapacityInputs(
 		plan.AddCheck(
 			failed(
 				domain.CheckNameDestinationCapacity,
-				"--skip-source-usage-check requires --allow-volume-shrink",
+				presentation.FieldRef("skipSourceUsageCheck")+" requires "+
+					presentation.FieldRef("allowVolumeShrink"),
 			),
 		)
 	}

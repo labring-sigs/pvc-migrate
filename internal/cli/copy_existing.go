@@ -237,7 +237,22 @@ func (r *rootState) executeCopy(
 		}
 
 		if !repeat {
-			return runtime.printer.Print(object)
+			if err := runtime.printer.Print(object); err != nil {
+				return err
+			}
+
+			return writeDryRunNotice(
+				cmd.ErrOrStderr(),
+				lifecycleExecuteCommand(
+					guidancePrefixesForCommand(
+						cmd,
+						workflowLeaseNamespace(backend, r.workflowStorageNamespace(cmd), object),
+					).pvcMigrate,
+					"copy",
+					"resume",
+					object.Name,
+				),
+			)
 		}
 
 		return printCopyDryRunResult(
@@ -268,7 +283,21 @@ func (r *rootState) executeCopy(
 		return reportCopyError(cmd, object.Name, object.Status.Phase, err)
 	}
 
-	return runtime.printer.Print(object)
+	if err := runtime.printer.Print(object); err != nil {
+		return err
+	}
+
+	return writeWorkflowNextSteps(
+		cmd.ErrOrStderr(),
+		guidancePrefixesForCommand(
+			cmd,
+			workflowLeaseNamespace(backend, r.workflowStorageNamespace(cmd), object),
+		).pvcMigrate,
+		"copy",
+		object.Name,
+		object.Status.Phase,
+		false,
+	)
 }
 
 func (r *rootState) executeClusterCopy(
@@ -307,7 +336,19 @@ func (r *rootState) executeClusterCopy(
 		}
 
 		if !repeat {
-			return runtime.printer.Print(object)
+			if err := runtime.printer.Print(object); err != nil {
+				return err
+			}
+
+			return writeDryRunNotice(
+				cmd.ErrOrStderr(),
+				lifecycleExecuteCommand(
+					guidancePrefixesForCommand(cmd, namespace).pvcMigrate,
+					"copy",
+					"resume",
+					object.Name,
+				),
+			)
 		}
 
 		return printCopyDryRunResult(cmd, runtime, object, namespace)
@@ -333,7 +374,18 @@ func (r *rootState) executeClusterCopy(
 		return reportCopyError(cmd, object.Name, object.Status.Phase, err)
 	}
 
-	return runtime.printer.Print(object)
+	if err := runtime.printer.Print(object); err != nil {
+		return err
+	}
+
+	return writeWorkflowNextSteps(
+		cmd.ErrOrStderr(),
+		guidancePrefixesForCommand(cmd, namespace).pvcMigrate,
+		"copy",
+		object.Name,
+		object.Status.Phase,
+		false,
+	)
 }
 
 func copyResumePhase(status v1alpha1.WorkflowStatus) v1alpha1.WorkflowPhase {

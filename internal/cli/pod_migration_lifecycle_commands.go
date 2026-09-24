@@ -34,7 +34,11 @@ func (r *rootState) newPodMigrationStatusCommand() *cobra.Command {
 					return err
 				}
 
-				return runtime.printer.Print(object)
+				if err := runtime.printer.Print(object); err != nil {
+					return err
+				}
+
+				return writePodMigrationNextSteps(cmd, object)
 			}
 
 			// Session ConfigMaps persist PodMigration objects whose
@@ -93,7 +97,12 @@ func (r *rootState) newPodMigrationResumeCommand() *cobra.Command {
 				if err := dispatch.validate(ctx); err != nil {
 					return err
 				}
-				return runtime.printer.Print(object)
+
+				if err := runtime.printer.Print(object); err != nil {
+					return err
+				}
+
+				return writePodMigrationDryRunNotice(cmd, object, "resume")
 			}
 
 			if err := r.confirm(ctx, cmd, args[0]); err != nil {
@@ -108,7 +117,11 @@ func (r *rootState) newPodMigrationResumeCommand() *cobra.Command {
 				return err
 			}
 
-			return runtime.printer.Print(object)
+			if err := runtime.printer.Print(object); err != nil {
+				return err
+			}
+
+			return writePodMigrationNextSteps(cmd, object)
 		},
 	}
 	bindDryRun(command, &dryRun)
@@ -141,7 +154,12 @@ func (r *rootState) newPodMigrationAbortCommand() *cobra.Command {
 				if err := dispatch.validateAbort(ctx); err != nil {
 					return err
 				}
-				return runtime.printer.Print(object)
+
+				if err := runtime.printer.Print(object); err != nil {
+					return err
+				}
+
+				return writePodMigrationDryRunNotice(cmd, object, "abort")
 			}
 
 			if err := r.confirm(ctx, cmd, args[0]); err != nil {
@@ -152,7 +170,11 @@ func (r *rootState) newPodMigrationAbortCommand() *cobra.Command {
 				return err
 			}
 
-			return runtime.printer.Print(object)
+			if err := runtime.printer.Print(object); err != nil {
+				return err
+			}
+
+			return writePodMigrationNextSteps(cmd, object)
 		},
 	}
 	bindDryRun(command, &dryRun)
@@ -185,7 +207,12 @@ func (r *rootState) newPodMigrationRollbackCommand() *cobra.Command {
 				if err := dispatch.validateRollback(ctx); err != nil {
 					return err
 				}
-				return runtime.printer.Print(object)
+
+				if err := runtime.printer.Print(object); err != nil {
+					return err
+				}
+
+				return writePodMigrationDryRunNotice(cmd, object, "rollback")
 			}
 
 			if err := r.confirm(ctx, cmd, args[0]); err != nil {
@@ -196,7 +223,11 @@ func (r *rootState) newPodMigrationRollbackCommand() *cobra.Command {
 				return err
 			}
 
-			return runtime.printer.Print(object)
+			if err := runtime.printer.Print(object); err != nil {
+				return err
+			}
+
+			return writePodMigrationNextSteps(cmd, object)
 		},
 	}
 	bindDryRun(command, &dryRun)
@@ -232,7 +263,22 @@ func (r *rootState) newPodMigrationCleanupCommand() *cobra.Command {
 				if err := dispatch.validateCleanup(ctx, options); err != nil {
 					return err
 				}
-				return runtime.printer.Print(object)
+
+				if err := runtime.printer.Print(object); err != nil {
+					return err
+				}
+
+				return writeDryRunNotice(
+					cmd.ErrOrStderr(),
+					cleanupExecuteCommand(
+						guidancePrefixesForCommand(cmd, object.GetNamespace()).pvcMigrate,
+						"migrate-pod",
+						object.GetName(),
+						options.UnusedStoragePolicy,
+						options.Finalize,
+						options.DeleteSession,
+					),
+				)
 			}
 
 			if err := r.confirm(ctx, cmd, args[0]); err != nil {
@@ -254,6 +300,24 @@ func (r *rootState) newPodMigrationCleanupCommand() *cobra.Command {
 	bindDryRun(command, &dryRun)
 
 	return command
+}
+
+// writePodMigrationDryRunNotice prints the execute form of the lifecycle
+// subcommand just previewed, resolved from the workflow's own namespace.
+func writePodMigrationDryRunNotice(
+	cmd *cobra.Command,
+	object crclient.Object,
+	subcommand string,
+) error {
+	return writeDryRunNotice(
+		cmd.ErrOrStderr(),
+		lifecycleExecuteCommand(
+			guidancePrefixesForCommand(cmd, object.GetNamespace()).pvcMigrate,
+			"migrate-pod",
+			subcommand,
+			object.GetName(),
+		),
+	)
 }
 
 func bindMigrationCleanupFlags(command *cobra.Command, options *app.MigrationCleanupOptions) {

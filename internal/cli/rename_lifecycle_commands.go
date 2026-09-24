@@ -90,7 +90,18 @@ func (r *rootState) newRenameStatusCommand() *cobra.Command {
 					return err
 				}
 
-				return runtime.printer.Print(object)
+				if err := runtime.printer.Print(object); err != nil {
+					return err
+				}
+
+				return writeWorkflowNextSteps(
+					cmd.ErrOrStderr(),
+					guidancePrefixesForCommand(cmd, object.Namespace).pvcMigrate,
+					"rename",
+					object.Name,
+					object.Status.Phase,
+					true,
+				)
 			}
 
 			store, err := renameStore(runtime, r.renameStorageNamespace(cmd))
@@ -145,7 +156,20 @@ func (r *rootState) renameLifecycleCommand(
 			if err := validate(ctx, executor, object); err != nil {
 				return reportRenameError(cmd, object, err)
 			}
-			return runtime.printer.Print(object)
+
+			if err := runtime.printer.Print(object); err != nil {
+				return err
+			}
+
+			return writeDryRunNotice(
+				cmd.ErrOrStderr(),
+				lifecycleExecuteCommand(
+					guidancePrefixesForCommand(cmd, namespace).pvcMigrate,
+					"rename",
+					use,
+					object.Name,
+				),
+			)
 		}
 
 		if err := r.confirm(ctx, cmd, object.Name); err != nil {
@@ -156,7 +180,18 @@ func (r *rootState) renameLifecycleCommand(
 			return reportRenameError(cmd, object, err)
 		}
 
-		return runtime.printer.Print(object)
+		if err := runtime.printer.Print(object); err != nil {
+			return err
+		}
+
+		return writeWorkflowNextSteps(
+			cmd.ErrOrStderr(),
+			guidancePrefixesForCommand(cmd, namespace).pvcMigrate,
+			"rename",
+			object.Name,
+			object.Status.Phase,
+			true,
+		)
 	}
 	bindDryRun(command, &dryRun)
 
@@ -197,7 +232,20 @@ func (r *rootState) newRenameResumeCommand() *cobra.Command {
 			if err := executor.ValidateResume(ctx, object); err != nil {
 				return reportRenameError(cmd, object, err)
 			}
-			return runtime.printer.Print(object)
+
+			if err := runtime.printer.Print(object); err != nil {
+				return err
+			}
+
+			return writeDryRunNotice(
+				cmd.ErrOrStderr(),
+				lifecycleExecuteCommand(
+					guidancePrefixesForCommand(cmd, namespace).pvcMigrate,
+					"rename",
+					"resume",
+					object.Name,
+				),
+			)
 		}
 
 		if err := r.confirm(ctx, cmd, object.Name); err != nil {
@@ -282,7 +330,22 @@ func (r *rootState) newRenameCleanupCommand() *cobra.Command {
 			if err := executor.ValidateCleanup(ctx, object, options); err != nil {
 				return reportRenameError(cmd, object, err)
 			}
-			return runtime.printer.Print(object)
+
+			if err := runtime.printer.Print(object); err != nil {
+				return err
+			}
+
+			return writeDryRunNotice(
+				cmd.ErrOrStderr(),
+				cleanupExecuteCommand(
+					guidancePrefixesForCommand(cmd, namespace).pvcMigrate,
+					"rename",
+					object.Name,
+					"",
+					options.Finalize,
+					options.DeleteSession,
+				),
+			)
 		}
 
 		if options.Finalize || options.DeleteSession {

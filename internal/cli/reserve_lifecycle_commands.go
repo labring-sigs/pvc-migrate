@@ -95,7 +95,21 @@ func (r *rootState) newReserveStatusCommand() *cobra.Command {
 					return err
 				}
 
-				return runtime.printer.Print(object)
+				if err := runtime.printer.Print(object); err != nil {
+					return err
+				}
+
+				return writeWorkflowNextSteps(
+					cmd.ErrOrStderr(),
+					guidancePrefixesForCommand(
+						cmd,
+						workflowHintNamespace("", r, cmd, object),
+					).pvcMigrate,
+					"reserve",
+					object.GetName(),
+					workflowObjectPhase(object),
+					false,
+				)
 			}
 
 			namespace := r.workflowStorageNamespace(cmd)
@@ -301,7 +315,36 @@ func (r *rootState) newReserveAbortCommand() *cobra.Command {
 			}
 		}
 
-		return runtime.printer.Print(object)
+		if err := runtime.printer.Print(object); err != nil {
+			return err
+		}
+
+		if dryRun {
+			return writeDryRunNotice(
+				cmd.ErrOrStderr(),
+				lifecycleExecuteCommand(
+					guidancePrefixesForCommand(
+						cmd,
+						workflowHintNamespace(backend, r, cmd, object),
+					).pvcMigrate,
+					"reserve",
+					"abort",
+					object.GetName(),
+				),
+			)
+		}
+
+		return writeWorkflowNextSteps(
+			cmd.ErrOrStderr(),
+			guidancePrefixesForCommand(
+				cmd,
+				workflowHintNamespace(backend, r, cmd, object),
+			).pvcMigrate,
+			"reserve",
+			object.GetName(),
+			workflowObjectPhase(object),
+			false,
+		)
 	}
 	bindDryRun(command, &dryRun)
 
@@ -422,7 +465,28 @@ func (r *rootState) newReserveCleanupCommand() *cobra.Command {
 			return err
 		}
 
-		return runtime.printer.Print(object)
+		if err := runtime.printer.Print(object); err != nil {
+			return err
+		}
+
+		if dryRun {
+			return writeDryRunNotice(
+				cmd.ErrOrStderr(),
+				cleanupExecuteCommand(
+					guidancePrefixesForCommand(
+						cmd,
+						workflowHintNamespace(backend, r, cmd, object),
+					).pvcMigrate,
+					"reserve",
+					object.GetName(),
+					options.UnusedStoragePolicy,
+					options.Finalize,
+					options.DeleteSession,
+				),
+			)
+		}
+
+		return nil
 	}
 	command.Flags().
 		StringVar(&options.UnusedStoragePolicy, "unused-storage-policy", "", "Keep or Delete reserved storage; defaults to the recorded policy. Delete removes destination PVCs this reservation created and never promoted to a copy; the source is always kept")

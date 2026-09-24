@@ -238,7 +238,16 @@ func waitForControllerObject[T crclient.Object](
 		return domain.NewError(category, "controller workflow", status.Message)
 	}
 
-	return nil
+	// The controller owns this workflow from here: point finalization at
+	// kubectl instead of the CLI lifecycle commands.
+	return writeControllerWorkflowNextSteps(
+		cmd.ErrOrStderr(),
+		kubectlCommandPrefixForCommand(cmd),
+		resourceName,
+		final.GetNamespace(),
+		final.GetName(),
+		status.Phase,
+	)
 }
 
 // workflowSpecsMatch compares the spec of two workflow objects through their

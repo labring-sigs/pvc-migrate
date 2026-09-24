@@ -109,7 +109,18 @@ func (r *rootState) newMoveStatusCommand() *cobra.Command {
 					return err
 				}
 
-				return runtime.printer.Print(object)
+				if err := runtime.printer.Print(object); err != nil {
+					return err
+				}
+
+				return writeWorkflowNextSteps(
+					cmd.ErrOrStderr(),
+					guidancePrefixesForCommand(cmd, moveStorageNamespace(object)).pvcMigrate,
+					"move",
+					object.Name,
+					object.Status.Phase,
+					true,
+				)
 			}
 
 			store, err := moveStore(runtime, r.global.sessionNamespace)
@@ -160,7 +171,20 @@ func (r *rootState) moveLifecycleCommand(
 			if err := validate(ctx, executor, object); err != nil {
 				return reportMoveError(cmd, object, err)
 			}
-			return runtime.printer.Print(object)
+
+			if err := runtime.printer.Print(object); err != nil {
+				return err
+			}
+
+			return writeDryRunNotice(
+				cmd.ErrOrStderr(),
+				lifecycleExecuteCommand(
+					guidancePrefixesForCommand(cmd, moveStorageNamespace(object)).pvcMigrate,
+					"move",
+					use,
+					object.Name,
+				),
+			)
 		}
 
 		if err := r.confirm(ctx, cmd, object.Name); err != nil {
@@ -171,7 +195,18 @@ func (r *rootState) moveLifecycleCommand(
 			return reportMoveError(cmd, object, err)
 		}
 
-		return runtime.printer.Print(object)
+		if err := runtime.printer.Print(object); err != nil {
+			return err
+		}
+
+		return writeWorkflowNextSteps(
+			cmd.ErrOrStderr(),
+			guidancePrefixesForCommand(cmd, moveStorageNamespace(object)).pvcMigrate,
+			"move",
+			object.Name,
+			object.Status.Phase,
+			true,
+		)
 	}
 	bindDryRun(command, &dryRun)
 
@@ -230,7 +265,20 @@ func (r *rootState) newMoveResumeCommand() *cobra.Command {
 			if err := executor.ValidateResume(ctx, object); err != nil {
 				return reportMoveError(cmd, object, err)
 			}
-			return runtime.printer.Print(object)
+
+			if err := runtime.printer.Print(object); err != nil {
+				return err
+			}
+
+			return writeDryRunNotice(
+				cmd.ErrOrStderr(),
+				lifecycleExecuteCommand(
+					guidancePrefixesForCommand(cmd, moveStorageNamespace(object)).pvcMigrate,
+					"move",
+					"resume",
+					object.Name,
+				),
+			)
 		}
 
 		if err := r.confirm(ctx, cmd, object.Name); err != nil {
@@ -245,7 +293,18 @@ func (r *rootState) newMoveResumeCommand() *cobra.Command {
 			return reportMoveError(cmd, object, err)
 		}
 
-		return runtime.printer.Print(object)
+		if err := runtime.printer.Print(object); err != nil {
+			return err
+		}
+
+		return writeWorkflowNextSteps(
+			cmd.ErrOrStderr(),
+			guidancePrefixesForCommand(cmd, moveStorageNamespace(object)).pvcMigrate,
+			"move",
+			object.Name,
+			object.Status.Phase,
+			true,
+		)
 	}
 	bindDryRun(command, &dryRun)
 
@@ -287,7 +346,22 @@ func (r *rootState) newMoveCleanupCommand() *cobra.Command {
 			if err := executor.ValidateCleanup(ctx, object, options); err != nil {
 				return reportMoveError(cmd, object, err)
 			}
-			return runtime.printer.Print(object)
+
+			if err := runtime.printer.Print(object); err != nil {
+				return err
+			}
+
+			return writeDryRunNotice(
+				cmd.ErrOrStderr(),
+				cleanupExecuteCommand(
+					guidancePrefixesForCommand(cmd, moveStorageNamespace(object)).pvcMigrate,
+					"move",
+					object.Name,
+					"",
+					options.Finalize,
+					options.DeleteSession,
+				),
+			)
 		}
 
 		if err := r.confirm(ctx, cmd, object.Name); err != nil {

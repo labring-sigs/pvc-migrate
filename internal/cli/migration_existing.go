@@ -123,7 +123,23 @@ func (r *rootState) executeMigration(
 		if err := executor.Validate(ctx, object); err != nil {
 			return reportMigrationError(cmd, object.Name, object.Status.Phase, err)
 		}
-		return runtime.printer.Print(object)
+
+		if err := runtime.printer.Print(object); err != nil {
+			return err
+		}
+
+		return writeDryRunNotice(
+			cmd.ErrOrStderr(),
+			lifecycleExecuteCommand(
+				guidancePrefixesForCommand(
+					cmd,
+					workflowLeaseNamespace(backend, r.workflowStorageNamespace(cmd), object),
+				).pvcMigrate,
+				"migrate",
+				"resume",
+				object.Name,
+			),
+		)
 	}
 
 	phase := copyResumePhase(object.Status.WorkflowStatus)
@@ -142,7 +158,21 @@ func (r *rootState) executeMigration(
 		return reportMigrationError(cmd, object.Name, object.Status.Phase, err)
 	}
 
-	return runtime.printer.Print(object)
+	if err := runtime.printer.Print(object); err != nil {
+		return err
+	}
+
+	return writeWorkflowNextSteps(
+		cmd.ErrOrStderr(),
+		guidancePrefixesForCommand(
+			cmd,
+			workflowLeaseNamespace(backend, r.workflowStorageNamespace(cmd), object),
+		).pvcMigrate,
+		"migrate",
+		object.Name,
+		object.Status.Phase,
+		true,
+	)
 }
 
 func (r *rootState) clusterMigrationExecutor(
@@ -202,7 +232,23 @@ func (r *rootState) executeClusterMigration(
 		if err := executor.Validate(ctx, object); err != nil {
 			return reportMigrationError(cmd, object.Name, object.Status.Phase, err)
 		}
-		return runtime.printer.Print(object)
+
+		if err := runtime.printer.Print(object); err != nil {
+			return err
+		}
+
+		return writeDryRunNotice(
+			cmd.ErrOrStderr(),
+			lifecycleExecuteCommand(
+				guidancePrefixesForCommand(
+					cmd,
+					clusterMigrationStorageNamespace(object),
+				).pvcMigrate,
+				"migrate",
+				"resume",
+				object.Name,
+			),
+		)
 	}
 
 	phase := copyResumePhase(object.Status.WorkflowStatus)
@@ -221,7 +267,18 @@ func (r *rootState) executeClusterMigration(
 		return reportMigrationError(cmd, object.Name, object.Status.Phase, err)
 	}
 
-	return runtime.printer.Print(object)
+	if err := runtime.printer.Print(object); err != nil {
+		return err
+	}
+
+	return writeWorkflowNextSteps(
+		cmd.ErrOrStderr(),
+		guidancePrefixesForCommand(cmd, clusterMigrationStorageNamespace(object)).pvcMigrate,
+		"migrate",
+		object.Name,
+		object.Status.Phase,
+		true,
+	)
 }
 
 func (r *rootState) resumeMigration(

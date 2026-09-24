@@ -157,7 +157,9 @@ func (m *Manager) waitForPodDeletion(
 	)
 }
 
-// DiscoverPod resolves a workload from a caller-owned Pod snapshot.
+// DiscoverPod resolves a workload from a caller-owned Pod snapshot. The
+// presentation argument renders field-spelling guidance for the planning
+// audience: flags for the CLI, spec fields for controller-recorded checks.
 func (m *Manager) DiscoverPod(
 	ctx context.Context,
 	pod *corev1.Pod,
@@ -165,6 +167,7 @@ func (m *Manager) DiscoverPod(
 	expected v1alpha1.LocalResourceReference,
 	switchoverCandidate string,
 	allowLeaderDowntime bool,
+	presentation domain.Presentation,
 ) (v1alpha1.WorkloadSpec, error) {
 	if err := validateDiscoverPodInput(pod, namespace, expected); err != nil {
 		return v1alpha1.WorkloadSpec{}, err
@@ -184,6 +187,7 @@ func (m *Manager) DiscoverPod(
 		owner,
 		switchoverCandidate,
 		allowLeaderDowntime,
+		presentation,
 	)
 }
 
@@ -251,6 +255,7 @@ func (m *Manager) discoverOwnedWorkload(
 	owner *metav1.OwnerReference,
 	candidate string,
 	allowLeaderDowntime bool,
+	presentation domain.Presentation,
 ) (v1alpha1.WorkloadSpec, error) {
 	if owner.UID == "" {
 		return v1alpha1.WorkloadSpec{}, domain.NewError(
@@ -272,14 +277,21 @@ func (m *Manager) discoverOwnedWorkload(
 
 	switch {
 	case owner.Kind == domain.KindStatefulSet && groupVersion.Group == appsv1.GroupName:
-		return m.discoverStatefulSetOwner(ctx, pod, owner, candidate, allowLeaderDowntime)
+		return m.discoverStatefulSetOwner(
+			ctx,
+			pod,
+			owner,
+			candidate,
+			allowLeaderDowntime,
+			presentation,
+		)
 	case owner.Kind == domain.KindJob && groupVersion.Group == batchv1.GroupName:
 		return m.discoverJobOwner(ctx, pod, owner)
 	case owner.Kind == domain.KindReplicaSet && groupVersion.Group == appsv1.GroupName:
 		return m.discoverReplicaSetOwner(ctx, pod, owner)
 	case owner.Kind == domain.KindInstanceSet &&
 		strings.Contains(groupVersion.Group, kubeBlocksGroupSuffix):
-		return m.kubeBlocksWorkload(ctx, pod, owner, candidate, allowLeaderDowntime)
+		return m.kubeBlocksWorkload(ctx, pod, owner, candidate, allowLeaderDowntime, presentation)
 	default:
 		return v1alpha1.WorkloadSpec{}, domain.NewError(
 			domain.ErrorPrecondition,
@@ -295,6 +307,7 @@ func (m *Manager) discoverStatefulSetOwner(
 	owner *metav1.OwnerReference,
 	candidate string,
 	allowLeaderDowntime bool,
+	presentation domain.Presentation,
 ) (v1alpha1.WorkloadSpec, error) {
 	sts, err := m.typed.AppsV1().StatefulSets(pod.Namespace).Get(
 		ctx,
@@ -339,7 +352,15 @@ func (m *Manager) discoverStatefulSetOwner(
 		return m.statefulSetWorkload(ctx, pod, sts, allowLeaderDowntime)
 	}
 
-	return m.discoverStatefulSetParent(ctx, pod, sts, parent, candidate, allowLeaderDowntime)
+	return m.discoverStatefulSetParent(
+		ctx,
+		pod,
+		sts,
+		parent,
+		candidate,
+		allowLeaderDowntime,
+		presentation,
+	)
 }
 
 func (m *Manager) discoverStatefulSetParent(
@@ -349,6 +370,7 @@ func (m *Manager) discoverStatefulSetParent(
 	parent *metav1.OwnerReference,
 	candidate string,
 	allowLeaderDowntime bool,
+	presentation domain.Presentation,
 ) (v1alpha1.WorkloadSpec, error) {
 	if parent.UID == "" {
 		return v1alpha1.WorkloadSpec{}, domain.NewError(
@@ -385,6 +407,7 @@ func (m *Manager) discoverStatefulSetParent(
 				controllerOwner(pod.OwnerReferences),
 				candidate,
 				allowLeaderDowntime,
+				presentation,
 			)
 		}
 	}
@@ -396,6 +419,7 @@ func (m *Manager) discoverStatefulSetParent(
 			controllerOwner(pod.OwnerReferences),
 			candidate,
 			allowLeaderDowntime,
+			presentation,
 		)
 	}
 

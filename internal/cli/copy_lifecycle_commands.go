@@ -367,7 +367,28 @@ func (r *rootState) newCopyCleanupCommand() *cobra.Command {
 			return err
 		}
 
-		return runtime.printer.Print(object)
+		if err := runtime.printer.Print(object); err != nil {
+			return err
+		}
+
+		if dryRun {
+			return writeDryRunNotice(
+				cmd.ErrOrStderr(),
+				cleanupExecuteCommand(
+					guidancePrefixesForCommand(
+						cmd,
+						workflowHintNamespace(backend, r, cmd, object),
+					).pvcMigrate,
+					"copy",
+					object.GetName(),
+					options.UnusedStoragePolicy,
+					options.Finalize,
+					options.DeleteSession,
+				),
+			)
+		}
+
+		return nil
 	}
 	command.Flags().
 		StringVar(&options.UnusedStoragePolicy, "unused-storage-policy", "", "Keep or Delete an undelivered destination; defaults to the recorded policy. Delete removes the destination PVC only when the copy aborted before completing; a completed copy's destination and the source are always kept")

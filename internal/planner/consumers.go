@@ -57,6 +57,7 @@ func checkCopyConsumers(
 	pvc *corev1.PersistentVolumeClaim,
 	online bool,
 	consumers []*corev1.Pod,
+	presentation domain.Presentation,
 ) {
 	if len(consumers) == 0 {
 		checkOfflinePVC(plan, pvc)
@@ -67,10 +68,11 @@ func checkCopyConsumers(
 		plan.AddCheck(failed(
 			domain.CheckNamePVCConsumers,
 			fmt.Sprintf(
-				"offline copy requires PVC %s/%s to have zero active Pod consumers; found %s; use --online for a finite warm copy",
+				"offline copy requires PVC %s/%s to have zero active Pod consumers; found %s; %s for a finite warm copy",
 				pvc.Namespace,
 				pvc.Name,
 				consumerNames(consumers),
+				presentation.FieldUse("online"),
 			),
 		))
 

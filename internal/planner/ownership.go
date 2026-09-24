@@ -11,6 +11,17 @@ import (
 	corev1 "k8s.io/api/core/v1"
 )
 
+// presentation selects how guidance renders: CLI planning quotes
+// copy-paste commands and flags; controller-planned messages are recorded
+// verbatim on workflow CRs and events, where CLI text does not belong.
+func (p *Planner) presentation() domain.Presentation {
+	if p.controllerSubmission {
+		return domain.PresentationController
+	}
+
+	return domain.PresentationCLI
+}
+
 // checkSessionOwnership stops a new session before approval or resource
 // creation when the source identity is already associated with a persisted or
 // orphaned session. PVC annotations and labels are checked together with the
@@ -105,7 +116,7 @@ func (p *Planner) checkSessionOwnership(
 					pv.Name,
 					owner,
 					ownerSession.Phase,
-					persistedOwnerGuidance(ownerSession),
+					persistedOwnerGuidance(ownerSession, p.presentation()),
 				),
 			),
 		)
@@ -114,6 +125,25 @@ func (p *Planner) checkSessionOwnership(
 	}
 
 	if err == nil {
+		if p.presentation() == domain.PresentationController {
+			// Check messages from controller planning land verbatim in
+			// workflow CR status, which must not carry CLI command text.
+			plan.AddCheck(
+				failed(
+					domain.CheckNameSessionOwnership,
+					fmt.Sprintf(
+						"PVC %s/%s or PV %s has orphan ownership from absent session %s; clear the ownership labels to retry",
+						pvc.Namespace,
+						pvc.Name,
+						pv.Name,
+						owner,
+					),
+				),
+			)
+
+			return
+		}
+
 		recordNamespace := p.sessionRecordNamespace
 		if recordNamespace == "" {
 			recordNamespace = sessionNamespace
@@ -191,13 +221,15 @@ func workflowAcceptsCleanupPolicy(session *kube.WorkflowOwner) bool {
 	}
 }
 
-func persistedOwnerGuidance(session *kube.WorkflowOwner) string {
-	base := sessionCLIBase(session.SessionNamespace, false)
-
-	executeBase := sessionCLIBase(session.SessionNamespace, true)
+// persistedOwnerGuidance explains how to release the storage. The CLI
+// presentation gets copy-paste commands; the controller presentation gets
+// a description of the releasing action, because its check messages land
+// verbatim in workflow CR status.
+func persistedOwnerGuidance(session *kube.WorkflowOwner, presentation domain.Presentation) string {
 	// Controller workflows are owned by the elected controller: the CLI
 	// lifecycle commands only manage ConfigMap-backed sessions. Deleting the
-	// CR converges storage through the controller's finalizer.
+	// CR converges storage through the controller's finalizer; kubectl is the
+	// universal operator surface, so this form serves both presentations.
 	if session.Backend == kube.SessionBackendCRD {
 		resource := session.Resource
 
@@ -215,6 +247,14 @@ func persistedOwnerGuidance(session *kube.WorkflowOwner) string {
 			session.ID,
 		)
 	}
+
+	if presentation == domain.PresentationController {
+		return controllerOwnerGuidance(session)
+	}
+
+	base := sessionCLIBase(session.SessionNamespace, false)
+
+	executeBase := sessionCLIBase(session.SessionNamespace, true)
 
 	workflow := workflowCommand(session)
 
@@ -297,6 +337,31 @@ func persistedOwnerGuidance(session *kube.WorkflowOwner) string {
 		workflow,
 		session.ID,
 	)
+}
+
+// controllerOwnerGuidance describes the storage-releasing action without
+// command text, for check messages recorded on workflow CRs.
+func controllerOwnerGuidance(session *kube.WorkflowOwner) string {
+	switch session.Phase {
+	case domain.PhaseCompleted, domain.PhaseAborted, domain.PhaseRolledBack:
+		return "finalize the finished session and delete its record to release this storage"
+	case domain.PhaseWarmCopied:
+		if session.Resource.Type == domain.SessionTypeCopy {
+			return "keep or discard the copied PVC by finalizing the session to release this storage"
+		}
+	case domain.PhaseReserved:
+		if session.Resource.Type == domain.SessionTypeReserve {
+			return "continue the reservation as a copy or close it to release this storage"
+		}
+	case domain.PhaseFailed:
+		if failedSessionCanAbort(session) {
+			return "abort the failed session and finalize its cleanup to release this storage"
+		}
+
+		return "roll back the failed session and finalize its cleanup to release this storage"
+	}
+
+	return "resume or abort the owning session to release this storage"
 }
 
 func workflowCommand(session *kube.WorkflowOwner) string {
