@@ -618,7 +618,7 @@ func (p *Planner) loadPlanVolumeInput(
 			failed(
 				domain.CheckNameSourcePVC,
 				fmt.Sprintf(
-					"PVC %s/%s is terminating (deletion requested at %s); a requested deletion cannot be cancelled through the API — keep the PV retained, let the deletion settle, and restore storage from the retained volume or a backup before migrating",
+					"PVC %s/%s is terminating (deletion requested at %s); wait for the deletion to settle before migrating",
 					pvc.Namespace,
 					pvc.Name,
 					pvc.DeletionTimestamp.UTC().Format(time.RFC3339),
@@ -691,7 +691,7 @@ func (p *Planner) loadPlanVolumeInput(
 			failed(
 				domain.CheckNameSourcePV,
 				fmt.Sprintf(
-					"PV %s is terminating (deletion requested at %s); a requested deletion cannot be cancelled through the API — keep the volume retained, let the deletion settle, and restore from the retained volume or a backup before migrating",
+					"PV %s is terminating (deletion requested at %s); wait for the deletion to settle before migrating",
 					pv.Name,
 					pv.DeletionTimestamp.UTC().Format(time.RFC3339),
 				),
