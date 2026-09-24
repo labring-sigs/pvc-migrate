@@ -62,32 +62,24 @@ func (m *PodMigrationExecutor) ValidateAbort(
 	}
 
 	plan := object.Status.Plan
-	if workflowDeletionInProgress(ctx) {
-		deleted, err := deletedPlannedSourcePVC(
-			ctx,
-			m.client,
-			object.Namespace,
-			plan.Volumes,
-		)
-		if err != nil {
-			return err
-		}
 
-		// Deleted source storage cannot be re-verified and gives the workload
-		// nothing to resume onto; deletion converges through cleanup instead.
-		if deleted {
-			return nil
-		}
-	}
-
-	// A terminating source cannot take the resumed workload back: the
-	// scheduler refuses pods mounting a claim that is being deleted, so the
-	// resume would wait forever. Surface the loss instead of hanging.
 	scan, err := scanPlannedSourcePVCs(ctx, m.client, object.Namespace, plan.Volumes)
 	if err != nil {
 		return err
 	}
 
+	if workflowDeletionInProgress(ctx) {
+		// Lost or terminating source storage cannot be re-verified and gives
+		// the workload nothing to resume onto — the scheduler refuses pods
+		// mounting a claim that is being deleted. Deletion must converge
+		// through cleanup instead of erroring or waiting forever.
+		if scan.Deleted || scan.Terminating != nil {
+			return nil
+		}
+	}
+
+	// A live abort resumes the workload onto the source claim; a terminating
+	// source would leave that resume waiting forever. Surface the loss.
 	if scan.Terminating != nil {
 		return sourceTerminationFailure("abort pod migration", *scan.Terminating)
 	}
@@ -132,7 +124,7 @@ func (m *PodMigrationExecutor) abort(ctx context.Context, object *v1alpha1.PodMi
 		object.Status.History,
 	)
 	if resume && workflowDeletionInProgress(ctx) {
-		deleted, err := deletedPlannedSourcePVC(
+		scan, err := scanPlannedSourcePVCs(
 			ctx,
 			m.client,
 			object.Namespace,
@@ -142,9 +134,11 @@ func (m *PodMigrationExecutor) abort(ctx context.Context, object *v1alpha1.PodMi
 			return m.fail(ctx, object, err)
 		}
 
-		// Resuming the workload onto deleted source storage can only fail;
-		// the deletion pass converges to Aborted and cleanup takes over.
-		if deleted {
+		// Resuming the workload onto lost or terminating source storage can
+		// only fail — the scheduler refuses pods mounting a claim that is
+		// being deleted; the deletion pass converges to Aborted and cleanup
+		// takes over.
+		if scan.Deleted || scan.Terminating != nil {
 			resume = false
 		}
 	}

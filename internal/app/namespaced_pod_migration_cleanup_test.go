@@ -349,6 +349,35 @@ func TestNamespacedPodMigrationDeletionConvergesWhenSourceStorageDeleted(t *test
 	}
 }
 
+func TestNamespacedPodMigrationDeletionConvergesWhenSourceTerminating(t *testing.T) {
+	executor, object, store, _ := namespacedPodMigrationFixture(t)
+	executor.workloads = &fakeController{}
+
+	namespacedPausedCheckpointFixture(object)
+
+	// The source deletion was armed underneath the paused workflow and a
+	// finalizer keeps it stuck in Terminating: the deletion pass must skip
+	// the workload resume the same way it does for a vanished source,
+	// instead of rejecting the abort and wedging the workflow finalizer.
+	armTerminatingSourcePVC(t, executor, object.Namespace, "a")
+
+	object.DeletionTimestamp = &metav1.Time{Time: executor.now()}
+	if err := store.Save(t.Context(), object); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := executor.FinalizeDeleted(t.Context(), object); err != nil {
+		t.Fatalf("terminating source storage must not wedge finalization: %v", err)
+	}
+
+	if _, err := store.Load(
+		t.Context(),
+		crclient.ObjectKey{Namespace: object.Namespace, Name: object.Name},
+	); !apierrors.IsNotFound(err) {
+		t.Fatalf("converged workflow remains in store: %v", err)
+	}
+}
+
 func TestNamespacedPodMigrationLiveAbortStillRequiresSourceStorage(t *testing.T) {
 	executor, object, store, _ := namespacedPodMigrationFixture(t)
 	executor.workloads = &fakeController{}
