@@ -368,12 +368,12 @@ If a PVC or PV still has session ownership after its session ConfigMap was lost,
 pvc-migrate --kubeconfig /path/to/kubeconfig \
   --session-namespace pvc-migrate-system \
   recovery cleanup-orphan database-20260809 \
-  --source-namespace application --source-pvc data-database-1
+  -n application --source-pvc data-database-1
 
 pvc-migrate --kubeconfig /path/to/kubeconfig \
   --session-namespace pvc-migrate-system \
   --yes recovery cleanup-orphan database-20260809 \
-  --source-namespace application --source-pvc data-database-1 \
+  -n application --source-pvc data-database-1 \
   --dry-run=false
 ```
 

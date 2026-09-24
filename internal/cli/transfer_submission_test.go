@@ -387,3 +387,135 @@ func TestTransferCommandsSubmitWithoutLegacyPlannerOrSessionStore(t *testing.T) 
 		})
 	}
 }
+
+// TestCRCreateDryRunPreviewsNamespacedObject pins the preview contract: the
+// namespaced cr creates print exactly the CR they would submit — its
+// metadata.namespace carries the whole namespace story and no namespace-role
+// field leaks into the spec.
+func TestCRCreateDryRunPreviewsNamespacedObject(t *testing.T) {
+	for _, test := range []struct {
+		kind domain.ControllerKind
+		args []string
+	}{
+		{"Migration", []string{"cr", "migrate", "create", "--source-pvc", "data"}},
+		{"Copy", []string{"cr", "copy", "create", "--source-pvc", "data"}},
+		{"Reservation", []string{"cr", "reserve", "create", "--source-pvc", "data"}},
+		{"PodMigration", []string{"cr", "migrate-pod", "create", "--pod", "database"}},
+	} {
+		t.Run(string(test.kind), func(t *testing.T) {
+			scheme := runtime.NewScheme()
+			if err := v1alpha1.AddToScheme(scheme); err != nil {
+				t.Fatal(err)
+			}
+
+			var out, diagnostics bytes.Buffer
+
+			root := NewRoot(Options{
+				Out: &out, ErrOut: &diagnostics,
+				runtimeFactory: func(*rootState) (*commandRuntime, error) {
+					return &commandRuntime{
+						clients: &kube.Clients{
+							Runtime:    crfake.NewClientBuilder().WithScheme(scheme).Build(),
+							Kubernetes: kubernetesfake.NewClientset(),
+						},
+						printer:           output.Printer{Writer: &out, Format: output.JSON},
+						waitForController: false,
+					}, nil
+				},
+			})
+			root.SetArgs(
+				append(
+					test.args,
+					"--namespace", "app",
+					"--session", "preview-op",
+				),
+			)
+
+			if err := root.ExecuteContext(t.Context()); err != nil {
+				t.Fatalf("dry-run failed: %v; %s", err, diagnostics.String())
+			}
+
+			preview := out.String()
+			if !strings.Contains(preview, `"namespace": "app"`) {
+				t.Fatalf("preview lost the tenant namespace: %s", preview)
+			}
+
+			for _, role := range []string{"sourceNamespace", "destinationNamespace", "temporaryNamespace", "sessionNamespace"} {
+				if strings.Contains(preview, `"`+role+`"`) {
+					t.Fatalf("namespaced preview leaked the %s role: %s", role, preview)
+				}
+			}
+
+			if !strings.Contains(diagnostics.String(), "--dry-run=false") {
+				t.Fatalf("preview must tell the operator how to execute: %s", diagnostics.String())
+			}
+		})
+	}
+}
+
+// TestCopyDryRunHintMatchesCommandMode pins the graduation dry-run hint: cr
+// commands rerun through cr copy create with -n (cluster graduations without
+// it), session commands through the session copy entrypoint.
+func TestCopyDryRunHintMatchesCommandMode(t *testing.T) {
+	root := NewRoot(Options{Version: "test"})
+
+	namespaced := &v1alpha1.Copy{ObjectMeta: metav1.ObjectMeta{Name: "grad", Namespace: "app"}}
+	cluster := &v1alpha1.ClusterCopy{ObjectMeta: metav1.ObjectMeta{Name: "grad"}}
+
+	run := func(t *testing.T, cmd string, object crclient.Object, namespace string) string {
+		t.Helper()
+
+		var out, hint bytes.Buffer
+
+		command := findSubCommandT(t, root, splitCommandPath(cmd)...)
+		command.SetErr(&hint)
+
+		rt := &commandRuntime{printer: output.Printer{Writer: &out, Format: output.JSON}}
+
+		if err := printCopyDryRunResult(command, rt, object, namespace); err != nil {
+			t.Fatal(err)
+		}
+
+		return hint.String()
+	}
+
+	t.Run("cr namespaced graduation", func(t *testing.T) {
+		output := run(t, "cr copy create", namespaced, "app")
+		for _, want := range []string{"--yes", "cr", "copy", "create", "--session", "grad", "-n", "app"} {
+			if !strings.Contains(output, want) {
+				t.Fatalf("hint %q missing from: %s", want, output)
+			}
+		}
+	})
+
+	t.Run("cr cluster graduation", func(t *testing.T) {
+		output := run(t, "cr copy create", cluster, "app")
+		if !strings.Contains(output, "--yes cr copy create --session grad") {
+			t.Fatalf("cluster hint wrong: %s", output)
+		}
+
+		if strings.Contains(output, "-n ") {
+			t.Fatalf("cluster graduation must not address a namespace: %s", output)
+		}
+	})
+
+	t.Run("session graduation", func(t *testing.T) {
+		output := run(t, "copy", namespaced, "app")
+		if !strings.Contains(output, " copy --session grad") {
+			t.Fatalf("session hint wrong: %s", output)
+		}
+
+		if strings.Contains(output, "cr copy create") {
+			t.Fatalf("session hint must not suggest the cr entrypoint: %s", output)
+		}
+	})
+}
+
+func splitCommandPath(command string) []string {
+	segments := strings.Fields(command)
+	for i, segment := range segments {
+		segments[i] = strings.TrimLeft(segment, "-")
+	}
+
+	return segments
+}

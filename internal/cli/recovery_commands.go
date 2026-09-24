@@ -45,14 +45,14 @@ func (r *rootState) newOrphanCleanupCommand() *cobra.Command {
 			}
 			prefix := sessionCommandPrefixForCommand(cmd, r.global.sessionNamespace)
 			validateCommand := fmt.Sprintf(
-				"%s recovery cleanup-orphan %s --source-namespace %s --source-pvc %s",
+				"%s recovery cleanup-orphan %s -n %s --source-pvc %s",
 				prefix,
 				args[0],
 				sourceNamespace,
 				sourcePVC,
 			)
 			executeCommand := fmt.Sprintf(
-				"%s --yes recovery cleanup-orphan %s --source-namespace %s --source-pvc %s --dry-run=false",
+				"%s --yes recovery cleanup-orphan %s -n %s --source-pvc %s --dry-run=false",
 				prefix,
 				args[0],
 				sourceNamespace,
@@ -135,7 +135,7 @@ func (r *rootState) newOrphanCleanupCommand() *cobra.Command {
 		},
 	}
 	command.Flags().
-		StringVarP(&sourceNamespace, "source-namespace", "n", "default", "Namespace of the owned source PVC")
+		StringVarP(&sourceNamespace, "namespace", "n", "default", "Namespace of the owned source PVC")
 	command.Flags().StringVar(&sourcePVC, "source-pvc", "", "Name of the owned source PVC")
 
 	if err := command.MarkFlagRequired("source-pvc"); err != nil {

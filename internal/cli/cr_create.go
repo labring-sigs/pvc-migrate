@@ -18,6 +18,10 @@ type crSubmission struct {
 	sessionType domain.SessionType
 	object      crclient.Object
 	submit      func(ctx context.Context, cmd *cobra.Command, runtime *commandRuntime) error
+	// preview, when set, renders the dry-run form of a submission whose real
+	// object only exists after backend resolution (a session graduation); it
+	// prints its own object and execute hint.
+	preview func(ctx context.Context, cmd *cobra.Command, runtime *commandRuntime) error
 }
 
 // runCRSubmission drives the shared submission contract: controller-semantics
@@ -45,6 +49,10 @@ func (r *rootState) runCRSubmission(
 	defer cancel()
 
 	if *dryRun {
+		if submission.preview != nil {
+			return submission.preview(ctx, cmd, runtime)
+		}
+
 		if err := runtime.printer.Print(submission.object); err != nil {
 			return err
 		}
@@ -433,6 +441,12 @@ func (r *rootState) buildCopySubmission(
 		return &crSubmission{
 			sessionType: domain.SessionTypeCopy,
 			object:      object,
+			// The graduated Copy depends on backend resolution (which
+			// reservation kind, which namespaces); dry-run renders through
+			// the same handoff path instead of the planning object.
+			preview: func(ctx context.Context, cmd *cobra.Command, runtime *commandRuntime) error {
+				return r.copyExisting(ctx, cmd, runtime, flags, true, true)
+			},
 			submit: func(ctx context.Context, cmd *cobra.Command, runtime *commandRuntime) error {
 				return r.copyExisting(ctx, cmd, runtime, flags, false, true)
 			},
@@ -785,9 +799,10 @@ func (r *rootState) newCRMoveCreateCommand() *cobra.Command {
 
 	f := command.Flags()
 	f.StringVar(&object.Name, "id", "", "Workflow ID; generated when omitted")
-	f.StringVar(
+	f.StringVarP(
 		&sourceNamespace,
 		"source-namespace",
+		"n",
 		"default",
 		"Source PVC namespace",
 	)

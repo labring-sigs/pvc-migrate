@@ -52,9 +52,10 @@ func (r *rootState) moveSubmissionCommand(planOnly bool) *cobra.Command {
 
 	f := command.Flags()
 	f.StringVar(&object.Name, "id", "", "Workflow ID; generated when omitted")
-	f.StringVar(
+	f.StringVarP(
 		&sourceNamespace,
 		"source-namespace",
+		"n",
 		"default",
 		"Source PVC namespace",
 	)
