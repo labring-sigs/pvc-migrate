@@ -6,6 +6,7 @@ import (
 
 	v1alpha1 "github.com/labring-sigs/pvc-migrate/api/v1alpha1"
 	"github.com/labring-sigs/pvc-migrate/internal/domain"
+	"github.com/labring-sigs/pvc-migrate/internal/kube"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
@@ -151,6 +152,61 @@ func deletionSourceMissing(
 			domain.ErrorKubernetes,
 			verifySourceStoragePhase,
 			"read source PV "+volume.SourcePV.Name,
+			err,
+		)
+	}
+
+	return pv.DeletionTimestamp != nil, nil
+}
+
+// deletionDestinationSettling reports whether the staged destination pair is
+// gone or terminating while finalizing a deleted workflow, so the deletion
+// pass skips re-validating storage it is about to release anyway.
+func deletionDestinationSettling(
+	ctx context.Context,
+	client kubernetes.Interface,
+	binding kube.PVCTransferBindings,
+) (bool, error) {
+	if !workflowDeletionInProgress(ctx) {
+		return false, nil
+	}
+
+	pvc, err := client.CoreV1().
+		PersistentVolumeClaims(binding.DestinationPVC.Namespace).
+		Get(ctx, binding.DestinationPVC.Name, metav1.GetOptions{})
+	if apierrors.IsNotFound(err) {
+		return true, nil
+	}
+
+	if err != nil {
+		return false, domain.WrapError(
+			domain.ErrorKubernetes,
+			verifySourceStoragePhase,
+			fmt.Sprintf(
+				"read destination PVC %s/%s",
+				binding.DestinationPVC.Namespace,
+				binding.DestinationPVC.Name,
+			),
+			err,
+		)
+	}
+
+	if pvc.DeletionTimestamp != nil {
+		return true, nil
+	}
+
+	pv, err := client.CoreV1().
+		PersistentVolumes().
+		Get(ctx, binding.DestinationPV.Name, metav1.GetOptions{})
+	if apierrors.IsNotFound(err) {
+		return true, nil
+	}
+
+	if err != nil {
+		return false, domain.WrapError(
+			domain.ErrorKubernetes,
+			verifySourceStoragePhase,
+			"read destination PV "+binding.DestinationPV.Name,
 			err,
 		)
 	}

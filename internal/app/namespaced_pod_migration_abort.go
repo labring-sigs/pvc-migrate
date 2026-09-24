@@ -187,8 +187,16 @@ func (m *PodMigrationExecutor) abort(ctx context.Context, object *v1alpha1.PodMi
 			return m.fail(ctx, object, err)
 		}
 
-		// The reserved-volume validation re-verifies the source identity,
-		// which no longer exists during deletion convergence.
+		if !skipValidation {
+			skipValidation, err = deletionDestinationSettling(ctx, m.client, binding)
+			if err != nil {
+				return m.fail(ctx, object, err)
+			}
+		}
+
+		// The reserved-volume validation re-verifies the live source and
+		// destination identities, which may already be going away during
+		// deletion convergence.
 		if !skipValidation {
 			if err := m.validateReservedVolume(
 				ctx,

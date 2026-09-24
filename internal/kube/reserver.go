@@ -990,6 +990,18 @@ func (r *Reserver) verifyDestinationIdentity(
 		)
 	}
 
+	if pv.DeletionTimestamp != nil {
+		return domain.NewError(
+			domain.ErrorPrecondition,
+			"reserve volume",
+			fmt.Sprintf(
+				"destination PV %s is terminating (deletion requested at %s); the transfer cannot proceed",
+				pv.Name,
+				pv.DeletionTimestamp.UTC().Format(time.RFC3339),
+			),
+		)
+	}
+
 	if err := validateReservationPVOwnership(
 		pv,
 		sessionID,
