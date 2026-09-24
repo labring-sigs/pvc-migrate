@@ -287,13 +287,22 @@ func persistedOwnerGuidance(session *kube.WorkflowOwner, presentation domain.Pre
 	case domain.PhaseReserved:
 		if session.Resource.Type == domain.SessionTypeReserve {
 			args := retainedCleanupArgs(session, workflow)
+			// A cluster-scoped reservation graduates through the
+			// cluster-copy family; the namespaced copy command cannot see
+			// its record.
+			copyFamily := "copy"
+			if session.Resource.Cluster {
+				copyFamily = "cluster-copy"
+			}
 
 			return fmt.Sprintf(
-				"%s; validate copy with `%s copy --session %s`, then execute `%s copy --session %s --dry-run=false`; close the reservation by validating `%s %s`, then executing `%s %s --dry-run=false`",
+				"%s; validate copy with `%s %s --session %s`, then execute `%s %s --session %s --dry-run=false`; close the reservation by validating `%s %s`, then executing `%s %s --dry-run=false`",
 				status,
 				base,
+				copyFamily,
 				session.ID,
 				base,
+				copyFamily,
 				session.ID,
 				base,
 				args,
@@ -371,12 +380,24 @@ func workflowCommand(session *kube.WorkflowOwner) string {
 
 	switch session.Resource.Type {
 	case domain.SessionTypeMigrate:
+		if session.Resource.Cluster {
+			return "cluster-migrate"
+		}
+
 		return "migrate"
 	case domain.SessionTypeMigratePod:
 		return "migrate-pod"
 	case domain.SessionTypeReserve:
+		if session.Resource.Cluster {
+			return "cluster-reserve"
+		}
+
 		return "reserve"
 	case domain.SessionTypeCopy:
+		if session.Resource.Cluster {
+			return "cluster-copy"
+		}
+
 		return "copy"
 	case domain.SessionTypeBackup:
 		return "backup"
