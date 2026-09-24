@@ -378,7 +378,7 @@ func TestCheckPVCReferencesModelsOfflineWarmCopyRWOPAndSharedUnit(t *testing.T) 
 			consumers, _ := collectPVCConsumers(plan, pvc, pods, nil, kube.ActivePodUsesPVC)
 			switch tt.operation {
 			case domain.OperationCopy:
-				checkCopyConsumers(plan, pvc, true, consumers)
+				checkCopyConsumers(plan, pvc, true, consumers, domain.PresentationCLI)
 			case domain.OperationReserve:
 				checkReservationConsumers(plan, pvc, consumers)
 			case domain.OperationMigratePod:

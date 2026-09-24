@@ -197,6 +197,7 @@ func (p *Planner) resolveMigration(ctx context.Context, name string, spec v1alph
 		inputs,
 		state.inventory.namespacePods,
 		state.inventory.namespacePodsErr,
+		p.guidanceAudience(),
 	)
 
 	p.selectPlanTarget(&state, v1alpha1.WorkloadNone, nil, "")
@@ -257,6 +258,7 @@ func checkOfflineMigrationPlanConsumers(
 	inputs []planVolumeInput,
 	pods []corev1.Pod,
 	listErr error,
+	audience domain.Presentation,
 ) {
 	names := []string{}
 	for _, input := range inputs {
@@ -286,10 +288,17 @@ func checkOfflineMigrationPlanConsumers(
 
 	sort.Strings(names)
 	names = slices.Compact(names)
+
+	alternative := "or use a PodMigration workflow to select a workload that can be paused before final sync"
+	if audience == domain.PresentationCLI {
+		alternative = "or use the separate migrate-pod command to select a workload that pvc-migrate can pause before final sync"
+	}
+
 	plan.AddCheck(failed(domain.CheckNamePVCConsumers,
 		fmt.Sprintf(
-			"offline migrate found active Pod consumer(s) %s; stop them before offline migration, or use a PodMigration workflow to select a workload that can be paused before final sync",
+			"offline migrate found active Pod consumer(s) %s; stop them before offline migration, %s",
 			strings.Join(names, ","),
+			alternative,
 		),
 	))
 }

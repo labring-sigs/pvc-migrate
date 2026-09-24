@@ -4,6 +4,7 @@ import (
 	"context"
 
 	v1alpha1 "github.com/labring-sigs/pvc-migrate/api/v1alpha1"
+	"github.com/labring-sigs/pvc-migrate/internal/domain"
 	"github.com/labring-sigs/pvc-migrate/internal/kube"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -41,7 +42,15 @@ func (m *Manager) discoverForTest(
 		return v1alpha1.WorkloadSpec{}, err
 	}
 
-	return m.DiscoverPod(ctx, pod, namespace, spec.Pod, "", spec.AllowLeaderDowntime)
+	return m.DiscoverPod(
+		ctx,
+		pod,
+		namespace,
+		spec.Pod,
+		"",
+		spec.AllowLeaderDowntime,
+		domain.PresentationCLI,
+	)
 }
 
 func kubeBlocksInstanceSetObject(apiVersion string, paused *bool) *unstructured.Unstructured {

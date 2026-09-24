@@ -11,18 +11,16 @@ import (
 	corev1 "k8s.io/api/core/v1"
 )
 
-// guidanceAudience is the presentation context of a check message. CLI
-// planning may quote copy-paste commands; controller-planned messages are
-// recorded verbatim on workflow CRs and events, where CLI command text does
-// not belong. Go has no sum types, and the two audiences differ only in
-// prose, so a closed constant set stands in for a Rust-style enum; advice
-// that merely spells a spec field stays single-form because CLI flag names
-// map one-to-one onto spec fields.
-type guidanceAudience int
+// Guidance messages carry two renderings selected by audience: CLI planning
+// quotes copy-paste commands and flags; controller-planned messages are
+// recorded verbatim on workflow CRs and events, where CLI text does not
+// belong. The presentation type and field-spelling helpers live in domain
+// so the workload discovery layer shares one mechanism.
+type guidanceAudience = domain.Presentation
 
 const (
-	audienceCLI guidanceAudience = iota
-	audienceController
+	audienceCLI        = domain.PresentationCLI
+	audienceController = domain.PresentationController
 )
 
 func (p *Planner) guidanceAudience() guidanceAudience {

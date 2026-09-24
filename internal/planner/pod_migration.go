@@ -196,6 +196,7 @@ func (p *Planner) resolvePodMigration(
 		plan, sourcePod, state.options.TargetNode,
 		state.storageClassChanged, len(state.plannedVolumes), len(state.pvcNames),
 		spec.ForceReprovision,
+		p.guidanceAudience(),
 	)
 
 	p.checkActivationPVCPolicies(ctx, plan, state.options.SourceNamespace, state.volumeSpecs)
@@ -425,6 +426,7 @@ func checkPodMigrationNeeded(
 	storageClassChanged bool,
 	plannedVolumes, selectedVolumes int,
 	forceReprovision bool,
+	audience domain.Presentation,
 ) {
 	if pod == nil || pod.Spec.NodeName == "" || pod.Spec.NodeName != targetNode ||
 		storageClassChanged || plannedVolumes == 0 || plannedVolumes != selectedVolumes {
@@ -439,12 +441,14 @@ func checkPodMigrationNeeded(
 	)
 	if forceReprovision {
 		plan.AddCheck(warned(domain.CheckNameForceReprovision,
-			message+"; forceReprovision will replace the backing PVs"))
+			message+"; "+audience.FieldRef("forceReprovision")+
+				" will replace the backing PVs"))
 		return
 	}
 
 	plan.AddCheck(failed(domain.CheckNameMigrationNeeded,
-		message+"; set forceReprovision to intentionally replace the backing PVs"))
+		message+"; "+audience.FieldUse("forceReprovision")+
+			" to intentionally replace the backing PVs"))
 }
 
 func (p *Planner) discoverPodMigrationWorkload(
@@ -462,6 +466,7 @@ func (p *Planner) discoverPodMigrationWorkload(
 
 	workload, err := p.controllers.DiscoverPod(
 		ctx, pod, namespace, expected, switchoverCandidate, allowLeaderDowntime,
+		p.guidanceAudience(),
 	)
 	if err != nil {
 		plan.AddCheck(failed(domain.CheckNameControllerAdapter, err.Error()))
