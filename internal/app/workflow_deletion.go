@@ -75,30 +75,41 @@ func sourcePVCDeleted(
 	return scan.Deleted, err
 }
 
-// scanPlannedSourcePVCs probes every planned source volume and reports the
-// first loss signal; a deleted PVC wins over a terminating one.
+// scanPlannedSourcePVCs probes every planned source volume and aggregates the
+// loss signals: a deleted PVC always wins over a terminating one, so the scan
+// keeps going after a terminating hit to look for a full deletion.
 func scanPlannedSourcePVCs(
 	ctx context.Context,
 	client kubernetes.Interface,
 	sourceNamespace string,
 	volumes []v1alpha1.VolumeSpec,
 ) (plannedSourceScan, error) {
+	scan := plannedSourceScan{}
 	for _, volume := range volumes {
 		if volume.SourcePVC.Name == "" {
 			continue
 		}
 
-		scan, err := probeSourcePVC(
+		probe, err := probeSourcePVC(
 			ctx,
 			client,
 			qualifiedResourceReference(volume.SourcePVC, sourceNamespace),
 		)
-		if err != nil || scan.Deleted || scan.Terminating != nil {
-			return scan, err
+		if err != nil {
+			return plannedSourceScan{}, err
+		}
+
+		if probe.Deleted {
+			scan.Deleted = true
+			return scan, nil
+		}
+
+		if probe.Terminating != nil && scan.Terminating == nil {
+			scan.Terminating = probe.Terminating
 		}
 	}
 
-	return plannedSourceScan{}, nil
+	return scan, nil
 }
 
 // deletedPlannedSourcePVC reports whether any planned source volume lost its

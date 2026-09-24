@@ -92,6 +92,36 @@ func TestFailSourceDeletedTerminatingSourceFollowsPhase(t *testing.T) {
 	}
 }
 
+func TestFailSourceDeletedDeletedWinsOverTerminating(t *testing.T) {
+	executor, object, _, _ := namespacedPodMigrationFixture(t)
+	executor.workloads = &fakeController{}
+
+	// Volume "a" lingers terminating while volume "b" is fully gone: the
+	// harder loss must decide the failure, at every phase that probes at all.
+	armTerminatingSourcePVC(t, executor, object.Namespace, "a")
+
+	if err := executor.client.CoreV1().
+		PersistentVolumeClaims(object.Namespace).
+		Delete(t.Context(), "b", metav1.DeleteOptions{}); err != nil {
+		t.Fatal(err)
+	}
+
+	object.Status.Phase = domain.PhaseFinalSynced
+
+	err := executor.FailSourceDeleted(t.Context(), object)
+	if err == nil {
+		t.Fatal("expected the recorded source-loss failure")
+	}
+
+	if !strings.Contains(err.Error(), "source PVC no longer exists") {
+		t.Fatalf("failure does not report the deleted source: %v", err)
+	}
+
+	if object.Status.Phase != domain.PhaseFailed {
+		t.Fatalf("phase = %s, want Failed", object.Status.Phase)
+	}
+}
+
 func TestFailSourceDeletedStillFailsDeletedSourceAfterFinalSync(t *testing.T) {
 	executor, object, _, _ := namespacedPodMigrationFixture(t)
 	executor.workloads = &fakeController{}
