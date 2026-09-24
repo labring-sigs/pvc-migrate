@@ -219,7 +219,7 @@ func (p *Planner) checkCopyPlanConsumers(
 			continue
 		}
 
-		checkCopyConsumers(state.plan, input.pvc, online, consumers, p.guidanceAudience())
+		checkCopyConsumers(state.plan, input.pvc, online, consumers, p.presentation())
 
 		if !online {
 			continue

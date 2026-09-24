@@ -56,7 +56,7 @@ func TestOwnershipControllerGuidanceOmitsCLICommands(t *testing.T) {
 			owner := ownershipFixture(t, domain.SessionTypeMigratePod)
 			owner.Phase = testCase.phase
 
-			guidance := persistedOwnerGuidance(owner, audienceController)
+			guidance := persistedOwnerGuidance(owner, domain.PresentationController)
 
 			for _, forbidden := range []string{"pvc-migrate", "--dry-run", "cleanup owner-session"} {
 				if strings.Contains(guidance, forbidden) {
@@ -73,7 +73,10 @@ func TestOwnershipControllerGuidanceOmitsCLICommands(t *testing.T) {
 	warmCopied := ownershipFixture(t, domain.SessionTypeCopy)
 
 	warmCopied.Phase = domain.PhaseWarmCopied
-	if guidance := persistedOwnerGuidance(warmCopied, audienceController); !strings.Contains(
+	if guidance := persistedOwnerGuidance(
+		warmCopied,
+		domain.PresentationController,
+	); !strings.Contains(
 		guidance,
 		"keep or discard the copied PVC",
 	) {
@@ -83,7 +86,10 @@ func TestOwnershipControllerGuidanceOmitsCLICommands(t *testing.T) {
 	reservation := ownershipFixture(t, domain.SessionTypeReserve)
 
 	reservation.Phase = domain.PhaseReserved
-	if guidance := persistedOwnerGuidance(reservation, audienceController); !strings.Contains(
+	if guidance := persistedOwnerGuidance(
+		reservation,
+		domain.PresentationController,
+	); !strings.Contains(
 		guidance,
 		"continue the reservation as a copy",
 	) {
@@ -97,8 +103,11 @@ func TestOwnershipCRDGuidanceStaysInKubectl(t *testing.T) {
 	owner := ownershipFixture(t, domain.SessionTypeMigratePod)
 	owner.Backend = kube.SessionBackendCRD
 
-	for _, audience := range []guidanceAudience{audienceCLI, audienceController} {
-		guidance := persistedOwnerGuidance(owner, audience)
+	for _, presentation := range []domain.Presentation{
+		domain.PresentationCLI,
+		domain.PresentationController,
+	} {
+		guidance := persistedOwnerGuidance(owner, presentation)
 		if !strings.Contains(guidance, "kubectl get podmigrations") ||
 			strings.Contains(guidance, "pvc-migrate ") {
 			t.Fatalf("CRD guidance must stay in kubectl: %s", guidance)
@@ -129,7 +138,7 @@ func TestOwnershipCleanupGuidanceMatchesCleanupFlags(t *testing.T) {
 		t.Run(testCase.workflow, func(t *testing.T) {
 			guidance := persistedOwnerGuidance(
 				ownershipFixture(t, testCase.sessionType),
-				audienceCLI,
+				domain.PresentationCLI,
 			)
 
 			if !strings.Contains(guidance, testCase.workflow+" cleanup owner-session") {
@@ -160,7 +169,7 @@ func TestOwnershipWarmCopiedGuidanceCoversCompletedCopy(t *testing.T) {
 	owner := ownershipFixture(t, domain.SessionTypeCopy)
 	owner.Phase = domain.PhaseWarmCopied
 
-	guidance := persistedOwnerGuidance(owner, audienceCLI)
+	guidance := persistedOwnerGuidance(owner, domain.PresentationCLI)
 	if !strings.Contains(guidance, "preserve the copied PVC") ||
 		!strings.Contains(guidance, "copy cleanup owner-session --unused-storage-policy Keep") {
 		t.Fatalf("warm-copied copy guidance: %s", guidance)
@@ -169,7 +178,7 @@ func TestOwnershipWarmCopiedGuidanceCoversCompletedCopy(t *testing.T) {
 	reservation := ownershipFixture(t, domain.SessionTypeReserve)
 	reservation.Phase = domain.PhaseReserved
 
-	promotion := persistedOwnerGuidance(reservation, audienceCLI)
+	promotion := persistedOwnerGuidance(reservation, domain.PresentationCLI)
 	if !strings.Contains(promotion, "validate copy with") ||
 		!strings.Contains(promotion, "close the reservation") {
 		t.Fatalf("reserved promotion guidance: %s", promotion)

@@ -57,7 +57,7 @@ func checkCopyConsumers(
 	pvc *corev1.PersistentVolumeClaim,
 	online bool,
 	consumers []*corev1.Pod,
-	audience domain.Presentation,
+	presentation domain.Presentation,
 ) {
 	if len(consumers) == 0 {
 		checkOfflinePVC(plan, pvc)
@@ -72,7 +72,7 @@ func checkCopyConsumers(
 				pvc.Namespace,
 				pvc.Name,
 				consumerNames(consumers),
-				audience.FieldUse("online"),
+				presentation.FieldUse("online"),
 			),
 		))
 

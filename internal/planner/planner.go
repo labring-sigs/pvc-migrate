@@ -233,7 +233,7 @@ func (p *Planner) validateStorageInputs(plan checkRecorder, options transferInpu
 	validateDestinationCapacityInputs(
 		plan, options.DestinationCapacity, options.Volumes,
 		options.AllowVolumeShrink, options.SkipSourceUsageCheck,
-		p.guidanceAudience(),
+		p.presentation(),
 	)
 }
 
@@ -299,7 +299,7 @@ func validateDestinationCapacityInputs(
 	destinationCapacity string,
 	volumes []v1alpha1.VolumeRequest,
 	allowVolumeShrink, skipSourceUsageCheck bool,
-	audience domain.Presentation,
+	presentation domain.Presentation,
 ) {
 	capacities := make([]string, 0, len(volumes)+1)
 	if destinationCapacity != "" {
@@ -316,8 +316,8 @@ func validateDestinationCapacityInputs(
 		plan.AddCheck(
 			failed(
 				domain.CheckNameDestinationCapacity,
-				audience.FieldRef("allowVolumeShrink")+" requires "+
-					audience.FieldRef("destinationCapacity"),
+				presentation.FieldRef("allowVolumeShrink")+" requires "+
+					presentation.FieldRef("destinationCapacity"),
 			),
 		)
 	}
@@ -326,8 +326,8 @@ func validateDestinationCapacityInputs(
 		plan.AddCheck(
 			failed(
 				domain.CheckNameDestinationCapacity,
-				audience.FieldRef("skipSourceUsageCheck")+" requires "+
-					audience.FieldRef("allowVolumeShrink"),
+				presentation.FieldRef("skipSourceUsageCheck")+" requires "+
+					presentation.FieldRef("allowVolumeShrink"),
 			),
 		)
 	}

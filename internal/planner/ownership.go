@@ -11,24 +11,15 @@ import (
 	corev1 "k8s.io/api/core/v1"
 )
 
-// Guidance messages carry two renderings selected by audience: CLI planning
-// quotes copy-paste commands and flags; controller-planned messages are
-// recorded verbatim on workflow CRs and events, where CLI text does not
-// belong. The presentation type and field-spelling helpers live in domain
-// so the workload discovery layer shares one mechanism.
-type guidanceAudience = domain.Presentation
-
-const (
-	audienceCLI        = domain.PresentationCLI
-	audienceController = domain.PresentationController
-)
-
-func (p *Planner) guidanceAudience() guidanceAudience {
+// presentation selects how guidance renders: CLI planning quotes
+// copy-paste commands and flags; controller-planned messages are recorded
+// verbatim on workflow CRs and events, where CLI text does not belong.
+func (p *Planner) presentation() domain.Presentation {
 	if p.controllerSubmission {
-		return audienceController
+		return domain.PresentationController
 	}
 
-	return audienceCLI
+	return domain.PresentationCLI
 }
 
 // checkSessionOwnership stops a new session before approval or resource
@@ -125,7 +116,7 @@ func (p *Planner) checkSessionOwnership(
 					pv.Name,
 					owner,
 					ownerSession.Phase,
-					persistedOwnerGuidance(ownerSession, p.guidanceAudience()),
+					persistedOwnerGuidance(ownerSession, p.presentation()),
 				),
 			),
 		)
@@ -134,7 +125,7 @@ func (p *Planner) checkSessionOwnership(
 	}
 
 	if err == nil {
-		if p.guidanceAudience() == audienceController {
+		if p.presentation() == domain.PresentationController {
 			// Check messages from controller planning land verbatim in
 			// workflow CR status, which must not carry CLI command text.
 			plan.AddCheck(
@@ -231,14 +222,14 @@ func workflowAcceptsCleanupPolicy(session *kube.WorkflowOwner) bool {
 }
 
 // persistedOwnerGuidance explains how to release the storage. The CLI
-// audience gets copy-paste commands; the controller audience gets a
-// description of the releasing action, because its check messages land
+// presentation gets copy-paste commands; the controller presentation gets
+// a description of the releasing action, because its check messages land
 // verbatim in workflow CR status.
-func persistedOwnerGuidance(session *kube.WorkflowOwner, audience guidanceAudience) string {
+func persistedOwnerGuidance(session *kube.WorkflowOwner, presentation domain.Presentation) string {
 	// Controller workflows are owned by the elected controller: the CLI
 	// lifecycle commands only manage ConfigMap-backed sessions. Deleting the
 	// CR converges storage through the controller's finalizer; kubectl is the
-	// universal operator surface, so this form serves both audiences.
+	// universal operator surface, so this form serves both presentations.
 	if session.Backend == kube.SessionBackendCRD {
 		resource := session.Resource
 
@@ -257,7 +248,7 @@ func persistedOwnerGuidance(session *kube.WorkflowOwner, audience guidanceAudien
 		)
 	}
 
-	if audience == audienceController {
+	if presentation == domain.PresentationController {
 		return controllerOwnerGuidance(session)
 	}
 
