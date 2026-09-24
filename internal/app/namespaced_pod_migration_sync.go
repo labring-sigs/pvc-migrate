@@ -60,6 +60,16 @@ func (m *PodMigrationExecutor) ValidateFinalSync(
 		return err
 	}
 
+	if err := validateFinalSyncSources(
+		ctx,
+		m.client,
+		object.Namespace,
+		plan.Volumes,
+		"pod migration final sync",
+	); err != nil {
+		return err
+	}
+
 	indexes := podMigrationVolumeIndexes(object.Status.Volumes)
 
 	bindings := make([]kube.PVCTransferBindings, 0, len(plan.Volumes))

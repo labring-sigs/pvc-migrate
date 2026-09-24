@@ -9,6 +9,7 @@ import (
 	"github.com/labring-sigs/pvc-migrate/internal/copyengine"
 	"github.com/labring-sigs/pvc-migrate/internal/domain"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
 	crclient "sigs.k8s.io/controller-runtime/pkg/client"
@@ -34,10 +35,20 @@ func installPodAbortSources(
 			},
 			Status: corev1.PersistentVolumeClaimStatus{Phase: corev1.ClaimBound},
 		}
+		// The fixture already seeds the source claims; re-assert their bound
+		// identity in case the test rearranged them.
 		if _, err := client.CoreV1().
 			PersistentVolumeClaims(namespace).
 			Create(t.Context(), pvc, metav1.CreateOptions{}); err != nil {
-			t.Fatal(err)
+			if !apierrors.IsAlreadyExists(err) {
+				t.Fatal(err)
+			}
+
+			if _, err := client.CoreV1().
+				PersistentVolumeClaims(namespace).
+				Update(t.Context(), pvc, metav1.UpdateOptions{}); err != nil {
+				t.Fatal(err)
+			}
 		}
 
 		pv := &corev1.PersistentVolume{

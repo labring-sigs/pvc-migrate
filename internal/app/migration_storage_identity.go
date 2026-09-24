@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 	"fmt"
+	"time"
 
 	v1alpha1 "github.com/labring-sigs/pvc-migrate/api/v1alpha1"
 	"github.com/labring-sigs/pvc-migrate/internal/domain"
@@ -307,6 +308,23 @@ func verifyActiveStorageVolume(
 				"read PVC %s/%s returned an empty object",
 				destinationNamespace,
 				sourcePVC.Name,
+			),
+		)
+	}
+
+	// A resumed workload cannot mount a claim that is being deleted — the
+	// scheduler refuses it, so the resume would wait out its whole timeout
+	// with the cause hidden in pod events. Surface the loss up front; a
+	// deletion pass keeps converging instead (it skips the workload resume).
+	if pvc.DeletionTimestamp != nil && !workflowDeletionInProgress(ctx) {
+		return domain.NewError(
+			domain.ErrorPrecondition,
+			verifyMigrationPhase,
+			fmt.Sprintf(
+				"active PVC %s/%s is terminating (deletion requested at %s); the workload cannot resume onto it",
+				pvc.Namespace,
+				pvc.Name,
+				pvc.DeletionTimestamp.UTC().Format(time.RFC3339),
 			),
 		)
 	}

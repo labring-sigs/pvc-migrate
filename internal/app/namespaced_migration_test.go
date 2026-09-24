@@ -88,6 +88,7 @@ func namespacedMigrationFixture(
 	executor.reserver = reserver
 	executor.switcher = &scriptedSwitcher{client: executor.client}
 	executor.now = func() time.Time { return time.Unix(100, 0).UTC() }
+	seedPlanSourcePVCs(t, executor.client, object.Namespace, object.Status.Plan.Volumes)
 
 	return executor, object, store, reserver
 }

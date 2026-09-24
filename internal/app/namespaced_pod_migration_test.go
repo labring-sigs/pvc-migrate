@@ -137,7 +137,11 @@ func namespacedPodMigrationFixture(
 	reserver := &concreteReservationReserver{}
 	executor.reserver = reserver
 	executor.switcher = &scriptedSwitcher{client: executor.client}
+
 	executor.now = func() time.Time { return time.Unix(100, 0).UTC() }
+	if object.Status.Plan != nil {
+		seedPlanSourcePVCs(t, executor.client, object.Namespace, object.Status.Plan.Volumes)
+	}
 
 	return executor, object, store, reserver
 }
