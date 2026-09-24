@@ -32,16 +32,13 @@ type reserveFlags struct {
 	unusedStoragePolicy   string
 }
 
-func (f *reserveFlags) bind(command *cobra.Command) {
+// bindTransfer binds the reservation inputs that shape the workflow spec.
+// Namespace roles bind separately through bindNamespaceRoles: session
+// commands take one flag per role, cr namespaced submits take a single -n,
+// and cr cluster submits take the roles their spec declares.
+func (f *reserveFlags) bindTransfer(command *cobra.Command) {
 	flags := command.Flags()
 	flags.StringVar(&f.sessionID, "session", "", "Migration session ID")
-	flags.StringVarP(&f.sourceNamespace, "source-namespace", "n", "default", "Source PVC namespace")
-	flags.StringVar(
-		&f.destinationNamespace,
-		"destination-namespace",
-		"",
-		"Destination namespace; defaults to source namespace",
-	)
 	flags.StringSliceVar(
 		&f.sourcePVCs,
 		"source-pvc",
@@ -127,6 +124,31 @@ func (f *reserveFlags) bind(command *cobra.Command) {
 		string(v1alpha1.UnusedStorageKeep),
 		"Keep or Delete reserved storage: Delete removes destination PVCs this reservation created and never promoted to a copy; promoted destinations belong to the copy workflow and the source is always kept (default Keep)",
 	)
+}
+
+// bindNamespaceRoles binds the per-role namespace flags the session and
+// cluster-scoped reservation entrypoints expose.
+func (f *reserveFlags) bindNamespaceRoles(command *cobra.Command) {
+	flags := command.Flags()
+	flags.StringVarP(&f.sourceNamespace, "source-namespace", "n", "default", "Source PVC namespace")
+	flags.StringVar(
+		&f.destinationNamespace,
+		"destination-namespace",
+		"",
+		"Destination namespace; defaults to source namespace",
+	)
+}
+
+func (f *reserveFlags) bind(command *cobra.Command) {
+	f.bindTransfer(command)
+	f.bindNamespaceRoles(command)
+}
+
+// setSingleNamespace pins every namespace role to one tenant namespace for a
+// namespaced Reservation submission.
+func (f *reserveFlags) setSingleNamespace(namespace string) {
+	f.sourceNamespace = namespace
+	f.destinationNamespace = namespace
 }
 
 func (f *reserveFlags) workflow(

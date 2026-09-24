@@ -31,8 +31,12 @@ func sessionCommandPrefixForCommand(value any, namespace string) string {
 		}
 	}
 
-	if namespace != "" && namespace != "pvc-migrate-system" {
-		args = append(args, "--workflow-namespace", shellQuote(namespace))
+	// Session commands address records in the session namespace; carry an
+	// explicit --session-namespace whenever the hint must reach a session
+	// stored outside the default. cr commands address CRs with -n on each
+	// verb, so their prefix stays namespace-free.
+	if namespace != "" && namespace != "pvc-migrate-system" && !isControllerCommand(command) {
+		args = append(args, "--session-namespace", shellQuote(namespace))
 	}
 
 	return strings.Join(args, " ")

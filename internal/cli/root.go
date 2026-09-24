@@ -34,24 +34,23 @@ type Options struct {
 }
 
 type globals struct {
-	kubeconfig        string
-	kubeContext       string
-	sessionNamespace  string
-	workflowNamespace string
-	timeout           time.Duration
-	copyTimeout       time.Duration
-	retries           int
-	retryBackoff      time.Duration
-	helmTimeout       time.Duration
-	output            string
-	logFormat         string
-	logLevel          string
-	color             string
-	streamToolLogs    bool
-	compress          bool
-	copyBandwidth     string
-	assumeYes         bool
-	toolImage         string
+	kubeconfig       string
+	kubeContext      string
+	sessionNamespace string
+	timeout          time.Duration
+	copyTimeout      time.Duration
+	retries          int
+	retryBackoff     time.Duration
+	helmTimeout      time.Duration
+	output           string
+	logFormat        string
+	logLevel         string
+	color            string
+	streamToolLogs   bool
+	compress         bool
+	copyBandwidth    string
+	assumeYes        bool
+	toolImage        string
 }
 
 type logFormat string
@@ -151,12 +150,6 @@ func NewRoot(options Options) *cobra.Command {
 		"pvc-migrate-system",
 		"Namespace for persistent migration sessions",
 	)
-	flags.StringVar(
-		&state.global.workflowNamespace,
-		"workflow-namespace",
-		"",
-		"Tenant namespace containing a controller workflow for lifecycle/status commands",
-	)
 	flags.DurationVar(
 		&state.global.timeout,
 		"timeout",
@@ -249,6 +242,7 @@ func NewRoot(options Options) *cobra.Command {
 		state.newBackupCommand(),
 		state.newRestoreCommand(),
 		state.newRecoveryCommand(),
+		state.newCRCommand(),
 		state.newControllerCommand(),
 		newVersionCommand(options.Version),
 	)
@@ -488,20 +482,6 @@ func (r *rootState) validateGlobalFlags() error {
 				strings.Join(problems, "; "),
 			),
 		)
-	}
-
-	if r.global.workflowNamespace != "" {
-		if problems := validation.IsDNS1123Label(r.global.workflowNamespace); len(problems) > 0 {
-			return domain.NewError(
-				domain.ErrorValidation,
-				"flags",
-				fmt.Sprintf(
-					"--workflow-namespace %q is invalid: %s",
-					r.global.workflowNamespace,
-					strings.Join(problems, "; "),
-				),
-			)
-		}
 	}
 
 	return nil

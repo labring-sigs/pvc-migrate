@@ -15,10 +15,10 @@ import (
 
 func (r *rootState) addReserveLifecycle(parent *cobra.Command) {
 	parent.AddCommand(
-		r.newReserveStatusCommand(),
-		r.newReserveResumeCommand(),
-		r.newReserveAbortCommand(),
-		r.newReserveCleanupCommand(),
+		r.newReserveStatusCommand(sourceSession),
+		r.newReserveResumeCommand(sourceSession),
+		r.newReserveAbortCommand(sourceSession),
+		r.newReserveCleanupCommand(sourceSession),
 	)
 }
 
@@ -27,8 +27,9 @@ func (r *rootState) loadReservation(
 	cmd *cobra.Command,
 	runtime *commandRuntime,
 	id string,
+	source workflowSource,
 ) (crclient.Object, error) {
-	object, _, err := r.loadReservationWithBackend(ctx, cmd, runtime, id)
+	object, _, err := r.loadReservationWithBackend(ctx, cmd, runtime, id, source)
 	return object, err
 }
 
@@ -37,6 +38,7 @@ func (r *rootState) loadReservationWithBackend(
 	cmd *cobra.Command,
 	runtime *commandRuntime,
 	id string,
+	source workflowSource,
 ) (crclient.Object, string, error) {
 	if runtime.clients == nil {
 		return nil, "", domain.NewError(
@@ -48,16 +50,25 @@ func (r *rootState) loadReservationWithBackend(
 
 	namespace := r.workflowStorageNamespace(cmd)
 
+	candidates := map[domain.ControllerKind]crclient.Object{
+		domain.ControllerKindReservation:        &v1alpha1.Reservation{},
+		domain.ControllerKindClusterReservation: &v1alpha1.ClusterReservation{},
+	}
+	switch source {
+	case sourceController:
+		delete(candidates, domain.ControllerKindClusterReservation)
+	case sourceClusterController:
+		delete(candidates, domain.ControllerKindReservation)
+	}
+
 	object, backend, err := r.loadWorkflowWithBackend(
 		ctx,
 		cmd,
 		runtime,
 		namespace,
 		id,
-		map[domain.ControllerKind]crclient.Object{
-			domain.ControllerKindReservation:        &v1alpha1.Reservation{},
-			domain.ControllerKindClusterReservation: &v1alpha1.ClusterReservation{},
-		},
+		candidates,
+		source,
 	)
 	if err != nil {
 		return nil, "", reportSessionLookupError(cmd, namespace, id, err)
@@ -75,9 +86,9 @@ func (r *rootState) loadReservationWithBackend(
 	}
 }
 
-func (r *rootState) newReserveStatusCommand() *cobra.Command {
+func (r *rootState) newReserveStatusCommand(source workflowSource) *cobra.Command {
 	return &cobra.Command{
-		Use:   "status [SESSION]",
+		Use:   "status [" + workflowArgLabel(source) + "]",
 		Short: "Show one reservation or list reservations",
 		Args:  cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -90,7 +101,7 @@ func (r *rootState) newReserveStatusCommand() *cobra.Command {
 			defer cancel()
 
 			if len(args) == 1 {
-				object, err := r.loadReservation(ctx, cmd, runtime, args[0])
+				object, err := r.loadReservation(ctx, cmd, runtime, args[0], source)
 				if err != nil {
 					return err
 				}
@@ -101,20 +112,48 @@ func (r *rootState) newReserveStatusCommand() *cobra.Command {
 
 				return writeWorkflowNextSteps(
 					cmd.ErrOrStderr(),
+					cmd,
 					guidancePrefixesForCommand(
 						cmd,
 						workflowHintNamespace("", r, cmd, object),
 					).pvcMigrate,
 					"reserve",
+					workflowHintNamespace("", r, cmd, object),
 					object.GetName(),
 					workflowObjectPhase(object),
 					false,
 				)
 			}
 
+			objects := []crclient.Object{}
+
+			if source != sourceSession {
+				if !crdListable(runtime) {
+					return runtime.printer.Print(objects)
+				}
+
+				kind := domain.ControllerKindReservation
+				if source == sourceClusterController {
+					kind = domain.ControllerKindClusterReservation
+				}
+
+				if len(runtime.controllerKinds) != 0 &&
+					!slices.Contains(runtime.controllerKinds, kind) {
+					return runtime.printer.Print(objects)
+				}
+
+				items, err := listControllerWorkflows(ctx, runtime, kind)
+				if err != nil {
+					return err
+				}
+
+				objects = append(objects, items...)
+
+				return runtime.printer.Print(objects)
+			}
+
 			namespace := r.workflowStorageNamespace(cmd)
 
-			objects := []crclient.Object{}
 			if len(runtime.controllerKinds) == 0 ||
 				slices.Contains(runtime.controllerKinds, domain.ControllerKindReservation) {
 				store, err := cliWorkflowStore(
@@ -157,56 +196,16 @@ func (r *rootState) newReserveStatusCommand() *cobra.Command {
 				}
 			}
 
-			if crdListable(runtime) && (len(runtime.controllerKinds) == 0 ||
-				slices.Contains(runtime.controllerKinds, domain.ControllerKindReservation)) {
-				crdStore, err := cliCRDWorkflowStore(
-					runtime,
-					func() *v1alpha1.Reservation { return &v1alpha1.Reservation{} },
-				)
-				if err != nil {
-					return err
-				}
-
-				items, err := crdStore.List(ctx, namespace)
-				if err != nil {
-					return err
-				}
-
-				for _, object := range items {
-					objects = append(objects, object)
-				}
-			}
-
-			if crdListable(runtime) && (len(runtime.controllerKinds) == 0 ||
-				slices.Contains(runtime.controllerKinds, domain.ControllerKindClusterReservation)) {
-				crdStore, err := cliCRDWorkflowStore(
-					runtime,
-					func() *v1alpha1.ClusterReservation { return &v1alpha1.ClusterReservation{} },
-				)
-				if err != nil {
-					return err
-				}
-
-				items, err := crdStore.List(ctx, "")
-				if err != nil {
-					return err
-				}
-
-				for _, object := range items {
-					objects = append(objects, object)
-				}
-			}
-
 			return runtime.printer.Print(objects)
 		},
 	}
 }
 
-func (r *rootState) newReserveResumeCommand() *cobra.Command {
+func (r *rootState) newReserveResumeCommand(source workflowSource) *cobra.Command {
 	var dryRun bool
 
 	command := &cobra.Command{
-		Use:   "resume SESSION",
+		Use:   "resume " + workflowArgLabel(source),
 		Short: "Continue a reservation from its persisted checkpoint",
 		Args:  cobra.ExactArgs(1),
 	}
@@ -219,18 +218,18 @@ func (r *rootState) newReserveResumeCommand() *cobra.Command {
 		ctx, cancel := r.context(cmd.Context())
 		defer cancel()
 
-		return r.reserveExisting(ctx, cmd, runtime, args[0], dryRun)
+		return r.reserveExisting(ctx, cmd, runtime, args[0], dryRun, source)
 	}
 	bindDryRun(command, &dryRun)
 
 	return command
 }
 
-func (r *rootState) newReserveAbortCommand() *cobra.Command {
+func (r *rootState) newReserveAbortCommand(source workflowSource) *cobra.Command {
 	var dryRun bool
 
 	command := &cobra.Command{
-		Use:   "abort SESSION",
+		Use:   "abort " + workflowArgLabel(source),
 		Short: "Abort a reservation",
 		Args:  cobra.ExactArgs(1),
 	}
@@ -243,7 +242,7 @@ func (r *rootState) newReserveAbortCommand() *cobra.Command {
 		ctx, cancel := r.context(cmd.Context())
 		defer cancel()
 
-		object, backend, err := r.loadReservationWithBackend(ctx, cmd, runtime, args[0])
+		object, backend, err := r.loadReservationWithBackend(ctx, cmd, runtime, args[0], source)
 		if err != nil {
 			return err
 		}
@@ -319,16 +318,20 @@ func (r *rootState) newReserveAbortCommand() *cobra.Command {
 			return err
 		}
 
+		namespace := workflowHintNamespace(backend, r, cmd, object)
+
 		if dryRun {
 			return writeDryRunNotice(
 				cmd.ErrOrStderr(),
 				lifecycleExecuteCommand(
+					cmd,
 					guidancePrefixesForCommand(
 						cmd,
-						workflowHintNamespace(backend, r, cmd, object),
+						namespace,
 					).pvcMigrate,
 					"reserve",
 					"abort",
+					namespace,
 					object.GetName(),
 				),
 			)
@@ -336,11 +339,13 @@ func (r *rootState) newReserveAbortCommand() *cobra.Command {
 
 		return writeWorkflowNextSteps(
 			cmd.ErrOrStderr(),
+			cmd,
 			guidancePrefixesForCommand(
 				cmd,
-				workflowHintNamespace(backend, r, cmd, object),
+				namespace,
 			).pvcMigrate,
 			"reserve",
+			namespace,
 			object.GetName(),
 			workflowObjectPhase(object),
 			false,
@@ -351,14 +356,14 @@ func (r *rootState) newReserveAbortCommand() *cobra.Command {
 	return command
 }
 
-func (r *rootState) newReserveCleanupCommand() *cobra.Command {
+func (r *rootState) newReserveCleanupCommand(source workflowSource) *cobra.Command {
 	var (
 		options app.ReservationCleanupOptions
 		dryRun  bool
 	)
 
 	command := &cobra.Command{
-		Use:   "cleanup SESSION",
+		Use:   "cleanup " + workflowArgLabel(source),
 		Short: "Finalize reservation storage and clean up its workflow",
 		Args:  cobra.ExactArgs(1),
 	}
@@ -371,7 +376,7 @@ func (r *rootState) newReserveCleanupCommand() *cobra.Command {
 		ctx, cancel := r.context(cmd.Context())
 		defer cancel()
 
-		object, backend, err := r.loadReservationWithBackend(ctx, cmd, runtime, args[0])
+		object, backend, err := r.loadReservationWithBackend(ctx, cmd, runtime, args[0], source)
 		if err != nil {
 			return err
 		}
@@ -473,11 +478,13 @@ func (r *rootState) newReserveCleanupCommand() *cobra.Command {
 			return writeDryRunNotice(
 				cmd.ErrOrStderr(),
 				cleanupExecuteCommand(
+					cmd,
 					guidancePrefixesForCommand(
 						cmd,
 						workflowHintNamespace(backend, r, cmd, object),
 					).pvcMigrate,
 					"reserve",
+					workflowHintNamespace(backend, r, cmd, object),
 					object.GetName(),
 					options.UnusedStoragePolicy,
 					options.Finalize,

@@ -12,9 +12,9 @@ import (
 	crclient "sigs.k8s.io/controller-runtime/pkg/client"
 )
 
-func (r *rootState) newOfflineMigrationStatusCommand() *cobra.Command {
+func (r *rootState) newOfflineMigrationStatusCommand(source workflowSource) *cobra.Command {
 	return &cobra.Command{
-		Use:   "status [SESSION]",
+		Use:   "status [" + workflowArgLabel(source) + "]",
 		Short: "Show one offline migration or list migrations",
 		Args:  cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -27,7 +27,13 @@ func (r *rootState) newOfflineMigrationStatusCommand() *cobra.Command {
 			defer cancel()
 
 			if len(args) == 1 {
-				object, backend, err := r.loadMigrationWithBackend(ctx, cmd, runtime, args[0])
+				object, backend, err := r.loadMigrationWithBackend(
+					ctx,
+					cmd,
+					runtime,
+					args[0],
+					source,
+				)
 				if err != nil {
 					return err
 				}
@@ -39,91 +45,69 @@ func (r *rootState) newOfflineMigrationStatusCommand() *cobra.Command {
 				return writeOfflineMigrationNextSteps(cmd, r, backend, object)
 			}
 
-			namespace := r.workflowStorageNamespace(cmd)
 			objects := []crclient.Object{}
 
-			if len(runtime.controllerKinds) == 0 ||
-				slices.Contains(runtime.controllerKinds, domain.ControllerKindMigration) {
-				store, err := cliWorkflowStore(
-					runtime,
-					namespace,
-					func() *v1alpha1.Migration { return &v1alpha1.Migration{} },
-				)
+			if source != sourceSession {
+				if !crdListable(runtime) {
+					return runtime.printer.Print(objects)
+				}
+
+				kind := domain.ControllerKindMigration
+				if source == sourceClusterController {
+					kind = domain.ControllerKindClusterMigration
+				}
+
+				if len(runtime.controllerKinds) != 0 &&
+					!slices.Contains(runtime.controllerKinds, kind) {
+					return runtime.printer.Print(objects)
+				}
+
+				items, err := listControllerWorkflows(ctx, runtime, kind)
 				if err != nil {
 					return err
 				}
 
-				items, err := store.List(ctx, namespace)
-				if err != nil {
-					return err
-				}
+				objects = append(objects, items...)
 
-				for _, object := range items {
-					objects = append(objects, object)
-				}
+				return runtime.printer.Print(objects)
 			}
 
-			if len(runtime.controllerKinds) == 0 ||
-				slices.Contains(runtime.controllerKinds, domain.ControllerKindClusterMigration) {
-				store, err := cliWorkflowStore(
-					runtime,
-					namespace,
-					func() *v1alpha1.ClusterMigration { return &v1alpha1.ClusterMigration{} },
-				)
-				if err != nil {
-					return err
-				}
+			namespace := r.workflowStorageNamespace(cmd)
 
-				filter := ""
-
-				items, err := store.List(ctx, filter)
-				if err != nil {
-					return err
-				}
-
-				for _, object := range items {
-					objects = append(objects, object)
-				}
+			migrationStore, err := cliWorkflowStore(
+				runtime,
+				namespace,
+				func() *v1alpha1.Migration { return &v1alpha1.Migration{} },
+			)
+			if err != nil {
+				return err
 			}
 
-			if crdListable(runtime) && (len(runtime.controllerKinds) == 0 ||
-				slices.Contains(runtime.controllerKinds, domain.ControllerKindMigration)) {
-				crdStore, err := cliCRDWorkflowStore(
-					runtime,
-					func() *v1alpha1.Migration { return &v1alpha1.Migration{} },
-				)
-				if err != nil {
-					return err
-				}
-
-				items, err := crdStore.List(ctx, namespace)
-				if err != nil {
-					return err
-				}
-
-				for _, object := range items {
-					objects = append(objects, object)
-				}
+			items, err := migrationStore.List(ctx, namespace)
+			if err != nil {
+				return err
 			}
 
-			if crdListable(runtime) && (len(runtime.controllerKinds) == 0 ||
-				slices.Contains(runtime.controllerKinds, domain.ControllerKindClusterMigration)) {
-				crdStore, err := cliCRDWorkflowStore(
-					runtime,
-					func() *v1alpha1.ClusterMigration { return &v1alpha1.ClusterMigration{} },
-				)
-				if err != nil {
-					return err
-				}
+			for _, object := range items {
+				objects = append(objects, object)
+			}
 
-				items, err := crdStore.List(ctx, "")
-				if err != nil {
-					return err
-				}
+			clusterStore, err := cliWorkflowStore(
+				runtime,
+				namespace,
+				func() *v1alpha1.ClusterMigration { return &v1alpha1.ClusterMigration{} },
+			)
+			if err != nil {
+				return err
+			}
 
-				for _, object := range items {
-					objects = append(objects, object)
-				}
+			clusterItems, err := clusterStore.List(ctx, "")
+			if err != nil {
+				return err
+			}
+
+			for _, object := range clusterItems {
+				objects = append(objects, object)
 			}
 
 			return runtime.printer.Print(objects)
@@ -131,11 +115,11 @@ func (r *rootState) newOfflineMigrationStatusCommand() *cobra.Command {
 	}
 }
 
-func (r *rootState) newOfflineMigrationResumeCommand() *cobra.Command {
+func (r *rootState) newOfflineMigrationResumeCommand(source workflowSource) *cobra.Command {
 	var dryRun bool
 
 	command := &cobra.Command{
-		Use:   "resume SESSION",
+		Use:   "resume " + workflowArgLabel(source),
 		Short: "Continue an offline migration from its checkpoint",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -147,7 +131,7 @@ func (r *rootState) newOfflineMigrationResumeCommand() *cobra.Command {
 			ctx, cancel := r.context(cmd.Context())
 			defer cancel()
 
-			return r.resumeMigration(ctx, cmd, runtime, args[0], dryRun)
+			return r.resumeMigration(ctx, cmd, runtime, args[0], dryRun, source)
 		},
 	}
 	bindDryRun(command, &dryRun)
@@ -155,11 +139,15 @@ func (r *rootState) newOfflineMigrationResumeCommand() *cobra.Command {
 	return command
 }
 
-func (r *rootState) newOfflineMigrationAbortCommand() *cobra.Command {
+func (r *rootState) newOfflineMigrationAbortCommand(source workflowSource) *cobra.Command {
 	var dryRun bool
 
 	command := &cobra.Command{
-		Use: "abort SESSION", Short: "Abort an offline migration", Args: cobra.ExactArgs(1),
+		Use: "abort " + workflowArgLabel(
+			source,
+		),
+		Short: "Abort an offline migration",
+		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			runtime, err := r.runtime()
 			if err != nil {
@@ -169,7 +157,7 @@ func (r *rootState) newOfflineMigrationAbortCommand() *cobra.Command {
 			ctx, cancel := r.context(cmd.Context())
 			defer cancel()
 
-			object, backend, err := r.loadMigrationWithBackend(ctx, cmd, runtime, args[0])
+			object, backend, err := r.loadMigrationWithBackend(ctx, cmd, runtime, args[0], source)
 			if err != nil {
 				return err
 			}
@@ -231,11 +219,15 @@ func (r *rootState) newOfflineMigrationAbortCommand() *cobra.Command {
 	return command
 }
 
-func (r *rootState) newOfflineMigrationRollbackCommand() *cobra.Command {
+func (r *rootState) newOfflineMigrationRollbackCommand(source workflowSource) *cobra.Command {
 	var dryRun bool
 
 	command := &cobra.Command{
-		Use: "rollback SESSION", Short: "Rollback an offline migration", Args: cobra.ExactArgs(1),
+		Use: "rollback " + workflowArgLabel(
+			source,
+		),
+		Short: "Rollback an offline migration",
+		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			runtime, err := r.runtime()
 			if err != nil {
@@ -245,7 +237,7 @@ func (r *rootState) newOfflineMigrationRollbackCommand() *cobra.Command {
 			ctx, cancel := r.context(cmd.Context())
 			defer cancel()
 
-			object, backend, err := r.loadMigrationWithBackend(ctx, cmd, runtime, args[0])
+			object, backend, err := r.loadMigrationWithBackend(ctx, cmd, runtime, args[0], source)
 			if err != nil {
 				return err
 			}
@@ -307,14 +299,18 @@ func (r *rootState) newOfflineMigrationRollbackCommand() *cobra.Command {
 	return command
 }
 
-func (r *rootState) newOfflineMigrationCleanupCommand() *cobra.Command {
+func (r *rootState) newOfflineMigrationCleanupCommand(source workflowSource) *cobra.Command {
 	var (
 		dryRun  bool
 		options app.MigrationCleanupOptions
 	)
 
 	command := &cobra.Command{
-		Use: "cleanup SESSION", Short: "Cleanup an offline migration", Args: cobra.ExactArgs(1),
+		Use: "cleanup " + workflowArgLabel(
+			source,
+		),
+		Short: "Cleanup an offline migration",
+		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			runtime, err := r.runtime()
 			if err != nil {
@@ -324,7 +320,7 @@ func (r *rootState) newOfflineMigrationCleanupCommand() *cobra.Command {
 			ctx, cancel := r.context(cmd.Context())
 			defer cancel()
 
-			object, backend, err := r.loadMigrationWithBackend(ctx, cmd, runtime, args[0])
+			object, backend, err := r.loadMigrationWithBackend(ctx, cmd, runtime, args[0], source)
 			if err != nil {
 				return err
 			}
@@ -399,11 +395,13 @@ func (r *rootState) newOfflineMigrationCleanupCommand() *cobra.Command {
 				return writeDryRunNotice(
 					cmd.ErrOrStderr(),
 					cleanupExecuteCommand(
+						cmd,
 						guidancePrefixesForCommand(
 							cmd,
 							workflowHintNamespace(backend, r, cmd, object),
 						).pvcMigrate,
 						"migrate",
+						workflowHintNamespace(backend, r, cmd, object),
 						object.GetName(),
 						options.UnusedStoragePolicy,
 						options.Finalize,
@@ -432,13 +430,14 @@ func writeOfflineMigrationNextSteps(
 	backend string,
 	object crclient.Object,
 ) error {
+	namespace := workflowHintNamespace(backend, r, cmd, object)
+
 	return writeWorkflowNextSteps(
 		cmd.ErrOrStderr(),
-		guidancePrefixesForCommand(
-			cmd,
-			workflowHintNamespace(backend, r, cmd, object),
-		).pvcMigrate,
+		cmd,
+		guidancePrefixesForCommand(cmd, namespace).pvcMigrate,
 		"migrate",
+		namespace,
 		object.GetName(),
 		workflowObjectPhase(object),
 		true,
@@ -452,15 +451,16 @@ func writeOfflineMigrationDryRunNotice(
 	object crclient.Object,
 	subcommand string,
 ) error {
+	namespace := workflowHintNamespace(backend, r, cmd, object)
+
 	return writeDryRunNotice(
 		cmd.ErrOrStderr(),
 		lifecycleExecuteCommand(
-			guidancePrefixesForCommand(
-				cmd,
-				workflowHintNamespace(backend, r, cmd, object),
-			).pvcMigrate,
+			cmd,
+			guidancePrefixesForCommand(cmd, namespace).pvcMigrate,
 			"migrate",
 			subcommand,
+			namespace,
 			object.GetName(),
 		),
 	)
@@ -480,7 +480,7 @@ func reportMigrationCleanupError(
 
 	prefix := guidancePrefixesForCommand(cmd, namespace).pvcMigrate
 
-	retry := "migrate cleanup " + shellQuote(name)
+	retry := "cleanup " + workflowHintAddress(cmd, namespace, name)
 	if options.UnusedStoragePolicy != "" {
 		retry += " --unused-storage-policy " + shellQuote(
 			options.UnusedStoragePolicy,
@@ -497,10 +497,12 @@ func reportMigrationCleanupError(
 
 	_, err := fmt.Fprintf(
 		cmd.ErrOrStderr(),
-		"Cleanup stopped before confirmed completion. Inspect current state: %s migrate status %s\nRevalidate cleanup before retrying: %s %s --dry-run\n",
+		"Cleanup stopped before confirmed completion. Inspect current state: %s %s status %s\nRevalidate cleanup before retrying: %s --yes %s %s --dry-run\n",
 		prefix,
-		shellQuote(name),
+		workflowCommandPath(cmd, "migrate"),
+		workflowHintAddress(cmd, namespace, name),
 		prefix,
+		workflowCommandPath(cmd, "migrate"),
 		retry,
 	)
 

@@ -6,6 +6,7 @@ import (
 	"io"
 	"strings"
 
+	v1alpha1 "github.com/labring-sigs/pvc-migrate/api/v1alpha1"
 	"github.com/labring-sigs/pvc-migrate/internal/domain"
 	"github.com/spf13/cobra"
 	"k8s.io/apimachinery/pkg/api/resource"
@@ -151,10 +152,24 @@ func printCopyDryRunResult(
 		return err
 	}
 
-	args := []string{
-		sessionCommandPrefixForCommand(cmd, namespace),
-		"copy", "--session", shellQuote(object.GetName()),
+	var args []string
+	if isControllerCommand(cmd) {
+		args = []string{
+			sessionCommandPrefixForCommand(cmd, namespace),
+			"--yes", "cr", "copy", "create", "--session", shellQuote(object.GetName()),
+		}
+		// A namespaced Copy is addressed by its tenant namespace; the
+		// cluster-scoped graduation carries its roles in the spec instead.
+		if _, cluster := object.(*v1alpha1.ClusterCopy); !cluster {
+			args = append(args, "-n", shellQuote(namespace))
+		}
+	} else {
+		args = []string{
+			sessionCommandPrefixForCommand(cmd, namespace),
+			"copy", "--session", shellQuote(object.GetName()),
+		}
 	}
+
 	for _, name := range []string{"online", "source-node", "strategy", "verify-checksum", "delete-extraneous", "unused-storage-policy"} {
 		if flag := cmd.Flags().Lookup(name); flag != nil && flag.Changed {
 			if flag.Value.Type() == "bool" {

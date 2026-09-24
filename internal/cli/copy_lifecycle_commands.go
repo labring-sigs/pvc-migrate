@@ -15,16 +15,18 @@ import (
 
 func (r *rootState) addCopyLifecycle(parent *cobra.Command) {
 	parent.AddCommand(
-		r.newCopyStatusCommand(),
-		r.newCopyResumeCommand(),
-		r.newCopyAbortCommand(),
-		r.newCopyCleanupCommand(),
+		r.newCopyStatusCommand(sourceSession),
+		r.newCopyResumeCommand(sourceSession),
+		r.newCopyAbortCommand(sourceSession),
+		r.newCopyCleanupCommand(sourceSession),
 	)
 }
 
-func (r *rootState) newCopyStatusCommand() *cobra.Command {
+func (r *rootState) newCopyStatusCommand(source workflowSource) *cobra.Command {
 	return &cobra.Command{
-		Use: "status [SESSION]", Short: "Show one copy or list copies", Args: cobra.MaximumNArgs(1),
+		Use:   "status [" + workflowArgLabel(source) + "]",
+		Short: "Show one copy or list copies",
+		Args:  cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			runtime, err := r.runtime()
 			if err != nil {
@@ -35,7 +37,7 @@ func (r *rootState) newCopyStatusCommand() *cobra.Command {
 			defer cancel()
 
 			if len(args) == 1 {
-				object, err := r.loadCopy(ctx, cmd, runtime, args[0])
+				object, err := r.loadCopy(ctx, cmd, runtime, args[0], source)
 				if err != nil {
 					return err
 				}
@@ -43,89 +45,69 @@ func (r *rootState) newCopyStatusCommand() *cobra.Command {
 				return runtime.printer.Print(object)
 			}
 
+			objects := []crclient.Object{}
+
+			if source != sourceSession {
+				if !crdListable(runtime) {
+					return runtime.printer.Print(objects)
+				}
+
+				kind := domain.ControllerKindCopy
+				if source == sourceClusterController {
+					kind = domain.ControllerKindClusterCopy
+				}
+
+				if len(runtime.controllerKinds) != 0 &&
+					!slices.Contains(runtime.controllerKinds, kind) {
+					return runtime.printer.Print(objects)
+				}
+
+				items, err := listControllerWorkflows(ctx, runtime, kind)
+				if err != nil {
+					return err
+				}
+
+				objects = append(objects, items...)
+
+				return runtime.printer.Print(objects)
+			}
+
 			namespace := r.workflowStorageNamespace(cmd)
 
-			objects := []crclient.Object{}
-			if len(runtime.controllerKinds) == 0 ||
-				slices.Contains(runtime.controllerKinds, domain.ControllerKindCopy) {
-				store, err := cliWorkflowStore(
-					runtime,
-					namespace,
-					func() *v1alpha1.Copy { return &v1alpha1.Copy{} },
-				)
-				if err != nil {
-					return err
-				}
-
-				items, err := store.List(ctx, namespace)
-				if err != nil {
-					return err
-				}
-
-				for _, object := range items {
-					objects = append(objects, object)
-				}
+			copyStore, err := cliWorkflowStore(
+				runtime,
+				namespace,
+				func() *v1alpha1.Copy { return &v1alpha1.Copy{} },
+			)
+			if err != nil {
+				return err
 			}
 
-			if len(runtime.controllerKinds) == 0 ||
-				slices.Contains(runtime.controllerKinds, domain.ControllerKindClusterCopy) {
-				store, err := cliWorkflowStore(
-					runtime,
-					namespace,
-					func() *v1alpha1.ClusterCopy { return &v1alpha1.ClusterCopy{} },
-				)
-				if err != nil {
-					return err
-				}
-
-				items, err := store.List(ctx, "")
-				if err != nil {
-					return err
-				}
-
-				for _, object := range items {
-					objects = append(objects, object)
-				}
+			items, err := copyStore.List(ctx, namespace)
+			if err != nil {
+				return err
 			}
 
-			if crdListable(runtime) && (len(runtime.controllerKinds) == 0 ||
-				slices.Contains(runtime.controllerKinds, domain.ControllerKindCopy)) {
-				crdStore, err := cliCRDWorkflowStore(
-					runtime,
-					func() *v1alpha1.Copy { return &v1alpha1.Copy{} },
-				)
-				if err != nil {
-					return err
-				}
-
-				items, err := crdStore.List(ctx, namespace)
-				if err != nil {
-					return err
-				}
-
-				for _, object := range items {
-					objects = append(objects, object)
-				}
+			for _, object := range items {
+				objects = append(objects, object)
 			}
 
-			if crdListable(runtime) && (len(runtime.controllerKinds) == 0 ||
-				slices.Contains(runtime.controllerKinds, domain.ControllerKindClusterCopy)) {
-				crdStore, err := cliCRDWorkflowStore(
-					runtime,
-					func() *v1alpha1.ClusterCopy { return &v1alpha1.ClusterCopy{} },
-				)
-				if err != nil {
-					return err
-				}
+			clusterStore, err := cliWorkflowStore(
+				runtime,
+				namespace,
+				func() *v1alpha1.ClusterCopy { return &v1alpha1.ClusterCopy{} },
+			)
+			if err != nil {
+				return err
+			}
 
-				items, err := crdStore.List(ctx, "")
-				if err != nil {
-					return err
-				}
+			clusterItems, err := clusterStore.List(ctx, "")
+			if err != nil {
+				return err
+			}
 
-				for _, object := range items {
-					objects = append(objects, object)
-				}
+			for _, object := range clusterItems {
+				objects = append(objects, object)
 			}
 
 			return runtime.printer.Print(objects)
@@ -133,11 +115,11 @@ func (r *rootState) newCopyStatusCommand() *cobra.Command {
 	}
 }
 
-func (r *rootState) newCopyResumeCommand() *cobra.Command {
+func (r *rootState) newCopyResumeCommand(source workflowSource) *cobra.Command {
 	var dryRun bool
 
 	command := &cobra.Command{
-		Use:   "resume SESSION",
+		Use:   "resume " + workflowArgLabel(source),
 		Short: "Continue a copy from its persisted checkpoint",
 		Args:  cobra.ExactArgs(1),
 	}
@@ -150,17 +132,21 @@ func (r *rootState) newCopyResumeCommand() *cobra.Command {
 		ctx, cancel := r.context(cmd.Context())
 		defer cancel()
 
-		return r.resumeCopy(ctx, cmd, runtime, args[0], dryRun)
+		return r.resumeCopy(ctx, cmd, runtime, args[0], dryRun, source)
 	}
 	bindDryRun(command, &dryRun)
 
 	return command
 }
 
-func (r *rootState) newCopyAbortCommand() *cobra.Command {
+func (r *rootState) newCopyAbortCommand(source workflowSource) *cobra.Command {
 	var dryRun bool
 
-	command := &cobra.Command{Use: "abort SESSION", Short: "Abort a copy", Args: cobra.ExactArgs(1)}
+	command := &cobra.Command{
+		Use:   "abort " + workflowArgLabel(source),
+		Short: "Abort a copy",
+		Args:  cobra.ExactArgs(1),
+	}
 	command.RunE = func(cmd *cobra.Command, args []string) error {
 		runtime, err := r.runtime()
 		if err != nil {
@@ -170,7 +156,7 @@ func (r *rootState) newCopyAbortCommand() *cobra.Command {
 		ctx, cancel := r.context(cmd.Context())
 		defer cancel()
 
-		object, backend, err := r.loadCopyWithBackend(ctx, cmd, runtime, args[0], false)
+		object, backend, err := r.loadCopyWithBackend(ctx, cmd, runtime, args[0], false, source)
 		if err != nil {
 			return err
 		}
@@ -251,14 +237,14 @@ func (r *rootState) newCopyAbortCommand() *cobra.Command {
 	return command
 }
 
-func (r *rootState) newCopyCleanupCommand() *cobra.Command {
+func (r *rootState) newCopyCleanupCommand(source workflowSource) *cobra.Command {
 	var (
 		options app.CopyCleanupOptions
 		dryRun  bool
 	)
 
 	command := &cobra.Command{
-		Use:   "cleanup SESSION",
+		Use:   "cleanup " + workflowArgLabel(source),
 		Short: "Finalize copy storage and clean up its workflow",
 		Args:  cobra.ExactArgs(1),
 	}
@@ -271,7 +257,7 @@ func (r *rootState) newCopyCleanupCommand() *cobra.Command {
 		ctx, cancel := r.context(cmd.Context())
 		defer cancel()
 
-		object, backend, err := r.loadCopyWithBackend(ctx, cmd, runtime, args[0], false)
+		object, backend, err := r.loadCopyWithBackend(ctx, cmd, runtime, args[0], false, source)
 		if err != nil {
 			return err
 		}
@@ -372,14 +358,15 @@ func (r *rootState) newCopyCleanupCommand() *cobra.Command {
 		}
 
 		if dryRun {
+			namespace := workflowHintNamespace(backend, r, cmd, object)
+
 			return writeDryRunNotice(
 				cmd.ErrOrStderr(),
 				cleanupExecuteCommand(
-					guidancePrefixesForCommand(
-						cmd,
-						workflowHintNamespace(backend, r, cmd, object),
-					).pvcMigrate,
+					cmd,
+					guidancePrefixesForCommand(cmd, namespace).pvcMigrate,
 					"copy",
+					namespace,
 					object.GetName(),
 					options.UnusedStoragePolicy,
 					options.Finalize,

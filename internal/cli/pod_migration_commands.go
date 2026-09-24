@@ -40,7 +40,7 @@ type podMigrationFlags struct {
 func (f *podMigrationFlags) bind(command *cobra.Command) {
 	flags := command.Flags()
 	flags.StringVar(&f.sessionID, "session", "", "Migration session ID")
-	flags.StringVarP(&f.sourceNamespace, "source-namespace", "n", "default", "Pod namespace")
+	flags.StringVarP(&f.sourceNamespace, "namespace", "n", "default", "Pod namespace")
 	flags.StringSliceVar(
 		&f.destinationCapacities,
 		"destination-capacity",
@@ -252,7 +252,7 @@ func (r *rootState) newMigratePodCommand() *cobra.Command {
 				)
 			}
 
-			return r.runPodMigrateCommand(cmd, flags, dryRun, false, false)
+			return r.runPodMigrateCommand(cmd, flags, dryRun)
 		},
 	}
 	flags.bind(command)
@@ -260,19 +260,16 @@ func (r *rootState) newMigratePodCommand() *cobra.Command {
 	bindDryRun(command, &dryRun)
 	command.AddCommand(
 		r.newPodMigrationPlanCommand(),
-		r.newPodMigrationCreateCommand(),
-		r.newPodMigrationStatusCommand(),
-		r.newPodMigrationResumeCommand(),
-		r.newPodMigrationAbortCommand(),
-		r.newPodMigrationRollbackCommand(),
-		r.newPodMigrationCleanupCommand(),
+		r.newPodMigrationStatusCommand(sourceSession),
+		r.newPodMigrationResumeCommand(sourceSession),
+		r.newPodMigrationAbortCommand(sourceSession),
+		r.newPodMigrationRollbackCommand(sourceSession),
+		r.newPodMigrationCleanupCommand(sourceSession),
 	)
 
 	return command
 }
 
-// newPodMigrationCreateCommand submits a declarative PodMigration workflow
-// for controller reconciliation.
 // newPodMigrationPlanCommand validates a Pod migration without mutations.
 // Planning lives in the main dry-run path; this subcommand keeps the
 // subcommand symmetry with the other operations.
@@ -314,7 +311,7 @@ func (r *rootState) newPodMigrationPlanCommand() *cobra.Command {
 				)
 			}
 
-			return r.runPodMigrateCommand(cmd, flags, true, false, false)
+			return r.runPodMigrateCommand(cmd, flags, true)
 		},
 	}
 	flags.bind(command)
@@ -323,64 +320,10 @@ func (r *rootState) newPodMigrationPlanCommand() *cobra.Command {
 	return command
 }
 
-func (r *rootState) newPodMigrationCreateCommand() *cobra.Command {
-	flags := &podMigrationFlags{}
-
-	var (
-		dryRun bool
-		wait   bool
-	)
-
-	command := &cobra.Command{
-		Use:   "create",
-		Short: "Submit a PodMigration workflow for controller reconciliation",
-		Args:  cobra.NoArgs,
-		RunE: func(cmd *cobra.Command, _ []string) error {
-			if err := validateDestinationCapacityFlags(
-				domain.OperationMigratePod,
-				false,
-				flags.destinationCapacities,
-				flags.allowVolumeShrink,
-				flags.skipSourceUsageCheck,
-				flags.sourcePaths,
-				flags.destinationPaths,
-			); err != nil {
-				return reportPreSessionError(cmd, err)
-			}
-
-			if flags.podName == "" {
-				return domain.NewError(
-					domain.ErrorValidation,
-					"migrate-pod create",
-					"--pod is required",
-				)
-			}
-
-			if flags.precopyPasses < 0 {
-				return domain.NewError(
-					domain.ErrorValidation,
-					"migrate-pod create",
-					"--precopy-passes cannot be negative",
-				)
-			}
-
-			return r.runPodMigrateCommand(cmd, flags, dryRun, true, wait)
-		},
-	}
-	flags.bind(command)
-	flags.bindForceReprovision(command)
-	bindCreateDryRun(command, &dryRun)
-	bindCreateWait(command, &wait)
-
-	return command
-}
-
 func (r *rootState) runPodMigrateCommand(
 	cmd *cobra.Command,
 	flags *podMigrationFlags,
 	dryRun bool,
-	submit bool,
-	wait bool,
 ) error {
 	runtime, err := r.runtime()
 	if err != nil {
@@ -390,32 +333,9 @@ func (r *rootState) runPodMigrateCommand(
 	ctx, cancel := r.context(cmd.Context())
 	defer cancel()
 
-	object, err := flags.workflow(r, runtime, false, submit)
+	object, err := flags.workflow(r, runtime, false, false)
 	if err != nil {
 		return err
-	}
-
-	// Submission previews plan with controller semantics: submission RBAC and
-	// CR-backed estimates, not the data-plane permissions local runs need.
-	if submit && runtime.planner != nil {
-		runtime.planner = runtime.planner.ForController()
-	}
-
-	// Only controller submission depends on the workflow CRDs being served.
-	if submit {
-		if err := requireControllerWorkflow(runtime, domain.SessionTypeMigratePod); err != nil {
-			return err
-		}
-	}
-
-	if submit && !dryRun {
-		if err := r.confirm(ctx, cmd, podApprovalIdentity(flags)); err != nil {
-			return reportApprovalError(cmd, err)
-		}
-
-		runtime.waitForController = wait
-
-		return submitPodMigration(ctx, cmd, runtime, object)
 	}
 
 	plan, err := runtime.planner.PlanNamespacedPodMigration(ctx, object, r.global.toolImage)
@@ -453,26 +373,49 @@ func (r *rootState) runPodMigrateCommand(
 		return err
 	}
 
-	return writePodMigrationNextSteps(cmd, object)
+	return writePodMigrationNextSteps(cmd, r, object)
 }
 
 // writePodMigrationNextSteps prints the lifecycle follow-ups after a finished
 // Pod migration: a terminal-phase block whose commands are copy-paste
-// executable, including the --yes and --dry-run=false approval flags.
-func writePodMigrationNextSteps(cmd *cobra.Command, object crclient.Object) error {
+// executable, including the --yes and --dry-run=false approval flags. Session
+// records live in the configured session namespace regardless of the tenant
+// namespace the PodMigration object carries, so that is the namespace the
+// suggested commands must address; cr commands address the tenant namespace
+// with -n instead.
+func writePodMigrationNextSteps(cmd *cobra.Command, r *rootState, object crclient.Object) error {
 	current, ok := object.(*v1alpha1.PodMigration)
 	if !ok {
 		return nil
 	}
 
+	namespace := podMigrationHintNamespace(cmd, r, current)
+
 	return writeWorkflowNextSteps(
 		cmd.ErrOrStderr(),
-		guidancePrefixesForCommand(cmd, current.Namespace).pvcMigrate,
+		cmd,
+		guidancePrefixesForCommand(cmd, namespace).pvcMigrate,
 		"migrate-pod",
+		namespace,
 		current.Name,
 		current.Status.Phase,
 		true,
 	)
+}
+
+// podMigrationHintNamespace resolves the namespace a PodMigration hint needs:
+// the tenant namespace for controller-owned CRs, the session storage
+// namespace for ConfigMap-backed records.
+func podMigrationHintNamespace(cmd *cobra.Command, r *rootState, object crclient.Object) string {
+	if isControllerCommand(cmd) {
+		return object.GetNamespace()
+	}
+
+	if r != nil {
+		return r.global.sessionNamespace
+	}
+
+	return "pvc-migrate-system"
 }
 
 func reportPodMigrationError(
@@ -483,9 +426,11 @@ func reportPodMigrationError(
 ) error {
 	_, err := fmt.Fprintf(
 		cmd.ErrOrStderr(),
-		"Pod migration %s stopped in phase %s. Inspect migrate-pod status %s before resume, abort or cleanup.\n",
+		"Pod migration %s stopped in phase %s. Inspect with `%s %s status %s` before resume, abort or cleanup.\n",
 		name,
 		phase,
+		guidancePrefixesForCommand(cmd, "").pvcMigrate,
+		workflowCommandPath(cmd, "migrate-pod"),
 		name,
 	)
 

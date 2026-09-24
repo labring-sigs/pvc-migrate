@@ -90,30 +90,38 @@ Use `--tool-image registry.example/pvc-migrate:0.1.0` when cluster nodes pull th
 
 ## Execution Modes
 
-The CLI separates the two durable execution backends by subcommand instead of a
-mode flag:
+The CLI separates the two durable execution backends by command group instead
+of a mode flag; the two modes never read or write each other's storage:
 
 - Top-level commands (`migrate`, `copy`, `reserve`, `backup`, `restore`,
   `rename`, `move`, `migrate-pod`) run the session backend: sessions persist in
-  ConfigMaps and the invoking process executes the workflow.
-- `<command> create` (for example `migrate create`) submits declarative intent
-  as operation-specific `migrate.sealos.io/v1alpha1` CRs for the elected
-  controller. The CLI defaults to namespaced kinds for tenant-local work and
-  selects a `Cluster*` kind when namespace roles differ. Cluster-scoped kinds
-  also accept same-namespace roles, which is useful for an administrator
-  submitting a workflow with cluster-level authority. Pod migration is a
-  same-namespace operation by design — a workload cannot be recreated in
-  another namespace — so `PodMigration` has no cluster-scoped form and runs
-  entirely in the pod's namespace. A `ClusterMigration` may set
+  ConfigMaps (`--session-namespace`) and the invoking process executes the
+  workflow. Their `plan`/`status`/`resume`/`abort`/`rollback`/`cleanup`
+  subcommands address session records only.
+- `pvc-migrate cr <family>` operates on workflow CRs only: `cr migrate-pod`,
+  `cr migrate`, `cr copy`, `cr reserve`, `cr rename`, `cr move`, `cr backup`,
+  `cr restore`, plus the explicit cluster-scoped families `cr cluster-migrate`,
+  `cr cluster-copy`, and `cr cluster-reserve`. Every family offers `create`
+  (submit for controller reconciliation; prints the workflow it would submit
+  until you pass `--dry-run=false`, then optionally `--wait`s), `status`,
+  `watch` (stream phase changes until a terminal phase), and the lifecycle
+  verbs (`resume`, `abort`, `rollback`, `cleanup`). Namespaced families address
+  a CR with `-n <tenant-namespace>`; on `create` that single flag is also the
+  spec's whole namespace story — the role flags (`--source-namespace`,
+  `--destination-namespace`, `--temporary-namespace`) exist only on the
+  cluster-scoped creates, whose specs genuinely declare those roles.
+  Cluster-scoped families need no namespace. Pod migration is a
+  same-namespace operation
+  by design — a workload cannot be recreated in another namespace — so
+  `PodMigration` has no cluster-scoped form. A `ClusterMigration` may set
   `destinationNamespace` to move a quiesced PVC into another namespace while
   switching its storage. PVC identity moves always use the cluster-scoped
-  `Move`. Backup, restore, and rename intentionally have no cluster-scoped
-  form. Cross-cluster workflows remain on the ConfigMap/session backend. The
-  controller uses leader election, watches every installed workflow kind, and
-  reuses the same resumable state machine. `create` defaults to printing the
-  workflow it would submit; pass `--dry-run=false` to submit. A command fails
-  clearly when its matching CRD is absent.
-- `<command> plan` validates either backend without mutations.
+  `Move` (`cr move`). Backup, restore, and rename intentionally have no
+  cluster-scoped form. Cross-cluster workflows remain on the ConfigMap/session
+  backend (`copy cross-cluster`, `reserve cross-cluster`). The controller uses
+  leader election, watches every installed workflow kind, and reuses the same
+  resumable state machine. A command fails clearly when its matching CRD is
+  absent.
 
 Install the controller backend using the Helm command above — it is the
 only supported installation path and ships the CRDs. The `config/`
@@ -133,8 +141,7 @@ repository namespaces from metadata. Cluster workflow specs declare each
 operational namespace once at the top level and keep nested references local
 to the relevant source or destination namespace.
 
-Submit declarative intent directly, or use `migrate create`-style subcommands
-in the CLI:
+Submit declarative intent directly, or use the `cr <family> create` commands
 
 ```yaml
 apiVersion: migrate.sealos.io/v1alpha1
@@ -213,20 +220,22 @@ require that operator identity in controller mode.
 Submit a supported migration and wait for its CR status to reach completion:
 
 ```bash
-pvc-migrate --yes migrate create \
-  --source-namespace application --source-pvc data \
-  --destination-pvc data
+pvc-migrate --yes cr migrate create -n application \
+  --source-pvc data --destination-pvc data
+pvc-migrate cr migrate watch data-migration -n application
 kubectl -n application get migrations
 ```
 
 Controller progress is read from the CR's durable status and written to
 stderr; the final table, JSON, or YAML document is written once to stdout.
-Lifecycle commands use `--workflow-namespace application` to address a
-tenant-scoped CR; the default remains the global `--session-namespace` for
-ConfigMap/session workflows.
+Session commands address records through the global `--session-namespace`;
+`cr` commands address namespaced CRs with `-n` on each verb, and
+cluster-scoped families (`cr cluster-migrate`, `cr cluster-copy`,
+`cr cluster-reserve`, `cr move`) need no namespace.
 `--timeout` bounds planning, submission, and waiting. A failed or deleted CR
 returns a nonzero exit code. Use `--wait=false` when another process owns
-observation. The controller records business failures in the CR status and
+observation (`cr <family> watch` follows it live). The controller records
+business failures in the CR status and
 does not treat them as reconcile errors; inspect the controller Deployment logs
 for structured reconciliation and data-plane events. Raw tool Pod streams and
 command-oriented `Next steps` guidance remain CLI-only.
@@ -277,8 +286,7 @@ pvc-migrate \
   --output yaml \
   migrate-pod plan \
   --session database-20260809 \
-  --source-namespace application \
-  --temporary-namespace pvc-migrate-system \
+  --namespace application \
   --pod database-1 \
   --destination-storage-class fast-local
 ```
@@ -306,8 +314,7 @@ pvc-migrate \
   --yes \
   migrate-pod \
   --session database-20260809 \
-  --source-namespace application \
-  --temporary-namespace pvc-migrate-system \
+  --namespace application \
   --pod database-1 \
   --destination-storage-class fast-local \
   --precopy-passes 1 \
@@ -361,12 +368,12 @@ If a PVC or PV still has session ownership after its session ConfigMap was lost,
 pvc-migrate --kubeconfig /path/to/kubeconfig \
   --session-namespace pvc-migrate-system \
   recovery cleanup-orphan database-20260809 \
-  --source-namespace application --source-pvc data-database-1
+  -n application --source-pvc data-database-1
 
 pvc-migrate --kubeconfig /path/to/kubeconfig \
   --session-namespace pvc-migrate-system \
   --yes recovery cleanup-orphan database-20260809 \
-  --source-namespace application --source-pvc data-database-1 \
+  -n application --source-pvc data-database-1 \
   --dry-run=false
 ```
 
@@ -518,7 +525,7 @@ pvc-migrate copy --dry-run=false \
   --destination-path restored/mysql
 
 pvc-migrate migrate-pod plan \
-  --source-namespace application \
+  --namespace application \
   --pod database-1 \
   --source-path data=mysql/current \
   --destination-path data=. \
@@ -583,7 +590,7 @@ pvc-migrate copy --dry-run=false \
 
 # For a Pod with two PVCs, map each source PVC by name.
 pvc-migrate migrate-pod plan \
-  --source-namespace application \
+  --namespace application \
   --pod database-1 \
   --destination-capacity data=200Gi \
   --destination-capacity logs=256Gi

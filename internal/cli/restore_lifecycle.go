@@ -13,11 +13,15 @@ import (
 	crclient "sigs.k8s.io/controller-runtime/pkg/client"
 )
 
+// loadRestore resolves one restore from the backend its command family
+// addresses — ConfigMap session records for the session commands, namespaced
+// Restore CRs for the cr commands — and returns the store bound to that backend.
 func (r *rootState) loadRestore(
 	ctx context.Context,
 	cmd *cobra.Command,
 	runtime *commandRuntime,
 	name string,
+	source workflowSource,
 ) (*v1alpha1.Restore, kube.WorkflowStore[*v1alpha1.Restore], string, error) {
 	namespace := r.workflowStorageNamespace(cmd)
 
@@ -30,6 +34,7 @@ func (r *rootState) loadRestore(
 		map[domain.ControllerKind]crclient.Object{
 			domain.ControllerKindRestore: &v1alpha1.Restore{},
 		},
+		source,
 	)
 	if err != nil {
 		return nil, nil, "", reportSessionLookupError(cmd, namespace, name, err)
@@ -57,9 +62,9 @@ func (r *rootState) loadRestore(
 	return restore, store, backend, nil
 }
 
-func (r *rootState) newRestoreStatusCommand() *cobra.Command {
+func (r *rootState) newRestoreStatusCommand(source workflowSource) *cobra.Command {
 	return &cobra.Command{
-		Use:   "status [SESSION]",
+		Use:   "status [" + workflowArgLabel(source) + "]",
 		Short: "Show one restore or list restores",
 		Args:  cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -72,7 +77,7 @@ func (r *rootState) newRestoreStatusCommand() *cobra.Command {
 			defer cancel()
 
 			if len(args) == 1 {
-				object, _, backend, err := r.loadRestore(ctx, cmd, runtime, args[0])
+				object, _, backend, err := r.loadRestore(ctx, cmd, runtime, args[0], source)
 				if err != nil {
 					return err
 				}
@@ -84,6 +89,29 @@ func (r *rootState) newRestoreStatusCommand() *cobra.Command {
 					"restore",
 					workflowLeaseNamespace(backend, r.workflowStorageNamespace(cmd), object),
 				)
+			}
+
+			objects := []crclient.Object{}
+
+			if source == sourceController {
+				if !crdListable(runtime) {
+					return runtime.printer.Print(objects)
+				}
+
+				kind := domain.ControllerKindRestore
+				if len(runtime.controllerKinds) != 0 &&
+					!slices.Contains(runtime.controllerKinds, kind) {
+					return runtime.printer.Print(objects)
+				}
+
+				items, err := listControllerWorkflows(ctx, runtime, kind)
+				if err != nil {
+					return err
+				}
+
+				objects = append(objects, items...)
+
+				return runtime.printer.Print(objects)
 			}
 
 			namespace := r.workflowStorageNamespace(cmd)
@@ -102,29 +130,8 @@ func (r *rootState) newRestoreStatusCommand() *cobra.Command {
 				return err
 			}
 
-			objects := make([]crclient.Object, len(items))
-			for i, object := range items {
-				objects[i] = object
-			}
-
-			if crdListable(runtime) && (len(runtime.controllerKinds) == 0 ||
-				slices.Contains(runtime.controllerKinds, domain.ControllerKindRestore)) {
-				crdStore, err := cliCRDWorkflowStore(
-					runtime,
-					func() *v1alpha1.Restore { return &v1alpha1.Restore{} },
-				)
-				if err != nil {
-					return err
-				}
-
-				items, err := crdStore.List(ctx, namespace)
-				if err != nil {
-					return err
-				}
-
-				for _, object := range items {
-					objects = append(objects, object)
-				}
+			for _, object := range items {
+				objects = append(objects, object)
 			}
 
 			return runtime.printer.Print(objects)
@@ -132,11 +139,11 @@ func (r *rootState) newRestoreStatusCommand() *cobra.Command {
 	}
 }
 
-func (r *rootState) newRestoreResumeCommand() *cobra.Command {
+func (r *rootState) newRestoreResumeCommand(source workflowSource) *cobra.Command {
 	var dryRun bool
 
 	command := &cobra.Command{
-		Use:   "resume SESSION",
+		Use:   "resume " + workflowArgLabel(source),
 		Short: "Continue a restore from its persisted phase",
 		Args:  cobra.ExactArgs(1),
 	}
@@ -149,7 +156,7 @@ func (r *rootState) newRestoreResumeCommand() *cobra.Command {
 		ctx, cancel := r.context(cmd.Context())
 		defer cancel()
 
-		object, store, backend, err := r.loadRestore(ctx, cmd, runtime, args[0])
+		object, store, backend, err := r.loadRestore(ctx, cmd, runtime, args[0], source)
 		if err != nil {
 			return err
 		}
@@ -200,9 +207,11 @@ func (r *rootState) newRestoreResumeCommand() *cobra.Command {
 			return writeDryRunNotice(
 				cmd.ErrOrStderr(),
 				lifecycleExecuteCommand(
+					cmd,
 					guidancePrefixesForCommand(cmd, namespace).pvcMigrate,
 					"restore",
 					"resume",
+					namespace,
 					object.Name,
 				),
 			)
@@ -296,11 +305,11 @@ func (r *rootState) newRestoreResumeCommand() *cobra.Command {
 	return command
 }
 
-func (r *rootState) newRestoreAbortCommand() *cobra.Command {
+func (r *rootState) newRestoreAbortCommand(source workflowSource) *cobra.Command {
 	var dryRun bool
 
 	command := &cobra.Command{
-		Use:   "abort SESSION",
+		Use:   "abort " + workflowArgLabel(source),
 		Short: "Abort a restore and retain destination data",
 		Args:  cobra.ExactArgs(1),
 	}
@@ -313,7 +322,7 @@ func (r *rootState) newRestoreAbortCommand() *cobra.Command {
 		ctx, cancel := r.context(cmd.Context())
 		defer cancel()
 
-		object, store, backend, err := r.loadRestore(ctx, cmd, runtime, args[0])
+		object, store, backend, err := r.loadRestore(ctx, cmd, runtime, args[0], source)
 		if err != nil {
 			return err
 		}
@@ -356,9 +365,11 @@ func (r *rootState) newRestoreAbortCommand() *cobra.Command {
 			return writeDryRunNotice(
 				cmd.ErrOrStderr(),
 				lifecycleExecuteCommand(
+					cmd,
 					guidancePrefixesForCommand(cmd, namespace).pvcMigrate,
 					"restore",
 					"abort",
+					namespace,
 					object.Name,
 				),
 			)
@@ -371,13 +382,13 @@ func (r *rootState) newRestoreAbortCommand() *cobra.Command {
 	return command
 }
 
-func (r *rootState) newRestoreCleanupCommand() *cobra.Command {
+func (r *rootState) newRestoreCleanupCommand(source workflowSource) *cobra.Command {
 	var options backup.RestoreCleanupOptions
 
 	var dryRun bool
 
 	command := &cobra.Command{
-		Use:   "cleanup SESSION",
+		Use:   "cleanup " + workflowArgLabel(source),
 		Short: "Finalize restore resources and clean up workflow metadata",
 		Args:  cobra.ExactArgs(1),
 	}
@@ -390,7 +401,7 @@ func (r *rootState) newRestoreCleanupCommand() *cobra.Command {
 		ctx, cancel := r.context(cmd.Context())
 		defer cancel()
 
-		object, store, backend, err := r.loadRestore(ctx, cmd, runtime, args[0])
+		object, store, backend, err := r.loadRestore(ctx, cmd, runtime, args[0], source)
 		if err != nil {
 			return err
 		}
@@ -440,8 +451,10 @@ func (r *rootState) newRestoreCleanupCommand() *cobra.Command {
 			return writeDryRunNotice(
 				cmd.ErrOrStderr(),
 				cleanupExecuteCommand(
+					cmd,
 					guidancePrefixesForCommand(cmd, r.workflowStorageNamespace(cmd)).pvcMigrate,
 					"restore",
+					r.workflowStorageNamespace(cmd),
 					object.Name,
 					"",
 					options.Finalize,

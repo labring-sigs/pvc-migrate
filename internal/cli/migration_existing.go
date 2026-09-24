@@ -19,6 +19,7 @@ func (r *rootState) loadMigrationWithBackend(
 	cmd *cobra.Command,
 	runtime *commandRuntime,
 	id string,
+	source workflowSource,
 ) (crclient.Object, string, error) {
 	if runtime.clients == nil {
 		return nil, "", domain.NewError(
@@ -30,16 +31,25 @@ func (r *rootState) loadMigrationWithBackend(
 
 	namespace := r.workflowStorageNamespace(cmd)
 
+	candidates := map[domain.ControllerKind]crclient.Object{
+		domain.ControllerKindMigration:        &v1alpha1.Migration{},
+		domain.ControllerKindClusterMigration: &v1alpha1.ClusterMigration{},
+	}
+	switch source {
+	case sourceController:
+		delete(candidates, domain.ControllerKindClusterMigration)
+	case sourceClusterController:
+		delete(candidates, domain.ControllerKindMigration)
+	}
+
 	object, backend, err := r.loadWorkflowWithBackend(
 		ctx,
 		cmd,
 		runtime,
 		namespace,
 		id,
-		map[domain.ControllerKind]crclient.Object{
-			domain.ControllerKindMigration:        &v1alpha1.Migration{},
-			domain.ControllerKindClusterMigration: &v1alpha1.ClusterMigration{},
-		},
+		candidates,
+		source,
 	)
 	if err != nil {
 		return nil, "", reportSessionLookupError(cmd, namespace, id, err)
@@ -73,9 +83,11 @@ func reportMigrationError(
 ) error {
 	_, err := fmt.Fprintf(
 		cmd.ErrOrStderr(),
-		"Migration %s stopped in phase %s. Inspect migrate status %s before resume, rollback or cleanup.\n",
+		"Migration %s stopped in phase %s. Inspect with `%s %s status %s` before resume, rollback or cleanup.\n",
 		name,
 		phase,
+		guidancePrefixesForCommand(cmd, "").pvcMigrate,
+		workflowCommandPath(cmd, "migrate"),
 		name,
 	)
 
@@ -131,12 +143,14 @@ func (r *rootState) executeMigration(
 		return writeDryRunNotice(
 			cmd.ErrOrStderr(),
 			lifecycleExecuteCommand(
+				cmd,
 				guidancePrefixesForCommand(
 					cmd,
 					workflowLeaseNamespace(backend, r.workflowStorageNamespace(cmd), object),
 				).pvcMigrate,
 				"migrate",
 				"resume",
+				workflowLeaseNamespace(backend, r.workflowStorageNamespace(cmd), object),
 				object.Name,
 			),
 		)
@@ -164,11 +178,13 @@ func (r *rootState) executeMigration(
 
 	return writeWorkflowNextSteps(
 		cmd.ErrOrStderr(),
+		cmd,
 		guidancePrefixesForCommand(
 			cmd,
 			workflowLeaseNamespace(backend, r.workflowStorageNamespace(cmd), object),
 		).pvcMigrate,
 		"migrate",
+		workflowLeaseNamespace(backend, r.workflowStorageNamespace(cmd), object),
 		object.Name,
 		object.Status.Phase,
 		true,
@@ -240,12 +256,14 @@ func (r *rootState) executeClusterMigration(
 		return writeDryRunNotice(
 			cmd.ErrOrStderr(),
 			lifecycleExecuteCommand(
+				cmd,
 				guidancePrefixesForCommand(
 					cmd,
 					clusterMigrationStorageNamespace(object),
 				).pvcMigrate,
 				"migrate",
 				"resume",
+				clusterMigrationStorageNamespace(object),
 				object.Name,
 			),
 		)
@@ -273,8 +291,10 @@ func (r *rootState) executeClusterMigration(
 
 	return writeWorkflowNextSteps(
 		cmd.ErrOrStderr(),
+		cmd,
 		guidancePrefixesForCommand(cmd, clusterMigrationStorageNamespace(object)).pvcMigrate,
 		"migrate",
+		clusterMigrationStorageNamespace(object),
 		object.Name,
 		object.Status.Phase,
 		true,
@@ -287,8 +307,9 @@ func (r *rootState) resumeMigration(
 	runtime *commandRuntime,
 	id string,
 	dryRun bool,
+	source workflowSource,
 ) error {
-	object, backend, err := r.loadMigrationWithBackend(ctx, cmd, runtime, id)
+	object, backend, err := r.loadMigrationWithBackend(ctx, cmd, runtime, id, source)
 	if err != nil {
 		return err
 	}
@@ -309,7 +330,7 @@ func (r *rootState) validateMigrationReservation(
 	runtime *commandRuntime,
 	id string,
 ) error {
-	object, backend, err := r.loadMigrationWithBackend(ctx, cmd, runtime, id)
+	object, backend, err := r.loadMigrationWithBackend(ctx, cmd, runtime, id, sourceSession)
 	if err != nil {
 		return err
 	}

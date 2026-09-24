@@ -19,13 +19,15 @@ func (r *rootState) loadCopy(
 	cmd *cobra.Command,
 	runtime *commandRuntime,
 	id string,
+	source workflowSource,
 ) (crclient.Object, error) {
-	object, _, err := r.loadCopyWithBackend(ctx, cmd, runtime, id, false)
+	object, _, err := r.loadCopyWithBackend(ctx, cmd, runtime, id, false, source)
 	return object, err
 }
 
-// loadCopyWithBackend resolves one copy/reservation identity from ConfigMap
-// session storage first and the workflow CRDs second. The backend tells the
+// loadCopyWithBackend resolves one copy/reservation identity from the single
+// backend its command family addresses — ConfigMap session records for the
+// session commands, workflow CRs for the cr commands. The backend tells the
 // caller which stores and handoff callbacks to bind: controller-owned
 // reservations hand off through the CRD store and the elected controller
 // executes the resulting Copy.
@@ -35,6 +37,7 @@ func (r *rootState) loadCopyWithBackend(
 	runtime *commandRuntime,
 	id string,
 	allowReservation bool,
+	source workflowSource,
 ) (crclient.Object, string, error) {
 	if runtime.clients == nil {
 		return nil, "", domain.NewError(
@@ -55,7 +58,24 @@ func (r *rootState) loadCopyWithBackend(
 		candidates[domain.ControllerKindClusterReservation] = &v1alpha1.ClusterReservation{}
 	}
 
-	object, backend, err := r.loadWorkflowWithBackend(ctx, cmd, runtime, namespace, id, candidates)
+	switch source {
+	case sourceController:
+		delete(candidates, domain.ControllerKindClusterCopy)
+		delete(candidates, domain.ControllerKindClusterReservation)
+	case sourceClusterController:
+		delete(candidates, domain.ControllerKindCopy)
+		delete(candidates, domain.ControllerKindReservation)
+	}
+
+	object, backend, err := r.loadWorkflowWithBackend(
+		ctx,
+		cmd,
+		runtime,
+		namespace,
+		id,
+		candidates,
+		source,
+	)
 	if err != nil {
 		return nil, "", reportSessionLookupError(cmd, namespace, id, err)
 	}
@@ -134,6 +154,12 @@ func validateCopyOverrides(cmd *cobra.Command, spec v1alpha1.CopySpec, flags *co
 	return nil
 }
 
+// copyExisting drives an already-persisted workflow: the session copy
+// commands adopt or resume ConfigMap session records (submit=false), while
+// cr create graduates a reservation into an executed copy (submit=true); a
+// submitted Copy is never re-submitted. cr create addresses a controller-owned
+// Reservation CR in the source namespace first and falls back to the
+// ConfigMap session — session commands only ever touch the session record.
 func (r *rootState) copyExisting(
 	ctx context.Context,
 	cmd *cobra.Command,
@@ -142,7 +168,43 @@ func (r *rootState) copyExisting(
 	dryRun bool,
 	submit bool,
 ) error {
-	object, backend, err := r.loadCopyWithBackend(ctx, cmd, runtime, flags.sessionID, true)
+	if submit && flags.sourceNamespace != "" {
+		crdObject, crdErr := lookupControllerObjects(
+			ctx,
+			runtime,
+			flags.sourceNamespace,
+			flags.sessionID,
+			map[domain.ControllerKind]crclient.Object{
+				domain.ControllerKindReservation:        &v1alpha1.Reservation{},
+				domain.ControllerKindClusterReservation: &v1alpha1.ClusterReservation{},
+			},
+		)
+		if crdErr == nil {
+			switch current := crdObject.(type) {
+			case *v1alpha1.Reservation:
+				return r.adoptReservation(ctx, cmd, runtime, current, flags, dryRun, backendCRD)
+			case *v1alpha1.ClusterReservation:
+				return r.adoptClusterReservation(
+					ctx,
+					cmd,
+					runtime,
+					current,
+					flags,
+					dryRun,
+					backendCRD,
+				)
+			}
+		}
+	}
+
+	object, backend, err := r.loadCopyWithBackend(
+		ctx,
+		cmd,
+		runtime,
+		flags.sessionID,
+		true,
+		sourceSession,
+	)
 	if err != nil {
 		return err
 	}
@@ -191,8 +253,9 @@ func (r *rootState) resumeCopy(
 	runtime *commandRuntime,
 	id string,
 	dryRun bool,
+	source workflowSource,
 ) error {
-	object, backend, err := r.loadCopyWithBackend(ctx, cmd, runtime, id, false)
+	object, backend, err := r.loadCopyWithBackend(ctx, cmd, runtime, id, false, source)
 	if err != nil {
 		return err
 	}
@@ -236,6 +299,8 @@ func (r *rootState) executeCopy(
 			return reportCopyError(cmd, object.Name, object.Status.Phase, err)
 		}
 
+		namespace := workflowLeaseNamespace(backend, r.workflowStorageNamespace(cmd), object)
+
 		if !repeat {
 			if err := runtime.printer.Print(object); err != nil {
 				return err
@@ -244,23 +309,17 @@ func (r *rootState) executeCopy(
 			return writeDryRunNotice(
 				cmd.ErrOrStderr(),
 				lifecycleExecuteCommand(
-					guidancePrefixesForCommand(
-						cmd,
-						workflowLeaseNamespace(backend, r.workflowStorageNamespace(cmd), object),
-					).pvcMigrate,
+					cmd,
+					guidancePrefixesForCommand(cmd, namespace).pvcMigrate,
 					"copy",
 					"resume",
+					namespace,
 					object.Name,
 				),
 			)
 		}
 
-		return printCopyDryRunResult(
-			cmd,
-			runtime,
-			object,
-			workflowLeaseNamespace(backend, r.workflowStorageNamespace(cmd), object),
-		)
+		return printCopyDryRunResult(cmd, runtime, object, namespace)
 	}
 
 	if !repeat && requiresResumeApproval(copyResumePhase(object.Status.WorkflowStatus)) {
@@ -289,11 +348,13 @@ func (r *rootState) executeCopy(
 
 	return writeWorkflowNextSteps(
 		cmd.ErrOrStderr(),
+		cmd,
 		guidancePrefixesForCommand(
 			cmd,
 			workflowLeaseNamespace(backend, r.workflowStorageNamespace(cmd), object),
 		).pvcMigrate,
 		"copy",
+		workflowLeaseNamespace(backend, r.workflowStorageNamespace(cmd), object),
 		object.Name,
 		object.Status.Phase,
 		false,
@@ -343,9 +404,11 @@ func (r *rootState) executeClusterCopy(
 			return writeDryRunNotice(
 				cmd.ErrOrStderr(),
 				lifecycleExecuteCommand(
+					cmd,
 					guidancePrefixesForCommand(cmd, namespace).pvcMigrate,
 					"copy",
 					"resume",
+					namespace,
 					object.Name,
 				),
 			)
@@ -380,8 +443,10 @@ func (r *rootState) executeClusterCopy(
 
 	return writeWorkflowNextSteps(
 		cmd.ErrOrStderr(),
+		cmd,
 		guidancePrefixesForCommand(cmd, namespace).pvcMigrate,
 		"copy",
+		namespace,
 		object.Name,
 		object.Status.Phase,
 		false,

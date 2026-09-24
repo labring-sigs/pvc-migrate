@@ -38,16 +38,13 @@ type copyFlags struct {
 	unusedStoragePolicy   string
 }
 
-func (f *copyFlags) bind(command *cobra.Command) {
+// bindTransfer binds the copy inputs that shape the workflow spec. Namespace
+// roles bind separately through bindNamespaceRoles: session commands take one
+// flag per role, cr namespaced submits take a single -n, and cr cluster
+// submits take the roles their spec declares.
+func (f *copyFlags) bindTransfer(command *cobra.Command) {
 	flags := command.Flags()
 	flags.StringVar(&f.sessionID, "session", "", "Migration session ID")
-	flags.StringVarP(&f.sourceNamespace, "source-namespace", "n", "default", "Source PVC namespace")
-	flags.StringVar(
-		&f.destinationNamespace,
-		"destination-namespace",
-		"",
-		"Destination namespace; defaults to source namespace",
-	)
 	flags.StringSliceVar(
 		&f.sourcePVCs,
 		"source-pvc",
@@ -145,6 +142,31 @@ func (f *copyFlags) bind(command *cobra.Command) {
 		string(v1alpha1.UnusedStorageKeep),
 		"Keep or Delete an undelivered destination: Delete removes the destination PVC only when the copy aborted before completing; a completed copy's destination and the source PVC are always kept (default Keep)",
 	)
+}
+
+// bindNamespaceRoles binds the per-role namespace flags the session and
+// cluster-scoped copy entrypoints expose.
+func (f *copyFlags) bindNamespaceRoles(command *cobra.Command) {
+	flags := command.Flags()
+	flags.StringVarP(&f.sourceNamespace, "source-namespace", "n", "default", "Source PVC namespace")
+	flags.StringVar(
+		&f.destinationNamespace,
+		"destination-namespace",
+		"",
+		"Destination namespace; defaults to source namespace",
+	)
+}
+
+func (f *copyFlags) bind(command *cobra.Command) {
+	f.bindTransfer(command)
+	f.bindNamespaceRoles(command)
+}
+
+// setSingleNamespace pins every namespace role to one tenant namespace for a
+// namespaced Copy submission or a session graduation lookup.
+func (f *copyFlags) setSingleNamespace(namespace string) {
+	f.sourceNamespace = namespace
+	f.destinationNamespace = namespace
 }
 
 func (f *copyFlags) workflow(

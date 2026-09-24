@@ -10,7 +10,6 @@ import (
 	"github.com/labring-sigs/pvc-migrate/internal/domain"
 	"github.com/labring-sigs/pvc-migrate/internal/kube"
 	"github.com/labring-sigs/pvc-migrate/internal/output"
-	"github.com/spf13/cobra"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	dynamicfake "k8s.io/client-go/dynamic/fake"
@@ -32,7 +31,7 @@ func (c repositorySubmissionClient) Create(
 	return c.Client.Create(ctx, object, options...)
 }
 
-func TestRepositorySubmissionPrintsControllerFailure(t *testing.T) {
+func TestCRBackupCreatePrintsControllerFailure(t *testing.T) {
 	scheme := runtime.NewScheme()
 	if err := v1alpha1.AddToScheme(scheme); err != nil {
 		t.Fatal(err)
@@ -55,35 +54,35 @@ func TestRepositorySubmissionPrintsControllerFailure(t *testing.T) {
 
 	var out, diagnostics bytes.Buffer
 
-	cmd := &cobra.Command{}
-	cmd.SetErr(&diagnostics)
-
-	r := &rootState{global: globals{assumeYes: true}}
-	rt := &commandRuntime{
-		clients: &kube.Clients{
-			Runtime: repositorySubmissionClient{
-				crfake.NewClientBuilder().WithScheme(scheme).Build(),
-			},
-			Kubernetes: kubernetesfake.NewClientset(),
-			Dynamic:    dynamicfake.NewSimpleDynamicClient(scheme, failed),
-		},
-		waitForController: true,
-		printer:           output.Printer{Writer: &out, Format: output.JSON},
-	}
-
-	err := r.submitBackup(
-		t.Context(),
-		cmd,
-		rt,
-		&v1alpha1.Backup{
-			ObjectMeta: metav1.ObjectMeta{Name: "backup", Namespace: "data"},
-			Spec: v1alpha1.BackupSpec{
-				SourcePVC:     v1alpha1.LocalResourceReference{Name: "source"},
-				Name:          "snapshot",
-				RepositoryRef: v1alpha1.LocalObjectReference{Name: "repository"},
+	command := NewRoot(
+		Options{
+			Out:    &out,
+			ErrOut: &diagnostics,
+			runtimeFactory: func(state *rootState) (*commandRuntime, error) {
+				return &commandRuntime{
+					clients: &kube.Clients{
+						Runtime: repositorySubmissionClient{
+							crfake.NewClientBuilder().WithScheme(scheme).Build(),
+						},
+						Kubernetes: kubernetesfake.NewClientset(),
+						Dynamic:    dynamicfake.NewSimpleDynamicClient(scheme, failed),
+					},
+					printer: output.Printer{Writer: &out, Format: output.JSON},
+				}, nil
 			},
 		},
 	)
+	command.SetArgs([]string{
+		"cr", "backup", "create",
+		"--id", "backup",
+		"-n", "data",
+		"--source-pvc", "source",
+		"--name", "snapshot",
+		"--backup-repository", "repository",
+		"--yes", "--dry-run=false",
+	})
+
+	err := command.Execute()
 	if domain.CategoryOf(err) != domain.ErrorConflict {
 		t.Fatalf("controller failure lost its category: %v", err)
 	}
@@ -94,7 +93,7 @@ func TestRepositorySubmissionPrintsControllerFailure(t *testing.T) {
 	}
 }
 
-func TestRepositorySubmissionPersistsConcreteCRDs(t *testing.T) {
+func TestCRBackupAndRestoreCreatePersistConcreteCRDs(t *testing.T) {
 	scheme := runtime.NewScheme()
 	if err := v1alpha1.AddToScheme(scheme); err != nil {
 		t.Fatal(err)
@@ -104,30 +103,36 @@ func TestRepositorySubmissionPersistsConcreteCRDs(t *testing.T) {
 
 	var out, diagnostics bytes.Buffer
 
-	cmd := &cobra.Command{}
-	cmd.SetOut(&out)
-	cmd.SetErr(&diagnostics)
-
-	r := &rootState{global: globals{assumeYes: true}}
-	rt := &commandRuntime{
-		clients: &kube.Clients{Runtime: client, Kubernetes: kubernetesfake.NewClientset()},
-		printer: output.Printer{Writer: &out, Format: output.JSON},
-	}
-
-	backupSpec := v1alpha1.BackupSpec{
-		SourcePVC:     v1alpha1.LocalResourceReference{Name: "source", UID: "source-uid"},
-		RepositoryRef: v1alpha1.LocalObjectReference{Name: "repository"},
-		Name:          "snapshot", Path: "data", Online: true, OpenEBSLVMEnableShared: true,
-	}
-	if err := r.submitBackup(
-		t.Context(),
-		cmd,
-		rt,
-		&v1alpha1.Backup{
-			ObjectMeta: metav1.ObjectMeta{Name: "backup", Namespace: "data"},
-			Spec:       backupSpec,
+	command := NewRoot(
+		Options{
+			Out:    &out,
+			ErrOut: &diagnostics,
+			runtimeFactory: func(state *rootState) (*commandRuntime, error) {
+				return &commandRuntime{
+					clients: &kube.Clients{
+						Runtime:    client,
+						Kubernetes: kubernetesfake.NewClientset(),
+					},
+					printer: output.Printer{Writer: &out, Format: output.JSON},
+				}, nil
+			},
 		},
-	); err != nil {
+	)
+
+	command.SetArgs([]string{
+		"cr", "backup", "create",
+		"--id", "backup",
+		"-n", "data",
+		"--source-pvc", "source",
+		"--name", "snapshot",
+		"--path", "data",
+		"--online",
+		"--openebs-lvm-enable-shared",
+		"--backup-repository", "repository",
+		"--yes", "--dry-run=false", "--wait=false",
+	})
+
+	if err := command.Execute(); err != nil {
 		t.Fatal(err)
 	}
 
@@ -140,6 +145,11 @@ func TestRepositorySubmissionPersistsConcreteCRDs(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	backupSpec := v1alpha1.BackupSpec{
+		SourcePVC:     v1alpha1.LocalResourceReference{Name: "source"},
+		RepositoryRef: v1alpha1.LocalObjectReference{Name: "repository"},
+		Name:          "snapshot", Path: "data", Online: true, OpenEBSLVMEnableShared: true,
+	}
 	if backup.Spec != backupSpec || backup.Status.Plan != nil || len(backup.Finalizers) == 0 {
 		t.Fatalf("backup request changed or protection missing: %+v", backup)
 	}
@@ -150,22 +160,24 @@ func TestRepositorySubmissionPersistsConcreteCRDs(t *testing.T) {
 
 	out.Reset()
 
-	restoreSpec := v1alpha1.RestoreSpec{
-		DestinationPVC: v1alpha1.LocalResourceReference{Name: "target"},
-		RepositoryRef:  v1alpha1.LocalObjectReference{Name: "repository"},
-		Name:           "snapshot", Path: "restore", CreatePVC: true,
-		DestinationStorageClass: "storage", DestinationCapacity: "2Gi",
-		DestinationAccessMode: "ReadWriteOnce", TargetNode: "worker", DeleteExtraneous: true,
-	}
-	if err := r.submitRestore(
-		t.Context(),
-		cmd,
-		rt,
-		&v1alpha1.Restore{
-			ObjectMeta: metav1.ObjectMeta{Name: "restore", Namespace: "data"},
-			Spec:       restoreSpec,
-		},
-	); err != nil {
+	command.SetArgs([]string{
+		"cr", "restore", "create",
+		"--id", "restore",
+		"-n", "data",
+		"--destination-pvc", "target",
+		"--name", "snapshot",
+		"--path", "restore",
+		"--create-pvc",
+		"--destination-storage-class", "storage",
+		"--destination-capacity", "2Gi",
+		"--destination-access-mode", "ReadWriteOnce",
+		"--target-node", "worker",
+		"--delete-extraneous",
+		"--backup-repository", "repository",
+		"--yes", "--dry-run=false", "--wait=false",
+	})
+
+	if err := command.Execute(); err != nil {
 		t.Fatal(err)
 	}
 
@@ -178,6 +190,13 @@ func TestRepositorySubmissionPersistsConcreteCRDs(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	restoreSpec := v1alpha1.RestoreSpec{
+		DestinationPVC: v1alpha1.LocalResourceReference{Name: "target"},
+		RepositoryRef:  v1alpha1.LocalObjectReference{Name: "repository"},
+		Name:           "snapshot", Path: "restore", CreatePVC: true,
+		DestinationStorageClass: "storage", DestinationCapacity: "2Gi",
+		DestinationAccessMode: "ReadWriteOnce", TargetNode: "worker", DeleteExtraneous: true,
+	}
 	if restore.Spec != restoreSpec || restore.Status.Plan != nil || len(restore.Finalizers) == 0 {
 		t.Fatalf("restore request changed or protection missing: %+v", restore)
 	}

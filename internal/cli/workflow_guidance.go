@@ -28,40 +28,62 @@ func workflowTerminalPhase(phase domain.Phase) bool {
 // form — dry-run is the default, so the preview form is the same command
 // without --yes and --dry-run=false. Active and failed phases stay silent:
 // run and error paths already print their own recovery guidance.
+//
+// The block is mode-aware through cmd: session commands print session-flavored
+// follow-ups; cr commands print cr-flavored follow-ups addressed with -n.
 func writeWorkflowNextSteps(
 	w io.Writer,
-	prefix, workflow, session string,
+	cmd *cobra.Command,
+	prefix, family, namespace, name string,
 	phase domain.Phase,
 	rollback bool,
 ) error {
-	if session == "" || !workflowTerminalPhase(phase) {
+	if name == "" || !workflowTerminalPhase(phase) {
 		return nil
+	}
+
+	label, scope := "session", name
+
+	finalizeLabel := "Finalize and delete retained resources/session"
+	if isControllerCommand(cmd) {
+		label, scope = "workflow", workflowScopeName(namespace, name)
+		finalizeLabel = "Finalize and delete retained resources/workflow"
 	}
 
 	if _, err := fmt.Fprintf(
 		w,
-		"\nNext steps for session %s (phase %s):\n",
-		session,
+		"\nNext steps for %s %s (phase %s):\n",
+		label,
+		scope,
 		phase,
 	); err != nil {
 		return err
 	}
 
+	address := workflowHintAddress(cmd, namespace, name)
+
 	lines := []string{
-		"  Inspect: " + prefix + " " + workflow + " status " + shellQuote(session),
+		"  Inspect: " + prefix + " " + workflowCommandPath(cmd, family) + " status " + address,
 	}
 
 	if phase == domain.PhaseCompleted && rollback {
 		lines = append(
 			lines,
-			"  Roll back: "+lifecycleExecuteCommand(prefix, workflow, "rollback", session),
+			"  Roll back: "+lifecycleExecuteCommand(
+				cmd,
+				prefix,
+				family,
+				"rollback",
+				namespace,
+				name,
+			),
 		)
 	}
 
 	lines = append(
 		lines,
-		"  Finalize and delete retained resources/session: "+
-			cleanupExecuteCommand(prefix, workflow, session, "", true, true),
+		"  "+finalizeLabel+": "+
+			cleanupExecuteCommand(cmd, prefix, family, namespace, name, "", true, true),
 	)
 
 	for _, line := range lines {
@@ -87,38 +109,36 @@ func writeDryRunNotice(w io.Writer, execute string) error {
 }
 
 // writeControllerWorkflowNextSteps prints follow-ups for a workflow the
-// elected controller owns: inspection and finalization stay in kubectl,
-// because deleting the CR converges storage through the controller's
-// finalizer rather than a CLI lifecycle command.
+// elected controller owns, in cr command form: cr status inspects, cr cleanup
+// finalizes, and a kubectl delete remains the declarative alternative (the
+// finalizer converges storage per the spec reclaim policies).
 func writeControllerWorkflowNextSteps(
 	w io.Writer,
-	kubectlPrefix, resource, namespace, name string,
+	cmd *cobra.Command,
+	prefix, resource, namespace, name string,
 	phase domain.Phase,
 ) error {
 	if name == "" || !workflowTerminalPhase(phase) {
 		return nil
 	}
 
-	scope := ""
-	if namespace != "" {
-		scope = "-n " + namespace + " "
-	}
-
 	if _, err := fmt.Fprintf(
 		w,
-		"\nNext steps for workflow %s/%s (phase %s):\n",
-		resource,
-		name,
+		"\nNext steps for workflow %s (phase %s):\n",
+		workflowScopeName(namespace, name),
 		phase,
 	); err != nil {
 		return err
 	}
 
+	family := crFamilyPathForResource(resource)
+	address := workflowHintAddress(cmd, namespace, name)
+
 	lines := []string{
-		"  Inspect: " + kubectlPrefix + " " + scope + "get " + resource + " " + shellQuote(name),
-		"  Finalize: " + kubectlPrefix + " " + scope + "delete " + resource + " " +
-			shellQuote(name) +
-			" (the finalizer converges storage per the spec reclaim policies)",
+		"  Inspect: " + prefix + " " + family + " status " + address,
+		"  Finalize: " + prefix + " --yes " + family + " cleanup " + address +
+			" --finalize --delete-session --dry-run=false" +
+			" (or delete the CR; the finalizer converges storage per the spec reclaim policies)",
 	}
 
 	for _, line := range lines {
@@ -220,18 +240,62 @@ func workflowObjectPhase(object crclient.Object) domain.Phase {
 		return current.Status.Phase
 	case *v1alpha1.ClusterCopy:
 		return current.Status.Phase
+	case *v1alpha1.PodMigration:
+		return current.Status.Phase
+	case *v1alpha1.Rename:
+		return current.Status.Phase
+	case *v1alpha1.Move:
+		return current.Status.Phase
+	case *v1alpha1.Backup:
+		return current.Status.Phase
+	case *v1alpha1.Restore:
+		return current.Status.Phase
 	default:
 		return ""
 	}
 }
 
-func lifecycleExecuteCommand(prefix, workflow, subcommand, session string) string {
+// workflowObjectMessage reads the workflow status message from any workflow
+// object shape; every workflow status embeds WorkflowStatus inline.
+func workflowObjectMessage(object crclient.Object) string {
+	switch current := object.(type) {
+	case *v1alpha1.Migration:
+		return current.Status.Message
+	case *v1alpha1.ClusterMigration:
+		return current.Status.Message
+	case *v1alpha1.Reservation:
+		return current.Status.Message
+	case *v1alpha1.ClusterReservation:
+		return current.Status.Message
+	case *v1alpha1.Copy:
+		return current.Status.Message
+	case *v1alpha1.ClusterCopy:
+		return current.Status.Message
+	case *v1alpha1.PodMigration:
+		return current.Status.Message
+	case *v1alpha1.Rename:
+		return current.Status.Message
+	case *v1alpha1.Move:
+		return current.Status.Message
+	case *v1alpha1.Backup:
+		return current.Status.Message
+	case *v1alpha1.Restore:
+		return current.Status.Message
+	default:
+		return ""
+	}
+}
+
+func lifecycleExecuteCommand(
+	cmd *cobra.Command,
+	prefix, family, subcommand, namespace, name string,
+) string {
 	return fmt.Sprintf(
 		"%s --yes %s %s %s --dry-run=false",
 		prefix,
-		workflow,
+		workflowCommandPath(cmd, family),
 		subcommand,
-		shellQuote(session),
+		workflowHintAddress(cmd, namespace, name),
 	)
 }
 
@@ -239,11 +303,12 @@ func lifecycleExecuteCommand(prefix, workflow, subcommand, session string) strin
 // mirroring the flags the operator passed so the suggested command preserves
 // their reclaim decisions.
 func cleanupExecuteCommand(
-	prefix, workflow, session string,
+	cmd *cobra.Command,
+	prefix, family, namespace, name string,
 	policy string,
 	finalize, deleteSession bool,
 ) string {
-	args := shellQuote(session)
+	args := workflowHintAddress(cmd, namespace, name)
 	if policy != "" {
 		args += " --unused-storage-policy " + shellQuote(policy)
 	}
@@ -256,5 +321,10 @@ func cleanupExecuteCommand(
 		args += " --delete-session"
 	}
 
-	return fmt.Sprintf("%s --yes %s cleanup %s --dry-run=false", prefix, workflow, args)
+	return fmt.Sprintf(
+		"%s --yes %s cleanup %s --dry-run=false",
+		prefix,
+		workflowCommandPath(cmd, family),
+		args,
+	)
 }

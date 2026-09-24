@@ -2,21 +2,17 @@ package cli
 
 import (
 	"context"
-	"slices"
-	"strings"
 
 	v1alpha1 "github.com/labring-sigs/pvc-migrate/api/v1alpha1"
 	"github.com/labring-sigs/pvc-migrate/internal/app"
 	"github.com/labring-sigs/pvc-migrate/internal/domain"
 	"github.com/spf13/cobra"
-	apierrors "k8s.io/apimachinery/pkg/api/errors"
-	"k8s.io/apimachinery/pkg/runtime/schema"
 	crclient "sigs.k8s.io/controller-runtime/pkg/client"
 )
 
-func (r *rootState) newPodMigrationStatusCommand() *cobra.Command {
+func (r *rootState) newPodMigrationStatusCommand(source workflowSource) *cobra.Command {
 	return &cobra.Command{
-		Use:   "status [SESSION]",
+		Use:   "status [" + workflowArgLabel(source) + "]",
 		Short: "Show one Pod migration or list Pod migrations",
 		Args:  cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -29,7 +25,7 @@ func (r *rootState) newPodMigrationStatusCommand() *cobra.Command {
 			defer cancel()
 
 			if len(args) == 1 {
-				object, _, err := r.loadPodMigration(ctx, runtime, args[0])
+				object, _, err := r.loadPodMigration(ctx, cmd, runtime, args[0], source)
 				if err != nil {
 					return err
 				}
@@ -38,7 +34,22 @@ func (r *rootState) newPodMigrationStatusCommand() *cobra.Command {
 					return err
 				}
 
-				return writePodMigrationNextSteps(cmd, object)
+				return writePodMigrationNextSteps(cmd, r, object)
+			}
+
+			var list []crclient.Object
+
+			if source == sourceController {
+				namespaced, err := runtime.podMigrationStore.List(ctx, crNamespaceForCommand(cmd))
+				if err != nil {
+					return err
+				}
+
+				for _, object := range namespaced {
+					list = append(list, object)
+				}
+
+				return runtime.printer.Print(list)
 			}
 
 			// Session ConfigMaps persist PodMigration objects whose
@@ -49,22 +60,8 @@ func (r *rootState) newPodMigrationStatusCommand() *cobra.Command {
 				return err
 			}
 
-			list := make([]crclient.Object, 0, len(sessions))
 			for _, object := range sessions {
 				list = append(list, object)
-			}
-
-			if crdListable(runtime) {
-				for _, probe := range r.podMigrationProbeNamespaces(nil) {
-					namespaced, err := runtime.podMigrationStore.List(ctx, probe)
-					if err != nil {
-						return err
-					}
-
-					for _, object := range namespaced {
-						list = append(list, object)
-					}
-				}
 			}
 
 			return runtime.printer.Print(list)
@@ -72,11 +69,11 @@ func (r *rootState) newPodMigrationStatusCommand() *cobra.Command {
 	}
 }
 
-func (r *rootState) newPodMigrationResumeCommand() *cobra.Command {
+func (r *rootState) newPodMigrationResumeCommand(source workflowSource) *cobra.Command {
 	var dryRun bool
 
 	command := &cobra.Command{
-		Use:   "resume SESSION",
+		Use:   "resume " + workflowArgLabel(source),
 		Short: "Continue a Pod migration from its persisted phase",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -88,7 +85,7 @@ func (r *rootState) newPodMigrationResumeCommand() *cobra.Command {
 			ctx, cancel := r.context(cmd.Context())
 			defer cancel()
 
-			object, dispatch, err := r.loadPodMigration(ctx, runtime, args[0])
+			object, dispatch, err := r.loadPodMigration(ctx, cmd, runtime, args[0], source)
 			if err != nil {
 				return err
 			}
@@ -102,7 +99,7 @@ func (r *rootState) newPodMigrationResumeCommand() *cobra.Command {
 					return err
 				}
 
-				return writePodMigrationDryRunNotice(cmd, object, "resume")
+				return writePodMigrationDryRunNotice(cmd, r, object, "resume")
 			}
 
 			if err := r.confirm(ctx, cmd, args[0]); err != nil {
@@ -121,7 +118,7 @@ func (r *rootState) newPodMigrationResumeCommand() *cobra.Command {
 				return err
 			}
 
-			return writePodMigrationNextSteps(cmd, object)
+			return writePodMigrationNextSteps(cmd, r, object)
 		},
 	}
 	bindDryRun(command, &dryRun)
@@ -129,11 +126,11 @@ func (r *rootState) newPodMigrationResumeCommand() *cobra.Command {
 	return command
 }
 
-func (r *rootState) newPodMigrationAbortCommand() *cobra.Command {
+func (r *rootState) newPodMigrationAbortCommand(source workflowSource) *cobra.Command {
 	var dryRun bool
 
 	command := &cobra.Command{
-		Use:   "abort SESSION",
+		Use:   "abort " + workflowArgLabel(source),
 		Short: "Stop a Pod migration before cutover",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -145,7 +142,7 @@ func (r *rootState) newPodMigrationAbortCommand() *cobra.Command {
 			ctx, cancel := r.context(cmd.Context())
 			defer cancel()
 
-			object, dispatch, err := r.loadPodMigration(ctx, runtime, args[0])
+			object, dispatch, err := r.loadPodMigration(ctx, cmd, runtime, args[0], source)
 			if err != nil {
 				return err
 			}
@@ -159,7 +156,7 @@ func (r *rootState) newPodMigrationAbortCommand() *cobra.Command {
 					return err
 				}
 
-				return writePodMigrationDryRunNotice(cmd, object, "abort")
+				return writePodMigrationDryRunNotice(cmd, r, object, "abort")
 			}
 
 			if err := r.confirm(ctx, cmd, args[0]); err != nil {
@@ -174,7 +171,7 @@ func (r *rootState) newPodMigrationAbortCommand() *cobra.Command {
 				return err
 			}
 
-			return writePodMigrationNextSteps(cmd, object)
+			return writePodMigrationNextSteps(cmd, r, object)
 		},
 	}
 	bindDryRun(command, &dryRun)
@@ -182,11 +179,11 @@ func (r *rootState) newPodMigrationAbortCommand() *cobra.Command {
 	return command
 }
 
-func (r *rootState) newPodMigrationRollbackCommand() *cobra.Command {
+func (r *rootState) newPodMigrationRollbackCommand(source workflowSource) *cobra.Command {
 	var dryRun bool
 
 	command := &cobra.Command{
-		Use:   "rollback SESSION",
+		Use:   "rollback " + workflowArgLabel(source),
 		Short: "Restore source bindings after Pod migration cutover",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -198,7 +195,7 @@ func (r *rootState) newPodMigrationRollbackCommand() *cobra.Command {
 			ctx, cancel := r.context(cmd.Context())
 			defer cancel()
 
-			object, dispatch, err := r.loadPodMigration(ctx, runtime, args[0])
+			object, dispatch, err := r.loadPodMigration(ctx, cmd, runtime, args[0], source)
 			if err != nil {
 				return err
 			}
@@ -212,7 +209,7 @@ func (r *rootState) newPodMigrationRollbackCommand() *cobra.Command {
 					return err
 				}
 
-				return writePodMigrationDryRunNotice(cmd, object, "rollback")
+				return writePodMigrationDryRunNotice(cmd, r, object, "rollback")
 			}
 
 			if err := r.confirm(ctx, cmd, args[0]); err != nil {
@@ -227,7 +224,7 @@ func (r *rootState) newPodMigrationRollbackCommand() *cobra.Command {
 				return err
 			}
 
-			return writePodMigrationNextSteps(cmd, object)
+			return writePodMigrationNextSteps(cmd, r, object)
 		},
 	}
 	bindDryRun(command, &dryRun)
@@ -235,14 +232,14 @@ func (r *rootState) newPodMigrationRollbackCommand() *cobra.Command {
 	return command
 }
 
-func (r *rootState) newPodMigrationCleanupCommand() *cobra.Command {
+func (r *rootState) newPodMigrationCleanupCommand(source workflowSource) *cobra.Command {
 	var (
 		options app.MigrationCleanupOptions
 		dryRun  bool
 	)
 
 	command := &cobra.Command{
-		Use:   "cleanup SESSION",
+		Use:   "cleanup " + workflowArgLabel(source),
 		Short: "Apply storage reclaim policies and close the Pod migration",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -254,7 +251,7 @@ func (r *rootState) newPodMigrationCleanupCommand() *cobra.Command {
 			ctx, cancel := r.context(cmd.Context())
 			defer cancel()
 
-			object, dispatch, err := r.loadPodMigration(ctx, runtime, args[0])
+			object, dispatch, err := r.loadPodMigration(ctx, cmd, runtime, args[0], source)
 			if err != nil {
 				return err
 			}
@@ -268,11 +265,15 @@ func (r *rootState) newPodMigrationCleanupCommand() *cobra.Command {
 					return err
 				}
 
+				namespace := podMigrationHintNamespace(cmd, r, object)
+
 				return writeDryRunNotice(
 					cmd.ErrOrStderr(),
 					cleanupExecuteCommand(
-						guidancePrefixesForCommand(cmd, object.GetNamespace()).pvcMigrate,
+						cmd,
+						guidancePrefixesForCommand(cmd, namespace).pvcMigrate,
 						"migrate-pod",
+						namespace,
 						object.GetName(),
 						options.UnusedStoragePolicy,
 						options.Finalize,
@@ -303,18 +304,25 @@ func (r *rootState) newPodMigrationCleanupCommand() *cobra.Command {
 }
 
 // writePodMigrationDryRunNotice prints the execute form of the lifecycle
-// subcommand just previewed, resolved from the workflow's own namespace.
+// subcommand just previewed, resolved from the namespace the workflow record
+// lives in: the session storage namespace for session records, the tenant
+// namespace for CRs.
 func writePodMigrationDryRunNotice(
 	cmd *cobra.Command,
+	r *rootState,
 	object crclient.Object,
 	subcommand string,
 ) error {
+	namespace := podMigrationHintNamespace(cmd, r, object)
+
 	return writeDryRunNotice(
 		cmd.ErrOrStderr(),
 		lifecycleExecuteCommand(
-			guidancePrefixesForCommand(cmd, object.GetNamespace()).pvcMigrate,
+			cmd,
+			guidancePrefixesForCommand(cmd, namespace).pvcMigrate,
 			"migrate-pod",
 			subcommand,
+			namespace,
 			object.GetName(),
 		),
 	)
@@ -344,13 +352,16 @@ type podMigrationDispatch struct {
 	cleanup          func(context.Context, app.MigrationCleanupOptions) error
 }
 
-// loadPodMigration resolves one Pod migration from session (ConfigMap),
-// cluster CRD, or namespaced CRD storage and returns the executor operations
-// bound to the backend that owns the record.
+// loadPodMigration resolves one Pod migration from the backend its command
+// family addresses — session (ConfigMap) records for the session commands,
+// namespaced PodMigration CRs for the cr commands — and returns the executor
+// operations bound to that backend.
 func (r *rootState) loadPodMigration(
 	ctx context.Context,
+	cmd *cobra.Command,
 	runtime *commandRuntime,
 	name string,
+	source workflowSource,
 ) (crclient.Object, *podMigrationDispatch, error) {
 	if runtime == nil || runtime.podMigrationStore == nil ||
 		runtime.podMigrationSessionStore == nil {
@@ -385,44 +396,27 @@ func (r *rootState) loadPodMigration(
 
 	key := crclient.ObjectKey{Name: name}
 
-	object, err := runtime.podMigrationSessionStore.Load(ctx, key)
-	if err == nil {
-		return object, bindDispatch(object, runtime.podMigrationSessionExecutor), nil
+	if source == sourceController {
+		namespace := crNamespaceForCommand(cmd)
+		if namespace == "" {
+			return nil, nil, domain.NewError(
+				domain.ErrorValidation,
+				"pod migration",
+				"-n/--namespace is required to address a namespaced workflow CR",
+			)
+		}
+
+		object, err := runtime.podMigrationStore.Load(
+			ctx, crclient.ObjectKey{Name: name, Namespace: namespace},
+		)
+
+		return object, bindDispatch(object, runtime.podMigrationExecutor), err
 	}
 
-	if !apierrors.IsNotFound(err) {
+	object, err := runtime.podMigrationSessionStore.Load(ctx, key)
+	if err != nil {
 		return nil, nil, err
 	}
 
-	for _, namespace := range r.podMigrationProbeNamespaces(nil) {
-		namespaced, nsErr := runtime.podMigrationStore.Load(
-			ctx, crclient.ObjectKey{Name: name, Namespace: namespace},
-		)
-		if apierrors.IsNotFound(nsErr) {
-			continue
-		}
-
-		if nsErr != nil {
-			return nil, nil, nsErr
-		}
-
-		return namespaced, bindDispatch(namespaced, runtime.podMigrationExecutor), nil
-	}
-
-	return nil, nil, apierrors.NewNotFound(
-		schema.GroupResource{Group: v1alpha1.GroupVersion.Group, Resource: "podmigrations"}, name,
-	)
-}
-
-// podMigrationProbeNamespaces lists the tenant namespaces a namespaced
-// PodMigration lookup must cover.
-func (r *rootState) podMigrationProbeNamespaces(_ *cobra.Command) []string {
-	namespaces := make([]string, 0, 3)
-	for _, candidate := range []string{r.global.workflowNamespace, r.global.sessionNamespace} {
-		if strings.TrimSpace(candidate) != "" && !slices.Contains(namespaces, candidate) {
-			namespaces = append(namespaces, strings.TrimSpace(candidate))
-		}
-	}
-
-	return namespaces
+	return object, bindDispatch(object, runtime.podMigrationSessionExecutor), nil
 }

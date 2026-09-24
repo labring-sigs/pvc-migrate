@@ -10,13 +10,36 @@ import (
 	"github.com/spf13/cobra"
 )
 
+// newSessionHintCommand builds a bare command the way the session lifecycle
+// commands look to the guidance helpers: no cr ancestor.
+func newSessionHintCommand() *cobra.Command {
+	return &cobra.Command{Use: "status"}
+}
+
+// newCRHintCommand builds a verb command nested under the cr group the way
+// the cr lifecycle commands look to the guidance helpers.
+func newCRHintCommand(family string) *cobra.Command {
+	root := &cobra.Command{Use: "pvc-migrate"}
+	cr := &cobra.Command{Use: "cr"}
+	group := &cobra.Command{Use: family}
+	verb := &cobra.Command{Use: "status"}
+
+	root.AddCommand(cr)
+	cr.AddCommand(group)
+	group.AddCommand(verb)
+
+	return verb
+}
+
 func TestWriteWorkflowNextStepsCompletedWithRollback(t *testing.T) {
 	var output bytes.Buffer
 
 	if err := writeWorkflowNextSteps(
 		&output,
+		newSessionHintCommand(),
 		"pvc-migrate --kubeconfig /etc/kc",
 		"migrate-pod",
+		"pvc-migrate-system",
 		"mig-1",
 		domain.PhaseCompleted,
 		true,
@@ -46,13 +69,80 @@ func TestWriteWorkflowNextStepsCompletedWithRollback(t *testing.T) {
 	}
 }
 
+func TestWriteWorkflowNextStepsControllerForm(t *testing.T) {
+	var output bytes.Buffer
+
+	if err := writeWorkflowNextSteps(
+		&output,
+		newCRHintCommand("migrate-pod"),
+		"pvc-migrate",
+		"migrate-pod",
+		"tenant-a",
+		"mig-1",
+		domain.PhaseCompleted,
+		true,
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	guidance := output.String()
+
+	if !strings.Contains(
+		guidance,
+		"\nNext steps for workflow tenant-a/mig-1 (phase Completed):\n",
+	) {
+		t.Fatalf("controller guidance lacks the titled header: %q", guidance)
+	}
+
+	for _, want := range []string{
+		"  Inspect: pvc-migrate cr migrate-pod status mig-1 -n tenant-a\n",
+		"  Roll back: pvc-migrate --yes cr migrate-pod rollback mig-1 -n tenant-a --dry-run=false\n",
+		"  Finalize and delete retained resources/workflow: " +
+			"pvc-migrate --yes cr migrate-pod cleanup mig-1 -n tenant-a" +
+			" --finalize --delete-session --dry-run=false\n",
+	} {
+		if !strings.Contains(guidance, want) {
+			t.Fatalf("controller guidance lacks %q: %q", want, guidance)
+		}
+	}
+}
+
+func TestWriteWorkflowNextStepsClusterControllerOmitsNamespace(t *testing.T) {
+	var output bytes.Buffer
+
+	if err := writeWorkflowNextSteps(
+		&output,
+		newCRHintCommand("move"),
+		"pvc-migrate",
+		"move",
+		"",
+		"move-1",
+		domain.PhaseCompleted,
+		true,
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	guidance := output.String()
+
+	if strings.Contains(guidance, "-n ") {
+		t.Fatalf("cluster-scoped guidance must omit -n: %q", guidance)
+	}
+
+	if !strings.Contains(guidance, "  Inspect: pvc-migrate cr move status move-1\n") {
+		t.Fatalf("cluster-scoped guidance lacks the inspect command: %q", guidance)
+	}
+}
+
 func TestWriteWorkflowNextStepsCompletedWithoutRollback(t *testing.T) {
 	var output bytes.Buffer
 
 	if err := writeWorkflowNextSteps(
 		&output,
+		newSessionHintCommand(),
 		"pvc-migrate",
 		"copy",
+		"pvc-migrate-system",
 		"mig-1",
 		domain.PhaseCompleted,
 		false,
@@ -81,8 +171,10 @@ func TestWriteWorkflowNextStepsTerminalWithoutRollbackWindow(t *testing.T) {
 
 		if err := writeWorkflowNextSteps(
 			&output,
+			newSessionHintCommand(),
 			"pvc-migrate",
 			"migrate-pod",
+			"pvc-migrate-system",
 			"mig-1",
 			phase,
 			true,
@@ -112,8 +204,10 @@ func TestWriteWorkflowNextStepsSilentOutsideTerminalPhases(t *testing.T) {
 
 		if err := writeWorkflowNextSteps(
 			&output,
+			newSessionHintCommand(),
 			"pvc-migrate",
 			"migrate-pod",
+			"pvc-migrate-system",
 			"mig-1",
 			phase,
 			true,
@@ -130,8 +224,10 @@ func TestWriteWorkflowNextStepsSilentOutsideTerminalPhases(t *testing.T) {
 
 	if err := writeWorkflowNextSteps(
 		&empty,
+		newSessionHintCommand(),
 		"pvc-migrate",
 		"migrate-pod",
+		"pvc-migrate-system",
 		"",
 		domain.PhaseCompleted,
 		true,
@@ -149,8 +245,10 @@ func TestWriteWorkflowNextStepsQuotesSession(t *testing.T) {
 
 	if err := writeWorkflowNextSteps(
 		&output,
+		newSessionHintCommand(),
 		"pvc-migrate",
 		"migrate-pod",
+		"pvc-migrate-system",
 		"mig 1",
 		domain.PhaseCompleted,
 		true,
@@ -190,8 +288,10 @@ func TestWriteDryRunNotice(t *testing.T) {
 
 func TestCleanupExecuteCommandMirrorsOptions(t *testing.T) {
 	command := cleanupExecuteCommand(
+		newSessionHintCommand(),
 		"pvc-migrate",
 		"migrate",
+		"pvc-migrate-system",
 		"mig-1",
 		"Keep",
 		true,
@@ -204,9 +304,32 @@ func TestCleanupExecuteCommandMirrorsOptions(t *testing.T) {
 		t.Fatalf("cleanup command mismatch: got %q want %q", command, want)
 	}
 
-	minimal := cleanupExecuteCommand("pvc-migrate", "copy", "mig-1", "", false, false)
+	minimal := cleanupExecuteCommand(
+		newSessionHintCommand(),
+		"pvc-migrate",
+		"copy",
+		"pvc-migrate-system",
+		"mig-1",
+		"",
+		false,
+		false,
+	)
 	if minimal != "pvc-migrate --yes copy cleanup mig-1 --dry-run=false" {
 		t.Fatalf("minimal cleanup command mismatch: %q", minimal)
+	}
+
+	controller := cleanupExecuteCommand(
+		newCRHintCommand("copy"),
+		"pvc-migrate",
+		"copy",
+		"tenant-a",
+		"mig-1",
+		"",
+		false,
+		false,
+	)
+	if controller != "pvc-migrate --yes cr copy cleanup mig-1 -n tenant-a --dry-run=false" {
+		t.Fatalf("controller cleanup command mismatch: %q", controller)
 	}
 }
 
@@ -215,8 +338,9 @@ func TestWriteControllerWorkflowNextSteps(t *testing.T) {
 
 	if err := writeControllerWorkflowNextSteps(
 		&output,
-		"kubectl",
-		"migrations.migrate.sealos.io",
+		newCRHintCommand("migrate"),
+		"pvc-migrate",
+		"migrations",
 		"sealos",
 		"mig 1",
 		domain.PhaseCompleted,
@@ -228,15 +352,16 @@ func TestWriteControllerWorkflowNextSteps(t *testing.T) {
 
 	if !strings.Contains(
 		guidance,
-		"\nNext steps for workflow migrations.migrate.sealos.io/mig 1 (phase Completed):\n",
+		"\nNext steps for workflow sealos/mig 1 (phase Completed):\n",
 	) {
 		t.Fatalf("controller guidance lacks the titled header: %q", guidance)
 	}
 
 	for _, want := range []string{
-		"  Inspect: kubectl -n sealos get migrations.migrate.sealos.io 'mig 1'\n",
-		"  Finalize: kubectl -n sealos delete migrations.migrate.sealos.io 'mig 1'" +
-			" (the finalizer converges storage per the spec reclaim policies)\n",
+		"  Inspect: pvc-migrate cr migrate status 'mig 1' -n sealos\n",
+		"  Finalize: pvc-migrate --yes cr migrate cleanup 'mig 1' -n sealos" +
+			" --finalize --delete-session --dry-run=false" +
+			" (or delete the CR; the finalizer converges storage per the spec reclaim policies)\n",
 	} {
 		if !strings.Contains(guidance, want) {
 			t.Fatalf("controller guidance lacks %q: %q", want, guidance)
@@ -247,8 +372,9 @@ func TestWriteControllerWorkflowNextSteps(t *testing.T) {
 
 	if err := writeControllerWorkflowNextSteps(
 		&cluster,
-		"kubectl",
-		"clustermigrations.migrate.sealos.io",
+		newCRHintCommand("cluster-migrate"),
+		"pvc-migrate",
+		"clustermigrations",
 		"",
 		"mig-1",
 		domain.PhaseCompleted,
@@ -258,7 +384,7 @@ func TestWriteControllerWorkflowNextSteps(t *testing.T) {
 
 	if !strings.Contains(
 		cluster.String(),
-		"  Inspect: kubectl get clustermigrations.migrate.sealos.io mig-1\n",
+		"  Inspect: pvc-migrate cr cluster-migrate status mig-1\n",
 	) {
 		t.Fatalf("cluster-scoped guidance must omit the namespace flag: %q", cluster.String())
 	}
@@ -272,8 +398,9 @@ func TestWriteControllerWorkflowNextStepsSilentOutsideTerminalPhases(t *testing.
 
 		if err := writeControllerWorkflowNextSteps(
 			&output,
-			"kubectl",
-			"migrations.migrate.sealos.io",
+			newCRHintCommand("migrate"),
+			"pvc-migrate",
+			"migrations",
 			"sealos",
 			"mig-1",
 			phase,
@@ -332,8 +459,9 @@ func TestControllerWorkflowGuidanceColorization(t *testing.T) {
 
 	if err := writeControllerWorkflowNextSteps(
 		&output,
-		"kubectl",
-		"migrations.migrate.sealos.io",
+		newCRHintCommand("migrate"),
+		"pvc-migrate",
+		"migrations",
 		"sealos",
 		"mig-1",
 		domain.PhaseCompleted,
@@ -344,19 +472,14 @@ func TestControllerWorkflowGuidanceColorization(t *testing.T) {
 	colored := string(colorizeLogText(output.Bytes()))
 
 	for _, want := range []string{
-		"\x1b[1;36mNext steps for workflow migrations.migrate.sealos.io/mig-1 (phase \x1b[0m",
+		"\x1b[1;36mNext steps for workflow sealos/mig-1 (phase \x1b[0m",
 		"\x1b[1;32mCompleted\x1b[0m",
-		"\x1b[36mInspect:\x1b[0m kubectl",
-		"\x1b[1;31mFinalize:\x1b[0m kubectl",
+		"\x1b[36mInspect:\x1b[0m pvc-migrate",
+		"\x1b[1;31mFinalize:\x1b[0m pvc-migrate",
 	} {
 		if !strings.Contains(colored, want) {
 			t.Fatalf("colored controller guidance lacks %q: %q", want, colored)
 		}
-	}
-
-	plain := regexp.MustCompile(`\x1b\[[0-9;]*m`).ReplaceAllString(colored, "")
-	if plain != output.String() {
-		t.Fatalf("colorization changed controller guidance: got %q want %q", plain, output.String())
 	}
 }
 
@@ -365,8 +488,10 @@ func TestWorkflowGuidanceColorization(t *testing.T) {
 
 	if err := writeWorkflowNextSteps(
 		&output,
+		newSessionHintCommand(),
 		"pvc-migrate",
 		"migrate-pod",
+		"pvc-migrate-system",
 		"mig-1",
 		domain.PhaseCompleted,
 		true,

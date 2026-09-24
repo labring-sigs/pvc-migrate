@@ -3,6 +3,7 @@ package cli
 import (
 	"context"
 	"fmt"
+	"slices"
 
 	v1alpha1 "github.com/labring-sigs/pvc-migrate/api/v1alpha1"
 	"github.com/labring-sigs/pvc-migrate/internal/app"
@@ -14,11 +15,11 @@ import (
 
 func (r *rootState) addRenameLifecycle(parent *cobra.Command) {
 	parent.AddCommand(
-		r.newRenameStatusCommand(),
-		r.newRenameResumeCommand(),
-		r.newRenameAbortCommand(),
-		r.newRenameRollbackCommand(),
-		r.newRenameCleanupCommand(),
+		r.newRenameStatusCommand(sourceSession),
+		r.newRenameResumeCommand(sourceSession),
+		r.newRenameAbortCommand(sourceSession),
+		r.newRenameRollbackCommand(sourceSession),
+		r.newRenameCleanupCommand(sourceSession),
 	)
 }
 
@@ -26,11 +27,15 @@ func (r *rootState) renameStorageNamespace(cmd *cobra.Command) string {
 	return workflowNamespaceForCommand(r, cmd)
 }
 
+// loadRename resolves one rename from the backend its command family
+// addresses: ConfigMap session records for the session commands, namespaced
+// Rename CRs for the cr commands.
 func (r *rootState) loadRename(
 	ctx context.Context,
 	cmd *cobra.Command,
 	runtime *commandRuntime,
 	id string,
+	source workflowSource,
 ) (*v1alpha1.Rename, kube.WorkflowStore[*v1alpha1.Rename], string, error) {
 	storageNamespace := r.renameStorageNamespace(cmd)
 
@@ -43,6 +48,7 @@ func (r *rootState) loadRename(
 		map[domain.ControllerKind]crclient.Object{
 			domain.ControllerKindRename: &v1alpha1.Rename{},
 		},
+		source,
 	)
 	if err != nil {
 		return nil, nil, "", reportSessionLookupError(cmd, storageNamespace, id, err)
@@ -70,9 +76,9 @@ func (r *rootState) loadRename(
 	return rename, store, backend, nil
 }
 
-func (r *rootState) newRenameStatusCommand() *cobra.Command {
+func (r *rootState) newRenameStatusCommand(source workflowSource) *cobra.Command {
 	return &cobra.Command{
-		Use:   "status [SESSION]",
+		Use:   "status [" + workflowArgLabel(source) + "]",
 		Short: "Show one rename workflow or list rename workflows",
 		Args:  cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -85,7 +91,7 @@ func (r *rootState) newRenameStatusCommand() *cobra.Command {
 			defer cancel()
 
 			if len(args) == 1 {
-				object, _, _, err := r.loadRename(ctx, cmd, runtime, args[0])
+				object, _, _, err := r.loadRename(ctx, cmd, runtime, args[0], source)
 				if err != nil {
 					return err
 				}
@@ -96,12 +102,29 @@ func (r *rootState) newRenameStatusCommand() *cobra.Command {
 
 				return writeWorkflowNextSteps(
 					cmd.ErrOrStderr(),
+					cmd,
 					guidancePrefixesForCommand(cmd, object.Namespace).pvcMigrate,
 					"rename",
+					object.Namespace,
 					object.Name,
 					object.Status.Phase,
 					true,
 				)
+			}
+
+			if source != sourceSession {
+				if !crdListable(runtime) ||
+					(len(runtime.controllerKinds) != 0 &&
+						!slices.Contains(runtime.controllerKinds, domain.ControllerKindRename)) {
+					return runtime.printer.Print([]crclient.Object(nil))
+				}
+
+				items, err := listControllerWorkflows(ctx, runtime, domain.ControllerKindRename)
+				if err != nil {
+					return err
+				}
+
+				return runtime.printer.Print(items)
 			}
 
 			store, err := renameStore(runtime, r.renameStorageNamespace(cmd))
@@ -125,11 +148,16 @@ type renameAction func(context.Context, *app.RenameExecutor, *v1alpha1.Rename) e
 
 func (r *rootState) renameLifecycleCommand(
 	use, short string,
+	source workflowSource,
 	validate, execute renameAction,
 ) *cobra.Command {
 	var dryRun bool
 
-	command := &cobra.Command{Use: use + " SESSION", Short: short, Args: cobra.ExactArgs(1)}
+	command := &cobra.Command{
+		Use:   use + " " + workflowArgLabel(source),
+		Short: short,
+		Args:  cobra.ExactArgs(1),
+	}
 	command.RunE = func(cmd *cobra.Command, args []string) error {
 		runtime, err := r.runtime()
 		if err != nil {
@@ -139,7 +167,7 @@ func (r *rootState) renameLifecycleCommand(
 		ctx, cancel := r.context(cmd.Context())
 		defer cancel()
 
-		object, store, backend, err := r.loadRename(ctx, cmd, runtime, args[0])
+		object, store, backend, err := r.loadRename(ctx, cmd, runtime, args[0], source)
 		if err != nil {
 			return err
 		}
@@ -164,9 +192,11 @@ func (r *rootState) renameLifecycleCommand(
 			return writeDryRunNotice(
 				cmd.ErrOrStderr(),
 				lifecycleExecuteCommand(
+					cmd,
 					guidancePrefixesForCommand(cmd, namespace).pvcMigrate,
 					"rename",
 					use,
+					namespace,
 					object.Name,
 				),
 			)
@@ -186,8 +216,10 @@ func (r *rootState) renameLifecycleCommand(
 
 		return writeWorkflowNextSteps(
 			cmd.ErrOrStderr(),
+			cmd,
 			guidancePrefixesForCommand(cmd, namespace).pvcMigrate,
 			"rename",
+			namespace,
 			object.Name,
 			object.Status.Phase,
 			true,
@@ -198,11 +230,11 @@ func (r *rootState) renameLifecycleCommand(
 	return command
 }
 
-func (r *rootState) newRenameResumeCommand() *cobra.Command {
+func (r *rootState) newRenameResumeCommand(source workflowSource) *cobra.Command {
 	var dryRun bool
 
 	command := &cobra.Command{
-		Use:   "resume SESSION",
+		Use:   "resume " + workflowArgLabel(source),
 		Short: "Continue a rename from its persisted checkpoint",
 		Args:  cobra.ExactArgs(1),
 	}
@@ -215,7 +247,7 @@ func (r *rootState) newRenameResumeCommand() *cobra.Command {
 		ctx, cancel := r.context(cmd.Context())
 		defer cancel()
 
-		object, store, backend, err := r.loadRename(ctx, cmd, runtime, args[0])
+		object, store, backend, err := r.loadRename(ctx, cmd, runtime, args[0], source)
 		if err != nil {
 			return err
 		}
@@ -240,9 +272,11 @@ func (r *rootState) newRenameResumeCommand() *cobra.Command {
 			return writeDryRunNotice(
 				cmd.ErrOrStderr(),
 				lifecycleExecuteCommand(
+					cmd,
 					guidancePrefixesForCommand(cmd, namespace).pvcMigrate,
 					"rename",
 					"resume",
+					namespace,
 					object.Name,
 				),
 			)
@@ -267,10 +301,11 @@ func (r *rootState) newRenameResumeCommand() *cobra.Command {
 	return command
 }
 
-func (r *rootState) newRenameAbortCommand() *cobra.Command {
+func (r *rootState) newRenameAbortCommand(source workflowSource) *cobra.Command {
 	return r.renameLifecycleCommand(
 		"abort",
 		"Abort a rename workflow",
+		source,
 		func(_ context.Context, executor *app.RenameExecutor, object *v1alpha1.Rename) error {
 			return executor.ValidateAbort(object)
 		},
@@ -280,10 +315,11 @@ func (r *rootState) newRenameAbortCommand() *cobra.Command {
 	)
 }
 
-func (r *rootState) newRenameRollbackCommand() *cobra.Command {
+func (r *rootState) newRenameRollbackCommand(source workflowSource) *cobra.Command {
 	return r.renameLifecycleCommand(
 		"rollback",
 		"Restore the original PVC name",
+		source,
 		func(ctx context.Context, executor *app.RenameExecutor, object *v1alpha1.Rename) error {
 			return executor.ValidateRollback(ctx, object)
 		},
@@ -293,14 +329,14 @@ func (r *rootState) newRenameRollbackCommand() *cobra.Command {
 	)
 }
 
-func (r *rootState) newRenameCleanupCommand() *cobra.Command {
+func (r *rootState) newRenameCleanupCommand(source workflowSource) *cobra.Command {
 	var (
 		options app.IdentityCleanupOptions
 		dryRun  bool
 	)
 
 	command := &cobra.Command{
-		Use:   "cleanup SESSION",
+		Use:   "cleanup " + workflowArgLabel(source),
 		Short: "Finalize retained rename resources and clean up the workflow",
 		Args:  cobra.ExactArgs(1),
 	}
@@ -313,7 +349,7 @@ func (r *rootState) newRenameCleanupCommand() *cobra.Command {
 		ctx, cancel := r.context(cmd.Context())
 		defer cancel()
 
-		object, store, backend, err := r.loadRename(ctx, cmd, runtime, args[0])
+		object, store, backend, err := r.loadRename(ctx, cmd, runtime, args[0], source)
 		if err != nil {
 			return err
 		}
@@ -338,8 +374,10 @@ func (r *rootState) newRenameCleanupCommand() *cobra.Command {
 			return writeDryRunNotice(
 				cmd.ErrOrStderr(),
 				cleanupExecuteCommand(
+					cmd,
 					guidancePrefixesForCommand(cmd, namespace).pvcMigrate,
 					"rename",
+					namespace,
 					object.Name,
 					"",
 					options.Finalize,

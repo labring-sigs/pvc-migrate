@@ -6,6 +6,7 @@ import (
 	v1alpha1 "github.com/labring-sigs/pvc-migrate/api/v1alpha1"
 	"github.com/labring-sigs/pvc-migrate/internal/app"
 	"github.com/labring-sigs/pvc-migrate/internal/copyengine"
+	"github.com/labring-sigs/pvc-migrate/internal/domain"
 	"github.com/labring-sigs/pvc-migrate/internal/kube"
 	"github.com/spf13/cobra"
 )
@@ -82,7 +83,19 @@ func (r *rootState) adoptCRDReservation(
 		return reportCopyError(cmd, source.Name, source.Status.Phase, err)
 	}
 
-	return runtime.printer.Print(object)
+	// The elected controller finishes the pair and executes the copy; honor
+	// --wait the same way the fresh submits do.
+	return waitForControllerObject(
+		ctx,
+		cmd,
+		runtime,
+		object,
+		func() *v1alpha1.Copy { return &v1alpha1.Copy{} },
+		"Copy",
+		"copies",
+		domain.PhaseWarmCopied,
+		func(current *v1alpha1.Copy) v1alpha1.WorkflowStatus { return current.Status.WorkflowStatus },
+	)
 }
 
 // adoptCRDClusterReservation is the cluster-scoped variant of adoptCRDReservation.
@@ -165,7 +178,21 @@ func (r *rootState) adoptCRDClusterReservation(
 		return reportCopyError(cmd, source.Name, source.Status.Phase, err)
 	}
 
-	return runtime.printer.Print(object)
+	// The elected controller finishes the pair and executes the copy; honor
+	// --wait the same way the fresh submits do.
+	return waitForControllerObject(
+		ctx,
+		cmd,
+		runtime,
+		object,
+		func() *v1alpha1.ClusterCopy { return &v1alpha1.ClusterCopy{} },
+		"ClusterCopy",
+		"clustercopies",
+		domain.PhaseWarmCopied,
+		func(current *v1alpha1.ClusterCopy) v1alpha1.WorkflowStatus {
+			return current.Status.WorkflowStatus
+		},
+	)
 }
 
 func (r *rootState) adoptReservation(

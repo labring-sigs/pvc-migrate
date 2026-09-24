@@ -12,37 +12,27 @@ import (
 )
 
 func (r *rootState) newReserveCommand() *cobra.Command {
-	command := r.reserveSubmissionCommand(false, false)
-	command.AddCommand(r.newReserveCreateCommand(), r.newReservePlanCommand())
+	command := r.reserveSubmissionCommand(false)
+	command.AddCommand(r.newReservePlanCommand())
 	r.addReserveLifecycle(command)
 	return command
 }
 
-// newReserveCreateCommand submits a declarative Reservation workflow for
-// controller reconciliation.
-func (r *rootState) newReserveCreateCommand() *cobra.Command {
-	return r.reserveSubmissionCommand(false, true)
-}
-
 func (r *rootState) newReservePlanCommand() *cobra.Command {
-	return r.reserveSubmissionCommand(true, false)
+	return r.reserveSubmissionCommand(true)
 }
 
-func (r *rootState) reserveSubmissionCommand(planOnly, submit bool) *cobra.Command {
+func (r *rootState) reserveSubmissionCommand(planOnly bool) *cobra.Command {
 	flags := &reserveFlags{}
 	dryRun := planOnly
-	wait := true
 
 	command := &cobra.Command{
 		Use:   "reserve",
 		Short: "Provision and retain destination PVCs",
 		Args:  cobra.NoArgs,
 	}
-	switch {
-	case planOnly:
+	if planOnly {
 		command.Use, command.Short = "plan", "Inspect reservation checks without mutations"
-	case submit:
-		command.Use, command.Short = "create", "Submit a Reservation workflow for controller reconciliation"
 	}
 
 	command.RunE = func(cmd *cobra.Command, _ []string) error {
@@ -64,40 +54,16 @@ func (r *rootState) reserveSubmissionCommand(planOnly, submit bool) *cobra.Comma
 			return err
 		}
 
-		if submit && runtime.planner != nil {
-			runtime.planner = runtime.planner.ForController()
-		}
-
 		ctx, cancel := r.context(cmd.Context())
 		defer cancel()
 
 		if existing {
-			if submit {
-				return domain.NewError(
-					domain.ErrorValidation,
-					"reserve create",
-					"an existing session cannot be re-submitted; the controller reconciles submitted workflows automatically",
-				)
-			}
-
-			return r.reserveExisting(ctx, cmd, runtime, flags.sessionID, dryRun)
+			return r.reserveExisting(ctx, cmd, runtime, flags.sessionID, dryRun, sourceSession)
 		}
 
-		object, err := flags.workflow(r, runtime, submit)
+		object, err := flags.workflow(r, runtime, false)
 		if err != nil {
 			return err
-		}
-
-		if submit {
-			if err := requireControllerWorkflow(runtime, domain.SessionTypeReserve); err != nil {
-				return err
-			}
-
-			if !dryRun {
-				runtime.waitForController = wait
-
-				return submitReservation(ctx, cmd, runtime, object)
-			}
 		}
 
 		if object.Spec.SourceNamespace == object.Spec.DestinationNamespace &&
@@ -118,12 +84,7 @@ func (r *rootState) reserveSubmissionCommand(planOnly, submit bool) *cobra.Comma
 	flags.bind(command)
 
 	if !planOnly {
-		if submit {
-			bindCreateDryRun(command, &dryRun)
-			bindCreateWait(command, &wait)
-		} else {
-			bindDryRun(command, &dryRun)
-		}
+		bindDryRun(command, &dryRun)
 	}
 
 	return command
@@ -278,8 +239,9 @@ func (r *rootState) reserveExisting(
 	runtime *commandRuntime,
 	id string,
 	dryRun bool,
+	source workflowSource,
 ) error {
-	object, backend, err := r.loadReservationWithBackend(ctx, cmd, runtime, id)
+	object, backend, err := r.loadReservationWithBackend(ctx, cmd, runtime, id, source)
 	if err != nil {
 		return err
 	}
@@ -314,12 +276,14 @@ func (r *rootState) reserveExisting(
 			return writeDryRunNotice(
 				cmd.ErrOrStderr(),
 				lifecycleExecuteCommand(
+					cmd,
 					guidancePrefixesForCommand(
 						cmd,
 						workflowLeaseNamespace(backend, r.workflowStorageNamespace(cmd), current),
 					).pvcMigrate,
 					"reserve",
 					"resume",
+					workflowLeaseNamespace(backend, r.workflowStorageNamespace(cmd), current),
 					current.Name,
 				),
 			)
@@ -369,9 +333,11 @@ func (r *rootState) reserveExisting(
 			return writeDryRunNotice(
 				cmd.ErrOrStderr(),
 				lifecycleExecuteCommand(
+					cmd,
 					guidancePrefixesForCommand(cmd, namespace).pvcMigrate,
 					"reserve",
 					"resume",
+					namespace,
 					current.Name,
 				),
 			)

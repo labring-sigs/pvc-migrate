@@ -12,51 +12,42 @@ import (
 )
 
 func (r *rootState) newBackupCommand() *cobra.Command {
-	command := r.backupSubmissionCommand(false, false)
+	command := r.backupSubmissionCommand(false)
 	command.AddCommand(
-		r.newBackupCreateCommand(),
 		r.newBackupPlanCommand(),
-		r.newBackupStatusCommand(),
-		r.newBackupResumeCommand(),
-		r.newBackupAbortCommand(),
-		r.newBackupCleanupCommand(),
+		r.newBackupStatusCommand(sourceSession),
+		r.newBackupResumeCommand(sourceSession),
+		r.newBackupAbortCommand(sourceSession),
+		r.newBackupCleanupCommand(sourceSession),
 	)
 
 	return command
 }
 
-// newBackupCreateCommand submits a declarative Backup workflow for controller
-// reconciliation. Location and credentials come from a BackupRepository.
-func (r *rootState) newBackupCreateCommand() *cobra.Command {
-	return r.backupSubmissionCommand(false, true)
-}
-
 func (r *rootState) newBackupPlanCommand() *cobra.Command {
-	return r.backupSubmissionCommand(true, false)
+	return r.backupSubmissionCommand(true)
 }
 
-func (r *rootState) backupSubmissionCommand(planOnly, submit bool) *cobra.Command {
+// backupSubmissionCommand builds the session backup command and its plan-only
+// preview. Controller submission lives in the cr backup create command.
+func (r *rootState) backupSubmissionCommand(planOnly bool) *cobra.Command {
 	object := &v1alpha1.Backup{
 		TypeMeta: metav1.TypeMeta{APIVersion: v1alpha1.GroupVersion.String(), Kind: "Backup"},
 	}
 	flags := &s3RepositoryFlags{}
 	dryRun := planOnly
-	wait := true
 
 	command := &cobra.Command{
 		Use:   "backup",
 		Short: "Back up PVC data to an S3 repository",
 		Args:  cobra.NoArgs,
 	}
-	switch {
-	case planOnly:
+	if planOnly {
 		command.Use, command.Short = "plan", "Validate a backup without mutations"
-	case submit:
-		command.Use, command.Short = "create", "Submit a Backup workflow for controller reconciliation"
 	}
 
 	command.RunE = func(cmd *cobra.Command, _ []string) error {
-		return r.runBackupObject(cmd, object.DeepCopy(), flags, dryRun, submit, wait)
+		return r.runBackupObject(cmd, object.DeepCopy(), flags, dryRun)
 	}
 	f := command.Flags()
 	f.StringVar(&object.Name, "id", "", "Workflow ID; generated when omitted")
@@ -82,15 +73,10 @@ func (r *rootState) backupSubmissionCommand(planOnly, submit bool) *cobra.Comman
 		false,
 		"Temporarily enable shared mounts for online OpenEBS LVM backup",
 	)
-	bindRepositoryFlags(command, flags, &object.Spec.RepositoryRef.Name, submit)
+	bindRepositoryFlags(command, flags, &object.Spec.RepositoryRef.Name, false)
 
 	if !planOnly {
-		if submit {
-			bindCreateDryRun(command, &dryRun)
-			bindCreateWait(command, &wait)
-		} else {
-			bindDryRun(command, &dryRun)
-		}
+		bindDryRun(command, &dryRun)
 	}
 
 	return command
@@ -101,10 +87,8 @@ func (r *rootState) runBackupObject(
 	object *v1alpha1.Backup,
 	flags *s3RepositoryFlags,
 	dryRun bool,
-	submit bool,
-	wait bool,
 ) error {
-	if err := r.validateBackupInput(cmd, object, flags, submit); err != nil {
+	if err := r.validateBackupInput(cmd, object, flags, false); err != nil {
 		return err
 	}
 
@@ -113,41 +97,17 @@ func (r *rootState) runBackupObject(
 		return reportRuntimeError(cmd, err)
 	}
 
-	if err := requireControllerWorkflow(runtime, domain.SessionTypeBackup); err != nil {
-		return err
-	}
-
 	if err := validateRepositoryFlags(
 		cmd,
 		flags,
 		object.Spec.RepositoryRef.Name,
-		submit,
+		false,
 	); err != nil {
 		return reportPreSessionError(cmd, err)
 	}
 
 	ctx, cancel := r.context(cmd.Context())
 	defer cancel()
-
-	// Controller submission plans the workflow and hands execution to the
-	// reconciler. The submitting process never touches the data plane.
-	if submit {
-		if dryRun {
-			if err := runtime.printer.Print(object); err != nil {
-				return err
-			}
-
-			return writeDryRunApprovalNotice(cmd.ErrOrStderr())
-		}
-
-		if err := r.confirm(ctx, cmd, object.Spec.Name); err != nil {
-			return reportApprovalError(cmd, err)
-		}
-
-		runtime.waitForController = wait
-
-		return r.submitBackup(ctx, cmd, runtime, object)
-	}
 
 	storageNamespace := object.Namespace
 
