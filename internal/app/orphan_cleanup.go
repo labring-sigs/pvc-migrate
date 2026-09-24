@@ -1000,6 +1000,10 @@ func (s *OrphanCleaner) CleanupOrphan(
 				)
 			}
 
+			if err := s.deleteStaleSessionRecord(lockedCtx, options); err != nil {
+				return err
+			}
+
 			remaining, err := s.hasOrphanSessionResources(lockedCtx, options.SessionID)
 			if err != nil {
 				return err
@@ -1193,6 +1197,43 @@ func (s *OrphanCleaner) deleteOrphanDestinationPVC(
 	return nil
 }
 
+// deleteStaleSessionRecord removes a session record whose kind this build no
+// longer serves. Planning treated it as absent, so cleanup clears the leftover
+// ConfigMap once the ownership markers are gone.
+func (s *OrphanCleaner) deleteStaleSessionRecord(
+	ctx context.Context,
+	options OrphanCleanupOptions,
+) error {
+	owner, err := s.records.Find(
+		ctx,
+		options.SessionID,
+		options.SessionNamespace,
+		options.SourceNamespace,
+	)
+	if err != nil || owner == nil || owner.Backend != kube.SessionBackendConfigMap ||
+		owner.Resource.Resource != "" {
+		return err
+	}
+
+	if err := s.client.CoreV1().
+		ConfigMaps(owner.SessionNamespace).
+		Delete(ctx, kube.SessionConfigMapName(options.SessionID), metav1.DeleteOptions{}); err != nil &&
+		!apierrors.IsNotFound(err) {
+		return domain.WrapError(
+			domain.ErrorKubernetes,
+			"cleanup orphan",
+			fmt.Sprintf(
+				"delete stale session record %s/%s",
+				owner.SessionNamespace,
+				kube.SessionConfigMapName(options.SessionID),
+			),
+			err,
+		)
+	}
+
+	return nil
+}
+
 func (s *OrphanCleaner) hasOrphanSessionResources(
 	ctx context.Context,
 	sessionID string,
@@ -1256,6 +1297,19 @@ func (s *OrphanCleaner) checkOrphanSessionRecord(
 		options.SourceNamespace,
 	)
 	switch {
+	case owner != nil && owner.Backend == kube.SessionBackendConfigMap &&
+		owner.Resource.Resource == "":
+		// A record whose kind this build no longer registers (written by an
+		// older binary) cannot be driven by any lifecycle command; recovery
+		// treats it like an absent record and clears the stale ConfigMap.
+		return orphanPassed(
+			domain.CheckNameSessionRecord,
+			fmt.Sprintf(
+				"session %s/%s uses a kind this build no longer serves; orphan ownership recovery applies and removes the stale record",
+				owner.SessionNamespace,
+				owner.ID,
+			),
+		)
 	case owner != nil:
 		return orphanFailed(
 			domain.CheckNameSessionRecord,

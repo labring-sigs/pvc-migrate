@@ -9,6 +9,7 @@ import (
 	"slices"
 	"sort"
 	"strings"
+	"time"
 
 	v1alpha1 "github.com/labring-sigs/pvc-migrate/api/v1alpha1"
 	"github.com/labring-sigs/pvc-migrate/internal/copyengine"
@@ -598,6 +599,25 @@ func (p *Planner) loadPlanVolumeInput(
 		return planVolumeInput{}, false
 	}
 
+	// A requested deletion only waits on protection finalizers while the
+	// workload keeps mounting the claim; pausing the workload for a cutover
+	// would let it fire mid-transfer. Terminating storage is never a source.
+	if pvc.DeletionTimestamp != nil {
+		state.plan.AddCheck(
+			failed(
+				domain.CheckNameSourcePVC,
+				fmt.Sprintf(
+					"PVC %s/%s is terminating (deletion requested at %s); wait for the deletion to settle or restore the claim before migrating",
+					pvc.Namespace,
+					pvc.Name,
+					pvc.DeletionTimestamp.UTC().Format(time.RFC3339),
+				),
+			),
+		)
+
+		return planVolumeInput{}, false
+	}
+
 	mode := corev1.PersistentVolumeFilesystem
 	if pvc.Spec.VolumeMode != nil {
 		mode = *pvc.Spec.VolumeMode
@@ -653,6 +673,21 @@ func (p *Planner) loadPlanVolumeInput(
 				pvc.UID,
 			),
 		))
+	}
+
+	if pv.DeletionTimestamp != nil {
+		state.plan.AddCheck(
+			failed(
+				domain.CheckNameSourcePV,
+				fmt.Sprintf(
+					"PV %s is terminating (deletion requested at %s); wait for the deletion to settle before migrating",
+					pv.Name,
+					pv.DeletionTimestamp.UTC().Format(time.RFC3339),
+				),
+			),
+		)
+
+		return planVolumeInput{}, false
 	}
 
 	p.checkSessionOwnership(ctx, state.plan, options.SessionNamespace, pvc, pv)
