@@ -22,14 +22,13 @@ func sourceLossFailure(operation string) error {
 
 // sourceTerminationFailure builds the terminal failure recorded when a
 // planned source PVC is terminating before final sync completed. The wording
-// mirrors the planner's terminating-source fence: the deletion cannot be
-// cancelled through the API, only waited out and recovered from.
+// parallels sourceLossFailure: name the claim, state the blocker, stop.
 func sourceTerminationFailure(operation string, termination sourceTermination) error {
 	return domain.NewError(
 		domain.ErrorPrecondition,
 		operation,
 		fmt.Sprintf(
-			"source PVC %s/%s is terminating (deletion requested at %s) before final sync completed; a requested deletion cannot be cancelled through the API — let it settle and restore storage from the retained volume or a backup before retrying",
+			"source PVC %s/%s is terminating (deletion requested at %s); the migration cannot continue",
 			termination.PVC.Namespace,
 			termination.PVC.Name,
 			termination.Since.UTC().Format(time.RFC3339),
