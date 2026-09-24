@@ -246,16 +246,30 @@ func (m *MigrationExecutor) cleanupInterruptedFinalSync(
 			volume,
 			status.VolumeReservationStatus,
 		)
-		if err := m.validateReservedVolume(
+
+		skipValidation, err := deletionValidationSkip(
 			ctx,
-			object.Name,
-			plan.TargetNode,
-			plan.ToolImage,
-			binding,
+			m.client,
+			object.Namespace,
 			volume,
-			qualifiedReservationCheckpoint(status.VolumeReservationStatus, object.Namespace),
-		); err != nil {
+			binding,
+		)
+		if err != nil {
 			return err
+		}
+
+		if !skipValidation {
+			if err := m.validateReservedVolume(
+				ctx,
+				object.Name,
+				plan.TargetNode,
+				plan.ToolImage,
+				binding,
+				volume,
+				qualifiedReservationCheckpoint(status.VolumeReservationStatus, object.Namespace),
+			); err != nil {
+				return err
+			}
 		}
 
 		request := copyengine.CleanupRequest{

@@ -103,19 +103,6 @@ func scanPlannedSourcePVCs(
 	return scan, nil
 }
 
-// deletedPlannedSourcePVC reports whether any planned source volume lost its
-// PVC. A deletion pass that would re-verify or resume onto it can only fail:
-// abort converges without the resume and cleanup releases the storage instead.
-func deletedPlannedSourcePVC(
-	ctx context.Context,
-	client kubernetes.Interface,
-	sourceNamespace string,
-	volumes []v1alpha1.VolumeSpec,
-) (bool, error) {
-	scan, err := scanPlannedSourcePVCs(ctx, client, sourceNamespace, volumes)
-	return scan.Deleted, err
-}
-
 // deletionSourceMissing reports whether a planned volume's source storage can
 // no longer be fully verified while finalizing a deleted workflow: the PVC
 // gone or terminating, or the PV gone or terminating. Only a deletion pass
@@ -212,4 +199,41 @@ func deletionDestinationSettling(
 	}
 
 	return pv.DeletionTimestamp != nil, nil
+}
+
+// deletionSourcePairSettling reports whether any planned volume's source
+// pair is going away while finalizing a deleted workflow, so the deletion
+// pass skips the source re-verification entirely.
+func deletionSourcePairSettling(
+	ctx context.Context,
+	client kubernetes.Interface,
+	sourceNamespace string,
+	volumes []v1alpha1.VolumeSpec,
+) (bool, error) {
+	for _, volume := range volumes {
+		settling, err := deletionSourceMissing(ctx, client, sourceNamespace, volume)
+		if err != nil || settling {
+			return settling, err
+		}
+	}
+
+	return false, nil
+}
+
+// deletionValidationSkip reports whether the deletion pass should skip the
+// reserved-volume re-validation because either side of the volume pair is
+// going away. Non-deletion callers get false and validate strictly.
+func deletionValidationSkip(
+	ctx context.Context,
+	client kubernetes.Interface,
+	sourceNamespace string,
+	volume v1alpha1.VolumeSpec,
+	binding kube.PVCTransferBindings,
+) (bool, error) {
+	skip, err := deletionSourceMissing(ctx, client, sourceNamespace, volume)
+	if err != nil || skip {
+		return skip, err
+	}
+
+	return deletionDestinationSettling(ctx, client, binding)
 }

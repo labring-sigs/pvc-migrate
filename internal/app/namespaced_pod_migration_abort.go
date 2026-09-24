@@ -182,21 +182,20 @@ func (m *PodMigrationExecutor) abort(ctx context.Context, object *v1alpha1.PodMi
 
 		binding := plannedMigrationBindings(object.Namespace, volume, checkpoint)
 
-		skipValidation, err := deletionSourceMissing(ctx, m.client, object.Namespace, volume)
+		// The reserved-volume validation re-verifies the live source and
+		// destination identities, which may already be going away during
+		// deletion convergence.
+		skipValidation, err := deletionValidationSkip(
+			ctx,
+			m.client,
+			object.Namespace,
+			volume,
+			binding,
+		)
 		if err != nil {
 			return m.fail(ctx, object, err)
 		}
 
-		if !skipValidation {
-			skipValidation, err = deletionDestinationSettling(ctx, m.client, binding)
-			if err != nil {
-				return m.fail(ctx, object, err)
-			}
-		}
-
-		// The reserved-volume validation re-verifies the live source and
-		// destination identities, which may already be going away during
-		// deletion convergence.
 		if !skipValidation {
 			if err := m.validateReservedVolume(
 				ctx,

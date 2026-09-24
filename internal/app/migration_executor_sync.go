@@ -285,16 +285,30 @@ func (m *ClusterMigrationExecutor) cleanupInterruptedFinalSync(
 			volume,
 			status.ClusterVolumeReservationStatus,
 		)
-		if err := m.validateReservedVolume(
+
+		skipValidation, err := deletionValidationSkip(
 			ctx,
-			object.Name,
-			plan.TargetNode,
-			plan.ToolImage,
-			binding,
+			m.client,
+			string(plan.SourceNamespace),
 			volume,
-			status.ClusterVolumeReservationStatus,
-		); err != nil {
+			binding,
+		)
+		if err != nil {
 			return err
+		}
+
+		if !skipValidation {
+			if err := m.validateReservedVolume(
+				ctx,
+				object.Name,
+				plan.TargetNode,
+				plan.ToolImage,
+				binding,
+				volume,
+				status.ClusterVolumeReservationStatus,
+			); err != nil {
+				return err
+			}
 		}
 
 		request := copyengine.CleanupRequest{

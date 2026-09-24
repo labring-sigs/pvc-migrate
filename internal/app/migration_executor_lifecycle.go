@@ -300,7 +300,7 @@ func (m *ClusterMigrationExecutor) ValidateAbort(
 
 	plan := object.Status.Plan
 	if workflowDeletionInProgress(ctx) {
-		deleted, err := deletedPlannedSourcePVC(
+		settling, err := deletionSourcePairSettling(
 			ctx,
 			m.client,
 			string(plan.SourceNamespace),
@@ -310,9 +310,9 @@ func (m *ClusterMigrationExecutor) ValidateAbort(
 			return err
 		}
 
-		// Deleted source storage cannot be re-verified; deletion converges
+		// Settling source storage cannot be re-verified; deletion converges
 		// through cleanup, which releases the retained volumes instead.
-		if deleted {
+		if settling {
 			return nil
 		}
 	}
