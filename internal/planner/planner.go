@@ -618,7 +618,7 @@ func (p *Planner) loadPlanVolumeInput(
 			failed(
 				domain.CheckNameSourcePVC,
 				fmt.Sprintf(
-					"PVC %s/%s is terminating (deletion requested at %s); wait for the deletion to settle or restore the claim before migrating",
+					"PVC %s/%s is terminating (deletion requested at %s); wait for the deletion to settle before migrating",
 					pvc.Namespace,
 					pvc.Name,
 					pvc.DeletionTimestamp.UTC().Format(time.RFC3339),
