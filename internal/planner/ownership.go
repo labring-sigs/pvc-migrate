@@ -80,7 +80,20 @@ func (p *Planner) checkSessionOwnership(
 		return
 	}
 
-	ownerSession, err := p.workflowOwners.Find(ctx, owner, sessionNamespace, pvc.Namespace)
+	ownerSession, err := p.workflowOwners.Find(
+		ctx,
+		owner,
+		sessionNamespace,
+		pvc.Namespace,
+		p.sessionRecordNamespace,
+	)
+	if ownerSession != nil && ownerSession.Backend == kube.SessionBackendConfigMap &&
+		ownerSession.Resource.Resource == "" {
+		// The record's kind is not served by this build (a removed API): no
+		// lifecycle command can drive it, so it is as orphaned as a lost record.
+		ownerSession = nil
+	}
+
 	if ownerSession != nil {
 		plan.AddCheck(
 			failed(
@@ -101,8 +114,13 @@ func (p *Planner) checkSessionOwnership(
 	}
 
 	if err == nil {
-		base := sessionCLIBase(sessionNamespace, false)
-		executeBase := sessionCLIBase(sessionNamespace, true)
+		recordNamespace := p.sessionRecordNamespace
+		if recordNamespace == "" {
+			recordNamespace = sessionNamespace
+		}
+
+		base := sessionCLIBase(recordNamespace, false)
+		executeBase := sessionCLIBase(recordNamespace, true)
 		args := fmt.Sprintf(
 			"recovery cleanup-orphan %s --source-namespace %s --source-pvc %s",
 			owner,

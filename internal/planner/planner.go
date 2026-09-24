@@ -63,6 +63,7 @@ type Planner struct {
 	logger                        *slog.Logger
 	controllerSubmission          bool
 	planningWorkflow              bool
+	sessionRecordNamespace        string
 	workflowOwners                workflowOwnerFinder
 }
 
@@ -116,6 +117,16 @@ func (p *Planner) WithWorkflowOwnerFinder(finder workflowOwnerFinder) *Planner {
 // the elected controller owns execution and its data-plane permissions.
 func (p *Planner) WithControllerSubmission(enabled bool) *Planner {
 	p.controllerSubmission = enabled
+	return p
+}
+
+// WithSessionRecordNamespace scopes session-record lookups to the namespace
+// local CLI sessions persist in. Namespaced workflow planning derives every
+// namespace role from the workload namespace, while local session records
+// still live in the --session-namespace value; ownership checks must search
+// the record location as well as the planned roles.
+func (p *Planner) WithSessionRecordNamespace(namespace string) *Planner {
+	p.sessionRecordNamespace = namespace
 	return p
 }
 
