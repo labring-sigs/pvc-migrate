@@ -27,6 +27,42 @@ func (r *rootState) newRenamePlanCommand() *cobra.Command {
 // renameSubmissionCommand runs or plans a session rename: the ConfigMap record
 // is created and executed in this process. Declarative Rename CRs belong to
 // the cr rename create command.
+// buildRenameWorkflow validates the typed rename inputs and returns the
+// workflow with a generated id when omitted; the session executor and the cr
+// create assemble it identically.
+func buildRenameWorkflow(
+	object *v1alpha1.Rename,
+	commandLabel string,
+) (*v1alpha1.Rename, error) {
+	if object.Spec.SourcePVC.Name == "" {
+		return nil, domain.NewError(
+			domain.ErrorValidation,
+			commandLabel,
+			"--source-pvc is required",
+		)
+	}
+
+	if object.Spec.DestinationPVC.Name == "" {
+		return nil, domain.NewError(
+			domain.ErrorValidation,
+			commandLabel,
+			"--destination-pvc is required",
+		)
+	}
+
+	current := object.DeepCopy()
+	if current.Name == "" {
+		id, err := domain.NewSessionID(time.Now())
+		if err != nil {
+			return nil, err
+		}
+
+		current.Name = id
+	}
+
+	return current, nil
+}
+
 func (r *rootState) renameSubmissionCommand(planOnly bool) *cobra.Command {
 	object := &v1alpha1.Rename{}
 	dryRun := planOnly
@@ -60,26 +96,9 @@ func (r *rootState) renameSubmissionCommand(planOnly bool) *cobra.Command {
 	)
 
 	command.RunE = func(cmd *cobra.Command, _ []string) error {
-		if object.Spec.SourcePVC.Name == "" {
-			return domain.NewError(domain.ErrorValidation, "rename", "--source-pvc is required")
-		}
-
-		if object.Spec.DestinationPVC.Name == "" {
-			return domain.NewError(
-				domain.ErrorValidation,
-				"rename",
-				"--destination-pvc is required",
-			)
-		}
-
-		current := object.DeepCopy()
-		if current.Name == "" {
-			id, err := domain.NewSessionID(time.Now())
-			if err != nil {
-				return err
-			}
-
-			current.Name = id
+		current, err := buildRenameWorkflow(object, "rename")
+		if err != nil {
+			return err
 		}
 
 		runtime, err := r.runtime()

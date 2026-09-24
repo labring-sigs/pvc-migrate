@@ -37,6 +37,12 @@ func newRootForHints() *cobra.Command {
 	root.AddCommand(podCmd)
 	root.AddCommand(&cobra.Command{Use: "unknown-top"})
 
+	crGroup := &cobra.Command{Use: "cr"}
+	crCopy := &cobra.Command{Use: "copy"}
+	crGroup.AddCommand(crCopy)
+	crCopy.AddCommand(&cobra.Command{Use: "status"})
+	root.AddCommand(crGroup)
+
 	return root
 }
 
@@ -96,14 +102,30 @@ func TestSessionRecordInspectionCommand(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	// Session records persist as ConfigMaps: the inspection hint must point
+	// at the session ConfigMap, not at workflow CRDs the mode never writes.
 	out = sessionRecordInspectionCommand(copyCmd, "tenant-ns", "session-1")
-	if !strings.Contains(out, "copies.migrate.sealos.io") ||
-		!strings.Contains(out, "clustercopies.migrate.sealos.io") {
-		t.Errorf("copy family resources missing, got %q", out)
+	if !strings.Contains(out, "get configmap pvc-migrate-session-session-1") {
+		t.Errorf("session inspection should target the session ConfigMap, got %q", out)
 	}
 
-	if strings.Contains(out, "renames.migrate.sealos.io") {
-		t.Errorf("copy family must not list renames, got %q", out)
+	if strings.Contains(out, "migrate.sealos.io") {
+		t.Errorf("session inspection must not suggest workflow CRDs, got %q", out)
+	}
+
+	crCopyCmd, _, err := root.Find([]string{"cr", "copy", "status"})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	out = sessionRecordInspectionCommand(crCopyCmd, "tenant-ns", "session-1")
+	if !strings.Contains(out, "copies.migrate.sealos.io") ||
+		!strings.Contains(out, "clustercopies.migrate.sealos.io") {
+		t.Errorf("cr copy family resources missing, got %q", out)
+	}
+
+	if strings.Contains(out, "migrations.migrate.sealos.io") {
+		t.Errorf("cr inspection must resolve the command's family, got %q", out)
 	}
 }
 

@@ -11,6 +11,7 @@ import (
 	"github.com/labring-sigs/pvc-migrate/internal/domain"
 	"github.com/spf13/cobra"
 	apiequality "k8s.io/apimachinery/pkg/api/equality"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	crclient "sigs.k8s.io/controller-runtime/pkg/client"
 )
 
@@ -179,7 +180,8 @@ func (r *rootState) copyExisting(
 				domain.ControllerKindClusterReservation: &v1alpha1.ClusterReservation{},
 			},
 		)
-		if crdErr == nil {
+		switch {
+		case crdErr == nil:
 			switch current := crdObject.(type) {
 			case *v1alpha1.Reservation:
 				return r.adoptReservation(ctx, cmd, runtime, current, flags, dryRun, backendCRD)
@@ -194,6 +196,22 @@ func (r *rootState) copyExisting(
 					backendCRD,
 				)
 			}
+		case apierrors.IsNotFound(crdErr):
+			// A cr submission graduates controller-owned reservations only.
+			// Falling through to ConfigMap session records would execute the
+			// copy in-process under the cr command tree, mixing the two
+			// execution modes the command groups keep apart.
+			return domain.NewError(
+				domain.ErrorValidation,
+				"cr copy create",
+				fmt.Sprintf(
+					"no Reservation or ClusterReservation %s exists in namespace %s; a ConfigMap session record is graduated by the session copy command",
+					flags.sessionID,
+					flags.sourceNamespace,
+				),
+			)
+		default:
+			return crdErr
 		}
 	}
 

@@ -40,6 +40,19 @@ func controllerWorkflowAvailable(runtime *commandRuntime, sessionType domain.Ses
 // workflowNamespaceForCommand resolves the storage namespace session
 // lifecycle and status commands use: a command-local --namespace when the
 // command defines one, otherwise the configured session namespace.
+// writeDeletedWorkflow prints the closing confirmation a cleanup prints when
+// it deleted the workflow record; the shared form keeps every family's
+// closing output identical instead of exiting silently.
+//
+// Callers must reach this only after a real deletion: families whose dry-run
+// path shares the printing tail guard the call with `&& !dryRun`, while
+// families whose dry-run branch returns early (move, rename, pod-migration)
+// rely on that early return. Never let a dry-run flow fall through to it.
+func writeDeletedWorkflow(cmd *cobra.Command, kind, name string) error {
+	_, err := fmt.Fprintf(cmd.OutOrStdout(), "Deleted %s %s.\n", kind, name)
+	return err
+}
+
 func workflowNamespaceForCommand(r *rootState, cmd *cobra.Command) string {
 	if cmd != nil {
 		if flag := cmd.Flags().Lookup("namespace"); flag != nil {

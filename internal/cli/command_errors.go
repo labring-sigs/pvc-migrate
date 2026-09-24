@@ -7,6 +7,7 @@ import (
 
 	"github.com/labring-sigs/pvc-migrate/internal/app"
 	"github.com/labring-sigs/pvc-migrate/internal/domain"
+	"github.com/labring-sigs/pvc-migrate/internal/kube"
 	"github.com/spf13/cobra"
 )
 
@@ -88,12 +89,26 @@ func workflowCommandNameForCommand(value any) string {
 	}
 }
 
+// sessionRecordInspectionCommand tells the operator how to inspect the record
+// a lookup failed to find: the workflow CR for controller commands, the
+// session ConfigMap for session commands.
 func sessionRecordInspectionCommand(value any, namespace, id string) string {
 	prefix := kubectlCommandPrefixForCommand(value)
-	name := workflowCommandNameForCommand(value)
+	// Controller commands report their cr family path; strip it so the
+	// family matches the workflow table in both modes.
+	family := strings.TrimPrefix(workflowCommandNameForCommand(value), "cr ")
+
+	if command, ok := value.(*cobra.Command); !ok || !isControllerCommand(command) {
+		return fmt.Sprintf(
+			"%s --namespace %s get configmap %s",
+			prefix,
+			shellQuote(namespace),
+			shellQuote(kube.SessionConfigMapName(id)),
+		)
+	}
 
 	for _, workflow := range domain.ControllerWorkflows() {
-		if sessionTypeCommandName(workflow.Type) != name {
+		if sessionTypeCommandName(workflow.Type) != family {
 			continue
 		}
 

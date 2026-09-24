@@ -461,13 +461,7 @@ func (r *rootState) newReserveCleanupCommand(source workflowSource) *cobra.Comma
 		}
 
 		if options.DeleteSession && !dryRun {
-			_, err := fmt.Fprintf(
-				cmd.OutOrStdout(),
-				"Deleted reservation workflow %s.\n",
-				object.GetName(),
-			)
-
-			return err
+			return writeDeletedWorkflow(cmd, "reservation workflow", object.GetName())
 		}
 
 		if err := runtime.printer.Print(object); err != nil {

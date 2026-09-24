@@ -24,6 +24,44 @@ func (r *rootState) newMovePlanCommand() *cobra.Command {
 	return r.moveSubmissionCommand(true)
 }
 
+// buildMoveWorkflow validates the typed move inputs and returns the workflow
+// the session executor plans locally or the cr create submits: namespace
+// roles pinned, a generated id when omitted, and the session namespace the
+// execution fences against.
+func buildMoveWorkflow(
+	object *v1alpha1.Move,
+	sourceNamespace, destinationNamespace, sessionNamespace, commandLabel string,
+) (*v1alpha1.Move, error) {
+	object.Spec.SourceNamespace = v1alpha1.NamespaceName(sourceNamespace)
+	object.Spec.DestinationNamespace = v1alpha1.NamespaceName(destinationNamespace)
+
+	if object.Spec.SourcePVC.Name == "" || object.Spec.DestinationNamespace == "" {
+		return nil, domain.NewError(
+			domain.ErrorValidation,
+			commandLabel,
+			"--source-pvc and --destination-namespace are required",
+		)
+	}
+
+	current := object.DeepCopy()
+
+	current.Spec.SessionNamespace = v1alpha1.NamespaceName(sessionNamespace)
+	if current.Spec.DestinationPVC != nil && current.Spec.DestinationPVC.Name == "" {
+		current.Spec.DestinationPVC = nil
+	}
+
+	if current.Name == "" {
+		id, err := domain.NewSessionID(time.Now())
+		if err != nil {
+			return nil, err
+		}
+
+		current.Name = id
+	}
+
+	return current, nil
+}
+
 // moveSubmissionCommand runs or plans a session move: the ConfigMap record is
 // created and executed in this process. Declarative Move CRs belong to the
 // cr move create command.
@@ -74,31 +112,15 @@ func (r *rootState) moveSubmissionCommand(planOnly bool) *cobra.Command {
 	)
 
 	command.RunE = func(cmd *cobra.Command, _ []string) error {
-		object.Spec.SourceNamespace = v1alpha1.NamespaceName(sourceNamespace)
-		object.Spec.DestinationNamespace = v1alpha1.NamespaceName(destinationNamespace)
-
-		if object.Spec.SourcePVC.Name == "" || object.Spec.DestinationNamespace == "" {
-			return domain.NewError(
-				domain.ErrorValidation,
-				"move",
-				"--source-pvc and --destination-namespace are required",
-			)
-		}
-
-		current := object.DeepCopy()
-
-		current.Spec.SessionNamespace = v1alpha1.NamespaceName(r.global.sessionNamespace)
-		if current.Spec.DestinationPVC.Name == "" {
-			current.Spec.DestinationPVC = nil
-		}
-
-		if current.Name == "" {
-			id, err := domain.NewSessionID(time.Now())
-			if err != nil {
-				return err
-			}
-
-			current.Name = id
+		current, err := buildMoveWorkflow(
+			object,
+			sourceNamespace,
+			destinationNamespace,
+			r.global.sessionNamespace,
+			"move",
+		)
+		if err != nil {
+			return err
 		}
 
 		runtime, err := r.runtime()

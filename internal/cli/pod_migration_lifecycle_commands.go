@@ -290,8 +290,10 @@ func (r *rootState) newPodMigrationCleanupCommand(source workflowSource) *cobra.
 				return err
 			}
 
+			// The record is gone; print the shared closing confirmation
+			// instead of exiting silently.
 			if options.DeleteSession {
-				return nil
+				return writeDeletedWorkflow(cmd, "pod migration workflow", object.GetName())
 			}
 
 			return runtime.printer.Print(object)

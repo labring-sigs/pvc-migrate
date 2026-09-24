@@ -344,13 +344,7 @@ func (r *rootState) newCopyCleanupCommand(source workflowSource) *cobra.Command 
 		}
 
 		if options.DeleteSession && !dryRun {
-			_, err := fmt.Fprintf(
-				cmd.OutOrStdout(),
-				"Deleted copy workflow %s.\n",
-				object.GetName(),
-			)
-
-			return err
+			return writeDeletedWorkflow(cmd, "copy workflow", object.GetName())
 		}
 
 		if err := runtime.printer.Print(object); err != nil {
