@@ -439,12 +439,12 @@ func checkPodMigrationNeeded(
 	)
 	if forceReprovision {
 		plan.AddCheck(warned(domain.CheckNameForceReprovision,
-			message+"; --force-reprovision will replace the backing PVs"))
+			message+"; forceReprovision will replace the backing PVs"))
 		return
 	}
 
 	plan.AddCheck(failed(domain.CheckNameMigrationNeeded,
-		message+"; use --force-reprovision to intentionally replace the backing PVs"))
+		message+"; set forceReprovision to intentionally replace the backing PVs"))
 }
 
 func (p *Planner) discoverPodMigrationWorkload(

@@ -311,7 +311,7 @@ func validateDestinationCapacityInputs(
 		plan.AddCheck(
 			failed(
 				domain.CheckNameDestinationCapacity,
-				"--allow-volume-shrink requires --destination-capacity",
+				"allowVolumeShrink requires destinationCapacity to be set",
 			),
 		)
 	}
@@ -320,7 +320,7 @@ func validateDestinationCapacityInputs(
 		plan.AddCheck(
 			failed(
 				domain.CheckNameDestinationCapacity,
-				"--skip-source-usage-check requires --allow-volume-shrink",
+				"skipSourceUsageCheck requires allowVolumeShrink",
 			),
 		)
 	}

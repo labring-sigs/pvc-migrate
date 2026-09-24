@@ -97,7 +97,7 @@ func VerifyVolumeShrinkUsage(
 				domain.ErrorConflict,
 				domain.ErrorOperationSourceUsageCheck,
 				fmt.Sprintf(
-					"PVC %s/%s whole-volume usage is %d bytes according to %s, above destination capacity %s; this cannot prove that selected source directory %q fits; abort this session and create a new one with a larger destination, or use --skip-source-usage-check only after independently measuring the selected data",
+					"PVC %s/%s whole-volume usage is %d bytes according to %s, above destination capacity %s; this cannot prove that selected source directory %q fits; abort this session and create a new one with a larger destination, or set skipSourceUsageCheck only after independently measuring the selected data",
 					sourcePVC.Namespace,
 					sourcePVC.Name,
 					usage.UsedBytes,

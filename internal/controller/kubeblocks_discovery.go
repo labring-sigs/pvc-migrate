@@ -50,7 +50,7 @@ func (m *Manager) kubeBlocksWorkload(
 			domain.ErrorPrecondition,
 			"discover KubeBlocks",
 			fmt.Sprintf(
-				"--switchover-candidate applies only when the selected InstanceSet Pod has a leader role; Pod %s/%s has role %s, so omit the candidate",
+				"switchoverCandidate applies only when the selected InstanceSet Pod has a leader role; Pod %s/%s has role %s, so omit the candidate",
 				pod.Namespace,
 				pod.Name,
 				role,
@@ -257,7 +257,7 @@ func validateKubeBlocksSwitchoverCandidate(
 	return domain.NewError(
 		domain.ErrorPrecondition,
 		"discover KubeBlocks",
-		"--switchover-candidate is supported only for InstanceSet-backed KubeBlocks components; Stop OpsRequests pause the complete legacy Cluster or component",
+		"switchoverCandidate is supported only for InstanceSet-backed KubeBlocks components; Stop OpsRequests pause the complete legacy Cluster or component",
 	)
 }
 
@@ -287,7 +287,7 @@ func (m *Manager) discoverKubeBlocksCandidate(
 			domain.ErrorPrecondition,
 			"discover KubeBlocks",
 			fmt.Sprintf(
-				"--switchover-candidate %s refers to the selected source Pod; choose a different Ready non-leader Pod in cluster %s component %s%s",
+				"switchoverCandidate %s refers to the selected source Pod; choose a different Ready non-leader Pod in cluster %s component %s%s",
 				pod.Name,
 				state.cluster,
 				state.component,
@@ -500,7 +500,7 @@ func resolveKubeBlocksRole(
 				domain.ErrorPrecondition,
 				"discover KubeBlocks",
 				fmt.Sprintf(
-					"selected instance %s role is unavailable while InstanceSet %s declares leader roles; wait for the KubeBlocks role probe to recover, or use --allow-leader-downtime to acknowledge a possible leader outage",
+					"selected instance %s role is unavailable while InstanceSet %s declares leader roles; wait for the KubeBlocks role probe to recover, or set allowLeaderDowntime to acknowledge a possible leader outage",
 					pod.Name,
 					owner.Name,
 				),
@@ -519,7 +519,7 @@ func resolveKubeBlocksRole(
 			domain.ErrorPrecondition,
 			"discover KubeBlocks",
 			fmt.Sprintf(
-				"selected instance %s reports role %s, which is absent from InstanceSet %s role definitions; wait for role status to converge, or use --allow-leader-downtime",
+				"selected instance %s reports role %s, which is absent from InstanceSet %s role definitions; wait for role status to converge, or set allowLeaderDowntime",
 				pod.Name,
 				role,
 				owner.Name,
@@ -568,7 +568,7 @@ func (m *Manager) resolveKubeBlocksSwitchover(
 			domain.ErrorPrecondition,
 			"discover KubeBlocks",
 			fmt.Sprintf(
-				"automatic switchover for selected instance %s is unavailable: %v; use --allow-leader-downtime to acknowledge the leader outage",
+				"automatic switchover for selected instance %s is unavailable: %v; set allowLeaderDowntime to acknowledge the leader outage",
 				pod.Name,
 				err,
 			),
@@ -815,7 +815,7 @@ func (m *Manager) kubeBlocksLeaderGuidance(
 		}
 
 		return fmt.Sprintf(
-			"selected MongoDB instance %s has role %s; use --switchover-candidate %s and pvc-migrate will validate and run the native switchover script. Manual MongoDB switchover: %s. The candidate must remain Ready and caught up; --allow-leader-downtime acknowledges a leader outage",
+			"selected MongoDB instance %s has role %s; set switchoverCandidate %s and the migration will validate and run the native switchover script. Manual MongoDB switchover: %s. The candidate must remain Ready and caught up; allowLeaderDowntime acknowledges a leader outage",
 			selected.Name,
 			role,
 			candidate,
@@ -831,7 +831,7 @@ func (m *Manager) kubeBlocksLeaderGuidance(
 
 	if isKubeBlocksRedis(selected) {
 		return fmt.Sprintf(
-			"selected instance %s has role %s; the KubeBlocks Redis addon does not provide a Switchover action. Rerun without --switchover-candidate and use --allow-leader-downtime to acknowledge the leader outage",
+			"selected instance %s has role %s; the KubeBlocks Redis addon does not provide a Switchover action. Unset switchoverCandidate and set allowLeaderDowntime to acknowledge the leader outage",
 			selected.Name,
 			role,
 		)
@@ -853,7 +853,7 @@ func (m *Manager) kubeBlocksLeaderGuidance(
 			opsAPIVersion,
 		); err != nil {
 			return fmt.Sprintf(
-				"selected instance %s has role %s; the served OpsRequest API rejected automatic switchover to %s: %v. Use the component's native switchover procedure, or use --allow-leader-downtime to acknowledge the leader outage",
+				"selected instance %s has role %s; the served OpsRequest API rejected automatic switchover to %s: %v. Use the component's native switchover procedure, or set allowLeaderDowntime to acknowledge the leader outage",
 				selected.Name,
 				role,
 				candidate,
@@ -863,7 +863,7 @@ func (m *Manager) kubeBlocksLeaderGuidance(
 	}
 
 	return fmt.Sprintf(
-		"selected instance %s has role %s; use --switchover-candidate %s for an automatic switchover, or complete a native switchover first and rerun the plan. Use --allow-leader-downtime to acknowledge the leader outage. KubeBlocks commands: kbcli cluster promote %s --namespace %s --instance %s --candidate %s; or %s",
+		"selected instance %s has role %s; set switchoverCandidate %s for an automatic switchover, or complete a native switchover first and replan. Set allowLeaderDowntime to acknowledge the leader outage. KubeBlocks commands: kbcli cluster promote %s --namespace %s --instance %s --candidate %s; or %s",
 		selected.Name,
 		role,
 		candidate,
@@ -1021,7 +1021,7 @@ func (m *Manager) kubeBlocksSwitchoverStrategy(
 		)
 		if err != nil {
 			return "", "", fmt.Errorf(
-				"MongoDB native switchover script preflight failed: %w; use --allow-leader-downtime to acknowledge the leader outage",
+				"MongoDB native switchover script preflight failed: %w; set allowLeaderDowntime to acknowledge the leader outage",
 				err,
 			)
 		}

@@ -288,7 +288,7 @@ func checkOfflineMigrationPlanConsumers(
 	names = slices.Compact(names)
 	plan.AddCheck(failed(domain.CheckNamePVCConsumers,
 		fmt.Sprintf(
-			"offline migrate found active Pod consumer(s) %s; stop them before offline migration, or use the separate migrate-pod command to select a workload that pvc-migrate can pause before final sync",
+			"offline migrate found active Pod consumer(s) %s; stop them before offline migration, or use a PodMigration workflow to select a workload that can be paused before final sync",
 			strings.Join(names, ","),
 		),
 	))
