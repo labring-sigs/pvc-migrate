@@ -109,9 +109,13 @@ func (r *rootState) renameSubmissionCommand(planOnly bool) *cobra.Command {
 		ctx, cancel := r.context(cmd.Context())
 		defer cancel()
 
-		storageNamespace := current.Namespace
+		// Session records persist in the session storage namespace — the
+		// create command's -n is tenant semantics and must not become the
+		// storage location. The lifecycle resolves records the same way
+		// (renameStorageNamespace on verbs that carry no -n).
+		storageNamespace := r.migrationRecordNamespace()
 
-		report, err := runtime.planner.PlanRename(ctx, current, storageNamespace)
+		report, err := runtime.planner.PlanRename(ctx, current, current.Namespace)
 		if err != nil {
 			return reportPlanningError(cmd, err)
 		}
