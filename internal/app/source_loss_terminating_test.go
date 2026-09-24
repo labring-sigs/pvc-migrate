@@ -138,6 +138,25 @@ func TestFailSourceDeletedStillFailsDeletedSourceAfterFinalSync(t *testing.T) {
 	}
 }
 
+func TestPodMigrationValidateAbortRejectsTerminatingSource(t *testing.T) {
+	executor, object, _, _ := namespacedPodMigrationFixture(t)
+	executor.workloads = &fakeController{}
+
+	// A paused workflow needs the workload resumed onto the source, and the
+	// scheduler refuses pods mounting a claim that is being deleted.
+	namespacedPausedCheckpointFixture(object)
+	armTerminatingSourcePVC(t, executor, object.Namespace, "a")
+
+	err := executor.ValidateAbort(t.Context(), object)
+	if err == nil {
+		t.Fatal("abort accepted a terminating source")
+	}
+
+	if !strings.Contains(err.Error(), "data/a is terminating") {
+		t.Fatalf("failure does not name the terminating source: %v", err)
+	}
+}
+
 func TestValidateFinalSyncRejectsLostSource(t *testing.T) {
 	tests := []struct {
 		name    string

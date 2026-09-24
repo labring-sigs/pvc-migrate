@@ -80,6 +80,18 @@ func (m *PodMigrationExecutor) ValidateAbort(
 		}
 	}
 
+	// A terminating source cannot take the resumed workload back: the
+	// scheduler refuses pods mounting a claim that is being deleted, so the
+	// resume would wait forever. Surface the loss instead of hanging.
+	scan, err := scanPlannedSourcePVCs(ctx, m.client, object.Namespace, plan.Volumes)
+	if err != nil {
+		return err
+	}
+
+	if scan.Terminating != nil {
+		return sourceTerminationFailure("abort pod migration", *scan.Terminating)
+	}
+
 	for _, volume := range plan.Volumes {
 		if err := verifySourceStorage(
 			ctx,
