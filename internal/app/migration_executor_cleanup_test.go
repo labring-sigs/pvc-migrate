@@ -85,18 +85,7 @@ func TestMigrationCleanupAbortedDeletesStagedDestinationButNeverTheSource(t *tes
 		)
 	}
 
-	// the source-identity probe needs the live source PVCs
-	for _, volume := range object.Status.Plan.Volumes {
-		if _, err := executor.client.CoreV1().PersistentVolumeClaims("source").
-			Create(t.Context(), &corev1.PersistentVolumeClaim{
-				ObjectMeta: metav1.ObjectMeta{
-					Namespace: "source", Name: volume.SourcePVC.Name,
-					UID: volume.SourcePVC.UID,
-				},
-			}, metav1.CreateOptions{}); err != nil {
-			t.Fatal(err)
-		}
-	}
+	// the source-identity probe reads the fixture's live bound source PVCs
 
 	_, volumes, _, err := executor.prepareCleanup(
 		t.Context(),
@@ -180,8 +169,13 @@ func TestMigrationUnplannedDeletionRemovesStoredObject(t *testing.T) {
 func TestClusterMigrationFailSourceDeletedConvergesToFailed(t *testing.T) {
 	executor, object, store, _ := migrationExecutorFixture(t)
 
-	// The fixture world holds no source PVCs: the planned source storage was
-	// deleted underneath the Reserved phase.
+	// The planned source storage was deleted underneath the Reserved phase.
+	deletePlannedSourcePVCs(
+		t,
+		executor.client,
+		string(object.Status.Plan.SourceNamespace),
+		object.Status.Plan.Volumes,
+	)
 	object.Status.Phase = domain.PhaseReserved
 
 	if err := store.Save(t.Context(), object); err != nil {
@@ -209,6 +203,13 @@ func TestClusterMigrationFailSourceDeletedConvergesToFailed(t *testing.T) {
 
 func TestClusterMigrationDeletionConvergesWhenSourceStorageDeleted(t *testing.T) {
 	executor, object, store, _ := migrationExecutorFixture(t)
+
+	deletePlannedSourcePVCs(
+		t,
+		executor.client,
+		string(object.Status.Plan.SourceNamespace),
+		object.Status.Plan.Volumes,
+	)
 
 	object.Status.Phase = domain.PhaseReserved
 	for _, volume := range object.Status.Plan.Volumes {

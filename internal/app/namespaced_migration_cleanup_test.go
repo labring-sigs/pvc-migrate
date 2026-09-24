@@ -87,19 +87,8 @@ func TestNamespacedMigrationCleanupAbortedDeletesStagedDestinationButNeverTheSou
 		)
 	}
 
-	// the source-identity probe needs the live source PVCs; namespaced
-	// migrations keep them in the workflow namespace
-	for _, volume := range object.Status.Plan.Volumes {
-		if _, err := executor.client.CoreV1().PersistentVolumeClaims(object.Namespace).
-			Create(t.Context(), &corev1.PersistentVolumeClaim{
-				ObjectMeta: metav1.ObjectMeta{
-					Namespace: object.Namespace, Name: volume.SourcePVC.Name,
-					UID: volume.SourcePVC.UID,
-				},
-			}, metav1.CreateOptions{}); err != nil {
-			t.Fatal(err)
-		}
-	}
+	// the source-identity probe reads the fixture's live bound source PVCs;
+	// namespaced migrations keep them in the workflow namespace
 
 	_, volumes, _, err := executor.prepareCleanup(
 		t.Context(),
@@ -183,6 +172,7 @@ func TestNamespacedMigrationUnplannedDeletionRemovesStoredObject(t *testing.T) {
 func TestNamespacedMigrationFailSourceDeletedConvergesToFailed(t *testing.T) {
 	executor, object, store, _ := namespacedMigrationFixture(t)
 
+	deletePlannedSourcePVCs(t, executor.client, object.Namespace, object.Status.Plan.Volumes)
 	object.Status.Phase = domain.PhaseReserved
 
 	if err := store.Save(t.Context(), object); err != nil {
@@ -209,6 +199,8 @@ func TestNamespacedMigrationFailSourceDeletedConvergesToFailed(t *testing.T) {
 
 func TestNamespacedMigrationDeletionConvergesWhenSourceStorageDeleted(t *testing.T) {
 	executor, object, store, _ := namespacedMigrationFixture(t)
+
+	deletePlannedSourcePVCs(t, executor.client, object.Namespace, object.Status.Plan.Volumes)
 
 	object.Status.Phase = domain.PhaseReserved
 	for _, volume := range object.Status.Plan.Volumes {

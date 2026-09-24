@@ -182,19 +182,8 @@ func TestNamespacedPodMigrationCleanupAbortedDeletesStagedDestinationButNeverThe
 		)
 	}
 
-	// the source-identity probe needs the live source PVCs; namespaced
-	// migrations keep them in the workflow namespace
-	for _, volume := range object.Status.Plan.Volumes {
-		if _, err := executor.client.CoreV1().PersistentVolumeClaims(object.Namespace).
-			Create(t.Context(), &corev1.PersistentVolumeClaim{
-				ObjectMeta: metav1.ObjectMeta{
-					Namespace: object.Namespace, Name: volume.SourcePVC.Name,
-					UID: volume.SourcePVC.UID,
-				},
-			}, metav1.CreateOptions{}); err != nil {
-			t.Fatal(err)
-		}
-	}
+	// the source-identity probe reads the fixture's live bound source PVCs;
+	// namespaced migrations keep them in the workflow namespace
 
 	_, volumes, _, err := executor.prepareCleanup(
 		t.Context(),
@@ -281,14 +270,15 @@ func TestNamespacedPodMigrationFailSourceDeletedUsesObjectNamespace(t *testing.T
 	executor, object, store, _ := namespacedPodMigrationFixture(t)
 	executor.workloads = &fakeController{}
 
+	// The wrapper must resolve the source namespace from the workflow object,
+	// not a plan field, for the probe to find the deletion.
+	deletePlannedSourcePVCs(t, executor.client, object.Namespace, object.Status.Plan.Volumes)
+
 	object.Status.Phase = domain.PhaseReserved
 	if err := store.Save(t.Context(), object); err != nil {
 		t.Fatal(err)
 	}
 
-	// The fixture world holds no source PVCs in the object's namespace: the
-	// wrapper must resolve the source namespace from the workflow object, not
-	// a plan field, for the probe to find the deletion.
 	if err := executor.FailSourceDeleted(t.Context(), object); err == nil {
 		t.Fatal("expected the recorded source-loss failure")
 	}
@@ -334,6 +324,11 @@ func TestNamespacedPodMigrationDeletionConvergesWhenSourceStorageDeleted(t *test
 	executor.workloads = &fakeController{}
 
 	namespacedPausedCheckpointFixture(object)
+
+	// The source storage was deleted underneath the paused workflow: deletion
+	// must converge without re-verifying it (#28) instead of wedging the
+	// finalizer.
+	deletePlannedSourcePVCs(t, executor.client, object.Namespace, object.Status.Plan.Volumes)
 
 	object.DeletionTimestamp = &metav1.Time{Time: executor.now()}
 	if err := store.Save(t.Context(), object); err != nil {

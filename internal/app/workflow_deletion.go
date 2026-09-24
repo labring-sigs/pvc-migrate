@@ -18,21 +18,36 @@ func workflowDeletionInProgress(ctx context.Context) bool {
 	return ctx.Value(workflowDeletionContextKey{}) == true
 }
 
-// sourcePVCDeleted reports whether one recorded source PVC no longer exists.
-func sourcePVCDeleted(
+// sourceTermination names a planned source PVC whose deletion was requested
+// but has not settled. The claim still carries its identity, yet the
+// deletionTimestamp is immutable, so the deletion can no longer be cancelled.
+type sourceTermination struct {
+	PVC   v1alpha1.ObjectReference
+	Since metav1.Time
+}
+
+// plannedSourceScan aggregates the source-loss signals of one probe pass.
+type plannedSourceScan struct {
+	Deleted     bool
+	Terminating *sourceTermination
+}
+
+// probeSourcePVC reads one source PVC once and classifies its deletion state:
+// gone, terminating, or intact.
+func probeSourcePVC(
 	ctx context.Context,
 	client kubernetes.Interface,
 	sourcePVC v1alpha1.ObjectReference,
-) (bool, error) {
-	_, err := client.CoreV1().
+) (plannedSourceScan, error) {
+	pvc, err := client.CoreV1().
 		PersistentVolumeClaims(sourcePVC.Namespace).
 		Get(ctx, sourcePVC.Name, metav1.GetOptions{})
 	if apierrors.IsNotFound(err) {
-		return true, nil
+		return plannedSourceScan{Deleted: true}, nil
 	}
 
 	if err != nil {
-		return false, domain.WrapError(
+		return plannedSourceScan{}, domain.WrapError(
 			domain.ErrorKubernetes,
 			verifySourceStoragePhase,
 			fmt.Sprintf("read source PVC %s/%s", sourcePVC.Namespace, sourcePVC.Name),
@@ -40,7 +55,50 @@ func sourcePVCDeleted(
 		)
 	}
 
-	return false, nil
+	if pvc.DeletionTimestamp != nil {
+		return plannedSourceScan{Terminating: &sourceTermination{
+			PVC:   sourcePVC,
+			Since: *pvc.DeletionTimestamp,
+		}}, nil
+	}
+
+	return plannedSourceScan{}, nil
+}
+
+// sourcePVCDeleted reports whether one recorded source PVC no longer exists.
+func sourcePVCDeleted(
+	ctx context.Context,
+	client kubernetes.Interface,
+	sourcePVC v1alpha1.ObjectReference,
+) (bool, error) {
+	scan, err := probeSourcePVC(ctx, client, sourcePVC)
+	return scan.Deleted, err
+}
+
+// scanPlannedSourcePVCs probes every planned source volume and reports the
+// first loss signal; a deleted PVC wins over a terminating one.
+func scanPlannedSourcePVCs(
+	ctx context.Context,
+	client kubernetes.Interface,
+	sourceNamespace string,
+	volumes []v1alpha1.VolumeSpec,
+) (plannedSourceScan, error) {
+	for _, volume := range volumes {
+		if volume.SourcePVC.Name == "" {
+			continue
+		}
+
+		scan, err := probeSourcePVC(
+			ctx,
+			client,
+			qualifiedResourceReference(volume.SourcePVC, sourceNamespace),
+		)
+		if err != nil || scan.Deleted || scan.Terminating != nil {
+			return scan, err
+		}
+	}
+
+	return plannedSourceScan{}, nil
 }
 
 // deletedPlannedSourcePVC reports whether any planned source volume lost its
@@ -52,22 +110,8 @@ func deletedPlannedSourcePVC(
 	sourceNamespace string,
 	volumes []v1alpha1.VolumeSpec,
 ) (bool, error) {
-	for _, volume := range volumes {
-		if volume.SourcePVC.Name == "" {
-			continue
-		}
-
-		deleted, err := sourcePVCDeleted(
-			ctx,
-			client,
-			qualifiedResourceReference(volume.SourcePVC, sourceNamespace),
-		)
-		if err != nil || deleted {
-			return deleted, err
-		}
-	}
-
-	return false, nil
+	scan, err := scanPlannedSourcePVCs(ctx, client, sourceNamespace, volumes)
+	return scan.Deleted, err
 }
 
 // deletionSourceMissing reports whether a planned volume's source PVC is gone

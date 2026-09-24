@@ -49,6 +49,16 @@ func (m *ClusterMigrationExecutor) ValidateFinalSync(
 	}
 
 	plan := object.Status.Plan
+	if err := validateFinalSyncSources(
+		ctx,
+		m.client,
+		string(plan.SourceNamespace),
+		plan.Volumes,
+		"migration final sync",
+	); err != nil {
+		return err
+	}
+
 	indexes := clusterMigrationVolumeIndexes(object.Status.Volumes)
 
 	bindings := make([]kube.PVCTransferBindings, 0, len(plan.Volumes))

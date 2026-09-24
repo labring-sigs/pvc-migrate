@@ -15,6 +15,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/kubernetes/fake"
 	ktesting "k8s.io/client-go/testing"
 	crclient "sigs.k8s.io/controller-runtime/pkg/client"
@@ -45,6 +46,64 @@ func migrationExecutorFixture(
 	t.Helper()
 
 	return migrationExecutorFixtureWith(t, nil)
+}
+
+// seedPlanSourcePVCs materializes the planned source claims in the executor's
+// cluster as live bound claims. Execution-phase probes treat the source PVCs
+// as real storage identity, so the fixture world has to carry them bound to
+// their source PVs.
+func seedPlanSourcePVCs(
+	t *testing.T,
+	client kubernetes.Interface,
+	namespace string,
+	volumes []v1alpha1.VolumeSpec,
+) {
+	t.Helper()
+
+	for _, volume := range volumes {
+		if volume.SourcePVC.Name == "" {
+			continue
+		}
+
+		if _, err := client.CoreV1().PersistentVolumeClaims(namespace).
+			Create(t.Context(), &corev1.PersistentVolumeClaim{
+				ObjectMeta: metav1.ObjectMeta{
+					Namespace: namespace,
+					Name:      volume.SourcePVC.Name,
+					UID:       volume.SourcePVC.UID,
+				},
+				Spec:   corev1.PersistentVolumeClaimSpec{VolumeName: volume.SourcePV.Name},
+				Status: corev1.PersistentVolumeClaimStatus{Phase: corev1.ClaimBound},
+			}, metav1.CreateOptions{}); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+// deletePlannedSourcePVCs removes the seeded source claims, restoring the
+// "source storage vanished" scenarios the source-loss probes converge on.
+func deletePlannedSourcePVCs(
+	t *testing.T,
+	client kubernetes.Interface,
+	namespace string,
+	volumes []v1alpha1.VolumeSpec,
+) {
+	t.Helper()
+
+	for _, volume := range volumes {
+		if volume.SourcePVC.Name == "" {
+			continue
+		}
+
+		if err := client.CoreV1().PersistentVolumeClaims(namespace).
+			Delete(
+				t.Context(),
+				volume.SourcePVC.Name,
+				metav1.DeleteOptions{},
+			); err != nil {
+			t.Fatal(err)
+		}
+	}
 }
 
 func migrationExecutorFixtureWith(
@@ -144,6 +203,13 @@ func migrationExecutorFixtureWith(
 	)
 	executor.now = func() time.Time { return time.Unix(100, 0).UTC() }
 	executor.reserver = reserver
+
+	seedPlanSourcePVCs(
+		t,
+		client,
+		string(object.Status.Plan.SourceNamespace),
+		object.Status.Plan.Volumes,
+	)
 
 	return executor, object, store, reserver
 }
