@@ -163,8 +163,6 @@ func (p Printer) printWorkflowInventory(objects []crclient.Object) error {
 			kind, status = "ClusterMigration", current.Status.WorkflowStatus
 		case *v1alpha1.PodMigration:
 			kind, status = "PodMigration", current.Status.WorkflowStatus
-		case *v1alpha1.ClusterPodMigration:
-			kind, status = "ClusterPodMigration", current.Status.WorkflowStatus
 		case *v1alpha1.Backup:
 			kind, status = "Backup", current.Status.WorkflowStatus
 		case *v1alpha1.Restore:

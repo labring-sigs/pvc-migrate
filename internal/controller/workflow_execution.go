@@ -427,8 +427,6 @@ func workflowStatusPtr(object crclient.Object) *v1alpha1.WorkflowStatus {
 		return &typed.Status.WorkflowStatus
 	case *v1alpha1.ClusterMigration:
 		return &typed.Status.WorkflowStatus
-	case *v1alpha1.ClusterPodMigration:
-		return &typed.Status.WorkflowStatus
 	case *v1alpha1.ClusterReservation:
 		return &typed.Status.WorkflowStatus
 	case *v1alpha1.ClusterCopy:

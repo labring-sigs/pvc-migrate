@@ -10,7 +10,6 @@ import (
 func TestExplicitZeroPrecopySurvivesSerialization(t *testing.T) {
 	for _, request := range []any{
 		v1alpha1.PodMigrationSpec{Pod: v1alpha1.LocalResourceReference{Name: "database-0"}, PrecopyPasses: 0},
-		v1alpha1.ClusterPodMigrationSpec{SourceNamespace: "app", PodMigrationSpec: v1alpha1.PodMigrationSpec{Pod: v1alpha1.LocalResourceReference{Name: "database-0"}, PrecopyPasses: 0}},
 	} {
 		encoded, err := json.Marshal(request)
 		if err != nil {

@@ -56,13 +56,10 @@ func TestPodMigrationRejectsInvalidInputs(t *testing.T) {
 					nil,
 					nil,
 				).WithControllerSubmission(submission).
-					PlanPodMigration(t.Context(),
-						&v1alpha1.ClusterPodMigration{
-							ObjectMeta: metav1.ObjectMeta{Name: "migration"},
-							Spec: v1alpha1.ClusterPodMigrationSpec{
-								SourceNamespace:  "app",
-								PodMigrationSpec: tt.spec,
-							},
+					PlanNamespacedPodMigration(t.Context(),
+						&v1alpha1.PodMigration{
+							ObjectMeta: metav1.ObjectMeta{Name: "migration", Namespace: "app"},
+							Spec:       tt.spec,
 						}, "example/tool:v1")
 				if domain.CategoryOf(err) != domain.ErrorValidation ||
 					!strings.Contains(err.Error(), tt.message) {
@@ -624,16 +621,13 @@ func TestPlanReportsOpenEBSWarmCopyMountCheck(t *testing.T) {
 			Type: corev1.NodeReady, Status: corev1.ConditionTrue,
 		}}},
 	})
-	object := &v1alpha1.ClusterPodMigration{
-		ObjectMeta: metav1.ObjectMeta{Name: "migration"},
-		Spec: v1alpha1.ClusterPodMigrationSpec{
-			SourceNamespace: "app", TemporaryNamespace: "system", SessionNamespace: "system",
-			PodMigrationSpec: v1alpha1.PodMigrationSpec{
-				Pod:           v1alpha1.LocalResourceReference{Name: "database-0"},
-				PrecopyPasses: 1,
-				TransferOptions: v1alpha1.TransferOptions{
-					TargetNode: "node-b", DestinationStorageClass: "fast",
-				},
+	object := &v1alpha1.PodMigration{
+		ObjectMeta: metav1.ObjectMeta{Name: "migration", Namespace: "app"},
+		Spec: v1alpha1.PodMigrationSpec{
+			Pod:           v1alpha1.LocalResourceReference{Name: "database-0"},
+			PrecopyPasses: 1,
+			TransferOptions: v1alpha1.TransferOptions{
+				TargetNode: "node-b", DestinationStorageClass: "fast",
 			},
 		},
 	}
@@ -642,7 +636,7 @@ func TestPlanReportsOpenEBSWarmCopyMountCheck(t *testing.T) {
 
 	plan, err := New(client, controller.NewManager(client, nil, nil)).
 		WithOpenEBSLVMSharedVolumeManager(plannerOpenEBSLVMSharedVolumeManager{}).
-		PlanPodMigration(t.Context(), object, "")
+		PlanNamespacedPodMigration(t.Context(), object, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -663,7 +657,7 @@ func TestPlanReportsOpenEBSWarmCopyMountCheck(t *testing.T) {
 
 	cutoverPlan, err := New(client, controller.NewManager(client, nil, nil)).
 		WithOpenEBSLVMSharedVolumeManager(plannerOpenEBSLVMSharedVolumeManager{}).
-		PlanPodMigration(t.Context(), object, "")
+		PlanNamespacedPodMigration(t.Context(), object, "")
 	if err != nil {
 		t.Fatal(err)
 	}

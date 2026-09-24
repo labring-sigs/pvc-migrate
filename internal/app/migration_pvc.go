@@ -13,6 +13,7 @@ import (
 func migrationPVCManifest(
 	workflowID string,
 	sourcePVC, sourcePV, destinationPV v1alpha1.ObjectReference,
+	destinationNamespace string,
 	sourceSpec corev1.PersistentVolumeClaimSpec,
 	metadata v1alpha1.PVCMetadata,
 	storageClass, capacity string,
@@ -23,7 +24,12 @@ func migrationPVCManifest(
 			fmt.Sprintf("destination capacity %q must be a positive quantity", capacity))
 	}
 
-	pvc := kube.BoundPVCManifest(workflowID, sourcePVC, destinationPV.Name, sourceSpec, metadata)
+	// The activated claim keeps the source PVC's name and spec but lands in
+	// the plan's destination namespace.
+	claim := sourcePVC.DeepCopy()
+	claim.Namespace = destinationNamespace
+
+	pvc := kube.BoundPVCManifest(workflowID, *claim, destinationPV.Name, sourceSpec, metadata)
 
 	pvc.Spec.StorageClassName = &storageClass
 	if pvc.Spec.Resources.Requests == nil {

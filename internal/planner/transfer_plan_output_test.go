@@ -147,7 +147,7 @@ func TestReservationPlannerWritesConcretePlan(t *testing.T) {
 func TestPodMigrationPlannerPreservesZeroPrecopyInPlan(t *testing.T) {
 	p, object := podMigrationPlanFixture(t)
 	before := object.Spec.DeepCopy()
-	report, err := p.PlanPodMigration(t.Context(), object, "")
+	report, err := p.PlanNamespacedPodMigration(t.Context(), object, "")
 
 	if err != nil || report == nil || !report.Ready || object.Status.Plan == nil {
 		t.Fatalf("plan=%+v err=%v", report, err)
@@ -171,7 +171,7 @@ func TestPodMigrationPlannerPreservesZeroPrecopyInPlan(t *testing.T) {
 func TestTransferZonePolicyOwnedByPodMigration(t *testing.T) {
 	p, object := podMigrationPlanFixture(t)
 
-	report, err := p.PlanPodMigration(t.Context(), object, "")
+	report, err := p.PlanNamespacedPodMigration(t.Context(), object, "")
 	if err != nil || !report.Ready || object.Status.Plan == nil {
 		t.Fatalf("initial plan=%+v err=%v", report, err)
 	}
@@ -190,12 +190,12 @@ func TestTransferZonePolicyOwnedByPodMigration(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	candidate := &v1alpha1.ClusterPodMigration{
-		ObjectMeta: metav1.ObjectMeta{Name: "cross-zone"},
+	candidate := &v1alpha1.PodMigration{
+		ObjectMeta: metav1.ObjectMeta{Name: "cross-zone", Namespace: "app"},
 		Spec:       *object.Spec.DeepCopy(),
 	}
 
-	report, err = p.PlanPodMigration(t.Context(), candidate, "")
+	report, err = p.PlanNamespacedPodMigration(t.Context(), candidate, "")
 	if err != nil || report.Ready || !hasFailedCheck(report.Checks, "availability-zone") ||
 		candidate.Status.Plan != nil || !reflect.DeepEqual(previous, &object.Status) {
 		t.Fatalf("cross-zone plan=%+v status=%+v err=%v", report, object.Status, err)
@@ -257,7 +257,7 @@ func TestPodConsumerCountsRemainAlignedWhenSourceResolutionFails(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	report, err := p.PlanPodMigration(t.Context(), object, "")
+	report, err := p.PlanNamespacedPodMigration(t.Context(), object, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -268,7 +268,7 @@ func TestPodConsumerCountsRemainAlignedWhenSourceResolutionFails(t *testing.T) {
 	}
 }
 
-func podMigrationPlanFixture(t *testing.T) (*Planner, *v1alpha1.ClusterPodMigration) {
+func podMigrationPlanFixture(t *testing.T) (*Planner, *v1alpha1.PodMigration) {
 	t.Helper()
 
 	objects := plannerObjects("2Gi")
@@ -284,15 +284,12 @@ func podMigrationPlanFixture(t *testing.T) (*Planner, *v1alpha1.ClusterPodMigrat
 		ObjectMeta: metav1.ObjectMeta{Name: "default", Namespace: "app"},
 	})
 	client := plannerClient(objects...)
-	object := &v1alpha1.ClusterPodMigration{
-		ObjectMeta: metav1.ObjectMeta{Name: "pod-migration"},
-		Spec: v1alpha1.ClusterPodMigrationSpec{
-			SourceNamespace: "app", TemporaryNamespace: "system", SessionNamespace: "system",
-			PodMigrationSpec: v1alpha1.PodMigrationSpec{
-				Pod:             v1alpha1.LocalResourceReference{Name: "writer"},
-				TransferOptions: v1alpha1.TransferOptions{TargetNode: "node-b"},
-				PrecopyPasses:   0,
-			},
+	object := &v1alpha1.PodMigration{
+		ObjectMeta: metav1.ObjectMeta{Name: "pod-migration", Namespace: "app"},
+		Spec: v1alpha1.PodMigrationSpec{
+			Pod:             v1alpha1.LocalResourceReference{Name: "writer"},
+			TransferOptions: v1alpha1.TransferOptions{TargetNode: "node-b"},
+			PrecopyPasses:   0,
 		},
 	}
 

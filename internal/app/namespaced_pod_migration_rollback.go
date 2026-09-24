@@ -142,6 +142,7 @@ func (m *PodMigrationExecutor) ValidateRollback(
 				m.client,
 				object.Name,
 				binding.SourcePVC,
+				object.Namespace,
 				binding.DestinationPV,
 				qualifiedOptionalReference(status.Activation.ActivePVC, object.Namespace),
 			); err != nil {
@@ -157,6 +158,7 @@ func (m *PodMigrationExecutor) ValidateRollback(
 				m.client,
 				binding.SourcePVC,
 				binding.SourcePV,
+				object.Namespace,
 			)
 			if err != nil {
 				return err
@@ -168,6 +170,7 @@ func (m *PodMigrationExecutor) ValidateRollback(
 					m.client,
 					object.Name,
 					binding.SourcePVC,
+					object.Namespace,
 					binding.DestinationPV,
 					active,
 				); err != nil {
@@ -315,6 +318,7 @@ func (m *PodMigrationExecutor) rollback(
 			ctx,
 			m.switcher,
 			object.Name,
+			object.Namespace,
 			binding,
 			desired,
 			&checkpoint,

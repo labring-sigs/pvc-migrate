@@ -46,6 +46,7 @@ func (s *scriptedSwitcher) VerifyVolumesOfflineForSession(
 func (s *scriptedSwitcher) ActivatePVC(
 	ctx context.Context,
 	workflowID string,
+	activateNamespace string,
 	volume kube.PVCTransferBindings,
 	_ *corev1.PersistentVolumeClaim,
 	status *v1alpha1.ClusterVolumeActivationStatus,
@@ -62,7 +63,7 @@ func (s *scriptedSwitcher) ActivatePVC(
 
 		active := &corev1.PersistentVolumeClaim{
 			ObjectMeta: metav1.ObjectMeta{
-				Namespace: volume.SourcePVC.Namespace,
+				Namespace: activateNamespace,
 				Name:      volume.SourcePVC.Name,
 				UID:       volume.SourcePVC.UID,
 				Labels: map[string]string{
@@ -140,8 +141,11 @@ func (s *scriptedSwitcher) ActivatePVC(
 	}
 
 	if status != nil {
-		// Activation renames the reserved claim into the source identity.
+		// Activation renames the reserved claim into the source identity,
+		// landing in the activation namespace (the source namespace unless the
+		// workflow migrates across namespaces).
 		active := volume.SourcePVC
+		active.Namespace = activateNamespace
 		now := metav1.Now()
 		status.ActivePVC = &active
 		status.ActivatedAt = &now
@@ -160,6 +164,7 @@ func (s *scriptedSwitcher) ActivatePVC(
 func (s *scriptedSwitcher) RollbackPVC(
 	ctx context.Context,
 	workflowID string,
+	activateNamespace string,
 	volume kube.PVCTransferBindings,
 	_ *corev1.PersistentVolumeClaim,
 	status *v1alpha1.ClusterVolumeActivationStatus,
@@ -284,6 +289,7 @@ func (fakeSwitcher) VerifyVolumesOfflineForSession(
 func (fakeSwitcher) ActivatePVC(
 	context.Context,
 	string,
+	string,
 	kube.PVCTransferBindings,
 	*corev1.PersistentVolumeClaim,
 	*v1alpha1.ClusterVolumeActivationStatus,
@@ -294,6 +300,7 @@ func (fakeSwitcher) ActivatePVC(
 
 func (fakeSwitcher) RollbackPVC(
 	context.Context,
+	string,
 	string,
 	kube.PVCTransferBindings,
 	*corev1.PersistentVolumeClaim,

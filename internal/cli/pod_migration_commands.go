@@ -14,7 +14,6 @@ import (
 type podMigrationFlags struct {
 	sessionID               string
 	sourceNamespace         string
-	temporaryNamespace      string
 	destinationCapacities   []string
 	sourcePaths             []string
 	destinationPaths        []string
@@ -41,12 +40,6 @@ func (f *podMigrationFlags) bind(command *cobra.Command) {
 	flags := command.Flags()
 	flags.StringVar(&f.sessionID, "session", "", "Migration session ID")
 	flags.StringVarP(&f.sourceNamespace, "source-namespace", "n", "default", "Pod namespace")
-	flags.StringVar(
-		&f.temporaryNamespace,
-		"temporary-namespace",
-		"pvc-migrate-system",
-		"Namespace for staged destination PVCs",
-	)
 	flags.StringSliceVar(
 		&f.destinationCapacities,
 		"destination-capacity",
@@ -159,11 +152,11 @@ func (f *podMigrationFlags) bindForceReprovision(command *cobra.Command) {
 }
 
 func (f *podMigrationFlags) workflow(
-	state *rootState,
-	runtime *commandRuntime,
-	temporaryExplicit bool,
-	submit bool,
-) (*v1alpha1.ClusterPodMigration, error) {
+	_ *rootState,
+	_ *commandRuntime,
+	_ bool,
+	_ bool,
+) (*v1alpha1.PodMigration, error) {
 	if err := validateDestinationCapacityFlags(
 		domain.OperationMigratePod,
 		false,
@@ -187,44 +180,32 @@ func (f *podMigrationFlags) workflow(
 		f.sessionID = id
 	}
 
-	sessionNamespace, temporaryNamespace := state.controllerPlanNamespaces(
-		runtime,
-		domain.SessionTypeMigratePod,
-		f.sourceNamespace,
-		f.sourceNamespace,
-		f.temporaryNamespace,
-		temporaryExplicit,
-		submit,
-	)
-
-	object := &v1alpha1.ClusterPodMigration{
-		ObjectMeta: metav1.ObjectMeta{Name: id},
-		Spec: v1alpha1.ClusterPodMigrationSpec{
-			SourceNamespace:    v1alpha1.NamespaceName(f.sourceNamespace),
-			TemporaryNamespace: v1alpha1.NamespaceName(temporaryNamespace),
-			SessionNamespace:   v1alpha1.NamespaceName(sessionNamespace),
-			PodMigrationSpec: v1alpha1.PodMigrationSpec{
-				Pod:                     v1alpha1.LocalResourceReference{Name: f.podName},
-				PrecopyPasses:           f.precopyPasses,
-				ForceReprovision:        f.forceReprovision,
-				OpenEBSLVMEnableShared:  f.openEBSLVMEnableShared,
-				SwitchoverCandidate:     f.switchoverCandidate,
-				AllowLeaderDowntime:     f.allowLeaderDowntime,
-				AllowPlacementViolation: f.allowPlacementViolation,
-				TransferOptions: v1alpha1.TransferOptions{
-					UnusedStoragePolicy: v1alpha1.UnusedStoragePolicy(
-						f.unusedStoragePolicy,
-					),
-					DestinationStorageClass: f.destinationClass,
-					CapacityAwareness:       f.capacityAwareness,
-					SourceNode:              f.sourceNode,
-					TargetNode:              f.targetNode,
-					Strategies:              append([]string(nil), f.strategies...),
-					VerifyChecksum:          f.verifyChecksum,
-					DeleteExtraneous:        new(f.deleteExtraneous),
-					AllowVolumeShrink:       f.allowVolumeShrink,
-					SkipSourceUsageCheck:    f.skipSourceUsageCheck,
-				},
+	// Pod migration is a same-namespace operation: the workload and its PVCs
+	// stay in the source namespace, so staging and the session boundary are
+	// that namespace too.
+	object := &v1alpha1.PodMigration{
+		ObjectMeta: metav1.ObjectMeta{Name: id, Namespace: f.sourceNamespace},
+		Spec: v1alpha1.PodMigrationSpec{
+			Pod:                     v1alpha1.LocalResourceReference{Name: f.podName},
+			PrecopyPasses:           f.precopyPasses,
+			ForceReprovision:        f.forceReprovision,
+			OpenEBSLVMEnableShared:  f.openEBSLVMEnableShared,
+			SwitchoverCandidate:     f.switchoverCandidate,
+			AllowLeaderDowntime:     f.allowLeaderDowntime,
+			AllowPlacementViolation: f.allowPlacementViolation,
+			TransferOptions: v1alpha1.TransferOptions{
+				UnusedStoragePolicy: v1alpha1.UnusedStoragePolicy(
+					f.unusedStoragePolicy,
+				),
+				DestinationStorageClass: f.destinationClass,
+				CapacityAwareness:       f.capacityAwareness,
+				SourceNode:              f.sourceNode,
+				TargetNode:              f.targetNode,
+				Strategies:              append([]string(nil), f.strategies...),
+				VerifyChecksum:          f.verifyChecksum,
+				DeleteExtraneous:        new(f.deleteExtraneous),
+				AllowVolumeShrink:       f.allowVolumeShrink,
+				SkipSourceUsageCheck:    f.skipSourceUsageCheck,
 			},
 		},
 	}
@@ -408,7 +389,7 @@ func (r *rootState) runPodMigrateCommand(
 	ctx, cancel := r.context(cmd.Context())
 	defer cancel()
 
-	object, err := flags.workflow(r, runtime, cmd.Flags().Changed("temporary-namespace"), submit)
+	object, err := flags.workflow(r, runtime, false, submit)
 	if err != nil {
 		return err
 	}
@@ -426,10 +407,6 @@ func (r *rootState) runPodMigrateCommand(
 		}
 	}
 
-	if err != nil {
-		return err
-	}
-
 	if submit && !dryRun {
 		if err := r.confirm(ctx, cmd, podApprovalIdentity(flags)); err != nil {
 			return reportApprovalError(cmd, err)
@@ -440,7 +417,7 @@ func (r *rootState) runPodMigrateCommand(
 		return submitPodMigration(ctx, cmd, runtime, object)
 	}
 
-	plan, err := runtime.planner.PlanPodMigration(ctx, object, r.global.toolImage)
+	plan, err := runtime.planner.PlanNamespacedPodMigration(ctx, object, r.global.toolImage)
 	if err != nil {
 		return reportPlanningError(cmd, err)
 	}
@@ -463,11 +440,11 @@ func (r *rootState) runPodMigrateCommand(
 	}
 
 	object.Status.Phase = domain.PhasePlanned
-	if err := runtime.clusterPodMigrationSessionStore.Create(ctx, object); err != nil {
+	if err := runtime.podMigrationSessionStore.Create(ctx, object); err != nil {
 		return reportPlanningError(cmd, err)
 	}
 
-	if err := runtime.clusterPodMigrationSessionExecutor.Run(ctx, object); err != nil {
+	if err := runtime.podMigrationSessionExecutor.Run(ctx, object); err != nil {
 		return reportPodMigrationError(cmd, object.Name, object.Status.Phase, err)
 	}
 

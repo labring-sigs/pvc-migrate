@@ -26,7 +26,6 @@ func addKnownTypes(scheme *runtime.Scheme) error {
 		&Rename{}, &RenameList{},
 		&BackupRepository{}, &BackupRepositoryList{},
 		&ClusterMigration{}, &ClusterMigrationList{},
-		&ClusterPodMigration{}, &ClusterPodMigrationList{},
 		&ClusterReservation{}, &ClusterReservationList{},
 		&ClusterCopy{}, &ClusterCopyList{},
 		&Move{}, &MoveList{},

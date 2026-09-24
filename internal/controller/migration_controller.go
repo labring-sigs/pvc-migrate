@@ -242,6 +242,7 @@ func migrationWorkflowNamespaces(
 	if plan != nil {
 		return []string{
 			string(plan.SourceNamespace),
+			string(plan.DestinationNamespace),
 			string(plan.TemporaryNamespace),
 			string(plan.SessionNamespace),
 		}
@@ -252,8 +253,14 @@ func migrationWorkflowNamespaces(
 		temporary = spec.SourceNamespace
 	}
 
+	destination := spec.DestinationNamespace
+	if destination == "" {
+		destination = spec.SourceNamespace
+	}
+
 	return []string{
 		string(spec.SourceNamespace),
+		string(destination),
 		string(temporary),
 		migrationWorkflowStorageNamespace(spec, nil),
 	}

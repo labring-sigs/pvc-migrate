@@ -81,6 +81,7 @@ func (m *PodMigrationExecutor) ValidateActivation(
 				m.client,
 				object.Name,
 				binding.SourcePVC,
+				object.Namespace,
 				binding.DestinationPV,
 				qualifiedOptionalReference(status.Activation.ActivePVC, object.Namespace),
 			); err != nil {
@@ -95,6 +96,7 @@ func (m *PodMigrationExecutor) ValidateActivation(
 			m.client,
 			binding.SourcePVC,
 			binding.SourcePV,
+			object.Namespace,
 		)
 		if err != nil {
 			return err
@@ -106,6 +108,7 @@ func (m *PodMigrationExecutor) ValidateActivation(
 				m.client,
 				object.Name,
 				binding.SourcePVC,
+				object.Namespace,
 				binding.DestinationPV,
 				active,
 			); err != nil {
@@ -218,6 +221,7 @@ func (m *PodMigrationExecutor) activate(
 			binding.SourcePVC,
 			binding.SourcePV,
 			binding.DestinationPV,
+			object.Namespace,
 			volume.SourcePVCSpec,
 			volume.SourcePVCMetadata,
 			volume.StorageClass,
@@ -233,6 +237,7 @@ func (m *PodMigrationExecutor) activate(
 			m.client,
 			m.switcher,
 			object.Name,
+			object.Namespace,
 			binding,
 			desired,
 			&checkpoint,
@@ -282,6 +287,7 @@ func (m *PodMigrationExecutor) verifyActiveVolumes(
 			m.client,
 			object.Name,
 			binding.SourcePVC,
+			object.Namespace,
 			binding.DestinationPV,
 			qualifiedOptionalReference(status.Activation.ActivePVC, object.Namespace),
 		); err != nil {

@@ -8,8 +8,29 @@ import (
 	v1alpha1 "github.com/labring-sigs/pvc-migrate/api/v1alpha1"
 	"github.com/labring-sigs/pvc-migrate/internal/copyengine"
 	"github.com/labring-sigs/pvc-migrate/internal/domain"
+	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/client-go/kubernetes"
 	crclient "sigs.k8s.io/controller-runtime/pkg/client"
 )
+
+func installPodWarmSourcePVs(
+	t *testing.T,
+	client kubernetes.Interface,
+	volumes []v1alpha1.VolumeSpec,
+) {
+	t.Helper()
+
+	for _, volume := range volumes {
+		if _, err := client.CoreV1().
+			PersistentVolumes().
+			Create(t.Context(), &corev1.PersistentVolume{
+				ObjectMeta: metav1.ObjectMeta{Name: volume.SourcePV.Name, UID: volume.SourcePV.UID},
+			}, metav1.CreateOptions{}); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
 
 func namespacedPodMigrationWarmFixture(
 	t *testing.T,

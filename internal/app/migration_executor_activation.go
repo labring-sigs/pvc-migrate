@@ -61,6 +61,7 @@ func (m *ClusterMigrationExecutor) ValidateActivation(
 				m.client,
 				object.Name,
 				binding.SourcePVC,
+				string(plan.DestinationNamespace),
 				binding.DestinationPV,
 				status.Activation.ActivePVC,
 			); err != nil {
@@ -75,6 +76,7 @@ func (m *ClusterMigrationExecutor) ValidateActivation(
 			m.client,
 			binding.SourcePVC,
 			binding.SourcePV,
+			string(plan.DestinationNamespace),
 		)
 		if err != nil {
 			return err
@@ -86,6 +88,7 @@ func (m *ClusterMigrationExecutor) ValidateActivation(
 				m.client,
 				object.Name,
 				binding.SourcePVC,
+				string(plan.DestinationNamespace),
 				binding.DestinationPV,
 				active,
 			); err != nil {
@@ -111,7 +114,7 @@ func (m *ClusterMigrationExecutor) ValidateActivation(
 		}
 
 		change, err := migrationActivationAdmission(
-			string(plan.SourceNamespace),
+			string(plan.DestinationNamespace),
 			volume,
 			found && !status.Activation.SourcePVCDeleted,
 		)
@@ -119,7 +122,9 @@ func (m *ClusterMigrationExecutor) ValidateActivation(
 			return err
 		}
 
-		groups[string(plan.SourceNamespace)] = append(groups[string(plan.SourceNamespace)], change)
+		groups[string(plan.DestinationNamespace)] = append(
+			groups[string(plan.DestinationNamespace)], change,
+		)
 		offline = append(offline, binding)
 	}
 
@@ -180,6 +185,7 @@ func (m *ClusterMigrationExecutor) activate(
 			binding.SourcePVC,
 			binding.SourcePV,
 			binding.DestinationPV,
+			string(plan.DestinationNamespace),
 			volume.SourcePVCSpec,
 			volume.SourcePVCMetadata,
 			volume.StorageClass,
@@ -194,6 +200,7 @@ func (m *ClusterMigrationExecutor) activate(
 			m.client,
 			m.switcher,
 			object.Name,
+			string(plan.DestinationNamespace),
 			binding,
 			desired,
 			&status.Activation,
@@ -226,6 +233,7 @@ func (m *ClusterMigrationExecutor) verifyActiveVolumes(
 			m.client,
 			object.Name,
 			binding.SourcePVC,
+			string(plan.DestinationNamespace),
 			binding.DestinationPV,
 			status.Activation.ActivePVC,
 		); err != nil {

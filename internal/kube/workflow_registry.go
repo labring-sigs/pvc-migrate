@@ -49,12 +49,6 @@ func workflowCRDResourceRegistry() []crdResource {
 			newList: func() crclient.ObjectList { return &v1alpha1.PodMigrationList{} },
 		},
 		{
-			kind:    domain.ControllerKindClusterPodMigration,
-			cluster: true,
-			new:     func() crclient.Object { return &v1alpha1.ClusterPodMigration{} },
-			newList: func() crclient.ObjectList { return &v1alpha1.ClusterPodMigrationList{} },
-		},
-		{
 			kind:    domain.ControllerKindReservation,
 			new:     func() crclient.Object { return &v1alpha1.Reservation{} },
 			newList: func() crclient.ObjectList { return &v1alpha1.ReservationList{} },
@@ -139,8 +133,6 @@ func workflowKind(object crclient.Object) domain.ControllerKind {
 		return domain.ControllerKindClusterMigration
 	case *v1alpha1.PodMigration:
 		return domain.ControllerKindPodMigration
-	case *v1alpha1.ClusterPodMigration:
-		return domain.ControllerKindClusterPodMigration
 	case *v1alpha1.Reservation:
 		return domain.ControllerKindReservation
 	case *v1alpha1.ClusterReservation:

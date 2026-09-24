@@ -24,8 +24,9 @@ func podWorkload(
 ) v1alpha1.WorkloadSpec {
 	workload := plan.DeepCopy()
 	if checkpoint != nil {
-		// Checkpointed pause-probe outcomes win over the plan; see
-		// clusterPodWorkload.
+		// The pause-probe outcomes (e.g. whether the VMCluster CRD kept the
+		// per-component paused field) live in the durable checkpoint, not in
+		// the plan; the checkpoint always wins.
 		if checkpoint.VMCluster != nil {
 			workload.VMCluster = checkpoint.VMCluster.DeepCopy()
 		}
@@ -38,57 +39,4 @@ func podWorkload(
 	}
 
 	return *workload
-}
-
-func clusterPodWorkload(
-	plan v1alpha1.WorkloadSpec,
-	checkpoint *v1alpha1.ClusterPodMigrationWorkloadStatus,
-) v1alpha1.WorkloadSpec {
-	workload := plan.DeepCopy()
-	if checkpoint != nil {
-		// The pause-probe outcomes (e.g. whether the VMCluster CRD kept the
-		// per-component paused field) live in the durable checkpoint, not in
-		// the plan; the checkpoint always wins.
-		if checkpoint.VMCluster != nil {
-			workload.VMCluster = checkpoint.VMCluster.DeepCopy()
-		}
-
-		if checkpoint.Pod != nil {
-			workload.Pod = localResourceReference(*checkpoint.Pod)
-		}
-
-		workload.AffectedPods = make(
-			[]v1alpha1.LocalResourceReference,
-			len(checkpoint.AffectedPods),
-		)
-		for i, pod := range checkpoint.AffectedPods {
-			workload.AffectedPods[i] = *localResourceReference(pod)
-		}
-	}
-
-	return *workload
-}
-
-func qualifiedPodWorkloadCheckpoint(
-	checkpoint *v1alpha1.PodMigrationWorkloadStatus,
-	namespace string,
-) *v1alpha1.ClusterPodMigrationWorkloadStatus {
-	if checkpoint == nil {
-		return nil
-	}
-
-	result := &v1alpha1.ClusterPodMigrationWorkloadStatus{}
-	if checkpoint.Pod != nil {
-		pod := qualifiedResourceReference(*checkpoint.Pod, namespace)
-		result.Pod = &pod
-	}
-
-	if checkpoint.AffectedPods != nil {
-		result.AffectedPods = make([]v1alpha1.ObjectReference, len(checkpoint.AffectedPods))
-		for i, pod := range checkpoint.AffectedPods {
-			result.AffectedPods[i] = qualifiedResourceReference(pod, namespace)
-		}
-	}
-
-	return result
 }

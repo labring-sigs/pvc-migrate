@@ -101,12 +101,14 @@ mode flag:
   controller. The CLI defaults to namespaced kinds for tenant-local work and
   selects a `Cluster*` kind when namespace roles differ. Cluster-scoped kinds
   also accept same-namespace roles, which is useful for an administrator
-  submitting a workflow with cluster-level authority. Pod migration with
-  administrator-selected temporary or session namespaces uses
-  `ClusterPodMigration` while keeping the workload and PVC identities in the
-  source namespace. PVC identity moves always use the cluster-scoped `Move`.
-  Backup, restore, and rename intentionally have no cluster-scoped form.
-  Cross-cluster workflows remain on the ConfigMap/session backend. The
+  submitting a workflow with cluster-level authority. Pod migration is a
+  same-namespace operation by design — a workload cannot be recreated in
+  another namespace — so `PodMigration` has no cluster-scoped form and runs
+  entirely in the pod's namespace. A `ClusterMigration` may set
+  `destinationNamespace` to move a quiesced PVC into another namespace while
+  switching its storage. PVC identity moves always use the cluster-scoped
+  `Move`. Backup, restore, and rename intentionally have no cluster-scoped
+  form. Cross-cluster workflows remain on the ConfigMap/session backend. The
   controller uses leader election, watches every installed workflow kind, and
   reuses the same resumable state machine. `create` defaults to printing the
   workflow it would submit; pass `--dry-run=false` to submit. A command fails

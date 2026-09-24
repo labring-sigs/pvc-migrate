@@ -52,7 +52,7 @@ func TestNamespacedPodMigrationOwnsPlanAndScope(t *testing.T) {
 	p, cluster := podMigrationPlanFixture(t)
 	object := &v1alpha1.PodMigration{
 		ObjectMeta: metav1.ObjectMeta{Name: "migration", Namespace: "app"},
-		Spec:       *cluster.Spec.PodMigrationSpec.DeepCopy(),
+		Spec:       *cluster.Spec.DeepCopy(),
 	}
 	before := object.Spec.DeepCopy()
 

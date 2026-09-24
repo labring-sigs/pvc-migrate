@@ -30,9 +30,9 @@ func TestExecutionFingerprintTracksOnlyExecutionInputs(t *testing.T) {
 			}
 		},
 	)
-	assertExecutionFingerprint(t, &v1alpha1.ClusterPodMigration{},
-		func(o *v1alpha1.ClusterPodMigration) { o.Spec.TemporaryNamespace = "other" },
-		func(o *v1alpha1.ClusterPodMigration) { o.Spec.UnusedStoragePolicy = "Delete" },
+	assertExecutionFingerprint(t, &v1alpha1.ClusterMigration{},
+		func(o *v1alpha1.ClusterMigration) { o.Spec.DestinationNamespace = "other" },
+		func(o *v1alpha1.ClusterMigration) { o.Spec.UnusedStoragePolicy = "Delete" },
 	)
 	assertExecutionFingerprint(t, &v1alpha1.Copy{},
 		func(o *v1alpha1.Copy) { o.Spec.Online = true },

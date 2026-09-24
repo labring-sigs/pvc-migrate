@@ -46,88 +46,64 @@ func TestRepositoryBindingRetriesFailedCheckpoint(t *testing.T) {
 }
 
 func TestRepositoryBindingRejectsIdentityDrift(t *testing.T) {
-	for _, backend := range []v1alpha1.BackupRepositoryType{v1alpha1.BackupRepositoryTypeS3, v1alpha1.BackupRepositoryTypePVC} {
-		t.Run(string(backend), func(t *testing.T) {
-			requested := &v1alpha1.BackupRepositoryBindingStatus{
-				Type:       backend,
-				UID:        "repository",
-				Generation: 1,
+	requested := &v1alpha1.BackupRepositoryBindingStatus{
+		Type: v1alpha1.BackupRepositoryTypeS3,
+		UID:  "repository",
+		S3: &v1alpha1.S3BackupRepositoryBindingStatus{
+			CredentialsSecretUID: "credentials",
+		},
+		Generation: 1,
+	}
+
+	object := plannedBackupObject()
+	status := &object.Status
+	store := &backupCheckpointStore{object: object.DeepCopy()}
+
+	save := func(ctx context.Context) error { return store.Save(ctx, object) }
+	for range 2 {
+		if err := PinRepository(
+			t.Context(),
+			requested,
+			&status.Repository,
+			save,
+		); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	if store.writes != 1 || !reflect.DeepEqual(store.object.Status.Repository, requested) {
+		t.Fatalf(
+			"binding was not pinned once: writes=%d binding=%+v",
+			store.writes,
+			status.Repository,
+		)
+	}
+
+	for _, field := range []string{"generation", "repository UID", "storage UID"} {
+		t.Run(field, func(t *testing.T) {
+			changed := requested.DeepCopy()
+			switch field {
+			case "generation":
+				changed.Generation++
+			case "repository UID":
+				changed.UID = "replacement"
+			case "storage UID":
+				changed.S3.CredentialsSecretUID = "replacement"
 			}
-			if backend == v1alpha1.BackupRepositoryTypeS3 {
-				requested.S3 = &v1alpha1.S3BackupRepositoryBindingStatus{
-					CredentialsSecretUID: "credentials",
-				}
-			} else {
-				requested.PVC = &v1alpha1.PVCBackupRepositoryBindingStatus{ClaimUID: "claim"}
+
+			if err := PinRepository(
+				t.Context(),
+				changed,
+				&status.Repository,
+				save,
+			); domain.CategoryOf(
+				err,
+			) != domain.ErrorConflict {
+				t.Fatalf("identity drift was accepted: %v", err)
 			}
 
-			object := plannedBackupObject()
-			status := &object.Status
-			store := &backupCheckpointStore{object: object.DeepCopy()}
-
-			save := func(ctx context.Context) error { return store.Save(ctx, object) }
-			for range 2 {
-				if err := PinRepository(
-					t.Context(),
-					requested,
-					&status.Repository,
-					save,
-				); err != nil {
-					t.Fatal(err)
-				}
-			}
-
-			if store.writes != 1 || !reflect.DeepEqual(store.object.Status.Repository, requested) {
-				t.Fatalf(
-					"binding was not pinned once: writes=%d binding=%+v",
-					store.writes,
-					status.Repository,
-				)
-			}
-
-			for _, field := range []string{"generation", "repository UID", "storage UID", "backend"} {
-				t.Run(field, func(t *testing.T) {
-					changed := requested.DeepCopy()
-					switch field {
-					case "generation":
-						changed.Generation++
-					case "repository UID":
-						changed.UID = "replacement"
-					case "storage UID":
-						if changed.S3 != nil {
-							changed.S3.CredentialsSecretUID = "replacement"
-						} else {
-							changed.PVC.ClaimUID = "replacement"
-						}
-					case "backend":
-						if changed.S3 != nil {
-							changed.Type, changed.S3 = v1alpha1.BackupRepositoryTypePVC, nil
-							changed.PVC = &v1alpha1.PVCBackupRepositoryBindingStatus{
-								ClaimUID: "claim",
-							}
-						} else {
-							changed.Type, changed.PVC = v1alpha1.BackupRepositoryTypeS3, nil
-							changed.S3 = &v1alpha1.S3BackupRepositoryBindingStatus{
-								CredentialsSecretUID: "credentials",
-							}
-						}
-					}
-
-					if err := PinRepository(
-						t.Context(),
-						changed,
-						&status.Repository,
-						save,
-					); domain.CategoryOf(
-						err,
-					) != domain.ErrorConflict {
-						t.Fatalf("identity drift was accepted: %v", err)
-					}
-
-					if store.writes != 1 || !reflect.DeepEqual(status.Repository, requested) {
-						t.Fatal("identity drift changed durable binding")
-					}
-				})
+			if store.writes != 1 || !reflect.DeepEqual(status.Repository, requested) {
+				t.Fatal("identity drift changed durable binding")
 			}
 		})
 	}

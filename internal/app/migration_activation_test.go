@@ -15,6 +15,7 @@ type activationSteps func(*v1alpha1.ClusterVolumeActivationStatus, kube.Progress
 func (f activationSteps) ActivatePVC(
 	_ context.Context,
 	_ string,
+	_ string,
 	_ kube.PVCTransferBindings,
 	_ *corev1.PersistentVolumeClaim,
 	status *v1alpha1.ClusterVolumeActivationStatus,
@@ -52,7 +53,7 @@ func TestMigrationActivationRetainsOnlySavedCheckpoints(t *testing.T) {
 		},
 	)
 
-	err := activateMigrationVolume(t.Context(), nil, steps, "migration",
+	err := activateMigrationVolume(t.Context(), nil, steps, "migration", "app",
 		kube.PVCTransferBindings{}, nil, &status, func(context.Context) error {
 			writes++
 			if writes == 2 {

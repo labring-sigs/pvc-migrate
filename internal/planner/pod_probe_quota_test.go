@@ -15,7 +15,6 @@ func TestPodPrecopyControlsConcurrentProbeQuota(t *testing.T) {
 			map[int]string{0: "final sync only", 1: "warm and final sync"}[passes],
 			func(t *testing.T) {
 				p, object := podMigrationPlanFixture(t)
-				object.Spec.TemporaryNamespace = "app"
 				object.Spec.Strategies = []string{domain.StrategyMount}
 				object.Spec.ForceReprovision = true
 				object.Spec.PrecopyPasses = passes
@@ -53,7 +52,7 @@ func TestPodPrecopyControlsConcurrentProbeQuota(t *testing.T) {
 					t.Fatal(err)
 				}
 
-				report, err := p.PlanPodMigration(t.Context(), object, "")
+				report, err := p.PlanNamespacedPodMigration(t.Context(), object, "")
 				if err != nil {
 					t.Fatal(err)
 				}

@@ -13,13 +13,17 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
+// activePVC probes the claim location the activated PVC occupies. Same-namespace
+// workflows pass the source namespace, so the original claim and its activated
+// replacement share one probe; cross-namespace workflows pass the destination.
 func (s *Switcher) activePVC(
 	ctx context.Context,
 	sessionID string,
+	activateNamespace string,
 	sourcePVC, sourcePV, destinationPV v1alpha1.ObjectReference,
 ) (*corev1.PersistentVolumeClaim, error) {
 	pvc, err := s.client.CoreV1().
-		PersistentVolumeClaims(sourcePVC.Namespace).
+		PersistentVolumeClaims(activateNamespace).
 		Get(ctx, sourcePVC.Name, metav1.GetOptions{})
 	if apierrors.IsNotFound(err) {
 		return nil, nil

@@ -19,24 +19,20 @@ func TestPodMigrationSpecDoesNotReadWorkloadSnapshots(t *testing.T) {
 			},
 		}},
 	}
-	for _, spec := range []any{object.Spec, v1alpha1.ClusterPodMigrationSpec{
-		SourceNamespace: "app", TemporaryNamespace: "app", SessionNamespace: "app",
-		PodMigrationSpec: object.Spec,
-	}} {
-		encoded, err := json.Marshal(spec)
-		if err != nil {
-			t.Fatal(err)
-		}
 
-		var fields map[string]json.RawMessage
-		if err := json.Unmarshal(encoded, &fields); err != nil {
-			t.Fatal(err)
-		}
+	encoded, err := json.Marshal(object.Spec)
+	if err != nil {
+		t.Fatal(err)
+	}
 
-		if fields["workload"] != nil || fields["originalObject"] != nil ||
-			string(fields["precopyPasses"]) != "0" {
-			t.Fatalf("spec crossed snapshot boundary: %s", encoded)
-		}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(encoded, &fields); err != nil {
+		t.Fatal(err)
+	}
+
+	if fields["workload"] != nil || fields["originalObject"] != nil ||
+		string(fields["precopyPasses"]) != "0" {
+		t.Fatalf("spec crossed snapshot boundary: %s", encoded)
 	}
 }
 

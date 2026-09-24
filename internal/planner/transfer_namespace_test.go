@@ -23,13 +23,10 @@ func TestTransferPlannerDefaultsMatchCRDNamespaces(t *testing.T) {
 			temporary string
 		}{
 			{"pod migration", func() (*domain.TransferPlan, error) {
-				return p.PlanPodMigration(t.Context(), &v1alpha1.ClusterPodMigration{
-					ObjectMeta: metav1.ObjectMeta{Name: "pod-migration"},
-					Spec: v1alpha1.ClusterPodMigrationSpec{
-						SourceNamespace: "app",
-						PodMigrationSpec: v1alpha1.PodMigrationSpec{
-							Pod: v1alpha1.LocalResourceReference{Name: "database"},
-						},
+				return p.PlanNamespacedPodMigration(t.Context(), &v1alpha1.PodMigration{
+					ObjectMeta: metav1.ObjectMeta{Name: "pod-migration", Namespace: "app"},
+					Spec: v1alpha1.PodMigrationSpec{
+						Pod: v1alpha1.LocalResourceReference{Name: "database"},
 					},
 				}, "")
 			}, "app"},

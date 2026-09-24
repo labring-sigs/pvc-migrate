@@ -330,34 +330,26 @@ func TestSaveCLIPlannedWorkflowFreezesExecutionIntent(t *testing.T) {
 	}
 }
 
-func TestPodMigrationStatusListsClusterScopedSessionObjects(t *testing.T) {
+func TestPodMigrationStatusListsSessionObjects(t *testing.T) {
 	clients := newWorkflowLookupRuntime(t)
-	object := &v1alpha1.ClusterPodMigration{
+	object := &v1alpha1.PodMigration{
 		TypeMeta: metav1.TypeMeta{
 			APIVersion: v1alpha1.GroupVersion.String(),
-			Kind:       "ClusterPodMigration",
+			Kind:       "PodMigration",
 		},
-		ObjectMeta: metav1.ObjectMeta{Name: "pod-migration-1"},
+		ObjectMeta: metav1.ObjectMeta{Name: "pod-migration-1", Namespace: "app"},
 	}
 
 	sessionStore, err := kube.NewConfigMapWorkflowStore(
 		clients.clients.Kubernetes,
 		"sessions",
-		func() *v1alpha1.ClusterPodMigration { return &v1alpha1.ClusterPodMigration{} },
+		func() *v1alpha1.PodMigration { return &v1alpha1.PodMigration{} },
 	)
 	if err != nil {
 		t.Fatal(err)
 	}
 
 	if err := sessionStore.Create(t.Context(), object); err != nil {
-		t.Fatal(err)
-	}
-
-	clusterStore, err := kube.NewCRDWorkflowStore(
-		clients.clients.Runtime,
-		func() *v1alpha1.ClusterPodMigration { return &v1alpha1.ClusterPodMigration{} },
-	)
-	if err != nil {
 		t.Fatal(err)
 	}
 
@@ -375,11 +367,10 @@ func TestPodMigrationStatusListsClusterScopedSessionObjects(t *testing.T) {
 		Out: &stdout, ErrOut: io.Discard,
 		runtimeFactory: func(state *rootState) (*commandRuntime, error) {
 			return &commandRuntime{
-				clients:                         clients.clients,
-				printer:                         printerFor(state),
-				clusterPodMigrationSessionStore: sessionStore,
-				clusterPodMigrationStore:        clusterStore,
-				podMigrationStore:               namespacedStore,
+				clients:                  clients.clients,
+				printer:                  printerFor(state),
+				podMigrationSessionStore: sessionStore,
+				podMigrationStore:        namespacedStore,
 			}, nil
 		},
 	})
@@ -389,12 +380,12 @@ func TestPodMigrationStatusListsClusterScopedSessionObjects(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	var listed []v1alpha1.ClusterPodMigration
+	var listed []v1alpha1.PodMigration
 	if err := json.Unmarshal(stdout.Bytes(), &listed); err != nil {
 		t.Fatal(err)
 	}
 
 	if len(listed) != 1 || listed[0].Name != object.Name {
-		t.Fatalf("status list = %#v, want one cluster session %q", listed, object.Name)
+		t.Fatalf("status list = %#v, want one session %q", listed, object.Name)
 	}
 }

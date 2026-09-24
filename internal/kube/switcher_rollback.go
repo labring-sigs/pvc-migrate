@@ -13,9 +13,12 @@ import (
 )
 
 // RollbackPVC restores the recorded source binding using an operation-owned manifest.
+// activateNamespace is where the activated claim landed; cross-namespace
+// workflows must retire it there before the source binding is restored.
 func (s *Switcher) RollbackPVC(
 	ctx context.Context,
 	sessionID string,
+	activateNamespace string,
 	volume PVCTransferBindings,
 	desired *corev1.PersistentVolumeClaim,
 	status *v1alpha1.ClusterVolumeActivationStatus,
@@ -30,6 +33,26 @@ func (s *Switcher) RollbackPVC(
 	}
 
 	manifest := desired.DeepCopy()
+
+	if activateNamespace != volume.SourcePVC.Namespace {
+		active, err := s.client.CoreV1().
+			PersistentVolumeClaims(activateNamespace).
+			Get(ctx, volume.SourcePVC.Name, metav1.GetOptions{})
+		if err != nil && !apierrors.IsNotFound(err) {
+			return domain.WrapError(
+				domain.ErrorKubernetes,
+				"rollback volume",
+				fmt.Sprintf("read PVC %s/%s", activateNamespace, volume.SourcePVC.Name),
+				err,
+			)
+		}
+
+		if err == nil {
+			if err := s.removeActiveDestination(ctx, sessionID, volume, active); err != nil {
+				return err
+			}
+		}
+	}
 
 	if err := s.ensureNoConsumers(
 		ctx,

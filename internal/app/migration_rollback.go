@@ -9,8 +9,14 @@ import (
 )
 
 type migrationRollbacker interface {
-	RollbackPVC(ctx context.Context, workflowID string, bindings kube.PVCTransferBindings,
-		desired *corev1.PersistentVolumeClaim, status *v1alpha1.ClusterVolumeActivationStatus, progress kube.ProgressFunc) error
+	RollbackPVC(
+		ctx context.Context,
+		workflowID, activateNamespace string,
+		bindings kube.PVCTransferBindings,
+		desired *corev1.PersistentVolumeClaim,
+		status *v1alpha1.ClusterVolumeActivationStatus,
+		progress kube.ProgressFunc,
+	) error
 }
 
 // rollbackMigrationVolume publishes only saved checkpoints. In particular, a
@@ -18,7 +24,7 @@ type migrationRollbacker interface {
 func rollbackMigrationVolume(
 	ctx context.Context,
 	switcher migrationRollbacker,
-	workflowID string,
+	workflowID, activateNamespace string,
 	bindings kube.PVCTransferBindings,
 	desired *corev1.PersistentVolumeClaim,
 	status *v1alpha1.ClusterVolumeActivationStatus,
@@ -26,15 +32,23 @@ func rollbackMigrationVolume(
 ) error {
 	checkpoint := status.DeepCopy()
 
-	return switcher.RollbackPVC(ctx, workflowID, bindings, desired, checkpoint, func() error {
-		previous := status.DeepCopy()
+	return switcher.RollbackPVC(
+		ctx,
+		workflowID,
+		activateNamespace,
+		bindings,
+		desired,
+		checkpoint,
+		func() error {
+			previous := status.DeepCopy()
 
-		*status = *checkpoint.DeepCopy()
-		if err := persistCheckpoint(ctx, save); err != nil {
-			*status = *previous
-			return err
-		}
+			*status = *checkpoint.DeepCopy()
+			if err := persistCheckpoint(ctx, save); err != nil {
+				*status = *previous
+				return err
+			}
 
-		return nil
-	})
+			return nil
+		},
+	)
 }

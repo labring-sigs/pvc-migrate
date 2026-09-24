@@ -3,6 +3,7 @@ package controller
 import (
 	"context"
 	"errors"
+	"slices"
 	"testing"
 
 	v1alpha1 "github.com/labring-sigs/pvc-migrate/api/v1alpha1"
@@ -191,4 +192,33 @@ func TestMigrationControllerDeletesUnplannedCRDWithoutLegacyService(t *testing.T
 	) {
 		t.Fatalf("CRD still exists: %v", err)
 	}
+}
+
+func TestMigrationWorkflowNamespacesIncludeDestination(t *testing.T) {
+	spec := v1alpha1.ClusterMigrationSpec{
+		SourceNamespace:      "source",
+		DestinationNamespace: "landing",
+		TemporaryNamespace:   "temporary",
+		SessionNamespace:     "sessions",
+	}
+
+	assertContains := func(namespaces []string) {
+		t.Helper()
+
+		if !slices.Contains(namespaces, "landing") {
+			t.Fatalf("destination namespace missing from collision scope: %v", namespaces)
+		}
+	}
+
+	assertContains(migrationWorkflowNamespaces(spec, nil))
+
+	assertContains(migrationWorkflowNamespaces(
+		v1alpha1.ClusterMigrationSpec{SourceNamespace: "source"},
+		&v1alpha1.ClusterMigrationPlan{
+			SourceNamespace:      "source",
+			DestinationNamespace: "landing",
+			TemporaryNamespace:   "source",
+			SessionNamespace:     "source",
+		},
+	))
 }

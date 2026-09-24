@@ -37,25 +37,16 @@ func (r *rootState) newPodMigrationStatusCommand() *cobra.Command {
 				return runtime.printer.Print(object)
 			}
 
-			// ClusterPodMigration is cluster-scoped. Its ConfigMap-backed
-			// session object has no resource namespace; the configured namespace
-			// is only the ConfigMap storage location and must not filter objects.
-			sessions, err := runtime.clusterPodMigrationSessionStore.List(ctx, "")
+			// Session ConfigMaps persist PodMigration objects whose
+			// metadata.namespace is the tenant namespace; the configured
+			// session namespace is only the ConfigMap storage location.
+			sessions, err := runtime.podMigrationSessionStore.List(ctx, "")
 			if err != nil {
 				return err
 			}
 
-			objects, err := runtime.clusterPodMigrationStore.List(ctx, "")
-			if err != nil {
-				return err
-			}
-
-			list := make([]crclient.Object, 0, len(sessions)+len(objects))
+			list := make([]crclient.Object, 0, len(sessions))
 			for _, object := range sessions {
-				list = append(list, object)
-			}
-
-			for _, object := range objects {
 				list = append(list, object)
 			}
 
@@ -297,8 +288,8 @@ func (r *rootState) loadPodMigration(
 	runtime *commandRuntime,
 	name string,
 ) (crclient.Object, *podMigrationDispatch, error) {
-	if runtime == nil || runtime.clusterPodMigrationStore == nil ||
-		runtime.clusterPodMigrationSessionStore == nil {
+	if runtime == nil || runtime.podMigrationStore == nil ||
+		runtime.podMigrationSessionStore == nil {
 		return nil, nil, domain.NewError(
 			domain.ErrorInternal,
 			"pod migration",
@@ -306,68 +297,37 @@ func (r *rootState) loadPodMigration(
 		)
 	}
 
+	bindDispatch := func(
+		object *v1alpha1.PodMigration,
+		executor *app.PodMigrationExecutor,
+	) *podMigrationDispatch {
+		return &podMigrationDispatch{
+			object:           object,
+			validate:         func(ctx context.Context) error { return executor.Validate(ctx, object) },
+			validateAbort:    func(ctx context.Context) error { return executor.ValidateAbort(ctx, object) },
+			validateRollback: func(ctx context.Context) error { return executor.ValidateRollback(ctx, object) },
+			validateCleanup: func(ctx context.Context, options app.MigrationCleanupOptions) error {
+				return executor.ValidateCleanup(ctx, object, options)
+			},
+			requestResume: func(ctx context.Context) error { return executor.RequestResume(ctx, object) },
+			run:           func(ctx context.Context) error { return executor.Run(ctx, object) },
+			abort:         func(ctx context.Context) error { return executor.Abort(ctx, object) },
+			rollback:      func(ctx context.Context) error { return executor.Rollback(ctx, object) },
+			cleanup: func(ctx context.Context, options app.MigrationCleanupOptions) error {
+				return executor.Cleanup(ctx, object, options)
+			},
+		}
+	}
+
 	key := crclient.ObjectKey{Name: name}
 
-	object, err := runtime.clusterPodMigrationSessionStore.Load(ctx, key)
+	object, err := runtime.podMigrationSessionStore.Load(ctx, key)
 	if err == nil {
-		executor := runtime.clusterPodMigrationSessionExecutor
-
-		return object, &podMigrationDispatch{
-			object:           object,
-			validate:         func(ctx context.Context) error { return executor.Validate(ctx, object) },
-			validateAbort:    func(ctx context.Context) error { return executor.ValidateAbort(ctx, object) },
-			validateRollback: func(ctx context.Context) error { return executor.ValidateRollback(ctx, object) },
-			validateCleanup: func(ctx context.Context, options app.MigrationCleanupOptions) error {
-				return executor.ValidateCleanup(ctx, object, options)
-			},
-			requestResume: func(ctx context.Context) error { return executor.RequestResume(ctx, object) },
-			run:           func(ctx context.Context) error { return executor.Run(ctx, object) },
-			abort:         func(ctx context.Context) error { return executor.Abort(ctx, object) },
-			rollback:      func(ctx context.Context) error { return executor.Rollback(ctx, object) },
-			cleanup: func(ctx context.Context, options app.MigrationCleanupOptions) error {
-				return executor.Cleanup(ctx, object, options)
-			},
-		}, nil
+		return object, bindDispatch(object, runtime.podMigrationSessionExecutor), nil
 	}
 
 	if !apierrors.IsNotFound(err) {
 		return nil, nil, err
-	}
-
-	object, err = runtime.clusterPodMigrationStore.Load(ctx, key)
-	if err == nil {
-		executor := runtime.clusterPodMigrationExecutor
-
-		return object, &podMigrationDispatch{
-			object:           object,
-			validate:         func(ctx context.Context) error { return executor.Validate(ctx, object) },
-			validateAbort:    func(ctx context.Context) error { return executor.ValidateAbort(ctx, object) },
-			validateRollback: func(ctx context.Context) error { return executor.ValidateRollback(ctx, object) },
-			validateCleanup: func(ctx context.Context, options app.MigrationCleanupOptions) error {
-				return executor.ValidateCleanup(ctx, object, options)
-			},
-			requestResume: func(ctx context.Context) error { return executor.RequestResume(ctx, object) },
-			run:           func(ctx context.Context) error { return executor.Run(ctx, object) },
-			abort:         func(ctx context.Context) error { return executor.Abort(ctx, object) },
-			rollback:      func(ctx context.Context) error { return executor.Rollback(ctx, object) },
-			cleanup: func(ctx context.Context, options app.MigrationCleanupOptions) error {
-				return executor.Cleanup(ctx, object, options)
-			},
-		}, nil
-	}
-
-	if !apierrors.IsNotFound(err) {
-		return nil, nil, err
-	}
-
-	if runtime.podMigrationStore == nil {
-		return nil, nil, apierrors.NewNotFound(
-			schema.GroupResource{
-				Group:    v1alpha1.GroupVersion.Group,
-				Resource: "clusterpodmigrations",
-			},
-			name,
-		)
 	}
 
 	for _, namespace := range r.podMigrationProbeNamespaces(nil) {
@@ -382,24 +342,7 @@ func (r *rootState) loadPodMigration(
 			return nil, nil, nsErr
 		}
 
-		executor := runtime.podMigrationExecutor
-
-		return namespaced, &podMigrationDispatch{
-			object:           namespaced,
-			validate:         func(ctx context.Context) error { return executor.Validate(ctx, namespaced) },
-			validateAbort:    func(ctx context.Context) error { return executor.ValidateAbort(ctx, namespaced) },
-			validateRollback: func(ctx context.Context) error { return executor.ValidateRollback(ctx, namespaced) },
-			validateCleanup: func(ctx context.Context, options app.MigrationCleanupOptions) error {
-				return executor.ValidateCleanup(ctx, namespaced, options)
-			},
-			requestResume: func(ctx context.Context) error { return executor.RequestResume(ctx, namespaced) },
-			run:           func(ctx context.Context) error { return executor.Run(ctx, namespaced) },
-			abort:         func(ctx context.Context) error { return executor.Abort(ctx, namespaced) },
-			rollback:      func(ctx context.Context) error { return executor.Rollback(ctx, namespaced) },
-			cleanup: func(ctx context.Context, options app.MigrationCleanupOptions) error {
-				return executor.Cleanup(ctx, namespaced, options)
-			},
-		}, nil
+		return namespaced, bindDispatch(namespaced, runtime.podMigrationExecutor), nil
 	}
 
 	return nil, nil, apierrors.NewNotFound(

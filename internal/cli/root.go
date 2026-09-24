@@ -82,15 +82,13 @@ type commandRuntime struct {
 	// result from test and injected runtimes that do not provide discovery
 	// metadata. Session-backed commands remain usable when no workflow CRD is
 	// installed; controller-backed commands still require an advertised kind.
-	controllerDiscoveryComplete        bool
-	waitForController                  bool
-	clusterPodMigrationStore           kube.WorkflowStore[*v1alpha1.ClusterPodMigration]
-	clusterPodMigrationExecutor        *app.ClusterPodMigrationExecutor
-	clusterPodMigrationSessionStore    kube.WorkflowStore[*v1alpha1.ClusterPodMigration]
-	clusterPodMigrationSessionExecutor *app.ClusterPodMigrationExecutor
-	podMigrationStore                  kube.WorkflowStore[*v1alpha1.PodMigration]
-	podMigrationExecutor               *app.PodMigrationExecutor
-	orphanCleaner                      *app.OrphanCleaner
+	controllerDiscoveryComplete bool
+	waitForController           bool
+	podMigrationSessionStore    kube.WorkflowStore[*v1alpha1.PodMigration]
+	podMigrationSessionExecutor *app.PodMigrationExecutor
+	podMigrationStore           kube.WorkflowStore[*v1alpha1.PodMigration]
+	podMigrationExecutor        *app.PodMigrationExecutor
+	orphanCleaner               *app.OrphanCleaner
 }
 
 func NewRoot(options Options) *cobra.Command {
@@ -335,15 +333,7 @@ func (r *rootState) runtime() (*commandRuntime, error) {
 
 	controllerKinds := kube.AvailableControllerWorkflowKinds(clients.Discovery)
 
-	clusterPodMigrationStore, err := kube.NewCRDWorkflowStore(
-		clients.Runtime,
-		func() *v1alpha1.ClusterPodMigration { return &v1alpha1.ClusterPodMigration{} },
-	)
-	if err != nil {
-		return nil, err
-	}
-
-	clusterPodMigrationLocker := kube.NewCRDWorkflowLocker(clients.Kubernetes)
+	podMigrationLocker := kube.NewCRDWorkflowLocker(clients.Kubernetes)
 
 	openEBSLVMSharedVolumeManager := kube.NewOpenEBSLVMSharedVolumeManager(
 		clients.Kubernetes,
@@ -390,32 +380,24 @@ func (r *rootState) runtime() (*commandRuntime, error) {
 		}
 	}
 
-	clusterPodMigrationExecutor := app.NewClusterPodMigrationExecutor(
-		clients.Kubernetes,
-		clusterPodMigrationStore,
-		clusterPodMigrationLocker,
-		r.global.sessionNamespace,
-		copyengine.NewPVMigrate(),
-		podMigrationExecutorConfig(),
-	)
-
-	// Session-side migrate-pod persists the concrete CRD in a ConfigMap: the
-	// CLI session path never creates workflow CRs, so the executor is bound to
-	// the ConfigMap store with the matching locker.
-	clusterPodMigrationSessionStore, err := kube.NewConfigMapWorkflowStore(
+	// Session-side migrate-pod persists the concrete CRD type in a ConfigMap:
+	// the CLI session path never creates workflow CRs, so the executor is
+	// bound to the ConfigMap store with the matching locker. The session's
+	// PodMigration carries its tenant namespace in metadata.namespace; leases
+	// for local runs live in that namespace next to the workload.
+	podMigrationSessionStore, err := kube.NewConfigMapWorkflowStore(
 		clients.Kubernetes,
 		r.global.sessionNamespace,
-		func() *v1alpha1.ClusterPodMigration { return &v1alpha1.ClusterPodMigration{} },
+		func() *v1alpha1.PodMigration { return &v1alpha1.PodMigration{} },
 	)
 	if err != nil {
 		return nil, err
 	}
 
-	clusterPodMigrationSessionExecutor := app.NewClusterPodMigrationExecutor(
+	podMigrationSessionExecutor := app.NewPodMigrationExecutor(
 		clients.Kubernetes,
-		clusterPodMigrationSessionStore,
+		podMigrationSessionStore,
 		kube.NewConfigMapWorkflowLocker(clients.Kubernetes),
-		r.global.sessionNamespace,
 		copyengine.NewPVMigrate(),
 		podMigrationExecutorConfig(),
 	)
@@ -433,14 +415,14 @@ func (r *rootState) runtime() (*commandRuntime, error) {
 	podMigrationExecutor := app.NewPodMigrationExecutor(
 		clients.Kubernetes,
 		podMigrationStore,
-		clusterPodMigrationLocker,
+		podMigrationLocker,
 		copyengine.NewPVMigrate(),
 		podMigrationExecutorConfig(),
 	)
 
 	orphanCleaner := app.NewOrphanCleaner(
 		clients.Kubernetes,
-		clusterPodMigrationLocker,
+		podMigrationLocker,
 		kube.NewCRDWorkflowLeaseCleaner(clients.Kubernetes),
 		kube.NewCompositeWorkflowOwnerFinder(
 			kube.NewCRDWorkflowOwnerFinder(clients.Dynamic),
@@ -464,18 +446,16 @@ func (r *rootState) runtime() (*commandRuntime, error) {
 		controllerLogger: controller.NewControllerLogger(
 			logger.With("component", "workflow-controller"),
 		),
-		controllers:                        controllers,
-		openEBSLVMSharedVolumeManager:      openEBSLVMSharedVolumeManager,
-		controllerKinds:                    slices.Clone(controllerKinds),
-		controllerDiscoveryComplete:        true,
-		waitForController:                  true,
-		clusterPodMigrationStore:           clusterPodMigrationStore,
-		clusterPodMigrationExecutor:        clusterPodMigrationExecutor,
-		clusterPodMigrationSessionStore:    clusterPodMigrationSessionStore,
-		clusterPodMigrationSessionExecutor: clusterPodMigrationSessionExecutor,
-		podMigrationStore:                  podMigrationStore,
-		podMigrationExecutor:               podMigrationExecutor,
-		orphanCleaner:                      orphanCleaner,
+		controllers:                   controllers,
+		openEBSLVMSharedVolumeManager: openEBSLVMSharedVolumeManager,
+		controllerKinds:               slices.Clone(controllerKinds),
+		controllerDiscoveryComplete:   true,
+		waitForController:             true,
+		podMigrationSessionStore:      podMigrationSessionStore,
+		podMigrationSessionExecutor:   podMigrationSessionExecutor,
+		podMigrationStore:             podMigrationStore,
+		podMigrationExecutor:          podMigrationExecutor,
+		orphanCleaner:                 orphanCleaner,
 	}, nil
 }
 

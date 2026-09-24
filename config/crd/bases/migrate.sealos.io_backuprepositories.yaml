@@ -44,36 +44,6 @@ spec:
             type: object
           spec:
             properties:
-              pvc:
-                description: |-
-                  PVCBackupRepositorySpec selects a PVC in the repository namespace. The
-                  controller exposes the schema before its data-plane adapter is enabled so
-                  clients can adopt one stable API while execution support is added.
-                properties:
-                  claimRef:
-                    description: LocalObjectReference identifies a resource in the
-                      same namespace.
-                    properties:
-                      name:
-                        maxLength: 253
-                        minLength: 1
-                        pattern: ^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$
-                        type: string
-                    required:
-                    - name
-                    type: object
-                  subPath:
-                    maxLength: 1024
-                    pattern: ^$|^[A-Za-z0-9][A-Za-z0-9._-]*(/[A-Za-z0-9][A-Za-z0-9._-]*)*$
-                    type: string
-                    x-kubernetes-validations:
-                    - message: subPath must be a normalized relative path and may
-                        not contain '.' or '..' segments
-                      rule: self == '' || self.split('/').all(segment, segment !=
-                        '.' && segment != '..')
-                required:
-                - claimRef
-                type: object
               s3:
                 description: |-
                   S3BackupRepositorySpec describes an S3-compatible object store. Credentials
@@ -143,15 +113,13 @@ spec:
                   so adding a backend does not create invalid cross-backend combinations.
                 enum:
                 - s3
-                - pvc
                 type: string
             required:
             - type
             type: object
             x-kubernetes-validations:
             - message: exactly one backend configuration must match type
-              rule: (self.type == 's3' && has(self.s3) && !has(self.pvc)) || (self.type
-                == 'pvc' && has(self.pvc) && !has(self.s3))
+              rule: self.type == 's3' && has(self.s3)
         required:
         - spec
         type: object

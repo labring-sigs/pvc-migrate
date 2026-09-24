@@ -61,30 +61,26 @@ func TestTransferSubmissionPersistsConcreteSpecs(t *testing.T) {
 			migration := &v1alpha1.ClusterMigration{
 				ObjectMeta: metav1.ObjectMeta{Name: "migration"},
 				Spec: v1alpha1.ClusterMigrationSpec{
-					SourceNamespace:    "app",
-					TemporaryNamespace: destination,
-					SessionNamespace:   sessionNamespace,
+					SourceNamespace:      "app",
+					DestinationNamespace: "app",
+					TemporaryNamespace:   destination,
+					SessionNamespace:     sessionNamespace,
 					MigrationSpec: v1alpha1.MigrationSpec{
 						Volumes:         volumes,
 						TransferOptions: options,
 					},
 				},
 			}
-			pod := &v1alpha1.ClusterPodMigration{
-				ObjectMeta: metav1.ObjectMeta{Name: "pod-migration"},
-				Spec: v1alpha1.ClusterPodMigrationSpec{
-					SourceNamespace:    "app",
-					TemporaryNamespace: destination,
-					SessionNamespace:   sessionNamespace,
-					PodMigrationSpec: v1alpha1.PodMigrationSpec{
-						Volumes:         volumes,
-						TransferOptions: options,
-						Pod: v1alpha1.LocalResourceReference{
-							Name: "database",
-							UID:  "pod-uid",
-						},
-						PrecopyPasses: 0,
+			pod := &v1alpha1.PodMigration{
+				ObjectMeta: metav1.ObjectMeta{Name: "pod-migration", Namespace: "app"},
+				Spec: v1alpha1.PodMigrationSpec{
+					Volumes:         volumes,
+					TransferOptions: options,
+					Pod: v1alpha1.LocalResourceReference{
+						Name: "database",
+						UID:  "pod-uid",
 					},
+					PrecopyPasses: 0,
 				},
 			}
 			copyObject := &v1alpha1.ClusterCopy{
@@ -123,7 +119,7 @@ func TestTransferSubmissionPersistsConcreteSpecs(t *testing.T) {
 				{"Migration", migration, migration.Spec.MigrationSpec, migration.Spec, func(ctx context.Context, cmd *cobra.Command, rt *commandRuntime) error {
 					return submitMigration(ctx, cmd, rt, migration)
 				}},
-				{"PodMigration", pod, pod.Spec.PodMigrationSpec, pod.Spec, func(ctx context.Context, cmd *cobra.Command, rt *commandRuntime) error {
+				{"PodMigration", pod, pod.Spec, pod.Spec, func(ctx context.Context, cmd *cobra.Command, rt *commandRuntime) error {
 					return submitPodMigration(ctx, cmd, rt, pod)
 				}},
 				{"Copy", copyObject, copyObject.Spec.CopySpec, copyObject.Spec, func(ctx context.Context, cmd *cobra.Command, rt *commandRuntime) error {
@@ -161,7 +157,9 @@ func TestTransferSubmissionPersistsConcreteSpecs(t *testing.T) {
 					}
 
 					kind, namespace, expected := test.kind, "app", test.localSpec
-					if scope != "namespaced" {
+					// PodMigration has no cluster-scoped form: it always
+					// submits into the tenant namespace.
+					if scope != "namespaced" && test.kind != "PodMigration" {
 						kind, namespace, expected = domain.ControllerKind(
 							"Cluster"+string(kind),
 						), "", test.clusterSpec
@@ -221,7 +219,7 @@ func TestTransferSubmissionPersistsConcreteSpecs(t *testing.T) {
 						}
 					}
 
-					if scope != "namespaced" &&
+					if scope != "namespaced" && test.kind != "PodMigration" &&
 						strings.Contains(diagnostics.String(), "kubectl -n") {
 						t.Fatalf(
 							"cluster workflow received namespaced guidance: %s",
@@ -330,7 +328,7 @@ func TestTransferCommandsSubmitWithoutLegacyPlannerOrSessionStore(t *testing.T) 
 		args []string
 	}{
 		{"Migration", []string{"migrate", "create", "--source-pvc", "missing", "--temporary-namespace", "app"}},
-		{"PodMigration", []string{"migrate-pod", "create", "--pod", "missing", "--temporary-namespace", "app", "--precopy-passes", "0"}},
+		{"PodMigration", []string{"migrate-pod", "create", "--pod", "missing", "--precopy-passes", "0"}},
 		{"Copy", []string{"copy", "create", "--source-pvc", "missing"}},
 		{"Reservation", []string{"reserve", "create", "--source-pvc", "missing"}},
 	} {

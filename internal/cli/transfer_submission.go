@@ -24,16 +24,22 @@ func submitMigration(
 		spec.SessionNamespace = spec.SourceNamespace
 	}
 
+	if spec.DestinationNamespace == "" {
+		spec.DestinationNamespace = spec.SourceNamespace
+	}
+
 	if err := domain.ValidateUnusedStoragePolicy(spec.UnusedStoragePolicy); err != nil {
 		return err
 	}
 
 	namespaces := []string{
 		string(spec.SourceNamespace),
+		string(spec.DestinationNamespace),
 		string(spec.TemporaryNamespace),
 		string(spec.SessionNamespace),
 	}
-	if spec.SourceNamespace == spec.TemporaryNamespace &&
+	if spec.SourceNamespace == spec.DestinationNamespace &&
+		spec.DestinationNamespace == spec.TemporaryNamespace &&
 		spec.TemporaryNamespace == spec.SessionNamespace {
 		workflow := &v1alpha1.Migration{
 			ObjectMeta: metav1.ObjectMeta{
@@ -80,61 +86,25 @@ func submitPodMigration(
 	ctx context.Context,
 	cmd *cobra.Command,
 	runtime *commandRuntime,
-	object *v1alpha1.ClusterPodMigration,
+	object *v1alpha1.PodMigration,
 ) error {
-	spec := object.Spec.DeepCopy()
-	if spec.TemporaryNamespace == "" {
-		spec.TemporaryNamespace = spec.SourceNamespace
-	}
-
-	if spec.SessionNamespace == "" {
-		spec.SessionNamespace = spec.SourceNamespace
-	}
-
-	if err := domain.ValidateUnusedStoragePolicy(spec.UnusedStoragePolicy); err != nil {
+	if err := domain.ValidateUnusedStoragePolicy(object.Spec.UnusedStoragePolicy); err != nil {
 		return err
 	}
 
-	namespaces := []string{
-		string(spec.SourceNamespace),
-		string(spec.TemporaryNamespace),
-		string(spec.SessionNamespace),
-	}
-	if spec.SourceNamespace == spec.TemporaryNamespace &&
-		spec.TemporaryNamespace == spec.SessionNamespace {
-		workflow := &v1alpha1.PodMigration{
-			ObjectMeta: metav1.ObjectMeta{
-				Name:      object.Name,
-				Namespace: string(spec.SourceNamespace),
-			},
-			Spec: spec.PodMigrationSpec,
-		}
+	workflow := object.DeepCopy()
 
-		return submitControllerObject(
-			ctx,
-			cmd,
-			runtime,
-			workflow,
-			func() *v1alpha1.PodMigration { return &v1alpha1.PodMigration{} },
-			"PodMigration",
-			"podmigrations",
-			namespaces,
-			domain.PhaseCompleted,
-			func(current *v1alpha1.PodMigration) v1alpha1.WorkflowStatus { return current.Status.WorkflowStatus },
-		)
-	}
-
-	workflow := &v1alpha1.ClusterPodMigration{
-		ObjectMeta: metav1.ObjectMeta{Name: object.Name},
-		Spec:       *spec,
-	}
-
-	return submitControllerObject(ctx, cmd, runtime, workflow,
-		func() *v1alpha1.ClusterPodMigration { return &v1alpha1.ClusterPodMigration{} },
-		"ClusterPodMigration", "clusterpodmigrations", namespaces, domain.PhaseCompleted,
-		func(current *v1alpha1.ClusterPodMigration) v1alpha1.WorkflowStatus {
-			return current.Status.WorkflowStatus
-		},
+	return submitControllerObject(
+		ctx,
+		cmd,
+		runtime,
+		workflow,
+		func() *v1alpha1.PodMigration { return &v1alpha1.PodMigration{} },
+		"PodMigration",
+		"podmigrations",
+		[]string{object.Namespace},
+		domain.PhaseCompleted,
+		func(current *v1alpha1.PodMigration) v1alpha1.WorkflowStatus { return current.Status.WorkflowStatus },
 	)
 }
 
