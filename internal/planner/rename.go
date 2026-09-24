@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"maps"
+	"time"
 
 	v1alpha1 "github.com/labring-sigs/pvc-migrate/api/v1alpha1"
 	"github.com/labring-sigs/pvc-migrate/internal/domain"
@@ -140,6 +141,19 @@ func (p *Planner) planPVCRebind(
 
 	if pv == nil || pv.Name == "" {
 		plan.AddCheck(failed(domain.CheckNameSourcePV, "read source PV returned an empty object"))
+		return plan
+	}
+
+	if pv.DeletionTimestamp != nil {
+		plan.AddCheck(failed(
+			domain.CheckNameSourcePV,
+			fmt.Sprintf(
+				"PV %s is terminating (deletion requested at %s); wait for the deletion to settle before rebinding",
+				pv.Name,
+				pv.DeletionTimestamp.UTC().Format(time.RFC3339),
+			),
+		))
+
 		return plan
 	}
 
@@ -325,6 +339,24 @@ func (p *Planner) validateRenameInventory(
 
 	if pvc.Status.Phase != corev1.ClaimBound || pvc.Spec.VolumeName == "" {
 		plan.AddCheck(failed(domain.CheckNameSourcePVC, "source PVC must be Bound"))
+		return false
+	}
+
+	// A requested deletion only waits on protection finalizers while a
+	// consumer keeps mounting the claim; rebinding a terminating claim would
+	// race the deletion or wait on it forever. Terminating storage is never a
+	// rebind source.
+	if pvc.DeletionTimestamp != nil {
+		plan.AddCheck(failed(
+			domain.CheckNameSourcePVC,
+			fmt.Sprintf(
+				"PVC %s/%s is terminating (deletion requested at %s); wait for the deletion to settle before rebinding",
+				pvc.Namespace,
+				pvc.Name,
+				pvc.DeletionTimestamp.UTC().Format(time.RFC3339),
+			),
+		))
+
 		return false
 	}
 

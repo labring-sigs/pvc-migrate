@@ -65,16 +65,6 @@ func probeSourcePVC(
 	return plannedSourceScan{}, nil
 }
 
-// sourcePVCDeleted reports whether one recorded source PVC no longer exists.
-func sourcePVCDeleted(
-	ctx context.Context,
-	client kubernetes.Interface,
-	sourcePVC v1alpha1.ObjectReference,
-) (bool, error) {
-	scan, err := probeSourcePVC(ctx, client, sourcePVC)
-	return scan.Deleted, err
-}
-
 // scanPlannedSourcePVCs probes every planned source volume and aggregates the
 // loss signals: a deleted PVC always wins over a terminating one, so the scan
 // keeps going after a terminating hit to look for a full deletion.
@@ -125,9 +115,11 @@ func deletedPlannedSourcePVC(
 	return scan.Deleted, err
 }
 
-// deletionSourceMissing reports whether a planned volume's source PVC is gone
-// while finalizing a deleted workflow. Only a deletion pass may skip the
-// validations that re-verify the live source identity.
+// deletionSourceMissing reports whether a planned volume's source storage can
+// no longer be fully verified while finalizing a deleted workflow: the PVC
+// gone or terminating, or the PV gone or terminating. Only a deletion pass
+// may skip the validations that re-verify the live source identity — a
+// half-deleted source pair must not wedge the finalizer either.
 func deletionSourceMissing(
 	ctx context.Context,
 	client kubernetes.Interface,
@@ -138,9 +130,30 @@ func deletionSourceMissing(
 		return false, nil
 	}
 
-	return sourcePVCDeleted(
+	probe, err := probeSourcePVC(
 		ctx,
 		client,
 		qualifiedResourceReference(volume.SourcePVC, sourceNamespace),
 	)
+	if err != nil || probe.Deleted || probe.Terminating != nil {
+		return probe.Deleted || probe.Terminating != nil, err
+	}
+
+	pv, err := client.CoreV1().
+		PersistentVolumes().
+		Get(ctx, volume.SourcePV.Name, metav1.GetOptions{})
+	if apierrors.IsNotFound(err) {
+		return true, nil
+	}
+
+	if err != nil {
+		return false, domain.WrapError(
+			domain.ErrorKubernetes,
+			verifySourceStoragePhase,
+			"read source PV "+volume.SourcePV.Name,
+			err,
+		)
+	}
+
+	return pv.DeletionTimestamp != nil, nil
 }

@@ -378,6 +378,42 @@ func TestNamespacedPodMigrationDeletionConvergesWhenSourceTerminating(t *testing
 	}
 }
 
+func TestNamespacedPodMigrationDeletionConvergesWhenSourcePVDeleted(t *testing.T) {
+	executor, object, store, _ := namespacedPodMigrationFixture(t)
+	executor.workloads = &fakeController{}
+
+	namespacedPausedCheckpointFixture(object)
+
+	// The source PVC lingers terminating on a holding finalizer while its PV
+	// was already deleted: the source pair can no longer be re-verified, and
+	// the deletion pass must skip that validation instead of wedging the
+	// finalizer on the missing PV.
+	armTerminatingSourcePVC(t, executor, object.Namespace, "a")
+
+	for i := range object.Status.Volumes {
+		// Copy attempts route the deletion pass through the reserved-volume
+		// re-validation that reads the source PV.
+		object.Status.Volumes[i].Sync.Attempts = 1
+	}
+	// The fixture world carries no source PVs: they were already deleted.
+
+	object.DeletionTimestamp = &metav1.Time{Time: executor.now()}
+	if err := store.Save(t.Context(), object); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := executor.FinalizeDeleted(t.Context(), object); err != nil {
+		t.Fatalf("half-deleted source pair must not wedge finalization: %v", err)
+	}
+
+	if _, err := store.Load(
+		t.Context(),
+		crclient.ObjectKey{Namespace: object.Namespace, Name: object.Name},
+	); !apierrors.IsNotFound(err) {
+		t.Fatalf("converged workflow remains in store: %v", err)
+	}
+}
+
 func TestNamespacedPodMigrationLiveAbortStillRequiresSourceStorage(t *testing.T) {
 	executor, object, store, _ := namespacedPodMigrationFixture(t)
 	executor.workloads = &fakeController{}
