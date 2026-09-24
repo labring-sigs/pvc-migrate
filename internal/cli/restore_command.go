@@ -134,7 +134,12 @@ func (r *rootState) runRestoreObject(
 	ctx, cancel := r.context(cmd.Context())
 	defer cancel()
 
-	storageNamespace := object.Namespace
+	// The session record ConfigMap lives in the session storage namespace,
+	// next to every other session family; the command's -n addresses the
+	// tenant namespace of the destination PVC and the repository resources,
+	// never the storage location. The lifecycle verbs (status, resume,
+	// abort, cleanup) resolve records the same way.
+	storageNamespace := r.migrationRecordNamespace()
 
 	store, err := cliWorkflowStore(
 		runtime,

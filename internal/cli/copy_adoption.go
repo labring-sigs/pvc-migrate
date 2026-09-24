@@ -265,6 +265,7 @@ func (r *rootState) adoptReservation(
 			return kube.NamespacedHandoffConfigMapReservationToCopy(
 				ctx,
 				runtime.clients.Kubernetes,
+				namespace,
 				reservation,
 				destination,
 			)

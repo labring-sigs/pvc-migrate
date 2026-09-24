@@ -176,7 +176,9 @@ func (r *rootState) renameSubmissionCommand(planOnly bool) *cobra.Command {
 		)
 
 		if err := store.Create(ctx, current); err != nil {
-			return reportSessionCreationError(cmd, current.Namespace, current.Name, err)
+			// The record is persisted in the session storage namespace; the
+			// inspection hint must point there, not at the tenant namespace.
+			return reportSessionCreationError(cmd, storageNamespace, current.Name, err)
 		}
 
 		if err := executor.Run(ctx, current); err != nil {

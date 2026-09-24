@@ -14,9 +14,12 @@ import (
 // NamespacedHandoffConfigMapReservationToCopy replaces the stored CRD in one conditional
 // ConfigMap update. Storage UID is preserved; source and target never coexist.
 // The caller owns the workflow Lease and validates live resources before calling.
+// The ConfigMap lives in the session storage namespace; reservation.Namespace is
+// the tenant namespace the workflow object carries, never the storage location.
 func NamespacedHandoffConfigMapReservationToCopy(
 	ctx context.Context,
 	client kubernetes.Interface,
+	namespace string,
 	reservation *v1alpha1.Reservation,
 	destination *v1alpha1.Copy,
 ) error {
@@ -35,7 +38,7 @@ func NamespacedHandoffConfigMapReservationToCopy(
 
 	source, err := NewConfigMapWorkflowStore(
 		client,
-		reservation.Namespace,
+		namespace,
 		func() *v1alpha1.Reservation {
 			return &v1alpha1.Reservation{}
 		},
@@ -44,7 +47,7 @@ func NamespacedHandoffConfigMapReservationToCopy(
 		return err
 	}
 
-	target, err := NewConfigMapWorkflowStore(client, reservation.Namespace, func() *v1alpha1.Copy {
+	target, err := NewConfigMapWorkflowStore(client, namespace, func() *v1alpha1.Copy {
 		return &v1alpha1.Copy{}
 	})
 	if err != nil {
@@ -56,7 +59,7 @@ func NamespacedHandoffConfigMapReservationToCopy(
 	}
 
 	current, err := client.CoreV1().
-		ConfigMaps(reservation.Namespace).
+		ConfigMaps(namespace).
 		Get(ctx, SessionConfigMapName(reservation.Name), metav1.GetOptions{})
 	if err != nil {
 		return err
@@ -99,7 +102,7 @@ func NamespacedHandoffConfigMapReservationToCopy(
 	}
 
 	updated, err = client.CoreV1().
-		ConfigMaps(reservation.Namespace).
+		ConfigMaps(namespace).
 		Update(ctx, updated, metav1.UpdateOptions{})
 	if err != nil {
 		return err
