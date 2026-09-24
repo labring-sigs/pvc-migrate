@@ -147,7 +147,16 @@ func (p *Planner) checkWorkflowPermissions(
 		return
 	}
 
-	p.logInfo("checking workflow RBAC permissions", "resource", resource, "namespaces", namespaces)
+	// Log the namespaces actually reviewed (checkNamespaceAccess reviews the
+	// deduplicated set): a same-namespace workflow passes the same name in
+	// several roles, and the raw slice would read as duplicate work.
+	p.logInfo(
+		"checking workflow RBAC permissions",
+		"resource",
+		resource,
+		"namespaces",
+		uniqueSorted(namespaces),
+	)
 	checks = append(p.checkNamespaceAccess(ctx, result, namespaces), checks...)
 	p.checkAccessReviews(ctx, result, checks)
 }

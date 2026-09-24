@@ -252,7 +252,6 @@ func (p *Planner) checkNetworkPolicies(
 	plan checkRecorder,
 	namespaces ...string,
 ) {
-	p.logInfo("checking NetworkPolicies", "namespaces", namespaces)
 	unique := make([]string, 0, len(namespaces))
 
 	seen := map[string]struct{}{}
@@ -264,6 +263,11 @@ func (p *Planner) checkNetworkPolicies(
 		seen[namespace] = struct{}{}
 		unique = append(unique, namespace)
 	}
+
+	// Log the namespaces actually checked: a same-namespace workflow passes
+	// the same name in several roles, and the raw slice would read as
+	// duplicate work.
+	p.logInfo("checking NetworkPolicies", "namespaces", unique)
 
 	type result struct {
 		namespace string
