@@ -33,22 +33,13 @@ type offlineMigrationFlags struct {
 	unusedStoragePolicy   string
 }
 
-func (f *offlineMigrationFlags) bind(command *cobra.Command) {
+// bindTransfer binds the migration inputs that shape the workflow spec.
+// Namespace roles bind separately through bindNamespaceRoles: session
+// commands take one flag per role, cr namespaced submits take a single -n,
+// and cr cluster submits take the roles their spec declares.
+func (f *offlineMigrationFlags) bindTransfer(command *cobra.Command) {
 	flags := command.Flags()
 	flags.StringVar(&f.sessionID, "session", "", "Migration session ID")
-	flags.StringVarP(&f.sourceNamespace, "source-namespace", "n", "default", "Source PVC namespace")
-	flags.StringVar(
-		&f.destinationNamespace,
-		"destination-namespace",
-		"",
-		"Namespace the migrated PVC lands in; empty keeps the source namespace",
-	)
-	flags.StringVar(
-		&f.temporaryNamespace,
-		"temporary-namespace",
-		"pvc-migrate-system",
-		"Namespace for staged destination PVCs",
-	)
 	flags.StringSliceVar(
 		&f.sourcePVCs,
 		"source-pvc",
@@ -139,6 +130,38 @@ func (f *offlineMigrationFlags) bind(command *cobra.Command) {
 		true,
 		"Delete destination files absent from the source",
 	)
+}
+
+// bindNamespaceRoles binds the per-role namespace flags the session and
+// cluster-scoped migration entrypoints expose.
+func (f *offlineMigrationFlags) bindNamespaceRoles(command *cobra.Command) {
+	flags := command.Flags()
+	flags.StringVarP(&f.sourceNamespace, "source-namespace", "n", "default", "Source PVC namespace")
+	flags.StringVar(
+		&f.destinationNamespace,
+		"destination-namespace",
+		"",
+		"Namespace the migrated PVC lands in; empty keeps the source namespace",
+	)
+	flags.StringVar(
+		&f.temporaryNamespace,
+		"temporary-namespace",
+		"pvc-migrate-system",
+		"Namespace for staged destination PVCs",
+	)
+}
+
+func (f *offlineMigrationFlags) bind(command *cobra.Command) {
+	f.bindTransfer(command)
+	f.bindNamespaceRoles(command)
+}
+
+// setSingleNamespace pins every namespace role to one tenant namespace for a
+// namespaced Migration submission.
+func (f *offlineMigrationFlags) setSingleNamespace(namespace string) {
+	f.sourceNamespace = namespace
+	f.destinationNamespace = namespace
+	f.temporaryNamespace = namespace
 }
 
 func (f *offlineMigrationFlags) workflow(

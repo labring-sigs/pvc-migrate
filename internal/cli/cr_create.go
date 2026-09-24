@@ -173,8 +173,9 @@ func (r *rootState) newCRMigrationCreateCommand() *cobra.Command {
 	flags := &offlineMigrationFlags{}
 
 	var (
-		dryRun bool
-		wait   bool
+		namespace string
+		dryRun    bool
+		wait      bool
 	)
 
 	command := &cobra.Command{
@@ -194,29 +195,33 @@ func (r *rootState) newCRMigrationCreateCommand() *cobra.Command {
 				return reportPreSessionError(cmd, err)
 			}
 
+			// A namespaced Migration derives every namespace role from
+			// metadata.namespace; cross-namespace work belongs to the
+			// cluster-scoped variant.
+			flags.setSingleNamespace(namespace)
+
 			object, err := r.buildMigrationSpec(cmd, flags)
 			if err != nil {
 				return err
 			}
 
-			applyClusterMigrationDefaults(&object.Spec)
-
-			if err := requireSameNamespaceSpec(
-				string(object.Spec.SourceNamespace),
-				string(object.Spec.DestinationNamespace),
-				string(object.Spec.SessionNamespace),
-				"cr migrate create",
-			); err != nil {
-				return err
+			// setSingleNamespace collapsed every role onto -n; submit the
+			// namespaced Migration the controller actually reconciles.
+			workflow := &v1alpha1.Migration{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      object.Name,
+					Namespace: string(object.Spec.SourceNamespace),
+				},
+				Spec: object.Spec.MigrationSpec,
 			}
 
 			return r.runCRSubmission(
 				cmd,
 				crSubmission{
 					sessionType: domain.SessionTypeMigrate,
-					object:      object,
+					object:      workflow,
 					submit: func(ctx context.Context, cmd *cobra.Command, runtime *commandRuntime) error {
-						return submitMigration(ctx, cmd, runtime, object)
+						return submitMigration(ctx, cmd, runtime, workflow)
 					},
 				},
 				&dryRun,
@@ -224,7 +229,14 @@ func (r *rootState) newCRMigrationCreateCommand() *cobra.Command {
 			)
 		},
 	}
-	flags.bind(command)
+	flags.bindTransfer(command)
+	command.Flags().StringVarP(
+		&namespace,
+		"namespace",
+		"n",
+		"default",
+		"Tenant namespace of the workflow CR and every PVC it addresses",
+	)
 	bindCreateDryRun(command, &dryRun)
 	bindCreateWait(command, &wait)
 
@@ -294,8 +306,9 @@ func (r *rootState) newCRCopyCreateCommand() *cobra.Command {
 	flags := &copyFlags{}
 
 	var (
-		dryRun bool
-		wait   bool
+		namespace string
+		dryRun    bool
+		wait      bool
 	)
 
 	command := &cobra.Command{
@@ -303,24 +316,27 @@ func (r *rootState) newCRCopyCreateCommand() *cobra.Command {
 		Short: "Submit a namespaced Copy workflow for controller reconciliation",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			submission, object, err := r.buildCopySubmission(cmd, flags)
-			if err != nil {
-				return err
-			}
+			// A namespaced Copy derives every namespace role from
+			// metadata.namespace; cross-namespace work belongs to the
+			// cluster-scoped variant.
+			flags.setSingleNamespace(namespace)
 
-			if err := requireSameNamespaceSpec(
-				string(object.Spec.SourceNamespace),
-				string(object.Spec.DestinationNamespace),
-				string(object.Spec.SessionNamespace),
-				"cr copy create",
-			); err != nil {
+			submission, _, err := r.buildCopySubmission(cmd, flags)
+			if err != nil {
 				return err
 			}
 
 			return r.runCRSubmission(cmd, *submission, &dryRun, &wait)
 		},
 	}
-	flags.bind(command)
+	flags.bindTransfer(command)
+	command.Flags().StringVarP(
+		&namespace,
+		"namespace",
+		"n",
+		"default",
+		"Tenant namespace of the workflow CR and every PVC it addresses",
+	)
 	bindCreateDryRun(command, &dryRun)
 	bindCreateWait(command, &wait)
 
@@ -428,11 +444,21 @@ func (r *rootState) buildCopySubmission(
 		return nil, nil, err
 	}
 
+	// setSingleNamespace collapsed every role onto -n; submit the namespaced
+	// Copy the controller actually reconciles.
+	workflow := &v1alpha1.Copy{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      object.Name,
+			Namespace: string(object.Spec.SourceNamespace),
+		},
+		Spec: object.Spec.CopySpec,
+	}
+
 	return &crSubmission{
 		sessionType: domain.SessionTypeCopy,
-		object:      object,
+		object:      workflow,
 		submit: func(ctx context.Context, cmd *cobra.Command, runtime *commandRuntime) error {
-			return submitCopy(ctx, cmd, runtime, object)
+			return submitCopy(ctx, cmd, runtime, workflow)
 		},
 	}, object, nil
 }
@@ -441,8 +467,9 @@ func (r *rootState) newCRReserveCreateCommand() *cobra.Command {
 	flags := &reserveFlags{}
 
 	var (
-		dryRun bool
-		wait   bool
+		namespace string
+		dryRun    bool
+		wait      bool
 	)
 
 	command := &cobra.Command{
@@ -450,24 +477,27 @@ func (r *rootState) newCRReserveCreateCommand() *cobra.Command {
 		Short: "Submit a namespaced Reservation workflow for controller reconciliation",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			submission, object, err := r.buildReserveSubmission(cmd, flags)
-			if err != nil {
-				return err
-			}
+			// A namespaced Reservation derives every namespace role from
+			// metadata.namespace; cross-namespace work belongs to the
+			// cluster-scoped variant.
+			flags.setSingleNamespace(namespace)
 
-			if err := requireSameNamespaceSpec(
-				string(object.Spec.SourceNamespace),
-				string(object.Spec.DestinationNamespace),
-				string(object.Spec.SessionNamespace),
-				"cr reserve create",
-			); err != nil {
+			submission, _, err := r.buildReserveSubmission(cmd, flags)
+			if err != nil {
 				return err
 			}
 
 			return r.runCRSubmission(cmd, *submission, &dryRun, &wait)
 		},
 	}
-	flags.bind(command)
+	flags.bindTransfer(command)
+	command.Flags().StringVarP(
+		&namespace,
+		"namespace",
+		"n",
+		"default",
+		"Tenant namespace of the workflow CR and every PVC it addresses",
+	)
 	bindCreateDryRun(command, &dryRun)
 	bindCreateWait(command, &wait)
 
@@ -559,11 +589,21 @@ func (r *rootState) buildReserveSubmission(
 		return nil, nil, err
 	}
 
+	// setSingleNamespace collapsed every role onto -n; submit the namespaced
+	// Reservation the controller actually reconciles.
+	workflow := &v1alpha1.Reservation{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      object.Name,
+			Namespace: string(object.Spec.SourceNamespace),
+		},
+		Spec: object.Spec.ReservationSpec,
+	}
+
 	return &crSubmission{
 		sessionType: domain.SessionTypeReserve,
-		object:      object,
+		object:      workflow,
 		submit: func(ctx context.Context, cmd *cobra.Command, runtime *commandRuntime) error {
-			return submitReservation(ctx, cmd, runtime, object)
+			return submitReservation(ctx, cmd, runtime, workflow)
 		},
 	}, object, nil
 }
@@ -915,31 +955,4 @@ func (r *rootState) newCRRestoreCreateCommand() *cobra.Command {
 	bindCreateWait(command, &wait)
 
 	return command
-}
-
-// requireSameNamespaceSpec rejects cross-namespace specs on the namespaced cr
-// create commands: those submissions belong to the cluster-scoped variants.
-func requireSameNamespaceSpec(source, destination, session, command string) error {
-	if source != destination || destination != session {
-		return domain.NewError(
-			domain.ErrorValidation,
-			command,
-			"cross-namespace workflows are cluster-scoped; submit them with "+clusterCreateHint(
-				command,
-			),
-		)
-	}
-
-	return nil
-}
-
-func clusterCreateHint(command string) string {
-	switch command {
-	case "cr copy create":
-		return "cr cluster-copy create"
-	case "cr reserve create":
-		return "cr cluster-reserve create"
-	default:
-		return "cr cluster-migrate create"
-	}
 }

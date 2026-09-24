@@ -6,7 +6,6 @@ import (
 	v1alpha1 "github.com/labring-sigs/pvc-migrate/api/v1alpha1"
 	"github.com/labring-sigs/pvc-migrate/internal/domain"
 	"github.com/spf13/cobra"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
 // applyClusterMigrationDefaults fills the namespace defaults the controller
@@ -25,56 +24,30 @@ func applyClusterMigrationDefaults(spec *v1alpha1.ClusterMigrationSpec) {
 	}
 }
 
+// submitMigration submits the namespaced Migration a create command
+// assembled; metadata.namespace is the workflow's whole namespace story.
 func submitMigration(
 	ctx context.Context,
 	cmd *cobra.Command,
 	runtime *commandRuntime,
-	object *v1alpha1.ClusterMigration,
+	workflow *v1alpha1.Migration,
 ) error {
-	spec := object.Spec.DeepCopy()
-	applyClusterMigrationDefaults(spec)
-
-	if err := domain.ValidateUnusedStoragePolicy(spec.UnusedStoragePolicy); err != nil {
+	if err := domain.ValidateUnusedStoragePolicy(workflow.Spec.UnusedStoragePolicy); err != nil {
 		return err
 	}
 
-	namespaces := []string{
-		string(spec.SourceNamespace),
-		string(spec.DestinationNamespace),
-		string(spec.TemporaryNamespace),
-		string(spec.SessionNamespace),
-	}
-	if spec.SourceNamespace == spec.DestinationNamespace &&
-		spec.DestinationNamespace == spec.TemporaryNamespace &&
-		spec.TemporaryNamespace == spec.SessionNamespace {
-		workflow := &v1alpha1.Migration{
-			ObjectMeta: metav1.ObjectMeta{
-				Name:      object.Name,
-				Namespace: string(spec.SourceNamespace),
-			},
-			Spec: spec.MigrationSpec,
-		}
-
-		return submitControllerObject(
-			ctx,
-			cmd,
-			runtime,
-			workflow,
-			func() *v1alpha1.Migration { return &v1alpha1.Migration{} },
-			"Migration",
-			"migrations",
-			namespaces,
-			domain.PhaseCompleted,
-			func(current *v1alpha1.Migration) v1alpha1.WorkflowStatus { return current.Status.WorkflowStatus },
-		)
-	}
-
-	workflow := &v1alpha1.ClusterMigration{
-		ObjectMeta: metav1.ObjectMeta{Name: object.Name},
-		Spec:       *spec,
-	}
-
-	return submitClusterMigration(ctx, cmd, runtime, workflow)
+	return submitControllerObject(
+		ctx,
+		cmd,
+		runtime,
+		workflow,
+		func() *v1alpha1.Migration { return &v1alpha1.Migration{} },
+		"Migration",
+		"migrations",
+		[]string{workflow.Namespace},
+		domain.PhaseCompleted,
+		func(current *v1alpha1.Migration) v1alpha1.WorkflowStatus { return current.Status.WorkflowStatus },
+	)
 }
 
 // submitClusterMigration submits the cluster-scoped variant explicitly.
@@ -146,51 +119,30 @@ func applyClusterCopyDefaults(spec *v1alpha1.ClusterCopySpec) {
 	}
 }
 
+// submitCopy submits the namespaced Copy a create command assembled;
+// metadata.namespace is the workflow's whole namespace story.
 func submitCopy(
 	ctx context.Context,
 	cmd *cobra.Command,
 	runtime *commandRuntime,
-	object *v1alpha1.ClusterCopy,
+	workflow *v1alpha1.Copy,
 ) error {
-	spec := object.Spec.DeepCopy()
-	applyClusterCopyDefaults(spec)
-
-	if err := domain.ValidateUnusedStoragePolicy(spec.UnusedStoragePolicy); err != nil {
+	if err := domain.ValidateUnusedStoragePolicy(workflow.Spec.UnusedStoragePolicy); err != nil {
 		return err
 	}
 
-	namespaces := []string{
-		string(spec.SourceNamespace),
-		string(spec.DestinationNamespace),
-		string(spec.SessionNamespace),
-	}
-	if spec.SourceNamespace == spec.DestinationNamespace &&
-		spec.DestinationNamespace == spec.SessionNamespace {
-		workflow := &v1alpha1.Copy{
-			ObjectMeta: metav1.ObjectMeta{
-				Name:      object.Name,
-				Namespace: string(spec.SourceNamespace),
-			},
-			Spec: spec.CopySpec,
-		}
-
-		return submitControllerObject(
-			ctx,
-			cmd,
-			runtime,
-			workflow,
-			func() *v1alpha1.Copy { return &v1alpha1.Copy{} },
-			"Copy",
-			"copies",
-			namespaces,
-			domain.PhaseWarmCopied,
-			func(current *v1alpha1.Copy) v1alpha1.WorkflowStatus { return current.Status.WorkflowStatus },
-		)
-	}
-
-	workflow := &v1alpha1.ClusterCopy{ObjectMeta: metav1.ObjectMeta{Name: object.Name}, Spec: *spec}
-
-	return submitClusterCopy(ctx, cmd, runtime, workflow)
+	return submitControllerObject(
+		ctx,
+		cmd,
+		runtime,
+		workflow,
+		func() *v1alpha1.Copy { return &v1alpha1.Copy{} },
+		"Copy",
+		"copies",
+		[]string{workflow.Namespace},
+		domain.PhaseWarmCopied,
+		func(current *v1alpha1.Copy) v1alpha1.WorkflowStatus { return current.Status.WorkflowStatus },
+	)
 }
 
 // submitClusterCopy submits the cluster-scoped variant explicitly.
@@ -235,54 +187,30 @@ func applyClusterReservationDefaults(spec *v1alpha1.ClusterReservationSpec) {
 	}
 }
 
+// submitReservation submits the namespaced Reservation a create command
+// assembled; metadata.namespace is the workflow's whole namespace story.
 func submitReservation(
 	ctx context.Context,
 	cmd *cobra.Command,
 	runtime *commandRuntime,
-	object *v1alpha1.ClusterReservation,
+	workflow *v1alpha1.Reservation,
 ) error {
-	spec := object.Spec.DeepCopy()
-	applyClusterReservationDefaults(spec)
-
-	if err := domain.ValidateUnusedStoragePolicy(spec.UnusedStoragePolicy); err != nil {
+	if err := domain.ValidateUnusedStoragePolicy(workflow.Spec.UnusedStoragePolicy); err != nil {
 		return err
 	}
 
-	namespaces := []string{
-		string(spec.SourceNamespace),
-		string(spec.DestinationNamespace),
-		string(spec.SessionNamespace),
-	}
-	if spec.SourceNamespace == spec.DestinationNamespace &&
-		spec.DestinationNamespace == spec.SessionNamespace {
-		workflow := &v1alpha1.Reservation{
-			ObjectMeta: metav1.ObjectMeta{
-				Name:      object.Name,
-				Namespace: string(spec.SourceNamespace),
-			},
-			Spec: spec.ReservationSpec,
-		}
-
-		return submitControllerObject(
-			ctx,
-			cmd,
-			runtime,
-			workflow,
-			func() *v1alpha1.Reservation { return &v1alpha1.Reservation{} },
-			"Reservation",
-			"reservations",
-			namespaces,
-			domain.PhaseReserved,
-			func(current *v1alpha1.Reservation) v1alpha1.WorkflowStatus { return current.Status.WorkflowStatus },
-		)
-	}
-
-	workflow := &v1alpha1.ClusterReservation{
-		ObjectMeta: metav1.ObjectMeta{Name: object.Name},
-		Spec:       *spec,
-	}
-
-	return submitClusterReservation(ctx, cmd, runtime, workflow)
+	return submitControllerObject(
+		ctx,
+		cmd,
+		runtime,
+		workflow,
+		func() *v1alpha1.Reservation { return &v1alpha1.Reservation{} },
+		"Reservation",
+		"reservations",
+		[]string{workflow.Namespace},
+		domain.PhaseReserved,
+		func(current *v1alpha1.Reservation) v1alpha1.WorkflowStatus { return current.Status.WorkflowStatus },
+	)
 }
 
 // submitClusterReservation submits the cluster-scoped variant explicitly.

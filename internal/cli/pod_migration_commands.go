@@ -40,7 +40,7 @@ type podMigrationFlags struct {
 func (f *podMigrationFlags) bind(command *cobra.Command) {
 	flags := command.Flags()
 	flags.StringVar(&f.sessionID, "session", "", "Migration session ID")
-	flags.StringVarP(&f.sourceNamespace, "source-namespace", "n", "default", "Pod namespace")
+	flags.StringVarP(&f.sourceNamespace, "namespace", "n", "default", "Pod namespace")
 	flags.StringSliceVar(
 		&f.destinationCapacities,
 		"destination-capacity",

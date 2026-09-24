@@ -106,9 +106,12 @@ of a mode flag; the two modes never read or write each other's storage:
   until you pass `--dry-run=false`, then optionally `--wait`s), `status`,
   `watch` (stream phase changes until a terminal phase), and the lifecycle
   verbs (`resume`, `abort`, `rollback`, `cleanup`). Namespaced families address
-  a CR with `-n <tenant-namespace>`; cluster-scoped families need no namespace.
-  The namespaced create commands reject cross-namespace specs and point at the
-  matching `cr cluster-* create`. Pod migration is a same-namespace operation
+  a CR with `-n <tenant-namespace>`; on `create` that single flag is also the
+  spec's whole namespace story — the role flags (`--source-namespace`,
+  `--destination-namespace`, `--temporary-namespace`) exist only on the
+  cluster-scoped creates, whose specs genuinely declare those roles.
+  Cluster-scoped families need no namespace. Pod migration is a
+  same-namespace operation
   by design — a workload cannot be recreated in another namespace — so
   `PodMigration` has no cluster-scoped form. A `ClusterMigration` may set
   `destinationNamespace` to move a quiesced PVC into another namespace while
@@ -283,8 +286,7 @@ pvc-migrate \
   --output yaml \
   migrate-pod plan \
   --session database-20260809 \
-  --source-namespace application \
-  --temporary-namespace pvc-migrate-system \
+  --namespace application \
   --pod database-1 \
   --destination-storage-class fast-local
 ```
@@ -312,8 +314,7 @@ pvc-migrate \
   --yes \
   migrate-pod \
   --session database-20260809 \
-  --source-namespace application \
-  --temporary-namespace pvc-migrate-system \
+  --namespace application \
   --pod database-1 \
   --destination-storage-class fast-local \
   --precopy-passes 1 \
@@ -524,7 +525,7 @@ pvc-migrate copy --dry-run=false \
   --destination-path restored/mysql
 
 pvc-migrate migrate-pod plan \
-  --source-namespace application \
+  --namespace application \
   --pod database-1 \
   --source-path data=mysql/current \
   --destination-path data=. \
@@ -589,7 +590,7 @@ pvc-migrate copy --dry-run=false \
 
 # For a Pod with two PVCs, map each source PVC by name.
 pvc-migrate migrate-pod plan \
-  --source-namespace application \
+  --namespace application \
   --pod database-1 \
   --destination-capacity data=200Gi \
   --destination-capacity logs=256Gi
