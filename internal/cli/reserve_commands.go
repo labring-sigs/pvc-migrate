@@ -306,7 +306,23 @@ func (r *rootState) reserveExisting(
 			if err := executor.Validate(ctx, current); err != nil {
 				return reportReservationError(cmd, current.Name, current.Status.Phase, err)
 			}
-			return runtime.printer.Print(current)
+
+			if err := runtime.printer.Print(current); err != nil {
+				return err
+			}
+
+			return writeDryRunNotice(
+				cmd.ErrOrStderr(),
+				lifecycleExecuteCommand(
+					guidancePrefixesForCommand(
+						cmd,
+						workflowLeaseNamespace(backend, r.workflowStorageNamespace(cmd), current),
+					).pvcMigrate,
+					"reserve",
+					"resume",
+					current.Name,
+				),
+			)
 		}
 
 		if err := executor.RequestResume(ctx, current); err != nil {
@@ -345,7 +361,20 @@ func (r *rootState) reserveExisting(
 			if err := executor.Validate(ctx, current); err != nil {
 				return reportReservationError(cmd, current.Name, current.Status.Phase, err)
 			}
-			return runtime.printer.Print(current)
+
+			if err := runtime.printer.Print(current); err != nil {
+				return err
+			}
+
+			return writeDryRunNotice(
+				cmd.ErrOrStderr(),
+				lifecycleExecuteCommand(
+					guidancePrefixesForCommand(cmd, namespace).pvcMigrate,
+					"reserve",
+					"resume",
+					current.Name,
+				),
+			)
 		}
 
 		if err := executor.RequestResume(ctx, current); err != nil {

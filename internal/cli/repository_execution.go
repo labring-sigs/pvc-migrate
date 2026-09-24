@@ -142,7 +142,7 @@ func printRepositoryWorkflowResult(
 	prefix := guidancePrefixesForCommand(cmd, storageNamespace).pvcMigrate
 	_, err := fmt.Fprintf(
 		cmd.ErrOrStderr(),
-		"Inspect: %s %s status %s\nFinalize after verifying the result: %s %s cleanup %s --finalize --delete-session\n",
+		"Inspect: %s %s status %s\nFinalize after verifying the result: %s --yes %s cleanup %s --finalize --delete-session --dry-run=false\n",
 		prefix,
 		operation,
 		shellQuote(object.GetName()),

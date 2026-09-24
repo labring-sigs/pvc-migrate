@@ -75,6 +75,37 @@ func (r *rootState) loadReservationWithBackend(
 	}
 }
 
+// reservationHintNamespace resolves the namespace a suggested reserve
+// command needs to find this workflow again, across both object shapes.
+func reservationHintNamespace(
+	backend string,
+	r *rootState,
+	cmd *cobra.Command,
+	object crclient.Object,
+) string {
+	if current, ok := object.(*v1alpha1.ClusterReservation); ok {
+		namespace := string(current.Spec.SessionNamespace)
+		if namespace == "" {
+			namespace = string(current.Spec.SourceNamespace)
+		}
+
+		return namespace
+	}
+
+	return workflowLeaseNamespace(backend, r.workflowStorageNamespace(cmd), object)
+}
+
+func reservationPhase(object crclient.Object) domain.Phase {
+	switch current := object.(type) {
+	case *v1alpha1.Reservation:
+		return current.Status.Phase
+	case *v1alpha1.ClusterReservation:
+		return current.Status.Phase
+	default:
+		return ""
+	}
+}
+
 func (r *rootState) newReserveStatusCommand() *cobra.Command {
 	return &cobra.Command{
 		Use:   "status [SESSION]",
@@ -95,7 +126,21 @@ func (r *rootState) newReserveStatusCommand() *cobra.Command {
 					return err
 				}
 
-				return runtime.printer.Print(object)
+				if err := runtime.printer.Print(object); err != nil {
+					return err
+				}
+
+				return writeWorkflowNextSteps(
+					cmd.ErrOrStderr(),
+					guidancePrefixesForCommand(
+						cmd,
+						reservationHintNamespace("", r, cmd, object),
+					).pvcMigrate,
+					"reserve",
+					object.GetName(),
+					reservationPhase(object),
+					false,
+				)
 			}
 
 			namespace := r.workflowStorageNamespace(cmd)
@@ -301,7 +346,36 @@ func (r *rootState) newReserveAbortCommand() *cobra.Command {
 			}
 		}
 
-		return runtime.printer.Print(object)
+		if err := runtime.printer.Print(object); err != nil {
+			return err
+		}
+
+		if dryRun {
+			return writeDryRunNotice(
+				cmd.ErrOrStderr(),
+				lifecycleExecuteCommand(
+					guidancePrefixesForCommand(
+						cmd,
+						reservationHintNamespace(backend, r, cmd, object),
+					).pvcMigrate,
+					"reserve",
+					"abort",
+					object.GetName(),
+				),
+			)
+		}
+
+		return writeWorkflowNextSteps(
+			cmd.ErrOrStderr(),
+			guidancePrefixesForCommand(
+				cmd,
+				reservationHintNamespace(backend, r, cmd, object),
+			).pvcMigrate,
+			"reserve",
+			object.GetName(),
+			reservationPhase(object),
+			false,
+		)
 	}
 	bindDryRun(command, &dryRun)
 
@@ -422,7 +496,28 @@ func (r *rootState) newReserveCleanupCommand() *cobra.Command {
 			return err
 		}
 
-		return runtime.printer.Print(object)
+		if err := runtime.printer.Print(object); err != nil {
+			return err
+		}
+
+		if dryRun {
+			return writeDryRunNotice(
+				cmd.ErrOrStderr(),
+				cleanupExecuteCommand(
+					guidancePrefixesForCommand(
+						cmd,
+						reservationHintNamespace(backend, r, cmd, object),
+					).pvcMigrate,
+					"reserve",
+					object.GetName(),
+					options.UnusedStoragePolicy,
+					options.Finalize,
+					options.DeleteSession,
+				),
+			)
+		}
+
+		return nil
 	}
 	command.Flags().
 		StringVar(&options.UnusedStoragePolicy, "unused-storage-policy", "", "Keep or Delete reserved storage; defaults to the recorded policy. Delete removes destination PVCs this reservation created and never promoted to a copy; the source is always kept")

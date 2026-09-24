@@ -32,7 +32,11 @@ func (r *rootState) newOfflineMigrationStatusCommand() *cobra.Command {
 					return err
 				}
 
-				return runtime.printer.Print(object)
+				if err := runtime.printer.Print(object); err != nil {
+					return err
+				}
+
+				return writeOfflineMigrationNextSteps(cmd, object)
 			}
 
 			namespace := r.workflowStorageNamespace(cmd)
@@ -210,7 +214,15 @@ func (r *rootState) newOfflineMigrationAbortCommand() *cobra.Command {
 				}
 			}
 
-			return runtime.printer.Print(object)
+			if err := runtime.printer.Print(object); err != nil {
+				return err
+			}
+
+			if dryRun {
+				return writeOfflineMigrationDryRunNotice(cmd, object, "abort")
+			}
+
+			return writeOfflineMigrationNextSteps(cmd, object)
 		},
 	}
 
@@ -278,7 +290,15 @@ func (r *rootState) newOfflineMigrationRollbackCommand() *cobra.Command {
 				}
 			}
 
-			return runtime.printer.Print(object)
+			if err := runtime.printer.Print(object); err != nil {
+				return err
+			}
+
+			if dryRun {
+				return writeOfflineMigrationDryRunNotice(cmd, object, "rollback")
+			}
+
+			return writeOfflineMigrationNextSteps(cmd, object)
 		},
 	}
 
@@ -371,7 +391,28 @@ func (r *rootState) newOfflineMigrationCleanupCommand() *cobra.Command {
 				return err
 			}
 
-			return runtime.printer.Print(object)
+			if err := runtime.printer.Print(object); err != nil {
+				return err
+			}
+
+			if dryRun {
+				return writeDryRunNotice(
+					cmd.ErrOrStderr(),
+					cleanupExecuteCommand(
+						guidancePrefixesForCommand(
+							cmd,
+							offlineMigrationHintNamespace(object),
+						).pvcMigrate,
+						"migrate",
+						object.GetName(),
+						options.UnusedStoragePolicy,
+						options.Finalize,
+						options.DeleteSession,
+					),
+				)
+			}
+
+			return nil
 		},
 	}
 	command.Flags().
@@ -383,6 +424,60 @@ func (r *rootState) newOfflineMigrationCleanupCommand() *cobra.Command {
 	bindDryRun(command, &dryRun)
 
 	return command
+}
+
+// offlineMigrationHintNamespace resolves the namespace a suggested migrate
+// command needs to find this workflow again, across both object shapes.
+func offlineMigrationHintNamespace(object crclient.Object) string {
+	switch current := object.(type) {
+	case *v1alpha1.ClusterMigration:
+		return clusterMigrationStorageNamespace(current)
+	case *v1alpha1.Migration:
+		return current.Namespace
+	default:
+		return ""
+	}
+}
+
+func offlineMigrationPhase(object crclient.Object) domain.Phase {
+	switch current := object.(type) {
+	case *v1alpha1.Migration:
+		return current.Status.Phase
+	case *v1alpha1.ClusterMigration:
+		return current.Status.Phase
+	default:
+		return ""
+	}
+}
+
+func writeOfflineMigrationNextSteps(
+	cmd *cobra.Command,
+	object crclient.Object,
+) error {
+	return writeWorkflowNextSteps(
+		cmd.ErrOrStderr(),
+		guidancePrefixesForCommand(cmd, offlineMigrationHintNamespace(object)).pvcMigrate,
+		"migrate",
+		object.GetName(),
+		offlineMigrationPhase(object),
+		true,
+	)
+}
+
+func writeOfflineMigrationDryRunNotice(
+	cmd *cobra.Command,
+	object crclient.Object,
+	subcommand string,
+) error {
+	return writeDryRunNotice(
+		cmd.ErrOrStderr(),
+		lifecycleExecuteCommand(
+			guidancePrefixesForCommand(cmd, offlineMigrationHintNamespace(object)).pvcMigrate,
+			"migrate",
+			subcommand,
+			object.GetName(),
+		),
+	)
 }
 
 func reportMigrationCleanupError(
