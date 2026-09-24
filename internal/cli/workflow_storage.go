@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"slices"
-	"strings"
 
 	v1alpha1 "github.com/labring-sigs/pvc-migrate/api/v1alpha1"
 	"github.com/labring-sigs/pvc-migrate/internal/domain"
@@ -137,91 +136,49 @@ func cliWorkflowStoreForBackend[T crclient.Object](
 	return kube.NewWorkflowStoreForBackend(runtime.clients, backend, namespace, factory)
 }
 
-// loadWorkflowWithBackend resolves one workflow identity from ConfigMap session
-// storage first and the workflow CRDs second, reporting which backend served
-// the lookup so callers can bind matching stores and handoff callbacks. CRD
-// lookups probe every namespace: flag-driven storage namespaces differ per
-// operation (copy names its flag --source-namespace, not --namespace).
+// loadWorkflowWithBackend resolves one workflow identity from the single
+// backend its command family addresses: ConfigMap session storage for the
+// session commands, the workflow CRDs for the cr commands. The modes never
+// probe each other's storage.
 func (r *rootState) loadWorkflowWithBackend(
 	ctx context.Context,
 	cmd *cobra.Command,
 	runtime *commandRuntime,
 	namespace, id string,
 	candidates map[domain.ControllerKind]crclient.Object,
+	source workflowSource,
 ) (crclient.Object, string, error) {
-	object, err := kube.LoadConfigMapWorkflow(ctx, runtime.clients.Kubernetes, namespace, id)
-	if err == nil {
-		return object, backendConfigMap, nil
-	}
-
-	if !apierrors.IsNotFound(err) {
-		return nil, "", err
-	}
-
-	// A session-only runtime may intentionally omit the controller-runtime
-	// client. Once ConfigMap storage misses, there is no CRD backend to probe;
-	// return the original not-found instead of dereferencing a nil client.
-	if !crdListable(runtime) {
-		return nil, "", err
-	}
-
-	probes := []string{namespace}
-	if extra := r.crdProbeNamespaces(cmd); len(extra) != 0 {
-		probes = append(probes, extra...)
-	}
-
-	for _, probeNamespace := range probes {
-		if probeNamespace == "" {
-			continue
+	if source != sourceSession {
+		if !crdListable(runtime) {
+			return nil, "", apierrors.NewNotFound(
+				schema.GroupResource{Group: "migrate.sealos.io", Resource: "workflows"},
+				id,
+			)
 		}
 
-		crdObject, crdErr := lookupControllerObjects(ctx, runtime, probeNamespace, id, candidates)
-		if crdErr != nil {
-			if apierrors.IsNotFound(crdErr) {
-				continue
-			}
-			return nil, "", crdErr
+		namespace := crNamespaceForCommand(cmd)
+		if source == sourceController && namespace == "" {
+			return nil, "", domain.NewError(
+				domain.ErrorValidation,
+				"workflow lookup",
+				"-n/--namespace is required to address a namespaced workflow CR",
+			)
+		}
+
+		crdObject, err := lookupControllerObjects(ctx, runtime, namespace, id, candidates)
+		if err != nil {
+			return nil, "", err
 		}
 
 		return crdObject, backendCRD, nil
 	}
 
-	return nil, "", err
-}
-
-// crdProbeNamespaces lists the additional tenant namespaces a CRD lookup must
-// cover: namespaced workflow CRs live in their source namespace while the
-// ConfigMap sessions live in the session namespace.
-func (r *rootState) crdProbeNamespaces(cmd *cobra.Command) []string {
-	namespaces := make([]string, 0, 3)
-
-	if cmd != nil {
-		for _, name := range []string{"namespace", "source-namespace", "workflow-namespace"} {
-			flag := cmd.Flags().Lookup(name)
-			if flag == nil {
-				continue
-			}
-
-			value, err := cmd.Flags().GetString(name)
-			if err != nil || strings.TrimSpace(value) == "" {
-				continue
-			}
-
-			value = strings.TrimSpace(value)
-			if !slices.Contains(namespaces, value) {
-				namespaces = append(namespaces, value)
-			}
-		}
+	object, err := kube.LoadConfigMapWorkflow(ctx, runtime.clients.Kubernetes, namespace, id)
+	if err != nil {
+		return nil, "", err
 	}
 
-	if r != nil && strings.TrimSpace(r.global.workflowNamespace) != "" {
-		value := strings.TrimSpace(r.global.workflowNamespace)
-		if !slices.Contains(namespaces, value) {
-			namespaces = append(namespaces, value)
-		}
-	}
-
-	return namespaces
+	return object, backendConfigMap, nil
 }
 
 // Workflow storage backends, mirrored from kube for load-reporting call sites.
@@ -229,6 +186,121 @@ const (
 	backendConfigMap = kube.BackendConfigMap
 	backendCRD       = kube.BackendCRD
 )
+
+// newWorkflowObject returns an empty object for one workflow kind.
+func newWorkflowObject(kind domain.ControllerKind) crclient.Object {
+	switch kind {
+	case domain.ControllerKindMigration:
+		return &v1alpha1.Migration{}
+	case domain.ControllerKindClusterMigration:
+		return &v1alpha1.ClusterMigration{}
+	case domain.ControllerKindPodMigration:
+		return &v1alpha1.PodMigration{}
+	case domain.ControllerKindCopy:
+		return &v1alpha1.Copy{}
+	case domain.ControllerKindClusterCopy:
+		return &v1alpha1.ClusterCopy{}
+	case domain.ControllerKindReservation:
+		return &v1alpha1.Reservation{}
+	case domain.ControllerKindClusterReservation:
+		return &v1alpha1.ClusterReservation{}
+	case domain.ControllerKindRename:
+		return &v1alpha1.Rename{}
+	case domain.ControllerKindMove:
+		return &v1alpha1.Move{}
+	case domain.ControllerKindBackup:
+		return &v1alpha1.Backup{}
+	case domain.ControllerKindRestore:
+		return &v1alpha1.Restore{}
+	default:
+		return nil
+	}
+}
+
+// listControllerWorkflows lists every workflow CR of one kind across all
+// namespaces (cluster-scoped kinds list cluster-wide) for the cr status
+// listings. An unserved kind yields an empty result, not an error.
+func listControllerWorkflows(
+	ctx context.Context,
+	runtime *commandRuntime,
+	kind domain.ControllerKind,
+) ([]crclient.Object, error) {
+	switch kind {
+	case domain.ControllerKindMigration:
+		return listCRDWorkflows(
+			ctx,
+			runtime,
+			func() *v1alpha1.Migration { return &v1alpha1.Migration{} },
+		)
+	case domain.ControllerKindClusterMigration:
+		return listCRDWorkflows(ctx, runtime,
+			func() *v1alpha1.ClusterMigration { return &v1alpha1.ClusterMigration{} })
+	case domain.ControllerKindPodMigration:
+		return listCRDWorkflows(
+			ctx,
+			runtime,
+			func() *v1alpha1.PodMigration { return &v1alpha1.PodMigration{} },
+		)
+	case domain.ControllerKindCopy:
+		return listCRDWorkflows(ctx, runtime, func() *v1alpha1.Copy { return &v1alpha1.Copy{} })
+	case domain.ControllerKindClusterCopy:
+		return listCRDWorkflows(
+			ctx,
+			runtime,
+			func() *v1alpha1.ClusterCopy { return &v1alpha1.ClusterCopy{} },
+		)
+	case domain.ControllerKindReservation:
+		return listCRDWorkflows(
+			ctx,
+			runtime,
+			func() *v1alpha1.Reservation { return &v1alpha1.Reservation{} },
+		)
+	case domain.ControllerKindClusterReservation:
+		return listCRDWorkflows(ctx, runtime,
+			func() *v1alpha1.ClusterReservation { return &v1alpha1.ClusterReservation{} })
+	case domain.ControllerKindRename:
+		return listCRDWorkflows(ctx, runtime, func() *v1alpha1.Rename { return &v1alpha1.Rename{} })
+	case domain.ControllerKindMove:
+		return listCRDWorkflows(ctx, runtime, func() *v1alpha1.Move { return &v1alpha1.Move{} })
+	case domain.ControllerKindBackup:
+		return listCRDWorkflows(ctx, runtime, func() *v1alpha1.Backup { return &v1alpha1.Backup{} })
+	case domain.ControllerKindRestore:
+		return listCRDWorkflows(
+			ctx,
+			runtime,
+			func() *v1alpha1.Restore { return &v1alpha1.Restore{} },
+		)
+	default:
+		return nil, fmt.Errorf("unknown workflow kind %q", kind)
+	}
+}
+
+func listCRDWorkflows[T crclient.Object](
+	ctx context.Context,
+	runtime *commandRuntime,
+	factory func() T,
+) ([]crclient.Object, error) {
+	store, err := cliCRDWorkflowStore(runtime, factory)
+	if err != nil {
+		return nil, err
+	}
+
+	items, err := store.List(ctx, "")
+	if err != nil {
+		if apierrors.IsNotFound(err) {
+			return nil, nil
+		}
+
+		return nil, err
+	}
+
+	objects := make([]crclient.Object, len(items))
+	for i, item := range items {
+		objects[i] = item
+	}
+
+	return objects, nil
+}
 
 // crdListable reports whether the runtime can enumerate workflow CRs. A
 // session-only runtime (no client or no discovered workflow CRD) still lists
@@ -255,6 +327,12 @@ func lookupControllerObjects(
 		resource, ok := domain.ControllerResourceForKind(kind)
 		if !ok {
 			return nil, fmt.Errorf("unknown workflow kind %q", kind)
+		}
+
+		// Namespaced kinds are only addressable through an explicit -n; an
+		// empty namespace restricts the lookup to cluster-scoped kinds.
+		if namespace == "" && !resource.Cluster {
+			continue
 		}
 
 		key := crclient.ObjectKey{Name: name, Namespace: namespace}

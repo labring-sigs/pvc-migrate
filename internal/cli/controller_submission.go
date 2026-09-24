@@ -129,15 +129,12 @@ func waitForControllerObject[T crclient.Object](
 	successPhase v1alpha1.WorkflowPhase,
 	statusOf func(T) v1alpha1.WorkflowStatus,
 ) error {
-	inspect := fmt.Sprintf("kubectl get %s %s -o yaml", resourceName, object.GetName())
-	if object.GetNamespace() != "" {
-		inspect = fmt.Sprintf(
-			"kubectl -n %s get %s %s -o yaml",
-			object.GetNamespace(),
-			resourceName,
-			object.GetName(),
-		)
-	}
+	inspect := fmt.Sprintf(
+		"%s %s status %s",
+		guidancePrefixesForCommand(cmd, object.GetNamespace()).pvcMigrate,
+		crFamilyPathForResource(resourceName),
+		workflowHintAddress(cmd, object.GetNamespace(), object.GetName()),
+	)
 
 	if _, err := fmt.Fprintf(
 		cmd.ErrOrStderr(),
@@ -238,11 +235,12 @@ func waitForControllerObject[T crclient.Object](
 		return domain.NewError(category, "controller workflow", status.Message)
 	}
 
-	// The controller owns this workflow from here: point finalization at
-	// kubectl instead of the CLI lifecycle commands.
+	// The controller owns this workflow from here: point inspection and
+	// finalization at the cr command group.
 	return writeControllerWorkflowNextSteps(
 		cmd.ErrOrStderr(),
-		kubectlCommandPrefixForCommand(cmd),
+		cmd,
+		guidancePrefixesForCommand(cmd, final.GetNamespace()).pvcMigrate,
 		resourceName,
 		final.GetNamespace(),
 		final.GetName(),

@@ -14,23 +14,20 @@ import (
 )
 
 func (r *rootState) newMoveCommand() *cobra.Command {
-	command := r.moveSubmissionCommand(false, false)
-	command.AddCommand(r.newMoveCreateCommand(), r.newMovePlanCommand())
+	command := r.moveSubmissionCommand(false)
+	command.AddCommand(r.newMovePlanCommand())
 	r.addMoveLifecycle(command)
 	return command
 }
 
-// newMoveCreateCommand submits a declarative Move workflow for controller
-// reconciliation.
-func (r *rootState) newMoveCreateCommand() *cobra.Command {
-	return r.moveSubmissionCommand(false, true)
-}
-
 func (r *rootState) newMovePlanCommand() *cobra.Command {
-	return r.moveSubmissionCommand(true, false)
+	return r.moveSubmissionCommand(true)
 }
 
-func (r *rootState) moveSubmissionCommand(planOnly, submit bool) *cobra.Command {
+// moveSubmissionCommand runs or plans a session move: the ConfigMap record is
+// created and executed in this process. Declarative Move CRs belong to the
+// cr move create command.
+func (r *rootState) moveSubmissionCommand(planOnly bool) *cobra.Command {
 	object := &v1alpha1.Move{
 		Spec: v1alpha1.MoveSpec{DestinationPVC: &v1alpha1.LocalResourceReference{}},
 	}
@@ -41,26 +38,17 @@ func (r *rootState) moveSubmissionCommand(planOnly, submit bool) *cobra.Command 
 	)
 
 	dryRun := planOnly
-	wait := true
 
 	command := &cobra.Command{
 		Use:   "move",
 		Short: "Move an offline PVC identity within or across namespaces",
 		Args:  cobra.NoArgs,
 	}
-	switch {
-	case planOnly:
+	if planOnly {
 		command.Use, command.Short = "plan", "Inspect PVC move checks without mutations"
-	case submit:
-		command.Use, command.Short = "create", "Submit a Move workflow for controller reconciliation"
 	}
 
-	if submit {
-		bindCreateDryRun(command, &dryRun)
-		bindCreateWait(command, &wait)
-	} else {
-		bindDryRun(command, &dryRun)
-	}
+	bindDryRun(command, &dryRun)
 
 	f := command.Flags()
 	f.StringVar(&object.Name, "id", "", "Workflow ID; generated when omitted")
@@ -119,48 +107,6 @@ func (r *rootState) moveSubmissionCommand(planOnly, submit bool) *cobra.Command 
 
 		ctx, cancel := r.context(cmd.Context())
 		defer cancel()
-
-		// Declarative submission: the Move CR is handed to the elected
-		// controller, which owns planning and execution. The session path
-		// below plans and executes in this process.
-		if submit {
-			if err := requireControllerWorkflow(runtime, domain.SessionTypeMove); err != nil {
-				return err
-			}
-
-			if err := kube.CheckWorkflowIdentityCollision(
-				ctx,
-				runtime.clients.Runtime,
-				runtime.clients.Kubernetes,
-				runtime.controllerKinds,
-				current.Name,
-				domain.ControllerKindMove,
-				[]string{
-					string(current.Spec.SourceNamespace),
-					string(current.Spec.DestinationNamespace),
-					r.global.sessionNamespace,
-				},
-				true,
-			); err != nil {
-				return err
-			}
-
-			if dryRun {
-				if err := runtime.printer.Print(current); err != nil {
-					return err
-				}
-
-				return writeDryRunApprovalNotice(cmd.ErrOrStderr())
-			}
-
-			if err := r.confirm(ctx, cmd, current.Spec.SourcePVC.Name); err != nil {
-				return reportApprovalError(cmd, err)
-			}
-
-			runtime.waitForController = wait
-
-			return submitMove(ctx, cmd, runtime, current)
-		}
 
 		report, err := runtime.planner.PlanMove(ctx, current, r.global.sessionNamespace)
 		if err != nil {

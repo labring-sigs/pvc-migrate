@@ -240,57 +240,19 @@ func (r *rootState) newMigrateCommand() *cobra.Command {
 				return reportPreSessionError(cmd, err)
 			}
 
-			return r.runOfflineMigrateCommand(cmd, flags, dryRun, false, false)
+			return r.runOfflineMigrateCommand(cmd, flags, dryRun)
 		},
 	}
 	flags.bind(command)
 	bindDryRun(command, &dryRun)
 	command.AddCommand(
-		r.newOfflineMigrationCreateCommand(),
 		r.newOfflineMigrationPlanCommand(),
-		r.newOfflineMigrationStatusCommand(),
-		r.newOfflineMigrationResumeCommand(),
-		r.newOfflineMigrationAbortCommand(),
-		r.newOfflineMigrationRollbackCommand(),
-		r.newOfflineMigrationCleanupCommand(),
+		r.newOfflineMigrationStatusCommand(sourceSession),
+		r.newOfflineMigrationResumeCommand(sourceSession),
+		r.newOfflineMigrationAbortCommand(sourceSession),
+		r.newOfflineMigrationRollbackCommand(sourceSession),
+		r.newOfflineMigrationCleanupCommand(sourceSession),
 	)
-
-	return command
-}
-
-// newOfflineMigrationCreateCommand submits a declarative Migration workflow
-// for controller reconciliation.
-func (r *rootState) newOfflineMigrationCreateCommand() *cobra.Command {
-	flags := &offlineMigrationFlags{}
-
-	var (
-		dryRun bool
-		wait   bool
-	)
-
-	command := &cobra.Command{
-		Use:   "create",
-		Short: "Submit a Migration workflow for controller reconciliation",
-		Args:  cobra.NoArgs,
-		RunE: func(cmd *cobra.Command, _ []string) error {
-			if err := validateDestinationCapacityFlags(
-				domain.OperationMigrate,
-				false,
-				flags.destinationCapacities,
-				flags.allowVolumeShrink,
-				flags.skipSourceUsageCheck,
-				flags.sourcePaths,
-				flags.destinationPaths,
-			); err != nil {
-				return reportPreSessionError(cmd, err)
-			}
-
-			return r.runOfflineMigrateCommand(cmd, flags, dryRun, true, wait)
-		},
-	}
-	flags.bind(command)
-	bindCreateDryRun(command, &dryRun)
-	bindCreateWait(command, &wait)
 
 	return command
 }
@@ -363,8 +325,6 @@ func (r *rootState) runOfflineMigrateCommand(
 	cmd *cobra.Command,
 	flags *offlineMigrationFlags,
 	dryRun bool,
-	submit bool,
-	wait bool,
 ) error {
 	runtime, err := r.runtime()
 	if err != nil {
@@ -374,37 +334,9 @@ func (r *rootState) runOfflineMigrateCommand(
 	ctx, cancel := r.context(cmd.Context())
 	defer cancel()
 
-	object, err := flags.workflow(r, runtime, cmd.Flags().Changed("temporary-namespace"), submit)
+	object, err := flags.workflow(r, runtime, cmd.Flags().Changed("temporary-namespace"), false)
 	if err != nil {
 		return err
-	}
-
-	// Submission previews plan with controller semantics: submission RBAC and
-	// CR-backed estimates, not the data-plane permissions local runs need.
-	if submit && runtime.planner != nil {
-		runtime.planner = runtime.planner.ForController()
-	}
-
-	// Only controller submission depends on the workflow CRDs being served;
-	// session execution is CRD-independent.
-	if submit {
-		if err := requireControllerWorkflow(runtime, domain.SessionTypeMigrate); err != nil {
-			return err
-		}
-	}
-
-	if err != nil {
-		return err
-	}
-
-	if submit && !dryRun {
-		if err := r.confirm(ctx, cmd, offlineApprovalIdentity(flags)); err != nil {
-			return reportApprovalError(cmd, err)
-		}
-
-		runtime.waitForController = wait
-
-		return submitMigration(ctx, cmd, runtime, object)
 	}
 
 	plan, err := runtime.planner.PlanOfflineMigration(ctx, object, r.global.toolImage)
@@ -465,8 +397,10 @@ func (r *rootState) runOfflineMigrateCommand(
 
 	return writeWorkflowNextSteps(
 		cmd.ErrOrStderr(),
+		cmd,
 		guidancePrefixesForCommand(cmd, namespace).pvcMigrate,
 		"migrate",
+		namespace,
 		object.Name,
 		object.Status.Phase,
 		true,

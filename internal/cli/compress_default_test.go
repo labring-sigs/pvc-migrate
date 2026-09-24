@@ -158,22 +158,22 @@ func TestTransferTuningFlagsRefusedWhereUnused(t *testing.T) {
 			wantSubstr: "backup and restore use rclone",
 		},
 		{
-			path:       []string{"copy", "create"},
+			path:       []string{"cr", "copy", "create"},
 			compress:   "true",
 			wantSubstr: "controller executes its transfers",
 		},
 		{
-			path:       []string{"copy", "create"},
+			path:       []string{"cr", "copy", "create"},
 			bandwidth:  true,
 			wantSubstr: "controller executes its transfers",
 		},
 		{
-			path:       []string{"migrate-pod", "create"},
+			path:       []string{"cr", "migrate-pod", "create"},
 			compress:   "true",
 			wantSubstr: "controller executes its transfers",
 		},
 		{
-			path:       []string{"migrate", "create"},
+			path:       []string{"cr", "migrate", "create"},
 			bandwidth:  true,
 			wantSubstr: "controller executes its transfers",
 		},

@@ -13,11 +13,15 @@ import (
 	crclient "sigs.k8s.io/controller-runtime/pkg/client"
 )
 
+// loadBackup resolves one backup from the backend its command family
+// addresses — ConfigMap session records for the session commands, namespaced
+// Backup CRs for the cr commands — and returns the store bound to that backend.
 func (r *rootState) loadBackup(
 	ctx context.Context,
 	cmd *cobra.Command,
 	runtime *commandRuntime,
 	name string,
+	source workflowSource,
 ) (*v1alpha1.Backup, kube.WorkflowStore[*v1alpha1.Backup], string, error) {
 	namespace := r.workflowStorageNamespace(cmd)
 
@@ -30,6 +34,7 @@ func (r *rootState) loadBackup(
 		map[domain.ControllerKind]crclient.Object{
 			domain.ControllerKindBackup: &v1alpha1.Backup{},
 		},
+		source,
 	)
 	if err != nil {
 		return nil, nil, "", reportSessionLookupError(cmd, namespace, name, err)
@@ -57,9 +62,9 @@ func (r *rootState) loadBackup(
 	return backup, store, backend, nil
 }
 
-func (r *rootState) newBackupStatusCommand() *cobra.Command {
+func (r *rootState) newBackupStatusCommand(source workflowSource) *cobra.Command {
 	return &cobra.Command{
-		Use:   "status [SESSION]",
+		Use:   "status [" + workflowArgLabel(source) + "]",
 		Short: "Show one backup or list backups",
 		Args:  cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -72,7 +77,7 @@ func (r *rootState) newBackupStatusCommand() *cobra.Command {
 			defer cancel()
 
 			if len(args) == 1 {
-				object, _, backend, err := r.loadBackup(ctx, cmd, runtime, args[0])
+				object, _, backend, err := r.loadBackup(ctx, cmd, runtime, args[0], source)
 				if err != nil {
 					return err
 				}
@@ -84,6 +89,29 @@ func (r *rootState) newBackupStatusCommand() *cobra.Command {
 					"backup",
 					workflowLeaseNamespace(backend, r.workflowStorageNamespace(cmd), object),
 				)
+			}
+
+			objects := []crclient.Object{}
+
+			if source == sourceController {
+				if !crdListable(runtime) {
+					return runtime.printer.Print(objects)
+				}
+
+				kind := domain.ControllerKindBackup
+				if len(runtime.controllerKinds) != 0 &&
+					!slices.Contains(runtime.controllerKinds, kind) {
+					return runtime.printer.Print(objects)
+				}
+
+				items, err := listControllerWorkflows(ctx, runtime, kind)
+				if err != nil {
+					return err
+				}
+
+				objects = append(objects, items...)
+
+				return runtime.printer.Print(objects)
 			}
 
 			namespace := r.workflowStorageNamespace(cmd)
@@ -102,29 +130,8 @@ func (r *rootState) newBackupStatusCommand() *cobra.Command {
 				return err
 			}
 
-			objects := make([]crclient.Object, len(items))
-			for i, object := range items {
-				objects[i] = object
-			}
-
-			if crdListable(runtime) && (len(runtime.controllerKinds) == 0 ||
-				slices.Contains(runtime.controllerKinds, domain.ControllerKindBackup)) {
-				crdStore, err := cliCRDWorkflowStore(
-					runtime,
-					func() *v1alpha1.Backup { return &v1alpha1.Backup{} },
-				)
-				if err != nil {
-					return err
-				}
-
-				items, err := crdStore.List(ctx, namespace)
-				if err != nil {
-					return err
-				}
-
-				for _, object := range items {
-					objects = append(objects, object)
-				}
+			for _, object := range items {
+				objects = append(objects, object)
 			}
 
 			return runtime.printer.Print(objects)
@@ -132,11 +139,11 @@ func (r *rootState) newBackupStatusCommand() *cobra.Command {
 	}
 }
 
-func (r *rootState) newBackupResumeCommand() *cobra.Command {
+func (r *rootState) newBackupResumeCommand(source workflowSource) *cobra.Command {
 	var dryRun bool
 
 	command := &cobra.Command{
-		Use:   "resume SESSION",
+		Use:   "resume " + workflowArgLabel(source),
 		Short: "Continue a backup from its persisted phase",
 		Args:  cobra.ExactArgs(1),
 	}
@@ -149,7 +156,7 @@ func (r *rootState) newBackupResumeCommand() *cobra.Command {
 		ctx, cancel := r.context(cmd.Context())
 		defer cancel()
 
-		object, store, backend, err := r.loadBackup(ctx, cmd, runtime, args[0])
+		object, store, backend, err := r.loadBackup(ctx, cmd, runtime, args[0], source)
 		if err != nil {
 			return err
 		}
@@ -189,9 +196,11 @@ func (r *rootState) newBackupResumeCommand() *cobra.Command {
 			return writeDryRunNotice(
 				cmd.ErrOrStderr(),
 				lifecycleExecuteCommand(
+					cmd,
 					guidancePrefixesForCommand(cmd, namespace).pvcMigrate,
 					"backup",
 					"resume",
+					namespace,
 					object.Name,
 				),
 			)
@@ -285,11 +294,11 @@ func (r *rootState) newBackupResumeCommand() *cobra.Command {
 	return command
 }
 
-func (r *rootState) newBackupAbortCommand() *cobra.Command {
+func (r *rootState) newBackupAbortCommand(source workflowSource) *cobra.Command {
 	var dryRun bool
 
 	command := &cobra.Command{
-		Use:   "abort SESSION",
+		Use:   "abort " + workflowArgLabel(source),
 		Short: "Abort a backup and retain published recovery points",
 		Args:  cobra.ExactArgs(1),
 	}
@@ -302,7 +311,7 @@ func (r *rootState) newBackupAbortCommand() *cobra.Command {
 		ctx, cancel := r.context(cmd.Context())
 		defer cancel()
 
-		object, store, backend, err := r.loadBackup(ctx, cmd, runtime, args[0])
+		object, store, backend, err := r.loadBackup(ctx, cmd, runtime, args[0], source)
 		if err != nil {
 			return err
 		}
@@ -345,9 +354,11 @@ func (r *rootState) newBackupAbortCommand() *cobra.Command {
 			return writeDryRunNotice(
 				cmd.ErrOrStderr(),
 				lifecycleExecuteCommand(
+					cmd,
 					guidancePrefixesForCommand(cmd, namespace).pvcMigrate,
 					"backup",
 					"abort",
+					namespace,
 					object.Name,
 				),
 			)
@@ -360,13 +371,13 @@ func (r *rootState) newBackupAbortCommand() *cobra.Command {
 	return command
 }
 
-func (r *rootState) newBackupCleanupCommand() *cobra.Command {
+func (r *rootState) newBackupCleanupCommand(source workflowSource) *cobra.Command {
 	var options backup.BackupCleanupOptions
 
 	var dryRun bool
 
 	command := &cobra.Command{
-		Use:   "cleanup SESSION",
+		Use:   "cleanup " + workflowArgLabel(source),
 		Short: "Finalize backup resources and clean up workflow metadata",
 		Args:  cobra.ExactArgs(1),
 	}
@@ -379,7 +390,7 @@ func (r *rootState) newBackupCleanupCommand() *cobra.Command {
 		ctx, cancel := r.context(cmd.Context())
 		defer cancel()
 
-		object, store, backend, err := r.loadBackup(ctx, cmd, runtime, args[0])
+		object, store, backend, err := r.loadBackup(ctx, cmd, runtime, args[0], source)
 		if err != nil {
 			return err
 		}
@@ -429,8 +440,10 @@ func (r *rootState) newBackupCleanupCommand() *cobra.Command {
 			return writeDryRunNotice(
 				cmd.ErrOrStderr(),
 				cleanupExecuteCommand(
+					cmd,
 					guidancePrefixesForCommand(cmd, r.workflowStorageNamespace(cmd)).pvcMigrate,
 					"backup",
+					r.workflowStorageNamespace(cmd),
 					object.Name,
 					"",
 					options.Finalize,

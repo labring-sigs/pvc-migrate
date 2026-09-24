@@ -14,45 +14,33 @@ import (
 )
 
 func (r *rootState) newRenameCommand() *cobra.Command {
-	command := r.renameSubmissionCommand(false, false)
-	command.AddCommand(r.newRenameCreateCommand(), r.newRenamePlanCommand())
+	command := r.renameSubmissionCommand(false)
+	command.AddCommand(r.newRenamePlanCommand())
 	r.addRenameLifecycle(command)
 	return command
 }
 
-// newRenameCreateCommand submits a declarative Rename workflow for controller
-// reconciliation.
-func (r *rootState) newRenameCreateCommand() *cobra.Command {
-	return r.renameSubmissionCommand(false, true)
-}
-
 func (r *rootState) newRenamePlanCommand() *cobra.Command {
-	return r.renameSubmissionCommand(true, false)
+	return r.renameSubmissionCommand(true)
 }
 
-func (r *rootState) renameSubmissionCommand(planOnly, submit bool) *cobra.Command {
+// renameSubmissionCommand runs or plans a session rename: the ConfigMap record
+// is created and executed in this process. Declarative Rename CRs belong to
+// the cr rename create command.
+func (r *rootState) renameSubmissionCommand(planOnly bool) *cobra.Command {
 	object := &v1alpha1.Rename{}
 	dryRun := planOnly
-	wait := true
 
 	command := &cobra.Command{
 		Use:   "rename",
 		Short: "Rebind an offline PVC name within its namespace",
 		Args:  cobra.NoArgs,
 	}
-	switch {
-	case planOnly:
+	if planOnly {
 		command.Use, command.Short = "plan", "Inspect PVC rename checks without mutations"
-	case submit:
-		command.Use, command.Short = "create", "Submit a Rename workflow for controller reconciliation"
 	}
 
-	if submit {
-		bindCreateDryRun(command, &dryRun)
-		bindCreateWait(command, &wait)
-	} else {
-		bindDryRun(command, &dryRun)
-	}
+	bindDryRun(command, &dryRun)
 
 	f := command.Flags()
 	f.StringVar(&object.Name, "id", "", "Workflow ID; generated when omitted")
@@ -99,33 +87,10 @@ func (r *rootState) renameSubmissionCommand(planOnly, submit bool) *cobra.Comman
 			return err
 		}
 
-		if submit && runtime.planner != nil {
-			runtime.planner = runtime.planner.ForController()
-		}
-
 		ctx, cancel := r.context(cmd.Context())
 		defer cancel()
 
 		storageNamespace := current.Namespace
-
-		if submit {
-			if err := requireControllerWorkflow(runtime, domain.SessionTypeRename); err != nil {
-				return err
-			}
-
-			if err := kube.CheckWorkflowIdentityCollision(
-				ctx,
-				runtime.clients.Runtime,
-				runtime.clients.Kubernetes,
-				runtime.controllerKinds,
-				current.Name,
-				domain.ControllerKindRename,
-				[]string{current.Namespace},
-				true,
-			); err != nil {
-				return err
-			}
-		}
 
 		report, err := runtime.planner.PlanRename(ctx, current, storageNamespace)
 		if err != nil {
@@ -160,16 +125,6 @@ func (r *rootState) renameSubmissionCommand(planOnly, submit bool) *cobra.Comman
 			Phase:     domain.PhasePlanned,
 			StartedAt: now,
 			UpdatedAt: now,
-		}
-
-		if submit {
-			if err := r.confirm(ctx, cmd, current.Spec.SourcePVC.Name); err != nil {
-				return reportApprovalError(cmd, err)
-			}
-
-			runtime.waitForController = wait
-
-			return submitRename(ctx, cmd, runtime, current)
 		}
 
 		if err := r.confirm(ctx, cmd, current.Spec.SourcePVC.Name); err != nil {

@@ -12,51 +12,42 @@ import (
 )
 
 func (r *rootState) newRestoreCommand() *cobra.Command {
-	command := r.restoreSubmissionCommand(false, false)
+	command := r.restoreSubmissionCommand(false)
 	command.AddCommand(
-		r.newRestoreCreateCommand(),
 		r.newRestorePlanCommand(),
-		r.newRestoreStatusCommand(),
-		r.newRestoreResumeCommand(),
-		r.newRestoreAbortCommand(),
-		r.newRestoreCleanupCommand(),
+		r.newRestoreStatusCommand(sourceSession),
+		r.newRestoreResumeCommand(sourceSession),
+		r.newRestoreAbortCommand(sourceSession),
+		r.newRestoreCleanupCommand(sourceSession),
 	)
 
 	return command
 }
 
-// newRestoreCreateCommand submits a declarative Restore workflow for
-// controller reconciliation.
-func (r *rootState) newRestoreCreateCommand() *cobra.Command {
-	return r.restoreSubmissionCommand(false, true)
-}
-
 func (r *rootState) newRestorePlanCommand() *cobra.Command {
-	return r.restoreSubmissionCommand(true, false)
+	return r.restoreSubmissionCommand(true)
 }
 
-func (r *rootState) restoreSubmissionCommand(planOnly, submit bool) *cobra.Command {
+// restoreSubmissionCommand builds the session restore command and its plan-only
+// preview. Controller submission lives in the cr restore create command.
+func (r *rootState) restoreSubmissionCommand(planOnly bool) *cobra.Command {
 	object := &v1alpha1.Restore{
 		TypeMeta: metav1.TypeMeta{APIVersion: v1alpha1.GroupVersion.String(), Kind: "Restore"},
 	}
 	flags := &s3RepositoryFlags{}
 	dryRun := planOnly
-	wait := true
 
 	command := &cobra.Command{
 		Use:   "restore",
 		Short: "Restore an S3 recovery point into a PVC",
 		Args:  cobra.NoArgs,
 	}
-	switch {
-	case planOnly:
+	if planOnly {
 		command.Use, command.Short = "plan", "Validate a restore without mutations"
-	case submit:
-		command.Use, command.Short = "create", "Submit a Restore workflow for controller reconciliation"
 	}
 
 	command.RunE = func(cmd *cobra.Command, _ []string) error {
-		return r.runRestoreObject(cmd, object.DeepCopy(), flags, dryRun, submit, wait)
+		return r.runRestoreObject(cmd, object.DeepCopy(), flags, dryRun)
 	}
 	f := command.Flags()
 	f.StringVar(&object.Name, "id", "", "Workflow ID; generated when omitted")
@@ -107,15 +98,10 @@ func (r *rootState) restoreSubmissionCommand(planOnly, submit bool) *cobra.Comma
 		false,
 		"Delete destination files absent from the recovery point",
 	)
-	bindRepositoryFlags(command, flags, &object.Spec.RepositoryRef.Name, submit)
+	bindRepositoryFlags(command, flags, &object.Spec.RepositoryRef.Name, false)
 
 	if !planOnly {
-		if submit {
-			bindCreateDryRun(command, &dryRun)
-			bindCreateWait(command, &wait)
-		} else {
-			bindDryRun(command, &dryRun)
-		}
+		bindDryRun(command, &dryRun)
 	}
 
 	return command
@@ -126,10 +112,8 @@ func (r *rootState) runRestoreObject(
 	object *v1alpha1.Restore,
 	flags *s3RepositoryFlags,
 	dryRun bool,
-	submit bool,
-	wait bool,
 ) error {
-	if err := r.validateRestoreInput(cmd, object, flags, submit); err != nil {
+	if err := r.validateRestoreInput(cmd, object, flags, false); err != nil {
 		return err
 	}
 
@@ -138,39 +122,17 @@ func (r *rootState) runRestoreObject(
 		return reportRuntimeError(cmd, err)
 	}
 
-	if err := requireControllerWorkflow(runtime, domain.SessionTypeRestore); err != nil {
-		return err
-	}
-
 	if err := validateRepositoryFlags(
 		cmd,
 		flags,
 		object.Spec.RepositoryRef.Name,
-		submit,
+		false,
 	); err != nil {
 		return reportPreSessionError(cmd, err)
 	}
 
 	ctx, cancel := r.context(cmd.Context())
 	defer cancel()
-
-	if submit {
-		if dryRun {
-			if err := runtime.printer.Print(object); err != nil {
-				return err
-			}
-
-			return writeDryRunApprovalNotice(cmd.ErrOrStderr())
-		}
-
-		if err := r.confirm(ctx, cmd, object.Spec.Name); err != nil {
-			return reportApprovalError(cmd, err)
-		}
-
-		runtime.waitForController = wait
-
-		return r.submitRestore(ctx, cmd, runtime, object)
-	}
 
 	storageNamespace := object.Namespace
 

@@ -33,21 +33,22 @@ func newWorkflowLookupRuntime(t *testing.T, objects ...crclient.Object) *command
 	}}
 }
 
-func TestLoadBackupProbesWorkflowNamespaceForCRD(t *testing.T) {
+func TestLoadBackupAddressesCRDFromCommandNamespace(t *testing.T) {
 	object := &v1alpha1.Backup{
 		ObjectMeta: metav1.ObjectMeta{Name: "backup-1", Namespace: "tenant-a"},
 	}
 	runtime := newWorkflowLookupRuntime(t, object)
-	state := &rootState{global: globals{
-		sessionNamespace:  "sessions",
-		workflowNamespace: "tenant-a",
-	}}
+	state := &rootState{global: globals{sessionNamespace: "sessions"}}
+
+	command := &cobra.Command{}
+	command.Flags().String("namespace", "tenant-a", "")
 
 	loaded, store, backend, err := state.loadBackup(
 		t.Context(),
-		&cobra.Command{},
+		command,
 		runtime,
 		object.Name,
+		sourceController,
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -72,21 +73,22 @@ func TestLoadBackupProbesWorkflowNamespaceForCRD(t *testing.T) {
 	}
 }
 
-func TestLoadBackupProbesDefaultWorkflowNamespaceForCRD(t *testing.T) {
+func TestLoadBackupAddressesDefaultNamespaceCRD(t *testing.T) {
 	object := &v1alpha1.Backup{
 		ObjectMeta: metav1.ObjectMeta{Name: "backup-default", Namespace: "default"},
 	}
 	runtime := newWorkflowLookupRuntime(t, object)
-	state := &rootState{global: globals{
-		sessionNamespace:  "sessions",
-		workflowNamespace: "default",
-	}}
+	state := &rootState{global: globals{sessionNamespace: "sessions"}}
+
+	command := &cobra.Command{}
+	command.Flags().String("namespace", "default", "")
 
 	loaded, _, backend, err := state.loadBackup(
 		t.Context(),
-		&cobra.Command{},
+		command,
 		runtime,
 		object.Name,
+		sourceController,
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -103,34 +105,22 @@ func TestLoadBackupProbesDefaultWorkflowNamespaceForCRD(t *testing.T) {
 	}
 }
 
-func TestCRDProbeNamespacesDeduplicatesAndKeepsDefault(t *testing.T) {
-	command := &cobra.Command{}
-	command.Flags().String("namespace", "default", "")
-	command.Flags().String("source-namespace", "default", "")
-
-	state := &rootState{global: globals{workflowNamespace: "default"}}
-
-	got := state.crdProbeNamespaces(command)
-	if len(got) != 1 || got[0] != "default" {
-		t.Fatalf("probe namespaces = %#v, want [default]", got)
-	}
-}
-
-func TestLoadRestoreProbesWorkflowNamespaceForCRD(t *testing.T) {
+func TestLoadRestoreAddressesCRDFromCommandNamespace(t *testing.T) {
 	object := &v1alpha1.Restore{
 		ObjectMeta: metav1.ObjectMeta{Name: "restore-1", Namespace: "tenant-a"},
 	}
 	runtime := newWorkflowLookupRuntime(t, object)
-	state := &rootState{global: globals{
-		sessionNamespace:  "sessions",
-		workflowNamespace: "tenant-a",
-	}}
+	state := &rootState{global: globals{sessionNamespace: "sessions"}}
+
+	command := &cobra.Command{}
+	command.Flags().String("namespace", "tenant-a", "")
 
 	loaded, store, backend, err := state.loadRestore(
 		t.Context(),
-		&cobra.Command{},
+		command,
 		runtime,
 		object.Name,
+		sourceController,
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -165,6 +155,7 @@ func TestLoadMoveUsesClusterScopedCRDKey(t *testing.T) {
 		&cobra.Command{},
 		runtime,
 		object.Name,
+		sourceClusterController,
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -202,6 +193,7 @@ func TestLoadWorkflowWithoutRuntimeClientReturnsNotFound(t *testing.T) {
 		map[domain.ControllerKind]crclient.Object{
 			domain.ControllerKindBackup: &v1alpha1.Backup{},
 		},
+		sourceSession,
 	)
 	if err == nil || !apierrors.IsNotFound(err) {
 		t.Fatalf("load error = %v, want not found", err)

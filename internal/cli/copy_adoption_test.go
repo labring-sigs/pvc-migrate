@@ -46,8 +46,7 @@ func TestCopyAdoptionLocksRecordedNamespaceBeforeHandoff(t *testing.T) {
 						Build(),
 				},
 			}
-			state := &rootState{}
-			state.global.workflowNamespace = "lookup-scope"
+			state := &rootState{global: globals{sessionNamespace: "pvc-migrate-system"}}
 			cmd := &cobra.Command{}
 			cmd.SetErr(io.Discard)
 

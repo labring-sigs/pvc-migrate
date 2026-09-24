@@ -327,10 +327,10 @@ func TestTransferCommandsSubmitWithoutLegacyPlannerOrSessionStore(t *testing.T) 
 		kind domain.ControllerKind
 		args []string
 	}{
-		{"Migration", []string{"migrate", "create", "--source-pvc", "missing", "--temporary-namespace", "app"}},
-		{"PodMigration", []string{"migrate-pod", "create", "--pod", "missing", "--precopy-passes", "0"}},
-		{"Copy", []string{"copy", "create", "--source-pvc", "missing"}},
-		{"Reservation", []string{"reserve", "create", "--source-pvc", "missing"}},
+		{"Migration", []string{"cr", "migrate", "create", "--source-pvc", "missing", "--temporary-namespace", "app"}},
+		{"PodMigration", []string{"cr", "migrate-pod", "create", "--pod", "missing", "--precopy-passes", "0"}},
+		{"Copy", []string{"cr", "copy", "create", "--source-pvc", "missing"}},
+		{"Reservation", []string{"cr", "reserve", "create", "--source-pvc", "missing"}},
 	} {
 		t.Run(string(test.kind), func(t *testing.T) {
 			scheme := runtime.NewScheme()

@@ -13,35 +13,28 @@ import (
 )
 
 func (r *rootState) newCopyCommand() *cobra.Command {
-	command := r.copySubmissionCommand(false, false)
-	command.AddCommand(r.newCopyCreateCommand(), r.newCopyPlanCommand())
+	command := r.copySubmissionCommand(false)
+	command.AddCommand(r.newCopyPlanCommand())
 	r.addCopyLifecycle(command)
 	return command
 }
 
-// newCopyCreateCommand submits a declarative Copy workflow for controller
-// reconciliation.
-func (r *rootState) newCopyCreateCommand() *cobra.Command {
-	return r.copySubmissionCommand(false, true)
-}
+func (r *rootState) newCopyPlanCommand() *cobra.Command { return r.copySubmissionCommand(true) }
 
-func (r *rootState) newCopyPlanCommand() *cobra.Command { return r.copySubmissionCommand(true, false) }
-
-func (r *rootState) copySubmissionCommand(planOnly, submit bool) *cobra.Command {
+// copySubmissionCommand builds the session copy entrypoints: the bare run
+// command and its plan preview. Controller submissions live under the cr
+// command group instead.
+func (r *rootState) copySubmissionCommand(planOnly bool) *cobra.Command {
 	flags := &copyFlags{}
 	dryRun := planOnly
-	wait := true
 
 	command := &cobra.Command{
 		Use:   "copy",
 		Short: "Run a finite copy without workload cutover",
 		Args:  cobra.NoArgs,
 	}
-	switch {
-	case planOnly:
+	if planOnly {
 		command.Use, command.Short = "plan", "Inspect copy checks without mutations"
-	case submit:
-		command.Use, command.Short = "create", "Submit a Copy workflow for controller reconciliation"
 	}
 
 	command.RunE = func(cmd *cobra.Command, _ []string) error {
@@ -71,35 +64,18 @@ func (r *rootState) copySubmissionCommand(planOnly, submit bool) *cobra.Command 
 			return err
 		}
 
-		if submit && runtime.planner != nil {
-			runtime.planner = runtime.planner.ForController()
-		}
-
 		ctx, cancel := r.context(cmd.Context())
 		defer cancel()
 
 		if existing {
-			// An existing Reservation is adoptable through create as well:
-			// the handoff persists the planned Copy CR and the elected
-			// controller executes it. Only a re-submitted Copy is refused.
-			return r.copyExisting(ctx, cmd, runtime, flags, dryRun, submit)
+			// An existing Reservation is adoptable: the handoff graduates the
+			// persisted reservation into the copy this session executes.
+			return r.copyExisting(ctx, cmd, runtime, flags, dryRun, false)
 		}
 
-		object, err := flags.workflow(r, runtime, submit)
+		object, err := flags.workflow(r, runtime, false)
 		if err != nil {
 			return err
-		}
-
-		if submit {
-			if err := requireControllerWorkflow(runtime, domain.SessionTypeCopy); err != nil {
-				return err
-			}
-
-			if !dryRun {
-				runtime.waitForController = wait
-
-				return submitCopy(ctx, cmd, runtime, object)
-			}
 		}
 
 		if object.Spec.SourceNamespace == object.Spec.DestinationNamespace &&
@@ -120,12 +96,7 @@ func (r *rootState) copySubmissionCommand(planOnly, submit bool) *cobra.Command 
 	flags.bind(command)
 
 	if !planOnly {
-		if submit {
-			bindCreateDryRun(command, &dryRun)
-			bindCreateWait(command, &wait)
-		} else {
-			bindDryRun(command, &dryRun)
-		}
+		bindDryRun(command, &dryRun)
 	}
 
 	return command

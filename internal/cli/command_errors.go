@@ -49,6 +49,7 @@ func sessionTypeCommandName(sessionType domain.SessionType) string {
 // workflowCommandNameForCommand identifies the local workflow owning a CLI
 // command before any object has been loaded. This keeps early errors
 // actionable without routing every failure through a global session command.
+// Commands inside the cr group report their cr family path.
 func workflowCommandNameForCommand(value any) string {
 	command, ok := value.(*cobra.Command)
 	if !ok || command == nil {
@@ -64,6 +65,19 @@ func workflowCommandNameForCommand(value any) string {
 
 	if current == nil || current == root {
 		return "migrate"
+	}
+
+	if current.Name() == "cr" {
+		family := command
+		for family != nil && family.Parent() != current {
+			family = family.Parent()
+		}
+
+		if family != nil {
+			return "cr " + family.Name()
+		}
+
+		return "cr"
 	}
 
 	switch current.Name() {
