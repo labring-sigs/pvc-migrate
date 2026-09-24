@@ -111,6 +111,32 @@ func TestNamespaceFlagSurface(t *testing.T) {
 			name: "session migrate",
 			path: []string{"migrate"},
 			present: []expectation{
+				{"namespace", "n"},
+			},
+			absent: []string{"source-namespace", "destination-namespace", "temporary-namespace"},
+		},
+		{
+			name: "session migrate plan",
+			path: []string{"migrate", "plan"},
+			present: []expectation{
+				{"namespace", "n"},
+			},
+			absent: []string{"source-namespace", "destination-namespace", "temporary-namespace"},
+		},
+		{
+			name: "session cluster-migrate",
+			path: []string{"cluster-migrate"},
+			present: []expectation{
+				{"source-namespace", "n"},
+				{"destination-namespace", ""},
+				{"temporary-namespace", ""},
+			},
+			absent: []string{"namespace"},
+		},
+		{
+			name: "session cluster-migrate plan",
+			path: []string{"cluster-migrate", "plan"},
+			present: []expectation{
 				{"source-namespace", "n"},
 				{"destination-namespace", ""},
 				{"temporary-namespace", ""},
@@ -120,6 +146,31 @@ func TestNamespaceFlagSurface(t *testing.T) {
 		{
 			name: "session copy",
 			path: []string{"copy"},
+			present: []expectation{
+				{"namespace", "n"},
+			},
+			absent: []string{"source-namespace", "destination-namespace", "temporary-namespace"},
+		},
+		{
+			name: "session cluster-copy",
+			path: []string{"cluster-copy"},
+			present: []expectation{
+				{"source-namespace", "n"},
+				{"destination-namespace", ""},
+			},
+			absent: []string{"namespace", "temporary-namespace"},
+		},
+		{
+			name: "session reserve",
+			path: []string{"reserve"},
+			present: []expectation{
+				{"namespace", "n"},
+			},
+			absent: []string{"source-namespace", "destination-namespace", "temporary-namespace"},
+		},
+		{
+			name: "session cluster-reserve",
+			path: []string{"cluster-reserve"},
 			present: []expectation{
 				{"source-namespace", "n"},
 				{"destination-namespace", ""},

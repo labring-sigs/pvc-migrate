@@ -14,12 +14,27 @@ import (
 	crclient "sigs.k8s.io/controller-runtime/pkg/client"
 )
 
+// migrationRecordNamespace resolves the namespace migration session records
+// live in: the configured session namespace. The -n the namespaced migrate
+// family binds addresses the tenant namespace of the workflow, never the
+// ConfigMap storage location.
+func (r *rootState) migrationRecordNamespace() string {
+	return r.global.sessionNamespace
+}
+
+// loadMigrationWithBackend resolves one migration identity from the single
+// backend its command family addresses — ConfigMap session records for the
+// session commands, workflow CRs for the cr commands — restricted to the one
+// record scope the family owns: migrate addresses Migration records,
+// cluster-migrate and cr cluster-migrate address ClusterMigration records,
+// cr migrate addresses Migration CRs.
 func (r *rootState) loadMigrationWithBackend(
 	ctx context.Context,
 	cmd *cobra.Command,
 	runtime *commandRuntime,
 	id string,
 	source workflowSource,
+	scope recordScope,
 ) (crclient.Object, string, error) {
 	if runtime.clients == nil {
 		return nil, "", domain.NewError(
@@ -30,16 +45,13 @@ func (r *rootState) loadMigrationWithBackend(
 	}
 
 	namespace := r.workflowStorageNamespace(cmd)
-
-	candidates := map[domain.ControllerKind]crclient.Object{
-		domain.ControllerKindMigration:        &v1alpha1.Migration{},
-		domain.ControllerKindClusterMigration: &v1alpha1.ClusterMigration{},
+	if source == sourceSession {
+		namespace = r.migrationRecordNamespace()
 	}
-	switch source {
-	case sourceController:
-		delete(candidates, domain.ControllerKindClusterMigration)
-	case sourceClusterController:
-		delete(candidates, domain.ControllerKindMigration)
+
+	kind := domain.ControllerKindMigration
+	if scope == clusterRecords {
+		kind = domain.ControllerKindClusterMigration
 	}
 
 	object, backend, err := r.loadWorkflowWithBackend(
@@ -48,16 +60,34 @@ func (r *rootState) loadMigrationWithBackend(
 		runtime,
 		namespace,
 		id,
-		candidates,
+		map[domain.ControllerKind]crclient.Object{kind: newWorkflowObject(kind)},
 		source,
 	)
 	if err != nil {
 		return nil, "", reportSessionLookupError(cmd, namespace, id, err)
 	}
 
-	switch object.(type) {
-	case *v1alpha1.Migration, *v1alpha1.ClusterMigration:
-		return object, backend, nil
+	switch current := object.(type) {
+	case *v1alpha1.Migration:
+		if scope == namespacedRecords {
+			return current, backend, nil
+		}
+
+		return nil, "", domain.NewError(
+			domain.ErrorValidation,
+			"migration",
+			"stored workflow is a namespaced Migration; address it with migrate",
+		)
+	case *v1alpha1.ClusterMigration:
+		if scope == clusterRecords {
+			return current, backend, nil
+		}
+
+		return nil, "", domain.NewError(
+			domain.ErrorValidation,
+			"migration",
+			"stored workflow is a ClusterMigration; address it with cluster-migrate",
+		)
 	default:
 		return nil, "", domain.NewError(
 			domain.ErrorValidation,
@@ -77,6 +107,7 @@ func (r *rootState) migrationConfig(runtime *commandRuntime) app.MigrationExecut
 
 func reportMigrationError(
 	cmd *cobra.Command,
+	family string,
 	name string,
 	phase v1alpha1.WorkflowPhase,
 	cause error,
@@ -87,7 +118,7 @@ func reportMigrationError(
 		name,
 		phase,
 		guidancePrefixesForCommand(cmd, "").pvcMigrate,
-		workflowCommandPath(cmd, "migrate"),
+		workflowCommandPath(cmd, family),
 		name,
 	)
 
@@ -96,13 +127,12 @@ func reportMigrationError(
 
 func (r *rootState) migrationExecutor(
 	runtime *commandRuntime,
-	cmd *cobra.Command,
 	backend string,
 ) (*app.MigrationExecutor, error) {
 	store, err := cliWorkflowStoreForBackend(
 		runtime,
 		backend,
-		r.workflowStorageNamespace(cmd),
+		r.migrationRecordNamespace(),
 		func() *v1alpha1.Migration { return &v1alpha1.Migration{} },
 	)
 	if err != nil {
@@ -126,14 +156,14 @@ func (r *rootState) executeMigration(
 	dryRun bool,
 	backend string,
 ) error {
-	executor, err := r.migrationExecutor(runtime, cmd, backend)
+	executor, err := r.migrationExecutor(runtime, backend)
 	if err != nil {
 		return err
 	}
 
 	if dryRun {
 		if err := executor.Validate(ctx, object); err != nil {
-			return reportMigrationError(cmd, object.Name, object.Status.Phase, err)
+			return reportMigrationError(cmd, "migrate", object.Name, object.Status.Phase, err)
 		}
 
 		if err := runtime.printer.Print(object); err != nil {
@@ -165,11 +195,11 @@ func (r *rootState) executeMigration(
 	}
 
 	if err := executor.RequestResume(ctx, object); err != nil {
-		return reportMigrationError(cmd, object.Name, object.Status.Phase, err)
+		return reportMigrationError(cmd, "migrate", object.Name, object.Status.Phase, err)
 	}
 
 	if err := executor.Run(ctx, object); err != nil {
-		return reportMigrationError(cmd, object.Name, object.Status.Phase, err)
+		return reportMigrationError(cmd, "migrate", object.Name, object.Status.Phase, err)
 	}
 
 	if err := runtime.printer.Print(object); err != nil {
@@ -246,7 +276,13 @@ func (r *rootState) executeClusterMigration(
 
 	if dryRun {
 		if err := executor.Validate(ctx, object); err != nil {
-			return reportMigrationError(cmd, object.Name, object.Status.Phase, err)
+			return reportMigrationError(
+				cmd,
+				"cluster-migrate",
+				object.Name,
+				object.Status.Phase,
+				err,
+			)
 		}
 
 		if err := runtime.printer.Print(object); err != nil {
@@ -261,7 +297,7 @@ func (r *rootState) executeClusterMigration(
 					cmd,
 					clusterMigrationStorageNamespace(object),
 				).pvcMigrate,
-				"migrate",
+				"cluster-migrate",
 				"resume",
 				clusterMigrationStorageNamespace(object),
 				object.Name,
@@ -278,11 +314,11 @@ func (r *rootState) executeClusterMigration(
 	}
 
 	if err := executor.RequestResume(ctx, object); err != nil {
-		return reportMigrationError(cmd, object.Name, object.Status.Phase, err)
+		return reportMigrationError(cmd, "cluster-migrate", object.Name, object.Status.Phase, err)
 	}
 
 	if err := executor.Run(ctx, object); err != nil {
-		return reportMigrationError(cmd, object.Name, object.Status.Phase, err)
+		return reportMigrationError(cmd, "cluster-migrate", object.Name, object.Status.Phase, err)
 	}
 
 	if err := runtime.printer.Print(object); err != nil {
@@ -293,7 +329,7 @@ func (r *rootState) executeClusterMigration(
 		cmd.ErrOrStderr(),
 		cmd,
 		guidancePrefixesForCommand(cmd, clusterMigrationStorageNamespace(object)).pvcMigrate,
-		"migrate",
+		"cluster-migrate",
 		clusterMigrationStorageNamespace(object),
 		object.Name,
 		object.Status.Phase,
@@ -308,8 +344,9 @@ func (r *rootState) resumeMigration(
 	id string,
 	dryRun bool,
 	source workflowSource,
+	scope recordScope,
 ) error {
-	object, backend, err := r.loadMigrationWithBackend(ctx, cmd, runtime, id, source)
+	object, backend, err := r.loadMigrationWithBackend(ctx, cmd, runtime, id, source, scope)
 	if err != nil {
 		return err
 	}
@@ -329,21 +366,22 @@ func (r *rootState) validateMigrationReservation(
 	cmd *cobra.Command,
 	runtime *commandRuntime,
 	id string,
+	scope recordScope,
 ) error {
-	object, backend, err := r.loadMigrationWithBackend(ctx, cmd, runtime, id, sourceSession)
+	object, backend, err := r.loadMigrationWithBackend(ctx, cmd, runtime, id, sourceSession, scope)
 	if err != nil {
 		return err
 	}
 
 	switch current := object.(type) {
 	case *v1alpha1.Migration:
-		executor, err := r.migrationExecutor(runtime, cmd, backend)
+		executor, err := r.migrationExecutor(runtime, backend)
 		if err != nil {
 			return err
 		}
 
 		if err := executor.ValidateReservation(ctx, current); err != nil {
-			return reportMigrationError(cmd, current.Name, current.Status.Phase, err)
+			return reportMigrationError(cmd, "migrate", current.Name, current.Status.Phase, err)
 		}
 	case *v1alpha1.ClusterMigration:
 		executor, err := r.clusterMigrationExecutor(runtime, cmd, current, backend)
@@ -352,7 +390,13 @@ func (r *rootState) validateMigrationReservation(
 		}
 
 		if err := executor.ValidateReservation(ctx, current); err != nil {
-			return reportMigrationError(cmd, current.Name, current.Status.Phase, err)
+			return reportMigrationError(
+				cmd,
+				"cluster-migrate",
+				current.Name,
+				current.Status.Phase,
+				err,
+			)
 		}
 	}
 

@@ -55,7 +55,9 @@ func namespacedConfigMapHandoffFixture(
 
 	client := fake.NewClientset(&corev1.ConfigMap{
 		ObjectMeta: metav1.ObjectMeta{
-			Namespace: "data", Name: SessionConfigMapName(source.Name), UID: source.UID,
+			// The record lives in the session storage namespace while the
+			// Reservation object carries its tenant namespace in metadata.
+			Namespace: "sessions", Name: SessionConfigMapName(source.Name), UID: source.UID,
 			ResourceVersion: source.ResourceVersion, Labels: sessionLabels(source.Name),
 		},
 		Data: map[string]string{SessionDataKey: string(data)},
@@ -83,6 +85,7 @@ func TestNamespacedConfigMapReservationHandoffCommitsCompleteCopyAtomically(t *t
 	if err := NamespacedHandoffConfigMapReservationToCopy(
 		t.Context(),
 		client,
+		"sessions",
 		source,
 		destination,
 	); err != nil {
@@ -91,7 +94,7 @@ func TestNamespacedConfigMapReservationHandoffCommitsCompleteCopyAtomically(t *t
 
 	store, err := NewConfigMapWorkflowStore(
 		client,
-		"data",
+		"sessions",
 		func() *v1alpha1.Copy { return &v1alpha1.Copy{} },
 	)
 	if err != nil {
@@ -143,6 +146,7 @@ func TestNamespacedConfigMapReservationHandoffRejectsLeaseLossAfterUpdate(t *tes
 	err := NamespacedHandoffConfigMapReservationToCopy(
 		WithLeaseFence(t.Context(), fence),
 		client,
+		"sessions",
 		source,
 		destination,
 	)
@@ -152,7 +156,7 @@ func TestNamespacedConfigMapReservationHandoffRejectsLeaseLossAfterUpdate(t *tes
 
 	store, err := NewConfigMapWorkflowStore(
 		client,
-		"data",
+		"sessions",
 		func() *v1alpha1.Copy { return &v1alpha1.Copy{} },
 	)
 	if err != nil {
@@ -201,6 +205,7 @@ func TestNamespacedConfigMapReservationHandoffFailurePreservesBothInputs(t *test
 			err := NamespacedHandoffConfigMapReservationToCopy(
 				WithLeaseFence(t.Context(), fence),
 				client,
+				"sessions",
 				source,
 				destination,
 			)
@@ -215,7 +220,7 @@ func TestNamespacedConfigMapReservationHandoffFailurePreservesBothInputs(t *test
 
 			store, err := NewConfigMapWorkflowStore(
 				client,
-				"data",
+				"sessions",
 				func() *v1alpha1.Reservation { return &v1alpha1.Reservation{} },
 			)
 			if err != nil {

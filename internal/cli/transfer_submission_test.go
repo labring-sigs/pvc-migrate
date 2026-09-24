@@ -454,8 +454,9 @@ func TestCRCreateDryRunPreviewsNamespacedObject(t *testing.T) {
 }
 
 // TestCopyDryRunHintMatchesCommandMode pins the graduation dry-run hint: cr
-// commands rerun through cr copy create with -n (cluster graduations without
-// it), session commands through the session copy entrypoint.
+// commands rerun through the cr family the object belongs to (copy with -n,
+// cluster-copy without it), session commands through the session copy
+// entrypoint.
 func TestCopyDryRunHintMatchesCommandMode(t *testing.T) {
 	root := NewRoot(Options{Version: "test"})
 
@@ -489,9 +490,13 @@ func TestCopyDryRunHintMatchesCommandMode(t *testing.T) {
 	})
 
 	t.Run("cr cluster graduation", func(t *testing.T) {
-		output := run(t, "cr copy create", cluster, "app")
-		if !strings.Contains(output, "--yes cr copy create --session grad") {
+		output := run(t, "cr cluster-copy create", cluster, "app")
+		if !strings.Contains(output, "--yes cr cluster-copy create --session grad") {
 			t.Fatalf("cluster hint wrong: %s", output)
+		}
+
+		if strings.Contains(output, "cr copy create") {
+			t.Fatalf("cluster graduation must not suggest the namespaced family: %s", output)
 		}
 
 		if strings.Contains(output, "-n ") {

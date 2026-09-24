@@ -241,14 +241,67 @@ func (f *offlineMigrationFlags) workflow(
 	return object, nil
 }
 
+// newMigrateCommand builds the namespaced migrate family: -n selects the one
+// tenant namespace the migration and every PVC it addresses live in. The
+// session record persists as a namespaced Migration.
 func (r *rootState) newMigrateCommand() *cobra.Command {
+	flags := &offlineMigrationFlags{}
+
+	var (
+		namespace string
+		dryRun    bool
+	)
+
+	command := &cobra.Command{
+		Use:   "migrate",
+		Short: "Run a complete offline PVC migration in this session",
+		Args:  cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			if err := validateDestinationCapacityFlags(
+				domain.OperationMigrate,
+				false,
+				flags.destinationCapacities,
+				flags.allowVolumeShrink,
+				flags.skipSourceUsageCheck,
+				flags.sourcePaths,
+				flags.destinationPaths,
+			); err != nil {
+				return reportPreSessionError(cmd, err)
+			}
+
+			// Derives every namespace role from the single tenant namespace;
+			// cross-namespace work belongs to cluster-migrate.
+			flags.setSingleNamespace(namespace)
+
+			return r.runMigrateCommand(cmd, flags, dryRun)
+		},
+	}
+	flags.bindTransfer(command)
+	command.Flags().StringVarP(
+		&namespace,
+		"namespace",
+		"n",
+		"default",
+		"Tenant namespace of the migration and every PVC it addresses",
+	)
+	bindDryRun(command, &dryRun)
+	command.AddCommand(r.offlineMigrationPlanCommand(false))
+	r.addOfflineMigrationLifecycle(command)
+
+	return command
+}
+
+// newClusterMigrateCommand builds the cluster-scoped migrate family: the
+// namespace roles the ClusterMigration spec declares stay addressable as
+// separate flags, so one migration can cross namespace boundaries.
+func (r *rootState) newClusterMigrateCommand() *cobra.Command {
 	flags := &offlineMigrationFlags{}
 
 	var dryRun bool
 
 	command := &cobra.Command{
-		Use:   "migrate",
-		Short: "Run a complete offline PVC migration in this session",
+		Use:   "cluster-migrate",
+		Short: "Run a cross-namespace offline PVC migration in this session",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			if err := validateDestinationCapacityFlags(
@@ -268,20 +321,20 @@ func (r *rootState) newMigrateCommand() *cobra.Command {
 	}
 	flags.bind(command)
 	bindDryRun(command, &dryRun)
-	command.AddCommand(
-		r.newOfflineMigrationPlanCommand(),
-		r.newOfflineMigrationStatusCommand(sourceSession),
-		r.newOfflineMigrationResumeCommand(sourceSession),
-		r.newOfflineMigrationAbortCommand(sourceSession),
-		r.newOfflineMigrationRollbackCommand(sourceSession),
-		r.newOfflineMigrationCleanupCommand(sourceSession),
-	)
+	command.AddCommand(r.offlineMigrationPlanCommand(true))
+	r.addClusterOfflineMigrationLifecycle(command)
 
 	return command
 }
 
-func (r *rootState) newOfflineMigrationPlanCommand() *cobra.Command {
+// offlineMigrationPlanCommand builds the plan preview for one migrate family:
+// the namespaced command plans through its single tenant namespace, the
+// cluster command plans the role-flagged ClusterMigration it would run.
+func (r *rootState) offlineMigrationPlanCommand(cluster bool) *cobra.Command {
 	flags := &offlineMigrationFlags{}
+
+	var namespace string
+
 	command := &cobra.Command{
 		Use:   "plan",
 		Short: "Inventory resources and validate this offline migration",
@@ -309,22 +362,45 @@ func (r *rootState) newOfflineMigrationPlanCommand() *cobra.Command {
 			defer cancel()
 
 			if existing {
-				return r.validateMigrationReservation(ctx, cmd, runtime, flags.sessionID)
+				scope := namespacedRecords
+				if cluster {
+					scope = clusterRecords
+				}
+
+				return r.validateMigrationReservation(ctx, cmd, runtime, flags.sessionID, scope)
 			}
 
-			object, err := flags.workflow(
-				r,
-				runtime,
-				cmd.Flags().Changed("temporary-namespace"),
-				false,
-			)
-			if err != nil {
-				return err
-			}
+			var plan *domain.TransferPlan
 
-			plan, err := runtime.planner.PlanOfflineMigration(ctx, object, r.global.toolImage)
-			if err != nil {
-				return reportPlanningError(cmd, err)
+			if cluster {
+				object, err := flags.workflow(
+					r,
+					runtime,
+					cmd.Flags().Changed("temporary-namespace"),
+					false,
+				)
+				if err != nil {
+					return err
+				}
+
+				plan, err = runtime.planner.PlanOfflineMigration(ctx, object, r.global.toolImage)
+				if err != nil {
+					return reportPlanningError(cmd, err)
+				}
+			} else {
+				// Derives every namespace role from the single tenant
+				// namespace; cross-namespace work belongs to cluster-migrate.
+				flags.setSingleNamespace(namespace)
+
+				object, err := r.namespacedMigration(cmd, runtime, flags)
+				if err != nil {
+					return err
+				}
+
+				plan, err = runtime.planner.PlanNamespacedMigration(ctx, object, r.global.toolImage)
+				if err != nil {
+					return reportPlanningError(cmd, err)
+				}
 			}
 
 			if err := printPlanResult(
@@ -339,11 +415,143 @@ func (r *rootState) newOfflineMigrationPlanCommand() *cobra.Command {
 			return requireReady(plan)
 		},
 	}
-	flags.bind(command)
+
+	if cluster {
+		flags.bind(command)
+
+		return command
+	}
+
+	flags.bindTransfer(command)
+	command.Flags().StringVarP(
+		&namespace,
+		"namespace",
+		"n",
+		"default",
+		"Tenant namespace of the migration and every PVC it addresses",
+	)
 
 	return command
 }
 
+// namespacedMigration wraps the planning object the transfer flags describe in
+// the namespaced Migration the session drives: metadata.namespace addresses
+// every PVC, so the spec carries no namespace roles. Callers must have run
+// setSingleNamespace first, exactly like the cr namespaced submission.
+func (r *rootState) namespacedMigration(
+	cmd *cobra.Command,
+	runtime *commandRuntime,
+	flags *offlineMigrationFlags,
+) (*v1alpha1.Migration, error) {
+	// The submit-shaped collapse only touches the role fields the wrapper
+	// below discards; every role already equals the tenant namespace.
+	object, err := flags.workflow(r, runtime, cmd.Flags().Changed("temporary-namespace"), true)
+	if err != nil {
+		return nil, err
+	}
+
+	return &v1alpha1.Migration{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      object.Name,
+			Namespace: string(object.Spec.SourceNamespace),
+		},
+		Spec: object.Spec.MigrationSpec,
+	}, nil
+}
+
+// runMigrateCommand plans and executes the namespaced Migration session: the
+// record persists as a ConfigMap in the session storage namespace while the
+// Migration object carries the tenant namespace, and the in-process executor
+// drives it.
+func (r *rootState) runMigrateCommand(
+	cmd *cobra.Command,
+	flags *offlineMigrationFlags,
+	dryRun bool,
+) error {
+	runtime, err := r.runtime()
+	if err != nil {
+		return err
+	}
+
+	ctx, cancel := r.context(cmd.Context())
+	defer cancel()
+
+	object, err := r.namespacedMigration(cmd, runtime, flags)
+	if err != nil {
+		return err
+	}
+
+	plan, err := runtime.planner.PlanNamespacedMigration(ctx, object, r.global.toolImage)
+	if err != nil {
+		return reportPlanningError(cmd, err)
+	}
+
+	if err := requireReadyWithOutput(
+		runtime,
+		plan,
+		cmd.ErrOrStderr(),
+		offlineMigrationPlanFailureAdvice,
+	); err != nil {
+		return err
+	}
+
+	if dryRun {
+		return printPlanResult(cmd, runtime, plan, offlineMigrationPlanFailureAdvice)
+	}
+
+	if err := r.confirm(ctx, cmd, offlineApprovalIdentity(flags)); err != nil {
+		return reportApprovalError(cmd, err)
+	}
+
+	now := metav1.Now()
+	object.Status.WorkflowStatus = v1alpha1.WorkflowStatus{
+		Phase: domain.PhasePlanned, StartedAt: now, UpdatedAt: now,
+	}
+
+	// The session record ConfigMap lives in the session storage namespace,
+	// next to every other session family; the Migration object itself carries
+	// the tenant namespace in metadata.namespace.
+	namespace := r.migrationRecordNamespace()
+
+	store, err := cliWorkflowStore(runtime, namespace,
+		func() *v1alpha1.Migration { return &v1alpha1.Migration{} })
+	if err != nil {
+		return err
+	}
+
+	if err := store.Create(ctx, object); err != nil {
+		return reportSessionCreationError(cmd, namespace, object.Name, err)
+	}
+
+	executor := app.NewMigrationExecutor(
+		runtime.clients.Kubernetes,
+		store,
+		cliWorkflowLocker(runtime),
+		copyengine.NewPVMigrate(),
+		r.migrationConfig(runtime),
+	)
+	if err := executor.Run(ctx, object); err != nil {
+		return reportMigrationError(cmd, "migrate", object.Name, object.Status.Phase, err)
+	}
+
+	if err := runtime.printer.Print(object); err != nil {
+		return err
+	}
+
+	return writeWorkflowNextSteps(
+		cmd.ErrOrStderr(),
+		cmd,
+		guidancePrefixesForCommand(cmd, namespace).pvcMigrate,
+		"migrate",
+		namespace,
+		object.Name,
+		object.Status.Phase,
+		true,
+	)
+}
+
+// runOfflineMigrateCommand plans and executes the ClusterMigration session the
+// role flags describe.
 func (r *rootState) runOfflineMigrateCommand(
 	cmd *cobra.Command,
 	flags *offlineMigrationFlags,
@@ -411,7 +619,7 @@ func (r *rootState) runOfflineMigrateCommand(
 		r.migrationConfig(runtime),
 	)
 	if err := executor.Run(ctx, object); err != nil {
-		return reportMigrationError(cmd, object.Name, object.Status.Phase, err)
+		return reportMigrationError(cmd, "cluster-migrate", object.Name, object.Status.Phase, err)
 	}
 
 	if err := runtime.printer.Print(object); err != nil {
@@ -422,7 +630,7 @@ func (r *rootState) runOfflineMigrateCommand(
 		cmd.ErrOrStderr(),
 		cmd,
 		guidancePrefixesForCommand(cmd, namespace).pvcMigrate,
-		"migrate",
+		"cluster-migrate",
 		namespace,
 		object.Name,
 		object.Status.Phase,

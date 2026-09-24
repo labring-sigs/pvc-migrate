@@ -154,19 +154,29 @@ func printCopyDryRunResult(
 
 	var args []string
 	if isControllerCommand(cmd) {
+		// The graduation rerun must name the cr family the object belongs to:
+		// a namespaced Copy is addressed by its tenant namespace, the
+		// cluster-scoped ClusterCopy carries its roles in the spec instead.
+		_, cluster := object.(*v1alpha1.ClusterCopy)
+
+		family := "copy"
+		if cluster {
+			family = "cluster-copy"
+		}
+
 		args = []string{
 			sessionCommandPrefixForCommand(cmd, namespace),
-			"--yes", "cr", "copy", "create", "--session", shellQuote(object.GetName()),
+			"--yes", "cr", family, "create", "--session", shellQuote(object.GetName()),
 		}
-		// A namespaced Copy is addressed by its tenant namespace; the
-		// cluster-scoped graduation carries its roles in the spec instead.
-		if _, cluster := object.(*v1alpha1.ClusterCopy); !cluster {
+		if !cluster {
 			args = append(args, "-n", shellQuote(namespace))
 		}
 	} else {
 		args = []string{
 			sessionCommandPrefixForCommand(cmd, namespace),
-			"copy", "--session", shellQuote(object.GetName()),
+			// The split session families each graduate their own records, so
+			// the rerun hint must name the family the command belongs to.
+			workflowCommandNameForCommand(cmd), "--session", shellQuote(object.GetName()),
 		}
 	}
 

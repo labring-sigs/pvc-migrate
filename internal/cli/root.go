@@ -154,7 +154,7 @@ func NewRoot(options Options) *cobra.Command {
 		&state.global.timeout,
 		"timeout",
 		30*time.Minute,
-		"Whole-operation context timeout; data-transfer operations (copy, migrate, migrate-pod, backup, restore) run under 24h when this flag keeps its 30m default",
+		"Whole-operation context timeout; data-transfer operations (copy, cluster-copy, migrate, cluster-migrate, migrate-pod, backup, restore) run under 24h when this flag keeps its 30m default",
 	)
 	flags.DurationVar(
 		&state.global.copyTimeout,
@@ -234,8 +234,11 @@ func NewRoot(options Options) *cobra.Command {
 
 	command.AddCommand(
 		state.newReserveCommand(),
+		state.newClusterReserveCommand(),
 		state.newCopyCommand(),
+		state.newClusterCopyCommand(),
 		state.newMigrateCommand(),
+		state.newClusterMigrateCommand(),
 		state.newMigratePodCommand(),
 		state.newRenameCommand(),
 		state.newMoveCommand(),
@@ -249,12 +252,13 @@ func NewRoot(options Options) *cobra.Command {
 	command.AddCommand(newCompletionCommand(command))
 
 	// Cross-cluster workflows run against two explicit API-server connections
-	// in the submitting process; they hang off copy/reserve as subcommands.
+	// in the submitting process; they are cross-namespace by definition, so
+	// they hang off the cluster-scoped session families.
 	for _, parent := range command.Commands() {
 		switch parent.Name() {
-		case "copy":
+		case "cluster-copy":
 			parent.AddCommand(state.newCrossClusterCopyCommand())
-		case "reserve":
+		case "cluster-reserve":
 			parent.AddCommand(state.newCrossClusterReserveCommand())
 		}
 	}
@@ -534,13 +538,15 @@ func printerFor(r *rootState) output.Printer {
 const dataTransferOperationTimeout = 24 * time.Hour
 
 // dataTransferRootCommands are root operations that can execute payload data
-// transfers (copy, migrate, migrate-pod, backup, restore, controller --once)
-// or resume them from a checkpoint. The controller one-shot command must use
-// the long bound because its inventory is not known until it lists the CRDs.
-// Metadata-only operations (rename, move, reserve) keep the short default.
+// transfers (copy, cluster-copy, migrate, cluster-migrate, migrate-pod,
+// backup, restore, controller --once) or resume them from a checkpoint. The
+// controller one-shot command must use the long bound because its inventory
+// is not known until it lists the CRDs.
+// Metadata-only operations (rename, move, reserve, cluster-reserve) keep the
+// short default.
 var dataTransferRootCommands = map[string]bool{
-	"copy": true, "migrate": true, "migrate-pod": true,
-	"backup": true, "restore": true, "controller": true,
+	"copy": true, "cluster-copy": true, "migrate": true, "cluster-migrate": true,
+	"migrate-pod": true, "backup": true, "restore": true, "controller": true,
 }
 
 // effectiveTimeout resolves the operation timeout: an explicit --timeout

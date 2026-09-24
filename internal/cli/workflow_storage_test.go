@@ -2,19 +2,28 @@ package cli
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
+	"errors"
 	"io"
+	"strings"
 	"testing"
 
 	v1alpha1 "github.com/labring-sigs/pvc-migrate/api/v1alpha1"
 	"github.com/labring-sigs/pvc-migrate/internal/domain"
 	"github.com/labring-sigs/pvc-migrate/internal/kube"
+	"github.com/labring-sigs/pvc-migrate/internal/objectstore"
+	"github.com/labring-sigs/pvc-migrate/internal/planner"
 	"github.com/spf13/cobra"
+	authorizationv1 "k8s.io/api/authorization/v1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
 	kubefake "k8s.io/client-go/kubernetes/fake"
+	k8stesting "k8s.io/client-go/testing"
 	crclient "sigs.k8s.io/controller-runtime/pkg/client"
 	crfake "sigs.k8s.io/controller-runtime/pkg/client/fake"
 )
@@ -31,6 +40,192 @@ func newWorkflowLookupRuntime(t *testing.T, objects ...crclient.Object) *command
 		Kubernetes: kubefake.NewClientset(),
 		Runtime:    crfake.NewClientBuilder().WithScheme(scheme).WithObjects(objects...).Build(),
 	}}
+}
+
+// sessionRecordClient builds a fake cluster holding one bound tenant PVC and
+// a reactor that records every ConfigMap create and then fails it, so a run
+// command stops exactly at its record persistence step.
+func sessionRecordClient(t *testing.T) (*kubefake.Clientset, *[]string) {
+	t.Helper()
+
+	mode := corev1.PersistentVolumeFilesystem
+	client := kubefake.NewClientset(
+		&corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "kube-system", UID: "cluster"}},
+		&corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "default", UID: "namespace"}},
+		&corev1.PersistentVolumeClaim{
+			ObjectMeta: metav1.ObjectMeta{
+				Namespace: "default",
+				Name:      "data",
+				UID:       types.UID("pvc"),
+			},
+			Spec: corev1.PersistentVolumeClaimSpec{
+				VolumeName:  "pv-data",
+				VolumeMode:  &mode,
+				AccessModes: []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce},
+			},
+			Status: corev1.PersistentVolumeClaimStatus{Phase: corev1.ClaimBound},
+		},
+		&corev1.PersistentVolume{
+			ObjectMeta: metav1.ObjectMeta{Name: "pv-data", UID: types.UID("pv")},
+			Spec: corev1.PersistentVolumeSpec{
+				PersistentVolumeReclaimPolicy: corev1.PersistentVolumeReclaimRetain,
+				Capacity: corev1.ResourceList{
+					corev1.ResourceStorage: resource.MustParse("1Gi"),
+				},
+				ClaimRef: &corev1.ObjectReference{
+					Namespace: "default",
+					Name:      "data",
+					UID:       types.UID("pvc"),
+				},
+			},
+			Status: corev1.PersistentVolumeStatus{Phase: corev1.VolumeBound},
+		},
+	)
+
+	created := &[]string{}
+	client.PrependReactor(
+		"create",
+		"configmaps",
+		func(action k8stesting.Action) (bool, runtime.Object, error) {
+			create, ok := action.(k8stesting.CreateActionImpl)
+			if !ok {
+				return true, nil, errors.New("unexpected configmap action")
+			}
+
+			*created = append(*created, create.Namespace)
+
+			return true, nil, errors.New("session record create unavailable")
+		},
+	)
+	client.PrependReactor(
+		"create",
+		"selfsubjectaccessreviews",
+		func(action k8stesting.Action) (bool, runtime.Object, error) {
+			review, ok := action.(k8stesting.CreateActionImpl).Object.(*authorizationv1.SelfSubjectAccessReview)
+			if !ok {
+				return true, nil, errors.New("unexpected access review object")
+			}
+
+			review = review.DeepCopy()
+			review.Status.Allowed = true
+
+			return true, review, nil
+		},
+	)
+
+	return client, created
+}
+
+// TestBackupRunStoresRecordInSessionNamespace pins the session backup run's
+// record location: the store must target the session storage namespace, never
+// the tenant namespace the command's -n addresses, or the lifecycle verbs —
+// which resolve records through the session namespace — cannot find it.
+func TestBackupRunStoresRecordInSessionNamespace(t *testing.T) {
+	t.Setenv("AWS_ACCESS_KEY_ID", "test")
+	t.Setenv("AWS_SECRET_ACCESS_KEY", "test")
+
+	client, created := sessionRecordClient(t)
+
+	var stderr bytes.Buffer
+
+	command := NewRoot(Options{
+		Version: "v1.2.3",
+		In:      strings.NewReader(""),
+		Out:     io.Discard,
+		ErrOut:  &stderr,
+		runtimeFactory: func(state *rootState) (*commandRuntime, error) {
+			return &commandRuntime{
+				clients: &kube.Clients{Kubernetes: client},
+				planner: planner.New(client, nil),
+				printer: printerFor(state),
+			}, nil
+		},
+		objectStoreFactory: func(_ context.Context, cfg objectstore.Config) (*objectstore.Store, error) {
+			return objectstore.NewWithClient(
+				&testObjectStoreClient{},
+				cfg,
+				objectstore.Credentials{AccessKey: "test", SecretKey: "test"},
+			)
+		},
+	})
+	command.SetArgs([]string{
+		"backup",
+		"--source-pvc", "data",
+		"--backend", "s3",
+		"--bucket", "backups",
+		"--name", "daily",
+		"--yes", "--dry-run=false",
+	})
+
+	if err := command.Execute(); err == nil {
+		t.Fatal("expected the record create failure to surface")
+	}
+
+	if len(*created) != 1 {
+		t.Fatalf("record creates = %v, want exactly one", *created)
+	}
+
+	if (*created)[0] != "pvc-migrate-system" {
+		t.Fatalf("record create namespace = %q, want the session namespace", (*created)[0])
+	}
+
+	if !strings.Contains(stderr.String(), "--namespace pvc-migrate-system get configmap") {
+		t.Fatalf("creation hint must inspect the session namespace: %s", stderr.String())
+	}
+
+	if strings.Contains(stderr.String(), "--namespace default get configmap") {
+		t.Fatalf("creation must not hint the tenant namespace: %s", stderr.String())
+	}
+}
+
+// TestRenameCreationHintInspectsSessionNamespace pins the rename create
+// failure hint: the record persists in the session storage namespace, so the
+// kubectl inspection must point there instead of the tenant namespace.
+func TestRenameCreationHintInspectsSessionNamespace(t *testing.T) {
+	client, created := sessionRecordClient(t)
+
+	var stderr bytes.Buffer
+
+	command := NewRoot(Options{
+		Version: "v1.2.3",
+		In:      strings.NewReader(""),
+		Out:     io.Discard,
+		ErrOut:  &stderr,
+		runtimeFactory: func(state *rootState) (*commandRuntime, error) {
+			return &commandRuntime{
+				clients: &kube.Clients{Kubernetes: client},
+				planner: planner.New(client, nil),
+				printer: printerFor(state),
+			}, nil
+		},
+	})
+	command.SetArgs([]string{
+		"rename",
+		"-n", "default",
+		"--source-pvc", "data",
+		"--destination-pvc", "renamed",
+		"--yes", "--dry-run=false",
+	})
+
+	if err := command.Execute(); err == nil {
+		t.Fatal("expected the record create failure to surface")
+	}
+
+	if len(*created) != 1 {
+		t.Fatalf("record creates = %v, want exactly one", *created)
+	}
+
+	if (*created)[0] != "pvc-migrate-system" {
+		t.Fatalf("record create namespace = %q, want the session namespace", (*created)[0])
+	}
+
+	if !strings.Contains(stderr.String(), "--namespace pvc-migrate-system get configmap") {
+		t.Fatalf("creation hint must inspect the session namespace: %s", stderr.String())
+	}
+
+	if strings.Contains(stderr.String(), "--namespace default get configmap") {
+		t.Fatalf("creation must not hint the tenant namespace: %s", stderr.String())
+	}
 }
 
 func TestLoadBackupAddressesCRDFromCommandNamespace(t *testing.T) {

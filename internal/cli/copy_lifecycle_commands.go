@@ -13,17 +13,52 @@ import (
 	crclient "sigs.k8s.io/controller-runtime/pkg/client"
 )
 
+// addCopyLifecycle mounts the namespaced session family verbs: they address
+// only Copy (and Reservation graduation) records. The records live in the
+// session storage namespace, so the verbs carry no namespace flag — the -n
+// the run command binds addresses the tenant namespace of the workflow, never
+// the ConfigMap storage location.
 func (r *rootState) addCopyLifecycle(parent *cobra.Command) {
 	parent.AddCommand(
-		r.newCopyStatusCommand(sourceSession),
-		r.newCopyResumeCommand(sourceSession),
-		r.newCopyAbortCommand(sourceSession),
-		r.newCopyCleanupCommand(sourceSession),
+		r.newScopedCopyStatusCommand(sourceSession, namespacedRecords),
+		r.newScopedCopyResumeCommand(sourceSession, namespacedRecords),
+		r.newScopedCopyAbortCommand(sourceSession, namespacedRecords),
+		r.newScopedCopyCleanupCommand(sourceSession, namespacedRecords),
+	)
+}
+
+// addClusterCopyLifecycle mounts the cluster-scoped session family verbs: they
+// address only ClusterCopy (and ClusterReservation graduation) records.
+func (r *rootState) addClusterCopyLifecycle(parent *cobra.Command) {
+	parent.AddCommand(
+		r.newScopedCopyStatusCommand(sourceSession, clusterRecords),
+		r.newScopedCopyResumeCommand(sourceSession, clusterRecords),
+		r.newScopedCopyAbortCommand(sourceSession, clusterRecords),
+		r.newScopedCopyCleanupCommand(sourceSession, clusterRecords),
 	)
 }
 
 func (r *rootState) newCopyStatusCommand(source workflowSource) *cobra.Command {
-	return &cobra.Command{
+	return r.newScopedCopyStatusCommand(source, recordScopeForSource(source))
+}
+
+func (r *rootState) newCopyResumeCommand(source workflowSource) *cobra.Command {
+	return r.newScopedCopyResumeCommand(source, recordScopeForSource(source))
+}
+
+func (r *rootState) newCopyAbortCommand(source workflowSource) *cobra.Command {
+	return r.newScopedCopyAbortCommand(source, recordScopeForSource(source))
+}
+
+func (r *rootState) newCopyCleanupCommand(source workflowSource) *cobra.Command {
+	return r.newScopedCopyCleanupCommand(source, recordScopeForSource(source))
+}
+
+func (r *rootState) newScopedCopyStatusCommand(
+	source workflowSource,
+	scope recordScope,
+) *cobra.Command {
+	command := &cobra.Command{
 		Use:   "status [" + workflowArgLabel(source) + "]",
 		Short: "Show one copy or list copies",
 		Args:  cobra.MaximumNArgs(1),
@@ -37,7 +72,7 @@ func (r *rootState) newCopyStatusCommand(source workflowSource) *cobra.Command {
 			defer cancel()
 
 			if len(args) == 1 {
-				object, err := r.loadCopy(ctx, cmd, runtime, args[0], source)
+				object, err := r.loadCopy(ctx, cmd, runtime, args[0], source, scope)
 				if err != nil {
 					return err
 				}
@@ -72,24 +107,33 @@ func (r *rootState) newCopyStatusCommand(source workflowSource) *cobra.Command {
 				return runtime.printer.Print(objects)
 			}
 
+			// One session family lists only its own kind: copy lists the
+			// namespaced Copy records, cluster-copy the ClusterCopy records.
+			// The ConfigMap namespace is the storage location; the objects
+			// inside carry the tenant namespace, so the listing is not
+			// filtered by it.
 			namespace := r.workflowStorageNamespace(cmd)
 
-			copyStore, err := cliWorkflowStore(
-				runtime,
-				namespace,
-				func() *v1alpha1.Copy { return &v1alpha1.Copy{} },
-			)
-			if err != nil {
-				return err
-			}
+			if scope == namespacedRecords {
+				copyStore, err := cliWorkflowStore(
+					runtime,
+					namespace,
+					func() *v1alpha1.Copy { return &v1alpha1.Copy{} },
+				)
+				if err != nil {
+					return err
+				}
 
-			items, err := copyStore.List(ctx, namespace)
-			if err != nil {
-				return err
-			}
+				items, err := copyStore.List(ctx, "")
+				if err != nil {
+					return err
+				}
 
-			for _, object := range items {
-				objects = append(objects, object)
+				for _, object := range items {
+					objects = append(objects, object)
+				}
+
+				return runtime.printer.Print(objects)
 			}
 
 			clusterStore, err := cliWorkflowStore(
@@ -113,9 +157,14 @@ func (r *rootState) newCopyStatusCommand(source workflowSource) *cobra.Command {
 			return runtime.printer.Print(objects)
 		},
 	}
+
+	return command
 }
 
-func (r *rootState) newCopyResumeCommand(source workflowSource) *cobra.Command {
+func (r *rootState) newScopedCopyResumeCommand(
+	source workflowSource,
+	scope recordScope,
+) *cobra.Command {
 	var dryRun bool
 
 	command := &cobra.Command{
@@ -132,14 +181,17 @@ func (r *rootState) newCopyResumeCommand(source workflowSource) *cobra.Command {
 		ctx, cancel := r.context(cmd.Context())
 		defer cancel()
 
-		return r.resumeCopy(ctx, cmd, runtime, args[0], dryRun, source)
+		return r.resumeCopy(ctx, cmd, runtime, args[0], dryRun, source, scope)
 	}
 	bindDryRun(command, &dryRun)
 
 	return command
 }
 
-func (r *rootState) newCopyAbortCommand(source workflowSource) *cobra.Command {
+func (r *rootState) newScopedCopyAbortCommand(
+	source workflowSource,
+	scope recordScope,
+) *cobra.Command {
 	var dryRun bool
 
 	command := &cobra.Command{
@@ -156,7 +208,15 @@ func (r *rootState) newCopyAbortCommand(source workflowSource) *cobra.Command {
 		ctx, cancel := r.context(cmd.Context())
 		defer cancel()
 
-		object, backend, err := r.loadCopyWithBackend(ctx, cmd, runtime, args[0], false, source)
+		object, backend, err := r.loadCopyWithBackend(
+			ctx,
+			cmd,
+			runtime,
+			args[0],
+			false,
+			source,
+			scope,
+		)
 		if err != nil {
 			return err
 		}
@@ -169,10 +229,14 @@ func (r *rootState) newCopyAbortCommand(source workflowSource) *cobra.Command {
 
 		switch current := object.(type) {
 		case *v1alpha1.Copy:
+			// Session records persist in the session storage namespace
+			// whatever tenant namespace their object carries; a CRD record
+			// ignores the store namespace entirely, so one resolution serves
+			// both backends.
 			store, err := cliWorkflowStoreForBackend(
 				runtime,
 				backend,
-				r.workflowStorageNamespace(cmd),
+				r.migrationRecordNamespace(),
 				func() *v1alpha1.Copy { return &v1alpha1.Copy{} },
 			)
 			if err != nil {
@@ -193,7 +257,7 @@ func (r *rootState) newCopyAbortCommand(source workflowSource) *cobra.Command {
 			}
 
 			if err != nil {
-				return reportCopyError(cmd, current.Name, current.Status.Phase, err)
+				return reportCopyError(cmd, "copy", current.Name, current.Status.Phase, err)
 			}
 		case *v1alpha1.ClusterCopy:
 			store, err := cliWorkflowStoreForBackend(
@@ -226,7 +290,7 @@ func (r *rootState) newCopyAbortCommand(source workflowSource) *cobra.Command {
 			}
 
 			if err != nil {
-				return reportCopyError(cmd, current.Name, current.Status.Phase, err)
+				return reportCopyError(cmd, "cluster-copy", current.Name, current.Status.Phase, err)
 			}
 		}
 
@@ -237,7 +301,10 @@ func (r *rootState) newCopyAbortCommand(source workflowSource) *cobra.Command {
 	return command
 }
 
-func (r *rootState) newCopyCleanupCommand(source workflowSource) *cobra.Command {
+func (r *rootState) newScopedCopyCleanupCommand(
+	source workflowSource,
+	scope recordScope,
+) *cobra.Command {
 	var (
 		options app.CopyCleanupOptions
 		dryRun  bool
@@ -257,7 +324,15 @@ func (r *rootState) newCopyCleanupCommand(source workflowSource) *cobra.Command 
 		ctx, cancel := r.context(cmd.Context())
 		defer cancel()
 
-		object, backend, err := r.loadCopyWithBackend(ctx, cmd, runtime, args[0], false, source)
+		object, backend, err := r.loadCopyWithBackend(
+			ctx,
+			cmd,
+			runtime,
+			args[0],
+			false,
+			source,
+			scope,
+		)
 		if err != nil {
 			return err
 		}
@@ -268,12 +343,18 @@ func (r *rootState) newCopyCleanupCommand(source workflowSource) *cobra.Command 
 			}
 		}
 
+		family := sessionFamilyCommand(scope, "copy")
+
 		switch current := object.(type) {
 		case *v1alpha1.Copy:
+			// Session records persist in the session storage namespace
+			// whatever tenant namespace their object carries; a CRD record
+			// ignores the store namespace entirely, so one resolution serves
+			// both backends.
 			store, err := cliWorkflowStoreForBackend(
 				runtime,
 				backend,
-				r.workflowStorageNamespace(cmd),
+				r.migrationRecordNamespace(),
 				func() *v1alpha1.Copy { return &v1alpha1.Copy{} },
 			)
 			if err != nil {
@@ -296,6 +377,7 @@ func (r *rootState) newCopyCleanupCommand(source workflowSource) *cobra.Command 
 			if err != nil {
 				return reportCopyCleanupError(
 					cmd,
+					family,
 					workflowLeaseNamespace(backend, r.workflowStorageNamespace(cmd), current),
 					current.Name,
 					options,
@@ -335,6 +417,7 @@ func (r *rootState) newCopyCleanupCommand(source workflowSource) *cobra.Command 
 			if err != nil {
 				return reportCopyCleanupError(
 					cmd,
+					family,
 					namespace,
 					current.Name,
 					options,
@@ -359,7 +442,7 @@ func (r *rootState) newCopyCleanupCommand(source workflowSource) *cobra.Command 
 				cleanupExecuteCommand(
 					cmd,
 					guidancePrefixesForCommand(cmd, namespace).pvcMigrate,
-					"copy",
+					family,
 					namespace,
 					object.GetName(),
 					options.UnusedStoragePolicy,
@@ -384,15 +467,16 @@ func (r *rootState) newCopyCleanupCommand(source workflowSource) *cobra.Command 
 
 func reportCopyError(
 	cmd *cobra.Command,
-	name string,
+	family, name string,
 	phase v1alpha1.WorkflowPhase,
 	cause error,
 ) error {
 	_, err := fmt.Fprintf(
 		cmd.ErrOrStderr(),
-		"Copy %s stopped in phase %s. Inspect copy status %s before resume or cleanup.\n",
+		"Copy %s stopped in phase %s. Inspect %s status %s before resume or cleanup.\n",
 		name,
 		phase,
+		workflowCommandPath(cmd, family),
 		name,
 	)
 
@@ -401,7 +485,7 @@ func reportCopyError(
 
 func reportCopyCleanupError(
 	cmd *cobra.Command,
-	namespace, name string,
+	family, namespace, name string,
 	options app.CopyCleanupOptions,
 	cause error,
 ) error {
@@ -412,8 +496,9 @@ func reportCopyCleanupError(
 	}
 
 	prefix := guidancePrefixesForCommand(cmd, namespace).pvcMigrate
+	path := workflowCommandPath(cmd, family)
 
-	retry := "copy cleanup " + shellQuote(name)
+	retry := path + " cleanup " + shellQuote(name)
 	if options.UnusedStoragePolicy != "" {
 		retry += " --unused-storage-policy " + shellQuote(
 			options.UnusedStoragePolicy,
@@ -430,8 +515,9 @@ func reportCopyCleanupError(
 
 	_, err := fmt.Fprintf(
 		cmd.ErrOrStderr(),
-		"Cleanup stopped before confirmed completion. Inspect current state: %s copy status %s\nRevalidate cleanup before retrying: %s %s --dry-run\n",
+		"Cleanup stopped before confirmed completion. Inspect current state: %s %s status %s\nRevalidate cleanup before retrying: %s %s --dry-run\n",
 		prefix,
+		path,
 		shellQuote(name),
 		prefix,
 		retry,

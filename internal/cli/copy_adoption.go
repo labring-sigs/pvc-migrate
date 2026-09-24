@@ -59,7 +59,7 @@ func (r *rootState) adoptCRDReservation(
 		}
 
 		if err := executor.Validate(ctx, preview); err != nil {
-			return reportCopyError(cmd, preview.Name, preview.Status.Phase, err)
+			return reportCopyError(cmd, "copy", preview.Name, preview.Status.Phase, err)
 		}
 
 		return printCopyDryRunResult(cmd, runtime, preview, source.Namespace)
@@ -80,7 +80,7 @@ func (r *rootState) adoptCRDReservation(
 		},
 	)
 	if err != nil {
-		return reportCopyError(cmd, source.Name, source.Status.Phase, err)
+		return reportCopyError(cmd, "copy", source.Name, source.Status.Phase, err)
 	}
 
 	// The elected controller finishes the pair and executes the copy; honor
@@ -149,7 +149,7 @@ func (r *rootState) adoptCRDClusterReservation(
 		}
 
 		if err := executor.Validate(ctx, preview); err != nil {
-			return reportCopyError(cmd, preview.Name, preview.Status.Phase, err)
+			return reportCopyError(cmd, "cluster-copy", preview.Name, preview.Status.Phase, err)
 		}
 
 		return printCopyDryRunResult(
@@ -175,7 +175,7 @@ func (r *rootState) adoptCRDClusterReservation(
 		},
 	)
 	if err != nil {
-		return reportCopyError(cmd, source.Name, source.Status.Phase, err)
+		return reportCopyError(cmd, "cluster-copy", source.Name, source.Status.Phase, err)
 	}
 
 	// The elected controller finishes the pair and executes the copy; honor
@@ -208,7 +208,10 @@ func (r *rootState) adoptReservation(
 		return r.adoptCRDReservation(ctx, cmd, runtime, source, flags, dryRun)
 	}
 
-	namespace := r.workflowStorageNamespace(cmd)
+	// The graduation reads the Reservation record and persists the graduated
+	// Copy in the session storage namespace, next to every other session
+	// family; both objects carry the tenant namespace in metadata.namespace.
+	namespace := r.migrationRecordNamespace()
 
 	spec := app.NamespacedCopySpecFromReservation(source.Spec)
 	if err := applyCopyOverrides(cmd, &spec, flags); err != nil {
@@ -238,7 +241,7 @@ func (r *rootState) adoptReservation(
 		}
 
 		if err := executor.Validate(ctx, preview); err != nil {
-			return reportCopyError(cmd, preview.Name, preview.Status.Phase, err)
+			return reportCopyError(cmd, "copy", preview.Name, preview.Status.Phase, err)
 		}
 
 		return printCopyDryRunResult(cmd, runtime, preview, namespace)
@@ -262,17 +265,18 @@ func (r *rootState) adoptReservation(
 			return kube.NamespacedHandoffConfigMapReservationToCopy(
 				ctx,
 				runtime.clients.Kubernetes,
+				namespace,
 				reservation,
 				destination,
 			)
 		},
 	)
 	if err != nil {
-		return reportCopyError(cmd, source.Name, source.Status.Phase, err)
+		return reportCopyError(cmd, "copy", source.Name, source.Status.Phase, err)
 	}
 
 	if err := executor.Run(ctx, object); err != nil {
-		return reportCopyError(cmd, object.Name, object.Status.Phase, err)
+		return reportCopyError(cmd, "copy", object.Name, object.Status.Phase, err)
 	}
 
 	return runtime.printer.Print(object)
@@ -327,7 +331,7 @@ func (r *rootState) adoptClusterReservation(
 		}
 
 		if err := executor.Validate(ctx, preview); err != nil {
-			return reportCopyError(cmd, preview.Name, preview.Status.Phase, err)
+			return reportCopyError(cmd, "cluster-copy", preview.Name, preview.Status.Phase, err)
 		}
 
 		return printCopyDryRunResult(cmd, runtime, preview, namespace)
@@ -358,11 +362,11 @@ func (r *rootState) adoptClusterReservation(
 		},
 	)
 	if err != nil {
-		return reportCopyError(cmd, source.Name, source.Status.Phase, err)
+		return reportCopyError(cmd, "cluster-copy", source.Name, source.Status.Phase, err)
 	}
 
 	if err := executor.Run(ctx, object); err != nil {
-		return reportCopyError(cmd, object.Name, object.Status.Phase, err)
+		return reportCopyError(cmd, "cluster-copy", object.Name, object.Status.Phase, err)
 	}
 
 	return runtime.printer.Print(object)
