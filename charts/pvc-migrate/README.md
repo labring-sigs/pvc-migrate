@@ -62,6 +62,7 @@ every upgrade. Unknown values and unsafe common mistakes fail schema validation.
 | `serviceAccount.create/name` | `true` / generated | Dedicated operator identity; an explicit name is required for an external account |
 | `rbac.create` | `true` | Install the existing controller permission contract. The chart grants no pod exec anywhere; without it MongoDB automatic switchover reports the operator choices (grant a pods/exec Role yourself, switch the primary manually, or accept leader downtime) |
 | `controller.logLevel/logFormat` | `info` / `json` | Structured controller logs |
+| `controller.pprof.enabled/port` | `false` / `6060` | Serve Go profiling on `127.0.0.1` inside the controller Pod only; reach it with `kubectl exec` — never exposed through a Service |
 | `resources` | 100m CPU/128Mi requests; 512Mi memory limit | Baseline for controller memory/cache use; tune to workflow count and object volume |
 | `podDisruptionBudget` | enabled, minAvailable 1 | Applied with multiple replicas; omitted with one replica |
 | `affinity` | preferred Pod anti-affinity | Prefer separate nodes without blocking installation on a single eligible node |

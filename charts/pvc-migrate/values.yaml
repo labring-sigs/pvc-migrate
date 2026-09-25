@@ -30,6 +30,11 @@ rbac:
 controller:
   logLevel: info
   logFormat: json
+  pprof:
+    # Serves Go profiling on 127.0.0.1 inside the controller Pod only.
+    # Reach it with `kubectl exec ... -- curl http://127.0.0.1:<port>`.
+    enabled: false
+    port: 6060
 podAnnotations: {}
 # Chart identity and selector labels are reserved.
 podLabels: {}

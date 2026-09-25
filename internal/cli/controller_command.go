@@ -18,6 +18,7 @@ func (r *rootState) newControllerCommand() *cobra.Command {
 		once                   bool
 		controllerNamespace    string
 		healthProbeBindAddress string
+		pprofPort              int
 	)
 
 	command := &cobra.Command{
@@ -46,6 +47,25 @@ func (r *rootState) newControllerCommand() *cobra.Command {
 						"--controller-namespace %q is invalid: %s",
 						controllerNamespace,
 						strings.Join(problems, "; "),
+					),
+				)
+			}
+
+			if once && cmd.Flags().Changed("pprof-port") {
+				return domain.NewError(
+					domain.ErrorValidation,
+					"flags",
+					"--pprof-port serves the running controller daemon and is not available with --once",
+				)
+			}
+
+			if pprofPort < 0 || pprofPort > 65535 {
+				return domain.NewError(
+					domain.ErrorValidation,
+					"flags",
+					fmt.Sprintf(
+						"--pprof-port %d is invalid: the port must be between 0 and 65535 (0 disables profiling)",
+						pprofPort,
 					),
 				)
 			}
@@ -91,6 +111,7 @@ func (r *rootState) newControllerCommand() *cobra.Command {
 				TrustedToolImage:              r.global.toolImage,
 				Logger:                        runtime.controllerLogger,
 				HealthProbeBindAddress:        healthProbeBindAddress,
+				PprofPort:                     pprofPort,
 			}
 			if once {
 				ctx, cancel := r.context(cmd.Context())
@@ -128,6 +149,12 @@ func (r *rootState) newControllerCommand() *cobra.Command {
 		"health-probe-bind-address",
 		":8081",
 		"Address for controller health and readiness probes",
+	)
+	command.Flags().IntVar(
+		&pprofPort,
+		"pprof-port",
+		0,
+		"Serve Go profiling endpoints on 127.0.0.1 only; 0 disables profiling",
 	)
 
 	return command

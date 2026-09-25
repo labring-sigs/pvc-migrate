@@ -59,6 +59,9 @@ spec:
             - --session-namespace={{ .Release.Namespace }}
             - --tool-image={{ include "pvc-migrate.toolImage" . }}
             - --health-probe-bind-address=:8081
+            {{- if .Values.controller.pprof.enabled }}
+            - --pprof-port={{ .Values.controller.pprof.port }}
+            {{- end }}
             - --log-level={{ .Values.controller.logLevel }}
             - --log-format={{ .Values.controller.logFormat }}
           securityContext:

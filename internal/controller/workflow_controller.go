@@ -634,6 +634,9 @@ type ManagerOptions struct {
 	TrustedToolImage              string
 	Logger                        *slog.Logger
 	HealthProbeBindAddress        string
+	// PprofPort serves the Go profiling endpoints on 127.0.0.1 only; 0
+	// disables profiling entirely.
+	PprofPort int
 }
 
 func workflowCacheOptions() cache.Options {
@@ -751,6 +754,19 @@ func StartManager(
 	cacheReady := &cacheReadiness{}
 	if err := manager.Add(cacheReady); err != nil {
 		return err
+	}
+
+	if options.PprofPort > 0 {
+		profiler, err := newPprofServer(options.PprofPort)
+		if err != nil {
+			return err
+		}
+
+		if err := manager.Add(profiler); err != nil {
+			return err
+		}
+
+		logger.Info("pprof endpoints listening on loopback", "address", profiler.address())
 	}
 
 	if err := manager.AddReadyzCheck("cache-sync", cacheReady.Check); err != nil {
