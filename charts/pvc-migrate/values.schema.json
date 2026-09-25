@@ -42,7 +42,15 @@
       "type": "object", "additionalProperties": false,
       "properties": {
         "logLevel": {"enum": ["debug", "info", "warn", "error"]},
-        "logFormat": {"enum": ["json", "text"]}
+        "logFormat": {"enum": ["json", "text"]},
+        "pprof": {
+          "type": "object", "additionalProperties": false,
+          "properties": {
+            "enabled": {"type": "boolean"},
+            "port": {"type": "integer", "minimum": 1, "maximum": 65535}
+          },
+          "required": ["enabled", "port"]
+        }
       }
     },
     "podAnnotations": {"$ref": "#/definitions/strings"},
