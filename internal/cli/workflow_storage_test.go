@@ -576,3 +576,113 @@ func TestPodMigrationStatusListsSessionObjects(t *testing.T) {
 		t.Fatalf("status list = %#v, want one session %q", listed, object.Name)
 	}
 }
+
+// TestBackupRestoreStatusListSessionRecords pins the bare backup/restore
+// status list: records live in the session storage namespace while carrying
+// the tenant namespace in metadata, so the list must not filter records by
+// the storage namespace.
+func TestBackupRestoreStatusListSessionRecords(t *testing.T) {
+	t.Run("backup", func(t *testing.T) {
+		clients := newWorkflowLookupRuntime(t)
+		object := &v1alpha1.Backup{
+			TypeMeta: metav1.TypeMeta{
+				APIVersion: v1alpha1.GroupVersion.String(),
+				Kind:       "Backup",
+			},
+			ObjectMeta: metav1.ObjectMeta{Name: "backup-1", Namespace: "app"},
+		}
+
+		store, err := kube.NewConfigMapWorkflowStore(
+			clients.clients.Kubernetes,
+			"sessions",
+			func() *v1alpha1.Backup { return &v1alpha1.Backup{} },
+		)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		if err := store.Create(t.Context(), object); err != nil {
+			t.Fatal(err)
+		}
+
+		var stdout bytes.Buffer
+
+		command := NewRoot(Options{
+			Out: &stdout, ErrOut: io.Discard,
+			runtimeFactory: func(state *rootState) (*commandRuntime, error) {
+				return &commandRuntime{
+					clients: clients.clients,
+					printer: printerFor(state),
+				}, nil
+			},
+		})
+		command.SetArgs(
+			[]string{"--output", "json", "--session-namespace", "sessions", "backup", "status"},
+		)
+
+		if err := command.Execute(); err != nil {
+			t.Fatal(err)
+		}
+
+		var listed []v1alpha1.Backup
+		if err := json.Unmarshal(stdout.Bytes(), &listed); err != nil {
+			t.Fatal(err)
+		}
+
+		if len(listed) != 1 || listed[0].Name != object.Name {
+			t.Fatalf("backup status list = %#v, want one session %q", listed, object.Name)
+		}
+	})
+
+	t.Run("restore", func(t *testing.T) {
+		clients := newWorkflowLookupRuntime(t)
+		object := &v1alpha1.Restore{
+			TypeMeta: metav1.TypeMeta{
+				APIVersion: v1alpha1.GroupVersion.String(),
+				Kind:       "Restore",
+			},
+			ObjectMeta: metav1.ObjectMeta{Name: "restore-1", Namespace: "app"},
+		}
+
+		store, err := kube.NewConfigMapWorkflowStore(
+			clients.clients.Kubernetes,
+			"sessions",
+			func() *v1alpha1.Restore { return &v1alpha1.Restore{} },
+		)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		if err := store.Create(t.Context(), object); err != nil {
+			t.Fatal(err)
+		}
+
+		var stdout bytes.Buffer
+
+		command := NewRoot(Options{
+			Out: &stdout, ErrOut: io.Discard,
+			runtimeFactory: func(state *rootState) (*commandRuntime, error) {
+				return &commandRuntime{
+					clients: clients.clients,
+					printer: printerFor(state),
+				}, nil
+			},
+		})
+		command.SetArgs(
+			[]string{"--output", "json", "--session-namespace", "sessions", "restore", "status"},
+		)
+
+		if err := command.Execute(); err != nil {
+			t.Fatal(err)
+		}
+
+		var listed []v1alpha1.Restore
+		if err := json.Unmarshal(stdout.Bytes(), &listed); err != nil {
+			t.Fatal(err)
+		}
+
+		if len(listed) != 1 || listed[0].Name != object.Name {
+			t.Fatalf("restore status list = %#v, want one session %q", listed, object.Name)
+		}
+	})
+}

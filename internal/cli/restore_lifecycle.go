@@ -124,7 +124,10 @@ func (r *rootState) newRestoreStatusCommand(source workflowSource) *cobra.Comman
 				return err
 			}
 
-			items, err := store.List(ctx, namespace)
+			// Records live in the session namespace while carrying the tenant
+			// namespace in metadata; the bare list shows every record the
+			// store holds, so no tenant filter applies here.
+			items, err := store.List(ctx, "")
 			if err != nil {
 				return err
 			}
