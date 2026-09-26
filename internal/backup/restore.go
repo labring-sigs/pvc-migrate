@@ -180,13 +180,29 @@ func renewRestoreLock(
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 
+	// Ownership loss (a rewritten annotation or a replaced PVC) aborts
+	// immediately; transient API errors retry inside the TTL budget, so one
+	// API-server blip cannot abandon a healthy restore. Past half the TTL a
+	// successor may legally hold the lock, so writing on would be unsafe.
+	lastRenewed := time.Now()
+
+	const retryInterval = 5 * time.Second
+
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
 			err := renewRestoreLockOnce(ctx, client, namespace, name, holder, pvcUID, ttl)
-			if err != nil {
+			if err == nil {
+				lastRenewed = time.Now()
+
+				ticker.Reset(interval)
+
+				continue
+			}
+
+			if lockRenewalAborts(err, lastRenewed, ttl) {
 				select {
 				case leaseErrors <- classifyRestoreLockError(ctx, err):
 				default:
@@ -196,6 +212,8 @@ func renewRestoreLock(
 
 				return
 			}
+
+			ticker.Reset(retryInterval)
 		}
 	}
 }

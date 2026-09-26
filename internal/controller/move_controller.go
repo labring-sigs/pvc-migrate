@@ -152,10 +152,7 @@ func (r *MoveReconciler) Reconcile(
 }
 
 func moveReconcileResult(err error) (reconcile.Result, error) {
-	if kube.IsSessionLockContention(err) || domain.CategoryOf(err) == domain.ErrorConflict {
-		return reconcile.Result{RequeueAfter: time.Second}, nil
-	}
-	return reconcile.Result{}, err
+	return workflowReconcileResult(err)
 }
 
 func (r *MoveReconciler) plan(ctx context.Context, object *v1alpha1.Move) (resultErr error) {

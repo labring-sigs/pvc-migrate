@@ -13,6 +13,24 @@ import (
 	"github.com/labring-sigs/pvc-migrate/internal/kube"
 )
 
+// retryBackoffDelay returns the exponential backoff before the next copy
+// attempt. The multiple saturates instead of overflowing: a float-to-int
+// conversion of 2^63 wraps negative and turned late retries into a tight
+// loop, and even a correct 2^63 multiple overflows against hour-scale bases.
+func retryBackoffDelay(base time.Duration, retryIndex int) time.Duration {
+	if base <= 0 {
+		return 0
+	}
+
+	multiple := uint64(1) << uint(min(retryIndex, 62))
+	if uint64(base) > math.MaxInt64/multiple {
+		return time.Duration(math.MaxInt64)
+	}
+
+	// The guard above bounds the product to math.MaxInt64.
+	return base * time.Duration(multiple) //nolint:gosec // bounded by the saturation guard
+}
+
 func (s *volumeCopyRunner) copyWithRetry(
 	ctx context.Context,
 	request copyengine.CopyRequest,
@@ -247,7 +265,7 @@ func (s *volumeCopyRunner) copyWithRetry(
 		}
 
 		if retryIndex+1 < s.config.Retries {
-			delay := time.Duration(math.Pow(2, float64(retryIndex))) * s.config.RetryBackoff
+			delay := retryBackoffDelay(s.config.RetryBackoff, retryIndex)
 			s.logInfo(
 				"copy retry scheduled",
 				"session",

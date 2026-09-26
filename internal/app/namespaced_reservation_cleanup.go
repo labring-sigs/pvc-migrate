@@ -26,6 +26,10 @@ func (r *ReservationExecutor) Cleanup(
 		return err
 	}
 
+	if options.Finalize {
+		ctx = context.WithValue(ctx, workflowFinalizeContextKey{}, true)
+	}
+
 	return withStoredWorkflowLock(ctx, r.store, r.locker, object.Namespace, object,
 		func(ctx context.Context) error { return r.cleanup(ctx, object, options) })
 }
