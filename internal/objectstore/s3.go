@@ -780,16 +780,23 @@ func (s *Store) AcquireLock(ctx context.Context, holder string, ttl time.Duratio
 		// buckets, so a concurrent holder may have overwritten our write.
 		// Read the lock back and refuse ownership when someone else won.
 		current, _, readErr := s.readLock(ctx)
-		if readErr == nil && current != nil &&
-			current.Holder != "" && current.Holder != holder {
+		if readErr != nil {
 			return "", domain.WrapError(
+				domain.ErrorPrecondition,
+				"S3 lock",
+				"verify the freshly acquired lock",
+				readErr,
+			)
+		}
+
+		if current != nil && current.Holder != "" && current.Holder != holder {
+			return "", domain.NewError(
 				domain.ErrorConflict,
 				"S3 lock",
 				fmt.Sprintf(
 					"backup recovery point is locked by %s (backend ignored conditional write)",
 					current.Holder,
 				),
-				err,
 			)
 		}
 

@@ -251,3 +251,57 @@ func TestClusterMigrationDeletionConvergesWhenSourceStorageDeleted(t *testing.T)
 		t.Fatalf("converged workflow remains in store: %v", err)
 	}
 }
+
+// TestMigrationCleanupHonorsRecordedUnusedStoragePolicy pins the plan-recorded
+// policy as the default: an aborted migration whose plan recorded Delete must
+// reclaim the staged destinations even when the cleanup command passes no
+// --unused-storage-policy override, exactly like the copy and reservation
+// families and the CLI flag help promise.
+func TestMigrationCleanupHonorsRecordedUnusedStoragePolicy(t *testing.T) {
+	executor, object, _, _ := migrationExecutorFixture(t)
+
+	object.Status.Phase = domain.PhaseAborted
+
+	object.Status.Plan.UnusedStoragePolicy = v1alpha1.UnusedStorageDelete
+	for _, volume := range object.Status.Plan.Volumes {
+		object.Status.Volumes = append(object.Status.Volumes,
+			v1alpha1.ClusterMigrationVolumeStatus{
+				ClusterVolumeReservationStatus: v1alpha1.ClusterVolumeReservationStatus{
+					SourcePVCName:     volume.SourcePVC.Name,
+					Reserved:          true,
+					DestinationPolicy: corev1.PersistentVolumeReclaimRetain,
+					DestinationPVC: &v1alpha1.ObjectReference{
+						Kind:      "PersistentVolumeClaim",
+						Namespace: "temporary",
+						Name:      "reserved-" + volume.SourcePVC.Name,
+						UID:       types.UID("reserved-" + volume.SourcePVC.Name),
+					},
+					DestinationPV: &v1alpha1.ObjectReference{
+						Kind: "PersistentVolume",
+						Name: "reserved-pv-" + volume.SourcePVC.Name,
+						UID:  types.UID("reserved-pv-" + volume.SourcePVC.Name),
+					},
+				},
+			},
+		)
+	}
+
+	_, volumes, _, err := executor.prepareCleanup(t.Context(), object, MigrationCleanupOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	deleted := 0
+	for _, volume := range volumes {
+		if volume.delete {
+			deleted++
+		}
+	}
+
+	if deleted != len(object.Status.Plan.Volumes) {
+		t.Fatalf(
+			"recorded Delete policy reclaimed %d volumes without an override, want the staged destinations",
+			deleted,
+		)
+	}
+}

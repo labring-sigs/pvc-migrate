@@ -297,6 +297,7 @@ type sessionLease struct {
 	cancel      context.CancelFunc
 	done        chan struct{}
 	once        sync.Once
+	deleteOnce  sync.Once
 	mu          sync.RWMutex
 	err         error
 	releaseErr  error
@@ -570,8 +571,20 @@ func (l *sessionLease) Release(ctx context.Context) error {
 
 // Delete stops renewal and deletes the Lease only when it is still held by
 // this lock. It is used when the protected session resources are removed and
-// the lock must disappear as one operation.
+// the lock must disappear as one operation. Like Release it runs at most
+// once: a second invocation must not report fencing against a successor's
+// freshly acquired Lease.
 func (l *sessionLease) Delete(ctx context.Context) error {
+	var err error
+
+	l.deleteOnce.Do(func() {
+		err = l.delete(ctx)
+	})
+
+	return err
+}
+
+func (l *sessionLease) delete(ctx context.Context) error {
 	l.cancel()
 	<-l.done
 
