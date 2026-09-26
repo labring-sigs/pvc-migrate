@@ -686,3 +686,96 @@ func TestBackupRestoreStatusListSessionRecords(t *testing.T) {
 		}
 	})
 }
+
+// TestRenameStatusListAndHintResolveSessionRecords pins the rename status
+// surface: the bare list must not filter records by the storage namespace
+// (they carry the tenant namespace in metadata), and the single-record
+// follow-up hints must resolve the record in its storage namespace instead
+// of poisoning the prefix with the tenant namespace.
+func TestRenameStatusListAndHintResolveSessionRecords(t *testing.T) {
+	clients := newWorkflowLookupRuntime(t)
+	object := &v1alpha1.Rename{
+		TypeMeta: metav1.TypeMeta{
+			APIVersion: v1alpha1.GroupVersion.String(),
+			Kind:       "Rename",
+		},
+		ObjectMeta: metav1.ObjectMeta{Name: "rename-1", Namespace: "app"},
+		Status: v1alpha1.RenameStatus{
+			WorkflowStatus: v1alpha1.WorkflowStatus{Phase: domain.PhaseCompleted},
+		},
+	}
+
+	store, err := kube.NewConfigMapWorkflowStore(
+		clients.clients.Kubernetes,
+		"sessions",
+		func() *v1alpha1.Rename { return &v1alpha1.Rename{} },
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if err := store.Create(t.Context(), object); err != nil {
+		t.Fatal(err)
+	}
+
+	var stdout, stderr bytes.Buffer
+
+	command := NewRoot(Options{
+		Out: &stdout, ErrOut: &stderr,
+		runtimeFactory: func(state *rootState) (*commandRuntime, error) {
+			return &commandRuntime{
+				clients: clients.clients,
+				printer: printerFor(state),
+			}, nil
+		},
+	})
+
+	t.Run("bare list", func(t *testing.T) {
+		stdout.Reset()
+
+		command.SetArgs(
+			[]string{"--output", "json", "--session-namespace", "sessions", "rename", "status"},
+		)
+
+		if err := command.Execute(); err != nil {
+			t.Fatal(err)
+		}
+
+		var listed []v1alpha1.Rename
+		if err := json.Unmarshal(stdout.Bytes(), &listed); err != nil {
+			t.Fatal(err)
+		}
+
+		if len(listed) != 1 || listed[0].Name != object.Name {
+			t.Fatalf("rename status list = %#v, want one session %q", listed, object.Name)
+		}
+	})
+
+	t.Run("single record hint namespace", func(t *testing.T) {
+		stderr.Reset()
+
+		command.SetArgs(
+			[]string{
+				"--output",
+				"json",
+				"--session-namespace",
+				"sessions",
+				"rename",
+				"status",
+				"rename-1",
+			},
+		)
+
+		if err := command.Execute(); err != nil {
+			t.Fatal(err)
+		}
+
+		if strings.Contains(stderr.String(), "--session-namespace app") {
+			t.Fatalf("hint addresses the tenant namespace: %s", stderr.String())
+		}
+
+		if !strings.Contains(stderr.String(), "--session-namespace sessions") {
+			t.Fatalf("hint must resolve the record in its storage namespace: %s", stderr.String())
+		}
+	})
+}
