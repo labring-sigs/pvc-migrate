@@ -107,6 +107,17 @@ func TestSessionOwnershipTreatsRemovedKindRecordsAsOrphan(t *testing.T) {
 	if strings.Contains(checks[0].Message, "--session-namespace app") {
 		t.Fatalf("orphan advice points at the workload namespace: %s", checks[0].Message)
 	}
+
+	// The suggested recovery command must match the actual flag surface of
+	// `recovery cleanup-orphan`: -n for the PVC namespace, never the removed
+	// --source-namespace spelling.
+	if strings.Contains(checks[0].Message, "--source-namespace") {
+		t.Fatalf("orphan advice names a removed flag: %s", checks[0].Message)
+	}
+
+	if !strings.Contains(checks[0].Message, "-n app") {
+		t.Fatalf("orphan advice must address the PVC namespace: %s", checks[0].Message)
+	}
 }
 
 func containsNamespace(namespaces []string, want string) bool {

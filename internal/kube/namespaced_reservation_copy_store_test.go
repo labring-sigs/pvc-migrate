@@ -114,6 +114,29 @@ func TestNamespacedConfigMapReservationHandoffCommitsCompleteCopyAtomically(t *t
 		t.Fatal("handoff lost identity, progress or modified the source snapshot")
 	}
 
+	// The routing label must follow the graduated payload: the bare status
+	// lists select records by workflow-kind, so a Copy record that still
+	// carries the reservation label vanishes from every list.
+	record, err := client.CoreV1().
+		ConfigMaps("sessions").
+		Get(t.Context(), SessionConfigMapName(source.Name), metav1.GetOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if record.Labels[WorkflowKindLabel] != "Copy" {
+		t.Fatalf("record workflow-kind label = %q, want Copy", record.Labels[WorkflowKindLabel])
+	}
+
+	listed, err := store.List(t.Context(), "")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if len(listed) != 1 || listed[0].Name != source.Name {
+		t.Fatalf("graduated record not listed by the copy store: %#v", listed)
+	}
+
 	writes := 0
 	for _, action := range client.Actions() {
 		if action.GetVerb() == "update" {
