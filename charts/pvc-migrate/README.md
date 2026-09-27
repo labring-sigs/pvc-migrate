@@ -62,6 +62,7 @@ every upgrade. Unknown values and unsafe common mistakes fail schema validation.
 | `serviceAccount.create/name` | `true` / generated | Dedicated operator identity; an explicit name is required for an external account |
 | `rbac.create` | `true` | Install the existing controller permission contract. The chart grants no pod exec anywhere; without it MongoDB automatic switchover reports the operator choices (grant a pods/exec Role yourself, switch the primary manually, or accept leader downtime) |
 | `controller.logLevel/logFormat` | `info` / `json` | Structured controller logs |
+| `controller.maxConcurrentReconciles` | `1` | Reconcile workers per workflow watch queue; keep `1` unless transfers of independent PVCs must overlap |
 | `controller.pprof.enabled/port` | `false` / `6060` | Serve Go profiling on `127.0.0.1` inside the controller Pod only; reach it with `kubectl exec` — never exposed through a Service |
 | `resources` | 100m CPU/128Mi requests; 512Mi memory limit | Baseline for controller memory/cache use; tune to workflow count and object volume |
 | `podDisruptionBudget` | enabled, minAvailable 1 | Applied with multiple replicas; omitted with one replica |
@@ -90,6 +91,37 @@ secret handling. Provision the required secrets in those namespaces first.
 Never bind the controller ClusterRole to tenants. It manages storage and
 reads Secret-backed Helm release history; tenant permissions should be
 bound separately within approved namespaces.
+
+### Operator trust boundaries
+
+The controller is an operator-domain component that acts on tenant-supplied
+input. Three boundaries follow from that design:
+
+**The controller dials tenant-specified S3 endpoints.** Repository endpoints
+come from `BackupRepository` objects that workflow authors choose. Backup and
+restore workflows make the controller itself connect to those endpoints
+(locking, manifest, and inventory checks), and the transfer job in the
+workflow namespace dials them for data. If workflow submission is open beyond
+trusted operators, restrict controller-pod egress with a NetworkPolicy that
+admits only approved object-storage destinations, and remember the same policy
+must allow the API server, DNS, and registry traffic the tool Pods need.
+
+**Repository credentials are readable by workflow-namespace admins.** The
+generated credentials Secret and the Helm release values carrying the rclone
+config are created in the workflow namespace, next to the transfer job that
+consumes them; each carries a cross-namespace owner annotation naming the
+repository. Give a workflow namespace only repositories whose credentials its
+administrators may already see. The controller pins the tool image, so a
+tenant cannot exfiltrate credentials through a custom image, but they can read
+them directly.
+
+**The release namespace is shared operator state.** Session records, leases,
+and credential source objects live in the controller's session namespace
+(defaults to the release namespace) for every tenant workflow. Treat it as
+single-operator infrastructure: anyone who can write there can rewrite or
+delete other tenants' migration records. Multi-tenant isolation is achieved by
+separating workflow namespaces and their RBAC, not by running additional
+controller releases in tenant namespaces.
 
 ## Existing Installation
 
