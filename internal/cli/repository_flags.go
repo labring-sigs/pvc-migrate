@@ -265,17 +265,18 @@ func prepareInlineRepository(
 }
 
 // loadRestoreRepositoryConnection rebuilds the object-store connection for a
-// persisted restore: CLI-created sessions carry a ConfigMap repository with
-// session-owned credentials, while controller-submitted restores reference a
-// user-owned BackupRepository CR with its own credentials Secret. The shared
-// resolver reads either; validation of the recorded spec and credentials is
-// identical for both.
+// persisted restore from the repository store its record backend dictates: a
+// CLI-created session carries a ConfigMap repository with session-owned
+// credentials, while a controller-submitted restore references a user-owned
+// BackupRepository CR with its own credentials Secret. Validation of the
+// recorded spec and credentials is identical for both.
 func (r *rootState) loadRestoreRepositoryConnection(
 	ctx context.Context,
 	runtime *commandRuntime,
 	object *v1alpha1.Restore,
+	backend string,
 ) (backup.S3RepositoryStore, error) {
-	store, _, err := r.repositoryResolver(runtime).Resolve(
+	store, _, err := r.repositoryResolverForBackend(runtime, backend).Resolve(
 		ctx,
 		crclient.ObjectKey{
 			Namespace: object.Namespace,
@@ -310,26 +311,4 @@ func (r *rootState) inlineRepositoryConnection(
 	}
 
 	return objectstore.New(ctx, config)
-}
-
-func (r *rootState) newControllerRepositoryStore(
-	ctx context.Context,
-	runtime *commandRuntime,
-	namespace, repositoryName, name string,
-) (*objectstore.Store, error) {
-	repository := &v1alpha1.BackupRepository{}
-	if err := runtime.clients.Runtime.Get(
-		ctx,
-		crclient.ObjectKey{Namespace: namespace, Name: repositoryName},
-		repository,
-	); err != nil {
-		return nil, err
-	}
-
-	config, err := backup.S3RepositoryLocation(repository, name)
-	if err != nil {
-		return nil, err
-	}
-
-	return objectstore.NewConfigOnly(config)
 }

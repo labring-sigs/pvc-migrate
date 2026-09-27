@@ -182,7 +182,9 @@ func (r *rootState) newRestoreResumeCommand(source workflowSource) *cobra.Comman
 					return err
 				}
 			} else if object.Status.Plan != nil {
-				connection, err := r.loadRestoreRepositoryConnection(ctx, runtime, object)
+				connection, err := r.loadRestoreRepositoryConnection(
+					ctx, runtime, object, backend,
+				)
 				if err != nil {
 					return err
 				}

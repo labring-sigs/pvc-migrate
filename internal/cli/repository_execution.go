@@ -10,7 +10,6 @@ import (
 	"github.com/labring-sigs/pvc-migrate/internal/kube"
 	"github.com/labring-sigs/pvc-migrate/internal/objectstore"
 	"github.com/spf13/cobra"
-	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	crclient "sigs.k8s.io/controller-runtime/pkg/client"
 )
 
@@ -29,22 +28,12 @@ func (r cliRepositoryResolver) Resolve(
 		Resolve(ctx, key, name)
 }
 
-// sessionOrCRRepositoryLoader resolves a repository reference for both
-// creation paths: CLI-created sessions persist an immutable ConfigMap record,
-// while controller-submitted workflows reference a user-owned BackupRepository
-// CR. Only a missing ConfigMap falls through to the CR — an identity or
-// ownership conflict on the session record is a tamper signal that must not be
-// masked by a same-named CR.
-func (r *rootState) sessionOrCRRepositoryLoader(
+// crRepositoryLoader reads the user-owned BackupRepository CR that
+// controller-submitted workflows reference.
+func (r *rootState) crRepositoryLoader(
 	runtime *commandRuntime,
 ) backup.RepositoryLoader {
 	return func(ctx context.Context, key crclient.ObjectKey) (*v1alpha1.BackupRepository, error) {
-		repository, err := kube.NewConfigMapRepositoryStore(runtime.clients.Kubernetes).
-			Load(ctx, key)
-		if err == nil || !apierrors.IsNotFound(err) {
-			return repository, err
-		}
-
 		object := &v1alpha1.BackupRepository{}
 		if err := runtime.clients.Runtime.Get(ctx, key, object); err != nil {
 			return nil, err
@@ -54,10 +43,23 @@ func (r *rootState) sessionOrCRRepositoryLoader(
 	}
 }
 
-func (r *rootState) repositoryResolver(runtime *commandRuntime) backup.S3RepositoryResolver {
+// repositoryResolverForBackend picks the repository source the workflow's
+// record backend dictates: a ConfigMap session owns the inline repository it
+// persisted, while a workflow CR references a user-owned BackupRepository CR.
+// The two stores are never consulted across backends, so a same-named object
+// of the other kind cannot silently satisfy a lookup.
+func (r *rootState) repositoryResolverForBackend(
+	runtime *commandRuntime,
+	backend string,
+) backup.S3RepositoryResolver {
+	load := kube.NewConfigMapRepositoryStore(runtime.clients.Kubernetes).Load
+	if backend == backendCRD {
+		load = r.crRepositoryLoader(runtime)
+	}
+
 	return cliRepositoryResolver{
 		clients: runtime.clients,
-		load:    r.sessionOrCRRepositoryLoader(runtime),
+		load:    load,
 		factory: r.options.objectStoreFactory,
 	}
 }
@@ -83,10 +85,15 @@ func (r *rootState) backupExecutor(
 ) *backup.BackupExecutor {
 	config := backup.BackupExecutorConfig{
 		Tools:               r.repositoryTools(runtime),
-		Repository:          r.repositoryResolver(runtime),
+		Repository:          r.repositoryResolverForBackend(runtime, backend),
 		SharedVolumeManager: runtime.openEBSLVMSharedVolumeManager,
 	}
-	config.RepositoryResources = kube.NewConfigMapRepositoryStore(runtime.clients.Kubernetes)
+	// Session-owned repository resources exist only for the ConfigMap record
+	// backend; a workflow CR references a user-owned BackupRepository whose
+	// resources this process must neither validate nor delete.
+	if backend != backendCRD {
+		config.RepositoryResources = kube.NewConfigMapRepositoryStore(runtime.clients.Kubernetes)
+	}
 
 	return backup.NewBackupExecutor(
 		runtime.clients.Kubernetes,
@@ -105,9 +112,11 @@ func (r *rootState) restoreExecutor(
 ) *backup.RestoreExecutor {
 	config := backup.RestoreExecutorConfig{
 		Tools:      r.repositoryTools(runtime),
-		Repository: r.repositoryResolver(runtime),
+		Repository: r.repositoryResolverForBackend(runtime, backend),
 	}
-	config.RepositoryResources = kube.NewConfigMapRepositoryStore(runtime.clients.Kubernetes)
+	if backend != backendCRD {
+		config.RepositoryResources = kube.NewConfigMapRepositoryStore(runtime.clients.Kubernetes)
+	}
 
 	return backup.NewRestoreExecutor(
 		runtime.clients.Kubernetes,
