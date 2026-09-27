@@ -30,6 +30,9 @@ rbac:
 controller:
   logLevel: info
   logFormat: json
+  # Reconcile workers per workflow watch queue. Keep 1 unless transfers of
+  # independent PVCs must overlap; serialized queues preserve arrival order.
+  maxConcurrentReconciles: 1
   pprof:
     # Serves Go profiling on 127.0.0.1 inside the controller Pod only.
     # Reach it with `kubectl exec ... -- curl http://127.0.0.1:<port>`.

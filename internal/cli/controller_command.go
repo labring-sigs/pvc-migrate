@@ -15,10 +15,11 @@ import (
 
 func (r *rootState) newControllerCommand() *cobra.Command {
 	var (
-		once                   bool
-		controllerNamespace    string
-		healthProbeBindAddress string
-		pprofPort              int
+		once                    bool
+		controllerNamespace     string
+		healthProbeBindAddress  string
+		pprofPort               int
+		maxConcurrentReconciles int
 	)
 
 	command := &cobra.Command{
@@ -70,6 +71,25 @@ func (r *rootState) newControllerCommand() *cobra.Command {
 				)
 			}
 
+			if once && cmd.Flags().Changed("max-concurrent-reconciles") {
+				return domain.NewError(
+					domain.ErrorValidation,
+					"flags",
+					"--max-concurrent-reconciles drives the daemon watch queues and is not available with --once",
+				)
+			}
+
+			if maxConcurrentReconciles < 1 {
+				return domain.NewError(
+					domain.ErrorValidation,
+					"flags",
+					fmt.Sprintf(
+						"--max-concurrent-reconciles %d is invalid: at least one reconcile worker is required",
+						maxConcurrentReconciles,
+					),
+				)
+			}
+
 			runtime, err := r.runtime()
 			if err != nil {
 				return err
@@ -112,6 +132,7 @@ func (r *rootState) newControllerCommand() *cobra.Command {
 				Logger:                        runtime.controllerLogger,
 				HealthProbeBindAddress:        healthProbeBindAddress,
 				PprofPort:                     pprofPort,
+				MaxConcurrentReconciles:       maxConcurrentReconciles,
 			}
 			if once {
 				ctx, cancel := r.context(cmd.Context())
@@ -155,6 +176,12 @@ func (r *rootState) newControllerCommand() *cobra.Command {
 		"pprof-port",
 		0,
 		"Serve Go profiling endpoints on 127.0.0.1 only; 0 disables profiling",
+	)
+	command.Flags().IntVar(
+		&maxConcurrentReconciles,
+		"max-concurrent-reconciles",
+		1,
+		"Reconcile workers per workflow watch queue (serial by default)",
 	)
 
 	return command
