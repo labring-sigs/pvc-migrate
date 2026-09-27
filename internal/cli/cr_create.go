@@ -363,6 +363,19 @@ func (r *rootState) newCRClusterCopyCreateCommand() *cobra.Command {
 		Short: "Submit a ClusterCopy workflow for controller reconciliation",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
+			// A session-only invocation graduates a reservation through the
+			// same handoff the namespaced family uses; the handoff resolves
+			// the cluster-scoped reservation itself. Only a brand-new copy
+			// takes the ClusterCopy submission below.
+			if targetsExistingSession(flags.sessionID, flags.sourcePVCs, flags.podName) {
+				submission, _, err := r.buildCopySubmission(cmd, flags)
+				if err != nil {
+					return err
+				}
+
+				return r.runCRSubmission(cmd, *submission, &dryRun, &wait)
+			}
+
 			_, object, err := r.buildCopySubmission(cmd, flags)
 			if err != nil {
 				return err
