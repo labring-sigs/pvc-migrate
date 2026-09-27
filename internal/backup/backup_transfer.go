@@ -22,6 +22,7 @@ type backupTransfer struct {
 	locker kube.SessionLocker
 	store  S3RepositoryStore
 	tools  ToolRuntime
+	runner ToolRunner
 }
 
 func (b *backupTransfer) toolRequest(
@@ -185,6 +186,11 @@ func (b *backupTransfer) run(
 	leaseErrors := make(chan error, 1)
 	leaseDone := make(chan struct{})
 
+	// The tool release name is filled in once the operation ID exists; the
+	// deferred lock finalization needs it to converge the tool before anyone
+	// could retry against the same recovery point.
+	var toolRelease string
+
 	go renewObjectStoreLock(
 		leaseCtx,
 		cancelLease,
@@ -205,33 +211,10 @@ func (b *backupTransfer) run(
 		default:
 		}
 
-		if releaseErr := runWithCleanupTimeout(
-			lockReleaseTimeout,
-			func(releaseCtx context.Context) error {
-				return b.store.ReleaseLock(releaseCtx, lease.current())
-			},
-		); releaseErr != nil {
-			// The renewal goroutine can race the deferred release: its Put
-			// may land server-side after the cancel already discarded the
-			// fresh ETag, so the conditional delete reports a conflict even
-			// though this holder published successfully. A conflict on
-			// release after a completed run means the lock object is stale,
-			// not that the backup failed; the lock then ages out by TTL.
-			if retErr == nil && domain.CategoryOf(releaseErr) == domain.ErrorConflict {
-				logOperation(
-					b.tools.Logger,
-					"backup operation lock left to expire after release conflict",
-					"namespace",
-					namespace,
-					"pvc",
-					plan.SourcePVC.Name,
-				)
-
-				return
-			}
-
-			retErr = errors.Join(retErr, releaseErr)
-		}
+		retErr = errors.Join(
+			retErr,
+			b.finalizeBackupOperation(ctx, lease, namespace, toolRelease, plan, retErr),
+		)
 	}()
 
 	// A concurrent backup may pass the initial preflight while this operation
@@ -278,6 +261,7 @@ func (b *backupTransfer) run(
 	}
 
 	toolID := toolOperationID(holder)
+	toolRelease = backupToolReleaseName(toolID)
 
 	backupRequest, err := b.toolRequest(
 		namespace, toolID, plan, writableMount,
@@ -323,7 +307,7 @@ func (b *backupTransfer) run(
 		})
 	}
 
-	toolErr := pvmigrate.RunBackup(leaseCtx, backupRequest)
+	toolErr := resolveToolRunner(b.runner).RunBackup(leaseCtx, backupRequest)
 
 	toolLogs.Stop()
 
@@ -417,6 +401,77 @@ func (b *backupTransfer) run(
 		TotalBytes:      inventory.TotalBytes,
 		InventorySHA256: inventory.SHA256,
 	})
+}
+
+// finalizeBackupOperation converges the interrupted tool and the operation
+// lock when a backup attempt returns. The tool is converged first; when its
+// removal cannot be confirmed the lock is left to expire by TTL so no retry
+// can start a second writer against the same recovery point.
+func (b *backupTransfer) finalizeBackupOperation(
+	ctx context.Context,
+	lease *lockLease,
+	namespace, toolRelease string,
+	plan v1alpha1.BackupPlan,
+	retErr error,
+) error {
+	var cleanupErr error
+	if retErr != nil && toolRelease != "" {
+		cleanupErr = cleanupInterruptedTool(
+			ctx,
+			b.runner,
+			b.tools,
+			"backup",
+			namespace,
+			toolRelease,
+		)
+		if cleanupErr != nil {
+			logOperation(
+				b.tools.Logger,
+				"interrupted backup tool may still run; operation lock left to expire",
+				"namespace",
+				namespace,
+				"pvc",
+				plan.SourcePVC.Name,
+				"error",
+				cleanupErr,
+			)
+		}
+	}
+
+	if operationLockReleaseBlocked(retErr, cleanupErr) {
+		return cleanupErr
+	}
+
+	releaseErr := runWithCleanupTimeout(
+		lockReleaseTimeout,
+		func(releaseCtx context.Context) error {
+			return b.store.ReleaseLock(releaseCtx, lease.current())
+		},
+	)
+	if releaseErr == nil {
+		return cleanupErr
+	}
+
+	// The renewal goroutine can race the deferred release: its Put may land
+	// server-side after the cancel already discarded the fresh ETag, so the
+	// conditional delete reports a conflict even though this holder published
+	// successfully. A conflict on release after a completed run means the
+	// lock object is stale, not that the backup failed; the lock then ages
+	// out by TTL.
+	if retErr == nil && domain.CategoryOf(releaseErr) == domain.ErrorConflict {
+		logOperation(
+			b.tools.Logger,
+			"backup operation lock left to expire after release conflict",
+			"namespace",
+			namespace,
+			"pvc",
+			plan.SourcePVC.Name,
+		)
+
+		return cleanupErr
+	}
+
+	return errors.Join(cleanupErr, releaseErr)
 }
 
 func (b *backupTransfer) prepareTool(
