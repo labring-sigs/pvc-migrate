@@ -13,6 +13,16 @@ rules:
   # consumes (deletes) it, resume/abort mutate the workflow record, and the
   # finalize path deletes it — the printed guidance itself says deleting the
   # CR is a valid way to finalize.
+  #
+  # These verbs cover driving the workflow CRs only. While the controller
+  # reconciles a CR it runs every transfer under the controller's own service
+  # account, so submitting and observing need nothing else. One exception:
+  # `cr <family> resume` on the transfer families (copy, backup, restore)
+  # executes the transfer machine in the invoking process, which additionally
+  # needs the runtime permissions of the session CLI in the workflow
+  # namespace — pods, services, and Helm release storage (secrets or
+  # configmaps), as listed in the README's execution model. Grant those
+  # separately to identities that actually resume transfers in-process.
   - apiGroups: ["migrate.sealos.io"]
     resources:
       - migrations
