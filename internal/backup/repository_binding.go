@@ -15,35 +15,6 @@ import (
 	crclient "sigs.k8s.io/controller-runtime/pkg/client"
 )
 
-// ResolveS3Repository reads the referenced API repository and its credentials.
-// Connection details stay in the data plane; resource identities are returned
-// separately for the operation to checkpoint before running a transfer.
-func ResolveS3Repository(
-	ctx context.Context,
-	reader crclient.Reader,
-	client kubernetes.Interface,
-	key crclient.ObjectKey,
-	name string,
-) (objectstore.Config, *v1alpha1.BackupRepositoryBindingStatus, error) {
-	if reader == nil {
-		return objectstore.Config{}, nil, domain.NewError(
-			domain.ErrorKubernetes, "backup repository", "repository reader is not configured",
-		)
-	}
-
-	return resolveStoredS3Repository(
-		ctx,
-		func(ctx context.Context, key crclient.ObjectKey) (*v1alpha1.BackupRepository, error) {
-			repository := &v1alpha1.BackupRepository{}
-			err := reader.Get(ctx, key, repository)
-			return repository, err
-		},
-		client,
-		key,
-		name,
-	)
-}
-
 type RepositoryLoader func(context.Context, crclient.ObjectKey) (*v1alpha1.BackupRepository, error)
 
 func resolveStoredS3Repository(

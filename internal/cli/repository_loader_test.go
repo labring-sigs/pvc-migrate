@@ -1,7 +1,6 @@
 package cli
 
 import (
-	"errors"
 	"testing"
 
 	v1alpha1 "github.com/labring-sigs/pvc-migrate/api/v1alpha1"
@@ -11,7 +10,6 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	kubefake "k8s.io/client-go/kubernetes/fake"
-	k8stesting "k8s.io/client-go/testing"
 	crclient "sigs.k8s.io/controller-runtime/pkg/client"
 	crfake "sigs.k8s.io/controller-runtime/pkg/client/fake"
 )
@@ -57,17 +55,17 @@ func controllerBackupRepository() *v1alpha1.BackupRepository {
 	}
 }
 
-// Controller-submitted workflows reference a user-owned BackupRepository CR;
-// the CLI resolver must find it when no session ConfigMap exists, so resume
-// and lifecycle verbs work against controller-planned backups.
-func TestSessionOrCRRepositoryLoaderFallsBackToCR(t *testing.T) {
-	repository := controllerBackupRepository()
-	runtime := repositoryLoaderRuntime(t, kubefake.NewClientset(), repository)
+func repositoryKey() crclient.ObjectKey {
+	return crclient.ObjectKey{Namespace: "application", Name: "archive"}
+}
 
-	loaded, err := (&rootState{}).sessionOrCRRepositoryLoader(runtime)(
-		t.Context(),
-		crclient.ObjectKey{Namespace: "application", Name: "archive"},
-	)
+// The CR record backend resolves repositories only through BackupRepository
+// CRs: a user-owned CR must load, and a missing one reports the CR NotFound
+// without consulting session storage.
+func TestCRBackendRepositoryLoaderIsCRScoped(t *testing.T) {
+	runtime := repositoryLoaderRuntime(t, kubefake.NewClientset(), controllerBackupRepository())
+
+	loaded, err := (&rootState{}).crRepositoryLoader(runtime)(t.Context(), repositoryKey())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -77,39 +75,51 @@ func TestSessionOrCRRepositoryLoaderFallsBackToCR(t *testing.T) {
 	}
 }
 
-// A session record that exists but is malformed is a tamper signal: the
-// loader must surface it instead of silently falling back to a same-named CR.
-func TestSessionOrCRRepositoryLoaderDoesNotMaskSessionConflicts(t *testing.T) {
-	kubernetes := kubefake.NewClientset()
-	forbidden := apierrors.NewForbidden(
-		corev1.Resource("configmaps"), "pvc-migrate-repository-x", errors.New("rbac"),
-	)
-	kubernetes.PrependReactor(
-		"get",
-		"configmaps",
-		func(k8stesting.Action) (bool, runtime.Object, error) { return true, nil, forbidden },
-	)
+func TestCRBackendRepositoryLoaderReportsCRNotFound(t *testing.T) {
+	runtime := repositoryLoaderRuntime(t, kubefake.NewClientset())
 
-	runtime := repositoryLoaderRuntime(t, kubernetes, controllerBackupRepository())
-
-	loaded, err := (&rootState{}).sessionOrCRRepositoryLoader(runtime)(
-		t.Context(),
-		crclient.ObjectKey{Namespace: "application", Name: "archive"},
-	)
-	if !apierrors.IsForbidden(err) || loaded != nil {
-		t.Fatalf("error = %v, loaded = %v; the session conflict must not fall back to the CR",
-			err, loaded)
+	_, err := (&rootState{}).crRepositoryLoader(runtime)(t.Context(), repositoryKey())
+	if !apierrors.IsNotFound(err) {
+		t.Fatalf("error = %v, want the CR NotFound", err)
 	}
 }
 
-func TestSessionOrCRRepositoryLoaderReportsMissingBoth(t *testing.T) {
-	runtime := repositoryLoaderRuntime(t, kubefake.NewClientset())
+// The ConfigMap record backend resolves repositories only through the
+// session's inline ConfigMap record: a same-named user-owned CR must not
+// silently satisfy the lookup when no session record exists.
+func TestConfigMapBackendRepositoryLoaderIgnoresCRs(t *testing.T) {
+	runtime := repositoryLoaderRuntime(t, kubefake.NewClientset(), controllerBackupRepository())
 
-	_, err := (&rootState{}).sessionOrCRRepositoryLoader(runtime)(
-		t.Context(),
-		crclient.ObjectKey{Namespace: "application", Name: "archive"},
-	)
+	resolver := (&rootState{}).repositoryResolverForBackend(runtime, backendConfigMap)
+
+	_, _, err := resolver.Resolve(t.Context(), repositoryKey(), "daily")
 	if !apierrors.IsNotFound(err) {
-		t.Fatalf("error = %v, want the CR NotFound", err)
+		t.Fatalf("error = %v, want the session record NotFound despite the same-named CR", err)
+	}
+}
+
+// The CR record backend resolves the same reference the ConfigMap backend
+// ignored: the two loaders are disjoint by construction.
+func TestCRBackendResolverReadsTheCR(t *testing.T) {
+	kubernetes := kubefake.NewClientset(&corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "credentials", Namespace: "application", UID: "credentials-uid",
+		},
+		Data: map[string][]byte{
+			"accessKey": []byte("key"),
+			"secretKey": []byte("secret"),
+		},
+	})
+	runtime := repositoryLoaderRuntime(t, kubernetes, controllerBackupRepository())
+
+	resolver := (&rootState{}).repositoryResolverForBackend(runtime, backendCRD)
+
+	store, binding, err := resolver.Resolve(t.Context(), repositoryKey(), "daily")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if binding.UID != "repository-uid" || store.Config().Bucket != "backups" {
+		t.Fatalf("binding = %+v", binding)
 	}
 }

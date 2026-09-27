@@ -11,6 +11,7 @@ import (
 	v1alpha1 "github.com/labring-sigs/pvc-migrate/api/v1alpha1"
 	"github.com/labring-sigs/pvc-migrate/internal/domain"
 	"github.com/labring-sigs/pvc-migrate/internal/kube"
+	"github.com/labring-sigs/pvc-migrate/internal/objectstore"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -59,13 +60,29 @@ func TestRepositoryResolutionAllowsCredentialRotationAndRejectsReplacement(t *te
 	client := kubefake.NewClientset(secret)
 	key := crclient.ObjectKeyFromObject(repository)
 
-	config, binding, err := ResolveS3Repository(
-		t.Context(),
-		reader,
-		client,
-		key,
-		"daily",
-	)
+	// The controller path resolves CR-backed repositories through the shared
+	// resolver with a CR reader — the production wiring this test pins.
+	crResolve := func() (objectstore.Config, *v1alpha1.BackupRepositoryBindingStatus, error) {
+		store, binding, err := NewS3RepositoryResolver(
+			func(ctx context.Context, loadKey crclient.ObjectKey) (*v1alpha1.BackupRepository, error) {
+				repository := &v1alpha1.BackupRepository{}
+				if err := reader.Get(ctx, loadKey, repository); err != nil {
+					return nil, err
+				}
+
+				return repository, nil
+			},
+			client,
+			nil,
+		).Resolve(t.Context(), key, "daily")
+		if err != nil {
+			return objectstore.Config{}, nil, err
+		}
+
+		return store.Config(), binding, nil
+	}
+
+	config, binding, err := crResolve()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -100,13 +117,7 @@ func TestRepositoryResolutionAllowsCredentialRotationAndRejectsReplacement(t *te
 		t.Fatal(err)
 	}
 
-	rotatedConfig, rotated, err := ResolveS3Repository(
-		t.Context(),
-		reader,
-		client,
-		key,
-		"daily",
-	)
+	rotatedConfig, rotated, err := crResolve()
 	if err != nil || rotatedConfig.SecretKey != "rotated" {
 		t.Fatalf("credential rotation failed: %v", err)
 	}
@@ -128,13 +139,7 @@ func TestRepositoryResolutionAllowsCredentialRotationAndRejectsReplacement(t *te
 		t.Fatal(err)
 	}
 
-	_, replacement, err := ResolveS3Repository(
-		t.Context(),
-		reader,
-		client,
-		key,
-		"daily",
-	)
+	_, replacement, err := crResolve()
 	if err != nil {
 		t.Fatal(err)
 	}
