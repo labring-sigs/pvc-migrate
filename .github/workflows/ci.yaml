@@ -30,6 +30,21 @@ jobs:
         with:
           version: v2.13.2
 
+  manifests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: "go.mod"
+          cache: true
+      # Fails when generated deepcopy/CRD artifacts (including the chart CRD
+      # copies refreshed by chart-sync) drift from the committed files; the
+      # staging step also catches newly generated files that were never added.
+      - run: make manifests
+      - run: git add -A
+      - run: git diff --cached --exit-code
+
   test:
     runs-on: ubuntu-latest
     steps:
