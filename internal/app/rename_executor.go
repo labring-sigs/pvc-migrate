@@ -438,7 +438,12 @@ func (r *RenameExecutor) cleanup(
 			r.client,
 			object.Name,
 			qualifiedResourceReference(plan.SourcePV, ""),
-			plan.SourceTemplate.ReclaimPolicy,
+			resolvedSourcePolicy(
+				ctx,
+				r.client,
+				qualifiedResourceReference(plan.SourcePV, ""),
+				plan.SourceTemplate.ReclaimPolicy,
+			),
 		); err != nil &&
 			!apierrors.IsNotFound(err) {
 			return err
