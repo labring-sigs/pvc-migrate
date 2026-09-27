@@ -65,6 +65,16 @@ func releaseSourceOwnership(
 		)
 	}
 
+	// The plan's recorded policy was read at planning time, which for a
+	// graduated workflow can postdate the transfer protection that switched
+	// the PV to Retain — restoring that would leak a Released Retain PV. The
+	// annotation the first protection wrote is the authoritative original.
+	if recorded := pv.Annotations[kube.OriginalPolicyAnnotation]; recorded != "" {
+		if policy := corev1.PersistentVolumeReclaimPolicy(recorded); policy != originalPolicy {
+			originalPolicy = policy
+		}
+	}
+
 	if pv.Labels[kube.SessionKey] != workflowID {
 		return nil
 	}
