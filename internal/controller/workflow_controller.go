@@ -40,28 +40,32 @@ import (
 // queue routes to an operation-specific reconciler that operates directly on
 // its concrete CRD type.
 type WorkflowReconciler struct {
-	backup                 *BackupReconciler
-	restore                *RestoreReconciler
-	rename                 *RenameReconciler
-	move                   *MoveReconciler
-	reservation            *ClusterReservationReconciler
-	namespacedReservation  *ReservationReconciler
-	namespacedCopy         *CopyReconciler
-	copy                   *ClusterCopyReconciler
-	migration              *ClusterMigrationReconciler
-	namespacedMigration    *MigrationReconciler
-	namespacedPodMigration *PodMigrationReconciler
-	kubeClient             kubernetes.Interface
-	clusterIdentity        string
-	trustedToolImage       string
-	supportedKinds         map[domain.ControllerKind]struct{}
-	logger                 *slog.Logger
-	activeWorkflows        sync.Map // CR UID -> context.CancelFunc
-	recorder               events.EventRecorder
+	backup                  *BackupReconciler
+	restore                 *RestoreReconciler
+	rename                  *RenameReconciler
+	move                    *MoveReconciler
+	reservation             *ClusterReservationReconciler
+	namespacedReservation   *ReservationReconciler
+	namespacedCopy          *CopyReconciler
+	copy                    *ClusterCopyReconciler
+	migration               *ClusterMigrationReconciler
+	namespacedMigration     *MigrationReconciler
+	namespacedPodMigration  *PodMigrationReconciler
+	kubeClient              kubernetes.Interface
+	clusterIdentity         string
+	trustedToolImage        string
+	supportedKinds          map[domain.ControllerKind]struct{}
+	logger                  *slog.Logger
+	activeWorkflows         sync.Map // CR UID -> context.CancelFunc
+	recorder                events.EventRecorder
+	maxConcurrentReconciles int
 }
 
 func NewWorkflowReconciler() *WorkflowReconciler {
-	return &WorkflowReconciler{logger: slog.Default()}
+	return &WorkflowReconciler{
+		logger:                  slog.Default(),
+		maxConcurrentReconciles: 1,
+	}
 }
 
 // WithLogger supplies the structured logger owned by the controller process.
@@ -87,6 +91,19 @@ func (r *WorkflowReconciler) WithSupportedKinds(kinds []domain.ControllerKind) *
 	for _, kind := range kinds {
 		r.supportedKinds[kind] = struct{}{}
 	}
+
+	return r
+}
+
+// WithMaxConcurrentReconciles caps the worker threads per watch queue. The
+// serial default keeps PVC transfers ordered by arrival; values below 1 keep
+// the default so an unset option cannot zero out the queue entirely.
+func (r *WorkflowReconciler) WithMaxConcurrentReconciles(n int) *WorkflowReconciler {
+	if r == nil || n < 1 {
+		return r
+	}
+
+	r.maxConcurrentReconciles = n
 
 	return r
 }
@@ -348,7 +365,10 @@ func (r *WorkflowReconciler) SetupWithManager(manager ctrl.Manager) error {
 
 			if err := ctrl.NewControllerManagedBy(manager).
 				Named(name).
-				WithOptions(controller.Options{SkipNameValidation: &skipNameValidation}).
+				WithOptions(controller.Options{
+					MaxConcurrentReconciles: r.maxConcurrentReconciles,
+					SkipNameValidation:      &skipNameValidation,
+				}).
 				For(object, builder.WithPredicates(queue.filter)).
 				Complete(&kindWorkflowReconciler{parent: r, kind: kind}); err != nil {
 				return err
@@ -645,6 +665,9 @@ type ManagerOptions struct {
 	// PprofPort serves the Go profiling endpoints on 127.0.0.1 only; 0
 	// disables profiling entirely.
 	PprofPort int
+	// MaxConcurrentReconciles caps the reconcile workers per watch queue.
+	// Values below 1 keep the serial default.
+	MaxConcurrentReconciles int
 }
 
 func workflowCacheOptions() cache.Options {
@@ -785,7 +808,8 @@ func StartManager(
 		WithLogger(logger.With("component", "workflow-controller")).
 		WithClusterIdentity(cluster.ID).
 		WithTrustedToolImage(normalizedTrustedImage).
-		WithSupportedKinds(options.SupportedKinds)
+		WithSupportedKinds(options.SupportedKinds).
+		WithMaxConcurrentReconciles(options.MaxConcurrentReconciles)
 	reconciler.WithKubernetesClient(options.KubernetesClient)
 
 	// Uncached reads keep the Lease identity check independent of informer lag.

@@ -40,30 +40,64 @@ func (*PVMigrate) Cleanup(ctx context.Context, request CleanupRequest) error {
 	}
 
 	for _, target := range targets {
-		flags := genericclioptions.NewConfigFlags(false)
-		flags.KubeConfig = &target.config
-		flags.Context = &target.context
-		flags.Namespace = &target.namespace
-		flags.WrapConfigFn = func(config *rest.Config) *rest.Config {
-			// Helm uninstall has no context argument. Bound in-flight requests and
-			// prevent further API calls after the execution fence is canceled.
-			config.Timeout = 10 * time.Second
-			config.Wrap(transport.ContextCanceller(ctx, context.Canceled))
-
-			return config
-		}
-
-		config := new(action.Configuration)
-		if err := config.Init(flags, target.namespace, os.Getenv("HELM_DRIVER")); err != nil {
-			return fmt.Errorf("initialize interrupted copy cleanup: %w", err)
-		}
-
-		if err := cleanupReleases(ctx, config, request); err != nil {
+		err := UninstallNamedRelease(
+			ctx,
+			target.config,
+			target.context,
+			target.namespace,
+			copyReleaseNames(request)...,
+		)
+		if err != nil {
 			return fmt.Errorf(
 				"clean up interrupted copy in namespace %s: %w",
 				target.namespace,
 				err,
 			)
+		}
+	}
+
+	return nil
+}
+
+// UninstallNamedRelease removes helm releases by exact name in one namespace.
+// A release that does not exist is success: the caller converges toward
+// "the tool is gone" and a missing release is that state.
+func UninstallNamedRelease(
+	ctx context.Context,
+	kubeconfigPath, kubeContext, namespace string,
+	releaseNames ...string,
+) error {
+	flags := genericclioptions.NewConfigFlags(false)
+	flags.KubeConfig = &kubeconfigPath
+	flags.Context = &kubeContext
+	flags.Namespace = &namespace
+	flags.WrapConfigFn = func(config *rest.Config) *rest.Config {
+		// Helm uninstall has no context argument. Bound in-flight requests and
+		// prevent further API calls after the execution fence is canceled.
+		config.Timeout = 10 * time.Second
+		config.Wrap(transport.ContextCanceller(ctx, context.Canceled))
+
+		return config
+	}
+
+	config := new(action.Configuration)
+	if err := config.Init(flags, namespace, os.Getenv("HELM_DRIVER")); err != nil {
+		return fmt.Errorf("initialize release cleanup: %w", err)
+	}
+
+	for _, name := range releaseNames {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+
+		uninstall := action.NewUninstall(config)
+		uninstall.DisableHooks = true
+		uninstall.WaitStrategy = helmkube.HookOnlyStrategy
+		uninstall.DeletionPropagation = "foreground"
+
+		uninstall.Timeout = 30 * time.Second
+		if _, err := uninstall.Run(name); err != nil && !errors.Is(err, driver.ErrReleaseNotFound) {
+			return fmt.Errorf("uninstall release %s: %w", name, err)
 		}
 	}
 

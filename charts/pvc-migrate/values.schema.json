@@ -43,6 +43,7 @@
       "properties": {
         "logLevel": {"enum": ["debug", "info", "warn", "error"]},
         "logFormat": {"enum": ["json", "text"]},
+        "maxConcurrentReconciles": {"type": "integer", "minimum": 1},
         "pprof": {
           "type": "object", "additionalProperties": false,
           "properties": {

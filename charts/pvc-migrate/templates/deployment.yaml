@@ -59,6 +59,7 @@ spec:
             - --session-namespace={{ .Release.Namespace }}
             - --tool-image={{ include "pvc-migrate.toolImage" . }}
             - --health-probe-bind-address=:8081
+            - --max-concurrent-reconciles={{ .Values.controller.maxConcurrentReconciles }}
             {{- if .Values.controller.pprof.enabled }}
             - --pprof-port={{ .Values.controller.pprof.port }}
             {{- end }}

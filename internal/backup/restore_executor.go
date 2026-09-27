@@ -18,6 +18,8 @@ type RestoreExecutorConfig struct {
 	Tools               ToolRuntime
 	Repository          S3RepositoryResolver
 	TrustedToolImage    string
+	// Runner executes the data-plane tool; nil uses the upstream runner.
+	Runner ToolRunner
 }
 
 // RestoreExecutor owns destination creation, identity checkpoints and restore
@@ -210,7 +212,12 @@ func (r *RestoreExecutor) run(ctx context.Context, object *v1alpha1.Restore) (re
 
 	plan = r.executionPlan(object)
 
-	transfer := restoreTransfer{client: r.client, store: repository, tools: r.config.Tools}
+	transfer := restoreTransfer{
+		client: r.client,
+		store:  repository,
+		tools:  r.config.Tools,
+		runner: r.config.Runner,
+	}
 	if err := transfer.run(
 		ctx,
 		object.Namespace,

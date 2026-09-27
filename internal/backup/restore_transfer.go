@@ -19,6 +19,7 @@ type restoreTransfer struct {
 	client kubernetes.Interface
 	store  S3RepositoryStore
 	tools  ToolRuntime
+	runner ToolRunner
 }
 
 func (r *restoreTransfer) toolRequest(
@@ -138,6 +139,11 @@ func (r *restoreTransfer) run(
 
 	leaseDone := make(chan struct{})
 
+	// The tool release name is filled in once the operation ID exists; the
+	// deferred lock finalization needs it to converge the tool before anyone
+	// could retry against the same destination.
+	var toolRelease string
+
 	go renewRestoreLock(
 		leaseCtx,
 		cancelLease,
@@ -158,6 +164,36 @@ func (r *restoreTransfer) run(
 		case leaseErr := <-leaseErrors:
 			retErr = errors.Join(retErr, leaseErr)
 		default:
+		}
+
+		var cleanupErr error
+		if retErr != nil && toolRelease != "" {
+			cleanupErr = cleanupInterruptedTool(
+				ctx,
+				r.runner,
+				r.tools,
+				"restore",
+				namespace,
+				toolRelease,
+			)
+			if cleanupErr != nil {
+				logOperation(
+					r.tools.Logger,
+					"interrupted restore tool may still run; destination lock left to expire",
+					"namespace",
+					namespace,
+					"pvc",
+					plan.DestinationPVC.Name,
+					"error",
+					cleanupErr,
+				)
+
+				retErr = errors.Join(retErr, cleanupErr)
+			}
+		}
+
+		if operationLockReleaseBlocked(retErr, cleanupErr) {
+			return
 		}
 
 		if releaseErr := runWithCleanupTimeout(lockReleaseTimeout, unlock); releaseErr != nil {
@@ -267,6 +303,7 @@ func (r *restoreTransfer) run(
 	}
 
 	toolID := toolOperationID(holder)
+	toolRelease = restoreToolReleaseName(toolID)
 
 	restoreRequest, err := r.toolRequest(
 		namespace, toolID, plan,
@@ -313,7 +350,7 @@ func (r *restoreTransfer) run(
 		})
 	}
 
-	toolErr := pvmigrate.RunRestore(leaseCtx, restoreRequest)
+	toolErr := resolveToolRunner(r.runner).RunRestore(leaseCtx, restoreRequest)
 
 	toolLogs.Stop()
 

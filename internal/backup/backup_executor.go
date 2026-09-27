@@ -18,6 +18,8 @@ type BackupExecutorConfig struct {
 	Repository          S3RepositoryResolver
 	SharedVolumeManager kube.OpenEBSLVMSharedVolumeManager
 	TrustedToolImage    string
+	// Runner executes the data-plane tool; nil uses the upstream runner.
+	Runner ToolRunner
 }
 
 // BackupExecutor owns Backup lifecycle and checkpoints the same CRD object in
@@ -249,6 +251,7 @@ func (b *BackupExecutor) runTransfer(
 		locker: b.locker,
 		store:  repository,
 		tools:  b.config.Tools,
+		runner: b.config.Runner,
 	}
 
 	writable := info.PV.Spec.CSI != nil && info.PV.Spec.CSI.Driver == kube.OpenEBSLVMCSIDriver &&
