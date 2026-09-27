@@ -654,3 +654,88 @@ func TestOpenEBSLVMSharedVolumeManagerRejectsReplacedSourcePV(t *testing.T) {
 		t.Fatalf("category=%s error=%v", domain.CategoryOf(err), err)
 	}
 }
+
+// Compensation converges when the volume it would restore no longer exists:
+// cleanup of a deleting workflow must not wedge forever on a restore that can
+// never run, while the forward enable path keeps failing loudly.
+func TestOpenEBSLVMRestoreConvergesWhenVolumeGone(t *testing.T) {
+	deletePV := func(t *testing.T, manager OpenEBSLVMSharedVolumeManager) {
+		t.Helper()
+
+		typedManager, ok := manager.(*openEBSLVMSharedVolumeManager)
+		if !ok {
+			t.Fatalf("manager type=%T", manager)
+		}
+
+		if err := typedManager.typed.CoreV1().PersistentVolumes().Delete(
+			context.Background(),
+			openEBSLVMSourcePV.Name,
+			metav1.DeleteOptions{},
+		); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	deleteLVMVolume := func(t *testing.T, dynamicClient *dynamicfake.FakeDynamicClient) {
+		t.Helper()
+
+		if err := dynamicClient.Resource(openEBSLVMVolumeGVR).
+			Namespace("openebs").
+			Delete(context.Background(), "pvc-123", metav1.DeleteOptions{}); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	t.Run("restore and verify pass when the source PV is gone", func(t *testing.T) {
+		manager, dynamicClient := newOpenEBSLVMTestManager(t, "yes")
+		state, _ := prepareOpenEBSLVMTest(t, manager)
+		deletePV(t, manager)
+
+		if err := manager.ValidateRestoreShared(
+			context.Background(),
+			"session-1",
+			state,
+		); err != nil {
+			t.Fatal(err)
+		}
+
+		if err := manager.RestoreShared(context.Background(), "session-1", state); err != nil {
+			t.Fatal(err)
+		}
+
+		for _, action := range dynamicClient.Actions() {
+			if action.GetVerb() == "patch" {
+				t.Fatalf("LVMVolume was patched after the PV vanished: %#v", action)
+			}
+		}
+	})
+
+	t.Run("restore and verify pass when the LVMVolume is gone", func(t *testing.T) {
+		manager, dynamicClient := newOpenEBSLVMTestManager(t, "yes")
+		state, _ := prepareOpenEBSLVMTest(t, manager)
+		deleteLVMVolume(t, dynamicClient)
+
+		if err := manager.ValidateRestoreShared(
+			context.Background(),
+			"session-1",
+			state,
+		); err != nil {
+			t.Fatal(err)
+		}
+
+		if err := manager.RestoreShared(context.Background(), "session-1", state); err != nil {
+			t.Fatal(err)
+		}
+	})
+
+	t.Run("enable still fails when the source PV is gone", func(t *testing.T) {
+		manager, _ := newOpenEBSLVMTestManager(t, "no")
+		state, _ := prepareOpenEBSLVMTest(t, manager)
+		deletePV(t, manager)
+
+		err := manager.EnableShared(context.Background(), "session-1", state)
+		if domain.CategoryOf(err) != domain.ErrorPrecondition {
+			t.Fatalf("category=%s error=%v", domain.CategoryOf(err), err)
+		}
+	})
+}

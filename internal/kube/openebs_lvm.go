@@ -3,6 +3,7 @@ package kube
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 
@@ -20,6 +21,13 @@ import (
 var openEBSLVMVolumeGVR = schema.GroupVersionResource{
 	Group: "local.openebs.io", Version: "v1alpha1", Resource: "lvmvolumes",
 }
+
+// errOpenEBSLVMVolumeMissing marks a volume lookup where the source PV or its
+// LVMVolume no longer exists. The forward paths (prepare, enable) must fail on
+// it; the restore/verify compensation paths treat it as converged — the
+// sharing state left with the volume, and wedging cleanup on a restore that
+// can never run is strictly worse than leaving nothing behind.
+var errOpenEBSLVMVolumeMissing = errors.New("OpenEBS LVM volume no longer exists")
 
 const (
 	OpenEBSLVMCSIDriver               = "local.csi.openebs.io"
@@ -282,6 +290,12 @@ func (m *openEBSLVMSharedVolumeManager) RestoreShared(
 		v1alpha1.ObjectReference{Name: state.SourcePV.Name, UID: state.SourcePV.UID},
 		state.LVMVolume,
 	)
+	if errors.Is(err, errOpenEBSLVMVolumeMissing) {
+		// The volume this checkpoint would restore is gone; its sharing state
+		// left with it.
+		return nil
+	}
+
 	if err != nil {
 		return err
 	}
@@ -319,6 +333,10 @@ func (m *openEBSLVMSharedVolumeManager) ValidateRestoreShared(
 		v1alpha1.ObjectReference{Name: state.SourcePV.Name, UID: state.SourcePV.UID},
 		state.LVMVolume,
 	)
+	if errors.Is(err, errOpenEBSLVMVolumeMissing) {
+		return nil
+	}
+
 	if err != nil {
 		return err
 	}
@@ -463,6 +481,15 @@ func (m *openEBSLVMSharedVolumeManager) volume(
 	}
 
 	pv, err := m.typed.CoreV1().PersistentVolumes().Get(ctx, sourcePVName, metav1.GetOptions{})
+	if apierrors.IsNotFound(err) {
+		return openEBSLVMVolume{}, domain.WrapError(
+			domain.ErrorPrecondition,
+			"OpenEBS LVM shared mount",
+			"source PV "+sourcePVName+" no longer exists",
+			errOpenEBSLVMVolumeMissing,
+		)
+	}
+
 	if err != nil {
 		return openEBSLVMVolume{}, domain.WrapError(
 			domain.ErrorKubernetes,
@@ -573,10 +600,11 @@ func (m *openEBSLVMSharedVolumeManager) volume(
 	}
 
 	if match == nil {
-		return openEBSLVMVolume{}, domain.NewError(
+		return openEBSLVMVolume{}, domain.WrapError(
 			domain.ErrorPrecondition,
 			"OpenEBS LVM shared mount",
 			fmt.Sprintf("LVMVolume %s for source PV %s was not found", wantedName, sourcePVName),
+			errOpenEBSLVMVolumeMissing,
 		)
 	}
 

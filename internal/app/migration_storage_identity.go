@@ -43,6 +43,10 @@ func verifySourceStorage(
 	pvc, err := client.CoreV1().
 		PersistentVolumeClaims(sourcePVC.Namespace).
 		Get(ctx, sourcePVC.Name, metav1.GetOptions{})
+	if deletionTolerantRead(ctx, err) {
+		return nil
+	}
+
 	if err != nil {
 		return domain.WrapError(
 			domain.ErrorKubernetes,
@@ -84,6 +88,10 @@ func verifySourceStorage(
 	pv, err := client.CoreV1().
 		PersistentVolumes().
 		Get(ctx, sourcePV.Name, metav1.GetOptions{})
+	if deletionTolerantRead(ctx, err) {
+		return nil
+	}
+
 	if err != nil {
 		return domain.WrapError(
 			domain.ErrorKubernetes,
@@ -162,6 +170,10 @@ func verifyRollbackStorageVolume(
 	pvc, err := client.CoreV1().
 		PersistentVolumeClaims(active.Namespace).
 		Get(ctx, active.Name, metav1.GetOptions{})
+	if deletionTolerantRead(ctx, err) {
+		return nil
+	}
+
 	if err != nil {
 		return domain.WrapError(
 			domain.ErrorKubernetes,
@@ -207,6 +219,10 @@ func verifyRollbackStorageVolume(
 	pv, err := client.CoreV1().
 		PersistentVolumes().
 		Get(ctx, expectedPV.Name, metav1.GetOptions{})
+	if deletionTolerantRead(ctx, err) {
+		return nil
+	}
+
 	if err != nil {
 		return domain.WrapError(
 			domain.ErrorKubernetes,
@@ -236,6 +252,15 @@ func verifyRollbackStorageVolume(
 	}
 
 	return nil
+}
+
+// deletionTolerantRead reports whether a vanished object passes verification:
+// only the deletion pass converges through cleanup when the storage it would
+// re-verify is already gone, mirroring the terminating-claim tolerance below —
+// a claim mid-deletion passes, so the completed deletion must pass too. Every
+// other phase fails loudly on a read error.
+func deletionTolerantRead(ctx context.Context, err error) bool {
+	return apierrors.IsNotFound(err) && workflowDeletionInProgress(ctx)
 }
 
 // verifyActiveStorageVolume revalidates an activated volume. The activated claim
@@ -291,6 +316,10 @@ func verifyActiveStorageVolume(
 	pvc, err := client.CoreV1().
 		PersistentVolumeClaims(destinationNamespace).
 		Get(ctx, sourcePVC.Name, metav1.GetOptions{})
+	if deletionTolerantRead(ctx, err) {
+		return nil
+	}
+
 	if err != nil {
 		return domain.WrapError(
 			domain.ErrorKubernetes,
@@ -354,6 +383,10 @@ func verifyActiveStorageVolume(
 	pv, err := client.CoreV1().
 		PersistentVolumes().
 		Get(ctx, expectedPV.Name, metav1.GetOptions{})
+	if deletionTolerantRead(ctx, err) {
+		return nil
+	}
+
 	if err != nil {
 		return domain.WrapError(
 			domain.ErrorKubernetes,

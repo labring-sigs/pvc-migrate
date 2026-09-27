@@ -69,11 +69,22 @@ func (m *PodMigrationExecutor) ValidateAbort(
 	}
 
 	if workflowDeletionInProgress(ctx) {
-		// Lost or terminating source storage cannot be re-verified and gives
-		// the workload nothing to resume onto — the scheduler refuses pods
-		// mounting a claim that is being deleted. Deletion must converge
-		// through cleanup instead of erroring or waiting forever.
-		if scan.Deleted || scan.Terminating != nil {
+		settling, err := deletionSourcePairSettling(
+			ctx,
+			m.client,
+			object.Namespace,
+			plan.Volumes,
+		)
+		if err != nil {
+			return err
+		}
+
+		// Lost or terminating source storage — either side of the volume
+		// pair — cannot be re-verified and gives the workload nothing to
+		// resume onto: the scheduler refuses pods mounting a claim that is
+		// being deleted, and a vanishing PV strands the same resume. Deletion
+		// must converge through cleanup instead of erroring or waiting forever.
+		if settling {
 			return nil
 		}
 	}
@@ -124,7 +135,7 @@ func (m *PodMigrationExecutor) abort(ctx context.Context, object *v1alpha1.PodMi
 		object.Status.History,
 	)
 	if resume && workflowDeletionInProgress(ctx) {
-		scan, err := scanPlannedSourcePVCs(
+		settling, err := deletionSourcePairSettling(
 			ctx,
 			m.client,
 			object.Namespace,
@@ -135,10 +146,10 @@ func (m *PodMigrationExecutor) abort(ctx context.Context, object *v1alpha1.PodMi
 		}
 
 		// Resuming the workload onto lost or terminating source storage can
-		// only fail — the scheduler refuses pods mounting a claim that is
-		// being deleted; the deletion pass converges to Aborted and cleanup
-		// takes over.
-		if scan.Deleted || scan.Terminating != nil {
+		// only fail — either side of the volume pair going away strands the
+		// resume; the deletion pass converges to Aborted and cleanup takes
+		// over.
+		if settling {
 			resume = false
 		}
 	}
