@@ -10,6 +10,7 @@ import (
 	"github.com/labring-sigs/pvc-migrate/internal/kube"
 	"github.com/labring-sigs/pvc-migrate/internal/objectstore"
 	"github.com/spf13/cobra"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	crclient "sigs.k8s.io/controller-runtime/pkg/client"
 )
 
@@ -28,12 +29,35 @@ func (r cliRepositoryResolver) Resolve(
 		Resolve(ctx, key, name)
 }
 
-func (r *rootState) repositoryResolver(runtime *commandRuntime) backup.S3RepositoryResolver {
-	load := kube.NewConfigMapRepositoryStore(runtime.clients.Kubernetes).Load
+// sessionOrCRRepositoryLoader resolves a repository reference for both
+// creation paths: CLI-created sessions persist an immutable ConfigMap record,
+// while controller-submitted workflows reference a user-owned BackupRepository
+// CR. Only a missing ConfigMap falls through to the CR — an identity or
+// ownership conflict on the session record is a tamper signal that must not be
+// masked by a same-named CR.
+func (r *rootState) sessionOrCRRepositoryLoader(
+	runtime *commandRuntime,
+) backup.RepositoryLoader {
+	return func(ctx context.Context, key crclient.ObjectKey) (*v1alpha1.BackupRepository, error) {
+		repository, err := kube.NewConfigMapRepositoryStore(runtime.clients.Kubernetes).
+			Load(ctx, key)
+		if err == nil || !apierrors.IsNotFound(err) {
+			return repository, err
+		}
 
+		object := &v1alpha1.BackupRepository{}
+		if err := runtime.clients.Runtime.Get(ctx, key, object); err != nil {
+			return nil, err
+		}
+
+		return object, nil
+	}
+}
+
+func (r *rootState) repositoryResolver(runtime *commandRuntime) backup.S3RepositoryResolver {
 	return cliRepositoryResolver{
 		clients: runtime.clients,
-		load:    load,
+		load:    r.sessionOrCRRepositoryLoader(runtime),
 		factory: r.options.objectStoreFactory,
 	}
 }

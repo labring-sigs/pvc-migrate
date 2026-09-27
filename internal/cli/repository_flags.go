@@ -265,54 +265,26 @@ func prepareInlineRepository(
 }
 
 // loadRestoreRepositoryConnection rebuilds the object-store connection for a
-// persisted restore session from its recorded spec and credentials Secret.
+// persisted restore: CLI-created sessions carry a ConfigMap repository with
+// session-owned credentials, while controller-submitted restores reference a
+// user-owned BackupRepository CR with its own credentials Secret. The shared
+// resolver reads either; validation of the recorded spec and credentials is
+// identical for both.
 func (r *rootState) loadRestoreRepositoryConnection(
 	ctx context.Context,
 	runtime *commandRuntime,
 	object *v1alpha1.Restore,
-) (*objectstore.Store, error) {
-	secretName := kube.BackupCredentialsSecretName(object.Name)
-
-	secret, err := runtime.clients.Kubernetes.CoreV1().Secrets(object.Namespace).
-		Get(ctx, secretName, metav1.GetOptions{})
-	if err != nil {
-		return nil, domain.WrapError(
-			domain.ErrorKubernetes,
-			"restore session",
-			"read session credentials Secret "+secretName,
-			err,
-		)
-	}
-
-	// The session persisted its inline BackupRepository alongside its
-	// credentials; reload it to rebuild the connection.
-	store := kube.NewConfigMapRepositoryStore(runtime.clients.Kubernetes)
-
-	repository, err := store.Load(ctx, crclient.ObjectKey{
-		Namespace: object.Namespace,
-		Name:      object.Spec.RepositoryRef.Name,
-	})
-	if err != nil {
-		return nil, err
-	}
-
-	config, err := backup.S3RepositoryLocation(
-		repository,
+) (backup.S3RepositoryStore, error) {
+	store, _, err := r.repositoryResolver(runtime).Resolve(
+		ctx,
+		crclient.ObjectKey{
+			Namespace: object.Namespace,
+			Name:      object.Spec.RepositoryRef.Name,
+		},
 		object.Spec.Name,
 	)
-	if err != nil {
-		return nil, err
-	}
 
-	config.AccessKey = string(secret.Data[kube.BackupAccessKeyDataKey])
-	config.SecretKey = string(secret.Data[kube.BackupSecretKeyDataKey])
-	config.SessionToken = string(secret.Data[kube.BackupSessionTokenDataKey])
-
-	if r.options.objectStoreFactory != nil {
-		return r.options.objectStoreFactory(ctx, config)
-	}
-
-	return objectstore.New(ctx, config)
+	return store, err
 }
 
 func (r *rootState) inlineRepositoryConnection(
