@@ -21,6 +21,10 @@ func deletionTestVolume(name string) v1alpha1.VolumeSpec {
 	}
 }
 
+// The skip is factual rather than mode-gated: every cleanup pass (abort
+// included, not just workflow deletion) must tolerate a source pair that is
+// already going away, or aborting a copy whose source vanished wedges the
+// workflow forever.
 func TestDeletionSourceMissingCoversSettlingSources(t *testing.T) {
 	terminating := &corev1.PersistentVolumeClaim{
 		ObjectMeta: metav1.ObjectMeta{
@@ -34,6 +38,18 @@ func TestDeletionSourceMissingCoversSettlingSources(t *testing.T) {
 
 	intactPV := &corev1.PersistentVolume{
 		ObjectMeta: metav1.ObjectMeta{Name: "pv-b", UID: types.UID("uid-pv-b")},
+	}
+
+	livePVC := &corev1.PersistentVolumeClaim{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: "data",
+			Name:      "c",
+			UID:       types.UID("uid-c"),
+		},
+	}
+
+	livePV := &corev1.PersistentVolume{
+		ObjectMeta: metav1.ObjectMeta{Name: "pv-c", UID: types.UID("uid-pv-c")},
 	}
 
 	tests := []struct {
@@ -59,6 +75,14 @@ func TestDeletionSourceMissingCoversSettlingSources(t *testing.T) {
 			Volume:  deletionTestVolume("b"),
 			objects: []any{intactPV},
 			missing: true,
+		},
+		{
+			// The relaxation forgives only vanished storage: a live pair is
+			// still validated strictly in every pass.
+			name:    "intact pair",
+			Volume:  deletionTestVolume("c"),
+			objects: []any{livePVC, livePV},
+			missing: false,
 		},
 	}
 
@@ -91,7 +115,7 @@ func TestDeletionSourceMissingCoversSettlingSources(t *testing.T) {
 			}
 
 			if missing != testCase.missing {
-				t.Fatalf("missing = %v, want %v", missing, testCase.missing)
+				t.Fatalf("deletion pass: missing = %v, want %v", missing, testCase.missing)
 			}
 
 			plain, err := deletionSourceMissing(t.Context(), client, "data", testCase.Volume)
@@ -99,8 +123,8 @@ func TestDeletionSourceMissingCoversSettlingSources(t *testing.T) {
 				t.Fatal(err)
 			}
 
-			if plain {
-				t.Fatal("non-deletion pass relaxed source validation")
+			if plain != testCase.missing {
+				t.Fatalf("abort pass: missing = %v, want %v", plain, testCase.missing)
 			}
 		})
 	}

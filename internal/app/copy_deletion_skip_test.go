@@ -61,6 +61,54 @@ func TestNamespacedCopyFinalizeDeletedConvergesWhenSourceDeleted(t *testing.T) {
 	}
 }
 
+// Aborting a failed copy whose source pair vanished must converge to Aborted,
+// not wedge in Aborting: the session record can then be finalized through the
+// normal cleanup path instead of manual deletion.
+func TestNamespacedCopyAbortConvergesWhenSourceDeleted(t *testing.T) {
+	executor, object, engine := namespacedCopyFixture(t, interceptor.Funcs{})
+	object.Status.Phase = domain.PhaseFailed
+	object.Status.ResumeFrom = domain.PhaseWarmCopying
+	object.Status.Volumes = namespacedFailedCopyAttemptStatuses(object.Status.Plan.Volumes)
+
+	if err := executor.Abort(t.Context(), object); err != nil {
+		t.Fatalf("abort wedged on the deleted source pair: %v", err)
+	}
+
+	if object.Status.Phase != domain.PhaseAborted {
+		t.Fatalf("phase = %s, want Aborted", object.Status.Phase)
+	}
+
+	if len(engine.cleanups) != len(object.Status.Plan.Volumes) {
+		t.Fatalf(
+			"tool cleanups = %d, want %d",
+			len(engine.cleanups), len(object.Status.Plan.Volumes),
+		)
+	}
+}
+
+func TestClusterCopyAbortConvergesWhenSourceDeleted(t *testing.T) {
+	executor, object, store, engine := copyExecutorFixture(t)
+	object.Status.Phase = domain.PhaseFailed
+	object.Status.ResumeFrom = domain.PhaseWarmCopying
+	object.Status.Volumes = failedCopyAttemptStatuses(object.Status.Plan.Volumes)
+	store.object = object.DeepCopy()
+
+	if err := executor.Abort(t.Context(), object); err != nil {
+		t.Fatalf("abort wedged on the deleted source pair: %v", err)
+	}
+
+	if object.Status.Phase != domain.PhaseAborted {
+		t.Fatalf("phase = %s, want Aborted", object.Status.Phase)
+	}
+
+	if len(engine.cleanups) != len(object.Status.Plan.Volumes) {
+		t.Fatalf(
+			"tool cleanups = %d, want %d",
+			len(engine.cleanups), len(object.Status.Plan.Volumes),
+		)
+	}
+}
+
 func failedCopyAttemptStatuses(volumes []v1alpha1.VolumeSpec) []v1alpha1.ClusterCopyVolumeStatus {
 	statuses := make([]v1alpha1.ClusterCopyVolumeStatus, 0, len(volumes))
 	for _, volume := range volumes {
