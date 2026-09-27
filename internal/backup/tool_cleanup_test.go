@@ -32,6 +32,7 @@ type cleanupToolRunner struct {
 	uninstallErr error
 
 	backupID    string
+	restoreID   string
 	uninstalled []uninstallCall
 }
 
@@ -40,8 +41,9 @@ func (r *cleanupToolRunner) RunBackup(_ context.Context, request pvmigrate.Backu
 	return r.runErr
 }
 
-func (*cleanupToolRunner) RunRestore(context.Context, pvmigrate.Restore) error {
-	return nil
+func (r *cleanupToolRunner) RunRestore(_ context.Context, request pvmigrate.Restore) error {
+	r.restoreID = request.ID
+	return r.runErr
 }
 
 func (r *cleanupToolRunner) UninstallTool(
