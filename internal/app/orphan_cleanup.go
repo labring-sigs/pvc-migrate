@@ -82,7 +82,7 @@ func (s *OrphanCleaner) withSessionIDLock(
 	ctx context.Context,
 	namespace, id string,
 	fn func(context.Context) error,
-) error {
+) (retErr error) {
 	if namespace == "" || id == "" {
 		return domain.NewError(
 			domain.ErrorValidation,
@@ -103,16 +103,23 @@ func (s *OrphanCleaner) withSessionIDLock(
 		operationCtx, heldSessionLock{lock: lock, namespace: namespace, id: id},
 	)
 
-	operationErr := fn(lockedCtx)
-	operationErr = errors.Join(operationErr, kube.LeaseFenceError(lockedCtx))
+	// The release must also run when the cleanup panics: the session Lease
+	// renews on its own context, so an unreleased lock would fence the session
+	// out instead of aging out by TTL.
+	defer func() {
+		releaseCtx, cancelRelease := context.WithTimeout(
+			context.WithoutCancel(ctx),
+			10*time.Second,
+		)
+		defer cancelRelease()
 
-	releaseCtx, cancelRelease := context.WithTimeout(
-		context.WithoutCancel(ctx),
-		10*time.Second,
-	)
-	defer cancelRelease()
+		retErr = errors.Join(retErr, lock.Release(releaseCtx))
+	}()
 
-	return errors.Join(operationErr, lock.Release(releaseCtx))
+	retErr = fn(lockedCtx)
+	retErr = errors.Join(retErr, kube.LeaseFenceError(lockedCtx))
+
+	return retErr
 }
 
 func (s *OrphanCleaner) PlanOrphanCleanup(
@@ -159,18 +166,7 @@ func (s *OrphanCleaner) PlanOrphanCleanup(
 		PersistentVolumeClaims(options.SourceNamespace).
 		Get(ctx, options.SourcePVC, metav1.GetOptions{})
 	if apierrors.IsNotFound(err) {
-		plan.AddCheck(
-			orphanFailed(
-				domain.CheckNameSourcePVC,
-				fmt.Sprintf(
-					"source PVC %s/%s does not exist",
-					options.SourceNamespace,
-					options.SourcePVC,
-				),
-			),
-		)
-
-		return plan, nil
+		return s.planDeletedSourceOrphan(ctx, plan, options)
 	}
 
 	if err != nil {
@@ -350,6 +346,108 @@ func (s *OrphanCleaner) PlanOrphanCleanup(
 
 		return plan, nil
 	}
+}
+
+// planDeletedSourceOrphan converges a session whose source PVC is already
+// gone. With no session-owned storage left, only the stale record and lease
+// remain and cleanup proceeds records-only. Storage that still carries the
+// session label is named explicitly and blocks the plan: deleting it without
+// the source PVC anchor would be a data-deletion decision the operator, not
+// the recovery tool, must make.
+func (s *OrphanCleaner) planDeletedSourceOrphan(
+	ctx context.Context,
+	plan *domain.OrphanCleanupPlan,
+	options OrphanCleanupOptions,
+) (*domain.OrphanCleanupPlan, error) {
+	selector := sessionOwnedSelector(options.SessionID)
+
+	pvs, err := s.client.CoreV1().PersistentVolumes().List(
+		ctx,
+		metav1.ListOptions{LabelSelector: selector},
+	)
+	if err != nil {
+		plan.AddCheck(orphanFailed(
+			domain.CheckNameSourcePV,
+			fmt.Sprintf("list session PVs: %v", err),
+		))
+
+		return plan, nil
+	}
+
+	pvcs, err := s.client.CoreV1().PersistentVolumeClaims("").List(
+		ctx,
+		metav1.ListOptions{LabelSelector: selector},
+	)
+	if err != nil {
+		plan.AddCheck(orphanFailed(
+			domain.CheckNameDestinationPVC,
+			fmt.Sprintf("list session PVCs: %v", err),
+		))
+
+		return plan, nil
+	}
+
+	if len(pvs.Items) == 0 && len(pvcs.Items) == 0 {
+		plan.Mode = domain.OrphanCleanupRecordsOnly
+		plan.AddCheck(orphanWarning(
+			domain.CheckNameSourcePVC,
+			fmt.Sprintf(
+				"source PVC %s/%s is already deleted; no session-owned storage remains",
+				options.SourceNamespace,
+				options.SourcePVC,
+			),
+		))
+		plan.AddCheck(orphanPassed(
+			domain.CheckNameResources,
+			"stale session record and lease will be removed",
+		))
+
+		return plan, nil
+	}
+
+	remaining := make([]string, 0, len(pvs.Items)+len(pvcs.Items))
+	for index := range pvs.Items {
+		pv := &pvs.Items[index]
+		remaining = append(
+			remaining,
+			fmt.Sprintf("PV %s (role %s)", pv.Name, pv.Labels[kube.ResourceRoleLabel]),
+		)
+	}
+
+	for index := range pvcs.Items {
+		claim := &pvcs.Items[index]
+		remaining = append(
+			remaining,
+			fmt.Sprintf(
+				"PVC %s/%s (role %s)",
+				claim.Namespace,
+				claim.Name,
+				claim.Labels[kube.ResourceRoleLabel],
+			),
+		)
+	}
+
+	plan.AddCheck(orphanFailed(
+		domain.CheckNameCurrentOwnership,
+		fmt.Sprintf(
+			"source PVC %s/%s is deleted but session-owned storage remains: %s; remove these resources or restore the source PVC before retrying",
+			options.SourceNamespace,
+			options.SourcePVC,
+			strings.Join(remaining, ", "),
+		),
+	))
+
+	return plan, nil
+}
+
+func sessionOwnedSelector(sessionID string) string {
+	return fmt.Sprintf(
+		"%s=%s,%s=%s",
+		kube.ManagedByLabel,
+		kube.ManagedByValue,
+		kube.SessionKey,
+		sessionID,
+	)
 }
 
 func (s *OrphanCleaner) planPostActivationOrphan(
@@ -992,6 +1090,9 @@ func (s *OrphanCleaner) CleanupOrphan(
 				); err != nil {
 					return err
 				}
+			case domain.OrphanCleanupRecordsOnly:
+				// Storage is already gone; only the stale record and lease
+				// remain, handled below.
 			default:
 				return domain.NewError(
 					domain.ErrorInternal,
