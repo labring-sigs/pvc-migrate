@@ -37,7 +37,7 @@ func WithWorkflowLease[T crclient.Object](
 	object T,
 	allowDeleting bool,
 	run func(context.Context, SessionLock) error,
-) error {
+) (retErr error) {
 	if object.GetUID() == "" || object.GetResourceVersion() == "" {
 		return domain.NewError(
 			domain.ErrorValidation,
@@ -76,10 +76,25 @@ func WithWorkflowLease[T crclient.Object](
 
 	bound = WithLeaseFence(bound, lock)
 
-	latest, operationErr := store.Load(bound, crclient.ObjectKeyFromObject(object))
-	if apierrors.IsNotFound(operationErr) && allowDeleting {
+	// The release must also run when the operation panics: the session Lease
+	// renews on its own context, so an unreleased lock would fence the
+	// workflow out forever instead of aging out by TTL.
+	releaseCtx, releaseCancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+	defer releaseCancel()
+
+	var operationErr error
+
+	defer func() {
+		retErr = errors.Join(operationErr, lock.Release(releaseCtx))
+	}()
+
+	latest, loadErr := store.Load(bound, crclient.ObjectKeyFromObject(object))
+	switch {
+	case apierrors.IsNotFound(loadErr) && allowDeleting:
 		operationErr = lock.Delete(bound)
-	} else if operationErr == nil {
+	case loadErr != nil:
+		operationErr = loadErr
+	default:
 		switch {
 		case latest.GetUID() != object.GetUID() || latest.GetResourceVersion() != object.GetResourceVersion():
 			operationErr = domain.NewError(
@@ -103,8 +118,5 @@ func WithWorkflowLease[T crclient.Object](
 
 	operationErr = errors.Join(operationErr, LeaseFenceError(bound))
 
-	releaseCtx, releaseCancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
-	defer releaseCancel()
-
-	return errors.Join(operationErr, lock.Release(releaseCtx))
+	return operationErr
 }
