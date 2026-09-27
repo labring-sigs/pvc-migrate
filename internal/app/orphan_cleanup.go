@@ -1016,7 +1016,7 @@ func (s *OrphanCleaner) CleanupOrphan(
 
 				if held, ok := lockedCtx.Value(sessionLockContextKey{}).(heldSessionLock); ok {
 					deleteCtx, cancelDelete := context.WithTimeout(
-						context.Background(),
+						context.WithoutCancel(lockedCtx),
 						10*time.Second,
 					)
 					defer cancelDelete()

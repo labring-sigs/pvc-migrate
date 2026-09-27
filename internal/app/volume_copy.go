@@ -213,20 +213,17 @@ func (s *volumeCopyRunner) copyWithRetry(
 
 		operationID := copyengine.OperationID(request.AttemptIdentity)
 
-		last = errors.Join(
-			copyErr,
-			s.cleanupCopyToolPods(
-				ctx,
-				request.AttemptIdentity.Source,
-				request.Destination.Reference,
-				operationID,
-			),
+		cleanupErr := s.cleanupCopyToolPods(
+			ctx,
+			request.AttemptIdentity.Source,
+			request.Destination.Reference,
+			operationID,
 		)
+
+		last = errors.Join(copyErr, cleanupErr)
 		if last == nil {
 			return nil
 		}
-
-		previousError = *lastError
 
 		*lastError = last.Error()
 		if err := persistCheckpoint(ctx, save); err != nil {
@@ -262,6 +259,14 @@ func (s *volumeCopyRunner) copyWithRetry(
 				message,
 				last,
 			)
+		}
+
+		// The failed attempt's tool Pods could not be confirmed released, so a
+		// second writer may still hold the claims. Give up this process's retry
+		// budget instead of mounting the next attempt next to it; the workflow
+		// retries when the owner reconciles it again.
+		if cleanupErr != nil {
+			return last
 		}
 
 		if retryIndex+1 < s.config.Retries {
