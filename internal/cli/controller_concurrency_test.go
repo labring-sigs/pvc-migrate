@@ -42,3 +42,17 @@ func TestControllerMaxConcurrentReconcilesFlagContract(t *testing.T) {
 		t.Fatalf("default error=%v, want a kubeconfig failure without concurrency", serialErr)
 	}
 }
+
+// The one-shot run binds no probes and derives its own namespace, so the two
+// remaining daemon-only flags are refused instead of silently not applying.
+func TestControllerOnceRefusesDaemonOnlyFlags(t *testing.T) {
+	for _, flag := range []string{"--health-probe-bind-address=:9999", "--controller-namespace=ops"} {
+		oneShot := NewRoot(Options{Version: "test", In: strings.NewReader("")})
+		oneShot.SetArgs([]string{"controller", "--once", flag, "--kubeconfig=/nonexistent"})
+
+		err := oneShot.ExecuteContext(context.Background())
+		if err == nil || !strings.Contains(err.Error(), "not available with --once") {
+			t.Fatalf("%s: error=%v, want the --once refusal", flag, err)
+		}
+	}
+}

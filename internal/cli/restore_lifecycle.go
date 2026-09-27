@@ -103,7 +103,9 @@ func (r *rootState) newRestoreStatusCommand(source workflowSource) *cobra.Comman
 					return runtime.printer.Print(objects)
 				}
 
-				items, err := listControllerWorkflows(ctx, runtime, kind)
+				items, err := listControllerWorkflows(
+					ctx, runtime, kind, crListNamespace(cmd, kind),
+				)
 				if err != nil {
 					return err
 				}
