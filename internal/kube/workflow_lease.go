@@ -78,13 +78,18 @@ func WithWorkflowLease[T crclient.Object](
 
 	// The release must also run when the operation panics: the session Lease
 	// renews on its own context, so an unreleased lock would fence the
-	// workflow out forever instead of aging out by TTL.
-	releaseCtx, releaseCancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
-	defer releaseCancel()
-
+	// workflow out forever instead of aging out by TTL. The budget is taken
+	// when the operation finishes — a context minted before run() would
+	// already be expired after any minutes-long operation.
 	var operationErr error
 
 	defer func() {
+		releaseCtx, releaseCancel := context.WithTimeout(
+			context.WithoutCancel(ctx),
+			10*time.Second,
+		)
+		defer releaseCancel()
+
 		retErr = errors.Join(operationErr, lock.Release(releaseCtx))
 	}()
 

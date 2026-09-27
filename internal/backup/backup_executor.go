@@ -91,7 +91,7 @@ func (b *BackupExecutor) run(ctx context.Context, object *v1alpha1.Backup) (resu
 
 		cleanupErr := runWithPreservedCleanupTimeout(
 			ctx,
-			lockReleaseTimeout,
+			workflowFinalizationTimeout,
 			func(cleanupCtx context.Context) error {
 				if err := b.toolsStopped(cleanupCtx, object); err != nil {
 					return err

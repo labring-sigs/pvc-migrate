@@ -347,7 +347,7 @@ func (s *Service) withLock(
 	ctx context.Context,
 	session *CopySession,
 	fn func(context.Context) error,
-) error {
+) (retErr error) {
 	if session == nil {
 		return errors.New("cross-cluster session is required")
 	}
@@ -372,23 +372,29 @@ func (s *Service) withLock(
 		sessionLockContextKey{},
 		lock,
 	)
-	operationErr := fn(operationCtx)
 
-	cancelOperation()
+	// The release must also run when the operation panics: the session Lease
+	// renews on its own context, so an unreleased lock would fence the session
+	// out instead of aging out by TTL.
+	defer func() {
+		cancelOperation()
 
-	releaseCtx, cancelRelease := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancelRelease()
+		releaseCtx, cancelRelease := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancelRelease()
 
-	releaseErr := lock.Release(releaseCtx)
+		retErr = errors.Join(retErr, lock.Err(), lock.Release(releaseCtx))
+	}()
 
-	return errors.Join(operationErr, lock.Err(), releaseErr)
+	retErr = fn(operationCtx)
+
+	return retErr
 }
 
 func (s *Service) withReservationLock(
 	ctx context.Context,
 	session *ReservationSession,
 	fn func(context.Context) error,
-) error {
+) (retErr error) {
 	if session == nil {
 		return errors.New("cross-cluster reservation session is required")
 	}
@@ -410,12 +416,20 @@ func (s *Service) withReservationLock(
 		sessionLockContextKey{},
 		lock,
 	)
-	operationErr := fn(operationCtx)
 
-	cancelOperation()
+	// The release must also run when the operation panics: the session Lease
+	// renews on its own context, so an unreleased lock would fence the session
+	// out instead of aging out by TTL.
+	defer func() {
+		cancelOperation()
 
-	releaseCtx, cancelRelease := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancelRelease()
+		releaseCtx, cancelRelease := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancelRelease()
 
-	return errors.Join(operationErr, lock.Err(), lock.Release(releaseCtx))
+		retErr = errors.Join(retErr, lock.Err(), lock.Release(releaseCtx))
+	}()
+
+	retErr = fn(operationCtx)
+
+	return retErr
 }
