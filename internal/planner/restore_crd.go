@@ -70,7 +70,11 @@ func (p *Planner) PlanRestore(ctx context.Context, object *v1alpha1.Restore, ima
 	}
 
 	if err != nil {
-		return err
+		return wrapPlanningReadError(
+			"plan restore",
+			"read destination PVC "+object.Namespace+"/"+request.DestinationPVC.Name,
+			err,
+		)
 	}
 
 	if pvc.DeletionTimestamp != nil || pvc.UID == "" {
