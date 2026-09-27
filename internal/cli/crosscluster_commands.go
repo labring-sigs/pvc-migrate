@@ -12,7 +12,6 @@ import (
 	"github.com/labring-sigs/pvc-migrate/internal/kube"
 	"github.com/labring-sigs/pvc-migrate/internal/output"
 	"github.com/spf13/cobra"
-	apierrors "k8s.io/apimachinery/pkg/api/errors"
 )
 
 // crossClusterConnectionFlags contains only two-cluster client settings.
@@ -225,15 +224,13 @@ func (r *rootState) newCrossClusterCopyRunCommand() *cobra.Command {
 
 			var session *crosscluster.CopySession
 			if flags.sessionID != "" {
-				session, err = loadCrossClusterCopy(
+				session, err = loadExistingCopySession(
 					ctx,
 					service,
 					options.SessionNamespace,
 					flags.sessionID,
 				)
-				if apierrors.IsNotFound(err) {
-					session, err = nil, nil
-				} else if err == nil {
+				if err == nil {
 					err = configureExistingCrossClusterCopy(cmd, session, flags)
 				}
 			}
