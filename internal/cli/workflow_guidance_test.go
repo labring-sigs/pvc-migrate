@@ -17,12 +17,18 @@ func newSessionHintCommand() *cobra.Command {
 }
 
 // newCRHintCommand builds a verb command nested under the cr group the way
-// the cr lifecycle commands look to the guidance helpers.
-func newCRHintCommand(family string) *cobra.Command {
+// the cr lifecycle commands look to the guidance helpers. Namespaced
+// families bind the -n flag on the verb, as the real wiring does.
+func newCRHintCommand(family string, namespaced bool) *cobra.Command {
 	root := &cobra.Command{Use: "pvc-migrate"}
 	cr := &cobra.Command{Use: "cr"}
 	group := &cobra.Command{Use: family}
 	verb := &cobra.Command{Use: "status"}
+
+	if namespaced {
+		var namespace string
+		verb.Flags().StringVarP(&namespace, "namespace", "n", "", "Tenant namespace")
+	}
 
 	root.AddCommand(cr)
 	cr.AddCommand(group)
@@ -74,7 +80,7 @@ func TestWriteWorkflowNextStepsControllerForm(t *testing.T) {
 
 	if err := writeWorkflowNextSteps(
 		&output,
-		newCRHintCommand("migrate-pod"),
+		newCRHintCommand("migrate-pod", true),
 		"pvc-migrate",
 		"migrate-pod",
 		"tenant-a",
@@ -112,7 +118,7 @@ func TestWriteWorkflowNextStepsClusterControllerOmitsNamespace(t *testing.T) {
 
 	if err := writeWorkflowNextSteps(
 		&output,
-		newCRHintCommand("move"),
+		newCRHintCommand("move", false),
 		"pvc-migrate",
 		"move",
 		"",
@@ -319,7 +325,7 @@ func TestCleanupExecuteCommandMirrorsOptions(t *testing.T) {
 	}
 
 	controller := cleanupExecuteCommand(
-		newCRHintCommand("copy"),
+		newCRHintCommand("copy", true),
 		"pvc-migrate",
 		"copy",
 		"tenant-a",
@@ -338,7 +344,7 @@ func TestWriteControllerWorkflowNextSteps(t *testing.T) {
 
 	if err := writeControllerWorkflowNextSteps(
 		&output,
-		newCRHintCommand("migrate"),
+		newCRHintCommand("migrate", true),
 		"pvc-migrate",
 		"migrations",
 		"sealos",
@@ -372,7 +378,7 @@ func TestWriteControllerWorkflowNextSteps(t *testing.T) {
 
 	if err := writeControllerWorkflowNextSteps(
 		&cluster,
-		newCRHintCommand("cluster-migrate"),
+		newCRHintCommand("cluster-migrate", false),
 		"pvc-migrate",
 		"clustermigrations",
 		"",
@@ -398,7 +404,7 @@ func TestWriteControllerWorkflowNextStepsSilentOutsideTerminalPhases(t *testing.
 
 		if err := writeControllerWorkflowNextSteps(
 			&output,
-			newCRHintCommand("migrate"),
+			newCRHintCommand("migrate", true),
 			"pvc-migrate",
 			"migrations",
 			"sealos",
@@ -459,7 +465,7 @@ func TestControllerWorkflowGuidanceColorization(t *testing.T) {
 
 	if err := writeControllerWorkflowNextSteps(
 		&output,
-		newCRHintCommand("migrate"),
+		newCRHintCommand("migrate", true),
 		"pvc-migrate",
 		"migrations",
 		"sealos",

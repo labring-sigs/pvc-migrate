@@ -218,36 +218,10 @@ func (r *rootState) newScopedReserveStatusCommand(
 			namespace := r.workflowStorageNamespace(cmd)
 
 			if scope == namespacedRecords {
-				if len(runtime.controllerKinds) == 0 ||
-					slices.Contains(runtime.controllerKinds, domain.ControllerKindReservation) {
-					store, err := cliWorkflowStore(
-						runtime,
-						namespace,
-						func() *v1alpha1.Reservation { return &v1alpha1.Reservation{} },
-					)
-					if err != nil {
-						return err
-					}
-
-					items, err := store.List(ctx, "")
-					if err != nil {
-						return err
-					}
-
-					for _, object := range items {
-						objects = append(objects, object)
-					}
-				}
-
-				return runtime.printer.Print(objects)
-			}
-
-			if len(runtime.controllerKinds) == 0 ||
-				slices.Contains(runtime.controllerKinds, domain.ControllerKindClusterReservation) {
 				store, err := cliWorkflowStore(
 					runtime,
 					namespace,
-					func() *v1alpha1.ClusterReservation { return &v1alpha1.ClusterReservation{} },
+					func() *v1alpha1.Reservation { return &v1alpha1.Reservation{} },
 				)
 				if err != nil {
 					return err
@@ -261,6 +235,26 @@ func (r *rootState) newScopedReserveStatusCommand(
 				for _, object := range items {
 					objects = append(objects, object)
 				}
+
+				return runtime.printer.Print(objects)
+			}
+
+			store, err := cliWorkflowStore(
+				runtime,
+				namespace,
+				func() *v1alpha1.ClusterReservation { return &v1alpha1.ClusterReservation{} },
+			)
+			if err != nil {
+				return err
+			}
+
+			items, err := store.List(ctx, "")
+			if err != nil {
+				return err
+			}
+
+			for _, object := range items {
+				objects = append(objects, object)
 			}
 
 			return runtime.printer.Print(objects)

@@ -444,10 +444,10 @@ func (r *rootState) buildCopySubmission(
 			// reservation kind, which namespaces); dry-run renders through
 			// the same handoff path instead of the planning object.
 			preview: func(ctx context.Context, cmd *cobra.Command, runtime *commandRuntime) error {
-				return r.copyExisting(ctx, cmd, runtime, flags, true, true)
+				return r.copyExisting(ctx, cmd, runtime, flags, true)
 			},
 			submit: func(ctx context.Context, cmd *cobra.Command, runtime *commandRuntime) error {
-				return r.copyExisting(ctx, cmd, runtime, flags, false, true)
+				return r.copyExisting(ctx, cmd, runtime, flags, false)
 			},
 		}, object, nil
 	}
