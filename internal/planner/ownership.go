@@ -152,7 +152,7 @@ func (p *Planner) checkSessionOwnership(
 		base := sessionCLIBase(recordNamespace, false)
 		executeBase := sessionCLIBase(recordNamespace, true)
 		args := fmt.Sprintf(
-			"recovery cleanup-orphan %s --source-namespace %s --source-pvc %s",
+			"recovery cleanup-orphan %s -n %s --source-pvc %s",
 			owner,
 			pvc.Namespace,
 			pvc.Name,

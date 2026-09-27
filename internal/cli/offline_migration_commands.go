@@ -193,11 +193,20 @@ func (f *offlineMigrationFlags) workflow(
 		f.sessionID = id
 	}
 
+	// The guard must see the real destination: feeding it the source twice
+	// made its cross-tenant check dead, so cross-namespace submissions also
+	// collapsed temporary PVCs and the session record into the source
+	// tenant. An empty destination keeps the source namespace.
+	destination := f.destinationNamespace
+	if destination == "" {
+		destination = f.sourceNamespace
+	}
+
 	sessionNamespace, temporaryNamespace := state.controllerPlanNamespaces(
 		runtime,
 		domain.SessionTypeMigrate,
 		f.sourceNamespace,
-		f.sourceNamespace,
+		destination,
 		f.temporaryNamespace,
 		temporaryExplicit,
 		submit,

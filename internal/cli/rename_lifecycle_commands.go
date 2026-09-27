@@ -90,7 +90,7 @@ func (r *rootState) newRenameStatusCommand(source workflowSource) *cobra.Command
 			defer cancel()
 
 			if len(args) == 1 {
-				object, _, _, err := r.loadRename(ctx, cmd, runtime, args[0], source)
+				object, _, backend, err := r.loadRename(ctx, cmd, runtime, args[0], source)
 				if err != nil {
 					return err
 				}
@@ -99,12 +99,18 @@ func (r *rootState) newRenameStatusCommand(source workflowSource) *cobra.Command
 					return err
 				}
 
+				// The hint prefix must resolve records where they live: the
+				// session namespace for ConfigMap records, the object
+				// namespace for CRs. object.Namespace is the tenant
+				// namespace and would poison the suggested commands.
+				namespace := workflowLeaseNamespace(backend, r.renameStorageNamespace(cmd), object)
+
 				return writeWorkflowNextSteps(
 					cmd.ErrOrStderr(),
 					cmd,
-					guidancePrefixesForCommand(cmd, object.Namespace).pvcMigrate,
+					guidancePrefixesForCommand(cmd, namespace).pvcMigrate,
 					"rename",
-					object.Namespace,
+					namespace,
 					object.Name,
 					object.Status.Phase,
 					true,
@@ -131,9 +137,10 @@ func (r *rootState) newRenameStatusCommand(source workflowSource) *cobra.Command
 				return err
 			}
 
-			namespace := workflowNamespaceForCommand(r, cmd)
-
-			objects, err := store.List(ctx, namespace)
+			// Records live in the session storage namespace while carrying
+			// the tenant namespace in metadata; the bare list shows every
+			// record the store holds, so no tenant filter applies here.
+			objects, err := store.List(ctx, "")
 			if err != nil {
 				return err
 			}

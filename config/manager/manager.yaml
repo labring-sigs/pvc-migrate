@@ -33,9 +33,10 @@ spec:
           imagePullPolicy: IfNotPresent
           args:
             - controller
-            - --mode=controller
+            - --controller-namespace=pvc-migrate-system
             - --session-namespace=pvc-migrate-system
             - --log-level=info
+            - --log-format=json
           ports:
             - name: health
               containerPort: 8081

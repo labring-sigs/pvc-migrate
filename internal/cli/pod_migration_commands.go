@@ -315,6 +315,7 @@ func (r *rootState) newPodMigrationPlanCommand() *cobra.Command {
 		},
 	}
 	flags.bind(command)
+	flags.bindForceReprovision(command)
 	bindDryRun(command, &dryRun)
 
 	return command

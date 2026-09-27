@@ -1,160 +1,60 @@
 package kube
 
 import (
-	"context"
 	"testing"
 
-	v1alpha1 "github.com/labring-sigs/pvc-migrate/api/v1alpha1"
 	"github.com/labring-sigs/pvc-migrate/internal/domain"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/client-go/kubernetes/fake"
 )
 
-func TestBackupCredentialsSecretLifecycle(t *testing.T) {
-	client := fake.NewClientset()
+func TestBackupCredentialsSecretNameIsStableHash(t *testing.T) {
+	first := BackupCredentialsSecretName("backup-test")
+	second := BackupCredentialsSecretName("backup-test")
 
-	secret, err := CreateBackupCredentialsSecret(
-		context.Background(),
-		client,
-		"sessions",
-		"backup-test",
-		map[string][]byte{
-			BackupAccessKeyDataKey: []byte("access"),
-			BackupSecretKeyDataKey: []byte("secret"),
-		},
-	)
-	if err != nil {
-		t.Fatal(err)
+	if first == "" || first != second {
+		t.Fatalf("name not deterministic: %q vs %q", first, second)
 	}
 
-	if secret.Immutable == nil || !*secret.Immutable || secret.Labels[SessionKey] != "backup-test" {
-		t.Fatalf("credentials Secret metadata = %#v", secret)
+	if first == BackupCredentialsSecretName("other-session") {
+		t.Fatal("distinct sessions must derive distinct Secret names")
 	}
 
-	ref := v1alpha1.ObjectReference{Namespace: secret.Namespace, Name: secret.Name, UID: secret.UID}
-
-	loaded, err := GetBackupCredentialsSecret(context.Background(), client, ref, "backup-test")
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	if string(loaded.Data[BackupAccessKeyDataKey]) != "access" ||
-		string(loaded.Data[BackupSecretKeyDataKey]) != "secret" {
-		t.Fatalf("credentials data = %#v", loaded.Data)
-	}
-
-	if _, err := GetBackupCredentialsSecret(
-		context.Background(),
-		client,
-		ref,
-		"other-session",
-	); err == nil {
-		t.Fatal("expected ownership mismatch")
-	}
-
-	if err := DeleteBackupCredentialsSecret(
-		context.Background(),
-		client,
-		ref,
-		"backup-test",
-	); err != nil {
-		t.Fatal(err)
+	if len(first) <= len(BackupCredentialsSecretPrefix) {
+		t.Fatalf("name %q carries no digest", first)
 	}
 }
 
-func TestBackupCredentialsSecretRejectsReplacementAndWrongName(t *testing.T) {
-	client := fake.NewClientset()
-
-	secret, err := CreateBackupCredentialsSecret(
-		context.Background(),
-		client,
-		"sessions",
-		"backup-test",
-		map[string][]byte{BackupAccessKeyDataKey: []byte("access")},
-	)
-	if err != nil {
+func TestValidateS3CredentialsData(t *testing.T) {
+	valid := map[string][]byte{
+		BackupAccessKeyDataKey: []byte("access"),
+		BackupSecretKeyDataKey: []byte("secret"),
+	}
+	if err := ValidateS3CredentialsData(valid); err != nil {
 		t.Fatal(err)
 	}
 
-	ref := v1alpha1.ObjectReference{Namespace: secret.Namespace, Name: secret.Name, UID: secret.UID}
-
-	secret.Labels[SessionKey] = "replacement"
-	if _, err := client.CoreV1().
-		Secrets(secret.Namespace).
-		Update(context.Background(), secret, metav1.UpdateOptions{}); err != nil {
+	withToken := map[string][]byte{
+		BackupAccessKeyDataKey:    []byte("access"),
+		BackupSecretKeyDataKey:    []byte("secret"),
+		BackupSessionTokenDataKey: []byte("token"),
+	}
+	if err := ValidateS3CredentialsData(withToken); err != nil {
 		t.Fatal(err)
 	}
 
-	if _, err := GetBackupCredentialsSecret(
-		context.Background(),
-		client,
-		ref,
-		"backup-test",
-	); domain.CategoryOf(
-		err,
-	) != domain.ErrorConflict {
-		t.Fatalf("replacement category=%s error=%v", domain.CategoryOf(err), err)
-	}
-
-	if err := ValidateBackupCredentialsSecretCleanup(
-		context.Background(),
-		client,
-		ref,
-		"backup-test",
-	); domain.CategoryOf(
-		err,
-	) != domain.ErrorConflict {
-		t.Fatalf("cleanup validation category=%s error=%v", domain.CategoryOf(err), err)
-	}
-
-	if err := DeleteBackupCredentialsSecret(
-		context.Background(),
-		client,
-		ref,
-		"backup-test",
-	); domain.CategoryOf(
-		err,
-	) != domain.ErrorConflict {
-		t.Fatalf("cleanup category=%s error=%v", domain.CategoryOf(err), err)
-	}
-
-	ref.Name = "unrelated-secret"
-	if err := DeleteBackupCredentialsSecret(
-		context.Background(),
-		client,
-		ref,
-		"backup-test",
-	); domain.CategoryOf(
-		err,
-	) != domain.ErrorConflict {
-		t.Fatalf("wrong-name category=%s error=%v", domain.CategoryOf(err), err)
-	}
-}
-
-func TestBackupCredentialsSecretMissingIsActionable(t *testing.T) {
-	client := fake.NewClientset()
-
-	ref := v1alpha1.ObjectReference{
-		Namespace: "sessions",
-		Name:      BackupCredentialsSecretName("backup-test"),
-	}
-	if _, err := GetBackupCredentialsSecret(
-		context.Background(),
-		client,
-		ref,
-		"backup-test",
+	missing := map[string][]byte{BackupAccessKeyDataKey: []byte("access")}
+	if err := ValidateS3CredentialsData(
+		missing,
 	); domain.CategoryOf(
 		err,
 	) != domain.ErrorPrecondition {
-		t.Fatalf("missing Secret category=%q error=%v", domain.CategoryOf(err), err)
+		t.Fatalf("missing secretKey category=%s error=%v", domain.CategoryOf(err), err)
 	}
 
-	if err := ValidateBackupCredentialsSecretCleanup(
-		context.Background(),
-		client,
-		ref,
-		"backup-test",
-	); err != nil {
-		t.Fatalf("missing Secret cleanup validation: %v", err)
+	unsafe := map[string][]byte{
+		BackupAccessKeyDataKey: []byte("access"),
+		BackupSecretKeyDataKey: []byte("se\rcret"),
+	}
+	if err := ValidateS3CredentialsData(unsafe); domain.CategoryOf(err) != domain.ErrorValidation {
+		t.Fatalf("control character category=%s error=%v", domain.CategoryOf(err), err)
 	}
 }

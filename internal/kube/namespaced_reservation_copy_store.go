@@ -96,6 +96,14 @@ func NamespacedHandoffConfigMapReservationToCopy(
 
 	updated := current.DeepCopy()
 	updated.Data = map[string]string{SessionDataKey: string(data)}
+	// The routing label must follow the payload's kind: the bare status
+	// lists select records by workflow-kind, so a graduated record that
+	// keeps the reservation label disappears from every list.
+	if updated.Labels == nil {
+		updated.Labels = map[string]string{}
+	}
+
+	updated.Labels[WorkflowKindLabel] = target.gvk.Kind
 
 	if err := errors.Join(ctx.Err(), LeaseFenceError(ctx)); err != nil {
 		return err

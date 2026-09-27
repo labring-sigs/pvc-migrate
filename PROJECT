@@ -93,15 +93,6 @@ resources:
   controller: true
   domain: sealos.io
   group: migrate
-  kind: ClusterPodMigration
-  path: github.com/labring-sigs/pvc-migrate/api/v1alpha1
-  version: v1alpha1
-- api:
-    crdVersion: v1
-    namespaced: false
-  controller: true
-  domain: sealos.io
-  group: migrate
   kind: ClusterReservation
   path: github.com/labring-sigs/pvc-migrate/api/v1alpha1
   version: v1alpha1
