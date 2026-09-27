@@ -424,7 +424,10 @@ func (r *rootState) newCrossClusterReserveRunCommand() *cobra.Command {
 			}
 
 			var session *crosscluster.ReservationSession
-			if flags.sessionID != "" {
+			// Only an explicitly passed --session means resume; the flag
+			// struct also carries the ID generated for a fresh session, which
+			// must fall through to planning, never load.
+			if cmd.Flags().Changed("session") {
 				session, err = loadExistingReservationSession(
 					ctx,
 					service,

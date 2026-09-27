@@ -223,7 +223,10 @@ func (r *rootState) newCrossClusterCopyRunCommand() *cobra.Command {
 			}
 
 			var session *crosscluster.CopySession
-			if flags.sessionID != "" {
+			// Only an explicitly passed --session means resume; the flag
+			// struct also carries the ID generated for a fresh session, which
+			// must fall through to planning, never load.
+			if cmd.Flags().Changed("session") {
 				session, err = loadExistingCopySession(
 					ctx,
 					service,
