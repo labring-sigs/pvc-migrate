@@ -61,7 +61,10 @@ func (*PVMigrate) Cleanup(ctx context.Context, request CleanupRequest) error {
 
 // UninstallNamedRelease removes helm releases by exact name in one namespace.
 // A release that does not exist is success: the caller converges toward
-// "the tool is gone" and a missing release is that state.
+// "the tool is gone" and a missing release is that state. The uninstall waits
+// for the release resources to be deleted (upstream's own cleanup strategy),
+// so a nil return means the tool Pods are actually gone, not merely marked
+// for deletion.
 func UninstallNamedRelease(
 	ctx context.Context,
 	kubeconfigPath, kubeContext, namespace string,
@@ -85,38 +88,23 @@ func UninstallNamedRelease(
 		return fmt.Errorf("initialize release cleanup: %w", err)
 	}
 
+	return uninstallReleases(ctx, config, releaseNames...)
+}
+
+// uninstallReleases is the exact-name uninstall loop shared by every cleanup
+// entry point, injectable with a prebuilt action configuration for tests.
+func uninstallReleases(
+	ctx context.Context,
+	config *action.Configuration,
+	releaseNames ...string,
+) error {
 	for _, name := range releaseNames {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
 
 		uninstall := action.NewUninstall(config)
-		uninstall.DisableHooks = true
-		uninstall.WaitStrategy = helmkube.HookOnlyStrategy
-		uninstall.DeletionPropagation = "foreground"
-
-		uninstall.Timeout = 30 * time.Second
-		if _, err := uninstall.Run(name); err != nil && !errors.Is(err, driver.ErrReleaseNotFound) {
-			return fmt.Errorf("uninstall release %s: %w", name, err)
-		}
-	}
-
-	return nil
-}
-
-func cleanupReleases(
-	ctx context.Context,
-	config *action.Configuration,
-	request CleanupRequest,
-) error {
-	for _, name := range copyReleaseNames(request) {
-		if err := ctx.Err(); err != nil {
-			return err
-		}
-
-		uninstall := action.NewUninstall(config)
-		uninstall.DisableHooks = true
-		uninstall.WaitStrategy = helmkube.HookOnlyStrategy
+		uninstall.WaitStrategy = helmkube.LegacyStrategy
 		uninstall.DeletionPropagation = "foreground"
 
 		uninstall.Timeout = 30 * time.Second

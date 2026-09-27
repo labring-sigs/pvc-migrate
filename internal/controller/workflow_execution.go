@@ -3,7 +3,6 @@ package controller
 import (
 	"context"
 	"errors"
-	"log/slog"
 	"strings"
 	"sync"
 	"time"
@@ -59,7 +58,7 @@ func workflowReconcileResult(err error) (reconcile.Result, error) {
 		apierrors.IsConflict(err) {
 		// Conflicts are expected under concurrent writers, but a workflow
 		// that retries forever is invisible unless the reason is logged.
-		slog.Warn("reconcile deferred by conflict; retrying", "error", err.Error())
+		currentReconcileLogger().Warn("reconcile deferred by conflict; retrying", "error", err.Error())
 		return reconcile.Result{RequeueAfter: time.Second}, nil
 	}
 
@@ -263,7 +262,7 @@ func planningFailureGate[T crclient.Object](
 		if err := markPlanningRetriesExhausted(ctx, store, recorder, object, status); err != nil {
 			result, resultErr := workflowReconcileResult(err)
 			if resultErr != nil {
-				slog.Error(
+				currentReconcileLogger().Error(
 					"planning retry terminal marker write failed",
 					"error",
 					resultErr.Error(),
