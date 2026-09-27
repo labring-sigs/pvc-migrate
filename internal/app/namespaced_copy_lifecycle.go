@@ -206,6 +206,20 @@ func (c *CopyExecutor) cleanupInterrupted(ctx context.Context, object *v1alpha1.
 			continue
 		}
 
+		qualified := qualifiedReservationCheckpoint(
+			checkpoint.VolumeReservationStatus,
+			object.Namespace,
+		)
+
+		skip, err := copyDeletionValidationSkip(ctx, c.client, object.Namespace, volume, qualified)
+		if err != nil {
+			return err
+		}
+
+		if skip {
+			continue
+		}
+
 		if err := c.validateVolume(
 			ctx,
 			kube.ReservationRequest{
@@ -216,7 +230,7 @@ func (c *CopyExecutor) cleanupInterrupted(ctx context.Context, object *v1alpha1.
 			object.Namespace,
 			object.Namespace,
 			volume,
-			qualifiedReservationCheckpoint(checkpoint.VolumeReservationStatus, object.Namespace),
+			qualified,
 		); err != nil {
 			return err
 		}
