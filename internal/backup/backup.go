@@ -199,6 +199,14 @@ func classifyLeaseError(ctx context.Context, err error) error {
 	return err
 }
 
+// lockRenewalAborts decides whether a failed renewal must abandon the
+// transfer: definite ownership loss always aborts, and transient failures
+// abort only once half the TTL has passed without a successful renewal —
+// past that point a successor may legally hold the lock.
+func lockRenewalAborts(err error, lastRenewed time.Time, ttl time.Duration) bool {
+	return domain.CategoryOf(err) == domain.ErrorConflict || time.Since(lastRenewed) > ttl/2
+}
+
 func renewObjectStoreLock(
 	ctx context.Context,
 	cancel context.CancelFunc,
@@ -217,13 +225,30 @@ func renewObjectStoreLock(
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 
+	// Definite ownership loss (a foreign holder or a fenced ETag) aborts
+	// immediately; transient failures retry inside the TTL budget the holder
+	// already owns, so one S3 blip cannot abandon a healthy multi-hour
+	// transfer. Half the TTL is the abort line: past it another holder may
+	// legally take over, so writing on would be unsafe.
+	lastRenewed := time.Now()
+
+	const retryInterval = 5 * time.Second
+
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
 			err := lease.renewNow(ctx, store, holder, ttl)
-			if err != nil {
+			if err == nil {
+				lastRenewed = time.Now()
+
+				ticker.Reset(interval)
+
+				continue
+			}
+
+			if lockRenewalAborts(err, lastRenewed, ttl) {
 				select {
 				case leaseErrors <- err:
 				default:
@@ -233,6 +258,8 @@ func renewObjectStoreLock(
 
 				return
 			}
+
+			ticker.Reset(retryInterval)
 		}
 	}
 }

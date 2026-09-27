@@ -636,6 +636,16 @@ func (s *Switcher) markPVPair(
 				changed = true
 			}
 
+			// Record the original reclaim policy in the same update as the Retain
+			// pin — the same invariant ensureRetain and retainPV uphold — so a
+			// finalize can always restore what the workflow changed.
+			if pv.Annotations[OriginalPolicyAnnotation] == "" {
+				pv.Annotations[OriginalPolicyAnnotation] = string(
+					pv.Spec.PersistentVolumeReclaimPolicy,
+				)
+				changed = true
+			}
+
 			if pv.Spec.PersistentVolumeReclaimPolicy != corev1.PersistentVolumeReclaimRetain {
 				pv.Spec.PersistentVolumeReclaimPolicy = corev1.PersistentVolumeReclaimRetain
 				changed = true

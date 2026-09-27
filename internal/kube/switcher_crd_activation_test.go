@@ -235,6 +235,26 @@ func TestActivatePVCCrossNamespaceCutover(t *testing.T) {
 		t.Fatalf("temporary claim survived cutover: %v", err)
 	}
 
+	// Every Retain pin must carry the recorded original reclaim policy in
+	// the same update — the finalize path refuses to restore a pinned PV
+	// without it.
+	for _, pvName := range []string{volume.SourcePV.Name, volume.DestinationPV.Name} {
+		pinned, err := switcher.client.CoreV1().
+			PersistentVolumes().
+			Get(t.Context(), pvName, metav1.GetOptions{})
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		if pinned.Spec.PersistentVolumeReclaimPolicy != corev1.PersistentVolumeReclaimRetain {
+			t.Fatalf("PV %s left unpinned: %+v", pvName, pinned.Spec)
+		}
+
+		if pinned.Annotations[OriginalPolicyAnnotation] == "" {
+			t.Fatalf("PV %s pinned without its original reclaim policy", pvName)
+		}
+	}
+
 	before := checkpoint.DeepCopy()
 	if err := switcher.ActivatePVC(
 		t.Context(),

@@ -25,6 +25,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/cache"
 	crclient "sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/controller"
 	"sigs.k8s.io/controller-runtime/pkg/event"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	crlog "sigs.k8s.io/controller-runtime/pkg/log"
@@ -339,8 +340,15 @@ func (r *WorkflowReconciler) SetupWithManager(manager ctrl.Manager) error {
 		for _, queue := range queues {
 			name := "workflow-" + strings.ToLower(string(kind)) + queue.suffix
 
+			// The queue set is constructed deterministically once per kind,
+			// so duplicate names cannot occur here; skipping the global name
+			// registry keeps the setup re-entrant within one process
+			// (tests that build a manager per run).
+			skipNameValidation := true
+
 			if err := ctrl.NewControllerManagedBy(manager).
 				Named(name).
+				WithOptions(controller.Options{SkipNameValidation: &skipNameValidation}).
 				For(object, builder.WithPredicates(queue.filter)).
 				Complete(&kindWorkflowReconciler{parent: r, kind: kind}); err != nil {
 				return err
@@ -1243,9 +1251,11 @@ func workflowSpecMutationError(
 	if observedGeneration == 0 || generation == observedGeneration {
 		return nil
 	}
-	// The API server increments generation when it first sets deletionTimestamp,
-	// even though spec is unchanged. Accept that single increment only until a
-	// deletion checkpoint has been observed; later spec changes remain fenced.
+	// Deletion does not bump generation for CRs with a status subresource
+	// (only spec writes do), so a deleting workflow whose generation moved
+	// experienced a real spec edit. Tolerate exactly that first edit until a
+	// deletion checkpoint has been observed — the workflow is going away and
+	// FinalizeDeleted re-validates — but never a second one.
 	if deleting && generation == observedGeneration+1 {
 		observedDeletion := false
 		for _, condition := range conditions {

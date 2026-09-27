@@ -211,6 +211,25 @@ func (b *backupTransfer) run(
 				return b.store.ReleaseLock(releaseCtx, lease.current())
 			},
 		); releaseErr != nil {
+			// The renewal goroutine can race the deferred release: its Put
+			// may land server-side after the cancel already discarded the
+			// fresh ETag, so the conditional delete reports a conflict even
+			// though this holder published successfully. A conflict on
+			// release after a completed run means the lock object is stale,
+			// not that the backup failed; the lock then ages out by TTL.
+			if retErr == nil && domain.CategoryOf(releaseErr) == domain.ErrorConflict {
+				logOperation(
+					b.tools.Logger,
+					"backup operation lock left to expire after release conflict",
+					"namespace",
+					namespace,
+					"pvc",
+					plan.SourcePVC.Name,
+				)
+
+				return
+			}
+
 			retErr = errors.Join(retErr, releaseErr)
 		}
 	}()

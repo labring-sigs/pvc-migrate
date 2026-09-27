@@ -26,6 +26,10 @@ func (m *MigrationExecutor) Cleanup(
 		return err
 	}
 
+	if options.Finalize {
+		ctx = context.WithValue(ctx, workflowFinalizeContextKey{}, true)
+	}
+
 	return withStoredWorkflowLock(
 		ctx,
 		m.store,
@@ -78,6 +82,14 @@ func (m *MigrationExecutor) prepareCleanup(
 
 	indexes := migrationVolumeIndexes(preview.Status.Volumes)
 
+	// The recorded plan policy applies unless the cleanup command overrides
+	// it — identical to the copy and reservation families, and to what the
+	// CLI flag help promises.
+	policy := plan.UnusedStoragePolicy
+	if options.UnusedStoragePolicy != "" {
+		policy = v1alpha1.UnusedStoragePolicy(options.UnusedStoragePolicy)
+	}
+
 	volumes := make([]reclaimVolume, 0, len(plan.Volumes)*2)
 	for _, planned := range plan.Volumes {
 		index, ok := indexes[planned.SourcePVC.Name]
@@ -89,9 +101,7 @@ func (m *MigrationExecutor) prepareCleanup(
 			)
 		}
 
-		deleteUnused := domain.DeletesUnusedStorage(
-			v1alpha1.UnusedStoragePolicy(options.UnusedStoragePolicy),
-		)
+		deleteUnused := domain.DeletesUnusedStorage(policy)
 
 		recovered, reclaimed, err := prepareMigrationReclaimVolume(
 			ctx,

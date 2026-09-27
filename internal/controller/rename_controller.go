@@ -136,10 +136,7 @@ func (r *RenameReconciler) Reconcile(
 }
 
 func renameReconcileResult(err error) (reconcile.Result, error) {
-	if kube.IsSessionLockContention(err) || domain.CategoryOf(err) == domain.ErrorConflict {
-		return reconcile.Result{RequeueAfter: time.Second}, nil
-	}
-	return reconcile.Result{}, err
+	return workflowReconcileResult(err)
 }
 
 func (r *RenameReconciler) plan(ctx context.Context, object *v1alpha1.Rename) (resultErr error) {
