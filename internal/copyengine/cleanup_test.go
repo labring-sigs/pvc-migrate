@@ -38,7 +38,12 @@ func TestCleanupRemovesOnlyInterruptedAttemptReleases(t *testing.T) {
 		}
 	}
 
-	if err := cleanupReleases(context.Background(), config, request); err != nil {
+	err := uninstallReleases(
+		context.Background(),
+		config,
+		copyReleaseNames(request)...,
+	)
+	if err != nil {
 		t.Fatal(err)
 	}
 
@@ -50,7 +55,11 @@ func TestCleanupRemovesOnlyInterruptedAttemptReleases(t *testing.T) {
 		t.Fatalf("unrelated release changed: %v", err)
 	}
 
-	if err := cleanupReleases(context.Background(), config, request); err != nil {
+	if err := uninstallReleases(
+		context.Background(),
+		config,
+		copyReleaseNames(request)...,
+	); err != nil {
 		t.Fatalf("repeated cleanup: %v", err)
 	}
 }
@@ -59,7 +68,7 @@ func TestCleanupStopsBeforeMutationOnCancellation(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 
-	if err := cleanupReleases(ctx, nil, CleanupRequest{}); !errors.Is(err, context.Canceled) {
+	if err := uninstallReleases(ctx, nil, "pv-migrate-x"); !errors.Is(err, context.Canceled) {
 		t.Fatalf("error=%v", err)
 	}
 }

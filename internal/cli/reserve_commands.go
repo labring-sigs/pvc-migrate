@@ -204,7 +204,7 @@ func (r *rootState) reservationConfig(runtime *commandRuntime) app.ReservationEx
 	config := app.ReservationExecutorConfig{
 		ToolImageProber: kube.NewToolImageProber(runtime.clients.Kubernetes),
 		ProbeTimeout:    r.global.helmTimeout, Logger: runtime.logger, Writer: r.errWriter(),
-		StreamToolLogs: r.global.streamToolLogs && false,
+		StreamToolLogs: r.global.streamToolLogs,
 		StructuredLogs: r.global.logFormat == string(logFormatJSON),
 	}
 

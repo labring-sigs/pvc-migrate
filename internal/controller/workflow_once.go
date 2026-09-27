@@ -51,6 +51,8 @@ func ReconcileWorkflowsOnce(
 		logger = slog.Default()
 	}
 
+	setReconcileLogger(logger)
+
 	r := NewWorkflowReconciler().
 		WithLogger(logger).
 		WithKubernetesClient(options.KubernetesClient).

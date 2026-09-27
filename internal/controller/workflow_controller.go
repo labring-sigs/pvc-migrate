@@ -684,6 +684,27 @@ type cacheReadiness struct {
 	ready atomic.Bool
 }
 
+// reconcileLogger carries the controller-owned logger into package-level
+// reconcile helpers that have no receiver to hold one; the process-global
+// slog default must never speak for the daemon (it is commonly discarded or
+// configured for a different CLI command). Installed before any reconcile
+// runs; the slog default only serves direct unit-test calls.
+var reconcileLogger atomic.Pointer[slog.Logger]
+
+func setReconcileLogger(logger *slog.Logger) {
+	if logger != nil {
+		reconcileLogger.Store(logger)
+	}
+}
+
+func currentReconcileLogger() *slog.Logger {
+	if logger := reconcileLogger.Load(); logger != nil {
+		return logger
+	}
+
+	return slog.Default()
+}
+
 func (r *cacheReadiness) Start(ctx context.Context) error {
 	r.ready.Store(true)
 	defer r.ready.Store(false)
@@ -757,6 +778,7 @@ func StartManager(
 
 	logger = NewControllerLogger(logger)
 	crlog.SetLogger(logr.FromSlogHandler(logger.Handler()))
+	setReconcileLogger(logger)
 
 	scheme := runtime.NewScheme()
 	if err := v1alpha1.AddToScheme(scheme); err != nil {

@@ -607,7 +607,8 @@ func (r *rootState) validateCopyBandwidth(cmd *cobra.Command) error {
 		)
 	}
 
-	if root == "copy" || root == "migrate" || root == "migrate-pod" || root == "controller" {
+	if root == "copy" || root == "migrate" || root == "migrate-pod" ||
+		root == "cluster-copy" || root == "cluster-migrate" || root == "controller" {
 		return copyengine.ValidateBandwidthLimit(r.global.copyBandwidth)
 	}
 

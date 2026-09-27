@@ -124,7 +124,10 @@ func (r *rootState) newRenameStatusCommand(source workflowSource) *cobra.Command
 					return runtime.printer.Print([]crclient.Object(nil))
 				}
 
-				items, err := listControllerWorkflows(ctx, runtime, domain.ControllerKindRename)
+				items, err := listControllerWorkflows(
+					ctx, runtime, domain.ControllerKindRename,
+					crListNamespace(cmd, domain.ControllerKindRename),
+				)
 				if err != nil {
 					return err
 				}

@@ -90,6 +90,22 @@ func (r *rootState) newControllerCommand() *cobra.Command {
 				)
 			}
 
+			// The remaining daemon-only flags would otherwise validate and
+			// silently not apply: the one-shot run binds no probes and derives
+			// its own namespace from the discovered workflows.
+			for flag, purpose := range map[string]string{
+				"health-probe-bind-address": "serves the running controller daemon",
+				"controller-namespace":      "names the daemon leader Lease and record namespace",
+			} {
+				if once && cmd.Flags().Changed(flag) {
+					return domain.NewError(
+						domain.ErrorValidation,
+						"flags",
+						"--"+flag+" "+purpose+" and is not available with --once",
+					)
+				}
+			}
+
 			runtime, err := r.runtime()
 			if err != nil {
 				return err

@@ -224,50 +224,76 @@ func listControllerWorkflows(
 	ctx context.Context,
 	runtime *commandRuntime,
 	kind domain.ControllerKind,
+	namespace string,
 ) ([]crclient.Object, error) {
 	switch kind {
 	case domain.ControllerKindMigration:
 		return listCRDWorkflows(
 			ctx,
 			runtime,
+			namespace,
 			func() *v1alpha1.Migration { return &v1alpha1.Migration{} },
 		)
 	case domain.ControllerKindClusterMigration:
-		return listCRDWorkflows(ctx, runtime,
+		return listCRDWorkflows(ctx, runtime, namespace,
 			func() *v1alpha1.ClusterMigration { return &v1alpha1.ClusterMigration{} })
 	case domain.ControllerKindPodMigration:
 		return listCRDWorkflows(
 			ctx,
 			runtime,
+			namespace,
 			func() *v1alpha1.PodMigration { return &v1alpha1.PodMigration{} },
 		)
 	case domain.ControllerKindCopy:
-		return listCRDWorkflows(ctx, runtime, func() *v1alpha1.Copy { return &v1alpha1.Copy{} })
+		return listCRDWorkflows(
+			ctx,
+			runtime,
+			namespace,
+			func() *v1alpha1.Copy { return &v1alpha1.Copy{} },
+		)
 	case domain.ControllerKindClusterCopy:
 		return listCRDWorkflows(
 			ctx,
 			runtime,
+			namespace,
 			func() *v1alpha1.ClusterCopy { return &v1alpha1.ClusterCopy{} },
 		)
 	case domain.ControllerKindReservation:
 		return listCRDWorkflows(
 			ctx,
 			runtime,
+			namespace,
 			func() *v1alpha1.Reservation { return &v1alpha1.Reservation{} },
 		)
 	case domain.ControllerKindClusterReservation:
-		return listCRDWorkflows(ctx, runtime,
+		return listCRDWorkflows(ctx, runtime, namespace,
 			func() *v1alpha1.ClusterReservation { return &v1alpha1.ClusterReservation{} })
 	case domain.ControllerKindRename:
-		return listCRDWorkflows(ctx, runtime, func() *v1alpha1.Rename { return &v1alpha1.Rename{} })
+		return listCRDWorkflows(
+			ctx,
+			runtime,
+			namespace,
+			func() *v1alpha1.Rename { return &v1alpha1.Rename{} },
+		)
 	case domain.ControllerKindMove:
-		return listCRDWorkflows(ctx, runtime, func() *v1alpha1.Move { return &v1alpha1.Move{} })
+		return listCRDWorkflows(
+			ctx,
+			runtime,
+			namespace,
+			func() *v1alpha1.Move { return &v1alpha1.Move{} },
+		)
 	case domain.ControllerKindBackup:
-		return listCRDWorkflows(ctx, runtime, func() *v1alpha1.Backup { return &v1alpha1.Backup{} })
+		return listCRDWorkflows(
+			ctx,
+			runtime,
+			namespace,
+			func() *v1alpha1.Backup { return &v1alpha1.Backup{} },
+		)
 	case domain.ControllerKindRestore:
 		return listCRDWorkflows(
 			ctx,
 			runtime,
+			namespace,
 			func() *v1alpha1.Restore { return &v1alpha1.Restore{} },
 		)
 	default:
@@ -278,6 +304,7 @@ func listControllerWorkflows(
 func listCRDWorkflows[T crclient.Object](
 	ctx context.Context,
 	runtime *commandRuntime,
+	namespace string,
 	factory func() T,
 ) ([]crclient.Object, error) {
 	store, err := cliCRDWorkflowStore(runtime, factory)
@@ -285,7 +312,7 @@ func listCRDWorkflows[T crclient.Object](
 		return nil, err
 	}
 
-	items, err := store.List(ctx, "")
+	items, err := store.List(ctx, namespace)
 	if err != nil {
 		if apierrors.IsNotFound(err) {
 			return nil, nil
@@ -300,6 +327,18 @@ func listCRDWorkflows[T crclient.Object](
 	}
 
 	return objects, nil
+}
+
+// crListNamespace scopes a bare CR status list to the addressed tenant
+// namespace. Cluster-scoped kinds ignore -n, and an empty value lists every
+// namespace exactly as before, so single-record addressing and the bare list
+// now agree on what -n means for the same family.
+func crListNamespace(cmd *cobra.Command, kind domain.ControllerKind) string {
+	if workflow, ok := domain.ControllerWorkflowForKind(kind); ok && workflow.Kind == kind {
+		return crNamespaceForCommand(cmd)
+	}
+
+	return ""
 }
 
 // crdListable reports whether the runtime can enumerate workflow CRs. A

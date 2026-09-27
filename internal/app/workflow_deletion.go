@@ -237,3 +237,25 @@ func deletionValidationSkip(
 
 	return deletionDestinationSettling(ctx, client, binding)
 }
+
+// copyDeletionValidationSkip applies the deletion relaxation to the copy
+// families' reserved-volume re-validation: a source or staged destination
+// that is already going away must not wedge the copy finalizer, exactly as
+// the migration families already skip. Checkpoints recorded before the
+// destination pair existed fall back to the source-only check.
+func copyDeletionValidationSkip(
+	ctx context.Context,
+	client kubernetes.Interface,
+	sourceNamespace string,
+	volume v1alpha1.VolumeSpec,
+	checkpoint v1alpha1.ClusterVolumeReservationStatus,
+) (bool, error) {
+	if checkpoint.DestinationPVC == nil || checkpoint.DestinationPV == nil {
+		return deletionSourceMissing(ctx, client, sourceNamespace, volume)
+	}
+
+	return deletionValidationSkip(ctx, client, sourceNamespace, volume, kube.PVCTransferBindings{
+		DestinationPVC: *checkpoint.DestinationPVC,
+		DestinationPV:  *checkpoint.DestinationPV,
+	})
+}

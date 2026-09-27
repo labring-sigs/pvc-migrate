@@ -218,6 +218,21 @@ func (c *ClusterCopyExecutor) cleanupInterrupted(
 			continue
 		}
 
+		skip, err := copyDeletionValidationSkip(
+			ctx,
+			c.client,
+			string(plan.SourceNamespace),
+			volume,
+			checkpoint.ClusterVolumeReservationStatus,
+		)
+		if err != nil {
+			return err
+		}
+
+		if skip {
+			continue
+		}
+
 		if err := c.validateVolume(
 			ctx,
 			kube.ReservationRequest{
