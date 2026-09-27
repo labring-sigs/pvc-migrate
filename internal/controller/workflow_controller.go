@@ -1281,44 +1281,6 @@ var (
 	_ crmanager.LeaderElectionRunnable = (*cacheReadiness)(nil)
 )
 
-func workflowSpecMutationError(
-	observedHash, currentHash string,
-	generation, observedGeneration int64,
-	deleting bool,
-	conditions []v1alpha1.WorkflowCondition,
-) error {
-	if observedHash != "" {
-		if observedHash == currentHash {
-			return nil
-		}
-		return changedWorkflowDefinitionError()
-	}
-
-	if observedGeneration == 0 || generation == observedGeneration {
-		return nil
-	}
-	// Deletion does not bump generation for CRs with a status subresource
-	// (only spec writes do), so a deleting workflow whose generation moved
-	// experienced a real spec edit. Tolerate exactly that first edit until a
-	// deletion checkpoint has been observed — the workflow is going away and
-	// FinalizeDeleted re-validates — but never a second one.
-	if deleting && generation == observedGeneration+1 {
-		observedDeletion := false
-		for _, condition := range conditions {
-			if condition.Type == "Deleting" || condition.Type == "DeletionBlocked" {
-				observedDeletion = true
-				break
-			}
-		}
-
-		if !observedDeletion {
-			return nil
-		}
-	}
-
-	return changedWorkflowDefinitionError()
-}
-
 func changedWorkflowDefinitionError() error {
 	return domain.NewError(
 		domain.ErrorConflict,
