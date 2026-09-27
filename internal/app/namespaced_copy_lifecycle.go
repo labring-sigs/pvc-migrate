@@ -211,28 +211,29 @@ func (c *CopyExecutor) cleanupInterrupted(ctx context.Context, object *v1alpha1.
 			object.Namespace,
 		)
 
+		// The deletion pass skips only the reserved-volume re-validation (the
+		// migration families' relaxation); tool convergence below still runs
+		// so a leaked release cannot outlive the workflow.
 		skip, err := copyDeletionValidationSkip(ctx, c.client, object.Namespace, volume, qualified)
 		if err != nil {
 			return err
 		}
 
-		if skip {
-			continue
-		}
-
-		if err := c.validateVolume(
-			ctx,
-			kube.ReservationRequest{
-				SessionID:  object.Name,
-				TargetNode: plan.TargetNode,
-				ToolImage:  c.transfer.toolImage(plan.ToolImage),
-			},
-			object.Namespace,
-			object.Namespace,
-			volume,
-			qualified,
-		); err != nil {
-			return err
+		if !skip {
+			if err := c.validateVolume(
+				ctx,
+				kube.ReservationRequest{
+					SessionID:  object.Name,
+					TargetNode: plan.TargetNode,
+					ToolImage:  c.transfer.toolImage(plan.ToolImage),
+				},
+				object.Namespace,
+				object.Namespace,
+				volume,
+				qualified,
+			); err != nil {
+				return err
+			}
 		}
 
 		request := copyengine.CleanupRequest{

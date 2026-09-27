@@ -15,7 +15,7 @@ import (
 // source PVC, so the deletion pass skips it exactly as the migration families
 // already do, and the finalizer cannot wedge on storage that is already gone.
 func TestClusterCopyFinalizeDeletedConvergesWhenSourceDeleted(t *testing.T) {
-	executor, object, store, _ := copyExecutorFixture(t)
+	executor, object, store, engine := copyExecutorFixture(t)
 	object.Status.Phase = domain.PhaseFailed
 	object.Status.Volumes = failedCopyAttemptStatuses(object.Status.Plan.Volumes)
 	object.DeletionTimestamp = &metav1.Time{Time: executor.now()}
@@ -28,10 +28,19 @@ func TestClusterCopyFinalizeDeletedConvergesWhenSourceDeleted(t *testing.T) {
 	if store.object != nil || object.Status.Phase != domain.PhaseAborted {
 		t.Fatalf("deletion did not converge: phase=%s", object.Status.Phase)
 	}
+
+	// The skip only forgives the reserved-volume re-validation; the tool
+	// convergence must still run for every reserved volume.
+	if len(engine.cleanups) != len(object.Status.Plan.Volumes) {
+		t.Fatalf(
+			"tool cleanups = %d, want %d",
+			len(engine.cleanups), len(object.Status.Plan.Volumes),
+		)
+	}
 }
 
 func TestNamespacedCopyFinalizeDeletedConvergesWhenSourceDeleted(t *testing.T) {
-	executor, object, _ := namespacedCopyFixture(t, interceptor.Funcs{})
+	executor, object, engine := namespacedCopyFixture(t, interceptor.Funcs{})
 	object.Status.Phase = domain.PhaseFailed
 	object.Status.Volumes = namespacedFailedCopyAttemptStatuses(object.Status.Plan.Volumes)
 	object.DeletionTimestamp = &metav1.Time{Time: object.CreationTimestamp.Time}
@@ -42,6 +51,13 @@ func TestNamespacedCopyFinalizeDeletedConvergesWhenSourceDeleted(t *testing.T) {
 
 	if object.Status.Phase != domain.PhaseAborted {
 		t.Fatalf("deletion did not converge: phase=%s", object.Status.Phase)
+	}
+
+	if len(engine.cleanups) != len(object.Status.Plan.Volumes) {
+		t.Fatalf(
+			"tool cleanups = %d, want %d",
+			len(engine.cleanups), len(object.Status.Plan.Volumes),
+		)
 	}
 }
 

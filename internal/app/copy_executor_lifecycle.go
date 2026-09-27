@@ -218,6 +218,10 @@ func (c *ClusterCopyExecutor) cleanupInterrupted(
 			continue
 		}
 
+		// The deletion pass skips the reserved-volume re-validation when the
+		// pair is settling, exactly as the migration families do — but the
+		// tool convergence below still runs: a leaked release must not
+		// outlive the workflow just because its source is already gone.
 		skip, err := copyDeletionValidationSkip(
 			ctx,
 			c.client,
@@ -229,23 +233,21 @@ func (c *ClusterCopyExecutor) cleanupInterrupted(
 			return err
 		}
 
-		if skip {
-			continue
-		}
-
-		if err := c.validateVolume(
-			ctx,
-			kube.ReservationRequest{
-				SessionID:  object.Name,
-				TargetNode: plan.TargetNode,
-				ToolImage:  c.transfer.toolImage(plan.ToolImage),
-			},
-			string(plan.SourceNamespace),
-			string(plan.DestinationNamespace),
-			volume,
-			*checkpoint.ClusterVolumeReservationStatus.DeepCopy(),
-		); err != nil {
-			return err
+		if !skip {
+			if err := c.validateVolume(
+				ctx,
+				kube.ReservationRequest{
+					SessionID:  object.Name,
+					TargetNode: plan.TargetNode,
+					ToolImage:  c.transfer.toolImage(plan.ToolImage),
+				},
+				string(plan.SourceNamespace),
+				string(plan.DestinationNamespace),
+				volume,
+				*checkpoint.ClusterVolumeReservationStatus.DeepCopy(),
+			); err != nil {
+				return err
+			}
 		}
 
 		request := copyengine.CleanupRequest{
