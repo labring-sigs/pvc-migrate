@@ -38,6 +38,47 @@ func loadCrossClusterCopy(
 	return service.PromoteReservation(ctx, reservation)
 }
 
+// An explicit --session always means resume. Falling back to planning a fresh
+// session under the same ID after a typo would provision new destination
+// volumes the caller believes already exist, so a missing session is an error.
+func missingSessionError(command, namespace, id string) error {
+	return domain.NewError(
+		domain.ErrorValidation,
+		command,
+		fmt.Sprintf(
+			"session %s not found in namespace %s; check the session ID with the status command, or omit --session to create a new session",
+			id,
+			namespace,
+		),
+	)
+}
+
+func loadExistingCopySession(
+	ctx context.Context,
+	service *crosscluster.Service,
+	namespace, id string,
+) (*crosscluster.CopySession, error) {
+	session, err := loadCrossClusterCopy(ctx, service, namespace, id)
+	if apierrors.IsNotFound(err) {
+		return nil, missingSessionError("cluster-copy cross run", namespace, id)
+	}
+
+	return session, err
+}
+
+func loadExistingReservationSession(
+	ctx context.Context,
+	service *crosscluster.Service,
+	namespace, id string,
+) (*crosscluster.ReservationSession, error) {
+	session, err := service.GetReservation(ctx, namespace, id)
+	if apierrors.IsNotFound(err) {
+		return nil, missingSessionError("cluster-reserve cross run", namespace, id)
+	}
+
+	return session, err
+}
+
 func validateExistingCrossClusterFlags(cmd *cobra.Command, additional ...string) error {
 	names := slices.Concat(additional, []string{
 		"source-namespace", "destination-namespace", "source-pvc", "destination-pvc",

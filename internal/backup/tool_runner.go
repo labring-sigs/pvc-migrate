@@ -11,8 +11,12 @@ import (
 )
 
 // toolCleanupTimeout bounds the detached best-effort removal of an
-// interrupted tool release; it must outlive the 30s helm uninstall wait.
-const toolCleanupTimeout = 90 * time.Second
+// interrupted tool release. The uninstall's worst case is the 30s delete
+// wait plus roughly seven individually bounded API calls (history read,
+// reachability, per-resource DELETEs, purge) under a slow API server, so the
+// budget stays above that sum; the operation lock TTL it protects is minutes
+// larger still.
+const toolCleanupTimeout = 150 * time.Second
 
 // ToolRunner runs the data-plane tool and can remove its helm release. The
 // interface keeps the transfer paths testable and gives the error paths one

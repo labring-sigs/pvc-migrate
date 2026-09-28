@@ -28,7 +28,14 @@ const (
 	// carries POSIX mode bits in object metadata, which plain rclone copy
 	// otherwise normalizes away (e.g. 0640 source becomes 0644 on restore).
 	rclonePreserveLinksArgs = "--links --metadata"
-	lockReleaseTimeout      = 10 * time.Second
+	// The PVC annotation lock releases inside RetryOnConflict (5 attempts ×
+	// Get+Update = up to 10 sequential requests); the budget must cover that
+	// request count on a loaded API server, not just the ~40ms retry backoff.
+	lockReleaseTimeout = 30 * time.Second
+	// Deferred finalization: tool-stopped pod lists plus one shared-mount
+	// restore (and checkpoint save) per recorded mount, so it scales with the
+	// mount count rather than a fixed request count.
+	workflowFinalizationTimeout = time.Minute
 )
 
 type PVCInfo struct {

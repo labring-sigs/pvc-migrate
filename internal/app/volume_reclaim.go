@@ -260,6 +260,35 @@ func restoreReclaimedPVPolicy(
 	return prepared, nil
 }
 
+// resolvedSourcePolicy prefers the original-policy annotation the first
+// transfer protection wrote over the plan's recorded policy: a plan built
+// after the protection switched the PV to Retain carries the protected value,
+// and restoring it verbatim silently leaves the PV on Retain or wedges the
+// delete path's policy match. A missing or replaced PV keeps the plan value.
+func resolvedSourcePolicy(
+	ctx context.Context,
+	client kubernetes.Interface,
+	pv v1alpha1.ObjectReference,
+	planned corev1.PersistentVolumeReclaimPolicy,
+) corev1.PersistentVolumeReclaimPolicy {
+	if pv.Name == "" {
+		return planned
+	}
+
+	current, err := client.CoreV1().PersistentVolumes().Get(ctx, pv.Name, metav1.GetOptions{})
+	if err != nil || current.UID != pv.UID {
+		return planned
+	}
+
+	if policy := corev1.PersistentVolumeReclaimPolicy(
+		current.Annotations[kube.OriginalPolicyAnnotation],
+	); validReclaimPolicy(policy) {
+		return policy
+	}
+
+	return planned
+}
+
 func reclaimPVPolicyMatches(
 	pv *corev1.PersistentVolume,
 	policy corev1.PersistentVolumeReclaimPolicy,

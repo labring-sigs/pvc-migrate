@@ -235,7 +235,7 @@ func validateCopyOverrides(cmd *cobra.Command, spec v1alpha1.CopySpec, flags *co
 // cluster-copy create graduate a controller-owned Reservation CR (namespaced or
 // cluster-scoped) in the source namespace into the Copy the elected controller
 // executes; a submitted Copy is never re-submitted. cr create addresses the
-// CRD first and never falls back to ConfigMap session records — the session
+// CRD only and never falls back to ConfigMap session records — the session
 // families own those through copySessionExisting.
 func (r *rootState) copyExisting(
 	ctx context.Context,
@@ -243,109 +243,62 @@ func (r *rootState) copyExisting(
 	runtime *commandRuntime,
 	flags *copyFlags,
 	dryRun bool,
-	submit bool,
 ) error {
-	if submit && flags.sourceNamespace != "" {
-		crdObject, crdErr := lookupControllerObjects(
-			ctx,
-			runtime,
-			flags.sourceNamespace,
-			flags.sessionID,
-			map[domain.ControllerKind]crclient.Object{
-				domain.ControllerKindReservation:        &v1alpha1.Reservation{},
-				domain.ControllerKindClusterReservation: &v1alpha1.ClusterReservation{},
-			},
+	// A cr submission graduates controller-owned reservation CRs only; an
+	// empty source namespace names no CRD resource, and a ConfigMap session
+	// record is graduated by the session copy command instead.
+	if flags.sourceNamespace == "" {
+		return domain.NewError(
+			domain.ErrorValidation,
+			"cr copy create",
+			"--source-namespace is required to graduate a Reservation or ClusterReservation CR; a ConfigMap session record is graduated by the session copy command",
 		)
-		switch {
-		case crdErr == nil:
-			switch current := crdObject.(type) {
-			case *v1alpha1.Reservation:
-				return r.adoptReservation(ctx, cmd, runtime, current, flags, dryRun, backendCRD)
-			case *v1alpha1.ClusterReservation:
-				return r.adoptClusterReservation(
-					ctx,
-					cmd,
-					runtime,
-					current,
-					flags,
-					dryRun,
-					backendCRD,
-				)
-			}
-		case apierrors.IsNotFound(crdErr):
-			// A cr submission graduates controller-owned reservations only.
-			// Falling through to ConfigMap session records would execute the
-			// copy in-process under the cr command tree, mixing the two
-			// execution modes the command groups keep apart.
-			return domain.NewError(
-				domain.ErrorValidation,
-				"cr copy create",
-				fmt.Sprintf(
-					"no Reservation or ClusterReservation %s exists in namespace %s; a ConfigMap session record is graduated by the session copy command",
-					flags.sessionID,
-					flags.sourceNamespace,
-				),
-			)
-		default:
-			return crdErr
-		}
 	}
 
-	// Only a cr submission that skipped the CRD lookup (an explicitly empty
-	// source namespace) reaches the session records below; the candidate set
-	// keeps today's both-scope shape for that defensive path.
-	object, backend, err := r.loadCopyRecordWithBackend(
+	crdObject, crdErr := lookupControllerObjects(
 		ctx,
-		cmd,
 		runtime,
+		flags.sourceNamespace,
 		flags.sessionID,
 		map[domain.ControllerKind]crclient.Object{
-			domain.ControllerKindCopy:               &v1alpha1.Copy{},
-			domain.ControllerKindClusterCopy:        &v1alpha1.ClusterCopy{},
 			domain.ControllerKindReservation:        &v1alpha1.Reservation{},
 			domain.ControllerKindClusterReservation: &v1alpha1.ClusterReservation{},
 		},
-		sourceSession,
 	)
-	if err != nil {
-		return err
-	}
-
-	switch current := object.(type) {
-	case *v1alpha1.Copy:
-		if submit {
-			return domain.NewError(
-				domain.ErrorValidation,
-				"copy create",
-				"an existing session cannot be re-submitted; the controller reconciles submitted workflows automatically",
+	switch {
+	case crdErr == nil:
+		switch current := crdObject.(type) {
+		case *v1alpha1.Reservation:
+			return r.adoptReservation(ctx, cmd, runtime, current, flags, dryRun, backendCRD)
+		case *v1alpha1.ClusterReservation:
+			return r.adoptClusterReservation(
+				ctx,
+				cmd,
+				runtime,
+				current,
+				flags,
+				dryRun,
+				backendCRD,
 			)
+		default:
+			return domain.NewError(domain.ErrorValidation, "copy", "unsupported copy input")
 		}
-
-		if err := validateCopyOverrides(cmd, current.Spec, flags); err != nil {
-			return err
-		}
-
-		return r.executeCopy(ctx, cmd, runtime, current, dryRun, true, backend)
-	case *v1alpha1.ClusterCopy:
-		if submit {
-			return domain.NewError(
-				domain.ErrorValidation,
-				"copy create",
-				"an existing session cannot be re-submitted; the controller reconciles submitted workflows automatically",
-			)
-		}
-
-		if err := validateCopyOverrides(cmd, current.Spec.CopySpec, flags); err != nil {
-			return err
-		}
-
-		return r.executeClusterCopy(ctx, cmd, runtime, current, dryRun, true, backend)
-	case *v1alpha1.Reservation:
-		return r.adoptReservation(ctx, cmd, runtime, current, flags, dryRun, backend)
-	case *v1alpha1.ClusterReservation:
-		return r.adoptClusterReservation(ctx, cmd, runtime, current, flags, dryRun, backend)
+	case apierrors.IsNotFound(crdErr):
+		// A cr submission graduates controller-owned reservations only.
+		// Falling through to ConfigMap session records would execute the
+		// copy in-process under the cr command tree, mixing the two
+		// execution modes the command groups keep apart.
+		return domain.NewError(
+			domain.ErrorValidation,
+			"cr copy create",
+			fmt.Sprintf(
+				"no Reservation or ClusterReservation %s exists in namespace %s; a ConfigMap session record is graduated by the session copy command",
+				flags.sessionID,
+				flags.sourceNamespace,
+			),
+		)
 	default:
-		return domain.NewError(domain.ErrorValidation, "copy", "unsupported copy input")
+		return crdErr
 	}
 }
 

@@ -73,6 +73,7 @@ Session families expose the lifecycle verbs each workflow supports (`status`, `r
 
 - Session commands execute in the invoking process and persist records as ConfigMaps in `--session-namespace` (default `pvc-migrate-system`).
 - `cr` commands submit workflow CRs the controller reconciles; the two backends never read or write each other's records.
+- While a workflow CR is controller-owned, every transfer runs under the controller's service account; an identity that only creates, watches, and finalizes CRs needs no runtime permissions. `cr <family> resume` on the transfer families (copy, backup, restore) is the exception — it executes the transfer machine in the invoking process and needs the session CLI's runtime permissions in the workflow namespace (pods, services, and Helm release storage secrets/configmaps).
 - Namespaced commands take one `-n/--namespace` — the tenant namespace of the workflow and every PVC it addresses.
 - Cluster families take role flags: `-n/--source-namespace`, `--destination-namespace`, plus `--temporary-namespace` on `cluster-migrate`/`cr cluster-migrate`.
 - The command boundary decides scope: same-namespace work uses the namespaced command and cannot express a cross-namespace spec, and vice versa.

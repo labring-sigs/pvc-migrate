@@ -73,3 +73,58 @@ func TestVerifyActiveStorageVolumeRejectsTerminatingActive(t *testing.T) {
 		t.Fatalf("deletion pass rejected a terminating active claim: %v", err)
 	}
 }
+
+// A claim that finished deleting is the terminal state of the very deletion
+// the terminating tolerance covers: the deletion pass must converge through
+// cleanup instead of failing on the read, or a torn-down namespace wedges the
+// workflow finalizer forever (its PVCs are gone before its CR is).
+func TestVerifyActiveStorageVolumeConvergesWhenActiveDeleted(t *testing.T) {
+	destinationPV := &corev1.PersistentVolume{
+		ObjectMeta: metav1.ObjectMeta{Name: "pv-destination", UID: "pv-uid"},
+	}
+	// The active claim is gone entirely; only the PV remains.
+	client := fake.NewClientset(destinationPV)
+
+	source := v1alpha1.ObjectReference{Namespace: "app", Name: "data", UID: "source-uid"}
+	expectedPV := v1alpha1.ObjectReference{Name: "pv-destination", UID: "pv-uid"}
+	recorded := v1alpha1.ObjectReference{Namespace: "app", Name: "data", UID: "active-uid"}
+
+	if err := verifyActiveStorageVolume(
+		t.Context(),
+		client,
+		"session",
+		source,
+		"app",
+		expectedPV,
+		&recorded,
+	); err == nil {
+		t.Fatal("live pass accepted a deleted active claim")
+	}
+
+	deletionCtx := context.WithValue(t.Context(), workflowDeletionContextKey{}, true)
+	if err := verifyActiveStorageVolume(
+		deletionCtx,
+		client,
+		"session",
+		source,
+		"app",
+		expectedPV,
+		&recorded,
+	); err != nil {
+		t.Fatalf("deletion pass rejected a deleted active claim: %v", err)
+	}
+
+	// The PV vanishing mid-deletion converges the same way.
+	empty := fake.NewClientset()
+	if err := verifyActiveStorageVolume(
+		deletionCtx,
+		empty,
+		"session",
+		source,
+		"app",
+		expectedPV,
+		&recorded,
+	); err != nil {
+		t.Fatalf("deletion pass rejected a deleted active pair: %v", err)
+	}
+}

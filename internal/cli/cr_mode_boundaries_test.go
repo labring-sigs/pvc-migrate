@@ -61,3 +61,49 @@ func TestCRCopyCreateRejectsConfigMapSessionGraduation(t *testing.T) {
 		t.Fatalf("error must name the reservation and namespace: %v; %s", err, diagnostics.String())
 	}
 }
+
+// TestCRClusterCopyCreateGraduatesBySession pins the cluster family's routing:
+// a session-only invocation must take the reservation graduation handoff, not
+// the fresh ClusterCopy submission — a fresh submission would collide with the
+// reservation's own workflow name and could never graduate it.
+func TestCRClusterCopyCreateGraduatesBySession(t *testing.T) {
+	scheme := runtime.NewScheme()
+	if err := v1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+
+	var out, diagnostics bytes.Buffer
+
+	root := NewRoot(Options{
+		Out: &out, ErrOut: &diagnostics,
+		runtimeFactory: func(state *rootState) (*commandRuntime, error) {
+			return &commandRuntime{
+				clients: &kube.Clients{
+					Runtime:    crfake.NewClientBuilder().WithScheme(scheme).Build(),
+					Kubernetes: kubernetesfake.NewClientset(),
+				},
+				printer:           printerFor(state),
+				waitForController: false,
+			}, nil
+		},
+	})
+	root.SetArgs([]string{
+		"cr", "cluster-copy", "create",
+		"--session", "missing-reservation",
+		"--source-namespace", "app",
+	})
+
+	err := root.ExecuteContext(t.Context())
+	if err == nil {
+		t.Fatal("graduation without a ClusterReservation CR must fail")
+	}
+
+	message := err.Error() + " " + diagnostics.String()
+	if !strings.Contains(message, "graduated by the session copy command") {
+		t.Fatalf(
+			"cluster create must route session-only invocations to the graduation handoff: %v; %s",
+			err,
+			diagnostics.String(),
+		)
+	}
+}

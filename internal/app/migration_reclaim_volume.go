@@ -73,8 +73,15 @@ func prepareMigrationReclaimVolume(
 	}
 
 	src := reclaimVolume{
-		pv:            qualifiedResourceReference(planned.SourcePV, ""),
-		policy:        planned.SourceReclaimPolicy,
+		pv: qualifiedResourceReference(planned.SourcePV, ""),
+		// The plan may postdate the transfer protection that switched the
+		// source PV to Retain; the annotation is the authoritative original.
+		policy: resolvedSourcePolicy(
+			ctx,
+			client,
+			qualifiedResourceReference(planned.SourcePV, ""),
+			planned.SourceReclaimPolicy,
+		),
 		metadata:      planned.SourcePVCMetadata,
 		skipMissingPV: phase == domain.PhaseAborted,
 	}

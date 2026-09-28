@@ -1,6 +1,7 @@
 package app
 
 import (
+	"context"
 	"strings"
 	"testing"
 
@@ -227,5 +228,28 @@ func TestValidateFinalSyncRejectsLostSource(t *testing.T) {
 				t.Fatalf("validation mutated phase to %s", object.Status.Phase)
 			}
 		})
+	}
+}
+
+// The deletion-pass abort gate must also see a vanishing PV: with the PVCs
+// still present but their planned PVs gone (the fixture world carries none),
+// the deletion converges to Aborted instead of wedging on a source that can
+// never be re-verified.
+func TestPodMigrationValidateAbortConvergesWhenSourcePVDeleted(t *testing.T) {
+	executor, object, _, _ := namespacedPodMigrationFixture(t)
+	executor.workloads = &fakeController{}
+
+	namespacedPausedCheckpointFixture(object)
+
+	deletionCtx := context.WithValue(t.Context(), workflowDeletionContextKey{}, true)
+
+	if err := executor.ValidateAbort(deletionCtx, object); err != nil {
+		t.Fatalf("deletion-pass abort wedged on the deleted PV: %v", err)
+	}
+
+	// A live abort still surfaces the loss: without the deletion pass there is
+	// no convergence path, so the missing PV must fail loudly.
+	if err := executor.ValidateAbort(t.Context(), object); err == nil {
+		t.Fatal("live abort accepted a deleted source PV")
 	}
 }

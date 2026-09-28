@@ -85,7 +85,10 @@ func workflowCommandPath(cmd *cobra.Command, family string) string {
 // -n tenant namespace that namespaced CR addressing requires.
 func workflowHintAddress(cmd *cobra.Command, namespace, name string) string {
 	address := shellQuote(name)
-	if isControllerCommand(cmd) && namespace != "" {
+	// Cluster-scoped cr families bind no -n, so the suggested command must
+	// not carry one; the flag's presence on the rendering command is exactly
+	// the namespaced-kind signal.
+	if isControllerCommand(cmd) && namespace != "" && cmd.Flags().Lookup("namespace") != nil {
 		address += " -n " + namespace
 	}
 

@@ -393,7 +393,12 @@ func (m *MoveExecutor) cleanup(
 			m.client,
 			object.Name,
 			qualifiedResourceReference(plan.Identity.SourcePV, ""),
-			plan.Identity.SourceTemplate.ReclaimPolicy,
+			resolvedSourcePolicy(
+				ctx,
+				m.client,
+				qualifiedResourceReference(plan.Identity.SourcePV, ""),
+				plan.Identity.SourceTemplate.ReclaimPolicy,
+			),
 		); err != nil &&
 			!apierrors.IsNotFound(err) {
 			return err

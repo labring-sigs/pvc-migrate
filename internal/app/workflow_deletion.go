@@ -104,17 +104,18 @@ func scanPlannedSourcePVCs(
 }
 
 // deletionSourceMissing reports whether a planned volume's source storage can
-// no longer be fully verified while finalizing a deleted workflow: the PVC
-// gone or terminating, or the PV gone or terminating. Only a deletion pass
-// may skip the validations that re-verify the live source identity — a
-// half-deleted source pair must not wedge the finalizer either.
+// no longer be fully verified: the PVC gone or terminating, or the PV gone or
+// terminating. Every caller is a cleanup pass (abort, finalize, deletion
+// convergence), and the skip is factual rather than mode-gated — a half-
+// deleted source pair must not wedge any of them, because the validation the
+// skip forgives cannot succeed against storage that no longer exists.
 func deletionSourceMissing(
 	ctx context.Context,
 	client kubernetes.Interface,
 	sourceNamespace string,
 	volume v1alpha1.VolumeSpec,
 ) (bool, error) {
-	if !workflowDeletionInProgress(ctx) || volume.SourcePVC.Name == "" {
+	if volume.SourcePVC.Name == "" {
 		return false, nil
 	}
 
@@ -147,17 +148,15 @@ func deletionSourceMissing(
 }
 
 // deletionDestinationSettling reports whether the staged destination pair is
-// gone or terminating while finalizing a deleted workflow, so the deletion
-// pass skips re-validating storage it is about to release anyway.
+// gone or terminating, so a cleanup pass skips re-validating storage it is
+// about to release anyway. Like deletionSourceMissing this is factual rather
+// than mode-gated: settling storage cannot be re-verified in any cleanup
+// pass, abort included.
 func deletionDestinationSettling(
 	ctx context.Context,
 	client kubernetes.Interface,
 	binding kube.PVCTransferBindings,
 ) (bool, error) {
-	if !workflowDeletionInProgress(ctx) {
-		return false, nil
-	}
-
 	pvc, err := client.CoreV1().
 		PersistentVolumeClaims(binding.DestinationPVC.Namespace).
 		Get(ctx, binding.DestinationPVC.Name, metav1.GetOptions{})

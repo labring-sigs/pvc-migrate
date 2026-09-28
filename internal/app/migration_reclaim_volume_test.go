@@ -248,3 +248,56 @@ func TestRecoverReservationVolumeAcceptsFinalizedPVCDuringDeletion(t *testing.T)
 		t.Fatalf("non-deleting recovery must still conflict, got %v", err)
 	}
 }
+
+// A plan built after the transfer protection switched the source PV to Retain
+// records Retain as the original policy; the reclaim must restore the
+// annotation's authoritative original instead of the poisoned plan value.
+func TestPrepareMigrationReclaimVolumePrefersAnnotatedOriginalPolicy(t *testing.T) {
+	protected := &corev1.PersistentVolume{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "pv-src",
+			UID:  types.UID("pv-src-uid"),
+			Annotations: map[string]string{
+				kube.OriginalPolicyAnnotation: string(corev1.PersistentVolumeReclaimDelete),
+			},
+		},
+		Spec: corev1.PersistentVolumeSpec{
+			PersistentVolumeReclaimPolicy: corev1.PersistentVolumeReclaimRetain,
+		},
+	}
+	client := fake.NewSimpleClientset(protected)
+
+	planned := v1alpha1.VolumeSpec{
+		SourcePVC: v1alpha1.LocalResourceReference{
+			Name: "src", UID: types.UID("src-uid"),
+		},
+		SourcePV: v1alpha1.LocalResourceReference{
+			Name: "pv-src", UID: types.UID("pv-src-uid"),
+		},
+		// The plan snapshot postdates the protection: it recorded Retain.
+		SourceReclaimPolicy: corev1.PersistentVolumeReclaimRetain,
+	}
+	checkpoint := v1alpha1.ClusterVolumeReservationStatus{
+		DestinationPolicy: corev1.PersistentVolumeReclaimDelete,
+	}
+
+	_, volumes, err := prepareMigrationReclaimVolume(
+		t.Context(), client, "workflow", domain.PhaseFailed,
+		"apps", "temporary", planned, checkpoint, nil, false,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	src := findVolume(volumes, "pv-src")
+	if src == nil {
+		t.Fatal("source volume missing from the reclaim set")
+	}
+
+	if src.policy != corev1.PersistentVolumeReclaimDelete {
+		t.Fatalf(
+			"source policy = %s, want Delete resolved from the annotation",
+			src.policy,
+		)
+	}
+}

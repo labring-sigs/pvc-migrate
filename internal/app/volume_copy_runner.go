@@ -202,35 +202,59 @@ func (s *volumeCopyRunner) deleteCopyToolPods(
 		}
 	}
 
-	for _, pod := range candidates {
+	var failures []error
+
+	// A fence trip mid-pass still reports which deletes already failed; the
+	// per-pod outcomes and the fence signal are independent facts.
+	fenceError := func() error {
 		if err := checkpointFenceError(ctx); err != nil {
+			return errors.Join(err, errors.Join(failures...))
+		}
+
+		return nil
+	}
+
+	for _, pod := range candidates {
+		if err := fenceError(); err != nil {
 			return err
 		}
 
-		uid, version := pod.UID, pod.ResourceVersion
+		// UID alone pins the identity the delete targets. A resourceVersion
+		// precondition turns unrelated status writes into 409s — the pods are
+		// terminating, so the kubelet rewrites them constantly — and would
+		// mislabel a finished copy as failed.
+		uid := pod.UID
 
 		deleteErr := s.client.CoreV1().Pods(pod.Namespace).Delete(
 			ctx,
 			pod.Name,
 			metav1.DeleteOptions{
-				Preconditions: &metav1.Preconditions{UID: &uid, ResourceVersion: &version},
+				Preconditions: &metav1.Preconditions{UID: &uid},
 			},
 		)
-		if deleteErr != nil && !apierrors.IsNotFound(deleteErr) {
-			return domain.WrapError(
-				domain.ErrorKubernetes,
-				"copy cleanup",
-				"delete copy tool Pod "+pod.Namespace+"/"+pod.Name,
-				deleteErr,
+		// NotFound and UID conflicts both mean the recorded pod is already
+		// gone; keep deleting the remaining candidates either way.
+		if deleteErr != nil && !apierrors.IsNotFound(deleteErr) &&
+			!apierrors.IsConflict(deleteErr) {
+			failures = append(
+				failures,
+				domain.WrapError(
+					domain.ErrorKubernetes,
+					"copy cleanup",
+					"delete copy tool Pod "+pod.Namespace+"/"+pod.Name,
+					deleteErr,
+				),
 			)
+
+			continue
 		}
 
-		if err := checkpointFenceError(ctx); err != nil {
+		if err := fenceError(); err != nil {
 			return err
 		}
 	}
 
-	return nil
+	return errors.Join(failures...)
 }
 
 func (s *volumeCopyRunner) startCopyToolLogs(

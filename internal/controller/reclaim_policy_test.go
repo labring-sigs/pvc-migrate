@@ -33,31 +33,13 @@ func TestOnlyUnusedStoragePolicyCanChangeAfterExecutionStarts(t *testing.T) {
 		current := original.DeepCopy()
 		current.Spec.Volumes[0].SourcePVC.Name = tc.sourcePVC
 		current.Spec.UnusedStoragePolicy = v1alpha1.UnusedStorageDelete
+		current.Status.ExecutionIntentHash = observedHash
 
-		currentHash, err := kube.WorkflowExecutionIntentHash(current)
-		if err != nil {
-			t.Fatal(err)
-		}
-
-		for _, generation := range []int64{1, 2, 3} {
-			for _, deleting := range []bool{false, true} {
-				if err := workflowSpecMutationError(
-					observedHash,
-					currentHash,
-					generation,
-					1,
-					deleting,
-					nil,
-				); (err == nil) != tc.allowed {
-					t.Fatalf(
-						"generation=%d deleting=%v source=%s err=%v",
-						generation,
-						deleting,
-						tc.sourcePVC,
-						err,
-					)
-				}
-			}
+		// The shipped fence is content-based: only UnusedStoragePolicy is
+		// canonicalized out of the intent hash, so the policy-only change
+		// keeps the hash equal and any other spec change breaks it.
+		if err := executionIntentMutationError(current); (err == nil) != tc.allowed {
+			t.Fatalf("source=%s err=%v", tc.sourcePVC, err)
 		}
 	}
 }

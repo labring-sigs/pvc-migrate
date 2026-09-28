@@ -16,6 +16,9 @@ type OrphanCleanupMode string
 const (
 	OrphanCleanupPreActivation  OrphanCleanupMode = "PreActivation"
 	OrphanCleanupPostActivation OrphanCleanupMode = "PostActivation"
+	// RecordsOnly converges a session whose storage is entirely gone: only
+	// the stale session record and lease remain to be removed.
+	OrphanCleanupRecordsOnly OrphanCleanupMode = "RecordsOnly"
 )
 
 type CheckSeverity string

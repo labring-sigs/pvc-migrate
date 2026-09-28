@@ -7,6 +7,7 @@ import (
 	"github.com/labring-sigs/pvc-migrate/internal/domain"
 	"github.com/labring-sigs/pvc-migrate/internal/kube"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
@@ -53,7 +54,11 @@ func (p *Planner) PlanBackup(ctx context.Context, object *v1alpha1.Backup, image
 		PersistentVolumeClaims(object.Namespace).
 		Get(ctx, request.SourcePVC.Name, metav1.GetOptions{})
 	if err != nil {
-		return err
+		return wrapPlanningReadError(
+			"plan backup",
+			"read source PVC "+object.Namespace+"/"+request.SourcePVC.Name,
+			err,
+		)
 	}
 
 	if pvc.DeletionTimestamp != nil || pvc.Status.Phase != corev1.ClaimBound ||
@@ -70,7 +75,11 @@ func (p *Planner) PlanBackup(ctx context.Context, object *v1alpha1.Backup, image
 		PersistentVolumes().
 		Get(ctx, pvc.Spec.VolumeName, metav1.GetOptions{})
 	if err != nil {
-		return err
+		return wrapPlanningReadError(
+			"plan backup",
+			"read source PV "+pvc.Spec.VolumeName,
+			err,
+		)
 	}
 
 	if err := checkReference(
@@ -110,4 +119,19 @@ func (p *Planner) PlanBackup(ctx context.Context, object *v1alpha1.Backup, image
 func repositoryCanPlan(status v1alpha1.WorkflowStatus) bool {
 	return status.Phase == "" || status.Phase == domain.PhasePlanned ||
 		(status.Phase == domain.PhaseFailed && status.ResumeFrom == domain.PhasePlanned)
+}
+
+// wrapPlanningReadError keeps planning-time read failures inside the
+// controller's planning retry window. A bare API error carries no domain
+// category, evaluates as internal, and fails the workflow terminally on the
+// first attempt — so a PVC applied in the same manifest as its Backup, or a
+// transient API failure, would never be retried. NotFound maps to
+// precondition (the world is not ready yet); every other failure is a plain
+// Kubernetes error.
+func wrapPlanningReadError(phase, action string, err error) error {
+	if apierrors.IsNotFound(err) {
+		return domain.WrapError(domain.ErrorPrecondition, phase, action, err)
+	}
+
+	return domain.WrapError(domain.ErrorKubernetes, phase, action, err)
 }

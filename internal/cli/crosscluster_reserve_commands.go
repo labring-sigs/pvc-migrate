@@ -8,7 +8,6 @@ import (
 	"github.com/labring-sigs/pvc-migrate/internal/crosscluster"
 	"github.com/labring-sigs/pvc-migrate/internal/domain"
 	"github.com/spf13/cobra"
-	apierrors "k8s.io/apimachinery/pkg/api/errors"
 )
 
 type crossClusterReserveFlags struct {
@@ -425,15 +424,17 @@ func (r *rootState) newCrossClusterReserveRunCommand() *cobra.Command {
 			}
 
 			var session *crosscluster.ReservationSession
-			if flags.sessionID != "" {
-				session, err = service.GetReservation(
+			// Only an explicitly passed --session means resume; the flag
+			// struct also carries the ID generated for a fresh session, which
+			// must fall through to planning, never load.
+			if cmd.Flags().Changed("session") {
+				session, err = loadExistingReservationSession(
 					ctx,
+					service,
 					options.SessionNamespace,
 					flags.sessionID,
 				)
-				if apierrors.IsNotFound(err) {
-					session, err = nil, nil
-				} else if err == nil {
+				if err == nil {
 					err = validateExistingCrossClusterFlags(cmd, "tool-image", "strategy")
 				}
 			}

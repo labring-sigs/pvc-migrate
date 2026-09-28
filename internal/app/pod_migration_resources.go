@@ -15,7 +15,10 @@ import (
 	"k8s.io/client-go/kubernetes"
 )
 
-const openEBSLVMSharedMountCleanupTimeout = 10 * time.Second
+// Failure recovery restores one LVM shared mount (Get+Patch, conflict-retried)
+// plus a checkpoint save per recorded mount, so the budget must scale with the
+// mount count on a loaded API server rather than a fixed request count.
+const openEBSLVMSharedMountCleanupTimeout = 30 * time.Second
 
 // PodMigrationExecutorConfig supplies services for workload migration.
 // Operation inputs and recovery checkpoints remain in the CRD.
