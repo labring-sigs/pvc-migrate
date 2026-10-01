@@ -155,7 +155,7 @@ func (p *Planner) resolveReservation(
 		state.inventory.namespacePodsErr,
 	)
 
-	p.selectPlanTarget(&state, v1alpha1.WorkloadNone, nil, "")
+	p.selectPlanTarget(ctx, &state, v1alpha1.WorkloadNone, nil, "")
 
 	plan, err := p.completeTransferPlan(ctx, &state, spec.Volumes)
 	if err != nil {

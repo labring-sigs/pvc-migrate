@@ -149,7 +149,7 @@ func (p *Planner) resolveCopy(ctx context.Context, name string, spec v1alpha1.Co
 	)
 	inspectShared := p.checkCopyPlanConsumers(ctx, &state, inputs, spec.Online)
 
-	p.selectPlanTarget(&state, v1alpha1.WorkloadNone, nil, "")
+	p.selectPlanTarget(ctx, &state, v1alpha1.WorkloadNone, nil, "")
 
 	plan, err := p.completeTransferPlan(ctx, &state, spec.Volumes)
 	if err != nil {

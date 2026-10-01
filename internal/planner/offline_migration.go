@@ -200,7 +200,7 @@ func (p *Planner) resolveMigration(ctx context.Context, name string, spec v1alph
 		p.presentation(),
 	)
 
-	p.selectPlanTarget(&state, v1alpha1.WorkloadNone, nil, "")
+	p.selectPlanTarget(ctx, &state, v1alpha1.WorkloadNone, nil, "")
 
 	plan, err := p.completeTransferPlan(ctx, &state, spec.Volumes)
 	if err != nil {
