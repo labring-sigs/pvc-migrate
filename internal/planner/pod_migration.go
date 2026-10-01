@@ -156,7 +156,7 @@ func (p *Planner) resolvePodMigration(
 	)
 
 	p.selectPlanTarget(
-		&state, workload.Adapter, sourcePod, availabilityZone(state.inventory.sourceNode),
+		ctx, &state, workload.Adapter, sourcePod, availabilityZone(state.inventory.sourceNode),
 	)
 
 	if state.targetNode != nil {

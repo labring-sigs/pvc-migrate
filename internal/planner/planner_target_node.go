@@ -16,12 +16,23 @@ import (
 )
 
 func (p *Planner) selectPlanTarget(
+	ctx context.Context,
 	state *planState,
 	workloadKind v1alpha1.WorkloadKind,
 	migratingPod *corev1.Pod,
 	sourceZone string,
 ) {
 	if state.autoTargetNode && len(state.plannedVolumes) > 0 {
+		// Filter candidates by the recreated Pod's own placement constraints
+		// so auto-selection never proposes a node the finished plan rejects.
+		var placement func(nodeName string) bool
+		if migratingPod != nil {
+			spec := *migratingPod.Spec.DeepCopy()
+			placement = newRecreationPlacementFilter(
+				ctx, p.client, migratingPod, spec,
+			)
+		}
+
 		state.targetNode = p.selectTargetNodeFromNodesWithZone(
 			state.plan,
 			workloadKind,
@@ -34,6 +45,7 @@ func (p *Planner) selectPlanTarget(
 			state.inventory.nodes,
 			state.inventory.nodesErr,
 			sourceZone,
+			placement,
 		)
 		if state.targetNode != nil {
 			state.options.TargetNode = state.targetNode.Name
@@ -319,8 +331,13 @@ func (p *Planner) selectTargetNodeFromNodes(
 		nodes,
 		err,
 		"",
+		nil,
 	)
 }
+
+// placementFilter reports whether a candidate node satisfies the recreated
+// Pod's pod-level placement constraints; nil accepts every node.
+type placementFilter func(nodeName string) bool
 
 func (p *Planner) selectTargetNodeFromNodesWithZone(
 	plan checkRecorder,
@@ -334,6 +351,7 @@ func (p *Planner) selectTargetNodeFromNodesWithZone(
 	nodes []corev1.Node,
 	err error,
 	sourceZone string,
+	placement placementFilter,
 ) *corev1.Node {
 	if len(volumes) == 0 {
 		plan.AddCheck(
@@ -358,6 +376,8 @@ func (p *Planner) selectTargetNodeFromNodesWithZone(
 	}
 
 	candidates := make([]targetNodeCandidate, 0, len(nodes))
+
+	placementRejected := 0
 	for i := range nodes {
 		node := &nodes[i]
 
@@ -372,13 +392,25 @@ func (p *Planner) selectTargetNodeFromNodesWithZone(
 			storageClasses,
 			capacityInventory,
 		)
-		if ok {
-			candidates = append(candidates, candidate)
+		if !ok {
+			continue
 		}
+
+		if placement != nil && !placement(node.Name) {
+			placementRejected++
+
+			continue
+		}
+
+		candidates = append(candidates, candidate)
 	}
 
 	if len(candidates) == 0 {
 		message := "no Ready and schedulable node satisfies Pod scheduling and destination StorageClass topology"
+		if placementRejected > 0 {
+			message += " and the recreated Pod's placement constraints"
+		}
+
 		if capacityInventory != nil && capacityInventory.loaded &&
 			len(capacityInventory.items) > 0 {
 			message += " with sufficient CSI-reported capacity"
@@ -393,6 +425,10 @@ func (p *Planner) selectTargetNodeFromNodesWithZone(
 	selected := candidates[0]
 
 	reasons := []string{"topology-compatible Ready node"}
+	if placement != nil {
+		reasons = append(reasons, "satisfies the recreated Pod's placement constraints")
+	}
+
 	if selected.capacityKnown > 0 {
 		reasons = append(
 			reasons,

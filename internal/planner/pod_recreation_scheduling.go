@@ -24,8 +24,7 @@ func recreationSchedulingIssues(
 	targetNode string,
 	recreatedSpec corev1.PodSpec,
 ) []string {
-	hasAffinity, hasAntiAffinity, hasSpread := placementConstraintKinds(recreatedSpec)
-	if !hasAffinity && !hasAntiAffinity && !hasSpread {
+	if !hasRecreationPlacementConstraints(recreatedSpec) {
 		return nil
 	}
 
@@ -42,11 +41,36 @@ func recreationSchedulingIssues(
 		}
 	}
 
+	return recreationPlacementIssues(
+		ctx, client, sourcePod, otherPods.Items, targetNode, recreatedSpec,
+	)
+}
+
+func hasRecreationPlacementConstraints(recreatedSpec corev1.PodSpec) bool {
+	hasAffinity, hasAntiAffinity, hasSpread := placementConstraintKinds(recreatedSpec)
+
+	return hasAffinity || hasAntiAffinity || hasSpread
+}
+
+// recreationPlacementIssues evaluates the recreated Pod's pod-level placement
+// constraints against a captured Pod layout. The final plan check and
+// target-node auto-selection share it so a node selection can never drift
+// from the constraints the finished plan enforces.
+func recreationPlacementIssues(
+	ctx context.Context,
+	client kubernetes.Interface,
+	sourcePod *corev1.Pod,
+	otherPods []corev1.Pod,
+	targetNode string,
+	recreatedSpec corev1.PodSpec,
+) []string {
+	hasAffinity, hasAntiAffinity, hasSpread := placementConstraintKinds(recreatedSpec)
+
 	issues := make([]string, 0)
 
 	if hasAffinity {
 		issues = append(issues, podAffinityIssuesForRecreation(
-			ctx, client, otherPods.Items, sourcePod, targetNode,
+			ctx, client, otherPods, sourcePod, targetNode,
 			recreatedSpec.Affinity.PodAffinity.
 				RequiredDuringSchedulingIgnoredDuringExecution,
 		)...)
@@ -54,7 +78,7 @@ func recreationSchedulingIssues(
 
 	if hasAntiAffinity {
 		issues = append(issues, podAntiAffinityIssuesForRecreation(
-			ctx, client, otherPods.Items, sourcePod, targetNode,
+			ctx, client, otherPods, sourcePod, targetNode,
 			recreatedSpec.Affinity.PodAntiAffinity.
 				RequiredDuringSchedulingIgnoredDuringExecution,
 		)...)
@@ -62,12 +86,41 @@ func recreationSchedulingIssues(
 
 	if hasSpread {
 		issues = append(issues, topologySpreadIssuesForRecreation(
-			ctx, client, otherPods.Items, sourcePod, targetNode,
+			ctx, client, otherPods, sourcePod, targetNode,
 			recreatedSpec,
 		)...)
 	}
 
 	return issues
+}
+
+// newRecreationPlacementFilter captures the Pod layout once and returns a
+// per-candidate-node predicate for auto-selection, so selection can drop
+// nodes the recreated Pod's own placement constraints would reject instead of
+// proposing a target the finished plan immediately fails. A failed layout
+// capture stays permissive: the fail-closed recreation check in the finished
+// plan remains the authority.
+func newRecreationPlacementFilter(
+	ctx context.Context,
+	client kubernetes.Interface,
+	sourcePod *corev1.Pod,
+	recreatedSpec corev1.PodSpec,
+) func(nodeName string) bool {
+	if !hasRecreationPlacementConstraints(recreatedSpec) {
+		return nil
+	}
+
+	otherPods, err := client.CoreV1().Pods(sourcePod.Namespace).
+		List(ctx, metav1.ListOptions{})
+	if err != nil {
+		return nil
+	}
+
+	return func(nodeName string) bool {
+		return len(recreationPlacementIssues(
+			ctx, client, sourcePod, otherPods.Items, nodeName, recreatedSpec,
+		)) == 0
+	}
 }
 
 func podAffinityIssuesForRecreation(
