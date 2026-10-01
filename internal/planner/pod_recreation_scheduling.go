@@ -257,6 +257,7 @@ func spreadDomainsForConstraint(
 		*constraint.NodeTaintsPolicy == corev1.NodeInclusionPolicyHonor
 
 	eligible = make([]corev1.Node, 0, len(nodes))
+
 	domains = make(map[string]string, len(nodes))
 	for i := range nodes {
 		node := &nodes[i]
@@ -272,6 +273,7 @@ func spreadDomainsForConstraint(
 				break
 			}
 		}
+
 		if missingKey {
 			continue
 		}

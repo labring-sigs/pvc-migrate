@@ -285,15 +285,17 @@ func TestRecreationSchedulingSpreadNodeTaintsPolicy(t *testing.T) {
 		},
 	}
 
-	newCase := func() (*corev1.Pod, *corev1.Pod, *corev1.Pod) {
+	newCase := func() (*corev1.Pod, *corev1.Pod) {
 		sourcePod := podWithLabels("db-0", "node-a", map[string]string{"app": "db"})
 		peer := podOnNode("db-1", "node-a", map[string]string{"app": "db"})
 		sourcePod.Spec.TopologySpreadConstraints = []corev1.TopologySpreadConstraint{constraint}
 
-		return sourcePod, peer, sourcePod
+		return sourcePod, peer
 	}
 
-	tainted := nodeWithLabels("node-tainted", map[string]string{"kubernetes.io/hostname": "node-tainted"})
+	tainted := nodeWithLabels(
+		"node-tainted", map[string]string{"kubernetes.io/hostname": "node-tainted"},
+	)
 	tainted.Spec.Taints = []corev1.Taint{{
 		Key: "node-role.kubernetes.io/control-plane", Effect: corev1.TaintEffectNoSchedule,
 	}}
@@ -307,7 +309,8 @@ func TestRecreationSchedulingSpreadNodeTaintsPolicy(t *testing.T) {
 		{name: "honor excludes untolerated domain", honorTaint: true, wantIssue: false},
 	} {
 		t.Run(testCase.name, func(t *testing.T) {
-			sourcePod, peer, _ := newCase()
+			sourcePod, peer := newCase()
+
 			spec := *sourcePod.Spec.DeepCopy()
 			if testCase.honorTaint {
 				honored := constraint
@@ -401,6 +404,7 @@ func TestRecreationSchedulingSpreadMinDomains(t *testing.T) {
 			if testCase.setField {
 				constraint.MinDomains = &minDomains
 			}
+
 			sourcePod.Spec.TopologySpreadConstraints = []corev1.TopologySpreadConstraint{constraint}
 
 			client := newSchedulingFake(t,
