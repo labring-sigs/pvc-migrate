@@ -63,7 +63,7 @@ func recreationSchedulingIssues(
 	if hasSpread {
 		issues = append(issues, topologySpreadIssuesForRecreation(
 			ctx, client, otherPods.Items, sourcePod, targetNode,
-			recreatedSpec.TopologySpreadConstraints,
+			recreatedSpec,
 		)...)
 	}
 
@@ -182,15 +182,36 @@ func topologySpreadIssuesForRecreation(
 	otherPods []corev1.Pod,
 	sourcePod *corev1.Pod,
 	targetNode string,
-	constraints []corev1.TopologySpreadConstraint,
+	recreatedSpec corev1.PodSpec,
 ) []string {
-	issues := make([]string, 0)
-
-	for _, constraint := range constraints {
-		if constraint.WhenUnsatisfiable != corev1.DoNotSchedule {
-			continue
+	hard := make([]corev1.TopologySpreadConstraint, 0, len(recreatedSpec.TopologySpreadConstraints))
+	for _, constraint := range recreatedSpec.TopologySpreadConstraints {
+		if constraint.WhenUnsatisfiable == corev1.DoNotSchedule {
+			hard = append(hard, constraint)
 		}
+	}
 
+	if len(hard) == 0 {
+		return nil
+	}
+
+	// kube-scheduler evaluates skew over the eligible domains of the whole
+	// cluster, including domains that currently hold zero matching Pods.
+	// Counting only the domains of matching Pods hides empty domains, lets a
+	// violating placement pass planning, and leaves the recreated Pod
+	// unschedulable after cutover.
+	nodes, err := client.CoreV1().Nodes().List(ctx, metav1.ListOptions{})
+	if err != nil {
+		return []string{
+			fmt.Sprintf(
+				"topologySpread constraints depend on the cluster's eligible topology domains during recreation (cannot list Nodes: %v)",
+				err,
+			),
+		}
+	}
+
+	issues := make([]string, 0)
+	for _, constraint := range hard {
 		selector, selErr := metav1.LabelSelectorAsSelector(constraint.LabelSelector)
 		if selErr != nil {
 			issues = append(issues, fmt.Sprintf(
@@ -201,14 +222,75 @@ func topologySpreadIssuesForRecreation(
 			continue
 		}
 
+		eligible, domains := spreadDomainsForConstraint(nodes.Items, recreatedSpec, constraint)
+
 		if issue := topologySpreadSkewIssue(
-			ctx, client, otherPods, sourcePod, targetNode, constraint, selector,
+			ctx, client, otherPods, sourcePod, targetNode,
+			constraint, selector, eligible, domains,
 		); issue != "" {
 			issues = append(issues, issue)
 		}
 	}
 
 	return issues
+}
+
+// spreadDomainsForConstraint mirrors kube-scheduler's eligible-domain set:
+// a node counts only when it carries every declared constraint's topologyKey
+// (the scheduler bypasses nodes missing any of them), satisfies the recreated
+// Pod's nodeSelector and required nodeAffinity (nodeAffinityPolicy defaults
+// to Honor), and — only when the constraint opts in with nodeTaintsPolicy
+// Honor, whose default is Ignore — tolerates the node's hard taints.
+func spreadDomainsForConstraint(
+	nodes []corev1.Node,
+	recreatedSpec corev1.PodSpec,
+	constraint corev1.TopologySpreadConstraint,
+) (eligible []corev1.Node, domains map[string]string) {
+	requiredKeys := make([]string, 0, len(recreatedSpec.TopologySpreadConstraints))
+	for _, other := range recreatedSpec.TopologySpreadConstraints {
+		if other.TopologyKey != "" {
+			requiredKeys = append(requiredKeys, other.TopologyKey)
+		}
+	}
+
+	honorTaints := constraint.NodeTaintsPolicy != nil &&
+		*constraint.NodeTaintsPolicy == corev1.NodeInclusionPolicyHonor
+
+	eligible = make([]corev1.Node, 0, len(nodes))
+
+	domains = make(map[string]string, len(nodes))
+	for i := range nodes {
+		node := &nodes[i]
+
+		if node.Labels[constraint.TopologyKey] == "" {
+			continue
+		}
+
+		missingKey := false
+		for _, key := range requiredKeys {
+			if node.Labels[key] == "" {
+				missingKey = true
+				break
+			}
+		}
+
+		if missingKey {
+			continue
+		}
+
+		if !nodeMatchesPodNodeAffinity(recreatedSpec, node) {
+			continue
+		}
+
+		if honorTaints && !nodeToleratesHardTaints(recreatedSpec, node) {
+			continue
+		}
+
+		eligible = append(eligible, *node)
+		domains[node.Name] = node.Labels[constraint.TopologyKey]
+	}
+
+	return eligible, domains
 }
 
 func topologySpreadSkewIssue(
@@ -219,28 +301,56 @@ func topologySpreadSkewIssue(
 	targetNode string,
 	constraint corev1.TopologySpreadConstraint,
 	selector labels.Selector,
+	eligibleNodes []corev1.Node,
+	nodeDomains map[string]string,
 ) string {
-	counts := map[string]int{}
+	domainOf := func(nodeName string) string {
+		if value := nodeDomains[nodeName]; value != "" {
+			return value
+		}
+
+		// A Pod on a node outside the eligible set still occupies its domain;
+		// kube-scheduler counts those Pods even though the domain is not a
+		// placement candidate, so the maximum must include them.
+		return nodeTopologyValue(ctx, client, nodeName, constraint.TopologyKey)
+	}
+
+	counts := make(map[string]int, len(nodeDomains))
+	for _, node := range eligibleNodes {
+		counts[nodeDomains[node.Name]] = 0
+	}
+
 	for _, other := range otherPods {
 		if other.Name == sourcePod.Name || !selector.Matches(labels.Set(other.Labels)) {
 			continue
 		}
 
-		domain := nodeTopologyValue(ctx, client, other.Spec.NodeName, constraint.TopologyKey)
-		counts[domain]++
+		counts[domainOf(other.Spec.NodeName)]++
 	}
 
-	targetDomain := nodeTopologyValue(ctx, client, targetNode, constraint.TopologyKey)
+	targetDomain := domainOf(targetNode)
 	counts[targetDomain]++ // the recreated Pod lands in the target domain
 
-	minCount := -1
+	// minDomains semantics: below the threshold the global minimum is treated
+	// as zero, exactly like the scheduler's own calculation.
+	minDomains := 1
+	if constraint.MinDomains != nil && *constraint.MinDomains > 1 {
+		minDomains = int(*constraint.MinDomains)
+	}
+
+	minCount := 0
+	if minDomains <= 1 || len(nodeDomains) >= minDomains {
+		minCount = -1
+
+		for _, count := range counts {
+			if minCount == -1 || count < minCount {
+				minCount = count
+			}
+		}
+	}
 
 	maxCount := -1
 	for _, count := range counts {
-		if minCount == -1 || count < minCount {
-			minCount = count
-		}
-
 		if count > maxCount {
 			maxCount = count
 		}
@@ -263,6 +373,51 @@ func topologySpreadSkewIssue(
 	}
 
 	return ""
+}
+
+// nodeMatchesPodNodeAffinity reports whether the node satisfies the spec's
+// nodeSelector and required nodeAffinity — the node-level constraints whose
+// default nodeAffinityPolicy Honor restricts eligible spread domains.
+func nodeMatchesPodNodeAffinity(spec corev1.PodSpec, node *corev1.Node) bool {
+	for key, expected := range spec.NodeSelector {
+		if node.Labels[key] != expected {
+			return false
+		}
+	}
+
+	if affinity := spec.Affinity; affinity != nil && affinity.NodeAffinity != nil &&
+		affinity.NodeAffinity.RequiredDuringSchedulingIgnoredDuringExecution != nil {
+		selector := affinity.NodeAffinity.RequiredDuringSchedulingIgnoredDuringExecution
+
+		matched := false
+		for _, term := range selector.NodeSelectorTerms {
+			if nodeSelectorTermMatches(term, node) {
+				matched = true
+				break
+			}
+		}
+
+		if !matched {
+			return false
+		}
+	}
+
+	return true
+}
+
+func nodeToleratesHardTaints(spec corev1.PodSpec, node *corev1.Node) bool {
+	for _, taint := range node.Spec.Taints {
+		if taint.Effect != corev1.TaintEffectNoSchedule &&
+			taint.Effect != corev1.TaintEffectNoExecute {
+			continue
+		}
+
+		if !tolerates(spec.Tolerations, taint) {
+			return false
+		}
+	}
+
+	return true
 }
 
 // placementConstraintKinds reports which scheduling constraint families the
