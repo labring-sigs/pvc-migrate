@@ -129,6 +129,30 @@ func (r *rootState) loadReservationWithBackend(
 	}
 
 	if !accepted {
+		// A graduated reservation is replaced in place by its copy record,
+		// so the reserve family can no longer address it; name the family
+		// that owns the closure instead of reporting a bare kind mismatch.
+		switch object.(type) {
+		case *v1alpha1.Copy:
+			return nil, "", domain.NewError(
+				domain.ErrorValidation,
+				"reserve",
+				fmt.Sprintf(
+					"session %s graduated to a copy; close it with the copy cleanup family",
+					id,
+				),
+			)
+		case *v1alpha1.ClusterCopy:
+			return nil, "", domain.NewError(
+				domain.ErrorValidation,
+				"reserve",
+				fmt.Sprintf(
+					"session %s graduated to a cluster copy; close it with the cluster-copy cleanup family",
+					id,
+				),
+			)
+		}
+
 		return nil, "", domain.NewError(
 			domain.ErrorValidation,
 			"reserve",
