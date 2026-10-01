@@ -81,11 +81,11 @@ Session families expose the lifecycle verbs each workflow supports (`status`, `r
 
 ## Quick start
 
-Offline migration in one namespace (every mutating command defaults to dry-run):
+Offline migration in one namespace (every mutating command defaults to dry-run). A namespaced offline migration needs a destination PVC name distinct from the source — the planner rejects a same-name destination in the source namespace; `rename` changes names in place afterwards:
 
 ```bash
 pvc-migrate --yes migrate --dry-run=false -n application \
-  --source-pvc database-data --destination-pvc database-data \
+  --source-pvc database-data --destination-pvc database-data-fast \
   --destination-storage-class fast-local
 ```
 
@@ -104,7 +104,7 @@ Controller workflow: create, observe, then finalize cleanup:
 
 ```bash
 pvc-migrate --yes cr migrate create -n application \
-  --source-pvc data --destination-pvc data
+  --source-pvc data --destination-pvc data-fast
 pvc-migrate cr migrate watch data-migration -n application
 pvc-migrate --yes cr migrate cleanup data-migration -n application --dry-run=false
 ```

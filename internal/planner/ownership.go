@@ -286,7 +286,6 @@ func persistedOwnerGuidance(session *kube.WorkflowOwner, presentation domain.Pre
 		}
 	case domain.PhaseReserved:
 		if session.Resource.Type == domain.SessionTypeReserve {
-			args := retainedCleanupArgs(session, workflow)
 			// A cluster-scoped reservation graduates through the
 			// cluster-copy family; the namespaced copy command cannot see
 			// its record.
@@ -295,8 +294,15 @@ func persistedOwnerGuidance(session *kube.WorkflowOwner, presentation domain.Pre
 				copyFamily = "cluster-copy"
 			}
 
+			// The graduation replaces the reservation record with the copy,
+			// so the closure that follows the executed copy must address the
+			// copy family; the reservation cleanup only works while no copy
+			// has graduated.
+			graduatedArgs := retainedCleanupArgs(session, copyFamily)
+			reservationArgs := retainedCleanupArgs(session, workflow)
+
 			return fmt.Sprintf(
-				"%s; validate copy with `%s %s --session %s`, then execute `%s %s --session %s --dry-run=false`; close the reservation by validating `%s %s`, then executing `%s %s --dry-run=false`",
+				"%s; validate copy with `%s %s --session %s`, then execute `%s %s --session %s --dry-run=false`; close the graduated record by validating `%s %s`, then executing `%s %s --dry-run=false`; before any copy executes, the reservation instead closes by validating `%s %s`, then executing `%s %s --dry-run=false`",
 				status,
 				base,
 				copyFamily,
@@ -305,9 +311,13 @@ func persistedOwnerGuidance(session *kube.WorkflowOwner, presentation domain.Pre
 				copyFamily,
 				session.ID,
 				base,
-				args,
+				graduatedArgs,
 				executeBase,
-				args,
+				graduatedArgs,
+				base,
+				reservationArgs,
+				executeBase,
+				reservationArgs,
 			)
 		}
 	case domain.PhaseFailed:

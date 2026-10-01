@@ -179,8 +179,41 @@ func TestOwnershipWarmCopiedGuidanceCoversCompletedCopy(t *testing.T) {
 	reservation.Phase = domain.PhaseReserved
 
 	promotion := persistedOwnerGuidance(reservation, domain.PresentationCLI)
-	if !strings.Contains(promotion, "validate copy with") ||
-		!strings.Contains(promotion, "close the reservation") {
+	if !strings.Contains(promotion, "validate copy with") {
 		t.Fatalf("reserved promotion guidance: %s", promotion)
+	}
+
+	// The graduation replaces the reservation record with the copy, so the
+	// closure printed after the executed copy must address the copy family;
+	// the reservation cleanup remains the pre-graduation alternative.
+	if !strings.Contains(
+		promotion,
+		"close the graduated record by validating `pvc-migrate copy cleanup owner-session --unused-storage-policy Keep --finalize --delete-session`",
+	) {
+		t.Fatalf("graduated closure must use the copy family: %s", promotion)
+	}
+
+	if !strings.Contains(
+		promotion,
+		"the reservation instead closes by validating `pvc-migrate reserve cleanup owner-session --unused-storage-policy Keep --finalize --delete-session`",
+	) {
+		t.Fatalf("pre-graduation closure must stay available: %s", promotion)
+	}
+}
+
+// TestOwnershipClusterReservedGraduationGuidance keeps the cluster family on
+// cluster-copy for both the graduation and its closure.
+func TestOwnershipClusterReservedGraduationGuidance(t *testing.T) {
+	owner := ownershipFixture(t, domain.SessionTypeReserve)
+	owner.Phase = domain.PhaseReserved
+	owner.Resource.Cluster = true
+
+	guidance := persistedOwnerGuidance(owner, domain.PresentationCLI)
+	if !strings.Contains(guidance, "cluster-copy --session owner-session") ||
+		!strings.Contains(
+			guidance,
+			"close the graduated record by validating `pvc-migrate cluster-copy cleanup owner-session",
+		) {
+		t.Fatalf("cluster graduation guidance: %s", guidance)
 	}
 }
