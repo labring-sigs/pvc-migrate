@@ -102,18 +102,23 @@ func (p *PVMigrate) Copy(ctx context.Context, request CopyRequest, progress Prog
 			Path:           transferEnginePath(request.Destination.Path),
 		},
 		DeleteExtraneousFiles: request.Policy.DeleteExtraneousFiles,
-		IgnoreMounted:         request.Mode == ModeWarm,
-		SourceMountReadWrite:  request.Source.MountReadWrite,
-		NoCompress:            !request.Policy.Compress,
-		NoCleanupOnFailure:    false,
-		IgnoreSizes:           request.Policy.IgnoreSizes,
-		ShowProgressBar:       false,
-		RsyncExtraArgs:        rsyncArgs,
-		Strategies:            strategies,
-		HelmTimeout:           request.Runtime.HelmTimeout,
-		HelmValues:            helmValues,
-		HelmStringValues:      append(imageValues, request.Runtime.HelmStringValues...),
-		Writer:                request.Runtime.Writer,
+		// The engine's own guards own the mounted-source decision per mode:
+		// warm passes intentionally run against mounted sources, and final
+		// syncs run after the source is quiesced, where the library's
+		// mounted signal is only a stale node binding or a terminal Pod.
+		// Leaving the decision to the library turns both into hard failures.
+		IgnoreMounted:        true,
+		SourceMountReadWrite: request.Source.MountReadWrite,
+		NoCompress:           !request.Policy.Compress,
+		NoCleanupOnFailure:   false,
+		IgnoreSizes:          request.Policy.IgnoreSizes,
+		ShowProgressBar:      false,
+		RsyncExtraArgs:       rsyncArgs,
+		Strategies:           strategies,
+		HelmTimeout:          request.Runtime.HelmTimeout,
+		HelmValues:           helmValues,
+		HelmStringValues:     append(imageValues, request.Runtime.HelmStringValues...),
+		Writer:               request.Runtime.Writer,
 		Logger: loggerWithDestinationNoSpaceDetection(
 			request.Runtime.Logger,
 			detector,
@@ -240,7 +245,9 @@ func classifyRunError(
 		return domain.WrapError(domain.ErrorTimeout, "copy PVC", message+": canceled", err)
 	}
 
-	return domain.WrapError(domain.ErrorCopy, "copy PVC", message, err)
+	// Domain errors render only their own message; the engine's root cause
+	// must be embedded here or operators see a bare "operation failed".
+	return domain.WrapError(domain.ErrorCopy, "copy PVC", message+": "+err.Error(), err)
 }
 
 type destinationNoSpaceError struct {
