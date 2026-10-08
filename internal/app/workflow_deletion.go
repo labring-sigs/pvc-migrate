@@ -19,6 +19,14 @@ func workflowDeletionInProgress(ctx context.Context) bool {
 	return ctx.Value(workflowDeletionContextKey{}) == true
 }
 
+// deletingWorkflow reports whether a workflow resource is converging to
+// deletion. Finalization executes the recorded plan alone, so spec-derived
+// validation is skipped for deleting workflows: a spec mutated after execution
+// started must not wedge the finalizer. Rename and Move follow the same rule.
+func deletingWorkflow(object metav1.Object) bool {
+	return object.GetDeletionTimestamp() != nil
+}
+
 // sourceTermination names a planned source PVC whose deletion was requested
 // but has not settled. The claim still carries its identity, yet the
 // deletionTimestamp is immutable, so the deletion can no longer be cancelled.

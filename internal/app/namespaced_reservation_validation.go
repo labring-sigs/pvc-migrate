@@ -31,8 +31,10 @@ func validateReservationObject(object *v1alpha1.Reservation) error {
 		return invalid("planned reservation requires a lifecycle phase and volumes")
 	}
 
-	if err := domain.ValidateUnusedStoragePolicy(object.Spec.UnusedStoragePolicy); err != nil {
-		return err
+	if !deletingWorkflow(object) {
+		if err := domain.ValidateUnusedStoragePolicy(object.Spec.UnusedStoragePolicy); err != nil {
+			return err
+		}
 	}
 
 	if err := domain.ValidateUnusedStoragePolicy(plan.UnusedStoragePolicy); err != nil {
@@ -48,12 +50,14 @@ func validateReservationObject(object *v1alpha1.Reservation) error {
 		return err
 	}
 
-	for _, request := range object.Spec.Volumes {
-		volume, exists := volumes[request.SourcePVC.Name]
-		if !exists || !reservationReferenceMatches(request.SourcePVC, volume.SourcePVC) ||
-			(request.SourcePV != nil && !reservationReferenceMatches(*request.SourcePV, volume.SourcePV)) ||
-			(request.DestinationPVC != nil && !reservationReferenceMatches(*request.DestinationPVC, volume.DestinationPVC)) {
-			return invalid("planned volume does not satisfy the requested identity")
+	if !deletingWorkflow(object) {
+		for _, request := range object.Spec.Volumes {
+			volume, exists := volumes[request.SourcePVC.Name]
+			if !exists || !reservationReferenceMatches(request.SourcePVC, volume.SourcePVC) ||
+				(request.SourcePV != nil && !reservationReferenceMatches(*request.SourcePV, volume.SourcePV)) ||
+				(request.DestinationPVC != nil && !reservationReferenceMatches(*request.DestinationPVC, volume.DestinationPVC)) {
+				return invalid("planned volume does not satisfy the requested identity")
+			}
 		}
 	}
 

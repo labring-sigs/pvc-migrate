@@ -15,8 +15,10 @@ func validateMigrationObject(object *v1alpha1.Migration) error {
 		return err
 	}
 
-	if err := domain.ValidateUnusedStoragePolicy(object.Spec.UnusedStoragePolicy); err != nil {
-		return err
+	if !deletingWorkflow(object) {
+		if err := domain.ValidateUnusedStoragePolicy(object.Spec.UnusedStoragePolicy); err != nil {
+			return err
+		}
 	}
 
 	phase := workflowResumePhase(object.Status.WorkflowStatus)
@@ -48,8 +50,10 @@ func validateMigrationObject(object *v1alpha1.Migration) error {
 		return err
 	}
 
-	if err := validateMigrationRequestedVolumes(object.Spec.Volumes, volumes); err != nil {
-		return err
+	if !deletingWorkflow(object) {
+		if err := validateMigrationRequestedVolumes(object.Spec.Volumes, volumes); err != nil {
+			return err
+		}
 	}
 
 	if len(object.Status.Volumes) == 0 &&

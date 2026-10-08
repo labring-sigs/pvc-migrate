@@ -29,8 +29,7 @@ func validateCopyObject(object *v1alpha1.Copy) error {
 		return nil
 	}
 
-	if object.Status.Phase == "" || len(plan.Volumes) == 0 ||
-		plan.Online != object.Spec.Online {
+	if object.Status.Phase == "" || len(plan.Volumes) == 0 {
 		return invalid("copy plan must match its spec and contain resolved volumes")
 	}
 
@@ -38,10 +37,16 @@ func validateCopyObject(object *v1alpha1.Copy) error {
 		return err
 	}
 
-	if err := domain.ValidateUnusedStoragePolicy(
-		object.Spec.UnusedStoragePolicy,
-	); err != nil {
-		return err
+	if !deletingWorkflow(object) {
+		if plan.Online != object.Spec.Online {
+			return invalid("copy plan must match its spec and contain resolved volumes")
+		}
+
+		if err := domain.ValidateUnusedStoragePolicy(
+			object.Spec.UnusedStoragePolicy,
+		); err != nil {
+			return err
+		}
 	}
 
 	volumes, err := validateReservationVolumes(
@@ -53,8 +58,10 @@ func validateCopyObject(object *v1alpha1.Copy) error {
 		return err
 	}
 
-	if err := validateCopyRequestedVolumes(object.Spec.Volumes, volumes); err != nil {
-		return err
+	if !deletingWorkflow(object) {
+		if err := validateCopyRequestedVolumes(object.Spec.Volumes, volumes); err != nil {
+			return err
+		}
 	}
 
 	if object.Status.SourceNode != "" && plan.SourceNode != "" &&
