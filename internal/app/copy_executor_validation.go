@@ -30,10 +30,7 @@ func validateClusterCopyObject(object *v1alpha1.ClusterCopy) error {
 	}
 
 	if object.Status.Phase == "" || len(plan.Volumes) == 0 || plan.SourceNamespace == "" ||
-		plan.DestinationNamespace == "" ||
-		plan.SourceNamespace != object.Spec.SourceNamespace ||
-		plan.DestinationNamespace != object.Spec.DestinationNamespace ||
-		plan.Online != object.Spec.Online {
+		plan.DestinationNamespace == "" {
 		return invalid("copy plan must match its spec and contain resolved volumes")
 	}
 
@@ -41,8 +38,16 @@ func validateClusterCopyObject(object *v1alpha1.ClusterCopy) error {
 		return err
 	}
 
-	if err := domain.ValidateUnusedStoragePolicy(object.Spec.UnusedStoragePolicy); err != nil {
-		return err
+	if !deletingWorkflow(object) {
+		if plan.SourceNamespace != object.Spec.SourceNamespace ||
+			plan.DestinationNamespace != object.Spec.DestinationNamespace ||
+			plan.Online != object.Spec.Online {
+			return invalid("copy plan must match its spec and contain resolved volumes")
+		}
+
+		if err := domain.ValidateUnusedStoragePolicy(object.Spec.UnusedStoragePolicy); err != nil {
+			return err
+		}
 	}
 
 	volumes, err := validateReservationVolumes(
@@ -54,8 +59,10 @@ func validateClusterCopyObject(object *v1alpha1.ClusterCopy) error {
 		return err
 	}
 
-	if err := validateCopyRequestedVolumes(object.Spec.Volumes, volumes); err != nil {
-		return err
+	if !deletingWorkflow(object) {
+		if err := validateCopyRequestedVolumes(object.Spec.Volumes, volumes); err != nil {
+			return err
+		}
 	}
 
 	if object.Status.SourceNode != "" && plan.SourceNode != "" &&

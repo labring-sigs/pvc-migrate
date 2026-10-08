@@ -58,8 +58,10 @@ func validateClusterMigrationObject(object *v1alpha1.ClusterMigration) error {
 		return err
 	}
 
-	if err := domain.ValidateUnusedStoragePolicy(object.Spec.UnusedStoragePolicy); err != nil {
-		return err
+	if !deletingWorkflow(object) {
+		if err := domain.ValidateUnusedStoragePolicy(object.Spec.UnusedStoragePolicy); err != nil {
+			return err
+		}
 	}
 
 	plan := object.Status.Plan
@@ -78,8 +80,10 @@ func validateClusterMigrationObject(object *v1alpha1.ClusterMigration) error {
 		return invalid("migration plan requires volumes and a lifecycle phase")
 	}
 
-	if err := validateMigrationPlanNamespaces(object.Spec, plan); err != nil {
-		return err
+	if !deletingWorkflow(object) {
+		if err := validateMigrationPlanNamespaces(object.Spec, plan); err != nil {
+			return err
+		}
 	}
 
 	if err := domain.ValidateUnusedStoragePolicy(plan.UnusedStoragePolicy); err != nil {
@@ -95,8 +99,10 @@ func validateClusterMigrationObject(object *v1alpha1.ClusterMigration) error {
 		return err
 	}
 
-	if err := validateMigrationRequestedVolumes(object.Spec.Volumes, volumes); err != nil {
-		return err
+	if !deletingWorkflow(object) {
+		if err := validateMigrationRequestedVolumes(object.Spec.Volumes, volumes); err != nil {
+			return err
+		}
 	}
 
 	return validateMigrationCheckpoints(

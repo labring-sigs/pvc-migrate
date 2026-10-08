@@ -17,11 +17,17 @@ func validatePodMigrationObject(object *v1alpha1.PodMigration) error {
 		return err
 	}
 
-	if err := domain.ValidateUnusedStoragePolicy(object.Spec.UnusedStoragePolicy); err != nil {
-		return err
+	if !deletingWorkflow(object) {
+		if err := domain.ValidateUnusedStoragePolicy(object.Spec.UnusedStoragePolicy); err != nil {
+			return err
+		}
+
+		if object.Spec.PrecopyPasses < 0 {
+			return invalid("precopy passes and completed passes cannot be negative")
+		}
 	}
 
-	if object.Spec.PrecopyPasses < 0 || object.Status.WarmPassesCompleted < 0 {
+	if object.Status.WarmPassesCompleted < 0 {
 		return invalid("precopy passes and completed passes cannot be negative")
 	}
 
@@ -43,15 +49,17 @@ func validatePodMigrationObject(object *v1alpha1.PodMigration) error {
 		return invalid("pod migration plan requires volumes and a lifecycle phase")
 	}
 
-	if plan.PrecopyPasses != object.Spec.PrecopyPasses {
-		return invalid("pod migration plan must preserve the requested precopy passes")
+	if !deletingWorkflow(object) {
+		if plan.PrecopyPasses != object.Spec.PrecopyPasses {
+			return invalid("pod migration plan must preserve the requested precopy passes")
+		}
+
+		if err := validatePodMigrationWorkload(object.Spec.Pod, plan.Workload); err != nil {
+			return err
+		}
 	}
 
 	if err := domain.ValidateUnusedStoragePolicy(plan.UnusedStoragePolicy); err != nil {
-		return err
-	}
-
-	if err := validatePodMigrationWorkload(object.Spec.Pod, plan.Workload); err != nil {
 		return err
 	}
 
@@ -72,8 +80,10 @@ func validatePodMigrationObject(object *v1alpha1.PodMigration) error {
 		return err
 	}
 
-	if err := validatePodMigrationOverrides(object.Spec.Volumes, volumes); err != nil {
-		return err
+	if !deletingWorkflow(object) {
+		if err := validatePodMigrationOverrides(object.Spec.Volumes, volumes); err != nil {
+			return err
+		}
 	}
 
 	if err := validatePodSharedMountCheckpoints(
