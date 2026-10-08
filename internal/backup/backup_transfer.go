@@ -129,7 +129,7 @@ func (b *backupTransfer) run(
 					retErr,
 					wrapBackupTargetLockError(
 						b.store.Destination(),
-						"backup target lock ownership was lost",
+						"backup target lock ownership was lost: "+lockErr.Error(),
 						lockErr,
 					),
 				)

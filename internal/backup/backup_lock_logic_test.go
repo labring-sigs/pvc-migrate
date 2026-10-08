@@ -103,6 +103,33 @@ func TestClassifyLeaseError(t *testing.T) {
 
 type testBackupSessionLocker struct{ lock kube.SessionLock }
 
+// TestLeaseAbortMessagesSurfaceReason pins that lock-loss aborts explain why
+// the lease ended: domain errors render only their own message, so the
+// renewal failure must be embedded or operators see a bare "ownership was
+// lost" with no diagnostic.
+func TestLeaseAbortMessagesSurfaceReason(t *testing.T) {
+	renewal := domain.WrapError(
+		domain.ErrorPrecondition,
+		"S3 lock",
+		"read lock before renewal failed: connection reset by peer",
+		errors.New("connection reset by peer"),
+	)
+
+	leaseErrors := make(chan error, 1)
+	leaseErrors <- renewal
+
+	got := checkObjectStoreLease(context.Background(), leaseErrors)
+	if !strings.Contains(got.Error(), "ownership was lost") ||
+		!strings.Contains(got.Error(), "connection reset by peer") {
+		t.Fatalf("lock-loss message hides the renewal failure: %v", got)
+	}
+
+	deadline := classifyLeaseError(context.Background(), context.DeadlineExceeded)
+	if !strings.Contains(deadline.Error(), "context deadline exceeded") {
+		t.Fatalf("lease-end message hides the cause: %v", deadline)
+	}
+}
+
 func (l testBackupSessionLocker) AcquireSessionLock(
 	context.Context,
 	string,

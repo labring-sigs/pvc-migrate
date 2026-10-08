@@ -813,7 +813,16 @@ func (s *Store) AcquireLock(ctx context.Context, holder string, ttl time.Duratio
 			)
 		}
 
-		return "", wrapS3Error(ctx, domain.ErrorConflict, "S3 lock", "acquire backup lock", getErr)
+		// The read explains a failed conditional write; a transport failure
+		// here says nothing about ownership, so it must not read as
+		// contention.
+		return "", wrapS3Error(
+			ctx,
+			domain.ErrorPrecondition,
+			"S3 lock",
+			"acquire backup lock",
+			getErr,
+		)
 	}
 
 	if current == nil {
@@ -840,13 +849,15 @@ func (s *Store) AcquireLock(ctx context.Context, holder string, ttl time.Duratio
 
 	output, err = s.client.PutObject(ctx, input)
 	if err != nil {
-		return "", wrapS3Error(
-			ctx,
-			domain.ErrorConflict,
-			"S3 lock",
-			"replace expired backup lock",
-			err,
-		)
+		// A conditional-write rejection means another holder raced the
+		// replacement of the expired lock; anything else is backend
+		// unavailability, which is retryable rather than contention.
+		category := domain.ErrorPrecondition
+		if isConditionalWriteFailure(err) {
+			category = domain.ErrorConflict
+		}
+
+		return "", wrapS3Error(ctx, category, "S3 lock", "replace expired backup lock", err)
 	}
 
 	newETag := aws.ToString(output.ETag)
