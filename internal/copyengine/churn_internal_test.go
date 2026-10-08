@@ -3,6 +3,7 @@ package copyengine
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 
 	v1alpha1 "github.com/labring-sigs/pvc-migrate/api/v1alpha1"
@@ -88,5 +89,24 @@ func TestCopyToleratesLiveSourceChurnOnlyWhenRequested(t *testing.T) {
 				t.Fatalf("churn must be tolerated: %v", err)
 			}
 		})
+	}
+}
+
+// TestClassifyRunErrorSurfacesRootCause pins that the engine failure text
+// reaches operators: domain errors render only their own message, so the
+// underlying cause must be embedded or a failed copy shows a bare
+// "operation failed" with no diagnostic.
+func TestClassifyRunErrorSurfacesRootCause(t *testing.T) {
+	cause := errors.New(
+		"PVC is mounted to a node and --ignore-mounted is not requested: node: node-a claim data",
+	)
+
+	err := classifyRunError(context.Background(), "pm-op", cause, false)
+	if !strings.Contains(err.Error(), "--ignore-mounted is not requested") {
+		t.Fatalf("root cause missing from classified error: %v", err)
+	}
+
+	if domain.CategoryOf(err) != domain.ErrorCopy {
+		t.Fatalf("category=%s, want copy", domain.CategoryOf(err))
 	}
 }

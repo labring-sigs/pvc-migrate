@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/tls"
 	"crypto/x509"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -428,6 +429,10 @@ func TestS3OperationsPreserveTimeoutCategory(t *testing.T) {
 			_, err := store.AcquireLock(ctx, "holder", time.Minute)
 			return err
 		},
+		"renew": func() error {
+			_, err := store.RenewLock(ctx, "holder", "etag", time.Minute)
+			return err
+		},
 		"release": func() error {
 			return store.ReleaseLock(ctx, "etag")
 		},
@@ -594,6 +599,128 @@ func TestLockReleaseRejectsStaleETag(t *testing.T) {
 		store.ReleaseLock(context.Background(), first),
 	); category != domain.ErrorConflict {
 		t.Fatalf("stale release category=%s, want conflict", category)
+	}
+}
+
+type putObjectErrorS3 struct {
+	API
+	err error
+}
+
+func (s putObjectErrorS3) PutObject(
+	context.Context,
+	*s3.PutObjectInput,
+	...func(*s3.Options),
+) (*s3.PutObjectOutput, error) {
+	return nil, s.err
+}
+
+type deleteObjectErrorS3 struct {
+	API
+	err error
+}
+
+func (s deleteObjectErrorS3) DeleteObject(
+	context.Context,
+	*s3.DeleteObjectInput,
+	...func(*s3.Options),
+) (*s3.DeleteObjectOutput, error) {
+	return nil, s.err
+}
+
+// Transport failures during renewal and release must stay retryable
+// preconditions: classifying them as conflicts would make the renewal loop
+// abandon a healthy transfer on the first backend blip and turn completed
+// backups into failures when the lock delete does not go through.
+func TestLockRenewalAndReleaseTransportFailuresStayRetryable(t *testing.T) {
+	ctx := context.Background()
+	transport := errors.New("connection reset by peer")
+
+	client := newFakeS3()
+
+	etag, err := newTestStore(t, client).AcquireLock(ctx, "holder", time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	t.Run("renewal read failure", func(t *testing.T) {
+		store := newTestStore(t, getObjectErrorS3{API: client, err: transport})
+		if _, err := store.RenewLock(
+			ctx,
+			"holder",
+			etag,
+			time.Minute,
+		); domain.CategoryOf(
+			err,
+		) != domain.ErrorPrecondition {
+			t.Fatalf("category=%s, want precondition", domain.CategoryOf(err))
+		}
+	})
+
+	t.Run("renewal write failure", func(t *testing.T) {
+		store := newTestStore(t, putObjectErrorS3{API: client, err: transport})
+		if _, err := store.RenewLock(
+			ctx,
+			"holder",
+			etag,
+			time.Minute,
+		); domain.CategoryOf(
+			err,
+		) != domain.ErrorPrecondition {
+			t.Fatalf("category=%s, want precondition", domain.CategoryOf(err))
+		}
+	})
+
+	t.Run("release failure", func(t *testing.T) {
+		store := newTestStore(t, deleteObjectErrorS3{API: client, err: transport})
+		if err := store.ReleaseLock(ctx, etag); domain.CategoryOf(err) != domain.ErrorPrecondition {
+			t.Fatalf("category=%s, want precondition", domain.CategoryOf(err))
+		}
+	})
+
+	t.Run("renewal fenced by concurrent write", func(t *testing.T) {
+		fenced := &smithy.GenericAPIError{Code: "PreconditionFailed", Message: "etag changed"}
+
+		store := newTestStore(t, putObjectErrorS3{API: client, err: fenced})
+		if _, err := store.RenewLock(
+			ctx,
+			"holder",
+			etag,
+			time.Minute,
+		); domain.CategoryOf(
+			err,
+		) != domain.ErrorConflict {
+			t.Fatalf("category=%s, want conflict", domain.CategoryOf(err))
+		}
+	})
+}
+
+func TestLockRenewalAdoptsSameHolderETagDrift(t *testing.T) {
+	client := newFakeS3()
+	store := newTestStore(t, client)
+	ctx := context.Background()
+
+	etag, err := store.AcquireLock(ctx, "holder", time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// A renewal whose response was lost leaves the stored lock under the same
+	// holder with a newer ETag; the next renewal must adopt it instead of
+	// mistaking its own lost write for a takeover.
+	client.mu.Lock()
+	lockObject := client.objects[store.LockKeyForTest()]
+	lockObject.etag = "lost-response-etag"
+	client.objects[store.LockKeyForTest()] = lockObject
+	client.mu.Unlock()
+
+	renewed, err := store.RenewLock(ctx, "holder", etag, time.Minute)
+	if err != nil || renewed == "" || renewed == etag {
+		t.Fatalf("renewed ETag=%q err=%v", renewed, err)
+	}
+
+	if err := store.ReleaseLock(ctx, renewed); err != nil {
+		t.Fatalf("release after adopted renewal: %v", err)
 	}
 }
 

@@ -457,21 +457,40 @@ func (b *backupTransfer) finalizeBackupOperation(
 	// conditional delete reports a conflict even though this holder published
 	// successfully. A conflict on release after a completed run means the
 	// lock object is stale, not that the backup failed; the lock then ages
-	// out by TTL.
-	if retErr == nil && domain.CategoryOf(releaseErr) == domain.ErrorConflict {
+	// out by TTL. A transport failure releasing the lock is equally not a
+	// backup failure — the recovery point is published, and the lock ages
+	// out the same way — so it must not turn a completed run into an error.
+	if retErr == nil && releaseFailureLeavesPublishedBackup(releaseErr) {
 		logOperation(
 			b.tools.Logger,
-			"backup operation lock left to expire after release conflict",
+			"backup operation lock left to expire after failed release",
 			"namespace",
 			namespace,
 			"pvc",
 			plan.SourcePVC.Name,
+			"error",
+			releaseErr,
 		)
 
 		return cleanupErr
 	}
 
 	return errors.Join(cleanupErr, releaseErr)
+}
+
+// releaseFailureLeavesPublishedBackup reports whether a lock-release error
+// after a successful run leaves the published recovery point intact with the
+// lock object merely aging out: an ETag conflict (a raced renewal or a
+// successor holder) or an unreachable backend never invalidates data that
+// was already written. Programming errors (validation, internal) still
+// surface.
+func releaseFailureLeavesPublishedBackup(err error) bool {
+	switch domain.CategoryOf(err) {
+	case domain.ErrorConflict, domain.ErrorPrecondition, domain.ErrorTimeout:
+		return true
+	default:
+		return false
+	}
 }
 
 func (b *backupTransfer) prepareTool(

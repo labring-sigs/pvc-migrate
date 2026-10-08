@@ -881,7 +881,16 @@ func (s *Store) ReleaseLock(ctx context.Context, etag string) error {
 
 	input.IfMatch = aws.String(etag)
 	if _, err := s.client.DeleteObject(ctx, input); err != nil && !isMissing(err) {
-		return wrapS3Error(ctx, domain.ErrorConflict, "S3 lock", "release backup lock", err)
+		// A conditional-write rejection is a fencing signal; anything else
+		// is backend unavailability, which must not read as an ownership
+		// conflict: a completed backup should not report failure because
+		// the delete did not go through.
+		category := domain.ErrorPrecondition
+		if isConditionalWriteFailure(err) {
+			category = domain.ErrorConflict
+		}
+
+		return wrapS3Error(ctx, category, "S3 lock", "release backup lock", err)
 	}
 
 	return nil
@@ -908,22 +917,31 @@ func (s *Store) RenewLock(
 
 	current, currentETag, err := s.readLock(ctx)
 	if err != nil {
+		// A transport failure here is backend unavailability, not evidence
+		// that another holder won: classifying it as a conflict would make
+		// the renewal loop abandon a healthy transfer on the first blip.
+		// Precondition keeps it retryable until the staleness deadline.
 		return "", wrapS3Error(
 			ctx,
-			domain.ErrorConflict,
+			domain.ErrorPrecondition,
 			"S3 lock",
 			"read lock before renewal",
 			err,
 		)
 	}
 
-	if current == nil || current.Holder != holder || currentETag != etag {
+	if current == nil || current.Holder != holder {
 		return "", domain.NewError(
 			domain.ErrorConflict,
 			"S3 lock",
 			"lock ownership changed before renewal",
 		)
 	}
+
+	// A renewal whose response was lost leaves the stored lock under the
+	// same holder with a newer ETag; adopt that ETag instead of mistaking
+	// our own write for a takeover. A foreign holder is caught above
+	// because holders are unique per attempt.
 
 	data, err := json.Marshal(Lock{Holder: holder, ExpiresAt: time.Now().UTC().Add(ttl)})
 	if err != nil {
@@ -946,7 +964,15 @@ func (s *Store) RenewLock(
 
 	output, err := s.client.PutObject(ctx, input)
 	if err != nil {
-		return "", wrapS3Error(ctx, domain.ErrorConflict, "S3 lock", "renew backup lock", err)
+		// A conditional-write rejection means another holder fenced us out;
+		// anything else is backend unavailability, retryable within the TTL
+		// budget this holder still owns.
+		category := domain.ErrorPrecondition
+		if isConditionalWriteFailure(err) {
+			category = domain.ErrorConflict
+		}
+
+		return "", wrapS3Error(ctx, category, "S3 lock", "renew backup lock", err)
 	}
 
 	newETag := aws.ToString(output.ETag)
@@ -1216,6 +1242,21 @@ func isMissing(err error) bool {
 func isNoSuchBucket(err error) bool {
 	var apiErr smithy.APIError
 	return errors.As(err, &apiErr) && apiErr.ErrorCode() == "NoSuchBucket"
+}
+
+// isConditionalWriteFailure reports whether the backend rejected a
+// conditional write: the object changed underneath the caller, which is a
+// definite ownership signal rather than backend unavailability.
+func isConditionalWriteFailure(err error) bool {
+	if apiErr, ok := errors.AsType[smithy.APIError](err); ok {
+		return apiErr.ErrorCode() == "PreconditionFailed" || apiErr.ErrorCode() == "Conflict"
+	}
+
+	var responseErr *smithyhttp.ResponseError
+
+	return errors.As(err, &responseErr) &&
+		(responseErr.HTTPStatusCode() == http.StatusPreconditionFailed ||
+			responseErr.HTTPStatusCode() == http.StatusConflict)
 }
 
 func LockHolder(operationID string) string {
