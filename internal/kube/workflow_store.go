@@ -529,6 +529,62 @@ func (s *CRDWorkflowStore[T]) EnsureProtection(ctx context.Context, object T) er
 	return nil
 }
 
+// SetAbortRequest records (value != "") or consumes (value == "") a
+// declarative abort request on the workflow metadata. Only metadata is
+// updated; the caller's status view is retained apart from its storage
+// version, which follows the persisted object.
+func (s *CRDWorkflowStore[T]) SetAbortRequest(
+	ctx context.Context,
+	object T,
+	value string,
+) error {
+	if err := requireWorkflowStorageVersion(object); err != nil {
+		return err
+	}
+
+	if err := errors.Join(ctx.Err(), LeaseFenceError(ctx)); err != nil {
+		return err
+	}
+
+	current, err := s.Load(ctx, crclient.ObjectKeyFromObject(object))
+	if err != nil {
+		return err
+	}
+
+	if err := checkWorkflowStorageVersion(object, current); err != nil {
+		return err
+	}
+
+	if current.GetDeletionTimestamp() != nil {
+		return workflowStoreConflict("abort request", "workflow is being deleted")
+	}
+
+	annotations := current.GetAnnotations()
+	if value != "" {
+		if annotations == nil {
+			annotations = make(map[string]string, 1)
+		}
+
+		annotations[WorkflowAbortRequestedAnnotation] = value
+	} else if annotations != nil {
+		delete(annotations, WorkflowAbortRequestedAnnotation)
+	}
+
+	current.SetAnnotations(annotations)
+
+	if err := errors.Join(ctx.Err(), LeaseFenceError(ctx)); err != nil {
+		return err
+	}
+
+	if err := s.client.Update(ctx, current); err != nil {
+		return err
+	}
+
+	copyWorkflowStorageVersion(object, current)
+
+	return nil
+}
+
 func (s *CRDWorkflowStore[T]) Load(ctx context.Context, key crclient.ObjectKey) (T, error) {
 	object := s.newObject()
 

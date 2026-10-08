@@ -6,6 +6,7 @@ import (
 	v1alpha1 "github.com/labring-sigs/pvc-migrate/api/v1alpha1"
 	"github.com/labring-sigs/pvc-migrate/internal/app"
 	"github.com/labring-sigs/pvc-migrate/internal/domain"
+	"github.com/labring-sigs/pvc-migrate/internal/kube"
 	"github.com/spf13/cobra"
 	crclient "sigs.k8s.io/controller-runtime/pkg/client"
 )
@@ -164,14 +165,20 @@ func (r *rootState) newPodMigrationAbortCommand(source workflowSource) *cobra.Co
 			}
 
 			if err := dispatch.abort(ctx); err != nil {
+				if dispatch.abortFallback == nil || !kube.IsSessionLockContention(err) {
+					return err
+				}
+
+				if err := dispatch.abortFallback(ctx, cmd); err != nil {
+					return err
+				}
+			}
+
+			if err := runtime.printer.Print(dispatch.object); err != nil {
 				return err
 			}
 
-			if err := runtime.printer.Print(object); err != nil {
-				return err
-			}
-
-			return writePodMigrationNextSteps(cmd, r, object)
+			return writePodMigrationNextSteps(cmd, r, dispatch.object)
 		},
 	}
 	bindDryRun(command, &dryRun)
@@ -350,8 +357,11 @@ type podMigrationDispatch struct {
 	requestResume    func(context.Context) error
 	run              func(context.Context) error
 	abort            func(context.Context) error
-	rollback         func(context.Context) error
-	cleanup          func(context.Context, app.MigrationCleanupOptions) error
+	// abortFallback delegates a contended abort to the controller on the CR
+	// backend; session records have no controller to hand the request to.
+	abortFallback func(context.Context, *cobra.Command) error
+	rollback      func(context.Context) error
+	cleanup       func(context.Context, app.MigrationCleanupOptions) error
 }
 
 // loadPodMigration resolves one Pod migration from the backend its command
@@ -411,8 +421,21 @@ func (r *rootState) loadPodMigration(
 		object, err := runtime.podMigrationStore.Load(
 			ctx, crclient.ObjectKey{Name: name, Namespace: namespace},
 		)
+		if err != nil {
+			return nil, nil, err
+		}
 
-		return object, bindDispatch(object, runtime.podMigrationExecutor), err
+		dispatch := bindDispatch(object, runtime.podMigrationExecutor)
+		dispatch.abortFallback = func(ctx context.Context, cmd *cobra.Command) error {
+			converged, err := requestControllerAbort(ctx, cmd, runtime.podMigrationStore, object)
+			if err == nil {
+				dispatch.object = converged
+			}
+
+			return err
+		}
+
+		return object, dispatch, nil
 	}
 
 	object, err := runtime.podMigrationSessionStore.Load(ctx, key)

@@ -9,6 +9,7 @@ import (
 	"github.com/labring-sigs/pvc-migrate/internal/app"
 	"github.com/labring-sigs/pvc-migrate/internal/copyengine"
 	"github.com/labring-sigs/pvc-migrate/internal/domain"
+	"github.com/labring-sigs/pvc-migrate/internal/kube"
 	"github.com/spf13/cobra"
 	crclient "sigs.k8s.io/controller-runtime/pkg/client"
 )
@@ -258,6 +259,23 @@ func (r *rootState) newScopedCopyAbortCommand(
 				err = executor.Abort(ctx, current)
 			}
 
+			if err != nil && !dryRun &&
+				backend == backendCRD && kube.IsSessionLockContention(err) {
+				converged, requestErr := requestControllerAbort(ctx, cmd, store, current)
+				if requestErr != nil {
+					return reportCopyError(
+						cmd,
+						"copy",
+						converged.Name,
+						converged.Status.Phase,
+						requestErr,
+					)
+				}
+
+				object = converged
+				err = nil
+			}
+
 			if err != nil {
 				return reportCopyError(cmd, "copy", current.Name, current.Status.Phase, err)
 			}
@@ -289,6 +307,23 @@ func (r *rootState) newScopedCopyAbortCommand(
 				err = executor.ValidateAbort(current)
 			} else {
 				err = executor.Abort(ctx, current)
+			}
+
+			if err != nil && !dryRun &&
+				backend == backendCRD && kube.IsSessionLockContention(err) {
+				converged, requestErr := requestControllerAbort(ctx, cmd, store, current)
+				if requestErr != nil {
+					return reportCopyError(
+						cmd,
+						"cluster-copy",
+						converged.Name,
+						converged.Status.Phase,
+						requestErr,
+					)
+				}
+
+				object = converged
+				err = nil
 			}
 
 			if err != nil {

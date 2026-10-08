@@ -8,6 +8,7 @@ import (
 	v1alpha1 "github.com/labring-sigs/pvc-migrate/api/v1alpha1"
 	"github.com/labring-sigs/pvc-migrate/internal/app"
 	"github.com/labring-sigs/pvc-migrate/internal/domain"
+	"github.com/labring-sigs/pvc-migrate/internal/kube"
 	"github.com/spf13/cobra"
 	crclient "sigs.k8s.io/controller-runtime/pkg/client"
 )
@@ -264,6 +265,33 @@ func (r *rootState) newScopedOfflineMigrationAbortCommand(
 					err = executor.Abort(ctx, current)
 				}
 
+				if err != nil && !dryRun &&
+					backend == backendCRD && kube.IsSessionLockContention(err) {
+					store, storeErr := cliWorkflowStoreForBackend(
+						runtime,
+						backend,
+						r.migrationRecordNamespace(),
+						func() *v1alpha1.Migration { return &v1alpha1.Migration{} },
+					)
+					if storeErr != nil {
+						return storeErr
+					}
+
+					converged, requestErr := requestControllerAbort(ctx, cmd, store, current)
+					if requestErr != nil {
+						return reportMigrationError(
+							cmd,
+							family,
+							converged.Name,
+							converged.Status.Phase,
+							requestErr,
+						)
+					}
+
+					object = converged
+					err = nil
+				}
+
 				if err != nil {
 					return reportMigrationError(
 						cmd,
@@ -284,6 +312,33 @@ func (r *rootState) newScopedOfflineMigrationAbortCommand(
 					err = executor.ValidateAbort(ctx, current)
 				} else {
 					err = executor.Abort(ctx, current)
+				}
+
+				if err != nil && !dryRun &&
+					backend == backendCRD && kube.IsSessionLockContention(err) {
+					store, storeErr := cliWorkflowStoreForBackend(
+						runtime,
+						backend,
+						r.workflowStorageNamespace(cmd),
+						func() *v1alpha1.ClusterMigration { return &v1alpha1.ClusterMigration{} },
+					)
+					if storeErr != nil {
+						return storeErr
+					}
+
+					converged, requestErr := requestControllerAbort(ctx, cmd, store, current)
+					if requestErr != nil {
+						return reportMigrationError(
+							cmd,
+							family,
+							converged.Name,
+							converged.Status.Phase,
+							requestErr,
+						)
+					}
+
+					object = converged
+					err = nil
 				}
 
 				if err != nil {

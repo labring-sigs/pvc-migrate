@@ -106,6 +106,10 @@ func (r *ClusterCopyReconciler) reconcile(
 		return workflowReconcileResult(err)
 	}
 
+	if kube.WorkflowAbortRequested(object) {
+		return r.reconcileAbortRequest(ctx, object)
+	}
+
 	switch object.Status.Phase {
 	case domain.PhaseFailed:
 		if object.Status.Plan != nil || !retryCorrectedPlanning(
@@ -150,6 +154,24 @@ func (r *ClusterCopyReconciler) reconcile(
 	}
 
 	return workflowReconcileResult(r.executor(object).Run(ctx, object))
+}
+
+// reconcileAbortRequest executes a declarative abort request. A requester
+// cannot win the session lease from an active reconcile — it holds the lease
+// for whole transfer attempts — so requesters record the annotation, the
+// queue predicate interrupts the active reconcile, and the controller runs
+// the abort here. The request is consumed once handled; transient contention
+// keeps it and retries on the next reconcile.
+func (r *ClusterCopyReconciler) reconcileAbortRequest(
+	ctx context.Context,
+	object *v1alpha1.ClusterCopy,
+) (reconcile.Result, error) {
+	err := r.executor(object).Abort(ctx, object)
+	if abortRequestTransient(err) {
+		return workflowReconcileResult(err)
+	}
+
+	return finishAbortRequest(ctx, r.store, r.recorder, object, err)
 }
 
 func (r *ClusterCopyReconciler) executor(object *v1alpha1.ClusterCopy) *app.ClusterCopyExecutor {
