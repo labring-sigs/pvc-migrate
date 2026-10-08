@@ -73,6 +73,7 @@ type commandRuntime struct {
 	planner                       *planner.Planner
 	printer                       output.Printer
 	logger                        *slog.Logger
+	baseLogger                    *slog.Logger
 	controllerLogger              *slog.Logger
 	controllers                   *controller.Manager
 	openEBSLVMSharedVolumeManager kube.OpenEBSLVMSharedVolumeManager
@@ -442,6 +443,9 @@ func (r *rootState) runtime() (*commandRuntime, error) {
 			WithLogger(logger.With("component", "planner")),
 		printer: output.Printer{Writer: r.options.Out, Format: format},
 		logger:  logger.With("component", "backup"),
+		// baseLogger carries no component attribute so each workflow family
+		// can label its own transfer logs accurately.
+		baseLogger: logger,
 		controllerLogger: controller.NewControllerLogger(
 			logger.With("component", "workflow-controller"),
 		),

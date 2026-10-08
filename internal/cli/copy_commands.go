@@ -203,6 +203,14 @@ func (r *rootState) copyConfig(runtime *commandRuntime) app.CopyExecutorConfig {
 }
 
 func (r *rootState) volumeCopyConfig(runtime *commandRuntime) app.VolumeCopyConfig {
+	// Copy transfers previously inherited the runtime-wide "backup" label;
+	// derive an accurate component from the unattributed base logger. Test
+	// runtimes may leave both unset.
+	logger := runtime.baseLogger
+	if logger == nil {
+		logger = runtime.logger
+	}
+
 	config := app.VolumeCopyConfig{
 		KubeconfigPath: r.global.kubeconfig,
 		Context:        r.global.kubeContext,
@@ -213,9 +221,13 @@ func (r *rootState) volumeCopyConfig(runtime *commandRuntime) app.VolumeCopyConf
 		Compress:       r.global.compress,
 		BandwidthLimit: r.global.copyBandwidth,
 		Writer:         r.errWriter(),
-		Logger:         runtime.logger,
+		Logger:         logger,
 		StreamToolLogs: r.global.streamToolLogs,
 		StructuredLogs: r.global.logFormat == string(logFormatJSON),
+	}
+
+	if logger != nil {
+		config.Logger = logger.With("component", "copy")
 	}
 
 	return config
