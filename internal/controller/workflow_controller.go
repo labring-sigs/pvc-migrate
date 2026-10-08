@@ -479,7 +479,13 @@ func workflowEventPredicate(onDelete ...func(crclient.Object)) predicate.Predica
 	return predicate.Funcs{
 		CreateFunc: func(event.CreateEvent) bool { return true },
 		UpdateFunc: func(e event.UpdateEvent) bool {
-			if e.ObjectNew.GetDeletionTimestamp() != nil {
+			// An abort request interrupts the active reconcile exactly like
+			// deletion does: the reconcile holds the session lease for whole
+			// transfer attempts, so the abort can only run once it yields.
+			abortRequested := !kube.WorkflowAbortRequested(e.ObjectOld) &&
+				kube.WorkflowAbortRequested(e.ObjectNew)
+
+			if e.ObjectNew.GetDeletionTimestamp() != nil || abortRequested {
 				for _, cancel := range onDelete {
 					cancel(e.ObjectNew)
 				}
@@ -487,6 +493,8 @@ func workflowEventPredicate(onDelete ...func(crclient.Object)) predicate.Predica
 
 			return e.ObjectNew.GetGeneration() != e.ObjectOld.GetGeneration() ||
 				kube.WorkflowHandoffChanged(e.ObjectOld, e.ObjectNew) ||
+				abortRequested ||
+				kube.WorkflowAbortRequestChanged(e.ObjectOld, e.ObjectNew) ||
 				e.ObjectOld.GetDeletionTimestamp() == nil &&
 					e.ObjectNew.GetDeletionTimestamp() != nil ||
 				workflowResumeStatusChanged(e.ObjectOld, e.ObjectNew) ||
