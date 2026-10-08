@@ -165,9 +165,17 @@ func checkObjectStoreLease(ctx context.Context, leaseErrors <-chan error) error 
 			return err
 		}
 
+		// Domain errors render only their own message, so the renewal
+		// failure that ended the lease must be embedded or the abort shows
+		// no reason.
 		return classifyLeaseError(
 			ctx,
-			domain.WrapError(domain.ErrorConflict, "S3 lock", "S3 lock ownership was lost", err),
+			domain.WrapError(
+				domain.ErrorConflict,
+				"S3 lock",
+				"S3 lock ownership was lost: "+err.Error(),
+				err,
+			),
 		)
 	default:
 	}
@@ -187,7 +195,7 @@ func classifyLeaseError(ctx context.Context, err error) error {
 		return domain.WrapError(
 			domain.ErrorTimeout,
 			"backup",
-			"S3 lock lease ended before the backup was published",
+			"S3 lock lease ended before the backup was published: "+err.Error(),
 			err,
 		)
 	}

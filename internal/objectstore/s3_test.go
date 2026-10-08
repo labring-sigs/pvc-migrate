@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/tls"
 	"crypto/x509"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -686,6 +687,84 @@ func TestLockRenewalAndReleaseTransportFailuresStayRetryable(t *testing.T) {
 			ctx,
 			"holder",
 			etag,
+			time.Minute,
+		); domain.CategoryOf(
+			err,
+		) != domain.ErrorConflict {
+			t.Fatalf("category=%s, want conflict", domain.CategoryOf(err))
+		}
+	})
+}
+
+// Acquisition faces the same classification boundary as renewal: backend
+// unavailability must stay a retryable precondition, while only genuine
+// fencing losses read as contention.
+func TestLockAcquisitionTransportFailuresStayRetryable(t *testing.T) {
+	ctx := context.Background()
+	transport := errors.New("connection reset by peer")
+
+	t.Run("read failure after rejected create", func(t *testing.T) {
+		client := newFakeS3()
+		if _, err := newTestStore(t, client).AcquireLock(ctx, "first", time.Minute); err != nil {
+			t.Fatal(err)
+		}
+
+		store := newTestStore(t, getObjectErrorS3{
+			API: putObjectErrorS3{API: client, err: transport},
+			err: transport,
+		})
+		if _, err := store.AcquireLock(
+			ctx,
+			"second",
+			time.Minute,
+		); domain.CategoryOf(
+			err,
+		) != domain.ErrorPrecondition {
+			t.Fatalf("category=%s, want precondition", domain.CategoryOf(err))
+		}
+	})
+
+	seedExpiredLock := func(t *testing.T) *fakeS3 {
+		t.Helper()
+
+		client := newFakeS3()
+
+		expired, err := json.Marshal(
+			Lock{Holder: "first", ExpiresAt: time.Now().UTC().Add(-time.Minute)},
+		)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		store := newTestStore(t, client)
+		client.objects[store.LockKeyForTest()] = fakeObject{data: expired, etag: "expired-etag"}
+
+		return client
+	}
+
+	t.Run("replace expired lock transport failure", func(t *testing.T) {
+		client := seedExpiredLock(t)
+
+		store := newTestStore(t, putObjectErrorS3{API: client, err: transport})
+		if _, err := store.AcquireLock(
+			ctx,
+			"second",
+			time.Minute,
+		); domain.CategoryOf(
+			err,
+		) != domain.ErrorPrecondition {
+			t.Fatalf("category=%s, want precondition", domain.CategoryOf(err))
+		}
+	})
+
+	t.Run("replace expired lock fenced by race", func(t *testing.T) {
+		client := seedExpiredLock(t)
+		fenced := &smithy.GenericAPIError{Code: "PreconditionFailed", Message: "etag changed"}
+
+		store := newTestStore(t, putObjectErrorS3{API: client, err: fenced})
+		if _, err := store.AcquireLock(
+			ctx,
+			"second",
 			time.Minute,
 		); domain.CategoryOf(
 			err,
