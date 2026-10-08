@@ -260,7 +260,9 @@ func checkOfflineMigrationPlanConsumers(
 	listErr error,
 	presentation domain.Presentation,
 ) {
-	names := []string{}
+	activeNames := []string{}
+
+	terminalNames := []string{}
 	for _, input := range inputs {
 		consumers, listed := collectPVCConsumers(
 			plan,
@@ -278,27 +280,55 @@ func checkOfflineMigrationPlanConsumers(
 		}
 
 		for _, consumer := range consumers {
-			names = append(names, consumer.Name)
+			if consumer.Status.Phase == corev1.PodSucceeded ||
+				consumer.Status.Phase == corev1.PodFailed {
+				terminalNames = append(
+					terminalNames,
+					fmt.Sprintf("%s (phase %s)", consumer.Name, consumer.Status.Phase),
+				)
+
+				continue
+			}
+
+			activeNames = append(activeNames, consumer.Name)
 		}
 	}
 
-	if len(names) == 0 {
+	if len(activeNames) == 0 && len(terminalNames) == 0 {
 		return
 	}
 
-	sort.Strings(names)
-	names = slices.Compact(names)
+	clauses := []string{}
+	if len(activeNames) > 0 {
+		sort.Strings(activeNames)
+		activeNames = slices.Compact(activeNames)
 
-	alternative := "or use a PodMigration workflow to select a workload that can be paused before final sync"
-	if presentation == domain.PresentationCLI {
-		alternative = "or use the separate migrate-pod command to select a workload that pvc-migrate can pause before final sync"
+		alternative := "or use a PodMigration workflow to select a workload that can be paused before final sync"
+		if presentation == domain.PresentationCLI {
+			alternative = "or use the separate migrate-pod command to select a workload that pvc-migrate can pause before final sync"
+		}
+
+		clauses = append(clauses, fmt.Sprintf(
+			"active Pod consumer(s) %s; stop them before offline migration, %s",
+			strings.Join(activeNames, ","),
+			alternative,
+		))
+	}
+
+	if len(terminalNames) > 0 {
+		sort.Strings(terminalNames)
+		terminalNames = slices.Compact(terminalNames)
+
+		// Terminal Pods no longer write, but a scheduled one still holds the
+		// PVC protection boundary, so only deleting the Pod object releases
+		// the claim.
+		clauses = append(clauses, fmt.Sprintf(
+			"terminal Pod(s) %s still hold the PVC protection boundary; delete the finished Pod objects before offline migration",
+			strings.Join(terminalNames, ","),
+		))
 	}
 
 	plan.AddCheck(failed(domain.CheckNamePVCConsumers,
-		fmt.Sprintf(
-			"offline migrate found active Pod consumer(s) %s; stop them before offline migration, %s",
-			strings.Join(names, ","),
-			alternative,
-		),
+		"offline migrate found "+strings.Join(clauses, "; "),
 	))
 }
