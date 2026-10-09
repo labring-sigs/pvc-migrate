@@ -134,3 +134,23 @@ func TestRequestControllerAbortReportsRejection(t *testing.T) {
 		t.Fatalf("rejection was not reported: %v", err)
 	}
 }
+
+func TestAbortRequestPhaseReadsRepositoryKinds(t *testing.T) {
+	backup := &v1alpha1.Backup{
+		Status: v1alpha1.BackupStatus{
+			WorkflowStatus: v1alpha1.WorkflowStatus{Phase: domain.PhaseWarmCopying},
+		},
+	}
+	if abortRequestPhase(backup) != domain.PhaseWarmCopying {
+		t.Fatal("backup phase was not read")
+	}
+
+	restore := &v1alpha1.Restore{
+		Status: v1alpha1.RestoreStatus{
+			WorkflowStatus: v1alpha1.WorkflowStatus{Phase: domain.PhaseAborted},
+		},
+	}
+	if abortRequestPhase(restore) != domain.PhaseAborted {
+		t.Fatal("restore phase was not read")
+	}
+}

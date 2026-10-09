@@ -468,7 +468,17 @@ func classifySyncError(ctx context.Context, operation string, err error) error {
 		)
 	}
 
-	return domain.WrapError(domain.ErrorCopy, operation, "S3 data synchronization failed", err)
+	// Domain errors render only their own message, and a bare "S3 data
+	// synchronization failed" misdirects operators when the real failure is
+	// elsewhere — a tool Pod stuck on volume mounting reads as an S3 problem.
+	// Embed the bounded tool error text so the workflow status points at the
+	// actual failure.
+	return domain.WrapError(
+		domain.ErrorCopy,
+		operation,
+		domain.BoundWorkflowMessage("S3 data synchronization failed: "+err.Error()),
+		err,
+	)
 }
 
 func classifyToolAndLeaseError(

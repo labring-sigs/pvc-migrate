@@ -132,6 +132,10 @@ func abortRequestPhase(object crclient.Object) v1alpha1.WorkflowPhase {
 		return typed.Status.Phase
 	case *v1alpha1.PodMigration:
 		return typed.Status.Phase
+	case *v1alpha1.Backup:
+		return typed.Status.Phase
+	case *v1alpha1.Restore:
+		return typed.Status.Phase
 	default:
 		return ""
 	}

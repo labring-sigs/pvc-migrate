@@ -168,7 +168,10 @@ func (r *rootState) newScopedCopyResumeCommand(
 	source workflowSource,
 	scope recordScope,
 ) *cobra.Command {
-	var dryRun bool
+	var (
+		dryRun bool
+		repeat bool
+	)
 
 	command := &cobra.Command{
 		Use:   "resume " + workflowArgLabel(source),
@@ -184,9 +187,15 @@ func (r *rootState) newScopedCopyResumeCommand(
 		ctx, cancel := r.context(cmd.Context())
 		defer cancel()
 
-		return r.resumeCopy(ctx, cmd, runtime, args[0], dryRun, source, scope)
+		return r.resumeCopy(ctx, cmd, runtime, args[0], dryRun, repeat, source, scope)
 	}
 	bindDryRun(command, &dryRun)
+	command.Flags().BoolVar(
+		&repeat,
+		"repeat",
+		false,
+		"Request another warm pass over a copy that finished its last pass; the delta since then is synchronized",
+	)
 
 	return command
 }

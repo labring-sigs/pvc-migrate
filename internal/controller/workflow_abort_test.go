@@ -187,6 +187,170 @@ func TestAbortRequestReconcileConverges(t *testing.T) {
 	}
 }
 
+// TestRepositoryAbortRequestRouting covers the declarative abort request on
+// the repository kinds: an actively reconciling backup or restore holds the
+// session lease for the whole S3 synchronization, so the abort must route
+// through the controller instead of wedging against the lease.
+func TestRepositoryAbortRequestRouting(t *testing.T) {
+	scheme := runtime.NewScheme()
+	if err := v1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Run("backup", func(t *testing.T) {
+		object := &v1alpha1.Backup{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "backup",
+				Namespace: "tenant",
+				UID:       "workflow",
+				Annotations: map[string]string{
+					kube.WorkflowAbortRequestedAnnotation: "2026-10-09T00:00:00Z",
+				},
+			},
+			Spec: v1alpha1.BackupSpec{
+				SourcePVC:     v1alpha1.LocalResourceReference{Name: "source"},
+				Name:          "daily",
+				RepositoryRef: v1alpha1.LocalObjectReference{Name: "archive"},
+			},
+			Status: v1alpha1.BackupStatus{
+				WorkflowStatus: v1alpha1.WorkflowStatus{Phase: domain.PhaseWarmCopying},
+				Plan: &v1alpha1.BackupPlan{
+					SourcePVC: v1alpha1.LocalResourceReference{Name: "source", UID: "pvc-uid"},
+					SourcePV: v1alpha1.LocalResourceReference{
+						Name: "pv-source",
+						UID:  "pv-uid",
+					},
+					Name:          "daily",
+					RepositoryRef: v1alpha1.LocalObjectReference{Name: "archive"},
+				},
+			},
+		}
+
+		client := crfake.NewClientBuilder().
+			WithScheme(scheme).
+			WithStatusSubresource(object).
+			WithObjects(object).
+			Build()
+		r := NewWorkflowReconciler().
+			WithSupportedKinds([]domain.ControllerKind{domain.ControllerKindBackup}).
+			WithTrustedToolImage("trusted/tool:v1")
+
+		options := ManagerOptions{
+			KubernetesClient: fake.NewClientset(
+				&corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "tenant"}},
+			),
+			BackupPlanner: func(context.Context, *v1alpha1.Backup, string) error {
+				t.Fatal("abort request must not replan")
+				return nil
+			},
+		}
+		if err := r.configureBackupController(
+			client,
+			options,
+			&moveControllerLocker{},
+		); err != nil {
+			t.Fatal(err)
+		}
+
+		r.backup.checkCollision = func(context.Context, string, string) error {
+			return nil
+		}
+
+		runAbortRoutingReconcile(t, client, r, domain.ControllerKindBackup, object)
+	})
+
+	t.Run("restore", func(t *testing.T) {
+		object := &v1alpha1.Restore{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "restore",
+				Namespace: "tenant",
+				UID:       "workflow",
+				Annotations: map[string]string{
+					kube.WorkflowAbortRequestedAnnotation: "2026-10-09T00:00:00Z",
+				},
+			},
+			Spec: v1alpha1.RestoreSpec{
+				Name:           "daily",
+				DestinationPVC: v1alpha1.LocalResourceReference{Name: "destination"},
+				RepositoryRef:  v1alpha1.LocalObjectReference{Name: "archive"},
+			},
+			Status: v1alpha1.RestoreStatus{
+				WorkflowStatus: v1alpha1.WorkflowStatus{Phase: domain.PhaseWarmCopying},
+				Plan: &v1alpha1.RestorePlan{
+					DestinationPVC: v1alpha1.LocalResourceReference{
+						Name: "destination",
+						UID:  "pvc-uid",
+					},
+					Name:          "daily",
+					RepositoryRef: v1alpha1.LocalObjectReference{Name: "archive"},
+				},
+			},
+		}
+
+		client := crfake.NewClientBuilder().
+			WithScheme(scheme).
+			WithStatusSubresource(object).
+			WithObjects(object).
+			Build()
+		r := NewWorkflowReconciler().
+			WithSupportedKinds([]domain.ControllerKind{domain.ControllerKindRestore}).
+			WithTrustedToolImage("trusted/tool:v1")
+
+		options := ManagerOptions{
+			KubernetesClient: fake.NewClientset(
+				&corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "tenant"}},
+			),
+			RestorePlanner: func(context.Context, *v1alpha1.Restore, string) error {
+				t.Fatal("abort request must not replan")
+				return nil
+			},
+		}
+		if err := r.configureRestoreController(
+			client,
+			options,
+			&moveControllerLocker{},
+		); err != nil {
+			t.Fatal(err)
+		}
+
+		r.restore.checkCollision = func(context.Context, string, string) error {
+			return nil
+		}
+
+		runAbortRoutingReconcile(t, client, r, domain.ControllerKindRestore, object)
+	})
+}
+
+func runAbortRoutingReconcile(
+	t *testing.T,
+	client crclient.Client,
+	r *WorkflowReconciler,
+	kind domain.ControllerKind,
+	object crclient.Object,
+) {
+	t.Helper()
+
+	entry := &kindWorkflowReconciler{parent: r, kind: kind}
+
+	request := reconcile.Request{NamespacedName: crclient.ObjectKeyFromObject(object)}
+	if _, err := entry.Reconcile(t.Context(), request); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := client.Get(t.Context(), request.NamespacedName, object); err != nil {
+		t.Fatal(err)
+	}
+
+	status := workflowStatusPhase(object)
+	if status != domain.PhaseAborted {
+		t.Fatalf("abort request did not converge: %s", status)
+	}
+
+	if kube.WorkflowAbortRequested(object) {
+		t.Fatal("handled abort request was not consumed")
+	}
+}
+
 func TestAbortRequestTransientClassification(t *testing.T) {
 	contention := domain.WrapError(
 		domain.ErrorConflict,
