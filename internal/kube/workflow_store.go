@@ -766,10 +766,21 @@ func requireWorkflowStorageVersion(object metav1.Object) error {
 	return nil
 }
 
+// ErrWorkflowStaleLoad marks a store write rejected because the workflow
+// changed after the caller loaded it. The rejection is a lost race, not a
+// semantic conflict: convergent passes (cleanup, finalize) may reload and
+// re-run, while strict execution keeps failing fast.
+var ErrWorkflowStaleLoad = errors.New("workflow stale load")
+
 func checkWorkflowStorageVersion(object, current metav1.Object) error {
 	if object.GetUID() != current.GetUID() ||
 		object.GetResourceVersion() != current.GetResourceVersion() {
-		return workflowStoreConflict("write", "workflow changed after it was loaded")
+		return domain.WrapError(
+			domain.ErrorConflict,
+			"write workflow",
+			"workflow changed after it was loaded",
+			ErrWorkflowStaleLoad,
+		)
 	}
 
 	return nil

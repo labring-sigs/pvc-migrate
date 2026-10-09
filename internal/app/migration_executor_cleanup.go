@@ -6,6 +6,7 @@ import (
 
 	v1alpha1 "github.com/labring-sigs/pvc-migrate/api/v1alpha1"
 	"github.com/labring-sigs/pvc-migrate/internal/domain"
+	"github.com/labring-sigs/pvc-migrate/internal/kube"
 )
 
 // MigrationCleanupOptions contains only policies that belong to migration.
@@ -44,7 +45,10 @@ func (m *ClusterMigrationExecutor) Cleanup(
 		m.storageNamespace,
 		object,
 		func(ctx context.Context) error {
-			return m.cleanup(ctx, object, options)
+			return kube.RetryStaleWorkflowWrite(ctx, m.store, object,
+				func(ctx context.Context, fresh *v1alpha1.ClusterMigration) error {
+					return m.cleanup(ctx, fresh, options)
+				})
 		},
 	)
 }

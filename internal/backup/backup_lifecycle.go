@@ -185,7 +185,12 @@ func (b *BackupExecutor) Cleanup(
 		b.lockNamespace(object),
 		object,
 		false,
-		func(ctx context.Context, lock kube.SessionLock) error { return b.cleanup(ctx, object, lock, options) },
+		func(ctx context.Context, lock kube.SessionLock) error {
+			return kube.RetryStaleWorkflowWrite(ctx, b.store, object,
+				func(ctx context.Context, fresh *v1alpha1.Backup) error {
+					return b.cleanup(ctx, fresh, lock, options)
+				})
+		},
 	)
 }
 

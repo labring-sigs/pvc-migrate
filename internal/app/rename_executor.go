@@ -404,7 +404,10 @@ func (r *RenameExecutor) Cleanup(
 	options IdentityCleanupOptions,
 ) error {
 	return r.locked(ctx, object, func(ctx context.Context) error {
-		return r.cleanup(ctx, object, options)
+		return kube.RetryStaleWorkflowWrite(ctx, r.store, object,
+			func(ctx context.Context, fresh *v1alpha1.Rename) error {
+				return r.cleanup(ctx, fresh, options)
+			})
 	})
 }
 
