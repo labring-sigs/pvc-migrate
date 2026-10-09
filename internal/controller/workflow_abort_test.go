@@ -225,3 +225,28 @@ func TestAbortRequestTransientClassification(t *testing.T) {
 		t.Fatal("validation rejections must not retry")
 	}
 }
+
+func TestAbortRequestTreatsConvergingToolAsTransient(t *testing.T) {
+	if !abortRequestTransient(kube.ErrTransferToolStillExists) {
+		t.Fatal("a tool still being converged by the interrupted run must retry")
+	}
+
+	wrapped := domain.WrapError(
+		domain.ErrorPrecondition,
+		"finalize workflow",
+		"transfer Pod tenant/rclone-a still exists; wait for transfer cleanup",
+		kube.ErrTransferToolStillExists,
+	)
+	if !abortRequestTransient(wrapped) {
+		t.Fatal("the classified still-exists rejection lost its sentinel")
+	}
+
+	genuine := domain.NewError(
+		domain.ErrorPrecondition,
+		"abort backup",
+		"completed backup cannot be aborted",
+	)
+	if abortRequestTransient(genuine) {
+		t.Fatal("durable rejections must not retry")
+	}
+}
