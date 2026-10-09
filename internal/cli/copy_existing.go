@@ -359,7 +359,7 @@ func (r *rootState) resumeCopy(
 	cmd *cobra.Command,
 	runtime *commandRuntime,
 	id string,
-	dryRun bool,
+	dryRun, repeat bool,
 	source workflowSource,
 	scope recordScope,
 ) error {
@@ -370,9 +370,9 @@ func (r *rootState) resumeCopy(
 
 	switch current := object.(type) {
 	case *v1alpha1.Copy:
-		return r.executeCopy(ctx, cmd, runtime, current, dryRun, false, backend)
+		return r.executeCopy(ctx, cmd, runtime, current, dryRun, repeat, backend)
 	case *v1alpha1.ClusterCopy:
-		return r.executeClusterCopy(ctx, cmd, runtime, current, dryRun, false, backend)
+		return r.executeClusterCopy(ctx, cmd, runtime, current, dryRun, repeat, backend)
 	default:
 		return domain.NewError(domain.ErrorValidation, "copy", "stored workflow is not a copy")
 	}
@@ -447,6 +447,27 @@ func (r *rootState) executeCopy(
 
 	if err != nil {
 		return reportCopyError(cmd, "copy", object.Name, object.Status.Phase, err)
+	}
+
+	if backend == backendCRD {
+		// The controller owns CR-mode execution: the requested pass or resume
+		// re-arms the workflow, and its status update wakes the controller to
+		// run the transfer in-cluster. Executing here would race that
+		// reconcile for the session lease and lose the coin flip half the
+		// time; follow the controller's progress instead.
+		return waitForControllerObject(
+			ctx,
+			cmd,
+			runtime,
+			object,
+			func() *v1alpha1.Copy { return &v1alpha1.Copy{} },
+			domain.ControllerKindCopy,
+			"copies",
+			domain.PhaseWarmCopied,
+			func(current *v1alpha1.Copy) v1alpha1.WorkflowStatus {
+				return current.Status.WorkflowStatus
+			},
+		)
 	}
 
 	if err := executor.Run(ctx, object); err != nil {
@@ -542,6 +563,27 @@ func (r *rootState) executeClusterCopy(
 
 	if err != nil {
 		return reportCopyError(cmd, "cluster-copy", object.Name, object.Status.Phase, err)
+	}
+
+	if backend == backendCRD {
+		// The controller owns CR-mode execution: the requested pass or resume
+		// re-arms the workflow, and its status update wakes the controller to
+		// run the transfer in-cluster. Executing here would race that
+		// reconcile for the session lease and lose the coin flip half the
+		// time; follow the controller's progress instead.
+		return waitForControllerObject(
+			ctx,
+			cmd,
+			runtime,
+			object,
+			func() *v1alpha1.ClusterCopy { return &v1alpha1.ClusterCopy{} },
+			domain.ControllerKindClusterCopy,
+			"clustercopies",
+			domain.PhaseWarmCopied,
+			func(current *v1alpha1.ClusterCopy) v1alpha1.WorkflowStatus {
+				return current.Status.WorkflowStatus
+			},
+		)
 	}
 
 	if err := executor.Run(ctx, object); err != nil {

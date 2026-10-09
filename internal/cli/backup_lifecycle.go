@@ -225,6 +225,28 @@ func (r *rootState) newBackupResumeCommand(source workflowSource) *cobra.Command
 			)
 		}
 
+		if backend == backendCRD {
+			// The controller executes repository workflows in-cluster: the S3
+			// control plane (completion manifests, distributed locks,
+			// inventories) is reachable from the cluster's network position
+			// but often not from a remote CLI process. RequestResume re-arms
+			// the workflow and the controller replans and executes it; follow
+			// its progress instead of racing it for the session lease.
+			return waitForControllerObject(
+				ctx,
+				cmd,
+				runtime,
+				object,
+				func() *v1alpha1.Backup { return &v1alpha1.Backup{} },
+				domain.ControllerKindBackup,
+				"backups",
+				domain.PhaseCompleted,
+				func(current *v1alpha1.Backup) v1alpha1.WorkflowStatus {
+					return current.Status.WorkflowStatus
+				},
+			)
+		}
+
 		if object.Status.Plan == nil {
 			err = kube.WithWorkflowLease(
 				ctx,
@@ -331,6 +353,24 @@ func (r *rootState) newBackupAbortCommand(source workflowSource) *cobra.Command 
 			}
 
 			err = executor.Abort(ctx, object)
+		}
+
+		if err != nil && !dryRun &&
+			backend == backendCRD && kube.IsSessionLockContention(err) {
+			converged, requestErr := requestControllerAbort(ctx, cmd, store, object)
+			if requestErr != nil {
+				return reportRepositoryWorkflowError(
+					cmd,
+					"backup",
+					converged.Namespace,
+					converged.Name,
+					converged.Status.Phase,
+					requestErr,
+				)
+			}
+
+			object = converged
+			err = nil
 		}
 
 		if err != nil {
