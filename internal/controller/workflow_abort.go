@@ -2,6 +2,7 @@ package controller
 
 import (
 	"context"
+	"errors"
 
 	"github.com/labring-sigs/pvc-migrate/internal/domain"
 	"github.com/labring-sigs/pvc-migrate/internal/kube"
@@ -14,9 +15,13 @@ import (
 // abortRequestTransient reports whether an abort execution lost a race it
 // should retry: session-lease contention or optimistic-concurrency conflicts
 // clear on their own, and Kubernetes failures may clear with the API server.
+// A transfer tool that is still present also clears on its own — the
+// interrupted run's detached cleanup converges the release — so fencing on it
+// retries instead of rejecting the request mid-convergence.
 // The request stays recorded and the next reconcile runs the abort again.
 func abortRequestTransient(err error) bool {
 	return kube.IsSessionLockContention(err) ||
+		errors.Is(err, kube.ErrTransferToolStillExists) ||
 		apierrors.IsConflict(err) ||
 		domain.CategoryOf(err) == domain.ErrorKubernetes
 }

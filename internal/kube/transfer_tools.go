@@ -2,6 +2,7 @@ package kube
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 
@@ -10,6 +11,12 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
 )
+
+// ErrTransferToolStillExists reports a transfer tool resource that is still
+// present. An interrupted run's detached cleanup may still be converging the
+// release, so callers that fence on this condition should retry rather than
+// treat the presence as durable.
+var ErrTransferToolStillExists = errors.New("transfer tool still exists")
 
 // RequireTransferToolsStopped retains recovery records while a tool still mounts
 // the claim. Attempt IDs cannot safely identify which workflow owns an orphan.
@@ -65,7 +72,7 @@ func RequireTransferToolsStopped(
 }
 
 func transferToolStillExists(kind, namespace, name string) error {
-	return domain.NewError(
+	return domain.WrapError(
 		domain.ErrorPrecondition,
 		"finalize workflow",
 		fmt.Sprintf(
@@ -74,5 +81,6 @@ func transferToolStillExists(kind, namespace, name string) error {
 			namespace,
 			name,
 		),
+		ErrTransferToolStillExists,
 	)
 }
