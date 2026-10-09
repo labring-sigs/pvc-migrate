@@ -6,6 +6,7 @@ import (
 
 	v1alpha1 "github.com/labring-sigs/pvc-migrate/api/v1alpha1"
 	"github.com/labring-sigs/pvc-migrate/internal/domain"
+	"github.com/labring-sigs/pvc-migrate/internal/kube"
 )
 
 // ReservationCleanupOptions cannot request deletion of source storage.
@@ -38,7 +39,12 @@ func (r *ClusterReservationExecutor) Cleanup(
 	}
 
 	return withStoredWorkflowLock(ctx, r.store, r.locker, r.storageNamespace, object,
-		func(ctx context.Context) error { return r.cleanup(ctx, object, options) })
+		func(ctx context.Context) error {
+			return kube.RetryStaleWorkflowWrite(ctx, r.store, object,
+				func(ctx context.Context, fresh *v1alpha1.ClusterReservation) error {
+					return r.cleanup(ctx, fresh, options)
+				})
+		})
 }
 
 func (r *ClusterReservationExecutor) prepareCleanup(

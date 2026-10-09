@@ -6,6 +6,7 @@ import (
 
 	v1alpha1 "github.com/labring-sigs/pvc-migrate/api/v1alpha1"
 	"github.com/labring-sigs/pvc-migrate/internal/domain"
+	"github.com/labring-sigs/pvc-migrate/internal/kube"
 )
 
 func (m *MigrationExecutor) ValidateCleanup(
@@ -37,7 +38,10 @@ func (m *MigrationExecutor) Cleanup(
 		object.Namespace,
 		object,
 		func(ctx context.Context) error {
-			return m.cleanup(ctx, object, options)
+			return kube.RetryStaleWorkflowWrite(ctx, m.store, object,
+				func(ctx context.Context, fresh *v1alpha1.Migration) error {
+					return m.cleanup(ctx, fresh, options)
+				})
 		},
 	)
 }

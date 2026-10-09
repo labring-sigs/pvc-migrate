@@ -364,7 +364,12 @@ func (m *MoveExecutor) Cleanup(
 	return m.locked(
 		ctx,
 		object,
-		func(ctx context.Context) error { return m.cleanup(ctx, object, options) },
+		func(ctx context.Context) error {
+			return kube.RetryStaleWorkflowWrite(ctx, m.store, object,
+				func(ctx context.Context, fresh *v1alpha1.Move) error {
+					return m.cleanup(ctx, fresh, options)
+				})
+		},
 	)
 }
 

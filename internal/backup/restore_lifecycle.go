@@ -172,7 +172,12 @@ func (r *RestoreExecutor) Cleanup(
 		r.lockNamespace(object),
 		object,
 		false,
-		func(ctx context.Context, lock kube.SessionLock) error { return r.cleanup(ctx, object, lock, options) },
+		func(ctx context.Context, lock kube.SessionLock) error {
+			return kube.RetryStaleWorkflowWrite(ctx, r.store, object,
+				func(ctx context.Context, fresh *v1alpha1.Restore) error {
+					return r.cleanup(ctx, fresh, lock, options)
+				})
+		},
 	)
 }
 
