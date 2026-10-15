@@ -116,6 +116,13 @@ func submitControllerObject[T crclient.Object](
 	)
 }
 
+// planningFollowBudget bounds how long a --wait command keeps following a
+// workflow whose planning retries have not resolved. The controller's retry
+// window spans ten minutes and most planning failures need operator action,
+// so the terminal follows only the early retries and hands the rest to the
+// background with an inspection hint.
+const planningFollowBudget = 2 * time.Minute
+
 // waitForControllerObject is shared by creation and explicit lifecycle requests.
 // It owns watch/output mechanics; the operation supplies its concrete status.
 func waitForControllerObject[T crclient.Object](
@@ -160,8 +167,20 @@ func waitForControllerObject[T crclient.Object](
 
 	resource := runtime.clients.Dynamic.Resource(v1alpha1.GroupVersion.WithResource(resourceName)).
 		Namespace(object.GetNamespace())
-	lastPhase := v1alpha1.WorkflowPhase("")
+
+	reporter := newControllerWaitReporter(cmd.ErrOrStderr(), string(kind), object.GetName())
+
+	keepAliveCtx, cancelKeepAlive := context.WithCancel(ctx)
+	defer cancelKeepAlive()
+
+	go reporter.run(keepAliveCtx)
+	defer reporter.stop()
+
 	notedPlanningRetry := false
+
+	var planningFollowStart time.Time
+
+	planningFollowExhausted := false
 
 	final, err := kube.WaitForWorkflow(
 		ctx,
@@ -170,19 +189,7 @@ func waitForControllerObject[T crclient.Object](
 		newObject,
 		func(current T) (bool, error) {
 			status := statusOf(current)
-			if status.Phase != lastPhase {
-				lastPhase = status.Phase
-				if _, err := fmt.Fprintf(
-					cmd.ErrOrStderr(),
-					"%s %s: %s %s\n",
-					kind,
-					current.GetName(),
-					status.Phase,
-					status.Message,
-				); err != nil {
-					return false, err
-				}
-			}
+			reporter.observe(status.Phase, status.Message)
 
 			switch status.Phase {
 			case successPhase,
@@ -192,20 +199,29 @@ func waitForControllerObject[T crclient.Object](
 				return true, nil
 			case domain.PhaseFailed:
 				// A planning failure inside the bounded retry window may still
-				// clear on its own (workload appearing, transient API error);
-				// keep following until the controller terminalizes it.
+				// clear on its own (workload appearing, transient API error),
+				// but the window spans minutes and most planning failures need
+				// operator action. Follow the retries for a short budget, then
+				// stop subjecting the terminal to the whole window.
 				if controller.PlanningRetryActive(&status, time.Now()) {
+					if planningFollowStart.IsZero() {
+						planningFollowStart = time.Now()
+					}
+
 					if !notedPlanningRetry {
 						notedPlanningRetry = true
 
-						if _, err := fmt.Fprintf(
-							cmd.ErrOrStderr(),
-							"%s %s: planning retries continue in the background; waiting for the outcome\n",
-							kind,
-							current.GetName(),
-						); err != nil {
-							return false, err
-						}
+						reporter.notef(
+							"%s: planning retries continue in the background; waiting up to %s for an outcome\n",
+							reporter.prefix,
+							planningFollowBudget,
+						)
+					}
+
+					if time.Since(planningFollowStart) >= planningFollowBudget {
+						planningFollowExhausted = true
+
+						return true, nil
 					}
 
 					return false, nil
@@ -221,12 +237,20 @@ func waitForControllerObject[T crclient.Object](
 		return err
 	}
 
+	if planningFollowExhausted {
+		reporter.notef(
+			"%s: planning is still retrying in the background; not waiting further — inspect it with `%s`\n",
+			reporter.prefix,
+			inspect,
+		)
+	}
+
 	if err := runtime.printer.Print(final); err != nil {
 		return err
 	}
 
 	status := statusOf(final)
-	if status.Phase == domain.PhaseFailed {
+	if status.Phase == domain.PhaseFailed && !planningFollowExhausted {
 		category := domain.ErrorCategory(status.ErrorCategory)
 		if category == "" {
 			category = domain.ErrorPrecondition

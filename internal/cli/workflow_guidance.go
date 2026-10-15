@@ -22,6 +22,21 @@ func workflowTerminalPhase(phase domain.Phase) bool {
 	}
 }
 
+// workflowSuccessPhase reports the resting phase each workflow kind succeeds
+// into: copies finish at WarmCopied and reservations at Reserved, while every
+// other kind reaches Completed. A watch that only stops at the generic
+// terminal phases would hang forever on a finished copy or reservation.
+func workflowSuccessPhase(kind domain.ControllerKind) domain.Phase {
+	switch kind {
+	case domain.ControllerKindCopy, domain.ControllerKindClusterCopy:
+		return domain.PhaseWarmCopied
+	case domain.ControllerKindReservation, domain.ControllerKindClusterReservation:
+		return domain.PhaseReserved
+	default:
+		return domain.PhaseCompleted
+	}
+}
+
 // writeWorkflowNextSteps prints the follow-up block after a workflow command
 // finished in (or a status command revealed) a terminal phase. Lines carry the
 // labels the stderr colorizer highlights, and every command is the execute
