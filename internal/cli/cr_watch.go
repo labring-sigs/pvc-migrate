@@ -1,7 +1,7 @@
 package cli
 
 import (
-	"fmt"
+	"context"
 
 	v1alpha1 "github.com/labring-sigs/pvc-migrate/api/v1alpha1"
 	"github.com/labring-sigs/pvc-migrate/internal/domain"
@@ -71,31 +71,22 @@ func (r *rootState) newCRWatchCommand(target crWatchTarget) *cobra.Command {
 				return err
 			}
 
-			lastPhase := domain.Phase("")
+			reporter := newControllerWaitReporter(cmd.ErrOrStderr(), string(target.kind), args[0])
 
-			printTransition := func(current crclient.Object) error {
-				phase := workflowObjectPhase(current)
-				if phase == "" || phase == lastPhase {
-					return nil
-				}
+			keepAliveCtx, cancelKeepAlive := context.WithCancel(ctx)
+			defer cancelKeepAlive()
 
-				lastPhase = phase
+			go reporter.run(keepAliveCtx)
+			defer reporter.stop()
 
-				_, reportErr := fmt.Fprintf(
-					cmd.ErrOrStderr(),
-					"%s %s: %s %s\n",
-					target.kind,
-					current.GetName(),
-					phase,
+			printTransition := func(current crclient.Object) {
+				reporter.observe(
+					workflowObjectPhase(current),
 					workflowObjectMessage(current),
 				)
-
-				return reportErr
 			}
 
-			if err := printTransition(typed); err != nil {
-				return err
-			}
+			printTransition(typed)
 
 			final, err := kube.WaitForWorkflow(
 				ctx,
@@ -103,11 +94,12 @@ func (r *rootState) newCRWatchCommand(target crWatchTarget) *cobra.Command {
 				typed,
 				func() crclient.Object { return newWorkflowObject(target.kind) },
 				func(current crclient.Object) (bool, error) {
-					if err := printTransition(current); err != nil {
-						return false, err
-					}
+					printTransition(current)
 
-					return workflowTerminalPhase(workflowObjectPhase(current)), nil
+					phase := workflowObjectPhase(current)
+
+					return workflowTerminalPhase(phase) ||
+						phase == workflowSuccessPhase(target.kind), nil
 				},
 			)
 			if err != nil {
