@@ -275,7 +275,7 @@ func (s *Switcher) verifyOfflineBindings(
 	case podErr := <-podCheckDone:
 		if podErr != nil {
 			cancel()
-			<-detachDone
+			<-detachDone //nolint:errcheck // the pod-check failure takes precedence; the receive only waits for detach completion
 			offlineWG.Wait()
 			return podErr
 		}
