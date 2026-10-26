@@ -671,6 +671,9 @@ func (s *Service) copy(
 					),
 					Compress:       compress,
 					BandwidthLimit: bandwidthLimit,
+					// The service-wide flag is the cross-cluster choice; a
+					// session spec carries no per-session override.
+					ToolNetworkPolicy: s.toolNetworkPolicy,
 				},
 				Runtime: copyengine.CopyRuntime{
 					ToolImage:        session.Spec.ToolImage,

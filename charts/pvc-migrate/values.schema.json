@@ -44,6 +44,7 @@
         "logLevel": {"enum": ["debug", "info", "warn", "error"]},
         "logFormat": {"enum": ["json", "text"]},
         "maxConcurrentReconciles": {"type": "integer", "minimum": 1},
+        "toolNetworkPolicy": {"enum": ["auto", "on", "off"]},
         "pprof": {
           "type": "object", "additionalProperties": false,
           "properties": {

@@ -254,9 +254,12 @@ func (r *WorkflowReconciler) configureBackupController(
 			SharedVolumeManager: options.OpenEBSLVMSharedVolumeManager,
 			Tools: backup.ToolRuntime{
 				KubeconfigPath: options.KubeconfigPath, KubeContext: options.KubeContext,
-				HelmTimeout:     options.TransferExecution.HelmTimeout,
-				ToolImageProber: kube.NewToolImageProber(options.KubernetesClient),
-				Writer:          io.Discard, Logger: r.logger, StructuredLogs: true,
+				HelmTimeout: options.TransferExecution.HelmTimeout,
+				// Controller-wide default; a workflow spec's toolNetworkPolicy
+				// overrides it through the frozen plan.
+				ToolNetworkPolicy: options.TransferExecution.ToolNetworkPolicy,
+				ToolImageProber:   kube.NewToolImageProber(options.KubernetesClient),
+				Writer:            io.Discard, Logger: r.logger, StructuredLogs: true,
 			},
 		},
 		checkCollision: func(ctx context.Context, namespace, name string) error {

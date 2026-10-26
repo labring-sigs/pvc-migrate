@@ -108,6 +108,19 @@ spec:
                 type: object
               targetNode:
                 type: string
+              toolNetworkPolicy:
+                description: |-
+                  ToolNetworkPolicy selects whether the rclone transfer pod receives the
+                  chart's allow-all NetworkPolicy, which lets the S3 synchronization run
+                  inside namespaces isolated with default-deny policies. Auto keeps the
+                  engine default: the policy is created unless the executing account
+                  cannot create NetworkPolicies. On and off force the choice and override
+                  that permission fallback.
+                enum:
+                - auto
+                - "on"
+                - "off"
+                type: string
               unusedStoragePolicy:
                 description: |-
                   UnusedStoragePolicy decides the fate of a destination this workflow
@@ -363,6 +376,15 @@ spec:
                   targetNode:
                     type: string
                   toolImage:
+                    type: string
+                  toolNetworkPolicy:
+                    description: |-
+                      ToolNetworkPolicy freezes the spec's NetworkPolicy choice for the
+                      rclone transfer pod.
+                    enum:
+                    - auto
+                    - "on"
+                    - "off"
                     type: string
                   unusedStoragePolicy:
                     description: |-

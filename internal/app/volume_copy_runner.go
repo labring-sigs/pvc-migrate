@@ -35,7 +35,11 @@ type VolumeCopyConfig struct {
 	// RsyncMaxRetries overrides the rsync job's internal retry count within
 	// one transfer attempt. Zero keeps the upstream default (10).
 	RsyncMaxRetries int
-	Compress        bool
+	// ToolNetworkPolicy is the controller- or session-wide default for the
+	// tool pods' allow-all NetworkPolicy. A workflow that sets its own
+	// toolNetworkPolicy overrides it; empty keeps the engine auto behavior.
+	ToolNetworkPolicy string
+	Compress          bool
 	// BandwidthLimit caps the rsync transfer rate (rsync --bwlimit syntax).
 	// Empty is unlimited.
 	BandwidthLimit   string

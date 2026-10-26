@@ -63,6 +63,7 @@ every upgrade. Unknown values and unsafe common mistakes fail schema validation.
 | `rbac.create` | `true` | Install the existing controller permission contract. The chart grants no pod exec anywhere; without it MongoDB automatic switchover reports the operator choices (grant a pods/exec Role yourself, switch the primary manually, or accept leader downtime) |
 | `controller.logLevel/logFormat` | `info` / `json` | Structured controller logs |
 | `controller.maxConcurrentReconciles` | `1` | Reconcile workers per workflow watch queue; keep `1` unless transfers of independent PVCs must overlap |
+| `controller.toolNetworkPolicy` | `auto` | Controller-wide default for the transfer tool pods' allow-all NetworkPolicy: `auto` creates it unless the controller account can create NetworkPolicies, `on` forces it, `off` never creates it; a workflow spec's `toolNetworkPolicy` overrides this per workflow |
 | `controller.pprof.enabled/port` | `false` / `6060` | Serve Go profiling on `127.0.0.1` inside the controller Pod only; reach it with `kubectl exec` — never exposed through a Service |
 | `resources` | 100m CPU/128Mi requests; 512Mi memory limit | Baseline for controller memory/cache use; tune to workflow count and object volume |
 | `podDisruptionBudget` | enabled, minAvailable 1 | Applied with multiple replicas; omitted with one replica |

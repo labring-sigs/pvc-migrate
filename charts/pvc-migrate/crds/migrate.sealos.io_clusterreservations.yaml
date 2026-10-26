@@ -171,6 +171,20 @@ spec:
                 type: array
               targetNode:
                 type: string
+              toolNetworkPolicy:
+                description: |-
+                  ToolNetworkPolicy selects whether transfer tool pods receive the chart's
+                  allow-all NetworkPolicy, which lets transfers run inside namespaces
+                  isolated with default-deny policies. Auto keeps the engine default:
+                  the policy is created unless the executing account cannot create
+                  NetworkPolicies. On and off force the choice for every tool component
+                  and override that permission fallback. The mount strategy deploys a
+                  single local-rsync pod and never creates a policy whatever this says.
+                enum:
+                - auto
+                - "on"
+                - "off"
+                type: string
               unusedStoragePolicy:
                 description: |-
                   UnusedStoragePolicy decides the fate of workflow-created storage that
