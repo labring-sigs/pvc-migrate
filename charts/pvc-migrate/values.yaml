@@ -33,6 +33,11 @@ controller:
   # Reconcile workers per workflow watch queue. Keep 1 unless transfers of
   # independent PVCs must overlap; serialized queues preserve arrival order.
   maxConcurrentReconciles: 1
+  # Controller-wide default for the transfer tool pods' allow-all
+  # NetworkPolicy: auto creates it unless the controller account cannot (the
+  # default), on forces it, off never creates it. A workflow spec's
+  # toolNetworkPolicy field overrides this value per workflow.
+  toolNetworkPolicy: auto
   pprof:
     # Serves Go profiling on 127.0.0.1 inside the controller Pod only.
     # Reach it with `kubectl exec ... -- curl http://127.0.0.1:<port>`.

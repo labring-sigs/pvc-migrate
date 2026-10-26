@@ -86,7 +86,15 @@ func (b *backupTransfer) toolRequest(
 		// not override the phase-aware result.
 		IgnoreMounted: true,
 		HelmValues: append(
-			kube.ToolSecurityContextHelmValues(),
+			append(
+				kube.ToolNetworkPolicyHelmValues(
+					kube.ResolveToolNetworkPolicy(
+						plan.ToolNetworkPolicy,
+						b.tools.ToolNetworkPolicy,
+					),
+				),
+				kube.ToolSecurityContextHelmValues()...,
+			),
 			overrides.Values...,
 		),
 		// Keep the generated credential-bearing config last so generic scheduling

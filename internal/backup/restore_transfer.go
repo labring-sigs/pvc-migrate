@@ -69,7 +69,15 @@ func (r *restoreTransfer) toolRequest(
 		IgnoreMounted:         true,
 		DeleteExtraneousFiles: plan.DeleteExtraneous,
 		HelmValues: append(
-			kube.ToolSecurityContextHelmValues(),
+			append(
+				kube.ToolNetworkPolicyHelmValues(
+					kube.ResolveToolNetworkPolicy(
+						plan.ToolNetworkPolicy,
+						r.tools.ToolNetworkPolicy,
+					),
+				),
+				kube.ToolSecurityContextHelmValues()...,
+			),
 			overrides.Values...,
 		),
 		// Keep the generated credential-bearing config last so generic scheduling

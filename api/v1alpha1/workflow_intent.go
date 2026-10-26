@@ -30,6 +30,15 @@ type TransferOptions struct {
 	TargetNode              string              `json:"targetNode,omitempty"`
 	// +kubebuilder:validation:Enum=auto;require;off
 	CapacityAwareness string `json:"capacityAwareness,omitempty"`
+	// ToolNetworkPolicy selects whether transfer tool pods receive the chart's
+	// allow-all NetworkPolicy, which lets transfers run inside namespaces
+	// isolated with default-deny policies. Auto keeps the engine default:
+	// the policy is created unless the executing account cannot create
+	// NetworkPolicies. On and off force the choice for every tool component
+	// and override that permission fallback. The mount strategy deploys a
+	// single local-rsync pod and never creates a policy whatever this says.
+	// +kubebuilder:validation:Enum=auto;on;off
+	ToolNetworkPolicy string `json:"toolNetworkPolicy,omitempty"`
 	// +kubebuilder:validation:MaxItems=32
 	Strategies     []string `json:"strategies,omitempty"`
 	VerifyChecksum bool     `json:"verifyChecksum,omitempty"`
@@ -185,10 +194,18 @@ type BackupSpec struct {
 	// +kubebuilder:validation:MinLength=1
 	// +kubebuilder:validation:MaxLength=253
 	// +kubebuilder:validation:Pattern=`^[A-Za-z0-9][A-Za-z0-9._-]*$`
-	Name                   string               `json:"name"`
-	RepositoryRef          LocalObjectReference `json:"repositoryRef"`
-	Online                 bool                 `json:"online,omitempty"`
-	OpenEBSLVMEnableShared bool                 `json:"openebsLvmEnableShared,omitempty"`
+	Name          string               `json:"name"`
+	RepositoryRef LocalObjectReference `json:"repositoryRef"`
+	Online        bool                 `json:"online,omitempty"`
+	// ToolNetworkPolicy selects whether the rclone transfer pod receives the
+	// chart's allow-all NetworkPolicy, which lets the S3 synchronization run
+	// inside namespaces isolated with default-deny policies. Auto keeps the
+	// engine default: the policy is created unless the executing account
+	// cannot create NetworkPolicies. On and off force the choice and override
+	// that permission fallback.
+	// +kubebuilder:validation:Enum=auto;on;off
+	ToolNetworkPolicy      string `json:"toolNetworkPolicy,omitempty"`
+	OpenEBSLVMEnableShared bool   `json:"openebsLvmEnableShared,omitempty"`
 }
 
 type RestoreSpec struct {
@@ -197,15 +214,23 @@ type RestoreSpec struct {
 	// +kubebuilder:validation:MinLength=1
 	// +kubebuilder:validation:MaxLength=253
 	// +kubebuilder:validation:Pattern=`^[A-Za-z0-9][A-Za-z0-9._-]*$`
-	Name                    string               `json:"name"`
-	RepositoryRef           LocalObjectReference `json:"repositoryRef"`
-	CreatePVC               bool                 `json:"createPVC,omitempty"`
-	DestinationStorageClass string               `json:"destinationStorageClass,omitempty" yaml:"destinationStorageClass,omitempty"`
-	DestinationAccessMode   string               `json:"destinationAccessMode,omitempty"   yaml:"destinationAccessMode,omitempty"`
-	DestinationCapacity     string               `json:"destinationCapacity,omitempty"     yaml:"destinationCapacity,omitempty"`
-	AllowMounted            bool                 `json:"allowMounted,omitempty"            yaml:"allowMounted,omitempty"`
-	TargetNode              string               `json:"targetNode,omitempty"              yaml:"targetNode,omitempty"`
-	DeleteExtraneous        bool                 `json:"deleteExtraneous,omitempty"        yaml:"deleteExtraneous,omitempty"`
+	Name          string               `json:"name"`
+	RepositoryRef LocalObjectReference `json:"repositoryRef"`
+	CreatePVC     bool                 `json:"createPVC,omitempty"`
+	// ToolNetworkPolicy selects whether the rclone transfer pod receives the
+	// chart's allow-all NetworkPolicy, which lets the S3 synchronization run
+	// inside namespaces isolated with default-deny policies. Auto keeps the
+	// engine default: the policy is created unless the executing account
+	// cannot create NetworkPolicies. On and off force the choice and override
+	// that permission fallback.
+	// +kubebuilder:validation:Enum=auto;on;off
+	ToolNetworkPolicy       string `json:"toolNetworkPolicy,omitempty"       yaml:"toolNetworkPolicy,omitempty"`
+	DestinationStorageClass string `json:"destinationStorageClass,omitempty" yaml:"destinationStorageClass,omitempty"`
+	DestinationAccessMode   string `json:"destinationAccessMode,omitempty"   yaml:"destinationAccessMode,omitempty"`
+	DestinationCapacity     string `json:"destinationCapacity,omitempty"     yaml:"destinationCapacity,omitempty"`
+	AllowMounted            bool   `json:"allowMounted,omitempty"            yaml:"allowMounted,omitempty"`
+	TargetNode              string `json:"targetNode,omitempty"              yaml:"targetNode,omitempty"`
+	DeleteExtraneous        bool   `json:"deleteExtraneous,omitempty"        yaml:"deleteExtraneous,omitempty"`
 	// UnusedStoragePolicy decides the fate of a destination this workflow
 	// created but that is no longer in use, for example after a failed
 	// restore. Keep retains it (default); Delete removes it.

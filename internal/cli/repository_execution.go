@@ -66,14 +66,17 @@ func (r *rootState) repositoryResolverForBackend(
 
 func (r *rootState) repositoryTools(runtime *commandRuntime) backup.ToolRuntime {
 	return backup.ToolRuntime{
-		HelmTimeout:     r.global.helmTimeout,
-		KubeconfigPath:  r.global.kubeconfig,
-		KubeContext:     r.global.kubeContext,
-		StreamToolLogs:  r.global.streamToolLogs,
-		StructuredLogs:  r.global.logFormat == string(logFormatJSON),
-		Writer:          r.errWriter(),
-		Logger:          runtime.logger,
-		ToolImageProber: kube.NewToolImageProber(runtime.clients.Kubernetes),
+		HelmTimeout:    r.global.helmTimeout,
+		KubeconfigPath: r.global.kubeconfig,
+		KubeContext:    r.global.kubeContext,
+		StreamToolLogs: r.global.streamToolLogs,
+		StructuredLogs: r.global.logFormat == string(logFormatJSON),
+		// The persistent flag is the process-wide default; a Backup or
+		// Restore spec that sets toolNetworkPolicy overrides it via its plan.
+		ToolNetworkPolicy: normalizedToolNetworkPolicy(r.global.toolNetworkPolicy),
+		Writer:            r.errWriter(),
+		Logger:            runtime.logger,
+		ToolImageProber:   kube.NewToolImageProber(runtime.clients.Kubernetes),
 	}
 }
 

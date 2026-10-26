@@ -110,7 +110,8 @@ func (p *Planner) PlanBackup(ctx context.Context, object *v1alpha1.Backup, image
 		SourcePV:  localPlanningReference(kube.PVReference(pv)),
 		Path:      request.Path, Name: request.Name, RepositoryRef: request.RepositoryRef,
 		Online: request.Online, OpenEBSLVMEnableShared: request.OpenEBSLVMEnableShared,
-		ToolImage: image,
+		ToolNetworkPolicy: request.ToolNetworkPolicy,
+		ToolImage:         image,
 	}
 
 	return nil
