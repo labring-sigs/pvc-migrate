@@ -199,11 +199,10 @@ func loadS3Credentials(
 		)
 	}
 
+	// The API server never returns StringData, so a Secret read from the
+	// cluster only ever carries credential fields in Data.
 	read := func(key string) string {
-		if value := secret.Data[key]; len(value) != 0 {
-			return string(value)
-		}
-		return secret.StringData[key]
+		return string(secret.Data[key])
 	}
 	if !flags.accessKeyExplicit {
 		if value := read(flags.accessKeyKey); value != "" {

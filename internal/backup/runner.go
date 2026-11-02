@@ -448,7 +448,12 @@ func runWithPreservedCleanupTimeout(
 	return err
 }
 
-func classifySyncError(ctx context.Context, operation string, err error) error {
+func classifySyncError(
+	ctx context.Context,
+	operation string,
+	credentials objectstore.Credentials,
+	err error,
+) error {
 	contextErr := ctx.Err()
 	if errors.Is(err, context.DeadlineExceeded) || errors.Is(contextErr, context.DeadlineExceeded) {
 		return domain.WrapError(
@@ -472,11 +477,15 @@ func classifySyncError(ctx context.Context, operation string, err error) error {
 	// synchronization failed" misdirects operators when the real failure is
 	// elsewhere — a tool Pod stuck on volume mounting reads as an S3 problem.
 	// Embed the bounded tool error text so the workflow status points at the
-	// actual failure.
+	// actual failure. The tool Pods process the complete rclone config, so
+	// their output can echo repository credentials; strip them before the text
+	// reaches the tenant-readable workflow status.
 	return domain.WrapError(
 		domain.ErrorCopy,
 		operation,
-		domain.BoundWorkflowMessage("S3 data synchronization failed: "+err.Error()),
+		domain.BoundWorkflowMessage(
+			"S3 data synchronization failed: "+redactCredentialText(err.Error(), credentials),
+		),
 		err,
 	)
 }
@@ -484,10 +493,11 @@ func classifySyncError(ctx context.Context, operation string, err error) error {
 func classifyToolAndLeaseError(
 	ctx context.Context,
 	operation string,
+	credentials objectstore.Credentials,
 	toolErr error,
 	leaseErrors <-chan error,
 ) error {
-	syncErr := classifySyncError(ctx, operation, toolErr)
+	syncErr := classifySyncError(ctx, operation, credentials, toolErr)
 	select {
 	case leaseErr := <-leaseErrors:
 		return errors.Join(leaseErr, syncErr)

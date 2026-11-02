@@ -26,6 +26,20 @@ func standaloneWorkload(pod *corev1.Pod) (v1alpha1.WorkloadSpec, error) {
 		)
 	}
 
+	// The snapshot is persisted whole inside the workflow status, so an
+	// oversized Pod must be rejected here instead of pushing the status write
+	// past the size limit the API server would refuse.
+	if len(raw) > domain.MaxOriginalPodSnapshotBytes {
+		return v1alpha1.WorkloadSpec{}, domain.NewError(
+			domain.ErrorPrecondition,
+			"discover standalone Pod",
+			fmt.Sprintf(
+				"standalone Pod %s/%s snapshot exceeds the %d-byte limit",
+				pod.Namespace, pod.Name, domain.MaxOriginalPodSnapshotBytes,
+			),
+		)
+	}
+
 	return v1alpha1.WorkloadSpec{
 		Adapter:        v1alpha1.WorkloadStandalone,
 		Pod:            workloadPodReference(pod),

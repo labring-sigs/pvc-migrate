@@ -33,6 +33,10 @@ func (b *backupTransfer) toolRequest(
 		return pvmigrate.Backup{}, err
 	}
 
+	if err := requireSecretReleaseStorage(); err != nil {
+		return pvmigrate.Backup{}, err
+	}
+
 	configValue, err := rcloneConfigHelmValue(rcloneConfig)
 	if err != nil {
 		return pvmigrate.Backup{}, err
@@ -313,7 +317,9 @@ func (b *backupTransfer) run(
 
 	toolErr = errors.Join(toolErr, toolLogs.ObservedError())
 	if toolErr != nil {
-		return classifyToolAndLeaseError(leaseCtx, "backup", toolErr, leaseErrors)
+		return classifyToolAndLeaseError(
+			leaseCtx, "backup", b.store.Credentials(), toolErr, leaseErrors,
+		)
 	}
 
 	if err := checkObjectStoreLease(leaseCtx, leaseErrors); err != nil {
