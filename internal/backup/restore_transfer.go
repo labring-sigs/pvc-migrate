@@ -30,6 +30,10 @@ func (r *restoreTransfer) toolRequest(
 		return pvmigrate.Restore{}, err
 	}
 
+	if err := requireSecretReleaseStorage(); err != nil {
+		return pvmigrate.Restore{}, err
+	}
+
 	configValue, err := rcloneConfigHelmValue(rcloneConfig)
 	if err != nil {
 		return pvmigrate.Restore{}, err
@@ -356,7 +360,9 @@ func (r *restoreTransfer) run(
 
 	toolErr = errors.Join(toolErr, toolLogs.ObservedError())
 	if toolErr != nil {
-		return classifyToolAndLeaseError(leaseCtx, "restore", toolErr, leaseErrors)
+		return classifyToolAndLeaseError(
+			leaseCtx, "restore", r.store.Credentials(), toolErr, leaseErrors,
+		)
 	}
 
 	if _, _, err := verifyPVCIdentity(

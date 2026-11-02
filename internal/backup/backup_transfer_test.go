@@ -8,6 +8,7 @@ import (
 	v1alpha1 "github.com/labring-sigs/pvc-migrate/api/v1alpha1"
 	"github.com/labring-sigs/pvc-migrate/internal/domain"
 	"github.com/labring-sigs/pvc-migrate/internal/kube"
+	"github.com/labring-sigs/pvc-migrate/internal/objectstore"
 	"github.com/utkuozdemir/pv-migrate/pvmigrate"
 )
 
@@ -33,7 +34,7 @@ func TestClassifySyncErrorSurfacesRootCause(t *testing.T) {
 		"pod backup-rclone-abc: Pending; FailedMount: cannot mount unformatted disk as we are manipulating it in read-only mode",
 	)
 
-	classified := classifySyncError(t.Context(), "backup", cause)
+	classified := classifySyncError(t.Context(), "backup", objectstore.Credentials{}, cause)
 	if domain.CategoryOf(classified) != domain.ErrorCopy {
 		t.Fatalf("category drifted: %v", domain.CategoryOf(classified))
 	}
@@ -49,7 +50,7 @@ func TestClassifySyncErrorSurfacesRootCause(t *testing.T) {
 func TestClassifySyncErrorBoundsMessage(t *testing.T) {
 	cause := errors.New(strings.Repeat("x", 2*domain.MaxWorkflowMessageBytes))
 
-	classified := classifySyncError(t.Context(), "backup", cause)
+	classified := classifySyncError(t.Context(), "backup", objectstore.Credentials{}, cause)
 
 	var typed *domain.Error
 	if !errors.As(classified, &typed) {
@@ -62,5 +63,44 @@ func TestClassifySyncErrorBoundsMessage(t *testing.T) {
 			len(typed.Message),
 			domain.MaxWorkflowMessageBytes,
 		)
+	}
+}
+
+// redactionFixture returns dummy repository credentials whose spellings are
+// easy to spot in a classified message.
+func redactionFixture() objectstore.Credentials {
+	return objectstore.Credentials{ //nolint:gosec // dummy values for a redaction test
+		AccessKey:    "mft-access-key",
+		SecretKey:    "mft,secret\\key",
+		SessionToken: "mft-session-token",
+	}
+}
+
+// TestClassifySyncErrorRedactsCredentials keeps repository credential values
+// out of the tenant-readable workflow status message even when the tool error
+// text echoes rclone configuration lines.
+func TestClassifySyncErrorRedactsCredentials(t *testing.T) {
+	values := redactionFixture()
+	cause := errors.New(
+		"rclone sync failed: access_key_id = mft-access-key rejected, " +
+			`token mft-session-token, config secret_access_key = mft\,secret\\key`,
+	)
+
+	classified := classifySyncError(t.Context(), "backup", values, cause)
+	message := classified.Error()
+
+	for _, value := range []string{values.AccessKey, values.SecretKey, values.SessionToken} {
+		if strings.Contains(message, value) {
+			t.Fatalf("classified message leaks credential value: %s", message)
+		}
+	}
+
+	if !strings.Contains(message, redactionPlaceholder) {
+		t.Fatalf("classified message lost the failure text: %s", message)
+	}
+
+	// The wrapped cause keeps the original tool error for operator-side logging.
+	if !errors.Is(classified, cause) {
+		t.Fatalf("classified error lost its cause: %v", classified)
 	}
 }

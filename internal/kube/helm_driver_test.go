@@ -9,15 +9,19 @@ func TestHelmReleaseStorage(t *testing.T) {
 	}{
 		{"", HelmReleaseStorageSecret},
 		{"secret", HelmReleaseStorageSecret},
+		{"secrets", HelmReleaseStorageSecret},
+		{"secret ", HelmReleaseStorageUnknown},
 		{"configmap", HelmReleaseStorageConfigMap},
 		{"configmaps", HelmReleaseStorageConfigMap},
-		// The driver name is case-insensitive and may carry stray whitespace:
-		// the resource estimate and the RBAC checks must agree with whatever
-		// spelling the operator used.
-		{"Configmap", HelmReleaseStorageConfigMap},
-		{" CONFIGMAPS ", HelmReleaseStorageConfigMap},
+		// Helm's driver switch is case-sensitive and rejects unrecognized
+		// values, so a differently spelled driver must not be classified as a
+		// working storage class the RBAC planner then plans around.
+		{"Configmap", HelmReleaseStorageUnknown},
+		{" CONFIGMAPS ", HelmReleaseStorageUnknown},
+		{"CONFIGMAP", HelmReleaseStorageUnknown},
 		{"memory", HelmReleaseStorageEphemeral},
 		{"sql", HelmReleaseStorageEphemeral},
+		{"postgres", HelmReleaseStorageUnknown},
 	}
 	for _, tc := range tests {
 		got := HelmReleaseStorage(func(string) (string, bool) { return tc.env, true })

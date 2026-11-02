@@ -72,6 +72,7 @@ Session families expose the lifecycle verbs each workflow supports (`status`, `r
 ## Execution and scoping model
 
 - Session commands execute in the invoking process and persist records as ConfigMaps in `--session-namespace` (default `pvc-migrate-system`).
+- S3 backup and restore require Helm's default Secret release storage: run them with `HELM_DRIVER` unset or set to `secret`, since the rclone config handed to the transfer job carries repository credentials.
 - `cr` commands submit workflow CRs the controller reconciles; the two backends never read or write each other's records.
 - While a workflow CR is controller-owned, every transfer runs under the controller's service account; an identity that only creates, watches, and finalizes CRs needs no runtime permissions. `cr <family> resume` on the transfer families (copy, backup, restore) is the exception — it executes the transfer machine in the invoking process and needs the session CLI's runtime permissions in the workflow namespace (pods, services, and Helm release storage secrets/configmaps).
 - Namespaced commands take one `-n/--namespace` — the tenant namespace of the workflow and every PVC it addresses.

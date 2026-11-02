@@ -113,15 +113,23 @@ consumes them; each carries a cross-namespace owner annotation naming the
 repository. Give a workflow namespace only repositories whose credentials its
 administrators may already see. The controller pins the tool image, so a
 tenant cannot exfiltrate credentials through a custom image, but they can read
-them directly.
+them directly. Two controls bound this exposure: S3 backup and restore refuse
+to run unless Helm release storage is the default Secret driver (`HELM_DRIVER`
+unset or `secret`), so the rclone config never persists in ConfigMaps readable
+without Secret access, and failure messages persisted into workflow status
+redact the repository credential values.
 
 **The release namespace is shared operator state.** Session records, leases,
 and credential source objects live in the controller's session namespace
 (defaults to the release namespace) for every tenant workflow. Treat it as
 single-operator infrastructure: anyone who can write there can rewrite or
-delete other tenants' migration records. Multi-tenant isolation is achieved by
-separating workflow namespaces and their RBAC, not by running additional
-controller releases in tenant namespaces.
+delete other tenants' migration records, and anyone who can read ConfigMaps
+there receives every tenant's session record, including the captured Pod
+snapshot a Pod migration persists. The same applies on the CR side: workflow
+status embeds the captured Pod object and failure messages, so workflow-CR
+read access (including `/status`) carries that content. Multi-tenant isolation
+is achieved by separating workflow namespaces and their RBAC, not by running
+additional controller releases in tenant namespaces.
 
 ## Existing Installation
 
