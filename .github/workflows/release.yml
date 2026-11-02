@@ -92,21 +92,64 @@ jobs:
         if: ${{ startsWith(github.ref, 'refs/tags/') }}
         env:
           GH_TOKEN: ${{ github.token }}
+          TAG_NAME: ${{ steps.release_meta.outputs.TAG_NAME }}
+          RELEASE_NAME: ${{ steps.release_meta.outputs.RELEASE_NAME }}
+          PRERELEASE: ${{ steps.release_meta.outputs.PRERELEASE }}
+          ASSET_FILE: pvc-migrate-${{ matrix.targets.GOOS }}-${{ matrix.targets.GOARCH }}${{ matrix.targets.EXT }}
         run: |
           set -euo pipefail
 
-          asset_file="pvc-migrate-${{ matrix.targets.GOOS }}-${{ matrix.targets.GOARCH }}${{ matrix.targets.EXT }}"
-          test -f "${asset_file}"
-          release_args=(
-            "${{ steps.release_meta.outputs.TAG_NAME }}"
-            --title "${{ steps.release_meta.outputs.RELEASE_NAME }}"
-            --verify-tag
-            --generate-notes
-          )
-          if [[ "${{ steps.release_meta.outputs.PRERELEASE }}" == "true" ]]; then
-            release_args+=(--prerelease)
-          fi
-          release_args+=("${asset_file}")
+          test -f "${ASSET_FILE}"
 
-          gh release create "${release_args[@]}" \
-          || gh release upload "${{ steps.release_meta.outputs.TAG_NAME }}" "${asset_file}"
+          # The GitHub API intermittently answers mutations with 5xx and the gh
+          # CLI does not retry them; linear backoff keeps a transient failure
+          # from deciding whether an asset ships.
+          retry() {
+            local attempts=$1
+            shift
+
+            local attempt=1
+            until "$@"; do
+              if [ "${attempt}" -ge "${attempts}" ]; then
+                return 1
+              fi
+
+              sleep $((attempt * 10))
+              attempt=$((attempt + 1))
+            done
+          }
+
+          release_exists() {
+            gh release view "${TAG_NAME}" --json tagName >/dev/null 2>&1
+          }
+
+          asset_attached() {
+            gh release view "${TAG_NAME}" --json assets --jq '.assets[].name' \
+              | grep -qx "${ASSET_FILE}"
+          }
+
+          # Every matrix job runs this step: the first to arrive creates the
+          # release and the rest attach their asset to it. A lost race and a
+          # transient API error both surface as a failed create, so the outcome
+          # is decided by observing the release, not by the create exit code.
+          if ! release_exists; then
+            release_args=(
+              "${TAG_NAME}"
+              --title "${RELEASE_NAME}"
+              --verify-tag
+              --generate-notes
+            )
+            if [[ "${PRERELEASE}" == "true" ]]; then
+              release_args+=(--prerelease)
+            fi
+
+            gh release create "${release_args[@]}" || true
+            retry 6 release_exists
+          fi
+
+          # --clobber keeps the upload idempotent across retries and job re-runs.
+          retry 6 gh release upload "${TAG_NAME}" "${ASSET_FILE}" --clobber
+
+          # The upload call can be acknowledged before the asset is listed; the
+          # step succeeds only once the asset is visible on the release.
+          retry 6 asset_attached
