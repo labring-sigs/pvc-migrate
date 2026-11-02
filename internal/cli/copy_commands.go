@@ -220,10 +220,13 @@ func (r *rootState) volumeCopyConfig(runtime *commandRuntime) app.VolumeCopyConf
 		CopyTimeout:    r.global.copyTimeout,
 		Compress:       r.global.compress,
 		BandwidthLimit: r.global.copyBandwidth,
-		Writer:         r.errWriter(),
-		Logger:         logger,
-		StreamToolLogs: r.global.streamToolLogs,
-		StructuredLogs: r.global.logFormat == string(logFormatJSON),
+		// The persistent flag is the session-wide tool NetworkPolicy choice;
+		// a workflow spec that sets toolNetworkPolicy overrides it.
+		ToolNetworkPolicy: normalizedToolNetworkPolicy(r.global.toolNetworkPolicy),
+		Writer:            r.errWriter(),
+		Logger:            logger,
+		StreamToolLogs:    r.global.streamToolLogs,
+		StructuredLogs:    r.global.logFormat == string(logFormatJSON),
 	}
 
 	if logger != nil {

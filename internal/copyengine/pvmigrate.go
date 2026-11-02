@@ -68,6 +68,14 @@ func (p *PVMigrate) Copy(ctx context.Context, request CopyRequest, progress Prog
 	}
 
 	helmValues := append(kube.ToolSecurityContextHelmValues(), request.Runtime.HelmValues...)
+	if network := kube.ToolNetworkPolicyHelmValues(
+		request.Policy.ToolNetworkPolicy,
+	); len(
+		network,
+	) > 0 {
+		helmValues = append(helmValues, network...)
+	}
+
 	if request.Policy.RsyncMaxRetries > 0 {
 		helmValues = append(helmValues,
 			fmt.Sprintf("rsync.maxRetries=%d", request.Policy.RsyncMaxRetries))

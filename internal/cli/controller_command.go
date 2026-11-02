@@ -136,8 +136,9 @@ func (r *rootState) newControllerCommand() *cobra.Command {
 				TransferExecution: app.VolumeCopyConfig{
 					Retries: r.global.retries, RetryBackoff: r.global.retryBackoff,
 					HelmTimeout: r.global.helmTimeout, Compress: r.global.compress,
-					BandwidthLimit: r.global.copyBandwidth,
-					CopyTimeout:    r.global.copyTimeout,
+					BandwidthLimit:    r.global.copyBandwidth,
+					CopyTimeout:       r.global.copyTimeout,
+					ToolNetworkPolicy: normalizedToolNetworkPolicy(r.global.toolNetworkPolicy),
 				},
 				Namespace:                     controllerNamespace,
 				KubernetesClient:              runtime.clients.Kubernetes,

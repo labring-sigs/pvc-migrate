@@ -52,6 +52,7 @@ func (p *Planner) PlanRestore(ctx context.Context, object *v1alpha1.Restore, ima
 		DestinationCapacity:     request.DestinationCapacity,
 		AllowMounted:            request.AllowMounted,
 		TargetNode:              request.TargetNode,
+		ToolNetworkPolicy:       request.ToolNetworkPolicy,
 		DeleteExtraneous:        request.DeleteExtraneous,
 		UnusedStoragePolicy:     request.UnusedStoragePolicy,
 		ToolImage:               image,

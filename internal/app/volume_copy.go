@@ -127,6 +127,10 @@ func (s *volumeCopyRunner) copyWithRetry(
 		request.Source.MountReadWrite = mountReadWrite
 		request.Policy.RsyncMaxRetries = s.config.RsyncMaxRetries
 		request.Policy.BandwidthLimit = s.config.BandwidthLimit
+		request.Policy.ToolNetworkPolicy = kube.ResolveToolNetworkPolicy(
+			request.Policy.ToolNetworkPolicy,
+			s.config.ToolNetworkPolicy,
+		)
 
 		s.logInfo(
 			"copy started",

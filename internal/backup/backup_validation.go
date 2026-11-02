@@ -95,6 +95,7 @@ func validateBackupSpecPlan(spec v1alpha1.BackupSpec, plan *v1alpha1.BackupPlan)
 			plan.Name != spec.Name ||
 			plan.Path != spec.Path ||
 			plan.Online != spec.Online ||
+			plan.ToolNetworkPolicy != spec.ToolNetworkPolicy ||
 			plan.OpenEBSLVMEnableShared != spec.OpenEBSLVMEnableShared {
 			return domain.NewError(
 				domain.ErrorConflict,

@@ -631,7 +631,12 @@ func (r *rootState) crossClusterService(
 
 	return crosscluster.NewService(source, dest, copyengine.NewPVMigrate()).
 			WithConnections(flags.sourceKubeconfig, flags.sourceContext, flags.destinationKubeconfig, flags.destinationContext).
-			WithRuntime(r.errWriter(), logger.With("component", "cross-cluster"), r.global.helmTimeout),
+			WithRuntime(
+				r.errWriter(),
+				logger.With("component", "cross-cluster"),
+				r.global.helmTimeout,
+				normalizedToolNetworkPolicy(r.global.toolNetworkPolicy),
+			),
 		nil
 }
 

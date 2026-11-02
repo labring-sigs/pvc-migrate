@@ -18,7 +18,11 @@ type ToolRuntime struct {
 	StreamToolLogs         bool
 	StructuredLogs         bool
 	ToolServiceAccountName string
-	Writer                 io.Writer
-	Logger                 *slog.Logger
-	ToolImageProber        kube.ToolImageProber
+	// ToolNetworkPolicy is the process-wide default for the rclone pod's
+	// allow-all NetworkPolicy. A plan that froze a spec value overrides it;
+	// empty keeps the engine auto behavior.
+	ToolNetworkPolicy string
+	Writer            io.Writer
+	Logger            *slog.Logger
+	ToolImageProber   kube.ToolImageProber
 }

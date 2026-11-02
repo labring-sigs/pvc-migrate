@@ -34,23 +34,24 @@ type Options struct {
 }
 
 type globals struct {
-	kubeconfig       string
-	kubeContext      string
-	sessionNamespace string
-	timeout          time.Duration
-	copyTimeout      time.Duration
-	retries          int
-	retryBackoff     time.Duration
-	helmTimeout      time.Duration
-	output           string
-	logFormat        string
-	logLevel         string
-	color            string
-	streamToolLogs   bool
-	compress         bool
-	copyBandwidth    string
-	assumeYes        bool
-	toolImage        string
+	kubeconfig        string
+	kubeContext       string
+	sessionNamespace  string
+	timeout           time.Duration
+	copyTimeout       time.Duration
+	retries           int
+	retryBackoff      time.Duration
+	helmTimeout       time.Duration
+	output            string
+	logFormat         string
+	logLevel          string
+	color             string
+	streamToolLogs    bool
+	compress          bool
+	copyBandwidth     string
+	toolNetworkPolicy string
+	assumeYes         bool
+	toolImage         string
 }
 
 type logFormat string
@@ -175,6 +176,12 @@ func NewRoot(options Options) *cobra.Command {
 		"helm-timeout",
 		10*time.Minute,
 		"pv-migrate tool deployment timeout",
+	)
+	flags.StringVar(
+		&state.global.toolNetworkPolicy,
+		"tool-network-policy",
+		kube.ToolNetworkPolicyAuto,
+		"allow-all NetworkPolicy for transfer tool pods: auto (default, skip when the account cannot create NetworkPolicies), on, or off",
 	)
 	flags.StringVarP(
 		&state.global.output,
@@ -356,10 +363,13 @@ func (r *rootState) runtime() (*commandRuntime, error) {
 		CopyTimeout:    r.global.copyTimeout,
 		Compress:       r.global.compress,
 		BandwidthLimit: r.global.copyBandwidth,
-		StreamToolLogs: r.global.streamToolLogs,
-		StructuredLogs: structuredLogs,
-		Writer:         serviceWriter,
-		Logger:         serviceLogger,
+		// The persistent flag carries the session-wide tool NetworkPolicy
+		// choice; a workflow spec that sets toolNetworkPolicy overrides it.
+		ToolNetworkPolicy: normalizedToolNetworkPolicy(r.global.toolNetworkPolicy),
+		StreamToolLogs:    r.global.streamToolLogs,
+		StructuredLogs:    structuredLogs,
+		Writer:            serviceWriter,
+		Logger:            serviceLogger,
 		// No TrustedToolImage pin on the session side: the plan records the
 		// requested tool image and every executor stage must use exactly that
 		// image. The controller pins its own trusted image separately.
@@ -462,6 +472,17 @@ func (r *rootState) runtime() (*commandRuntime, error) {
 	}, nil
 }
 
+// normalizedToolNetworkPolicy maps a validated flag value onto the canonical
+// auto default; validateGlobalFlags rejects anything else first.
+func normalizedToolNetworkPolicy(value string) string {
+	normalized, err := kube.NormalizeToolNetworkPolicy(value)
+	if err != nil {
+		return kube.ToolNetworkPolicyAuto
+	}
+
+	return normalized
+}
+
 func (r *rootState) validateGlobalFlags() error {
 	switch {
 	case r.global.retries < 1:
@@ -477,6 +498,14 @@ func (r *rootState) validateGlobalFlags() error {
 			domain.ErrorValidation,
 			"flags",
 			"--helm-timeout must be greater than 0",
+		)
+	}
+
+	if _, err := kube.NormalizeToolNetworkPolicy(r.global.toolNetworkPolicy); err != nil {
+		return domain.NewError(
+			domain.ErrorValidation,
+			"flags",
+			"--tool-network-policy "+r.global.toolNetworkPolicy+": use auto, on, or off",
 		)
 	}
 

@@ -57,6 +57,10 @@ type CopyPolicy struct {
 	BandwidthLimit          string
 	RsyncMaxRetries         int
 	TolerateLiveSourceChurn bool
+	// ToolNetworkPolicy selects whether tool pods receive the upstream chart's
+	// allow-all NetworkPolicy: auto (empty) keeps the engine default and its
+	// permission fallback; on and off force the choice for every component.
+	ToolNetworkPolicy string
 }
 
 // CopyRuntime contains the trusted tool and process-level execution options.

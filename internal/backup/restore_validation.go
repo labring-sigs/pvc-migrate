@@ -77,6 +77,7 @@ func validateRestoreSpecPlan(spec v1alpha1.RestoreSpec, plan *v1alpha1.RestorePl
 		plan.CreatePVC != spec.CreatePVC || plan.DestinationStorageClass != spec.DestinationStorageClass ||
 		plan.DestinationAccessMode != mode || plan.DestinationCapacity != spec.DestinationCapacity ||
 		plan.AllowMounted != spec.AllowMounted || plan.TargetNode != spec.TargetNode ||
+		plan.ToolNetworkPolicy != spec.ToolNetworkPolicy ||
 		plan.DeleteExtraneous != spec.DeleteExtraneous || plan.UnusedStoragePolicy != spec.UnusedStoragePolicy {
 		return domain.NewError(
 			domain.ErrorConflict,

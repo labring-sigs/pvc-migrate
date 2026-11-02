@@ -48,4 +48,8 @@ func applyTransferPolicy(
 	if options.RsyncMaxRetries != nil && *options.RsyncMaxRetries >= 0 {
 		config.RsyncMaxRetries = int(*options.RsyncMaxRetries)
 	}
+
+	if options.ToolNetworkPolicy != "" {
+		config.ToolNetworkPolicy = options.ToolNetworkPolicy
+	}
 }

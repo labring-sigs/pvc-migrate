@@ -60,6 +60,7 @@ spec:
             - --tool-image={{ include "pvc-migrate.toolImage" . }}
             - --health-probe-bind-address=:8081
             - --max-concurrent-reconciles={{ .Values.controller.maxConcurrentReconciles }}
+            - --tool-network-policy={{ .Values.controller.toolNetworkPolicy }}
             {{- if .Values.controller.pprof.enabled }}
             - --pprof-port={{ .Values.controller.pprof.port }}
             {{- end }}

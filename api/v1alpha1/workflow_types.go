@@ -293,7 +293,11 @@ type BackupPlan struct {
 	RepositoryRef          LocalObjectReference `json:"repositoryRef"                    yaml:"repositoryRef"`
 	Online                 bool                 `json:"online,omitempty"                 yaml:"online,omitempty"`
 	OpenEBSLVMEnableShared bool                 `json:"openebsLvmEnableShared,omitempty" yaml:"openebsLvmEnableShared,omitempty"`
-	ToolImage              string               `json:"toolImage,omitempty"              yaml:"toolImage,omitempty"`
+	// ToolNetworkPolicy freezes the spec's NetworkPolicy choice for the
+	// rclone transfer pod.
+	// +kubebuilder:validation:Enum=auto;on;off
+	ToolNetworkPolicy string `json:"toolNetworkPolicy,omitempty" yaml:"toolNetworkPolicy,omitempty"`
+	ToolImage         string `json:"toolImage,omitempty"         yaml:"toolImage,omitempty"`
 }
 
 type RestorePlan struct {
@@ -312,8 +316,12 @@ type RestorePlan struct {
 	DestinationCapacity     string               `json:"destinationCapacity,omitempty"     yaml:"destinationCapacity,omitempty"`
 	AllowMounted            bool                 `json:"allowMounted,omitempty"            yaml:"allowMounted,omitempty"`
 	TargetNode              string               `json:"targetNode,omitempty"              yaml:"targetNode,omitempty"`
-	ToolImage               string               `json:"toolImage,omitempty"               yaml:"toolImage,omitempty"`
-	DeleteExtraneous        bool                 `json:"deleteExtraneous,omitempty"        yaml:"deleteExtraneous,omitempty"`
+	// ToolNetworkPolicy freezes the spec's NetworkPolicy choice for the
+	// rclone transfer pod.
+	// +kubebuilder:validation:Enum=auto;on;off
+	ToolNetworkPolicy string `json:"toolNetworkPolicy,omitempty" yaml:"toolNetworkPolicy,omitempty"`
+	ToolImage         string `json:"toolImage,omitempty"         yaml:"toolImage,omitempty"`
+	DeleteExtraneous  bool   `json:"deleteExtraneous,omitempty"  yaml:"deleteExtraneous,omitempty"`
 	// UnusedStoragePolicy controls storage identities that are no longer in
 	// use at a terminal state. The in-use copy is always kept.
 	// +kubebuilder:validation:Enum=Keep;Delete

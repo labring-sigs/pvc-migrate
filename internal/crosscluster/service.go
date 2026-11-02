@@ -67,6 +67,7 @@ type Service struct {
 	now                                       func() time.Time
 	interval                                  time.Duration
 	helmTimeout                               time.Duration
+	toolNetworkPolicy                         string
 	writer                                    io.Writer
 	logger                                    *slog.Logger
 	locker                                    kube.SessionLocker
@@ -96,6 +97,7 @@ func (s *Service) WithRuntime(
 	writer io.Writer,
 	logger *slog.Logger,
 	helmTimeout time.Duration,
+	toolNetworkPolicy string,
 ) *Service {
 	if writer != nil {
 		s.writer = kube.NewSynchronizedWriter(writer)
@@ -107,6 +109,10 @@ func (s *Service) WithRuntime(
 
 	if helmTimeout > 0 {
 		s.helmTimeout = helmTimeout
+	}
+
+	if toolNetworkPolicy != "" {
+		s.toolNetworkPolicy = toolNetworkPolicy
 	}
 
 	return s

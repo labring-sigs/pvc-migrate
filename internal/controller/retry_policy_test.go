@@ -6,6 +6,7 @@ import (
 
 	v1alpha1 "github.com/labring-sigs/pvc-migrate/api/v1alpha1"
 	"github.com/labring-sigs/pvc-migrate/internal/app"
+	"github.com/labring-sigs/pvc-migrate/internal/kube"
 )
 
 func TestApplyTransferPolicy(t *testing.T) {
@@ -77,6 +78,28 @@ func TestApplyTransferPolicy(t *testing.T) {
 
 		if config.Retries != 3 {
 			t.Fatalf("retries=%d", config.Retries)
+		}
+	})
+
+	t.Run("tool network policy spec overrides controller default", func(t *testing.T) {
+		config := app.VolumeCopyConfig{ToolNetworkPolicy: kube.ToolNetworkPolicyOff}
+
+		applyTransferPolicy(&config, &v1alpha1.TransferOptions{
+			ToolNetworkPolicy: kube.ToolNetworkPolicyOn,
+		}, func(string) {})
+
+		if config.ToolNetworkPolicy != kube.ToolNetworkPolicyOn {
+			t.Fatalf("toolNetworkPolicy=%q", config.ToolNetworkPolicy)
+		}
+	})
+
+	t.Run("empty tool network policy keeps controller default", func(t *testing.T) {
+		config := app.VolumeCopyConfig{ToolNetworkPolicy: kube.ToolNetworkPolicyOff}
+
+		applyTransferPolicy(&config, &v1alpha1.TransferOptions{}, func(string) {})
+
+		if config.ToolNetworkPolicy != kube.ToolNetworkPolicyOff {
+			t.Fatalf("toolNetworkPolicy=%q", config.ToolNetworkPolicy)
 		}
 	})
 }
