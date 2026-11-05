@@ -20,7 +20,7 @@ var ErrPauseApproval = errors.New("workload pause approval declined")
 // than a failure.
 var errPodMigrationHeld = errors.New("pod migration held for manual cutover")
 
-const manualCutoverHoldMessage = "warm copy complete; manual cutover holds the workload running until a resume request approves the pause and final sync"
+const manualCutoverHoldMessage = "warm copy complete; manual cutover holds the workload running until a resume request or a cleared manualCutover field approves the pause and final sync"
 
 // podCutoverGatePhase reports whether the workload is still running and its
 // pause has not been attempted yet — exactly the states where stopping the

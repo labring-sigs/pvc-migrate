@@ -12,7 +12,9 @@ import (
 )
 
 // WorkflowExecutionIntentHash fingerprints admitted execution input. Cleanup
-// policy edits do not retarget execution; metadata and status are not input.
+// policy edits do not retarget execution; the PodMigration manual-cutover flag
+// only gates when the same execution may stop the workload; metadata and
+// status are not input.
 func WorkflowExecutionIntentHash(object crclient.Object) (string, error) {
 	if object == nil || reflect.ValueOf(object).Kind() != reflect.Pointer ||
 		reflect.ValueOf(object).IsNil() {
@@ -39,6 +41,7 @@ func WorkflowExecutionIntentHash(object crclient.Object) (string, error) {
 	case *v1alpha1.PodMigration:
 		input := current.Spec.DeepCopy()
 		input.UnusedStoragePolicy = ""
+		input.ManualCutover = false
 		canonicalizeTransferDefaults(&input.TransferOptions)
 		spec = input
 	case *v1alpha1.Copy:

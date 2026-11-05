@@ -11,6 +11,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	crclient "sigs.k8s.io/controller-runtime/pkg/client"
 )
 
 // gateWorkloadController counts workload pauses so the gate tests can prove
@@ -88,21 +89,21 @@ func warmCopiedMigration(object *v1alpha1.PodMigration) {
 func cutoverGateFixture(
 	t *testing.T,
 	configure ...func(*v1alpha1.PodMigration),
-) (*PodMigrationExecutor, *v1alpha1.PodMigration, *gateWorkloadController) {
+) (*PodMigrationExecutor, *v1alpha1.PodMigration, *gateWorkloadController, *namespacedPodMigrationCheckpointStore) {
 	t.Helper()
 
-	executor, object, _, _ := namespacedPodMigrationFixture(t, configure...)
+	executor, object, store, _ := namespacedPodMigrationFixture(t, configure...)
 	workloads := &gateWorkloadController{}
 	executor.workloads = workloads
 
-	return executor, object, workloads
+	return executor, object, workloads, store
 }
 
 // TestPodMigrationManualCutoverHoldsAtWarmCopied pins the declarative gate:
 // with spec.manualCutover the run rests at WarmCopied with the workload
 // running, records why it is not advancing once, and reports success.
 func TestPodMigrationManualCutoverHoldsAtWarmCopied(t *testing.T) {
-	executor, object, workloads := cutoverGateFixture(t, func(object *v1alpha1.PodMigration) {
+	executor, object, workloads, _ := cutoverGateFixture(t, func(object *v1alpha1.PodMigration) {
 		warmCopiedMigration(object)
 		object.Spec.ManualCutover = true
 	})
@@ -141,7 +142,7 @@ func TestPodMigrationManualCutoverHoldsAtWarmCopied(t *testing.T) {
 // interactive gate: a declined approval leaves the record at WarmCopied with
 // the workload untouched and surfaces ErrPauseApproval.
 func TestPodMigrationPauseApprovalDeclinedKeepsWorkloadRunning(t *testing.T) {
-	executor, object, workloads := cutoverGateFixture(t, warmCopiedMigration)
+	executor, object, workloads, _ := cutoverGateFixture(t, warmCopiedMigration)
 
 	declined := errors.New("wrong value typed")
 	err := executor.RunWithPauseApproval(
@@ -169,7 +170,7 @@ func TestPodMigrationPauseApprovalDeclinedKeepsWorkloadRunning(t *testing.T) {
 // TestPodMigrationPauseApprovalPassesToPause proves an approved callback lets
 // the pause proceed: the workload controller is invoked exactly once.
 func TestPodMigrationPauseApprovalPassesToPause(t *testing.T) {
-	executor, object, workloads := cutoverGateFixture(t, warmCopiedMigration)
+	executor, object, workloads, _ := cutoverGateFixture(t, warmCopiedMigration)
 
 	approved := false
 	approve := func(context.Context, *v1alpha1.PodMigration) error {
@@ -200,7 +201,7 @@ func TestPodMigrationPauseApprovalPassesToPause(t *testing.T) {
 // declaration that approves the held pause: the phase moves to Pausing, the
 // approved edge the run loop then converges without any further gate.
 func TestRequestResumeApprovesManualCutover(t *testing.T) {
-	executor, object, workloads := cutoverGateFixture(t, func(object *v1alpha1.PodMigration) {
+	executor, object, workloads, _ := cutoverGateFixture(t, func(object *v1alpha1.PodMigration) {
 		warmCopiedMigration(object)
 		object.Spec.ManualCutover = true
 	})
@@ -226,10 +227,56 @@ func TestRequestResumeApprovesManualCutover(t *testing.T) {
 	}
 }
 
+// TestPodMigrationClearingManualCutoverApprovesPause pins the declarative
+// approval by spec edit: once the held workflow's manualCutover field is
+// cleared through the API, the next loaded run pauses the workload without
+// any further gate.
+func TestPodMigrationClearingManualCutoverApprovesPause(t *testing.T) {
+	executor, object, workloads, store := cutoverGateFixture(
+		t,
+		func(object *v1alpha1.PodMigration) {
+			warmCopiedMigration(object)
+			object.Spec.ManualCutover = true
+		},
+	)
+
+	if err := executor.Run(t.Context(), object); err != nil {
+		t.Fatalf("held migration returned an error: %v", err)
+	}
+
+	if workloads.pauseCalls != 0 {
+		t.Fatal("held migration paused the workload")
+	}
+
+	edited := object.DeepCopy()
+
+	edited.Spec.ManualCutover = false
+	if err := store.client.Update(t.Context(), edited); err != nil {
+		t.Fatalf("clearing manualCutover through the API failed: %v", err)
+	}
+
+	reloaded, err := store.Load(t.Context(), crclient.ObjectKeyFromObject(object))
+	if err != nil {
+		t.Fatalf("reload after the spec edit failed: %v", err)
+	}
+
+	if err := executor.Run(t.Context(), reloaded); err != nil {
+		t.Fatalf("migration after clearing manualCutover failed: %v", err)
+	}
+
+	if workloads.pauseCalls != 1 {
+		t.Fatalf("workload paused %d time(s) after approval, want exactly 1", workloads.pauseCalls)
+	}
+
+	if reloaded.Status.Phase == domain.PhaseWarmCopied {
+		t.Fatal("approved migration never left WarmCopied")
+	}
+}
+
 // TestRequestResumeIgnoresIncompleteWarmCopy keeps the resume request from
 // approving a pause while warm-copy passes are still pending.
 func TestRequestResumeIgnoresIncompleteWarmCopy(t *testing.T) {
-	executor, object, _ := cutoverGateFixture(t, func(object *v1alpha1.PodMigration) {
+	executor, object, _, _ := cutoverGateFixture(t, func(object *v1alpha1.PodMigration) {
 		warmCopiedMigration(object)
 		object.Spec.PrecopyPasses = 2
 		object.Status.Plan.PrecopyPasses = 2
