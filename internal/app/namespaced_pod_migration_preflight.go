@@ -69,6 +69,17 @@ func (m *PodMigrationExecutor) RequestResume(
 				return err
 			}
 
+			// A manual-cutover workflow rests ahead of the workload pause;
+			// the resume request is the approval that lets it proceed.
+			if podCutoverResumePending(object) {
+				return m.transition(
+					ctx,
+					object,
+					domain.PhasePausing,
+					"manual cutover approved by resume request",
+				)
+			}
+
 			if object.Status.Phase != domain.PhaseFailed {
 				return nil
 			}

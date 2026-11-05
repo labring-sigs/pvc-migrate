@@ -2,27 +2,60 @@ package app
 
 import (
 	"context"
+	"errors"
 
 	v1alpha1 "github.com/labring-sigs/pvc-migrate/api/v1alpha1"
 	"github.com/labring-sigs/pvc-migrate/internal/domain"
 )
 
 func (m *PodMigrationExecutor) Run(ctx context.Context, object *v1alpha1.PodMigration) error {
+	return m.runWithPauseApproval(ctx, object, nil)
+}
+
+// RunWithPauseApproval runs the migration with an interactive approval in
+// front of the workload pause: the callback fires once, immediately before
+// the workload would be stopped for the final sync, and a declined approval
+// leaves the record at its warm-copy phase with the workload untouched.
+func (m *PodMigrationExecutor) RunWithPauseApproval(
+	ctx context.Context,
+	object *v1alpha1.PodMigration,
+	pauseApproval func(context.Context, *v1alpha1.PodMigration) error,
+) error {
+	return m.runWithPauseApproval(ctx, object, pauseApproval)
+}
+
+func (m *PodMigrationExecutor) runWithPauseApproval(
+	ctx context.Context,
+	object *v1alpha1.PodMigration,
+	pauseApproval func(context.Context, *v1alpha1.PodMigration) error,
+) error {
 	if err := validatePodMigrationObject(object); err != nil {
 		return err
 	}
 
-	return withStoredWorkflowLock(
+	err := withStoredWorkflowLock(
 		ctx,
 		m.store,
 		m.locker,
 		object.Namespace,
 		object,
-		func(ctx context.Context) error { return m.run(ctx, object) },
+		func(ctx context.Context) error { return m.run(ctx, object, pauseApproval) },
 	)
+
+	// A manual-cutover hold is a successful stopping point, not a failure:
+	// the record rests at WarmCopied and continues on the next run.
+	if errors.Is(err, errPodMigrationHeld) {
+		return nil
+	}
+
+	return err
 }
 
-func (m *PodMigrationExecutor) run(ctx context.Context, object *v1alpha1.PodMigration) error {
+func (m *PodMigrationExecutor) run(
+	ctx context.Context,
+	object *v1alpha1.PodMigration,
+	pauseApproval func(context.Context, *v1alpha1.PodMigration) error,
+) error {
 	for {
 		if err := ctx.Err(); err != nil {
 			return err
@@ -46,7 +79,7 @@ func (m *PodMigrationExecutor) run(ctx context.Context, object *v1alpha1.PodMigr
 					return err
 				}
 			} else {
-				if err := m.pauseAndFinalSync(ctx, object); err != nil {
+				if err := m.pauseAndFinalSync(ctx, object, pauseApproval); err != nil {
 					return err
 				}
 			}
@@ -59,7 +92,7 @@ func (m *PodMigrationExecutor) run(ctx context.Context, object *v1alpha1.PodMigr
 		case domain.PhaseRollingBack, domain.PhaseRolledBack:
 			return m.rollback(ctx, object)
 		case domain.PhasePausing:
-			if err := m.pauseAndFinalSync(ctx, object); err != nil {
+			if err := m.pauseAndFinalSync(ctx, object, pauseApproval); err != nil {
 				return err
 			}
 		case domain.PhasePaused, domain.PhaseFinalSyncing:

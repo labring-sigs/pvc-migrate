@@ -75,7 +75,7 @@ func (m *PodMigrationExecutor) FinalizeDeleted(
 				phase != domain.PhaseAborted {
 				var err error
 				if deletionRequiresConvergence(phase) {
-					err = m.run(ctx, object)
+					err = m.run(ctx, object, nil)
 				} else {
 					err = m.abort(ctx, object)
 				}

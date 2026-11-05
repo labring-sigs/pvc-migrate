@@ -23,6 +23,7 @@ func TestExecutionFingerprintTracksOnlyExecutionInputs(t *testing.T) {
 		func(o *v1alpha1.PodMigration) { o.Spec.PrecopyPasses = 1 },
 		func(o *v1alpha1.PodMigration) {
 			o.Spec.UnusedStoragePolicy = "Delete"
+			o.Spec.ManualCutover = true
 			o.Status.Plan = &v1alpha1.PodMigrationPlan{
 				Workload: v1alpha1.WorkloadSpec{
 					OriginalObject: &apiextensionsv1.JSON{Raw: []byte(`{invalid snapshot`)},

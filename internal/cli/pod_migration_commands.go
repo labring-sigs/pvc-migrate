@@ -1,11 +1,13 @@
 package cli
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"time"
 
 	v1alpha1 "github.com/labring-sigs/pvc-migrate/api/v1alpha1"
+	"github.com/labring-sigs/pvc-migrate/internal/app"
 	"github.com/labring-sigs/pvc-migrate/internal/domain"
 	"github.com/spf13/cobra"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -34,6 +36,7 @@ type podMigrationFlags struct {
 	allowPlacementViolation bool
 	precopyPasses           int
 	openEBSLVMEnableShared  bool
+	manualCutover           bool
 	unusedStoragePolicy     string
 }
 
@@ -145,6 +148,12 @@ func (f *podMigrationFlags) bind(command *cobra.Command) {
 		false,
 		"Acknowledge selected leader downtime for InstanceSet-backed KubeBlocks or native StatefulSet scale-down",
 	)
+	flags.BoolVar(
+		&f.manualCutover,
+		"manual-cutover",
+		false,
+		"Hold after the warm copy: the workload keeps running until a resume request approves the pause and final sync",
+	)
 }
 
 func (f *podMigrationFlags) bindForceReprovision(command *cobra.Command) {
@@ -194,6 +203,7 @@ func (f *podMigrationFlags) workflow(
 			SwitchoverCandidate:     f.switchoverCandidate,
 			AllowLeaderDowntime:     f.allowLeaderDowntime,
 			AllowPlacementViolation: f.allowPlacementViolation,
+			ManualCutover:           f.manualCutover,
 			TransferOptions: v1alpha1.TransferOptions{
 				UnusedStoragePolicy: v1alpha1.UnusedStoragePolicy(
 					f.unusedStoragePolicy,
@@ -366,7 +376,19 @@ func (r *rootState) runPodMigrateCommand(
 		return reportPlanningError(cmd, err)
 	}
 
-	if err := runtime.podMigrationSessionExecutor.Run(ctx, object); err != nil {
+	if err := runtime.podMigrationSessionExecutor.RunWithPauseApproval(
+		ctx, object, r.podPauseApproval(cmd, flags),
+	); err != nil {
+		if errors.Is(err, app.ErrPauseApproval) {
+			// The workload was never touched: the record rests at its warm-copy
+			// phase, and the printed commands continue or abandon it.
+			if printErr := runtime.printer.Print(object); printErr != nil {
+				return printErr
+			}
+
+			return reportPauseApprovalError(cmd, r, object, err)
+		}
+
 		return reportPodMigrationError(cmd, object.Name, object.Status.Phase, err)
 	}
 
@@ -443,4 +465,52 @@ func podApprovalIdentity(flags *podMigrationFlags) string {
 		return flags.podName
 	}
 	return flags.sessionID
+}
+
+// podPauseApproval builds the interactive approval the session executor calls
+// once, immediately before the workload would be stopped for the final sync.
+// It stays nil when --yes was given (every approval is skipped) or when
+// --manual-cutover holds the migration instead of prompting.
+func (r *rootState) podPauseApproval(
+	cmd *cobra.Command,
+	flags *podMigrationFlags,
+) func(context.Context, *v1alpha1.PodMigration) error {
+	if r.global.assumeYes || flags.manualCutover {
+		return nil
+	}
+
+	return func(ctx context.Context, object *v1alpha1.PodMigration) error {
+		fmt.Fprintf(
+			cmd.ErrOrStderr(),
+			"Warm copy complete. The next step stops Pod %s/%s for the final sync and cutover.\n",
+			object.Namespace,
+			object.Spec.Pod.Name,
+		)
+
+		return r.confirm(ctx, cmd, podApprovalIdentity(flags))
+	}
+}
+
+// reportPauseApprovalError explains a declined pause approval: nothing was
+// stopped, the warm copy is preserved, and the printed commands continue or
+// abandon the migration.
+func reportPauseApprovalError(
+	cmd *cobra.Command,
+	r *rootState,
+	object *v1alpha1.PodMigration,
+	cause error,
+) error {
+	namespace := podMigrationHintNamespace(cmd, r, object)
+	prefix := guidancePrefixesForCommand(cmd, namespace).pvcMigrate
+
+	_, err := fmt.Fprintf(
+		cmd.ErrOrStderr(),
+		"\nApproval stopped before the workload was paused; the warm copy is preserved and the Pod is still running.\n"+
+			"Continue the cutover later: %s\n"+
+			"Keep the Pod on its current storage instead: %s\n",
+		lifecycleExecuteCommand(cmd, prefix, "migrate-pod", "resume", namespace, object.Name),
+		lifecycleExecuteCommand(cmd, prefix, "migrate-pod", "abort", namespace, object.Name),
+	)
+
+	return errors.Join(cause, err)
 }
