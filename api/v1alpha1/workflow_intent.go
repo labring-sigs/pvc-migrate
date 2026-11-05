@@ -145,6 +145,12 @@ type PodMigrationSpec struct {
 	// topologySpread constraints on the target node — for topologies where
 	// the operator will re-balance the remaining replicas afterwards.
 	AllowPlacementViolation bool `json:"allowPlacementViolation,omitempty"`
+	// ManualCutover holds the migration once the warm copy passes complete:
+	// the workload keeps running and the workflow rests at WarmCopied until
+	// a resume request (or clearing this field) approves the workload pause
+	// and final sync that cut over to the destination storage.
+	// +optional
+	ManualCutover bool `json:"manualCutover,omitempty"`
 	// Optional per-volume capacity and path settings, keyed by source PVC name.
 	// +kubebuilder:validation:MaxItems=1024
 	Volumes []VolumeRequest `json:"volumes,omitempty"`

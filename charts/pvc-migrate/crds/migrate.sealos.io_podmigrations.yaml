@@ -88,6 +88,13 @@ spec:
                 type: string
               forceReprovision:
                 type: boolean
+              manualCutover:
+                description: |-
+                  ManualCutover holds the migration once the warm copy passes complete:
+                  the workload keeps running and the workflow rests at WarmCopied until
+                  a resume request (or clearing this field) approves the workload pause
+                  and final sync that cut over to the destination storage.
+                type: boolean
               openebsLvmEnableShared:
                 type: boolean
               pod:

@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"errors"
 
 	v1alpha1 "github.com/labring-sigs/pvc-migrate/api/v1alpha1"
 	"github.com/labring-sigs/pvc-migrate/internal/domain"
@@ -15,13 +16,19 @@ func (m *PodMigrationExecutor) PauseAndFinalSync(
 		return err
 	}
 
-	return withStoredWorkflowLock(ctx, m.store, m.locker, object.Namespace, object,
-		func(ctx context.Context) error { return m.pauseAndFinalSync(ctx, object) })
+	err := withStoredWorkflowLock(ctx, m.store, m.locker, object.Namespace, object,
+		func(ctx context.Context) error { return m.pauseAndFinalSync(ctx, object, nil) })
+	if errors.Is(err, errPodMigrationHeld) {
+		return nil
+	}
+
+	return err
 }
 
 func (m *PodMigrationExecutor) pauseAndFinalSync(
 	ctx context.Context,
 	object *v1alpha1.PodMigration,
+	pauseApproval func(context.Context, *v1alpha1.PodMigration) error,
 ) error {
 	phase := workflowResumePhase(object.Status.WorkflowStatus)
 	if object.Status.Plan == nil || !podPausePhase(phase) {
@@ -38,6 +45,15 @@ func (m *PodMigrationExecutor) pauseAndFinalSync(
 
 	if podFinalSyncPhase(phase) {
 		return m.finalSync(ctx, object)
+	}
+
+	// The workload is still running and its pause has not been attempted:
+	// this is the last point where the manual-cutover hold or the
+	// interactive approval can still keep it running.
+	if podCutoverGatePhase(phase) {
+		if err := m.cutoverGate(ctx, object, pauseApproval); err != nil {
+			return err
+		}
 	}
 
 	if m.workloads == nil {
