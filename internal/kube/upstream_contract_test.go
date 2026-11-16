@@ -131,6 +131,7 @@ func TestUpstreamRequestShapeRequiresAdapterReview(t *testing.T) {
 		"RcloneExtraArgs",
 		"DeleteExtraneousFiles",
 		"IgnoreMounted",
+		"NoChown",
 		"NonRoot",
 		"Detach",
 		"NoCleanup",
@@ -521,6 +522,38 @@ func TestToolDockerfileTracksUpstreamAlpineBase(t *testing.T) {
 	if !strings.Contains(string(local), "ARG ALPINE_VERSION="+upstreamVersion) {
 		t.Fatalf("tool Dockerfile Alpine version differs from upstream: want %s", upstreamVersion)
 	}
+}
+
+// TestToolDockerfileTracksUpstreamPosixMeta keeps the tool image aligned with
+// upstream's bucket backup and restore metadata preservation: while upstream
+// ships cmd/posixmeta, the tool image must build it; if upstream drops or
+// renames it, the stale reference must be removed along with it.
+func TestToolDockerfileTracksUpstreamPosixMeta(t *testing.T) {
+	local, err := os.ReadFile(filepath.Join(repositoryRoot(t), "Dockerfile"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	const buildReference = "github.com/utkuozdemir/pv-migrate/cmd/posixmeta"
+
+	_, statErr := os.Stat(filepath.Join(upstreamModuleDir(t), "cmd", "posixmeta"))
+	upstreamShips := statErr == nil
+
+	if upstreamShips == strings.Contains(string(local), buildReference) {
+		return
+	}
+
+	if upstreamShips {
+		t.Fatalf(
+			"upstream ships cmd/posixmeta but the tool Dockerfile does not build %s",
+			buildReference,
+		)
+	}
+
+	t.Fatalf(
+		"upstream no longer ships cmd/posixmeta but the tool Dockerfile still builds %s",
+		buildReference,
+	)
 }
 
 func TestToolDockerfileDefaultsMissingVersionMetadata(t *testing.T) {

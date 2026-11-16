@@ -10,7 +10,7 @@
 - Same-namespace work (`migrate`, `copy`, `reserve` with a single `-n`) and cross-namespace work (`cluster-migrate`, `cluster-copy`, `cluster-reserve` with role flags) are separate command families.
 - Two execution modes: session commands execute in-process; `cr` commands submit workflow CRs that the controller reconciles. The two backends never share records.
 - Cross-cluster copy and reservation (`cluster-copy cross`, `cluster-reserve cross`) with separate source and destination kubeconfig connections.
-- Backup and restore of PVC files to S3-compatible object storage; controller mode reads its configuration from a namespaced `BackupRepository`.
+- Backup and restore of PVC files to S3-compatible object storage; controller mode reads its configuration from a namespaced `BackupRepository`. Backups preserve POSIX metadata — permission modes, numeric ownership, symlinks, directory mtimes, and empty directories — and restores of older backups without that metadata continue to work.
 - Rename or move offline PVC identities while retaining their PV; the source PV stays retained for a rollback window after cutover.
 
 ## Supported workloads
