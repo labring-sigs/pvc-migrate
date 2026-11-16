@@ -1,5 +1,5 @@
-ARG GO_VERSION=1.27.3
-ARG ALPINE_VERSION=3.24.3
+ARG GO_VERSION=1.27.4
+ARG ALPINE_VERSION=3.24.4
 
 FROM --platform=$BUILDPLATFORM golang:${GO_VERSION}-trixie AS build
 
@@ -22,6 +22,11 @@ COPY --link . .
 RUN --mount=type=cache,target=/go/pkg/mod \
     --mount=type=cache,target=/root/.cache/go-build \
     ["sh", "-c", "version=\"${BUILD_VERSION:-dev}\"; CGO_ENABLED=0 GOOS=\"${TARGETOS:-linux}\" GOARCH=\"${TARGETARCH:-amd64}\" go build -trimpath -ldflags=\"-s -w -X main.version=$version -X main.toolImageRepository=${TOOL_IMAGE_REPOSITORY}\" -o /out/pvc-migrate ./cmd/pvc-migrate"]
+# Build upstream's POSIX metadata helper from the pinned module so bucket
+# backup and restore preserve modes, ownership, symlinks, and directory times.
+RUN --mount=type=cache,target=/go/pkg/mod \
+    --mount=type=cache,target=/root/.cache/go-build \
+    ["sh", "-c", "CGO_ENABLED=0 GOOS=\"${TARGETOS:-linux}\" GOARCH=\"${TARGETARCH:-amd64}\" go build -trimpath -ldflags=\"-s -w\" -o /out/posixmeta github.com/utkuozdemir/pv-migrate/cmd/posixmeta"]
 
 FROM alpine:${ALPINE_VERSION}
 
@@ -49,6 +54,7 @@ RUN apk add --no-cache \
 COPY docker/sshd_config /etc/ssh/sshd_config
 COPY --link --chmod=0755 docker/sh /usr/local/bin/sh
 COPY --from=build /out/pvc-migrate /usr/local/bin/pvc-migrate
+COPY --from=build /out/posixmeta /usr/local/bin/posixmeta
 
 LABEL org.opencontainers.image.title="pvc-migrate tool image" \
       org.opencontainers.image.description="pvc-migrate CLI and in-cluster PVC reservation, rsync, SSHD, and rclone tools" \
