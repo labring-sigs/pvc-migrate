@@ -165,6 +165,55 @@ func TestToolLogStreamerReconnectsWithoutReplayingHistory(t *testing.T) {
 	}
 }
 
+// Kubernetes refuses pods/log until the container has started.
+type pendingToolLogSource struct {
+	fakeToolLogSource
+	remaining int
+}
+
+func (s *pendingToolLogSource) streamPodLogs(
+	ctx context.Context,
+	namespace, name string,
+	options *corev1.PodLogOptions,
+) (io.ReadCloser, error) {
+	if s.remaining > 0 {
+		s.remaining--
+		return nil, apierrors.NewBadRequest("pod does not have a host assigned")
+	}
+
+	return s.fakeToolLogSource.streamPodLogs(ctx, namespace, name, options)
+}
+
+func TestToolLogsReportSchedulingBlockOnceAndFollowAfterRecovery(t *testing.T) {
+	pod := upstreamToolPod("pm-pending")
+	pod.Status.Conditions = []corev1.PodCondition{{
+		Type: corev1.PodScheduled, Status: corev1.ConditionFalse,
+		Reason: "Unschedulable", Message: "insufficient storage",
+	}}
+	source := &pendingToolLogSource{
+		fakeToolLogSource: fakeToolLogSource{pod: pod, streams: []string{"transfer started"}},
+		remaining:         2,
+	}
+
+	var output lockedBuffer
+
+	stream := startToolLogStream(t.Context(), source, ToolLogOptions{
+		Logger:     slog.New(slog.NewJSONHandler(&output, nil)),
+		Structured: true,
+		Cluster:    "destination",
+	}, pod)
+	waitForText(t, &output, "transfer started")
+	stream.Stop()
+
+	text := output.String()
+	if strings.Count(text, "tool Pod startup blocked") != 1 ||
+		!strings.Contains(text, `"reason":"Unschedulable"`) ||
+		!strings.Contains(text, `"message":"insufficient storage"`) ||
+		!strings.Contains(text, `"cluster":"destination"`) {
+		t.Fatal(text)
+	}
+}
+
 func TestToolLogStreamerKeepsStructuredOutputParseable(t *testing.T) {
 	pod := upstreamToolPod("pm-json")
 	source := &fakeToolLogSource{pod: pod, streams: []string{"copied 42 bytes\n"}}

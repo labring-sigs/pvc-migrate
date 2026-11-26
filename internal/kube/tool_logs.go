@@ -388,6 +388,8 @@ func (s *toolLogStreamer) matches(pod *corev1.Pod) bool {
 func (s *toolLogStreamer) followContainer(ctx context.Context, namespace, pod, container string) {
 	s.emitStart(ctx, namespace, pod, container)
 
+	var lastReason, lastMessage string
+
 	streamed := false
 	for ctx.Err() == nil {
 		options := &corev1.PodLogOptions{Container: container, Follow: true}
@@ -425,6 +427,17 @@ func (s *toolLogStreamer) followContainer(ctx context.Context, namespace, pod, c
 		current, getErr := s.source.getPod(ctx, namespace, pod)
 		if apierrors.IsNotFound(getErr) || (getErr == nil && podLogsComplete(current, container)) {
 			return
+		}
+
+		if getErr == nil && current != nil {
+			reason, message, blocked := podStartupFailure(current, container)
+			if blocked && (reason != lastReason || message != lastMessage) {
+				s.options.Logger.WarnContext(ctx, "tool Pod startup blocked",
+					"namespace", namespace, "pod", pod, "container", container,
+					"reason", reason, "message", message)
+			}
+
+			lastReason, lastMessage = reason, message
 		}
 
 		if err != nil {

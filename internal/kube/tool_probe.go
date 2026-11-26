@@ -326,7 +326,7 @@ func (p *KubernetesToolImageProber) probeTarget(
 			case corev1.PodFailed:
 				return false, toolProbePodFailure(current, image, observedTarget)
 			default:
-				if reason, message, fatal := toolProbePendingFailure(current); fatal {
+				if reason, message, fatal := podStartupFailure(current, ""); fatal {
 					return false, toolProbePodFailureWithMessage(
 						current,
 						image,
@@ -1196,33 +1196,6 @@ func toolProbePodStatusParts(pod *corev1.Pod) []string {
 	}
 
 	return parts
-}
-
-func toolProbePendingFailure(pod *corev1.Pod) (reason, message string, fatal bool) {
-	for _, condition := range pod.Status.Conditions {
-		if condition.Type == corev1.PodScheduled && condition.Status == corev1.ConditionFalse {
-			return condition.Reason, condition.Message, true
-		}
-	}
-
-	for _, status := range pod.Status.ContainerStatuses {
-		if status.State.Waiting == nil {
-			continue
-		}
-
-		reason = status.State.Waiting.Reason
-		switch reason {
-		case "ErrImagePull",
-			"ImagePullBackOff",
-			"InvalidImageName",
-			"CreateContainerConfigError",
-			"CreateContainerError",
-			"RunContainerError":
-			return reason, status.State.Waiting.Message, true
-		}
-	}
-
-	return "", "", false
 }
 
 // IsConcurrentMountFailureMessage identifies deterministic CSI or filesystem
