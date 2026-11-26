@@ -30,6 +30,7 @@ rbac:
 controller:
   logLevel: info
   logFormat: json
+  streamToolLogs: false
   # Reconcile workers per workflow watch queue. Keep 1 unless transfers of
   # independent PVCs must overlap; serialized queues preserve arrival order.
   maxConcurrentReconciles: 1

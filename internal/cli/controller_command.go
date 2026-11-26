@@ -16,6 +16,7 @@ import (
 func (r *rootState) newControllerCommand() *cobra.Command {
 	var (
 		once                    bool
+		streamToolLogs          bool
 		controllerNamespace     string
 		healthProbeBindAddress  string
 		pprofPort               int
@@ -138,6 +139,7 @@ func (r *rootState) newControllerCommand() *cobra.Command {
 					HelmTimeout: r.global.helmTimeout, Compress: r.global.compress,
 					BandwidthLimit:    r.global.copyBandwidth,
 					CopyTimeout:       r.global.copyTimeout,
+					StreamToolLogs:    streamToolLogs,
 					ToolNetworkPolicy: normalizedToolNetworkPolicy(r.global.toolNetworkPolicy),
 				},
 				Namespace:                     controllerNamespace,
@@ -175,6 +177,8 @@ func (r *rootState) newControllerCommand() *cobra.Command {
 			return err
 		},
 	}
+	command.Flags().
+		BoolVar(&streamToolLogs, "stream-tool-logs", false, "Include tool Pod output in controller logs")
 	command.Flags().StringVar(
 		&controllerNamespace,
 		"controller-namespace",

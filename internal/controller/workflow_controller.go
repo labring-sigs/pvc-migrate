@@ -961,13 +961,20 @@ func (r *WorkflowReconciler) configureTransferControllers(
 	transfer.TrustedToolImage = image
 	transfer.Logger = logger
 	transfer.StructuredLogs = true
-	transfer.StreamToolLogs = false
 	transfer.Writer = nil
 
 	copyConfig := app.CopyExecutorConfig{
 		Transfer:            transfer,
 		ToolImageProber:     kube.NewToolImageProber(options.KubernetesClient),
 		SharedVolumeManager: options.OpenEBSLVMSharedVolumeManager,
+	}
+
+	reservationConfig := app.ReservationExecutorConfig{
+		TrustedToolImage: image,
+		Logger:           logger,
+		StructuredLogs:   transfer.StructuredLogs,
+		StreamToolLogs:   transfer.StreamToolLogs,
+		ToolImageProber:  copyConfig.ToolImageProber,
 	}
 
 	engine := copyengine.NewPVMigrate()
@@ -1114,11 +1121,7 @@ func (r *WorkflowReconciler) configureTransferControllers(
 			planner: options.NamespacedReservationPlanner,
 			locker:  locker,
 			active:  &r.activeWorkflows,
-			config: app.ReservationExecutorConfig{
-				TrustedToolImage: image,
-				Logger:           logger,
-				ToolImageProber:  copyConfig.ToolImageProber,
-			},
+			config:  reservationConfig,
 			checkCollision: func(ctx context.Context, name string, namespaces []string) error {
 				return kube.CheckWorkflowIdentityCollision(
 					ctx,
@@ -1153,11 +1156,7 @@ func (r *WorkflowReconciler) configureTransferControllers(
 			planner: options.ReservationPlanner,
 			locker:  locker,
 			active:  &r.activeWorkflows,
-			config: app.ReservationExecutorConfig{
-				TrustedToolImage: image,
-				Logger:           logger,
-				ToolImageProber:  copyConfig.ToolImageProber,
-			},
+			config:  reservationConfig,
 			checkCollision: func(ctx context.Context, name string, namespaces []string) error {
 				return kube.CheckWorkflowIdentityCollision(
 					ctx,

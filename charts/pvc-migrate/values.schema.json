@@ -42,6 +42,7 @@
       "type": "object", "additionalProperties": false,
       "properties": {
         "logLevel": {"enum": ["debug", "info", "warn", "error"]},
+        "streamToolLogs": {"type": "boolean"},
         "logFormat": {"enum": ["json", "text"]},
         "maxConcurrentReconciles": {"type": "integer", "minimum": 1},
         "toolNetworkPolicy": {"enum": ["auto", "on", "off"]},

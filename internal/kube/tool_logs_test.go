@@ -184,6 +184,67 @@ func (s *pendingToolLogSource) streamPodLogs(
 	return s.fakeToolLogSource.streamPodLogs(ctx, namespace, name, options)
 }
 
+func TestToolLogsReadCompletedContainerAfterPendingRequest(t *testing.T) {
+	pod := upstreamToolPod("pm-fast")
+	pod.Status.ContainerStatuses = []corev1.ContainerStatus{{
+		Name: "rsync", State: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{}},
+	}}
+	source := &pendingToolLogSource{
+		fakeToolLogSource: fakeToolLogSource{pod: pod, streams: []string{"finished\n"}},
+		remaining:         1,
+	}
+
+	var output lockedBuffer
+
+	initial := pod.DeepCopy()
+	initial.Status = corev1.PodStatus{}
+
+	stream := startToolLogStream(t.Context(), source, ToolLogOptions{Writer: &output}, initial)
+	defer stream.Stop()
+
+	select {
+	case <-stream.done:
+	case <-time.After(time.Second):
+		t.Fatal("completed container log request did not finish")
+	}
+
+	if len(source.streamCalls) != 1 || source.streamCalls[0].Follow ||
+		strings.Count(output.String(), "finished") != 1 {
+		t.Fatalf("snapshot requests=%v, output=%s", source.streamCalls, output.String())
+	}
+}
+
+func TestToolLogsSnapshotJobThatFinishesBetweenWatchEvents(t *testing.T) {
+	pod := upstreamToolPod("pm-short")
+	pod.Status = corev1.PodStatus{Phase: corev1.PodPending}
+	events := watch.NewRaceFreeFake()
+	source := &fakeToolLogSource{
+		list:     &corev1.PodList{Items: []corev1.Pod{*pod}},
+		podWatch: events, pod: pod, streams: []string{"payload copied\n"},
+	}
+
+	var output lockedBuffer
+
+	stream := startToolLogStream(t.Context(), source, ToolLogOptions{
+		Namespaces: []string{pod.Namespace}, OperationID: "pm-short", Writer: &output,
+	}, nil)
+	defer stream.Stop()
+
+	waitForText(t, &output, "Following tool logs")
+
+	completed := pod.DeepCopy()
+	completed.Status.Phase = corev1.PodSucceeded
+	events.Modify(completed)
+	events.Modify(completed)
+	waitForText(t, &output, "payload copied")
+	stream.Stop()
+
+	if len(source.streamCalls) != 1 || source.streamCalls[0].Follow ||
+		source.streamCalls[0].TailLines != nil {
+		t.Fatalf("expected a single complete snapshot, requests=%v", source.streamCalls)
+	}
+}
+
 func TestToolLogsReportSchedulingBlockOnceAndFollowAfterRecovery(t *testing.T) {
 	pod := upstreamToolPod("pm-pending")
 	pod.Status.Conditions = []corev1.PodCondition{{
@@ -393,6 +454,9 @@ func upstreamToolPod(operationID string) *corev1.Pod {
 			},
 		},
 		Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "rsync"}}},
+		Status: corev1.PodStatus{ContainerStatuses: []corev1.ContainerStatus{{
+			Name: "rsync", State: corev1.ContainerState{Running: &corev1.ContainerStateRunning{}},
+		}}},
 	}
 }
 

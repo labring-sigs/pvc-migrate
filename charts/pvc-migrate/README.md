@@ -61,6 +61,7 @@ every upgrade. Unknown values and unsafe common mistakes fail schema validation.
 | `imagePullSecrets` | `[]` | Existing pull secrets in the release namespace |
 | `serviceAccount.create/name` | `true` / generated | Dedicated operator identity; an explicit name is required for an external account |
 | `rbac.create` | `true` | Install the existing controller permission contract. The chart grants no pod exec anywhere; without it MongoDB automatic switchover reports the operator choices (grant a pods/exec Role yourself, switch the primary manually, or accept leader downtime) |
+| `controller.streamToolLogs` | `false` | Include tool Pod output in controller logs during transfers and volume reservations |
 | `controller.logLevel/logFormat` | `info` / `json` | Structured controller logs |
 | `controller.maxConcurrentReconciles` | `1` | Reconcile workers per workflow watch queue; keep `1` unless transfers of independent PVCs must overlap |
 | `controller.toolNetworkPolicy` | `auto` | Controller-wide default for the transfer tool pods' allow-all NetworkPolicy: `auto` creates it unless the controller account can create NetworkPolicies, `on` forces it, `off` never creates it; a workflow spec's `toolNetworkPolicy` overrides this per workflow |
