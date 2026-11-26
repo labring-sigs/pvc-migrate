@@ -6,7 +6,6 @@ import (
 
 	v1alpha1 "github.com/labring-sigs/pvc-migrate/api/v1alpha1"
 	"github.com/labring-sigs/pvc-migrate/internal/domain"
-	"github.com/labring-sigs/pvc-migrate/internal/kube"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -265,9 +264,8 @@ func (s *Service) cleanupDestinationPV(
 
 	client := s.destination.Kubernetes.CoreV1().PersistentVolumes()
 
-	return kube.WaitFor(
+	return s.waitForDestination(
 		ctx,
-		s.interval,
 		"destination PV "+pvName+" release",
 		func(waitCtx context.Context) (bool, error) {
 			pv, err := client.Get(waitCtx, pvName, metav1.GetOptions{})
@@ -377,9 +375,8 @@ func (s *Service) deleteReservationConsumer(
 		return err
 	}
 
-	return kube.WaitFor(
+	return s.waitForDestination(
 		ctx,
-		s.interval,
 		"reservation Pod "+pod.Namespace+"/"+pod.Name+" deletion",
 		func(waitCtx context.Context) (bool, error) {
 			current, err := pods.Get(waitCtx, pod.Name, metav1.GetOptions{})

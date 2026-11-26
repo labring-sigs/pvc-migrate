@@ -537,6 +537,8 @@ func (s *Service) copy(
 		return errors.New("cross-cluster session is already being cleaned or has been cleaned")
 	}
 
+	recovering := session.Status.Phase == PhaseTransferring || session.Status.Phase == PhaseFailed
+
 	if err := s.reserveCopy(ctx, session); err != nil {
 		return err
 	}
@@ -620,84 +622,50 @@ func (s *Service) copy(
 		}
 
 		volume := &session.Spec.Volumes[i]
-		if err := s.validateTransferVolume(ctx, session, i); err != nil {
+
+		req := copyengine.CopyRequest{
+			AttemptIdentity: copyengine.AttemptIdentity{
+				SessionID: session.ID + "-" + volume.Source.PVC.Name,
+				Source:    objectRef(volume.Source.PVC),
+				Mode:      copyengine.ModeFinal,
+			},
+			Source: copyengine.CopySource{
+				KubeconfigPath: s.sourceKubeconfig,
+				Context:        s.sourceContext,
+				Path:           volume.Transfer.SourcePath,
+			},
+			Destination: copyengine.CopyDestination{
+				Reference:      objectRef(volume.Destination.PVC),
+				KubeconfigPath: s.destinationKubeconfig,
+				Context:        s.destinationContext,
+				Path:           volume.Transfer.DestinationPath,
+			},
+			Policy: copyengine.CopyPolicy{
+				Strategies:            append([]string(nil), session.Spec.Strategies...),
+				DeleteExtraneousFiles: session.Spec.DeleteExtraneous,
+				VerifyChecksum:        session.Spec.VerifyChecksum,
+				IgnoreSizes: capacitySmaller(
+					volume.Destination.Capacity,
+					volume.Source.Capacity,
+				),
+				Compress:       compress,
+				BandwidthLimit: bandwidthLimit,
+				// The service-wide flag is the cross-cluster choice; a
+				// session spec carries no per-session override.
+				ToolNetworkPolicy: s.runtime.ToolNetworkPolicy,
+			},
+			Runtime: copyengine.CopyRuntime{
+				ToolImage:        session.Spec.ToolImage,
+				HelmTimeout:      s.runtime.HelmTimeout,
+				HelmValues:       append([]string(nil), identityValues.Values...),
+				HelmStringValues: append([]string(nil), schedulingValues...),
+				Writer:           s.runtime.Writer,
+				Logger:           s.runtime.Logger,
+			},
+		}
+		if err := s.copyVolume(ctx, session, i, req, retries, recovering); err != nil {
 			status.Transfer.LastError = err.Error()
-			session.Status.Phase = PhaseFailed
-			session.Status.Message = err.Error()
-			s.touch(session)
-
-			if saveErr := s.save(ctx, session, false); saveErr != nil {
-				return errors.Join(err, saveErr)
-			}
-
-			return err
-		}
-
-		var last error
-
-		previousAttempts := status.Transfer.Attempts
-		for retry := 1; retry <= retries; retry++ {
-			if err := requireSessionLease(ctx); err != nil {
-				return err
-			}
-
-			attempt := previousAttempts + retry
-			status.Transfer.Attempts = attempt
-			req := copyengine.CopyRequest{
-				AttemptIdentity: copyengine.AttemptIdentity{
-					SessionID: session.ID + "-" + volume.Source.PVC.Name,
-					Source:    objectRef(volume.Source.PVC),
-					Mode:      copyengine.ModeFinal,
-					Attempt:   attempt,
-				},
-				Source: copyengine.CopySource{
-					KubeconfigPath: s.sourceKubeconfig,
-					Context:        s.sourceContext,
-					Path:           volume.Transfer.SourcePath,
-				},
-				Destination: copyengine.CopyDestination{
-					Reference:      objectRef(volume.Destination.PVC),
-					KubeconfigPath: s.destinationKubeconfig,
-					Context:        s.destinationContext,
-					Path:           volume.Transfer.DestinationPath,
-				},
-				Policy: copyengine.CopyPolicy{
-					Strategies:            append([]string(nil), session.Spec.Strategies...),
-					DeleteExtraneousFiles: session.Spec.DeleteExtraneous,
-					VerifyChecksum:        session.Spec.VerifyChecksum,
-					IgnoreSizes: capacitySmaller(
-						volume.Destination.Capacity,
-						volume.Source.Capacity,
-					),
-					Compress:       compress,
-					BandwidthLimit: bandwidthLimit,
-					// The service-wide flag is the cross-cluster choice; a
-					// session spec carries no per-session override.
-					ToolNetworkPolicy: s.toolNetworkPolicy,
-				},
-				Runtime: copyengine.CopyRuntime{
-					ToolImage:        session.Spec.ToolImage,
-					HelmTimeout:      s.helmTimeout,
-					HelmValues:       append([]string(nil), identityValues.Values...),
-					HelmStringValues: append([]string(nil), schedulingValues...),
-					Writer:           s.writer,
-					Logger:           s.logger,
-				},
-			}
-
-			last = s.copier.Copy(ctx, req, nil)
-			if last == nil {
-				last = requireSessionLease(ctx)
-			}
-
-			if last == nil {
-				break
-			}
-		}
-
-		if last != nil {
-			status.Transfer.LastError = last.Error()
-			return s.fail(ctx, session, last)
+			return s.fail(ctx, session, err)
 		}
 
 		now := metav1.NewTime(s.now().UTC())

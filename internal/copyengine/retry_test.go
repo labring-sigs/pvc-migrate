@@ -1,9 +1,11 @@
-package app
+package copyengine_test
 
 import (
 	"math"
 	"testing"
 	"time"
+
+	"github.com/labring-sigs/pvc-migrate/internal/copyengine"
 )
 
 // TestRetryBackoffDelaySaturates pins the retry backoff contract: exact
@@ -31,16 +33,16 @@ func TestRetryBackoffDelaySaturates(t *testing.T) {
 	}
 
 	for _, tc := range cases {
-		if got := retryBackoffDelay(base, tc.retryIndex); got != tc.want {
-			t.Fatalf("retryBackoffDelay(1s, %d) = %v, want %v", tc.retryIndex, got, tc.want)
+		if got := copyengine.RetryBackoffDelay(base, tc.retryIndex); got != tc.want {
+			t.Fatalf("RetryBackoffDelay(1s, %d) = %v, want %v", tc.retryIndex, got, tc.want)
 		}
 	}
 
-	if got := retryBackoffDelay(time.Hour, 100); got != time.Duration(math.MaxInt64) {
+	if got := copyengine.RetryBackoffDelay(time.Hour, 100); got != time.Duration(math.MaxInt64) {
 		t.Fatalf("hour-scale base must saturate, got %v", got)
 	}
 
-	if got := retryBackoffDelay(0, 3); got != 0 {
+	if got := copyengine.RetryBackoffDelay(0, 3); got != 0 {
 		t.Fatalf("zero base must stay zero, got %v", got)
 	}
 }

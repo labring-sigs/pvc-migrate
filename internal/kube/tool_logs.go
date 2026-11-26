@@ -36,6 +36,8 @@ var ErrToolPodNoSpace = errors.New("tool Pod reported no space left on device")
 // ToolLogOptions controls how logs from short-lived tool Pods are surfaced.
 // Writer is used for text logs; structured logs are emitted through Logger.
 type ToolLogOptions struct {
+	// Cluster distinguishes source and destination when following two API servers.
+	Cluster     string
 	Namespaces  []string
 	OperationID string
 	Writer      io.Writer
@@ -203,7 +205,7 @@ type toolLogStreamer struct {
 	stream  *ToolLogStream
 
 	mu      sync.Mutex
-	seen    map[string]struct{}
+	seen    map[string]chan *corev1.Pod
 	writers sync.WaitGroup
 }
 
@@ -219,6 +221,10 @@ func startToolLogStream(
 
 	if options.Logger == nil {
 		options.Logger = slog.New(slog.DiscardHandler)
+	}
+
+	if options.Cluster != "" {
+		options.Logger = options.Logger.With("cluster", options.Cluster)
 	}
 
 	if options.StopTimeout <= 0 {
@@ -237,13 +243,13 @@ func startToolLogStream(
 		source:  source,
 		options: options,
 		stream:  stream,
-		seen:    make(map[string]struct{}),
+		seen:    make(map[string]chan *corev1.Pod),
 	}
 	go func() {
 		defer close(stream.done)
 
 		if exactPod != nil {
-			streamer.startPod(ctx, exactPod)
+			streamer.startPod(ctx, exactPod, false)
 		} else {
 			streamer.watchNamespaces(ctx)
 		}
@@ -274,10 +280,11 @@ func (s *toolLogStreamer) watchNamespaces(ctx context.Context) {
 }
 
 func (s *toolLogStreamer) watchNamespace(ctx context.Context, namespace string) {
+	var listDenied, watchDenied sync.Once
 	for ctx.Err() == nil {
 		list, err := s.source.listPods(ctx, namespace, metav1.ListOptions{})
 		if err != nil {
-			s.logWatchError(ctx, namespace, "list", err)
+			s.logWatchError(ctx, namespace, "list", err, &listDenied)
 
 			if !waitToolLogRetry(ctx) {
 				return
@@ -287,14 +294,14 @@ func (s *toolLogStreamer) watchNamespace(ctx context.Context, namespace string) 
 		}
 
 		for index := range list.Items {
-			s.startPod(ctx, &list.Items[index])
+			s.startPod(ctx, &list.Items[index], true)
 		}
 
 		podWatch, err := s.source.watchPods(ctx, namespace, metav1.ListOptions{
 			ResourceVersion: list.ResourceVersion,
 		})
 		if err != nil {
-			s.logWatchError(ctx, namespace, "watch", err)
+			s.logWatchError(ctx, namespace, "watch", err, &watchDenied)
 
 			if !waitToolLogRetry(ctx) {
 				return
@@ -324,13 +331,13 @@ func (s *toolLogStreamer) consumeWatch(ctx context.Context, podWatch watch.Inter
 
 			pod, ok := event.Object.(*corev1.Pod)
 			if ok && (event.Type == watch.Added || event.Type == watch.Modified) {
-				s.startPod(ctx, pod)
+				s.startPod(ctx, pod, true)
 			}
 		}
 	}
 }
 
-func (s *toolLogStreamer) startPod(ctx context.Context, pod *corev1.Pod) {
+func (s *toolLogStreamer) startPod(ctx context.Context, pod *corev1.Pod, watched bool) {
 	if pod == nil || !s.matches(pod) {
 		return
 	}
@@ -343,20 +350,26 @@ func (s *toolLogStreamer) startPod(ctx context.Context, pod *corev1.Pod) {
 
 		s.mu.Lock()
 
-		_, exists := s.seen[key]
+		updates, exists := s.seen[key]
 		if !exists {
-			s.seen[key] = struct{}{}
+			updates = make(chan *corev1.Pod, 1)
+			s.seen[key] = updates
+		} else {
+			// Keep only the latest watch state while the log reader starts.
+			select {
+			case <-updates:
+			default:
+			}
+
+			updates <- pod
 		}
 		s.mu.Unlock()
 
-		if exists {
-			continue
+		if !exists {
+			s.writers.Go(func() {
+				s.followContainer(ctx, pod, container.Name, watched, updates)
+			})
 		}
-
-		podNamespace, podName, containerName := pod.Namespace, pod.Name, container.Name
-		s.writers.Go(func() {
-			s.followContainer(ctx, podNamespace, podName, containerName)
-		})
 	}
 }
 
@@ -366,7 +379,7 @@ func (s *toolLogStreamer) matches(pod *corev1.Pod) bool {
 	}
 
 	instance := pod.Labels[AppInstanceLabel]
-	if instance == "" || !containsNameSegment(instance, s.options.OperationID) {
+	if !strings.HasPrefix(instance, "pv-migrate-"+s.options.OperationID+"-") {
 		return false
 	}
 
@@ -378,16 +391,53 @@ func (s *toolLogStreamer) matches(pod *corev1.Pod) bool {
 	}
 }
 
-func containsNameSegment(value, segment string) bool {
-	return strings.Contains("-"+value+"-", "-"+segment+"-")
-}
-
-func (s *toolLogStreamer) followContainer(ctx context.Context, namespace, pod, container string) {
+func (s *toolLogStreamer) followContainer(
+	ctx context.Context,
+	initial *corev1.Pod,
+	container string,
+	watched bool,
+	updates <-chan *corev1.Pod,
+) {
+	namespace, pod := initial.Namespace, initial.Name
 	s.emitStart(ctx, namespace, pod, container)
 
-	streamed := false
+	var lastReason, lastMessage string
+
+	reportStartup := func(current *corev1.Pod) {
+		reason, message, blocked := podStartupFailure(current, container)
+		if blocked && (reason != lastReason || message != lastMessage) {
+			s.options.Logger.WarnContext(ctx, "tool Pod startup blocked",
+				"namespace", namespace, "pod", pod, "container", container,
+				"reason", reason, "message", message)
+		}
+
+		lastReason, lastMessage = reason, message
+	}
+
+	// A Job can run to completion between kubelet status updates. Open a
+	// snapshot immediately on a terminal event, before Helm removes its Pod.
+	for watched && !podLogsComplete(initial, container) {
+		if slices.ContainsFunc(
+			initial.Status.ContainerStatuses,
+			func(status corev1.ContainerStatus) bool {
+				return status.Name == container && status.State.Running != nil
+			},
+		) {
+			break
+		}
+
+		reportStartup(initial)
+
+		select {
+		case <-ctx.Done():
+			return
+		case initial = <-updates:
+		}
+	}
+
+	streamed, finalRead := false, podLogsComplete(initial, container)
 	for ctx.Err() == nil {
-		options := &corev1.PodLogOptions{Container: container, Follow: true}
+		options := &corev1.PodLogOptions{Container: container, Follow: !finalRead}
 		if streamed {
 			tail := int64(0)
 			options.TailLines = &tail
@@ -400,11 +450,6 @@ func (s *toolLogStreamer) followContainer(ctx context.Context, namespace, pod, c
 		}
 
 		if ctx.Err() != nil {
-			return
-		}
-
-		current, getErr := s.source.getPod(ctx, namespace, pod)
-		if apierrors.IsNotFound(getErr) || (getErr == nil && podLogsComplete(current, container)) {
 			return
 		}
 
@@ -422,6 +467,29 @@ func (s *toolLogStreamer) followContainer(ctx context.Context, namespace, pod, c
 			)
 
 			return
+		}
+
+		if finalRead {
+			return
+		}
+
+		current, getErr := s.source.getPod(ctx, namespace, pod)
+		if apierrors.IsNotFound(getErr) {
+			return
+		}
+
+		if getErr == nil && podLogsComplete(current, container) {
+			if streamed {
+				return
+			}
+			// The container finished between a failed pods/log request and Get.
+			finalRead = true
+
+			continue
+		}
+
+		if getErr == nil && current != nil {
+			reportStartup(current)
 		}
 
 		if err != nil {
@@ -540,7 +608,7 @@ func (s *toolLogStreamer) emitStart(ctx context.Context, namespace, pod, contain
 	_, _ = fmt.Fprintf(
 		s.options.Writer,
 		"Following tool logs for %s/%s (container %s)\n",
-		namespace,
+		s.displayNamespace(namespace),
 		pod,
 		container,
 	)
@@ -569,11 +637,47 @@ func (s *toolLogStreamer) emitLine(ctx context.Context, namespace, pod, containe
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	_, _ = fmt.Fprintf(s.options.Writer, "[tool %s/%s %s] %s\n", namespace, pod, container, line)
+	_, _ = fmt.Fprintf(
+		s.options.Writer,
+		"[tool %s/%s %s] %s\n",
+		s.displayNamespace(namespace),
+		pod,
+		container,
+		line,
+	)
 }
 
-func (s *toolLogStreamer) logWatchError(ctx context.Context, namespace, action string, err error) {
+func (s *toolLogStreamer) displayNamespace(namespace string) string {
+	if s.options.Cluster != "" {
+		return s.options.Cluster + "/" + namespace
+	}
+	return namespace
+}
+
+func (s *toolLogStreamer) logWatchError(
+	ctx context.Context,
+	namespace, action string,
+	err error,
+	denied *sync.Once,
+) {
 	if ctx.Err() != nil {
+		return
+	}
+
+	if apierrors.IsForbidden(err) {
+		denied.Do(func() {
+			s.options.Logger.WarnContext(
+				ctx,
+				"tool Pod log discovery is forbidden",
+				"namespace",
+				namespace,
+				"action",
+				action,
+				"error",
+				err,
+			)
+		})
+
 		return
 	}
 

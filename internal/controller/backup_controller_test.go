@@ -56,8 +56,14 @@ func TestBackupControllerOwnsPlanningResumeAndDeletion(t *testing.T) {
 			return errors.New("source unavailable")
 		},
 	}
+
+	options.TransferExecution.StreamToolLogs = true
 	if err := r.configureBackupController(client, options, locker); err != nil {
 		t.Fatal(err)
+	}
+
+	if !r.backup.config.Tools.StreamToolLogs || !r.backup.config.Tools.StructuredLogs {
+		t.Fatal("controller did not forward structured tool Pod logs")
 	}
 
 	r.backup.checkCollision = func(_ context.Context, namespace, name string) error {

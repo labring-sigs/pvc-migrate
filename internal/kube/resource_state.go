@@ -51,6 +51,33 @@ func PodReady(pod *corev1.Pod) bool {
 	return false
 }
 
+func podStartupFailure(pod *corev1.Pod, container string) (reason, message string, found bool) {
+	for _, condition := range pod.Status.Conditions {
+		if condition.Type == corev1.PodScheduled && condition.Status == corev1.ConditionFalse {
+			return condition.Reason, condition.Message, true
+		}
+	}
+
+	for _, status := range pod.Status.ContainerStatuses {
+		if status.State.Waiting == nil || (container != "" && status.Name != container) {
+			continue
+		}
+
+		reason = status.State.Waiting.Reason
+		switch reason {
+		case "ErrImagePull",
+			"ImagePullBackOff",
+			"InvalidImageName",
+			"CreateContainerConfigError",
+			"CreateContainerError",
+			"RunContainerError":
+			return reason, status.State.Waiting.Message, true
+		}
+	}
+
+	return "", "", false
+}
+
 // StorageClassAllowsNode reports whether a node satisfies one of the
 // StorageClass allowed-topology terms.
 func StorageClassAllowsNode(sc *storagev1.StorageClass, node *corev1.Node) bool {

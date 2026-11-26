@@ -60,11 +60,13 @@ func (s *Service) CreateReservationConsumerForTest(
 ) error {
 	index := volumeIndexForTest(session, volume.Source.PVC.Name)
 
-	return s.createReservationConsumer(ctx, reservationState{
+	_, err := s.createReservationConsumer(ctx, reservationState{
 		ID:     session.ID,
 		Spec:   &session.Spec.SessionContext,
 		Status: &session.Status.Volumes[index].Reservation,
 	}, volume)
+
+	return err
 }
 
 func volumeIndexForTest(session *CopySession, name string) int {

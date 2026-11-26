@@ -125,6 +125,7 @@ func (s *Service) reserveVolume(ctx context.Context, state reservationState, v *
 		return fmt.Errorf("destination StorageClass %s UID changed", storageClass.Name)
 	}
 
+	var logs *kube.ToolLogStream
 	if storageClass.VolumeBindingMode != nil &&
 		*storageClass.VolumeBindingMode == storagev1.VolumeBindingWaitForFirstConsumer &&
 		v.Destination.PV.UID == "" {
@@ -132,18 +133,27 @@ func (s *Service) reserveVolume(ctx context.Context, state reservationState, v *
 			return err
 		}
 
-		if err := s.createReservationConsumer(ctx, state, v); err != nil {
+		pod, err := s.createReservationConsumer(ctx, state, v)
+		if err != nil {
 			return err
+		}
+
+		if s.runtime.StreamToolLogs {
+			logs = kube.StartPodLogs(ctx, clients, pod, s.toolLogOptions("destination"))
+			defer logs.Stop()
 		}
 
 		if err := state.Save(ctx); err != nil {
 			return fmt.Errorf("persist reservation Pod ownership: %w", err)
 		}
+
+		if err := s.waitForReservationScheduling(ctx, pod); err != nil {
+			return err
+		}
 	}
 
-	err = kube.WaitFor(
+	err = s.waitForDestination(
 		ctx,
-		s.interval,
 		"destination PVC "+pvc.Namespace+"/"+pvc.Name+" binding",
 		func(waitCtx context.Context) (bool, error) {
 			current, e := clients.CoreV1().
@@ -183,23 +193,24 @@ func (s *Service) reserveVolume(ctx context.Context, state reservationState, v *
 				UID:        pv.UID,
 			}
 
-			if ref := state.Status.ConsumerPod; ref.UID != "" {
-				if deleteErr := s.deleteReservationConsumer(
-					waitCtx,
-					state,
-				); deleteErr != nil {
-					return false, deleteErr
-				}
-
-				now := metav1.NewTime(s.now().UTC())
-				state.Status.CompletedAt = &now
-			}
-
 			return true, nil
 		},
 	)
+	if err != nil || state.Status.ConsumerPod.UID == "" {
+		return err
+	}
 
-	return err
+	// Kubelet may remove the container log file as soon as deletion starts.
+	logs.Stop()
+
+	if err := s.deleteReservationConsumer(ctx, state); err != nil {
+		return err
+	}
+
+	now := metav1.NewTime(s.now().UTC())
+	state.Status.CompletedAt = &now
+
+	return nil
 }
 
 func validateDestinationPVCSpec(pvc *corev1.PersistentVolumeClaim, volume *VolumeSpec) error {
@@ -272,12 +283,12 @@ func (s *Service) createReservationConsumer(
 	ctx context.Context,
 	state reservationState,
 	volume *VolumeSpec,
-) error {
+) (*corev1.Pod, error) {
 	name := reservationConsumerName(state.ID, volume.Source.PVC.Name)
 
 	node := state.Spec.TargetNode
 	if node == "" || node == domain.AutoValue {
-		return fmt.Errorf(
+		return nil, fmt.Errorf(
 			"WFFC destination PVC %s/%s requires a resolved target node",
 			volume.Destination.PVC.Namespace,
 			volume.Destination.PVC.Name,
@@ -286,12 +297,12 @@ func (s *Service) createReservationConsumer(
 
 	target, err := s.destination.Kubernetes.CoreV1().Nodes().Get(ctx, node, metav1.GetOptions{})
 	if err != nil {
-		return fmt.Errorf("read destination node %s: %w", node, err)
+		return nil, fmt.Errorf("read destination node %s: %w", node, err)
 	}
 
 	hostname := target.Labels[corev1.LabelHostname]
 	if hostname == "" {
-		return fmt.Errorf("destination node %s lacks %s", node, corev1.LabelHostname)
+		return nil, fmt.Errorf("destination node %s lacks %s", node, corev1.LabelHostname)
 	}
 
 	runAs := int64(0)
@@ -334,7 +345,7 @@ func (s *Service) createReservationConsumer(
 	existing, err := client.Get(ctx, name, metav1.GetOptions{})
 	if apierrors.IsNotFound(err) {
 		if err := requireSessionLease(ctx); err != nil {
-			return err
+			return nil, err
 		}
 
 		existing, err = client.Create(ctx, pod, metav1.CreateOptions{})
@@ -344,15 +355,15 @@ func (s *Service) createReservationConsumer(
 	}
 
 	if err != nil {
-		return fmt.Errorf("create reservation Pod %s/%s: %w", pod.Namespace, name, err)
+		return nil, fmt.Errorf("create reservation Pod %s/%s: %w", pod.Namespace, name, err)
 	}
 
 	if err := requireSessionLease(ctx); err != nil {
-		return err
+		return nil, err
 	}
 
 	if existing.Labels[ManagedByLabel] != ManagedBy || existing.Labels[SessionKey] != state.ID {
-		return fmt.Errorf(
+		return nil, fmt.Errorf(
 			"reservation Pod %s/%s is not owned by session",
 			existing.Namespace,
 			existing.Name,
@@ -368,12 +379,17 @@ func (s *Service) createReservationConsumer(
 		UID:        existing.UID,
 	}
 
-	return kube.WaitFor(
+	return existing, nil
+}
+
+func (s *Service) waitForReservationScheduling(ctx context.Context, existing *corev1.Pod) error {
+	client := s.destination.Kubernetes.CoreV1().Pods(existing.Namespace)
+
+	return s.waitForDestination(
 		ctx,
-		s.interval,
 		"reservation Pod "+existing.Namespace+"/"+existing.Name+" scheduling",
 		func(waitCtx context.Context) (bool, error) {
-			current, e := client.Get(waitCtx, name, metav1.GetOptions{})
+			current, e := client.Get(waitCtx, existing.Name, metav1.GetOptions{})
 			if e != nil {
 				return false, e
 			}

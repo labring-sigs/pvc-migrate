@@ -4,32 +4,12 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"math"
 	"slices"
-	"time"
 
 	"github.com/labring-sigs/pvc-migrate/internal/copyengine"
 	"github.com/labring-sigs/pvc-migrate/internal/domain"
 	"github.com/labring-sigs/pvc-migrate/internal/kube"
 )
-
-// retryBackoffDelay returns the exponential backoff before the next copy
-// attempt. The multiple saturates instead of overflowing: a float-to-int
-// conversion of 2^63 wraps negative and turned late retries into a tight
-// loop, and even a correct 2^63 multiple overflows against hour-scale bases.
-func retryBackoffDelay(base time.Duration, retryIndex int) time.Duration {
-	if base <= 0 {
-		return 0
-	}
-
-	multiple := uint64(1) << uint(min(retryIndex, 62))
-	if uint64(base) > math.MaxInt64/multiple {
-		return time.Duration(math.MaxInt64)
-	}
-
-	// The guard above bounds the product to math.MaxInt64.
-	return base * time.Duration(multiple) //nolint:gosec // bounded by the saturation guard
-}
 
 func (s *volumeCopyRunner) copyWithRetry(
 	ctx context.Context,
@@ -132,26 +112,6 @@ func (s *volumeCopyRunner) copyWithRetry(
 			s.config.ToolNetworkPolicy,
 		)
 
-		s.logInfo(
-			"copy started",
-			"session",
-			request.SessionID,
-			"pvc",
-			request.AttemptIdentity.Source.Name,
-			"mode",
-			request.Mode,
-			"attempt",
-			*attempts,
-			"source",
-			request.AttemptIdentity.Source.Namespace+"/"+request.AttemptIdentity.Source.Name,
-			"sourcePath",
-			request.Source.Path,
-			"destination",
-			request.Destination.Reference.Namespace+"/"+request.Destination.Reference.Name,
-			"destinationPath",
-			request.Destination.Path,
-		)
-
 		toolLogs := s.startCopyToolLogs(
 			ctx,
 			request.AttemptIdentity.Source.Namespace,
@@ -163,49 +123,13 @@ func (s *volumeCopyRunner) copyWithRetry(
 		attemptRequest.Runtime.HelmValues = slices.Clone(request.Runtime.HelmValues)
 		attemptRequest.Runtime.HelmStringValues = slices.Clone(request.Runtime.HelmStringValues)
 
-		// A per-attempt bound turns a hung transfer into a retryable failure
-		// instead of burning the whole operation budget. Tool cleanup below
-		// still runs on the operation context on purpose.
-		attemptCtx, attemptCancel := ctx, func() {}
-		if s.config.CopyTimeout > 0 {
-			attemptCtx, attemptCancel = context.WithTimeout(ctx, s.config.CopyTimeout)
-		}
-
-		copyErr := s.copier.Copy(attemptCtx, attemptRequest, func(progress copyengine.Progress) {
-			s.logInfo(
-				"copy progress",
-				"session",
-				request.SessionID,
-				"pvc",
-				request.AttemptIdentity.Source.Name,
-				"mode",
-				progress.Mode,
-				"attempt",
-				progress.Attempt,
-				"state",
-				progress.State,
-				"message",
-				progress.Message,
-			)
-		})
-
-		toolLogs.Stop()
-		copyErr = mergeToolLogError(copyErr, toolLogs.ObservedError())
-
-		attemptCancel()
-
-		if copyErr != nil && attemptCtx.Err() != nil && ctx.Err() == nil {
-			copyErr = domain.WrapError(
-				domain.ErrorTimeout,
-				domain.ErrorOperationCopyAttempt,
-				fmt.Sprintf(
-					"copy attempt %d exceeded --copy-timeout %s",
-					*attempts,
-					s.config.CopyTimeout,
-				),
-				copyErr,
-			)
-		}
+		copyErr := copyengine.RunAttempt(
+			ctx,
+			s.copier,
+			attemptRequest,
+			s.config.CopyTimeout,
+			toolLogs,
+		)
 
 		s.logInfo(
 			"waiting for copy tool Pods to release PVCs",
@@ -242,7 +166,7 @@ func (s *volumeCopyRunner) copyWithRetry(
 			return err
 		}
 
-		if isDestinationNoSpaceError(last) {
+		if copyengine.IsDestinationNoSpaceError(last) {
 			message := fmt.Sprintf(
 				"destination PVC %s/%s ran out of space; abort and clean up this session, then create a new session with a larger --destination-capacity",
 				request.Destination.Reference.Namespace,
@@ -274,7 +198,7 @@ func (s *volumeCopyRunner) copyWithRetry(
 		}
 
 		if retryIndex+1 < s.config.Retries {
-			delay := retryBackoffDelay(s.config.RetryBackoff, retryIndex)
+			delay := copyengine.RetryBackoffDelay(s.config.RetryBackoff, retryIndex)
 			s.logInfo(
 				"copy retry scheduled",
 				"session",

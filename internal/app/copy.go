@@ -1,14 +1,11 @@
 package app
 
 import (
-	"errors"
 	"fmt"
 	"slices"
-	"strings"
 	"time"
 
 	v1alpha1 "github.com/labring-sigs/pvc-migrate/api/v1alpha1"
-	"github.com/labring-sigs/pvc-migrate/internal/copyengine"
 	"github.com/labring-sigs/pvc-migrate/internal/domain"
 	"github.com/labring-sigs/pvc-migrate/internal/kube"
 	corev1 "k8s.io/api/core/v1"
@@ -125,49 +122,6 @@ func validateCopyConsumersFromPods(
 	}
 
 	return inferredSourceNode, nil
-}
-
-func mergeToolLogError(copyErr, observedErr error) error {
-	if copyErr == nil {
-		return nil
-	}
-	return errors.Join(copyErr, observedErr)
-}
-
-func isDestinationNoSpaceError(err error) bool {
-	if err == nil {
-		return false
-	}
-
-	if copyengine.IsDestinationNoSpaceError(err) {
-		return true
-	}
-
-	var visit func(error) bool
-
-	visit = func(candidate error) bool {
-		if candidate == nil {
-			return false
-		}
-
-		if errors.Is(candidate, kube.ErrToolPodNoSpace) {
-			return true
-		}
-
-		message := strings.ToLower(candidate.Error())
-		if strings.Contains(message, "no space left on device") ||
-			strings.Contains(message, "enospc") {
-			return true
-		}
-
-		if joined, ok := candidate.(interface{ Unwrap() []error }); ok {
-			return slices.ContainsFunc(joined.Unwrap(), visit)
-		}
-
-		return visit(errors.Unwrap(candidate))
-	}
-
-	return visit(err)
 }
 
 func destinationCapacityIsSmaller(sourceCapacity, destinationCapacity string) bool {

@@ -222,3 +222,28 @@ func TestNamespaceFlagSurface(t *testing.T) {
 		})
 	}
 }
+
+func TestStreamToolLogsDefaults(t *testing.T) {
+	root := NewRoot(Options{})
+	for _, tc := range []struct {
+		path []string
+		want bool
+	}{
+		{[]string{"cluster-copy", "cross"}, true},
+		{[]string{"controller"}, false},
+	} {
+		command, _, err := root.Find(tc.path)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		if err := command.ParseFlags(nil); err != nil {
+			t.Fatal(err)
+		}
+
+		got, err := command.Flags().GetBool("stream-tool-logs")
+		if err != nil || got != tc.want {
+			t.Fatalf("%v --stream-tool-logs = %t, %v; want %t", tc.path, got, err, tc.want)
+		}
+	}
+}

@@ -259,6 +259,7 @@ func (r *WorkflowReconciler) configureBackupController(
 				// overrides it through the frozen plan.
 				ToolNetworkPolicy: options.TransferExecution.ToolNetworkPolicy,
 				ToolImageProber:   kube.NewToolImageProber(options.KubernetesClient),
+				StreamToolLogs:    options.TransferExecution.StreamToolLogs,
 				Writer:            io.Discard, Logger: r.logger, StructuredLogs: true,
 			},
 		},

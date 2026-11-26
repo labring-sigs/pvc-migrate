@@ -18,15 +18,35 @@ import (
 // treat the presence as durable.
 var ErrTransferToolStillExists = errors.New("transfer tool still exists")
 
-// RequireTransferToolsStopped retains recovery records while a tool still mounts
-// the claim. Attempt IDs cannot safely identify which workflow owns an orphan.
+// TransferToolCheck selects which workload controllers could recreate a Pod
+// mounting the claim. Pods are always checked.
+type TransferToolCheck struct {
+	OperationID string
+	Jobs        bool
+	Deployments bool
+}
+
+// RequireTransferToolsStopped checks rclone Pods and Jobs before finalization.
 func RequireTransferToolsStopped(
 	ctx context.Context,
 	client kubernetes.Interface,
 	namespace, claim string,
 ) error {
+	return (TransferToolCheck{Jobs: true}).RequireStopped(ctx, client, namespace, claim)
+}
+
+func (check TransferToolCheck) RequireStopped(
+	ctx context.Context,
+	client kubernetes.Interface,
+	namespace, claim string,
+) error {
+	prefix := "pv-migrate-"
+	if check.OperationID != "" {
+		prefix += check.OperationID + "-"
+	}
+
 	usesClaim := func(labels map[string]string, volumes []corev1.Volume) bool {
-		if !strings.HasPrefix(labels[AppInstanceLabel], "pv-migrate-") {
+		if !strings.HasPrefix(labels[AppInstanceLabel], prefix) {
 			return false
 		}
 
@@ -57,14 +77,31 @@ func RequireTransferToolsStopped(
 		}
 	}
 
-	jobs, err := client.BatchV1().Jobs(namespace).List(ctx, metav1.ListOptions{})
-	if err != nil {
-		return err
+	if check.Deployments {
+		deployments, err := client.AppsV1().
+			Deployments(namespace).
+			List(ctx, metav1.ListOptions{LabelSelector: AppComponentLabel + "=" + ToolComponentSSHD})
+		if err != nil {
+			return err
+		}
+
+		for _, deployment := range deployments.Items {
+			if usesClaim(deployment.Spec.Template.Labels, deployment.Spec.Template.Spec.Volumes) {
+				return transferToolStillExists("Deployment", namespace, deployment.Name)
+			}
+		}
 	}
 
-	for _, job := range jobs.Items {
-		if usesClaim(job.Spec.Template.Labels, job.Spec.Template.Spec.Volumes) {
-			return transferToolStillExists("Job", namespace, job.Name)
+	if check.Jobs {
+		jobs, err := client.BatchV1().Jobs(namespace).List(ctx, metav1.ListOptions{})
+		if err != nil {
+			return err
+		}
+
+		for _, job := range jobs.Items {
+			if usesClaim(job.Spec.Template.Labels, job.Spec.Template.Spec.Volumes) {
+				return transferToolStillExists("Job", namespace, job.Name)
+			}
 		}
 	}
 

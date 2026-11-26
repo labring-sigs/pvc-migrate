@@ -56,8 +56,14 @@ func TestRestoreControllerOwnsPlanningResumeAndDeletion(t *testing.T) {
 			return errors.New("destination unavailable")
 		},
 	}
+
+	options.TransferExecution.StreamToolLogs = true
 	if err := r.configureRestoreController(client, options, locker); err != nil {
 		t.Fatal(err)
+	}
+
+	if !r.restore.config.Tools.StreamToolLogs || !r.restore.config.Tools.StructuredLogs {
+		t.Fatal("controller did not forward structured tool Pod logs")
 	}
 
 	r.restore.checkCollision = func(_ context.Context, namespace, name string) error {

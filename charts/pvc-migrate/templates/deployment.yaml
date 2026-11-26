@@ -64,6 +64,9 @@ spec:
             {{- if .Values.controller.pprof.enabled }}
             - --pprof-port={{ .Values.controller.pprof.port }}
             {{- end }}
+            {{- if .Values.controller.streamToolLogs }}
+            - --stream-tool-logs=true
+            {{- end }}
             - --log-level={{ .Values.controller.logLevel }}
             - --log-format={{ .Values.controller.logFormat }}
           securityContext:

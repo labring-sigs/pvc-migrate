@@ -33,6 +33,7 @@ import (
 type fakeCopier struct {
 	requests []copyengine.CopyRequest
 	failures int
+	run      func(context.Context, copyengine.CopyRequest, copyengine.ProgressFunc) error
 }
 
 type failingLeaseFence struct{ err error }
@@ -42,11 +43,15 @@ func (f failingLeaseFence) Err() error { return f.err }
 func (*fakeCopier) Cleanup(context.Context, copyengine.CleanupRequest) error { return nil }
 
 func (f *fakeCopier) Copy(
-	_ context.Context,
+	ctx context.Context,
 	request copyengine.CopyRequest,
-	_ copyengine.ProgressFunc,
+	progress copyengine.ProgressFunc,
 ) error {
 	f.requests = append(f.requests, request)
+	if f.run != nil {
+		return f.run(ctx, request, progress)
+	}
+
 	if f.failures > 0 {
 		f.failures--
 		return errors.New("injected transfer failure")

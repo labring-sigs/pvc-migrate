@@ -50,6 +50,8 @@ func newTransferControllerFixture(
 			return nil, errors.New("source unavailable")
 		},
 	}
+
+	opts.TransferExecution.StreamToolLogs = true
 	if err := r.configureTransferControllers(
 		client,
 		opts,
@@ -58,6 +60,11 @@ func newTransferControllerFixture(
 		nil,
 	); err != nil {
 		t.Fatal(err)
+	}
+
+	if !r.copy.config.Transfer.StreamToolLogs || !r.reservation.config.StreamToolLogs ||
+		!r.reservation.config.StructuredLogs {
+		t.Fatal("controller did not forward structured tool Pod logs")
 	}
 
 	r.reservation.checkCollision = func(context.Context, string, []string) error { return nil }

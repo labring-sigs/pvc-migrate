@@ -12,7 +12,9 @@ import (
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/watch"
 )
@@ -160,6 +162,116 @@ func TestToolLogStreamerReconnectsWithoutReplayingHistory(t *testing.T) {
 
 	if source.streamCalls[1].TailLines == nil || *source.streamCalls[1].TailLines != 0 {
 		t.Fatalf("reconnect options=%#v", source.streamCalls[1])
+	}
+}
+
+// Kubernetes refuses pods/log until the container has started.
+type pendingToolLogSource struct {
+	fakeToolLogSource
+	remaining int
+}
+
+func (s *pendingToolLogSource) streamPodLogs(
+	ctx context.Context,
+	namespace, name string,
+	options *corev1.PodLogOptions,
+) (io.ReadCloser, error) {
+	if s.remaining > 0 {
+		s.remaining--
+		return nil, apierrors.NewBadRequest("pod does not have a host assigned")
+	}
+
+	return s.fakeToolLogSource.streamPodLogs(ctx, namespace, name, options)
+}
+
+func TestToolLogsReadCompletedContainerAfterPendingRequest(t *testing.T) {
+	pod := upstreamToolPod("pm-fast")
+	pod.Status.ContainerStatuses = []corev1.ContainerStatus{{
+		Name: "rsync", State: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{}},
+	}}
+	source := &pendingToolLogSource{
+		fakeToolLogSource: fakeToolLogSource{pod: pod, streams: []string{"finished\n"}},
+		remaining:         1,
+	}
+
+	var output lockedBuffer
+
+	initial := pod.DeepCopy()
+	initial.Status = corev1.PodStatus{}
+
+	stream := startToolLogStream(t.Context(), source, ToolLogOptions{Writer: &output}, initial)
+	defer stream.Stop()
+
+	select {
+	case <-stream.done:
+	case <-time.After(time.Second):
+		t.Fatal("completed container log request did not finish")
+	}
+
+	if len(source.streamCalls) != 1 || source.streamCalls[0].Follow ||
+		strings.Count(output.String(), "finished") != 1 {
+		t.Fatalf("snapshot requests=%v, output=%s", source.streamCalls, output.String())
+	}
+}
+
+func TestToolLogsSnapshotJobThatFinishesBetweenWatchEvents(t *testing.T) {
+	pod := upstreamToolPod("pm-short")
+	pod.Status = corev1.PodStatus{Phase: corev1.PodPending}
+	events := watch.NewRaceFreeFake()
+	source := &fakeToolLogSource{
+		list:     &corev1.PodList{Items: []corev1.Pod{*pod}},
+		podWatch: events, pod: pod, streams: []string{"payload copied\n"},
+	}
+
+	var output lockedBuffer
+
+	stream := startToolLogStream(t.Context(), source, ToolLogOptions{
+		Namespaces: []string{pod.Namespace}, OperationID: "pm-short", Writer: &output,
+	}, nil)
+	defer stream.Stop()
+
+	waitForText(t, &output, "Following tool logs")
+
+	completed := pod.DeepCopy()
+	completed.Status.Phase = corev1.PodSucceeded
+	events.Modify(completed)
+	events.Modify(completed)
+	waitForText(t, &output, "payload copied")
+	stream.Stop()
+
+	if len(source.streamCalls) != 1 || source.streamCalls[0].Follow ||
+		source.streamCalls[0].TailLines != nil {
+		t.Fatalf("expected a single complete snapshot, requests=%v", source.streamCalls)
+	}
+}
+
+func TestToolLogsReportSchedulingBlockOnceAndFollowAfterRecovery(t *testing.T) {
+	pod := upstreamToolPod("pm-pending")
+	pod.Status.Conditions = []corev1.PodCondition{{
+		Type: corev1.PodScheduled, Status: corev1.ConditionFalse,
+		Reason: "Unschedulable", Message: "insufficient storage",
+	}}
+	source := &pendingToolLogSource{
+		fakeToolLogSource: fakeToolLogSource{pod: pod, streams: []string{"transfer started"}},
+		remaining:         2,
+	}
+
+	var output lockedBuffer
+
+	stream := startToolLogStream(t.Context(), source, ToolLogOptions{
+		Logger:     slog.New(slog.NewJSONHandler(&output, nil)),
+		Structured: true,
+		Cluster:    "destination",
+	}, pod)
+	waitForText(t, &output, "transfer started")
+	stream.Stop()
+
+	text := output.String()
+	if strings.Count(text, "tool Pod startup blocked") != 1 ||
+		!strings.Contains(text, `"reason":"Unschedulable"`) ||
+		!strings.Contains(text, `"message":"insufficient storage"`) ||
+		!strings.Contains(text, `"cluster":"destination"`) {
+		t.Fatal(text)
 	}
 }
 
@@ -315,6 +427,7 @@ func TestToolLogMatcherUsesExactOperationSegmentAndKnownComponents(t *testing.T)
 		{name: "rsync", instance: "pv-migrate-pm-abc-mount", component: "rsync", want: true},
 		{name: "rclone", instance: "pv-migrate-pm-abc-backup", component: "rclone", want: true},
 		{name: "operation prefix collision", instance: "pv-migrate-pm-abcd-mount", component: "rsync"},
+		{name: "operation embedded in another release", instance: "pv-migrate-old-pm-abc-local", component: "sshd"},
 		{name: "operation suffix collision", instance: "pv-migrate-old-pm-abcde-mount", component: "rsync"},
 		{name: "unrelated component", instance: "pv-migrate-pm-abc-mount", component: "sidecar"},
 	} {
@@ -341,6 +454,9 @@ func upstreamToolPod(operationID string) *corev1.Pod {
 			},
 		},
 		Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "rsync"}}},
+		Status: corev1.PodStatus{ContainerStatuses: []corev1.ContainerStatus{{
+			Name: "rsync", State: corev1.ContainerState{Running: &corev1.ContainerStateRunning{}},
+		}}},
 	}
 }
 
@@ -357,4 +473,28 @@ func waitForText(t *testing.T, buffer *lockedBuffer, text string) {
 	}
 
 	t.Fatalf("timed out waiting for %q in %q", text, buffer.String())
+}
+
+func TestToolLogDiscoveryReportsDeniedPermissionOnce(t *testing.T) {
+	var out lockedBuffer
+
+	streamer := toolLogStreamer{
+		options: ToolLogOptions{Logger: slog.New(slog.NewTextHandler(&out, nil))},
+	}
+	denied := apierrors.NewForbidden(
+		schema.GroupResource{Resource: "pods"},
+		"",
+		errors.New("watch denied"),
+	)
+
+	var once sync.Once
+	for range 3 {
+		streamer.logWatchError(t.Context(), "app", "watch", denied, &once)
+	}
+
+	line := out.String()
+	if strings.Count(line, "level=WARN") != 1 || !strings.Contains(line, "action=watch") ||
+		!strings.Contains(line, "namespace=app") {
+		t.Fatal(line)
+	}
 }
