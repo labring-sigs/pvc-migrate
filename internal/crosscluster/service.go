@@ -58,6 +58,18 @@ type ReservationOptions struct {
 	Strategies              []string
 }
 
+// Runtime configures the submitting process for both cross-cluster workflows.
+type Runtime struct {
+	Writer            io.Writer
+	Logger            *slog.Logger
+	HelmTimeout       time.Duration
+	ToolNetworkPolicy string
+	CopyTimeout       time.Duration
+	RetryBackoff      time.Duration
+	StreamToolLogs    bool
+	StructuredLogs    bool
+}
+
 type Service struct {
 	source                                    *kube.Clients
 	destination                               *kube.Clients
@@ -66,10 +78,7 @@ type Service struct {
 	destinationKubeconfig, destinationContext string
 	now                                       func() time.Time
 	interval                                  time.Duration
-	helmTimeout                               time.Duration
-	toolNetworkPolicy                         string
-	writer                                    io.Writer
-	logger                                    *slog.Logger
+	runtime                                   Runtime
 	locker                                    kube.SessionLocker
 	leases                                    *kube.CRDWorkflowLeaseCleaner
 }
@@ -81,9 +90,10 @@ func NewService(source, destination *kube.Clients, copier copyengine.Engine) *Se
 		copier:      copier,
 		now:         time.Now,
 		interval:    time.Second,
-		helmTimeout: 10 * time.Minute,
-		writer:      kube.NewSynchronizedWriter(io.Discard),
-		logger:      slog.Default(),
+		runtime: Runtime{
+			HelmTimeout: 10 * time.Minute, RetryBackoff: 2 * time.Second,
+			Writer: kube.NewSynchronizedWriter(io.Discard), Logger: slog.Default(),
+		},
 	}
 	if source != nil {
 		service.locker = kube.NewConfigMapWorkflowLocker(source.Kubernetes)
@@ -93,29 +103,49 @@ func NewService(source, destination *kube.Clients, copier copyengine.Engine) *Se
 	return service
 }
 
-func (s *Service) WithRuntime(
-	writer io.Writer,
-	logger *slog.Logger,
-	helmTimeout time.Duration,
-	toolNetworkPolicy string,
-) *Service {
-	if writer != nil {
-		s.writer = kube.NewSynchronizedWriter(writer)
+func (s *Service) WithRuntime(options Runtime) *Service {
+	if options.HelmTimeout <= 0 {
+		options.HelmTimeout = s.runtime.HelmTimeout
 	}
 
-	if logger != nil {
-		s.logger = logger
+	if options.RetryBackoff <= 0 {
+		options.RetryBackoff = s.runtime.RetryBackoff
 	}
 
-	if helmTimeout > 0 {
-		s.helmTimeout = helmTimeout
+	if options.Logger == nil {
+		options.Logger = s.runtime.Logger
 	}
 
-	if toolNetworkPolicy != "" {
-		s.toolNetworkPolicy = toolNetworkPolicy
-	}
+	options.Writer = kube.NewSynchronizedWriter(options.Writer)
+	s.runtime = options
 
 	return s
+}
+
+func (s *Service) toolLogOptions(cluster string) kube.ToolLogOptions {
+	return kube.ToolLogOptions{
+		Cluster:    cluster,
+		Writer:     s.runtime.Writer,
+		Logger:     s.runtime.Logger,
+		Structured: s.runtime.StructuredLogs,
+	}
+}
+
+func (s *Service) waitForDestination(
+	ctx context.Context,
+	description string,
+	condition func(context.Context) (bool, error),
+) error {
+	s.runtime.Logger.InfoContext(
+		ctx,
+		"waiting for Kubernetes resource",
+		"cluster",
+		"destination",
+		"description",
+		description,
+	)
+
+	return kube.WaitFor(ctx, s.interval, description, condition)
 }
 
 func (s *Service) WithConnections(

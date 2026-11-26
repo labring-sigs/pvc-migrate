@@ -12,7 +12,9 @@ import (
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/watch"
 )
@@ -315,6 +317,7 @@ func TestToolLogMatcherUsesExactOperationSegmentAndKnownComponents(t *testing.T)
 		{name: "rsync", instance: "pv-migrate-pm-abc-mount", component: "rsync", want: true},
 		{name: "rclone", instance: "pv-migrate-pm-abc-backup", component: "rclone", want: true},
 		{name: "operation prefix collision", instance: "pv-migrate-pm-abcd-mount", component: "rsync"},
+		{name: "operation embedded in another release", instance: "pv-migrate-old-pm-abc-local", component: "sshd"},
 		{name: "operation suffix collision", instance: "pv-migrate-old-pm-abcde-mount", component: "rsync"},
 		{name: "unrelated component", instance: "pv-migrate-pm-abc-mount", component: "sidecar"},
 	} {
@@ -357,4 +360,28 @@ func waitForText(t *testing.T, buffer *lockedBuffer, text string) {
 	}
 
 	t.Fatalf("timed out waiting for %q in %q", text, buffer.String())
+}
+
+func TestToolLogDiscoveryReportsDeniedPermissionOnce(t *testing.T) {
+	var out lockedBuffer
+
+	streamer := toolLogStreamer{
+		options: ToolLogOptions{Logger: slog.New(slog.NewTextHandler(&out, nil))},
+	}
+	denied := apierrors.NewForbidden(
+		schema.GroupResource{Resource: "pods"},
+		"",
+		errors.New("watch denied"),
+	)
+
+	var once sync.Once
+	for range 3 {
+		streamer.logWatchError(t.Context(), "app", "watch", denied, &once)
+	}
+
+	line := out.String()
+	if strings.Count(line, "level=WARN") != 1 || !strings.Contains(line, "action=watch") ||
+		!strings.Contains(line, "namespace=app") {
+		t.Fatal(line)
+	}
 }

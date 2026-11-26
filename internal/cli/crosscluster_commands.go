@@ -631,12 +631,16 @@ func (r *rootState) crossClusterService(
 
 	return crosscluster.NewService(source, dest, copyengine.NewPVMigrate()).
 			WithConnections(flags.sourceKubeconfig, flags.sourceContext, flags.destinationKubeconfig, flags.destinationContext).
-			WithRuntime(
-				r.errWriter(),
-				logger.With("component", "cross-cluster"),
-				r.global.helmTimeout,
-				normalizedToolNetworkPolicy(r.global.toolNetworkPolicy),
-			),
+			WithRuntime(crosscluster.Runtime{
+				Writer:            r.errWriter(),
+				Logger:            logger.With("component", "cross-cluster"),
+				HelmTimeout:       r.global.helmTimeout,
+				ToolNetworkPolicy: normalizedToolNetworkPolicy(r.global.toolNetworkPolicy),
+				CopyTimeout:       r.global.copyTimeout,
+				RetryBackoff:      r.global.retryBackoff,
+				StreamToolLogs:    r.global.streamToolLogs,
+				StructuredLogs:    r.global.logFormat == string(logFormatJSON),
+			}),
 		nil
 }
 

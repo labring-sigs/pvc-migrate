@@ -9,6 +9,7 @@ import (
 	"time"
 
 	v1alpha1 "github.com/labring-sigs/pvc-migrate/api/v1alpha1"
+	"github.com/labring-sigs/pvc-migrate/internal/copyengine"
 	"github.com/labring-sigs/pvc-migrate/internal/domain"
 	"github.com/labring-sigs/pvc-migrate/internal/kube"
 	"github.com/labring-sigs/pvc-migrate/internal/parallel"
@@ -119,7 +120,7 @@ func sleepContext(ctx context.Context, duration time.Duration) error {
 }
 
 func failureReason(err error) string {
-	if isDestinationNoSpaceError(err) {
+	if copyengine.IsDestinationNoSpaceError(err) {
 		return domain.FailureDestinationCapacityExhausted
 	}
 	return ""

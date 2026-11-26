@@ -122,6 +122,8 @@ pvc-migrate cluster-copy cross --dry-run=false \
   --destination-storage-class fast
 ```
 
+Cross-cluster copy and resume stream tool Pod logs from both clusters to stderr. Text lines identify the source or destination cluster, namespace, Pod, and container. JSON logs include a `cluster` field. Use `--stream-tool-logs=false` to keep only workflow and engine messages. The default `local` strategy runs rsync over SSH. Use `--log-level=debug` to see its transfer progress.
+
 ## Safety
 
 - Dry-run is the default everywhere: execution requires an explicit `--dry-run=false`, and workload pause and storage identity changes additionally require `--yes` or interactive approval.

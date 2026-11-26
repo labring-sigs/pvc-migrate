@@ -442,6 +442,11 @@ func TestCrossClusterExecuteCommandCarriesChangedFlags(t *testing.T) {
 	flags.String("destination-kubeconfig", "", "destination")
 	flags.String("unused-storage-policy", "", "policy")
 	flags.Bool("delete-session", false, "delete")
+	flags.Bool("stream-tool-logs", true, "stream")
+
+	if err := flags.Set("stream-tool-logs", "false"); err != nil {
+		t.Fatal(err)
+	}
 
 	if err := flags.Set("source-kubeconfig", "/etc/alt source"); err != nil {
 		t.Fatal(err)
@@ -454,7 +459,7 @@ func TestCrossClusterExecuteCommandCarriesChangedFlags(t *testing.T) {
 	got := crossClusterExecuteCommand(&command, "cluster-copy cross cleanup", "mig-1")
 
 	want := "pvc-migrate --yes cluster-copy cross cleanup mig-1" +
-		" --source-kubeconfig='/etc/alt source' --delete-session=true --dry-run=false"
+		" --source-kubeconfig='/etc/alt source' --delete-session=true --stream-tool-logs=false --dry-run=false"
 	if got != want {
 		t.Fatalf("cross-cluster command mismatch: got %q want %q", got, want)
 	}

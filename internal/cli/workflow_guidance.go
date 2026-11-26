@@ -192,6 +192,8 @@ func crossClusterExecuteCommand(cmd *cobra.Command, path, session string) string
 		"source-kubeconfig", "source-context",
 		"destination-kubeconfig", "destination-context", "session-namespace",
 		"unused-storage-policy", "delete-session",
+		"kubeconfig", "context", "timeout", "copy-timeout", "retries", "retry-backoff", "helm-timeout",
+		"stream-tool-logs", "log-format", "log-level", "compress", "copy-bandwidth-limit", "tool-network-policy",
 	} {
 		if flag := cmd.Flags().Lookup(name); flag != nil && flag.Changed {
 			args = append(args, "--"+name+"="+shellQuote(flag.Value.String()))

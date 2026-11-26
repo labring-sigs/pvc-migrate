@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"slices"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -272,7 +273,27 @@ func (e *destinationNoSpaceError) Unwrap() error { return e.cause }
 // mover logs. It does not infer capacity exhaustion from rsync exit codes.
 func IsDestinationNoSpaceError(err error) bool {
 	var target *destinationNoSpaceError
-	return errors.As(err, &target)
+	if errors.As(err, &target) || errors.Is(err, kube.ErrToolPodNoSpace) {
+		return true
+	}
+
+	return errorContainsNoSpace(err)
+}
+
+func errorContainsNoSpace(err error) bool {
+	if err == nil {
+		return false
+	}
+
+	if containsDestinationNoSpace(err.Error()) {
+		return true
+	}
+
+	if joined, ok := err.(interface{ Unwrap() []error }); ok {
+		return slices.ContainsFunc(joined.Unwrap(), errorContainsNoSpace)
+	}
+
+	return errorContainsNoSpace(errors.Unwrap(err))
 }
 
 type destinationNoSpaceDetector struct {

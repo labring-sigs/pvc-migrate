@@ -36,6 +36,8 @@ var ErrToolPodNoSpace = errors.New("tool Pod reported no space left on device")
 // ToolLogOptions controls how logs from short-lived tool Pods are surfaced.
 // Writer is used for text logs; structured logs are emitted through Logger.
 type ToolLogOptions struct {
+	// Cluster distinguishes source and destination when following two API servers.
+	Cluster     string
 	Namespaces  []string
 	OperationID string
 	Writer      io.Writer
@@ -221,6 +223,10 @@ func startToolLogStream(
 		options.Logger = slog.New(slog.DiscardHandler)
 	}
 
+	if options.Cluster != "" {
+		options.Logger = options.Logger.With("cluster", options.Cluster)
+	}
+
 	if options.StopTimeout <= 0 {
 		options.StopTimeout = defaultToolLogStopTimeout
 	}
@@ -274,10 +280,11 @@ func (s *toolLogStreamer) watchNamespaces(ctx context.Context) {
 }
 
 func (s *toolLogStreamer) watchNamespace(ctx context.Context, namespace string) {
+	var listDenied, watchDenied sync.Once
 	for ctx.Err() == nil {
 		list, err := s.source.listPods(ctx, namespace, metav1.ListOptions{})
 		if err != nil {
-			s.logWatchError(ctx, namespace, "list", err)
+			s.logWatchError(ctx, namespace, "list", err, &listDenied)
 
 			if !waitToolLogRetry(ctx) {
 				return
@@ -294,7 +301,7 @@ func (s *toolLogStreamer) watchNamespace(ctx context.Context, namespace string) 
 			ResourceVersion: list.ResourceVersion,
 		})
 		if err != nil {
-			s.logWatchError(ctx, namespace, "watch", err)
+			s.logWatchError(ctx, namespace, "watch", err, &watchDenied)
 
 			if !waitToolLogRetry(ctx) {
 				return
@@ -366,7 +373,7 @@ func (s *toolLogStreamer) matches(pod *corev1.Pod) bool {
 	}
 
 	instance := pod.Labels[AppInstanceLabel]
-	if instance == "" || !containsNameSegment(instance, s.options.OperationID) {
+	if !strings.HasPrefix(instance, "pv-migrate-"+s.options.OperationID+"-") {
 		return false
 	}
 
@@ -376,10 +383,6 @@ func (s *toolLogStreamer) matches(pod *corev1.Pod) bool {
 	default:
 		return false
 	}
-}
-
-func containsNameSegment(value, segment string) bool {
-	return strings.Contains("-"+value+"-", "-"+segment+"-")
 }
 
 func (s *toolLogStreamer) followContainer(ctx context.Context, namespace, pod, container string) {
@@ -403,11 +406,6 @@ func (s *toolLogStreamer) followContainer(ctx context.Context, namespace, pod, c
 			return
 		}
 
-		current, getErr := s.source.getPod(ctx, namespace, pod)
-		if apierrors.IsNotFound(getErr) || (getErr == nil && podLogsComplete(current, container)) {
-			return
-		}
-
 		if apierrors.IsForbidden(err) {
 			s.options.Logger.Warn(
 				"tool Pod logs are forbidden",
@@ -421,6 +419,11 @@ func (s *toolLogStreamer) followContainer(ctx context.Context, namespace, pod, c
 				err,
 			)
 
+			return
+		}
+
+		current, getErr := s.source.getPod(ctx, namespace, pod)
+		if apierrors.IsNotFound(getErr) || (getErr == nil && podLogsComplete(current, container)) {
 			return
 		}
 
@@ -540,7 +543,7 @@ func (s *toolLogStreamer) emitStart(ctx context.Context, namespace, pod, contain
 	_, _ = fmt.Fprintf(
 		s.options.Writer,
 		"Following tool logs for %s/%s (container %s)\n",
-		namespace,
+		s.displayNamespace(namespace),
 		pod,
 		container,
 	)
@@ -569,11 +572,47 @@ func (s *toolLogStreamer) emitLine(ctx context.Context, namespace, pod, containe
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	_, _ = fmt.Fprintf(s.options.Writer, "[tool %s/%s %s] %s\n", namespace, pod, container, line)
+	_, _ = fmt.Fprintf(
+		s.options.Writer,
+		"[tool %s/%s %s] %s\n",
+		s.displayNamespace(namespace),
+		pod,
+		container,
+		line,
+	)
 }
 
-func (s *toolLogStreamer) logWatchError(ctx context.Context, namespace, action string, err error) {
+func (s *toolLogStreamer) displayNamespace(namespace string) string {
+	if s.options.Cluster != "" {
+		return s.options.Cluster + "/" + namespace
+	}
+	return namespace
+}
+
+func (s *toolLogStreamer) logWatchError(
+	ctx context.Context,
+	namespace, action string,
+	err error,
+	denied *sync.Once,
+) {
 	if ctx.Err() != nil {
+		return
+	}
+
+	if apierrors.IsForbidden(err) {
+		denied.Do(func() {
+			s.options.Logger.WarnContext(
+				ctx,
+				"tool Pod log discovery is forbidden",
+				"namespace",
+				namespace,
+				"action",
+				action,
+				"error",
+				err,
+			)
+		})
+
 		return
 	}
 
